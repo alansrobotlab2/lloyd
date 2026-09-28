@@ -1307,20 +1307,26 @@ compared, `eval/run_compaction_recall_eval.py`, run past the threshold).
   memory_adds, fact_adds, duration_ms, status, stop_reason}` when the flush turn
   ends; `turn_start_record.flushed_before_summary` on the next rewrite.
 - `tests/test_memory_flush.py`.
-### P1 — cross-turn prefix reuse (switched; ships as today)
+### P1 — cross-turn prefix reuse (rollout step 1 shipped: system_tail)
 
 The system prompt heads every request, so anything in it that moves between
 turns re-prefills the whole previous conversation on the next turn's first
 iteration. Two things moved it: the session state (`<goal>`, `<plan>`,
 `<active_todos>`, rendered ahead of the static harness hints) and the memory
 files (re-read every turn, so one `memory_add` anywhere invalidated every open
-session). Three switches under `harness.prompt_layout`, all shipping off:
+session). Three switches under `harness.prompt_layout`. What ships today, read
+off `config.yaml` and pinned by `tests/test_harness_doc_claims.py`:
+`session_state: system_tail`, `freeze_memory: false`,
+`replay_injected_context: false` — rollout step 1 landed in `ca7eb481`
+(2026-09-25), and the other two switches are still off:
 
 - **`session_state: system_head | system_tail | user_tail`**
   (`prompt_builder.session_state_layout`, unknown values read as
-  `system_head`). `system_head` is today's output byte for byte (checked
-  against `f75f4004` over seven input shapes with the real vault; pinned by
-  `test_system_head_is_byte_identical_to_today`). `system_tail` renders one
+  `system_head`). `system_head` is the pre-rollout output byte for byte — the
+  equivalence the switch was gated on, and still the fallback for an unknown
+  value (checked against `f75f4004` over seven input shapes with the real
+  vault; pinned by `test_system_head_is_byte_identical_to_today`). The shipped
+  value is `system_tail`: it renders one
   `build_session_state_block` (`<session_state>` around the same three
   renderers) after every static paragraph, registered as the `session_state`
   component. `user_tail` leaves it out of the system prompt;
@@ -1350,9 +1356,11 @@ tail it equals the old `_extract_subliminal_prefix`.
 **Measurement, always on:** `prefix_miss.record_turn_start` writes
 `brain1.turn_start_prefix {iteration, input_tokens, cache_read, reuse,
 ttft_ms}` on the first `assistant_message` of each turn from all three
-writers — the iteration `prefix_miss` deliberately skips. Rollout is
-`system_tail`, then an A/B of `user_tail`; adopt when turn-N+1 first-iteration
-`reuse` rises and `eval/run_eval.py` does not fall. `tests/test_prompt_layout.py`.
+writers — the iteration `prefix_miss` deliberately skips. Rollout: step 1,
+`system_tail`, **shipped 2026-09-25** in `ca7eb481` (a config-only commit);
+next is the A/B of `user_tail`, adopted when turn-N+1 first-iteration `reuse`
+rises and `eval/run_eval.py` does not fall, then `freeze_memory`.
+`tests/test_prompt_layout.py`.
 
 ### P8 — parallel read-only Task fan-out; subagent defaults
 
@@ -1700,10 +1708,11 @@ Pin: `tests/test_workers_router.py::test_the_sync_message_route_is_gone`.
 TTL 300 s, per-tool timeouts); P13 (behaviour-preserving, replay-diffed);
 P6's max-turns wrap-up (`harness.max_turns_wrapup`, primary only); P8's
 fan-out for the `read-only` profile (`parallel_safe`); D10's deny-list
-(`non_compactable_tools`); D7's one retry. **Ships in shadow**: P10
+(`non_compactable_tools`); D7's one retry; and P1 rollout step 1,
+`session_state: system_tail` (`ca7eb481`, 2026-09-25). **Ships in shadow**: P10
 (`action_review.mode`, `injection_probe.mode`). **Ships off / as today**:
 D2's `compaction.persist_summary`, P3's `compaction.memory_flush.enabled`,
-P1's `prompt_layout` (`system_head`, `freeze_memory: false`), P4's memory
+P1's `prompt_layout` `freeze_memory` and `replay_injected_context`, P4's memory
 index (`memory.render_overflow: render_all`, today's full render), P5's
 `skills.index.descriptions`, P6's `echo_guard.mode: nudge`, P9's
 `harness.rpc.enabled`, and the general `parallel_tool_calls`.
@@ -1720,8 +1729,9 @@ a negative result is a clean `rejected`):
   render flip, the MEMORY.md ceiling change and the vault patch.
 - **P5** — the skills eval's `desc_push` / `desc_pull` arms, then
   `skills.index.descriptions` and the pull switch.
-- **P1** — rollout `system_tail`, then the `user_tail` A/B
-  (`brain1.turn_start_prefix`), then `freeze_memory`.
+- **P1** — step 1 (`system_tail`, shipped 2026-09-25 in `ca7eb481`) is done;
+  what is left is the `user_tail` A/B (`brain1.turn_start_prefix`), then
+  `freeze_memory`.
 - **P6** — whether `echo_guard.mode: tool_choice` beats `nudge`.
 - **P9** — its eval needs a session with live, unsandboxed Bash, which the
   bench/eval sandbox rule (CLAUDE.md, "The vault is protected at the tool
