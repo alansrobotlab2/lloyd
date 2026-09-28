@@ -25,6 +25,7 @@ import pytest
 
 import app.data_root as dr
 import app.paths as paths
+from app.autonomy import _parse_task_file
 
 _SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "groundskeeper" / "retention-sweep.py"
 
@@ -1683,9 +1684,7 @@ def test_the_skill_says_ten_stores_and_its_table_has_a_row_per_report_line(
 
     monkeypatch.setattr("sys.argv", ["retention-sweep.py"])
     assert rs.main() == 0
-    report = [ln.strip() for ln in capsys.readouterr().out.splitlines()
-              if ln.startswith("  ") and ln.strip().endswith(
-                  ("freed", "candidate", "removed (keep last 200)"))]
+    report = _store_report_lines(capsys.readouterr().out)
     assert len(report) == 10, f"the sweep prints {len(report)} store lines: {report}"
     assert len(rows) == len(report), (
         f"the skill lists {len(rows)} stores against {len(report)} report lines: "
@@ -1698,6 +1697,269 @@ def test_the_skill_says_ten_stores_and_its_table_has_a_row_per_report_line(
     assert "groundskeeper-writes.jsonl" in pair_row, pair_row
     assert "GROUNDSKEEPER_QUEUE_MAX_AGE_DAYS" in pair_row, pair_row
     assert f">{rs.GROUNDSKEEPER_QUEUE_MAX_AGE_DAYS}d" in pair_row, pair_row
+
+
+# ---------------------------------------------------------------------------
+# The third surface: what the worker is TOLD. (#1734)
+#
+# `app/autonomy.py::_build_task_prompt` splices the skill body AND
+# `Task description: {description}` into ONE prompt, so the weekly run of task #79
+# is handed "ten unbounded-growth stores" by SKILL.md and "Report all nine lines."
+# by its own task file in the same turn. The node above compares the skill to the
+# printed report and never opens the task file, so the drift lived in the one
+# surface no test read: `b3afdb99` (#1573) enumerated nine stores a day before
+# `d24c7ecd` bounded the groundskeeper queue pair as the tenth, and no commit since
+# re-numbered the list.
+# ---------------------------------------------------------------------------
+
+#: The two sentences in the description that state a count. Both are load-bearing:
+#: the first is what the worker is told the sweep bounds, the second is the
+#: instruction it obeys when it writes its report.
+_STORE_CLAIM_PATTERNS = (
+    re.compile(r"(\w+) stores are bounded"),
+    re.compile(r"Report all\s+(\w+) lines"),
+)
+#: The literal that opens the hand-written enumeration, and the word that closes it.
+#: The guard requires both, so a rewrite that drops either makes it raise rather than
+#: silently find nothing to compare.
+_STORE_ORDER_ANCHOR = "in this order:"
+_STORE_ORDER_TAIL = "Report all"
+_STORE_COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+                      "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+                      "twelve": 12, "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6,
+                      "7": 7, "8": 8, "9": 9, "10": 10, "11": 11, "12": 12}
+
+
+def _store_report_lines(out: str) -> list[str]:
+    """One line per bounded store, in the order `main()` printed them.
+
+    The store lines are the report; the header, the data-root line and the two
+    automod lines are not stores. This is the definition the skill-table node above
+    uses too — both readers of "how many stores are there" now take it from here, so
+    the two sides of a count comparison cannot be two different measurements.
+    """
+    return [ln.strip() for ln in out.splitlines()
+            if ln.startswith("  ") and ln.strip().endswith(
+                ("freed", "candidate", "removed (keep last 200)"))]
+
+
+def _store_label(line: str) -> str:
+    """The words the REPORT uses to name the store on this line.
+
+    Cut at the age window or the file list, whichever comes first: `sessions >90d
+    inactive (background >30d): 0 gzipped, 0.0 MiB candidate` → `sessions`,
+    `groundskeeper queue (groundskeeper-queue.json + groundskeeper-writes.jsonl)
+    >30d: …` → `groundskeeper queue`.
+    """
+    head = line.split(":")[0]
+    head = re.split(r"\s>", head, maxsplit=1)[0]
+    return head.split("(")[0].strip()
+
+
+def _assert_description_names_the_reported_stores(description: str, report: list[str],
+                                                  where: str) -> list[tuple[int, str]]:
+    """Raise `AssertionError` unless `description` enumerates and claims `report`.
+
+    Three comparisons, all against lines that were actually printed:
+
+    * every count sentence in the description equals `len(report)`;
+    * the enumeration carries exactly `len(report)` items, numbered 1..N with no gap
+      and no repeat, so inserting a store without re-numbering the tail (or vice
+      versa) raises instead of quietly reporting one line short;
+    * item *i* names the store the *i*-th printed line names, which is what pins the
+      ORDER as well as the count. A store is matched by the first and last word of
+      its report label, tolerant of a description that words the middle differently
+      (`workers.db table runs` for the printed `workers.db runs`), and strict enough
+      that swapping two adjacent items fails on the word the other line owns.
+
+    `where` names the file or fixture in every message, because the failing case is
+    a person reading a diff at 23:00.
+    """
+    def _count(token: str, sentence: str) -> int:
+        word = token.lower().strip(".;,")
+        if word not in _STORE_COUNT_WORDS:
+            raise AssertionError(
+                f"{where}: '{sentence}' states a store count as {token!r}, which is "
+                f"neither a digit nor one of the words the guard knows")
+        return _STORE_COUNT_WORDS[word]
+
+    for pattern in _STORE_CLAIM_PATTERNS:
+        m = pattern.search(description)
+        if m is None:
+            raise AssertionError(
+                f"{where}: the description never states {pattern.pattern!r}, so the "
+                f"guard cannot read the count the worker is being handed")
+        claimed = _count(m.group(1), m.group(0))
+        if claimed != len(report):
+            raise AssertionError(
+                f"{where}: the description says {m.group(1)} ({claimed}) but the sweep "
+                f"prints {len(report)} store lines: "
+                f"{[_store_label(l) for l in report]}")
+
+    start = description.find(_STORE_ORDER_ANCHOR)
+    if start < 0:
+        raise AssertionError(
+            f"{where}: no {_STORE_ORDER_ANCHOR!r} enumeration to compare against the "
+            f"{len(report)} lines the sweep prints")
+    region = description[start + len(_STORE_ORDER_ANCHOR):]
+    end = region.find(_STORE_ORDER_TAIL)
+    if end < 0:
+        raise AssertionError(
+            f"{where}: the {_STORE_ORDER_ANCHOR!r} enumeration never closes — no "
+            f"{_STORE_ORDER_TAIL!r} after it, so the guard cannot tell where the "
+            f"store list ends")
+    # Stripped: the enumeration opens as `in this order: 1 task logs`, and item 1 is
+    # matched at the start of the region, so the leading space belongs to it.
+    region = region[:end].strip()
+
+    items: list[tuple[int, str]] = []
+    for m in re.finditer(r"(?:^|; )(\d{1,2})\s+([^;]+)", region):
+        items.append((int(m.group(1)), m.group(2).split(",")[0].strip()))
+    if not items:
+        raise AssertionError(
+            f"{where}: {_STORE_ORDER_ANCHOR!r} is followed by no numbered items")
+    numbers = [n for n, _ in items]
+    if numbers != list(range(1, len(items) + 1)):
+        raise AssertionError(
+            f"{where}: the enumeration is numbered {numbers} — items must be numbered "
+            f"1..{len(items)} in the order the sweep prints them, so an inserted or "
+            f"retired store leaves the list self-evidently wrong")
+    if len(items) != len(report):
+        raise AssertionError(
+            f"{where}: the description enumerates {len(items)} stores "
+            f"({[label for _, label in items]}) but the sweep prints {len(report)} "
+            f"store lines ({[_store_label(l) for l in report]})")
+
+    for (number, label), line in zip(items, report):
+        printed = _store_label(line)
+        words = printed.split()
+        want = {words[0], words[-1]}
+        have = set(label.lower().replace("(", " ").replace(")", " ").split())
+        missing = want - have
+        if missing:
+            raise AssertionError(
+                f"{where}: item {number} of the description is {label!r} but store "
+                f"{number} of the report is {printed!r} — the enumeration is out of "
+                f"step with the printed order (missing {sorted(missing)})")
+    return items
+
+
+@pytest.fixture()
+def _store_report(rs, tmp_path, monkeypatch, capsys) -> list[str]:
+    """The store lines production `main()` prints over the fixture data root."""
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py"])
+    assert rs.main() == 0
+    return _store_report_lines(capsys.readouterr().out)
+
+
+def _task79_front_matter(rs) -> tuple[str, str] | None:
+    """(front-matter text, description) for task #79, or None if the vault is away.
+
+    Read through the engine's own loader, not a hand-rolled split, because the
+    `description` the guard checks has to be the string `_build_task_prompt` puts in
+    front of the worker; a second parser here would be a second answer. The path is
+    the real vault, not `rs.AUTONOMY_DIR` — that constant is redirected into
+    `tmp_path` by the `rs` fixture and holds a synthetic task, and the file under
+    test is the one the weekly run is actually dispatched from.
+    """
+    path = rs.vault_root() / "autonomy" / "79-retention-sweep.md"
+    if not path.is_file():
+        return None
+    parsed = _parse_task_file(path)
+    if not parsed or not parsed.get("description"):
+        return None
+    return path.read_text(encoding="utf-8").split("---\n", 2)[1], parsed["description"]
+
+
+def test_the_task_description_names_every_store_the_sweep_prints(
+        rs, _store_report):
+    """#1734 clauses 1–3: the prompt-rendered description and the report are one list.
+
+    Task #79's front matter is half of the prompt the weekly worker gets, and it
+    enumerated nine stores while the sweep printed ten — so the run was instructed,
+    in the same turn it was told about ten stores, to report nine lines. This reads
+    the shipped file through the loader the scheduler uses and compares its counts
+    and its order against the lines `main()` printed above.
+    """
+    fm = _task79_front_matter(rs)
+    if fm is None:
+        pytest.skip("autonomy/79-retention-sweep.md is not reachable from the vault")
+    front, description = fm
+
+    assert "nine" not in front.lower(), (
+        "the front matter still says nine somewhere, and the prompt the worker gets "
+        "is built from this file: "
+        + "; ".join(ln for ln in front.splitlines() if "nine" in ln.lower()))
+
+    items = _assert_description_names_the_reported_stores(description, _store_report,
+                                                          "autonomy/79-retention-sweep.md")
+    assert len(items) == len(_store_report) == 10, (
+        f"the guard compared {len(items)} items against {len(_store_report)} lines")
+
+    # Clause 2, on the tenth store's own terms: the groundskeeper pair sits where the
+    # sweep prints it, between the session spill dirs and `workers.db runs`, and names
+    # both files plus the constant that decides its window, so the description says
+    # what the line means rather than just how many there are.
+    printed_groundskeeper = next(
+        i for i, line in enumerate(_store_report) if "groundskeeper" in line)
+    number, label = items[printed_groundskeeper]
+    assert "groundskeeper" in label.lower(), (
+        f"store {number} prints as groundskeeper but the description's item "
+        f"{number + 1} is {label!r}")
+    item_text = description.split(f"{number} ")[1].split(f"{number + 1} ")[0]
+    assert "groundskeeper-queue.json" in item_text, item_text
+    assert "groundskeeper-writes.jsonl" in item_text, item_text
+    assert "GROUNDSKEEPER_QUEUE_MAX_AGE_DAYS" in item_text, item_text
+    assert str(rs.GROUNDSKEEPER_QUEUE_MAX_AGE_DAYS) in item_text, item_text
+    assert "workers.db" in items[printed_groundskeeper + 1][1], items
+    assert "queue" in items[printed_groundskeeper + 2][1].lower(), items
+
+
+def test_the_store_count_guard_refuses_a_description_that_disagrees_with_the_report(
+        _store_report):
+    """#1734 clause 4: the guard can fire, in both directions of the drift.
+
+    The real file agrees, which is why a guard over it proves nothing on its own — so
+    the same function is run against fixture strings that disagree with the printed
+    lines three ways, each the way a real edit gets it wrong. All three raise; the
+    unedited fixture does not, which is the control that says the raises are about the
+    mismatch and not about the guard's shape.
+    """
+    labels = [_store_label(line) for line in _store_report]
+    good = ("The script is the only actor. ten stores are bounded, and the report "
+            "names them in this order: "
+            + "; ".join(f"{i + 1} {lab}, bounded at the window in the line"
+                        for i, lab in enumerate(labels))
+            + ". Report all ten lines.")
+    _assert_description_names_the_reported_stores(good, _store_report, "control fixture")
+
+    # (a) the #1734 drift itself: the prose says nine while ten lines are printed.
+    nine = good.replace("ten stores are bounded", "nine stores are bounded")
+    with pytest.raises(AssertionError, match="says nine") as raised:
+        _assert_description_names_the_reported_stores(nine, _store_report, "fixture nine")
+    assert "10 store lines" in str(raised.value), raised.value
+
+    # (b) the same lie on the instruction half only: counts in prose fixed, the
+    # sentence the worker obeys left at nine.
+    tell_nine = good.replace("Report all ten lines", "Report all nine lines")
+    with pytest.raises(AssertionError, match="says nine"):
+        _assert_description_names_the_reported_stores(tell_nine, _store_report,
+                                                      "fixture report-all")
+
+    # (c) the count claimed and the items enumerated disagree: item 8 is dropped and
+    # 9/10 left in place, so the numbering itself is the tell.
+    dropped = good.replace(f"8 {labels[7]}, bounded at the window in the line; ", "")
+    with pytest.raises(AssertionError, match="numbered"):
+        _assert_description_names_the_reported_stores(dropped, _store_report,
+                                                      "fixture dropped item")
+
+    # (d) and the order half, where every count is right: swapping two adjacent items
+    # keeps ten and ten but puts the queue's words on the runs line.
+    swapped = (good.replace(f"9 {labels[8]},", f"9 {labels[9]},")
+                   .replace(f"10 {labels[9]},", f"10 {labels[8]},"))
+    with pytest.raises(AssertionError, match="out of step"):
+        _assert_description_names_the_reported_stores(swapped, _store_report,
+                                                      "fixture swapped order")
 
 
 # ---------------------------------------------------------------------------
