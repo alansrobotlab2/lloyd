@@ -33,7 +33,9 @@ record names, one `HOME` swap away.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import shlex
 import sys
 from pathlib import Path
 
@@ -75,6 +77,10 @@ DENY_SET_WRITES = {
     "install-destination-service": "install -m 644 /tmp/x {repo}/agent-services/y.conf",
     "mv-destination-identity": "mv /tmp/evil ~/obsidian/lloyd/SOUL.md",
     "sed-in-place-service": "sed -i 's/a/b/' ~/lloyd/agent-services/conf/guardian.env",
+    # A *shell's* heredoc body is shell code, so #1740's split hands it straight
+    # back to the grammar instead of dropping it as data: the write inside it has
+    # to stay refused, which is what separates the narrowing from a switch-off.
+    "shell-heredoc-body-redirect": "bash <<'SH'\necho x > {home}/.openclaw/credentials.json\nSH\n",
     "interpreter-open-write": "python3 -c \"open('{home}/.openclaw/x','w').write('x')\"",
     "cd-relative-sed-in-place": "cd ~/lloyd && sed -i 's/x/y/' agent-services/supervisord.conf",
 }
@@ -416,3 +422,152 @@ def test_the_grant_that_lifts_the_file_lane_lifts_this_lane_too(home):
                                  session_id=SID) is None
     assert check_bash_command(command, str(home / "lloyd"), at_dispatch=True,
                              session_id=SID) is not None, "the lift cannot outlive its scope"
+
+
+# ── #1740: a payload's write calls are read; its data is not ────────────────
+#
+# The item's two directions meet in these nodes, and they pull against each other.
+# A deny-set path that sits *inside program text* — a case-table entry, a patch
+# hunk, a line to grep for — is data the command carries, and up to #1740 it came
+# back as a write target: `_tokens` rewrites every "\n" to " ; " and the only thing
+# skipped was the heredoc *word*, so a body was visited as its own command segments
+# and a `>` anywhere in it named whatever followed as a redirect. The same path in
+# a write call the payload actually *performs* is a write, and on `-c` it refused
+# while on stdin it returned None — `python3 -` has no operand, and a body read as
+# shell contains no shell redirect. So one node below closes the false positives
+# and another closes the under-block; either one dropped on its own is the bug
+# recurring in the other direction.
+
+#: The write calls `write_targets`' payload arm knows, as templates over one
+#: target: `open` with a mode argument, and `pathlib`'s writer. Two because the arm
+#: is a set of write-call patterns, not a match on the word `open`.
+PAYLOAD_WRITES = (
+    "open('{t}','w').write('x')",
+    "from pathlib import Path\nPath('{t}').write_text('x')",
+)
+
+
+def _payload_on_stdin(body: str) -> str:
+    """A body handed to python the way a patch script is written: `-` as the
+    operand and a quoted heredoc word, so the shell expands nothing inside it."""
+    return "python3 - <<'PY'\n" + body + "PY\n"
+
+
+@pytest.mark.parametrize("write_form", PAYLOAD_WRITES)
+def test_an_interpreter_write_refuses_on_stdin_as_on_the_flag(home, write_form):
+    """#1740 clause 2. A payload's own write is refused whichever way it arrives.
+
+    Measured at `b002b2e9` the `-c` spelling refused and the stdin one returned
+    None, so feeding a program on stdin was an under-block that a fix narrowing
+    what bodies get parsed as shell would have widened rather than closed. Both
+    spellings are asserted on both lanes, and `write_targets` is checked to name
+    the target under the interpreter shape — the shape the refusal quotes — so the
+    node cannot pass on an unrelated target.
+    """
+    target = home / ".openclaw" / "created-by-the-command"
+    call = write_form.format(t=target)
+    on_flag = "python3 -c " + shlex.quote(call)
+    on_stdin = _payload_on_stdin(call + "\n")
+    # The same write one line after an apostrophe in prose. `_payload_literals`
+    # skips a quote with nothing to close it on its own line, so a comment cannot
+    # mask the statement below it: an unescape rule that hid this would be the
+    # under-block this round was written to close, wearing a fix's clothes.
+    after_prose = _payload_on_stdin("# don't mind this line\n" + call + "\n")
+    for cmd in (on_flag, on_stdin, after_prose):
+        match = check_bash_command(cmd, str(home / "lloyd"), at_dispatch=True,
+                                   session_id=SID)
+        assert match is not None, cmd
+        assert str(target) in match[0], match
+        assert not target.exists(), "the check is pre-dispatch, not a wrapper"
+        decision, reason = _hook_decision(cmd, str(home / "lloyd"))
+        assert decision == "deny", (cmd, decision, reason)
+        assert "protected write" in reason, reason
+
+
+def test_a_deny_set_path_carried_as_data_inside_a_payload_is_not_a_write(home):
+    """#1740 clause 3. The fourth false positive, replayed: a `python -c` whose
+    payload holds the write only as a case-table string must not refuse.
+
+    The string is built with `json.dumps` rather than typed so its escaping is the
+    real thing: one level in, the inner quotes arrive to the guard as `\\"`, which
+    is what marks them as text *inside* a literal of the payload rather than as
+    statements of it. That distinction is the whole of the fix — a regex over the
+    payload cannot see it, and at `b002b2e9` this command returned the target with
+    the shape `'a write from an interpreter to'` and refused on both lanes.
+    The stdin spelling is asserted alongside it because the payload arm now runs on
+    heredoc bodies too, and it must inherit the same data-not-code rule; it did not
+    refuse at the base commit only because nothing read the body at all.
+    """
+    target = home / ".openclaw" / "x"
+    entry = "python3 -c \"open('" + str(target) + "','w').write('x')\""
+    payload = ("import json\nfor line in [" + json.dumps(entry)
+               + "]:\n    print(line)\n")
+    commands = ["python3 -c " + shlex.quote(payload), _payload_on_stdin(payload)]
+    # The same pair with the quoted write handed to a function that *describes* it,
+    # beside a deny-set path as its own argument. Nothing here writes: both paths
+    # are arguments. This is the shape that pins the rule as such rather than as a
+    # side effect of resolution — read as a call, the quoted `open(` is answered
+    # with the literal that follows it in the same statement window, and the node's
+    # `write_targets(...) == []` is what turns red.
+    described = ("describe(\"open('" + str(target) + "','w').write('x')\", '"
+                 + str(home / ".openclaw" / "credentials.json") + "')\n")
+    commands += ["python3 -c " + shlex.quote(described), _payload_on_stdin(described)]
+    # And the same write mentioned in a comment, which is where most of the
+    # deny-set paths in a real patch script actually appear. The apostrophe in
+    # `don't` has no closing quote before the path, so the comment's text is what
+    # the scan sees, not a call.
+    commented = ("# don't reach for open('" + str(target) + "','w') here\n"
+                 "print('skipped')\n")
+    commands += ["python3 -c " + shlex.quote(commented), _payload_on_stdin(commented)]
+    for cmd in commands:
+        assert str(target) in cmd and "open(" in cmd and "'w'" in cmd, cmd
+        assert PP.write_targets(cmd, str(home / "lloyd")) == [], cmd
+        assert check_bash_command(cmd, str(home / "lloyd"), at_dispatch=True,
+                                 session_id=SID) is None, cmd
+        decision, reason = _hook_decision(cmd, str(home / "lloyd"))
+        assert "protected write" not in reason, (cmd, decision, reason)
+
+
+def test_no_write_target_from_the_reference_traffic_ends_in_a_quote(home):
+    """#1740 clause 4. `shlex` hands back a token with its quotes stripped, so a
+    path that still ends in one came from text the shell grammar was never meant to
+    parse — every false positive the item measured arrived that way.
+
+    Each command is pinned to the targets it is meant to produce, not merely to the
+    absence of a quote: two of the four are ordinary writes, so a guard that
+    answered nothing for anything would fail here rather than pass. Measured at
+    `b002b2e9` the case-table body returned three targets, two of them ending in
+    `",` (`…/credentials.json",`) and both in the deny set; here it returns the one
+    the command's own redirect names, `/tmp/probe.py`.
+    """
+    corpus = [
+        # The clause-1 shape: a `cat` body whose lines are probe commands.
+        "cat > /tmp/probe.py <<'EOF'\n"
+        "cases = [\n"
+        '    "echo x > ~/.openclaw/credentials.json",\n'
+        '    "echo x | tee -a ~/lloyd/agent-services/supervisord.conf",\n'
+        "    'sed -i \\'s/a/b/\\' notes.md',\n"
+        '    "mv /tmp/evil ~/obsidian/lloyd/SOUL.md",\n'
+        "]\n"
+        "EOF\n",
+        # A patch script of the shape the second reference session ran: the deny-set
+        # paths are entries of a table it will visit later, and a `>` sits in prose.
+        _payload_on_stdin("TARGETS = [\n    '"
+                          + str(home / "lloyd" / "agent-services" / "link.conf")
+                          + "',\n    '" + str(home / ".openclaw" / "credentials.json")
+                          + "',\n]\nfor p in TARGETS:\n    print('would patch', p, "
+                          "'-> done')\n"),
+        # Two writes the guard does have to see, so the node cannot pass on a guard
+        # that answers nothing for anything.
+        f"cp /tmp/a.py {home}/lloyd/scripts/b.py",
+        f"sed -i 's/x/y/' {home}/notes.md",
+    ]
+    expected = [["/tmp/probe.py"], [],
+                [str(home / "lloyd" / "scripts" / "b.py")],
+                [str(home / "notes.md")]]
+    assert sum(len(e) for e in expected) == 3, "the positive control is vacuous"
+    for cmd, want in zip(corpus, expected):
+        targets = PP.write_targets(cmd, str(home / "lloyd"))
+        for path, shape in targets:
+            assert not path.endswith(('"', "'")), (path, shape, cmd)
+        assert [p for p, _shape in targets] == want, cmd

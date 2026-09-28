@@ -36,6 +36,7 @@ corpus = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(corpus)
 
 import app.harness.safety as safety  # noqa: E402
+from app.harness import protected_paths as PP  # noqa: E402
 
 #: A plausible over-block: a rule that keys on the `-delete` verb instead of on
 #: what the sweep takes out. `check_protected_delete` refuses a `find -delete`
@@ -297,6 +298,88 @@ def test_the_write_check_judges_a_link_by_where_it_points(deny_home, tmp_path):
     assert safety.check_bash_command(
         worktree, str(deny_home / "lloyd"),
         session_id="20260927_143507_chatabc") is None, worktree
+
+
+#: The attack arm lives in `tests/test_bash_write_guard.py`; loading it the way the
+#: header loads `tests/unit/test_harness_safety.py` is what lets the node below
+#: re-run *that* file's shapes instead of keeping a second copy of them here — a
+#: second list of the same eight spellings is a list that silently diverges from
+#: the one the attack arm actually tests.
+_GUARD_SPEC = importlib.util.spec_from_file_location(
+    "_bash_write_guard", LLOYD_HOME / "tests" / "test_bash_write_guard.py")
+guard = importlib.util.module_from_spec(_GUARD_SPEC)
+_GUARD_SPEC.loader.exec_module(guard)
+
+#: Two `cat > /tmp/probe.py <<'EOF'` bodies that are data and nothing else. The
+#: plain one is the clause's own wording; the table is trimmed from the case table
+#: in `~/lloyd-data/sessions/20260927_143443_autocode_5659.json`, and keeps the
+#: `'sed -i \'s/a/b/\' …'` line because that line's odd number of quotes is what
+#: left the entries after it standing *outside* a quoted string to the old parser
+#: — a balanced case table never tripped it, and a test built from one alone would
+#: pass at the base commit and pin nothing.
+_CAT_BODIES = [
+    "cat > /tmp/probe.py <<'EOF'\n"
+    "echo x > ~/.openclaw/credentials.json\n"
+    "EOF\n",
+    "cat > /tmp/probe.py <<'EOF'\n"
+    "cases = [\n"
+    '    "echo x > ~/.openclaw/credentials.json",\n'
+    '    "echo x | tee -a ~/lloyd/agent-services/supervisord.conf",\n'
+    "    'sed -i \\'s/a/b/\\' notes.md',\n"
+    '    "mv /tmp/evil ~/obsidian/lloyd/SOUL.md",\n'
+    "]\n"
+    "EOF\n",
+]
+
+
+@pytest.mark.parametrize("cmd", _CAT_BODIES)
+def test_a_heredoc_body_of_data_is_not_read_for_write_targets(deny_home, cmd):
+    """#1740 clause 1: a heredoc body is program text, so neither of its two
+    shapes is a write target — while the redirect the command itself spells still is.
+
+    `_tokens` rewrites every `\\n` to ` ; ` and nothing stripped the body, so each
+    body line was visited as its own command segment and a `>` inside it read as a
+    redirect. Measured against the live tree at `b002b2e9`, the plain body returned
+    2 write targets and the table 3, both refused on both lanes, and the table's
+    extra targets came back still carrying a closing quote the shell never handed
+    them (`…/credentials.json",`) — a token `shlex` had not stripped, which is how
+    the item recognised them as data. Both halves are asserted here: the guard
+    answers None on each lane, and `write_targets` still reports the one target the
+    operator's own line names, so the node cannot pass by the whole check having
+    been switched off.
+    """
+    assert PP.write_targets(cmd, str(deny_home / "lloyd")) \
+        == [("/tmp/probe.py", "a redirect into")], cmd
+    assert safety.check_bash_command(cmd, str(deny_home / "lloyd"),
+                                     session_id="20260927_143507_chatabc") is None, cmd
+    decision, reason = guard._hook_decision(cmd, str(deny_home / "lloyd"))
+    assert decision != "deny", (decision, reason)
+    assert "protected write" not in reason, reason
+
+
+def test_the_write_guard_still_refuses_every_shape_the_attack_arm_names(deny_home):
+    """#1740 clause 5, both directions in one run: the narrowing that freed the
+    data above freed no write.
+
+    The baseline pair has to stay clean (`false_blocked == 0 and misses == 0`, the
+    same assertion `test_both_directions_discriminate_against_the_same_baseline`
+    makes of it) *and* every spellings table the attack arm holds must still come
+    back refused, because a fix that stops reading program text as shell is one
+    edit away from also not reading a shell payload as shell. `bash -c` is the
+    shape in that table that keeps being parsed as shell after #1740 — a shell
+    body or a shell `-c` argument is code, not data — and `interpreter-open-write`
+    is the one that keeps being read for its write calls.
+    """
+    base = corpus.run_safety_pair()
+    assert base["false_blocked"] == 0 and base["misses"] == 0, (
+        f"the baseline pair is no longer clean: {corpus.format_safety_pair(base)}")
+    shapes = dict(guard.DENY_SET_WRITES)
+    assert len(shapes) >= 8, shapes
+    for key, template in sorted(shapes.items()):
+        cmd = template.format(home=deny_home, repo=deny_home / "lloyd")
+        assert safety.check_bash_command(
+            cmd, str(deny_home / "lloyd"),
+            session_id="20260927_143507_chatabc") is not None, (key, cmd)
 
 
 def test_the_write_check_lets_a_round_edit_its_own_worktree(deny_home, tmp_path):

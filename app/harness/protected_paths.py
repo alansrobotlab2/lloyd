@@ -749,20 +749,20 @@ _MOVE_TAKES_VALUE = frozenset({
 #: `sed` options that carry the script, which is then not a file operand.
 _SED_SCRIPT_FLAGS = frozenset({"-e", "--expression", "-f", "--file"})
 
-#: The quoted-literal forms to read out of an interpreter's argument — the same
-#: two patterns `referenced_paths` and `_interpreter_delete` scan with, at :661
-#: and :526. Read out *whole*, because handing the payload to
-#: `referenced_paths` as one blob merges adjacent literals: shlex strips the
-#: quotes and keeps the comma, so `open('/a/x','w')` comes back naming
-#: `/a/x,w`, a path that exists nowhere. It still trips a directory entry, which
-#: is how the redirect-shaped case is caught either way, but it never equals the
-#: identity file, and a check that only ever matched `SOUL.md,w` would let
-#: `open("<…>/SOUL.md","w")` through while reporting a clean hit on the other
-#: spelling.
-_QUOTED_LITERALS = (r"'([^'\n]{2,400})'", r'"([^"\n]{2,400})"')
+#: The quoted literals of an interpreter's argument are read out *whole*, by
+#: `_payload_literals`, never by handing the payload to `referenced_paths` as one
+#: blob: that merges adjacent literals — shlex strips the quotes and keeps the
+#: comma, so `open('/a/x','w')` comes back naming `/a/x,w`, a path that exists
+#: nowhere. It still trips a directory entry, which is how the redirect-shaped
+#: case is caught either way, but it never equals the identity file, and a check
+#: that only ever matched `SOUL.md,w` would let `open("<…>/SOUL.md","w")` through
+#: while reporting a clean hit on the other spelling. Until #1740 this was two
+#: regexes alternated over the payload, which could not see that a literal sat
+#: inside another literal, and so could not tell a write call from one quoted as
+#: data.
 
 #: A call inside an interpreter's argument that writes, and which quoted literal
-#: of that call is its destination — `…_QUOTED_LITERALS` index 0 for
+#: of that call is its destination — `_payload_literals` index 0 for
 #: `open(p, "w")`, `Path(p).write_text(…)`, `fs.writeFileSync(p, …)`,
 #: `File.write(p, …)`; index 1 for the two-argument movers, whose literal 0 is
 #: the SOURCE. Position matters because `referenced_paths` does not know it: read
@@ -826,28 +826,177 @@ def _sed_inplace_files(args: list[str]) -> list[str]:
     return positionals if script_flag else positionals[1:]
 
 
+def _payload_literals(payload: str) -> list[tuple[int, int, str]]:
+    """`(start, end, text)` for every string literal at the payload's *own* level.
+
+    One unescape level has already been applied: `_tokens` ran `shlex` over the
+    command, which strips the quotes around the payload and leaves `\\\"` inside
+    it as `\"`. That one level is exactly what separates code from data. A
+    case-table entry spelling out another command arrives as
+    `"python3 -c \"open('/home/…/.openclaw/x','w')\""` — its inner quotes are
+    still escaped, so this scan sees a single string body spanning the whole
+    entry, and the `open(` inside it is text. The same call written at the
+    payload's statement level is `open('/home/…/.openclaw/x','w')`, whose
+    literals are code and whose path is a destination. `re.finditer` over the
+    payload cannot tell those two apart, which is the mechanism behind #1740's
+    fourth false positive.
+
+    The limits are under-blocks, not blocks: an apostrophe in prose inside a
+    payload (`# don't`) has no closing quote on its line and is skipped, and a
+    raw-string body containing a quote is read as though it were escaped.
+    """
+    out: list[tuple[int, int, str]] = []
+    i, n = 0, len(payload)
+    while i < n:
+        if payload[i] not in "\"'":
+            i += 1
+            continue
+        close = payload[i:i + 3] if payload[i:i + 3] in ('"""', "'''") else payload[i]
+        body = i + len(close)
+        j = body
+        while j < n:
+            if payload[j] == "\\":
+                j += 2                       # an escaped quote does not close it
+                continue
+            if payload.startswith(close, j):
+                break
+            if len(close) == 1 and payload[j] == "\n":
+                break
+            j += 1
+        if j >= n or not payload.startswith(close, j):
+            i += 1                      # a stray quote in prose: not a literal
+            continue
+        out.append((i, j + len(close), payload[body:j]))
+        i = j + len(close)
+    return out
+
+
 def _interpreter_destinations(payload: str) -> list[str]:
     """The paths the write calls in one interpreter argument would land on.
 
     Each call is read in its own window, from the call to the end of its
     statement, so a payload holding two writes never hands the second one's
     literal to the first, and the literal read is the one that position names.
+
+    Only a call at the payload's own statement level counts. A write call quoted
+    *inside* a string of the payload is data the payload merely carries — a case
+    table of commands to probe, a patch hunk, a log line to match — and reporting
+    its path as a write target is what refused three Bash calls in the very
+    session that authored this guard (#1740).
     """
     out: list[str] = []
+    regions = _payload_literals(payload)
     for pattern, index in _INTERPRETER_WRITE_CALLS:
         for match in pattern.finditer(payload):
+            if any(start <= match.start() < end for start, end, _t in regions):
+                continue                        # quoted inside a string: data
             window = payload[match.start():]
             cut = min((window.find(sep) for sep in (";", "\n")
                        if window.find(sep) != -1), default=len(window))
-            window = window[:cut or None]
-            literals: list[tuple[int, str]] = []
-            for quoted in _QUOTED_LITERALS:
-                for lit in re.finditer(quoted, window[:400]):
-                    literals.append((lit.start(), lit.group(1)))
-            literals.sort()
-            if len(literals) > index and literals[index][1] not in out:
-                out.append(literals[index][1])
+            limit = match.start() + (cut or len(window))
+            literals = [text for (start, _end, text) in regions
+                        if match.start() <= start < limit
+                        and "\n" not in text]   # a multi-line body is never a destination
+            if len(literals) > index and literals[index] not in out:
+                out.append(literals[index])
     return out
+
+
+#: A heredoc operator, in its four spellings: `<<WORD`, `<<-WORD`, `<<'WORD'`
+#: and `<<"WORD"`. `<<<` (bash's here-string) cannot match, because the word has
+#: to start with a letter or underscore and `<` is neither — a here-string is one
+#: word on the operator's own line, which the shell grammar already reads.
+_HEREDOC_OP = re.compile(r"<<(?P<dash>-)?[ \t]*(?P<q>['\"]?)(?P<word>[A-Za-z_]\w*)(?P=q)")
+
+
+def _heredoc_end(lines: list[str], start: int, word: str, dash: bool) -> int | None:
+    """The index of the line carrying the delimiter, or None if there is none.
+
+    A missing terminator means *no heredoc*, so a `<<` that is only text — inside
+    a quoted string, or an unbalanced one the shell would have rejected — never
+    swallows the rest of the command and quietly under-blocks it.
+    """
+    pat = re.compile(rf"^[ \t]*{re.escape(word)}\b")
+    for k in range(start, len(lines)):
+        if pat.match(lines[k].lstrip(" \t") if dash else lines[k]):
+            return k
+    return None
+
+
+def _heredoc_recipient(prefix: str) -> str:
+    """The bare command name a heredoc body belongs to, '' if there is none.
+
+    Read off the operator's own line, after the last shell boundary and through
+    any `FOO=bar` prefix or wrapper, so `env python3 - <<EOF` is recognised as
+    python's payload and not `env`'s.
+    """
+    seg = re.split(r"[;&|()\n]", prefix)[-1].strip()
+    if not seg:
+        return ""
+    argv, _via_xargs = _strip_wrappers(_tokens(seg))
+    return os.path.basename(argv[0]) if argv else ""
+
+
+def _split_heredocs(command: str) -> "tuple[str, list[str]]":
+    """`(text for the shell grammar, interpreter bodies)` for one command.
+
+    A heredoc body is program text or data, never a command line, and `_tokens`
+    rewriting every `\\n` to ` ; ` meant the shell grammar parsed it as a stream
+    of them: `cat > /tmp/probe.py <<'EOF'` with one `echo x > <deny-path>` line
+    inside came back naming that path as a redirect target, and a `>` in a JS or
+    CSS line read as a redirect too (#1740, three refusals in the guard's own
+    authoring session). So a body leaves the shell stream here, and what happens
+    to it depends on what was handed it:
+
+    * a **shell** (`bash`, `sh`, `zsh`, `dash`, `ksh`, `fish`) — the body *is*
+      shell code, so it stays in the stream and keeps being parsed as before;
+    * a **language with write-call patterns** (`python3`, `perl`, `node`, …) —
+      the body is a payload, and it is returned to be read by
+      `_interpreter_destinations`, for its write calls only. This is also what
+      shuts the hole #1740 measured open: `python3 - <<'EOF'` with
+      `open('<deny>/x','w')` in it used to return None, because the body reached
+      neither the operand list (stdin is not an operand) nor a write-call scan;
+    * **anything else** (`cat`, `tee`, `gcc`) — the body is data. It is dropped,
+      and the command keeps only what the operator's own line spells, which is
+      where a genuine `cat > <deny-path>` still refuses.
+
+    Multiple heredocs on one line are read one at a time, and a body that follows
+    an operator this pass did not consume keeps its current (parsed-as-shell)
+    behaviour rather than losing a refusal.
+    """
+    lines = command.split("\n")
+    out: list[str] = []
+    payloads: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        match = _HEREDOC_OP.search(line)
+        if not match:
+            out.append(line)
+            i += 1
+            continue
+        word, dash = match.group("word"), bool(match.group("dash"))
+        end = _heredoc_end(lines, i + 1, word, dash)
+        if end is None:
+            out.append(line)
+            i += 1
+            continue
+        recipient = _heredoc_recipient(line[:match.start()])
+        body = "\n".join(lines[i + 1:end])
+        if recipient in _SHELLS:
+            out.append(line)                     # a shell body is shell code
+            out.extend(lines[i + 1:end + 1])
+        else:
+            # Both ends of the splice survive: what followed the operator on its
+            # own line (`cat <<EOF | tee target`) is a command, and so is what
+            # followed the delimiter (`…\nEOF && echo done`).
+            tail = re.match(rf"[ \t]*{re.escape(word)}\b(.*)$", lines[end])
+            out.append(line[:match.start()] + line[match.end():]
+                       + (tail.group(1) if tail else ""))
+            if _INTERPRETER.match(recipient):
+                payloads.append(body)            # data for `cat` is simply dropped
+        i = end + 1
+    return "\n".join(out), payloads
 
 
 def _move_destination(flags: list[str], operands: list[str]) -> str | None:
@@ -880,6 +1029,8 @@ def write_targets(command: str, cwd: str | None = None,
     """
     if not command or not isinstance(command, str):
         return []
+    # Program text comes out of the shell stream first: see `_split_heredocs`.
+    command, payloads = _split_heredocs(command)
     home = os.path.normpath(os.path.expanduser("~"))
     state = {"cwd": _start_cwd(cwd, home)}
     out: list[tuple[str, str]] = []
@@ -980,6 +1131,14 @@ def write_targets(command: str, cwd: str | None = None,
                 visit(argv)
                 argv = []
         visit(argv)
+        # A payload fed on stdin gets the same write-call reading a `-c` operand
+        # gets, and only that reading: `python3 - <<'EOF'` whose body opens a
+        # deny-set path for writing used to return None, because stdin is not an
+        # operand and nothing scanned the body for write calls (#1740 clause 2).
+        for body in payloads:
+            for literal in _interpreter_destinations(body):
+                for path in referenced_paths(literal, state["cwd"], _depth + 1):
+                    keep(path, "a write from an interpreter to")
     except Exception:  # noqa: BLE001 — a parser bug must not become a crash
         return out
     return out
