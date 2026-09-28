@@ -362,6 +362,17 @@ LIVE_BENCH_CATEGORIES = {
     # `test_every_live_bench_file_is_named_in_the_census`; its assertion names the id
     # and this line is the whole fix it asks for.
     "bench_021_skill_invocation_self_kill": "synthetic",
+    # Keyed by stem with the `category:` its own front matter declares
+    # (`lloyd/bench/bench_022_skill_invocation_never_ran_chain.md:4` = `synthetic`),
+    # the only authority this table may copy. It arrived on disk while #1724's round
+    # was being written — the same defect its assertion table had for 019/020/021, in
+    # the second registry that globs the directory: the task landed in the vault and
+    # neither this map nor `eval/autoresearch_assertions.yaml` was told, so both
+    # coverage nodes red on it for whichever round was in flight. Its assertion entry
+    # came with this line. Untracked in the vault as of 2026-09-28 (22 `.md` on disk,
+    # `git -C ~/obsidian ls-files lloyd/bench | wc -l` = 21), so the `git clean -fd`
+    # caveat in the comment above is live for this id as it is for `bench_021`.
+    "bench_022_skill_invocation_never_ran_chain": "synthetic",
 }
 
 

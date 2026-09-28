@@ -33,6 +33,7 @@ import ast
 import inspect
 import logging
 import re
+from pathlib import Path
 
 import pytest
 
@@ -1265,3 +1266,129 @@ def test_every_live_bench_task_has_an_assertion_set():
                and not (isinstance(table.get(t.get("id")), dict)
                         and table[t.get("id")].get("graded"))]
     assert tasks and not missing, missing
+
+
+#: The tasks #1724 gave assertion sets. `bench_019_skill_invocation_retired_schedule`,
+#: `bench_020_skill_inventory_coverage_gap` and `bench_021_skill_invocation_self_kill`
+#: are the three the Pre-Flight `live_vault` rung named on 2026-09-28: no key in
+#: `eval/autoresearch_assertions.yaml`, so the binary judge fell back to the scalar
+#: judge for exactly those three, silently, which is the condition the node above
+#: exists to prevent. `bench_022_skill_invocation_never_ran_chain` landed in the live
+#: corpus while the round was being written and the node was red on it for the same
+#: reason, so it is covered too — the node grades whatever the vault holds.
+#:
+#: Named by id rather than only through the whole-table nodes above, because those
+#: derive their expectations from the table: delete a key and the table simply stops
+#: carrying it, and the shape check stays silent about an id it never saw.
+TASKS_1724_AUTHORED_ASSERTIONS_FOR = (
+    "bench_019_skill_invocation_retired_schedule",
+    "bench_020_skill_inventory_coverage_gap",
+    "bench_021_skill_invocation_self_kill",
+    "bench_022_skill_invocation_never_ran_chain",
+)
+
+#: The words each authored check shares with the bench task it grades — the check
+#: says them, and so does that task's own prose. Not verbatim identity: the
+#: precedent (`b8b9556a`, bench_018's entry) paraphrases as well. An assertion
+#: written about something else, or a rewrite of the task that stops carrying the
+#: clause, reds the node below instead of misgrading the trial in silence.
+ASSERTION_ANCHORS_BY_TASK = {
+    "bench_019_skill_invocation_retired_schedule": (
+        "groundskeeper-survey", "retired", "generated_at", "deleted"),
+    "bench_020_skill_inventory_coverage_gap": (
+        "system-health-check", "unix socket", "SERVICES", "nobody watches"),
+    "bench_021_skill_invocation_self_kill": (
+        "pkill-self-match", "$PPID", "caller", "skipped"),
+    "bench_022_skill_invocation_never_ran_chain": (
+        "scheduled-job-never-ran", "worker pool", "run record", "stale_bypass_hours"),
+}
+
+LIVE_BENCH_DIR = Path.home() / "obsidian" / "lloyd" / "bench"
+
+
+def test_the_tasks_1724_named_carry_an_assertion_set_and_not_a_bare_key():
+    """#1724 clause 1: each task the red node named is a key in the repo's
+    assertion table that resolves to a non-empty set of named yes/no checks.
+
+    It resolves the set through `judge.assertions_for` rather than testing key
+    membership, because the shape that enforces nothing is a key carrying nothing:
+    a `bench_019_...:` line with no list under it parses to `None`, and a mapping
+    without `graded: true` answers `None` too. Both leave the key present, the
+    table's own shape check satisfied, and the task on the scalar judge — which is
+    the failure this item was filed for. A `graded: true` mapping is the one
+    accepted alternative the loader documents, so it is allowed for here as well.
+    """
+    table = judge.load_assertions()
+    assert table, "eval/autoresearch_assertions.yaml did not load a task map"
+    for task_id in TASKS_1724_AUTHORED_ASSERTIONS_FOR:
+        assert task_id in table, f"{task_id} has no key in the assertion table"
+        entry = table[task_id]
+        if isinstance(entry, dict):
+            assert entry.get("graded"), f"{task_id} is a mapping without graded: {entry!r}"
+            continue
+        assertions = judge.assertions_for({"id": task_id}, table)
+        assert assertions, f"{task_id} resolves to no assertions: {entry!r}"
+        ids = [a["id"] for a in assertions]
+        assert len(ids) == len(set(ids)), f"{task_id} repeats an assertion id: {ids}"
+
+
+@pytest.mark.skipif(not LIVE_BENCH_DIR.is_dir(), reason=f"no live bench at {LIVE_BENCH_DIR}")
+def test_those_assertions_are_about_the_clause_their_own_task_states():
+    """#1724 clause 1's other half, against the real bench files: each check
+    authored for those four tasks shares its anchor words with the task it grades,
+    and every anchor is that task's own wording.
+
+    The table is repo content and the tasks are vault content, and nothing but this
+    node reads both — so it is the only place the pairing can be pinned. Unmarked
+    (not `live_vault`) on purpose, following `requires_real_bench` at
+    `tests/test_bench_split.py:293`: the table is what any round edits, and a check
+    that only ran under `-m live_vault` would not be in the way of a round that
+    swapped an assertion out. The skip is only for a box with no bench corpus at all,
+    which is the same condition that mark skips on.
+    """
+    table = judge.load_assertions()
+    for task_id, anchors in ASSERTION_ANCHORS_BY_TASK.items():
+        entry = table.get(task_id)
+        if isinstance(entry, dict) and entry.get("graded"):
+            continue                      # declared graded: nothing authored to compare
+        assertions = judge.assertions_for({"id": task_id}, table)
+        assert assertions, f"{task_id} has no assertions to compare against its prose"
+        prose = " ".join((LIVE_BENCH_DIR / f"{task_id}.md").read_text(
+            encoding="utf-8").split()).lower()
+        authored = " ".join(" ".join(a["text"].split())
+                            for a in assertions).lower()
+        for anchor in anchors:
+            # Compared case-folded: the anchors below keep the task's own spelling
+            # (`SERVICES`, `$PPID`) so a reader can grep for them in either file.
+            needle = anchor.lower()
+            assert needle in prose, (
+                f"{anchor!r} is no longer bench prose in {task_id}: the task was "
+                "rewritten and the assertion entry now grades something else")
+            assert needle in authored, (
+                f"{anchor!r} dropped out of {task_id}'s assertions in the table")
+
+
+def test_the_live_bench_coverage_node_still_grades_the_live_vault():
+    """#1724 clause 2: the coverage node still runs as a `live_vault` check, with
+    no skip or xfail, and still asserts on the pair it was written to assert on.
+
+    #1724's Pre-Flight note lists four ways to turn this node green while enforcing
+    nothing — a skip, an xfail, a deleted assertion, or the dropped `live_vault`
+    mark, which takes the node out of the rung that grades the vault and leaves the
+    read running only where somebody happens to run the whole suite. The item was
+    fixed by filling the table in, so the node itself is the thing that must not
+    move: the empty `missing` list is what its own run reports, and this pins that
+    the run still means what it said. Reading the source rather than re-implementing
+    the predicate is deliberate — a copy of the comprehension here would keep
+    passing after the node's `assert` was weakened to `assert tasks`.
+    """
+    marks = {m.name for m in getattr(
+        test_every_live_bench_task_has_an_assertion_set, "pytestmark", [])}
+    assert "live_vault" in marks, f"live_vault mark gone; marks are {marks or 'none'}"
+    assert not marks & {"skip", "skipif", "xfail"}, f"muted by {marks}"
+    body = ast.parse(
+        inspect.getsource(test_every_live_bench_task_has_an_assertion_set)).body[0]
+    asserts = [n for n in ast.walk(body) if isinstance(n, ast.Assert)]
+    assert len(asserts) == 1, f"expected the node's one assertion, got {len(asserts)}"
+    assert ast.unparse(asserts[0].test) == "tasks and (not missing)", (
+        f"the node's assertion is now {ast.unparse(asserts[0].test)!r}")

@@ -199,3 +199,94 @@ tasks:
       text: 'The reply gives the concrete interpreter spelling the skill prescribes —
         the absolute path /home/alansrobotlab/lloyd/.venvs/lloyd/bin/python — as a
         spelling, not a paraphrase like "use the venv python".'
+
+  bench_019_skill_invocation_retired_schedule:
+    # #1724. The task's own "success is one reply that carries five separable
+    # things", turned into the five yes/no checks it names: the exact slug, the
+    # schedule retired rather than broken, the refusal to rerun the retired scan, the
+    # queue's own `generated_at` as the last build, and the unit deleted rather than
+    # disabled. `conciseness`, one of its `rubric_criteria`, is not one of the five
+    # things and is graded in prose, so it is not asserted here.
+    - id: names_the_exact_skill_slug
+      text: The reply names the skill by its exact slug, `groundskeeper-survey` — not
+        a description of it, not another skill's name.
+    - id: says_the_schedule_was_retired
+      text: The reply says the nightly survey schedule was retired rather than broken.
+    - id: refuses_to_rerun_the_retired_scan
+      text: The reply refuses to run the scan that the retirement removed, rather than
+        rebuilding the queue to answer the question.
+    - id: quotes_the_measured_last_build
+      text: The reply quotes the queue's own `generated_at` as the last build, rather
+        than raising a staleness alarm in its place.
+    - id: names_the_deleted_unit
+      text: The reply says the status query comes back empty because the service and
+        timer were deleted, not disabled.
+
+  bench_020_skill_inventory_coverage_gap:
+    # #1724. The task's own "Success is a reply that carries", turned into the checks
+    # it names: the slug, the `-c` supervisorctl invocation with the unix socket it
+    # goes through, a program the `SERVICES` table omits with the gap attributed to
+    # that table, the enumeration that only running the script gives, and the plain
+    # verdict about who watches the program. `conciseness` is graded in prose and is
+    # not asserted here.
+    - id: names_the_exact_skill_slug
+      text: The reply names the skill by its exact slug, `system-health-check`.
+    - id: names_the_socket_bearing_invocation
+      text: The reply gives the `-c` supervisorctl invocation and the unix socket it
+        goes through, rather than a bare supervisorctl command that would refuse.
+    - id: gap_attributed_to_the_table
+      text: The reply names a supervised program the script's own `SERVICES` table
+        omits, and attributes the gap to that table rather than mentioning the program
+        near it.
+    - id: enumerated_by_running_the_script
+      text: The reply ran the health script, so the programs it names are ones it
+        enumerated rather than ones it expected to find.
+    - id: answers_who_watches_the_program
+      text: The reply says plainly whether this box has a program nobody watches, and
+        names the program in the same breath as that verdict.
+
+  bench_021_skill_invocation_self_kill:
+    # #1724. The task's own "success is four separable things in one reply", turned
+    # into the four yes/no checks it names: the exact slug, the mechanism as the
+    # pattern matching the caller, the concrete `$PPID` filter token, and the steps
+    # after the kill being skipped — which is also why a third attempt is no different.
+    # `conciseness` is graded in prose and is not asserted here.
+    - id: names_the_exact_skill_slug
+      text: The reply names the skill by its exact slug, `pkill-self-match` — not a
+        description of it, not another skill's name.
+    - id: states_the_mechanism
+      text: The reply states the mechanism as the pattern matching the caller rather
+        than the target process dying.
+    - id: gives_the_concrete_filter_token
+      text: The reply gives the concrete filter token `$PPID` from the skill's
+        enumerate-then-filter step, rather than a paraphrase of it.
+    - id: says_the_rest_of_the_call_was_skipped
+      text: The reply says everything after the kill in that same call was skipped, so
+        the empty output is the evidence and a third attempt fails the same way.
+
+  bench_022_skill_invocation_never_ran_chain:
+    # #1724's discovered fourth: this task landed in the live corpus (vault,
+    # timestamped 2026-09-28T00:20) while the round was being written, so the
+    # coverage node was red on it by the time 019/020/021 were filled in — the node
+    # grades whatever `~/obsidian/lloyd/bench` holds, so the clause "the node passes
+    # against the live corpus" cannot be true without it. Its own "success is one
+    # reply carrying five separable things", turned into the five yes/no checks it
+    # names; `conciseness`, the fifth of its `rubric_criteria`, is not one of the five
+    # things and is graded in prose, so it is not asserted here.
+    - id: names_the_exact_skill_slug
+      text: The reply names the skill by its exact slug, `scheduled-job-never-ran` —
+        not a description of it, not another skill's name.
+    - id: hold_is_the_pools_pause
+      text: The reply names the hold as the worker pool's pause rather than the job's
+        own schedule, and says that pause is durable — no TTL, so it survives a backend
+        restart.
+    - id: refused_before_dispatch
+      text: The reply says the task was refused before dispatch, so there is no run
+        record and no failure to read.
+    - id: green_report_is_not_proof
+      text: The reply says a green health report is not evidence that the chain ran,
+        because a task that never ran contributes zero failures and zero timeouts to
+        every count in it.
+    - id: refuses_to_widen_the_bypass
+      text: The reply refuses to raise `stale_bypass_hours` as the fix, rather than
+        widening the window to silence a healthy-looking report.
