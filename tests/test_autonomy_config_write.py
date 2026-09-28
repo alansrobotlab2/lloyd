@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 
 import pytest
 import yaml
@@ -186,3 +187,192 @@ def test_the_surface_advertises_the_writer_separately():
         assert len(tools[name].description or "") >= 60, name
         for pname, spec in (tools[name].input_schema.get("properties") or {}).items():
             assert (spec.get("description") or "").strip(), f"{name}.{pname}"
+
+
+# ── #1672: the surface promised a knob no code reads ─────────────────────────
+#
+# `autonomy_config_set` used to invite `key='max_parallel'` and answer a write
+# with `{"set", "value", "path"}`. Nothing in Lloyd reads that key, or any other
+# key of `_config.md`: `_read_config()` has exactly two callers, both in
+# `agent_mcp/autonomy.py`, and every other mention of the file in the tree is an
+# exclusion — `app/autonomy.py`, `app/routers/autonomy.py`,
+# `app/routers/dashboard.py` and `app/routers/mc_ui.py` all *skip* it, and
+# `grep -rEl "_config\.md" ~/obsidian/skills` returns 0 files. Worse, the string
+# `max_parallel` IS live-looking: `workers/sources/autoresearch.py` and
+# `bench_mine.py` read a `max_parallel` of their own out of `config.yaml`
+# (`CONFIG["workers"]["sources"]`), so a grep finds a consumer for a key that has
+# none. The four tests below pin the tool surface against re-learning the
+# misdirection: no unread key named, both descriptions saying what the file is,
+# and the payload saying per key whether anything applies it.
+
+#: A key an `inputSchema` description offers the caller: a snake_case word in
+#: quotes or backticks. Only the `key` property is scanned — a `value`
+#: description legitimately quotes a sample value, and `true` would match.
+_SCHEMA_NAMED_KEY = re.compile(r"""['"`]([a-z][a-z0-9_]{2,})['"`]""")
+
+
+def _tools() -> dict:
+    return {t.name: t for t in asyncio.run(autonomy.list_tools())}
+
+
+def test_the_key_schema_names_no_key_that_no_code_reads():
+    """Clause 1. `tools/list` is served to every session, so the example it
+    carries is the claim a caller plans from: naming `max_parallel` says
+    "here is a scheduler knob", and it is false.
+
+    The demand is structural rather than a grep for one string: any key the `key`
+    property quotes must be one code actually reads, which today means the
+    description may quote nothing."""
+    applied = autonomy._CONFIG_KEYS_APPLIED_BY_CODE
+    assert applied == frozenset(), (
+        "the applied-key set is no longer empty, so this test's demand is a "
+        "different one — update it to name the live key rather than dropping it")
+    tools = _tools()
+    for name in ("autonomy_config", "autonomy_config_set"):
+        props = tools[name].input_schema.get("properties") or {}
+        quoted = set(_SCHEMA_NAMED_KEY.findall(props["key"].get("description") or ""))
+        assert quoted <= applied, (
+            f"{name}.key advertises {sorted(quoted - applied)} — no code reads "
+            f"them, so the example promises an effect the fleet will never apply")
+    # Positive control that the scanner is not blind, and that this is what the
+    # removed text looked like: the pre-fix line was exactly
+    # "Config key to set, e.g. 'max_parallel'".
+    assert _SCHEMA_NAMED_KEY.findall("Config key to set, e.g. 'max_parallel'") == [
+        "max_parallel"], "the scanner matches nothing, so the check above is free"
+
+    surface = json.dumps([
+        {"name": t.name, "description": t.description, "schema": t.input_schema}
+        for t in tools.values()])
+    assert "max_parallel" not in surface, (
+        "the decoy key is back on the autonomy tool surface. It is greppable in "
+        "config.yaml under a DIFFERENT reader (workers/sources/autoresearch.py), "
+        "which is what made it the worst possible example")
+
+
+def test_both_config_tools_say_a_written_key_is_documentary_until_read():
+    """Clause 2. Neither half may promise the scheduler will apply the value.
+
+    The old read half was titled "Read autonomy scheduler configuration" and the
+    old `value` description said "as a string the scheduler parses" — a promise
+    about a parse that exists nowhere. So the demand here is that the word
+    itself is gone from both descriptions, and that both carry the one shared
+    claim (`_DOCUMENTARY_PHRASE`) that says what would end the limit: a reader."""
+    tools = _tools()
+    for name in ("autonomy_config", "autonomy_config_set"):
+        desc = tools[name].description or ""
+        assert "_config.md" in desc, f"{name} does not say which file this is about"
+        assert autonomy._DOCUMENTARY_PHRASE in desc, (
+            f"{name} does not carry the shared claim: {desc}")
+        assert "scheduler" not in desc.lower(), (
+            f"{name} still names the scheduler, which is the promise that no "
+            f"reader exists to keep: {desc}")
+        assert "the scheduler parses" not in json.dumps(tools[name].input_schema)
+    assert autonomy._DOCUMENTARY_PHRASE in autonomy._config_key_effect("anything")[1], (
+        "the payload and the description no longer say the same thing")
+
+
+def test_both_config_descriptions_are_one_string_literal():
+    """The claim only reaches a caller if the scan that guards it can see it.
+
+    `_gist_losses` walks `agent_mcp/*.py` and reads `Tool(description=…)` nodes,
+    skipping anything that is not an `ast.Constant` — so writing the description
+    as `"…" + _DOCUMENTARY_PHRASE` was enough to make both tools vanish from the
+    scan, and the failure it produced was in an unrelated assertion ("no longer
+    losing guidance, remove from GIST_LOSS_EXCEPTIONS") about 3,000 km from the
+    edit. The shared phrase is therefore a constant only for THIS file's
+    assertions; in the source it is pasted, twice, on purpose."""
+    import ast
+    from pathlib import Path
+
+    src = Path(autonomy.__file__).read_text(encoding="utf-8")
+    seen = {}
+    for node in ast.walk(ast.parse(src)):
+        if not (isinstance(node, ast.Call) and getattr(node.func, "id", "") == "Tool"):
+            continue
+        kw = {k.arg: k.value for k in node.keywords}
+        name, desc = kw.get("name"), kw.get("description")
+        if isinstance(name, ast.Constant):
+            seen[name.value] = desc
+    for name in ("autonomy_config", "autonomy_config_set"):
+        assert name in seen, f"{name} is no longer declared the way the scan reads"
+        assert isinstance(seen[name], ast.Constant), (
+            f"{name}'s description is not a literal, so `_gist_losses` skips the "
+            "tool and its gist is unguarded")
+        assert autonomy._DOCUMENTARY_PHRASE in seen[name].value
+
+
+def test_the_success_payload_says_whether_the_key_is_applied(cfg_file, monkeypatch):
+    """Clause 3, across both seams. The write did happen — the key is on disk —
+    so `{"set", "value", "path"}` was not a lie, it was an implication: a
+    returned call naming a config file is read as a knob that took.
+
+    The payload now says per key whether anything applies it, and the flag comes
+    from `_CONFIG_KEYS_APPLIED_BY_CODE` rather than being hardcoded `False`: the
+    second half of this test puts the key in that set and demands the SAME call
+    flip to saying it is applied. Without that the field could never be wrong,
+    and a field that can never be wrong reports nothing."""
+    out = json.loads(autonomy._handle_config_set(
+        {"key": "max_parallel", "value": "3"}))
+    assert (out["set"], out["value"]) == ("max_parallel", "3"), out
+    assert out["path"] == str(cfg_file), out
+    # Bytes BELOW the closing fence — `TAIL` above still carries that fence,
+    # `_split_config` hands back only what follows it.
+    assert out["bytes_below_front_matter"] == len(BODY.encode("utf-8")), out
+    assert out["applied_by_code"] is False, out
+    assert "not read by any code" in out["effect"], out
+    assert autonomy._read_config()["max_parallel"] == "3", (
+        "the new field is a refusal in disguise: the key must still be written")
+
+    monkeypatch.setattr(autonomy, "_CONFIG_KEYS_APPLIED_BY_CODE",
+                        frozenset({"max_parallel"}))
+    again = json.loads(autonomy._handle_config_set(
+        {"key": "max_parallel", "value": "4"}))
+    assert again["applied_by_code"] is True, again
+    assert "will be applied" in again["effect"], again
+
+    # The seam a caller actually crosses: `call_tool` out of `agent_mcp.main`,
+    # which is where the JSON becomes text over MCP.
+    over_mcp = json.loads(asyncio.run(autonomy.call_tool(
+        "autonomy_config_set", {"key": "some_new_key", "value": "1"}
+    )).content[0].text)
+    assert over_mcp["applied_by_code"] is False, over_mcp
+    assert over_mcp["path"] == str(cfg_file), over_mcp
+
+
+def test_the_read_write_split_and_the_clobber_safe_round_trip_are_intact(cfg_file):
+    """Clause 4. #1672 is a wording fix, so everything #1326 established has to
+    survive it unchanged: the read refuses a `value` and is still in `READ_ONLY`
+    behind those four refusals, the writer still requires both parameters, the
+    tail below the closing fence still comes back byte for byte, and a front
+    matter that cannot be round-tripped is still refused rather than rewritten.
+
+    This is the control on the whole round: a test that cannot fail would let a
+    payload change quietly re-merge the two tools or drop the body again."""
+    from agent_mcp import annotations
+
+    assert "autonomy_config" in annotations.READ_ONLY
+    assert "autonomy_config_set" not in annotations.READ_ONLY, (
+        "the writer is now annotated read-only, which is the #1326 bug returning")
+
+    refused = json.loads(autonomy._handle_config({"key": "a", "value": "1"}))
+    assert refused["error"] == autonomy._CONFIG_WRITE_MOVED, refused
+    assert refused["use_tool"] == "autonomy_config_set", refused
+    assert cfg_file.read_bytes() == LIVE_CONFIG.encode(), "the read half writes"
+
+    tools = _tools()
+    assert sorted(tools["autonomy_config_set"].input_schema.get("required") or []) == [
+        "key", "value"]
+    assert "value" not in (tools["autonomy_config"].input_schema.get("properties") or {})
+
+    written = json.loads(autonomy._handle_config_set({"key": "paused", "value": "true"}))
+    assert written["set"] == "paused", written
+    after = cfg_file.read_text(encoding="utf-8")
+    assert after.endswith(TAIL), f"the body below the fence moved: {after[-60:]!r}"
+    assert _front_matter(after)["paused"] == "true", after
+
+    cfg_file.write_text("---\n: this is not yaml [\n---\n" + BODY, encoding="utf-8")
+    before = cfg_file.read_bytes()
+    refused = json.loads(autonomy._handle_config_set({"key": "a", "value": "1"}))
+    assert refused.get("yaml_broken") is True, refused
+    assert cfg_file.read_bytes() == before, "an unparseable front matter was rewritten"
+

@@ -293,6 +293,50 @@ def _read_config() -> dict:
     return {}
 
 
+#: #1672: the keys of `_config.md` that any code READS and therefore APPLIES.
+#: Empty, measured not assumed: `_read_config()` has exactly two callers, both
+#: in this file (`_handle_config`, `_handle_config_set`), and every other mention
+#: of `_config.md` in Lloyd's own code is an exclusion — the scheduler
+#: (`app/autonomy.py`), the board and the dashboard routers and `mc_ui` all *skip*
+#: the file, and no skill references it. A key joins this set only when a change
+#: both names it here and reads it there; until then a write is a note in a
+#: markdown file. It is a set and not a comment so the reply can say which of the
+#: two a given key is, instead of leaving the caller to infer an effect.
+_CONFIG_KEYS_APPLIED_BY_CODE: frozenset[str] = frozenset()
+
+#: The claim both halves of the tool pair carry about this file. It appears in
+#: each description as a LITERAL — `_gist_losses` (app/harness/tests/
+#: test_tool_search.py) reads `Tool(description=…)` by AST and skips anything
+#: that is not a Constant, so a `+` here would silently drop both tools out of
+#: the scan that exists to catch a gist losing its guidance. `tests/
+#: test_autonomy_config_write.py` pins that both descriptions still say it, and
+#: `_config_key_effect` below repeats it in the reply, so the two cannot drift
+#: without a test going red.
+_DOCUMENTARY_PHRASE = "documentary until some code reads them, and nothing does"
+
+
+def _config_key_effect(key: str) -> tuple[bool, str]:
+    """Whether a key written by `autonomy_config_set` does anything, and the
+    sentence that says so (#1672).
+
+    The success payload used to be `{"set", "value", "path"}`: it named a file
+    and returned, which reads as a knob that took. For a key in
+    `_CONFIG_KEYS_APPLIED_BY_CODE` a write genuinely is an effect; for one that
+    is not, the only honest payload says so in the same object.
+    """
+    applied = key in _CONFIG_KEYS_APPLIED_BY_CODE
+    if applied:
+        return True, (f"`{key}` is read by code and will be applied on the next "
+                      "read of the config.")
+    return False, (
+        f"`{key}` is not read by any code. Keys in `_config.md` are documentary "
+        "until some code reads them, and nothing does: the only reader of this "
+        "file is this tool pair — the scheduler, the board and the dashboard all "
+        "skip it — so the write is a note in a markdown file. The scheduler's "
+        "real tuning lives in `config.yaml` under `autonomy:`, which neither "
+        "tool reaches.")
+
+
 #: The front-matter fence of `_config.md`. The file is read with
 #: `split("---\n", 2)`, so the *second* fence is the closing one and everything
 #: after it is prose — a rewrite must not care what that prose contains, which
@@ -385,17 +429,17 @@ async def list_tools():
             },
             "required": ["id"],
         }),
-        Tool(name="autonomy_config", description="Read autonomy scheduler configuration. Called with no key it returns the whole config; with a key it reads one setting. It never writes — use autonomy_config_set to change a key.", inputSchema={
+        Tool(name="autonomy_config", description="Read the autonomy config file `_config.md`: one setting with a key, all with none. It never writes; use autonomy_config_set. Keys there are documentary until some code reads them, and nothing does.", inputSchema={
             "type": "object",
             "properties": {
-                "key": {"type": "string", "description": "Config key to read (empty to read the whole config)"},
+                "key": {"type": "string", "description": "Config key to read (empty for all)"},
             },
         }),
-        Tool(name="autonomy_config_set", description="Set one key in the autonomy scheduler config (~/obsidian/autonomy/_config.md). Writes the key into the front matter and leaves any prose below it untouched; to read instead, call autonomy_config.", inputSchema={
+        Tool(name="autonomy_config_set", description="Set one key in the autonomy config file `_config.md`: rewrites the front matter, prose below it survives. Keys there are documentary until some code reads them, and nothing does — the reply says whether yours is applied.", inputSchema={
             "type": "object",
             "properties": {
-                "key": {"type": "string", "description": "Config key to set, e.g. 'max_parallel'"},
-                "value": {"type": "string", "description": "New value, as a string the scheduler parses (e.g. '3', 'true')"},
+                "key": {"type": "string", "description": "Config key to set (nothing applies it)"},
+                "value": {"type": "string", "description": "New value, stored verbatim"},
             },
             "required": ["key", "value"],
         }),
@@ -709,8 +753,16 @@ def _handle_config_set(params: dict) -> str:
     except (OSError, yaml.YAMLError) as exc:
         return json.dumps({"error": f"could not rewrite {config_path}: {exc}",
                            "yaml_broken": True})
+    applied, effect_note = _config_key_effect(key)
     return json.dumps({"set": key, "value": value, "path": str(config_path),
-                       "bytes_below_front_matter": len(tail.encode("utf-8"))})
+                       "bytes_below_front_matter": len(tail.encode("utf-8")),
+                       # #1672: the file was named and the call returned, which a
+                       # caller reads as a knob that took. The write did happen;
+                       # whether it does anything is a separate fact, and it
+                       # belongs in the same object rather than in a description
+                       # read before the call.
+                       "applied_by_code": applied,
+                       "effect": effect_note})
 
 
 async def _handle_run(params: dict) -> str:

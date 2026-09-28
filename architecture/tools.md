@@ -405,6 +405,18 @@ so an old prompt loses nothing but the write.
 front-matter fence, so the bytes below it survive byte-for-byte, and it refuses a
 file whose front matter it cannot parse instead of re-emitting a fallback over it.
 
+**What the file is not is a place the scheduler reads (#1672).** `_read_config()`
+has exactly two callers, both in `agent_mcp/autonomy.py`, and every other mention
+of `_config.md` in the tree is an exclusion — `app/autonomy.py`,
+`app/routers/autonomy.py`, `app/routers/dashboard.py` and `app/routers/mc_ui.py`
+all skip it, and no skill names it. So both descriptions say a key there is
+documentary until some code reads it, the `key` parameter quotes no example (it
+used to offer `max_parallel`, which is live-looking only because
+`workers/sources/autoresearch.py` reads a *different* `max_parallel` out of
+`config.yaml`), and the payload carries `applied_by_code` plus an `effect`
+sentence computed from `_CONFIG_KEYS_APPLIED_BY_CODE` — empty, and a key joins it
+only when a change both names it there and reads it somewhere.
+
 | Tool | Classified | Does | Consequence |
 |---|---|---|---|
 | `grant_list` | hint RO (module-set), not in `READ_ONLY` | reads only | blocked in plan mode and in bench sessions; ledgered as FX. Harmless, but the two readers disagree |
@@ -529,8 +541,8 @@ shown. `†` marks a hint set by the module itself rather than the table (see §
 | `autonomy_write_task` | ID | — | Create or update (upsert) a scheduled task |
 | `autonomy_get_task` | RO | `id` | One task in full, with its recent run records |
 | `autonomy_delete_task` | DX ID | `id` | Archive a task back to `draft` (the default), or delete its file with `archive=false` |
-| `autonomy_config` | RO | — | Read scheduler configuration: the whole config with no key, one setting with a key |
-| `autonomy_config_set` | FX | `key`, `value` | Set one scheduler config key. Was the `value` half of `autonomy_config` (#1326); rewrites the front matter and leaves the body below it byte-identical |
+| `autonomy_config` | RO | — | Read `_config.md`: the whole front matter with no key, one setting with a key. Documentary — no code outside this tool pair reads the file (#1672) |
+| `autonomy_config_set` | FX | `key`, `value` | Set one key in `_config.md`. Was the `value` half of `autonomy_config` (#1326); rewrites the front matter and leaves the body below it byte-identical, and says in the reply whether the key it wrote is applied by anything (#1672) |
 | `autonomy_run_task` | FX | `id` | Run a task now, inside the aggregator. The call blocks until the run ends (its own description says "background", which is wrong) |
 | `autonomy_health` | RO | — | Fleet health over N days: failures, timeouts, empty runs, GPU-hours |
 
