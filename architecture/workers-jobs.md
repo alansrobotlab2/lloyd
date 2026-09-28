@@ -428,8 +428,7 @@ abort. Landing runs detached, exactly as when a human drives it.
   older reason is retired — `automod_start` does **not** refuse a turn with no
   Inner Voice attached any more (`automod.require_inner_voice` defaults false
   since 2026-09-24, IV plan R5: every turn is recorded and every turn runs the
-  deterministic guards), though `workers/sources/autocode.py:25-29` still says
-  it does, which is where this section copied it from.
+  deterministic guards).
 - **The loop finishes rounds the turn did not.** Since 2026-09-18 the
   scheduler is a second writer of a round's outcome: `land_passed_gates` lands
   a round whose gate passed at the commit it still holds, `regate_unreviewed`

@@ -22,11 +22,17 @@ aborted, gate failed, decided the item was not worth it after all — is
 recorded and the item is not picked again by this source. A second attempt is
 a human's decision.
 
-Why this goes through `/api/message/stream` rather than `run_query`: the
-observer. `automod_start` refuses a turn with no Inner Voice attached, and the
-chat path is the only one that attaches it. Going through it also puts the
-round in the Inner Voice history, which is where anyone reviews what the agent
-did afterwards.
+Why this goes through `/api/message/stream` rather than `run_query`: Inner
+Voice attaches in the chat endpoint and nowhere else (the note on
+`workers.sources.*.inner_voice` in `config.yaml`), so the chat path is the only
+one on which this source's `inner_voice: true` reaches the observer — off
+2026-09-12, on again 2026-09-25 — and the only place a round's transcript lands
+where anyone can read what the agent actually did. There was a harder version
+of this reason until 2026-09-24: `automod_start` would not open a round for a
+turn the observer had not attached. IV plan R5 retired it, and
+`automod.require_inner_voice` is the key that would restore it — that defaults
+false and is set in neither `config.yaml` nor `data/tool_overrides.yaml`, so
+nothing on this path depends on it any more.
 """
 
 from __future__ import annotations

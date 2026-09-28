@@ -239,3 +239,173 @@ def test_section2_and_section6_report_one_measurement():
 def stale_not_present_tense(sec2: str):
     """Guard for the deleted-rate assertion above, not a test: returns None."""
     return None
+
+
+# ---------------------------------------------------------------- `autocode`'s
+# Inner-Voice claim (#1689). The module docstring of `workers/sources/autocode.py`
+# asserted that `automod_start` refuses a turn with no Inner Voice attached — a
+# gate inert since 2026-09-24 — and §4 of this doc copied the sentence, so the
+# doc was describing a refusal that does not fire. The four nodes below pin the
+# source, the traceability of its retirement, the sweep for any other carrier,
+# and the pointer the fix had to remove rather than move.
+
+import workers.sources.autocode as autocode  # noqa: E402
+
+SEC4 = "## 4. Self-modification — the loop that changes Lloyd's own code"
+
+_REFUSAL_VERB = re.compile(r"\brefus\w*", re.I)
+#: A refusal *for want of* the observer, which is the claim and the only thing
+#: worth scanning for: a bare "refused" within 200 chars of the word "observer"
+#: matched six unrelated sentences on the first try — the Bash sandbox's write
+#: refusal, `autonomy.revert_run_writes` answering per path, the observer's own
+#: bench harness — none of which says anything about `automod_start`.
+_IV_REFUSAL = re.compile(
+    r"refus\w*[^.!?]{0,60}?(?:with\s+no|without|for\s+want\s+of|lacking|missing)"
+    r"[^.!?]{0,40}?(?:inner\s+voice|observer)", re.I)
+_IV_REFUSAL_REV = re.compile(
+    r"(?:\bno|\bwithout|lacking)\s+(?:an?\s+)?(?:inner\s+voice|observer)"
+    r"[^.!?]{0,60}?refus\w*", re.I)
+#: The retired sentence itself, verbatim, so the scan's own sight is checked
+#: against the thing it exists to catch rather than only against the tree.
+RETIRED_SENTENCE = ("`automod_start` refuses a turn with no Inner Voice attached, "
+                    "and the chat path is the only one that attaches it.")
+#: A sentence/paragraph that says the rule is past.
+_RETIRED = re.compile(r"retir\w*|no longer|does not|did not|would not|used to"
+                      r"|any more|until 20\d\d", re.I)
+#: The switch that would restore the gate, and the only thing that makes a
+#: present-tense description of it safe to leave in a doc.
+_IV_KEY = "require_inner_voice"
+#: A retirement has to say when, or it is a rumour.
+_DATED = re.compile(r"20\d\d-\d\d-\d\d")
+
+
+def _scope() -> list[Path]:
+    """The live tree's `architecture/*.md` + `workers/sources/*.py`.
+
+    `.claude/worktrees/agent-*/` holds gitignored snapshots of both and each one
+    still carries the old sentence; walking the directory tree would report four
+    copies of a claim that is not in the tree, so this names the two live
+    directories explicitly instead.
+    """
+    return sorted(ARCH.glob("*.md")) + sorted((ROOT / "workers" / "sources").glob("*.py"))
+
+
+def _refusal_windows(text: str) -> list[str]:
+    """±200 chars around every refusal that is ascribed to the missing observer.
+
+    A window rather than a sentence: the retirement record for
+    `architecture/automod.md`'s rule sits in the paragraph *above* the rule it
+    retires, so a sentence-level split flags corrected history as a live claim —
+    the #1713 failure this file already has a control test for. A window errs
+    the other way, toward letting text through, which is the cheaper mistake.
+    """
+    return [text[max(0, m.start() - 200):m.end() + 200]
+            for rx in (_IV_REFUSAL, _IV_REFUSAL_REV)
+            for m in rx.finditer(text)]
+
+
+def test_autocode_docstring_states_the_live_reason_not_the_retired_refusal():
+    """Clause 1: the docstring was the ORIGIN of the false claim, not a copy.
+
+    `architecture/workers-jobs.md` §4 got its sentence about a refusal from
+    here, which is why correcting the doc alone left the loop able to re-derive
+    the same false sentence on the next review. Checked in both directions so
+    the paragraph cannot simply be deleted: the retired claim is gone, and the
+    reason that IS true is still stated — the chat endpoint is the only place
+    Inner Voice attaches, it is on for this source again since 2026-09-25, and
+    it is where a round's transcript can be read.
+    """
+    doc = " ".join((autocode.__doc__ or "").split())
+    assert doc, "autocode has no module docstring to check"
+    assert "no Inner Voice attached" not in doc
+    windows = _refusal_windows(doc)
+    assert not windows, (
+        f"the module docstring still couples a refusal with the missing observer "
+        f"(#1689 retired that gate 2026-09-24): {windows[0][:160]!r} — the live "
+        "reason to use /api/message/stream is the chat attach point, not a refusal")
+    for live in ("chat endpoint", "2026-09-25", "transcript"):
+        assert live in doc, (
+            f"the true reason no longer states {live!r}: rewriting the retired "
+            "claim must not delete why the source uses /api/message/stream")
+
+
+def test_autocode_docstring_names_the_key_that_would_restore_the_gate():
+    """Clause 2: a retirement is only traceable if it names its own switch.
+
+    The key is checked against the code that reads it rather than against the
+    docstring, because the failure this item is about is a claim that outlived
+    the thing it described: if `agent_mcp/automod.py` stopped reading
+    `automod.require_inner_voice`, a docstring pointing at it would be the next
+    generation of the same bug.
+    """
+    doc = " ".join((autocode.__doc__ or "").split())
+    assert "automod.require_inner_voice" in doc, (
+        "the docstring says the refusal is gone without naming what would bring "
+        "it back, so a reader cannot check the retirement")
+    src = (ROOT / "agent_mcp" / "automod.py").read_text(encoding="utf-8")
+    assert 'get("require_inner_voice", False)' in src, (
+        "the docstring names a key the gate no longer reads, or one that no "
+        "longer defaults false — the retirement note has outlived the code")
+    assert "defaults false" in doc, (
+        "the docstring names the key without its default, which is the half "
+        "that says the gate is off now")
+
+
+def test_no_live_file_asserts_the_inner_voice_refusal():
+    """Clause 3: the sweep the item asked for, over the live tree only.
+
+    A file may describe the rule in the present tense only if it also carries
+    the retirement record — the key and a date — so `architecture/automod.md`
+    keeps explaining how the gate worked while nothing may state it as current.
+    The walk is paired with its positive control two ways: it must find a
+    refusal window somewhere (a pattern empty against the corpus proves
+    nothing), and the file that carries that window has to be one that records
+    the retirement, or this test is passing on an unchecked exemption.
+    """
+    files = _scope()
+    assert len(files) > 10, f"the walk found only {len(files)} files; it is not scanning"
+    assert _refusal_windows(RETIRED_SENTENCE), (
+        "the scan no longer matches the sentence #1689 was filed from, so an "
+        "empty result below would be the pattern dying, not the claim dying")
+    violations, windows, carriers = [], 0, set()
+    for path in files:
+        text = path.read_text(encoding="utf-8")
+        if _IV_KEY in text and _DATED.search(text) and _RETIRED.search(text):
+            carriers.add(path.name)
+        for window in _refusal_windows(text):
+            windows += 1
+            if _RETIRED.search(window):
+                continue
+            if path.name not in carriers:
+                violations.append((path.name, " ".join(window.split())[:160]))
+    assert windows, (
+        "the scan found no refusal-and-observer coupling anywhere under "
+        "architecture/ or workers/sources/, so it cannot tell a fix from a "
+        "broken pattern — architecture/automod.md is meant to still carry one")
+    assert not violations, (
+        f"{len(violations)} unlabelled refusal claim(s) remain: {violations} — "
+        "state a retired rule only beside its key and date (#1689)")
+    assert "automod.md" in carriers, (
+        "architecture/automod.md no longer records the retirement, which is "
+        "what licenses its description of the retired rule; a test that passes "
+        "because every file is exempt is not a sweep")
+
+
+def test_workers_jobs_dropped_the_pointer_at_the_docstring_it_fixed():
+    """Clause 4: the doc used to say `autocode.py:25-29` still makes the claim.
+
+    That sentence was true the day it was written and false the moment the
+    docstring was fixed — the same carried-forward claim one layer down, which
+    is the failure #1689 exists to end. So §4 keeps the retirement (key and
+    date) and names no other file's contents: a section that says what another
+    file says is a claim that rots every time that file is edited, and the test
+    below is what notices instead of the prose.
+    """
+    sec4 = _section(SEC4)
+    assert sec4, f"§4 {SEC4!r} not found — the heading moved and this test is blind"
+    assert "autocode.py" not in sec4, (
+        "§4 names the module docstring's contents again; #1689 deleted that "
+        "pointer precisely because the next edit to the docstring falsifies it")
+    assert "require_inner_voice" in sec4 and "2026-09-24" in sec4, (
+        "§4 lost the retirement record along with the pointer — the dated fact "
+        "is the part that has to stay")
