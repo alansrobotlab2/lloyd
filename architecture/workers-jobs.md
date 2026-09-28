@@ -155,12 +155,25 @@ Four behaviours are load-bearing:
   wins. When the two were equal the pool cancelled the handler before it could
   write anything: 237 runs and 73.6 GPU-hours in `workers.db` with a NULL
   `task_id` are that bug.
-- **An unparseable task file is announced at startup, once.** A file the
-  scheduler cannot parse is invisible to it, which is the 2026-05-28 stall;
-  silence there is indistinguishable from a healthy fleet.
-- **There is a stall alarm.** A task due, overdue past a multiple of its own
-  interval, and with no queue row — or a claimable item going stale — raises
-  after `_STALL_ALARM_TICKS` consecutive ticks, rate-limited.
+- **It does not watch the fleet. `workers/fleet_watchdog.py` does.** Until #1682
+  the alarms below sat in this source's `enqueue_if_due`, so `enabled: false` on
+  this one source — a dispatch-side switch — disarmed all of them and raised no
+  alert about the disarmament. They now run from `WorkerPool._watch_fleet`, on the
+  scheduler loop's own seat, whether or not this source is enabled or even raises:
+  - **A task file the scheduler cannot parse is announced**, on a 30 min cadence
+    and on state transitions. A file that does not parse is invisible to the
+    scheduler, which is the 2026-05-28 stall; silence there is indistinguishable
+    from a healthy fleet.
+  - **There are two stall alarms**, each with its own streak and cooldown. The
+    grossly-overdue one: a task due past a multiple of its own interval with no
+    queue row, or a claimable item going stale past 3x `max_duration_seconds`
+    (the source's own config value, which is the only thing the watchdog reads
+    from it), after `_STALL_ALARM_TICKS` ticks, rate-limited 6 h. And the
+    `next_run` one, for a task whose own `next_run` is a full period stale with no
+    queue row at all, after its own streak, rate-limited 24 h.
+  - **The invariant across both** (#938): an outage of the model server pauses
+    dispatch, never the watching. The vLLM gate stays here because it is dispatch;
+    the detectors above are read-only and never probe the model server.
 
 Long version: [[autonomy]] for the mechanism, [[autonomy-jobs]] for the 36
 jobs it dispatches — the reflection chain, trace2skill, the graph chain, vault

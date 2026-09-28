@@ -191,11 +191,12 @@ def test_the_two_dependency_refusals_are_distinguishable_in_the_stall_alert(
 
     Drives the real alert route — `_next_run_stalled` builds `hold` from
     `autonomy.hold_reason` and `_nextrun_alert_message` prints it through
-    `_hold_note` — over one board carrying both states at once: #39 behind a #42
+    `_hold_note` (both in `workers/fleet_watchdog.py` since #1682) — over one board
+    carrying both states at once: #39 behind a #42
     whose 50.7 h silence is past its 36 h bound with the declared handoff absent,
     and #45 behind a #44 that stopped 20.0 h ago, inside its bound."""
     from workers.queue import WorkQueue
-    import workers.sources.scheduled_task as st
+    import workers.fleet_watchdog as fw
 
     two_days = PIN - dt.timedelta(days=2)
     _chain(aut, tmp_path, next_run=two_days)      # #42 → #39, upstream 50.7 h quiet
@@ -205,12 +206,14 @@ def test_the_two_dependency_refusals_are_distinguishable_in_the_stall_alert(
     write_task(aut, 45, depends_on=44, stale_bypass_hours=36,
                last_run=two_days.isoformat(), next_run=two_days.isoformat())
 
-    stalled = {int(e["id"]): e for e in st._next_run_stalled(
+    # The two alert functions live in `workers/fleet_watchdog.py` since #1682, which
+    # moved the fleet's alarms out of the dispatch source; same bodies, same call.
+    stalled = {int(e["id"]): e for e in fw._next_run_stalled(
         WorkQueue(tmp_path / "alert.db"))}
     assert {39, 45} <= set(stalled), (
         "neither dependent reached the alert, so the strings below would pass on "
         f"an empty message: {sorted(stalled)}")
-    msg = st._nextrun_alert_message([stalled[39], stalled[45]])
+    msg = fw._nextrun_alert_message([stalled[39], stalled[45]])
     assert "#44 ran 20.0 h ago" in msg, msg
     assert "stale_bypass 36 h passed; #42's declared output_artifact is not on disk" in msg, msg
     assert msg.count("waiting on #") == 2, msg

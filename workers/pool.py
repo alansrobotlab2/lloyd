@@ -916,6 +916,12 @@ class WorkerPool:
             # side of the call it measures — nor inside `_scheduler_pass`, whose
             # per-source `except` is the swallow that makes the blindness.
             await self._watch_dispatch()
+            # The fleet's own alarms, for the same reason and from the same seat:
+            # they used to ride inside `scheduled_task.enqueue_if_due`, which the
+            # loop below skips outright for a source config says is disabled — so
+            # switching a source off used to switch off the watching of the fleet
+            # that source dispatches, silently (#1682). Never raises either.
+            await self._watch_fleet()
 
             try:
                 await self._scheduler_pass()
@@ -1062,6 +1068,29 @@ class WorkerPool:
                 logger.info("dispatch_watch: %s", event)
         except Exception as e:
             logger.warning("dispatch watch failed: %s", e, exc_info=True)
+
+    async def _watch_fleet(self) -> None:
+        """Run the fleet's stall alarms and the task-file scan (#1682).
+
+        Third reader on this seat, and the one with the sharpest reason for it:
+        the two stall alarms, the starving clause and the unparseable-task-file
+        scan all read only task files and the queue, but until #1682 they ran only
+        when the `scheduled-task` source was enabled AND its `enqueue_if_due`
+        returned — so a dispatch-side switch (`enabled: false`, or the raise #1681
+        is about) disarmed the fleet's own alarms and produced no alert about the
+        disarmament. `workers/fleet_watchdog.tick` is that surveillance with the
+        dispatch half taken out.
+
+        Never raises, for the same reason as the two calls above it: the alarms
+        that survive a broken dispatch are worthless if a fault in one of them
+        takes the loop, and so every enqueue in the fleet, down with it.
+        """
+        try:
+            from workers import fleet_watchdog
+
+            await fleet_watchdog.tick(self.queue)
+        except Exception as e:
+            logger.error("fleet watchdog failed: %s", e, exc_info=True)
 
     # ── Worker loop — claims items and runs them ──────────────────────────
 

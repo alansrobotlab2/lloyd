@@ -9,12 +9,17 @@ that raises every tick must not be retried every second. But that leaves it unab
 to say anything about whether dispatch *works*. A source raising on every tick
 reads fresher than one merely between its intervals.
 
-The blind spot is not cosmetic, because every alarm the fleet has for scheduled
-work lives *inside* the one call whose failure is being swallowed:
-``_grossly_overdue``, ``_next_run_stalled``, ``_scan_unparseable_task_files`` and
-``_note_vllm_outage`` are all called from ``scheduled_task.enqueue_if_due``. When
-dispatch stops raising, the monitoring of the fleet stops with it, and the pool's
-one ``logger.error`` line is the entire surviving signal. Nor does anything read
+The blind spot is not cosmetic, though #1682 narrowed it. Three of the four
+alarms that used to live *inside* the one call whose failure is being swallowed
+— ``_grossly_overdue``, ``_next_run_stalled`` and
+``_scan_unparseable_task_files`` — now run from
+``workers/fleet_watchdog.py`` on the scheduler loop's own seat, before any
+source is consulted, so a source that raises every tick no longer takes the
+fleet's stall alarms down with it. ``_note_vllm_outage`` is still called from
+``scheduled_task.enqueue_if_due`` and is still swallowed with everything after
+the gate (#1683 owns that alarm). What this module watches is therefore the
+half that has no other signal: dispatch itself, whose silence looks exactly
+like an idle fleet. Nor does anything read
 the stamp: outside this module the key is written in two places in ``pool.py``,
 cited in tests as interval arithmetic, and named in architecture prose — nowhere
 does a reader judge its age. And the health route cannot cover it either:

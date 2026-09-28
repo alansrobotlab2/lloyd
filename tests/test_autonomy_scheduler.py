@@ -42,6 +42,69 @@ def _scan_not_due():
     return _SCAN_NOT_DUE
 
 
+import workers.fleet_watchdog as fw  # noqa: E402  (#1682: where the alarms live now)
+
+#: The `_state` keys #1682 moved to `workers/fleet_watchdog.py`. Seeding is routed BY
+#: KEY because a seed that lands in the wrong dict does nothing at all: the test still
+#: passes, and the alarm it believes it armed is reading the other module.
+_SURVEILLANCE_KEYS = frozenset({
+    "unparseable_scan_at", "unparseable_alerted",
+    "stall_streak", "stall_alerted_at",
+    "nextrun_streak", "nextrun_alerted_at"})
+
+
+def seed_state(monkeypatch, **over):
+    """Arm the streaks, cooldowns and cadence slots a test needs, each in the module
+    that has owned it since #1682.
+
+    Every call site used to write one dict onto `scheduled_task._state`, which is why
+    the split had to be routed rather than renamed: the surveillance keys moved, the
+    outage accounting did not, and a `stall_streak` seeded onto the dispatch dict is a
+    test that passes for the wrong reason.
+    """
+    import workers.sources.scheduled_task as st
+    watch = {k: v for k, v in over.items() if k in _SURVEILLANCE_KEYS}
+    disp = {k: v for k, v in over.items() if k not in _SURVEILLANCE_KEYS}
+    if watch:
+        monkeypatch.setattr(fw, "_state", {**fw._state, **watch})
+    if disp:
+        monkeypatch.setattr(st, "_state", {**st._state, **disp})
+
+
+async def scheduler_tick(q, src_cfg: dict) -> None:
+    """One scheduler loop pass, in the order `WorkerPool._scheduler_loop` runs it.
+
+    #1682 put the alarms on the loop itself (`_watch_fleet`, before the pass), so the
+    call a test used to make once — `enqueue_if_due`, which carried both halves — is
+    now only the dispatch half. A test that asserts on an ALERT drives this; a test
+    that asserts only on what reached the QUEUE still calls `enqueue_if_due` alone,
+    which is #1682's clause 2: the dispatch half on its own raises no alarm and runs
+    no scan.
+    """
+    import workers.sources.scheduled_task as st
+    await fw.tick(q)
+    await st.enqueue_if_due(q, src_cfg)
+
+
+def capture_alerts(monkeypatch, alerts: list) -> list:
+    """Capture every alert posted, whichever module posts it (#1682).
+
+    Both `_alert`s into ONE list on purpose: the tests here count alerts and name the
+    task inside them, and an alarm that changed modules must not be able to escape a
+    count by posting through its new home. The outage alarm still posts from the
+    source, the rearm notices still post from `autonomy`, the stall alarms post from
+    the watchdog.
+    """
+    import workers.sources.scheduled_task as st
+
+    async def _sink(msg):
+        alerts.append(msg)
+
+    monkeypatch.setattr(st, "_alert", _sink)
+    monkeypatch.setattr(fw, "_alert", _sink)
+    return alerts
+
+
 @pytest.fixture(autouse=True)
 def _scheduler_state_restored():
     """Restore `scheduled_task._state`'s CONTENTS around every test in this file.
@@ -55,12 +118,23 @@ def _scheduler_state_restored():
     cadence state its own (#939). Verified by neutering this fixture's last two lines:
     a later probe file then reads `unparseable_scan_at` as the instant the file's last
     tick ran instead of the module's `None`.
+
+    #1682 moved the surveillance keys — `stall_streak`, `stall_alerted_at`,
+    `nextrun_streak`, `nextrun_alerted_at` and the scan's two — into
+    `workers/fleet_watchdog._state`, and the outage accounting stayed behind, so
+    BOTH dicts are restored now. Leaving the watchdog's out is exactly the
+    order-dependence clause 4 is about: a test that armed a stall streak would hand
+    it to whichever test ran next, and an alarm that inherits a streak alerts on a
+    tick that confirmed nothing — every streak test in this file green, and none of
+    them measuring confirmation.
     """
     import workers.sources.scheduled_task as st
-    saved = {k: (set(v) if isinstance(v, set) else v) for k, v in st._state.items()}
+    saved = [{k: (set(v) if isinstance(v, set) else v) for k, v in d.items()}
+             for d in (st._state, fw._state)]
     yield
-    st._state.clear()
-    st._state.update(saved)
+    for live, snap in zip((st._state, fw._state), saved):
+        live.clear()
+        live.update(snap)
 
 
 @pytest.fixture
@@ -256,20 +330,19 @@ async def test_one_queue_tick_rearms_a_retired_task(aut, monkeypatch, tmp_path):
     # fails on the real nextrun stall alarm ("#1 (task1) is 24.0h past its
     # next_run"), so it is a live check on the rearm's next_run and not a
     # tautology about an empty list.
-    monkeypatch.setattr(st, "_state", {**st._state, "unparseable_scan_at": _scan_not_due(),
-                                       "stall_streak": st._STALL_ALARM_TICKS,
-                                       "nextrun_streak": st._STALL_NEXTRUN_TICKS,
-                                       "stall_alerted_at": None,
-                                       "nextrun_alerted_at": None})
+    seed_state(monkeypatch, unparseable_scan_at=_scan_not_due(),
+               stall_streak=fw._STALL_ALARM_TICKS,
+               nextrun_streak=fw._STALL_NEXTRUN_TICKS,
+               stall_alerted_at=None, nextrun_alerted_at=None)
     alerts: list[str] = []
 
     async def _record_alert(msg):
         alerts.append(msg)
 
-    monkeypatch.setattr(st, "_alert", _record_alert)
+    capture_alerts(monkeypatch, alerts)
 
     q = WorkQueue(tmp_path / "rearm-tick.db")
-    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    await scheduler_tick(q, {"max_duration_seconds": 1800})
 
     t1, t2 = read_task(aut, 1), read_task(aut, 2)
     assert t1["status"] == "up_next", (
@@ -917,21 +990,19 @@ async def test_a_task_at_the_infra_ceiling_is_not_enqueued_by_the_queue_source(
                next_run=_iso(hours=5), last_run=_iso(hours=6))
 
     monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: True)
-    monkeypatch.setattr(st, "_state", {**st._state,
-                                       "unparseable_scan_at": _scan_not_due(),
-                                       "stall_streak": st._STALL_ALARM_TICKS,
-                                       "nextrun_streak": st._STALL_NEXTRUN_TICKS,
-                                       "stall_alerted_at": None,
-                                       "nextrun_alerted_at": None})
+    seed_state(monkeypatch, unparseable_scan_at=_scan_not_due(),
+               stall_streak=fw._STALL_ALARM_TICKS,
+               nextrun_streak=fw._STALL_NEXTRUN_TICKS,
+               stall_alerted_at=None, nextrun_alerted_at=None)
     alerts: list[str] = []
 
     async def _record_alert(msg):
         alerts.append(msg)
 
-    monkeypatch.setattr(st, "_alert", _record_alert)
+    capture_alerts(monkeypatch, alerts)
 
     q = WorkQueue(tmp_path / "ceiling.db")
-    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    await scheduler_tick(q, {"max_duration_seconds": 1800})
 
     enqueued = {int(i.payload["task_id"]) for i in
                 q.list_items(source="scheduled-task", limit=500)
@@ -949,7 +1020,7 @@ async def test_a_task_at_the_infra_ceiling_is_not_enqueued_by_the_queue_source(
     # while task 1, whose `next_run` is the resume instant, must not. A bare
     # `alerts == []` would have passed just as happily on a scan that found
     # nothing at all, which is the exact failure #1121 was filed for.
-    stalled_ids = {int(e["id"]) for e in st._next_run_stalled(q)}
+    stalled_ids = {int(e["id"]) for e in fw._next_run_stalled(q)}
     assert 3 in stalled_ids, (
         "positive control broken: the next-run scan did not flag the task that "
         "really is five periods past `next_run`, so anything this test goes on "
@@ -1653,7 +1724,7 @@ async def test_the_stall_alarm_shares_the_one_verdict(aut, monkeypatch, tmp_path
     dispatch, and an unheld-dependent-forever read as a broken dispatch path.
     This calls the worker-side function itself, not a copy of its logic."""
     from workers.queue import WorkQueue
-    from workers.sources.scheduled_task import _grossly_overdue
+    from workers.fleet_watchdog import _grossly_overdue
 
     _pin(aut, monkeypatch)
     _stale_pair(aut)                              # upstream paused, 2 days stale
@@ -1755,16 +1826,17 @@ async def test_one_pool_tick_enqueues_exactly_what_the_board_calls_unheld(
                last_run=(PIN - dt.timedelta(days=3)).isoformat())
 
     monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: True)
-    monkeypatch.setattr(st, "_state", {**st._state, "unparseable_scan_at": _scan_not_due(),
-                                       "stall_streak": 0, "stall_alerted_at": None})
+    seed_state(monkeypatch, unparseable_scan_at=_scan_not_due(),
+               stall_streak=0, stall_alerted_at=None)
 
     async def _no_alert(msg):
         raise AssertionError(f"a clean tick alerted: {msg}")
 
     monkeypatch.setattr(st, "_alert", _no_alert)
+    monkeypatch.setattr(fw, "_alert", _no_alert)
 
     q = WorkQueue(tmp_path / "tick.db")
-    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    await scheduler_tick(q, {"max_duration_seconds": 1800})
 
     enqueued = {str(i.payload.get("task_id")) for i in
                 q.list_items(source="scheduled-task", limit=500)
@@ -1852,7 +1924,7 @@ def test_the_next_run_assertion_sees_the_three_shapes_the_stall_alarm_excludes(
     alarm is graded on the SAME fleet as the new one, so the three exclusions
     and the control are all exercised in the same breath as the new keys."""
     from workers.queue import WorkQueue
-    from workers.sources.scheduled_task import _grossly_overdue, _next_run_stalled
+    from workers.fleet_watchdog import _grossly_overdue, _next_run_stalled
 
     _pin(aut, monkeypatch)
     _next_run_fleet(aut)
@@ -1911,28 +1983,27 @@ async def test_the_next_run_alert_carries_the_hold_reason_and_fires_low_frequenc
     # test_the_stall_alarm_shares_the_one_verdict and again in the test above.
     _next_run_fleet(aut, control=False)
     monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: True)
-    monkeypatch.setattr(st, "_state", {**st._state, "unparseable_scan_at": _scan_not_due(),
-                                       "stall_streak": 0, "stall_alerted_at": None,
-                                       "nextrun_streak": 0,
-                                       "nextrun_alerted_at": None})
+    seed_state(monkeypatch, unparseable_scan_at=_scan_not_due(),
+               stall_streak=0, stall_alerted_at=None,
+               nextrun_streak=0, nextrun_alerted_at=None)
     alerts: list[str] = []
 
     async def _capture(msg):
         alerts.append(msg)
 
-    monkeypatch.setattr(st, "_alert", _capture)
+    capture_alerts(monkeypatch, alerts)
     q = WorkQueue(tmp_path / "nextrun-tick.db")
-    ticks = st._STALL_NEXTRUN_TICKS
+    ticks = fw._STALL_NEXTRUN_TICKS
 
     for _ in range(ticks - 1):
-        await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+        await scheduler_tick(q, {"max_duration_seconds": 1800})
     assert not alerts, (
         f"alerted on tick {len(alerts)} of {ticks} — the new assertion does not "
         f"confirm across ticks the way the alarm beside it does")
-    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    await scheduler_tick(q, {"max_duration_seconds": 1800})
     assert len(alerts) == 1, f"expected exactly one alert on tick {ticks}, got {len(alerts)}"
     for _ in range(ticks):
-        await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+        await scheduler_tick(q, {"max_duration_seconds": 1800})
     assert len(alerts) == 1, (
         "re-alerted inside its own cooldown — that is the noisy alarm's failure")
 
@@ -1972,7 +2043,10 @@ async def test_the_pool_reaches_the_next_run_assertion_through_the_registry(
     `run_task` is never reached; the assertion that the queue stayed empty is
     what proves that, and it is also what makes driving a real pool safe here."""
     from workers.queue import WorkQueue
-    import workers.sources as sources
+    # `from workers import sources`: the patch below WRAPS the registry's own entry, so
+    # this has to name the same registry dict `workers/pool.py:945` imports by name
+    # inside `_scheduler_pass` and indexes with `entry["enqueue_if_due"]`.
+    from workers import sources
     import workers.sources.scheduled_task as st
     from workers.pool import WorkerPool
 
@@ -1986,18 +2060,33 @@ async def test_the_pool_reaches_the_next_run_assertion_through_the_registry(
                next_run=(PIN - 2 * day).isoformat())
 
     monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: True)
-    monkeypatch.setattr(st, "_state", {**st._state, "unparseable_scan_at": _scan_not_due(),
-                                       "stall_streak": 0, "stall_alerted_at": None,
-                                       "nextrun_streak": st._STALL_NEXTRUN_TICKS - 1,
-                                       "nextrun_alerted_at": None})
+    seed_state(monkeypatch, unparseable_scan_at=_scan_not_due(),
+               stall_streak=0, stall_alerted_at=None,
+               nextrun_streak=fw._STALL_NEXTRUN_TICKS - 1,
+               nextrun_alerted_at=None)
     alerts: list[str] = []
+    registry_calls: list[int] = []
 
     async def _capture(msg):
         alerts.append(msg)
 
-    monkeypatch.setattr(st, "_alert", _capture)
+    capture_alerts(monkeypatch, alerts)
+    # Count the call on the object the registry holds, because the pool reaches the
+    # coroutine by ATTRIBUTE off that object (`pool.py:963`,
+    # `await source.enqueue_if_due(...)`) inside a `try` that swallows everything: a
+    # registry entry that resolved to the wrong thing, or an attribute that is not
+    # awaitable, leaves no trace. Until #1682 the alert below proved the dispatch
+    # anyway — the alarm lived inside the call — so nothing else witnessed this seam,
+    # and that is the only reason the counted call is here now.
+    real_enqueue = st.enqueue_if_due
+
+    async def _counting_enqueue(queue, src_cfg):
+        registry_calls.append(1)
+        await real_enqueue(queue, src_cfg)
+
     monkeypatch.setattr(sources, "SOURCE_REGISTRY", {"scheduled-task": st},
                         raising=False)
+    monkeypatch.setattr(st, "enqueue_if_due", _counting_enqueue)
     monkeypatch.setattr(sources, "get_sources_config", lambda: {
         "scheduled-task": {"enabled": True, "interval_seconds": 0,
                            "max_duration_seconds": 60}}, raising=False)
@@ -2007,12 +2096,17 @@ async def test_the_pool_reaches_the_next_run_assertion_through_the_registry(
     await pool.start()
     try:
         for _ in range(300):
-            if alerts:
+            if alerts and registry_calls:
                 break
             await asyncio.sleep(0.02)
     finally:
         await pool.stop()
 
+    assert registry_calls, (
+        "the pool's scheduler loop never dispatched the scheduled-task source through "
+        "its `SOURCE_REGISTRY` entry — #1108's bug, which is what this test exists to "
+        "catch, and which the alert below stopped witnessing when #1682 moved the "
+        "alarms onto the loop's own seat in front of the per-source `try`")
     assert alerts, ("the pool's own scheduler loop never reached the next_run "
                     "assertion — it would be dead code in production")
     assert "900" in alerts[0] and "waiting on #950" in alerts[0], alerts[0]
@@ -2079,7 +2173,7 @@ def test_the_stall_scan_flags_a_draft_task_and_names_its_status(
     non-`up_next` tasks returned `[]` — which is exactly what the shipped alarm
     returned for the live board while #68 was ~168 periods late."""
     from workers.queue import WorkQueue
-    from workers.sources.scheduled_task import _grossly_overdue, _next_run_stalled
+    from workers.fleet_watchdog import _grossly_overdue, _next_run_stalled
 
     _pin(aut, monkeypatch)
     _status_fleet(aut)
@@ -2139,19 +2233,18 @@ async def test_the_widened_alert_names_the_draft_task_and_its_status(
                last_run=(PIN - dt.timedelta(hours=12, minutes=30)).isoformat(),
                next_run=(PIN - dt.timedelta(hours=12, minutes=15)).isoformat())
     monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: True)
-    monkeypatch.setattr(st, "_state", {**st._state, "unparseable_scan_at": _scan_not_due(),
-                                       "stall_streak": 0, "stall_alerted_at": None,
-                                       "nextrun_streak": 0,
-                                       "nextrun_alerted_at": None})
+    seed_state(monkeypatch, unparseable_scan_at=_scan_not_due(),
+               stall_streak=0, stall_alerted_at=None,
+               nextrun_streak=0, nextrun_alerted_at=None)
     alerts: list[str] = []
 
     async def _capture(msg):
         alerts.append(msg)
 
-    monkeypatch.setattr(st, "_alert", _capture)
+    capture_alerts(monkeypatch, alerts)
     q = WorkQueue(tmp_path / "draft-alert.db")
-    for _ in range(st._STALL_NEXTRUN_TICKS):
-        await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    for _ in range(fw._STALL_NEXTRUN_TICKS):
+        await scheduler_tick(q, {"max_duration_seconds": 1800})
 
     assert len(alerts) == 1, f"expected one alert on the confirm tick, got {alerts}"
     msg = alerts[0]
@@ -2998,18 +3091,24 @@ def _seed_queue_row(q, task_id):
               priority=30, dedup_key=f"scheduled-task:{task_id}")
 
 
-def _clean_outage_state(monkeypatch, st, **over):
-    """Swap in a `_state` with both stall streaks and all outage accounting at
-    zero, so no tick here inherits another test's streak, cooldown or outage, and
-    nothing here leaks into the module copy afterwards."""
-    fresh = {**st._state, "unparseable_scan_at": _scan_not_due(),
+def _clean_outage_state(monkeypatch, st=None, **over):
+    """Zero both stall streaks and all outage accounting — each in the module that has
+    kept it since #1682 — so no tick here inherits another test's streak, cooldown or
+    outage, and nothing here leaks into either module copy afterwards.
+
+    The `st` the callers pass is accepted and ignored on purpose: routing is by KEY
+    (`seed_state`), so the module an older call site names is no longer the one that
+    holds the streaks being zeroed, and honouring the argument would put the
+    surveillance keys back on the dispatch dict, which is the bug the routing exists
+    to prevent.
+    """
+    clean = {"unparseable_scan_at": _scan_not_due(),
              "stall_streak": 0, "stall_alerted_at": None,
              "nextrun_streak": 0, "nextrun_alerted_at": None,
              "vllm_down_logged": False, "vllm_down_since": None,
              "vllm_down_alerted": False}
-    fresh.update(over)
-    monkeypatch.setattr(st, "_state", fresh)
-    return fresh
+    clean.update(over)          # a caller's override wins over the zeroed default
+    seed_state(monkeypatch, **clean)
 
 
 async def test_a_closed_health_gate_still_evaluates_every_stall_detector(
@@ -3032,7 +3131,7 @@ async def test_a_closed_health_gate_still_evaluates_every_stall_detector(
     _seed_queue_row(q, 915)
 
     calls = {"grossly": 0, "starving": 0, "nextrun": 0}
-    real = (st._grossly_overdue, st._queue_starving, st._next_run_stalled)
+    real = (fw._grossly_overdue, fw._queue_starving, fw._next_run_stalled)
 
     def _spy_grossly(queue):
         calls["grossly"] += 1
@@ -3046,19 +3145,19 @@ async def test_a_closed_health_gate_still_evaluates_every_stall_detector(
         calls["nextrun"] += 1
         return real[2](queue)
 
-    monkeypatch.setattr(st, "_grossly_overdue", _spy_grossly)
-    monkeypatch.setattr(st, "_queue_starving", _spy_starving)
-    monkeypatch.setattr(st, "_next_run_stalled", _spy_nextrun)
+    monkeypatch.setattr(fw, "_grossly_overdue", _spy_grossly)
+    monkeypatch.setattr(fw, "_queue_starving", _spy_starving)
+    monkeypatch.setattr(fw, "_next_run_stalled", _spy_nextrun)
     monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: False)
-    _clean_outage_state(monkeypatch, st)
+    _clean_outage_state(monkeypatch)
     alerts: list[str] = []
 
     async def _capture(msg):
         alerts.append(msg)
 
-    monkeypatch.setattr(st, "_alert", _capture)
+    capture_alerts(monkeypatch, alerts)
 
-    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    await scheduler_tick(q, {"max_duration_seconds": 1800})
 
     assert calls["grossly"] >= 1, (
         "the due-ness stall detector was never called on a tick with the model "
@@ -3107,22 +3206,22 @@ async def test_the_stall_alarm_alerts_through_an_outage_and_keeps_its_exclusions
 
     monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: False)
     _clean_outage_state(
-        monkeypatch, st,
+        monkeypatch,
         nextrun_alerted_at=dt.datetime.now(dt.timezone.utc))
     alerts: list[str] = []
 
     async def _capture(msg):
         alerts.append(msg)
 
-    monkeypatch.setattr(st, "_alert", _capture)
+    capture_alerts(monkeypatch, alerts)
 
-    ticks = st._STALL_ALARM_TICKS
+    ticks = fw._STALL_ALARM_TICKS
     for _ in range(ticks - 1):
-        await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+        await scheduler_tick(q, {"max_duration_seconds": 1800})
     assert alerts == [], (
         f"alerted on tick {len(alerts)} of {ticks}: the moved alarm stopped "
         "confirming across consecutive ticks")
-    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    await scheduler_tick(q, {"max_duration_seconds": 1800})
 
     stalled_alerts = [m for m in alerts if "autonomy scheduler may be stalled" in m]
     assert len(stalled_alerts) == 1, (
@@ -3136,7 +3235,7 @@ async def test_the_stall_alarm_alerts_through_an_outage_and_keeps_its_exclusions
     assert "912" in msg, f"the grossly overdue task is not named: {msg}"
     # Clause 3, as the alarm's own three exclusions.
     assert "913" not in msg, (
-        f"flagged a task inside {st._STALL_INTERVAL_MULT}x its interval: {msg}")
+        f"flagged a task inside {fw._STALL_INTERVAL_MULT}x its interval: {msg}")
     assert "914" not in msg, f"flagged the deliberately stopped task: {msg}"
     assert "915" not in msg, f"flagged the task with a live queue row: {msg}"
     board = list(aut.dependency_resolution_set())
@@ -3144,15 +3243,15 @@ async def test_the_stall_alarm_alerts_through_an_outage_and_keeps_its_exclusions
     assert aut._is_task_due(t913, board, now=PIN) is True, (
         "the fixture is no longer a due-but-within-2.5x case, so the exclusion "
         "above is not testing the multiple")
-    assert "915" in {str(t) for t in st._active_task_ids(q)}, (
+    assert "915" in {str(t) for t in fw._active_task_ids(q)}, (
         "the queue-row fixture lost its live row, so that exclusion tested nothing")
-    assert st._grossly_overdue(q) == [912], (
+    assert fw._grossly_overdue(q) == [912], (
         "the detector's own exclusions drifted from the message's")
 
     # And it stays one alert: the 6 h cooldown is load-bearing, since this alarm
     # alerted 100 times in 6 days before it was added.
     for _ in range(ticks):
-        await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+        await scheduler_tick(q, {"max_duration_seconds": 1800})
     assert len(alerts) == 1, (
         f"re-alerted inside the cooldown: {len(alerts)} alerts — that noise is "
         "why the cooldown exists")
@@ -3183,13 +3282,13 @@ async def test_dispatch_stays_paused_while_the_outage_is_being_watched(
     monkeypatch.setattr(st.WorkQueue, "enqueue", _capture)
     health = {"ok": False}
     monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: health["ok"])
-    _clean_outage_state(monkeypatch, st)
+    _clean_outage_state(monkeypatch)
     alerts: list[str] = []
 
     async def _capture_alert(msg):
         alerts.append(msg)
 
-    monkeypatch.setattr(st, "_alert", _capture_alert)
+    capture_alerts(monkeypatch, alerts)
 
     q = WorkQueue(tmp_path / "paused.db")
     await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
@@ -3234,13 +3333,13 @@ async def test_a_sustained_outage_alerts_once_and_a_later_outage_alerts_again(
         "30 min to 6 h the clause allows")
 
     monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: False)
-    _clean_outage_state(monkeypatch, st)
+    _clean_outage_state(monkeypatch)
     alerts: list[str] = []
 
     async def _capture(msg):
         alerts.append(msg)
 
-    monkeypatch.setattr(st, "_alert", _capture)
+    capture_alerts(monkeypatch, alerts)
     q = WorkQueue(tmp_path / "outage-alert.db")
     threshold = st._VLLM_DOWN_ALERT_SECONDS
 
@@ -4021,29 +4120,31 @@ def _unparseable_fleet(aut):
     return aut.AUTONOMY_DIR / "771-task771.md"
 
 
-def _clean_unparseable_state(monkeypatch, st):
-    """`_state` with the scan never run and no file already alerted on, and both
-    stall streaks plus the outage accounting at zero, so a tick here inherits
-    neither another test's cadence nor its cooldown."""
-    monkeypatch.setattr(st, "_state", {
-        **st._state, "unparseable_scan_at": None, "unparseable_alerted": set(),
-        "stall_streak": 0, "stall_alerted_at": None,
-        "nextrun_streak": 0, "nextrun_alerted_at": None,
-        "vllm_down_logged": False, "vllm_down_since": None,
-        "vllm_down_alerted": False})
+def _clean_unparseable_state(monkeypatch):
+    """`_state` with the scan never run and no file already alerted on, and both stall
+    streaks plus the outage accounting at zero, so a tick here inherits neither another
+    test's cadence nor its cooldown. Routed BY KEY (#1682): the scan's two slots are
+    the watchdog's to keep, the outage's three are not."""
+    seed_state(monkeypatch,
+               unparseable_scan_at=None, unparseable_alerted=set(),
+               stall_streak=0, stall_alerted_at=None,
+               nextrun_streak=0, nextrun_alerted_at=None,
+               **{"vllm_down_logged": False, "vllm_down_since": None,
+                  "vllm_down_alerted": False})
 
 
 def _watch_alerts(monkeypatch, st):
     """Stub the two things that leave the process — the model-server health probe
-    and the Discord post — and hand back the list the alerts land in."""
+    and the Discord post — and hand back the list the alerts land in.
+
+    The health probe is the source's (#938 put the gate on the dispatch path and #1682
+    left it there); the post is captured from BOTH modules, because #1682 moved the
+    stall alarms and left the outage alarm where it was, and a scan test that read only
+    one of the two posts would call a noisy fleet a silent one.
+    """
     monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: True)
     alerts: list[str] = []
-
-    async def _capture(msg):
-        alerts.append(msg)
-
-    monkeypatch.setattr(st, "_alert", _capture)
-    return alerts
+    return capture_alerts(monkeypatch, alerts)
 
 
 def _unparseable_clock(aut, monkeypatch, st):
@@ -4058,13 +4159,15 @@ def _unparseable_clock(aut, monkeypatch, st):
     what makes this a cadence, so on the pre-fix source the failure names the
     defect instead of dying on an attribute lookup.
     """
-    assert getattr(st, "_UNPARSEABLE_SCAN_SECONDS", None) is not None, (
+    # Read from the module that owns the scan since #1682: the interval travelling
+    # with the code that reads it is part of what the move is for.
+    assert getattr(fw, "_UNPARSEABLE_SCAN_SECONDS", None) is not None, (
         "the scan declares no re-run interval, so it is still the one that runs on "
         "the first tick and never again: there is no cadence to step")
     now = [_pin(aut, monkeypatch)]
 
     def step():
-        now[0] = now[0] + dt.timedelta(seconds=st._UNPARSEABLE_SCAN_SECONDS)
+        now[0] = now[0] + dt.timedelta(seconds=fw._UNPARSEABLE_SCAN_SECONDS)
         _pin(aut, monkeypatch, when=now[0])
 
     return step
@@ -4098,35 +4201,35 @@ async def test_the_unparseable_scan_runs_again_on_a_bounded_cadence(
 
     _unparseable_fleet(aut)
     step = _unparseable_clock(aut, monkeypatch, st)
-    _clean_unparseable_state(monkeypatch, st)
+    _clean_unparseable_state(monkeypatch)
     alerts = _watch_alerts(monkeypatch, st)
 
     scans: list[int] = []
-    real = st._unparseable_task_files
+    real = fw._unparseable_task_files
 
     def _spy():
         scans.append(1)
         return real()
 
-    monkeypatch.setattr(st, "_unparseable_task_files", _spy)
+    monkeypatch.setattr(fw, "_unparseable_task_files", _spy)
 
     q = WorkQueue(tmp_path / "cadence.db")
-    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    await scheduler_tick(q, {"max_duration_seconds": 1800})
     assert len(scans) == 1, (
         f"the first tick ran the scan {len(scans)} times: a boot that never "
         f"checks its task files at all is not the defect being fixed")
 
-    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    await scheduler_tick(q, {"max_duration_seconds": 1800})
     assert len(scans) == 1, (
         "the scan ran twice with no uptime between the ticks, so there is no "
         "cadence and the alert would fire every tick instead")
 
-    assert st._UNPARSEABLE_SCAN_SECONDS <= 3600, (
-        f"a cadence of {st._UNPARSEABLE_SCAN_SECONDS}s cannot deliver a check "
+    assert fw._UNPARSEABLE_SCAN_SECONDS <= 3600, (
+        f"a cadence of {fw._UNPARSEABLE_SCAN_SECONDS}s cannot deliver a check "
         f"within the one-hour bound the acceptance clause sets")
 
     step()
-    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    await scheduler_tick(q, {"max_duration_seconds": 1800})
     assert len(scans) == 2, (
         f"after one interval of scheduler uptime the scan had run {len(scans)} "
         f"time(s): the one-shot flag is still in force, which is the whole defect "
@@ -4149,11 +4252,11 @@ async def test_a_file_that_turns_unparseable_mid_uptime_alerts_exactly_once(
 
     path = _unparseable_fleet(aut)
     step = _unparseable_clock(aut, monkeypatch, st)
-    _clean_unparseable_state(monkeypatch, st)
+    _clean_unparseable_state(monkeypatch)
     alerts = _watch_alerts(monkeypatch, st)
 
     q = WorkQueue(tmp_path / "mid-uptime.db")
-    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    await scheduler_tick(q, {"max_duration_seconds": 1800})
     assert alerts == [], f"the boot scan alerted on a healthy fleet: {alerts}"
 
     _corrupt(path)
@@ -4162,7 +4265,7 @@ async def test_a_file_that_turns_unparseable_mid_uptime_alerts_exactly_once(
         "the class the scan exists for")
 
     step()
-    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    await scheduler_tick(q, {"max_duration_seconds": 1800})
 
     assert len(alerts) == 1, (
         f"a file that became unparseable after boot produced {len(alerts)} "
@@ -4190,20 +4293,20 @@ async def test_the_unparseable_alert_follows_transitions_not_scans(
     path = _unparseable_fleet(aut)
     intact = path.read_text()
     step = _unparseable_clock(aut, monkeypatch, st)
-    _clean_unparseable_state(monkeypatch, st)
+    _clean_unparseable_state(monkeypatch)
     alerts = _watch_alerts(monkeypatch, st)
 
     q = WorkQueue(tmp_path / "transitions.db")
-    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    await scheduler_tick(q, {"max_duration_seconds": 1800})
 
     _corrupt(path)
     step()
-    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    await scheduler_tick(q, {"max_duration_seconds": 1800})
     assert len(alerts) == 1, f"corruption did not alert exactly once: {alerts}"
 
     # Still broken, one interval later: named once, and not again.
     step()
-    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    await scheduler_tick(q, {"max_duration_seconds": 1800})
     assert len(alerts) == 1, (
         f"an unchanged bad set re-alerted on a later check: {alerts}. The alert "
         f"is keyed on the transition, not on the scan")
@@ -4211,18 +4314,18 @@ async def test_the_unparseable_alert_follows_transitions_not_scans(
     # Healed: the recovery is said, and the file leaves the alerted set.
     path.write_text(intact)
     step()
-    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    await scheduler_tick(q, {"max_duration_seconds": 1800})
     assert len(alerts) == 2, (
         f"a file that parses again was not reported as recovered: {alerts}")
     assert "parseable again" in alerts[1] and path.name in alerts[1], alerts[1]
-    assert path.name not in st._state["unparseable_alerted"], (
+    assert path.name not in fw._state["unparseable_alerted"], (
         "the recovered file stayed in the alerted set, so the next corruption "
         "would be silently swallowed")
 
     # Broken again: the same file must be able to raise an alert a second time.
     _corrupt(path)
     step()
-    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    await scheduler_tick(q, {"max_duration_seconds": 1800})
     assert len(alerts) == 3, (
         f"a re-corruption after a recovery was silent: {alerts}. Recovery that "
         f"does not re-arm the alert is the retraction asymmetry, and the second "
@@ -4340,19 +4443,16 @@ async def _starve_alerts(aut, monkeypatch, tmp_path, q):
     """
     import workers.sources.scheduled_task as st
     monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: True)
-    monkeypatch.setattr(st, "_state", {**st._state,
-                                       "unparseable_scan_at": _scan_not_due(),
-                                       "stall_streak": st._STALL_ALARM_TICKS,
-                                       "stall_alerted_at": None,
-                                       "nextrun_streak": 0,
-                                       "nextrun_alerted_at": None})
+    seed_state(monkeypatch, unparseable_scan_at=_scan_not_due(),
+               stall_streak=fw._STALL_ALARM_TICKS, stall_alerted_at=None,
+               nextrun_streak=0, nextrun_alerted_at=None)
     alerts: list[str] = []
 
     async def _capture(msg):
         alerts.append(msg)
 
-    monkeypatch.setattr(st, "_alert", _capture)
-    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    capture_alerts(monkeypatch, alerts)
+    await scheduler_tick(q, {"max_duration_seconds": 1800})
     return alerts
 
 
@@ -4467,7 +4567,7 @@ async def test_the_parked_suppression_is_read_from_the_task_file(aut, monkeypatc
     exists to prevent, and why `test_the_parked_field_is_read_by_the_recoverer`
     below is the same claim from the other side.
     """
-    from workers.sources.scheduled_task import _next_run_stalled
+    from workers.fleet_watchdog import _next_run_stalled
 
     _pin(aut, monkeypatch)
     _parked_fleet(aut)
@@ -4495,7 +4595,7 @@ def test_the_alert_drops_a_declared_park_and_keeps_naming_the_undeclared_one(
     undo #1121, so the same message has to name the identical task that said nothing
     about itself."""
     from workers.queue import WorkQueue
-    from workers.sources.scheduled_task import _next_run_stalled, _nextrun_alert_message
+    from workers.fleet_watchdog import _next_run_stalled, _nextrun_alert_message
 
     _pin(aut, monkeypatch)
     _parked_fleet(aut)
@@ -4527,7 +4627,7 @@ def test_the_alert_reports_a_suppressed_park_instead_of_going_silent(
     keeps them apart, and it has to be there even when it is the whole message.
     """
     from workers.queue import WorkQueue
-    from workers.sources.scheduled_task import _next_run_stalled, _nextrun_alert_message
+    from workers.fleet_watchdog import _next_run_stalled, _nextrun_alert_message
 
     _pin(aut, monkeypatch)
     _parked_fleet(aut)
@@ -4612,7 +4712,7 @@ def test_the_live_board_suppresses_the_task_alan_parked_and_says_so(tmp_path):
     assumed.
     """
     from workers.queue import WorkQueue
-    from workers.sources.scheduled_task import _next_run_stalled, _nextrun_alert_message
+    from workers.fleet_watchdog import _next_run_stalled, _nextrun_alert_message
 
     files = list(VAULT_AUTONOMY_DIR.glob("*.md"))
     assert len(files) > MIN_LIVE_TASK_FILES, (

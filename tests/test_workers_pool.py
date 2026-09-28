@@ -716,7 +716,13 @@ def _hold_operator_pause(q, *, hours: float) -> str:
 
 
 async def _starving_alerts(q, monkeypatch, tmp_path):
-    """One real `enqueue_if_due` tick over `q`; returns the alerts it posted.
+    """One real scheduler-loop pass over `q`; returns the alerts it posted.
+
+    The pass is the loop's own order — `fleet_watchdog.tick` (the alarms, seated on
+    the loop itself by #1682) and then `enqueue_if_due` (the dispatch half) — because
+    the starving clause is not in the dispatch call any more: a test that ran only
+    `enqueue_if_due` would see no alert and would be measuring the split, not the
+    alarm.
 
     The task dir is pointed at an EMPTY directory, so the alert under test can
     only be the starving clause: with no task files neither `overdue` nor the
@@ -724,13 +730,14 @@ async def _starving_alerts(q, monkeypatch, tmp_path):
     the alternative is a tick that scans and re-arms the LIVE board.
     """
     from app import autonomy
+    import workers.fleet_watchdog as fw
     import workers.sources.scheduled_task as st
     monkeypatch.setattr(autonomy, "AUTONOMY_DIR", tmp_path / "tasks")
     monkeypatch.setattr(autonomy, "AUTONOMY_RUNS_DIR", tmp_path / "runs")
     (tmp_path / "tasks").mkdir(exist_ok=True)
     monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: True)
-    monkeypatch.setattr(st, "_state", {**st._state, "unparseable_scan_at": None,
-                                       "stall_streak": st._STALL_ALARM_TICKS,
+    monkeypatch.setattr(fw, "_state", {**fw._state, "unparseable_scan_at": None,
+                                       "stall_streak": fw._STALL_ALARM_TICKS,
                                        "stall_alerted_at": None,
                                        "nextrun_streak": 0,
                                        "nextrun_alerted_at": None})
@@ -739,7 +746,8 @@ async def _starving_alerts(q, monkeypatch, tmp_path):
     async def _capture(msg):
         alerts.append(msg)
 
-    monkeypatch.setattr(st, "_alert", _capture)
+    monkeypatch.setattr(fw, "_alert", _capture)
+    await fw.tick(q)
     await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
     return alerts
 
