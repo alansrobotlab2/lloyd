@@ -284,16 +284,39 @@ async def _enqueue_ledger_losers(queue: WorkQueue, src_cfg: dict) -> None:
     if float(queue.wm_get(NAME, "ledger_mtime") or 0.0) >= mtime:
         return
 
+    # The pairs this source has already retired, on either outcome. `_item_key`
+    # writes the marker for a mined or rejected pair through `_mark_done`, and
+    # `mark_completed` releases the dedup key by design, so the queue cannot be
+    # the record that a pair was mined — without this read the same five pairs
+    # were re-offered on every ledger mtime change: 127 of the 133 completed
+    # `mine` items in the 7 days to 2026-09-28 were one task at composite 0.05,
+    # 29/26/24/24/24 across its five rounds, while `watermarks` held the five
+    # `done:ledger:…` keys the whole time (#1711). The run input below reads the
+    # same set and cannot collide with it: its keys are bare `run_…` ids, these
+    # are `ledger:`-prefixed pairs.
+    done = {k[len("done:"):] for k in queue.wm_keys(NAME) if k.startswith("done:")}
+
     # _recent_ledger_losers reads and json-parses the full ledger.jsonl
     # (tens of MB) line by line — blocking I/O + CPU. Keep it off the shared
     # event loop so it can't stall HTTP/UI. See [[project_gap_fill_event_loop_freeze]].
+    #
+    # Filtered after the slice, on purpose. Marked rows still consume the
+    # selector's `limit = 5`, so a tick whose whole slate is marked enqueues
+    # nothing: the input goes quiet until those rows age out of the 7-day window
+    # or a new sub-0.6 baseline row appears. Asking the selector for more rows to
+    # make up the difference is a selection-budget decision #1711 leaves to the
+    # owed-check job, not something this filter may smuggle in as a loop.
     losers = await asyncio.to_thread(_recent_ledger_losers)
     queue.wm_set(NAME, "ledger_mtime", repr(mtime))
     if not losers:
         return
     enqueued = 0
+    marked = 0
     for row in losers:
         task_id = row.get("task_id", "")
+        if _ledger_key(str(task_id), str(row.get("round_id", ""))) in done:
+            marked += 1
+            continue
         dedup_key = f"bench-mine:{task_id}:{row.get('round_id','')}"
         new_id = queue.enqueue(
             source=NAME,
@@ -306,8 +329,13 @@ async def _enqueue_ledger_losers(queue: WorkQueue, src_cfg: dict) -> None:
         )
         if new_id is not None:
             enqueued += 1
-    if enqueued:
-        logger.info("Enqueued %d bench-mine items", enqueued)
+    # Logged on a quiet tick too: a tick that filtered its whole slate is exactly
+    # the state #1711 sat in for days, and "enqueued 0" is only legible if the
+    # reason went to the log with it. An all-marked tick happens when the ledger
+    # moved, which is once per autoresearch round, not once per tick.
+    if enqueued or marked:
+        logger.info("bench-mine: enqueued %d ledger items (%d eligible, %d already mined)",
+                    enqueued, len(losers), marked)
 
 
 async def _enqueue_failed_runs(queue: WorkQueue, src_cfg: dict, limit: int) -> None:
@@ -349,12 +377,28 @@ def _fail_key(key: str) -> str:
     return f"fail:{key}"
 
 
+def _ledger_key(task_id: str, round_id: str) -> str:
+    """The marker key for one ledger row: the `(task, round)` pair, not the task.
+
+    One definition, shared by whoever is deciding whether to offer a row and
+    whoever is retiring one, because the two are the same string and a second
+    copy of a format is how they drift apart — which is precisely the one-sided
+    contract that let `startswith("baseline")` sit unread against the
+    `BASELINE_<int>` the writer mints for the ledger's whole life (#625).
+
+    The round is part of the key, not decoration: one task can legitimately lose
+    in several rounds, and #1711's flood was five rounds of a single task, so a
+    key on task alone would answer the flood with a silence.
+    """
+    return f"ledger:{task_id}:{round_id}"
+
+
 def _item_key(item: QueueItem) -> str:
     """The stable identity of whatever this item was mined from."""
     p = item.payload
     if p.get("run_id"):
         return str(p["run_id"])
-    return f"ledger:{p.get('loser_task_id', '')}:{p.get('round_id', '')}"
+    return _ledger_key(str(p.get("loser_task_id", "")), str(p.get("round_id", "")))
 
 
 def _mark_done(key: str, why: str) -> None:

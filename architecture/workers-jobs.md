@@ -766,9 +766,11 @@ above are what closed it. Over the 7 days to 2026-09-28 `session-distill` is 28
 ok of 29 runs and `bench-mine` 118 ok of 163, and of `bench-mine`'s 32 failures
 30 are one `ConnectError` burst on 2026-09-24, not cap deaths — 2 runs in the
 whole window died at the ceiling with nothing written. The shared shape is still
-the diagnosis, but the defect that shape now shares is not the budget: it is a
-`done:` marker the ledger input writes and never reads, and a calibration gate
-that scores the staging envelope instead of the candidate. Both are named in the
+the diagnosis, but the defect that shape now shares is not the budget: it was a
+`done:` marker the ledger input wrote and never read (#1711, landed 2026-09-28 —
+that input now reads the same watermark set the failed-runs input always did),
+beside a calibration gate that scores the staging envelope instead of the
+candidate, which is still open. Both are named in the
 `bench-mine` subsection below. The family's third member, `gap-fill`, never ran at all and
 was retired on 2026-09-24 (§7).
 
@@ -837,12 +839,18 @@ other session sources' — #896) and stages a candidate task under
   queue items of kind `mine` in that window against 0 on 2026-09-19. It fires too
   often. 128 of those 132 items are one task — `bench_007_skill_invocation`,
   baseline 0.05 — offered 24 to 29 times per round across 5 rounds, because
-  `_enqueue_ledger_losers` never consults the `done:` markers this source writes
-  (all 10 current `done:ledger:*` keys exist, the earliest of them before most of
-  those runs) and `mark_completed` releases the dedup key behind it. The
-  failed-runs input does read that watermark; the ledger input is the half of the
-  module that skipped its own "a failure corpus is an infinite loop without
-  markers" rule (filed).
+  `_enqueue_ledger_losers` did not consult the `done:` markers this source writes
+  (all 10 of those `done:ledger:*` keys existed, the earliest of them before most
+  of those runs) while `mark_completed` released the dedup key behind it. The
+  failed-runs input always read that watermark; the ledger input was the half of
+  the module that skipped its own "a failure corpus is an infinite loop without
+  markers" rule, and #1711 closed that on 2026-09-28: it now builds the same
+  `done:` set and skips a `(task_id, round_id)` pair already retired under
+  `_ledger_key`. What that fix does not do is widen the selector's `limit = 5` —
+  marked rows still consume the slice, so with all five current rows marked the
+  input offers nothing until they age out of the 7-day window (~09-29/30) or new
+  sub-0.6 rows appear. Whether that silence is acceptable, or the filter belongs
+  before the slice, is still owed (#1711's owed-check).
 - **Every candidate carries a `calibration` block** — N trials against the
   canonical prompt, and whether the composite landed strictly inside the
   capability edge. A task the learner always passes and one it always fails both

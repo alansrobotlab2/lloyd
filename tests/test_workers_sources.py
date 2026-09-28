@@ -464,7 +464,8 @@ async def test_a_missing_ledger_is_not_an_error(tmp_path, monkeypatch, q):
 
 def _ledger_row(variant_id: str, task_id: str, score: float, *,
                 created_at: str | None = None,
-                trace_status: str = "success") -> dict:
+                trace_status: str = "success",
+                round_id: str = "R_fixture") -> dict:
     """One baseline-trial ledger row, built by the pipeline's own row builder.
 
     The keys come from `bench_runner_sdk.ledger_row_for` — the function that
@@ -478,13 +479,19 @@ def _ledger_row(variant_id: str, task_id: str, score: float, *,
     `trace_status` defaults to `success` because that is what 4,003 of the
     ledger's 4,080 baseline rows carry; 77 are `error`, and every one of those
     scores under the 0.6 loser line.
+
+    `round_id` is a parameter because the pair `(task_id, round_id)` is the
+    identity a `done:` marker is filed under (`_item_key` →
+    `ledger:{task_id}:{round_id}`), so a test that wants to mark one round of a
+    task and offer another cannot get there through `task_id` alone. It still
+    defaults to `R_fixture`, the value `ledger_row_for` was already being handed.
     """
     from scripts.autoresearch.bench_runner_sdk import ledger_row_for
 
     row = ledger_row_for(
         {"variant_id": variant_id, "task_id": task_id, "status": trace_status},
         {"composite_score": score, "objective_score": score, "rubric_overall": score},
-        "R_fixture")
+        round_id)
     if created_at:
         # `ledger_row_for` stamps `now_iso()`, which is inside the window; only
         # a row deliberately placed elsewhere needs this override.
@@ -614,6 +621,163 @@ async def test_a_ledger_loser_reaches_the_queue_as_a_mine_item(tmp_path, monkeyp
     assert len(items) == 1, "the selected loser never reached the queue"
     assert items[0].payload["loser_task_id"] == "bench_004_shape_gate"
     assert items[0].payload["composite_score"] == 0.42
+
+
+# ── the ledger input reads its own `done:` markers (#1711) ────────────
+#
+# The heading over the marker section of the module says a failure corpus is an
+# infinite loop without markers, and the ledger half of the module wrote them and
+# never read them: `_stage_and_calibrate` retires a pair on both outcomes
+# (`_mark_done(_item_key(item), …)`), `mark_completed` releases the dedup key by
+# design, and `_enqueue_ledger_losers` asked the queue nothing. Measured over the
+# 7 days to 2026-09-28: 133 completed `mine` items, 127 of them one task
+# (`bench_007_skill_invocation`) spread over five rounds at 29, 26, 24, 24 and 24
+# — 6.54 wall-hours, every one of them a real primary turn, while
+# `watermarks` already held the five `done:ledger:bench_007_…` keys.
+#
+# The key is the pair, so these tests always name a round as well as a task: a
+# filter on task_id alone would strand the other rounds of a task that legitimately
+# lost again, and the flood is five rounds of ONE task.
+# ─────────────────────────────────────────────────────────────────────
+
+
+async def test_a_ledger_loser_with_a_done_marker_is_not_enqueued(tmp_path, monkeypatch, q):
+    """Clause 1, seeded from outside the module: the marker is a literal string,
+    not something this test asked the producer to write, so the two sides cannot
+    agree with each other and with nothing else. That is the class of bug that
+    cost #625 its whole life — a selector and a writer each self-consistent."""
+    _fixture_ledger(tmp_path, monkeypatch,
+                    [_ledger_row("BASELINE_123", "bench_x", 0.42, round_id="R_1")])
+    q.wm_set(BM.NAME, "done:ledger:bench_x:R_1",
+             json.dumps({"why": "mined", "at": "2026-09-28T00:00:00+00:00"}))
+
+    await BM.enqueue_if_due(q, {})
+
+    assert [i for i in q.list_items(source=BM.NAME)
+            if i.kind == BM.KIND_LEDGER] == [], \
+        "a (task, round) pair already carrying a done: marker was offered again"
+
+
+async def test_an_unmarked_ledger_loser_is_still_enqueued_with_its_fields(
+        tmp_path, monkeypatch, q):
+    """The positive control for the test above, and the pair-granularity half:
+    one row of this task IS marked, its other round is not, and only the marked
+    one may vanish. A filter keyed on task_id alone passes the test above and
+    fails this one — which is the difference between closing #1711 and replacing
+    a flood with a silence."""
+    _fixture_ledger(tmp_path, monkeypatch, [
+        _ledger_row("BASELINE_123", "bench_x", 0.42, round_id="R_1"),
+        _ledger_row("BASELINE_124", "bench_x", 0.31, round_id="R_2"),
+    ])
+    q.wm_set(BM.NAME, "done:ledger:bench_x:R_1", json.dumps({"why": "mined"}))
+
+    await BM.enqueue_if_due(q, {})
+
+    items = [i for i in q.list_items(source=BM.NAME) if i.kind == BM.KIND_LEDGER]
+    assert [i.payload["round_id"] for i in items] == ["R_2"], \
+        "the unmarked round of a partly-marked task did not survive the filter"
+    payload = items[0].payload
+    assert payload["loser_task_id"] == "bench_x"
+    assert payload["composite_score"] == 0.31
+    assert payload["max_turns"] == BM.DEFAULT_MAX_TURNS, \
+        "the envelope changed while the filter was being added"
+
+
+async def test_a_ledger_loser_is_offered_once(tmp_path, monkeypatch, q):
+    """The ledger analogue of `test_a_run_is_offered_once`, and the seam the
+    other three do not cross: the marker here is written by the module's own
+    retire path through `_item_key`, so this fails if the enqueue side and the
+    retire side ever stop spelling the key the same way.
+
+    `mark_completed` is called for real rather than skipped, because releasing
+    the dedup key is the mechanism: without a read of the marker, the next tick
+    finds an empty queue slot and fills it. The mtime gate is then opened by
+    `utime`, which is what an autoresearch round appending a row does to the
+    file — the tick that re-offered these five pairs every two hours was opened
+    by a write that had nothing to do with them.
+    """
+    ledger = _fixture_ledger(tmp_path, monkeypatch,
+                             [_ledger_row("BASELINE_123", "bench_x", 0.42,
+                                          round_id="R_1")])
+
+    await BM.enqueue_if_due(q, {})
+    first = [i for i in q.list_items(source=BM.NAME)
+             if i.kind == BM.KIND_LEDGER][0]
+    q.mark_completed(first.id)
+    _bm_queue(monkeypatch, q)
+    BM._mark_done(BM._item_key(first), "mined")
+
+    import os
+    os.utime(ledger, (time.time() + 10, time.time() + 10))
+    await BM.enqueue_if_due(q, {})
+
+    assert len([i for i in q.list_items(source=BM.NAME)
+                if i.kind == BM.KIND_LEDGER]) == 1, \
+        "an already-mined ledger pair was re-offered"
+
+
+async def test_a_tick_whose_losers_are_all_marked_offers_nothing_and_widens_nothing(
+        tmp_path, monkeypatch, q):
+    """Every candidate marked: the tick must come home empty.
+
+    The second input still has to run (a ledger with nothing left to mine is not
+    a reason to stop mining failed runs), and the candidate slice must not be
+    widened or re-fetched to find something. Both halves are pinned, because the
+    tempting "fix" for the resulting silence is to ask the selector for more rows
+    — which is the selection-budget decision #1711 explicitly leaves to the
+    owed-check job, not something a filter is allowed to sneak in as a loop.
+
+    `_recent_ledger_losers` is spied on rather than run against a fixture here:
+    this test is about how many times the enqueue path asks, and how wide it asks.
+    """
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_text("", encoding="utf-8")
+    monkeypatch.setattr(BM, "LEDGER_PATH", ledger)
+    monkeypatch.setattr(BM, "AUTONOMY_RUNS_DIR", tmp_path / "no-runs")
+
+    rows = [_ledger_row(f"BASELINE_{n}", "bench_x", 0.1 * n, round_id=f"R_{n}")
+            for n in (1, 2, 3)]
+    for row in rows:
+        q.wm_set(BM.NAME, f"done:ledger:{row['task_id']}:{row['round_id']}",
+                 json.dumps({"why": "mined"}))
+
+    # Read the real signature BEFORE the spy stands in for it: the default is the
+    # budget being asserted against, and inspecting the spy would compare the spy
+    # with itself.
+    default_limit = inspect.signature(BM._recent_ledger_losers).parameters["limit"].default
+
+    calls: list[tuple[tuple, dict]] = []
+
+    def _spy(*args, **kwargs):
+        calls.append((args, kwargs))
+        return list(rows)
+
+    monkeypatch.setattr(BM, "_recent_ledger_losers", _spy)
+
+    await BM.enqueue_if_due(q, {})          # raises nothing is the assertion
+
+    assert q.list_items(source=BM.NAME) == [], "a marked-through-the-board tick enqueued anyway"
+    assert len(calls) == 1, f"the candidate slice was fetched {len(calls)} times, not once"
+
+    asked = (calls[0][1].get("limit")
+             if "limit" in calls[0][1]
+             else (calls[0][0][1] if len(calls[0][0]) > 1 else default_limit))
+    assert int(asked) <= int(default_limit), \
+        f"the tick asked for {asked} candidates to make up for filtered ones"
+
+
+def test_the_ledger_marker_key_has_one_definition(tmp_path):
+    """The enqueue side and the retire side must build the same bytes, and a
+    second copy of the format is how they drift apart (#625's shape again, one
+    side renamed). `_item_key` is what every marker write goes through, so the
+    pair-builder it uses is pinned against the literal the marker tests seed."""
+    assert BM._ledger_key("bench_x", "R_1") == "ledger:bench_x:R_1"
+    assert BM._item_key(_item({"loser_task_id": "bench_x", "round_id": "R_1"})) \
+        == BM._ledger_key("bench_x", "R_1")
+    # And the run input's key is untouched by this: it is a bare run_id, which
+    # is why one `done:` set can serve both inputs without them colliding.
+    assert BM._item_key(_item({"run_id": "run_24_20260908_235954"})) \
+        == "run_24_20260908_235954"
 
 
 def test_the_id_the_writer_mints_is_the_id_the_selector_selects(tmp_path, monkeypatch):
