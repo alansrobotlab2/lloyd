@@ -1,0 +1,17 @@
+[Unit]
+Description=Check the Lloyd tailnet TLS leaf daily and renew it inside its window
+Documentation=file:///home/alansrobotlab/lloyd/agent-services/systemd/lloyd-cert-renew.service
+
+[Timer]
+# Daily, at an odd minute so this does not pile onto the :00/15/30/45 vault
+# snapshot work. The script exits 0 having touched nothing until the leaf is
+# within 14 days of its notAfter, so a daily check costs a single openssl read
+# for 76 days out of 90 and buys a two-week runway on the last one.
+# Persistent=true means a box that was off when a check was due runs one at
+# boot instead of silently skipping the day the expiry lands on.
+OnCalendar=*-*-* 04:17:00
+Persistent=true
+RandomizedDelaySec=15m
+
+[Install]
+WantedBy=timers.target

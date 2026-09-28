@@ -1,0 +1,23 @@
+[Unit]
+Description=Renew the Lloyd tailnet TLS leaf before it expires
+Documentation=file:///home/alansrobotlab/lloyd/scripts/renew-tailnet-cert.sh
+# Vite picks agent-services/cert/goliath.taile37041.ts.net.crt by existence, not
+# by validity, so an expired leaf is served as confidently as a live one and the
+# only symptom is every tailnet client failing TLS. The leaf is a 90-day Let's
+# Encrypt cert and, before #1727, nothing renewed it at all (SETUP.md:1513).
+# The script is inert outside its 14-day window, so running it often is free;
+# running it late is not.
+
+[Service]
+Type=oneshot
+# tailscale, openssl and supervisorctl: supervisorctl is a --local/bin tool, so
+# the PATH is stated rather than inherited from whatever the manager happened to
+# be started with.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=%h
+# A re-mint restarts the MC frontend, so this never outranks the services it
+# would restart.
+Nice=10
+ExecStart=/home/alansrobotlab/lloyd/scripts/renew-tailnet-cert.sh
+# A failed run means the leaf was not renewed, which is the state an operator
+# needs to see in `systemctl --user --failed` and the journal. Left non-zero.

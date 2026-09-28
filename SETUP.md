@@ -1510,8 +1510,18 @@ lsup restart lloyd-mc:lloyd-frontend
 
 Confirm from the log (`[vite] HTTPS using Tailscale public cert`), not by eye.
 `curl -k` cannot verify this — `-k` disables exactly the check the browser
-enforces. The cert is a 90-day Let's Encrypt leaf and **nothing renews it**;
-Vite reads it at startup, so a re-mint needs a frontend restart.
+enforces. The cert is a 90-day Let's Encrypt leaf, and the block above is what
+`scripts/renew-tailnet-cert.sh` does for you — it reads the leaf's `notAfter`, re-mints
+only inside 14 days of it, and restarts the frontend, exiting 0 having touched nothing
+until then. Give it an owner (the units are in `agent-services/systemd/`, the same
+route as the vault snapshot above):
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now lloyd-cert-renew.timer   # daily check, renews inside 14 days
+```
+
+Vite reads the cert at startup, so a re-mint needs a frontend restart either way.
 
 **Builds fail with `No space left on device` while `df -h` shows space free.**
 `/tmp` is a tmpfs with a fixed inode budget (1,048,576 here) independent of its
