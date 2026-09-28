@@ -1302,3 +1302,55 @@ def test_a_900_character_wordy_summary_records_complete_words_plus_the_marker():
     # Truncation is a length rule, not an excuse to drop most of the record: a
     # cut that kept 60 characters would satisfy "≤ 500" just as well.
     assert len(kept) > SUMMARY_MAX_CHARS - 20, "threw away more than the marker needed"
+
+
+# ---------------------------------------------------------------------------
+# #1684 — the fleet's health gate probes the endpoint config names
+#
+# `WorkerPool._scheduler_loop` → `scheduled_task.enqueue_if_due` is the one pass
+# that decides whether ANY autonomy task may be enqueued, and until now the URL it
+# probed on that pass was a literal baked into the source file. Moving the
+# primary's port under `models:` therefore stopped dispatch on an endpoint the
+# engine never served, and nothing on this path could see the disagreement. The
+# tick below is the pool's real call into the source, so what it records is what
+# the fleet's verdict is actually made of.
+# ---------------------------------------------------------------------------
+
+
+async def test_one_tick_probes_the_endpoint_config_says_the_primary_lives_on(
+        q, monkeypatch, tmp_path):
+    """Clause 3: the recorded probe carries the config-derived URL, not the literal.
+
+    The task dir is redirected to an EMPTY directory, as `_starving_alerts` does,
+    so the tick scans nothing live; the probe is the only thing under test and it
+    refuses. Pre-fix the recorded call is `()` — `_vllm_healthy` was invoked with
+    no URL at all and fell through to the module constant — so this fails on the
+    first assertion, not on a string comparison someone could retarget.
+    """
+    from app import autonomy, config as cfg
+    import workers.sources.scheduled_task as st
+
+    monkeypatch.setattr(autonomy, "AUTONOMY_DIR", tmp_path / "tasks")
+    monkeypatch.setattr(autonomy, "AUTONOMY_RUNS_DIR", tmp_path / "runs")
+    (tmp_path / "tasks").mkdir(exist_ok=True)
+    # The outage accounting is process-global; snapshot it through monkeypatch so
+    # this tick's bookkeeping cannot make a later test's first tick a "recovery".
+    monkeypatch.setitem(st._state, "vllm_down_logged", False)
+    monkeypatch.setitem(st._state, "vllm_down_since", None)
+    monkeypatch.setitem(st._state, "vllm_down_alerted", False)
+    monkeypatch.setitem(cfg.MODEL_CONFIGS["primary"], "base_url",
+                        "http://127.0.0.1:9999")
+
+    probes: list = []
+    monkeypatch.setattr(st, "_vllm_healthy",
+                        lambda *a, **k: probes.append(a) or False)
+
+    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+
+    assert len(probes) == 1, f"the fleet gate probed {len(probes)} times"
+    assert probes[0] == (4.0, "http://127.0.0.1:9999/health"), (
+        f"the fleet gate probed {probes[0]!r}, not the config-derived endpoint")
+    assert probes[0][1] != st._VLLM_HEALTH_URL, (
+        "the URL that gates every dispatch is still the module's literal")
+    assert q.list_items(source=st.NAME) == [], (
+        "dispatch enqueued while its own health probe was refusing")

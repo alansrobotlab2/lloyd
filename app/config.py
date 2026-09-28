@@ -354,16 +354,41 @@ def service_url(name: str, default: str = "") -> str:
     return str(url) if url else default
 
 
+#: The endpoint a caller falls back to when config has nothing to say about the
+#: default model. A last resort, not a source of truth: `models.<default>` owns
+#: this value (#1684 — surfaces that carried their own copy of the literal kept
+#: probing the old port after a config port move).
+DEFAULT_MODEL_BASE_URL_FALLBACK = "http://127.0.0.1:8096"
+#: Named, for the same reason the URL is returned with its key: a surface that
+#: probed this endpoint has to be able to say it came from the fallback and not
+#: from config.
+DEFAULT_MODEL_BASE_URL_FALLBACK_KEY = "app.config fallback literal (config has no models.<default> endpoint)"
+
+
+def default_model_base_url_source() -> tuple[str, str]:
+    """Base URL of the default model, plus the config key the answer came from.
+
+    `default_model_base_url` is the value; this is the value with its provenance.
+    A surface that PROBES the endpoint needs both, because a failure it reports
+    has to name where it looked: the dispatch gate used to interpolate its own
+    hardcoded :8096 into the outage alert, so a port move under `models:` paused
+    the fleet while the alert pointed at a URL the primary never served (#1684).
+    """
+    default = (CONFIG.get("model") or {}).get("default", "primary")
+    cfg = _get_model_cfg(default)
+    base = cfg.get("base_url")
+    if base:
+        return str(base), f"models.{default}.base_url"
+    env_base = (cfg.get("env") or {}).get("ANTHROPIC_BASE_URL")
+    if env_base:
+        return str(env_base), f"models.{default}.env.ANTHROPIC_BASE_URL"
+    return DEFAULT_MODEL_BASE_URL_FALLBACK, DEFAULT_MODEL_BASE_URL_FALLBACK_KEY
+
+
 def default_model_base_url() -> str:
     """Base URL of the default model — the fallback when a caller has no
     explicit ANTHROPIC_BASE_URL in its resolved model env."""
-    default = (CONFIG.get("model") or {}).get("default", "primary")
-    cfg = _get_model_cfg(default)
-    return (
-        cfg.get("base_url")
-        or cfg.get("env", {}).get("ANTHROPIC_BASE_URL", "")
-        or "http://127.0.0.1:8096"
-    )
+    return default_model_base_url_source()[0]
 
 
 # Alias rewrites already logged. CONFIG is loaded once at import, so the

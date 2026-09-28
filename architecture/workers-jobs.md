@@ -183,7 +183,14 @@ Four behaviours are load-bearing:
   - **The invariant across both** (#938): an outage of the model server pauses
     dispatch, never the watching. The vLLM gate stays here because it is dispatch,
     and its own threshold is 45 min of failed `/health` before `logger.error`
-    plus discord. It is one of TWO watchers of the primary's `:8096`: the other is
+    plus discord. Which `/health` it checks is config-derived — the default
+    model's `models.<name>.base_url` through
+    `app.config.default_model_base_url_source` — so a port move under `models:`
+    moves the gate, and the alert names the config key it read; the literal
+    `:8096` survives in that module only as the fallback for an unreadable config
+    (#1684). (The co-watcher's port is a separate literal table,
+    `app/supervisor_client.py:_INFRA_SERVICES`.) It is one of TWO watchers of the
+    primary's `:8096`: the other is
     `workers/service_probe.py`, which watches the PORT under supervisord rather
     than `/health` and announces the closed port to the journal and a toast at its
     own 30 min grace, from the pool's scheduler loop and outside this gate. One

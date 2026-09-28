@@ -37,7 +37,42 @@ _PRIORITY_MAP = {
 
 # vLLM health gate: skip enqueuing when the model server is unreachable so a wedge
 # doesn't turn every due task into a ConnectError flood.
+#
+# This literal is the LAST-RESORT FALLBACK only (#1684). The endpoint the gate
+# actually probes is derived from config by `_primary_health_target`, the same way
+# a named model's leg always has been: the fleet-wide leg was the one leg reading
+# a hardcoded port, so moving the primary's port under `models:` paused ALL
+# dispatch on a URL the engine never served, and the alert that eventually arrived
+# named that stale URL while the fleet sat stopped on it.
 _VLLM_HEALTH_URL = "http://127.0.0.1:8096/health"
+#: Provenance to print when the derivation itself could not run, so the outage
+#: alert still names where its URL came from (#1684).
+_VLLM_URL_FALLBACK_KEY = ("config unreadable — workers/sources/scheduled_task.py "
+                          "fallback literal")
+
+
+def _primary_health_target() -> tuple[str, str]:
+    """(health URL, config key) for the fleet gate's primary leg.
+
+    Resolved through `app.config.default_model_base_url_source`, which reads the
+    default model's `models.<name>.base_url` (then its `env.ANTHROPIC_BASE_URL`)
+    — the key the engine and the rest of the app treat as the source of truth —
+    and yields the literal above only when config cannot be read at all.
+
+    The key travels with the URL because a surface that stops the fleet on a
+    failed probe has to say which endpoint it probed and where that came from: a
+    port move then diagnoses itself instead of producing an alert about a port
+    nobody moved (#1684).
+    """
+    try:
+        from app.config import default_model_base_url_source
+        base, source_key = default_model_base_url_source()
+    except Exception:
+        return _VLLM_HEALTH_URL, _VLLM_URL_FALLBACK_KEY
+    if not base:
+        return _VLLM_HEALTH_URL, _VLLM_URL_FALLBACK_KEY
+    return base.rstrip("/") + "/health", source_key
+
 
 def _model_health_url(model: str) -> str:
     """Health endpoint for the model a task actually runs on.
@@ -46,6 +81,11 @@ def _model_health_url(model: str) -> str:
     resolves it through config.models.<name>.env.ANTHROPIC_BASE_URL). Probing
     only the primary would let a dead secondary turn every one of its tasks
     into a ConnectError flood — the exact failure the primary gate prevents.
+
+    Every leg is config-derived: an empty/`primary` pin resolves through
+    `_primary_health_target`, a named pin through that model's own env, and the
+    post-`except` leg lands on the primary's config-derived endpoint rather than
+    a literal (#1684).
     """
     model = str(model or "").strip()
     try:
@@ -54,7 +94,7 @@ def _model_health_url(model: str) -> str:
     except Exception:
         pass
     if not model or model in ("primary", "null", "none"):
-        return _VLLM_HEALTH_URL
+        return _primary_health_target()[0]
     try:
         from app import autonomy
         base = autonomy._get_model_env(model).get("ANTHROPIC_BASE_URL")
@@ -62,7 +102,7 @@ def _model_health_url(model: str) -> str:
             return base.rstrip("/") + "/health"
     except Exception:
         pass
-    return _VLLM_HEALTH_URL
+    return _primary_health_target()[0]
 # How long the model server can stay unreachable at /health before the outage
 # itself is an alert (not one `logger.warning` line deduped for the whole
 # outage). The gate in `enqueue_if_due` pauses dispatch, and when this constant
@@ -108,8 +148,12 @@ _state = {"vllm_down_logged": False,
 
 
 def _vllm_healthy(timeout: float = 4.0, url: str | None = None) -> bool:
+    # Even the no-URL call site derives from config: leaving it to fall through to
+    # `_VLLM_HEALTH_URL` would keep a reachable path that probes the literal, which
+    # is the exact divergence #1684 is about.
+    target = url or _primary_health_target()[0]
     try:
-        with urllib.request.urlopen(url or _VLLM_HEALTH_URL, timeout=timeout) as r:
+        with urllib.request.urlopen(target, timeout=timeout) as r:
             return 200 <= r.status < 300
     except Exception:
         return False
@@ -121,7 +165,9 @@ async def _alert(message: str) -> None:
     except Exception as e:
         logger.error("alert dispatch failed: %s", e)
 
-def _vllm_outage_sentence(outage, own_seconds: float, now) -> str:
+def _vllm_outage_sentence(outage, own_seconds: float, now,
+                          url: str | None = None,
+                          url_source: str | None = None) -> str:
     """The one sentence a sustained primary outage produces (#1683).
 
     Which instrument measured it is stated in the sentence, because the two
@@ -131,8 +177,19 @@ def _vllm_outage_sentence(outage, own_seconds: float, now) -> str:
     quotes), and `own_seconds` is how long this scheduler has failed to get a
     200 from /health. The second is only ever used when the first does not
     exist, and saying so is what keeps a reader from adding them.
+
+    `url`/`url_source` are the endpoint the gate actually probed and the config
+    key it came from (#1684). Before that the sentence interpolated the module's
+    own literal, so a port move produced an alert pointing at a port the primary
+    had never served while this same gate held the fleet paused; naming the key
+    is what makes the outage self-diagnosing. Both default to a fresh
+    derivation, so no caller can print an endpoint it did not resolve.
     """
     import datetime as _dt
+
+    if url is None:
+        url, url_source = _primary_health_target()
+    url_source = url_source or _VLLM_URL_FALLBACK_KEY
 
     if outage is None:
         measured = own_seconds
@@ -147,8 +204,9 @@ def _vllm_outage_sentence(outage, own_seconds: float, now) -> str:
         where = (f"measured on the service probe's :{outage.port} closed-port "
                  f"streak (workers/service_probe.py){quoted}")
     started = now - _dt.timedelta(seconds=measured)
-    return (f"primary model server {_VLLM_HEALTH_URL} has been unreachable for "
-            f"{measured / 60:.0f} min (since {started.isoformat()}, {where}): "
+    return (f"primary model server {url} has been unreachable for "
+            f"{measured / 60:.0f} min (since {started.isoformat()}, {where}, "
+            f"that endpoint is config-derived: {url_source}): "
             f"autonomy dispatch is PAUSED until it recovers, so every stall "
             f"alert from here on is describing a paused fleet, not a broken "
             f"one. Neither that line nor this one writes a guardian ledger row "
@@ -204,7 +262,11 @@ async def _note_vllm_outage() -> None:
     measured = own_seconds if outage is None else outage.down_seconds
     if measured >= _VLLM_DOWN_ALERT_SECONDS:
         _state["vllm_down_alerted"] = True
-        msg = _vllm_outage_sentence(outage, own_seconds, now)
+        # Re-derived here rather than carried from the probe: same config, so the
+        # alert names the very endpoint this gate has been failing to reach, and
+        # the key it is configured by (#1684).
+        url, url_source = _primary_health_target()
+        msg = _vllm_outage_sentence(outage, own_seconds, now, url, url_source)
         logger.error("%s", msg)
         await _alert(msg)
 
@@ -231,7 +293,13 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
     # The detectors' own exclusions are untouched, so an outage does not turn
     # every paused or queue-waiting task into noise: only a task that dispatch
     # would have enqueued and did not is flagged.
-    vllm_ok = await loop.run_in_executor(None, _vllm_healthy)
+    # The endpoint is resolved HERE, not left to `_vllm_healthy`'s fallback, so the
+    # probe the whole fleet's verdict rests on is the same config-derived URL the
+    # outage alert will name — `models.<default>.base_url`, not a literal copied
+    # into this module (#1684: a port move under `models:` used to pause every
+    # dispatch on a URL the primary never served).
+    primary_url, _ = _primary_health_target()
+    vllm_ok = await loop.run_in_executor(None, _vllm_healthy, 4.0, primary_url)
 
     # The gate pauses dispatch here. Since #1682 the stall detectors that used
     # to run above this line run on the pool's own seat before this pass even

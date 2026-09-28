@@ -2150,3 +2150,199 @@ def test_the_count_abstains_when_the_store_cannot_be_read(monkeypatch):
     assert SD._facts_without_source(_DISTILL_SESSION) is None
     assert SD._facts_without_source("") is None, (
         "a run with no session id has no write record; that is unknown, not clean")
+
+
+# ---------------------------------------------------------------------------
+# #1684 — the dispatch gate's primary leg is config-derived, not a literal
+#
+# `workers/sources/scheduled_task.py` hardcoded `http://127.0.0.1:8096/health` and
+# returned it for the `primary`/empty pin, for the post-`except` leg and for the
+# no-URL call of `_vllm_healthy` — while every NAMED model's leg had always been
+# read from config. So the one leg that gates the whole fleet was the one leg no
+# config edit could move: point `models.primary.base_url` at another port and
+# `enqueue_if_due` returns on every tick — zero runs enqueued — while the alert
+# that finally arrives names a URL the primary never served. These tests pin the
+# derived leg, the literal's retirement to the config-unreadable fallback, and the
+# alert's provenance.
+# ---------------------------------------------------------------------------
+
+
+def test_the_gates_primary_leg_follows_the_configured_primary_endpoint(monkeypatch):
+    """Clause 1: `models.primary.base_url` moves the fleet gate with it.
+
+    Asserted for all three pins that used to short-circuit to the literal
+    (`"primary"`, `""`, `None`), and against the literal itself: the point of the
+    clause is that the gate no longer answers with its own copy of the port.
+    """
+    from app import config as cfg
+    from workers.sources import scheduled_task as ST
+
+    monkeypatch.setitem(cfg.MODEL_CONFIGS["primary"], "base_url",
+                        "http://127.0.0.1:9999")
+    for pin in ("primary", "", None):
+        assert ST._model_health_url(pin) == "http://127.0.0.1:9999/health", (
+            f"pin {pin!r} did not follow models.primary.base_url")
+    assert ST._model_health_url("primary") != ST._VLLM_HEALTH_URL, (
+        "the gate still answers with the literal it used to hardcode")
+    assert ST._primary_health_target()[1] == "models.primary.base_url", (
+        "the provenance key does not name the config key that answered")
+
+    # The other config key the clause names: with `base_url` blanked the leg must
+    # come from the model's own env, still not from the literal.
+    monkeypatch.setitem(cfg.MODEL_CONFIGS["primary"], "base_url", "")
+    monkeypatch.setitem(cfg.MODEL_CONFIGS["primary"]["env"],
+                        "ANTHROPIC_BASE_URL", "http://127.0.0.1:9999")
+    assert ST._model_health_url("primary") == "http://127.0.0.1:9999/health"
+    assert ST._primary_health_target()[1] == (
+        "models.primary.env.ANTHROPIC_BASE_URL")
+
+
+def test_the_primary_leg_falls_back_to_the_literal_only_when_config_raises(monkeypatch):
+    """Clause 2: the 8096 literal survives ONLY as the config-unreadable answer.
+
+    `RuntimeError` out of the config helper is the unreadable-config case, and an
+    empty answer is its quiet twin — an unknown `model.default` resolves to no
+    endpoint at all. Both have to land on the literal, and say they did.
+    """
+    from app import config as cfg
+    from workers.sources import scheduled_task as ST
+
+    def _unreadable():
+        raise RuntimeError("config.yaml could not be parsed")
+
+    monkeypatch.setattr(cfg, "default_model_base_url_source", _unreadable)
+    assert ST._model_health_url("primary") == "http://127.0.0.1:8096/health"
+    assert ST._model_health_url("primary") == ST._VLLM_HEALTH_URL, (
+        "the last-resort endpoint is no longer the literal the clause keeps")
+    assert ST._primary_health_target()[1] == ST._VLLM_URL_FALLBACK_KEY, (
+        "the fallback must name itself as the fallback, not as a config key")
+
+    monkeypatch.setattr(cfg, "default_model_base_url_source",
+                        lambda: ("", "models.nonexistent.base_url"))
+    assert ST._primary_health_target() == (ST._VLLM_HEALTH_URL,
+                                          ST._VLLM_URL_FALLBACK_KEY), (
+        "an empty derived endpoint must fall back rather than probe ''")
+
+
+def test_the_outage_alert_names_the_endpoint_it_probed_and_its_config_key(monkeypatch):
+    """Clause 4: a port move has to be self-diagnosing in the alert itself.
+
+    The outage is driven through the real `_note_vllm_outage` on an already-running
+    outage (state aged past the threshold) so the sentence is the one discord
+    carries. The service probe holds no streak, so nothing in the message can
+    contribute a port — `:8096` absent is therefore a claim about THIS gate, and
+    pre-fix it is exactly what the message contained.
+    """
+    import datetime as dt
+
+    from app import config as cfg
+    from workers import service_probe as sp
+    from workers.sources import scheduled_task as ST
+
+    monkeypatch.setitem(cfg.MODEL_CONFIGS["primary"], "base_url",
+                        "http://127.0.0.1:9999")
+    monkeypatch.setattr(sp, "_shared", sp.ServiceProbe())
+    monkeypatch.setitem(ST._state, "vllm_down_logged", True)
+    monkeypatch.setitem(ST._state, "vllm_down_alerted", False)
+    monkeypatch.setitem(ST._state, "vllm_down_since",
+                        dt.datetime.now(dt.timezone.utc)
+                        - dt.timedelta(seconds=ST._VLLM_DOWN_ALERT_SECONDS + 60))
+
+    alerts: list[str] = []
+
+    async def _capture(msg):
+        alerts.append(msg)
+
+    monkeypatch.setattr(ST, "_alert", _capture)
+
+    asyncio.run(ST._note_vllm_outage())
+
+    assert len(alerts) == 1, f"the aged outage produced no alert: {alerts}"
+    msg = alerts[0]
+    assert "http://127.0.0.1:9999/health" in msg, (
+        f"the alert does not name the endpoint that was probed: {msg}")
+    assert "models.primary.base_url" in msg, (
+        f"the alert does not name the config key it came from: {msg}")
+    assert ":8096" not in msg, (
+        f"the alert still quotes the retired literal: {msg}")
+
+
+def _secondary_on_its_own_port(monkeypatch, tmp_path) -> str:
+    """Point `app.autonomy.LLOYD_HOME` at a config.yaml whose secondary answers on
+    :9991, and return the health URL that implies.
+
+    `app.autonomy._get_model_env` re-reads `config.yaml` off disk rather than
+    reading the in-memory `app.config.CONFIG`, so redirecting `LLOYD_HOME` is what
+    actually moves a named model's endpoint — patching `MODEL_CONFIGS` is answered
+    by the file and changes nothing (measured: the leg still returned :8091). The
+    port is one no other test here uses, so a leg that collapsed onto the primary's
+    endpoint or onto this module's literal could not satisfy the assertions below.
+    """
+    from app import autonomy, config as cfg
+
+    (tmp_path / "config.yaml").write_text(
+        "model:\n"
+        "  default: primary\n"
+        "models:\n"
+        "  primary:\n"
+        "    alias: primary\n"
+        "    env:\n"
+        "      ANTHROPIC_BASE_URL: http://127.0.0.1:8096\n"
+        "  secondary:\n"
+        "    alias: secondary\n"
+        "    env:\n"
+        "      ANTHROPIC_BASE_URL: http://127.0.0.1:9991\n",
+        encoding="utf-8")
+    monkeypatch.setattr(autonomy, "LLOYD_HOME", tmp_path)
+    # Shipped config says `secondary_enabled: false`, which rewrites the alias to
+    # primary; switch it on so the named leg is exercised at all — the same switch
+    # `test_secondary_routes_to_primary_when_disabled` flips.
+    monkeypatch.setitem(cfg.CONFIG, "secondary_enabled", True)
+    return "http://127.0.0.1:9991/health"
+
+
+def test_a_named_model_leg_still_resolves_to_its_own_configured_endpoint(
+        monkeypatch, tmp_path):
+    """Clause 5, first half: deriving the primary leg changed no named pin."""
+    from workers.sources import scheduled_task as ST
+
+    secondary_url = _secondary_on_its_own_port(monkeypatch, tmp_path)
+
+    assert ST._model_health_url("secondary") == secondary_url
+    assert ST._model_health_url("secondary") != ST._model_health_url("primary"), (
+        "a named pin collapsed onto the primary endpoint")
+
+
+def test_a_task_pinned_to_an_unhealthy_named_model_is_skipped_not_enqueued(
+        monkeypatch, tmp_path, q):
+    """Clause 5, second half: the per-task rule one level below the fleet gate.
+
+    One real `enqueue_if_due` tick over one due task pinned to `secondary`, with
+    the primary answering and the secondary refusing. The task must be skipped —
+    enqueuing it would spend its attempts on a ConnectError retry loop, which is
+    the failure the gate exists to prevent.
+    """
+    from app import autonomy
+    from workers.sources import scheduled_task as ST
+
+    secondary_url = _secondary_on_its_own_port(monkeypatch, tmp_path)
+    monkeypatch.setattr(autonomy, "recover_stuck_tasks", lambda *a, **k: [])
+    monkeypatch.setattr(autonomy, "get_due_tasks",
+                        lambda *a, **k: [{"id": 555, "name": "secondary-pinned",
+                                          "model": "secondary",
+                                          "priority": "low"}])
+
+    probed: list = []
+
+    def _health(timeout: float = 4.0, url: str | None = None):
+        probed.append(url)
+        return url != secondary_url
+
+    monkeypatch.setattr(ST, "_vllm_healthy", _health)
+
+    asyncio.run(ST.enqueue_if_due(q, {"max_duration_seconds": 1800}))
+
+    assert secondary_url in probed, (
+        f"the pinned model's own endpoint was never probed: {probed}")
+    assert q.list_items(source=ST.NAME) == [], (
+        "a task pinned to an unhealthy model server was enqueued anyway")
