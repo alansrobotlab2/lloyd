@@ -646,6 +646,261 @@ def test_an_unresolvable_citation_makes_the_review_unreliable_and_spends_no_atte
     assert "test_facts_surviving_readers" in events[-1]["error"]
 
 
+# The two wordings this rail has, verbatim from review.py. `PAST_EOF` is the
+# `downgraded` reason #1750 clause 5 holds to, and the one that reaches the review event
+# on the re-ask path; `PAST_EOF_UNRESOLVED` is the `citation_unresolved` wording, which
+# is what a broken citation rail carries into `unreliable` (#1442's shape).
+PAST_EOF = "evidence_line {line} past EOF ({eof} lines) of {path}"
+PAST_EOF_UNRESOLVED = "evidence_line {line} is past EOF of {path} ({eof} lines at the graded head)"
+
+
+def _past_eof_entry(clause=1, *, line=500, **kw):
+    """A `met` clause in a `_one_tree` worktree: `app/x.py` is one line there, so 500
+    is past EOF and every other rail holds. Each keyword is a rail #1750 says must
+    hold before a citation defect may be treated as the grader's own problem.
+    """
+    entry = {"clause": clause, "verdict": "met", "evidence_path": "app/x.py",
+             "evidence_line": line, "test_node_id": "tests/test_x.py::test_it",
+             "how_verified": "ran",
+             "note": "capture_round plants each scenario and the scorecard names the dir"}
+    entry.update(kw)
+    return entry
+
+
+def test_a_met_clause_whose_only_defect_is_a_line_past_eof_is_not_a_grade(wt):
+    """Clause 1: the only rail that fails is a line the named file cannot contain, so
+    `parse_review` reports the review unreliable rather than returning an empty list.
+
+    The distinction decides what the attempt is spent on. A wrong line number in a
+    file that resolved is arithmetic the grader did, and the author has nothing to
+    edit — the file, the node and the behaviour all passed. `unreliable` is the list
+    that means "this review did not grade the diff", so adding an entry here IS the
+    fix: the no-attempt path for that list already exists in `rung_review`.
+    """
+    parsed = RV.parse_review(_obj(evidence_line=500), worktree=wt,
+                             changed_tests=["tests/test_x.py"], n_clauses=1)
+    c = parsed["clauses"][0]
+    assert c["verdict"] == "partial" and c.get("citation_only") is True, c
+    assert c["downgraded"] == [PAST_EOF.format(line=500, eof=6, path="app/x.py")], \
+        "the reason stays verbatim in the clause however the review is routed"
+    assert len(parsed["unreliable"]) == 1, parsed["unreliable"]
+    assert "clause 1" in parsed["unreliable"][0]
+    assert PAST_EOF.format(line=500, eof=6, path="app/x.py") in parsed["unreliable"][0]
+
+
+def test_a_line_past_eof_spends_no_attempt_at_the_rung(monkeypatch, tmp_path):
+    """Clause 2: at the rung that same review is an `external_blocker`, not a retry.
+
+    Shaped like `test_an_unresolvable_citation_makes_the_review_unreliable_and_spends_no_attempt`,
+    which pins this accounting for a test file the grader invented. The line-number
+    case reaches the same arm and inherits the same treatment: the rung fails, the item
+    keeps its attempt, and `review_retry` is absent because nothing was graded.
+    """
+    _one_tree(tmp_path)
+    obj = {"premise": "sound", "summary": "graded, but on a number that is not there",
+           "clauses": [_past_eof_entry()], "test_honesty": [], "seams_unverified": []}
+    events = _arm(monkeypatch, tmp_path, grade=_grader(obj), prior=1)
+    ok, detail, data = _Gate(7, ["app/x.py", "tests/test_x.py"], tmp_path).rung_review()
+    assert ok is False and data["external_blocker"] is True, data
+    assert "keeps its attempt" in detail, detail
+    assert "no review attempt is spent" in detail, detail
+    assert "review_retry" not in data, "a grader's arithmetic is not a graded refusal"
+    assert PAST_EOF.format(line=500, eof=1, path="app/x.py") in detail, detail
+    ev = events[-1]
+    assert ev["event"] == "review" and ev["ok"] is False and ev["blocking"] is False
+    assert PAST_EOF.format(line=500, eof=1, path="app/x.py") in ev["error"], ev["error"]
+
+
+@pytest.mark.parametrize("bad_node", [
+    # A real node, in a test file this diff never touched: the clause is demoted, and
+    # the author can fix it by citing a test the diff actually changed.
+    "tests/test_old.py::test_before",
+    # A file the grader invented. This is the rail that already routes to `unreliable`
+    # on its own (#1442), and the case the flag must not swallow: the phantom-file
+    # `broken` marker is the ONLY thing separating this from a re-ask, since `why`
+    # still holds nothing but the past-EOF line.
+    PHANTOM,
+])
+def test_a_line_past_eof_beside_a_failing_node_rail_is_still_a_graded_refusal(wt,
+                                                                             bad_node):
+    """Clause 3: past EOF is the grader's own problem only when it is the ONLY one.
+
+    With the node rail failing as well, the clause has a defect the author can act on
+    (or the review is already unreliable for a reason that has its own test), so the
+    citation gets no special treatment and `unreliable` stays as those tests left it.
+    Widening the routing past this line would hand every bad node citation a free
+    re-gate, and a grader that keeps inventing nodes would never be refused at all.
+    """
+    parsed = RV.parse_review(
+        _obj(evidence_line=500, test_node_id=bad_node),
+        worktree=wt, changed_tests=["tests/test_x.py"], n_clauses=1)
+    c = parsed["clauses"][0]
+    assert c["verdict"] in ("partial", "unmet"), c
+    # The flag is what routes a clause to the re-ask, and it is not set for either
+    # shape: a second rail spoke about the clause, whatever it decided.
+    assert c.get("citation_only") is not True, c
+    if bad_node == "tests/test_old.py::test_before":
+        # A node in a file the diff never touched is a finding about the diff, so the
+        # review stays actionable: `unreliable` empty, no free re-gate, the attempt
+        # charged as before. And the demoted clause still carries the reason verbatim.
+        assert parsed.get("unreliable", []) == [], parsed.get("unreliable")
+        assert PAST_EOF.format(line=500, eof=6, path="app/x.py") in c["downgraded"], c
+    else:
+        # The invented-file shape was ALREADY unreliable before this change (#1442):
+        # the rail could not read its input at all, so `broken` named the clause and the
+        # review spent no attempt. That path is unchanged; the past-EOF line rides along
+        # inside the SAME reason list, because `broken[idx]` holds the very list the line
+        # rail appends to. Both reasons are visible, neither one is a new route.
+        assert c["verdict"] == "partial", c
+        assert PAST_EOF.format(line=500, eof=6, path="app/x.py") in c["downgraded"], c
+        assert any("test_node_id" in w for w in c["downgraded"]), c
+        reasons = " ".join(parsed["unreliable"])
+        assert bad_node.split("::")[0] in reasons, parsed["unreliable"]
+        assert PAST_EOF_UNRESOLVED.format(line=500, eof=6, path="app/x.py") in reasons, \
+            parsed["unreliable"]
+        reasons = parsed["unreliable"]
+        assert any(bad_node.split("::")[0] in r for r in reasons), reasons
+        assert PAST_EOF_UNRESOLVED.format(line=500, eof=6, path="app/x.py") in \
+            " ".join(reasons), reasons
+
+
+def test_a_line_past_eof_beside_an_inferred_verification_is_a_graded_refusal(wt):
+    """Clause 3, other half: `how_verified: inferred` is a claim about the evidence,
+    not about the grader's arithmetic, so the clause stays a `partial` to be fixed.
+    """
+    parsed = RV.parse_review(_obj(evidence_line=500, how_verified="inferred"),
+                             worktree=wt, changed_tests=["tests/test_x.py"], n_clauses=1)
+    c = parsed["clauses"][0]
+    assert c["verdict"] == "partial" and c.get("citation_only") is not True, c
+    assert parsed.get("unreliable", []) == [], parsed.get("unreliable")
+
+
+def test_a_demotion_that_is_not_a_phantom_line_is_still_a_grade(wt):
+    """The guard's other half: `len(why) == 1` alone would be enough to re-ask almost
+    every demotion in the file, so the reason has to BE the impossible line.
+
+    A single `how_verified is not ran|read` demotion is a finding about the clause: the
+    grader looked and could not say it ran anything. Granting that a re-ask would let a
+    round re-gate indefinitely without the author changing a line, and would empty
+    `unreliable` of its meaning — the list says the review could not check the diff, not
+    that the diff was weak.
+    """
+    parsed = RV.parse_review(_obj(how_verified="inferred"), worktree=wt,
+                             changed_tests=["tests/test_x.py"], n_clauses=1)
+    c = parsed["clauses"][0]
+    assert c["verdict"] == "partial" and c["downgraded"] == ["how_verified is not ran|read"], c
+    assert c.get("citation_only") is not True, c
+    assert parsed.get("unreliable", []) == [], parsed.get("unreliable")
+    assert parsed["downgraded"] == [1], "the downgrade is still a graded fact"
+
+
+def test_a_phantom_line_on_a_broken_premise_still_spends_its_attempt(monkeypatch,
+                                                                    tmp_path):
+    """A citation defect must not rescue a review that also says the item is unsound.
+
+    `PREMISES` is exactly `("sound", "unsound")`, and the no-attempt arm returns the text
+    `the item keeps its attempt`; reaching it from an unsound premise would hand a round
+    the grader says should not have been attempted a free re-gate every time the grader
+    also mis-numbers a line. The premise verdict is a finding about the ITEM, so it
+    outranks the citation and the refusal charges its attempt as it did before.
+    """
+    _one_tree(tmp_path)
+    obj = {"premise": "unsound", "premise_problems": ["the item restates a landed fix"],
+           "summary": "", "clauses": [_past_eof_entry()],
+           "test_honesty": [], "seams_unverified": []}
+    events = _arm(monkeypatch, tmp_path, grade=_grader(obj), prior=1)
+    ok, detail, data = _Gate(7, ["app/x.py", "tests/test_x.py"], tmp_path).rung_review()
+    assert ok is False and data.get("external_blocker") is not True, data
+    # `Gate.rung_review`'s unsound-premise branch returns `review_premise_unsound`, not
+    # `review_retry`, and it is a charged refusal — so the key is the branch, named.
+    assert data["review_premise_unsound"] is True, data
+    assert "keeps its attempt" not in detail, detail
+    # Charged, in the rung's own ledger event: `blocking` true and the unsound-premise
+    # `kind`, which is a different decision from the graded `retry` — a finding about the
+    # item, not about the diff.
+    ev = events[-1]
+    assert ev["blocking"] is True and ev["kind"] == "unsound", ev
+    # The item-level keys `review_retry` / `review_premise_unsound` are copied onto the
+    # event by the gate's run loop (`gate.py`'s
+    # `for key in ("review_retry", "review_premise_unsound")`), outside this rung, so
+    # they are asserted in `data`, which is what that loop reads.
+    assert data["review_summary"], data
+
+
+def test_a_line_past_eof_never_masks_an_unmet_clause(monkeypatch, tmp_path):
+    """Clause 4: one phantom line number must not hide a genuine finding on another
+    clause, because the `unreliable` arm returns before findings are ever delivered.
+
+    This is the common shape, not the corner: the docstring above `parse_review`
+    counts 23 `met` clauses across 15 rounds citing a line past EOF. A round that
+    pairs a phantom number with a real failure still has to come back with that
+    failure named, and still pays for it.
+    """
+    _one_tree(tmp_path)
+    contract = {"id": 7, "title": "t", "body": "b", "path": "",
+                "clauses": ["clause one holds", "clause two holds"]}
+    obj = {"premise": "sound", "summary": "one phantom, one real", "clauses": [
+        _past_eof_entry(1),
+        {"clause": 2, "verdict": "unmet", "evidence_path": "app/x.py", "evidence_line": 1,
+         "test_node_id": "tests/test_x.py::test_it", "how_verified": "ran",
+         "note": "the second path is not covered at all"}],
+        "test_honesty": [], "seams_unverified": []}
+    events = _arm(monkeypatch, tmp_path, grade=_grader(obj), contract=contract)
+    ok, detail, data = _Gate(7, ["app/x.py", "tests/test_x.py"], tmp_path).rung_review()
+    assert ok is False, "a real unmet clause must still refuse the round"
+    assert data.get("external_blocker") is not True, (
+        "the phantom citation swallowed the finding: the author would be told to "
+        "re-gate and never shown what is wrong")
+    assert data["review_retry"] is True and data["review_attempt"] == 1, data
+    assert "the second path is not covered at all" in data["review_findings"], data
+    assert PAST_EOF.format(line=500, eof=1, path="app/x.py") in data["review_findings"], \
+        "the phantom line is still reported, as a downgrade rather than a re-ask"
+    # Charged, and both clause texts reach the ledger: `blocking` + the graded `retry`
+    # kind, `findings` naming the real failure, and the phantom clause still carrying its
+    # verbatim `downgraded` reason and its `citation_only` mark.
+    ev = events[-1]
+    assert ev["blocking"] is True and ev["kind"] == "retry", ev
+    assert "the second path is not covered at all" in ev["findings"], ev
+    phantom = next(c for c in ev["clauses"] if c["clause"] == 1)
+    assert phantom["citation_only"] is True and phantom["downgraded"] == [
+        PAST_EOF.format(line=500, eof=1, path="app/x.py")], phantom
+    assert ev["downgraded"] == [1], ev
+
+
+def test_the_reread_still_loses_nothing_in_the_ledger(monkeypatch, tmp_path):
+    """Clause 5, the half that is not about the verdict: the re-read leaves the reason
+    in the ledger word for word, in BOTH places the review event carries it.
+
+    Three rounds on 2026-09-11 were downgraded here and nothing recorded which path
+    failed. Converting the case into a re-ask must not lose the reason along with the
+    refusal. The one `review` event holds the string twice over: in `error`, the
+    human-readable reason the arm returns, and in `clauses[0]["downgraded"]`, the
+    machine-readable list the finalizer reads. A reader searching `promotions.jsonl`
+    for `evidence_line` finds it either way.
+
+    The refusal path is covered by the parametrised
+    `test_a_line_past_eof_beside_a_failing_node_rail_is_still_a_graded_refusal`, which
+    asserts the same string in that clause's `downgraded`, and by
+    `test_a_line_past_eof_never_masks_an_unmet_clause`, which asserts it inside the
+    event's `findings`.
+    """
+    _one_tree(tmp_path)
+    reason = PAST_EOF.format(line=500, eof=1, path="app/x.py")
+    obj = {"premise": "sound", "summary": "", "clauses": [_past_eof_entry()],
+           "test_honesty": [], "seams_unverified": []}
+    events = _arm(monkeypatch, tmp_path, grade=_grader(obj))
+    _Gate(7, ["app/x.py", "tests/test_x.py"], tmp_path).rung_review()
+    review_events = [e for e in events if e["event"] == "review"]
+    assert len(review_events) == 1, events
+    ev = review_events[0]
+    assert reason in ev["error"], ev
+    assert ev["clauses"][0]["downgraded"] == [reason], ev["clauses"][0]
+    assert ev["clauses"][0]["citation_only"] is True, ev["clauses"][0]
+    # The list the no-attempt arm is built on, on the event too: this is what
+    # `rung_review`'s detail and the item's attempt accounting both read.
+    assert any(reason in u for u in ev["unreliable"]), ev.get("unreliable")
+
+
 def test_a_note_denying_added_tests_against_a_positive_delta_spends_no_attempt(
         monkeypatch, tmp_path):
     """#1442 clause 4: "This round's diff adds no such test", said of a diff
@@ -1366,9 +1621,17 @@ def test_a_met_citing_a_line_past_eof_is_downgraded(wt):
     assert any("past EOF" in w and "(6 lines)" in w for w in c["downgraded"]), c
     assert any("evidence_line 500 is past EOF of app/x.py" in u for u in c["citation_unresolved"])
     assert "accepted" not in c
-    # Not a rail failure: the file is real, the number is wrong — the review
-    # stays actionable and the clause is simply unmet.
-    assert parsed.get("unreliable", []) == []
+    # #1750 overturns the ruling this file recorded here for a year ("the file is
+    # real, the number is wrong — the review stays actionable and the clause is
+    # simply unmet"). Round SM_20260928_164226 is the counter-evidence: the grader
+    # cited line 769 of a 366-line file, its own finding text affirmed the clause, and
+    # the round spent one of its two review attempts on a number only the grader could
+    # have written. An impossible line in a file that DID resolve is the grader's
+    # arithmetic. Where the clause has a defect besides that number it stays a graded
+    # refusal — see
+    # `test_a_line_past_eof_beside_a_failing_node_rail_is_still_a_graded_refusal`.
+    assert c["downgraded"] == ["evidence_line 500 past EOF (6 lines) of app/x.py"]
+    assert any("past EOF" in u for u in parsed["unreliable"]), parsed["unreliable"]
 
 
 def test_a_line_inside_the_file_and_the_last_line_stand(wt):

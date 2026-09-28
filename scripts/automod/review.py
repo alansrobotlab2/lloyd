@@ -1596,6 +1596,21 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
                         **({"citation_unresolved": unresolved} if unresolved else {}),
                         **({"downgraded": why} if why else {}),
                         **({"accepted": accepted} if accepted else {})})
+        # #1750 — `citation_only`: demoted from the grader's `met` to `partial` by
+        # exactly ONE reason, and that reason is a line the cited file cannot contain.
+        # `len(why) == 1` is the whole guard, and it is load-bearing on its own because
+        # of where it sits: `why` is filled only inside `if verdict == "met"`, and each
+        # rail appends its own sentence there — a missing path, a node outside the diff,
+        # an `inferred` verification, a demoted evidence path. So one reason means the
+        # grader said `met` AND no other rail spoke about this clause, without my
+        # re-testing either. A number the named file cannot contain is arithmetic the
+        # grader did on a file it did read at the head it did check out, and the author
+        # has nothing to edit. `gate.rung_review` re-asks it once instead of charging it.
+        # No `idx not in broken` or grader-verdict check is added here: no input reaches
+        # this line with a broken rail or a soft grader verdict and only this one reason,
+        # so a guard for it would be a branch no test can reach.
+        if len(why) == 1 and "past EOF (" in why[0]:
+            clauses[-1]["citation_only"] = True
     # A clause the grader did not mention is not met — it was not graded.
     for idx in range(1, n_clauses + 1):
         if idx not in seen:
@@ -1665,6 +1680,54 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
             judged = _judgments({})
         if text:
             seams.append({"seam": text, "testable_before_landing": testable, **judged})
+    # #1750 — the grader's own arithmetic goes down the no-attempt path.
+    #
+    # `rung_review` already knows how to say "this review did not grade the diff":
+    # `unreliable` becomes `external_blocker`, the rung fails, the item keeps its
+    # attempt, and the note says gate again. A phantom test file and an unresolvable
+    # commit sha take it. A line number the cited file cannot contain is the same kind
+    # of defect — the path resolved, so the grader did read that file; the line it names
+    # is past that file's end at the graded head, so no author edit can produce it — but
+    # it took the graded-refusal path instead, and round SM_20260928_164226 spent one of
+    # its two review attempts on `evidence_line 769` in a 366-line file whose finding
+    # text went on to affirm the clause.
+    #
+    # Only when it is the review's ONLY defect. `rung_review` short-circuits on any
+    # non-empty `unreliable` and returns before findings are delivered, so a round with
+    # one phantom number and one genuinely `unmet` clause must not be told merely to
+    # re-gate — it has to be shown the failure and pay for it. That pairing is the
+    # common case, not the corner: the rail's own docstring counts 23 `met` clauses
+    # across 15 rounds citing a line past EOF. Hence the block-list below rather than a
+    # check of the citation alone.
+    #
+    # No new bound is needed. `rung_review` counts every grading turn against
+    # REVIEW_HARD_CAP, so a grader that repeats its own phantom number ends there, and
+    # `premise_problems` keeps a broken-premise refusal charging its attempt.
+    reasked = [c for c in clauses if c.get("citation_only")]
+    # `PREMISES` is ("sound", "unsound"); an unsound premise is a finding about the ITEM
+    # rather than about this review's arithmetic, so it keeps its charged refusal.
+    if reasked and premise == "sound":
+        # Anything else the author could act on: a clause the grader did not mark `met`,
+        # or a test-honesty finding. An unverified seam is deliberately NOT in here: the
+        # re-ask re-grades the round, so a seam advisory arrives on the next turn instead
+        # of being lost, and it is a note about the change's shape rather than a finding
+        # the phantom number displaced.
+        blocking = ([c["clause"] for c in clauses
+                     if not c.get("citation_only") and c["verdict"] != "met"]
+                    + [h.get("clause") for h in honesty])
+        if not blocking:
+            for c in reasked:
+                # The verbatim rail reason rides inside the entry, so the single `review`
+                # event this path writes carries it twice: in `error` (the rung's detail)
+                # and in that event's `clauses`, which is copied from the parsed verdict
+                # and holds the clause's own `downgraded` list. Pinned by
+                # `tests/test_automod_review.py::test_the_reread_still_loses_nothing_in_the_ledger`.
+                unreliable.append(
+                    f"clause {c['clause']}: "
+                    + "; ".join(c.get("downgraded") or [])
+                    + " — a line past EOF of a file whose path resolved is the grader's"
+                      " own citation, not a finding about the diff, so the clause is"
+                      " re-asked and nothing on this diff was graded from it")
     amend_ok = obj.get("amendments_ok")
     return {"premise": premise, "clauses": clauses, "test_honesty": honesty,
             "seams_unverified": seams[:10],
