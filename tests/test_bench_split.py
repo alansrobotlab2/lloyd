@@ -307,8 +307,8 @@ MIN_LIVE_BENCH_TASKS = 11
 
 #: Every file in `~/obsidian/lloyd/bench/`, keyed by task id (the file stem, which
 #: each file also declares as `id:`), with the `category:` its own front matter
-#: carries. Measured against the files on disk on 2026-09-28: 20 entries — 6 replay,
-#: 11 synthetic, 2 adversarial, 1 safety. That count is a snapshot of a hand-kept
+#: carries. Measured against the files on disk on 2026-09-28: 21 entries — 6 replay,
+#: 12 synthetic, 2 adversarial, 1 safety. That count is a snapshot of a hand-kept
 #: table and no assertion here reads it; the count that IS asserted is the corpus
 #: floor in `MIN_LIVE_BENCH_TASKS` above, and every entry below is re-checked
 #: against disk by the node named next, so a stale number in this comment is
@@ -343,15 +343,25 @@ LIVE_BENCH_CATEGORIES = {
     # Keyed by stem with the `category:` its own front matter declares — the only
     # authority this table may copy. bench_018 landed in the corpus on 2026-09-26
     # (vault `0e33bdd9`), bench_019 on 2026-09-27 (`15c3daae`) and bench_020 on
-    # 2026-09-27 (#1697, `b6df5fca`), so all twenty `.md` files in that directory are
-    # tracked as of this writing (`git -C ~/obsidian ls-files lloyd/bench | wc -l` =
-    # 20, `status --porcelain -- lloyd/bench` empty). The node below globs the
-    # directory, so an uncommitted task counts the moment it is on disk — and is also
-    # the task a `git clean -fd` in the vault would take back out, which fails this
-    # node in the other direction, by name.
+    # 2026-09-27 (#1697, `b6df5fca`). The node below globs the directory, so an
+    # uncommitted task counts the moment it is on disk — and is also the task a
+    # `git clean -fd` in the vault would take back out, which fails this node in the
+    # other direction, by name. That is not hypothetical for the newest entry: as of
+    # this writing 21 `.md` files sit in that directory while `git -C ~/obsidian
+    # ls-files lloyd/bench | wc -l` = 20 and `status --porcelain -- lloyd/bench` names
+    # `bench_021` untracked (`??`), written 2026-09-27T23:32 local. It is keyed here
+    # because the node reads the disk, so that is the state main has to be green
+    # against; the vault's own commit of it is the bench author's step, not this
+    # table's, and until it lands the `git clean` flip above is live for this one id.
     "bench_018_skill_invocation_rare_interp": "synthetic",
     "bench_019_skill_invocation_retired_schedule": "synthetic",
     "bench_020_skill_inventory_coverage_gap": "synthetic",
+    # Keyed by stem with the `category:` its own front matter declares
+    # (`lloyd/bench/bench_021_skill_invocation_self_kill.md:4` = `synthetic`), which is
+    # the only authority this table may copy. The node that reds on its absence is
+    # `test_every_live_bench_file_is_named_in_the_census`; its assertion names the id
+    # and this line is the whole fix it asks for.
+    "bench_021_skill_invocation_self_kill": "synthetic",
 }
 
 
