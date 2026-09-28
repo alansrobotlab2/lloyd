@@ -4338,6 +4338,258 @@ async def test_the_unparseable_alert_follows_transitions_not_scans(
     assert path.name in alerts[2] and "unparseable" in alerts[2], alerts[2]
 
 
+# ── #1669: this branch's delivery is followed to the surface a person reads ──────
+#
+# The two branches above — `_scan_unparseable_task_files`'s fault message and its
+# recovery — had never printed on this box. Measured 2026-09-27: "unparseable and
+# INVISIBLE" and "parseable again and back" appear 0 times in
+# `~/lloyd-data/logs/server.err*` (positive control "more than one period past their own
+# next_run", the alarm beside it that posts through the same `_alert`: 166 hits in the
+# same file set) and 0 times in `~/obsidian/memory/*.md` (control "Scheduler alert not
+# delivered": 7 lines, all in `memory/2026-09-27.md`). Each test of those branches
+# captured the alert through `_watch_alerts`, which stubs `_alert`, so coverage stopped
+# one call short of the observable and the branch's own delivery had never run anywhere.
+#
+# The observable is the daily note, not Discord: `discord.home_channel` is null with an
+# empty token on this box, which is Alan's standing decision (app/discord_notify.py:84-
+# 95), so `_survive_the_dropped_alert`'s fallback is the transport's only branch here.
+# The check that closes the residual is therefore a real scheduler tick whose alert is
+# followed all the way into `memory/<today>.md`, with only the two things that leave the
+# process stubbed — the model-server health probe and Discord's HTTP transport.
+#
+# `tests/test_autonomy_failure_alert.py` proves that drop branch starting from a direct
+# `discord_alert` call. What the walk below adds, and what all three nodes pin, is the
+# from-the-scheduler half: an alarm that never reached `discord_alert` because the
+# `_alert` above it was stubbed is exactly the gap #1669 is about.
+#
+# The clause each node pins, so a reader grading the item need not search for it:
+#   1  test_a_corrupted_task_file_is_reported_on_the_daily_note
+#   2  test_a_healed_task_file_is_reported_on_the_daily_note_too
+#   3  test_both_parse_alert_lines_carry_the_undelivered_prose
+
+#: `_survive_the_dropped_alert`'s own opening words (app/discord_notify.py:113), quoted
+#: rather than paraphrased: the delivery-failure prose every scheduler alarm shares,
+#: which is what tells a note line that travelled the transport from one some code path
+#: wrote straight to the file.
+_UNDELIVERED_PROSE = "Scheduler alert not delivered"
+
+#: `append_daily_alert_line`'s entry format (app/autonomy.py:3081): `- HH:MM %Z — <body>`
+#: in America/Los_Angeles. Asserted as a shape, never as a timestamp.
+_NOTE_BULLET = re.compile(r"^- \d{2}:\d{2} \S+ — ")
+
+
+def _note_alert_lines() -> list[str]:
+    """Today's daily-note bullets, front matter stripped.
+
+    The front matter comes off first because a fresh note's `tags:` block is itself a
+    set of `- ` lines, and counting those would make an untouched note look like it had
+    already reported an alarm. Read through `LLOYD_DAILY_NOTE_DIR` — the variable
+    `autonomy._daily_note_dir()` consults at call time — and the filename globbed rather
+    than computed, so a run crossing midnight in the writer's timezone cannot read as a
+    missing alert.
+    """
+    note_dir = Path(os.environ["LLOYD_DAILY_NOTE_DIR"])
+    lines: list[str] = []
+    for path in sorted(note_dir.glob("*.md")):
+        text = path.read_text()
+        if text.startswith("---\n"):
+            _, _, text = text.partition("\n---\n")
+        lines.extend(ln for ln in text.splitlines() if ln.startswith("- "))
+    return lines
+
+
+async def _walk_a_task_file_through_unparseable(aut, monkeypatch, tmp_path):
+    """Break one task file and heal it, ticking the real scheduler across each step.
+
+    Nothing about the alert is stubbed. The route a line takes is the production one:
+    `fleet_watchdog.tick` takes the scan slot → `_scan_unparseable_task_files` parses the
+    real fixture directory on a real executor thread → `fleet_watchdog._alert` →
+    `app.discord_notify.discord_alert` → `_survive_the_dropped_alert` →
+    `autonomy.append_daily_alert_line` → a file under `LLOYD_DAILY_NOTE_DIR`, which is
+    this test's `tmp_path`. The stubs are the two the section above already names as
+    what leaves the process: the source's `_vllm_healthy` probe, and `httpx.AsyncClient`,
+    Discord's transport — that last one recording rather than vanishing, so an alarm that
+    reached the socket instead of the note shows up as a post and cannot pass green.
+
+    `discord.home_channel` is pinned null rather than inherited from the live config, so
+    the fallback branch is the thing under test on any machine that runs the suite, and
+    not an accident of this box.
+
+    Two ticks in the walk must produce nothing, each for its own reason: the first scans
+    a healthy board, which is what makes the fault line below attributable to the
+    corruption rather than to boot, and the tick after the heal at the SAME instant stays
+    silent because the scan is a cadence — which is what turns "one further interval
+    passes" in clause 2 into a step this test takes instead of a phrase.
+
+    Returns the task file, the lines added at each of the four steps, and the posts that
+    reached the transport.
+    """
+    import httpx
+
+    from workers.queue import WorkQueue
+    import workers.sources.scheduled_task as st
+
+    notes = tmp_path / "notes"
+    monkeypatch.setenv("LLOYD_DAILY_NOTE_DIR", str(notes))
+    monkeypatch.setattr("app.discord_notify.CONFIG",
+                        {"discord": {"home_channel": None, "token": ""}},
+                        raising=False)
+
+    posted: list[str] = []
+
+    class _RefusedSend:
+        """`httpx.AsyncClient` with the socket taken out."""
+
+        def __init__(self, *_a, **_k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def post(self, _url, **kwargs):
+            posted.append(str(kwargs.get("json")))
+            return None
+
+    monkeypatch.setattr(httpx, "AsyncClient", _RefusedSend)
+    monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: True)
+
+    path = _unparseable_fleet(aut)
+    intact = path.read_text()
+    step = _unparseable_clock(aut, monkeypatch, st)
+    _clean_unparseable_state(monkeypatch)
+    cfg = {"max_duration_seconds": 1800}
+    q = WorkQueue(tmp_path / "delivery.db")
+
+    await scheduler_tick(q, cfg)
+    healthy = _note_alert_lines()
+
+    _corrupt(path)
+    step()
+    await scheduler_tick(q, cfg)
+    after_fault = _note_alert_lines()
+
+    path.write_text(intact)
+    await scheduler_tick(q, cfg)          # healed, but the scan is not due yet
+    after_heal = _note_alert_lines()
+
+    step()
+    await scheduler_tick(q, cfg)          # one further interval: the recovery is due
+    after_recovery = _note_alert_lines()
+
+    return {
+        "path": path,
+        "healthy": healthy,
+        "fault": after_fault[len(healthy):],
+        "heal_without_a_slot": after_heal[len(after_fault):],
+        "recovery": after_recovery[len(after_heal):],
+        "all": after_recovery,
+        "posted": posted,
+    }
+
+
+async def test_a_corrupted_task_file_is_reported_on_the_daily_note(
+        aut, monkeypatch, tmp_path):
+    """Clause 1: the fault branch's line reaches the note, and names the file.
+
+    A tick taken after the file on disk stops parsing appends exactly one bullet, and
+    that bullet names the file and says "unparseable" — the two things a reader needs to
+    act on it. Nothing else in the fixture fleet is late, and the tick over the healthy
+    board appended nothing, so the line is this corruption's and not the sum of whatever
+    else the tick had to say.
+
+    This is the alarm that has never fired on this box in either direction, so the
+    positive half matters as much as the absence above it: if the branch had no route to
+    a person, the walk below stops at an empty note rather than passing.
+    """
+    walk = await _walk_a_task_file_through_unparseable(aut, monkeypatch, tmp_path)
+
+    assert walk["healthy"] == [], (
+        "a healthy fixture board already reached the note, so a line appearing later "
+        f"proves nothing about the corruption: {walk['healthy']}")
+    assert len(walk["fault"]) == 1, (
+        f"corrupting one task file appended {len(walk['fault'])} note lines, not one: "
+        f"{walk['fault']}")
+    line = walk["fault"][0]
+    assert walk["path"].name in line, (
+        "the line has to name the file a person can go and look at: "
+        f"expected {walk['path'].name!r} in {line!r}")
+    assert "unparseable" in line, (
+        f"the line must use the word the alarm was written for: {line!r}")
+    assert _NOTE_BULLET.match(line), (
+        "the line is not in `append_daily_alert_line`'s own entry format, so it did not "
+        f"come from the writer every scheduler alarm shares: {line!r}")
+
+
+async def test_a_healed_task_file_is_reported_on_the_daily_note_too(
+        aut, monkeypatch, tmp_path):
+    """Clause 2: the recovery branch reaches the same surface, one interval later.
+
+    The same walk, one step further: once the file parses again and the scan's cadence
+    slot comes round, a second bullet appears naming the file and saying "parseable
+    again". Without it the note records the injury and never the repair, which is the
+    asymmetry that leaves a resolved incident surviving as an instruction to act.
+
+    The intervening tick is part of the clause, not stage dressing: the file was already
+    healed before that tick ran and still produced no line, because the scan had not
+    taken a slot. So "one further interval passes" is a step the walk takes and the test
+    measures, not a word in a docstring.
+    """
+    walk = await _walk_a_task_file_through_unparseable(aut, monkeypatch, tmp_path)
+
+    assert len(walk["fault"]) == 1, (
+        "the fault line is missing, so there is no recovery to compare against: "
+        f"{walk['fault']}")
+    assert walk["heal_without_a_slot"] == [], (
+        "a healed file was reported the instant it parsed, before the scan's interval "
+        f"came round — the cadence is gone: {walk['heal_without_a_slot']}")
+    assert len(walk["recovery"]) == 1, (
+        f"one further interval after the file parsed again, {len(walk['recovery'])} "
+        f"note lines appeared, not one: {walk['recovery']}")
+    line = walk["recovery"][0]
+    assert walk["path"].name in line, (
+        f"the recovery names no file, so nobody knows which alarm it retracts: {line!r}")
+    assert "parseable again" in line, (
+        f"the recovery branch's own words are how a reader tells it from a new fault: "
+        f"{line!r}")
+    assert _NOTE_BULLET.match(line), (
+        f"the recovery line did not come from the shared writer: {line!r}")
+
+
+async def test_both_parse_alert_lines_carry_the_undelivered_prose(
+        aut, monkeypatch, tmp_path):
+    """Clause 3: both lines say the transport refused them, and the socket stayed shut.
+
+    Two claims, one per direction of the walk. Each line carries "Scheduler alert not
+    delivered" and the reason `_missing_transport_halves` builds for a null
+    `home_channel` — the prose the other scheduler alarms carry — and zero posts reached
+    `httpx.AsyncClient`. Together those are what prove the route rather than the
+    destination: a branch that wrote to the note directly, or posted to Discord and
+    skipped the note, fails here while the wording tests above could still pass.
+    """
+    walk = await _walk_a_task_file_through_unparseable(aut, monkeypatch, tmp_path)
+
+    lines = walk["fault"] + walk["recovery"]
+    assert len(lines) == 2, (
+        "both directions of the walk are needed to check both lines: "
+        f"fault={walk['fault']} recovery={walk['recovery']}")
+    for line in lines:
+        assert _UNDELIVERED_PROSE in line, (
+            f"a note line that does not say it was undelivered is indistinguishable "
+            f"from one someone chose to write here: {line!r}")
+        assert "discord.home_channel is unset" in line, (
+            "the reason must name the missing half of the transport, as every other "
+            f"scheduler alarm's line does: {line!r}")
+        assert "⚠️ Autonomy health alert" in line, (
+            "the title is how a reader sorts which alarm this was: "
+            f"{line!r}")
+    assert walk["posted"] == [], (
+        "an alert reached Discord's transport, so the note lines above are not "
+        f"evidence of the fallback route: {walk['posted']}")
+
+
 # ---------------------------------------------------------------------------
 # #815: the frequency domain is one constant, and a task outside it says so
 # ---------------------------------------------------------------------------
