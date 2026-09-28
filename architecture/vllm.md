@@ -733,12 +733,17 @@ has still not been run as of 2026-09-11.
 
 - **The acceptance bar, for the fleet as it runs today** — `workers.slots` 6
   and `workers.sources.autocode.max_inflight` 2 (4 until the evening of
-  2026-09-24), so two long-lived rounds resident beside triage, the scheduled tasks and a chat. One normal day at
-  that shape with Alan chatting passes when (a) no chat turn carries a prefix
+  2026-09-24), so two long-lived rounds resident beside triage, the scheduled tasks and a chat. The bar is met
+  by **one named full UTC day** — the day an extract on disk covers, which is a checkable
+  thing, where the phrase this bullet used to carry was not — when that day's window
+  carries **chat turns** and all four of its conditions hold: (a) no chat turn carries a prefix
   miss, (b) the fleet's misses and re-prefilled tokens per day are at or under
   §6.1's per-day baseline, (c) KV p50 is under the gate
   (`workers.kv_gate.max_kv_usage`, 0.60), and (d) no two-request window runs
-  under 15 tok/s that is not a cold admission. (d) is counted per engine status
+  under 15 tok/s that is not a cold admission. Chat turns present in the window is a
+  population requirement, not a fifth measurement: (a) is equally true of a day with no chat
+  in it at all — zero of zero — so a window carrying no chat turn does not test (a) and
+  cannot clear the bar. (d) is counted per engine status
   line over what the engine computed in its 10 s — prompt *and* generation —
   which is a stricter population than the decode speed a person feels: a pass
   there is a claim about the engine, not about chat. The bar written for
@@ -755,17 +760,40 @@ has still not been run as of 2026-09-11.
   `scripts/vllm_prefix_miss_window.py` over the extract committed as
   `tests/fixtures/vllm_prefix_miss_2026-09-25.json`: **443 turns, 443
   measured, 16 turns carrying 46 misses and 5,664,101 re-prefilled tokens**,
-  worst turn 929,365. It is no working day's shape either — the retrieval-eval
-  bench and the MCP eval runs are most of its turns — so what this day adds
-  over 09-23 is the chat in it. By session kind (misses / re-prefilled):
+  worst turn 929,365. The day need not be free of bench and worker turns for any of this to
+  be about chat: `session_kind` separates the two before (a) counts anything, so a window of
+  443 turns can carry 23 that a person typed. What this day adds over 09-23 is the chat in
+  it. By session kind (misses / re-prefilled):
   archreview 18 / 2.4M, autonomy 16 / 1.9M, deepresearch 4 / 0.5M, autocode
-  4 / 0.4M, youtubediges 3 / 0.3M, autotriage 1 / 0.1M. 46 miss iterations
+  4 / 0.4M, youtubediges 3 / 0.3M, autotriage 1 / 0.1M. **That list is a miss breakdown, not
+  the day's turn mix** — it is derived over the 16 turns that missed, grouped by kind
+  (`scripts/vllm_prefix_miss_window.py:225-229`), so every turn that missed at least once is
+  in it and the turns that never missed are not. So this page states no turn-mix figure and
+  no chat-session count, because the extract
+  cannot produce either: its turn rows are `[iso_ts, kind, misses, tokens]` with no session id
+  in them, and the kind is already resolved at extract time. Whether carrying raw ids would
+  make a turn mix derivable is a scope decision (#1719's owed entry 2), not a figure to write
+  in from elsewhere. 46 miss iterations
   logged, 42 of them fully cold (nothing cached) and 4 partial.
-- **(a) passes.** 0 of the day's 23 chat turns carries a prefix miss — the
-  criterion the 09-23 reading could not test at all, since its chat count was
-  a handful and its rounds were four. Whether 23 turns of chat make this the
-  *normal* day the bar asks for is not a call this page can make; it is the
-  owed-check's, not a round's.
+- **(a) passes**, and now over a population one can point at. 0 of the day's 23 chat turns
+  carries a prefix miss — the criterion the 09-23 reading could not test at all, since its
+  chat count was a handful and its rounds were four. A **chat turn** is a turn row whose
+  session id `session_kind` (`scripts/vllm_prefix_miss_window.py:61-66`) classifies as
+  `chat`, and that classifier counts `chat` by exclusion: an id is chat unless it starts
+  `task:` or splits on `_` into four or more parts, whose third part is then the producer
+  slug (`20260925_041134_autocode_bd3f` → `autocode`). The two mints whose ids land in the
+  23 cover the conversations this engine serves: an Inner-Voice-on chat takes the
+  three-part `<ts>_iv<hex>` shape from `app/routers/sessions.py:724` (`suffix =
+  "iv" + secrets.token_hex(2)`), and a plain one `<ts>_<6 hex>` from
+  `app/routers/messages.py:2113` — three parts each, so neither is mistaken for a
+  producer's. 23 is therefore every turn that came from a chat-shaped id, and a turn whose
+  id parses to another kind is invisible to (a) rather than counted in it. The mint that is
+  *not* in the 23, though its shape looks like a chat id's, is `new_background_session_id`
+  (`app/sessions_io.py:279`): its four-part ids carry a producer slug as that third part, so
+  they are counted as whichever slug they name. #1719 was filed asking this bullet to cite
+  that mint as the chat id's, which is how a chat population would end up naming background
+  turns. Whether 23 chat turns is enough of a day to satisfy (a) in practice is not a call
+  this page can make; it is the owed-check's, not a round's.
 - **Against §6.1, per day: (b) passes.** §6.1's baseline is 194 misses and
   20.6M tokens over *two* days (09-08/09) — 97 misses and 10.3M tokens a day.
   This window is 46 and 5.7M in *one* day, about 0.5x the misses and 0.5x the

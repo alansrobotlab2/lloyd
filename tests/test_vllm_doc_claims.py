@@ -172,6 +172,162 @@ def _per_day_budget(s6: str) -> tuple[int, float]:
     return round(int(m.group(3)) / days), round(float(m.group(4)) / days, 1)
 
 
+# ── #1719: (a)'s population is named by its rule, and the bar has measured ──
+# content. Before this, "(a) passes: 0 of the day's 23 chat turns" said nothing
+# about what a chat turn is, and the bar was cleared by "one normal day at that
+# shape with Alan chatting" — a phrase the owed-check had to re-litigate because
+# nothing in the doc could be checked against it.
+
+def _criterion_bullet(reading: str, letter: str) -> str:
+    """The bullet that marks one criterion, whole.
+
+    `s10` arrives whitespace-FLATTENED by `_section`, so bullets are delimited by
+    the ` - **` that opens the next one, not by newlines. Scoped to the bullet
+    rather than to §10 because the point of these nodes is WHERE the doc says it:
+    a mint citation parked anywhere else on the page would still leave a reader of
+    (a) unable to tell which 23 turns were counted.
+    """
+    start = reading.find(f"- **({letter})")
+    assert start >= 0, f"no '({letter})' bullet in the counted reading — it was retitled"
+    nxt = reading.find(" - **", start + 1)
+    return reading[start:nxt if nxt > start else len(reading)]
+
+
+def test_criterion_a_names_the_population_it_counted(reading):
+    """Clause 1: the reader can see that a turn whose id parses to another kind
+    is not in the 23.
+
+    `chat` is what `session_kind` falls through to, not a positive test, so the
+    doc has to say the rule — an id that splits on `_` into fewer than four parts
+    — or the count is a claim about a set nobody can re-form from the extract.
+    """
+    b = _criterion_bullet(reading, "a")
+    assert "session_kind" in b, "(a) names no classifier, so 'chat turn' is undefined"
+    assert "scripts/vllm_prefix_miss_window.py" in b and re.search(
+        r"scripts/vllm_prefix_miss_window\.py:\d+", b), \
+        "(a) must cite the classifier where it lives, by line"
+    for phrase in ("four", "chat"):
+        assert phrase in b.lower(), f"(a) does not state the rule (missing {phrase!r})"
+    assert re.search(r"fewer than four|four or more", b), \
+        "(a) must give the part-count rule that decides chat vs a producer slug"
+    assert re.search(r"invisible to \(a\)|not counted by \(a\)|rather than counted in", b), \
+        "(a) must say explicitly that a turn parsing to another kind is outside the 23"
+
+
+def test_criterion_a_cites_both_chat_mints_and_no_four_part_one(reading):
+    """Clause 2: both chat-id mints, path and line, and the four-part background
+    mint named as the one that is NOT in the count.
+
+    The line numbers are checked against the code they cite, not just grepped: a
+    citation that only has to appear in the doc is a citation that silently rots
+    the first time `sessions.py` grows a function above it. And #1719 was filed
+    asking for `app/sessions_io.py:279` — `new_background_session_id`, which mints
+    exactly the four-part ids `session_kind` parses OUT of chat — so that path may
+    appear in this bullet only as the exclusion, never as the chat id's origin.
+    """
+    b = _criterion_bullet(reading, "a")
+    cited = dict(re.findall(r"`(app/[\w/]+\.py):(\d+)`", b))
+    assert set(cited) == {"app/routers/sessions.py", "app/routers/messages.py",
+                          "app/sessions_io.py"}, \
+        f"(a) cites {sorted(cited)}; it must name both chat mints and the background one"
+
+    def _line(path: str, n: int) -> str:
+        return (ROOT / path).read_text(encoding="utf-8").splitlines()[n - 1]
+
+    iv_line = _line("app/routers/sessions.py", int(cited["app/routers/sessions.py"]))
+    assert "iv" in iv_line and "token_hex" in iv_line, (
+        f"app/routers/sessions.py:{cited['app/routers/sessions.py']} is {iv_line.strip()!r} "
+        "— the doc's iv-mint citation has drifted off `suffix = \"iv\" + "
+        "secrets.token_hex(2)`, which is the line that makes an iv id a chat id")
+    plain_line = _line("app/routers/messages.py", int(cited["app/routers/messages.py"]))
+    assert "uuid4" in plain_line and "%Y%m%d_%H%M%S" in plain_line, (
+        f"app/routers/messages.py:{cited['app/routers/messages.py']} is {plain_line.strip()!r} "
+        "— the doc's plain-chat-mint citation has drifted off the 3-part id literal")
+    bg_line = _line("app/sessions_io.py", int(cited["app/sessions_io.py"]))
+    assert "def new_background_session_id" in bg_line, (
+        f"app/sessions_io.py:{cited['app/sessions_io.py']} is {bg_line.strip()!r} — the "
+        "line the doc names as the four-part mint is not that mint's def")
+
+    # The exclusion has to be stated, not merely left unstated: #1719's own text
+    # asked for this path as the chat mint, and "absent" would not survive the
+    # next reader who walks in with the same idea.
+    excl = re.search(r"app/sessions_io\.py:\d+`?[^\n]{0,400}", b, re.S)
+    assert excl and re.search(r"not in the 23|excluded|counted as whichever slug", excl.group(0)), \
+        ("the background mint appears in (a) without being named as excluded from the 23 — "
+         "the exact confusion #1719 was filed over")
+    assert not re.search(r"(iv|Inner.Voice)[^\n]{0,120}app/sessions_io\.py", b) \
+        and not re.search(r"app/sessions_io\.py:\d+[^\n]{0,120}(iv\b|Inner Voice)", b), \
+        "(a) attributes the iv-prefixed chat id to the background mint"
+
+
+def test_the_bar_names_its_population_instead_of_a_normal_day(s10):
+    """Clause 3: "one normal day at that shape with Alan chatting" is gone from
+    §10, and what replaced it is checkable — conditions (a)-(d) plus chat turns
+    present in the window.
+
+    The phrase is not banned for style. It has no measured content, which is why
+    the owed check that had to decide whether 23 turns cleared it could only
+    re-litigate it. §7's "KV p90 < 60% on a normal day" is a different page's
+    problem and deliberately out of scope here.
+    """
+    assert "normal day" not in s10.lower(), (
+        "§10 still asks for a 'normal day': the bar's population is a phrase, not a "
+        "measurement, and that is what owed-check had to re-decide")
+    bar = s10[:s10.index("- **The counted reading")]
+    assert re.search(r"one named full UTC day", bar), \
+        "the bar must name what it is met over — a day an extract on disk covers"
+    for letter in "abcd":
+        assert re.search(rf"\({letter}\)", bar), f"the bar no longer lists condition ({letter})"
+    assert re.search(r"chat turns[^\n]{0,200}(population requirement|not a fifth measurement)",
+                     bar, re.S) or \
+        re.search(r"(population requirement|not a fifth measurement)[^\n]{0,200}chat turn",
+                  bar, re.S), \
+        "the chat-turns requirement must be stated AS a population requirement, so a reader " \
+        "does not go looking for a fifth measurement"
+    assert "zero of zero" in bar, (
+        "the reason chat turns must be present is that (a) is vacuously true with none in "
+        "the window; the bar has to say so or the requirement reads as a preference")
+
+
+def test_the_counting_day_may_be_full_of_worker_turns(reading, derived):
+    """Clause 4: the day need not be free of bench/worker turns, the by-kind list
+    is called what it is, and no figure is hand-written to fill the gap.
+
+    `by_kind` is built over `missing` (`scripts/vllm_prefix_miss_window.py:225-229`), so it
+    is a breakdown of the turns that missed and says nothing about the 443-turn mix; calling
+    it a turn mix would be a false statement in derived prose, which is the worst kind this
+    page has. The mix IS computable from the extract — its turn rows carry the kind — which
+    is what makes the ban below a check rather than a wish: for every kind whose turn count
+    differs from its miss count, writing `kind <turn count>` could only have come from
+    outside `derive`. Where the two coincide (`deepresearch` missed on all 4 of its turns)
+    the pairing is genuinely ambiguous and is left alone: a test cannot ban a number that is
+    also a legal one, and pretending otherwise would be an invention from the other side.
+    """
+    ex = json.loads(EXTRACT.read_text(encoding="utf-8"))
+    assert re.search(r"need not be free of bench[^\n]{0,40}worker|bench and worker turns",
+                     reading), "§10 must say the counting day is allowed to be busy"
+    assert "miss breakdown" in reading, "the by-kind list must be called a miss breakdown"
+    assert re.search(r"not[^\n]{0,30}turn mix", reading), \
+        "the text must say the by-kind list is NOT the day's turn mix"
+
+    import collections
+    true_turns = collections.Counter(t[1] for t in ex["turns"])
+    derived_misses = {k: v[0] for k, v in derived["by_kind"].items()}
+    assert true_turns["chat"] == derived["chat_turns"], \
+        "the extract's own chat count no longer agrees with derive; the 23 is unverified"
+    ambiguous = {k for k, n in true_turns.items() if n == derived_misses.get(k)}
+    banned = {k: n for k, n in true_turns.items() if n != derived_misses.get(k)}
+    assert len(banned) >= 10 and "chat" in banned and "bench" in banned, (
+        f"only {len(banned)} kinds separate a turn count from a miss count ({sorted(ambiguous)}"
+        ") — too few for the ban below to be worth running")
+    for kind, n in banned.items():
+        assert not re.search(rf"\b{re.escape(kind)} {n}\b", reading), (
+            f"§10 pairs {kind!r} with {n}: that is its TURN count in the extract and is not "
+            "a figure `derive` returns, so it can only have been hand-written")
+    assert not re.search(r"\d+ chat sessions?", reading, re.I), \
+        "a chat-session count is not derivable (turn rows carry no session id)"
+
+
 def test_criterion_b_is_marked_and_is_the_per_day_budget(reading, derived, s10):
     """(b)'s mark follows the budget, and the budget follows §6.1."""
     s61 = _section(6)
