@@ -76,52 +76,61 @@ reads as off too: `source_inner_voice` falls back to False since #1015, when
 
 ## 2. What actually ran
 
-Seven days to 2026-09-11, from `workers.db`. The point of this table is that
-the sources not doing what their config implies are all one family (§6). It
-still carries the `gap-fill` row it was measured with; that source was retired
-on 2026-09-24 (§7).
+Seven days to 2026-09-28 (`runs.completed_at >= '2026-09-21'`), read
+2026-09-28T05:32Z from `~/lloyd-data/workers.db` — the same window §6 quotes, so
+one doc reports one measurement. (Its mining counts are a couple of runs lower:
+§6 read the same window ~1 h earlier, and the pool is still writing rows.) Rows
+are the registered sources; `ok` / `failed` / `skipped` are the three statuses a
+run can end in, and the residue is `interrupted` (2 `autocode`, 1
+`scheduled-task`). `runs` is pruned at 30 days, so re-measure before quoting
+this table — what it is for is the gap between what a source's config implies
+and what its row says.
 
 | source | family | runs | ok | failed | skipped | avg |
 |---|---|---|---|---|---|---|
-| `scheduled-task` | dispatch | 907 | 778 | 94 | 35 | 154 s |
-| `youtube-digest` | intake | 452 | 359 | 92 | 1 | 147 s |
-| `session-distill` | mining | 369 | 215 | **154** | 0 | 95 s |
-| `bench-mine` | mining | 60 | 6 | **49** | 5 | 156 s |
-| `autotriage` | self-mod | 57 | 55 | 0 | 2 | 274 s |
-| `autocode` | self-mod | 43 | 41 | 2 | 0 | 1492 s |
-| `automod-regression` | self-mod | 39 | 9 | 0 | 30 | 9 s |
-| `deep-research` | intake | 14 | 9 | 5 | 0 | 401 s |
-| `backlog-cluster` | self-mod | 1 | 1 | 0 | 0 | 209 s |
-| `gap-fill` | mining | **0** | — | — | — | — |
+| `autotriage` | self-mod | 451 | 340 | 0 | 111 | 175 s |
+| `autocode` | self-mod | 327 | 270 | 21 | 34 | 1402 s |
+| `bench-mine` | mining | 165 | 120 | 32 | 13 | 145 s |
+| `board-steward` | self-mod | 144 | 100 | 17 | 27 | 84 s |
+| `scheduled-task` | dispatch | 136 | 131 | 4 | 0 | 529 s |
+| `autoresearch` | self-mod | 53 | 18 | **35** | 0 | 1493 s |
+| `youtube-digest` | intake | 53 | 39 | 14 | 0 | 149 s |
+| `backlog-cluster` | self-mod | 31 | 31 | 0 | 0 | 3 s |
+| `session-distill` | mining | 30 | 29 | 1 | 0 | 160 s |
+| `owed-check` | self-mod | 22 | 22 | 0 | 0 | 325 s |
+| `deep-research` | intake | 19 | 18 | 1 | 0 | 437 s |
+| `arch-review` | self-mod | 18 | 18 | 0 | 0 | 868 s |
+| `automod-regression` | self-mod | **0** | — | — | — | — |
 
-- **`session-distill` fails 42% of its runs and `bench-mine` 82%, both the
-  same way**: `empty response (stop_reason=max_turns) — nothing written`. Both
-  hard-coded a turn budget in the source (15 and 8) rather than reading one from
-  config, and both routinely exhausted it; `bench-mine` since got a config key
-  (#896, 2026-09-24 — §6), `session-distill`'s 15 is still a literal. An empty
-  turn is correctly recorded as
-  a failure — that rule is [[workers]] §4 and it is what stops a
-  `(no response)` note being written — so what these numbers say is that the
-  budget is wrong, not that the rule is.
-- **`gap-fill` never ran, ever**, and is retired (§7). Zero rows in `runs`
-  for the life of the database: its input was facts carrying `label: gap` or
-  `provenance: GAP`, and nothing in the extraction pipeline ever emitted one
-  (`facts_idx` has no `label` column; 0 of ~313k rows carried `GAP`
-  provenance). It stat-walked the ~70k-file facts tree every 5 minutes on a
-  worker thread, finding nothing, until #897.
-- **The two that remain are one family, and the shared shape is the
-  diagnosis**: both are `run_prompt_on_primary` with a literal budget and a
-  `write_staging_note` at the end. §6 is what they have in common; this is what
-  it costs.
-- **`automod-regression` skips 30 of 39**, which is the design working: it
-  measures once per promotion, dedups on the commit, and a poll that finds no
-  recent settlement returns in milliseconds. The poll interval (900 s since
-  2026-09-18, hourly before that) means "shortly after a landing", not
-  "constant evals".
-- The 7-day window also holds rows from sources under their **old names** —
-  `backlog-selfmod`, `backlog-implement`, `autoimplement`,
-  `selfmod-regression`, `autoimplement-regression` — all renamed on 2026-09-09,
-  and `domain-research`, retired 2026-09-08. See §7.
+- **The mining pair's cap deaths are history, and so is the code that set the
+  cap.** Over the 7 days to 2026-09-11 both failed most of their runs at
+  `empty response (stop_reason=max_turns) — nothing written`, against a turn
+  budget fixed in the source (15 and 8) — §6 has those numbers and the shape.
+  Both budgets are config now: `workers.sources.bench-mine.max_turns` (#896,
+  2026-09-24) and `workers.sources.session-distill.max_turns` (#1460,
+  2026-09-25), each carried in the queue payload so an item runs under the
+  budget it was enqueued with. Over these same 7 days to 2026-09-28
+  `session-distill` is 29 ok of 30 and its one failure is `stop_reason=stop,
+  turns=14` — no `session-distill` row in `runs` names `max_turns` at all —
+  while 30 of `bench-mine`'s 32 failures are one `ConnectError` burst on
+  2026-09-24 and 2 are cap deaths. An empty turn is correctly a failure
+  ([[workers]] §4); the budget was what was wrong, and moving it was free.
+- **The two mining sources are still one shape, and the shared shape is the
+  diagnosis**: both are `run_prompt_on_primary` with a budget read from
+  `src_cfg` into the payload and a `write_staging_note` at the end. §6 is what
+  they have in common; this is what it costs.
+- **`autoresearch` is the row not doing what its config implies**: 35 of its 53
+  ended `TimeoutError: exceeded max_duration_seconds=1800`, all of them the
+  pre-#1546 shape §4 walks; rounds since that cap raise complete.
+- **`automod-regression` has no row to read**, which is the design working: the
+  promoter starts the detached runner itself, so this source's poll fires only
+  for a runner that never started — §4 measured the same zero on 2026-09-27.
+- **The store on this box begins 2026-09-22T20:03Z** (the 2026-09-22 data
+  wipe), so no window `runs` can show holds the old names §7 lists. One
+  unregistered name does write rows: `queue-maintenance`, 19 of them here, from
+  the pool's own maintenance sweep (`workers/maintenance.py`). It is not in
+  `SOURCE_REGISTRY`, so it has no row above — whether it should is an open
+  question, not a fact this table settles.
 
 ---
 
@@ -761,7 +770,8 @@ the real path fail; `tests/test_research_doc_claims.py` pins the real leaf now.
 
 This was the family that did not work: measured over the 7 days to 2026-09-11
 it failed 42% and 82% of its runs, both at `max_turns` with nothing written, and
-§2 still carries those numbers in the present tense (filed). The two config keys
+§2 carried those numbers in the present tense until #1713 re-measured that
+section on 2026-09-28. The two config keys
 above are what closed it. Over the 7 days to 2026-09-28 `session-distill` is 28
 ok of 29 runs and `bench-mine` 118 ok of 163, and of `bench-mine`'s 32 failures
 30 are one `ConnectError` burst on 2026-09-24, not cap deaths — 2 runs in the
