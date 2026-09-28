@@ -54,6 +54,18 @@ messages, not the rendered prompt.** Concretely:
   133 digests for the tools array alone account for most of it — so budget tens of
   KB per iteration, not a few. They are what
   `scripts/meta_review/prompt_diff.py` reads.
+* **Dated files are deleted after `harness.component_manifest.retention_days`
+  (default 14; `0` disables).** The writer thread sweeps `manifests/` once per
+  process day and removes every `<YYYY-MM-DD>.ndjson` older than the window,
+  ageing a file by the date in its name rather than its mtime; nothing else in the
+  tree deletes anything. This is a confidentiality window as much as a disk one:
+  an unbounded store of digests of vault text, email bodies and user messages was
+  the debt #1604 named — 2.4 GB over 9 days on 2026-09-27, with 2.8 TB free on the
+  filesystem, so the bytes were never the problem.
+* **Every line carries `build_ms`** — the milliseconds spent building that line,
+  timed in `record_request` around `_build_line` alone. The cost of a line was
+  asserted (~40 KB of canonical JSON to hash per request) and never measured; with
+  the field present a p50 is computable from one day's file with no other source.
 * The store lives OUTSIDE every git-tracked tree — `~/.local/state/lloyd-
   request-manifests` by default (`$LLOYD_MANIFEST_STORE` or
   `harness.component_manifest.store_dir` override it;
@@ -110,10 +122,11 @@ import json
 import logging
 import os
 import queue
+import re
 import threading
 import time
 from collections import OrderedDict
-from datetime import datetime, timezone
+from datetime import date as _day, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -140,6 +153,11 @@ RETENTION_POLICY = (
     "  confidentiality policy.\n"
     "* The rendered prompt (chat-template output: markers, tool markup, the whole\n"
     "  concatenated history) is never hashed and never written here.\n"
+    "* Dated files are DELETED after harness.component_manifest.retention_days\n"
+    "  (default 14; 0 disables). The writer thread sweeps manifests/ once per\n"
+    "  process day and removes every <YYYY-MM-DD>.ndjson older than the window,\n"
+    "  ageing a file by the date in its name, not its mtime. Nothing else in the\n"
+    "  store is ever removed - including this file.\n"
     "\n"
     "The digests are of vault text, email bodies and user messages, and a length\n"
     "plus a hash is still a fingerprint of confidential content. This directory is\n"
@@ -211,6 +229,133 @@ def git_tree_containing(path: "Path | str") -> str:
         except OSError:
             continue
     return ""
+
+
+# ── retention over the day files ──────────────────────────────────────────
+#
+# The store grew with age and nothing bounded it: 2.4 GB across 9 dated files on
+# 2026-09-27 (45 MB → 531 MB/day), still being written, with no deletion anywhere
+# in the tree (#1604). Bytes were not the argument — `df` had 2.8 T free. What was
+# unbounded is retention of `sha256:` digests of vault text, email bodies and user
+# messages, which this module's own `POLICY.md` says to treat "with the same
+# confidentiality as ~/obsidian". The window is that confidentiality decision
+# expressed as a file age.
+#
+# It lives in the writer rather than in `scripts/groundskeeper/retention-sweep.py`
+# (which has never heard of this store) because the sweep is weekly and this store
+# takes a day's worth of lines per run of the box; a round-landable question that
+# belongs to the directory's owner belongs here. Idempotent, so it costs nothing
+# that several processes each run their own writer thread against one store.
+
+#: Used when `harness.component_manifest.retention_days` is absent or unparseable.
+#: 14 is what the item asks for, and it is already wider than what the only reader
+#: wants: `scripts/meta_review/prompt_diff.py` opens at most the last two dated
+#: files, so the window bounds the reader's work as well as the store.
+DEFAULT_RETENTION_DAYS = 14
+
+#: `<YYYY-MM-DD>.ndjson` and nothing else. `_day_file` writes exactly this shape,
+#: so a name that does not match it is not this module's file and is never
+#: removed — which is also why `POLICY.md` and anything a human drops in the store
+#: survive every sweep.
+_DAY_FILE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})\.ndjson$")
+
+
+def retention_days() -> int:
+    """The age window in days; `0` or negative disables pruning entirely.
+
+    Read per call like the rest of the config here, so a process that started
+    before the key existed and one started after agree on one store. The value goes
+    through `str()` on purpose: YAML hands over a string as often as a number, and a
+    bare `int(raw)` would read a mistyped `false` as the 0 that means "delete
+    everything", where `int("False")` has to fail and fall back to the default.
+    """
+    raw = _cfg().get("retention_days")
+    if raw is None:
+        return DEFAULT_RETENTION_DAYS
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return DEFAULT_RETENTION_DAYS
+
+
+def prune_store(*, store: "Path | str | None" = None,
+                today: "str | None" = None) -> "dict[str, int]":
+    """Delete dated day files older than `retention_days()`. Never raises.
+
+    Age is the date *in the name*, not mtime: a file is appended to for its own
+    day and renamed by nothing, so the name is the record's age and a restored or
+    clock-skewed mtime cannot make an old file look young. The cutoff is
+    `today - (days - 1)`, so the default window keeps exactly 14 dated files
+    including today's. `today` is a parameter so a test can hold it fixed instead
+    of depending on when it ran.
+
+    Only files inside `manifests/` whose name parses as a date are eligible; this
+    never walks anywhere else, and `2026-13-99.ndjson` is not a day so it is not
+    ours to delete. Returns `{"files": deleted, "bytes": freed, "errors": n}` — an
+    unlistable directory is one error and deletes nothing.
+    """
+    out = {"files": 0, "bytes": 0, "errors": 0}
+    days = retention_days()
+    if days <= 0:
+        return out
+    root = Path(store) if store else store_root()
+    manifests = root / "manifests"
+    if not manifests.is_dir():
+        return out
+    try:
+        newest = datetime.strptime(today or datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                                   "%Y-%m-%d").date()
+    except ValueError:
+        return out
+    cutoff = newest - timedelta(days=days - 1)
+    try:
+        paths = list(manifests.iterdir())
+    except OSError:
+        out["errors"] += 1
+        return out
+    for path in paths:
+        match = _DAY_FILE_RE.match(path.name)
+        if match is None:
+            continue
+        try:
+            file_day = _day(int(match.group(1)), int(match.group(2)),
+                            int(match.group(3)))
+        except ValueError:
+            continue
+        if file_day >= cutoff:
+            continue
+        try:
+            out["bytes"] += path.stat().st_size
+            path.unlink()
+            out["files"] += 1
+        except OSError:
+            out["errors"] += 1
+    return out
+
+
+def _prune_and_count(*, today: "str | None" = None) -> "dict[str, int]":
+    """`prune_store` plus the counters and the one log line a report reads.
+
+    Retention is never allowed to reach a request or kill the writer thread: a
+    store that cannot be swept simply keeps growing, which is the old behaviour,
+    not an outage. `prune_errors` is the counter that says it still is.
+    """
+    try:
+        result = prune_store(today=today)
+    except Exception as exc:  # noqa: BLE001 — retention never breaks a turn
+        _bump("prune_errors")
+        logger.warning("component_manifest: %s while pruning the manifest store — "
+                       "nothing was deleted and the store keeps growing",
+                       type(exc).__name__)
+        return {"files": 0, "bytes": 0, "errors": 1}
+    _bump("pruned_files", int(result.get("files", 0)))
+    _bump("pruned_bytes", int(result.get("bytes", 0)))
+    _bump("prune_errors", int(result.get("errors", 0)))
+    if result["files"]:
+        logger.info("component_manifest: pruned %d manifest day file(s) older than "
+                    "%d day(s) from %s (%d byte(s) freed)", result["files"],
+                    retention_days(), store_root() / "manifests", result["bytes"])
+    return result
 
 
 # ── hashing ───────────────────────────────────────────────────────────────
@@ -400,7 +545,8 @@ _stats_lock = threading.Lock()
 # `lines_written` are the pair that proves the writer thread actually drained
 # what it was handed, which one counter alone cannot say.
 _stats = {"recorded": 0, "write_errors": 0, "hash_errors": 0,
-          "lines_written": 0, "bytes_written": 0}
+          "lines_written": 0, "bytes_written": 0,
+          "pruned_files": 0, "pruned_bytes": 0, "prune_errors": 0}
 
 
 def _bump(key: str, amount: int = 1) -> None:
@@ -431,9 +577,47 @@ def _ensure_writer() -> None:
         _writer_started = True
 
 
+#: How long the writer may sit on an empty queue before it looks at the calendar.
+#: The prune needs a clock and this thread is the only thing that ever touches the
+#: store: parked in a blocking `get()` it would never wake on a date change, so a
+#: process that outlives midnight would keep appending to a file the window has
+#: already passed — and on this box the backend runs for weeks. 15 minutes is a
+#: date-string compare per wake, which is not a cost worth a smaller number.
+_IDLE_POLL_SECONDS = 900.0
+
+
+def _today() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _sweep_if_new_day(pruned_on: str) -> str:
+    """Sweep the store if the date has moved since `pruned_on`; return the new marker.
+
+    The one trigger retention has. `pruned_on` is the caller's own memory, not a
+    module global: every process that sends a request runs its own writer thread
+    against the one store, and each only needs to avoid sweeping twice *itself* —
+    a sweep is idempotent, so the cost per process is one directory listing a day.
+    Called with `""` it always sweeps, which is what a test that wants a sweep now,
+    rather than at midnight, uses.
+    """
+    today = _today()
+    if today != pruned_on:
+        _prune_and_count(today=today)
+    return today
+
+
 def _writer_loop() -> None:
+    # One sweep per process-day. It runs before the first `get()`, so a store that
+    # filled while the box was down is bounded the moment it is next opened, and
+    # again on the first wake after midnight, so a backend that runs for weeks does
+    # not keep appending into a file the window has passed.
+    pruned_on = _sweep_if_new_day("")
     while True:
-        item = _queue.get()
+        try:
+            item = _queue.get(timeout=_IDLE_POLL_SECONDS)
+        except queue.Empty:
+            pruned_on = _sweep_if_new_day(pruned_on)
+            continue
         try:
             if item is None:
                 return
@@ -611,9 +795,16 @@ def record_request(*, base_url: str, model: str, payload: dict[str, Any],
     if not enabled():
         return None
     try:
+        # The cost of describing a request is not free: 131 tool definitions is
+        # ~40 KB of canonical JSON to hash, and the memo only helps while the array
+        # is unchanged. Nothing measured this before (#1604), so the timer starts
+        # here — around the build and nothing else, which is why it cannot live in
+        # `_build_line`, and the queue hand-off and `_bump` below are outside it.
+        started = time.perf_counter()
         line = _build_line(base_url=base_url, model=model, payload=payload,
                            session_id=session_id, iteration=iteration,
                            send_site=send_site)
+        line["build_ms"] = round((time.perf_counter() - started) * 1000.0, 3)
         _ensure_writer()
         _queue.put(canonical_json(line))
         _bump("recorded")

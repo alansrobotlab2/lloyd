@@ -814,3 +814,64 @@ def test_the_recorded_chat_template_reaches_the_manifest_line(tmp_path, monkeypa
     assert line["chat_template"] == {
         "id": f"sha256:{hashlib.sha256(body.encode()).hexdigest()}",
         "source": str(template)}, line["chat_template"]
+
+
+# ── what describing a request costs (#1604) ───────────────────────────────
+#
+# `build_ms` exists because the cost was asserted for months — 131 tool definitions
+# is ~40 KB of canonical JSON to hash per request — and never measured: `grep -c
+# '"build_ms"'` on 2026-09-27's file returned 0, and the only `time.monotonic()` in
+# the module was `flush()`'s wait loop. A number nobody can check is not a number,
+# so these two tests are the instrument.
+
+
+def test_every_line_of_a_real_turn_carries_build_ms_and_a_p50_is_computable(
+        monkeypatch, tmp_path):
+    """Clause 4: every line the loop emits carries the milliseconds spent building
+    it, from the real send path rather than a direct call, and one day's file is
+    enough to compute a p50 from — no second source, no joining with a log.
+
+    Three iterations is the whole of `_drive_turn`, so the p50 here is over three
+    lines; that is the smallest file that can still distinguish a median from a
+    mean, which is the shape the clause asks a reader to be able to take.
+    """
+    import statistics
+
+    _note_real_components("manifest-loop", tmp_path)
+    _drive_turn(monkeypatch)
+    lines = _lines(Path(os.environ["LLOYD_MANIFEST_STORE"]))
+    assert len(lines) == 3, len(lines)
+    assert all("build_ms" in line for line in lines), [sorted(line) for line in lines]
+
+    costs = [line["build_ms"] for line in lines]
+    assert all(isinstance(c, (int, float)) and not isinstance(c, bool) for c in costs)
+    assert all(0.0 < c < 60_000.0 for c in costs), costs
+    assert statistics.median(costs) > 0.0
+    assert "build_ms" not in json.dumps(lines[0].get("params") or {}), \
+        "build_ms is a line field, not a sampling parameter"
+
+
+def test_build_ms_times_the_build_and_nothing_else(monkeypatch):
+    """Clause 4's discriminator: the field has to be a measurement of `_build_line`,
+    so making that function slow moves the number. A constant, or a timer started
+    somewhere the build is not, leaves this red.
+
+    The queue hand-off and the write are excluded on the other side of the same
+    line: the write happens on the writer thread, after `record_request` has
+    returned, so a real 60 KB append is not in the figure.
+    """
+    import time
+
+    real_build = cm._build_line
+
+    def _slow_build(**kwargs):
+        time.sleep(0.06)
+        return real_build(**kwargs)
+
+    monkeypatch.setattr(cm, "_build_line", _slow_build)
+    line = cm.record_request(base_url="http://127.0.0.1:8080", model="primary",
+                             payload={"messages": [{"role": "user",
+                                                    "content": "go"}]},
+                             session_id="20260928_120000_buildms_s", iteration=1,
+                             send_site="tests/test_component_manifest.py")
+    assert line["build_ms"] >= 60.0, line["build_ms"]
