@@ -323,6 +323,36 @@ def test_nightly_source_runs_off_the_loop_thread_and_records_the_event(isolated)
     assert CL.load_clusters()["clusters"][0]["item_ids"] == [1, 2, 3]
 
 
+def test_an_empty_triage_pool_names_the_pool_and_not_the_vectors(isolated):
+    """2026-09-27: 8 of the source's last 10 runs took a zero-item pool, and the
+    one that appended `no vectors available` read as a dead qmd embedding path
+    while the run 3 h earlier had found 43 vectors over 43 items. The clause is
+    a check whose denominator was zero; the record has to name which zero."""
+    from workers.sources import backlog_cluster as SRC
+    assert _items() == [], "no untriaged draft: this is the zero-item input"
+    out = asyncio.run(SRC.execute(_Item({"judge": False})))
+    assert out["status"] == "success", "an idle night is not a reported failure"
+    assert "no items in the triage pool" in out["summary"]
+    assert "no vectors available" not in out["summary"]
+    ev = S.read_events(path=S.LEDGER_PATH)[-1]
+    assert ev["items_considered"] == 0 and ev["vectors_found"] == 0
+
+
+def test_zero_vectors_over_a_nonempty_pool_keeps_the_vector_clause(isolated):
+    """The other half of #1690: `no vectors available` is the alarm for qmd's
+    vector leg, and it must still fire when items were asked for and came back
+    with no vectors — the shape the empty pool was impersonating."""
+    from workers.sources import backlog_cluster as SRC
+    for i in (1, 2, 3):
+        write_item(isolated, i, body="`app/x.py` `app/y.py`")
+    assert len(_items()) == 3, "a non-empty pool is what makes vectors a verdict"
+    out = asyncio.run(SRC.execute(_Item({"judge": False})))
+    assert out["status"] == "success"
+    assert "no vectors available, clustered on paths and parents only" in out["summary"]
+    assert "no items in the triage pool" not in out["summary"]
+    assert S.read_events(path=S.LEDGER_PATH)[-1]["items_considered"] == 3
+
+
 def test_the_source_is_registered_with_the_pool_interface():
     import workers.sources as sources_pkg
     mod = sources_pkg.SOURCE_REGISTRY["backlog-cluster"]

@@ -116,7 +116,14 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     summary = (f"{len(data['clusters'])} clusters over {n_items} items "
                f"({data['pairs_judged']} pairs judged, {data['judge_cached']} cached); "
                f"{data['parents_persisted']} parents persisted")
-    if not data["vectors_found"]:
+    if not data["items_considered"]:
+        # Nothing was in the pool to ask qmd about, so `vectors_found: 0` says
+        # nothing about the embedding path. 2026-09-27: 8 of 10 runs over an
+        # empty pool read as a dead qmd, one of them with this clause attached
+        # and no true positive in 88 events. Print the denominator beside the
+        # verdict, and keep the failure reading for a real one.
+        summary += " — no items in the triage pool"
+    elif not data["vectors_found"]:
         # Still a success: paths and parents are a real signal on their own.
         summary += " — no vectors available, clustered on paths and parents only"
     return {"status": "success", "summary": summary, "artifact_path": str(path)}

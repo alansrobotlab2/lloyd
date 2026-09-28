@@ -281,9 +281,11 @@ dir, which `autotriage`'s group mode consumes.
 **What it is producing is close to nothing.** 8 of its 10 runs on 2026-09-27
 returned `0 clusters over 0 items`: its input is the untriaged-`draft` pool,
 and the sweep keeps that pool empty on a caught-up board. On an empty input its
-own summary appends `no vectors available`, so the run record reads like a dead
-embedding pipeline when nothing was ever asked for — the denominator, not the
-vectors, is zero (filed). The edge into `autotriage`'s group mode is therefore
+summary says `no items in the triage pool`; `no vectors available, clustered on
+paths and parents only` is reserved for a run that asked for items and got no
+vectors back (#1690). Before that split both zeros printed the same clause, so
+an idle night read as a dead embedding pipeline with the denominator, not the
+vectors, at zero. The edge into `autotriage`'s group mode is therefore
 carried by the days on which new drafts outrun the sweep, not by this job's
 cadence.
 
