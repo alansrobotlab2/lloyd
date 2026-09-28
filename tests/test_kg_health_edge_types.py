@@ -8,7 +8,9 @@ snapshot is a file a person reads and a metric later reports quote, so the fold
 belongs before the count, not in whoever opens the JSON afterwards.
 """
 import importlib.util
+import json
 import sys
+import datetime as dt
 from pathlib import Path
 
 import pytest
@@ -216,12 +218,20 @@ def test_a_share_only_failure_is_attributed_to_share_and_not_to_an_under_floor_t
     not there, which is what happened when `conflicts_with (1)` appeared on a line
     that share had been failing since at least the night before.
     """
-    line = khr.edge_type_cardinality({"mentions": 60, "uses": 40})
+    # `previous` is what makes the share condition fire here at all: 60% of the
+    # store is under the 80% ceiling, and #1658 made the share a trend, so a share
+    # only fails the share condition when it is ABOVE the previous night's. That is
+    # the sharper trigger the old level replaced, and the attribution still has to
+    # name it rather than leave a bare FAIL.
+    line = khr.edge_type_cardinality(
+        {"mentions": 60, "uses": 40},
+        previous={"date": "2026-09-27", "share": 0.49})
 
     assert line.startswith("Edge-type cardinality: FAIL — "), line
     assert "types under 5 uses: none" in line, \
         "the under-floor condition must still read clean: " + line
-    assert "conditions failing: dominant type share (mentions 60.0% > 50%)" in line, line
+    assert ("conditions failing: dominant type share (mentions 60.0% > previous "
+            "night 2026-09-27 49.0%)") in line, line
     assert "floor" not in _failing_segment(line), \
         f"share alone must not be attributed to the floor: {_failing_segment(line)}"
 
@@ -254,12 +264,186 @@ def test_both_conditions_are_attributed_together_and_a_clean_vocabulary_names_no
     condition hide the other. The clean row keeps the PASS wording
     `test_cardinality_passes_a_spread_vocabulary_with_no_rare_type` pins.
     """
+    # `previous` carries the share condition into this fixture: 59.4% is under the
+    # 80% ceiling, so the joint row needs a lower previous night to be a joint row.
     both = khr.edge_type_cardinality(
-        {"mentions": 60, "uses": 35, "related_to": 5, "conflicts_with": 1})
+        {"mentions": 60, "uses": 35, "related_to": 5, "conflicts_with": 1},
+        previous={"date": "2026-09-27", "share": 0.58})
     failing_both = _failing_segment(both)
     assert failing_both.startswith("types below the 5-use floor (conflicts_with (1))"), both
-    assert "dominant type share (mentions 59.4% > 50%)" in failing_both, both
+    assert ("dominant type share (mentions 59.4% > previous night 2026-09-27 "
+            "58.0%)") in failing_both, both
 
     clean = khr.edge_type_cardinality({"uses": 40, "part_of": 35, "related_to": 25})
     assert clean.startswith("Edge-type cardinality: PASS — "), clean
     assert _failing_segment(clean) == "none\n" or _failing_segment(clean) == "none", clean
+
+
+# ── #1658: a grace for new types, and a share that is measured as a trend ──────
+#
+# Both halves of this gate were reporting a condition no reader could act on. The
+# floor caught `conflicts_with (1)` and `describes (1)` — one edge each, both minted
+# 2026-09-26 by `fact_relate`, which REFUSES a type outside the canonical `EDGE_TYPES`
+# set, so the store's only writer had used an approved type once and was told it was
+# a one-off. And the share bound of 50% FAILed every night against a number that was
+# falling: 09-23 92.2%, 09-24 83.9%, 09-25 84.6%, 09-26 76.3%, 09-27 69.4-69.8%, with
+# task #74 retyping ~2.5k `mentions` edges a night. A verdict that never changes
+# carries no information, so the reader stops reading the section — which is how a
+# real catch-all would get through.
+#
+# The tests below pin the two new rules AND the floor under them: the grace defers
+# (a 30-day-old singleton still fails), the ceiling still catches a runaway leader on
+# its own with no history to compare against, a rising share still fails, and a PASS
+# still prints the measured share so "it passed" is never mistaken for "it stopped
+# measuring".
+NOW_1658 = dt.datetime(2026, 9, 28, 12, tzinfo=dt.timezone.utc)
+CONFLICTS_EDGE_2026_09_26 = "2026-09-26T05:11:43Z"     # edge id 44916, origin fact_relate
+NIGHT_BEFORE = {"date": "2026-09-27", "share": 0.765}  # 09-27 measured: 25,849/36,959 etc.
+
+
+def test_a_type_younger_than_the_grace_is_exempt_from_the_floor_and_named_as_in_grace():
+    """#1658 clause 1, both halves. `conflicts_with` at 1 of 101 active edges, first
+    seen 2 days ago (its real date) → PASS, and it is named as in grace so the
+    exemption is visible rather than silent. First seen 30 days ago → FAIL naming
+    `types below the 5-use floor (conflicts_with (1))`, because a grace defers the
+    floor and does not remove it: these two singletons will not grow, so the line
+    re-catches them when the window closes and a human rules on the permanent floor.
+    """
+    dist = {"mentions": 40, "uses": 35, "related_to": 25, "conflicts_with": 1}
+    fresh = khr.edge_type_cardinality(
+        dist, first_seen={"conflicts_with": CONFLICTS_EDGE_2026_09_26},
+        previous=NIGHT_BEFORE, now=NOW_1658)
+    assert fresh.startswith("Edge-type cardinality: PASS — "), fresh
+    assert "in grace" in fresh and "conflicts_with (1)" in fresh, fresh
+    assert "conditions failing: none" in fresh, fresh
+    # The exemption has to be stated as an exemption, not as a clean floor: PASS
+    # with `conflicts_with` simply absent would read as "no type is under the floor".
+    assert khr.EDGE_TYPE_GRACE_NIGHTS == 14, khr.EDGE_TYPE_GRACE_NIGHTS
+
+    stale = khr.edge_type_cardinality(
+        dist, first_seen={"conflicts_with": "2026-08-29T05:11:43Z"},
+        previous=NIGHT_BEFORE, now=NOW_1658)
+    assert stale.startswith("Edge-type cardinality: FAIL — "), stale
+    assert ("conditions failing: types below the 5-use floor "
+            "(conflicts_with (1))") in stale, stale
+    assert "in grace" not in stale, stale
+
+
+def test_the_share_fails_on_the_ceiling_or_a_rise_and_passes_a_falling_share():
+    """#1658 clause 2: the dominant-type condition is a trend with a level under it.
+
+    70.0% fallen from 76.5% → PASS (this is 2026-09-26/27's actual movement, and the
+    old bound FAILed it nightly). 70.0% risen from 69.8% → FAIL naming the dominant
+    type share, which is the case the old bound could not express: a store drifting
+    the wrong way while sitting below any fixed line.
+    """
+    fell = khr.edge_type_cardinality({"mentions": 70, "uses": 30},
+                                     previous={"date": "2026-09-27", "share": 0.765},
+                                     now=NOW_1658)
+    assert fell.startswith("Edge-type cardinality: PASS — "), fell
+    rose = khr.edge_type_cardinality({"mentions": 70, "uses": 30},
+                                     previous={"date": "2026-09-27", "share": 0.698},
+                                     now=NOW_1658)
+    assert rose.startswith("Edge-type cardinality: FAIL — "), rose
+    assert ("dominant type share (mentions 70.0% > previous night 2026-09-27 "
+            "69.8%)") in _failing_segment(rose), rose
+
+
+def test_the_previous_night_is_day_aligned_and_no_history_only_lets_the_ceiling_fail(tmp_path):
+    """#1658 clause 3, both halves.
+
+    Day-aligned, not snapshot-to-snapshot: `kg_health` runs 3-5× a day and `mentions`
+    grew between CONSECUTIVE snapshots in every hour measured on 2026-09-27 (+149,
+    +152, +152, +84, +68), so a snapshot-to-snapshot comparison would report "rising"
+    on every single nightly run — the same permanent-FAIL failure mode the 50% bound
+    had. The fixture therefore hands over a snapshot count that ROSE since the last
+    snapshot (24,941 from 24,505) while the dated share FELL (65.83% → 63.4%), and
+    the verdict must be PASS: what the ruling asks about is the overnight trend, not
+    the intra-day churn.
+
+    And with no snapshot directory at all, only the ceiling can fail, and the line
+    says no previous night was available rather than implying it compared and won.
+    """
+    empty = tmp_path / "metrics"
+    assert khr.previous_dated_share(NOW_1658, empty) is None
+
+    d = empty
+    d.mkdir(parents=True)
+    # Last night's final snapshot: `mentions` 24,505 of 31,005 = 79.0%. Today's count
+    # is HIGHER (24,941) because the store grows ~700 edges a night, and its SHARE is
+    # lower (73.8%) because task #74 retypes ~2.5k `mentions` edges into `uses` and
+    # `related_to` — count up, share down, which is exactly the pair a snapshot-to-
+    # snapshot reader would call "rising" and a day-aligned one calls what it is.
+    (d / "kg-health-2026-09-27T223448Z.json").write_text(json.dumps({
+        "captured_at": "2026-09-27T22:34:48.000+00:00",
+        "edges": {"by_type": {"mentions": 24505, "uses": 3000, "related_to": 3500}}}),
+        encoding="utf-8")
+    prev = khr.previous_dated_share(NOW_1658, d)
+    assert prev and prev["date"] == "2026-09-27", prev
+    assert prev["share"] == pytest.approx(24505 / 31005), prev
+
+    today = d / "kg-health-2026-09-28T113356Z.json"
+    today.write_text(json.dumps({
+        "captured_at": "2026-09-28T11:33:56.000+00:00",
+        "edges": {"by_type": {"mentions": 24941, "uses": 5316, "related_to": 3534}}}),
+        encoding="utf-8")
+    # Today's own snapshot must not become "the previous night" — that is the whole
+    # day-alignment rule, and failing to apply it would FAIL the run against itself.
+    assert khr.previous_dated_share(NOW_1658, d)["date"] == "2026-09-27", d
+    count_rose = 24941 > 24505
+    share_fell = (24941 / 33791) < prev["share"]
+    assert count_rose and share_fell, "fixture no longer shows the trap"
+    line = khr.edge_type_cardinality({"mentions": 24941, "uses": 5316,
+                                      "related_to": 3534},
+                                     previous=prev, now=NOW_1658)
+    assert line.startswith("Edge-type cardinality: PASS — "), line
+
+    no_history = khr.edge_type_cardinality({"mentions": 70, "uses": 30}, now=NOW_1658)
+    assert no_history.startswith("Edge-type cardinality: PASS — "), no_history
+    assert "no previous night" in no_history, no_history
+    runaway = khr.edge_type_cardinality({"mentions": 85, "uses": 15}, now=NOW_1658)
+    assert runaway.startswith("Edge-type cardinality: FAIL — "), runaway
+    assert "dominant type share" in _failing_segment(runaway), runaway
+
+
+def test_a_pass_still_prints_the_dominant_type_its_share_and_the_active_total():
+    """#1658 clause 4: the purpose survived the softening, so prove it on the PASS.
+
+    A gate that stops failing is only an improvement if it still measures. Asserted
+    on the PASSING line — the FAIL line was always informative, the PASS line is the
+    one that can quietly become the word "PASS" and nothing else. And a leader at
+    85% still fails with no history to compare against: the ceiling is the catch-all
+    the whole section exists for.
+    """
+    passed = khr.edge_type_cardinality({"mentions": 70, "uses": 30},
+                                       previous={"date": "2026-09-27", "share": 0.765},
+                                       now=NOW_1658)
+    for fragment in ("mentions", "70.0%", "100 active edges"):
+        assert fragment in passed, (fragment, passed)
+    assert khr.edge_type_cardinality({"mentions": 85, "uses": 15},
+                                     now=NOW_1658).startswith(
+        "Edge-type cardinality: FAIL — ")
+
+
+def test_the_quoted_bound_is_the_one_that_can_fail_the_line_and_grace_lists_only_rare_types():
+    """#1658 clause 5, both halves.
+
+    The retired wording printed `(limit 50%)` beside a rule that no longer uses 50,
+    which is worse than printing nothing: a reader reconciling "76.5% … (limit 50%)"
+    against a PASS concludes the gate is broken and stops trusting the section. So the
+    line quotes the ceiling that can actually fail it, and the word "limit" is gone
+    from it entirely. Second half: a type AT the floor is never decorated as in
+    grace — `related_to` at exactly the minimum is not exempt from anything, and a
+    grace note attached to a passing type would make the exemption look arbitrary.
+    """
+    line = khr.edge_type_cardinality(
+        {"mentions": 40, "uses": 35, "related_to": 25, "conflicts_with": 1},
+        first_seen={"conflicts_with": CONFLICTS_EDGE_2026_09_26,
+                    "mentions": "2026-01-01T00:00:00Z"},
+        previous=NIGHT_BEFORE, now=NOW_1658)
+    assert "(limit 50%)" not in line and "limit" not in line, line
+    assert f"ceiling {khr.EDGE_TYPE_MAX_SHARE:.0%}" in line, line
+    grace_part = line.split("in grace", 1)[1].split(";")[0]
+    assert "conflicts_with" in grace_part, line
+    assert "related_to" not in grace_part and "mentions" not in grace_part, grace_part
+    assert "related_to" not in line.split("types under 5 uses")[1].split(";")[0], line

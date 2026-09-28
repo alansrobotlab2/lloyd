@@ -573,12 +573,21 @@ def test_cardinality_passes_a_spread_vocabulary_with_no_rare_type():
     assert "types under 5 uses: none" in line
 
 
-@pytest.mark.parametrize("dist", [{"mentions": 51, "uses": 49},
-                                  {"uses": 50, "part_of": 50, "informs": 4}])
-def test_either_signal_alone_fails(dist):
-    """A catch-all with no rare types fails, and so does a rare type with no
-    catch-all — they are two different drifts."""
-    assert CARDINALITY_RE.match(khr.edge_type_cardinality(dist)).group(1) == "FAIL"
+@pytest.mark.parametrize("dist,previous", [
+    # A catch-all with no rare types. #1658 made that condition a trend, so it fails
+    # on the ceiling (87% > 80%) or on a rise (51% over a 49% night) — not on 51%
+    # alone, which is what FAILed every night while task #74 retyped the dominant
+    # type down by ~2.5k edges a night.
+    ({"mentions": 87, "uses": 13}, None),
+    ({"mentions": 51, "uses": 49}, {"date": "2026-09-27", "share": 0.49}),
+    # A rare type with no catch-all still fails on its own, with no history at all.
+    ({"uses": 50, "part_of": 50, "informs": 4}, None),
+])
+def test_either_signal_alone_fails(dist, previous):
+    """A runaway catch-all fails, and so does a rare type with no catch-all — they
+    are two different drifts and each still fails without the other."""
+    assert CARDINALITY_RE.match(
+        khr.edge_type_cardinality(dist, previous=previous)).group(1) == "FAIL"
 
 
 def test_cardinality_fail_is_report_output_and_still_exits_zero(tmp_path, monkeypatch):

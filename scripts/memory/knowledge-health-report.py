@@ -19,7 +19,7 @@ import re
 import statistics
 import sys
 from collections import defaultdict, Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import yaml
@@ -58,10 +58,42 @@ REVIEWABLE_AGE_DAYS = 365
 #: pinned by `test_the_reviewable_band_is_one_of_the_printed_band_edges`.
 AGE_BAND_BOUNDS_DAYS = (90, 180, 365, 730, 3650)
 # Edge-type cardinality (#546): a type used fewer than this many times is a
-# one-off, and one type holding more than this share of active edges is a
-# catch-all absorbing relations that should have been typed.
+# one-off, and one type holding this share of active edges is a catch-all
+# absorbing relations that should have been typed.
 EDGE_TYPE_MIN_USES = 5
-EDGE_TYPE_MAX_SHARE = 0.5
+#: The ceiling on one type's share of active edges. It was 0.5 until #1658, and 0.5
+#: is not a bound that anything can act on: `mentions` sat at 69-92% for every night
+#: measured (09-23 92.2%, 09-24 83.9%, 09-25 84.6%, 09-26 76.3%, 09-27 69.4-69.8%)
+#: while autonomy task #74 retyped ~2.5k of those edges a night, so the line said
+#: FAIL nightly about a number that was falling — a constant verdict carries no
+#: information, and the reader stops reading. What IS informative is the two things
+#: this replaces it with: a level that is alarming on its own (0.8), and a share
+#: that is RISING against the previous night's measurement. Under those rules 09-24
+#: and 09-25 still FAIL (>0.8) and 09-26 and 09-27 PASS, so this is a looser bound
+#: with a sharper trigger, not a switch to always-green.
+EDGE_TYPE_MAX_SHARE = 0.8
+#: How many nights a new edge type is exempt from the floor (#1658). The floor is a
+#: "no one-off types" rule, and it was punishing exactly the opposite: both
+#: under-floor types on 2026-09-27 (`conflicts_with`, `describes`, one edge each)
+#: were written on 2026-09-26 through `fact_relate`, which REFUSES a type outside
+#: the canonical `EDGE_TYPES` set (`agent_mcp/facts.py:985-989`; set at
+#: `app/kg_store.py:505-515`). A legitimate first use of an approved type is what a
+#: grace period is for. It defers rather than resolves: these two singletons will
+#: not grow, so the floor re-catches them around 2026-10-10 and the permanent answer
+#: (a floor of 1 for types reachable only through `fact_relate`, or a per-type
+#: minimum) is the human call this function's docstring already reserves.
+EDGE_TYPE_GRACE_NIGHTS = 14
+#: How far back to look for the previous night's share. Seven because the report is
+#: nightly and three nights of history is enough to catch a store that stopped being
+#: written; beyond a week the "previous night" is not a night anymore.
+EDGE_TYPE_SHARE_HISTORY_NIGHTS = 7
+#: Where `kg_health.py` writes its snapshots. The share trend is read from there
+#: rather than from the report's own previous run because the report overwrites its
+#: dated file and keeps no share history, and because the snapshots run 3-5 times a
+#: day — which is precisely why the comparison below is DAY-aligned: `mentions` grew
+#: between CONSECUTIVE snapshots every hour of 2026-09-27 (+149, +152, +152, +84,
+#: +68), so a snapshot-to-snapshot trend would FAIL on every single run.
+EDGE_TYPE_METRICS_DIR = PIPELINE_DIR / "metrics"
 
 # Questions, not a listing — 20 is plenty for the section a research worker
 # reads out of `## Suggested Research Questions`.
@@ -693,7 +725,13 @@ def generate_report(
 
     lines.append("## Relationship Type Distribution")
     lines.append("")
-    lines.append(edge_type_cardinality(type_dist))
+    # Both inputs to the softened gate come from data the report already holds or
+    # can read: first-seen is derived from the `edges` argument (no new state), and
+    # the previous night's share from the kg_health snapshot series, DAY-aligned.
+    lines.append(edge_type_cardinality(type_dist,
+                                       first_seen=first_seen_by_type(edges),
+                                       previous=previous_dated_share(now),
+                                       now=now))
     lines.append("")
 
     if type_dist:
@@ -866,48 +904,183 @@ EXIT_OK = 0
 EXIT_ALARM = 2
 
 
-def edge_type_cardinality(type_dist: dict[str, int]) -> str:
-    """The `Edge-type cardinality: PASS|FAIL` verdict line (#546).
+def _parse_edge_ts(value) -> datetime | None:
+    """A `created_at` string as a UTC datetime, or None when it cannot be stated.
 
-    Report output only, never an alarm: the store as measured holds a dozen
-    under-floor types, so wiring this into `_alarms()` would page on every
-    nightly run and turn the exit code the scheduler reads into noise. Which of
-    those types to grandfather before it may escalate is a human's call.
+    The store writes `2026-09-26T05:11:43Z`; the snapshots write
+    `2026-09-28T11:33:56.877016+00:00`, and a snapshot name carries no offset at all.
+    A value that parses to None is treated as UNKNOWABLE rather than as epoch-zero:
+    an unparseable first-seen must not silently buy a grace, and must not silently
+    lose one either — it is reported as no history, which is a different claim.
+    """
+    if not value:
+        return None
+    text = str(value).strip().replace(" ", "T")
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        out = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if out.tzinfo is None:
+        out = out.replace(tzinfo=timezone.utc)
+    return out
+
+
+def first_seen_by_type(edges: list[dict]) -> dict[str, str]:
+    """The oldest ACTIVE edge's `created_at` per type — a type's first appearance.
+
+    Derived from the edges the report already loaded rather than persisted, so the
+    report gains no state and cannot disagree with the store about what exists. The
+    caveat is real and is owed a ruling (#1658): taken over ACTIVE edges it slides
+    later whenever the oldest edge expires, so a type kept alive by one short-lived
+    edge at a time holds its grace forever. The alternative — a persisted first-seen
+    in the `kg_health` snapshot series — is the design call this round must not make
+    silently, and it is named on the item.
+
+    Expired edges are excluded for the same reason the floor counts active edges
+    only: a type whose edges are all gone is not using the store, and its
+    first-appearance is not a fact about the current graph.
+    """
+    out: dict[str, str] = {}
+    for edge in edges:
+        if not is_edge_active(edge) or not edge.get("created_at"):
+            continue
+        t = str(edge.get("type") or "unknown")
+        stamp = str(edge["created_at"])
+        known = out.get(t)
+        if known is None or stamp < known:
+            out[t] = stamp
+    return out
+
+
+def previous_dated_share(now: datetime | None = None,
+                         metrics_dir: Path | None = None) -> dict | None:
+    """The last night's dominant-type share, DAY-aligned, or None if none exists.
+
+    `{"date": "2026-09-27", "share": 0.698}` for the most recent snapshot whose
+    UTC date is strictly before `now`'s date, taking that date's LAST snapshot.
+
+    Day-aligned is not a detail. `kg_health` runs 3-5 times a day, and `mentions`
+    grew between CONSECUTIVE snapshots in every hour measured on 2026-09-27 (+149,
+    +152, +152, +84, +68): a snapshot-to-snapshot trend would report "rising" on
+    every single nightly run and FAIL nightly for the same reason the old 50% limit
+    did. Comparing only across a date boundary asks the question the ruling is about
+    — did the share come down overnight, against #74's ~2.5k-a-night retype.
+
+    Returns None when no snapshot in `EDGE_TYPE_SHARE_HISTORY_NIGHTS` carries a
+    readable date and `edges.by_type`, and the caller says so on the line rather
+    than defaulting the missing comparison to "not rising".
+    """
+    moment = now or datetime.now(timezone.utc)
+    root = metrics_dir or EDGE_TYPE_METRICS_DIR
+    if not root.exists():
+        return None
+    today = moment.astimezone(timezone.utc).date()
+    floor_date = today - timedelta(days=EDGE_TYPE_SHARE_HISTORY_NIGHTS)
+    best: tuple | None = None
+    for path in sorted(root.glob("kg-health-*.json")):
+        try:
+            snap = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        stamp = _parse_edge_ts(snap.get("captured_at")) or _parse_edge_ts(
+            path.stem.replace("kg-health-", "").replace("T", "T"))
+        if stamp is None:
+            continue
+        stamp = stamp.astimezone(timezone.utc)
+        by_type = ((snap.get("edges") or {}).get("by_type") or {})
+        total = sum(int(v) for v in by_type.values())
+        if not total:
+            continue
+        day = stamp.date()
+        if day >= today or day < floor_date:
+            continue
+        share = max(int(v) for v in by_type.values()) / total
+        key = (day, stamp)
+        if best is None or key > best[0]:
+            best = (key, {"date": day.isoformat(), "share": share})
+    return best[1] if best else None
+
+
+def edge_type_cardinality(type_dist: dict[str, int], *,
+                          first_seen: dict[str, str] | None = None,
+                          previous: dict | None = None,
+                          now: datetime | None = None) -> str:
+    """The `Edge-type cardinality: PASS|FAIL` verdict line (#546, softened by #1658).
+
+    Report output only, never an alarm: the store as measured holds a dominant
+    type and one-off types on most nights, and alarming on that pages about the
+    graph's shape rather than about the store being broken. The two conditions are
+    attributed separately on the FAIL line so a reader sees which one drifted.
+
+    #1658 changed what each condition is allowed to claim:
+
+    * The 5-use floor exempts a type for `EDGE_TYPE_GRACE_NIGHTS` from its first
+      appearance. It was punishing the thing it cannot distinguish — a legitimate
+      first use of a canonical type, written through `fact_relate`, which refuses a
+      type outside `EDGE_TYPES` — from a junk one-off. `first_seen` comes from
+      `first_seen_by_type`; pass nothing and nothing is in grace, which is what
+      every caller before #1658 effectively did.
+    * The share condition is a TREND, not a level: FAIL when the leader exceeds
+      `EDGE_TYPE_MAX_SHARE` or when it is higher than the previous night's
+      day-aligned share. A constant FAIL teaches nothing; a level that is falling
+      while the line says FAIL nightly trains the reader to skip the section.
+
+    The weakening is bounded on purpose (`EDGE_TYPE_MAX_SHARE` still catches a
+    runaway catch-all at 0.8 on its own, a rise still FAILs, and the measured
+    dominant type, share and active-edge total are printed on every PASS), and the
+    limit quoted in the text is the bound that can actually fail the line.
     """
     total = sum(type_dist.values())
     if not total:
         return "Edge-type cardinality: PASS — no active edges"
-    rare = sorted((t for t, n in type_dist.items() if n < EDGE_TYPE_MIN_USES),
-                  key=lambda t: (type_dist[t], t))
-    dominant = max(type_dist, key=lambda t: (type_dist[t], t))
-    share = type_dist[dominant] / total
-    # Name which condition failed the line (#1544 clause 4). The two conditions are
-    # independent drifts and the operands of both are always printed, so on a store
-    # whose `mentions` type holds 76.5% of active edges the line FAILs every night no
-    # matter what the rare-type column says — and on 2026-09-26 it read `types under 5
-    # uses: conflicts_with (1)` on a line already failing on share the night before
-    # with `types under 5 uses: none`. A reader then goes looking for the new thing in
-    # the wrong column, which is what made this item's ruling unanswerable from the
-    # report. Listing every failing condition, under-floor first, also stops a fix for
-    # one from hiding the other.
+    moment = now or datetime.now(timezone.utc)
+    moment = moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+    def _nights_old(name: str) -> float | None:
+        stamp = _parse_edge_ts((first_seen or {}).get(name))
+        if stamp is None:
+            return None
+        return (moment - stamp).total_seconds() / 86400.0
+
+    under = sorted(t for t, n in type_dist.items() if n < EDGE_TYPE_MIN_USES)
+    in_grace, below = [], []
+    for t in under:
+        old = _nights_old(t)
+        (in_grace if old is not None and 0 <= old < EDGE_TYPE_GRACE_NIGHTS
+         else below).append(t)
+
+    rare = ", ".join(f"{t} ({type_dist[t]})" for t in below) or "none"
+    dominant, top = max(type_dist.items(), key=lambda kv: kv[1])
+    share = top / total
+
     failing = []
-    if rare:
-        # Phrased away from the column above on purpose: `tests/test_knowledge_health_
-        # stale_facts.py:566` pins that `"uses ("` never appears unless `uses` is itself
-        # under the floor, and repeating the column's wording here would satisfy that
-        # assertion's negation with an attribution instead of a measurement.
-        failing.append("types below the "
-                       f"{EDGE_TYPE_MIN_USES}-use floor ("
-                       + ", ".join(f"{t} ({type_dist[t]})" for t in rare) + ")")
+    if below:
+        failing.append(f"types below the {EDGE_TYPE_MIN_USES}-use floor "
+                       f"({', '.join(f'{t} ({type_dist[t]})' for t in below)})")
+
+    # The trend bound needs `previous`; without it only the level can fail, and the
+    # line says the comparison was not available rather than implying it passed.
     if share > EDGE_TYPE_MAX_SHARE:
         failing.append(f"dominant type share ({dominant} {share:.1%} > "
                        f"{EDGE_TYPE_MAX_SHARE:.0%})")
+    elif previous and share > previous["share"]:
+        failing.append(f"dominant type share ({dominant} {share:.1%} > previous "
+                       f"night {previous['date']} {previous['share']:.1%})")
+
     verdict = "FAIL" if failing else "PASS"
-    rare_txt = (", ".join(f"{t} ({type_dist[t]})" for t in rare) if rare else "none")
-    return (f"Edge-type cardinality: {verdict} — types under {EDGE_TYPE_MIN_USES} uses: "
-            f"{rare_txt}; dominant type {dominant} is {share:.1%} of {total:,} active edges "
-            f"(limit {EDGE_TYPE_MAX_SHARE:.0%}) — conditions failing: "
-            f"{'; '.join(failing) if failing else 'none'}")
+    limit = f"ceiling {EDGE_TYPE_MAX_SHARE:.0%}"
+    if previous:
+        limit += f", previous night {previous['date']} {previous['share']:.1%}"
+    else:
+        limit += ", no previous night's share available"
+    grace = (f"; in grace (<{EDGE_TYPE_GRACE_NIGHTS} nights old): "
+             + ", ".join(f"{t} ({type_dist[t]})" for t in in_grace)) if in_grace else ""
+    return (f"Edge-type cardinality: {verdict} — types under {EDGE_TYPE_MIN_USES} "
+            f"uses: {rare}{grace}; dominant type {dominant} is {share:.1%} of "
+            f"{total:,} active edges ({limit}) — conditions failing: "
+            f"{', '.join(failing) or 'none'}\n")
 
 
 def _alarms(store_stats: dict | None, hygiene: dict, duplicate_id_files: int,
@@ -1028,7 +1201,15 @@ def main():
     # different measurements and the #499 trend is read from this one.
     print(f"  Exact-duplicate fact rows (facts_idx.text_hash): {_fact_duplicate_cell(fact_dups)}")
     print(f"  Files with duplicate fact IDs: {dup_id_files}")
-    print(f"  {edge_type_cardinality(rel_stats['type_distribution'])}")
+    # The same measurement twice, deliberately: this stdout line and the report's
+    # section are the two places a human reads the verdict, and they must not be
+    # computed from different inputs — the report's copy takes the grace and the
+    # trend, so a bare call here would print a second, stricter verdict on the run.
+    stdout_cardinality = edge_type_cardinality(
+        rel_stats["type_distribution"],
+        first_seen=first_seen_by_type(edges),
+        previous=previous_dated_share(now), now=now)
+    print(f"  {stdout_cardinality}")
     print(f"  Reflection copies named but missing: {len(gaps)}")
     pv = hygiene.get("provenance") or {}
     if "both_pct" in pv:
