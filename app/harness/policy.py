@@ -846,6 +846,52 @@ def _explain_missing(scope: str, tool: str, rows: Iterable[dict],
     return ""
 
 
+def _explain_shadow(*, scope: str, tool: str, bounded: list[dict],
+                    broad: list[dict], args: dict) -> str:
+    """Why a live predicate-less grant did not pay for this call (#1636).
+
+    Under most-specific-wins a predicate-bearing grant for the same (scope,
+    tool) makes its predicate the governing condition for that pair, so a call
+    the predicate refuses is denied while the broad grant is still live. Read
+    straight off `_explain_missing` that denial says "no grant", which is both
+    untrue and an instruction to mint the broader row that is already standing
+    there — so this names the bounded row, its predicate, and the row it
+    shadows. Whoever has to decide then edits the bounded grant or revokes it,
+    which is the visible act the design asks for.
+
+    Both lists hold only live, unexpired, destination-less rows for this pair,
+    because `check_grants` builds them from `store.live()`; the only reasons a
+    bounded row there did not pay are a predicate this call does not satisfy and
+    a spent quota, and both are said here.
+    """
+    bits = []
+    for row in bounded:
+        predicate = str(row.get("arg_predicate") or "").strip()
+        quota, consumed = row.get("quota"), row.get("consumed") or 0
+        if quota is not None and consumed >= quota:
+            refused = f"is over quota ({consumed}/{quota})"
+        elif not predicate_matches(predicate, args):
+            refused = "does not match this call"
+        else:
+            continue
+        # The predicate travels with the row in both branches: whoever reads
+        # this has to know what the bound is to change it, and a quota line
+        # alone makes them go look the row up.
+        bits.append(f"#{row['id']} predicate={predicate!r} {refused}")
+    if not bits:
+        # Every bounded row could have paid and none did — a state the match
+        # loop cannot reach. Say nothing and let the caller keep its own
+        # explanation rather than assert a reason that is not true.
+        return ""
+    broad_ids = ", ".join(f"#{row['id']}" for row in broad)
+    return (f"the bounded grant(s) for '{tool}' in scope '{scope}' "
+            f"[{'; '.join(bits)}] shadow the predicate-less grant(s) "
+            f"{broad_ids} for the same scope and tool: the predicate governs "
+            f"the pair, so a grant with no predicate cannot pay for a call it "
+            f"refuses. Widen or revoke the bounded grant to restore that — "
+            f"minting another predicate-less row leaves the shadow standing.")
+
+
 def _decide_destination(store: GrantStore, *, scope: str, tool: str,
                         live: list[dict], destination: Any,
                         at: dt.datetime, now: dt.datetime | None,
@@ -913,6 +959,13 @@ def check_grants(store: GrantStore, *, scope: str, tool_name: Any,
     An allowed call consumes one unit of quota, so a grant bounds volume as
     well as reach.
 
+    Resolution among several live grants for one (scope, tool) pair is
+    most-specific-wins (#1636): the rows carrying an argument predicate govern
+    the pair, and a predicate-less row for that pair cannot pay for a call they
+    refuse. A pair holding no predicate is answered exactly as it always was.
+    The rule is per (scope, tool) and per axis — see the `bounded`/`broad`
+    split in the match loop.
+
     `destination` (#628) is the host a network call is about to contact. It is
     the one input that defeats the tier-1 early return, and deliberately so:
     the egress tools are tier 1 by the ladder's own definition (reading a page
@@ -962,19 +1015,46 @@ def check_grants(store: GrantStore, *, scope: str, tool_name: Any,
                                    destination=destination, at=at, now=now,
                                    record=record)
 
+    # Candidates for this (scope, tool), off #628's destination axis. A grant
+    # minted *for a destination* is not a licence for every other tier-2 call
+    # that tool can make — `email_send` to api.example.com does not authorize a
+    # vault write under the same tool pattern — and by the same token it is not
+    # a narrowing of them either, so a destination row neither pays here nor
+    # shadows anything: those rows are answered by `_decide_destination`.
+    eligible = [row for row in live
+                if row["tool_pattern"] == tool
+                and not str(row.get("destination") or "").strip()]
+    bounded: list[dict] = []
+    broad: list[dict] = []
+    for row in eligible:
+        target = bounded if str(row.get("arg_predicate") or "").strip() else broad
+        target.append(row)
+
+    # #1636 — most-specific-wins. `mint()` puts no uniqueness on the (scope,
+    # tool) pair and `sync_task_grants` matches on (scope, tool, predicate), so
+    # a pair can hold several rows; before this rule resolution was first-match
+    # in `live()`'s `ORDER BY expires_at ASC`, which meant a predicate could
+    # never narrow a capability — the loop simply fell through the mismatch to
+    # the predicate-less row, and which quota an in-bounds call consumed was
+    # decided by expiry date rather than by specificity. So the predicate-
+    # bearing rows for a pair govern it: they are what the human minted to
+    # bound the tool, and a call they refuse is denied even while the broad
+    # grant is live. A pair holding no predicate pays as it always has.
+    #
+    # Quota does not lift a shadow. A bounded row that is spent cannot pay, but
+    # it still stands, and handing the pair back to the broad grant at that
+    # moment would let *spending a quota widen a capability* — the opposite of
+    # what a bounded grant is for. A human who wants the broad capability back
+    # revokes or edits the bounded row, which is the visible act.
+    #
+    # Among several bounded rows for one pair the existing tie-break is kept:
+    # first row in expiry order whose predicate the call satisfies.
     match = None
-    for row in live:
-        if row["tool_pattern"] != tool:
-            continue
+    for row in (bounded or broad):
         quota, consumed = row.get("quota"), row.get("consumed") or 0
         if quota is not None and consumed >= quota:
             continue
         if not predicate_matches(row.get("arg_predicate") or "", args):
-            continue
-        # A grant minted *for a destination* is not a licence for every other
-        # tier-2 call that tool can make: `email_send` to api.example.com does
-        # not authorize a vault write under the same tool pattern.
-        if str(row.get("destination") or "").strip():
             continue
         match = row
         break
@@ -989,6 +1069,12 @@ def check_grants(store: GrantStore, *, scope: str, tool_name: Any,
     why = _explain_missing(scope, tool,
                            store.candidates(scope=scope, tool=tool, now=at), at,
                            destination=destination)
+    if bounded and broad:
+        # The pair does hold a live grant, so "no grant" would be untrue, and
+        # the mintable row appended below would be an invitation to mint past
+        # the narrowing somebody already asked for. Name the row that refused.
+        why = _explain_shadow(scope=scope, tool=tool, bounded=bounded,
+                              broad=broad, args=args) or why
     reason = (f"grant: {'no grant' if not why else why} — '{tool}' is a "
               f"tier-{tier} (hard-to-reverse) action and scope '{scope}' is "
               f"unattended.")
