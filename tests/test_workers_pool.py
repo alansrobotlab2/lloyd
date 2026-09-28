@@ -1230,3 +1230,75 @@ async def test_the_watch_is_silent_on_a_re_armed_or_disabled_source(q, monkeypat
     q.wm_set("s", dispatch_watch.OK_WM_KEY, datetime.now(timezone.utc).isoformat())
     assert len(live.tick()) == 1
     assert [s[2] for s in said] == ["warn", "info"], said
+
+
+# ---------------------------------------------------------------------------
+# #1606 — the summary is cut on a word, and says so
+# ---------------------------------------------------------------------------
+#
+# `runs.summary` is 500 characters wide and every reader of a run — the
+# dashboard cell, the fleet-watchdog alert, the `grep` over a day of rows — reads
+# that string alone. The cap was a byte slice, so 77 of board-steward's 154 rows
+# sit at exactly 500 characters and 63 of them stop inside a word — one ends
+# "…remain under guardian observati". The reader cannot tell a truncated record
+# from a complete one, and neither could the source. `"word "` is 5 characters,
+# so a blind `[:497]` lands on the 'r' of a word, which is what the assertions
+# below catch.
+
+
+def test_a_summary_that_fits_is_stored_exactly_as_the_source_wrote_it():
+    from workers.queue import SUMMARY_MARKER, SUMMARY_MAX_CHARS
+
+    fits = "wrote the note; 3 claims checked"
+    assert normalize_result(_item(), {"summary": fits})["summary"] == fits
+
+    # Exactly 500 characters still "fits": the boundary is `<=`, not `<`. A cap
+    # that fires at `>=` would append a marker to a record with nothing missing,
+    # and the marker would stop meaning anything.
+    exact = "word " * (SUMMARY_MAX_CHARS // 5)
+    assert len(exact) == SUMMARY_MAX_CHARS
+    stored = normalize_result(_item(), {"summary": exact})["summary"]
+    assert stored == exact, "a full-width summary must not be told it overflowed"
+    assert not stored.endswith(SUMMARY_MARKER)
+
+
+def test_a_summary_over_the_cap_is_cut_at_a_word_boundary_and_marked():
+    from workers.queue import SUMMARY_MARKER, SUMMARY_MAX_CHARS
+
+    text = "word " * 180                       # 900 characters, all whole words
+    stored = normalize_result(_item(), {"summary": text})["summary"]
+
+    assert stored.endswith(SUMMARY_MARKER), "a truncated record must say so"
+    kept = stored[:-len(SUMMARY_MARKER)]
+    assert len(stored) <= SUMMARY_MAX_CHARS, "the marker counts against the cap"
+    assert text.startswith(kept)
+    assert kept and text[len(kept)].isspace(), \
+        f"cut landed inside a word: ...{kept[-8:]!r}"
+    # 5-character words, so a prefix ending on a whole word is 5n-1 characters:
+    # an arithmetic statement of "word boundary" that a byte slice cannot satisfy
+    # (497 and 500 are both ≡ 2 mod 5).
+    assert len(kept) % 5 == 4
+    # The two byte slices this replaces, named rather than implied: neither the
+    # raw cap nor the cap minus the marker is what a word-boundary cut produces.
+    assert kept != text[:SUMMARY_MAX_CHARS]
+    assert kept != text[:SUMMARY_MAX_CHARS - len(SUMMARY_MARKER)]
+
+
+def test_a_900_character_wordy_summary_records_complete_words_plus_the_marker():
+    """Clause 2 of #1606, at the width the clause names.
+
+    900 characters of space-separated words must come back as at most 500
+    characters whose last real word is complete, marker included — the record a
+    person can quote without inventing the rest of a word.
+    """
+    from workers.queue import SUMMARY_MARKER, SUMMARY_MAX_CHARS
+
+    stored = normalize_result(_item(), {"summary": "word " * 180})["summary"]
+
+    assert len(stored) <= SUMMARY_MAX_CHARS
+    assert stored.endswith(SUMMARY_MARKER)
+    kept = stored[:-len(SUMMARY_MARKER)]
+    assert kept.endswith("word"), f"final token is not a complete word: {kept[-10:]!r}"
+    # Truncation is a length rule, not an excuse to drop most of the record: a
+    # cut that kept 60 characters would satisfy "≤ 500" just as well.
+    assert len(kept) > SUMMARY_MAX_CHARS - 20, "threw away more than the marker needed"

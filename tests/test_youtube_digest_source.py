@@ -794,3 +794,105 @@ async def test_a_missing_skill_fails_the_run_before_the_session(tmp_path, backlo
     assert result["status"] == "failed"
     assert Y.SKILL in result["summary"], f"failure must name the skill: {result['summary']}"
     assert result["meta"].get("skill_missing") is True
+
+
+# ---------------------------------------------------------------------------
+# #1606 — a failure summary is one line
+# ---------------------------------------------------------------------------
+#
+# youtube-digest is the source that pastes a fetched script's stderr into its
+# summary verbatim. All 6 of its 500-character rows in `runs` are
+# `status='failed'`, and all 6 carry 6 newlines — 7 physical lines in a column
+# every reader renders as one record ("ai-engineer g0vqT_wZtXA: Could not fetch transcript:
+# Primary: Traceback (most recent call last):\n  File "<string>", line 5, in
+# <module>…"), split three each across two videos of the same channel. A
+# word-boundary cut at the cap would not have touched those, which is why the
+# source now collapses its own whitespace and leaves the length to
+# `queue._insert_run`.
+
+
+async def test_a_traceback_failure_is_recorded_as_one_line_naming_the_video(backlog,
+                                                                             tmp_path,
+                                                                             monkeypatch):
+    """Clause 5 of #1606, through `execute` — not through the helper doing it.
+
+    The fetch script reports the upstream exception as its stderr, verbatim and
+    multi-line, and the site was `f"{channel} {video_id}: {why}"[:500]`: a slice
+    that flattened nothing, so the traceback's own layout went into the row.
+    """
+    from workers.pool import normalize_result
+    from workers.queue import SUMMARY_MAX_CHARS
+
+    traceback_ = (
+        'Could not fetch transcript: Primary: Traceback (most recent call last):\n'
+        '  File "<string>", line 5, in <module>\n'
+        '    print(get_transcript(sys.argv[1]))\n'
+        '  File "/home/alansrobotlab/.venvs/ytdlp/lib/python3.12/site-packages/'
+        'youtube_transcript_api/_api.py", line 72, in list\n'
+        '    return self.list(language_codes=language_codes)\n'
+        'TranscriptsDisabled: \n'
+        'could not retrieve a transcript for the video\n'
+        'please ask the author to fix this'
+    )
+    # Six newlines is what the stored rows hold — 7 physical lines at exactly 500
+    # characters, the seventh cut off by the cap — and the raw stderr the script
+    # returns is longer still, which is why the fixture carries this many.
+    assert traceback_.count("\n") == 7, "the fixture must really be multi-line"
+
+    script = _Script({"ok": False, "error": traceback_})
+    monkeypatch.setattr(Y, "_script", script)
+
+    item = _item({"channel": "ai-engineer", "video_id": "g0vqT_wZtXA"})
+    result = await Y.execute(item)
+    assert result["status"] == "failed", \
+        f"a failed fetch must fail closed, got {result['status']}"
+
+    # What the source hands the pool, and what the pool stores, both one line.
+    assert "\n" not in result["summary"], f"multi-line left the source: {result['summary']!r}"
+    stored = normalize_result(_item({"channel": "ai-engineer",
+                                        "video_id": "g0vqT_wZtXA"}),
+                          result)["summary"]
+    assert "\n" not in stored
+    assert len(stored) <= SUMMARY_MAX_CHARS
+    assert "ai-engineer" in stored and "g0vqT_wZtXA" in stored, \
+        "a one-line summary that does not say which video is a worse record: " + stored
+    assert "Could not fetch transcript" in stored and "TranscriptsDisabled" in stored, \
+        "flattening the layout must keep the reason: " + stored
+    assert "  " not in stored, f"traceback indentation survived: {stored!r}"
+
+
+async def test_a_missing_skill_protocol_failure_is_one_line_too(backlog, tmp_path,
+                                                                monkeypatch):
+    """The second failure site, reached through the transcript-fetch branch.
+
+    `SkillProtocolMissing` is raised with a message the code itself writes over
+    several lines, so this is not an upstream string the source could not predict:
+    the site was `f"{channel} {video_id}: {exc}"[:500]` and stored the newlines.
+    """
+    from workers.pool import normalize_result
+
+    meta = _meta(tmp_path)
+    script = _Script({"ok": True, "meta": meta, "transcript": "word " * 900,
+                      "subs_lang": "en", "subs_kind": "asr", "duration": "12:34",
+                      "title": "What is LLM"})
+    monkeypatch.setattr(Y, "_script", script)
+
+    def explode(meta_arg, tracked, **kw):
+        raise Y.SkillProtocolMissing(
+            "youtube-digest: the worker protocol is missing\n"
+            "  the skill is at ~/obsidian/skills/youtube-digest/SKILL.md\n"
+            "  and it is empty"
+        )
+
+    monkeypatch.setattr(Y, "build_prompt", explode)
+
+    result = await Y.execute(_item({"channel": "ai-engineer", "video_id": "abc123"}))
+    assert result["status"] == "failed"
+    assert result["meta"].get("skill_missing") is True
+
+    stored = normalize_result(_item({"channel": "ai-engineer", "video_id": "abc123"}),
+                              result)["summary"]
+    assert "\n" not in stored, f"a source-written newline reached the row: {stored!r}"
+    assert "ai-engineer" in stored and "abc123" in stored
+    assert "protocol is missing" in stored
+    assert "  " not in stored

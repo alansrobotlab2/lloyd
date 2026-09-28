@@ -677,6 +677,28 @@ def _eval_record(parsed: Optional[dict], session_id: str) -> dict:
     }
 
 
+def _one_line(value: Any) -> str:
+    """Collapse a value that may span lines into the one line a summary is.
+
+    A failed fetch hands this source the fetch script's whole stderr, and every
+    one of the six youtube-digest rows that hit the 500-character cap is exactly that: `ai-engineer g0vqT_wZtXA: Could not fetch
+    transcript: Primary: Traceback (most recent call last):\\n  File "<string>",
+    line 5…` — a stored run record that is seven physical lines, which no dashboard
+    cell, fleet alert, or one-line-per-run `grep` renders as one record.
+    The informative clause is already at the head ("Could not fetch
+    transcript"), so this keeps the words and drops the layout: every run of
+    whitespace, newline included, becomes one space.
+
+    Deliberately applied here, by the source that phrases the summary, and not
+    inside `queue._insert_run`. Length is the column's business and belongs at
+    the insert; which words a source chooses, and whether it says them over one
+    line, is the source's. Flattening at the insert would silently rewrite
+    another source's summary too, and a source that wants a multi-line record
+    should have to ask for it.
+    """
+    return " ".join(str(value).split())
+
+
 async def _fail(channel: str, video_id: str, why: str) -> None:
     try:
         await _script(channel, f"--fail={video_id}", f"--reason={why[:400]}", timeout=60)
@@ -712,11 +734,12 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                                 timeout=float(src_cfg.get("fetch_timeout_seconds", 420)))
     except ScriptError as exc:
         await _fail(channel, video_id, f"fetch crashed: {exc}")
-        return {"status": "failed", "summary": f"{channel} {video_id}: fetch crashed: {exc}"[:500],
+        return {"status": "failed",
+                "summary": f"{channel} {video_id}: fetch crashed: {_one_line(exc)}",
                 "meta": {**base_meta, "fetch_crashed": True}}
     if not fetched.get("ok"):
         why = str(fetched.get("error") or "fetch failed")
-        return {"status": "failed", "summary": f"{channel} {video_id}: {why}"[:500],
+        return {"status": "failed", "summary": f"{channel} {video_id}: {_one_line(why)}",
                 "meta": {**base_meta, "fetch_error": why,
                          "failure_count": fetched.get("failure_count")}}
     meta = fetched["meta"]
@@ -734,7 +757,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         # `seen.json`, because this is the deploy's fault and not the video's,
         # and the entry is offered again once the skill is back.
         logger.error("youtube-digest: %s", exc)
-        return {"status": "failed", "summary": f"{channel} {video_id}: {exc}"[:500],
+        return {"status": "failed", "summary": f"{channel} {video_id}: {_one_line(exc)}",
                 "meta": {**base_meta, "skill_missing": True}}
     vault_before = await asyncio.to_thread(_vault_dirty_paths)
     want_structured = bool(payload.get("structured_verdict", True))
@@ -753,11 +776,11 @@ async def execute(item: QueueItem) -> dict[str, Any]:
             ))
     except DrainActive as exc:
         # Not the video's fault: the entry stays `fetched` and is re-offered.
-        return {"status": "skipped", "summary": f"landing in progress: {exc}"[:500],
+        return {"status": "skipped", "summary": f"landing in progress: {_one_line(exc)}",
                 "meta": {**base_meta, "drain_active": True}}
     except TurnTimeout as exc:
         await _fail(channel, video_id, f"turn timeout: {exc}")
-        return {"status": "failed", "summary": f"{channel} {video_id}: {exc}"[:500],
+        return {"status": "failed", "summary": f"{channel} {video_id}: {_one_line(exc)}",
                 "meta": {**base_meta, "turn_timeout": True}}
 
     session_id = run.get("session_id")
@@ -797,7 +820,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         why = f"turn produced nothing ({'; '.join(errs) or 'no error reported'})"
         logger.warning("youtube-digest: %s %s: %s — left fetched, retried in %ds",
                        channel, video_id, why, INFRA_DEFER_SECONDS)
-        return {"status": "failed", "summary": f"{channel} {video_id}: {why}"[:500],
+        return {"status": "failed", "summary": f"{channel} {video_id}: {_one_line(why)}",
                 "defer_seconds": INFRA_DEFER_SECONDS,
                 "meta": {**base_meta, "session_id": session_id, "infra": True,
                          "empty_response": True, "unexpected_vault_writes": unexpected}}
@@ -824,7 +847,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         what = "without a note" if not on_disk else "without a RESULT block over a pre-existing note"
         why = f"turn ended ({stop_reason}, {run.get('num_turns')} iterations) {what} at {note_path.name}"
         await _fail(channel, video_id, why)
-        return {"status": "failed", "summary": f"{channel} {video_id}: {why}"[:500],
+        return {"status": "failed", "summary": f"{channel} {video_id}: {_one_line(why)}",
                 "response": text,
                 "meta": {**base_meta, "session_id": session_id,
                          "stop_reason": stop_reason,
@@ -868,7 +891,10 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         bits.append(f"{len(unexpected)} unexpected vault write(s)")
     return {
         "status": "success",
-        "summary": ", ".join(bits)[:500],
+        # A video title is model-supplied metadata and can carry a newline, and
+        # no source-side `[:500]` survives in this file: `queue._insert_run`
+        # owns the length, on a word boundary, with the marker.
+        "summary": _one_line(", ".join(bits)),
         "artifact_path": str(note_path),
         "response": text,
         "meta": {**base_meta, "session_id": session_id, "note": str(note_path),

@@ -562,11 +562,22 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                     "agreement": agree, "applied": applied, "board_health": health,
                     "session_id": run.get("session_id"), "summary": parsed["summary"]})
     verb = "applied" if apply else "proposed (dry run)"
+    # The steward's own sentence leads, and the counts follow it (#1606). This
+    # string is capped at 500 characters on its way into `runs.summary`, the
+    # sentence is up to 400 of them (`parse_steward`) and the counts are ~110,
+    # so half of all ticks overflow — and what fell off the end was the tail of
+    # the board state, the only outcome in the record: 77 of the 154
+    # board-steward rows stop at exactly 500 characters, 63 of them mid-word
+    # ("…remain under guardian observati"). The counts are the corroborating
+    # detail and the machine-derived half; read the judgment first and let the
+    # counts be the part that truncates.
+    counts = (f"{len(parsed['moves'])} move(s) {verb}, agreement "
+              f"{agree['rate']:.0%} ({len(agree['agree'])} agree, "
+              f"{len(agree['disagree'])} disagree, {len(agree['no_opinion'])} "
+              f"where the machine abstains, {len(agree['missed'])} missed); "
+              f"next pick #{parsed['next_pick'] or '—'}")
     return {"status": "success",
-            "summary": (f"{len(parsed['moves'])} move(s) {verb}, agreement "
-                        f"{agree['rate']:.0%} ({len(agree['agree'])} agree, "
-                        f"{len(agree['disagree'])} disagree, {len(agree['no_opinion'])} "
-                        f"where the machine abstains, {len(agree['missed'])} missed); "
-                        f"next pick #{parsed['next_pick'] or '—'}: {parsed['summary']}"),
+            "summary": (f"{parsed['summary']} — {counts}"
+                        if parsed["summary"] else counts),
             "meta": {"session_id": run.get("session_id"), "agreement": agree}}
 

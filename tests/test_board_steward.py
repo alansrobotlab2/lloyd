@@ -449,3 +449,62 @@ def test_the_steward_is_told_a_met_landing_closes_carrying_needs_human(board):
     assert "done" not in W.STEWARD_STATUSES
     assert W.parse_steward({"moves": [{"item_id": 4, "status": "done", "tags_add": [],
                                        "tags_remove": [], "note": "x"}]})["moves"] == []
+
+
+def test_the_summary_leads_with_the_steward_s_judgment_not_the_counts(board, monkeypatch):
+    """Clause 4 of #1606: the outcome has to survive the 500-character column.
+
+    The record used to read
+    `0 move(s) proposed (dry run), agreement 100% (0 agree, …, 0 missed); next
+    pick #1596: <the board state>` — ~110 characters of machine-derived counts
+    in front of the one sentence only the steward wrote. `parse_steward` allows
+    that sentence 400 characters and the counts take ~110, so the record overflows
+    on a good day, and what falls off the end is the tail of the judgment: 77 of
+    the 154 board-steward rows in `runs` are exactly 500 characters and 63 of them
+    are cut mid-word ("…guardian observati"). Leading with the counts therefore
+    deleted the only outcome in the row and kept the boilerplate that explains it.
+    """
+    import asyncio
+
+    from workers.pool import normalize_result
+    from workers.queue import SUMMARY_MARKER, SUMMARY_MAX_CHARS
+    from workers.sources import _common as C
+
+    _ten_item_board(board)
+    judgment = "Net flow 24 h is +43, " * 18            # 396 characters, under the 400 cap
+    assert len(judgment) < 400, "parse_steward caps the sentence at 400"
+
+    async def turn(prompt, **kw):
+        return {"text": "", "session_id": "s", "stop_reason": "stop", "num_turns": 1,
+                "structured": {"moves": [], "next_pick": 0, "next_pick_reason": "",
+                               "summary": judgment}}
+
+    monkeypatch.setattr(C, "run_prompt_in_session", turn)
+    out = asyncio.run(W.execute(SimpleNamespace(payload={"apply": False})))
+    assert out["status"] == "success"
+
+    # The steward's sentence is first, and the counts follow it.
+    assert out["summary"].startswith(judgment), \
+        f"the judgment is not at the head: {out['summary'][:60]!r}"
+    assert out["summary"].index("move(s)") > len(judgment)
+    assert out["summary"].index("agreement") > out["summary"].index("move(s)")
+
+    # And through the cap the column applies, the judgment is still whole and
+    # the counts are the part that got cut — which is the whole point of the
+    # reordering, and the half that a source-side assertion cannot see.
+    recorded = normalize_result(_run_item(), out)["summary"]
+    assert len(recorded) <= SUMMARY_MAX_CHARS
+    assert recorded.endswith(SUMMARY_MARKER), "this record is long enough to truncate"
+    assert recorded.startswith(judgment), "the outcome did not survive the cap"
+    assert recorded.index(SUMMARY_MARKER) > len(judgment) + len(" — 0 move(s)")
+    assert "move(s)" in recorded, "the counts were dropped instead of the overflow"
+
+
+def _run_item():
+    """A stand-in queue item for the pool's normaliser.
+
+    `_item` above is this module's backlog-item factory and takes an id, so the
+    run-record helper has its own name. `normalize_result` reads `source` for the
+    declined marker and `payload` for the task id.
+    """
+    return SimpleNamespace(source=W.NAME, payload={})

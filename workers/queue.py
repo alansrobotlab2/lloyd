@@ -170,6 +170,57 @@ def _iso_or_none(raw: Any) -> Optional[datetime]:
     return parsed
 
 
+#: Width of the `runs.summary` column's contract (#642 follow-up, #1606).
+SUMMARY_MAX_CHARS = 500
+#: What a summary that had to be shortened says about it. ASCII so the marker
+#: is one byte per character in a TEXT column SQLite matched byte-wise by the
+#: audit query (`length(summary)=500`), and never a word character, so a
+#: truncated record is distinguishable from a complete one by its last byte.
+SUMMARY_MARKER = "..."
+
+
+def shorten_summary(text: str, limit: int = SUMMARY_MAX_CHARS) -> str:
+    """Fit a run-record summary into `limit` characters, on a word boundary.
+
+    A summary that already fits comes back byte-identical, with no marker: a
+    record that says "..." when nothing was dropped teaches the reader to
+    distrust the marker, and the point of the marker is that a summary ending
+    in it is known-incomplete rather than suspicious.
+
+    A summary that does not fit is cut at the last word boundary that fits
+    inside `limit - len(SUMMARY_MARKER)`, and the marker is appended, so the
+    result is always no longer than `limit` and always ends on a whole word.
+    The blind `text[:500]` this replaces cut mid-token on a trailing partial
+    word — 77 of board-steward's 154 rows in `runs` land exactly at 500
+    characters and 63 of those end where the words ran out, not where a reader
+    can tell the sentence stopped ("…remain under guardian observati").
+
+    When the first word alone is longer than the room (a single 900-character
+    token, a path, a base64 blob) there is no boundary to cut at, and the only
+    honest options are a mid-word cut with a marker or an empty record. It
+    takes the mid-word cut: the marker still says content followed, and a
+    reader who sees 497 characters of a hash plus "..." is not misled.
+    """
+    if len(text) <= limit:
+        return text
+    room = max(1, limit - len(SUMMARY_MARKER))
+    end = room
+    # `text[end]` is the first character that does not fit. If it is not
+    # whitespace, the word containing it is only partly inside the window, and
+    # the window's last word is therefore a fragment — back off to the start of
+    # it so what remains is a sequence of complete words.
+    if not text[end].isspace():
+        while end > 0 and not text[end - 1].isspace():
+            end -= 1
+    kept = text[:end].rstrip()
+    if not kept:
+        # No boundary in reach: keep the characters we have rather than an
+        # empty record, which would read as "the run said nothing".
+        kept = text[:room].rstrip()
+        return kept + SUMMARY_MARKER if kept else text[:limit]
+    return kept + SUMMARY_MARKER
+
+
 # The one INSERT for the `runs` table. `record_run` and the crash-recovery sweep
 # both write run rows, and the column list drifts (it gained `meta_json`, then
 # `claims_json`, by ALTER TABLE): two copies of it is how one of them stops
@@ -189,6 +240,16 @@ def _insert_run(conn: sqlite3.Connection, *, run_id: str, queue_id: Optional[int
                 meta_json: str = "", claims_json: str = "") -> None:
     """Insert one run row on `conn`, without committing.
 
+    `summary` goes through `shorten_summary`, not a slice: this is the one place
+    every run row's summary is written — `record_run`, the caller that already
+    normalised through `pool.normalize_result`, and the crash-recovery sweep that
+    never passed through it — so the column's shape (≤ 500 characters, and no
+    word cut in half) is guaranteed here whatever a source or the pool hands in.
+    A source that caps its own string first defeats that: a blind `[:500]`
+    upstream arrives already 500 long and already split mid-word, and a cap that
+    cannot see the difference stores it. Sources therefore hand back the whole
+    sentence and let this insert own the length.
+
     No commit here on purpose: the crash-recovery sweep writes its rows inside
     the same transaction as the queue UPDATE that reclaims them, so a sweep
     cannot be half-applied — a run recorded while its queue row is still
@@ -200,7 +261,7 @@ def _insert_run(conn: sqlite3.Connection, *, run_id: str, queue_id: Optional[int
         (
             run_id, queue_id, source, task_id, status,
             started_at, completed_at, float(duration_seconds),
-            summary[:500], artifact_path, response_json[:50000],
+            shorten_summary(summary), artifact_path, response_json[:50000],
             meta_json[:20000] if meta_json else None,
             claims_json[:20000] if claims_json else None,
         ),

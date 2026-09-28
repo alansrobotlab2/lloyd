@@ -327,7 +327,11 @@ over 7 d). Its successful ticks report `0 move(s) proposed, agreement 100% (0
 agree, 0 disagree, 0 missed)` — a `rate` of 1.0 computed over zero judged
 decisions, which is the failure mode `config.yaml` itself warns of above the
 flip — and 17 of the 136 failed with `finalizer failed: output truncated at
-8192 tokens`, so a twelfth of the ticks do not even write their row. Until a
+8192 tokens`, so a twelfth of the ticks do not even write their row. (Since #1606
+a tick's record opens with the steward's own sentence and these counts follow
+it, because the counts took ~110 of the summary's 500 characters and the
+sentence up to 400, so half of all ticks lost the tail of their board state to
+the cap. What the counts *say* is unchanged; only their position is.) Until a
 tick proposes a move it disagrees about, `apply` has nothing to be flipped on
 the strength of.
 

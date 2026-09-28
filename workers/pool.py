@@ -29,7 +29,8 @@ from app.harness.policy import current_effect_scope, current_scope
 from app.sessions_io import current_run_sessions
 from workers.dispatch_watch import OK_WM_KEY
 from workers.evidence import gaps_key, verify_bundle
-from workers.queue import WorkQueue, QueueItem, get_queue, new_run_id
+from workers.queue import (WorkQueue, QueueItem, get_queue, new_run_id,
+                           shorten_summary)
 
 logger = logging.getLogger("lloyd-workers.pool")
 
@@ -250,7 +251,13 @@ def normalize_result(item: QueueItem, result: Any) -> dict[str, Any]:
 
     return {
         "status": status,
-        "summary": summary[:500],
+        # Word-boundary, not a slice (#1606). This is the value a reader of the
+        # dashboard, the fleet alert and the runs table actually sees, and a
+        # blind `[:500]` was cutting it in the middle of a word with nothing to
+        # say the sentence continued. `queue._insert_run` applies the same
+        # function again, which is a no-op on anything already inside the cap —
+        # the two are one rule, applied at the two boundaries a summary crosses.
+        "summary": shorten_summary(summary),
         "artifact_path": str(result.get("artifact_path") or ""),
         "response": str(result.get("response") or "")[:50000],
         "task_id": _task_id_of(item, result),
@@ -1302,7 +1309,14 @@ class WorkerPool:
                         started_at=started_at_iso,
                         completed_at=completed_at,
                         duration_seconds=duration,
-                        summary=error_msg[:500],
+                        # No `[:500]` here: `record_run` → `_insert_run` shortens
+                        # it on a word boundary with the marker, and a blind cut
+                        # at this call site would hand that insert an
+                        # already-truncated string it cannot tell from a whole
+                        # one. An exception message can run past 500 characters
+                        # (a chained `repr`, a long path), and this is the run
+                        # record a person reads after a timeout.
+                        summary=error_msg,
                         task_id=_task_id_of(item),
                         # A timed-out run is the one most worth reading, so
                         # its transcript is named here too — not only on the
@@ -1337,7 +1351,14 @@ class WorkerPool:
                         started_at=started_at_iso,
                         completed_at=completed_at,
                         duration_seconds=duration,
-                        summary=error_msg[:500],
+                        # No `[:500]` here: `record_run` → `_insert_run` shortens
+                        # it on a word boundary with the marker, and a blind cut
+                        # at this call site would hand that insert an
+                        # already-truncated string it cannot tell from a whole
+                        # one. An exception message can run past 500 characters
+                        # (a chained `repr`, a long path), and this is the run
+                        # record a person reads after a timeout.
+                        summary=error_msg,
                         task_id=_task_id_of(item),
                         meta_json=json.dumps({
                             "exception": type(e).__name__,

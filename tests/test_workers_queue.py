@@ -1386,3 +1386,58 @@ def test_mark_running_with_no_id_clears_a_stamp_the_claim_left_behind(q):
         left = conn.execute("SELECT current_run_id FROM queue WHERE id=?",
                             (item.id,)).fetchone()[0]
     assert left is None, "a no-id transition kept a stamp the next sweep would use"
+
+
+def test_a_run_row_cannot_end_mid_word(q):
+    """Clause 3 of #1606: the insert, not the caller, owns the column's shape.
+
+    `record_run` is the path every writer takes — the pool after
+    `normalize_result`, the crash-recovery sweep that never passes through it,
+    and a caller that capped its own string and arrived already 500 long. The
+    blind `summary[:500]` this replaces was a byte slice at the last boundary,
+    so it stored `'…and the bu'` as if it were a whole thought.
+    """
+    from workers.queue import SUMMARY_MARKER, SUMMARY_MAX_CHARS
+
+    text = "word " * 240                       # 1,200 characters of whole words
+    q.record_run(run_id=new_run_id("s"), queue_id=None, source="s", status="success",
+                 started_at="a", completed_at="b", duration_seconds=1.0, summary=text)
+    stored = q.list_runs(source="s")[0]["summary"]
+
+    assert len(stored) <= SUMMARY_MAX_CHARS
+    assert stored.endswith(SUMMARY_MARKER), "the row gives no hint it is incomplete"
+    kept = stored[:-len(SUMMARY_MARKER)]
+    assert text.startswith(kept) and text[len(kept)].isspace(), \
+        f"row ends inside a word: ...{kept[-8:]!r}"
+    assert len(kept) % 5 == 4                  # whole 5-character words only
+
+
+def test_a_run_row_that_fits_carries_no_marker(q):
+    """The other half of the column's contract: an untouchable record."""
+    from workers.queue import SUMMARY_MARKER
+
+    q.record_run(run_id=new_run_id("s"), queue_id=None, source="s", status="success",
+                 started_at="a", completed_at="b", duration_seconds=1.0,
+                 summary="queued 3 items, nothing moved")
+    stored = q.list_runs(source="s")[0]["summary"]
+    assert stored == "queued 3 items, nothing moved"
+    assert not stored.endswith(SUMMARY_MARKER)
+
+
+def test_the_marker_sits_inside_the_cap_not_beyond_it(q):
+    """A truncation that overshoots its own column is a broken cap twice over.
+
+    `"s" * 2000` has no word boundary to retreat to — a hash, a path, a base64
+    blob is the shape this covers — so the honest answer is a mid-word cut plus
+    the marker rather than an empty summary. The width still holds.
+    """
+    from workers.queue import SUMMARY_MARKER, SUMMARY_MAX_CHARS
+
+    q.record_run(run_id=new_run_id("s"), queue_id=None, source="s", status="failed",
+                 started_at="a", completed_at="b", duration_seconds=1.0,
+                 summary="s" * 2000)
+    stored = q.list_runs(source="s")[0]["summary"]
+
+    assert len(stored) == SUMMARY_MAX_CHARS
+    assert stored.endswith(SUMMARY_MARKER)
+    assert set(stored[:-len(SUMMARY_MARKER)]) == {"s"}
