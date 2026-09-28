@@ -11,6 +11,17 @@
 #     (case-insensitive substring match against entity dir names)
 #   expect_docs: substrings any of which should appear in returned document paths
 #     (relative to ~/obsidian/) — at least one match counts as a hit
+#     LABEL POLICY (#1748), which that match rule does not state: a NEW or
+#     RE-POINTED expect_docs label must name one document — a path with a `/` and
+#     a `.md` basename, e.g. `knowledge/foo.md`. The 23 labels that predate #1662
+#     and are bare substrings (qmd -> qmd, robotics-projects -> robot, …) are
+#     legacy: they stay legal only as the pinned set in
+#     tests/test_eval_corpus_guard.py::_PRE_1662_SUBSTRING_SHAPED_GOLD_LABELS,
+#     which that guard holds may SHRINK and may NEVER GROW. The reason is the
+#     metric, not tidiness: widening a label to a substring changes which returned
+#     paths count as a doc hit, so it moves doc_hit_rate / doc_recall_avg /
+#     mrr_doc / ndcg10 while looking like a label fix — an unreturnable label is
+#     reported as unreturnable, not broadened until it passes.
 #   notes: why this query is in the set, especially for hard/known-fail cases
 #
 # Scoring (simple, per-query):

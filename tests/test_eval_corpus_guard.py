@@ -2538,3 +2538,176 @@ def test_the_unreturnable_labels_may_be_served_but_never_deleted():
     assert set(RETIRABLE_GOLD_LABELS) <= classified, (
         "a pinned label is in the corpus but in none of the three states, so the "
         "report is not reading it at all")
+
+# ── #1748: the gold LABEL shape is a one-way ratchet, not a whole-file rule ───
+#
+# #1662's clause 4 asked that EVERY `expect_docs` entry in this corpus contain a
+# `/` and a `.md` basename. That is false of the file and was false before #1662
+# existed: 23 of its labels are substrings, and the file's own schema line says
+# "expect_docs: substrings any of which should appear in returned document paths".
+# Narrowing them onto single documents would move `doc_hit_rate`, `doc_recall_avg`,
+# `mrr_doc` and `ndcg10` in one step — the meaning of the metric, not a defect
+# fix — so no diff can satisfy that literal without doing #1662's unrelated work.
+# What the clause was FOR is the ratchet below: a round that finds a query
+# unreturnable must not be able to "fix" it by widening its gold label to a
+# substring, so the substring-shaped set is pinned as of #1662 and may only
+# SHRINK. The 23 stay legal; a new one, or an old one re-pointed onto a
+# substring, is what reddens.
+
+_GOLD_YAML = Path(__file__).resolve().parents[1] / "eval" / "vault_recall_queries.yaml"
+
+#: Every substring-shaped `expect_docs` label on 2026-09-28, before any part of
+#: #1662 landed (`git log efcee660 -- eval/vault_recall_queries.yaml` carries none
+#: of that item's work, and the corpus one-liner prints the same 86 queries / 23
+#: labels this frozenset was generated from). The set may shrink — narrowing one
+#: of these onto a single document is fine, and the same commit that does it
+#: deletes its entry here — and may never gain a member by any other edit.
+_PRE_1662_SUBSTRING_SHAPED_GOLD_LABELS = frozenset({
+    "backlog-overview -> backlog/",
+    "entity-resolution-sweep -> autonomy/48-entity-resolution",
+    "entity-resolution-sweep -> skills/entity-resolution-sweep",
+    "inner-voice -> inner_voice",
+    "inner-voice -> lloyd/inner_voice",
+    "kg-maintenance-tasks -> autonomy/24-",
+    "kg-maintenance-tasks -> autonomy/48-",
+    "kg-maintenance-tasks -> autonomy/51-",
+    "kg-maintenance-tasks -> autonomy/67-",
+    "kg-maintenance-tasks -> autonomy/74-",
+    "nightly-reflection -> autonomy/39-",
+    "nightly-reflection -> autonomy/42-",
+    "nightly-reflection -> nightly-reflection",
+    "qmd -> qmd",
+    "qwen38-local-serving -> hybrid-gdn-qsa-inference-serving",
+    "qwen38-local-serving -> qwen38-27b-local-24gb",
+    "qwen38-local-serving -> qwen38-flash-next-engram",
+    "robotics-projects -> GR00T",
+    "robotics-projects -> robot",
+    "robotics-projects -> robotics",
+    "tgs-rag-state -> 363-implement-tgs-rag",
+    "tgs-rag-state -> neuro-symbolic-rag",
+    "tgs-rag-state -> tgs-rag",
+})
+
+
+def _gold_label_pairs(path: Path = _GOLD_YAML) -> set:
+    """Every `query id -> expect_docs label` pair the corpus asserts."""
+    import yaml
+
+    queries = yaml.safe_load(path.read_text())["queries"]
+    return {f"{q['id']} -> {d}" for q in queries for d in (q.get("expect_docs") or [])}
+
+
+def _substring_shaped_gold_labels(pairs: set) -> set:
+    """The pairs whose label is a substring rather than a named document.
+
+    The predicate is #1662's clause-4 literal inverted: a label names one document
+    iff it carries a `/` and its basename ends in `.md`. Kept in this file rather
+    than imported so the ratchet cannot be disarmed by editing the scorer.
+    """
+    return {p for p in pairs
+            if "/" not in p.split(" -> ", 1)[1]
+            or not p.split(" -> ", 1)[1].rsplit("/", 1)[-1].endswith(".md")}
+
+
+def _gold_label_ratchet_violations(pairs: set) -> tuple:
+    """`(grown, narrowed)` for one corpus's label pairs — the ratchet's two halves.
+
+    Pure over a pair set so the failure modes can be exercised on a synthetic
+    corpus without touching the real one, which is what makes clause 3 checkable:
+    an instrument whose only passing state is the current file has not been shown
+    to be able to fail.
+    """
+    shaped = _substring_shaped_gold_labels(pairs)
+    grown = sorted(shaped - _PRE_1662_SUBSTRING_SHAPED_GOLD_LABELS)
+    narrowed = sorted(_PRE_1662_SUBSTRING_SHAPED_GOLD_LABELS - shaped)
+    return grown, narrowed
+
+
+def test_no_gold_label_was_widened_into_a_substring_to_pass_the_returnability_guard():
+    """#1748 clauses 2 and 3: the substring-shaped label set is one-way.
+
+    Two directions, both must be able to fail, because the failure this ratchet
+    exists to prevent is a round that meets an unreturnable gold label and
+    *widens* it — which turns a doc miss into a doc hit while looking like a
+    label-quality improvement:
+
+    * **Grow:** any substring-shaped label that is not one of the pinned 23 — a
+      new query given `qmd`-style gold, or a pinned label re-pointed onto a
+      substring — reddens the first assert.
+    * **Narrow without editing the pin:** a pinned label replaced by a named
+      document (legitimate work) reddens the second assert until the same commit
+      deletes its entry from the frozenset, which is what keeps the pinned set
+      from silently rotting into a list of labels the corpus no longer carries.
+    """
+    grown, narrowed = _gold_label_ratchet_violations(_gold_label_pairs())
+    assert not grown, (
+        f"{len(grown)} new substring-shaped expect_docs label(s): {grown[:5]} — a "
+        "label added after #1662 must name one document (`<dir>/<name>.md`); "
+        "widening gold is how an unreturnable query starts passing as retrieved")
+
+    assert not narrowed, (
+        f"{len(narrowed)} pinned pre-#1662 label(s) are no longer in the corpus: "
+        f"{narrowed[:5]} — narrowing a legacy substring label onto a document is "
+        "allowed, but delete its entry from "
+        "_PRE_1662_SUBSTRING_SHAPED_GOLD_LABELS in the same commit, and expect "
+        "doc_hit_rate/doc_recall_avg/mrr_doc/ndcg10 to move at that point")
+
+
+def test_the_gold_header_states_the_ratchet_instead_of_licensing_any_substring():
+    """#1748 clause 4: the file's own schema line must not read as a free pass.
+
+    `expect_docs: substrings any of which should appear in returned document
+    paths` is still true of retrieval semantics and stays, but the header now has
+    to say what a NEW label must look like and that the 23 legacy ones are a
+    shrinking pinned set — otherwise the next round reads one line, adds a
+    substring, and only the test above catches it, after the round has already
+    committed.
+    """
+    raw = _GOLD_YAML.read_text().split("\n")
+    end = next(i for i, ln in enumerate(raw) if ln.strip() and not ln.lstrip().startswith("#"))
+    header = "\n".join(raw[:end])
+    low = header.lower()
+    assert "expect_docs: substrings" in header, "the schema line itself moved"
+    for needle in ("name one document", "legacy", "never grow"):
+        assert needle in low, f"header does not state the ratchet: {needle}"
+    # The policy has to meet a reader AT the schema line, and the count it quotes
+    # has to be the count the guard pins — a header that says "23" over a guard
+    # pinning 24 is a second instrument disagreeing with the first.
+    assert low.index("label policy") > low.index("expect_docs: substrings"), (
+        "the policy is stated before the line it qualifies")
+    assert "23" in header and len(_PRE_1662_SUBSTRING_SHAPED_GOLD_LABELS) == 23, (
+        len(_PRE_1662_SUBSTRING_SHAPED_GOLD_LABELS))
+
+
+def test_the_gold_label_ratchet_reddens_on_a_new_substring_label():
+    """#1748 clause 3, grow direction: an injected substring-shaped label is `grown`.
+
+    `brand-new-query -> some-slug` is exactly what a round under pressure writes
+    when a gold path turns out not to be returnable, and it is legal under the
+    file's match rule — which is the whole reason the ratchet has to be the guard.
+    """
+    grown, narrowed = _gold_label_ratchet_violations(
+        _gold_label_pairs() | {"brand-new-query -> some-slug"})
+    assert grown == ["brand-new-query -> some-slug"], grown
+    assert narrowed == [], narrowed
+
+
+def test_the_gold_label_ratchet_reddens_when_a_pinned_label_narrows_unpinned():
+    """#1748 clause 3, narrow direction: a pinned label pointed at a document, with
+    the pinned frozenset left untouched, is `narrowed` — and stays legal once the
+    pin is edited in the same change.
+    """
+    pairs = _gold_label_pairs()
+    pinned = sorted(_PRE_1662_SUBSTRING_SHAPED_GOLD_LABELS)[0]
+    qid, _ = pinned.split(" -> ", 1)
+    narrowed_away = (pairs - {pinned}) | {f"{qid} -> knowledge/some-doc.md"}
+    grown, narrowed = _gold_label_ratchet_violations(narrowed_away)
+    assert grown == [], grown
+    assert narrowed == [pinned], narrowed
+
+    # The same corpus is legal once the pin is edited in the same change, which is
+    # the sanctioned route: narrow the label, drop its entry from the frozenset.
+    rest = _PRE_1662_SUBSTRING_SHAPED_GOLD_LABELS - {pinned}
+    shaped_after = _substring_shaped_gold_labels(narrowed_away)
+    assert sorted(shaped_after - rest) == [] and sorted(rest - shaped_after) == [], (
+        sorted(shaped_after ^ rest))
