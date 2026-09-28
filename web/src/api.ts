@@ -926,10 +926,14 @@ export interface ActiveProc {
   streaming: boolean
 }
 
-// The chrome side-panel build sets VITE_API_BASE='http://127.0.0.1:8080/api'
-// (loopback bypasses the mTLS middleware at server.py:76-113). Main web app
-// keeps the relative '/api' default so the Vite proxy injects client-cert
-// headers.
+// The chrome side-panel build sets VITE_API_BASE='http://127.0.0.1:8080/api'.
+// It gets through because `server.py` gates /api/* on the ASGI peer address:
+// `ApiPeerGate` asks `_is_trusted_peer` about `scope["client"]` alone — never a
+// `Host` or `X-Forwarded-For` header — and loopback is inside the trusted set,
+// so a loopback call needs no client certificate. The main web app keeps the
+// relative '/api' default and reaches the backend through the Vite proxy, whose
+// xfwd forwarding *replaces* that peer address with the browser's own; what
+// admits the browser is its address sitting inside the trusted network set.
 const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) || '/api'
 
 export const api = {
@@ -1778,7 +1782,7 @@ export const api = {
     return r.json()
   },
 
-  // ── LAN access / mTLS ────────────────────────────────────────────────
+  // ── LAN access / client cert enrolment ───────────────────────────────
   getLanInfo: async (): Promise<{
     lan_ip: string | null
     hostname: string
