@@ -205,30 +205,46 @@ def test_old_rows_only_is_no_telemetry_for_that_window(tmp_path):
     assert skill_injection_counts(tmp_path, 60)["skills"]["aged"]["offers"] == 1
 
 
-def test_the_reader_does_not_touch_the_uptake_instrument_it_complements():
-    """`app/uptake.py` still owns the *load* half, through its own proxy:
-    `SKILL_PRESENCE_PROXY = "proxy:skills_read+injected_context (#435 pending)"`
-    at `app/uptake.py:173`, with `SKILL_PRESENCE_NOTE` at `:187-191` calling it
-    "Not per-injection telemetry".
+def test_the_reader_does_not_write_into_the_uptake_instrument_it_complements():
+    """The boundary this module must not cross, re-pinned after #1603 moved uptake.
 
-    This module adds only the offer half, so pin the two boundaries this change
-    must not cross: it neither imports uptake nor writes under `eval/uptake/`
-    (those tables are uptake's own artifacts), and the proxy constant is
-    untouched — retiring its `(#435 pending)` marker needs a day of real
-    `prefetch.skill_match` traffic first, which is the post-landing person
-    check, and deleting the constant would silently drop `presence_source` from
-    every skill row of every table uptake writes.
+    Two claims, and only one of them changed. The write half is unchanged: this
+    reader neither imports uptake nor writes under `eval/uptake/` — those tables
+    are uptake's artifacts, and a second writer would make the committed numbers
+    unattributable.
+
+    The read half moved. This test used to assert that uptake's proxy literal was
+    present *with* its `(#435 pending)` marker, which made a stale sentence load-
+    bearing: #435 shipped on 2026-09-24 as `3774e27b`, uptake started reading the
+    rows this module counts, and the test kept the marker pinned anyway — so the
+    only thing reading that marker saw "still draft" and this file saw a green
+    suite. What is pinned now is the relationship, not the retired bytes: uptake
+    reads this event by name, keeps the proxy beside it as a labelled route rather
+    than replacing it, and neither name is allowed to lose its marker again.
     """
     src = (ROOT / "app" / "skill_telemetry.py").read_text(encoding="utf-8")
     assert "import uptake" not in src and "eval/uptake" not in src, (
         "the offer-half reader reached into the load-half instrument's artifacts")
 
     uptake = (ROOT / "app" / "uptake.py").read_text(encoding="utf-8")
-    assert ('SKILL_PRESENCE_PROXY = "proxy:skills_read+'
-            'injected_context (#435 pending)"') in uptake, (
-        "the proxy constant moved or lost its marker; the marker is a person's "
-        "post-landing edit once live traffic confirms the events, not this "
-        "round's to retire")
+    # Same event, both halves: the counts here and the presence rows there are
+    # two readings of one emitter, and a rename on one side has to break this.
+    assert SKILL_MATCH_EVENT in uptake, "uptake no longer reads the event this counts"
+    assert uptake_const("SKILL_PRESENCE_TELEMETRY") == SKILL_MATCH_EVENT.replace(
+        "prefetch.", "prefetch:"), "the presence label stopped naming the event"
+    # The proxy stays, because the fallback is load-bearing (#1603 clause 3), and
+    # it stays unrenamed-in-substance: still the read-plus-block proxy it was.
+    proxy = uptake_const("SKILL_PRESENCE_PROXY")
+    assert proxy == "proxy:skills_read+injected_context", proxy
+    assert proxy in uptake_const("SKILL_PRESENCE_NOTE")
+    assert "SKILL_EVIDENCE_SOURCES" in uptake, (
+        "the two routes stopped being a declared pair")
+
+
+def uptake_const(name: str) -> str:
+    """A module constant from `app/uptake.py`, read the way a consumer reads it."""
+    import app.uptake as m
+    return getattr(m, name)
 
 
 def test_counts_are_not_clipped_by_the_event_reader_default_page(tmp_path,

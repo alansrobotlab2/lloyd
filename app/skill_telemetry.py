@@ -5,14 +5,16 @@ prefetched turn. One call answers the two questions the instrument exists for,
 over the last N days: per-skill **offer / loaded / ignored** counts, and whether
 the store holds any of that at all.
 
-`ignored` is the point of the whole thing. The loaded half has always been
-reachable: `app/routers/_messages_subliminal.py` persists the injected block as
-a `role="subliminal"` message and `app/uptake.py` parses the `<skill name=…>`
-blocks out of it — through a proxy it names itself (`SKILL_PRESENCE_PROXY` at
-`app/uptake.py:173`, `SKILL_PRESENCE_NOTE` at `:187-191`), because that proves
-what *landed* and says nothing about what was matched and then not rendered.
-This module answers the half nothing else could: what a turn was offered and
-never got.
+`ignored` is the point of the whole thing. The loaded half was reachable before
+this module existed: `app/routers/_messages_subliminal.py` persists the injected
+block as a `role="subliminal"` message, and uptake's `SKILL_PRESENCE_PROXY` route
+recovered presence from those blocks and from `skills_read` payloads. That route
+is still there and still load-bearing — it is the only evidence for a session
+whose log predates these rows — but it is no longer the only one: as of #1603
+`app/uptake.py` reads these same rows through
+`skill_evidence_by_session()` and labels the two routes separately
+(`SKILL_PRESENCE_TELEMETRY` and `SKILL_PRESENCE_PROXY`). What this module answers
+is the half uptake still cannot: what a turn was offered and never got.
 
 Two shapes a caller must be able to tell apart, so the return is a dict and not
 a bare mapping of counts. `no_telemetry: True` means the window measured

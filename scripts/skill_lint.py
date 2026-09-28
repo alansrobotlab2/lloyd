@@ -341,7 +341,16 @@ def find_duplicates(skills: list[tuple[str, str]]) -> list[tuple[str, str, float
 
 
 def check_stale(skill_path: Path, fm: dict) -> tuple[bool, int]:
-    """Return (is_stale, age_days). Active-marked skills are exempt."""
+    """Return (is_stale, age_days). Active-marked skills are exempt.
+
+    The exemption is why this category reports 0 and has reported 0 on every run
+    since the library was bulk-marked: the return happens BEFORE the age is read,
+    so `age_days` is 0 rather than the real age for the marked majority. The
+    report therefore states the exemption beside the count (`stale_context`), and
+    `CATEGORY_TRUST["STALE"]` says `no` — a 0 from here carries no information
+    about whether anything is old. Retiring the exemption is library governance
+    (#1603's owed list), not a lint change.
+    """
     if (fm.get("status") or "").lower() == "active":
         return False, 0
     try:
@@ -350,6 +359,41 @@ def check_stale(skill_path: Path, fm: dict) -> tuple[bool, int]:
         return False, 0
     age = (dt.datetime.now() - mtime).days
     return age > STALE_DAYS, age
+
+
+def stale_context(ages: list[int], marked_active: int, total: int) -> dict:
+    """What the STALE count cannot see, measured rather than asserted.
+
+    Two inert halves keep the bucket empty, and both are properties of the library
+    rather than of any skill: the `status: active` exemption above, and the fact
+    that no file in the tree is old enough to trip the threshold even where the
+    exemption does not apply. Reporting the count without these reads as "nothing
+    is stale", which is the falsest thing this report can say.
+    """
+    return {
+        "threshold_days": STALE_DAYS,
+        "marked_active": marked_active,
+        "unmarked": total - marked_active,
+        "total": total,
+        # Over every scanned skill regardless of status — the exemption hides age
+        # from `stale`, not from the filesystem.
+        "max_age_days": max(ages) if ages else 0,
+        "oldest_could_trip": bool(ages) and max(ages) > STALE_DAYS,
+    }
+
+
+def skill_mtime_age_days(skill_path: Path) -> int | None:
+    """Age of the file itself, exemption ignored. `None` when it cannot be stated.
+
+    A separate function rather than a branch inside `check_stale`: the whole point
+    is a number that the exemption does not touch, and folding it in would let one
+    early return decide both the verdict and the measurement of the verdict.
+    """
+    try:
+        mtime = dt.datetime.fromtimestamp(skill_path.stat().st_mtime)
+    except OSError:
+        return None
+    return (dt.datetime.now() - mtime).days
 
 
 # ── authorship (#774) ───────────────────────────────────────────────────────
@@ -953,6 +997,13 @@ def lint(skill_records: Optional[Sequence] = None) -> dict:
     sizes: list[dict] = []
     skills: list[tuple[str, str]] = []
     total = 0
+    # Accumulated for `stale_context`: the age of every scanned file read
+    # REGARDLESS of the `status: active` exemption `check_stale` applies, the count
+    # carrying that exemption, and every scanned name — the denominator the usage
+    # block needs to say how many skills the telemetry never saw.
+    stale_ages: list[int] = []
+    marked_active = 0
+    scanned_names: list[str] = []
 
     for record in active:
         entry = record.directory
@@ -971,6 +1022,13 @@ def lint(skill_records: Optional[Sequence] = None) -> dict:
             continue
 
         fm, body, yaml_err = parse_frontmatter(content)
+
+        scanned_names.append(entry.name)
+        if (fm.get("status") or "").lower() == "active":
+            marked_active += 1
+        age_ignoring_exemption = skill_mtime_age_days(skill_file)
+        if age_ignoring_exemption is not None:
+            stale_ages.append(age_ignoring_exemption)
 
         # Counted before the dead check: a dead skill is still in the library,
         # and who wrote it is the first question when it has to be fixed.
@@ -1090,6 +1148,20 @@ def lint(skill_records: Optional[Sequence] = None) -> dict:
         "drift": drift,
         "duplicates": duplicates,
         "stale": stale,
+        # Why that count is 0, measured over the same walk: how many scanned skills
+        # carry the `status: active` exemption that returns before the age check, and
+        # the oldest file in the tree read regardless of it. Without these the line
+        # reads "no skill is stale", which the check does not know.
+        "stale_context": stale_context(stale_ages, marked_active, total),
+        # The usage half, which IS measurable: per-skill offers/loaded/ignored read
+        # through `app.skill_telemetry.skill_injection_counts`. Collected here rather
+        # than in the renderer so a read failure is one event with a reason in the
+        # artifact, and the report renders what was measured instead of a promise.
+        "usage": collect_usage_counts(),
+        # Every scanned skill name, so the usage block can name which of them the
+        # telemetry never saw. `total` alone would let "93 unmeasured" and "93 of
+        # 193" disagree with each other across a partial scan.
+        "names": sorted(scanned_names),
         "phantom": phantom,
         "missing_script": missing_script,
         # #1580. A skill whose commands name a unit that is in neither unit root.
@@ -1139,9 +1211,24 @@ CATEGORY_TRUST: dict[str, tuple[str, str]] = {
     "DUPLICATE": ("mostly", "the name + description double gate suppresses a real "
                             "pair (`periodic-memory-capture-dee`/`-lloyd`), which is "
                             "a judgment call the report cannot make"),
-    "STALE": ("no", "every skill is marked `status: active` and `check_stale` "
-                    "returns before the age check, so no input reaches the "
-                    "comparison — 0 carries no information"),
+    # Both inert halves named, and the measured half pointed at. This entry used to
+    # close by blaming the missing events, which stopped being true the day #435
+    # landed (`3774e27b`, 2026-09-24): the rows exist, `app.skill_telemetry` reads
+    # them, and #1603
+    # wired this report to them. So the reason now states the two things that DO
+    # keep the count at 0 — the exemption, and an age ceiling no file has reached —
+    # and sends the reader to `stale_context` and the usage table for the numbers.
+    "STALE": ("no", "two halves, both inert: `check_stale` returns (False, 0) "
+                    "before the age check for any skill marked "
+                    "`status: active`, so no marked skill reaches the comparison; "
+                    "and the oldest `SKILL.md` in the scanned roots has not reached "
+                    "the threshold, so the un-marked remainder cannot either. "
+                    "`stale_context` carries the marked count and `max_age_days`. "
+                    "Usage over the window IS measured — per-skill "
+                    "offers/loaded/ignored from the `prefetch.skill_match` rows "
+                    "#435 ships — and a skill with no row is listed as unmeasured, "
+                    "not zero-offer, because only the top "
+                    "`SKILL_REPORT_TOP_K = 8` skills emit one."),
     "PHANTOM_TOOL": ("yes", "positive controls fire and the count suppresses the "
                             "Clean verdict; the PHANTOM_EXEMPT skills are never scanned"),
     "MISSING_SCRIPT": ("yes", "the test suite asserts the corpus-wide count, so an "
@@ -1217,6 +1304,114 @@ def render_size(result: dict) -> list[str]:
                    f"{heading} ({block.get('lines', 0)} lines) |")
     out.append("")
     return out
+
+
+#: The window the STALE bucket reports usage over. Thirty days because that is the
+#: span `app.skill_telemetry.skill_injection_counts` is written to take and the
+#: span a "has this skill stopped being offered?" claim needs; it is NOT yet a
+#: retirement threshold, because the rows themselves only begin 2026-09-25 and a
+#: 30-day window is not 30 days deep until ~2026-10-24 (#1603, owed).
+USAGE_WINDOW_DAYS = 30
+
+
+def collect_usage_counts(days: int = USAGE_WINDOW_DAYS, root=None) -> dict:
+    """Per-skill offers / loaded / ignored over the last `days`, from the real rows.
+
+    The report used to print this measurement as future work instead of measuring
+    it — "see #334 follow-ups" — on the grounds that the events did not exist. That
+    has been false since #435 landed on 2026-09-24 as `3774e27b`:
+    `prefetch._emit_skill_match_events`
+    writes one `prefetch.skill_match` row per offered skill per turn, and
+    `app.skill_telemetry` is the reader. So this collects it, and the STALE section
+    prints it instead of the promise.
+
+    Failures are returned, not raised: this is an advisory sweep whose exit code
+    must stay 0, but a swallowed exception would print an empty usage block, and
+    an empty usage block is exactly what a reader cannot distinguish from "no skill
+    is being offered". The error string therefore travels in the dict and the
+    renderer prints it.
+    """
+    try:
+        if str(Path(__file__).resolve().parent.parent) not in sys.path:
+            sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from app.paths import EVENT_LOGS_DIR
+        from app.skill_telemetry import skill_injection_counts
+    except Exception as exc:                       # noqa: BLE001 — see docstring
+        return {"error": f"import failed: {type(exc).__name__}: {exc}",
+                "skills": {}, "events": 0, "sessions": 0, "days": days,
+                "no_telemetry": True}
+    try:
+        out = skill_injection_counts(root or EVENT_LOGS_DIR, days)
+    except Exception as exc:                       # noqa: BLE001
+        return {"error": f"read failed: {type(exc).__name__}: {exc}",
+                "skills": {}, "events": 0, "sessions": 0, "days": days,
+                "no_telemetry": True}
+    out["days"] = days
+    return out
+
+
+#: The word a no-row skill gets, and the reason it is not called zero. Kept as a
+#: constant because a reader of the report and a test of it must not disagree about
+#: whether "no rows" was ever allowed to mean "not used".
+USAGE_UNMEASURED_LABEL = "unmeasured"
+
+
+def usage_lines(usage: dict, known_names: list[str]) -> list[str]:
+    """The measured usage half of the STALE bucket, as report lines.
+
+    Two claims have to stay separate or the section lies. An offer row is written
+    per skill per turn that reached it, so `offers` counts *ranked* skills — and
+    `SKILL_REPORT_TOP_K = 8` in `app/prefetch.py` caps that at eight a turn. A
+    skill with no rows in the window is therefore NOT a skill with zero offers: it
+    is a skill the telemetry could not see, and 93 of the 193 library skills were
+    in that state on 2026-09-28 while scoring below rank 8. So no-row skills go in a
+    separate list under `USAGE_UNMEASURED_LABEL`, and the sentence naming them
+    names the ceiling that produces them.
+
+    An absent `usage` is its own case and is not silently empty either: a run that
+    could not read the event log says so here, in words, rather than printing a
+    table with nothing in it.
+    """
+    days = usage.get("days", USAGE_WINDOW_DAYS)
+    head = [f"### Usage over the last {days} days — `prefetch.skill_match`", ""]
+    if usage.get("error"):
+        return head + [f"NOT MEASURED: reading the injection telemetry failed — "
+                       f"`{usage['error']}`. The absence above is a failure to read, "
+                       f"not a window with no offers in it.", ""]
+    if usage.get("no_telemetry") or not usage.get("events"):
+        return head + ["NOT MEASURED: no `prefetch.skill_match` rows in the window. The",
+                       "emitter ships (`app/prefetch.py`, #435, and #1603 wired the report to it),",
+                       "so this is a window with no logged turns — not evidence that nothing was",
+                       "offered, and not the old claim that the telemetry does not exist.", ""]
+
+    counts = usage.get("skills") or {}
+    head.append(f"Read through `app.skill_telemetry.skill_injection_counts`: "
+                f"{usage.get('events', 0)} rows over {usage.get('sessions', 0)} sessions, "
+                f"{len(counts)} skills with at least one row.")
+    head.append("")
+    head.append("| skill | offers | loaded | ignored | loaded share |")
+    head.append("|---|---|---|---|---|")
+    for name, c in sorted(counts.items(), key=lambda kv: -kv[1].get("loaded", 0)):
+        offers = c.get("offers", 0)
+        loaded = c.get("loaded", 0)
+        share = f"{loaded / offers:.0%}" if offers else "n/a"
+        head.append(f"| `{name}` | {offers} | {loaded} | {c.get('ignored', 0)} | {share} |")
+    seen = set(counts)
+    unmeasured = sorted(set(known_names) - seen)
+    head.append("")
+    head.append(f"**{len(unmeasured)} of {len(known_names)} scanned skills carry no row in the "
+                f"window and are {USAGE_UNMEASURED_LABEL}, not zero-offer.**")
+    head.append("`prefetch.skill_match` is written only for skills the scorer ranked into "
+                "`SKILL_REPORT_TOP_K = 8`")
+    head.append("(`app/prefetch.py`), so a skill scoring below rank 8 emits nothing however often "
+                "it")
+    head.append("would have applied. Absence here cannot separate an unused skill from an "
+                "unranked")
+    head.append("one, which is why no retirement threshold is applied to this table yet.")
+    if unmeasured:
+        head.append("")
+        head.append(f"{USAGE_UNMEASURED_LABEL}: " + ", ".join(f"`{n}`" for n in unmeasured))
+    return head
 
 
 def render_report(result: dict) -> str:
@@ -1398,18 +1593,46 @@ def render_report(result: dict) -> str:
             lines.append(f"- `{a}` ↔ `{b}` — similarity {ratio}")
         lines.append("")
 
-    # STALE
-    if n_stale:
+    # STALE — renders on the usage half alone, not only on the mtime half.
+    #
+    # The gate used to be `if n_stale:`, and `n_stale` is 0 by construction (see
+    # `check_stale`), so the whole section was unreachable: the one place that
+    # could say what staleness measurement exists was only printed when the check
+    # that cannot fire happened to fire. Usage data is what is measurable now, so
+    # the section leads with the inert half and prints the live half regardless.
+    usage = result.get("usage") or {}
+    staled = result.get("stale_context") or {}
+    if n_stale or usage or staled:
         lines.append(f"## STALE — {n_stale} skills > {STALE_DAYS} days since last edit")
         lines.append("")
-        lines.append("Not marked `status: active`. Review for removal or promotion. Usage-based")
-        lines.append("staleness detection (N queries where this skill scored > 0) requires")
-        lines.append("injection-level telemetry not yet emitted — see #334 follow-ups.")
+        if staled:
+            lines.append("This 0 is not a measurement of staleness. Two halves of the check are")
+            lines.append("inert on this library, and both would have to move before the count meant")
+            lines.append("anything:")
+            lines.append("")
+            lines.append("- `check_stale` returns `(False, 0)` **before reading the age** for any")
+            lines.append(f"  skill marked `status: active` — {staled['marked_active']} of "
+                         f"{staled['total']} scanned skills carry that mark, and")
+            lines.append("  the age of those files is never read, so `age_days` is 0 rather than old.")
+            lines.append(f"- The oldest `SKILL.md` in the scanned roots is {staled['max_age_days']} days old,")
+            lines.append(f"  below the {STALE_DAYS}-day threshold, so the "
+                         f"{staled['unmarked']} skills without the mark cannot")
+            lines.append(f"  reach it either: `max_age_days` exceeds the threshold is "
+                         f"{'true' if staled['oldest_could_trip'] else 'false'}.")
+            lines.append("")
+            lines.append("Re-marking the library, or retiring the mtime/status check outright, is a")
+            lines.append("governance call rather than a lint one (#1603). What the lint can measure is")
+            lines.append("usage, and it is measured below.")
+        else:
+            lines.append("Not marked `status: active`. Review for removal or promotion.")
+        if n_stale:
+            lines.append("")
+            lines.append("| name | age (days) | status |")
+            lines.append("|---|---|---|")
+            for item in sorted(result["stale"], key=lambda x: -x["age_days"]):
+                lines.append(f"| `{item['name']}` | {item['age_days']} | {item['status']} |")
         lines.append("")
-        lines.append("| name | age (days) | status |")
-        lines.append("|---|---|---|")
-        for item in sorted(result["stale"], key=lambda x: -x["age_days"]):
-            lines.append(f"| `{item['name']}` | {item['age_days']} | {item['status']} |")
+        lines.extend(usage_lines(usage, result.get("names", [])))
         lines.append("")
 
     # `n_phantom` belongs in this condition and was missing from it until

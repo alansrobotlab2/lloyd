@@ -475,7 +475,9 @@ def run(days: int, cache: dict[str, Any]) -> tuple[dict[str, Any], list[uptake.T
         turns=turns,
         dispute_flags=flags,
         memory_entries=uptake.memory_entries(tally=tally),
-        skills_read=uptake.skills_read_by_session(),
+        # One walk, both routes: the per-injection event where the logs have it
+        # (sessions from 2026-09-25) and the read proxy everywhere else.
+        skills_read=uptake.skill_evidence_by_session(),
         active_skills=uptake.active_skill_names(),
         memory_tally=tally,
     )

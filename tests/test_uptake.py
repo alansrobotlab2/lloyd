@@ -475,8 +475,14 @@ def test_coverage_block_reports_what_the_table_actually_covers():
     cov = table["coverage"]
     assert cov["user_md_entries"]["covered"] == 2 and cov["user_md_entries"]["total"] == 2
     assert cov["active_skills"]["covered"] == 2 and cov["active_skills"]["total"] == 4
-    # The half the item cannot ask for yet must be labelled, not hidden.
-    assert cov["active_skills"]["presence_source"] == uptake.SKILL_PRESENCE_PROXY
+    # The half the instrument cannot ask for yet must be labelled, not hidden.
+    # Which label the block carries now depends on which route contributed
+    # coverage (#1603), so the per-route split beneath it is the part a reader can
+    # act on: here `voice-mode` arrived as an injected block and
+    # `voice-clone-sample` only ever as a read, and both counts are visible.
+    assert cov["active_skills"]["presence_source"] in uptake.SKILL_EVIDENCE_SOURCES
+    assert cov["active_skills"]["covered_by_source"] == {
+        uptake.SKILL_PRESENCE_TELEMETRY: 1, uptake.SKILL_PRESENCE_PROXY: 2}, cov
     assert "435" in cov["active_skills"]["note"]
 
 
@@ -600,7 +606,14 @@ def test_every_row_matches_the_declared_contract_hermetically():
     for row in json.loads(files[-1].read_text())["entries"]:
         assert uptake.ROW_KEYS <= set(row), (
             f"{row['entry']} is missing {uptake.ROW_KEYS - set(row)} in the artifact")
-        assert row["presence_source"] in uptake.PRESENCE_SOURCES, row["presence_source"]
+        # Historic rows are held to the vocabulary they were written under, mapped
+        # forward: the committed table names the skill proxy with the `(#435
+        # pending)` marker glued on, and rewriting an artifact to match a rename
+        # would destroy the record of what was measured. `PRESENCE_SOURCE_RENAMES`
+        # is the declared bridge, so an *unmapped* retired value still fails here.
+        source = uptake.PRESENCE_SOURCE_RENAMES.get(
+            row["presence_source"], row["presence_source"])
+        assert source in uptake.PRESENCE_SOURCES, row["presence_source"]
 
 
 # ---------------------------------------------------------------- gate ------
@@ -1707,8 +1720,21 @@ def test_the_skill_s_descriptions_of_the_table_match_what_the_code_emits():
     assert not missing, f"skill cites fields the table does not emit: {missing}"
 
     # Every presence_source the skill quotes must be one the code really writes.
-    quoted = {s for s in ("always_in_force:system_prompt", "prefetch:vault_context")
+    # #1603 added a third label and made the skill channel two, so the skill's
+    # skill-route wording is in the enumerated set too: this test used to check two
+    # names and therefore could not see the proxy being renamed under the sentence
+    # that explains it — the mixed-surface drift #1603 finding 6 named, where the
+    # vault quotes a value's STRING and the code owns its meaning. The skill quotes
+    # the unmarked proxy value, and historic artifacts carry the marked one, so the
+    # prefix match below is what makes one sentence cover both.
+    quoted = {s for s in ("always_in_force:system_prompt", "prefetch:vault_context",
+                          uptake.SKILL_PRESENCE_PROXY, uptake.SKILL_PRESENCE_TELEMETRY)
               if s in text}
+    # The skill cites the proxy (it explains what a skill row's rate means), so
+    # this is not an empty intersection passing by accident.
+    assert uptake.SKILL_PRESENCE_PROXY in quoted, (
+        "the skill stopped describing the proxy route at all, so the prefix check "
+        "below has no skill-channel row to grade")
     assert quoted, "skill quotes no presence_source at all"
     for src in quoted:
         emitted = any(s.startswith(src) for s in sources)
@@ -2400,6 +2426,11 @@ def test_a_note_shown_two_ways_across_turns_reports_its_basis_as_mixed(tmp_path)
     assert srow["weighted_disputes"] is None, srow
 
 
+#: A skill present only as a read, so the proxy channel keeps a row now that the
+#: injection channel has one of its own (`_TOKEN` above arrives as a block).
+_SKILL_READ_ONLY = "voice-clone-sample"
+
+
 def _three_channel_table():
     """One row from each channel, so the per-source block has a denominator."""
     return uptake.build_uptake_table(
@@ -2407,7 +2438,319 @@ def _three_channel_table():
                         ctx_titles=["2026-04-21 Daily Notes"])],
         dispute_flags={"s1#1": True},
         memory_entries=[uptake.Entry("lloyd/MEMORY.md", _TOKEN)],
-        skills_read={"s1": {_TOKEN: 1}})
+        # Two skill rows, one per presence route: `_TOKEN` above arrived as a
+        # persisted injected block (the injection channel) and `_SKILL_READ_ONLY`
+        # only ever as a `skills_read` (the proxy channel). The block below
+        # requires a row on *every* declared source, so a new source has to be
+        # given a row here or the fixture stops covering what it claims to.
+        skills_read={"s1": {_TOKEN: 1, _SKILL_READ_ONLY: 1}})
+
+
+#: Event-log lines, so a test can hand uptake the same bytes the agent loop and
+#: the prefetch path write. `data.args` on a tool call is a JSON *string*, and a
+#: `prefetch.skill_match` row carries `skill`/`landed` directly — a fixture that
+#: quietly normalises either would test a reader nothing writes to.
+def _ev(session, event, data):
+    return json.dumps({"ts": "2026-09-26T10:00:00.000Z", "session_id": session,
+                       "event": event, "data": data})
+
+
+def _receipt(session):
+    return _ev(session, uptake.TURN_EVENT, {"source": "user", "text": "hi"})
+
+
+def _read(session, skill):
+    return _ev(session, "tool_call", {"name": "skills_read",
+                                      "args": json.dumps({"name": skill})})
+
+
+def _match(session, skill, *, landed):
+    return _ev(session, uptake.SKILL_MATCH_EVENT,
+               {"skill": skill, "score": 15.9, "landed": landed,
+                "injected_body": landed})
+
+
+def _write_events(root, lines, session="s1"):
+    """`event_logs/*.events.jsonl`, the layout `lloyd_root()` readers glob."""
+    d = root / "event_logs"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{session}.events.jsonl").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8")
+    return root
+
+
+def test_a_landed_skill_match_row_credits_presence_from_its_own_turn_onward(tmp_path):
+    """#1603 clause 2: the injector's own event is read, and it is read on the
+    right side of the turn boundary.
+
+    Two things had to be true to make this channel real rather than cosmetic, and
+    only the first is obvious. The credit must come from `landed: true`, not from
+    any row: `SKILL_REPORT_TOP_K = 8` offers eight skills a turn and renders fewer
+    than that, so crediting offers would inflate every popular skill's presence
+    with prompts it never appeared in. And the ordinal must be `turn + 1`, because
+    `_emit_skill_match_events` writes the row while the prompt is being *built* —
+    before the receipt row of the very turn it served, measured on 298 live
+    sessions where 563 of 624 landed rows sit ahead of the first counted receipt.
+    Crediting the count-so-far here would attribute the injection to the turn
+    *before* it, which is the early-credit defect the ordinal shape exists to stop.
+    """
+    _write_events(tmp_path, [
+        _receipt("s1"),                                    # turn 1
+        _match("s1", "system-health-check", landed=True),  # building turn 2
+        _receipt("s1"),
+    ])
+    ev = uptake.skill_evidence_by_session(tmp_path)
+    assert uptake.skills_read_by_session(tmp_path) == {}      # nobody read anything
+    assert ev[uptake.SKILL_PRESENCE_TELEMETRY] == {
+        "s1": {"system-health-check": 2}}, ev
+
+    table = uptake.build_uptake_table(
+        turns=[_mk_turn(1, "first", None), _mk_turn(2, "second", "first"),
+               _mk_turn(3, "third", "second")],
+        dispute_flags={"s1#3": True}, active_skills=["system-health-check"],
+        skills_read=ev)
+    row = [r for r in table["entries"] if r["entry"] == "skill:system-health-check"][0]
+    # Credited from turn 2 on, and not one turn early.
+    assert row["present_turn_ids"] == ["s1#2", "s1#3"], row
+    assert row["presence_bound"] == "causal_event_order", row
+    # Named by a declared source that says which telemetry, not by the proxy.
+    assert row["presence_source"] == uptake.SKILL_PRESENCE_TELEMETRY, row
+    assert row["presence_source"] in uptake.PRESENCE_SOURCES
+    assert uptake.SKILL_PRESENCE_TELEMETRY == "prefetch:skill_match"
+    assert "(#435 pending)" not in uptake.SKILL_PRESENCE_TELEMETRY
+    assert row["presence_route"] == uptake.SKILL_PRESENCE_TELEMETRY, row
+    assert table["coverage"]["active_skills"]["presence_source"] == \
+        uptake.SKILL_PRESENCE_TELEMETRY, table["coverage"]["active_skills"]
+    assert table["coverage"]["active_skills"]["covered"] == 1
+    assert table["coverage"]["active_skills"]["covered_by_source"] == {
+        uptake.SKILL_PRESENCE_TELEMETRY: 1, uptake.SKILL_PRESENCE_PROXY: 0}, \
+        table["coverage"]["active_skills"]
+
+
+def test_an_offered_but_unlanded_skill_match_row_credits_nothing(tmp_path):
+    """The other half of clause 2: an offer is not a presence.
+
+    Every skill `_emit_skill_match_events` writes about gets a row, landed or not,
+    so a reader that ignored the flag would report the top-K offer set as
+    presence — and the top-K ceiling (`SKILL_REPORT_TOP_K = 8`,
+    `app/prefetch.py:95`) would then read as evidence a skill was used.
+    """
+    _write_events(tmp_path, [
+        _receipt("s1"),
+        _match("s1", "never-rendered", landed=False),
+        _receipt("s1"),
+    ])
+    ev = uptake.skill_evidence_by_session(tmp_path)
+    assert ev[uptake.SKILL_PRESENCE_TELEMETRY] == {}, ev
+    table = uptake.build_uptake_table(
+        turns=[_mk_turn(1, "first", None), _mk_turn(2, "second", "first")],
+        dispute_flags={}, active_skills=["never-rendered"], skills_read=ev)
+    assert table["entries"] == [], table["entries"]
+    assert table["coverage"]["active_skills"]["covered"] == 0
+
+
+def test_a_session_without_skill_match_rows_keeps_the_proxy_route_and_its_coverage(tmp_path):
+    """#1603 clause 3: pre-telemetry presence survives the rename, because the
+    fallback is a labelled route and not a silent replacement.
+
+    The rows begin 2026-09-25, so every log before that date has none. A change
+    that sourced skill presence solely from them would have collapsed
+    `coverage.active_skills.covered` for all history and looked like a clean
+    instrument while doing it — the clean-looking zero this whole file is built to
+    refuse. So the same log that has no rows at all must still credit the read,
+    under the proxy's own name, with the same coverage the flat form produced.
+    """
+    _write_events(tmp_path, [
+        _receipt("s1"),                                    # turn 1
+        _read("s1", "system-health-check"),                # read during turn 1
+        _receipt("s1"),
+    ])
+    ev = uptake.skill_evidence_by_session(tmp_path)
+    assert ev[uptake.SKILL_PRESENCE_TELEMETRY] == {}, ev
+    assert ev[uptake.SKILL_PRESENCE_PROXY] == {"s1": {"system-health-check": 1}}, ev
+
+    turns = [_mk_turn(1, "first", None), _mk_turn(2, "second", "first")]
+    active = ["system-health-check", "never-touched"]
+    both = uptake.build_uptake_table(turns=turns, dispute_flags={},
+                                     active_skills=active, skills_read=ev)
+    flat = uptake.build_uptake_table(turns=turns, dispute_flags={},
+                                     active_skills=active,
+                                     skills_read=uptake.skills_read_by_session(tmp_path))
+    row = [r for r in both["entries"] if r["entry"] == "skill:system-health-check"][0]
+    assert row["presence_source"] == uptake.SKILL_PRESENCE_PROXY, row
+    assert row["presence_source"] != uptake.SKILL_PRESENCE_TELEMETRY
+    assert row["present_turn_ids"] == ["s1#1", "s1#2"], row
+    cov = both["coverage"]["active_skills"]
+    # The anti-collapse assertion, stated as an equality rather than a threshold:
+    # the two-route reader and the proxy-only reader agree on coverage exactly.
+    assert cov == flat["coverage"]["active_skills"], (cov, flat["coverage"])
+    assert cov["covered"] == 1 and cov["total"] == 2, cov
+    assert cov["presence_source"] == uptake.SKILL_PRESENCE_PROXY, cov
+    assert cov["covered_by_source"] == {uptake.SKILL_PRESENCE_PROXY: 1,
+                                        uptake.SKILL_PRESENCE_TELEMETRY: 0}, cov
+    bps = both["coverage"]["by_presence_source"]
+    assert bps[uptake.SKILL_PRESENCE_PROXY]["rows"] == 1, bps
+    assert bps[uptake.SKILL_PRESENCE_TELEMETRY]["rows"] == 0, bps
+
+
+def test_the_two_skill_routes_come_off_one_walk_of_the_logs(tmp_path):
+    """The seam inside the instrument: one pass, both channels, same ordinal rule.
+
+    Two functions each globbing `*.events.jsonl` would be two chances for the
+    ordinal rule to drift between channels — and the channels are only comparable
+    if their turn counters mean the same thing, which is the entire point of
+    publishing `covered_by_source`. So `skills_read_by_session` is the proxy slice
+    of `skill_evidence_by_session`, not a second reader, and this is the mixed log
+    that would show it: a read and a landed row in the same file, in the order the
+    live logs put them.
+    """
+    _write_events(tmp_path, [
+        _match("s1", "landed-only", landed=True),   # before any receipt row at all
+        _receipt("s1"),                             # turn 1
+        _read("s1", "read-only"),
+        _read("s1", "never-offered"),               # no row for it at all
+        _match("s1", "read-only", landed=False),    # offered, not rendered
+        _receipt("s1"),                             # turn 2
+        _match("s1", "read-only", landed=True),     # building turn 3
+    ])
+    ev = uptake.skill_evidence_by_session(tmp_path)
+    assert ev[uptake.SKILL_PRESENCE_PROXY] == uptake.skills_read_by_session(tmp_path)
+    assert ev[uptake.SKILL_PRESENCE_PROXY] == {
+        "s1": {"read-only": 1, "never-offered": 1}}, ev
+    # The row before any receipt row credits turn 1; the one after two receipts
+    # credits turn 3, never turn 2.
+    assert ev[uptake.SKILL_PRESENCE_TELEMETRY] == {
+        "s1": {"landed-only": 1, "read-only": 3}}, ev
+
+    table = uptake.build_uptake_table(
+        turns=[_mk_turn(1, "a", None), _mk_turn(2, "b", "a"), _mk_turn(3, "c", "b")],
+        dispute_flags={},
+        active_skills=["landed-only", "read-only", "never-offered"], skills_read=ev)
+    rows = {r["entry"]: r for r in table["entries"]}
+    assert rows["skill:landed-only"]["presence_source"] == uptake.SKILL_PRESENCE_TELEMETRY
+    # `never-offered` has a read and not a single row: the pre-telemetry shape, and
+    # the case clause 3 is about. It keeps the proxy label and the proxy bound.
+    assert rows["skill:never-offered"]["presence_source"] == uptake.SKILL_PRESENCE_PROXY
+    assert rows["skill:never-offered"]["presence_bound"] == "causal_event_order"
+    assert rows["skill:read-only"]["present_turn_ids"] == ["s1#1", "s1#2", "s1#3"]
+    # Both routes pin `read-only`'s presence to a turn — the read to turn 1, the
+    # landed row to turn 3 — so the bounds tie, and the tie breaks in declared
+    # route order: the row says injection, not "the model merely asked". That is
+    # the whole point of having the second channel; losing it to whichever route
+    # credited the earlier turn would leave the label describing the weaker proof.
+    assert rows["skill:read-only"]["presence_bound"] == "causal_event_order"
+    assert rows["skill:read-only"]["presence_route"] == uptake.SKILL_PRESENCE_TELEMETRY
+    assert rows["skill:read-only"]["presence_source"] == uptake.SKILL_PRESENCE_TELEMETRY
+    cov = table["coverage"]["active_skills"]
+    # Three distinct skills, but the two route counts sum to four: `read-only` is
+    # credited by BOTH routes — a read on turn 1 and a landed row on turn 3 — and
+    # its row keeps the stronger label while both routes still count it. The split
+    # is per route, so it does not add up to `covered`, which is the union.
+    assert cov["covered"] == 3, cov
+    assert cov["covered_by_source"] == {uptake.SKILL_PRESENCE_TELEMETRY: 2,
+                                        uptake.SKILL_PRESENCE_PROXY: 2}, cov
+    assert cov["presence_source"] == uptake.SKILL_PRESENCE_TELEMETRY, cov
+
+
+def test_skills_read_cannot_mix_evidence_sources_with_session_keys():
+    """The shape guard under clause 2 and 3: which channel a session's evidence
+    belongs to is the claim the emitted label is made of, so it is never guessed.
+
+    A dict carrying both a source key and a session key is exactly what a caller
+    gets by passing `skills_read_by_session()` output beside a telemetry slice, and
+    the silent reading (treat the unrecognised key as a session) would file a whole
+    session's reads under whatever channel happened to be walked first.
+    """
+    with pytest.raises(ValueError) as ei:
+        uptake._skill_evidence_routes({uptake.SKILL_PRESENCE_PROXY: {"s1": {"a": 1}},
+                                      "s2": {"b": 2}})
+    assert "mixes evidence sources" in str(ei.value), ei.value
+    empty = uptake._skill_evidence_routes(None)
+    assert set(empty) == set(uptake.SKILL_EVIDENCE_SOURCES)
+    assert empty[uptake.SKILL_PRESENCE_TELEMETRY] == {}
+
+
+def test_a_retired_presence_source_stays_readable_through_the_rename_table(tmp_path):
+    """The other side of the rename: three committed tables still say
+    `proxy:skills_read+injected_context (#435 pending)`, and the marker coming off
+    must not turn history into an undeclared value.
+
+    `eval/uptake/uptake-2026-09-20.json` was written with the marker in the value
+    and cannot be rewritten — `test_current_tables_stay_readable_and_old_ones_stay
+    _stamped` exists to keep old files exactly as they were. So the mapping from
+    the retired value to the current one is a declared fact of the module, named
+    rather than absorbed into a `startswith("proxy:")` test, and every retired
+    value must land on a source that is still declared.
+    """
+    assert uptake.PRESENCE_SOURCE_RENAMES == {
+        "proxy:skills_read+injected_context (#435 pending)": uptake.SKILL_PRESENCE_PROXY}
+    for old, new in uptake.PRESENCE_SOURCE_RENAMES.items():
+        assert "(#435 pending)" in old, old
+        assert new in uptake.PRESENCE_SOURCES, (old, new)
+
+    files = sorted((REPO / "eval" / "uptake").glob("uptake-*.json"))
+    retired = {r["presence_source"] for f in files
+               for r in json.loads(f.read_text())["entries"]}
+    retired -= uptake.PRESENCE_SOURCES
+    assert retired, "no committed table carries a retired source, so the map below is untested"
+    unmapped = retired - set(uptake.PRESENCE_SOURCE_RENAMES)
+    assert not unmapped, f"historic tables name {sorted(unmapped)}, undeclared and unmapped"
+
+
+def test_the_note_and_source_constants_name_the_injection_telemetry_not_a_pending_item():
+    """#1603 clause 1, code side: no `(#435 pending)` marker anywhere in uptake, and
+    the note that reaches a consolidator names both routes it actually reads.
+
+    The marker was true when it was written and false from 2026-09-24, when #435
+    landed as `3774e27b`; nothing noticed because the only thing that read it was
+    a test asserting the literal. A consolidator acting on "still draft" would
+    report skill presence as unresolved when the injector's own event had been on
+    disk for days, so the note has to name `prefetch.skill_match` and the
+    fallback's limit, not a ticket's status.
+    """
+    src = (REPO / "app" / "uptake.py").read_text(encoding="utf-8")
+    pending = "(#435" + " pending)"
+    assert pending not in src, "uptake still carries the pending marker"
+    for const in (uptake.SKILL_PRESENCE_PROXY, uptake.SKILL_PRESENCE_TELEMETRY,
+                  uptake.SKILL_PRESENCE_NOTE):
+        assert pending not in const, const
+    assert "draft" not in uptake.SKILL_PRESENCE_NOTE.lower(), uptake.SKILL_PRESENCE_NOTE
+    assert "prefetch.skill_match" in uptake.SKILL_PRESENCE_NOTE, uptake.SKILL_PRESENCE_NOTE
+    assert uptake.SKILL_PRESENCE_TELEMETRY in uptake.SKILL_PRESENCE_NOTE
+    assert uptake.SKILL_PRESENCE_PROXY in uptake.SKILL_PRESENCE_NOTE
+    # The date the fallback stops being optional is in the note, because that is
+    # what makes a pre-telemetry skill row a measurement rather than a gap.
+    assert "2026-09-25" in uptake.SKILL_PRESENCE_NOTE, uptake.SKILL_PRESENCE_NOTE
+
+
+def test_uptake_redeclares_the_names_it_copies_from_the_prompt_path():
+    """Seam across the process boundary uptake refuses to cross.
+
+    uptake may not import the prompt path — it runs without a model and must not
+    reach the loop it measures — so the event name it greps for and the injected
+    block shapes it parses are re-declared here, and the writer lives in
+    `app/prefetch.py`. A copy is only safe while it equals its original, and the
+    failure mode is silent: rename the event upstream and uptake reads zero rows
+    from logs full of them, reporting no skill presence at all. So every copied
+    name is pinned to the value the writer actually uses.
+    """
+    import inspect
+    from app import prefetch
+
+    assert uptake.SKILL_MATCH_EVENT == prefetch.SKILL_MATCH_EVENT
+    # And that the reader actually filters on the constant rather than on a second
+    # literal: the prefilter is the hot path, and a string there that no longer
+    # matches the constant would keep compiling while reading zero rows.
+    reader = inspect.getsource(uptake.skill_evidence_by_session)
+    assert "SKILL_MATCH_EVENT" in reader, reader[:200]
+
+    # And the injected-block shape: `<skill name="x" score="15.9">` is written by
+    # `app/prefetch.py:1295` and parsed by `uptake._SKILL_INJECTION`, in two files
+    # that never import each other. Bytes the writer emits go to the reader here,
+    # and a tag rename on either side has to show up as this going red.
+    rendered = '<skill name="voice-mode" score="15.9">' + "\nbody\n</skill>"
+    assert "<skill name=" in Path(prefetch.__file__).read_text(encoding="utf-8")
+    assert uptake._injected_skills(rendered) == ["voice-mode"], rendered
 
 
 def test_the_table_breaks_its_weights_out_per_presence_source():
@@ -2416,7 +2759,11 @@ def test_the_table_breaks_its_weights_out_per_presence_source():
     Measured in the committed table: the largest `weighted_disputes` per source
     is 0.2308 / 0.0505 / 0.0294 — an ~8× gap that is a property of which channel
     a row belongs to, not of uptake. Any single ranking over all rows is decided
-    by that, and a reader with one sorted list cannot see it happening.
+    by that, and a reader with one sorted list cannot see it happening. Since
+    #1603 the skill channel is two channels — the injector's own event and the
+    read proxy — so a fourth block has to appear, and this fixture has to put a
+    row in it: a declared source with no rows is exactly the "not measured" gap
+    the block exists to expose.
     """
     table = _three_channel_table()
     assert {r["presence_source"] for r in table["entries"]} <= set(uptake.PRESENCE_SOURCES)

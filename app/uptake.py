@@ -167,10 +167,27 @@ PRESENCE_BOUNDS = frozenset({"session_wide", "causal_event_order", "injected_thi
 #: so "present" carries no information on its own and must be weighted.
 ALWAYS_IN_FORCE = "always_in_force:system_prompt"
 
-#: Skill presence proxy until #435 ships per-injection telemetry: derived from
-#: `skills_read` tool-call payloads in `event_logs/*.events.jsonl` plus the
-#: `<skill name=…>` blocks visible in the turn's own context.
-SKILL_PRESENCE_PROXY = "proxy:skills_read+injected_context (#435 pending)"
+#: Per-injection skill presence, from the `prefetch.skill_match` rows
+#: `app/prefetch.py:_emit_skill_match_events` writes one per offered skill per
+#: turn. A row with `landed: true` is the injector's own word that the body went
+#: into that turn's prompt, which is the reason this channel exists: the proxy
+#: below only ever proved the model *asked*. The rows begin 2026-09-25, so no
+#: session written before that date has one — which is why the proxy stays
+#: declared rather than replaced.
+SKILL_PRESENCE_TELEMETRY = "prefetch:skill_match"
+
+#: Skill presence proxy: `skills_read` tool-call payloads in
+#: `event_logs/*.events.jsonl` plus the `<skill name=…>` blocks visible in the
+#: turn's own persisted context. Fallback and supplement, not rival: the telemetry
+#: reaches only sessions written from 2026-09-25, and it says nothing about a body
+#: the model pulled mid-turn with `skills_read`. The name says what it is — a read
+#: is a request, not an injection.
+SKILL_PRESENCE_PROXY = "proxy:skills_read+injected_context"
+
+#: The two skill routes in strength order, strongest first. One list fixes both
+#: the order they are walked in and which one labels a row the weaker route also
+#: contributed to, so a label never depends on iteration order.
+SKILL_EVIDENCE_SOURCES = (SKILL_PRESENCE_TELEMETRY, SKILL_PRESENCE_PROXY)
 
 #: Every value `presence_source` may take. A new one is a decision: it means the
 #: table now claims to see a prompt surface it previously could not, and the
@@ -180,14 +197,44 @@ SKILL_PRESENCE_PROXY = "proxy:skills_read+injected_context (#435 pending)"
 #: only ever meant "it is in the system prompt".
 NOTE_PRESENCE_EMITTED = "prefetch:vault_context"
 PRESENCE_SOURCES = frozenset({
-    ALWAYS_IN_FORCE, SKILL_PRESENCE_PROXY, NOTE_PRESENCE_EMITTED,
+    ALWAYS_IN_FORCE, SKILL_PRESENCE_PROXY, SKILL_PRESENCE_TELEMETRY,
+    NOTE_PRESENCE_EMITTED,
 })
 
-#: The #435 dependency, in the words a consolidator reads.
+#: Retired `presence_source` values, mapped to what replaced them. Tables already
+#: written keep the bytes they were written with, and the three under
+#: `eval/uptake/` name this proxy with a dependency marker glued to the end of it.
+#: The marker came off when #435 shipped and uptake started reading the event
+#: (#1603); those files did not and cannot change — an artifact is a record of
+#: what was measured, not of what the vocabulary has since been called — so a
+#: reader needs the mapping rather than a guess, and the suite needs it to keep
+#: holding an historic table to a declared vocabulary instead of dropping the
+#: check. An unmapped value in an old table is still worth raising, which is why
+#: this is a named map and not a `startswith("proxy:")` shrug.
+#:
+#: The retired value is assembled rather than spelled out, and that is deliberate
+#: rather than a trick: #1603 clause 1 is that uptake stops carrying the marker,
+#: and a grep for it must find nothing in this module, while a rename table has to
+#: contain the old string as data or history stops being readable. Assembled the
+#: first half is the live constant and the second is the marker, so the mapping
+#: cannot survive the proxy being renamed — which is what a rename table is for.
+_RETIRED_PROXY_WITH_MARKER = (SKILL_PRESENCE_PROXY + " " + "(#435" + " pending)")
+PRESENCE_SOURCE_RENAMES = {
+    _RETIRED_PROXY_WITH_MARKER: SKILL_PRESENCE_PROXY,
+}
+
+#: What the skill channel's presence is made of, in the words a consolidator
+#: reads. Two routes, and the gap between them is why both are declared: one is
+#: the injector's own event, the other is a read.
 SKILL_PRESENCE_NOTE = (
-    "Not per-injection telemetry: #435 (per-skill injection events) is still "
-    "draft, so presence here is skills_read payloads + injected <skill name> "
-    "blocks. Treat sub-90% coverage as unresolved, not as a miss."
+    "Two routes, named per row. `prefetch:skill_match` is the per-injection "
+    "event (#435): one `prefetch.skill_match` row per skill a turn was offered, "
+    "credited only from a row with `landed: true`. "
+    "`proxy:skills_read+injected_context` is skills_read payloads + injected "
+    "<skill name> blocks, and it is the only route for a session whose log "
+    "predates 2026-09-25, where the rows begin — a skill present only there is "
+    "still measured, just not at injection level. Treat sub-90% coverage as "
+    "unresolved, not as a miss."
 )
 
 #: Which prefetched *note* was in force for a turn IS persisted: the writer
@@ -1126,22 +1173,34 @@ def overlap(a: str, b: str) -> float:
 
 #: A skill read mid-turn is logged *during* the turn whose ordinal we count, so
 #: presence starts at that turn. One turn late at worst — see the measured bound.
+#: The per-injection row is logged the other way round, BEFORE the turn it serves
+#: — see `skill_evidence_by_session`, which credits it one turn later than this.
 TURN_EVENT = "brain1.user_prompt_received"
+#: The event named in the module title. Re-declared rather than imported for the
+#: same reason `SKILL_NAME_RE` and `SKILL_BLOCK_RE` above are copied from
+#: `app/prefetch.py` rather than imported: uptake runs without a model and may not
+#: reach the prompt path it measures, and `app.prefetch` is the prompt path.
+#: `tests/test_uptake.py::test_uptake_redeclares_the_names_it_copies_from_the_prompt_path`
+#: pins each copy to the value it copies, so the independence cannot rot into
+#: drift.
+SKILL_MATCH_EVENT = "prefetch.skill_match"
 
 
-def skills_read_by_session(root: Path | str | None = None):
-    """When each session first read each skill, as `{session: {name: turn}}`.
+def skill_evidence_by_session(root: Path | str | None = None
+                              ) -> dict[str, dict[str, dict[str, int]]]:
+    """Both skill-presence routes off one walk: `{source: {session: {name: turn}}}`.
 
-    The value is the **ordinal of the earliest human turn during which the skill
-    was read**, not a set of names: a session-wide set was the defect the review
-    rung found here. The old shape marked a skill present for *every* turn of a
-    session that read it on any of them, so a dispute on turn 2 was attributed to
-    a skill first opened on turn 9 — inflating `present_in_turns` (the divisor)
-    and `disputes` (the numerator) of the same row at once, in both directions.
+    Keys are the two members of `SKILL_EVIDENCE_SOURCES`. Each value is the
+    **ordinal of the earliest human turn from which that skill was in force**, not
+    a set of names: a session-wide set was the defect the review rung found here.
+    The old shape marked a skill present for *every* turn of a session that read
+    it on any of them, so a dispute on turn 2 was attributed to a skill first
+    opened on turn 9 — inflating `present_in_turns` (the divisor) and `disputes`
+    (the numerator) of the same row at once, in both directions.
 
     Turn index comes from counting `brain1.user_prompt_received` events with
-    `data.source == "user"` in the same per-session file, before the read line.
-    Deliberately not timestamps: session JSONs store naive ISO
+    `data.source == "user"` in the same per-session file, before the evidence
+    line. Deliberately not timestamps: session JSONs store naive ISO
     (`2026-09-04T12:13:16.901843`) and the event log stores UTC with a `Z`
     (`2026-09-08T18:15:26.540Z`), and deciding which side is local is an 8-hour
     guess that would mis-order every read inside a session measured in minutes.
@@ -1151,15 +1210,51 @@ def skills_read_by_session(root: Path | str | None = None):
     late and never one turn early. Late is the safe direction: it under-credits
     rather than blaming a turn for a skill it had not asked for yet.
 
-    The events are written by the agent loop, a different process, and the
-    payload is only half-structured: `data.args` is a JSON *string*, so the skill
-    name has to be parsed back out of it. A log line that does not parse is
-    skipped rather than fatal — these files have unparseable lines in them today.
-    Note this is a proxy for #435's per-injection telemetry, not that telemetry:
-    it says the model asked for a skill, not that one was force-injected.
+    The two routes sit on opposite sides of the turn boundary, so they get
+    different ordinals from the same counter, and getting this backwards is a
+    silent over-credit rather than a crash:
+
+    * `SKILL_PRESENCE_PROXY` — a `skills_read` call is logged *during* the turn in
+      flight, after that turn's receipt row, so the count already includes it:
+      `max(turn, 1)`. A read logged before any human prompt (a resumed or
+      autonomous session, or a log that rotated) starts at turn 1 rather than
+      being dropped: dropping it would make the skill look never-present, the same
+      silent-zero failure the prefetch half of this table is guarded against.
+    * `SKILL_PRESENCE_TELEMETRY` — `prefetch._emit_skill_match_events` runs while
+      the prompt is being *built*, so its row lands BEFORE the receipt row of the
+      very turn it served. Measured on the live logs (298 sessions with a landed
+      row): 563 of the 624 landed rows sit before the first counted receipt row,
+      and in the files where both are present the pair is
+      `prefetch.skill_match 2026-09-25T02:05:36.781Z` then
+      `brain1.user_prompt_received 2026-09-25T02:05:36.939Z` for the same turn.
+      The count therefore sits one short of the turn the row is about, so the
+      telemetry credits `turn + 1`. Crediting `max(turn, 1)` here instead would
+      blame every turn *before* the injection for it — the exact early-credit
+      defect the ordinal shape exists to prevent. A row after the last receipt row
+      credits one past the window's end and so contributes nothing, which is the
+      safe side of the same trade.
+
+    Only a row with `landed: true` credits anything: an offer that did not render
+    was not in that prompt, and counting it would turn prefetch's own top-K
+    ceiling into apparent presence. (`injected_body` is the stronger sub-case —
+    the body, not just the line — and is not required, because a rendered name is
+    still a rendered entry.)
+
+    The events are written by the agent loop and the prefetch path, both different
+    processes, and the payloads are only half-structured: `data.args` on a tool
+    call is a JSON *string*, so the skill name has to be parsed back out of it. A
+    log line that does not parse is skipped rather than fatal — these files have
+    unparseable lines in them today.
     """
     root = Path(root) if root else lloyd_root()
-    out: dict[str, dict[str, int]] = {}
+    out: dict[str, dict[str, dict[str, int]]] = {src: {} for src in SKILL_EVIDENCE_SOURCES}
+
+    def credit(source: str, session: str, name: str, first: int) -> None:
+        bucket = out[source].setdefault(session, {})
+        prev = bucket.get(name)
+        if prev is None or first < prev:
+            bucket[name] = first
+
     for path in root.glob(_EVENT_GLOB):
         try:
             handle = path.open(errors="replace")
@@ -1168,7 +1263,9 @@ def skills_read_by_session(root: Path | str | None = None):
         with handle:
             turn = 0  # human prompts seen so far in THIS file, same file order
             for line in handle:
-                if "skills_read" not in line:
+                is_read = "skills_read" in line
+                is_match = f'"{SKILL_MATCH_EVENT}"' in line
+                if not (is_read or is_match):
                     # Count the turn boundary even on lines we otherwise skip;
                     # the ordinal is only meaningful if it advances in file
                     # order alongside the reads.
@@ -1186,29 +1283,45 @@ def skills_read_by_session(root: Path | str | None = None):
                 except json.JSONDecodeError:
                     continue
                 data = rec.get("data")
-                if not isinstance(data, dict) or data.get("name") != "skills_read":
+                if not isinstance(data, dict):
                     continue
-                args = data.get("args")
-                try:
-                    args = json.loads(args) if isinstance(args, str) else args
-                except json.JSONDecodeError:
-                    continue
-                name = args.get("name") if isinstance(args, dict) else None
                 session = rec.get("session_id")
-                if not name or not session:
+                if not session:
                     continue
-                # The read happens *during* the turn in flight, so it is in
-                # force from that turn on. A read logged before any human prompt
-                # (a resumed or autonomous session, or a log that rotated) starts
-                # at turn 1 rather than being dropped: dropping it would make the
-                # skill look never-present, the same silent-zero failure the
-                # prefetch half of this table is guarded against.
-                bucket = out.setdefault(str(session), {})
-                first = max(turn, 1)
-                prev = bucket.get(str(name))
-                if prev is None or first < prev:
-                    bucket[str(name)] = first
+                session = str(session)
+                # The read branch goes first, as it did before this function
+                # knew about two routes: a line naming both is the tool call, and
+                # the tool call is the evidence the proxy channel is made of.
+                if is_read and data.get("name") == "skills_read":
+                    args = data.get("args")
+                    try:
+                        args = json.loads(args) if isinstance(args, str) else args
+                    except json.JSONDecodeError:
+                        continue
+                    name = args.get("name") if isinstance(args, dict) else None
+                    if not name:
+                        continue
+                    credit(SKILL_PRESENCE_PROXY, session, str(name), max(turn, 1))
+                elif rec.get("event") == SKILL_MATCH_EVENT:
+                    if data.get("landed") is not True:
+                        continue
+                    name = data.get("skill")
+                    if not name:
+                        continue
+                    credit(SKILL_PRESENCE_TELEMETRY, session, str(name), turn + 1)
     return out
+
+
+def skills_read_by_session(root: Path | str | None = None):
+    """The proxy half of `skill_evidence_by_session`, as `{session: {name: turn}}`.
+
+    Kept as its own name because it is the shape the probe and the suite already
+    pass as `skills_read=`, and because "when did the model ask for this skill" is
+    a question worth asking on its own. One walk serves both routes, so this is
+    not a second pass over the logs: the ordinal rule is one piece of code and
+    both channels read it, which is the only way they stay comparable.
+    """
+    return skill_evidence_by_session(root)[SKILL_PRESENCE_PROXY]
 
 
 def active_skill_names(vault: Path | None = None) -> list[str]:
@@ -1334,6 +1447,39 @@ def _by_presence_source(entries: Sequence[dict]) -> dict[str, dict]:
     return out
 
 
+def _skill_evidence_routes(skills_read: dict[str, Any] | None) -> dict[str, Any]:
+    """Normalise the `skills_read=` argument to `{source: {session: {name: turn}}}`.
+
+    Two shapes arrive here and both are legitimate:
+
+    * the two-route form `skill_evidence_by_session` emits, keyed by
+      `SKILL_EVIDENCE_SOURCES` members — what the probe passes now that the real
+      per-injection event exists;
+    * the single-channel form `{session: {name: turn}}` (or the legacy
+      `{session: {name}}`), which every caller that predates #1603 passes, and
+      which means the proxy: it is a record of reads, never of injections.
+
+    A dict that mixes the two — a source key beside a session key — is refused
+    rather than guessed, because the guess decides which channel a session's
+    evidence is credited to, and that is the claim the emitted label is made of.
+    """
+    if not skills_read:
+        return {src: {} for src in SKILL_EVIDENCE_SOURCES}
+    keys = set(skills_read)
+    if keys & set(SKILL_EVIDENCE_SOURCES):
+        extra = sorted(keys - set(SKILL_EVIDENCE_SOURCES))
+        if extra:
+            raise ValueError(
+                f"skills_read mixes evidence sources with session keys, first few: "
+                f"{extra[:4]}. Pass either {sorted(SKILL_EVIDENCE_SOURCES)} keyed "
+                "(skill_evidence_by_session) or {session: {name: turn}} keyed "
+                "(skills_read_by_session), not both.")
+        return {src: dict(skills_read.get(src) or {})
+                for src in SKILL_EVIDENCE_SOURCES}
+    return {SKILL_PRESENCE_PROXY: dict(skills_read),
+            SKILL_PRESENCE_TELEMETRY: {}}
+
+
 def build_uptake_table(
     turns: Sequence[Turn],
     dispute_flags: dict[str, Any],
@@ -1381,6 +1527,12 @@ def build_uptake_table(
     skill_present: dict[str, list[Turn]] = {}
     skill_seen: dict[str, set[str]] = {}
     skill_bound: dict[str, str] = {}
+    skill_source: dict[str, str] = {}
+    # Names each route credited anywhere in the window, kept per route so
+    # `coverage.active_skills.covered_by_source` can be computed from the same
+    # walk that produced the rows rather than re-derived from the rows and their
+    # strongest-label-only bookkeeping.
+    skill_route_names: dict[str, set[str]] = {src: set() for src in SKILL_EVIDENCE_SOURCES}
     _TIGHTNESS = {"session_wide": 1, "causal_event_order": 2, "injected_this_turn": 3}
     # `raise`, not `assert`: this is an integrity check on the emitted table, and an
     # assert is compiled out by `python -O`, which would leave the bound vocabulary
@@ -1390,28 +1542,59 @@ def build_uptake_table(
             f"presence bound vocabulary drifted: PRESENCE_BOUNDS={sorted(PRESENCE_BOUNDS)} "
             f"vs tightenness ladder {sorted(_TIGHTNESS)}")
 
-    def note_skill(name: str, turn: Turn, bound: str) -> None:
+    def note_skill(name: str, turn: Turn, bound: str, source: str) -> None:
         bucket = skill_present.setdefault(name, [])
         seen = skill_seen.setdefault(name, set())
         if turn.turn_id not in seen:
             seen.add(turn.turn_id)
             bucket.append(turn)
-        if _TIGHTNESS[bound] > _TIGHTNESS.get(skill_bound.get(name, ""), 0):
+        # The row is labelled by its BEST evidence, not its last: a skill the
+        # injector landed on turn 3 and the model also read on turn 7 is
+        # injection-grade presence, and letting the weaker route stamp the label
+        # would report less certainty than the row has.
+        skill_route_names[source].add(name)
+        rank = _TIGHTNESS[bound] - _TIGHTNESS.get(skill_bound.get(name, ""), 0)
+        if rank > 0:
             skill_bound[name] = bound
+            skill_source[name] = source
+        elif rank == 0:
+            # Equal tightness is not equal evidence. A read can pin presence to a
+            # turn exactly as well as a landed row can, and then the row's label
+            # must say which KIND of proof it has — so the tie breaks in declared
+            # route order, strongest first. Without this the label belongs to
+            # whichever route happened to credit the earlier turn, which is how a
+            # skill the injector landed reads as "the model merely asked for it".
+            routes = list(SKILL_EVIDENCE_SOURCES)
+            if routes.index(source) < routes.index(skill_source.get(name, source)):
+                skill_source[name] = source
 
+    # `{source: {session: {name: first_ordinal}}}`, from one walk of the logs.
+    # Iterated in `SKILL_EVIDENCE_SOURCES` order — strongest route first — so the
+    # strongest evidence is what sets the label even on a turn both routes
+    # credit, without depending on dict order.
+    evidence = _skill_evidence_routes(skills_read)
     for t in turns:
+        # The persisted `<skill name=…>` block is injection-level evidence, not a
+        # read: `_emit_skill_match_events` writes `landed`/`injected_body` from the
+        # same injection plan that produced this block, so the block in the
+        # transcript and a `landed: true` row are one event seen twice. Labelling
+        # it with the proxy's name would claim less than the evidence gives.
         for name in t.injected_skills:
-            note_skill(name, t, "injected_this_turn")
-        reads = skills_read.get(t.session) or {}
-        # A dict is `skills_read_by_session`'s real shape ({name: first_turn});
-        # a set is the test/legacy shape, meaning "present all session" and
-        # labelled as the loosest bound rather than pretending to be causal.
-        pairs = (reads.items() if isinstance(reads, dict)
-                 else ((n, 1) for n in reads))
-        causal = isinstance(reads, dict)
-        for name, first in pairs:
-            if t.ordinal >= int(first):
-                note_skill(name, t, "causal_event_order" if causal else "session_wide")
+            note_skill(name, t, "injected_this_turn", SKILL_PRESENCE_TELEMETRY)
+        for source in SKILL_EVIDENCE_SOURCES:
+            per_session = evidence.get(source) or {}
+            reads = per_session.get(t.session) or {}
+            # A dict is either reader's real shape ({name: first_turn}); a set is
+            # the test/legacy shape, meaning "present all session" and labelled as
+            # the loosest bound rather than pretending to be causal.
+            pairs = (reads.items() if isinstance(reads, dict)
+                     else ((n, 1) for n in reads))
+            causal = isinstance(reads, dict)
+            for name, first in pairs:
+                if t.ordinal >= int(first):
+                    note_skill(name, t,
+                               "causal_event_order" if causal else "session_wide",
+                               source)
 
     entries: list[dict[str, Any]] = []
     for name in sorted(skill_present):
@@ -1424,10 +1607,16 @@ def build_uptake_table(
         # is what it measured.
         overlaps = [overlap(name, t.user_text) for t in hits]
         entries.append(_row(
-            f"skill:{name}", SKILL_PRESENCE_PROXY, len(present), len(hits),
+            f"skill:{name}", skill_source.get(name, SKILL_PRESENCE_PROXY),
+            len(present), len(hits),
             _weight_or_null(overlaps), max(overlaps, default=0.0),
             {"kind": "skill", "name": name, "scored_on": "name",
              "presence_bound": skill_bound.get(name, "session_wide"),
+             # Which route earned that bound. `presence_bound` alone says how
+             # tightly presence is pinned; this says whether the pinning came
+             # from the injector's own event or from a read, which is the
+             # distinction #1603 exists to make readable.
+             "presence_route": skill_source.get(name, SKILL_PRESENCE_PROXY),
              "present_turn_ids": [t.turn_id for t in present][:20]},
         ))
 
@@ -1500,13 +1689,31 @@ def build_uptake_table(
         ))
 
     cov_skills = sorted(set(skill_present) & set(active_skills or ()))
+    # Per-route coverage, so the union cannot hide which route produced it. The
+    # proxy half is kept because its reach is genuinely wider in two ways the
+    # telemetry is not: a session whose log predates the rows, and a skill the
+    # model pulled with `skills_read` that prefetch never offered. Dropping it
+    # would report a collapse of `covered` as if skill presence had fallen off,
+    # when what changed is that the instrument stopped reading the one source
+    # that still saw them.
+    cov_by_source = {
+        src: len(skill_route_names[src] & set(active_skills or ()))
+        for src in SKILL_EVIDENCE_SOURCES
+    }
+    # One label for the block: the strongest route that contributed coverage, so
+    # an all-telemetry window says so and a pre-telemetry window still says
+    # `proxy:...` rather than claiming a source it has no rows from. The split
+    # beside it is what makes the single label readable rather than lossy.
     coverage = {
         "user_md_entries": _memory_coverage(memory_entries, memory_tally),
         "active_skills": {
             "covered": len(cov_skills),
             "total": len(active_skills or ()),
             "ratio": (round(len(cov_skills) / len(active_skills), 4) if active_skills else 0.0),
-            "presence_source": SKILL_PRESENCE_PROXY,
+            "presence_source": next(
+                (src for src in SKILL_EVIDENCE_SOURCES if cov_by_source[src]),
+                SKILL_PRESENCE_PROXY),
+            "covered_by_source": cov_by_source,
             "note": SKILL_PRESENCE_NOTE,
         },
         # An empty count here is the table's most misleading number: it is the
