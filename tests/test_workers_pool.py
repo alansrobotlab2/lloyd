@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from datetime import timezone
+from datetime import datetime, timezone
 
 from workers import dispatch_watch
 from workers.pool import WorkerPool, normalize_result
@@ -167,6 +167,107 @@ async def test_an_in_band_failure_does_not_send_the_item_back_for_a_retry(q, mon
     runs = await _drain_one(q, monkeypatch, SimpleNamespace(NAME="s", execute=execute))
     assert runs[0]["status"] == "failed"
     assert q.get(1).state == "completed", "an in-band failure was retried"
+
+
+async def test_a_returned_deferral_holds_the_row_out_of_the_next_tick(q, monkeypatch):
+    """`defer_seconds` is the third thing a source can ask for (#1714).
+
+    An in-band `{"status": "failed"}` used to have exactly two spacings: the
+    queue's backoff, reachable only by RAISING, or the source's own
+    `interval_seconds`. `youtube-digest`'s infra branch needed the second to stop
+    being the whole story — a primary outage re-offered the same videos every
+    300 s with a fresh row and `attempts=1` each time — without taking the first,
+    because `mark_failed` counts an attempt against work the engine never got. So
+    the run stays recorded and terminal-in-effect while the ROW waits behind
+    `not_before`. The control is `test_an_in_band_failure_does_not_send_the_item_back_for_a_retry`
+    one test up: a `failed` with no deferral still completes.
+    """
+    async def execute(item):
+        return {"status": "failed", "summary": "turn produced nothing",
+                "defer_seconds": 900}
+
+    q.enqueue("s", "k", dedup_key="yd:abc")
+    before = datetime.now(timezone.utc)
+    runs = await _drain_one(q, monkeypatch, SimpleNamespace(NAME="s", execute=execute))
+
+    assert runs[0]["status"] == "failed", "the deferral changed what the run records"
+    row = q.get(1)
+    assert row.state == "queued", "a deferred in-band failure completed its row"
+    assert row.not_before, "the row was released with no spacing: it is queueable next tick"
+    held = (datetime.fromisoformat(row.not_before) - before).total_seconds()
+    assert 800 < held <= 905, f"the row waits {held:.0f}s, not the 900 the source asked for"
+    assert q.claim_next("w0") is None, "the deferred row was claimable inside its window"
+    assert q.enqueue("s", "k", dedup_key="yd:abc") is None, (
+        "the deferred row released its dedup key, so the next tick enqueues a second "
+        "row for the same work and the bound never applies to one row twice")
+
+
+async def test_a_deferral_on_a_successful_run_is_ignored(q, monkeypatch, caplog):
+    """Deferring a success would re-run finished work: a second note, a second send.
+
+    The field is a source's request, not the pool's policy, so the policy lives
+    here — including the junk cases, which must land on the ordinary completion
+    path with a warning rather than raise inside a worker.
+    """
+    async def execute(item):
+        return {"status": "success", "summary": "wrote the note", "defer_seconds": 900}
+
+    q.enqueue("s", "k")
+    with caplog.at_level("WARNING"):
+        await _drain_one(q, monkeypatch, SimpleNamespace(NAME="s", execute=execute))
+    assert q.get(1).state == "completed" and q.get(1).not_before is None
+    assert "SUCCESSFUL" in caplog.text, (
+        "the pool ignored a deferral on a success silently — the source believes it "
+        "backed off when it did not")
+
+    assert normalize_result(_item(), {"status": "failed", "summary": "x",
+                                      "defer_seconds": "900"})["defer_seconds"] == 900.0
+    for junk in ("soon", [], float("inf"), float("nan"), -5, 0):
+        assert normalize_result(_item(), {"status": "failed", "summary": "x",
+                                          "defer_seconds": junk})["defer_seconds"] is None, (
+            f"defer_seconds={junk!r} was accepted; a non-finite or non-positive value "
+            "would park the row for a time nobody stated")
+    assert normalize_result(_item(), {"status": "failed", "summary": "x"})["defer_seconds"] is None
+
+
+async def test_the_digest_infra_turn_end_to_end_leaves_its_row_waiting(q, monkeypatch, tmp_path):
+    """One run across all three modules this change touches: source, pool, queue.
+
+    Each layer has its own node, and the seam between them is where #1714 lived —
+    the digest module returned a number, the pool had to carry it, the queue had to
+    hold the row by it, and the claim query had to honour it. Driving the real
+    `youtube_digest.execute` through a real `WorkerPool` against a real
+    `WorkQueue` is the only way to see the three agree: any one of them could
+    satisfy its own test while the chain still re-offered the video on the tick.
+    """
+    from workers.sources import youtube_digest as Y
+    from tests.test_youtube_digest_source import _Script, _meta, _turn
+
+    monkeypatch.setattr(Y, "BACKLOG_DIR", tmp_path / "backlog")
+    monkeypatch.setattr(Y, "_vault_dirty_paths", lambda: set())
+    monkeypatch.setattr(Y, "_script", _Script({"ok": True, "meta": _meta(tmp_path)}))
+    monkeypatch.setattr(Y, "run_prompt_in_session", _turn("", stop_reason=None))
+
+    q.enqueue(Y.NAME, "video",
+              payload={"channel": "ai-engineer", "video_id": "abc123"},
+              dedup_key="youtube-digest:ai-engineer:abc123")
+    before = datetime.now(timezone.utc)
+    runs = await _drain_one(q, monkeypatch,
+                            SimpleNamespace(NAME=Y.NAME, execute=Y.execute),
+                            source_name=Y.NAME)
+
+    assert runs[0]["status"] == "failed" and runs[0]["source"] == Y.NAME
+    assert json.loads(runs[0]["meta_json"])["infra"] is True, (
+        "the run record is the owed check's only evidence of an infra failure")
+    row = q.get(1)
+    assert row.state == "queued" and row.dedup_key == "youtube-digest:ai-engineer:abc123"
+    held = (datetime.fromisoformat(row.not_before) - before).total_seconds()
+    assert 800 < held <= 905, (
+        f"the row waits {held:.0f}s — the digest asked for {Y.INFRA_DEFER_SECONDS}s "
+        "and the pool or the queue dropped it")
+    assert q.claim_next("w0") is None, (
+        "the row was claimable inside its window: across the three modules the video "
+        "would still be re-offered every 300 s tick, which is the bug")
 
 
 async def test_a_raised_exception_is_recorded_and_requeued(q, monkeypatch):

@@ -88,6 +88,73 @@ async def test_an_empty_turn_writes_nothing_and_is_recorded_as_failed(
     assert result["meta"]["empty_response"] is True
 
 
+async def test_the_infra_shaped_digest_turn_asks_for_spacing(monkeypatch, tmp_path):
+    """An empty turn whose cause is the engine asks to be re-offered later — and
+    still spends nothing from the video's own retry budget (#1714).
+
+    The three sources above finish an empty turn and are done with it: each owns
+    a registry (`research.db`, the session's `attempts`) and re-offers from there.
+    `youtube-digest`'s infra branch owns NOTHING — it deliberately skips the
+    script's `--fail` so `seen.json` does not charge a video for an outage (six
+    videos went through it in five seconds each on 2026-09-09 and all six were
+    right to be retried) — and with no registry touched, the only spacing left was
+    the source's `interval_seconds`: 300 s, forever. That is what `defer_seconds`
+    is for, and the no-`--fail` half is asserted here in the same test because a
+    bound bought by charging the video would be the regression, not the fix.
+
+    The digest module's own harness is imported rather than re-implemented —
+    `tests/test_youtube_digest_source.py` owns `_meta`, `_Script` and `_turn`.
+    """
+    from workers.sources import youtube_digest as Y
+    from tests.test_youtube_digest_source import _Script, _item, _meta, _turn
+
+    monkeypatch.setattr(Y, "BACKLOG_DIR", tmp_path / "backlog")
+    monkeypatch.setattr(Y, "_vault_dirty_paths", lambda: set())
+    script = _Script({"ok": True, "meta": _meta(tmp_path)})
+    monkeypatch.setattr(Y, "_script", script)
+    monkeypatch.setattr(Y, "run_prompt_in_session", _turn("", stop_reason=None))
+
+    result = await Y.execute(_item({"channel": "ai-engineer", "video_id": "abc123"}))
+
+    assert result["status"] == "failed" and result["meta"]["infra"] is True
+    assert result["meta"]["empty_response"] is True
+    assert result["defer_seconds"] == Y.INFRA_DEFER_SECONDS == 900, (
+        f"the infra branch deferred {result.get('defer_seconds')!r}s; the bound is "
+        "INFRA_DEFER_SECONDS (900 s, the scanner's own RETRY_INTERVAL_SECONDS), "
+        "stated in the module and in §Intake")
+    assert script.modes() == ["--fetch"], (
+        "the branch reached for --fail to get a backoff: seen.json would now hold a "
+        "failure_count for a primary outage, which is the thing this branch refuses to do")
+    assert not any("--fail" in arg for call in script.calls for arg in call[1:])
+
+
+@pytest.mark.parametrize("mod,payload", [
+    (SD, {"session_path": "/tmp/nope.json"}),
+    (BM, {"loser_task_id": "bench_1", "composite_score": 0.2}),
+])
+async def test_an_ordinary_empty_turn_asks_for_no_spacing(mod, payload, monkeypatch, tmp_path):
+    """The deferral is the infra branch's, not a blanket rule for empty turns.
+
+    `session-distill` and `bench-mine` decide their own re-offer in their own
+    registry, which is what §Intake's "the retry lives outside the queue" means; a
+    `defer_seconds` on their empty turn would park a queue row the source has
+    already written off, and the dedup key it now keeps would block the next
+    legitimate item of the same kind for the length of the bound.
+    """
+    monkeypatch.setattr(
+        mod, "run_prompt_on_primary",
+        lambda *a, **k: _async(C.TurnResult(text="", stop_reason="max_turns")))
+    monkeypatch.setattr(mod, "write_staging_note",
+                        lambda **kw: tmp_path / "x.md")
+    monkeypatch.setattr(SD, "_mark_done_if_exhausted", lambda item: None, raising=False)
+
+    result = await mod.execute(_item(payload))
+    assert result["status"] == "failed"
+    assert "defer_seconds" not in result, (
+        f"{mod.NAME} deferred an empty turn it owns the retry for: the row would sit "
+        "unclaimable while the source believes it is done")
+
+
 async def test_a_state_turn_that_wrote_nothing_does_not_report_a_clean_stop(
         monkeypatch, tmp_path):
     """`stop_reason="stop"` in a failure record is a claim about the model.

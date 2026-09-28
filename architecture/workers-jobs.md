@@ -593,13 +593,30 @@ than to either job:
   puts it in the prompt, and checks the file afterwards. A confident `RESULT`
   block over an empty directory is a failed attempt, not a note — and supplying
   the path is what makes the check possible at all.
-- **The retry lives outside the queue.** The pool records an in-band
+- **The retry lives outside the queue, but the SPACING does not, and since #1714
+  it cannot be left with nothing.** The pool records an in-band
   `{"status": "failed"}` and then calls `mark_completed` **regardless** — only a
   *raised* exception reaches `mark_failed` and the queue's backoff. So a source
-  that returns `failed` and expects a retry does not get one. Each of these two
-  keeps its own registry of attempts (`seen.json`, `research.db`) and decides
-  there when to offer the work again. This is the part most likely to be got
-  wrong by someone reading `pool.py`.
+  that returns `failed` and expects a retry does not get one from the queue. Each
+  of these two keeps its own registry of attempts (`seen.json`, `research.db`) and
+  decides there when to offer the work again. This is the part most likely to be
+  got wrong by someone reading `pool.py`. What that rule used to leave unstated is
+  the case where the source decides *nothing* — `youtube-digest`'s infra-shaped
+  branch deliberately touches neither registry (no `--fail`, so `seen.json` records
+  no attempt against a video that never got a turn), which left the re-offer
+  spaced by the source's `interval_seconds` alone: 300 s, forever, with a fresh
+  row and `attempts=1` each time. A source in that position now returns
+  `defer_seconds: <n>` alongside the `failed`, and the pool releases the row with
+  `mark_completed(item_id, not_before=now+n)`: the run is still recorded, the row
+  goes back to `queued` behind that timestamp and **keeps its `dedup_key`**, so the
+  next tick's `enqueue` coalesces against it instead of minting a row. For
+  `youtube-digest` that n is `INFRA_DEFER_SECONDS` (900 s — the scanner's own
+  `RETRY_INTERVAL_SECONDS`), and the ceiling is the queue's ordinary
+  `max_attempts` (3), because `claim_next` raises `attempts` on every claim: a
+  video that keeps losing its turn to the engine is offered three times, at least
+  900 s apart, and `_poison_at_cap` then ends it at `state='poisoned'`. The
+  no-penalty half is unchanged — `seen.json` still learns nothing from an infra
+  turn, so a video the engine never served is not charged for it either way.
 
 A fourth follows from the third: because each owns its own retry, each can
 afford to treat **a `DrainActive` as not the work's fault**. The backend landing

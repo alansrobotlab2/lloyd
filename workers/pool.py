@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import time
 from datetime import datetime, timedelta, timezone
 from functools import partial
@@ -236,6 +237,17 @@ def normalize_result(item: QueueItem, result: Any) -> dict[str, Any]:
     # is in the pilot and its model emitted nothing, which is a gap.
     claims = result.get("claims") if isinstance(result.get("claims"), list) else None
 
+    # `defer_seconds` (#1714) is how a source asks for SPACING rather than a
+    # retry: the run is finished and recorded, but its queue row should not be
+    # offered again until the seconds pass. It exists because an in-band
+    # `{"status": "failed"}` used to have exactly two possible spacings — the
+    # queue's backoff (only reachable by *raising*) or the source's own tick —
+    # so a source that blamed neither itself nor the work got the tick, and a
+    # 300 s tick is not a bound on anything. Only a run that did not succeed may
+    # defer: deferring a success would re-run finished work and repeat its
+    # effects, which is the one thing the in-band contract promises not to do.
+    defer = _defer_seconds_of(item, result, status)
+
     return {
         "status": status,
         "summary": summary[:500],
@@ -244,7 +256,43 @@ def normalize_result(item: QueueItem, result: Any) -> dict[str, Any]:
         "task_id": _task_id_of(item, result),
         "meta": result.get("meta") if isinstance(result.get("meta"), dict) else {},
         "claims": claims,
+        "defer_seconds": defer,
     }
+
+
+def _defer_seconds_of(item: QueueItem, result: dict[str, Any], status: str) -> Optional[float]:
+    """The deferral a source asked for, or None — validated in one place.
+
+    A non-number is dropped with a warning rather than guessed at: a source that
+    returns `{"defer_seconds": "900"}` or `None` meant to space something out,
+    and silently completing the row would put it back on the every-tick path it
+    was asking to leave. A number <= 0 means "next tick", which is what an
+    ordinary completion already is.
+    """
+    raw = result.get("defer_seconds")
+    if raw is None:
+        return None
+    try:
+        seconds = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("source %s returned defer_seconds=%r, not a number — ignored",
+                       item.source, raw)
+        return None
+    if status == "success":
+        logger.warning("source %s asked to defer a SUCCESSFUL run by %s s — ignored, "
+                       "the row stays terminal", item.source, seconds)
+        return None
+    if not math.isfinite(seconds):
+        # `inf`/`nan` reach here from a source that divided by zero. `inf` would
+        # raise inside the datetime arithmetic that resolves the deferral, and
+        # `nan` compares false against every bound, so a guard that only tested
+        # `seconds <= 0` would hand both onward instead of rejecting them.
+        logger.warning("source %s returned a non-finite defer_seconds=%r — ignored",
+                       item.source, raw)
+        return None
+    if seconds <= 0:
+        return None
+    return seconds
 
 
 
@@ -1211,7 +1259,19 @@ class WorkerPool:
                                      if bundle is not None else ""),
                     )
                 )
-                await asyncio.to_thread(self.queue.mark_completed, item.id)
+                # The run is recorded either way; the deferral only decides when
+                # the ROW may be offered again (#1714). Resolved here at the
+                # release rather than stamped by the source, because a source
+                # that computes its own timestamp is a source whose clock skew
+                # silently becomes a row deferred for a year or for nothing.
+                defer_to = None
+                if norm["defer_seconds"] is not None:
+                    defer_to = (datetime.now(timezone.utc)
+                                + timedelta(seconds=norm["defer_seconds"])).isoformat()
+                    logger.info("[%s] deferring %s/%s row %s by %.0fs", worker_id,
+                                item.source, item.kind, item.id, norm["defer_seconds"])
+                await asyncio.to_thread(
+                    partial(self.queue.mark_completed, item.id, not_before=defer_to))
                 logger.log(
                     logging.WARNING if run_status == "failed" else logging.INFO,
                     "[%s] %s %s/%s in %.1fs%s", worker_id,

@@ -225,6 +225,112 @@ def test_an_item_becomes_claimable_once_its_backoff_expires(q):
     assert q.claim_next("worker-0") is not None
 
 
+def test_a_completion_can_defer_the_row_to_a_caller_supplied_time(q):
+    """`mark_completed(not_before=…)` — the spacing a source owns but the queue
+    still holds (#1714).
+
+    `youtube-digest`'s infra-shaped branch must not touch `seen.json`, so it
+    claims no attempt anywhere, and an in-band `{"status": "failed"}` used to
+    leave `mark_completed` the only release — which put the row back in the
+    intake path with no spacing beyond the source's 300 s tick. The release
+    needed a `not_before` the CALLER supplies: `mark_failed`'s backoff is
+    exponential over `attempts` and belongs to a failure the source owns, not to
+    a turn the engine never got. The control is the sibling row with
+    `not_before` NULL, claimable in the same sweep.
+    """
+    deferred = q.enqueue("youtube-digest", "session", dedup_key="yd:abc")
+    sibling = q.enqueue("youtube-digest", "session", dedup_key="yd:def")
+    item = q.claim_next("w0")
+    assert item.id == deferred
+
+    later = (datetime.now(timezone.utc) + timedelta(seconds=900)).isoformat()
+    q.mark_completed(item.id, not_before=later)
+
+    row = q.get(item.id)
+    assert row.state == "queued", "a deferred release completed the row: nothing re-runs it"
+    assert row.completed_at is None, "a deferred release stamped a completion on a row still open"
+    assert row.not_before == later, (
+        f"the row carries {row.not_before!r}, not the caller's {later!r}: the bound a "
+        "source stated is not the spacing the row will keep")
+    assert row.claimed_by is None and row.claimed_at is None, "the row stayed claimed"
+    assert row.dedup_key == "yd:abc", (
+        "a deferred release cleared the dedup key, so the next tick's enqueue mints a "
+        "fresh row and the bound is spent on a new row every time")
+
+    claimed = q.claim_next("w0")
+    assert claimed is not None and claimed.id == sibling, (
+        "the deferred row was claimable while the NULL one sat behind it — the claim "
+        "query is not honouring the stored timestamp")
+
+    # Same sweep, other side of the line: past the timestamp, it is claimable.
+    with q._connect() as conn:
+        conn.execute("UPDATE queue SET not_before=? WHERE id=?",
+                     ((datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+                      deferred))
+    assert q.claim_next("w0") is not None
+
+
+def test_a_deferred_row_stops_at_the_same_attempts_cap_as_any_other(q):
+    """The bound §Intake states for `youtube-digest`'s infra path: 900 s apart,
+    three tries, then `_poison_at_cap`.
+
+    The spacing is what a deferral adds; the ceiling is the queue's ordinary
+    `max_attempts` (3), and this node is what makes that sentence checkable rather
+    than a hope. It only works because the deferral keeps `attempts` and the
+    `dedup_key`: a row released back to `queued` at `attempts=1`, or released with
+    its key so the next tick enqueued a fresh one, would re-offer the video forever
+    and the doc's "three times" would be false on the day it was written.
+    """
+    qid = q.enqueue("youtube-digest", "session", dedup_key="yd:abc")
+    future = (datetime.now(timezone.utc) + timedelta(seconds=900)).isoformat()
+    past = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+
+    def _window_has_elapsed():
+        with q._connect() as conn:
+            conn.execute("UPDATE queue SET not_before=? WHERE id=?", (past, qid))
+
+    for n in (1, 2, 3):
+        _window_has_elapsed()
+        item = q.claim_next("w0")
+        assert item is not None and item.id == qid, f"no claim available at try {n}"
+        assert item.attempts == n, f"attempt {n} was handed out as {item.attempts}"
+        q.mark_completed(item.id, not_before=future)
+        if n == 1:
+            assert q.claim_next("w0") is None, (
+                "the row was claimable the moment it was deferred, so the releases "
+                "below are not evidence of a 900 s spacing at all")
+
+    row = q.get(qid)
+    assert row.state == "queued" and row.attempts == 3, (
+        f"after three deferred releases the row is {row.state} at attempts="
+        f"{row.attempts}: the ceiling the doc names has nothing to count")
+    # The fourth look has to be one the claim query can even SEE: until the
+    # window passes, `not_before` is what keeps the row back, and the cap never
+    # gets a turn. Testing the ceiling inside the window would pass on a queue
+    # with no cap at all.
+    _window_has_elapsed()
+    assert q.claim_next("w0") is None, "a fourth try was handed out past max_attempts"
+    assert q.get(qid).state == "poisoned", (
+        "the exhausted row stayed claimable instead of being poisoned — a deferred "
+        "release must end at the same ceiling as a `mark_failed` retry ladder")
+
+
+def test_a_plain_completion_still_leaves_nothing_behind(q):
+    """The default is the old call: `not_before` untouched, row terminal.
+
+    Every other source releases through this signature, and a deferral that
+    leaked into the default path would re-run finished work — a duplicate email
+    send, a second note for one video.
+    """
+    q.enqueue("s", "k", dedup_key="key-1")
+    item = q.claim_next("w0")
+    q.mark_completed(item.id)
+
+    row = q.get(item.id)
+    assert row.state == "completed" and row.not_before is None
+    assert row.dedup_key is None, "the default release must still free the key"
+
+
 def test_exhausting_the_attempts_poisons_rather_than_loops(q):
     q.enqueue("s", "k")
     item = q.claim_next("worker-0")

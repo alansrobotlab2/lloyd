@@ -60,8 +60,53 @@ def _section(heading: str) -> str:
 
 
 SEC2 = "## 2. What actually ran"
+SEC5 = "## 5. Intake — the outside world in"
 SEC6 = "## 6. Mining"
 SEC7 = "## 7. Retired and renamed"
+
+
+def test_intake_states_where_the_infra_path_spacing_lives_and_its_bound():
+    """#1714: §Intake's own rule left a hole, and the hole is the doc's claim.
+
+    The third rule says the retry lives outside the queue — each intake source
+    keeps its own registry (`seen.json`, `research.db`) and decides there when to
+    offer the work again. `youtube-digest`'s infra-shaped branch deliberately
+    touches NEITHER registry (no `--fail`, so a primary outage is not charged to
+    the video), which under that sentence left the re-offer spaced by
+    `interval_seconds` alone: every 300 s, forever, one fresh row with
+    `attempts=1` each time. The paragraph now has to say three things or it is
+    describing a system that re-offers on every tick: the field a source uses to
+    ask for spacing (`defer_seconds`), where the wait is stored (the queue's
+    `not_before`, on the same row, which keeps its `dedup_key`), and what caps the
+    re-offers once each wait passes (`max_attempts`, because `claim_next` raises
+    `attempts` on every claim).
+    """
+    sec5 = _section(SEC5)
+    assert sec5, f"§5 {SEC5!r} not found — the heading moved and this test is blind"
+    flat = " ".join(sec5.split())
+
+    for fact, why in (
+        ("defer_seconds", "the field a source asks for spacing with"),
+        ("not_before", "where the wait is actually stored, so a reader can find it"),
+        ("dedup_key", "the row keeps its key, or the next tick mints a fresh row"),
+        ("INFRA_DEFER_SECONDS", "which source sets it, named"),
+        ("max_attempts", "what caps the re-offers once each wait passes"),
+        ("seen.json", "the registry the branch still refuses to touch"),
+    ):
+        assert fact in flat, (
+            f"§Intake no longer states {why} ({fact!r} is gone): the rule reads as "
+            "'the source owns its retry', which is the statement #1714 was filed "
+            "against for a branch that owns nothing")
+
+    m = re.search(r"`INFRA_DEFER_SECONDS`[^.]*?\((\d+)\s*s", flat)
+    assert m, (
+        "§Intake names INFRA_DEFER_SECONDS without its number of seconds beside it, "
+        "so nothing here can be compared with the constant — 'a longer interval' is "
+        "not a bound")
+    assert int(m.group(1)) == 900, (
+        f"§Intake says {m.group(1)} s while workers/sources/youtube_digest.py sets "
+        "INFRA_DEFER_SECONDS = 900: one statement, two places, and the doc is the "
+        "one a reader trusts")
 
 
 def test_gap_fill_is_retired():

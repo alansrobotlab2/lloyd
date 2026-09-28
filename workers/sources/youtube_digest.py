@@ -77,6 +77,28 @@ NAME = "youtube-digest"
 #: the next research topic because Alan reads these.
 DEFAULT_PRIORITY = 60
 
+#: How long an infra-shaped failure ("turn produced nothing") parks ITS OWN
+#: queue row before the video is digested again — the bound #1714 exists to
+#: state. The no-penalty half of that branch is deliberate and stays: it never
+#: calls the script's `--fail`, so `seen.json` records nothing against the video
+#: and the bundle survives (on 2026-09-09 a primary restart put six videos
+#: through it in five seconds each, and all six went on to work). What was NOT
+#: deliberate is that nothing spaced the re-offer: the row stayed `fetched`, the
+#: source's tick is `interval_seconds` 300, and every tick enqueued a NEW row
+#: with `attempts` back to 1. Measured on 2026-09-24, ids 409/410/411 enqueued at
+#: 13:56:39 and the same three videos again as 413/414/415 at 14:01:49 — 300.00 s,
+#: with `not_before` NULL on all 53 youtube-digest rows ever written.
+#:
+#: 900 s is the scanner path's own `RETRY_INTERVAL_SECONDS`
+#: (`scripts/youtube_channel_monitor.py:139`, and the same 900 the `failed`
+#: registry path uses via `_is_retry_eligible`), so a video that lost a turn to
+#: the engine is offered again on the clock the system already treats as one
+#: retry's worth of spacing — at most twice more, since the row now survives its
+#: run and the queue's `max_attempts` (3) stops handing it out at the third
+#: claim. A brief restart therefore costs a video 15 minutes of lateness and
+#: exactly nothing in `seen.json`.
+INFRA_DEFER_SECONDS = 900
+
 SCRIPT = LLOYD_HOME / "scripts" / "youtube_channel_monitor.py"
 PROFILE_PATH = LLOYD_HOME / "eval" / "lloyd_profile.md"
 BACKLOG_DIR = VAULT_ROOT / "backlog"
@@ -756,15 +778,27 @@ async def execute(item: QueueItem) -> dict[str, Any]:
 
     # 3a. An infra-shaped turn: no text and no stop reason means the harness
     #     never got a completion (engine unreachable, aggregator restarting).
-    #     Not the video's fault, so it is not counted against its retries: the
-    #     row stays `fetched`, the bundle is kept, and the next tick re-offers
-    #     it. On 2026-09-09 the primary was down for a launcher change and
-    #     six videos went through this path in five seconds each.
+    #     Not the video's fault, so it is not counted against its retries: this
+    #     branch calls no `--fail`, `seen.json` is untouched, the row stays
+    #     `fetched` and the bundle is kept. On 2026-09-09 the primary was down
+    #     for a launcher change and six videos went through this path in five
+    #     seconds each, and every one of them was right to be tried again.
+    #
+    #     What it did not have was a spacing. `fetched` is a queueable status and
+    #     `_is_retry_eligible` gates only `failed` rows, so "tried again" meant a
+    #     new row on every 300 s tick for as long as the engine stayed away, with
+    #     no attempt counted anywhere (#1714). `defer_seconds` is the bound: the
+    #     pool parks THIS row behind `not_before` for `INFRA_DEFER_SECONDS` (900 s)
+    #     instead of completing it, and keeps its dedup key, so the next tick's
+    #     `enqueue` coalesces against it rather than minting a fresh row. The
+    #     transient case above pays 15 minutes; the outage case stops multiplying.
     if not text.strip() and stop_reason is None:
         errs = [str(e)[:160] for e in (run.get("errors") or [])[:2]]
         why = f"turn produced nothing ({'; '.join(errs) or 'no error reported'})"
-        logger.warning("youtube-digest: %s %s: %s — left fetched for retry", channel, video_id, why)
+        logger.warning("youtube-digest: %s %s: %s — left fetched, retried in %ds",
+                       channel, video_id, why, INFRA_DEFER_SECONDS)
         return {"status": "failed", "summary": f"{channel} {video_id}: {why}"[:500],
+                "defer_seconds": INFRA_DEFER_SECONDS,
                 "meta": {**base_meta, "session_id": session_id, "infra": True,
                          "empty_response": True, "unexpected_vault_writes": unexpected}}
 

@@ -641,12 +641,48 @@ class WorkQueue:
         self,
         item_id: int,
         dedup_release: bool = True,
+        not_before: Optional[str] = None,
     ) -> None:
         """Mark success. Clears `error` (prior retry errors become stale on success)
         and releases `dedup_key` so future enqueues of the same key succeed.
         `attempts` is preserved so 'recovered after N attempts' is still visible.
+
+        `not_before` is the **deferral** (#1714): release the finished run but
+        park the row until that timestamp, for a source whose run failed for a
+        reason that is not the work's fault and wants the same row offered again
+        later rather than a fresh one every tick. A deferred row goes back to
+        `queued` with `completed_at` NULL and `attempts` kept, so it is neither
+        terminal nor claimable until the stamp passes — and it KEEPS its
+        `dedup_key`, which is the other half of the bound: releasing the key is
+        exactly how the source's next tick slips a duplicate row past the
+        `enqueue` coalesce, which is the churn the deferral exists to stop.
+        `dedup_release` is therefore ignored while a deferral holds.
+
+        A stamp that is unparseable or not strictly in the future is not a
+        deferral, and the row completes normally instead. Honouring one of those
+        would leave the row `queued` and instantly claimable — the tight failure
+        loop `mark_failed`'s 30 s backoff exists to prevent — and losing a
+        deferral quietly is why this one says so out loud.
         """
+        deferred: Optional[str] = None
+        if not_before is not None:
+            when = _iso_or_none(not_before)
+            if when is not None and when > datetime.now(timezone.utc):
+                deferred = when.isoformat()
+            else:
+                logger.warning(
+                    "mark_completed(%s): not_before=%r is not a future instant; "
+                    "completing the row instead of deferring it", item_id, not_before)
+
         with self._lock, self._connect() as conn:
+            if deferred is not None:
+                conn.execute(
+                    "UPDATE queue SET state='queued', claimed_at=NULL, claimed_by=NULL, "
+                    "completed_at=NULL, error=NULL, not_before=? WHERE id=?",
+                    (deferred, item_id),
+                )
+                conn.commit()
+                return
             if dedup_release:
                 conn.execute(
                     "UPDATE queue SET state='completed', completed_at=?, error=NULL, dedup_key=NULL WHERE id=?",
