@@ -30,11 +30,11 @@ ask.
 
 | # | Surface | Module | Question it answers |
 |---|---|---|---|
-| 1 | L0 classes and the block signal | `app/prompt_surface.py` | What the model is told to refuse, and the exact signal it must emit. Prompt, therefore the weakest layer — and a tracked prompt-surface path, so a diff here runs the tool-choice eval |
+| 1 | L0 classes and the block signal | `lloyd/SOUL.md`, pinned by `app/prompt_surface.py` | What the model is told to refuse, and the exact signal it must emit. The prose is the vault identity file; the module holds what a trim may not drop (`GATE_HEADS`, `LOAD_BEARING`, the ceilings). Prompt, therefore the weakest layer — and it is **not** a trigger for the tool-choice eval: `Gate.PROMPT_SURFACE_PATHS` (`scripts/automod/gate.py:1303`) keys on `app/prompt_builder.py`, `app/prefetch.py` and the three loaded vault files, so a diff that loosens a ceiling here is scored by no behavioural rung |
 | 2 | Deterministic Bash denies | `app/harness/safety.py` | Is this command catastrophic (`check_bash_command` at `app/harness/safety.py:372`)? Installed as a default `PreToolUse` hook on every primary turn, Inner Voice on or off — it replaced the LLM-judgment lever that only ran when IV ran |
-| 3 | Protected trees, two policies | `app/harness/protected_paths.py` | What may be **destroyed** (the structural shell check that refuses a wholesale delete) and what may be **written** (the deny-set the `Write`/`Edit`/`vault_write` lane consults, `PROTECTED_WRITE_ROOTS` at `app/harness/protected_paths.py:131`, `write_deny_reason` at `app/harness/protected_paths.py:176`). One module, two questions, deliberately co-located so they cannot disagree about what is sacred |
+| 3 | Protected trees, two policies | `app/harness/protected_paths.py` | What may be **destroyed** (the structural shell check that refuses a wholesale delete) and what may be **written** (the deny-set two lanes consult — `Write`/`Edit` through `agent_mcp/builtin_fs.py:238`, Bash through `check_bash_command`; `PROTECTED_WRITE_ROOTS` at `app/harness/protected_paths.py:148`, `write_deny_reason` at `app/harness/protected_paths.py:195`). `vault_write` is exempt from it, deliberately and test-pinned, which is the open hole this review filed. One module, two questions, deliberately co-located so they cannot disagree about what is sacred |
 | 4 | The read-only sandbox | `agent_mcp/_tool_sandbox.py` | Is this session one that must never change the machine? Bench and eval sessions, enforced in `agent_mcp/main.py::call_tool` — the one function every tool call from every caller passes through, not in a runner, because runner copies live in worktrees |
-| 5 | Unattended tool bans | `app/tool_bans.py` | Which tools may an unattended turn call at all? One list, three readers: the chat router arms it for every non-user session, the review grader's deny list must be a superset of it, and a `Task` child has to inherit it |
+| 5 | Unattended tool bans | `app/tool_bans.py` | Which tools may an unattended turn call at all? Two tuples (`WORKER_AUTOMOD_BAN`, `WORKER_GRANT_MINT_BAN`), four readers: the shared worker turn path bakes both in (`workers/sources/_common.py:427`, `:433`), the chat router arms them off the session's own platform (`app/routers/turn_options.py:222-228`) — the automod ban for every non-user session except the one source whose job IS the loop (`AUTOMOD_DRIVER_SOURCES`, `app/routers/messages.py:589`), the grant ban wherever an authority scope is in force (`messages.py:564`) — the review grader's deny list spreads the automod ban (`workers/sources/arch_review.py:140`), and a `Task` child has to inherit it (`agent_mcp/builtin_task.py:378`) |
 | 6 | Scope-bound grants | `agent_mcp/builtin_grants.py` | Did a human mint authority for this specific scope, with an expiry? The interactive half is `grant_create`/`grant_list`/`grant_revoke`; the other half is `grants:` front matter on an autonomy task file, where editing the file *is* the grant. The protected-write escape in layer 3 (`allow_protected_writes`) is the same idea scoped to one call |
 | 7 | Effect authority | `agent_mcp/_tool_effects.py` | Has this *effect* already happened (#544)? A timeout means unknown, not failure, so a retry is the dangerous path — which makes this an authority question, not a reliability one |
 | 8 | Egress | `agent_mcp/egress.py` | Is this destination allowed at all (#628)? Telemetry first, then a default-deny policy. Before this the outbound path had no destination concept: `http_fetch`/`http_request` checked only whether a host was private, `browser.py` mirrored that check, and nothing recorded where a call went |
@@ -57,12 +57,20 @@ the useful part of the doc.
   reason is the cross-cutting trap in one sentence: `LLOYD_HOME` is
   *code*-relative, so inside a worktree it names the worktree, and a deny-set
   that followed the code would protect the copy while leaving the live tree open.
-  `app/paths.py:11` is where `VAULT_ROOT` agrees with it. The prompt's copy of
-  the same rule is still prose, and prose is checked by
+  `app/paths.py:109` is where `VAULT_ROOT` agrees with it. What the constant does
+  *not* cover is the vault lane's own answer to "is this path allowed" —
+  `agent_mcp/vault.py:1608` decides by containment under `VAULT` alone and never
+  asks `write_deny_reason`, so membership in the set does not mean the file is
+  closed. The prompt's copy of the same rule is still prose, and prose is checked by
   `tests/test_prompt_surface_guard.py`, not by the code.
-- **Loopback.** `server.py` skips mTLS for loopback, so `chrome-extension`'s
-  service worker can call `http://127.0.0.1:8080` with no client certificate
-  ([[browser-side-panel]]) while every other origin must present one. The egress
+- **Loopback.** mTLS was dropped on 2026-06-14 (`server.py:73-75`,
+  [[mission-control]]), so no origin presents a certificate: the control is
+  `ApiPeerGate`, which admits `/api/*` from a loopback peer or a peer inside
+  `server.trusted_networks` (default Tailscale's `100.64.0.0/10`) and checks the
+  per-device allowlist only when a `x-client-fingerprint` arrives anyway.
+  `chrome-extension`'s service worker reaches `http://127.0.0.1:8080` because it
+  is loopback, not because a cert was waived for it ([[browser-side-panel]] still
+  says the former — filed). The egress
   policy and the browser guard both reason about private ranges, from separate
   code.
 - **Compaction thresholds.** The values live in `config.yaml`; `app/compaction.py`
@@ -78,7 +86,9 @@ the useful part of the doc.
 The loop's own scope limit: a fix that needs a path automod may never write is
 not a round's work, whatever its clauses say. `config.yaml`, runtime `data/**`,
 `.env*`, `pytest.ini`, `.gitignore` and the frontend's build inputs are in that
-set, and the marker for it is `human-only:` at the head of a triage acceptance
+set — as `DENIED_GLOBS` in `scripts/automod/spec.py`, enforced by `check_scope`
+on the round's changed paths, which is what actually stops the bytes landing —
+and the marker for it is `human-only:` at the head of a triage acceptance
 (`HUMAN_ONLY_PREFIX`, `is_human_only` in `scripts/automod/backlog.py`). The skip
 that consumes it sits in the implement-pool selection, so a human-only item is
 never handed an attempt; the same predicate decides whether clause splitting
@@ -106,7 +116,8 @@ spends an unattended round discovering that.
   inventory that reads like a proof is the failure mode
   `architecture/arch-review.md` opens with. The honest test is a property, not a
   list: enumerate the write endpoints and ask which ones a guard sits on — that
-  is how the unprotected surface in two of the six recorded instances was found.
+  is how the unprotected surface was found in every instance on the record, most
+  recently the `vault_write` lane this pass filed.
   A new tool, a new runner or a new write route should be checked against the
   thirteen rows above, and a row missing means this doc is the thing that is
   stale, not that the surface is safe.
@@ -119,3 +130,11 @@ spends an unattended round discovering that.
   enforced in a shared choke point (`agent_mcp/main.py::call_tool`,
   `app/harness/safety.py`'s hook) that is stated, because a guard's position in
   the ladder is only real if every caller passes it.
+- **2026-09-28 — `stale` (arch-review, whole-doc unit).** Four claims were wrong against
+  the tree: the Loopback row's mTLS story (dropped 2026-06-14; the control is
+  `ApiPeerGate`'s peer-address rule), row 1's claim that a diff to
+  `app/prompt_surface.py` runs the tool-choice eval (it is not in
+  `PROMPT_SURFACE_PATHS`), row 3's claim that the `vault_write` lane consults the
+  write deny-set (it does not, by test-pinned design — filed), and the two
+  `protected_paths.py` line numbers; row 5's reader count and the never-write
+  path set's enforcement point (`spec.py::DENIED_GLOBS`) were made precise.
