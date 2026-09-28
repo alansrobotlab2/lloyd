@@ -117,6 +117,42 @@ def _run(cmd: list[str], cwd: Path | None = None, env: dict | None = None,
                           capture_output=True, text=True, timeout=timeout, check=False)
 
 
+#: A test file that executed none of its pinned assertions says so with this
+#: prefix in its output (`tests/dashboard_pins.py`, #1691).
+PIN_FINDING_PREFIX = "DASHBOARD_PINS_NOT_EXECUTED"
+
+PIN_FINDING_RE = re.compile(rf"{re.escape(PIN_FINDING_PREFIX)}[^\n]*")
+
+#: The environment variable that promises a run its frontend dependencies are
+#: reachable: `tests/dashboard_pins.py` reads it and turns a pin that never
+#: executed into a FAILURE rather than a skip. The helper keeps its OWN copy of the
+#: spelling (`dp.DECLARED_ENV`) because it has to stay importable in a scratch tree
+#: with no `scripts/` package, so what holds the two together is a test, not an
+#: import — see `test_the_two_ends_of_the_seam_are_named_in_both_files`.
+FRONTEND_PINS_ENV = "LLOYD_FRONTEND_PINS_AVAILABLE"
+
+
+def _pin_findings(out: str) -> list[str]:
+    """The named no-execution findings in one pytest run's output, de-duplicated
+    in order of first appearance (#1691).
+
+    A pin that did not RUN is not a pin that passed, and the reason
+    `tests/test_dashboard_responsive.py` could report `6 skipped` with exit 0 for
+    months is that nothing between a line in pytest's output and the rung's
+    `12757 passed, 1 xfailed, 31 skipped` looked at it. The suite-wide
+    `PYTEST_MAX_SKIPPED` ceiling (40) is already sitting at 31 by ledger, so six
+    more skips are permanently inside the budget, and the partial-run branch
+    applies no floor at all. Surfacing the finding costs one clause of the detail.
+    """
+    if not out:
+        return []
+    seen: list[str] = []
+    for line in PIN_FINDING_RE.findall(out):
+        if line not in seen:
+            seen.append(line)
+    return seen
+
+
 def _pyflakes(python: Path, root: Path, files: list[str]) -> set[str]:
     """Findings for `files`, normalized so line numbers do not create noise."""
     existing = [f for f in files if (root / f).exists() and f.endswith(".py")]
@@ -242,6 +278,11 @@ def _parse_pytest_summary(text: str) -> dict:
     if not out["collected"]:
         out["collected"] = (out["passed"] + out["failed"] + out["xfailed"]
                             + out["errors"] + out["tests_skipped"])
+    # Carried on every branch, because a named no-execution finding is a fact about
+    # the run and not about its exit code: it has to reach the rung that PASSED
+    # (#1691), and `_re_run_parallel_failures` copies this dict, so the finding
+    # survives the serial re-run too.
+    out["pin_findings"] = _pin_findings(text)
     return out
 
 
@@ -1431,6 +1472,15 @@ class Gate:
         """
         base_cmd = [str(self.python), "-m", "pytest", "-q", "-m", TESTS_MARK_EXPR]
         env = self._child_env(isolate_home=True)
+        # #1691: this worktree is the one place the frontend dependencies were
+        # GUARANTEED — `rung_frontend` symlinks `web/node_modules` in for a round
+        # that touched `web/`. Declaring that lets `tests/dashboard_pins.py` fail a
+        # run whose dashboard pins did not execute, while a worktree with no
+        # node_modules (every non-frontend round, and every reviewer's snapshot)
+        # keeps its skips. The check is the real binary, not the directory: a
+        # symlink whose target vanished declares nothing.
+        if (self.worktree / "web" / "node_modules" / ".bin" / "vite").exists():
+            env[FRONTEND_PINS_ENV] = "1"
 
         def serial(extra: list[str]):
             done = _run(base_cmd + list(extra), cwd=self.worktree, env=env, timeout=1800)
@@ -1515,6 +1565,12 @@ class Gate:
         """
         extra = dict(extra or {})
         lead = str(extra.pop("_lead", "") or "")
+        # #1691: a run that skipped its pinned assertions is a pass with a hole in
+        # it, and the hole has to be in the sentence a reviewer reads. `6 skipped`
+        # out of a 12,700-test suite is invisible in a count; the finding that names
+        # the file, the number of pins and the reason is not.
+        findings = counts.get("pin_findings") or []
+        pins = ("; " + "; ".join(findings)) if findings else ""
         if only:
             # A partial run answers a narrower question, so the whole-suite
             # floors below do not apply — they would fail every partial run
@@ -1525,7 +1581,7 @@ class Gate:
                 return False, (f"test files removed by this round: {removed}"), {**counts, **extra}
             return True, (lead + f"pytest (partial, {len(only)} changed test file(s) since the "
                           f"last full run): {counts['passed']} passed, "
-                          f"{counts['tests_skipped']} skipped"), {
+                          f"{counts['tests_skipped']} skipped" + pins), {
                               **counts, **extra, "partial": True, "only": list(only)}
 
         # Non-negotiable under auto-landing: `pytest -q` exits 0 if the round
@@ -1559,7 +1615,12 @@ class Gate:
                       f"{counts['tests_skipped']} skipped"
                       + (f" ({counts['workers']} workers)" if counts.get("workers", 1) > 1 else "")
                       + (f"; {len(flinched)} failed only under parallel load and passed "
-                         f"serially: {_name_ids(flinched)}" if flinched else "")), {**counts, **extra}
+                         f"serially: {_name_ids(flinched)}" if flinched else "")
+                      # #1691: the counts say how many tests ran; they cannot say that
+                      # a file's own pinned assertions ran NONE of them. Six skips inside
+                      # a 40-skip budget is invisible in a total, so the finding the file
+                      # prints is repeated here, in the line a reviewer reads.
+                      + pins), {**counts, **extra}
 
     def _touched_paths(self) -> set[str]:
         """The round's own diff. `preflight` records it; a direct call of the
