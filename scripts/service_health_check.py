@@ -8,6 +8,8 @@ Returns structured status for LLM, MCP, and other Lloyd services.
 import argparse
 import hashlib
 import json
+import os
+import re
 import socket
 import subprocess
 from datetime import datetime, timezone
@@ -15,6 +17,16 @@ from pathlib import Path
 from typing import Optional
 
 SUPervisor_CONF = "/home/alansrobotlab/lloyd/agent-services/supervisor/supervisord.conf"
+
+# Test seam (#1649). Under pytest, a test may point the supervisor path at a stand-in
+# by exporting UNIT. Guarded on PYTEST_CURRENT_TEST so it cannot fire on a live run:
+# this script is the thing a human runs when the box is broken, and an environment
+# variable that silently redirects which supervisor it reads — into a nonexistent
+# conf, or into one that answers what an attacker wants — would make every row it
+# prints a lie about a machine that is fine. Outside pytest this line changes
+# nothing, and the only test that uses it passes a path to a stub executable.
+if os.environ.get("PYTEST_CURRENT_TEST") and os.environ.get("UNIT"):
+    SUPervisor_CONF = os.environ["UNIT"]
 
 SERVICES = {
     # Supervisor services — status via supervisorctl, no HTTP check
@@ -42,6 +54,246 @@ SERVICES = {
     # http_check().
     "agent-qmd-daemon": {"command": ["supervisorctl", "-c", SUPervisor_CONF, "status", "agent-qmd-daemon"], "category": "retrieval", "port": 8181},
 }
+
+# Every state supervisord can report for a program. A state outside this table is
+# not a service that is down — it is a check that did not read anything (#1040
+# learned that about exit codes; #1649 applies it to a program supervisor was
+# never asked about at all).
+SUP_PROGRAM_STATES = {
+    "RUNNING", "STARTING", "STOPPING", "STOPPED", "BACKOFF", "FATAL",
+    "UNKNOWN", "EXITED", "CREATING",
+}
+
+# The category a row graded on process state alone lands in: its own `Fleet:`
+# heading, not one of the four existing ones. #1649's design note asks the
+# implementer to choose this deliberately, because the per-category summary marks a
+# category degraded when ANY member is unhealthy. `Supervisor:` already means
+# "agent-djev" (the one declared entry carrying that category), so filing the vault
+# sync, tts, livekit, the qmd watcher and the agent worker there would let tts
+# stopping turn a heading whose red currently means "the decision engine is down" —
+# the reader would go looking for djev. A distinct bucket keeps every existing
+# heading meaning exactly what it meant before this landed, and `Fleet:` is the
+# honest label: every program supervisor has loaded that no probe was written for.
+# What these rows DO share with the declared ones is `Overall:` — an undeclared
+# program in FATAL must be able to stop this run printing `8/8 services healthy`,
+# which is the bug. Whether the new heading ever gets noisy is live traffic, so
+# #1649 owes one post-landing read of a real run.
+FLEET_CATEGORY = "fleet"
+
+
+def _sup_program(svc: dict) -> Optional[str]:
+    """The supervisord program a SERVICES entry refers to, or None.
+
+    `SERVICES` is keyed by a label, not by a program name: the entry called
+    `lloyd-backend` asks supervisor about `lloyd-mc:lloyd-backend`, and `lloyd-mc:`
+    is supervisor's group prefix — it is the program name `supervisorctl status`
+    prints. Coverage derived from the dict's KEYS would therefore report
+    `lloyd-mc:lloyd-backend` as an undeclared program a second time, and the label
+    `lloyd-backend` as a program supervisor never heard of.
+    """
+    cmd = svc.get("command") or []
+    if len(cmd) >= 5 and cmd[0] == "supervisorctl" and "status" in cmd:
+        return cmd[-1]
+    return None
+
+
+def declared_programs() -> set:
+    """Programs the declared pass already reports, so the derived pass skips them.
+
+    Both halves matter. The key is the program name for the entries whose command
+    is not a supervisorctl call — `agent-llm-primary` curls :8000 — and the
+    command's last word is it for the three `lloyd-mc:` group members, whose keys
+    are unqualified labels. Deriving from keys alone would report
+    `lloyd-mc:lloyd-backend` as undeclared, and derive from commands alone would
+    report `agent-llm-primary` twice.
+    """
+    return set(SERVICES) | {p for p in (_sup_program(s) for s in SERVICES.values())
+                            if p}
+
+
+_FLEET: Optional[dict] = None
+
+
+# A supervisord program name: `[group:]process`, alphanumerics and `._-`. Used to
+# tell a status line from an error line — `unix:///run/supervisor/supervisor.sock`
+# and `error:` both fail it, every name in `conf.d/` passes it.
+_PROGRAM = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(?::[A-Za-z0-9._-]+)?\Z")
+
+
+def supervisor_fleet() -> tuple:
+    """`({program: state-or-None}, error_or_None)` over every loaded program.
+
+    One fleet-wide `supervisorctl -c CONF status`, parsed positionally: field 0 is
+    the program (group prefix included), field 1 the state. A line with no state
+    field keeps its program with state None rather than being dropped, because a
+    program the checker silently skipped is the bug #1649 is about.
+
+    The error half is load-bearing: a script that could not reach supervisor and
+    printed no undeclared rows would look exactly like a box with no undeclared
+    programs, which is how a coverage check passes for the wrong reason.
+
+    A nonzero exit is NOT the error signal here. `supervisorctl status` exits 3
+    whenever any loaded program is not RUNNING, which on this box right now means
+    EVERY run: `agent-llm-secondary` is STOPPED by config, so `rc != 0` is the
+    steady state and reading it as "unreadable" would have made this fix grade
+    zero programs on a healthy machine and only work once something broke. The
+    answer is the parse: a line whose first field is not shaped like a program
+    (`unix://… refused connection`, `error: <class …>`) is not a program, and a
+    fleet answer containing one is not a fleet answer at all — so an unparseable
+    line is reported as an unreadable fleet rather than invented as a service. The
+    exit code is never consulted. Fail-loud in both directions is the point: a
+    silently skipped line is the exact bug #1649 is about, so the parse refuses to
+    guess which lines it did not understand.
+    """
+    global _FLEET
+    if _FLEET is None:
+        fleet, error = {}, None
+        try:
+            r = subprocess.run(
+                ["supervisorctl", "-c", SUPervisor_CONF, "status"],
+                capture_output=True, text=True, timeout=10)
+            noise = []
+            for line in r.stdout.splitlines():
+                fields = line.split()
+                if not fields:
+                    continue
+                if not _PROGRAM.match(fields[0]):
+                    noise.append(line.strip()[:80])
+                    continue
+                fleet[fields[0]] = fields[1] if len(fields) > 1 else None
+            if not fleet or noise:
+                detail = "; ".join(noise[:2]) or ((r.stdout or "") + " "
+                                                  + (r.stderr or "")).strip()[:80]
+                error = (f"no usable program lines (exit {r.returncode})"
+                         if not fleet else
+                         f"{len(noise)} line(s) were not program lines") + (
+                    f": {detail}" if detail else "")
+        except Exception as exc:
+            error = str(exc)[:160]
+        _FLEET = (fleet, error)
+    return _FLEET
+
+
+def _ask_program(name: str) -> Optional[str]:
+    """Re-ask supervisor for one program's state, when the fleet read gave no usable one.
+
+    The one probe a derived program gets, and it is the same read with one name
+    added: `supervisorctl -c CONF status <program>`, whose answer is one line and
+    whose state is still field 2 (#1040). A fleet-wide `status` that garbled or
+    dropped one program's state field should not be answered with a guess about a
+    process that may be up.
+
+    For `agent-obsidian-sync` in particular this is the entire allowance. #1141:
+    the round-trip probe this skill used to run against the vault sync deleted the
+    live sync registration on 09-14. A process-state read has no side effect — it
+    opens no port, runs no script, reads no sentinel file and no lock, asks
+    supervisor nothing it does not already track — so it cannot cost anything the
+    service it is measuring owns.
+    """
+    try:
+        r = subprocess.run(
+            ["supervisorctl", "-c", SUPervisor_CONF, "status", name],
+            capture_output=True, text=True, timeout=10)
+        fields = (r.stdout or "").split()
+        return fields[1] if len(fields) > 1 else None
+    except Exception:
+        return None
+
+
+def _state_verdict(name: str, state: Optional[str]) -> tuple:
+    """(healthy, status) for one program, from its state word and nothing else.
+
+    No exit code, because a fleet-wide `status` does not carry one per program,
+    and #1040's rule still holds: the state is the verdict. The declared seven
+    keep their own per-name call (which does report an exit code, and is the
+    difference between a service that crash-looped and one that exited once); this
+    is the cheaper grade for the programs nobody declared, where the question is
+    only "is the process up".
+    """
+    if state != "RUNNING" and name in _switched_off():
+        # Deliberately stopped by config, which `app/llm_slots` owns; #699 ruled a
+        # switched-off slot invisible rather than "stopped", and the set is read
+        # from that module. There is no second list of names here to rot.
+        return True, (f"expected stopped: {name} is switched off in config — "
+                      "not a fault")
+    if state is None:
+        return False, ("no state field in supervisorctl status — nothing was "
+                       "graded, which is a broken check, not a stopped service")
+    if state not in SUP_PROGRAM_STATES:
+        return False, (f"state {state!r} is not a supervisord program state, so "
+                       "the answer could not be graded — a broken reading, not a "
+                       "stopped service")
+    if state == "RUNNING":
+        return True, "RUNNING (process state only — no probe declared)"
+    return False, f"{state} (process state only — no probe declared)"
+
+
+def _process_state_row(name: str, state: Optional[str]) -> dict:
+    if state is None:
+        # The fleet-wide answer gave this program no state field. Ask for that one
+        # program before calling the reading broken — same command with a name
+        # appended, no new kind of probe, and a process that is up gets its true
+        # state instead of a false alarm.
+        state = _ask_program(name)
+    healthy, status = _state_verdict(name, state)
+    return {"name": name, "category": FLEET_CATEGORY, "healthy": healthy,
+            "status": status, "exit_code": 0}
+
+
+def derived_supervisor_rows() -> list:
+    """One row per loaded program that `SERVICES` does not refer to (#1649).
+
+    This is the whole fix: the checker's coverage was a hand-maintained list of
+    seven labels while supervisor ran twelve programs, so `agent-livekit-server`,
+    `agent-obsidian-sync`, `agent-qmd-watcher`, `agent-tts` and
+    `lloyd-agent-worker` were never read and could sit in FATAL beside an
+    `Overall: 8/8 services healthy`. Derived from `status`, a program is graded the
+    day supervisor starts it, with no edit to this file.
+
+    Process state only, by ruling and by incident: `agent-obsidian-sync` gets
+    `supervisorctl status` and nothing else. #1141 records that a round-trip probe
+    of the vault sync deleted the live sync registration on 09-14 — a health check
+    that costs the thing it measures is worse than no check, so no port
+    connection, sentinel read or other side-effecting call is made for any derived
+    program.
+    """
+    fleet, error = supervisor_fleet()
+    if error is not None:
+        return [{"name": "supervisorctl status", "category": FLEET_CATEGORY,
+                 "healthy": False, "exit_code": 0,
+                 "status": f"could not read the loaded program list ({error}) — no "
+                           "undeclared program was graded, so this run covered only "
+                           "the declared services"}]
+    if not fleet:
+        return [{"name": "supervisorctl status", "category": FLEET_CATEGORY,
+                 "healthy": False, "exit_code": 0,
+                 "status": "reported no programs at all — that is not a healthy "
+                           "fleet, it is an empty answer, so nothing outside the "
+                           "declared services was graded"}]
+    declared = declared_programs()
+    off = _switched_off()
+    rows = []
+    for name, state in sorted(fleet.items()):
+        # A program gets a row unless the declared pass is already reporting it —
+        # and only then. `and name not in off` is the half that matters: `main`
+        # removes every switched-off name from the list it checks, so a declared
+        # service whose slot is off has no probe row, and skipping it here as well
+        # loses the program from the report entirely. The review rung caught
+        # exactly that: `_switched_off()` is config-derived and can name
+        # `agent-tts`, `agent-voice-mcp` or `agent-voice-mode`, which would have put
+        # this check back to not covering the units #1649 is about — and this time
+        # the five rows would go missing conditionally, only on a box where someone
+        # switched a slot off, so the suite could never see it.
+        #
+        # `_state_verdict` owns the wording: a switched-off program that is not
+        # RUNNING reads `expected stopped`, and one that IS RUNNING reads RUNNING,
+        # because "config says off, supervisor says up" is a fact a health report
+        # must not silently drop.
+        if name in declared and name not in off:
+            continue
+        rows.append(_process_state_row(name, state))
+    return rows
+
 
 def _switched_off() -> set:
     """Supervisord programs config.yaml has deliberately switched off.
@@ -344,6 +596,12 @@ def main():
 
     # Run checks
     results = []
+    # The coverage pass (#1649): every loaded program `SERVICES` does not refer to.
+    # Only for a whole-fleet run — `--services foo` asks about foo, `--category llm`
+    # asks about the LLMs, and neither wants twelve unsolicited rows. The declared
+    # probes go second so the familiar rows print first.
+    if not args.services and args.category in (None, "all"):
+        results.extend(derived_supervisor_rows())
     for name in service_names:
         if name in SERVICES:
             results.append(check_service(name, SERVICES[name]))
