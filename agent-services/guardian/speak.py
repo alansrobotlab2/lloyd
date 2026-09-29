@@ -75,6 +75,22 @@ DEFAULTS: dict = {
     "shaping_module": f"{_REPO}/agent-services/tts_shaping.py",
     "synth_timeout": 60.0,
     "max_chars": 240,
+    # Two ceilings on *consuming* a response, both distinct from `synth_timeout`.
+    # That one is per blocking socket operation, so a stream that keeps handing
+    # over bytes more often than every 60 s never trips it and `read()` keeps
+    # accumulating: on 2026-09-28 19:51 a decoder that never reached EOS played
+    # 655.57 s of scrambled audio — 31,467,360 bytes of s16le at 24000 Hz — for a
+    # 160-character alert, and `budget = len(pcm) / (2 * sr) + 15.0` in `play`
+    # turned that garbage into a 670.6 s speaker booking. Neither number is a
+    # guess: `max_chars: 240` caps the utterance, which is ~20 s of speech at
+    # `speed: 1.22`, so 60 s of audio is ~3x the longest legitimate alert and
+    # under a tenth of the incident; 90 s of wall clock is above `synth_timeout`
+    # (so a stalled socket still trips *that* bound first, as it has six times in
+    # voice.log) and 7x under the broadcast. Both stay DEFAULTS-only:
+    # `sync-voice-config.py` projects six keys out of config.yaml and this pair
+    # has no config.yaml path, exactly like `synth_timeout` and `max_chars`.
+    "max_audio_seconds": 60.0,
+    "synth_wall_clock": 90.0,
     # Spoken alerts only. This must never reach livekit_worker: voice mode has
     # to stay conversational at any hour, and a Lloyd who goes mute mid-answer
     # at 23:00 is a bug, not a courtesy. That is why the setting lives under
@@ -88,6 +104,11 @@ CONFIG_NAME = "voice.json"
 SPOKEN_NAME = "voice_spoken.json"
 LOG_NAME = "voice.log"
 _LOG_CAP = 256 * 1024
+# Room around a playback attempt: process start-up, device contention, the
+# player's own teardown. It was a bare `15.0` inside a budget that grew without
+# bound, where nobody had to say what it was for; now it is the only thing
+# besides the ceiling that sets that budget, so it has a name.
+_PLAY_SLACK_S = 15.0
 
 
 def voice_enabled() -> bool:
@@ -257,12 +278,86 @@ def should_speak(key: str, state_dir: Path, window: float,
 
 
 # ── synthesis ─────────────────────────────────────────────────────────
-def synthesize(text: str, cfg: dict) -> bytes | None:
+# Read granularity on the wire: the size `probes.py:32` already reads at. Big
+# enough that a healthy eight-second utterance arrives in a couple of pieces,
+# small enough that the loop gets to test its ceilings often.
+_READ_CHUNK = 65536
+
+
+def _pcm_seconds(n_bytes: int, sample_rate: int) -> float:
+    """Seconds of mono s16le PCM — the one unit a bound on a *stream* is kept in."""
+    return n_bytes / float(2 * int(sample_rate))
+
+
+def _read_bounded(resp, cfg: dict, state_dir: Path | None = None) -> bytes:
+    """Consume a streaming response under two independent ceilings, keeping the head.
+
+    `resp.read()` with no argument was the whole defect: one call that bounds
+    neither how many bytes arrive nor how long they take. `synth_timeout` is a
+    *per blocking socket operation* timeout, so a stream dripping bytes more
+    often than every 60 s never trips it, and the 2026-09-28 19:51 runaway bought
+    itself 655.57 s of speakers that way. So:
+
+    * the wall-clock budget is tested **before a read is started**, which is what
+      makes it independent of the per-socket timeout — a drip can never buy one
+      more read once `synth_wall_clock` is spent. Total cost is that budget plus
+      at most one chunk already in flight, never an unbounded read.
+    * the byte ceiling is tested on what has arrived, so the answer is a
+      truncation rather than a mute: the decoder emits the real sentence first
+      and hallucinates after it, so the first `max_audio_seconds` are the alert.
+
+    Which ceiling fired goes to voice.log with the seconds it was set at and the
+    seconds received. An alert silently shortened is the same anti-pattern
+    `shape()` logs its fallback for.
+    """
+    sr = int(cfg["sample_rate"])
+    ceiling_s = float(cfg["max_audio_seconds"])
+    wall_s = float(cfg["synth_wall_clock"])
+    cap = int(ceiling_s * sr * 2)
+    cap -= cap % 2                                    # whole samples only
+    started = time.monotonic()
+    parts: list[bytes] = []
+    got = 0
+    fired: str | None = None
+    while True:
+        if time.monotonic() - started >= wall_s:
+            fired = "wall-clock"
+            break
+        chunk = resp.read(_READ_CHUNK)
+        if not chunk:
+            break                                     # the stream ended on its own
+        parts.append(chunk)
+        got += len(chunk)
+        if got >= cap:
+            fired = "duration"
+            break
+    pcm = b"".join(parts)[:cap]
+    if fired:
+        try:                                          # stop draining the socket now
+            resp.close()
+        except Exception:
+            pass
+        recv, kept = _pcm_seconds(got, sr), _pcm_seconds(len(pcm), sr)
+        if fired == "duration":
+            _log(state_dir, f"synth duration ceiling fired: received {recv:.2f}s of "
+                            f"audio, ceiling max_audio_seconds={ceiling_s:.2f}s — kept "
+                            f"the first {kept:.2f}s and stopped reading")
+        else:
+            _log(state_dir, f"synth wall-clock deadline fired: received {recv:.2f}s of "
+                            f"audio in {time.monotonic() - started:.2f}s, ceiling "
+                            f"synth_wall_clock={wall_s:.2f}s — kept the first {kept:.2f}s")
+    return pcm
+
+
+def synthesize(text: str, cfg: dict, state_dir: Path | None = None) -> bytes | None:
     """Raw s16le PCM from the Qwen3-TTS server, unshaped.
 
     Requests `stream: true` and `speed: 1.0` to match `livekit_worker`
     exactly: that is the path the voice was tuned against, and the server
     silently drops `speed` there anyway — we apply it ourselves in `shape`.
+
+    The body arrives through `_read_bounded`, not `resp.read()`, and `state_dir`
+    is where an over-run is recorded — the same optional argument `shape()` takes.
     """
     payload = json.dumps({
         "model": cfg["model"],
@@ -279,7 +374,7 @@ def synthesize(text: str, cfg: dict) -> bytes | None:
     with urllib.request.urlopen(req, timeout=float(cfg["synth_timeout"])) as resp:
         if not (200 <= resp.status < 300):
             return None
-        return resp.read()
+        return _read_bounded(resp, cfg, state_dir)
 
 
 def _load_shaping_module(cfg: dict):
@@ -375,8 +470,15 @@ def play(pcm: bytes, cfg: dict) -> bool:
         cmd = _player(path)
         if cmd is None:
             return False
-        budget = len(pcm) / float(2 * sr) + 15.0
-        proc = subprocess.run(cmd, capture_output=True, timeout=budget)
+        # The player's timeout used to be `len(pcm) / (2 * sr) + 15.0`, which
+        # scales with exactly the quantity a runaway decoder controls — so the
+        # 31,467,360-byte artefact of 2026-09-28 booked 670.6 s of speakers for
+        # itself. The ceiling bounds it from above; a short alert still gets a
+        # short timeout, and only the tail it carries is added on top.
+        spoken_s = min(_pcm_seconds(len(pcm), sr), float(cfg["max_audio_seconds"]))
+        tail_s = int(cfg.get("tail_silence_ms") or 0) / 1000.0
+        proc = subprocess.run(cmd, capture_output=True,
+                              timeout=spoken_s + tail_s + _PLAY_SLACK_S)
         return proc.returncode == 0
     finally:
         try:
@@ -411,7 +513,7 @@ def _worker_python() -> str:
 def speak_now(text: str, cfg: dict, state_dir: Path) -> bool:
     """Synthesise and play, blocking. This is what the detached worker runs."""
     try:
-        pcm = synthesize(text, cfg)
+        pcm = synthesize(text, cfg, state_dir)
     except (urllib.error.URLError, OSError, ValueError) as exc:
         _log(state_dir, f"synth failed ({type(exc).__name__}: {exc}) for {text[:60]!r}")
         return False

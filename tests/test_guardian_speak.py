@@ -1,7 +1,7 @@
 """The guardian's spoken channel.
 
-Three things are worth pinning here, and they are the three that actually
-went wrong while this was being built:
+Four things are worth pinning here, and each is something that actually went
+wrong rather than something that was merely conceivable:
 
   * **Shaping must engage, and say so when it cannot.** The first cut called
     `OutputShaper.enabled()` on what is a `@property`, so every utterance went
@@ -13,15 +13,26 @@ went wrong while this was being built:
   * **Nothing may raise, and nothing may block.** Every channel in notify.py
     holds that contract; this one adds a subprocess, which is a new way to
     violate it.
+  * **Consuming a response must have a ceiling that is not the response's own
+    length.** On 2026-09-28 19:51 a decoder that never reached EOS streamed
+    31,467,360 bytes of s16le at 24000 Hz — 655.57 s of scrambled audio for a
+    160-character alert — and `play` gave it 670.6 s of speakers to do it in,
+    because the playback budget was `len(pcm) / (2 * sr) + 15.0`. `synthesize`
+    now reads in chunks under `max_audio_seconds` and a separate
+    `synth_wall_clock`, and the budget is capped by the ceiling.
 
 Nothing here plays audio: `conftest` sets LLOYD_VOICE_ALERTS=0 for every test
-and the two tests that need dispatch to proceed re-enable it with a stubbed
-`subprocess.Popen`.
+and the tests that need dispatch to proceed re-enable it with a stubbed
+`subprocess.Popen`. The playback tests below stub `subprocess.run` as well, so
+no `paplay` is ever spawned; the stream tests stub `urlopen` with an object that
+has the same `read(n)`/`close()` contract as `http.client.HTTPResponse`, so no
+TTS server is involved either.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -262,6 +273,284 @@ def test_config_overlays_defaults_and_tolerates_junk(tmp_path):
 
     (tmp_path / speak.CONFIG_NAME).write_text("{{{ not json")
     assert speak.load_config(tmp_path)["voice"] == speak.DEFAULTS["voice"]
+
+
+# ── consuming a runaway stream (#1779) ────────────────────────────────
+
+class _EndlessResponse:
+    """A TTS response that never ends, which is what the 2026-09-28 19:51 decoder
+    runaway was: bytes, indefinitely, at a rate that never trips a socket timeout.
+
+    Same contract `http.client.HTTPResponse` offers `synthesize` — `read(n)`
+    returns what has arrived rather than blocking for `n`, `read()` with no
+    argument reads to end-of-stream, `close()` stops the drain, and exiting the
+    `with` block closes it. The body is random bytes, extended as it is drained,
+    so "it kept the head" is checkable against the object's own first bytes and
+    no window shift could pass for it.
+
+    `max_reads` is this file's own backstop: an implementation with no ceiling
+    would otherwise stream inside a test forever, so the fake raises after 2000
+    reads (16 MiB at the 8192-byte chunk size, a fraction of a second) naming how
+    much it got through — the incident reproduced as a failure rather than a hang.
+    """
+
+    def __init__(self, chunk_size: int = 8192, delay: float = 0.0,
+                 max_reads: int = 2000):
+        self.status = 200
+        self.closed = False
+        self.reads = 0
+        self.chunk_size = chunk_size
+        self.delay = delay
+        self.max_reads = max_reads
+        self._pos = 0
+        self.body = os.urandom(1 << 20)
+
+    def _read_one(self, k: int) -> bytes:
+        self.reads += 1
+        if self.reads > self.max_reads:
+            raise AssertionError(
+                f"still streaming after {self.reads - 1} reads and {self._pos} "
+                f"bytes ({self._pos / float(2 * 24000):.1f}s at 24000Hz): no "
+                f"ceiling stopped it")
+        if self.delay:
+            time.sleep(self.delay)
+        if self._pos + k > len(self.body):
+            self.body += os.urandom(1 << 20)
+        out = self.body[self._pos:self._pos + k]
+        self._pos += k
+        return out
+
+    def read(self, n: int = -1) -> bytes:
+        if n is None or n < 0:
+            # read-to-EOF: blocks until the peer stops. With no ceiling in the
+            # reader this is where the eleven minutes went, so it accumulates
+            # until the fake's own backstop raises rather than hanging here.
+            parts: list[bytes] = []
+            while True:
+                parts.append(self._read_one(self.chunk_size))
+            return b"".join(parts)        # unreachable while the stream has no end
+        return self._read_one(min(n, self.chunk_size))
+
+    def close(self) -> None:
+        self.closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+def _voice_cfg(**over) -> dict:
+    """DEFAULTS with overrides, the way `load_config` hands them to `synthesize`.
+
+    Named apart from the `_cfg` further down, which is quiet-hours only.
+    """
+    return dict(speak.DEFAULTS, **over)
+
+
+def _streaming(monkeypatch, stream):
+    monkeypatch.setattr(speak.urllib.request, "urlopen",
+                        lambda req, timeout=None: stream)
+
+
+class _ChunkedResponse:
+    """A response that behaves: hands out `body` in pieces, then end-of-stream.
+
+    `read()` with no argument has to drain to the end like the real
+    `HTTPResponse.read()`, otherwise a reader that never chunks would "pass" this
+    node for the wrong reason — the one below is a guard, not a clause, and a
+    guard that fails for a fake's shortcoming teaches nothing about the ceiling.
+    """
+
+    def __init__(self, body: bytes, chunk_size: int):
+        self.status = 200
+        self.closed = False
+        self._body = body
+        self._chunk = chunk_size
+        self._pos = 0
+
+    def read(self, n: int = -1) -> bytes:
+        if n is None or n < 0:
+            rest = self._body[self._pos:]
+            self._pos = len(self._body)
+            return rest
+        k = min(n, self._chunk)
+        out = self._body[self._pos:self._pos + k]
+        self._pos += len(out)
+        return out
+
+    def close(self) -> None:
+        self.closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+
+def test_an_endless_stream_stops_at_the_duration_ceiling(tmp_path, monkeypatch):
+    """Clause 1. `resp.read()` with no argument is what let the 2026-09-28
+    runaway reach 655.57 s; the ceiling is `max_audio_seconds` of mono s16le at
+    `sample_rate`, and the head is what survives — the decoder says the real
+    sentence first and hallucinates after it, so a truncation still speaks."""
+    cfg = _voice_cfg(max_audio_seconds=2.0, synth_wall_clock=90.0)
+    cap = int(cfg["max_audio_seconds"] * cfg["sample_rate"] * 2)     # 96000
+    assert cap == 96_000, "the ceiling arithmetic this test is about"
+    stream = _EndlessResponse(chunk_size=8192)
+    _streaming(monkeypatch, stream)
+
+    out = speak.synthesize("Guardian alert. Gate rung failed.", cfg, tmp_path)
+
+    assert out is not None
+    assert len(out) <= cap, f"{len(out)} bytes is {len(out) / 48000.0}s of audio"
+    assert len(out) == cap, "the ceiling was not reached, so it was not tested"
+    assert out == stream.body[:cap], "kept something other than the head of the stream"
+
+
+def test_the_over_run_closes_the_response_and_stops_reading(tmp_path, monkeypatch):
+    """Clause 2. A ceiling that only truncates the *copy* while the socket keeps
+    draining still holds the worker open on the runaway's clock — `close()` is
+    the part that returns the connection the moment the decision is made."""
+    cfg = _voice_cfg(max_audio_seconds=2.0, synth_wall_clock=90.0)
+    stream = _EndlessResponse(chunk_size=8192)
+    _streaming(monkeypatch, stream)
+
+    speak.synthesize("Guardian alert. Gate rung failed.", cfg, tmp_path)
+
+    assert stream.closed is True, "the response was left open on the over-run"
+    # 96000 / 8192 = 11.7, so exactly twelve reads reach the ceiling. A thirteenth
+    # would mean it kept draining the socket after deciding to stop.
+    assert stream.reads == 12, f"read {stream.reads} times; 12 reaches the ceiling"
+
+
+def test_a_slow_drip_is_stopped_by_the_wall_clock_not_the_socket_timeout(
+        tmp_path, monkeypatch):
+    """Clause 3. `synth_timeout` bounds one blocking socket operation, so a
+    stream that trickles bytes faster than that never trips it — six such stalls
+    are in voice.log on their own. `synth_wall_clock` is the total, and it is
+    tested before a read is *started*, which is what makes it independent: here
+    the per-socket timeout is 30 s and the total 0.30 s, so nothing but the total
+    can explain returning in a third of a second."""
+    cfg = _voice_cfg(max_audio_seconds=600.0, synth_wall_clock=0.30, synth_timeout=30.0)
+    stream = _EndlessResponse(chunk_size=1024, delay=0.01)
+    _streaming(monkeypatch, stream)
+
+    started = time.monotonic()
+    out = speak.synthesize("Guardian alert. Gate rung failed.", cfg, tmp_path)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < cfg["synth_wall_clock"] + 0.15, (
+        f"took {elapsed:.2f}s; the 30s per-socket timeout is the only bound that "
+        f"could do that")
+    assert speak._pcm_seconds(len(out), cfg["sample_rate"]) < 600.0, (
+        "the duration ceiling is what stopped it, not the wall clock")
+    assert stream.closed is True
+
+
+def test_an_over_run_names_the_ceiling_and_the_seconds_received(tmp_path, monkeypatch):
+    """Clause 4. An alert that quietly arrives three-quarters-short is the same
+    anti-pattern `shape()` logs its fallback for: the channel would report itself
+    healthy while saying less than it was told to. One line per ceiling, naming
+    which fired, the ceiling, and the seconds the stream actually delivered."""
+    cfg_dur = _voice_cfg(max_audio_seconds=2.0, synth_wall_clock=90.0)
+    stream = _EndlessResponse(chunk_size=8192)
+    _streaming(monkeypatch, stream)
+    speak.synthesize("Guardian alert. Gate rung failed.", cfg_dur, tmp_path)
+    dur_log = (tmp_path / speak.LOG_NAME).read_text()
+    # Twelve 8192-byte reads = 98304 bytes = 2.048 s at 24000 Hz mono s16le.
+    assert "duration ceiling" in dur_log, dur_log
+    assert "max_audio_seconds=2.00s" in dur_log, "the ceiling is not named in seconds"
+    assert f"received {98304 / 48000.0:.2f}s of audio" in dur_log, dur_log
+
+    (tmp_path / speak.LOG_NAME).unlink()
+    cfg_wall = _voice_cfg(max_audio_seconds=600.0, synth_wall_clock=0.30, synth_timeout=30.0)
+    _streaming(monkeypatch, _EndlessResponse(chunk_size=1024, delay=0.01))
+    speak.synthesize("Guardian alert. Gate rung failed.", cfg_wall, tmp_path)
+    wall_log = (tmp_path / speak.LOG_NAME).read_text()
+    assert "wall-clock" in wall_log, wall_log
+    assert "synth_wall_clock=0.30s" in wall_log, "the ceiling is not named in seconds"
+    assert "received" in wall_log and "s of audio" in wall_log, wall_log
+
+
+def test_a_stream_that_ends_on_its_own_is_returned_whole_and_unlogged(tmp_path,
+                                                                     monkeypatch):
+    """The ceiling must bound, not replace: a healthy 8-second utterance — 395520
+    bytes, what a 96-character alert measured on the live server — arrives
+    complete, and nothing is logged because nothing was overridden."""
+    body = os.urandom(395_520)
+    stream = _ChunkedResponse(body, chunk_size=65_536)
+    _streaming(monkeypatch, stream)
+
+    out = speak.synthesize("Guardian alert. Gate rung failed.", _voice_cfg(), tmp_path)
+
+    assert out == body
+    assert not (tmp_path / speak.LOG_NAME).exists(), "a clean synth logged an over-run"
+
+
+# ── playback budget ───────────────────────────────────────────────────
+
+def _player_timeout(pcm: bytes, cfg: dict, monkeypatch) -> float:
+    """Run `play` with the player stubbed and return the timeout it asked for."""
+    seen = {}
+
+    class _Proc:
+        returncode = 0
+
+    def fake_run(cmd, **kw):
+        seen["timeout"] = kw.get("timeout")
+        return _Proc()
+
+    monkeypatch.setattr(speak, "_player", lambda path: ["paplay", path])
+    monkeypatch.setattr(speak.subprocess, "run", fake_run)
+    assert speak.play(pcm, cfg) is True
+    return float(seen["timeout"])
+
+
+def test_play_timeout_is_capped_by_the_ceiling_not_by_the_pcm(monkeypatch):
+    """Clause 5. `budget = len(pcm) / (2 * sr) + 15.0` scaled with the one
+    quantity a runaway decoder controls: the 31,467,360-byte artefact of
+    2026-09-28 computed its own 670.6 s booking that way. The ceiling caps it —
+    60 s of audio + 0.25 s of tail + 15 s of slack = 75.25 s — and a pcm twice or
+    five times over the ceiling asks for the same thing, while a short alert
+    still gets a short timeout rather than a blanket one."""
+    cfg = _voice_cfg(sample_rate=24000, max_audio_seconds=60.0, tail_silence_ms=250)
+    at = lambda s: b"\x00" * int(s * 24000 * 2)          # mono s16le, `s` seconds
+
+    over_120s = _player_timeout(at(120.0), cfg, monkeypatch)
+    over_300s = _player_timeout(at(300.0), cfg, monkeypatch)
+    assert over_120s == pytest.approx(60.0 + 0.25 + 15.0), over_120s
+    assert over_300s == pytest.approx(60.0 + 0.25 + 15.0), "budget grew with the pcm"
+    assert over_300s < 670.6, "the incident's own booking time must not be reachable"
+
+    short = _player_timeout(at(1.0), cfg, monkeypatch)
+    assert short == pytest.approx(1.0 + 0.25 + 15.0), short
+
+
+def test_the_two_ceiling_keys_resolve_from_defaults(tmp_path):
+    """Both keys have to survive a worker that never got a synced voice.json —
+    `sync-voice-config.py` projects only six keys out of config.yaml, and these
+    two are deliberately not among them, like `synth_timeout` and `max_chars`.
+    The numbers are the ones the DEFAULTS comment derives: `max_chars: 240` is
+    ~20 s of speech at `speed: 1.22`, so 60 s is ~3x the longest real alert and
+    over ten times under the 655.57 s it played on 2026-09-28; 90 s is above the
+    60 s `synth_timeout`, so a stalled socket still trips *that* bound first
+    rather than having it turned into dead code."""
+    cfg = speak.load_config(tmp_path)                       # no voice.json at all
+    assert cfg["max_audio_seconds"] == 60.0
+    assert cfg["synth_wall_clock"] == 90.0
+    assert cfg["max_audio_seconds"] <= 655.57 / 10, "the ceiling must stay far under the incident"
+    assert cfg["synth_wall_clock"] > cfg["synth_timeout"], (
+        "a total below the per-socket timeout retires the per-socket timeout")
+
+    # A voice.json that overrides *other* keys keeps both ceilings, so a synced
+    # config cannot silently reopen the gap.
+    (tmp_path / speak.CONFIG_NAME).write_text('{"speed": 1.1, "voice": "clone:other"}')
+    overlaid = speak.load_config(tmp_path)
+    assert overlaid["speed"] == 1.1
+    assert overlaid["max_audio_seconds"] == 60.0 and overlaid["synth_wall_clock"] == 90.0
 
 
 # ── wiring into the fan-out ───────────────────────────────────────────
