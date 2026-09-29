@@ -4,9 +4,14 @@ Every agent-loop iteration is a fresh request that re-submits the whole
 conversation. While the engine still holds that prefix, an iteration pays only
 for what was appended since the last one — 5-7k tokens on a 207k prompt,
 measured 2026-09-10 on the FP8 build. When the prefix has been evicted in
-between, the whole prompt is prefilled again from cold, one 8,192-token chunk
-per engine step, and every other request on the engine gets one token per
-step until it finishes. That is the 09-09 "5 tok/s" stall: every one of the
+between, the whole prompt is prefilled again from cold, one
+`MAX_NUM_BATCHED_TOKENS`-sized chunk per engine step — 4,096 tokens since
+2026-09-10, half what the engine defaults to — and every other request on the
+engine gets one token per step until it finishes. The knob lives in the
+primary's supervisord environment, at
+`agent-services/supervisor/conf.d/agent-llm-primary.conf`; the rationale is
+`architecture/vllm.md` §5.1, and either name is where a halving gets written
+down. That is the 09-09 "5 tok/s" stall: every one of the
 27 episodes in that day's engine log was a 100-200k prompt re-prefilled from
 cold beside a chat. The FP8 cutover (a 1.74x pool, 3200-token pages) made each
 one cheaper; nothing measured whether they still happen. This does.

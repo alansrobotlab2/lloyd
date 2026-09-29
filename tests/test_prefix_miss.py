@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+from pathlib import Path
 
 import pytest
 
@@ -283,3 +285,212 @@ def test_the_recorder_counts_a_miss_and_puts_it_on_the_usage_row(announced):
     final = [m for m in data["messages"] if m.get("role") == "assistant"][-1]
     assert final["stats"]["reprefill_tokens"] == 156_000
     assert final["stats"]["prefix_misses"] == 1
+
+
+# ── #1785: what a cold re-prefill costs, at the chunk budget actually in force ──
+#
+# The module docstring priced a cold re-prefill at "one 8,192-token chunk per
+# engine step" in the present tense. That stopped being the budget on
+# 2026-09-10, when commit 62bad14a adopted a 4096-token chunk — half vLLM's
+# default — and put it in the primary's supervisord `environment=`, because
+# `architecture/vllm.md` §5.1 measured what the width costs a bystander: at the
+# wider chunk a cold long prompt held its neighbour's step at 608 ms, at 4096 it
+# came down to 333 ms. So the one number that decides *how bad* a miss is was 2x
+# off in the only place a coding agent reads the mechanism before touching
+# prefix accounting: a 200k prompt is ~50 engine steps, not ~25.
+#
+# The number is worth a real pin rather than a re-wording, because it lives in
+# two places that no build step joins: prose in `app/prefix_miss.py` and a
+# supervisor conf value. `architecture/context-window.md` carried the same 8,192
+# and was corrected to 4,096 in the pass that filed this item, leaving the
+# docstring as the last stale surface. The nodes below compare the prose to the
+# conf on every run, so the next halving cannot leave the docstring behind.
+
+#: The retired claim, verbatim, as the control for the bans below: this text
+#: trips all three, so none is an empty pattern passing on an empty corpus.
+RETIRED_CHUNK_CLAIM = (
+    "the whole prompt is prefilled again from cold, one 8,192-token chunk per "
+    "engine step, and every other request on the engine gets one token per "
+    "step until it finishes.")
+
+_ROOT = Path(__file__).resolve().parent.parent
+CONF = _ROOT / "agent-services" / "supervisor" / "conf.d" / "agent-llm-primary.conf"
+_SRC = _ROOT / "app" / "prefix_miss.py"
+
+
+def _conf_env(text: str | None = None) -> dict[str, str]:
+    """The supervisord `environment=` map, parsed as
+    `tests/test_flash_next_launcher.py` parses it, so both files read the one
+    declarative source of the engine's pins."""
+    assert CONF.exists(), f"{CONF} is gone, so nothing here prices a chunk any more"
+    text = CONF.read_text(encoding="utf-8") if text is None else text
+    line = next((line for line in text.splitlines()
+                 if line.startswith("environment=")), None)
+    assert line, "the program's environment= line is gone from the conf"
+    return dict(re.findall(r'(\w+)="([^"]*)"', line))
+
+
+def _module_docstring() -> str:
+    """The MODULE docstring only, whitespace-flattened.
+
+    Through `ast`, not by grepping the file: this module's code and other
+    docstrings mention token counts too, and the surface #1785 was filed against
+    is the one a reader gets from `help(prefix_miss)`.
+    """
+    import ast
+    doc = ast.get_docstring(ast.parse(_SRC.read_text(encoding="utf-8")))
+    assert doc, "app/prefix_miss.py has no module docstring — nothing to price"
+    return " ".join(doc.split())
+
+
+def _stated_chunk(doc: str) -> int:
+    """The magnitude the docstring prices a chunk at, or a failure saying so."""
+    m = re.search(r"MAX_NUM_BATCHED_TOKENS\D*?(\d[\d,]{2,6})\s+tokens", doc)
+    assert m, (
+        "the docstring no longer states a token magnitude beside "
+        "MAX_NUM_BATCHED_TOKENS, so the number this item was filed over has been "
+        f"replaced by a bare key name: {doc[:200]!r}")
+    return int(m.group(1).replace(",", ""))
+
+
+def _chunk_drift(doc: str, conf_text: str) -> str | None:
+    """None when the prose prices the chunk the conf sets; otherwise why not.
+
+    A pure function of the two texts, so the node below can feed it a mutated
+    conf and see the drift fire without touching the real file.
+    """
+    env = _conf_env(conf_text)
+    assert "MAX_NUM_BATCHED_TOKENS" in env, (
+        "the conf's environment= no longer sets MAX_NUM_BATCHED_TOKENS at all, so "
+        "the engine would be on vLLM's default and the prose's key name is the "
+        "stale part — re-read the conf before believing either number")
+    stated, live = _stated_chunk(doc), int(env["MAX_NUM_BATCHED_TOKENS"])
+    return None if stated == live else (
+        f"the docstring prices a cold prefill chunk at {stated} tokens while the "
+        f"conf sets MAX_NUM_BATCHED_TOKENS=\"{live}\" — the sentence is the "
+        "defect #1785 was filed for, and 2x wrong is 2x wrong in either direction")
+
+
+def test_a_cold_prefill_is_priced_at_the_chunk_budget_in_force():
+    """Clause 1: the mechanism, at the width that is actually running.
+
+    Graded in both directions, because a deletion would also silence the
+    sentence: the retired figure is gone AND the conf's value is stated in the
+    same passage as `MAX_NUM_BATCHED_TOKENS` AND the stall itself still reads as
+    it did — every other request on the engine getting one token per step is the
+    reason the module exists, and it must survive an edit that only changes a
+    number. The figure is then compared to the conf rather than to a literal, so
+    this node is the drift detector the acceptance asks for.
+    """
+    doc = _module_docstring()
+    old = " ".join(RETIRED_CHUNK_CLAIM.split())
+
+    # Controls first: the retired text has to trip the bans, and still carry the
+    # stall clause that the rewrite must keep.
+    assert "8,192-token chunk" in old, (
+        "the retired sentence no longer contains the figure its own ban targets, "
+        "so the check below would be a ban on nothing")
+    assert "one token per step" in old, (
+        "the retired text stopped carrying the stall clause, so requiring it of "
+        "the new docstring would be free")
+
+    for banned in ("8,192", "8192"):
+        assert banned not in doc, (
+            f"the docstring prices the live budget at {banned} tokens again — "
+            "the budget since 2026-09-10 is the one in the conf")
+    assert "MAX_NUM_BATCHED_TOKENS" in doc, (
+        "the docstring no longer names the knob, so a reader has nothing to go "
+        "update and the number has no owner")
+    for stall in ("every other request on the engine", "one token per step"):
+        assert stall in doc, (
+            f"the docstring lost {stall!r}: the neighbour-starvation mechanism is "
+            "the point of the module, and an edit that fixes a number by "
+            "deleting the sentence has not fixed anything")
+
+    drift = _chunk_drift(doc, CONF.read_text(encoding="utf-8"))
+    assert drift is None, drift
+
+
+def test_the_corrected_prose_names_an_owner_that_resolves():
+    """Clause 2: where the knob lives, so the next halving has one place to edit.
+
+    The clause offers a choice — the conf path or `architecture/vllm.md` §5.1 —
+    so the test takes the disjunction as stated rather than demanding both, and
+    then adds the half that makes a citation worth having: whatever is named has
+    to resolve. A docstring that cited `conf.d/agent-llm.conf` (a plausible
+    typo, and one no grep in this file would notice) would pass a plain `in`
+    check and still send the next reader to a file that does not exist.
+    """
+    doc = _module_docstring()
+
+    conf_rel = "agent-services/supervisor/conf.d/agent-llm-primary.conf"
+    named_conf, named_doc = conf_rel in doc, "vllm.md" in doc
+    assert named_conf or named_doc, (
+        "the docstring states a chunk size with no owner to update from: "
+        f"{doc[:220]!r} — the whole point of #1785's fix is that the next "
+        "halving has one place to be written down")
+
+    if named_conf:
+        assert (_ROOT / conf_rel).exists(), (
+            f"the docstring cites {conf_rel}, which is not on disk")
+        assert "MAX_NUM_BATCHED_TOKENS" in _conf_env(), (
+            "the cited conf no longer sets the key the prose is about")
+    if named_doc:
+        assert "§5.1" in doc, (
+            "the docstring points at vllm.md without a section, and §5.1 is the "
+            "one that carries the measurement")
+        vllm = (_ROOT / "architecture" / "vllm.md").read_text(encoding="utf-8")
+        head = [ln for ln in vllm.splitlines() if ln.startswith("#")]
+        budget = str(int(_conf_env()["MAX_NUM_BATCHED_TOKENS"]))
+        assert any("5.1" in ln and budget in ln for ln in head), (
+            f"vllm.md has no §5.1 heading stating the budget the conf sets "
+            f"({budget}), so the section the docstring cites is not the one "
+            "that justifies the number — either the doc moved or the conf did")
+    assert doc.index("MAX_NUM_BATCHED_TOKENS") < min(
+        [i for i in (doc.find(conf_rel), doc.find("vllm.md")) if i >= 0]), (
+        "the owner citation is no longer in the passage that states the chunk — "
+        "a citation parked at the end of a page is not the pointer it claims to "
+        "be (the `__doc__` is one flattened block, so order is all a reader has)")
+
+
+def test_the_expected_chunk_size_is_read_from_the_conf_not_from_a_literal():
+    """Clause 3: the pin has to move when the conf moves, or it pins nothing.
+
+    Three halves. (a) This file contains no copy of the expected value, so the
+    number can only come from the conf — that is checkable, not a claim about
+    intent. (b) The pin passes against the conf as it stands. (c) The pin is
+    re-run against a mutated conf, in-process, and goes red: the conf-only change
+    that #1783-style prose drift actually looks like. The substitution itself is
+    asserted to have landed, because a mutation that silently matched nothing
+    would leave (c) green forever — a check with a zero denominator is not a
+    check.
+    """
+    import ast
+    live = int(_conf_env()["MAX_NUM_BATCHED_TOKENS"])
+    doc = _module_docstring()
+
+    # Scanned through the AST, not by grepping the file: the history block above
+    # quotes 4096 as prose about commit 62bad14a and that is a citation, not a
+    # copy. What must not exist is the value as a constant, because that is what
+    # quietly becomes the expected number when the conf moves.
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    hard = [n.lineno for n in ast.walk(tree)
+            if isinstance(n, ast.Constant) and n.value in (live, f"{live:,}")]
+    assert not hard, (
+        f"this file hard-codes the expected chunk size at line(s) {hard}, so a "
+        "conf change to anything else would leave the comparison reading the "
+        "wrong side of itself — the value has to come from the conf")
+
+    conf_text = CONF.read_text(encoding="utf-8")
+    assert _chunk_drift(doc, conf_text) is None
+
+    needle = f'MAX_NUM_BATCHED_TOKENS="{live}"'
+    for mutant in (live * 2, live // 2):
+        mutated = conf_text.replace(needle, f'MAX_NUM_BATCHED_TOKENS="{mutant}"')
+        assert mutated != conf_text, (
+            f"the mutation harness wrote nothing: {needle!r} is not in the conf, "
+            "so the drift check below would be asserting on the unmutated file")
+        reason = _chunk_drift(doc, mutated)
+        assert reason, (
+            f"a conf-only change to {mutant} left the pin green — the docstring "
+            "and the conf are no longer being compared to each other")
