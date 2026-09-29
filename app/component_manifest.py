@@ -115,6 +115,12 @@ crosses it rather than a grep that suggests it:
   the real send function against a stub engine in
   `tests/test_component_manifest_send_sites.py`, not by grepping for
   `record_request(`.
+* Two of those five have no session to key the registry on, so they cannot cross
+  the first seam at all: `app/secondary_models.py` is handed a transcript and
+  `app/inner_voice/observer.py` builds its own observer prompt, and neither owns
+  a `session_id`. They describe their injection to `record_request(components=…)`
+  instead, and their lines read `components_captured: "send_site"` rather than
+  borrowing a session key that no session owns.
 """
 
 from __future__ import annotations
@@ -177,9 +183,28 @@ DEFAULT_SUBDIR = "lloyd-request-manifests"
 #: Distinct sessions whose components are remembered. Count-bounded on purpose:
 #: an autonomy round runs for hours on one session and its entry must outlive
 #: the turn, so an age-based expiry would silently blank long turns.
-MAX_SESSIONS = 128
+#:
+#: 128 was 4.6-6.4x under the day's own traffic — the store carried 826, 646 and
+#: 591 distinct `session_id`s on 2026-09-26/27/28 — so `_registry.popitem` was
+#: dropping live sessions every day and every line it dropped read
+#: `components_captured: "unrecorded"`. 1024 is 1.24x the busiest observed day
+#: (826 on 2026-09-26) — headroom, not a margin of safety, which is why the counter
+#: below matters more than the number; the
+#: bound stays a pure count, with no age- or activity-based expiry, because the
+#: failure mode it must not repeat is a silent blank. `stats()["evictions"]` is
+#: now the readable consequence rather than an inference, and the injected
+#: prefetch block is held as a digest pair (`note_components`), not as text, so
+#: eight times the entries is not eight times the confidential text resident.
+MAX_SESSIONS = 1024
 
 _UNRECORDED = "unrecorded"
+#: `components_captured` vocabulary. `turn_start` is the registry handoff: the
+#: components are the ones `prompt_builder` built for this session at the start
+#: of the turn. `send_site` means the sending function handed over what it is
+#: injecting on this call — a site with no session to key on, so nothing about
+#: those rows is turn-scoped and the field must not claim they are.
+_TURN_START = "turn_start"
+_SEND_SITE = "send_site"
 
 # ── config ────────────────────────────────────────────────────────────────
 
@@ -410,22 +435,43 @@ def note_components(session_id: str, components: "dict[str, str] | None", *,
 
     Called from `prompt_builder` with the same ordered dict that produced the
     system prompt, and from the chat router with the prefetched context block.
+
+    The prefetch is digested **here** and only the `{sha256, bytes}` pair is
+    kept: the block is vault text, and the registry is a process-lifetime table,
+    so holding it as a string meant the retrieved context of up to `MAX_SESSIONS`
+    sessions sat in the heap of a server that also serves the requests that asked
+    for it. The emitted manifest line is unaffected — it already carried exactly
+    this pair, computed at emit time — which is what the two prefetch nodes in
+    `tests/test_component_manifest_prefetch_seam.py` pin: the pair in the
+    registry, and the identical object on the line. An empty block still stays
+    absent rather than becoming a hash of `""`, as the negative node there shows.
     """
     if not session_id or not enabled():
         return
+    dropped = 0
     try:
         with _registry_lock:
             entry = _registry.setdefault(session_id, {})
             if components is not None:
                 entry["components"] = dict(components)
             if prefetch_text is not None:
-                entry["prefetch"] = prefetch_text
+                body = prefetch_text or ""
+                entry["prefetch"] = ("" if not body
+                                     else {"sha256": digest_text(body),
+                                           "bytes": _size(body)})
             entry["at"] = time.time()
             _registry.move_to_end(session_id)
             while len(_registry) > MAX_SESSIONS:
                 _registry.popitem(last=False)
+                dropped += 1
     except Exception as exc:  # noqa: BLE001 — a lost record is never an error
         logger.debug("component_manifest: registry write failed: %s", exc)
+    if dropped:
+        # Outside the lock and after the try: a drop is not an error, it is a
+        # rate, and `stats()["evictions"]` is where a report reads it instead of
+        # opening the store. One increment per entry dropped, so the number is
+        # the count of sessions whose next line reads `unrecorded`.
+        _bump("evictions", dropped)
 
 
 def note_prefetch(session_id: str, text: str) -> None:
@@ -550,10 +596,14 @@ _writer_lock = threading.Lock()
 _stats_lock = threading.Lock()
 # `write_errors` is the clause the acceptance names; `recorded` and
 # `lines_written` are the pair that proves the writer thread actually drained
-# what it was handed, which one counter alone cannot say.
+# what it was handed, which one counter alone cannot say. `evictions` is the
+# registry's own overflow rate — one per session dropped by the `MAX_SESSIONS`
+# bound, which is how a reader tells "this line found nothing to record" from
+# "this line was dropped before it could be" without opening the store.
 _stats = {"recorded": 0, "write_errors": 0, "hash_errors": 0,
           "lines_written": 0, "bytes_written": 0,
-          "pruned_files": 0, "pruned_bytes": 0, "prune_errors": 0}
+          "pruned_files": 0, "pruned_bytes": 0, "prune_errors": 0,
+          "evictions": 0}
 
 
 def _bump(key: str, amount: int = 1) -> None:
@@ -800,6 +850,34 @@ def _reset_tools_memo() -> None:
 # ── recording ─────────────────────────────────────────────────────────────
 
 
+def components_from_payload(payload: dict[str, Any]) -> dict[str, str]:
+    """Name the part of an outbound payload that the sender itself composed.
+
+    For a site with no session to key the registry on, this is what it has to
+    offer: the system message is the text the harness wrote, and everything after
+    it is data the caller handed over — which the line already digests one row
+    per message, in order. So only the system message becomes a component, under
+    `system_prompt`, the same key `prompt_builder` uses for the same thing on the
+    primary's path. A site that sends no system message gets an empty dict, which
+    means `components_captured` stays `unrecorded` — that site genuinely injects
+    nothing of its own, and a helper that manufactured a component from user
+    data would be worse than the honest blank.
+
+    Never raises: this sits on the send path, and a manifest that cannot name its
+    prompt must not cost the request.
+    """
+    try:
+        for msg in (payload or {}).get("messages") or []:
+            if isinstance(msg, dict) and msg.get("role") == "system":
+                body = msg.get("content") or ""
+                if not str(body):
+                    return {}
+                return {"system_prompt": str(body)}
+    except Exception as exc:  # noqa: BLE001 — naming a prompt is never worth a raise
+        logger.debug("component_manifest: payload scan failed: %s", exc)
+    return {}
+
+
 def source_of_session(session_id: str) -> str:
     """`chat` for a chat session, the worker source name for a background one.
 
@@ -821,7 +899,9 @@ def _request_id() -> str:
 
 def record_request(*, base_url: str, model: str, payload: dict[str, Any],
                    session_id: str = "", iteration: "int | None" = None,
-                   send_site: str = "") -> "dict[str, Any] | None":
+                   send_site: str = "",
+                   components: "dict[str, str] | None" = None
+                   ) -> "dict[str, Any] | None":
     """Manifest the request that is about to be sent; return the line.
 
     Called with the payload already built and BEFORE the connection opens, so
@@ -832,6 +912,16 @@ def record_request(*, base_url: str, model: str, payload: dict[str, Any],
     `stats()` and returns None, and the request proceeds. What it hands the
     writer is a serialized line and nothing else — no bytes of the request
     itself, which is the whole retention policy in one sentence.
+
+    `components` is for a send site that holds its own prompt and has no session
+    to key the registry on. The registry exists because `prompt_builder` builds
+    the system prompt and `client.py::stream_chat` sends it, and only a shared
+    table reaches across that gap; a routed background job has neither gap nor
+    session — `app/secondary_models.py` is handed a transcript, digests its own
+    system message, and posts. Passing the dict here is the honest form of "what
+    did this request inject": inventing a `session_id` for it would put a key in
+    a session-keyed store that no session owns. Used only when the registry has
+    nothing for `session_id`, so a session's own handoff always wins.
     """
     if not enabled():
         return None
@@ -844,7 +934,7 @@ def record_request(*, base_url: str, model: str, payload: dict[str, Any],
         started = time.perf_counter()
         line = _build_line(base_url=base_url, model=model, payload=payload,
                            session_id=session_id, iteration=iteration,
-                           send_site=send_site)
+                           send_site=send_site, components=components)
         line["build_ms"] = round((time.perf_counter() - started) * 1000.0, 3)
         _ensure_writer()
         _queue.put(canonical_json(line))
@@ -860,7 +950,8 @@ def record_request(*, base_url: str, model: str, payload: dict[str, Any],
 
 def _build_line(*, base_url: str, model: str, payload: dict[str, Any],
                 session_id: str, iteration: "int | None",
-                send_site: str) -> dict[str, Any]:
+                send_site: str,
+                components: "dict[str, str] | None" = None) -> dict[str, Any]:
     """Describe the payload as digests and sizes. Keeps no text but the digests.
 
     `params` is the deliberately non-content-bearing half of the payload — every
@@ -881,8 +972,15 @@ def _build_line(*, base_url: str, model: str, payload: dict[str, Any],
     tools = _tools_block(payload.get("tools"))
 
     entry = components_for(session_id)
+    remembered = entry.get("components") or {}
+    # A session's own handoff always wins: an inline dict is a send site's
+    # answer to "what did I inject", and a session that built a prompt knows
+    # more about this turn than the site that happens to be sending it.
+    named = remembered or (components or {})
+    captured = _TURN_START if remembered else (_SEND_SITE if components
+                                               else _UNRECORDED)
     component_rows = []
-    for name, text in (entry.get("components") or {}).items():
+    for name, text in named.items():
         body = text or ""
         component_rows.append({"name": name, "sha256": digest_text(body),
                                "bytes": _size(body)})
@@ -901,11 +999,12 @@ def _build_line(*, base_url: str, model: str, payload: dict[str, Any],
         "provider": provider_for(base_url),
         "chat_template": chat_template(model, base_url),
         "components": component_rows,
-        # Why this is turn-scoped: `build_system_prompt` runs once per user turn,
-        # so every iteration of that turn carries the same component dict; the
-        # per-iteration re-anchor rides in on a message, and the message digests
-        # are what catch it moving.
-        "components_captured": "turn_start" if component_rows else _UNRECORDED,
+        # Why `turn_start` is the word for the registry path: `build_system_prompt`
+        # runs once per user turn, so every iteration of that turn carries the same
+        # component dict; the per-iteration re-anchor rides in on a message, and the
+        # message digests are what catch it moving. `send_site` is the other path —
+        # the site's own answer, per call — and `unrecorded` the absence of both.
+        "components_captured": captured,
         "messages": message_rows,
         "params": scalar,
     }
@@ -913,8 +1012,10 @@ def _build_line(*, base_url: str, model: str, payload: dict[str, Any],
         line["tools"] = tools
     prefetch = entry.get("prefetch")
     if prefetch:
-        line["prefetch"] = {"sha256": digest_text(prefetch),
-                            "bytes": _size(prefetch)}
+        # Already `{sha256, bytes}`: `note_components` digests the block at note
+        # time so the text need not stay resident. Copied, because the caller
+        # hands the line to a serializer and the registry keeps its own entry.
+        line["prefetch"] = dict(prefetch)
     return line
 
 

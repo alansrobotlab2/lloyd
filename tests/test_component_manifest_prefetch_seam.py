@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -219,9 +220,15 @@ def test_the_stream_handler_registers_the_injected_block_for_its_turn(monkeypatc
     session_id = "20260919_121314_seamchat"
     _handler_registered_the_block(session_id, monkeypatch)
     entry = cm.components_for(session_id)
-    assert entry.get("prefetch") == PREFETCH_SENTINEL, (
+    assert entry.get("prefetch") == {"sha256": cm.digest_text(PREFETCH_SENTINEL),
+                                     "bytes": len(PREFETCH_SENTINEL.encode("utf-8"))}, (
         "post_message_stream did not register the prefetched block for the "
         f"session it was about to run: {sorted(entry)}")
+    # #1782: the registry is a process-lifetime table and the block is vault
+    # text, so what is registered is the block's digest pair, not the block.
+    assert PREFETCH_SENTINEL not in json.dumps(entry), (
+        "the injected text is resident in the registry; the digest pair is what "
+        "should be kept there")
 
 
 def test_the_injected_block_reaches_the_manifest_as_its_own_component(monkeypatch):
@@ -260,6 +267,44 @@ def test_the_injected_block_reaches_the_manifest_as_its_own_component(monkeypatc
     assert "PREFETCH-SEAM-SENTINEL" not in written, (
         "the injected block's text landed in the manifest store")
     assert USER_TEXT not in written, "the user's message landed in it too"
+
+
+def test_the_registry_holds_the_pair_and_the_line_carries_what_it_always_carried(monkeypatch):
+    """#1782, both halves: less resident, byte-for-byte the same emission.
+
+    The residency half: after `note_prefetch`, the in-process entry holds
+    `{sha256, bytes}` and not the text — the registry lives as long as the server,
+    so holding the block meant the retrieved context of up to `MAX_SESSIONS`
+    sessions sat in the heap of a process that also serves the requests asking for
+    it, and raising that cap to 1024 would have multiplied exactly that.
+
+    The emission half, which is the reason the change was safe to make at all:
+    the digest pair is computed at note time now instead of at emit time, so the
+    `prefetch` object on the line must not move. The expected sha here is
+    `hashlib` over the literal string, deliberately not `cm.digest_text` — a test
+    that derived its expectation from the same helper it is checking would pass
+    while both drifted together.
+    """
+    session_id = "20260919_121317_seamchat"
+    text = "CONTEXT-BLOCK-A\nsecond line of vault prose\n"
+    cm.note_prefetch(session_id, text)
+
+    entry = cm.components_for(session_id)
+    stored = entry.get("prefetch")
+    assert isinstance(stored, dict) and set(stored) == {"sha256", "bytes"}, (
+        f"the registry holds {type(stored).__name__}, not a digest pair")
+    assert text not in json.dumps(entry), "the injected text itself is resident"
+    assert stored["bytes"] == len(text.encode("utf-8"))
+
+    expected = {"sha256": "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                "bytes": len(text.encode("utf-8"))}
+    assert stored == expected, stored
+
+    rows = _send_one(session_id, monkeypatch)
+    assert len(rows) == 1, rows
+    assert rows[0]["prefetch"] == expected, (
+        "the line's prefetch object changed when the digest moved to note time — "
+        "the one thing this change was not allowed to do")
 
 
 def test_a_turn_with_no_injected_block_records_no_prefetch_component(monkeypatch):

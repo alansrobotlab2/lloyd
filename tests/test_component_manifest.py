@@ -20,6 +20,11 @@ acceptance check measured as zero hits for
 `component_manifest|request_manifest|prompt_diff` across `app/`, `scripts/` and
 `tests/`.
 
+Two of the nodes here are #1782's, not #581's: the registry bound (128 -> 1024,
+still a pure count with no age- or activity-based expiry) and
+`stats()["evictions"]`, which is what makes the overflow rate readable without
+opening a 3 GB store of confidential digests.
+
 What this file does NOT claim, because the item does not ask for it: no
 component bytes are retained, so a manifest addresses a request it cannot
 replay, and `rebuild_request` is deliberately absent. The docstring on
@@ -34,6 +39,7 @@ import json
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -713,6 +719,108 @@ def test_a_session_prompt_builder_never_built_is_reported_unrecorded(monkeypatch
     line = _lines(Path(os.environ["LLOYD_MANIFEST_STORE"]))[0]
     assert line["components"] == []
     assert line["components_captured"] == cm._UNRECORDED
+
+def test_an_overflow_keeps_the_newest_and_drops_only_the_oldest():
+    """The registry bound (#1782): 1024 sessions, a pure count, nothing else.
+
+    128 was 4.6-6.4x under this box's own traffic — the store carried 826, 646
+    and 591 distinct session ids on 2026-09-26/27/28 — so the LRU was dropping
+    live sessions every day, and each drop printed
+    `components_captured: "unrecorded"` for a request that had a real prompt.
+    Counted on purpose, not aged: an autonomy round runs for hours on one
+    session, so an age- or activity-based expiry would blank the digests of
+    exactly the sessions whose prompts a run-to-run diff most wants. The node
+    below pins that absence instead of trusting this sentence.
+    """
+    for n in range(1, cm.MAX_SESSIONS + 2):       # one more session than fits
+        cm.note_components(f"s{n}", {"system_prompt": f"prompt {n % 3}"})
+    assert cm.MAX_SESSIONS >= 1024, (
+        "the cap is still under a day's observed traffic (826 distinct session ids "
+        "on 2026-09-26), so the registry is still blanking live sessions")
+    assert len(cm._registry) == cm.MAX_SESSIONS
+    assert cm.components_for("s1") == {}, "the oldest session was not the one dropped"
+    assert (cm.components_for(f"s{cm.MAX_SESSIONS + 1}").get("components")
+            or {}).get("system_prompt"), "the newest session's components were not kept"
+
+
+def test_a_session_inside_the_recent_window_survives_500_more_sessions():
+    """The bound has to hold where the traffic actually is, not at the edge.
+
+    The failure #1782 is about was never the 1025th session. It was an ordinary
+    session losing its entry hours early, because 128 slots made the registry a
+    rolling window narrower than a working day. Note a session inside the most
+    recent 128, push 500 further distinct sessions through, and it must resolve.
+    """
+    for n in range(1, cm.MAX_SESSIONS + 2):
+        cm.note_components(f"s{n}", {"system_prompt": "p"})
+    for n in range(cm.MAX_SESSIONS + 2, cm.MAX_SESSIONS + 502):   # 500 more
+        cm.note_components(f"s{n}", {"system_prompt": "p"})
+    assert cm.components_for(f"s{cm.MAX_SESSIONS + 1}") != {}, (
+        "a session inside the most recent 128 lost its components to 500 later "
+        "sessions — the window is narrower than the cap claims")
+    assert cm.components_for("s1") == {}, "and the oldest went anyway: the bound holds"
+
+
+def test_the_registry_ages_nothing_out_at_all():
+    """No age-based expiry, pinned as an absence rather than a comment.
+
+    The entry carries an `at` timestamp, which is exactly what an expiry would
+    read, and `components_for` never looks at it: it returns the entry it finds.
+    So the field is backdated here, a year, in the registry's own dict — not by
+    patching the clock, because `note_components` reaches `time.time` through the
+    very attribute a patch would replace, and a lambda that calls it recurses into
+    itself until `note_components`' `except Exception` swallows the
+    `RecursionError`. A node that green on a swallowed error pins nothing, which
+    is the mistake this node replaced.
+
+    Asserting the backdate landed is what makes the absence meaningful: an entry
+    one year older than every other entry, followed by 20 sessions of ordinary
+    traffic, still resolves. If anyone later adds a TTL to make room, this says
+    out loud that long-running sessions are the ones that would lose.
+    """
+    year = 365 * 86400
+    cm.note_components("long-running-round", {"system_prompt": "still here"})
+    assert "at" in cm._registry["long-running-round"], (
+        "the entry carries no timestamp, so there is nothing here to age and the "
+        "node would pass vacuously")
+    cm._registry["long-running-round"]["at"] -= year
+    for n in range(20):                                   # some ordinary traffic
+        cm.note_components(f"other-{n}", {"system_prompt": "p"})
+    assert time.time() - cm._registry["long-running-round"]["at"] > year - 60, (
+        "the entry was never actually backdated, so this proves nothing about ageing")
+    assert cm.components_for("long-running-round") != {}, (
+        "an entry older than the rest was dropped: the bound is no longer a count")
+
+
+def test_evictions_counts_every_session_the_lru_dropped():
+    """The overflow is readable without opening the store (#1782).
+
+    A cap the traffic exceeds daily, dropping in silence, is indistinguishable
+    from a feature that was never implemented — which is what 128 had been since
+    the commit that introduced it. One increment per dropped entry, so the number
+    is the count of sessions whose next line reads `unrecorded`, and `stats()` is
+    where a report reads it instead of scanning 3 GB of confidential digests.
+    """
+    assert cm.stats()["evictions"] == 0
+    for n in range(cm.MAX_SESSIONS + 7):
+        cm.note_components(f"s{n}", {"system_prompt": "p"})
+    assert cm.stats()["evictions"] == 7
+
+
+def test_evictions_stays_0_while_the_registry_stays_inside_its_cap():
+    """A counter that always climbs counts nothing; this one counts drops.
+
+    Re-noting a session moves it to the back of the LRU — that is what
+    `move_to_end` is for — but never adds an entry, so 200 notes across 3 sessions
+    must leave the counter at zero.
+    """
+    for n in range(200):
+        cm.note_components(f"s{n % 3}", {"system_prompt": "p"})
+    assert len(cm._registry) == 3
+    assert cm.stats()["evictions"] == 0, (
+        "evictions moved without any entry being dropped, so it cannot be read "
+        "as a drop rate")
+
 
 def test_the_chat_template_field_says_why_when_no_file_is_configured():
     """The absent half, asserted exactly rather than accepted either way.

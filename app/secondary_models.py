@@ -31,12 +31,23 @@ def _record_manifest(url: str, payload: dict) -> None:
     the provider slot. Never raises: a manifest that cannot be written must not
     cost the call it describes, and this module's callers are background jobs
     that would otherwise lose their summary to an instrumentation bug.
+
+    `components=` rather than a session id, because there is no session id to
+    thread: the five jobs are handed a transcript, not a session —
+    `_sync_secondary_title(transcript)` is the whole signature. The registry
+    these lines would otherwise read is keyed on sessions, so the alternative to
+    naming the prompt here is filing 245 rows a day under a key no session owns.
+    What this module composes is the job's system prompt, and that is the one
+    component it can honestly name; the transcript is the caller's data and the
+    line already digests it as a message. 245 of the day's 3,837 unrecorded lines
+    on 2026-09-28 were these five posts, every one carrying a real system prompt.
     """
     try:
-        from app.component_manifest import record_request
+        from app.component_manifest import components_from_payload, record_request
         record_request(base_url=url.rsplit("/v1/", 1)[0],
                        model=str(payload.get("model") or ""), payload=payload,
-                       send_site="app/secondary_models.py")
+                       send_site="app/secondary_models.py",
+                       components=components_from_payload(payload))
     except Exception:  # noqa: BLE001
         pass
 

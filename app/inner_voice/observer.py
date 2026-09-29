@@ -28,7 +28,7 @@ from typing import Any, Awaitable, Callable
 import httpx
 
 from app import event_log as _event_log
-from app.component_manifest import record_request
+from app.component_manifest import components_from_payload, record_request
 from app.config import CONFIG, _get_model_cfg, resolve_model_alias
 from app.inner_voice import guards as _guards
 from app.inner_voice import observer_prompt as _prompt
@@ -398,8 +398,17 @@ async def _post_chat_completion_with_tools(
     # #581: manifest this non-streaming send site too. Never raises and
     # never delays: the digest is of the payload built above, and the file
     # write happens on the manifest's writer thread.
+    #
+    # `components=` rather than a session id: this prompt is the observer's own
+    # (`_OBSERVER_SYSTEM` plus a goal card when one exists), not a chat
+    # session's assembled prompt, and the per-session registry is keyed on
+    # sessions. A fabricated key would have filed 2,346 rows a day — every
+    # unrecorded line this site produced on 2026-09-28 — under a session that
+    # never injected them. The site names what it composed instead, and the
+    # line reads `components_captured: "send_site"` to say so.
     record_request(base_url=base_url, model=model_name, payload=payload,
-                   send_site="app/inner_voice/observer.py::_post_chat_completion_with_tools")
+                   send_site="app/inner_voice/observer.py::_post_chat_completion_with_tools",
+                   components=components_from_payload(payload))
     resp = await _client().post(url, json=payload, timeout=timeout_seconds)
     resp.raise_for_status()
     return resp.json()

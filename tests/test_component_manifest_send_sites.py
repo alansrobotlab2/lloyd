@@ -19,6 +19,7 @@ model, no token spend — and reads back what landed in the store.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import sys
@@ -411,3 +412,91 @@ def test_the_finalizer_tools_hash_is_the_array_the_caller_captured(monkeypatch):
     assert len(fin) >= 1, [ln["send_site"] for ln in _lines()]
     assert fin[-1]["tools"]["sha256"] == cm.digest_obj(captured), (
         "the finalizer's recorded tools hash is not the array the caller captured")
+
+
+# ── #1782: the two sites that injected a prompt and reported nothing ─────────
+#
+# Both nodes drive the real send function against the same stubs the four-site
+# test above uses, and both compare the digest on the line against `hashlib` over
+# the system message the stub captured — the bytes that were about to go on the
+# wire. Deriving the expectation from the manifest module's own helper would let
+# the two drift together, which is the one thing a digest test must not allow.
+
+
+def _sha(text: str) -> str:
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _system_message(payload: dict) -> str:
+    for msg in payload.get("messages") or []:
+        if msg.get("role") == "system":
+            return str(msg.get("content") or "")
+    raise AssertionError(f"the stub captured no system message: {payload}")
+
+
+def test_the_observer_site_records_its_own_system_prompt(stub_engine, monkeypatch):
+    """#1782 clause 4: the observer line is no longer `unrecorded`.
+
+    2,346 of the day's 3,837 unrecorded lines on 2026-09-28 — 61% of them — came
+    from this one function, every one of them carrying a real system prompt that
+    the manifest had no way to name: the component registry is keyed on sessions,
+    and an inner-voice judgement has no session. The site now describes what it
+    composed, so the line names the component and the diff can ask which prompt
+    moved.
+    """
+    system = "judge this event against the goal card"
+    asyncio.run(_post_chat_completion_with_tools(
+        base_url="http://127.0.0.1:8096", model_name="obs-model",
+        system_prompt=system, user_prompt="the event", tools=TOOLS,
+        max_tokens=200, timeout_seconds=5.0))
+    cm.flush(timeout=8.0)
+
+    lines = [ln for ln in _lines()
+             if ln["send_site"] == SITES["observer"]]
+    assert len(lines) == 1, lines
+    line = lines[0]
+    assert line["components_captured"] != "unrecorded", line
+    assert line["components_captured"] == cm._SEND_SITE, (
+        "a site that describes itself must not be reported as a turn-boundary "
+        f"handoff; got {line['components_captured']!r}")
+    by_name = {c["name"]: c for c in line["components"]}
+    assert set(by_name) == {"system_prompt"}, line["components"]
+    assert by_name["system_prompt"]["sha256"] == _sha(_system_message(_PostClient.posted[-1])), (
+        "the digest on the line is not the system prompt the stub was sent")
+    assert by_name["system_prompt"]["bytes"] == len(system.encode("utf-8"))
+
+
+def test_the_routed_jobs_record_their_system_prompt(stub_engine, monkeypatch):
+    """#1782 clause 5: the five secondary jobs are no longer 100% unrecorded.
+
+    The smaller half of the same defect — 245 lines on 2026-09-28, all of them
+    unrecorded, because the five routed jobs are handed a transcript and have no
+    session id at any level of their call chain: `_sync_secondary_title(transcript)`
+    is the whole signature. Threading a session through four call sites to fill a
+    session-keyed table with rows no session owns would be the wrong fix; naming
+    the prompt at the post is the right one.
+    """
+    from app.config import CONFIG
+    monkeypatch.setitem(CONFIG, "models", {
+        "primary": {"base_url": "http://127.0.0.1:8096", "engine": "vllm"},
+        "secondary": {"base_url": "http://127.0.0.1:8097", "engine": "llama.cpp"},
+    })
+    before = len(_lines())
+    title = secondary_models._sync_secondary_title("a transcript worth naming",
+                                                   timeout=5.0)
+    cm.flush(timeout=8.0)
+
+    assert title, "the job did not run, so the line below proves nothing"
+    lines = [ln for ln in _lines()[before:]
+             if ln["send_site"] == SITES["secondary"]]
+    assert len(lines) == 1, lines
+    line = lines[0]
+    assert line["components_captured"] != "unrecorded", (
+        f"the job's own line still reads unrecorded: {line['components_captured']!r}")
+    assert line["components_captured"] == cm._SEND_SITE, line
+    by_name = {c["name"]: c for c in line["components"]}
+    assert set(by_name) == {"system_prompt"}, line["components"]
+    assert by_name["system_prompt"]["sha256"] == _sha(secondary_models._TITLE_SYSTEM), (
+        "the recorded digest is not the title job's own system prompt")
+    assert by_name["system_prompt"]["bytes"] == len(
+        secondary_models._TITLE_SYSTEM.encode("utf-8"))
