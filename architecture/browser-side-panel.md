@@ -24,8 +24,8 @@ doc that exists, and no doc did.
 
 | Path | What it is |
 |---|---|
-| `chrome-extension/src/background/service-worker.ts` | 319 lines: tab/navigation/session orchestration, the manual-check guard, the kickoff prompts |
-| `chrome-extension/src/background/url.ts` | 60 lines: `canonicalize()` and the YouTube tests |
+| `chrome-extension/src/background/service-worker.ts` | 320 lines: tab/navigation/session orchestration, the manual-check guard, the kickoff prompts |
+| `chrome-extension/src/background/url.ts` | 68 lines: `canonicalize()`, the YouTube tests and `canCheckUrl` |
 | `chrome-extension/src/background/tab-session-map.ts` | 92 lines: the `chrome.storage.session` wrapper holding the tab→session mapping |
 | `chrome-extension/src/background/lloyd-client.ts` | 81 lines: three backend calls, used by the service worker only |
 | `web/sidepanel.html` | the panel's HTML entry, 12 lines |
@@ -41,11 +41,12 @@ must not import the app's state.
 ## What one check does
 
 Pressing "Check it out, Lloyd" on a tab, in order. The button is the only entry
-point, and it is enabled only when the tab's URL passes `shouldSpawnSession`
-(`chrome-extension/src/background/url.ts`), which refuses `google.com` and its
-subdomains outright and every YouTube page that is not a video. That refusal
-lives in the button's `disabled` state, not in the service worker: the handler
-that actually mints the session tests only that the URL is http(s) (#1765).
+point, and it is enabled only when the tab's URL passes `canCheckUrl`
+(`chrome-extension/src/background/url.ts`): http(s), and not refused by
+`shouldSpawnSession`, which refuses `google.com` and its subdomains outright and
+every YouTube page that is not a video. `handleManualCheck` re-reads the same
+predicate before taking the tab lock, so the disabled button is a hint and the
+service worker is the guard (#1765, `tests/test_sidepanel_spawn_guard.py`).
 
 1. `POST /api/sessions/create` with `{platform: "browser", inner_voice: true}` —
    the tag is what makes these sessions findable (`app/routers/sessions.py`).

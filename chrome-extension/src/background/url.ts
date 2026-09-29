@@ -58,3 +58,11 @@ export function shouldSpawnSession(url: string): boolean {
   }
   return true
 }
+
+// The one answer to "may this tab be checked": http(s), and not refused
+// above. The button's `canCheck` (pushFocus) and the check itself
+// (handleManualCheck) both read it, so the disabled button is a hint and the
+// service worker is the guard (#1765).
+export function canCheckUrl(url: string | undefined): boolean {
+  return Boolean(url && /^https?:/i.test(url) && shouldSpawnSession(url))
+}

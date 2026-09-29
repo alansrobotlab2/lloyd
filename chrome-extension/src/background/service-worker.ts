@@ -21,7 +21,7 @@ import {
   getCanonical,
   setCanonical,
 } from "./tab-session-map"
-import { canonicalize, isYouTube, shouldSpawnSession } from "./url"
+import { canCheckUrl, canonicalize, isYouTube } from "./url"
 import {
   createBrowserSession,
   patchBrowserMetadata,
@@ -83,9 +83,7 @@ async function pushFocus(windowId: number, tabId: number) {
   let canCheck = false
   try {
     const tab = await chrome.tabs.get(tabId)
-    canCheck = Boolean(
-      tab.url && /^https?:/i.test(tab.url) && shouldSpawnSession(tab.url),
-    )
+    canCheck = canCheckUrl(tab.url)
   } catch {
     /* tab gone — push what we have */
   }
@@ -258,7 +256,10 @@ async function spawnSession(
 // has a session for this URL we focus it instead of re-spawning.
 async function handleManualCheck(windowId: number, tabId: number) {
   const tab = await chrome.tabs.get(tabId).catch(() => null)
-  if (!tab || !tab.url || !/^https?:/i.test(tab.url)) {
+  // The same answer the button was rendered from, re-read here: a stale
+  // panel or a message that did not come from the button still mints
+  // nothing for a refused URL (Gmail, Google search, non-video YouTube).
+  if (!tab || !tab.url || !canCheckUrl(tab.url)) {
     await pushFocus(windowId, tabId)
     return
   }
