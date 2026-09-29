@@ -376,6 +376,65 @@ def test_the_denylist_is_not_overridable_by_a_spec():
     assert spec.classify("config.yaml") == "denied"
 
 
+# --- config.yaml: comment-only edits land, value edits never do -------------
+
+_CFG = REPO_ROOT / "config.yaml"
+
+
+def _scope_with(before: str, after: str, path: str = "config.yaml"):
+    return spec.check_scope(["app/x.py", path], contents=lambda p: (before, after))
+
+
+def test_a_comment_only_config_edit_is_in_scope_on_the_real_file():
+    before = _CFG.read_text(encoding="utf-8")
+    assert "\n  # " in before, "positive control: the live file carries comments"
+    after = before.replace("\n  # ", "\n  # (reworded) ", 1)
+    after = after.replace("\n  # ", "\n  #\n  # ", 1)  # a new comment line too
+    ok, reason, buckets = _scope_with(before, after)
+    assert ok, reason
+    assert buckets["comment_only"] == ["config.yaml"] and buckets["denied"] == []
+
+
+def test_moving_an_inline_comment_off_a_value_line_is_comment_only():
+    before = "a:\n  cap: 400   # a section is <= 162 lines\n"
+    after = "a:\n  # One review's whole-file diff.\n  cap: 400\n"
+    assert spec.comment_only_change(before, after) == (True, "comments and layout only")
+
+
+@pytest.mark.parametrize("after", [
+    "a:\n  cap: 401   # a section is <= 162 lines\n",        # a value
+    "a:\n  cap: '400'   # a section is <= 162 lines\n",      # quoting changes the type
+    "a:\n  cap: 400\n  extra: 1\n",                          # a new key
+    "a:\n  cup: 400\n",                                      # a renamed key
+    "a:\n  cap: [400\n",                                     # does not parse
+])
+def test_any_value_change_to_config_yaml_stays_denied(after):
+    before = "a:\n  cap: 400   # a section is <= 162 lines\n"
+    ok, reason, buckets = _scope_with(before, after)
+    assert not ok and buckets["denied"] == ["config.yaml"], reason
+    assert "comment-only edit to config.yaml is allowed; this one is not" in reason
+
+
+def test_the_real_file_with_one_value_flipped_is_denied():
+    before = _CFG.read_text(encoding="utf-8")
+    after = before.replace("enabled: true", "enabled: false", 1)
+    assert after != before, "positive control: the live file has an enabled flag"
+    ok, _, buckets = _scope_with(before, after)
+    assert not ok and buckets["denied"] == ["config.yaml"]
+
+
+def test_comment_only_is_config_yaml_alone_and_unreadable_is_denied():
+    """`.gitignore` with only a comment changed is still denied: the exception
+    is for the one denied file the YAML check can judge."""
+    ok, _, buckets = _scope_with("# a\n", "# b\n", path=".gitignore")
+    assert not ok and buckets["denied"] == [".gitignore"]
+
+    def missing(_p):
+        raise FileNotFoundError("HEAD:config.yaml")
+    ok, reason, buckets = spec.check_scope(["config.yaml"], contents=missing)
+    assert not ok and buckets["denied"] == ["config.yaml"], reason
+
+
 @pytest.mark.parametrize("path", ["web/src/App.tsx", "web/src/components/pages/BrowserPage.tsx",
                                   "web/index.html", "web/public/favicon.svg"])
 def test_frontend_sources_are_allowed_because_the_frontend_rung_builds_them(path):

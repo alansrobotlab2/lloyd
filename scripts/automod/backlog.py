@@ -236,7 +236,8 @@ SURFACES = ("code", "frontend", "vault", "mixed", "external")
 
 # An acceptance that opens with this is a contract only a human can execute:
 # the fix needs a path the loop may never touch (config.yaml, data/**, .env*,
-# pytest.ini, .gitignore, the frontend's build inputs). `select_confirmed`
+# pytest.ini, .gitignore, the frontend's build inputs; a comment-only
+# config.yaml edit is landable, `spec.comment_only_change`). `select_confirmed`
 # skips it rather than spending an implement round discovering it — which is
 # exactly what #278 spent nine iterations on before web/src was allowed.
 HUMAN_ONLY_PREFIX = "human-only:"

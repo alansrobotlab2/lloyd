@@ -285,6 +285,32 @@ def test_preflight_refuses_a_denied_path(live_repo, tmp_path, monkeypatch):
     assert not ok and "denied" in reason
 
 
+@pytest.mark.parametrize("edit, lands", [
+    (("# the cap is <= 162 lines", "# the cap is one review's diff"), True),
+    (("cap: 400", "cap: 401"), False),
+])
+def test_preflight_lands_a_comment_only_config_edit_and_no_other(live_repo, tmp_path,
+                                                                 monkeypatch, edit, lands):
+    """Both sides are read from git — the base commit and the round's HEAD."""
+    (live_repo / "config.yaml").write_text(
+        "arch:\n  # the cap is <= 162 lines\n  cap: 400\n", encoding="utf-8")
+    git(live_repo, "add", "-A")
+    git(live_repo, "commit", "-q", "-m", "config")
+    base = git(live_repo, "rev-parse", "HEAD").stdout.strip()
+    wt = tmp_path / "wt"
+    git(live_repo, "worktree", "add", "-q", "-b", "automod/cfg", str(wt), base)
+    cfg = wt / "config.yaml"
+    cfg.write_text(cfg.read_text().replace(*edit), encoding="utf-8")
+    git(wt, "commit", "-q", "-am", "reword")
+    g = _gate_for(live_repo, wt, base, monkeypatch)
+    ok, reason, data = g.rung_preflight()
+    assert ok is lands, reason
+    if lands:
+        assert data["buckets"]["comment_only"] == ["config.yaml"]
+    else:
+        assert "denied" in reason and "not only comments" in reason
+
+
 def test_preflight_accepts_an_in_scope_diff(live_repo, tmp_path, monkeypatch):
     base = git(live_repo, "rev-parse", "HEAD").stdout.strip()
     wt = tmp_path / "wt"

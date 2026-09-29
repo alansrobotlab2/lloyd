@@ -3745,6 +3745,18 @@ than the one this prevents.
   is only the candidate's dependency set if a round cannot change it. Also
   `.git/**` and `.venvs/**`: the object store and the interpreter a rollback
   has to still work with afterwards.
+  **One exception (2026-09-28): a comment-only `config.yaml` edit lands.**
+  Rung 0 reads the file at the base and at the round's HEAD, and
+  `spec.comment_only_change` requires two things. The YAML scanner's token
+  stream, which carries no comments, must be identical, so no key, value,
+  quoting style or order moved. The parsed documents must also compare equal.
+  The path then moves from `denied` to the `comment_only` bucket. A new or
+  deleted file, a value change, or a file that does not parse stays denied,
+  and the refusal says which. The lock-out the denial exists for needs a value
+  to change. Refusing comments too left every stale comment to a hand edit:
+  #1614, #1617, #1628, #1630 and #1746 were all confirmed and unlandable on the
+  same day. `COMMENT_ONLY_GLOBS` names only `config.yaml`, the one denied file
+  the YAML check can judge.
 - **protected** — the gate itself, the guardian, the supervisor confs, and the
   health/restart path the rollback depends on. Allowed, but only with a
   passing drill.

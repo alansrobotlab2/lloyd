@@ -1115,7 +1115,19 @@ class Gate:
         if dirty:
             data["dirty_tolerated"] = dirty[:20]
 
-        ok, reason, buckets = spec.check_scope(changed)
+        def _both_sides(path: str) -> tuple[str, str]:
+            # The base and the committed candidate, the pair `changed_paths`
+            # diffed. A side that does not exist raises: a new or deleted
+            # config file is not a comment edit.
+            sides = []
+            for rev in (self.base, "HEAD"):
+                r = W.git(self.worktree, "show", f"{rev}:{path}")
+                if r.returncode != 0:
+                    raise FileNotFoundError(f"{rev}:{path}")
+                sides.append(r.stdout)
+            return sides[0], sides[1]
+
+        ok, reason, buckets = spec.check_scope(changed, contents=_both_sides)
         if not ok:
             return False, reason, {**data, "buckets": buckets}
 

@@ -32,6 +32,13 @@ Note `requirements.txt` / `requirements.lock` are *allowed*, but only because
 gate rung 3 builds a throwaway venv from them (btrfs reflink clone + `uv pip
 install` of the delta) and boots the canary against it. Without that rung they
 would belong in `denied`.
+
+`config.yaml` stays *denied*, with one exception that cannot change a value:
+a diff whose YAML token stream is identical before and after, so only
+comments and layout moved (`COMMENT_ONLY_GLOBS`, `comment_only_change`). The
+lock-out the denial guards against needs a value to change. Refusing
+comments too left every stale comment in the file to a hand edit: five items
+sat confirmed and unlandable at once on 2026-09-28.
 """
 
 from __future__ import annotations
@@ -115,6 +122,37 @@ DENIED_GLOBS: tuple[str, ...] = (
     ".venvs/**",
 )
 
+# Denied paths a round may still change when the change is comment-only.
+# Verbatim names, never a glob: each entry must be a YAML file, because
+# `comment_only_change` is a YAML check.
+COMMENT_ONLY_GLOBS: tuple[str, ...] = ("config.yaml",)
+
+
+def _yaml_tokens(text: str) -> list[tuple]:
+    """The token stream with comments and positions dropped: what a value is."""
+    import yaml
+    return [(type(t).__name__, getattr(t, "value", None), getattr(t, "style", None))
+            for t in yaml.scan(text)]
+
+
+def comment_only_change(before: str, after: str) -> tuple[bool, str]:
+    """Is `before` → `after` a change to comments and layout only?
+
+    Two independent checks, both required: the scanner's token stream (which
+    carries no comments) is identical, so no key, value, quoting style or
+    ordering moved; and the parsed documents compare equal. A file that does
+    not parse on either side is refused.
+    """
+    import yaml
+    try:
+        if _yaml_tokens(before) != _yaml_tokens(after):
+            return False, "a key or value changed, not only comments"
+        if yaml.safe_load(before) != yaml.safe_load(after):
+            return False, "the parsed document changed"
+    except yaml.YAMLError as exc:
+        return False, f"does not parse: {str(exc)[:200]}"
+    return True, "comments and layout only"
+
 
 def _match(path: str, globs: tuple[str, ...]) -> bool:
     for pattern in globs:
@@ -171,14 +209,35 @@ def classify_all(paths: list[str]) -> dict[str, list[str]]:
     return out
 
 
-def check_scope(paths: list[str]) -> tuple[bool, str, dict[str, list[str]]]:
+def check_scope(paths: list[str], *, contents=None
+                ) -> tuple[bool, str, dict[str, list[str]]]:
     """Gate rung 0's diff-scope check.
 
     Returns (ok, reason, buckets). `ok` is False if anything is denied or
     unlisted. Protected paths are permitted here — they are what turns on the
     rollback drill in rung 6, handled by the caller.
+
+    `contents(path) -> (before, after)` lets a denied path in
+    `COMMENT_ONLY_GLOBS` through when `comment_only_change` says so; it moves
+    to the `comment_only` bucket. Without it, or when the check fails, the
+    path stays denied and the reason says what changed.
     """
     buckets = classify_all(paths)
+    buckets["comment_only"] = []
+    why_not: list[str] = []
+    for p in list(buckets["denied"]):
+        if contents is None or normalize(p) not in COMMENT_ONLY_GLOBS:
+            continue
+        try:
+            before, after = contents(p)
+            ok, why = comment_only_change(before, after)
+        except Exception as exc:  # noqa: BLE001 — unreadable is not comment-only
+            ok, why = False, f"cannot read both sides: {exc}"
+        if ok:
+            buckets["denied"].remove(p)
+            buckets["comment_only"].append(p)
+        else:
+            why_not.append(f"{p}: {why}")
     # Both refusals name what to do instead. A round that needs a path the
     # loop may never touch used to be told only that it could not have it,
     # and the move it then reached for was `git add -f` — which defeats the
@@ -191,7 +250,9 @@ def check_scope(paths: list[str]) -> tuple[bool, str, dict[str, list[str]]]:
              "to the automod state dir (~/.local/state/lloyd-automod/), not "
              "into the repo.")
     if buckets["denied"]:
-        return False, (f"denied paths in diff: {sorted(buckets['denied'])}. "
+        only = (f" A comment-only edit to {', '.join(COMMENT_ONLY_GLOBS)} is "
+                f"allowed; this one is not ({'; '.join(why_not)})." if why_not else "")
+        return False, (f"denied paths in diff: {sorted(buckets['denied'])}.{only} "
                        f"{_MOVE}"), buckets
     if buckets["unlisted"]:
         return False, (f"paths outside the writable set: "

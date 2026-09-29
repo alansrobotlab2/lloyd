@@ -358,7 +358,10 @@ the lockfile, `vite.config.*`, `tsconfig*.json`). If the fix needs one of \
 them the item is still `confirmed`, but the loop cannot land it: begin \
 ACCEPTANCE with `human-only:` and name the path. The implementer skips those \
 instead of spending a round finding out, and the owed-check job rules on them \
-(a route around the path, or the exact edit for the one list Alan reads).
+(a route around the path, or the exact edit for the one list Alan reads). \
+One exception: a fix that only rewords **comments** in `config.yaml` (no key, \
+value or quoting changes; the gate checks the YAML token stream is identical) \
+IS landable. Do not mark it `human-only:`; write ordinary clauses.
 - **A condition no round can satisfy is not an acceptance clause.** An audit, \
 a scope decision, a number that needs a week of real traffic: put it under \
 HUMAN_CLAUSES, never under ACCEPTANCE_CLAUSES. The implementer is not asked to \
