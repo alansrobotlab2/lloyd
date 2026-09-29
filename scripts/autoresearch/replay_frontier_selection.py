@@ -31,7 +31,8 @@ as "the frontier would have promoted an unsafe prompt".
 Leg attribution: the tie question is #1060's, not this one's
 -----------------------------------------------------------
 The printed attribution separates two remedies that overlap. Of the refusals whose
-reason starts `insufficient_win_fraction`, how many had a whole-bench mean delta at or
+`refusal_class` is `insufficient_win_fraction` — the prose prefix on a row that predates
+#1860 and has no field — how many had a whole-bench mean delta at or
 above the loaded `min_composite_delta` — those are reachable by #1060's tie semantics
 alone (counting a tie as a win), since they already cleared the delta floor and were
 stopped only by the fraction. Of those, how many strictly dominate — only a frontier
@@ -69,6 +70,7 @@ from typing import Any
 
 from scripts.autoresearch import promote
 from scripts.autoresearch.promote import REFUSAL_WIN_FRACTION as WIN_FRACTION_PREFIX
+from scripts.autoresearch.promote import refusal_head, row_refusal_class
 from scripts.autoresearch.common import AutoresearchConfig, load_config
 from scripts.autoresearch.judge import aggregate_variant
 
@@ -259,6 +261,13 @@ def replay(ledger_path: Path, *, through: str | None = None,
                     promotions.append(vid)
                 continue
             reason = str(dec.get("reason") or "")
+            # #1860: the class the row states in machine form, falling back to the prose
+            # head. The fallback is load-bearing — every decision row written before
+            # #1860 has no field, and a census that read the field alone would report a
+            # zero denominator over all of them. The two readings agree on every row that
+            # has a field, except the ones the deadline branch wrapped, which are exactly
+            # the rows this field exists to un-wrap.
+            refusal_class = row_refusal_class(dec) or refusal_head(reason)
             if dec.get("promoted"):
                 promotions.append(vid)
                 continue
@@ -273,12 +282,12 @@ def replay(ledger_path: Path, *, through: str | None = None,
             # probe failed, so a frontier — and this census — cannot count one.
             if m["dominates"]:
                 dominating.append(vid)
-                if reason.startswith(WIN_FRACTION_PREFIX):
+                if refusal_class == WIN_FRACTION_PREFIX:
                     iwf_dominating += 1
             if (m["better_ids"] and not m["worse_ids"] and m["safety_failed_ids"]
                     and not (dec or {}).get("promoted")):
                 attribution["safety_vetoed_no_regression"] += 1
-            if reason.startswith(WIN_FRACTION_PREFIX):
+            if refusal_class == WIN_FRACTION_PREFIX:
                 attribution["win_fraction_refusals"] += 1
                 mean_delta = ((sum(p["composite_score"] for p in summ["per_task"])
                                - sum(p["composite_score"] for p in base_summ["per_task"]))
@@ -374,7 +383,8 @@ def print_report(out: dict[str, Any]) -> None:
     print("")
     print("Leg attribution — #1060's tie question separated from #595's frontier question")
     floor = (out["thresholds"].get("min_composite_delta", 0.05) if out["thresholds"] else 0.05)
-    print(f"  refusals whose reason starts `{WIN_FRACTION_PREFIX}`: "
+    print(f"  refusals classified `{WIN_FRACTION_PREFIX}` (prose prefix on a "
+          f"pre-#1860 row): "
           f"{attr['win_fraction_refusals']}")
     print(f"  of those {attr['win_fraction_refusals']} refusals, cleared the "
           f"+{floor} mean-delta floor: "

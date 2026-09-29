@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.autoresearch import bench_runner, bench_runner_sdk, run_round
+from scripts.autoresearch import bench_runner, bench_runner_sdk, promote, run_round
 from scripts.autoresearch.common import _run_spec_from_cfg, validate_run_spec
 from tests.test_autoresearch_promotion import make_cfg
 from tests.test_autoresearch_round_report import _rows, round_env  # noqa: F401  (fixture)
@@ -198,6 +198,26 @@ def test_a_stopped_round_reports_and_ledgers_what_it_measured_and_promotes_nothi
     assert result["deadline_stopped"] is True and result["tasks_not_reached"] == ["bench_a2"]
     assert result["budget_minutes"] == 30 and result["tasks_run"] == 1
     assert [d["should_promote"] for d in result["decisions"]] == [False]
+    # #1860 clauses 1 and 4, on the row this round actually appended. The prose is
+    # byte-identical to the sentence this branch has always written, because its prefix is
+    # what the strict-win census matches; the wrapped predicate now ALSO rides in a field,
+    # so a consumer buckets this refusal by what refused it instead of by the deadline that
+    # happened to be running. 21 of the 124 decision rows on the live ledger (re-measured
+    # 2026-09-29) were mis-bucketed by exactly that reading.
+    decision = result["decisions"][0]
+    assert decision["reason"] == (
+        "deadline_stopped: 1 task(s) not reached, no promotion from a partial round "
+        "(predicate said: no_targeted_overlap)"), decision["reason"]
+    assert "predicate said:" in decision["reason"]
+    assert decision["predicate_refusal"] == "no_targeted_overlap", sorted(decision)
+    rows = [json.loads(l) for l in cfg.paths.ledger_path.read_text().splitlines()
+            if l.strip()]
+    row = [r for r in rows if r.get("event") == "decision" and r.get("variant_id") == "V_1"]
+    assert len(row) == 1, rows
+    assert row[0]["refusal_class"] == "no_targeted_overlap", row[0]
+    assert row[0]["reason"] == decision["reason"], "the row carries the prose verbatim"
+    assert row[0]["should_promote"] is False and row[0]["promoted"] is False
+    assert result["promoted"] is None and result["post_promotion_restore"] is None
     assert result["decisions"][0]["reason"].startswith("deadline_stopped: 1 task(s) not reached")
     assert result["promoted"] is None and result["round_summary_row"] is None
 
@@ -1078,9 +1098,13 @@ def test_the_coverage_numbers_reach_no_promotion_decision(round_env, monkeypatch
     assert result["matrix_coverage"]["lint_valid_total"] == 18, \
         "the numbers exist, so the assertions above ruled out a real path"
     for d in result["decisions"]:
+        # `predicate_refusal` is #1860's: what `evaluate_promotion` returned before the
+        # deadline branch wrapped the prose, which is how the ledger row gets a class that
+        # is not the wrap. No coverage figure rides in it — the spy above is what proves
+        # that half, this set is what proves nothing else was added.
         assert set(d) == {"variant_id", "mean_composite", "targeted_delta",
                           "heldout_delta", "normalized_gain", "should_promote",
-                          "reason", "validity"}, set(d)
+                          "reason", "predicate_refusal", "validity"}, set(d)
 
 
 # ── #1828: the re-open line has to name where its two figures are read from ──────
@@ -1281,3 +1305,85 @@ def test_the_last_scored_round_entry_is_in_the_payload_on_a_round_that_did_not_s
     report = Path(result["summary_file"]).read_text(encoding="utf-8")
     assert "- re-open figures are read from" not in report
     assert "- coverage given up by the shrink" not in report
+
+
+# ── #1860: a stopped round's refusal has to be readable without parsing prose ──
+#
+# The node above pins the whole chain end to end on the one shape a real round produced.
+# These two pin the vocabulary around it: the classes the deadline branch is on record
+# wrapping, and the fact that for every OTHER refusal the new field and the prose prefix
+# are the same string — which is what lets a consumer read one field and keep today's
+# buckets. 21 of the 124 decision rows on the live ledger as of 2026-09-29 begin
+# `deadline_stopped:` in prose while their predicate said something else.
+
+#: The wrapped sentence, spelled the way `run_round`'s deadline arm spells it, so the
+#: nodes below wrap a verdict as the writer does rather than inventing a shape. The
+#: byte-identity of the real thing is pinned by
+#: `test_a_stopped_round_reports_and_ledgers_what_it_measured_and_promotes_nothing`.
+def _wrapped(predicate_reason: str) -> str:
+    return ("deadline_stopped: 1 task(s) not reached, no promotion from a partial round "
+            f"(predicate said: {predicate_reason})")
+
+
+#: The three classes #1860 names, each with the prose `evaluate_promotion` really returns
+#: for it: the two coverage refusals are `partial_{arm}_coverage ({scored} of {pool}
+#: {label} tasks scored; unscored: {missing})` (promote.py:322-325, prose confirmed by
+#: `test_partial_heldout_coverage_refuses_and_names_the_unscored_task` in
+#: tests/test_autoresearch_promotion.py), and `safety_regression` is the bare string at
+#: promote.py:291 — it names no task because exactly one bench task carries
+#: `safety_critical: true` today (1 of 22 bench files, counted 2026-09-29).
+WRAPPED_CLASSES = [
+    ("partial_heldout_coverage",
+     "partial_heldout_coverage (1 of 2 held-out tasks scored; unscored: bench_a2)"),
+    ("partial_targeted_coverage",
+     "partial_targeted_coverage (1 of 2 targeted tasks scored; unscored: bench_a1)"),
+    ("safety_regression", "safety_regression"),
+]
+
+
+@pytest.mark.parametrize("want_class,predicate_reason", WRAPPED_CLASSES)
+def test_a_stopped_row_states_the_predicate_class_not_the_deadline_wrap(
+        want_class, predicate_reason):
+    """Clause 1 for the classes the item names: the field is the predicate's head.
+
+    `run_round` hands the row builder `predicate_refusal`, the verdict it held before the
+    wrap, so the class survives the sentence. The prose keeps the wrap either way.
+    """
+    row = run_round.decision_ledger_row(
+        "R_1", {"variant_id": "V_1", "should_promote": False,
+                "reason": _wrapped(predicate_reason),
+                "predicate_refusal": want_class}, None)
+    assert row["refusal_class"] == want_class, row
+    assert row["refusal_class"] != "deadline_stopped", \
+        "the wrap names when the refusal happened, not what refused it"
+    assert row["reason"] == _wrapped(predicate_reason), "the prose is not the field's place"
+
+
+def test_an_unwrapped_refusal_states_the_head_of_its_own_reason():
+    """Clause 2: with nothing wrapping it, the field IS the prose prefix.
+
+    So a consumer reading one field gets the buckets the prose gives it today — these
+    three rows count identically under either reading. The wrapped row at the end is the
+    one shape where the two differ, which is the whole reason the field exists.
+    """
+    rows = {want: run_round.decision_ledger_row(
+        "R_1", {"variant_id": "V_1", "should_promote": False, "reason": prose,
+                "predicate_refusal": want}, None)
+        for want, prose in WRAPPED_CLASSES}
+    for want, row in rows.items():
+        assert row["refusal_class"] == want, row
+        assert promote.refusal_head(row["reason"]) == want, row["reason"]
+    by_field = {k: sum(1 for r in rows.values() if r["refusal_class"] == k) for k in rows}
+    by_prose = {k: sum(1 for r in rows.values()
+                       if promote.refusal_head(r["reason"]) == k) for k in rows}
+    assert by_field == by_prose == {"partial_heldout_coverage": 1,
+                                    "partial_targeted_coverage": 1,
+                                    "safety_regression": 1}, (by_field, by_prose)
+
+    wrapped = run_round.decision_ledger_row(
+        "R_1", {"variant_id": "V_1", "should_promote": False,
+                "reason": _wrapped(WRAPPED_CLASSES[0][1]),
+                "predicate_refusal": "partial_heldout_coverage"}, None)
+    assert promote.refusal_head(wrapped["reason"]) == "deadline_stopped"
+    assert wrapped["refusal_class"] == "partial_heldout_coverage", \
+        "the two readings must differ on exactly the wrapped rows, and on nothing else"

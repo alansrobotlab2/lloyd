@@ -416,6 +416,15 @@ PUBLISHED_TRIAL_KEYS = {
 PUBLISHED_DECISION_KEYS = {"round_id", "event", "variant_id", "should_promote",
                            "reason", "promoted", "created_at"}
 
+#: The one key #1860 adds, and only to a row that refused: `refusal_class` is the class
+#: the predicate itself returned, in machine form, beside the prose `reason` rather than
+#: inside it. A row that promoted has no refusal to classify, so the seven above stay the
+#: unconditional floor — `test_the_decision_row_shape_is_pinned_at_the_writer` pins that
+#: half, and the two nodes below pin this key's presence on a refusal and its absence on
+#: an acceptance. Rows written before #1860 carry neither, which is why the census in
+#: `replay_frontier_selection.py` falls back to the prose head when the field is absent.
+REFUSAL_ONLY_KEYS = {"refusal_class"}
+
 #: The keys `run_round.decision_ledger_row` puts on top of the seven when the bench
 #: lint ran: the eight #646 validity fields it flattens onto the row (`promote_valid`,
 #: `reason_valid`, `means_agree`, `all_task_mean`, `valid_task_mean`, `valid_tasks`,
@@ -503,12 +512,20 @@ def test_the_validity_keys_stay_conditional_on_the_decision_row(tmp_path):
     refusal = {"variant_id": "V_1", "should_promote": False,
                "reason": f"{promote.REFUSAL_WIN_FRACTION} (0.12 < 0.5)"}
     bare = run_round.decision_ledger_row("R_1", refusal, None)
-    assert set(bare) == PUBLISHED_DECISION_KEYS, sorted(bare)
+    # A refusal row is the seven plus #1860's `refusal_class`; the eight validity keys are
+    # still conditional on the lint having run, which is what this node is for.
+    assert set(bare) == PUBLISHED_DECISION_KEYS | REFUSAL_ONLY_KEYS, sorted(bare)
+    assert bare["refusal_class"] == promote.REFUSAL_WIN_FRACTION, \
+        "the machine-readable class is the head of this row's own refusal"
+    accepted = run_round.decision_ledger_row(
+        "R_1", {"variant_id": "V_1", "should_promote": True, "reason": "promote"}, None)
+    assert set(accepted) == PUBLISHED_DECISION_KEYS, \
+        "a row that refused nothing carries no refusal class — the floor is still seven"
 
     linted = run_round.decision_ledger_row(
         "R_1", {**refusal, "validity": {"means_agree": False, "promote_valid": True}},
         None)
-    assert set(linted) == (PUBLISHED_DECISION_KEYS
+    assert set(linted) == (PUBLISHED_DECISION_KEYS | REFUSAL_ONLY_KEYS
                            | {"bench_validity", "means_agree", "promote_valid"}), \
         sorted(linted)
     assert linted["means_agree"] is False
@@ -536,14 +553,19 @@ def test_the_conditional_key_set_is_what_the_writer_flattens():
                  "excluded_tasks": ["bench_000_dud"],
                  "safety_outside_valid_pool": []}
     full = run_round.decision_ledger_row("R_1", {**refusal, "validity": all_eight}, None)
-    assert set(full) - PUBLISHED_DECISION_KEYS == CONDITIONAL_VALIDITY_KEYS, \
-        sorted(set(full) ^ (PUBLISHED_DECISION_KEYS | CONDITIONAL_VALIDITY_KEYS))
+    # `refusal_class` is this row's refusal key (#1860) and rides outside the conditional
+    # validity set, so it is taken off before the validity comparison — the nine below are
+    # still exactly what a linted round flattens.
+    assert set(full) - PUBLISHED_DECISION_KEYS - REFUSAL_ONLY_KEYS \
+        == CONDITIONAL_VALIDITY_KEYS, \
+        sorted(set(full) ^ (PUBLISHED_DECISION_KEYS | REFUSAL_ONLY_KEYS
+                            | CONDITIONAL_VALIDITY_KEYS))
     assert len(CONDITIONAL_VALIDITY_KEYS) == 9, sorted(CONDITIONAL_VALIDITY_KEYS)
 
     partial = run_round.decision_ledger_row(
         "R_1", {**refusal, "validity": {"means_agree": True, "promote_valid": True}},
         None)
-    extra = set(partial) - PUBLISHED_DECISION_KEYS
+    extra = set(partial) - PUBLISHED_DECISION_KEYS - REFUSAL_ONLY_KEYS
     assert extra and extra < CONDITIONAL_VALIDITY_KEYS, sorted(extra)
     assert len(all_eight) == 8, "the writer flattens eight fields, plus the dict copy"
 
@@ -627,7 +649,9 @@ def test_the_ondemand_writer_emits_the_same_per_trial_keys():
 def write_written_round(ledger_path: Path, *, rid: str, base_scores: dict,
                         variant_id: str, variant_scores: dict, reason: str,
                         should_promote: bool = False,
-                        promoted: bool = False) -> Path:
+                        promoted: bool = False,
+                        predicate_refusal: str | None = None,
+                        drop_refusal_class: bool = False) -> Path:
     """Append one round to `ledger_path` through the real writers and the real
     `ledger_append`, and return the path.
 
@@ -635,6 +659,11 @@ def write_written_round(ledger_path: Path, *, rid: str, base_scores: dict,
     `trial_ledger_row` / `decision_ledger_row` produce and what `ledger_append` writes,
     which is what makes the census reading it a test of the seam rather than of a
     fixture that agrees with itself.
+
+    #1860's two extra knobs stage the two ledger eras: `predicate_refusal` is what a
+    round the deadline stopped hands the writer, and `drop_refusal_class` removes the
+    field from the row after the writer built it — a row as the 124 on the live ledger
+    read it, with the prose and nothing else.
     """
     from scripts.autoresearch.common import ledger_append
 
@@ -644,8 +673,12 @@ def write_written_round(ledger_path: Path, *, rid: str, base_scores: dict,
     for task_id, score in variant_scores.items():
         ledger_append(ledger_path, trial_ledger_row_for(rid, variant_id,
                                                         task_id, score))
-    ledger_append(ledger_path, decision_ledger_row_for(
-        rid, variant_id, should_promote=should_promote, reason=reason, promoted=promoted))
+    row = decision_ledger_row_for(rid, variant_id, should_promote=should_promote,
+                                  reason=reason, promoted=promoted,
+                                  predicate_refusal=predicate_refusal)
+    if drop_refusal_class:
+        row.pop("refusal_class", None)
+    ledger_append(ledger_path, row)
     return ledger_path
 
 
@@ -655,11 +688,15 @@ def trial_ledger_row_for(rid, variant_id, task_id, score):
                                       _score(score, task_id))
 
 
-def decision_ledger_row_for(rid, variant_id, *, should_promote, reason, promoted):
+def decision_ledger_row_for(rid, variant_id, *, should_promote, reason, promoted,
+                            predicate_refusal=None):
     from scripts.autoresearch import run_round
+    decision = {"variant_id": variant_id, "should_promote": should_promote,
+                "reason": reason}
+    if predicate_refusal is not None:
+        decision["predicate_refusal"] = predicate_refusal
     return run_round.decision_ledger_row(
-        rid, {"variant_id": variant_id, "should_promote": should_promote,
-              "reason": reason}, variant_id if promoted else None)
+        rid, decision, variant_id if promoted else None)
 
 
 def test_the_census_reads_a_round_the_writers_actually_wrote(tmp_path):
@@ -702,6 +739,65 @@ def test_the_census_reads_a_round_the_writers_actually_wrote(tmp_path):
     by_round = {r["round_id"]: r for r in d2["rounds"]}
     assert by_round["R_LANDED"]["dominating_refused"] == 0, by_round["R_LANDED"]
     assert by_round["R_LANDED"]["promoted_variant_ids"] == ["V_Landed"], by_round
+
+
+def test_the_census_counts_a_deadline_wrapped_win_fraction_refusal(tmp_path):
+    """Clause 3 (#1860): the strict-win leg is bucketed by the field, and the fallback holds.
+
+    A round the deadline stopped wraps the predicate's verdict in a sentence about the
+    deadline, so a refusal that began `insufficient_win_fraction` reaches the ledger
+    beginning `deadline_stopped:`. Bucketing the prose then drops it out of
+    `win_fraction_refusals` into `dominating_by_other_reason` — the same two-answers-from-
+    one-corpus reading that gave the live ledger 46/54/21 by prefix and 68/50/3 by embedded
+    predicate over the same 124 rows. Bucketing `refusal_class` is what makes them agree.
+
+    The other three ledgers are what stop the fix becoming a new silent denominator: all
+    124 rows on the live ledger predate the field, so a legacy win-fraction row must STILL
+    count in the leg and a legacy row of another class must still stay out. A census that
+    read the field alone reports 0 refusals over the entire real corpus — the
+    empty-denominator failure #1860 is about, re-created by the fix.
+    """
+    def attribution_of(name: str, **row) -> dict:
+        led = write_written_round(
+            tmp_path / name / "ledger.jsonl", rid="R_" + name, base_scores=FLAT,
+            variant_id="V_1",
+            variant_scores={**FLAT, TARGETED[0]: 0.4400, HELDOUT[2]: 0.5100}, **row)
+        out = rfs.replay(led)
+        assert out["totals"]["dominating_refused"] == 1, out["totals"]
+        return out["attribution"]
+
+    wrapped = attribution_of(
+        "WRAPPED",
+        reason=("deadline_stopped: 1 task(s) not reached, no promotion from a partial "
+                "round (predicate said: insufficient_win_fraction (0.12 < 0.5; wins=1 "
+                "ties=7 losses=0 of 8 targeted tasks))"),
+        predicate_refusal=promote.REFUSAL_WIN_FRACTION)
+    assert wrapped["win_fraction_refusals"] == 1, wrapped
+    assert wrapped["win_fraction_refusals_dominating"] == 1, wrapped
+    assert wrapped["dominating_by_other_reason"] == 0, \
+        "a wrapped win-fraction refusal is not a refusal on some other leg"
+
+    # The field says otherwise, so the prose prefix must not count it either way.
+    wrapped_other = attribution_of(
+        "WRAPPED_OTHER",
+        reason=("deadline_stopped: 1 task(s) not reached, no promotion from a partial "
+                "round (predicate said: safety_regression)"),
+        predicate_refusal="safety_regression")
+    assert wrapped_other["win_fraction_refusals"] == 0, wrapped_other
+    assert wrapped_other["dominating_by_other_reason"] == 1, wrapped_other
+
+    legacy_win = attribution_of(
+        "LEGACY_WIN", drop_refusal_class=True,
+        reason=(f"{promote.REFUSAL_WIN_FRACTION} (0.12 < 0.5; wins=1 ties=7 losses=0"
+                " of 8 targeted tasks)"))
+    assert legacy_win["win_fraction_refusals"] == 1, \
+        "the 124 rows already on the ledger have no field; the prose fallback is their only" \
+        " reading, and losing it would print a zero denominator over all of them"
+
+    legacy_other = attribution_of("LEGACY_OTHER", drop_refusal_class=True,
+                                 reason="safety_regression")
+    assert legacy_other["win_fraction_refusals"] == 0, legacy_other
+    assert legacy_other["dominating_by_other_reason"] == 1, legacy_other
 
 
 def test_the_census_refuses_to_run_against_a_missing_ledger(tmp_path):

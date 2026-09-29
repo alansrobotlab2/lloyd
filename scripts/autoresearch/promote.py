@@ -67,6 +67,39 @@ def _ts() -> str:
 #: matching a renamed reason reports 0 and reads as "the leg stopped firing".
 REFUSAL_WIN_FRACTION = "insufficient_win_fraction"
 
+#: The decision ledger row's machine-readable refusal class (#1860). `reason` is prose
+#: and, on a round the deadline stopped, that prose wraps the predicate's verdict in a
+#: sentence about the deadline — so a reader that buckets refusals by the prose prefix
+#: files those rows under the wrap and not under what refused them (21 of the 124
+#: decision rows on the live ledger as of 2026-09-29). The field rides BESIDE the
+#: prose: the prefix stays what the strict-win census matches, because
+#: `run_round.decision_ledger_row` documents the prose as load-bearing.
+REFUSAL_CLASS_FIELD = "refusal_class"
+
+
+def refusal_head(reason: Any) -> str:
+    """The class name a refusal's prose begins with.
+
+    Everything before the first `(` or `:`, with the parenthesis taken first so a colon
+    inside it cannot cut the name short: `partial_heldout_coverage (1 of 4 held-out
+    tasks scored; unscored: bench_a2)` is a `partial_heldout_coverage` refusal and
+    `unsplit_tasks (bench_x: 3)` is an `unsplit_tasks` refusal. This is the same cut the
+    ledger's own prefix-vs-prose audit applies to `reason`.
+    """
+    return str(reason or "").split("(")[0].split(":")[0].strip()
+
+
+def row_refusal_class(row: dict[str, Any] | None) -> str:
+    """The refusal class a ledger row states in machine form; empty if it predates #1860.
+
+    Empty means "this row was written before the field existed", and the consumer must
+    then fall back to the prose prefix. That fallback is not a courtesy: every one of the
+    124 decision rows on the live ledger as of 2026-09-29 has no field, and a census that
+    read the field alone would report a zero denominator over all of them — the exact
+    silent-empty failure #1860 is about, re-created by the fix.
+    """
+    return str((row or {}).get(REFUSAL_CLASS_FIELD) or "").strip()
+
 
 def _per_task(summary: dict[str, float]) -> dict[str, float]:
     out: dict[str, float] = {}

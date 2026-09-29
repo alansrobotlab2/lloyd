@@ -56,7 +56,8 @@ from . import behavioural
 # `promote.slice_metrics(...)` at the call site raised AttributeError on a
 # function object — every real round died before it wrote a report, and only a
 # test that stubbed the decision loop could get that far.
-from .promote import evaluate_promotion, promote, slice_metrics, validity_report, validity_report_lines
+from .promote import (REFUSAL_CLASS_FIELD, evaluate_promotion, promote, refusal_head,
+                      slice_metrics, validity_report, validity_report_lines)
 from .variant_sandbox import AnchorApplyError, materialize, materialize_baseline
 
 logger = logging.getLogger("autoresearch.run_round")
@@ -1154,12 +1155,19 @@ def decision_ledger_row(round_id: str, decision: dict[str, Any],
                         variant: dict[str, Any] | None = None) -> dict[str, Any]:
     """The `decision` row for one variant, as the ledger sees it.
 
-    Seven keys, always; the eight conditional #646 validity keys on top when the
-    bench lint ran; and `LOSER_EVIDENCE_KEYS` when `variant` is given, which `run()`
-    always does. `reason` is the predicate's own prose verbatim —
-    `replay_frontier_selection.py` counts the strict-win leg by matching
-    `promote.REFUSAL_WIN_FRACTION` against its prefix, so flattening, prefixing or
-    rewording it here would silently move that census' denominator.
+    Seven keys, always; `refusal_class` on top of them when the row refused (#1860); the
+    eight conditional #646 validity keys when the bench lint ran; and
+    `LOSER_EVIDENCE_KEYS` when `variant` is given, which `run()` always does. A row that
+    promoted carries no refusal class, so the seven stay the unconditional floor.
+
+    `reason` is the predicate's own prose, byte-identical: on a round the deadline stopped
+    the caller has already rewritten it into the `deadline_stopped: … (predicate said: …)`
+    sentence, and that prose is what the strict-win census' fallback matches, so
+    flattening, prefixing or rewording it here would silently move that denominator.
+    `refusal_class` is the class the predicate itself returned — taken from
+    `predicate_refusal` where the caller held one before it wrapped the prose, and
+    otherwise the head of this row's own reason — which is what lets a consumer bucket a
+    refusal by what refused it without parsing a sentence.
 
     #860/#794: the evidence trio is written at decision time because nothing else
     records it where the proposer can read it — hypothesis text otherwise lives only
@@ -1179,6 +1187,15 @@ def decision_ledger_row(round_id: str, decision: dict[str, Any],
         "promoted": promoted_variant_id == decision["variant_id"],
         "created_at": now_iso(),
     }
+    # #1860: the refusal the predicate actually returned, in a field. Written only on a
+    # refusal — a row that did not refuse has no refusal class, and the seven keys above
+    # stay the unconditional floor the row-shape pin publishes. `predicate_refusal` is
+    # what the deadline branch knew before it wrapped the verdict in prose; with no such
+    # key the class is simply the head of this row's own reason.
+    if not decision["should_promote"]:
+        row[REFUSAL_CLASS_FIELD] = (
+            str(decision.get("predicate_refusal") or "").strip()
+            or refusal_head(decision["reason"]))
     # #646: the all-task mean beside the lint-valid-task mean, flattened onto
     # the row that carries the decision. `means_agree` is the field the item
     # asks for — the ledger line that says the two denominators disagreed on
@@ -1479,6 +1496,11 @@ async def run(
         if not vs:
             continue
         should, reason = evaluate_promotion(cfg, baseline_summary, vs, split=split)
+        # #1860: what the predicate itself said, before any wrapper below. The deadline
+        # arm rewrites `reason` into a sentence about the deadline, and that prose is
+        # what the strict-win census matches, so it stays exactly as it was — this is
+        # the value the ledger row carries in machine form alongside it.
+        predicate_refusal = "" if should else refusal_head(reason)
         if deadline_stopped:
             # Every item is a proposal deployed only on a measured gain; a round
             # that did not measure every task has not measured one.
@@ -1494,6 +1516,10 @@ async def run(
             "normalized_gain": m["normalized_gain"],
             "should_promote": should,
             "reason": reason,
+            # #1860: read by `decision_ledger_row`, which would otherwise only have the
+            # wrapped prose to derive a class from — and for a stopped round that prose
+            # begins `deadline_stopped:`, which is the wrap, not the refusal.
+            "predicate_refusal": predicate_refusal,
             # #646: the same predicate re-run over only the tasks the validity lint
             # refuses to call broken. Advisory — `should_promote` is what decides —
             # and its whole purpose is the case where the two disagree.
