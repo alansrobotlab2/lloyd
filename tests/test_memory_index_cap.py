@@ -109,7 +109,12 @@ def test_memory_add_then_memory_read_a_topic_file(memories_root):
     path = root / "memory" / "voice-mode.md"
     assert path.read_text() == "# topics/voice-mode\n\n- detail one\n- detail two\n"
     got = session._memory_read({"file": "topics/voice-mode"})
-    assert got == {"content": path.read_text(), "file": "topics/voice-mode"}
+    # Whole-dict equality kept on purpose; the one added key is #1796 clause 2 —
+    # `memory_read` now echoes the absolute `path` its content came from, the same
+    # field all three writers already return, because a caller cannot reconstruct
+    # it from a destination argument it may have mis-named.
+    assert got == {"content": path.read_text(), "file": "topics/voice-mode",
+                   "path": str(path)}
 
 
 def test_a_missing_topic_read_lists_the_topics_that_exist(memories_root):

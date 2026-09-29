@@ -2012,3 +2012,237 @@ async def test_the_memory_tool_wire_payload_refuses_a_mis_named_destination_key(
     assert "file_path" in body["error"], body
     assert mem.read_text(encoding="utf-8") == INDEX_BEFORE
     _assert_live_memory_files_clean(ZORKMID)
+
+
+# ── #1796: the two residuals #1729's round deliberately left ─────────────────
+#
+# (1) `_memory_read` never got the guard its three writers got. It resolves
+# `params.get("file", "MEMORY.md")`, so `memory_read({"file_path": "topics/x"})`
+# answered the LOADED index instead of the topic the caller named — 5 calls in
+# `~/lloyd-data/sessions/*.json` since 2026-09-20, all under `file_path`, four of
+# them bench traffic and one the nightly session-distill job. A read mis-route
+# costs a wrong answer rather than a corrupted file, but the wrong answer is the
+# one the model then reasons on, and its own result gave it no way to notice:
+# unlike the three writers, `_memory_read`'s returns echoed only the `file`
+# argument, so the mis-routed read printed `"file": "MEMORY.md"` for a call that
+# asked for a topic.
+#
+# (2) `_memory_remove`'s miss was the bare `"entry not found in file"` while
+# `_memory_replace` beside it appends `_near_match_hint`. The 2026-09-28
+# hand-restore of the mis-routed rows began at exactly that message (probe case
+# D: `{"error": "entry not found in file", "code": "NO_MATCH"}`) — the two
+# tools a clean-up run alternates between answered a miss two different ways.
+
+READ_ALIASES = ["file_path", "filepath", "file_name", "filename",
+                "path", "memory_file", "destination", "target"]
+
+# One index line quoted a date wrong: the bytes differ, the line is right there,
+# and only a line number says so. Line 3 of `_stale_tail_index()`.
+STALE_TAIL = ("- [project] (2026-09-28) anchor: `keeper` | why: stays "
+              "| checked: 2026-09-29")
+
+
+def _stale_tail_index() -> Path:
+    """A three-line index whose line 3 differs from `STALE_TAIL` by one date."""
+    return _index_file(
+        "# Lloyd Long-Term Memory\n"
+        "- [project] unrelated entry about the wake word\n"
+        "- [project] (2026-09-28) anchor: `keeper` | why: stays "
+        "| checked: 2026-09-28\n")
+
+
+def _topic_file(off_tree, slug: str, text: str) -> Path:
+    """A scratch `topics/<slug>` file, holding `text`, under the pinned root."""
+    topic = SESSION.MEMORIES_ROOT / "memory" / f"{slug}.md"
+    topic.parent.mkdir(parents=True, exist_ok=True)
+    topic.write_text(text, encoding="utf-8")
+    return topic
+
+
+@pytest.mark.parametrize("alias", READ_ALIASES)
+def test_memory_read_refuses_a_destination_named_under_any_key_but_file(alias):
+    """Clause 1: the read lane answers the same alias set its writers answer.
+
+    Refused before `_resolve_file` can fall back to the `MEMORY.md` default, so
+    the assertion that matters most is the absent `content` key: a refusal that
+    named the key AND handed back the loaded index's bytes would still leave the
+    caller reasoning on a file it never asked for. The error names `file` and the
+    offending key, which is the half the 09-25 callers were missing when they
+    retried the wrong key rather than fixing it.
+    """
+    mem = _index_file(INDEX_BEFORE)
+    res = SESSION._memory_read({alias: "topics/user-md-ledger",
+                                "summary": "check what is remembered"})
+    assert res.get("code") == "INVALID_PARAM", res
+    assert "`file`" in res["error"], res
+    assert alias in res["error"], res
+    assert "content" not in res, f"a refused read returned bytes anyway: {res}"
+    assert INDEX_BEFORE not in res["error"], (
+        f"a refused read leaked the defaulted file into its error: {res}")
+    assert mem.read_text(encoding="utf-8") == INDEX_BEFORE
+    _assert_live_memory_files_clean(ZORKMID)
+
+
+def test_memory_read_reports_the_absolute_path_of_every_file_it_reads(off_tree):
+    """Clause 2: `path` beside `file`, for all three destination kinds.
+
+    The asymmetry #1729 fixed on the write side and left open here: the writers
+    echo the absolute path they touched because `{"success": true, "file":
+    "MEMORY.md"}` is a result whose wrongness the caller has to notice for
+    itself. A read has the same property in a sharper form — the content that
+    comes back is what the model then believes, so the path it came from is the
+    one field it cannot afford to reconstruct from an argument it may have
+    mis-named.
+    """
+    root = off_tree["memories"]
+    mem = _index_file(INDEX_BEFORE)
+    user = root / "USER.md"
+    user.write_text("# Alan\n- stands\n", encoding="utf-8")
+    topic = _topic_file(off_tree, "user-md-ledger", "# topics/user-md-ledger\n\n- a row\n")
+    for file, want in (("MEMORY.md", mem), ("USER.md", user),
+                       ("topics/user-md-ledger", topic)):
+        res = SESSION._memory_read({"file": file})
+        assert "code" not in res, res
+        assert res["content"] == want.read_text(encoding="utf-8"), res
+        assert res["file"] == file, res
+        assert res["path"] == str(want), res
+        assert Path(res["path"]).is_absolute(), res
+    # The point of echoing a path: a read aimed at a topic can never print the
+    # loaded index in it, however the caller spelled the key.
+    assert "MEMORY.md" not in SESSION._memory_read(
+        {"file": "topics/user-md-ledger"})["path"]
+
+
+def test_memory_read_reports_the_path_it_looked_at_when_the_file_is_missing(off_tree):
+    """The two miss branches still say WHERE they looked.
+
+    A defaulted `MEMORY.md`/`USER.md` miss returns `content: ""`, and a dangling
+    index link returns the topic list; both keep their existing shape and gain
+    only the `path`, so a caller chasing a blank read can tell an empty file from
+    a file that is not there, and from one in the wrong place.
+    """
+    root = off_tree["memories"]
+    (root / "USER.md").unlink(missing_ok=True)
+    missing = SESSION._memory_read({"file": "USER.md"})
+    assert missing["content"] == "" and missing["path"] == str(root / "USER.md"), missing
+    dangling = SESSION._memory_read({"file": "topics/nope"})
+    assert dangling["exists"] is False, dangling
+    assert dangling["path"] == str(root / "memory" / "nope.md"), dangling
+    assert "MEMORY.md" not in dangling["path"], dangling
+
+
+def test_memory_remove_names_the_nearest_line_when_the_entry_matches_nothing():
+    """Clause 3: probe case D, from the 2026-09-28 hand-restore.
+
+    `{"error": "entry not found in file", "code": "NO_MATCH"}` is 25 characters
+    that say only the bytes differ — no number, no candidate. The clean-up run
+    that got it had to go find the line by hand, and the file's line count is
+    already in the payload `_memory_replace` returns for the same file.
+    """
+    mem = _stale_tail_index()
+    before = mem.read_text(encoding="utf-8")
+    res = SESSION._memory_remove({"file": "MEMORY.md", "entry": STALE_TAIL})
+    assert res.get("code") == "NO_MATCH", res
+    assert res.get("matched") is False, res
+    assert "entry not found in file" in res["error"], res
+    assert _named_line(res["error"]) == 3, res
+    assert "anchor:" in res["error"], res
+    assert mem.read_text(encoding="utf-8") == before, "a refused remove wrote the index"
+    _assert_live_memory_files_clean(ZORKMID)
+
+
+def test_memory_remove_and_memory_replace_answer_a_miss_the_same_way():
+    """Clause 3's other half: ONE shape for the two tools a clean-up alternates.
+
+    Asserted as the equality of the hint rather than of the whole message, because
+    the base names the parameter that missed (`old_text` / `entry`) and only the
+    hint is meant to agree. The replace side is already pinned by
+    `test_a_failed_memory_replace_names_the_nearest_line` and
+    `test_a_failed_memory_replace_with_nothing_close_reports_the_line_count`; the
+    remove side had no equivalent, which is how the two drifted apart.
+    """
+    _stale_tail_index()
+    rep = SESSION._memory_replace({"file": "MEMORY.md", "old_text": STALE_TAIL,
+                                   "new_text": "would-have-been"})
+    rem = SESSION._memory_remove({"file": "MEMORY.md", "entry": STALE_TAIL})
+    assert rep.get("code") == rem.get("code") == "NO_MATCH", (rep, rem)
+    assert rep.get("matched") is False and rem.get("matched") is False, (rep, rem)
+    assert "; " in rep["error"] and "; " in rem["error"], (rep, rem)
+    assert rem["error"].split("; ", 1)[1] == rep["error"].split("; ", 1)[1], \
+        (rep["error"], rem["error"])
+
+
+def test_memory_remove_reports_the_line_count_when_no_line_is_close(off_tree):
+    """The fallback branch of clause 3: nothing near, so say how big the file is.
+
+    Same third shape `_memory_replace` produces: a number the caller can act on
+    (re-Read this many lines) instead of a bare absence, and no invented line
+    number when nothing scored above the cutoff.
+    """
+    mem = _stale_tail_index()
+    res = SESSION._memory_remove({"file": "MEMORY.md",
+                                  "entry": "zzzz qqqw fluff about nothing at all here"})
+    assert res.get("code") == "NO_MATCH", res
+    n_lines = len(mem.read_text(encoding="utf-8").splitlines())
+    assert f"file has {n_lines} lines" in res["error"], res
+    assert "nearest line" not in res["error"], res
+    _assert_live_memory_files_clean(ZORKMID)
+
+
+def test_memory_read_still_reads_when_the_destination_is_under_file_or_defaulted(off_tree):
+    """The positive control for clause 1: a guard that refused every read passes nothing.
+
+    `file` keeps its `MEMORY.md` default — dropping it is the owed ruling carried
+    from #1729, not this change — `USER.md` and `topics/<slug>` read as they did,
+    and a call carrying only non-destination extras still reads, because the
+    harness adds `summary` to every tool call and a guard on every unrecognised
+    key would break the transport rather than the bug.
+    """
+    root = off_tree["memories"]
+    mem = _index_file(INDEX_BEFORE)
+    (root / "USER.md").write_text("# Alan\n- stands\n", encoding="utf-8")
+    _topic_file(off_tree, "user-md-ledger", "# topics/user-md-ledger\n\n- a row\n")
+    assert SESSION._memory_read({})["content"] == INDEX_BEFORE
+    assert SESSION._memory_read({"file": "MEMORY.md"})["content"] == INDEX_BEFORE
+    assert SESSION._memory_read({"file": "USER.md"})["content"] == "# Alan\n- stands\n"
+    assert SESSION._memory_read({"file": "topics/user-md-ledger"})["content"] \
+        == "# topics/user-md-ledger\n\n- a row\n"
+    stray = SESSION._memory_read({"file": "MEMORY.md",
+                                  "summary": "check what is remembered",
+                                  "tool_call_id": "call_1"})
+    assert "code" not in stray, stray
+    assert stray["content"] == INDEX_BEFORE, stray
+    assert stray["path"] == str(mem), stray
+
+
+async def test_the_memory_read_wire_payload_refuses_a_mis_named_destination_key():
+    """The same seam as the writers' wire test: `call_tool` → `_wrap` → JSON.
+
+    `memory_read` is served by the `lloyd-mcp` process, so the serialized body is
+    what a worker sees, and `content` absent there is the assertion that the
+    mis-routed read reached no file at all. The argument set is the 2026-09-25
+    session-distill call's own shape: a destination under `file_path`, plus the
+    harness's `summary`.
+    """
+    mem = _index_file(INDEX_BEFORE)
+    res = await SESSION.call_tool("memory_read", {
+        "file_path": "topics/user-md-ledger", "summary": "check what is remembered"})
+    assert res.is_error is True, res
+    body = json.loads(res.content[0].text)
+    assert body["code"] == "INVALID_PARAM", body
+    assert "`file`" in body["error"], body
+    assert "file_path" in body["error"], body
+    assert "content" not in body, body
+    assert mem.read_text(encoding="utf-8") == INDEX_BEFORE
+    _assert_live_memory_files_clean(ZORKMID)
+
+
+async def test_the_memory_read_wire_payload_carries_the_path_it_read(off_tree):
+    """Clause 2 across the MCP boundary, which is where the model reads it."""
+    mem = _index_file(INDEX_BEFORE)
+    res = await SESSION.call_tool("memory_read", {"file": "MEMORY.md"})
+    assert res.is_error is not True, res
+    body = json.loads(res.content[0].text)
+    assert body["content"] == INDEX_BEFORE, body
+    assert body["file"] == "MEMORY.md", body
+    assert body["path"] == str(mem), body

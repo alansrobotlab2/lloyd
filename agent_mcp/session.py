@@ -110,9 +110,11 @@ def _misnamed_destination(params: dict) -> Optional[str]:
     None when no alias key is present. `file` itself stays optional — its
     `MEMORY.md` default has callers, and dropping the default is the owed ruling
     on #1729, not this change — but a call that supplies a destination-looking
-    key has stated where it meant to write, and quietly writing the loaded index
-    instead is the defect. Checked before the path is resolved or opened, so a
-    refused call cannot touch a file at all.
+    key has stated which file it meant to name, and quietly answering with the
+    loaded index instead is the defect: a write appends 2,290 B there (#1729) and
+    a read hands back its bytes as if they were the topic's (#1796). Checked
+    before the path is resolved or opened, so a refused call cannot touch a file
+    at all.
     """
     for key in _DESTINATION_ALIASES:
         if key in params:
@@ -120,11 +122,18 @@ def _misnamed_destination(params: dict) -> Optional[str]:
     return None
 
 
-def _destination_error(key: str) -> dict:
-    """Refusal for `_misnamed_destination`, naming the key it accepts instead."""
+def _destination_error(key: str, *, verb: str = "written") -> dict:
+    """Refusal for `_misnamed_destination`, naming the key it accepts instead.
+
+    `verb` keeps the one sentence honest across the four tools that share it:
+    reused verbatim on a read it asserts a write the caller never attempted
+    (#1796). The two clauses every caller depends on are identical either way —
+    the error names `file`, and it names the offending key — which is why no test
+    pins this sentence whole.
+    """
     return _err(
         f"Unknown argument {key!r}: the memory tools take the destination under "
-        f"`file` (MEMORY.md, USER.md, or topics/<slug>). Nothing was written — "
+        f"`file` (MEMORY.md, USER.md, or topics/<slug>). Nothing was {verb} — "
         f"re-send it with `file` instead of `{key}`.",
         ErrorCode.INVALID_PARAM)
 
@@ -151,18 +160,32 @@ def _topic_names() -> list[str]:
 
 
 def _memory_read(params: dict) -> dict:
+    # #1796: the guard its three writers got from #1729, and for the same reason.
+    # A read mis-routed under `file_path` answered the LOADED index and looked like
+    # a result — 5 such calls in `~/lloyd-data/sessions/*.json` since 2026-09-20,
+    # one of them the nightly session-distill job. Refused before `_resolve_file`
+    # can fall back to the default, so the refused read reaches no file at all.
+    bad_key = _misnamed_destination(params)
+    if bad_key:
+        return _destination_error(bad_key, verb="read")
     file = params.get("file", "MEMORY.md").strip()
     filepath = _resolve_file(file)
     if filepath is None:
         return _err(_INVALID_FILE, ErrorCode.INVALID_PARAM)
+    # `path` on every return, for the reason the writers give at `_memory_add`: the
+    # content that comes back from a read is what the caller then believes, so the
+    # file it came from is the field it cannot afford to reconstruct from an
+    # argument it may have mis-named. It also says WHERE a blank read looked.
     if not filepath.exists():
         if file in MEMORY_FILES:
-            return {"content": "", "file": file}
+            return {"content": "", "file": file, "path": str(filepath)}
         # A dangling index link is the one miss worth answering with the list: the
         # model followed a `→ topics/<slug>` line, and the names that do exist are
         # the cheapest way back to the right one.
-        return {"content": "", "file": file, "exists": False, "topics": _topic_names()}
-    return {"content": filepath.read_text(encoding="utf-8"), "file": file}
+        return {"content": "", "file": file, "path": str(filepath),
+                "exists": False, "topics": _topic_names()}
+    return {"content": filepath.read_text(encoding="utf-8"), "file": file,
+            "path": str(filepath)}
 
 
 def _date_stamp_enabled() -> bool:
@@ -381,7 +404,17 @@ def _memory_remove(params: dict) -> dict:
                 return _err(f"{file} does not exist", ErrorCode.NOT_FOUND)
             content = filepath.read_text(encoding="utf-8")
             if entry not in content:
-                return _err("entry not found in file", ErrorCode.NO_MATCH, matched=False)
+                # #1796: the report `_memory_replace` above already gives. The
+                # 2026-09-28 hand-restore of the mis-routed rows opened with
+                # `{"error": "entry not found in file", "code": "NO_MATCH"}` — 25
+                # characters that say only the bytes differ — and then went looking
+                # by hand for the line a number can name. Same helpers, same
+                # budget, so the two tools a clean-up run alternates between answer
+                # a miss one way.
+                return _err(_fit_not_found(
+                    "entry not found in file",
+                    _near_match_hint(content, entry, label="entry")),
+                    ErrorCode.NO_MATCH, matched=False)
             updated = _drop_entry_line(content, entry)
             # Whole-line deletion cannot itself leave a gap, but a line sitting
             # alone between two blanks leaves the two blanks adjacent.
