@@ -3594,11 +3594,25 @@ draws djev independently instead of replaying the anchor's answers.
   (`refresh_stale_floor`, 2026-09-27). After it drains its queue, still
   holding `regression.lock`, it compares the artifact's
   `queries_fingerprint` with the live question set. On a mismatch it runs
-  `measure_noise` once per fingerprint (about 10 min), writes a
+  `measure_noise` (about 10 min), writes a
   `noise_refreshed` ledger row, and announces the outcome. A result with fewer
   than 3 samples per metric is not published, and the old artifact is kept.
   Nothing did this before: rounds grew the set from 81 to 86 queries on
   09-23, and every check for four days (120 of them) was report-only.
+- **A spent fingerprint is retried on a chosen cadence, not by ledger amnesia**
+  (`FLOOR_RETRY_INTERVAL_DAYS` = 7, #1844, 2026-09-29). A thin (non-environmental)
+  refresh spends the fingerprint, and the guard that remembered it remembered
+  exactly `read_events(limit=4000)` rows — so the retry rhythm was how fast
+  unrelated jobs wrote rows (~44 h at the 89.8 rows/hour measured on 09-29),
+  regardless of the floor's age: too often for a nine-arm measurement, and
+  `refresh_stale_floor` refused a genuinely un-burnt floor for as long as the row
+  stayed in the tail. A retry now needs BOTH the published artifact's own
+  `measured_at` and the last spend row older than the interval, read off the
+  artifact rather than the ledger because the ledger on this box holds no
+  `ok:true noise_refreshed` row to read an age from (all four are `ok:false`). An
+  artifact stamping no readable `measured_at` is FRESH and is never retried, and
+  the scan is the whole ledger so no row can fall out of a window and reopen the
+  question.
   `python -m scripts.automod.regression_runner noise` still re-measures by
   hand, and it also takes `regression.lock` and writes `eval-noise.json`. **Anything that restarts or loads djev or the
   qmd daemon holds that lock too**; the second rollback was the author's own

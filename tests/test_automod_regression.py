@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -1859,6 +1860,179 @@ def test_a_thin_full_refresh_publishes_nothing_and_spends_the_fingerprint(floor_
     assert json.loads(floor_env["path"].read_text())["queries_fingerprint"] == "old-fp", \
         "below MIN_FLOOR_SAMPLES the floor must not be published"
     assert R.refresh_stale_floor() is None, "a measurement this thin still spends the fingerprint"
+
+
+# ---------------------------------------------------------------------------
+# The spend has a cadence now, and the cadence is a constant (#1844)
+# ---------------------------------------------------------------------------
+#
+# Spending a fingerprint used to be permanent for exactly as long as the ledger
+# remembered the row, and the length of that memory was the retry rhythm: at the
+# 89.8 rows/hour measured on 2026-09-29 the guard's 4000-row window forgot a
+# fingerprint in ~44 h regardless of the floor's age, while inside the window it
+# refused forever. Live instance: fingerprint 045dbbf05ffe spent by an
+# ok:false / no-env_failure row at 2026-09-28T16:14:59Z with the published floor
+# still stamped 2026-09-22T01:20:36Z. Both directions are now decided by
+# FLOOR_RETRY_INTERVAL_S — one week — read off the published artifact's own
+# `measured_at` (the ledger has no successful row to read it from: all four
+# `noise_refreshed` rows on this box are ok:false).
+
+def _past_the_interval() -> float:
+    """One day past `FLOOR_RETRY_INTERVAL_DAYS` — the age that makes a
+    timestamp, or an attempt, unambiguously outside the retry interval."""
+    return (R.FLOOR_RETRY_INTERVAL_DAYS + 1) * 86400
+
+
+def _stamp(seconds_ago: float) -> str:
+    """An ISO-8601 `Z` stamp `seconds_ago` in the past, exactly as
+    `state.now_iso()` and `measure_noise` write them."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - seconds_ago))
+
+
+def _old_floor(floor_env, *, with_stamp=True):
+    """Publish a floor measured a day past the retry interval, on the stale
+    fingerprint. Returns the artifact's exact bytes for a restore comparison."""
+    doc = {"queries_fingerprint": "old-fp", "metrics": {"doc_hit_rate": {"stdev": 0.01}}}
+    if with_stamp:
+        doc["measured_at"] = _stamp(_past_the_interval())
+    text = json.dumps(doc, indent=2)
+    floor_env["path"].write_text(text)
+    return text
+
+
+def _spent_row(floor_env, *, seconds_ago: float) -> dict:
+    row = {"event": "noise_refreshed", "ok": False, "queries_fingerprint": "new-fp",
+           "error": "too few samples per metric (1 < 3)"}
+    if seconds_ago is not None:
+        row["created_at"] = _stamp(seconds_ago)
+    floor_env["events"].append(row)
+    return row
+
+
+def test_a_spent_fingerprint_is_retried_once_the_published_floor_is_past_the_interval(
+        floor_env, monkeypatch):
+    """Clause 1: the row that spent the fingerprint no longer blocks a
+    re-measure by itself. Floor older than the interval AND the spend older
+    than the interval -> the measurement runs and appends its own row."""
+    _old_floor(floor_env)
+    _spent_row(floor_env, seconds_ago=_past_the_interval())
+    monkeypatch.setattr(R, "measure_noise", _measured(5))
+
+    row = R.refresh_stale_floor()
+
+    assert row is not None and row["ok"] is True, \
+        "a week-old floor must be re-measurable despite the spent fingerprint"
+    refreshes = [e for e in floor_env["events"] if e["event"] == "noise_refreshed"]
+    assert len(refreshes) == 2 and refreshes[-1]["queries_fingerprint"] == "new-fp"
+    assert json.loads(floor_env["path"].read_text())["queries_fingerprint"] == "new-fp"
+
+
+def test_a_floor_measured_inside_the_interval_is_not_retried_however_old_the_spend(
+        floor_env, monkeypatch):
+    """Clause 2, first half: a fresh floor is nobody's business. The spend row
+    is older than the interval here, so only the floor's own age can stop
+    this — which is what keeps the extra attempt off every drained run."""
+    floor_env["path"].write_text(json.dumps(
+        {"queries_fingerprint": "old-fp", "metrics": {},
+         "measured_at": _stamp(3600)}))
+    _spent_row(floor_env, seconds_ago=_past_the_interval())
+    monkeypatch.setattr(R, "measure_noise", lambda *a, **kw: pytest.fail(
+        "re-measured a floor published an hour ago"))
+
+    assert R.refresh_stale_floor() is None
+    assert len([e for e in floor_env["events"] if e["event"] == "noise_refreshed"]) == 1
+
+
+def test_a_spend_inside_the_interval_bounds_the_extra_attempt_to_one(
+        floor_env, monkeypatch):
+    """Clause 2, second half: the floor IS old enough, so the only thing left
+    stopping a second nine-arm measurement this interval is the attempt itself."""
+    _old_floor(floor_env)
+    _spent_row(floor_env, seconds_ago=3600)      # this interval's attempt, already taken
+    monkeypatch.setattr(R, "measure_noise", lambda *a, **kw: pytest.fail(
+        "took a second attempt inside the retry interval"))
+
+    assert R.refresh_stale_floor() is None
+
+
+def test_an_attempt_inside_the_interval_is_still_counted_once_it_leaves_the_recent_window(
+        floor_env, monkeypatch):
+    """Clause 2's bound holds across a long ledger, which is the whole point of
+    scanning past the guard's old 4000-row window. `read_events` returns
+    `rows[-limit:]`, so this spend row is 5,000 rows from the end and INVISIBLE
+    to the old guard: the run that forgot it re-measured on every drained run,
+    at a cadence set by how fast unrelated jobs write rows."""
+    _old_floor(floor_env)
+    spend = _spent_row(floor_env, seconds_ago=7200)
+    import scripts.automod.state as S
+    ledger = [{"event": "gate", "n": i} for i in range(5000)]
+    ledger.insert(0, spend)
+    monkeypatch.setattr(S, "read_events",
+                        lambda limit=100, **kw: ledger[-limit:] if limit else ledger)
+    monkeypatch.setattr(R, "measure_noise", lambda *a, **kw: pytest.fail(
+        "re-measured a fingerprint whose last attempt is two hours old, 5000 rows down"))
+
+    assert R.refresh_stale_floor() is None
+
+
+def test_an_artifact_stamping_nothing_is_fresh_and_never_retried(floor_env, monkeypatch):
+    """Clause 3: an age the artifact never stated is read as FRESH. The spend
+    here is well past the interval, so only the missing `measured_at` can be
+    what stops the measurement — the reason the `floor_env` fixture and
+    `test_a_thin_full_refresh_publishes_nothing_and_spends_the_fingerprint`
+    keep passing with this guard weakened."""
+    _old_floor(floor_env, with_stamp=False)
+    _spent_row(floor_env, seconds_ago=_past_the_interval())
+    monkeypatch.setattr(R, "measure_noise", lambda *a, **kw: pytest.fail(
+        "retried a floor whose age is unknown"))
+
+    assert R.refresh_stale_floor() is None
+
+
+def test_an_unparseable_stamp_is_fresh_too(floor_env, monkeypatch):
+    """Clause 3's other reading: a `measured_at` that cannot be parsed is an
+    age nobody may infer, so it is not treated as a very old one."""
+    floor_env["path"].write_text(json.dumps(
+        {"queries_fingerprint": "old-fp", "metrics": {}, "measured_at": "last tuesday"}))
+    _spent_row(floor_env, seconds_ago=_past_the_interval())
+    monkeypatch.setattr(R, "measure_noise", lambda *a, **kw: pytest.fail(
+        "inferred an age from an unparseable measured_at"))
+
+    assert R.refresh_stale_floor() is None
+
+
+def test_a_retried_thin_measurement_publishes_nothing_and_spends_the_interval_again(
+        floor_env, monkeypatch):
+    """Clause 4: what the weakened guard is for. The retry runs the real arm
+    path, comes back under MIN_FLOOR_SAMPLES, publishes nothing, restores the
+    previous artifact byte for byte, and the attempt it just made is what
+    stops the next drained run — one extra attempt per interval, not one."""
+    before = _old_floor(floor_env)
+    _spent_row(floor_env, seconds_ago=_past_the_interval())
+    _noise_health(monkeypatch, 39210)
+    monkeypatch.setattr(R, "PinnedCorpus", lambda workdir, **kw: _NoisePin())
+    arms: list = []
+
+    def arm(tree, label, env, **kw):
+        arms.append(label)
+        if not label.endswith("trial-0"):
+            return None
+        return {"overall": {"doc_hit_rate": 0.6}, "corpus_ok": True, "corpus": {},
+                "n_records": 81, "empty_doc_queries": []}
+    monkeypatch.setattr(R, "_run_arm", arm)
+
+    row = R.refresh_stale_floor()
+
+    assert row is not None and row["ok"] is False and row["env_failure"] is False, \
+        "the retry had to run the measurement to come back this thin"
+    assert len(arms) == 9, f"all nine arms ran: {arms}"
+    assert "too few samples per metric (1 < 3)" in row["error"]
+    assert R.MIN_FLOOR_SAMPLES == 3
+    assert floor_env["path"].read_text() == before, \
+        "the previous artifact comes back byte for byte, stamp included"
+    assert floor_env["said"] == ["Regression floor is stale"]
+    assert R.refresh_stale_floor() is None, "the attempt just taken is this interval's one"
+
 
 
 def test_the_refresh_runs_only_from_a_drained_run_holding_the_lock(monkeypatch):

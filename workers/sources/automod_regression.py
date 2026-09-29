@@ -48,6 +48,7 @@ import subprocess
 import tempfile
 import time
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -1476,6 +1477,77 @@ def run_pending(max_checks: int | None = None) -> list[dict]:
 # The floor needs at least this many samples per metric to be a σ at all.
 MIN_FLOOR_SAMPLES = 3
 
+# How old the PUBLISHED floor has to be before a fingerprint that already spent
+# itself may be measured again (#1844), and how far apart two such attempts at
+# the same fingerprint are at minimum. Seven days: long enough that a question
+# set nobody can measure does not cost nine eval arms every drained run — the
+# run is ~10 min of pinned-corpus work — and short enough that a floor nobody
+# can re-measure does not withhold every verdict for a month. The published
+# floor has carried `measured_at: 2026-09-22T01:20:36Z` on this box since
+# 2026-09-22, so the interval is not hypothetical: that artifact is older than
+# it on the day this shipped.
+FLOOR_RETRY_INTERVAL_DAYS = 7
+FLOOR_RETRY_INTERVAL_S = FLOOR_RETRY_INTERVAL_DAYS * 86400
+
+# How far back `refresh_stale_floor` looks for a row that spent the live
+# fingerprint: everything. The old `limit=4000` was the whole point of the
+# window, and the window was a cadence nobody picked (see the comment at the
+# guard). `state.read_events` decodes the full file before slicing, so this
+# constant changes what is returned, not what is parsed.
+_FLOOR_LEDGER_SCAN_ROWS = 10 ** 9
+
+
+def _utc_seconds(stamp: Any) -> float | None:
+    """Seconds since the epoch for `state.now_iso()`'s `…T…Z` format, or None
+    when there is nothing readable. None is the answer that matters: the caller
+    must not guess an age that the artifact never stated."""
+    if not isinstance(stamp, str) or not stamp.strip():
+        return None
+    try:
+        return datetime.strptime(stamp.strip(), "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        return None
+
+
+def _floor_is_old_enough_to_retry(old_text: str, *, now: float | None = None) -> bool:
+    """Whether the published floor's OWN measurement timestamp is past the retry
+    interval (#1844).
+
+    Read from the artifact and never from the ledger: on this box there is no
+    `ok:true noise_refreshed` row in `promotions.jsonl` at all — all four rows
+    are `ok:false` — so "the newest successful row" is nothing to read, while
+    `measured_at` is what `measure_noise` stamps on what it publishes. A floor
+    that states no readable timestamp is treated as FRESH, never as ancient:
+    an artifact whose age is unknown must not buy a nine-arm measurement on
+    every drained run.
+    """
+    try:
+        measured = _utc_seconds(json.loads(old_text).get("measured_at"))
+    except (ValueError, AttributeError):
+        measured = None
+    if measured is None:
+        return False
+    return ((time.time() if now is None else now) - measured) > FLOOR_RETRY_INTERVAL_S
+
+
+def _retry_attempt_is_due(spent: list[dict], *, now: float | None = None) -> bool:
+    """Whether the newest row that spent the fingerprint is itself past the
+    interval — the bound that keeps the extra allowance to ONE attempt per
+    fingerprint per interval (#1844), so a floor that cannot be measured does
+    not re-spend nine eval arms on every drained run.
+
+    A row with no readable `created_at` counts as just now, never as long ago:
+    an attempt whose age cannot be read cannot prove it is old enough to allow
+    another one.
+    """
+    now = time.time() if now is None else now
+    newest = 0.0
+    for e in spent:
+        stamp = _utc_seconds(e.get("created_at"))
+        newest = max(newest, stamp if stamp is not None else now)
+    return (now - newest) > FLOOR_RETRY_INTERVAL_S
+
 
 def refresh_stale_floor() -> dict | None:
     """Re-measure the noise floor once the question set it was measured on is
@@ -1485,10 +1557,12 @@ def refresh_stale_floor() -> dict | None:
     A stale floor withholds every verdict (#1352), and nothing re-measured it:
     `noise` was a command a person had to remember. From 2026-09-23 07:39 PDT
     to 09-27 every check — 120 of them — was report-only because rounds had
-    grown the question set from 81 queries to 86. One attempt per fingerprint,
-    so a measurement that keeps failing costs one run and one announcement, not
-    one per landing. A result with too few samples is not published: the old
-    artifact is put back, and the checks stay honestly stale.
+    grown the question set from 81 queries to 86. A fingerprint is tried once,
+    and again only after `FLOOR_RETRY_INTERVAL_DAYS` have passed since both the
+    published floor's own `measured_at` and that attempt (#1844) — so a
+    measurement that keeps failing costs one run and one announcement per
+    interval, not one per drained run. A result with too few samples is not
+    published: the old artifact is put back, and the checks stay honestly stale.
 
     An attempt that could not start at all is a different thing (#1749). Since
     09-27 every attempt died inside the eval's own empty-corpus guard, and the
@@ -1512,10 +1586,29 @@ def refresh_stale_floor() -> dict | None:
         return None
     # An env_failure row did not get to measure anything, so it did not earn
     # the fingerprint (#1749); any other row — ok or not — spent it once.
-    if any(e.get("event") == "noise_refreshed" and e.get("queries_fingerprint") == live
-           and (e.get("ok") or not e.get("env_failure"))
-           for e in S.read_events(limit=4000)):
+    #
+    # The scan is the WHOLE ledger, not the 4000-row window this guard used,
+    # because that window was itself the cadence: a spent fingerprint became
+    # silently retryable the moment the ledger grew past the tail the guard
+    # remembers — ~44 h at the 89.8 rows/hour measured on 2026-09-29 — whatever
+    # the published floor's age said. That is a retry rhythm nobody chose, and
+    # it fights the interval below. `read_events` decodes the entire file and
+    # slices the tail afterwards (scripts/automod/state.py:331-347), so widening
+    # the limit buys the slice, not another parse.
+    spent = [e for e in S.read_events(limit=_FLOOR_LEDGER_SCAN_ROWS)
+             if e.get("event") == "noise_refreshed" and e.get("queries_fingerprint") == live
+             and (e.get("ok") or not e.get("env_failure"))]
+    # Clauses 1 and 2 of #1844 compose here: the published floor must be past the
+    # interval (`_floor_is_old_enough_to_retry`) AND no row may have spent this
+    # fingerprint inside the interval (`_retry_attempt_is_due`). A spend inside
+    # the interval therefore still blocks, and the extra allowance fires at most
+    # once per fingerprint per interval.
+    if spent and not (_floor_is_old_enough_to_retry(old_text) and _retry_attempt_is_due(spent)):
         return None
+    if spent:
+        logger.info("published floor is older than %d days and the %d row(s) that spent %s "
+                    "all predate the interval too: taking the one extra attempt (#1844)",
+                    FLOOR_RETRY_INTERVAL_DAYS, len(spent), live)
     logger.info("noise floor is stale (%s, questions now %s); re-measuring", old_fp, live)
     started = time.time()
     error, noise, env_failure, probe = "", None, False, {}
