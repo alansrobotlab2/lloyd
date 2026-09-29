@@ -103,7 +103,7 @@ defaults the micro pass to a `trigger_fraction` of 0.8 while `config.yaml` ships
 |---|---|---|
 | `compaction.mode` | `summarize` | the summarise step's strategy; `truncate` skips it |
 | `compaction.keep_recent_turns` | 5 | how many recent turns stay verbatim past the summary boundary. Truncation has its own count, `TURNS_TO_KEEP` = 20 (`app/compaction.py:90`) |
-| `compaction.persist_summary` | false | fold vs regenerate, one or the other. Off until the `summary_persisted` arm of `eval/run_compaction_recall_eval.py` is compared |
+| `compaction.persist_summary` | false | fold vs regenerate, one or the other. Compared against `summary_legacy` on 2026-09-25 and kept off: behind on recall, 42 s slower at turn start ([[measurement]] §Arms that are flag values) |
 | `compaction.summary_input_budget_tokens` | 48000 | bounds one fold's delta |
 | `compaction.max_folds_per_turn` | 3 | leftover delta folds on later turns |
 | `compaction.restore.budget_tokens` / `max_files` | 50000 / 5 | what Layer C puts back after a summary: re-read file bodies, on top of the verbatim tail |
@@ -122,11 +122,16 @@ because the old count-only rule cleared 93 of 97 results on a review using 17% o
 its window.
 
 `compaction.memory_flush` (`app/memory_flush.py`) ships off for the same reason
-`persist_summary` does: both are `--arms` variants of
-`eval/run_compaction_recall_eval.py` (its ARMS table, with `summary_legacy` as
-their baseline) and neither has been compared yet. Neither is named in
-[[measurement]], which is filed #1787; until that lands, the runner is the only
-place the comparison is defined. Its shape is one ambient turn at 0.85 of the threshold,
+`persist_summary` does: both are `--arms` presets of
+`eval/run_compaction_recall_eval.py`, and both were measured against
+`summary_legacy` on 2026-09-25 — twelve kept rows each. `summary_persisted` came
+in behind on recall (-0.25, not significant in direction) and 42 s slower at
+turn start (significant); `memory_flush` gained 0.08, and of the eight sessions
+whose flush saw the planted fact it wrote the distinctive one down in one, so the
+gain is not the flush's. The run, its numbers and the stay-off verdict are
+[[measurement]] §Arms that are flag values; what the pair waits on now is not a
+first comparison but the cross-turn one that runner has no preset for. The
+flush's shape is one ambient turn at 0.85 of the threshold,
 `max_turns: 6`, tool pool restricted to `memory_read`, `memory_add`, `fact_get`
 and `fact_add`, once per cycle, whose rows stay in the transcript and never
 re-enter history. What it writes is in [[memory]].

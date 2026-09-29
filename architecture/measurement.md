@@ -81,6 +81,71 @@ bare `python3` in a gate worktree with no store and no daemon.
 `scripts/eval_trend_stats.py` folds the nightly runs into a trend and reads them
 from `$LLOYD_DATA/eval/baselines/`, not from the repo copy.
 
+## Arms that are flag values: the compaction-recall runner
+
+§The arms inventories **directories**. The same word carries a second, unrelated
+sense in this tree: `--arms` is a flag six runner scripts under `eval/` and
+`scripts/` declare, and its values are configuration presets inside one script.
+`memory_eval` is the collision spelled out — it is a directory arm *and* a
+runner whose `--arms` values (`closed_book`, `history`, `prefetch`) are not
+directories. Nothing separates the two senses but this paragraph: **an `--arms`
+value gets no row in §The arms**, and the node that holds that table set-equal
+to `eval/*` in both directions is exactly what refuses one, so a reader who puts
+a preset there gets a red test where they meant to write an answer.
+
+`eval/run_compaction_recall_eval.py` is the runner two shipped-off `compaction`
+flags lean on. Its `ARMS` dict holds fifteen presets; the `--arms` default runs
+the threshold family (`none`, `production`, `tool_clear`, `raised`, `trigger90`)
+and the summary family is `summary_legacy`, `summary_persisted` and
+`memory_flush`. The middle column is counted over the tracked baselines — the
+`compaction*.json` files under `eval/baselines/` — and
+`tests/test_architecture_coverage_doc_claims.py` set-equals both the preset list
+and that column against the dict and those files, so an arm that gets run, or a
+preset added to the dict, turns this table red until somebody reads it again:
+
+| Preset | Kept rows | What it is |
+|---|---|---|
+| `none` | yes (26 kept) | no compaction beyond the window — the floor |
+| `production` | yes (26 kept) | `config.yaml` as it is, both passes; the threshold family's paired baseline |
+| `tool_clear` | yes (26 kept) | tool-output clearing only, trigger/target 0.2/0.1 |
+| `raised` | yes (10 of 20 kept) | 0.9/0.7 at both passes: fire later, keep more |
+| `trigger90` | yes (10 of 20 kept) | trigger 0.9, target 0.52 |
+| `self_record` | no | #1514's free route: clearing plus a clause naming the session's own record |
+| `observation` | no | #1481's observation stubs and `recall_observation` |
+| `production_self_record` | no | that switch at production's thresholds |
+| `production_observation` | no | that switch at production's thresholds |
+| `rung4` | no | #1499's truncation rung, today's spill-first form |
+| `rung4_lossy` | no | that rung's pre-2026-09-11 lossy form |
+| `rung4_self_record` | no | today's rung 4 with #1514's clause |
+| `summary_legacy` | yes (12 kept) | regenerate-every-turn 9-section summary — **the baseline the other two summary presets are scored against** |
+| `summary_persisted` | yes (12 kept) | D2: `compaction.persist_summary`, the incremental 5-section record |
+| `memory_flush` | yes (12 kept) | P3: `summary_legacy` preceded by an `app/memory_flush.py` turn |
+
+The comparison those two flags were waiting for ran on 2026-09-25:
+`eval/baselines/compaction-summary-arms-2026-09-25.json`, twelve kept rows per
+summary preset, no drops, no errors, paired against `summary_legacy` in the
+artifact's own `paired_vs_summary_legacy` block (the runner computes it as
+`paired(rows, base="summary_legacy")`). `summary_persisted` came in -0.25 on
+distinctive recall (CI -0.58 to +0.08 — a loss in direction, not in
+significance) and +42 s at turn start (CI +30 to +53, significant), with median
+probe TTFT 11.7 s against legacy's 4.1 s. `memory_flush` gained +0.08 on both
+recall measures (not significant) for +5.9 s at turn start (CI -0.4 to +12.1,
+not significant), and across its twelve rows the flush turn saw the planted fact
+in the bound history 8 times and wrote the distinctive one down once. The
+write-up is `eval/measurements/compaction-summary-arms-2026-09-25.md` and its
+verdict is **keep both flags off**.
+
+So the two `config.yaml` comments that say a flag ships off "until the recall
+eval's … arm is compared" name a comparison that has happened, and what each
+flag is actually waiting for is different. D2's intended win is a cross-turn
+effect — reuse one stable summary across consecutive over-threshold turns — and
+no preset in `ARMS` compacts a session more than once, so that question is
+unmeasured and needs a new arm rather than a re-run; P3's question was measured
+and the answer was no. Flipping either flag is a ruling on those two facts, not
+a reading of a green cell: nothing in this table is asserted passing, and the
+counts above are re-measured with a glob over `eval/baselines/`, not copied from
+here.
+
 ## The bench corpus
 
 The bench tasks are markdown, not Python, and they are not in this repo: they sit
@@ -174,3 +239,18 @@ round's own prefix twice per run. The full ladder is in [[automod]].
   `scripts/eval_trend_stats.py`'s `--help` still names the repo copy as its
   default root where this doc names the data root; the code backs the doc
   (#1791).
+- **2026-09-29 — §Arms that are flag values added (#1787).**
+  `architecture/context-window.md` delegated two "ships off until compared"
+  flags to this doc, and this doc named none of the arms involved: greps for
+  `summary_persisted`, `memory_flush`, `persist_summary` and `summary_legacy`
+  over this file returned 0 hits, and its single "compact" hit is the
+  tracked-baseline filename list under §Two roots — a pin, not an arm. The
+  fifteen presets, the kept-row counts and the paired deltas came from the
+  runner's `ARMS` dict and the three `compaction*.json` baselines, not from that
+  doc's prose. That matters for one figure in the item itself: it asked to have
+  the pair recorded as "the uncompared pair behind the two config.yaml flags",
+  and on the tree they are not — `eval/baselines/compaction-summary-arms-2026-09-25.json`
+  carries twelve kept rows per arm and a `paired_vs_summary_legacy` block, and
+  `eval/measurements/compaction-summary-arms-2026-09-25.md` ruled both flags
+  stay off. What is unmeasured is D2's cross-turn reuse question, which no
+  preset in `ARMS` can ask.

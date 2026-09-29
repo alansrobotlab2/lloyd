@@ -30,6 +30,8 @@ with nothing wrong:
 
 from __future__ import annotations
 
+import collections
+import json
 import re
 import subprocess
 import sys
@@ -592,3 +594,405 @@ def test_an_ignored_citation_is_exempt_and_a_fictional_one_is_not():
         "and the main node is passing for the wrong reason")
     assert FICTION_CITATION not in git_ignored([FICTION_CITATION]), (
         "the fabricated path is git-ignored, which makes it a useless negative control")
+
+
+# ── #1787: the compaction-recall runner, the presets its flag takes, and the
+# ── second sense of "arm" they live in ──────────────────────────────────────
+#
+# `architecture/context-window.md` delegated two "ships off until compared"
+# `compaction` flags to `architecture/measurement.md` as the doc that owned the
+# comparison, and measurement.md named none of them: at base `d00f56d0` greps for
+# `summary_persisted`, `memory_flush`, `persist_summary` and `summary_legacy` over
+# it returned 0 hits, and the only "compact" line in the file was the tracked
+# baseline-filename list under §Two roots — a pin, not an arm. What made the
+# pointer worse than empty was that measurement.md's own §The arms defines an arm
+# as "a directory under `eval/`" and holds that table set-equal to `eval/*`, while
+# `summary_persisted` and `memory_flush` are `--arms` values of one runner. So the
+# row the item first suggested is the one shape that cannot work: the set-equality
+# node above would grade it as named-but-absent. The content had to be its own
+# `## ` section, and these nodes are what stop that section from being a paragraph
+# nobody can falsify — the preset list is read off the runner's `ARMS` dict, and
+# the compared column off the baseline artifacts it writes.
+#
+# One thing the measurement changed about the contract. Clause 2 asked for the two
+# flags to be recorded as "the uncompared pair", and they are not:
+# `eval/baselines/compaction-summary-arms-2026-09-25.json` carries twelve kept rows
+# per preset and a `paired_vs_summary_legacy` block, and
+# `eval/measurements/compaction-summary-arms-2026-09-25.md` rules both flags stay
+# off. Writing "uncompared" would have made this doc the third place a stale claim
+# is copied to, so the section says what was measured and what is still unmeasured
+# (D2's cross-turn reuse question, which no preset in `ARMS` can ask). The numbers
+# below are what makes that reading re-measurable rather than a nicer sentence.
+
+#: The runner whose `--arms` values the new section inventories. Cited in
+#: backticks, never as a wikilink: `[[compaction-recall]]` would have to be a
+#: top-level architecture doc for
+#: `test_every_wikilink_in_a_new_doc_names_a_top_level_architecture_doc` to
+#: tolerate it, and it is not a doc at all.
+RUNNER_REL = "eval/run_compaction_recall_eval.py"
+
+#: The config-table cell #1787 rewrote, kept verbatim from base `d00f56d0` so the
+#: node that forbids it is known to match something.
+OLD_CONTEXT_WINDOW_ROW = (
+    "| `compaction.persist_summary` | false | fold vs regenerate, one or the "
+    "other. Off until the `summary_persisted` arm of "
+    "`eval/run_compaction_recall_eval.py` is compared |")
+
+#: The disclosure clause 5 removes, as it stood at base `d00f56d0`. Compared
+#: whitespace-flattened, because the doc wrapped it over three lines.
+OLD_DISCLOSURE = ("Neither is named in [[measurement]], which is filed #1787; "
+                  "until that lands, the runner is the only place the "
+                  "comparison is defined.")
+
+#: The three summary presets, in the order the doc scores them.
+SUMMARY_PRESETS = ("summary_legacy", "summary_persisted", "memory_flush")
+
+#: The run that answered the two flags, and its write-up. Both are tracked, and
+#: both are cited by the section, so a reader gets the artifact from the prose.
+SUMMARY_RUN = EVAL / "baselines/compaction-summary-arms-2026-09-25.json"
+SUMMARY_WRITEUP = EVAL / "measurements/compaction-summary-arms-2026-09-25.md"
+
+_H2 = re.compile(r"^## (.+)$", re.M)
+
+#: A row of the preset table: first cell a preset in backticks, second cell the
+#: compared marker plus the kept-row count the doc claims for it.
+_PRESET_ROW = re.compile(r"^\|\s*`([a-z0-9_]+)`\s*\|\s*(yes|no)"
+                         r"(?:\s*\((\d+)(?: of (\d+))? kept\))?\s*\|", re.M)
+
+#: `[[measurement]] §Section`, as the two delegates spell it. The capture stops at
+#: a colon so a reference may name a section with a sub-clause in its heading; the
+#: heading match is by unique prefix, which is what a hand-written §-ref is.
+_MEASUREMENT_REF = re.compile(r"\[\[measurement\]\] §([A-Za-z][^,.;)\n]*)")
+
+
+def _flat(text: str) -> str:
+    """Text with every run of whitespace collapsed to one space. The doc is
+    hand-wrapped at ~78 columns, so any sentence long enough to matter contains a
+    newline, and a fixture asserted against the raw bytes fails for where the
+    author broke the line."""
+    return " ".join(text.split())
+
+
+def _h2_sections(text: str) -> dict[str, str]:
+    """Every top-level `## ` section of a doc, in file order. `### ` is not a
+    boundary here, which is the whole reason #1787's content could not be a `### `
+    child of §The arms: `_section()`'s window, and so the graded table's window,
+    runs to the next `## `."""
+    hits = list(_H2.finditer(text))
+    return {m.group(1).strip():
+            text[m.end(): (hits[i + 1].start() if i + 1 < len(hits) else len(text))]
+            for i, m in enumerate(hits)}
+
+
+def recall_section(text: str) -> tuple[str, str]:
+    """The one `## ` section that cites the runner — the section #1787 added."""
+    hits = [(head, body) for head, body in _h2_sections(text).items()
+            if f"`{RUNNER_REL}`" in body]
+    assert len(hits) == 1, (
+        f"{RUNNER_REL} is cited by {len(hits)} `## ` sections of measurement.md; "
+        "the nodes below need exactly one to grade (a second citation belongs in "
+        "the section that already has it)")
+    return hits[0]
+
+
+def runner_presets() -> list[str]:
+    """The keys of the runner's `ARMS` dict, read by executing the module: what
+    `--arms` actually accepts, so the doc is checked against the parser and not
+    against a transcription of the list in prose."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "_arms_probe", ROOT / RUNNER_REL)
+    module = importlib.util.module_from_spec(spec)
+    # Registered before exec: the module builds `@dataclass` types at import and
+    # `dataclasses` resolves the declaring module through `sys.modules`. Without
+    # this line the probe dies on `AttributeError: 'NoneType' object has no
+    # attribute '__dict__'` and says nothing about the presets.
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+        return list(module.ARMS)
+    finally:
+        sys.modules.pop(spec.name, None)
+
+
+def baseline_rows() -> dict[str, tuple[int, int]]:
+    """`preset -> (rows, kept)` over every tracked `compaction*.json`. This is the
+    same definition the artifacts use for themselves: a row counts when its
+    `status` is `ok`, which is what the per-arm `kept` in their own `summary`
+    block adds up to."""
+    rows: collections.Counter = collections.Counter()
+    kept: collections.Counter = collections.Counter()
+    for path in sorted((EVAL / "baselines").glob("compaction*.json")):
+        for row in json.loads(path.read_text(encoding="utf-8")).get("rows", []):
+            rows[row["arm"]] += 1
+            if (row.get("status") or "ok") == "ok" and not row.get("dropped"):
+                kept[row["arm"]] += 1
+    return {arm: (rows[arm], kept[arm]) for arm in rows}
+
+
+def preset_rows(body: str) -> dict[str, tuple[str, int | None, int | None]]:
+    """The preset table as `name -> (yes|no, kept count, row count)`."""
+    return {name: (mark, int(kept) if kept else None, int(total) if total else None)
+            for name, mark, kept, total in _PRESET_ROW.findall(body)}
+
+
+def _heading_for(ref: str, headings: set[str]) -> str:
+    """The one heading a `§ref` points at — matched by unique prefix, since the
+    delegates write the short form of a heading that carries a sub-clause."""
+    hits = sorted(h for h in headings if h == ref or h.startswith(ref))
+    assert len(hits) == 1, (
+        f"§{ref!r} matches {len(hits)} headings of measurement.md "
+        f"({hits}); a delegate that could mean two sections means neither")
+    return hits[0]
+
+
+def test_the_runner_presets_are_a_section_of_their_own_and_match_the_dict():
+    """Clauses 1 and 4: the presets live in a `## ` section that is not §The arms,
+    they are exactly what `--arms` accepts, and adding them did not touch the
+    directory table.
+
+    The set-equality against `runner_presets()` is what makes the section a
+    document and not a guess: add a preset to `ARMS` without a row, or a row
+    without a preset, and this node names the difference — the same hold the arms
+    table has on directories. The directory table is then re-graded inside its own
+    §window rather than trusted, because this diff is the one that put a second
+    backtick-first table into the file. Note which window: `_section()` ends at the
+    next `## `, which is why the comparison below is scoped to it. Whole-doc
+    `arms_named_by()` now also sees the preset rows, so it is the wrong denominator
+    for a doc that carries both senses, and `COVERED` does not list
+    `measurement.md` for that reason.
+    """
+    text = _text("measurement.md")
+    head, body = recall_section(text)
+    assert head != "The arms" and "`--arms`" in body
+    assert f"`{RUNNER_REL}`" in body
+
+    rows = preset_rows(body)
+    assert rows, "no preset rows parsed — the table stopped being parseable"
+    assert set(rows) == set(runner_presets()), (
+        f"measurement.md's preset table and {RUNNER_REL}'s ARMS dict disagree: "
+        f"doc-only {sorted(set(rows) - set(runner_presets()))}, "
+        f"dict-only {sorted(set(runner_presets()) - set(rows))}")
+    for preset in SUMMARY_PRESETS:
+        assert preset in rows, f"{preset} has no row in the preset table"
+
+    # Clause 4: the graded inventory, in its own window, still names exactly the
+    # directories — no row leaked into it, and none was edited.
+    # `_ARMS_ROW` over the window, not `arms_named_by()`: that helper takes a
+    # whole doc and re-parses §The arms out of it itself (`arms_named_by`
+    # line ~89), which is right for its own node and wrong for a doc that now
+    # carries a second backtick-first table.
+    window = _section(text, "The arms")
+    named = set(_ARMS_ROW.findall(window))
+    assert f"`{RUNNER_REL}`" not in window, (
+        "the runner citation moved inside §The arms, so the window the graded "
+        "node parses is no longer only the directory table")
+    assert named == eval_arms_on_disk()
+    assert not (set(rows) & named), (
+        "a preset name also reads as an eval/ directory arm, so the two senses "
+        f"have collided: {sorted(set(rows) & named)}")
+
+
+def test_the_compared_column_is_the_baselines_and_the_quoted_numbers_are_theirs():
+    """Clause 2, measured twice: the yes/no column against every tracked
+    `compaction*.json`, and each figure the section quotes against the artifact it
+    came from.
+
+    Re-deriving the numbers rather than the sentence is the point, because this is
+    where the item and the tree disagreed. The clause described `summary_persisted`
+    and `memory_flush` as "the uncompared pair"; the artifacts give both twelve
+    kept rows and a paired comparison against `summary_legacy`, and the write-up
+    ruled both flags stay off. So the section states the comparison and the ruling,
+    and this node is what makes a later reader re-measure it instead of re-copying
+    either claim — including the claim in this docstring.
+    """
+    _, body = recall_section(_text("measurement.md"))
+    flat = _flat(body)
+    rows = preset_rows(body)
+    measured = baseline_rows()
+    assert measured, "no compaction baselines on disk to compare the column with"
+    for preset, (mark, kept, total) in sorted(rows.items()):
+        have_rows, have_kept = measured.get(preset, (0, 0))
+        assert mark == ("yes" if have_kept else "no"), (
+            f"{preset}: the doc says {mark!r}, the tracked baselines kept "
+            f"{have_kept} of {have_rows} rows")
+        if mark == "yes":
+            assert kept == have_kept, (
+                f"{preset}: the doc quotes {kept} kept rows, the artifacts have "
+                f"{have_kept}")
+            if total is not None:
+                assert total == have_rows, (
+                    f"{preset}: the doc says {total} rows, the artifacts have "
+                    f"{have_rows}")
+    assert {name for name, (mark, _k, _t) in rows.items() if mark == "no"} == {
+        "self_record", "observation", "production_self_record",
+        "production_observation", "rung4", "rung4_lossy", "rung4_self_record"}, (
+        "the never-run set changed shape; the doc's 'not yet run anywhere' "
+        "sentence and the baselines have to be read together again")
+
+    # What is scored against what — the thing clause 2 asks a reader to be able
+    # to tell — named in the prose and present in the artifact.
+    assert SUMMARY_PRESETS[0] in flat and "baseline" in flat.lower()
+    assert "`paired_vs_summary_legacy`" in body, (
+        "the section no longer names the block that says what is scored against "
+        "what")
+    run = json.loads(SUMMARY_RUN.read_text(encoding="utf-8"))
+    paired = run["paired_vs_summary_legacy"]
+    assert set(paired) == set(SUMMARY_PRESETS[1:]), (
+        "the artifact no longer pairs exactly the two summary presets against "
+        f"summary_legacy: {sorted(paired)}")
+    for arm, want in {"summary_legacy": (11, 12), "summary_persisted": (8, 12),
+                      "memory_flush": (12, 12)}.items():
+        s = run["summary"][arm]
+        assert (s["distinctive"]["k"], s["distinctive"]["n"], s["kept"],
+                s["dropped"], s["errors"]) == (*want, want[1], 0, 0), (arm, s)
+    assert ("twelve kept rows per summary preset, no drops, no errors,"
+            " paired against `summary_legacy`") in flat, flat[:400]
+
+    # The figures the prose quotes, each against the field it came from.
+    persist = paired["summary_persisted"]
+    assert round(persist["distinctive_hit"]["diff"], 2) == -0.25, persist["distinctive_hit"]
+    assert "-0.25" in flat and not persist["distinctive_hit"]["significant"]
+    assert not persist["distinctive_hit"]["significant"], persist["distinctive_hit"]
+    stall = persist["turn_start_wall_s"]
+    assert round(stall["diff"]) == 42 and stall["significant"], stall
+    assert (round(stall["lo"]), round(stall["hi"])) == (30, 53), stall
+    assert "+42 s" in flat and "+30 to +53" in flat
+    medians = {a: run["summary"][a]["median_ttft_first_s"] for a in SUMMARY_PRESETS}
+    assert round(medians["summary_persisted"], 1) == 11.7, medians
+    assert round(medians["summary_legacy"], 1) == 4.1, medians
+    assert "11.7 s against legacy's 4.1 s" in flat, medians
+    flush_pair = paired["memory_flush"]
+    assert round(flush_pair["distinctive_hit"]["diff"], 2) == 0.08, flush_pair
+    assert "+0.08" in flat
+    rows_ = run["rows"]
+    saw = sum(1 for r in rows_ if r["arm"] == "memory_flush"
+              and r["flush"]["planted_in_history"])
+    saved = sum(1 for r in rows_ if r["arm"] == "memory_flush"
+                and r["flush"]["planted_saved"]["distinctive"])
+    assert (saw, saved) == (8, 1), (saw, saved)
+    assert ("saw the planted fact in the bound history 8 times and wrote the "
+            "distinctive one down once") in flat, (saw, saved)
+
+    # And the ruling the two flags rest on belongs to the write-up, quoted here.
+    assert SUMMARY_WRITEUP.exists()
+    assert "keep both flags off" in flat.lower()
+    assert "keep `compaction.persist_summary: false`" in SUMMARY_WRITEUP.read_text(
+        encoding="utf-8")
+
+    # The control that these comparisons could fail: one row claiming "no" for a
+    # preset with kept rows, one claiming a count no artifact has.
+    false_rows = preset_rows("| Preset | Kept rows | What it is |\n|---|---|---|\n"
+                             "| `summary_persisted` | no | invented row |\n"
+                             "| `none` | yes (99 kept) | invented count |\n")
+    assert any(mark == "no" and measured.get(name, (0, 0))[1]
+               for name, (mark, _k, _t) in false_rows.items()), (
+        "the yes/no comparison cannot see a false 'no', so clause 2 is not being "
+        "measured by it")
+    assert any(mark == "yes" and kept != measured.get(name, (0, 0))[1]
+               for name, (mark, kept, _t) in false_rows.items()), (
+        "the kept-count comparison cannot see an inflated count")
+
+
+def test_the_two_senses_of_arm_are_separated_in_the_prose_and_the_tree():
+    """Clause 3: the section says these are `--arms` values inside one runner and
+    not the directories §The arms inventories — and shows it twice, because the
+    prose alone is the thing that rotted once already.
+
+    The tree half is what makes the sentence checkable rather than stylistic: no
+    preset may name a directory under `eval/`, so the two senses stay disjoint by
+    construction, and a future run that adds `eval/summary_persisted/` has to
+    reconcile the two tables instead of letting a reader confuse them. The
+    runner's own `--arms` default is read beside it, so "the threshold family is
+    the default" is the parser's default and not the doc's.
+    """
+    _, body = recall_section(_text("measurement.md"))
+    flat = _flat(body).lower().replace("**", "")
+    assert "`--arms`" in body
+    assert "an `--arms` value gets no row in §the arms" in flat, (
+        "the rule separating the two senses is gone from the section, which is "
+        "the conflation #1787 was filed over")
+    for sense in ("directory", "directories"):
+        assert sense in flat, (
+            f"the section never uses the word {sense!r}, so it cannot be saying "
+            "these presets are not that")
+
+    presets = set(runner_presets())
+    dirs = eval_arms_on_disk()
+    assert not (presets & dirs), (
+        f"a preset shares a name with an eval/ directory: {sorted(presets & dirs)}")
+    for arm in ("none", "production", "tool_clear", "memory_flush"):
+        assert not (EVAL / arm).exists(), (
+            f"{RUNNER_REL} preset {arm!r} is also an eval/{arm} directory, so the "
+            "two tables now name one thing two ways")
+
+    src = (ROOT / RUNNER_REL).read_text(encoding="utf-8")
+    default = re.search(r'--arms",\s*default="([^"]+)"', src)
+    assert default, "the runner's --arms default is no longer parseable"
+    listed = default.group(1).split(",")
+    assert listed == ["none", "production", "tool_clear", "raised", "trigger90"], listed
+    assert all(f"`{name}`" in body for name in listed), (
+        "the default family the section describes is not the flag's default")
+    assert "`closed_book`" in body and "`memory_eval`" in body, (
+        "the section's worked example of the two senses colliding is gone: "
+        "`memory_eval` is a directory arm whose runner takes --arms values, which "
+        "is why the distinction is stated rather than assumed")
+    assert "closed_book" in (EVAL / "run_memory_eval.py").read_text(encoding="utf-8")
+
+    # Control: the disjointness assertion has teeth. `memory_eval` really is a
+    # directory, so pretending it is a preset must trip the check above.
+    assert (EVAL / "memory_eval").is_dir()
+    assert (presets | {"memory_eval"}) & dirs, (
+        "injecting a real directory name into the preset set did not trip the "
+        "disjointness check, so nothing here is holding the two senses apart")
+
+
+def test_context_window_delegates_to_the_section_and_says_nothing_unmeasured():
+    """Clause 5: `context-window.md` no longer says the answer is absent, and every
+    delegate of its own to [[measurement]] lands on a section that is there.
+
+    Four moves, because a removed sentence and a dangling pointer are both ways to
+    finish this item wrongly. The two removed spellings are asserted absent against
+    the text kept above, so neither assertion is an empty pattern; every
+    `[[measurement]] §…` reference in that doc has to match one heading of
+    measurement.md by unique prefix — that drift is what made the original pointer
+    wrong, so it is pinned for all of them, not only the new ones; the delegate
+    paragraph is asserted to name the run's date and the fact that it was measured;
+    and the fixtures are asserted to still contain what clause 5 removed.
+    """
+    cw = _text("context-window.md")
+    cflat = _flat(cw)
+    assert _flat(OLD_DISCLOSURE) not in cflat, (
+        "the disclosure that measurement.md names neither arm is back, and "
+        "measurement.md now carries the section it was disclaiming")
+    assert "is compared" not in cflat, (
+        "a compaction flag is described as waiting on a comparison again; the "
+        "comparison ran on 2026-09-25 and ruled both flags stay off")
+    assert "summary_persisted" in cflat and "memory_flush" in cflat, (
+        "the doc no longer names the two presets at all — an emptied pointer is "
+        "not a fixed one")
+
+    refs = _MEASUREMENT_REF.findall(cw)
+    assert refs, "context-window.md cites [[measurement]] with no named section"
+    heads = set(_h2_sections(_text("measurement.md")))
+    for ref in refs:
+        _heading_for(ref.strip(), heads)
+
+    paras = [q for q in cw.split("\n\n")
+             if "`compaction.memory_flush`" in q and "app/memory_flush.py" in q]
+    assert len(paras) == 1, (
+        f"{len(paras)} paragraphs cover the memory_flush delegate, so clause 5 "
+        "has nothing specific to grade")
+    joined = _flat(paras[0])
+    assert "measured against `summary_legacy` on 2026-09-25" in joined, joined
+    assert "[[measurement]]" in joined and "§" in joined, joined
+
+    # The fixtures still carry what was removed, so the two absences above are not
+    # passing because the patterns went stale.
+    assert OLD_CONTEXT_WINDOW_ROW.endswith("is compared |")
+    assert "is compared" in OLD_CONTEXT_WINDOW_ROW
+    assert "Neither is named in" in OLD_DISCLOSURE
+    assert not _MEASUREMENT_REF.search(OLD_DISCLOSURE), (
+        "the old disclosure carried a §-reference, so the reference check above "
+        "would have passed on the text clause 5 removes — it is no longer a "
+        "control")
