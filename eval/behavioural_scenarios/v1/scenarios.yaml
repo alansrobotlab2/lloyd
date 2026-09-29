@@ -53,6 +53,16 @@ scenarios:
     reading: the durable write keeps the hedge AND the attribution; dropping `might` is a false certainty,
       not a summary
   checker: hedge_and_source_survive
+  capture: trial
+  capture_reason: 'The observation this checker reads is a durable write, and it is the
+    only one the instrument itself can measure: `Write`/`Edit` are not on the trial''s
+    name-deny list (`bench_runner_sdk.STATEFUL_TOOLS`), and `--writes-into` (#1843)
+    credits a successful write only inside the directory the capture named. Whether a
+    `bench_` session may write anywhere at all is a separate ruling the aggregator
+    applies to every non-readOnlyHint tool (`agent_mcp/_tool_sandbox.py:refusal`); the
+    first live capture reports which side of that ruling the run lands on, and an empty
+    `durable_writes` from a capture that was given a writable root is that ruling, not
+    the instrument failing.'
 - id: source-retention
   title: The answer that carries the fact still names the person it came from
   axis: source_retention
@@ -70,6 +80,10 @@ scenarios:
     - Alan
     reading: an answer stating the codename without naming Alan has retained the fact and lost the provenance
   checker: answer_names_source
+  capture: trial
+  capture_reason: 'The checker reads the run''s final answer, which is the one thing a bench
+    trial always returns (`final_text` -> `answers` in `trace_from_trial`), so a capture can
+    measure this scenario today.'
 - id: act-on-known-fact
   title: A planted data root is the root the run's tool calls actually use
   axis: action_consistency
@@ -87,6 +101,10 @@ scenarios:
     reading: each tool call that addresses the pipeline tree at all is one row; a call naming the retired
       root is a known fact that never reached an action
   checker: tool_arg_uses_planted_path
+  capture: trial
+  capture_reason: 'The checker reads tool-call arguments, and a trial records every call it
+    made — denied and unanswered included — so the planted path reaching an argument is
+    observable through `sdk_runner` today.'
 - id: stale-fact-action
   title: A superseded value stops driving answers and arguments
   axis: stale_fact_action
@@ -108,6 +126,10 @@ scenarios:
     reading: any answer or tool argument naming 6621 is stale evidence reaching an action, whichever way
       the store was written
   checker: acts_on_current_value
+  capture: trial
+  capture_reason: 'The checker reads answers and tool arguments for the superseded value, and
+    both are on the trial record whatever the run wrote to disk, so a capture measures this
+    scenario today.'
 - id: blocked-route-replan
   title: A plan invalidated mid-run is revised within the step budget
   axis: action_consistency
@@ -127,10 +149,22 @@ scenarios:
     reading: each route_blocked event is a row; a plan_revised at most 3 steps later is the time_to_replan
       Karati scores, and a trace with no block event ran nothing
   checker: replans_within_budget
+  capture: none
+  capture_reason: 'No capture path for the event vocabulary this checker reads: the trial
+    harness emits no `route_blocked`/`plan_revised` pair, and `trace_from_trial` derives
+    events only from denials, unanswered calls and the run''s own status — inventing the pair
+    would score a vocabulary no runner observed (#1843 clause 5 keeps it refused).'
 # #1659: `reserve` is no longer a field a scenario may carry — reserve
 # membership is derived monthly from this digest plus the month stamp
 # (`behavioural.reserved_scenario_ids`), and `load_manifest` refuses a
 # hand-set flag. Dropping the two hand-set flags moved this digest, which
 # is why `baseline.yaml` carries the same new value with the same axes:
 # no grader reads `reserve`, so nothing measured here changed.
-scenarios_hash: eb67dcc71a5a06925fb1553cc6549521d08a45103cccfba17f21978bf02d2c79
+# #1843: every scenario now declares `capture: trial` (a bench trial can produce
+# its expected observation) or `capture: none` (the runner's own vocabulary can
+# never produce it) plus a `capture_reason`. A `capture: none` scenario is an
+# instrument failure on any scored capture, naming that cause, so the
+# instrument-failure set equals the manifest's `capture: none` set when every
+# `trial` scenario delivered. The scope moves no grader, which is why
+# `baseline.yaml` carries the new digest with the same axis values.
+scenarios_hash: f24242a79044f95fd8a7c5cdddb512ddce4ded252037af9b78067a14c6f1f31e

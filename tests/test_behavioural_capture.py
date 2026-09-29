@@ -43,6 +43,15 @@ REFERENCE = B.load_traces(B.REFERENCE_TRACES_DIR)
 BUDGET = CAP.DEFAULT_CAPTURE_BUDGET_SECONDS
 RUN_ID = "R_capture_probe"
 
+#: #1843 clause 4, read off the shipped manifest rather than typed here, because
+#: the clause IS an identity between the scorecard and that file: for a capture in
+#: which every `capture: trial` scenario produced its observation, the
+#: instrument-failure set is exactly this list. The literal is pinned once, in
+#: `test_the_unmeasurable_scenario_names_the_vocabulary_it_needs`, so a manifest
+#: edit cannot silently move the expectation of every node that uses this.
+NO_CAPTURE_PATH_IDS = [sid for sid, s in zip(IDS, SCENARIOS)
+                      if B.capture_scope(s)[0] == "none"]
+
 
 def _cfg(tmp_path: Path):
     """A config pointed at a scratch research root — never the live one."""
@@ -225,8 +234,12 @@ def test_the_round_scores_a_capture_and_names_the_directory_it_scored(tmp_path):
     assert scorecard["trace_source"] != "reference"
     assert scorecard["reference_replay"] is False, (
         "a real capture is not a replay of the pinned baseline's own traces")
-    assert scorecard["denominator"] == len(IDS) == scorecard["scenarios_total"]
-    assert scorecard["instrument_failures"] == []
+    # #1843 clause 4: one scenario of the five declares `capture: none`, so a
+    # capture that ran all five still scores four — `captured` counts what the
+    # runner produced, the denominator counts what any capture can measure.
+    assert scorecard["scenarios_total"] == len(IDS)
+    assert scorecard["denominator"] == len(IDS) - len(NO_CAPTURE_PATH_IDS)
+    assert scorecard["instrument_failures"] == NO_CAPTURE_PATH_IDS
     assert scorecard["capture"]["captured"] == len(IDS)
     assert scorecard["capture"]["not_captured"] == []
 
@@ -300,8 +313,11 @@ def test_a_scenario_whose_run_raised_reports_the_error_and_is_not_scored_as_zero
     assert len(meta["scenarios"]) == len(IDS), "the capture continued past the failure"
 
     scorecard = B.round_scorecard(cfg, RUN_ID)
-    assert scorecard["denominator"] == len(IDS) - 1
-    assert scorecard["instrument_failures"] == ["source-retention"]
+    # This capture lost one scenario of its own, and the suite always loses the
+    # scenario that declares `capture: none` (#1843 clause 4) — so the denominator
+    # is the suite minus both, in manifest order.
+    assert scorecard["denominator"] == len(IDS) - 1 - len(NO_CAPTURE_PATH_IDS)
+    assert scorecard["instrument_failures"] == ["source-retention", *NO_CAPTURE_PATH_IDS]
     source = next(a for a in scorecard["axes"] if a["axis"] == "source_retention")
     assert source["denominator"] == 0 and source["value"] is None
     scored_row = next(r for r in scorecard["scenarios"] if r["id"] == "source-retention")
@@ -332,11 +348,17 @@ def test_a_returned_object_with_no_observations_writes_no_trace(tmp_path):
     assert "observable" in row["reason"], row["reason"]
     assert not (out / "act-on-known-fact.yaml").exists()
     scorecard = B.round_scorecard(cfg, RUN_ID)
-    assert scorecard["instrument_failures"] == ["act-on-known-fact"]
+    # The scenario this capture broke, plus the one no capture can measure
+    # (#1843 clause 4), and nothing else.
+    assert scorecard["instrument_failures"] == ["act-on-known-fact",
+                                               *NO_CAPTURE_PATH_IDS]
     action = next(a for a in scorecard["axes"] if a["axis"] == "action_consistency")
-    assert action["denominator"] == 1, (
-        "the other scenario on this axis still counts; only the unmeasured one "
-        "leaves the denominator")
+    # Before #1843 this asserted `denominator: 1` — the other scenario on the axis
+    # still counting while only the broken one left. It now leaves too: the axis's
+    # two scenarios were `act-on-known-fact` and `blocked-route-replan`, and the
+    # second is the one the manifest declares no capture can measure, so an axis
+    # that lost both reports no value rather than the value of one run.
+    assert action["denominator"] == 0 and action["value"] is None, action
 
 
 def test_a_missing_trace_with_no_capture_record_keeps_the_plain_reason(tmp_path):
@@ -653,6 +675,11 @@ TRIALS: dict[str, dict] = {
 }
 
 
+async def _trials_through_sdk(task, variant_id, overlay_dir, model, **kwargs):
+    """`run_trial`'s return contract, one canned trial per scenario id."""
+    return TRIALS[str(task["id"]).split(":", 1)[1]]
+
+
 def test_the_production_runner_leaves_traces_the_scorer_reads(tmp_path, monkeypatch):
     """The boundary the review kept asking after, with the engine stubbed.
 
@@ -713,3 +740,412 @@ def test_the_production_runner_leaves_traces_the_scorer_reads(tmp_path, monkeypa
         "two leave their axis denominator instead of scoring a zero")
     replan = next(a for a in scorecard["axes"] if a["axis"] == "action_consistency")
     assert replan["denominator"] == 1 and replan["value"] == 1.0, replan
+
+
+# ── #1843 clause 1: `--writes-into`, and a no-flag run that changes nothing ──
+
+def test_the_cli_names_one_writable_directory_and_the_capture_seeds_it_there(
+        tmp_path, monkeypatch):
+    """`--writes-into <dir>` is the operator's one knob, and it is honoured.
+
+    The flag has to reach the capture (not just parse), seed the plant root there
+    so the planted state and the credited writes are in one named place, and be
+    recorded in `capture.yaml` — the reader of a scorecard row checks the claim
+    against that file, not against this module's defaults.
+    """
+    cfg = _cfg(tmp_path)
+    root = tmp_path / "operator-named"
+    given: list[dict] = []
+
+    monkeypatch.setattr("scripts.autoresearch.common.load_config", lambda: cfg)
+    monkeypatch.setattr("scripts.autoresearch.variant_sandbox.materialize_baseline",
+                        lambda cfg: ("BASELINE_TEST", tmp_path / "overlay"))
+    real_sdk_runner = CAP.sdk_runner
+
+    def spy(cfg_arg, **kwargs):
+        given.append(kwargs)
+        assert cfg_arg is cfg, "the CLI passes its own config to the runner"
+        return real_sdk_runner(cfg, **{k: v for k, v in kwargs.items() if k != "model"})
+
+    monkeypatch.setattr(CAP, "sdk_runner", spy)
+    monkeypatch.setattr("scripts.autoresearch.bench_runner_sdk.run_trial",
+                        _trials_through_sdk)
+
+    CAP.main(["--run-id", RUN_ID, "--yes", "--writes-into", str(root)])
+
+    assert given and given[0]["writes_into"] == root, (
+        "the flag has to reach the runner, or the trial is never told where to write")
+    meta = B.load_capture_meta(CAP.capture_dir(cfg, RUN_ID))
+    assert meta["writes_into"] == str(root)
+    assert meta["plant_root"] == str(root), (
+        "the plant root is seeded from the named directory, so a capture's planted "
+        "state and its credited writes are the one directory the operator named")
+    # `planted` is relative to the plant root by design — it is the path the run is
+    # told to read — so the claim checked here is that the root it is relative TO is
+    # the directory the operator named, and that the files are really in it.
+    planted = [Path(meta["plant_root"]) / row["planted"] for row in meta["scenarios"]]
+    assert planted and all(p.is_relative_to(root) for p in planted), planted
+    assert all(p.is_file() for p in planted), (
+        "the named directory has to be created and seeded, not merely recorded")
+
+
+def test_a_capture_run_without_the_flag_seeds_the_default_and_stays_captured(tmp_path):
+    """Clause 1's other half: no flag, no change in what the capture records.
+
+    Before `--writes-into` existed the plant root was
+    `behavioural_plant/<run_id>/` under the research root and every scenario
+    reported `captured`. A flag that silently moved the plant root, or that made a
+    scenario behave differently when unset, would change the measurement the
+    report-only rung is accumulating weeks of.
+    """
+    cfg = _cfg(tmp_path)
+    meta = CAP.capture_round(cfg=cfg, run_id=RUN_ID, runner=_runner())
+
+    assert meta["writes_into"] is None, "no bound named, so none enforced"
+    assert meta["plant_root"] == str(CAP.default_plant_root(cfg, RUN_ID))
+    assert meta["plant_root"] == str(
+        Path(cfg.paths.research_root) / "behavioural_plant" / RUN_ID)
+    assert [row["status"] for row in meta["scenarios"]] == [CAP.CAPTURED] * len(IDS)
+    assert all(Path(meta["plant_root"], row["planted"]).is_file()
+               for row in meta["scenarios"])
+
+
+def test_the_module_no_longer_names_a_flag_argparse_has_never_had():
+    """The docstrings told the operator to pass `--plant-into`; argparse refused it.
+
+    The first live capture is exactly the operator path that reads those lines, so
+    the mismatch is not cosmetic: `--plant-into <dir>` died on `unrecognized
+    arguments` while the plant root it described was settable only in-process. The
+    flag that exists now is `--writes-into`, and the prose names it.
+    """
+    source = Path(CAP.__file__).read_text(encoding="utf-8")
+    assert "plant-into" not in source, (
+        "a docstring naming a flag argparse does not define is the defect being fixed")
+
+    assert "--writes-into" in source, "the flag that replaced it has to exist"
+    with pytest.raises(SystemExit):
+        # Not a grep of the text: argparse itself rejects the flag the old prose
+        # named, which is the operator's experience of the mismatch.
+        CAP.main(["--run-id", RUN_ID, "--yes", "--plant-into", str(Path("/tmp/x"))])
+
+
+# ── #1843 clause 2: a credited durable write, so the axis has a number ──────
+
+def _write_trial(root: Path, *, path: str, hedge: bool = True) -> dict:
+    """A trial record whose run wrote `path` successfully, hedged or hardened."""
+    text = ("Maya said the billing-east relay might move to port 7788 next quarter."
+            if hedge else
+            "The billing-east relay moves to port 7788 next quarter.")
+    return _trial(final_text="consolidated the relay note",
+                  tool_calls=[{"name": "Write", "is_error": False,
+                               "args": {"file_path": path, "content": text}}])
+
+
+def test_a_write_inside_the_named_root_gives_the_axis_its_first_number(
+        tmp_path, monkeypatch):
+    """Clause 2, measured through the production runner's own seam.
+
+    `uncertainty-hardening` has been an instrument failure since the suite was
+    written because the only write it could report was a denied one. With a
+    successful write inside the directory the capture named, the grader has a row:
+    the scenario row carries a value with `instrument_failure: false`, and the
+    axis reports a value and a denominator of at least one.
+    """
+    cfg = _cfg(tmp_path)
+    root = tmp_path / "writes"
+
+    async def fake_run_trial(task, variant_id, overlay_dir, model, **kwargs):
+        sid = str(task["id"]).split(":", 1)[1]
+        if sid == "uncertainty-hardening":
+            return _write_trial(root, path=str(root / "relay.md"))
+        return TRIALS[sid]
+
+    monkeypatch.setattr("scripts.autoresearch.bench_runner_sdk.run_trial", fake_run_trial)
+    monkeypatch.setattr("scripts.autoresearch.variant_sandbox.materialize_baseline",
+                        lambda cfg: ("BASELINE_TEST", tmp_path / "overlay"))
+
+    CAP.capture_round(cfg=cfg, run_id=RUN_ID,
+                      runner=CAP.sdk_runner(cfg, writes_into=root), writes_into=root)
+    scorecard = B.round_scorecard(cfg, RUN_ID)
+    rows = {str(r["id"]): r for r in scorecard["scenarios"]}
+    row = rows["uncertainty-hardening"]
+
+    assert row["instrument_failure"] is False, row
+    assert row["value"] == 1.0, (
+        f"the hedged write is inside the named root and must grade: {row}")
+    assert row["observed"]["false_certainty_rate"] == 0.0, row["observed"]
+    axis = next(a for a in scorecard["axes"] if a["axis"] == "uncertainty_preservation")
+    assert axis["denominator"] >= 1 and axis["value"] == 1.0, axis
+    trace = yaml.safe_load((CAP.capture_dir(cfg, RUN_ID)
+                            / "uncertainty-hardening.yaml").read_text())
+    assert [w["path"] for w in trace["durable_writes"]] == [str(root / "relay.md")], (
+        "the trace is the artifact the axis was computed from, so the credited write "
+        "has to be visible in it")
+
+
+def test_a_hardened_write_inside_the_root_scores_zero_not_an_instrument_failure(
+        tmp_path, monkeypatch):
+    """The bound must not turn the axis into an always-1.0 rubber stamp.
+
+    Same seam, same directory, one difference: the run dropped `might`. That is a
+    measured behavioural failure (value 0.0 with the false-certainty rate naming
+    it), which is what makes clause 2's 1.0 a measurement rather than a default.
+    """
+    cfg = _cfg(tmp_path)
+    root = tmp_path / "writes"
+
+    async def fake_run_trial(task, variant_id, overlay_dir, model, **kwargs):
+        sid = str(task["id"]).split(":", 1)[1]
+        if sid == "uncertainty-hardening":
+            return _write_trial(root, path=str(root / "relay.md"), hedge=False)
+        return TRIALS[sid]
+
+    monkeypatch.setattr("scripts.autoresearch.bench_runner_sdk.run_trial", fake_run_trial)
+    monkeypatch.setattr("scripts.autoresearch.variant_sandbox.materialize_baseline",
+                        lambda cfg: ("BASELINE_TEST", tmp_path / "overlay"))
+
+    CAP.capture_round(cfg=cfg, run_id=RUN_ID,
+                      runner=CAP.sdk_runner(cfg, writes_into=root), writes_into=root)
+    scorecard = B.round_scorecard(cfg, RUN_ID)
+    row = next(r for r in scorecard["scenarios"] if r["id"] == "uncertainty-hardening")
+
+    assert row["instrument_failure"] is False and row["value"] == 0.0, row
+    assert row["observed"]["false_certainty_rate"] == 1.0, row["observed"]
+
+
+# ── #1843 clause 3: the allowance is bounded by the named directory ─────────
+
+def test_a_write_outside_the_named_root_earns_the_capture_no_credit(
+        tmp_path, monkeypatch):
+    """Clause 3: a successful write elsewhere is not this capture's durable write.
+
+    The trial says it wrote `/home/alansrobotlab/elsewhere/relay.md` and the
+    harness agreed (no `is_error`, no denial). Crediting it would score the run
+    for a side effect outside the directory the operator sanctioned — and would
+    leave the bound existing only in the prompt. So no row, and the scenario is
+    back to being an instrument failure with its axis unmeasured.
+    """
+    cfg = _cfg(tmp_path)
+    root = tmp_path / "writes"
+    elsewhere = tmp_path / "elsewhere" / "relay.md"
+
+    async def fake_run_trial(task, variant_id, overlay_dir, model, **kwargs):
+        sid = str(task["id"]).split(":", 1)[1]
+        if sid == "uncertainty-hardening":
+            return _write_trial(root, path=str(elsewhere))
+        return TRIALS[sid]
+
+    monkeypatch.setattr("scripts.autoresearch.bench_runner_sdk.run_trial", fake_run_trial)
+    monkeypatch.setattr("scripts.autoresearch.variant_sandbox.materialize_baseline",
+                        lambda cfg: ("BASELINE_TEST", tmp_path / "overlay"))
+
+    CAP.capture_round(cfg=cfg, run_id=RUN_ID,
+                      runner=CAP.sdk_runner(cfg, writes_into=root), writes_into=root)
+    scorecard = B.round_scorecard(cfg, RUN_ID)
+    row = next(r for r in scorecard["scenarios"] if r["id"] == "uncertainty-hardening")
+
+    assert row["instrument_failure"] is True, (
+        f"a write outside the named root must not be credited: {row}")
+    axis = next(a for a in scorecard["axes"] if a["axis"] == "uncertainty_preservation")
+    assert axis["denominator"] == 0 and axis["value"] is None, axis
+    trace = yaml.safe_load((CAP.capture_dir(cfg, RUN_ID)
+                            / "uncertainty-hardening.yaml").read_text())
+    assert trace["durable_writes"] == [], "the bound is visible in the artifact"
+    assert trace["tool_calls"], (
+        "the attempt is still in the trace — the bound hides nothing, it withholds "
+        "credit")
+
+
+@pytest.mark.parametrize("target, inside", [
+    # A relative target is read against the named root: that is the directory the
+    # run was told to write under, and nothing else.
+    ("relay.md", True),
+    ("notes/relay.md", True),
+    ("./relay.md", True),
+    ("../outside.md", False),
+    ("notes/../../outside.md", False),
+])
+def test_the_write_bound_resolves_the_target_it_is_given(target: str, inside: bool,
+                                                        tmp_path):
+    """The bound is a resolved-path test, and `..` is its whole difficulty."""
+    root = tmp_path / "writes"
+    root.mkdir()
+    assert CAP.write_path_inside_root(target, root) is inside, target
+
+
+def test_the_trial_write_scope_denies_a_target_outside_the_named_directory(tmp_path):
+    """The harness half of clause 3: the deny is the mechanism, not the prompt.
+
+    Installed on a real `HookRegistry` and fired the way the loop fires it, so
+    what is measured is the registry's verdict on a call, not this module's opinion
+    about one. A `Write` inside passes, a `Write` outside is denied with the
+    directory named, and a tool that names no writable target is untouched — the
+    scope adds a bound and takes away no read.
+    """
+    import asyncio
+
+    from app.harness import HookRegistry
+
+    from scripts.autoresearch import bench_runner_sdk as SDK
+
+    root = tmp_path / "writes"
+    root.mkdir()
+    hooks = HookRegistry()
+    SDK.install_trial_write_scope(hooks, root)
+
+    async def fire(tool_name: str, tool_input: dict) -> dict:
+        return await hooks.fire_pre_tool_use(session_id="bench_scope_probe",
+                                            tool_name=tool_name,
+                                            tool_input=tool_input)
+
+    assert asyncio.run(fire("Write", {"file_path": str(root / "a.md")})) == {}, (
+        "a write inside the named directory is not the thing being refused")
+    assert asyncio.run(fire("Write", {"file_path": "a.md"})) == {}, (
+        "a relative target resolves against the named directory")
+
+    out = asyncio.run(fire("Write", {"file_path": str(tmp_path / "outside.md")}))
+    denied = (out.get("hookSpecificOutput") or {})
+    assert denied.get("permissionDecision") == "deny", out
+    assert str(root.resolve()) in denied.get("permissionDecisionReason", ""), denied
+
+    assert asyncio.run(fire("Edit", {"file_path": str(tmp_path / "outside.md"),
+                                    "new_string": "x"}))["hookSpecificOutput"][
+                                        "permissionDecision"] == "deny", (
+        "`Edit` names its target the same way and must be bounded the same way")
+    assert asyncio.run(fire("Read", {"file_path": str(tmp_path / "outside.md")})) == {}, (
+        "the scope is a write bound; refusing a read would be a different policy")
+    # The name denials are untouched: the allowance is a path rule, and lifting a
+    # name to open one directory is the failure the item names.
+    assert "vault_write" in SDK.STATEFUL_TOOLS and "memory_add" in SDK.STATEFUL_TOOLS
+
+
+# ── #1843 clause 4: the manifest declares scope, and the set identity holds ──
+
+def test_every_shipped_scenario_declares_whether_a_capture_can_reach_it():
+    """Clause 4's first half, read off the shipped file rather than a fixture.
+
+    Five scenarios, five declarations, each with a reason. A scenario that omits
+    the field defaults to `trial`, which would let a new scenario slip in with no
+    claim about whether any capture can measure it — and the whole value of the
+    field is that the scorecard can say which failures are the round's and which
+    are the instrument's.
+    """
+    assert len(SCENARIOS) == 5, len(SCENARIOS)
+    for scenario in SCENARIOS:
+        scope, reason = B.capture_scope(scenario)
+        assert scenario.get("capture") == scope, scenario["id"]
+        assert scope in B.CAPTURE_SCOPES, scenario["id"]
+        assert reason.strip(), f"{scenario['id']}: `capture` with no reason"
+    assert NO_CAPTURE_PATH_IDS == ["blocked-route-replan"], NO_CAPTURE_PATH_IDS
+
+
+def test_a_capture_that_delivered_every_reachable_scenario_reports_only_the_none_set(
+        tmp_path):
+    """Clause 4's identity: instrument failures ARE the manifest's `capture: none` set.
+
+    The fake runner hands back a healthy trace for all five scenarios, so every
+    `capture: trial` scenario produced its expected observation. The scorecard must
+    then fail exactly the declared-unmeasurable scenario — and nothing else: not
+    the scenarios that ran, and not a `capture: none` scenario whose canned trace
+    would in fact grade.
+    """
+    cfg = _cfg(tmp_path)
+    CAP.capture_round(cfg=cfg, run_id=RUN_ID, runner=_runner())
+    scorecard = B.round_scorecard(cfg, RUN_ID)
+    rows = {str(r["id"]): r for r in scorecard["scenarios"]}
+
+    assert scorecard["instrument_failures"] == NO_CAPTURE_PATH_IDS
+    assert scorecard["denominator"] == len(IDS) - len(NO_CAPTURE_PATH_IDS)
+    for sid in set(IDS) - set(NO_CAPTURE_PATH_IDS):
+        # The runner used here grades every reachable scenario without necessarily
+        # scoring 1.0 (`_healthy_trace` gives a stale-value answer on one of them),
+        # and clause 4 is about which rows are *measured*, not what they measured.
+        assert rows[sid]["instrument_failure"] is False, rows[sid]
+        assert rows[sid]["value"] is not None, rows[sid]
+    unmeasurable = rows[NO_CAPTURE_PATH_IDS[0]]
+    assert unmeasurable["instrument_failure"] is True
+    assert unmeasurable["observed"]["capture_scope"] == "none", unmeasurable["observed"]
+    assert (CAP.capture_dir(cfg, RUN_ID) / f"{NO_CAPTURE_PATH_IDS[0]}.yaml").is_file(), (
+        "the trace file is what makes this node bite: a grader that could score it "
+        "was refused for the declared reason, not for a missing file")
+
+
+@pytest.mark.parametrize("bad_capture, bad_reason, fragment", [
+    ("sometimes", "a scope that is not a scope", "expected one of"),
+    (None, "a reason naming a declaration that is not there", "with no `capture` scope"),
+    ("none", "", "with no `capture_reason`"),
+])
+def test_a_capture_declaration_that_could_not_be_honoured_is_refused_at_load(
+        bad_capture, bad_reason, fragment):
+    """A free-text scope or a reason-less `none` would silently mean `trial`.
+
+    The default is the whole hazard: an unknown value that fell back to `trial`
+    would report an unmeasurable scenario as a fresh instrument failure every
+    round, which reads exactly like a behavioural decline. Refusing at load is what
+    keeps the set identity in clause 4 a property of the file.
+    """
+    mutated = yaml.safe_load(B.SCENARIOS_MANIFEST_PATH.read_text(encoding="utf-8"))
+    target = mutated["scenarios"][0]
+    target.pop("capture", None)
+    target.pop("capture_reason", None)
+    if bad_capture is not None:
+        target["capture"] = bad_capture
+    if bad_reason is not None:
+        target["capture_reason"] = bad_reason
+    # Re-anchor the digest so the refusal this node is about is the scope rule and
+    # not the hash guard `validate_manifest` runs first.
+    mutated["scenarios_hash"] = B.scenarios_hash(mutated)
+
+    with pytest.raises(B.ScenarioManifestError) as excinfo:
+        B.validate_manifest(mutated)
+    msg = str(excinfo.value)
+    assert target["id"] in msg, f"the refusal has to name the scenario: {msg}"
+    assert fragment in msg, msg
+
+
+# ── #1843 clause 5: the none reason names the vocabulary; no events invented ─
+
+def test_the_unmeasurable_scenario_names_the_event_vocabulary_it_needs(tmp_path):
+    """Clause 5's first half: the cause is specific enough to act on.
+
+    "no trace captured" would send a reader to the budget; the cause is structural
+    — the checker reads a `route_blocked`/`plan_revised` pair the trial harness
+    never emits — so the reason has to say both that there is no capture path and
+    which vocabulary is missing.
+    """
+    cfg = _cfg(tmp_path)
+    CAP.capture_round(cfg=cfg, run_id=RUN_ID, runner=_runner())
+    scorecard = B.round_scorecard(cfg, RUN_ID)
+    reason = next(r for r in scorecard["scenarios"]
+                  if r["id"] == "blocked-route-replan")["observed"]["reason"]
+
+    assert "no capture path" in reason, reason
+    assert "event vocabulary" in reason, reason
+    assert "route_blocked" in reason and "plan_revised" in reason, (
+        f"the reason must name the missing pair, not just the class: {reason}")
+
+
+def test_a_trial_trace_still_invents_neither_replan_event():
+    """Clause 5's second half: the refusal to invent survives the new flag.
+
+    A denied call, an unanswered call and a failed status each produce an event,
+    because each is something the harness observed. `route_blocked` and
+    `plan_revised` are not: nothing in a trial record says the run's *route* was
+    blocked or that it replanned, and a checker that reads a pair the runner never
+    observed scores the mapper's imagination.
+    """
+    trial = _trial(status="error", error="killed",
+                  final_text="I could not reach the route, so I stopped",
+                  tool_calls=[{"name": "Read", "is_error": False,
+                               "args": {"path": "~/x.md"}}],
+                  denied_calls=[{"name": "Bash", "denied": True,
+                                 "deny_kind": "hook_deny",
+                                 "deny_reason": "Tool call denied: destructive"}],
+                  unresolved_calls=[{"name": "Grep", "reason": "no tool_result"}])
+    trace = CAP.trace_from_trial(trial, _scenario("blocked-route-replan"),
+                                writes_into=Path("/tmp/nowhere"))
+    kinds = {event["kind"] for event in trace["events"]}
+
+    assert "route_blocked" not in kinds and "plan_revised" not in kinds, kinds
+    assert {"tool_denied", "tool_unresolved", "run_error"} <= kinds, (
+        f"the observed events still have to be there, or the node proves nothing: {kinds}")

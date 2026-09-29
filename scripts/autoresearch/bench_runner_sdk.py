@@ -203,6 +203,96 @@ STATEFUL_TOOLS: frozenset[str] = frozenset({
     "automod_vault_revert",
 })
 
+# #1843: the trial's mutating tools that name their target as a path argument.
+# `Write`/`Edit` are the whole list because they are deliberately NOT in
+# `STATEFUL_TOOLS` — a runtime-routed trial can already call them, which is why a
+# behavioural capture's only writable surface is theirs — and their write surface
+# is bounded by this hook rather than by a name. `vault_write`/`memory_add` are
+# not listed here and no directory opens them: they are refused by name through
+# `STATEFUL_TOOLS` above and again by the aggregator sandbox
+# (`agent_mcp/_tool_sandbox.py:refusal`), and this module's whole contract is that
+# an allowance is expressed as a narrower path, never as a lifted name.
+WRITE_SCOPED_TOOLS: dict[str, tuple[str, ...]] = {
+    "Write": ("file_path",),
+    "Edit": ("file_path",),
+}
+
+
+def write_scope_denial(tool_name: str, tool_input: dict[str, Any],
+                       writes_into: Path) -> str:
+    """'' when this call may run; the reason it may not, otherwise (#1843).
+
+    Resolved, never string-matched, for the reason #582 learned: `..`, a symlinked
+    parent and a `~` all land on the inode the rule has to speak about. A relative
+    target is read as relative to `writes_into`, because that directory is what
+    the trial was told to write under; an absolute target is the run's own claim,
+    so `~/notes.md` or `/tmp/x` is outside and is refused.
+
+    A tool with no usable path argument is refused too: a mutation whose target
+    cannot be read cannot be shown to be inside anything, and the alternative —
+    letting it through and trusting the prompt — is the deny that does not exist.
+    """
+    fields = WRITE_SCOPED_TOOLS.get(tool_name)
+    if fields is None:
+        return ""
+    base = Path(writes_into).resolve()
+    checked = False
+    for field in fields:
+        raw = tool_input.get(field)
+        if raw is None or str(raw).strip() == "":
+            continue
+        checked = True
+        target = Path(str(raw)).expanduser()
+        resolved = (base / target if not target.is_absolute() else target).resolve()
+        if not resolved.is_relative_to(base):
+            return (f"`{resolved}` is outside the capture's writable directory "
+                    f"`{base}` (#1843 trial write scope)")
+    if not checked:
+        return (f"`{tool_name}` named no target path, so the capture cannot show the "
+                f"write lands inside `{base}` (#1843 trial write scope)")
+    return ""
+
+
+def install_trial_write_scope(hooks: Any, writes_into: Path) -> None:
+    """Bound one trial's path-naming mutations to `writes_into`.
+
+    A second matcherless hook on the trial's own registry, beside the corpus read
+    deny (`app/harness/bench_corpus.py:install_bench_corpus_hook`), and installed
+    by the runtime-routed bench runner only. It is the denial channel rather than
+    a tool-list change for the reason the item states: `disallowed_tools` removes
+    a name from the model's view with no path argument in that channel, so
+    permitting a write *under one directory* through it would permit it
+    *everywhere*. A refusal here reaches `denied_calls` through the harness's
+    `Tool call denied:` marker (`app/harness/loop.py`), so the capture records the
+    attempt instead of silently losing it.
+    """
+    base = Path(writes_into)
+
+    async def _write_scope_cb(
+        input_data: dict[str, Any], _tool_use_id: str | None, _ctx: Any,
+    ) -> dict[str, Any]:
+        tool_name = input_data.get("tool_name", "")
+        if tool_name not in WRITE_SCOPED_TOOLS:
+            return {}
+        tool_input = input_data.get("tool_input") or {}
+        why = write_scope_denial(tool_name,
+                                 tool_input if isinstance(tool_input, dict) else {},
+                                 base)
+        if not why:
+            return {}
+        logger.warning("[bench_write_scope] denied %s session=%s: %s",
+                       tool_name, input_data.get("session_id"), why)
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": why,
+            }
+        }
+
+    hooks.add_pre_tool_use(None, _write_scope_cb, fail_closed=True)
+
+
 # How to tell "the model tried and the harness refused" from "it ran".
 # Matched against the tool_result content the harness synthesises in
 # app/harness/loop.py — these strings are the deny/error channel.
@@ -309,6 +399,7 @@ def build_options(
     hooks: Any | None = None,
     priority: int = AUTORESEARCH_PRIORITY,
     system_append: str = "",
+    writes_into: Path | str | None = None,
 ) -> Any:
     """Build the `RunOptions` for one trial.
 
@@ -323,6 +414,14 @@ def build_options(
     operator-level tool policy a constraint-conflict task plants, so the
     constraint sits where a real one would rather than in the user's message.
     Empty (the default, and every existing caller) leaves the prompt as built.
+
+    `writes_into` (#1843) bounds the trial's path-naming mutations to one
+    operator-named directory. Unset — the default, and every existing caller
+    including the whole bench fleet — installs nothing, so a bench trial's write
+    surface is exactly what it was before the flag existed. Set, it is an extra
+    deny, never a permission: `STATEFUL_TOOLS` is still merged into
+    `disallowed_tools` below, and a tool the trial can call is refused when its
+    target resolves outside that directory.
     """
     from app.config import _get_model_env, _resolve_model_name
     from app.harness import HookRegistry, RunOptions, install_default_safety_hook
@@ -343,6 +442,12 @@ def build_options(
     # that is not Bash and is shared with production turns, where the corpus is
     # ordinary reading (triage runs, autocode rounds, the bench miner).
     install_bench_corpus_hook(hooks)
+    if writes_into is not None:
+        # #1843: bounded after the corpus deny and before anything runs, so the
+        # directory is the only place this trial can put a file. Not conditional on
+        # `sandbox_stateful_tools`: that switch governs the *name* denials, and this
+        # one governs paths — a caller that un-sandboxes names still gets the bound.
+        install_trial_write_scope(hooks, Path(writes_into))
 
     disallowed = list(_get_disallowed_tools(plan_mode=False))
     if sandbox_stateful_tools:
@@ -502,10 +607,13 @@ async def run_trial(
     extra_disallowed: list[str] | None = None,
     probe_prompt: str = "",
     system_append: str = "",
+    writes_into: Path | str | None = None,
 ) -> dict[str, Any]:
     """One (variant × task) trial through the harness. Returns a trace.
 
-    `system_append` is forwarded to `build_options` (#678's planted policy).
+    `system_append` is forwarded to `build_options` (#678's planted policy), and
+    so is `writes_into` (#1843): the trial's write bound, which a behavioural
+    capture names and the bench fleet never does.
 
     `probe_prompt` is the planted positive control (#651): text appended to the
     task's own prompt whose only job is to make the trial go looking for how it

@@ -1246,3 +1246,76 @@ def test_record_is_what_appends_the_row_and_not_the_trial_itself(monkeypatch, ca
 
     rows = _ledger_rows(ledger)
     assert len(rows) == 1 and re.match(r"^CLI_", rows[0]["round_id"]), rows
+
+
+# ---------------------------------------------------------------------------
+# #1843: `writes_into` is a bound on the trial's own write surface, installed
+# where the trial's client is built. Two things have to hold at once, and only a
+# test across this seam shows both: the bound is installed for the caller that
+# names a directory, and the name denials are byte-identical for the caller that
+# does — the whole point of routing the allowance through a PreToolUse deny is
+# that opening one directory never un-forbids a tool everywhere.
+
+
+def _pre_hook_count(options) -> int:
+    return len(options.hooks._pre)
+
+
+def test_a_trial_built_without_a_write_bound_is_the_trial_built_today(monkeypatch):
+    """The default of a new `build_options` argument must change nothing.
+
+    Every bench trial in the fleet — the corpus, the grids, the shadow arms —
+    calls this without a write bound. A default that installed a hook, or widened
+    or narrowed `disallowed_tools`, would move a score for reasons nobody edited.
+    """
+    _patch_off_vault(monkeypatch)
+    plain = build_options(model="primary", overlay_dir=Path("/overlay"),
+                          session_id="bench_test_1", max_agent_turns=7)
+    before = _pre_hook_count(plain)
+
+    bounded = build_options(model="primary", overlay_dir=Path("/overlay"),
+                            session_id="bench_test_2", max_agent_turns=7,
+                            writes_into=None)
+
+    assert _pre_hook_count(bounded) == before, (
+        "`writes_into=None` installs nothing beyond what every trial already gets")
+    assert set(bounded.disallowed_tools) == set(plain.disallowed_tools), (
+        "the name denials cannot move with a flag this caller never passed")
+
+
+def test_a_trial_built_with_a_write_bound_denies_elsewhere_and_keeps_name_denials(
+        monkeypatch, tmp_path):
+    """Both halves of the allowance, measured on the object the trial runs with.
+
+    Installed: a `Write` aimed outside the named directory is denied by the built
+    client's own registry. Intact: `vault_write` and the rest of `STATEFUL_TOOLS`
+    are still disallowed, which is the difference between a bound and a loophole.
+    """
+    import asyncio
+
+    _patch_off_vault(monkeypatch)
+    root = tmp_path / "writes"
+    root.mkdir()
+    plain = build_options(model="primary", overlay_dir=Path("/overlay"),
+                          session_id="bench_test_3", max_agent_turns=7)
+    opts = build_options(model="primary", overlay_dir=Path("/overlay"),
+                         session_id="bench_test_4", max_agent_turns=7,
+                         writes_into=root)
+
+    assert _pre_hook_count(opts) == _pre_hook_count(plain) + 1, (
+        "the scope is one more PreToolUse gate on the trial's own registry")
+    for tool in ("memory_add", "fact_add", "vault_write", "backlog_write_task",
+                 "email_send"):
+        assert tool in opts.disallowed_tools, (
+            f"naming a writable directory must not lift the denial of {tool}")
+
+    async def fire(tool_name: str, tool_input: dict) -> dict:
+        return await opts.hooks.fire_pre_tool_use(session_id="bench_test_4",
+                                                 tool_name=tool_name,
+                                                 tool_input=tool_input)
+
+    inside = asyncio.run(fire("Write", {"file_path": str(root / "note.md")}))
+    assert inside == {}, inside
+    outside = asyncio.run(fire("Write", {"file_path": str(tmp_path / "elsewhere.md")}))
+    assert (outside.get("hookSpecificOutput") or {}).get("permissionDecision") == "deny", (
+        outside)

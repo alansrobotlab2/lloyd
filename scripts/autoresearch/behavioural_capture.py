@@ -93,8 +93,9 @@ def default_plant_root(cfg: Any, run_id: str) -> Path:
     where the harness reads, which is a real write into a live tree. The default
     therefore plants into `behavioural_plant/<run_id>/` under the research root:
     the pipeline runs end to end and the record says plainly that the scenario
-    state was planted somewhere the model was not looking. Point `--plant-into`
-    at a vault for a measurement that reproduces the named failure.
+    state was planted somewhere the model was not looking. `--writes-into`
+    (#1843) replaces this with a directory the operator named, which is also the
+    one directory a durable write from the run is credited inside.
     """
     return Path(cfg.paths.research_root) / "behavioural_plant" / run_id
 
@@ -193,7 +194,8 @@ def capture_round(*, cfg: Any, run_id: str, runner: Callable[[dict[str, Any]], d
                   plant_root: Path | None = None,
                   budget_seconds: float = DEFAULT_CAPTURE_BUDGET_SECONDS,
                   clock: Callable[[], float] = time.monotonic,
-                  engine: str = "injected") -> dict[str, Any]:
+                  engine: str = "injected",
+                  writes_into: Path | None = None) -> dict[str, Any]:
     """Run every scenario once, write its trace, and account for the rest.
 
     Returns the capture record — the same dict written to `capture.yaml` — with
@@ -211,16 +213,25 @@ def capture_round(*, cfg: Any, run_id: str, runner: Callable[[dict[str, Any]], d
     manifest = manifest or behavioural.load_manifest()
     out = capture_dir(cfg, run_id)
     out.mkdir(parents=True, exist_ok=True)
-    plant_root = Path(plant_root) if plant_root is not None else default_plant_root(cfg, run_id)
+    # #1843: one operator-named directory serves both halves of a capture — the
+    # state planted for the run to discover, and the only place a durable write it
+    # makes is credited. Neither is derived from the other, so a caller that wants
+    # a separate plant root passes `plant_root` and keeps the write bound.
+    writes_into = Path(writes_into) if writes_into is not None else None
+    if plant_root is None:
+        plant_root = writes_into if writes_into is not None else default_plant_root(cfg, run_id)
+    plant_root = Path(plant_root)
     started = clock()
     rows: list[dict[str, Any]] = []
 
     for scenario in manifest["scenarios"]:
         sid = str(scenario["id"])
+        scope = behavioural.capture_scope(scenario)[0]
         elapsed = clock() - started
         if elapsed >= budget_seconds:
             rows.append({"id": sid, "axis": scenario.get("axis"),
                          "checker": scenario.get("checker"),
+                         "capture": scope,
                          "status": SKIPPED_BUDGET, "seconds": 0.0,
                          "trace": None,
                          "reason": f"capture budget of {budget_seconds:g} s exhausted "
@@ -229,6 +240,7 @@ def capture_round(*, cfg: Any, run_id: str, runner: Callable[[dict[str, Any]], d
             continue
         row: dict[str, Any] = {"id": sid, "axis": scenario.get("axis"),
                               "checker": scenario.get("checker"),
+                              "capture": scope,
                               "status": CAPTURED, "trace": f"{sid}.yaml"}
         began = clock()
         try:
@@ -264,6 +276,13 @@ def capture_round(*, cfg: Any, run_id: str, runner: Callable[[dict[str, Any]], d
         "budget_seconds": budget_seconds,
         "elapsed_seconds": elapsed,
         "budget_exhausted": elapsed >= budget_seconds,
+        # Where the state was planted, and the one directory a durable write from
+        # the run is credited inside (None: no bound was named, so none was
+        # enforced). Both are recorded because a reader of a scorecard row has to
+        # be able to check the claim against the file system, not against this
+        # module's defaults (#1843 clause 1).
+        "plant_root": str(plant_root),
+        "writes_into": None if writes_into is None else str(writes_into),
         "suite": manifest.get("suite"),
         "scenarios_hash": manifest.get("_scenarios_hash"),
         "scenarios": rows,
@@ -302,13 +321,38 @@ DURABLE_WRITE_ARGS: dict[str, tuple[str, str]] = {
 }
 
 
-def durable_write_row(call: dict[str, Any]) -> dict[str, str] | None:
+def write_path_inside_root(path: str, root: Path) -> bool:
+    """Whether a write target resolves inside `root` (#1843 clause 3).
+
+    Resolved, never string-matched, for the reason #582 learned: `..`, a
+    symlinked parent and a `~` all land on the inode the rule has to speak about.
+    A relative target is read as relative to `root`, because `root` is what the
+    run was told to write under — the prompt in `sdk_runner` names that directory
+    and nothing else — while an absolute target is taken as the run's own claim,
+    so a `~/notes.md` or `/tmp/x` is outside and is not credited.
+    """
+    p = Path(str(path)).expanduser()
+    base = Path(root).resolve()
+    target = (base / p if not p.is_absolute() else p).resolve()
+    return target.is_relative_to(base)
+
+
+def durable_write_row(call: dict[str, Any], *,
+                      writes_into: Path | None = None) -> dict[str, str] | None:
     """One successful write-shaped call as a `durable_writes` row, or None.
 
     A call the harness denied, or that came back `is_error`, wrote nothing. A
     grader that reads durable writes is asking what the run put on disk, so
     filing a refused write as one would hand the run credit for a record it
     never made — the exact false positive this suite exists to make impossible.
+
+    `writes_into` (#1843) is the operator-named directory a capture is allowed to
+    write under. When it is set, a successful write outside it is not a durable
+    write of this capture either: the allowance is bounded by the named directory,
+    and crediting a write somewhere else would score the run for a side effect the
+    capture never sanctioned. Unset, the row is whatever the runner reports — a
+    runner that wrote something outside any bound is the runner's own business,
+    and no capture asked for that.
     """
     if call.get("denied") or call.get("is_error"):
         return None
@@ -321,10 +365,13 @@ def durable_write_row(call: dict[str, Any]) -> dict[str, str] | None:
     path, text = str(args.get(spec[0]) or ""), str(args.get(spec[1]) or "")
     if not path or not text:
         return None
+    if writes_into is not None and not write_path_inside_root(path, writes_into):
+        return None
     return {"path": path, "text": text}
 
 
-def trace_from_trial(trial: dict[str, Any], scenario: dict[str, Any]) -> dict[str, Any]:
+def trace_from_trial(trial: dict[str, Any], scenario: dict[str, Any], *,
+                     writes_into: Path | None = None) -> dict[str, Any]:
     """A trial record as the whole-run trace the graders read.
 
     `scenario_id` comes from the SCENARIO, never from the trial: the trial knows
@@ -343,12 +390,15 @@ def trace_from_trial(trial: dict[str, Any], scenario: dict[str, Any]) -> dict[st
     * `answers` — the trial's `final_text` when it said anything. The harness
       keeps only the terminal answer, so that is the one row.
     * `durable_writes` — only from successful write-shaped calls, through
-      `durable_write_row`. The bench harness denies the mutating tools, so a
-      capture through `sdk_runner` measures no durable write, and the
-      `uncertainty_preservation` axis reports an instrument failure instead of a
-      score. Pointing a capture at a writable vault is the re-score's decision
-      (#1659's owed item 1), not something this mapper can fake by trusting a
-      refused call.
+      `durable_write_row`, and with `--writes-into` set only from calls whose
+      target resolves inside that directory. Nothing here is invented from a
+      refused call: the harness denies the mutating tools by name
+      (`bench_runner_sdk.STATEFUL_TOOLS`) and the aggregator refuses every
+      state-changing tool in a `bench_` session
+      (`agent_mcp/_tool_sandbox.py:refusal`), so a capture that comes back with no
+      durable write reports the `uncertainty_preservation` axis as an instrument
+      failure rather than a score, and the manifest says which scenarios a
+      capture can reach at all (`capture:` in `scenarios.yaml`).
     * `events` — only what the trial observed: denials, unanswered calls, a
       timed-out or errored run. `route_blocked` and `plan_revised` are NOT
       invented here, because the harness emits no such pair; the scenario that
@@ -393,7 +443,8 @@ def trace_from_trial(trial: dict[str, Any], scenario: dict[str, Any]) -> dict[st
         "captured_by": (f"bench trial ({trial.get('harness') or 'harness'},"
                         f" {trial.get('trial_id') or trial.get('task_id') or '?'},"
                         f" status={status or '?'})"),
-        "durable_writes": [r for r in (durable_write_row(c) for c in calls) if r],
+        "durable_writes": [r for r in (durable_write_row(c, writes_into=writes_into)
+                                       for c in calls) if r],
         "answers": [final_text] if final_text else [],
         "tool_calls": [{"name": str(c.get("name") or ""),
                         "args": (c.get("args") if isinstance(c.get("args"), dict) else {})}
@@ -416,7 +467,8 @@ def trace_from_trial(trial: dict[str, Any], scenario: dict[str, Any]) -> dict[st
 def sdk_runner(cfg: Any, *, model: str | None = None,
                variant_id: str = "behavioural_capture",
                per_task_timeout: int = 300,
-               max_agent_turns: int = 12) -> Callable[[dict[str, Any]], dict]:
+               max_agent_turns: int = 12,
+               writes_into: Path | None = None) -> Callable[[dict[str, Any]], dict]:
     """The one runner that spends GPU: one whole agentic run per scenario.
 
     Builds a baseline overlay (the canonical prompt, no candidate edits — this
@@ -429,15 +481,27 @@ def sdk_runner(cfg: Any, *, model: str | None = None,
     trial record is not a trace: it carries no `scenario_id` (so `load_traces`
     would refuse the whole directory), and it names its observations
     `final_text`/`denied_calls` rather than `answers`/`tool_calls`. Through this
-    runner a capture measures the three scenarios whose evidence is an argument
-    list or an answer — `act-on-known-fact`, `source-retention`,
-    `stale-fact-action` — and reports the other two as instrument failures,
-    because the trial harness denies the mutating tools
-    (`uncertainty-hardening` needs a durable write) and emits no
-    `route_blocked`/`plan_revised` pair (`blocked-route-replan` needs that event
-    vocabulary). Both of those are decisions for the re-score — a writable vault
-    to point `--plant-into` at, and an event source for the replan probe — and an
-    instrument failure that says which is what clause 2 is for.
+    runner a capture measures the scenarios whose evidence is an argument list or
+    an answer — `act-on-known-fact`, `source-retention`, `stale-fact-action` — and
+    the manifest says which of the rest no capture can reach: `blocked-route-replan`
+    is declared `capture: none` because the harness emits no
+    `route_blocked`/`plan_revised` pair and `trace_from_trial` invents neither.
+    `uncertainty-hardening` is `capture: trial` only against a named root: its
+    evidence is a durable write, and a write is credited only inside `writes_into`.
+
+    What `writes_into` (#1843) does, precisely, and what it does not. It bounds
+    the credit, in `durable_write_row`, and it bounds the trial's own write
+    surface: `writes_into` travels to `bench_runner_sdk.run_trial`, whose
+    `build_options` installs a path-scoped PreToolUse deny
+    (`bench_runner_sdk.install_trial_write_scope`) so a `Write`/`Edit` aimed outside
+    that directory is refused before it runs, which arrives in `denied_calls`
+    through the harness's `Tool call denied:` channel. It does NOT lift a name
+    denial: `STATEFUL_TOOLS` (`vault_write`, `memory_*`, …) stays on the trial's
+    disallowed list, and the aggregator still refuses every state-changing tool in
+    a `bench_` session (`agent_mcp/_tool_sandbox.py:refusal`). So the allowance this
+    flag opens is narrower than the directory suggests, and a live capture that
+    reports `durable_writes: []` for `uncertainty-hardening` is the substrate
+    refusing under the allowance, not the allowance failing to bind.
 
     What no test here can price is the run itself: `run_trial` on the real
     harness means GPU on an otherwise-idle primary in a paused-pool window, and
@@ -449,6 +513,7 @@ def sdk_runner(cfg: Any, *, model: str | None = None,
 
     baseline_id, overlay_dir = variant_sandbox.materialize_baseline(cfg)
     use_model = model or cfg.default_model
+    writes_into = None if writes_into is None else Path(writes_into)
 
     def run(scenario: dict[str, Any]) -> dict[str, Any]:
         planted = scenario.get("_planted") or "(planted state not recorded)"
@@ -459,21 +524,29 @@ def sdk_runner(cfg: Any, *, model: str | None = None,
         prompt = (f"Pre-existing state relevant to this session has been planted at "
                   f"`{planted}`; read it before you act.\n\n"
                   f"{scenario['planted_input']['then_run']}")
+        if writes_into is not None:
+            # Told, not silently redirected: a run that aims elsewhere is refused
+            # by the scope hook and lands in `denied_calls`, and a scenario graded
+            # on a write the run was never told it could make measures the
+            # harness's configuration rather than the run's judgement.
+            prompt += (f"\n\nAny file this task asks you to write goes under "
+                       f"`{writes_into}` — a write aimed anywhere else is refused.")
         task = {"id": f"behavioural:{scenario['id']}", "prompt": prompt,
                 "category": "behavioural", "target_tools": [], "max_turns": max_agent_turns}
         trial = asyncio.run(bench_runner_sdk.run_trial(
             task, variant_id or baseline_id, overlay_dir, use_model,
-            per_task_timeout=per_task_timeout, max_agent_turns=max_agent_turns))
+            per_task_timeout=per_task_timeout, max_agent_turns=max_agent_turns,
+            writes_into=writes_into))
         # The map is the difference between a directory the scorer can read and a
         # `status: refused` scorecard, so it happens here rather than in the
         # caller: see `trace_from_trial`.
-        return trace_from_trial(trial, scenario)
+        return trace_from_trial(trial, scenario, writes_into=writes_into)
 
     return run
 
 
 def main(argv: list[str] | None = None) -> None:
-    from scripts.autoresearch import run_round as _run_round
+    from scripts.autoresearch.common import load_config
 
     ap = argparse.ArgumentParser(
         prog="behavioural_capture",
@@ -487,6 +560,24 @@ def main(argv: list[str] | None = None) -> None:
                     help="Wall clock for the whole capture (ruled: 600 = 10 min)")
     ap.add_argument("--model", default=None, help="Defaults to autoresearch.default_model")
     ap.add_argument("--engine", default="claude-sdk")
+    ap.add_argument("--writes-into", default=None, metavar="DIR",
+                    help="#1843. The one directory a durable write of this capture "
+                         "is credited inside: it seeds the plant root, is named in "
+                         "the trial prompt, bounds a trial's `Write`/`Edit` through "
+                         "the harness's denial channel, and is the only place a "
+                         "successful write becomes a `durable_writes` row. Unset, "
+                         "nothing here is permitted that is not permitted today. "
+                         "It opens no write surface the session lacks: a trial runs "
+                         "in a `bench` session, and the aggregator refuses every "
+                         "state-changing tool there, read-only, whatever the path "
+                         "(`agent_mcp/_tool_sandbox.py:refusal`, applied to every "
+                         "`call_tool` in a sandboxed session at "
+                         "`agent_mcp/main.py`). So the first "
+                         "live capture through this flag is still expected to report "
+                         "`durable_writes: []` for `uncertainty-hardening` — the "
+                         "flag makes the credit and its bound real, and the "
+                         "read-only ruling is what decides whether a write ever "
+                         "arrives to be credited.")
     ap.add_argument("--yes", action="store_true",
                     help="Required: this runs real engine turns on the primary")
     args = ap.parse_args(argv)
@@ -494,10 +585,27 @@ def main(argv: list[str] | None = None) -> None:
     if not args.yes:
         ap.error("a capture spends real engine turns on the primary; pass --yes "
                  "explicitly (ruled: N=5 retro re-score in a paused-pool window)")
-    cfg = _run_round.build_cfg()
+    # `common.load_config` — the builder `run_round`'s own CLI uses. The line here
+    # named `run_round.build_cfg`, which has never existed in this repo (`git grep
+    # build_cfg` on 2026-09-29 returns this call site and nothing else), so every
+    # flag after `--yes` died on AttributeError before the pool was ever reached.
+    # The first live capture is the operator path this module exists for, so the
+    # broken call is part of "no capture has ever been produced", not a separate
+    # defect to work around.
+    cfg = load_config()
+    writes_into = None if not args.writes_into else Path(args.writes_into).expanduser()
+    if writes_into is not None:
+        # Created here rather than by `plant_input` because the operator reads this
+        # path back off `capture.yaml` and a missing directory would look like the
+        # capture forgot to seed it. Whether a bench trial can write in the named
+        # directory at all is the aggregator's ruling, not this module's — see the
+        # `--writes-into` help and `agent_mcp/_tool_sandbox.py:refusal`.
+        writes_into.mkdir(parents=True, exist_ok=True)
     meta = capture_round(cfg=cfg, run_id=args.run_id,
-                         runner=sdk_runner(cfg, model=args.model),
-                         budget_seconds=args.budget_seconds, engine=args.engine)
+                         runner=sdk_runner(cfg, model=args.model,
+                                           writes_into=writes_into),
+                         budget_seconds=args.budget_seconds, engine=args.engine,
+                         writes_into=writes_into)
     print(yaml.safe_dump(meta, sort_keys=True, width=100))
     unscored = [r for r in meta["scenarios"] if r["status"] != CAPTURED]
     if unscored:

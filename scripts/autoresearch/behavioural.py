@@ -98,6 +98,19 @@ MIN_SCENARIOS = 4
 #: which scorecard column it feeds, `checker` names the pure grader in `GRADERS`.
 REQUIRED_SCENARIO_FIELDS = ("id", "axis", "planted_input", "expected_observation", "checker")
 
+#: #1843 clause 4. What a scenario declares about whether any capture can
+#: measure it. `trial` means a bench trial can produce its expected observation;
+#: `none` means the runner's own vocabulary cannot, so the scenario scores
+#: nothing no matter how many captures run. A scenario that omits the field is
+#: `trial` — the behaviour every scenario had before the field existed.
+CAPTURE_SCOPES = ("trial", "none")
+
+#: The phrase a `capture: none` scenario's instrument failure is required to
+#: carry (#1843 clause 5). It names the class of the failure; the scenario's own
+#: `capture_reason` carries the specific cause, which is never this string —
+#: only one shipped scenario's cause is an event vocabulary at all.
+NO_CAPTURE_PATH_PHRASE = "no capture path for its event vocabulary"
+
 
 class ScenarioManifestError(RuntimeError):
     """The frozen manifest is malformed, unhashed, or its hash does not match."""
@@ -148,10 +161,10 @@ def _field_issues(scenario: dict[str, Any], index: int) -> list[str]:
 def load_manifest(path: Path = SCENARIOS_MANIFEST_PATH) -> dict[str, Any]:
     """Load and validate the frozen manifest; refuse rather than score less.
 
-    Every refusal names the offending scenario id (clause 1) and is a
-    `ScenarioManifestError`, which is what turns "the suite silently measured
-    three scenarios" into a loud failure. The hash is recomputed here and
-    never trusted from the file (clause 2).
+    Parsing and file-level complaints live here; every rule a payload has to
+    satisfy lives in `validate_manifest`, which is the same check a caller can run
+    on a manifest it built or edited rather than one it read from disk. The hash
+    is recomputed there and never trusted from the file (clause 2).
     """
     if not path.exists():
         raise ScenarioManifestError(f"scenario manifest not found at {path}")
@@ -162,13 +175,23 @@ def load_manifest(path: Path = SCENARIOS_MANIFEST_PATH) -> dict[str, Any]:
             f"scenario manifest at {path} is not valid YAML: {exc}") from exc
     if not isinstance(payload, dict):
         raise ScenarioManifestError(f"scenario manifest at {path} must be a mapping")
+    return validate_manifest(payload, source=str(path))
 
+
+def validate_manifest(payload: dict[str, Any], *,
+                      source: str = "manifest") -> dict[str, Any]:
+    """Apply every manifest rule to a parsed payload; annotate and return it.
+
+    Every refusal names the offending scenario id (clause 1) and is a
+    `ScenarioManifestError`, which is what turns "the suite silently measured
+    three scenarios" into a loud failure.
+    """
     schema = payload.get("schema")
     if schema != MANIFEST_SCHEMA:
         raise ScenarioManifestError(
             f"scenario manifest schema is {schema!r}, expected {MANIFEST_SCHEMA!r}")
 
-    payload["_scenarios_hash"] = verify_hash(payload, source=str(path))
+    payload["_scenarios_hash"] = verify_hash(payload, source=source)
 
     axes = payload.get("axes")
     if not isinstance(axes, list) or not axes:
@@ -224,8 +247,46 @@ def load_manifest(path: Path = SCENARIOS_MANIFEST_PATH) -> dict[str, Any]:
                 f"derived monthly by `reserved_scenario_ids` from the month stamp "
                 f"and the frozen `scenarios_hash`; a hand-set flag freezes the "
                 f"rotation and is never read")
+        _capture_scope_issue(scenario, sid)
     payload["_declared_axes"] = declared
     return payload
+
+
+def _capture_scope_issue(scenario: dict[str, Any], sid: str) -> None:
+    """#1843 clause 4: refuse a capture declaration that could not be honoured.
+
+    The field is what lets a scorecard tell "this capture failed to measure the
+    scenario" from "no capture through this runner can ever measure it", and both
+    readings print as an instrument failure. A free-text or misspelled scope
+    would silently fall back to `trial` and report an unmeasurable scenario as a
+    fresh instrument failure on every round, so an unknown value is a refusal at
+    load rather than a default. A `none` scope with no reason is the same defect
+    one level down: the reason is the only thing the reader is owed.
+    """
+    scope = scenario.get("capture")
+    reason = scenario.get("capture_reason")
+    if scope is None:
+        if reason not in (None, ""):
+            raise ScenarioManifestError(
+                f"{sid}: `capture_reason` with no `capture` scope — the reason "
+                f"explains a declaration that is not there")
+        return
+    if scope not in CAPTURE_SCOPES:
+        raise ScenarioManifestError(
+            f"{sid}: `capture` is {scope!r}, expected one of "
+            f"{', '.join(CAPTURE_SCOPES)}")
+    if scope == "none" and not (isinstance(reason, str) and reason.strip()):
+        raise ScenarioManifestError(
+            f"{sid}: `capture: none` with no `capture_reason` — an unmeasurable "
+            f"scenario has to say which part of the runner's vocabulary it needs")
+
+
+def capture_scope(scenario: dict[str, Any]) -> tuple[str, str]:
+    """A scenario's declared capture scope and its reason ('' when capturable)."""
+    scope = scenario.get("capture")
+    if scope not in CAPTURE_SCOPES:
+        return "trial", ""
+    return str(scope), str(scenario.get("capture_reason") or "")
 
 
 def verify_hash(payload: dict[str, Any], source: str = "manifest") -> str:
@@ -594,6 +655,26 @@ def _round(value: float | None) -> float | None:
     return None if value is None else round(value, 6)
 
 
+def _uncapturable_row(graded: dict[str, Any], scope_reason: str) -> dict[str, Any]:
+    """A `capture: none` scenario's row: never a score, always a named cause.
+
+    Two things are reported and neither is a measurement. The first is the
+    structural one — no capture through this runner can produce the observation
+    the checker reads — which holds whether or not a trace file happens to exist,
+    so a canned trace that WOULD grade is still not a measurement of it. The
+    second is this capture's own account of the scenario, kept verbatim after the
+    first when it has one: a scenario the budget never reached is both, and
+    dropping the budget sentence would erase the one fact the capture record was
+    written to carry.
+    """
+    reason = f"{NO_CAPTURE_PATH_PHRASE} (manifest `capture: none`): {scope_reason}"
+    prior = str((graded.get("observed") or {}).get("reason") or "")
+    if prior:
+        reason = f"{reason}; this capture's own record: {prior}"
+    return {"ran": 0, "matched": 0, "value": None, "instrument_failure": True,
+            "observed": {"reason": reason, "capture_scope": "none"}}
+
+
 def build_scorecard(*, manifest: dict[str, Any], traces: dict[str, dict[str, Any]],
                     baseline: dict[str, Any], scenarios_digest: str,
                     trace_source: str, round_id: str | None = None,
@@ -613,11 +694,23 @@ def build_scorecard(*, manifest: dict[str, Any], traces: dict[str, dict[str, Any
     scenario with no trace file and a cause in that record reports the cause —
     `no trace captured: <budget exhausted / the run raised>` — because a reader
     has to be able to tell "the round never got to this scenario" from "this
-    scenario scored nothing". Reserve membership is derived for the month, never
-    read from the manifest, and `reference_replay` says in the artifact whether
-    these deltas compare a run against itself.
+    scenario scored nothing". A scenario the manifest declares `capture: none` is
+    reported the same way with a different cause (`_uncapturable_row`), which is
+    what makes clause 4's set identity hold: for a capture in which every
+    `capture: trial` scenario produced its expected observation, the
+    instrument-failure set IS the manifest's `capture: none` set. Reserve
+    membership is derived for the month, never read from the manifest, and
+    `reference_replay` says in the artifact whether these deltas compare a run
+    against itself.
     """
     causes = capture_failure_causes(capture)
+    # #1843 clause 4: a declared `capture: none` is a claim about CAPTURES, so it
+    # is enforced only where a capture record is being scored. The shipped
+    # reference directory and any hand-made trace dir carry no `capture.yaml`, and
+    # grading their traces as they come is the honest thing to do with them —
+    # which is also why the pinned baseline's own re-grade does not move when a
+    # scope is declared.
+    scope_enforced = capture is not None
     reserved = set(reserved_scenario_ids(manifest["scenarios"],
                                          manifest_hash=scenarios_digest, stamp=stamp))
     scenario_rows: list[dict[str, Any]] = []
@@ -633,6 +726,9 @@ def build_scorecard(*, manifest: dict[str, Any], traces: dict[str, dict[str, Any
                       "instrument_failure": True, "observed": {"reason": reason}}
         else:
             graded = GRADERS[scenario["checker"]](trace, scenario)
+        scope, scope_reason = capture_scope(scenario)
+        if scope_enforced and scope == "none":
+            graded = _uncapturable_row(graded, scope_reason)
         if graded["value"] is not None:
             per_axis.setdefault(str(scenario["axis"]), []).append(graded["value"])
         scenario_rows.append({
