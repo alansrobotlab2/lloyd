@@ -1087,6 +1087,13 @@ def main(argv: list[str] | None = None) -> int:
         print("  that n is a LOWER BOUND: every discordant pair observed in this "
               "series is one-sided (b,c = 1,0 or 0,1), the most favourable shape "
               "available. Any two-sided discordance needs more queries.")
+    #: The re-base chronology. One constraint on its own wording, found the hard way
+    #: in this round: the #1663 node in `tests/test_eval_trend_stats.py`
+    #: (`test_a_pair_differing_only_in_which_queries_carry_gold_is_annotated`) proves
+    #: a moved gold subset did NOT break the id join by asserting that the join's
+    #: error title is absent from this block's whole output — so the sixth point below
+    #: has to describe that ERROR line rather than quote its title, or the paragraph
+    #: trips the check that describes it.
     print("  The query file was grown under #1319 on 2026-09-21 (20 -> 87 gold "
           "queries, the original 20 ids first and byte-identical), and that growth "
           "IS the approved re-base point: absolute values measured from the first "
@@ -1097,9 +1104,12 @@ def main(argv: list[str] | None = None) -> int:
           "answer (87 -> 81 gold queries, the original 20 texts untouched): a "
           "second re-base point, for the same reason. On 2026-09-24 #1354 added "
           "5 queries whose answers are the lloyd checkout's own architecture "
-          "docs (81 -> 86 gold queries), which no collection indexes yet, so "
-          "they score as document misses until one does: a third re-base "
-          "point. And a fourth re-base point, which is NOT a corpus change: "
+          "docs (81 -> 86 gold queries): a third re-base point. It stays a point "
+          "even though those five are gone again below, because the nights before "
+          "this drop really were scored on 86; what was false in earlier printings "
+          "of this line was that the five were waiting on a collection — no "
+          "collection ever indexed them, which is why they were retired rather "
+          "than re-based. And a fourth re-base point, which is NOT a corpus change: "
           "#1486 (`dbfde750`) landed semantic seeding of entity queries at "
           "2026-09-25 16:57 PDT, "
           "between the 09-25 and 09-26 nights, so the 2026-09-26 baseline is the "
@@ -1134,7 +1144,32 @@ def main(argv: list[str] | None = None) -> int:
           "the pre-re-base nights stay in the published window annotated. The 80%-power "
           "decision "
           "that used to sit behind this line is no longer open — see the n "
-          "printed above.")
+          "printed above. And a sixth re-base point, which IS a corpus change and "
+          "the undoing of the third: on 2026-09-28 #1662 (`e64ac4b3`) retired "
+          "those same five #1354 queries (86 -> 81 gold queries), because the "
+          "checkout documents they named are in no deployed qmd collection, so "
+          "each of the five counted on the document leg and scored a miss there on "
+          "every run that ever scored them. Their removal lifts doc_hit_rate, "
+          "doc_recall_avg, mrr_doc and ndcg10 with retrieval standing exactly "
+          "still — a mean moving because its population did — so do not compare "
+          "absolute DOCUMENT-leg means across the 2026-09-29 night, the first "
+          "scored on 81. No number is quoted for that step, deliberately: #1662's "
+          "drop and #1663's denominator re-definition landed the same day, so the "
+          "one published pair spanning them carries both moves and neither is "
+          "attributable from it; the step above is #1663's alone, and a figure "
+          "credited to #1662 would be a number nobody checked. What is verifiable "
+          "rather than measured is the half this step does NOT touch: the entity "
+          "and term legs do not move here, because all five carried "
+          "`expect_entities: []` and no `expect_terms`, the block-present-names-no-"
+          "label case `run_eval.py`'s `_counts_on_leg` had already dropped from "
+          "those two denominators — which is the same fact that left the document "
+          "leg as the only one they could drag. And unlike the fifth point, this "
+          "one is not invisible to this tool: an id leaving the corpus breaks the "
+          "join on purpose, so when this boundary falls inside a window it arrives "
+          "as the ERROR line this tool prints for ids present in one night and not "
+          "the other, naming the ids only in the earlier night, plus the "
+          "unjoinable transition in the counts above — an announced re-base, not a "
+          "silent one.")
 
     by_label = {n.label: n for n in nights}
     claims = [] if args.no_claims else list(CLAIMS) + [_parse_claim(c) for c in args.claim]

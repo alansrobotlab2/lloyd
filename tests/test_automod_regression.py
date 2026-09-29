@@ -1420,7 +1420,45 @@ def test_a_rollback_request_carries_the_floor_it_claimed(monkeypatch, tmp_path):
 # #1412 — the holdout leg: delta_dev, delta_holdout, overfit_suspected
 # ---------------------------------------------------------------------------
 
-N_DEV, N_HOLD = 86, 27
+# Fixture arm sizes for the synthetic `_arm(n_queries=…)` records below, and
+# nothing to do with the gold corpus. They are two distinct integers because the
+# holdout maths under test here (`delta_dev` against `delta_holdout`, the overfit
+# rule) only bites when the dev and holdout denominators differ; any other pair of
+# distinct sizes would serve. The count that does describe a corpus lives in
+# eval/vault_recall_queries.yaml, whose `- id:` entries are re-counted every run by
+# tests/test_eval_corpus_guard.py::test_the_gold_file_states_the_size_it_actually_has
+# — so this line quotes no corpus size at all. It used to be spelled in the bare
+# two-token shape a corpus constant has everywhere else in this suite, and the 86 it
+# held had been stale since #1662 retired five queries on 2026-09-28 while still
+# reading like today's gold n (#1831).
+FIXTURE_DEV_N, FIXTURE_HOLD_N = 86, 27
+
+
+def test_the_holdout_arm_sizes_do_not_read_like_the_corpus_size():
+    """#1831 (b): the fixture denominators say fixture, in the name and in the note.
+
+    Two mechanical claims, because what was wrong was a reader's inference and the
+    only way to pin an inference is to pin the tokens it is drawn from. (1) The
+    token someone greps this file for when they want its gold query count is absent
+    from it: the constants are `FIXTURE_*_N` now, a shape no corpus reading would
+    produce, and every use site below (this line through the last one at `:1551`)
+    passes one as a synthetic `n_queries=` to a fabricated `_arm`. (2) The note above
+    the assignment points at the file that holds the real count instead of restating
+    a number that goes stale the way 86 did.
+    """
+    src = Path(__file__).read_text(encoding="utf-8")
+    # Built by concatenation, so this file contains no instance of the strings it
+    # forbids — a pin that wrote them out would fail the check it exists to make.
+    for forbidden in ("N_" + "DEV", "N_" + "HOLD"):
+        assert forbidden not in src, (
+            "a module-level constant is back to the two-token shape that reads as "
+            "today's gold query count; name it FIXTURE_*_N")
+    head = src.split("FIXTURE_DEV_N, FIXTURE_HOLD_N")[0][-900:]
+    assert "fixture" in head.lower(), (
+        "the note above the assignment no longer says these are fixture sizes")
+    assert "eval/vault_recall_queries.yaml" in head, (
+        "the note must point at the file whose `- id:` entries are the corpus "
+        "rather than quote a count that moves with it")
 
 
 def _four_arms(dev_base, dev_cur, hold_base, hold_cur, *, calls=None):
@@ -1459,8 +1497,8 @@ def test_a_dev_only_gain_is_overfit_suspected_and_never_reads_as_no_regression(m
     events, rollback = _holdout_env(monkeypatch, tmp_path)
     calls: list = []
     monkeypatch.setattr(R, "_run_arm", _four_arms(
-        _arm(N_DEV, [], n_queries=N_DEV), _arm(N_DEV, [], n_queries=N_DEV, ndcg10=0.70),
-        _arm(N_HOLD, [], n_queries=N_HOLD), _arm(N_HOLD, [], n_queries=N_HOLD, ndcg10=0.50), calls=calls))
+        _arm(FIXTURE_DEV_N, [], n_queries=FIXTURE_DEV_N), _arm(FIXTURE_DEV_N, [], n_queries=FIXTURE_DEV_N, ndcg10=0.70),
+        _arm(FIXTURE_HOLD_N, [], n_queries=FIXTURE_HOLD_N), _arm(FIXTURE_HOLD_N, [], n_queries=FIXTURE_HOLD_N, ndcg10=0.50), calls=calls))
     out = R._execute_blocking()
 
     assert out["regressed"] is False and not rollback, "the flag must never request a rollback"
@@ -1475,7 +1513,7 @@ def test_a_dev_only_gain_is_overfit_suspected_and_never_reads_as_no_regression(m
     assert check["transfer_gap"]["ndcg10"] == pytest.approx(0.20)
     assert check["holdout"]["status"] == "measured"
     assert check["holdout"]["overfit_metrics"] == ["ndcg10"]
-    assert check["holdout"]["n_holdout"] == N_HOLD
+    assert check["holdout"]["n_holdout"] == FIXTURE_HOLD_N
     assert check["holdout"]["split_hash"], "the record names the split it measured"
     # Human clause 4's shape: both legs scored on both trees, holdout after dev.
     assert ("holdout-paired-lkg", "holdout") in calls and ("holdout-check", "holdout") in calls
@@ -1485,8 +1523,8 @@ def test_a_dev_only_gain_is_overfit_suspected_and_never_reads_as_no_regression(m
 def test_a_gain_that_transfers_is_a_plain_no_regression(monkeypatch, tmp_path):
     events, _ = _holdout_env(monkeypatch, tmp_path)
     monkeypatch.setattr(R, "_run_arm", _four_arms(
-        _arm(N_DEV, [], n_queries=N_DEV), _arm(N_DEV, [], n_queries=N_DEV, ndcg10=0.70),
-        _arm(N_HOLD, [], n_queries=N_HOLD), _arm(N_HOLD, [], n_queries=N_HOLD, ndcg10=0.68)))
+        _arm(FIXTURE_DEV_N, [], n_queries=FIXTURE_DEV_N), _arm(FIXTURE_DEV_N, [], n_queries=FIXTURE_DEV_N, ndcg10=0.70),
+        _arm(FIXTURE_HOLD_N, [], n_queries=FIXTURE_HOLD_N), _arm(FIXTURE_HOLD_N, [], n_queries=FIXTURE_HOLD_N, ndcg10=0.68)))
     out = R._execute_blocking()
     assert out["overfit_suspected"] is False
     assert out["summary"].startswith("no regression after"), out["summary"]
@@ -1499,8 +1537,8 @@ def test_a_holdout_loss_inside_its_floor_is_not_flagged(monkeypatch, tmp_path):
     """One question's worth at n=27 is ~0.038: a smaller loss is the leg's own grain."""
     _holdout_env(monkeypatch, tmp_path)
     monkeypatch.setattr(R, "_run_arm", _four_arms(
-        _arm(N_DEV, [], n_queries=N_DEV), _arm(N_DEV, [], n_queries=N_DEV, ndcg10=0.70),
-        _arm(N_HOLD, [], n_queries=N_HOLD), _arm(N_HOLD, [], n_queries=N_HOLD, ndcg10=0.57)))
+        _arm(FIXTURE_DEV_N, [], n_queries=FIXTURE_DEV_N), _arm(FIXTURE_DEV_N, [], n_queries=FIXTURE_DEV_N, ndcg10=0.70),
+        _arm(FIXTURE_HOLD_N, [], n_queries=FIXTURE_HOLD_N), _arm(FIXTURE_HOLD_N, [], n_queries=FIXTURE_HOLD_N, ndcg10=0.57)))
     out = R._execute_blocking()
     assert out["overfit_suspected"] is False, out["summary"]
 
@@ -1508,14 +1546,14 @@ def test_a_holdout_loss_inside_its_floor_is_not_flagged(monkeypatch, tmp_path):
 def test_the_flag_leaves_the_rollback_decision_exactly_as_it_was(monkeypatch, tmp_path):
     """A real dev regression rolls back with the same reasons whether or not the
     holdout leg ran and whatever it said."""
-    bad = _arm(N_DEV, [], n_queries=N_DEV, entity_hit_rate=0.1, ndcg10=0.70)
+    bad = _arm(FIXTURE_DEV_N, [], n_queries=FIXTURE_DEV_N, entity_hit_rate=0.1, ndcg10=0.70)
 
     def run(disabled: bool):
         events, rollback = _holdout_env(monkeypatch, tmp_path)
         if disabled:
             monkeypatch.setenv(R.HOLDOUT_LEG_SWITCH_ENV, "0")
         monkeypatch.setattr(R, "_run_arm", _four_arms(
-            _arm(N_DEV, [], n_queries=N_DEV), dict(bad), _arm(N_HOLD, [], n_queries=N_HOLD), _arm(N_HOLD, [], n_queries=N_HOLD, ndcg10=0.4)))
+            _arm(FIXTURE_DEV_N, [], n_queries=FIXTURE_DEV_N), dict(bad), _arm(FIXTURE_HOLD_N, [], n_queries=FIXTURE_HOLD_N), _arm(FIXTURE_HOLD_N, [], n_queries=FIXTURE_HOLD_N, ndcg10=0.4)))
         return R._execute_blocking(), rollback, _check(events)
 
     with_leg, rb_with, check_with = run(False)
@@ -1532,8 +1570,8 @@ def test_an_unmeasured_holdout_arm_is_a_count_never_an_id(monkeypatch, tmp_path)
     events, _ = _holdout_env(monkeypatch, tmp_path)
     reserved_probe = "reserved-probe-id"
     monkeypatch.setattr(R, "_run_arm", _four_arms(
-        _arm(N_DEV, [], n_queries=N_DEV), _arm(N_DEV, [], n_queries=N_DEV, ndcg10=0.70),
-        _arm(N_HOLD, [], n_queries=N_HOLD), _arm(N_HOLD, [reserved_probe], n_queries=N_HOLD, ndcg10=0.50)))
+        _arm(FIXTURE_DEV_N, [], n_queries=FIXTURE_DEV_N), _arm(FIXTURE_DEV_N, [], n_queries=FIXTURE_DEV_N, ndcg10=0.70),
+        _arm(FIXTURE_HOLD_N, [], n_queries=FIXTURE_HOLD_N), _arm(FIXTURE_HOLD_N, [reserved_probe], n_queries=FIXTURE_HOLD_N, ndcg10=0.50)))
     out = R._execute_blocking()
     check = _check(events)
     assert check["holdout"]["status"] == "unmeasured"
@@ -1548,7 +1586,7 @@ def test_a_refused_manifest_does_not_run_the_holdout_leg(monkeypatch, tmp_path):
     calls: list = []
     monkeypatch.setattr(R.retrieval_holdout, "load_manifest", lambda root=None: None)
     monkeypatch.setattr(R, "_run_arm", _four_arms(
-        _arm(N_DEV, [], n_queries=N_DEV), _arm(N_DEV, [], n_queries=N_DEV), _arm(N_HOLD, [], n_queries=N_HOLD), _arm(N_HOLD, [], n_queries=N_HOLD), calls=calls))
+        _arm(FIXTURE_DEV_N, [], n_queries=FIXTURE_DEV_N), _arm(FIXTURE_DEV_N, [], n_queries=FIXTURE_DEV_N), _arm(FIXTURE_HOLD_N, [], n_queries=FIXTURE_HOLD_N), _arm(FIXTURE_HOLD_N, [], n_queries=FIXTURE_HOLD_N), calls=calls))
     R._execute_blocking()
     assert [leg for _, leg in calls] == ["dev", "dev"]
     assert _check(events)["holdout"]["status"] == "unmeasured"

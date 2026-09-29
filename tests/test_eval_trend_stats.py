@@ -1296,6 +1296,82 @@ def test_the_fifth_re_base_point_sits_beside_the_four_it_must_not_displace(
         "the last pre-re-base night must be named, or the boundary has no left edge")
 
 
+def test_the_sizing_block_books_the_gold_retirement_as_a_sixth_point(tmp_path, capsys):
+    """#1831 clauses 1+2: #1662's 86 -> 81 gold drop is booked, and no gold query is
+    left waiting for a collection.
+
+    #1662 (`e64ac4b3`, 2026-09-28) retired the five #1354 checkout-doc queries, and
+    `eval/vault_recall_queries.yaml`'s own header books that step for the document
+    leg. The paragraph that tells a reader how to read the trend did not: it stopped
+    at the 81 -> 86 growth and still promised those five "score as document misses
+    until one does", a forward-looking claim about queries the corpus stopped
+    containing on 2026-09-28. The metrics and the no-compare warning are asserted
+    inside the sixth point's own text and not against the whole block, because
+    `doc_hit_rate`, `mrr_doc` and `ndcg10` are already named by the fifth point — a
+    membership test on the block would stay green with the sixth point deleted, which
+    is the same incidental-pass shape that let the stale sentence outlive the
+    `"{n} gold queries"` assert above it. The absence checks run twice on purpose: on
+    the printed block, and on the script's source, since the item's own check is
+    `grep -n 'until one does' scripts/eval_trend_stats.py` returning nothing.
+    """
+    d = _write_paired_window(tmp_path, BIG_WINDOW_N)
+    assert main(["--baselines", str(d), "--reps", "200", "--no-claims"]) == 0
+    sizing = capsys.readouterr().out.split("POWER / QUERY-COUNT SIZING")[1]
+    for required in ("#1662", "e64ac4b3", "86 -> 81", "2026-09-28",
+                     "sixth re-base point"):
+        assert required in sizing, f"{required!r} missing from the sizing block"
+    tail = sizing.split("sixth re-base point")[1]
+    for metric in ("doc_hit_rate", "doc_recall_avg", "mrr_doc", "ndcg10"):
+        assert metric in tail, f"{metric!r} not named by the sixth point itself"
+    assert "do not compare absolute DOCUMENT-leg means" in tail, (
+        "the step must be told as a boundary a reader cannot average across")
+    assert "2026-09-29 night" in tail, (
+        "the boundary needs its right edge: 2026-09-29 is the first night scored on 81")
+    for stale in ("until one does", "no collection indexes yet"):
+        assert stale not in sizing, (
+            f"{stale!r} is back — it claims a gold query is still scoring as a "
+            "document miss awaiting a collection, which #1662 retired on 2026-09-28")
+    source = (ROOT / "scripts" / "eval_trend_stats.py").read_text(encoding="utf-8")
+    assert "until one does" not in source, (
+        "the claim exists somewhere in the script even though this window does not "
+        "print it, so the item's grep would still be non-zero")
+
+
+def test_the_sixth_re_base_point_sits_beside_the_five_it_must_not_displace(
+        tmp_path, capsys):
+    """#1831 clause 3: the paragraph gained a point and lost none of the five.
+
+    Same "BESIDE, not instead of" bar the fifth point is held to — a re-base
+    paragraph that buys a new boundary by dropping an old one un-informs the reader
+    who needed the old one. The third point gets the sharpest look here, because it
+    is the one this edit had to change: the 81 -> 86 growth is a real boundary (the
+    nights before the drop were scored on 86), and only the "waiting on a collection"
+    gloss was false. So the node pins that the growth, its date and its ordinal all
+    survive, that the correction reads as a retirement and not as a deletion, and
+    that the six ordinals are printed in the order the boundaries happened.
+    """
+    d = _write_paired_window(tmp_path, BIG_WINDOW_N)
+    assert main(["--baselines", str(d), "--reps", "200", "--no-claims"]) == 0
+    sizing = capsys.readouterr().out.split("POWER / QUERY-COUNT SIZING")[1]
+    for other in ("#1319", "2026-09-21", "20 -> 87", "second re-base point",
+                  "87 -> 81", "#1354", "2026-09-24", "81 -> 86", "third re-base point",
+                  "#1486", "dbfde750", "2026-09-26", "fourth re-base point",
+                  "#1663", "efcee660", "fifth re-base point"):
+        assert other in sizing, f"{other!r} re-base lost from the paragraph"
+    positions = [sizing.index(t) for t in ("third re-base point", "fourth re-base point",
+                                          "fifth re-base point", "sixth re-base point")]
+    assert positions == sorted(positions), (
+        "the points must be printed in the order the boundaries happened, or the "
+        "ordinals stop being a chronology")
+    third = sizing.split("third re-base point")[1].split("fourth re-base point")[0]
+    assert "stays a point" in third, (
+        "the 81 -> 86 growth was demoted instead of corrected: nights before the "
+        "drop really were scored on 86 and the boundary is still needed")
+    assert "no collection ever indexed them" in third, (
+        "the correction must say the five were retired because no collection ever "
+        "indexed them, which is what replaces the deleted forward-looking claim")
+
+
 def test_a_pair_differing_only_in_which_queries_carry_gold_is_annotated(tmp_path,
                                                                        capsys):
     """Clause 3: gold-subset drift is annotated, and the pair still joins.
