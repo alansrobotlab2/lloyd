@@ -2060,7 +2060,10 @@ workers:
       daily_max: 4                  # a first pass over the picklist in ~a week
       max_open_items: 25            # open arch-review items before a tick skips
       spawn_cap: 5
-      max_delta_lines: 400          # a group section is <= 162 lines; 400 is a doc refresh
+      # One review's diff, added + deleted, counted over the whole file
+      # (check_doc_bound). Sized for a whole-doc refresh, not a group section;
+      # a group's own bound is max_shrink_pct measured against its section.
+      max_delta_lines: 400
       max_shrink_pct: 30            # waived for a `superseded`/`aspirational` banner
       # The functional groups of the two jobs docs, one unit each. Each entry
       # is `<doc slug>:<section name>`; the name is matched against the `## `

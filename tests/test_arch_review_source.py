@@ -1228,7 +1228,7 @@ async def test_only_open_review_items_for_this_unit_reach_the_prompt(tree, monke
 async def test_a_group_may_not_delete_its_own_section_wholesale(tree, monkeypatch):
     """#913. The shrink denominator is the UNIT, not the file.
 
-    A group's section is a small fraction of a jobs doc — 43 lines of 824 — so
+    A group's section is a fraction of a jobs doc (43 lines of 824 at #913) — so
     measuring its deletions against the whole file let it delete itself
     entirely and score 5%. The section rail does not catch it either: a hunk
     that removes the whole section is, by construction, inside the section.

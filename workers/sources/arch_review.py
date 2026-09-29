@@ -1197,11 +1197,11 @@ def check_doc_bound(root: Path, rel: str, *, max_delta_lines: int, max_shrink_pc
     total = added + deleted
     if total > int(max_delta_lines):
         return True, f"diff is {total} changed lines, cap {max_delta_lines}"
-    # The denominator is the UNIT, not the file. A group's section is a small
-    # fraction of a jobs doc — 43 lines of 824 — so measuring its deletions
-    # against the whole file lets it delete itself entirely and score 5%. The
-    # section rail does not catch that either: a hunk that removes the whole
-    # section is, by construction, inside the section.
+    # The denominator is the UNIT, not the file. A group's section is a
+    # fraction of a jobs doc (#913 measured 43 lines of 824), so measuring its
+    # deletions against the whole file lets it delete itself entirely and score
+    # a few percent. The section rail does not catch that either: a hunk that
+    # removes the whole section is, by construction, inside the section.
     base = (section[1] - section[0] + 1) if section else _head_line_count(root, rel)
     if base and not allow_shrink:
         pct = deleted * 100.0 / base
