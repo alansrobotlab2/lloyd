@@ -20,7 +20,7 @@ from agent_mcp import backlog_similar as SIM
 from app.backlog_boards import BOARDS, UnknownBoard, check_board
 from app.backlog_move import now_stamp
 from app.backlog_status import PIPELINE_STATUSES
-from app.backlog_tags import SPAWN_TAG_PREFIX, normalize_tags
+from app.backlog_tags import SPAWN_TAG_PREFIX, new_task_tags, normalize_tags
 from app import frontmatter as FM
 
 BACKLOG_DIR = Path.home() / "obsidian" / "backlog"
@@ -299,6 +299,11 @@ def _handle_write(args: dict) -> str:
         except UnknownBoard as e:
             return json.dumps({"success": False, "error": str(e)})
 
+    # `task_id` is reassigned below on the create path, so "is this a create?"
+    # has to be answered here — the tags default further down is create-only and
+    # must not fire on an update of a legacy file (#1804).
+    creating = task_id is None
+
     if task_id is not None:
         task = load_task(task_id)
         if not task:
@@ -390,7 +395,17 @@ def _handle_write(args: dict) -> str:
     for key in ("priority", "board"):
         if args.get(key):
             task[key] = args[key]
-    if args.get("tags") is not None:
+    # A created task always carries a non-empty `tags` list (#1804): an absent
+    # key and `tags: []` are the same hole in `scripts/vault/segment_scan.py`'s
+    # new tags half, and 12 files on the board are that hole already. The caller's
+    # tags win when it named any — the loop's `spawned-by-*` mints included — and
+    # the fallback is the shared `DEFAULT_NEW_TASK_TAGS`, so this route and
+    # `POST /api/backlog/task-create` cannot drift (#518's lesson: fixing one of
+    # the two writers left the other emitting non-conformant files). An *update*
+    # is untouched: `tags: []` there still clears the field, exactly as before.
+    if creating:
+        task["tags"] = new_task_tags(args.get("tags"))
+    elif args.get("tags") is not None:
         task["tags"] = normalize_tags(args["tags"])
     if args.get("blocked") is not None:
         task["blocked"] = args["blocked"]

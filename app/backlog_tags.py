@@ -44,6 +44,39 @@ SPAWN_TAG_PREFIX = "spawned-by-"
 NEEDS_HUMAN_TAG = "needs-human"
 
 
+# What `tags` a *newly created* task gets when its caller named none (#1804).
+# Both live writers — `agent_mcp/backlog.py::_handle_write` and the
+# `POST /api/backlog/task-create` route — fall back to this one tuple rather
+# than each keeping its own, because #518 already learned what two defaults do:
+# `type` was fixed on the MCP path first, and the route went on emitting
+# OKF-violating tasks for weeks behind the shared test file. A tagless item is
+# the same defect again for the `tags` key, now that
+# `scripts/vault/segment_scan.py` counts one per directory.
+#
+# It is one ordinary tag and nothing more. It is deliberately *not* a
+# `spawned-by-*` tag: that prefix is the loop's own marker, read by
+# `loop_spawn_tag` for expiry and the scorecard's self-spawned gauge, so a
+# default would silently claim every hand-created task as loop output. It is
+# not `needs-human` either, which two pool filters test for. Tag vocabulary has
+# no query-time consumer since #868, so the value here is only a lineage label
+# saying "this is a board item" — the presence of a non-empty list is the part
+# the tests pin.
+DEFAULT_NEW_TASK_TAGS: tuple[str, ...] = ("backlog",)
+
+
+def new_task_tags(value: Any) -> list[str]:
+    """The `tags` list for a task being created: the caller's, or the default.
+
+    Never returns an empty list, which is the whole point — a create that
+    answers the schema's array with nothing still has to carry a list, or the
+    file it writes is the next `missing tags: 1`. Goes through `normalize_tags`
+    so a caller that passed a scalar or a `'[a, b]'` string gets a real list on
+    disk rather than the shape `scripts/vault/segment_scan.py` now counts as
+    missing.
+    """
+    return normalize_tags(value) or list(DEFAULT_NEW_TASK_TAGS)
+
+
 def is_spawn_tag(tag: Any) -> bool:
     """Does this tag mark an item as something a loop session filed for itself?
 

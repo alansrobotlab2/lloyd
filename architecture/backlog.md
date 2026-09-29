@@ -543,9 +543,16 @@ nightly OKF count could only climb (#518). Both writers now stamp
 edited for weeks without healing) but still does not backfill a `type` a legacy
 file never had — which OKF type it is stays a migration decision (#585).
 `tests/test_backlog_okf_frontmatter.py` pins both writers.
-`scripts/vault/segment_scan.py` counts notes lacking `segment:` per directory
-over the extractor allow-list plus `backlog/`, and exits 1 on any
-(`tests/test_okf_segment_producers.py`).
+Neither one wrote `tags` unless its caller named one, so 12 board files reached
+disk with no `tags` key or `tags: []` (#1804) — newest created 2026-09-29, after
+the scanner first shipped. Both create paths now fall back to the one
+`app/backlog_tags.DEFAULT_NEW_TASK_TAGS`, and neither invents tags on an
+*update*, which stays #585's stance.
+`scripts/vault/segment_scan.py` counts notes lacking `segment:`, and notes whose
+parsed frontmatter has no usable `tags` list (no key, an empty list, or a
+scalar), per directory over the extractor allow-list plus `backlog/`, and exits
+1 on any (`tests/test_okf_segment_producers.py`). Presence only: #868 retired
+tag-vocabulary maintenance, since no query-time consumer reads these strings.
 
 ## QMD integration
 

@@ -19,6 +19,16 @@ What this file pins, by acceptance clause (clause 2, the backlog update path, is
   extractor allow-list plus `backlog/`, exits 0 on a conformant tree and 1 when
   one file in an otherwise conformant directory omits the key.
 
+#1804 added the second half of that same scan: `tags` is gated beside
+`segment`, on the parsed block, so a note whose `tags` key is absent, an empty
+list, or a scalar is counted. Three more nodes below pin it — the conformant
+tree at `missing tags: 0`/rc 0, a tree with two offenders in one directory and
+one in `backlog/` at `missing tags: 2`/`1`/rc 1, and the scalar shape — and the
+segment assertions above are unchanged apart from `_conformant_vault`, which had
+to declare `tags` too or it would no longer be the conformant tree they read.
+Presence only: #868 retired tag-vocabulary maintenance in 2026-09-22 because no
+query-time consumer reads these strings.
+
 The template checks read the live vault's skills, so they carry `live_vault`: the
 gate deselects them, and they go red if a nightly skills pass drops the key again.
 """
@@ -170,17 +180,27 @@ def test_doc_digester_template_declares_segment_and_tags():
 # ── clause 5: the committed scan ─────────────────────────────────────────────
 
 def _conformant_vault(root: Path) -> None:
+    """A tree with zero missing `segment:` *and* zero missing `tags:` (#1804).
+
+    Every concept note here declares both keys, because the scanner now gates on
+    both: a fixture that only satisfied the segment half would report
+    `missing tags: 4` and rc 1, and the segment assertions below would be
+    reading a tree that was never conformant. `backlog/1-long.md` carries its
+    `tags` *below* a 250-line block, the same long-front-matter shape it exists
+    to cover for `segment:`.
+    """
     for d in ("knowledge/research", "projects", "people", "personal", "work",
               "memory", "backlog"):
         (root / d).mkdir(parents=True, exist_ok=True)
     (root / "knowledge/research/a.md").write_text(
-        "---\ntype: research\nsegment: knowledge\n---\n\n# A\n")
-    (root / "projects/p.md").write_text("---\ntype: project\nsegment: projects\n---\n\n# P\n")
+        "---\ntype: research\nsegment: knowledge\ntags: [research]\n---\n\n# A\n")
+    (root / "projects/p.md").write_text(
+        "---\ntype: project\nsegment: projects\ntags: [projects]\n---\n\n# P\n")
     (root / "memory/2026-09-23.md").write_text(
-        "---\ntype: daily\nsegment: memory\n---\n\n# Day\n")
+        "---\ntype: daily\nsegment: memory\ntags: [daily]\n---\n\n# Day\n")
     long_block = "".join(f"k{i}: v{i}\n" for i in range(250))
     (root / "backlog/1-long.md").write_text(
-        f"---\ntype: backlog\n{long_block}segment: backlog\n---\n\n# Long\n")
+        f"---\ntype: backlog\n{long_block}segment: backlog\ntags: [backlog]\n---\n\n# Long\n")
     # Reserved and excluded files are not concept notes and never count.
     (root / "knowledge/index.md").write_text("# index, no front matter\n")
     (root / "memory/vault-maintenance").mkdir()
@@ -213,6 +233,69 @@ def test_scan_exits_1_on_one_keyless_file_and_names_its_directory(tmp_path, caps
     assert re.search(r"^\s+knowledge/\s+missing segment: 1$", out, re.M), out
     assert re.search(r"^\s+backlog/\s+missing segment: 0$", out, re.M), out
     assert "knowledge/research/b.md" in out
+
+
+# ── #1804 clause 2/3: the same scan gates on `tags` too ──────────────────────
+
+def test_scan_reports_zero_missing_tags_on_a_conformant_tree(tmp_path, capsys):
+    """The conformant direction of the new half: rc 0 and a zero count line."""
+    _conformant_vault(tmp_path)
+    assert segment_scan.main(["--root", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    for d in ("knowledge/", "projects/", "memory/", "backlog/"):
+        assert re.search(rf"^\s+{re.escape(d)}\s+missing tags: 0$", out, re.M), out
+    assert "total missing tags: 0" in out
+
+
+def test_scan_exits_1_on_empty_and_absent_tags_and_names_their_directories(tmp_path, capsys):
+    """`tags: []` and no `tags` key are one defect, counted over every scanned dir.
+
+    Two offenders in `knowledge/research/` so one directory line reads
+    `missing tags: 2`, and a third in `backlog/`, which the extractor allow-list
+    leaves out and `EXTRA_DIRS` puts back in — the tags half walks the same
+    `iter_md` set the segment half does, so a tagless task cannot hide there.
+    Both files keep their `segment:`, so every `missing segment:` line stays 0
+    and only the new half can make this tree fail.
+    """
+    _conformant_vault(tmp_path)
+    (tmp_path / "knowledge/research/empty-tags.md").write_text(
+        "---\ntype: research\nsegment: knowledge\ntags: []\n---\n\n# Empty\n")
+    (tmp_path / "knowledge/research/no-tags-key.md").write_text(
+        "---\ntype: research\nsegment: knowledge\n---\n\n# Absent\n")
+    (tmp_path / "backlog/2-empty-tags.md").write_text(
+        "---\ntype: backlog\nsegment: backlog\ntags: []\n---\n\n# Task\n")
+
+    assert segment_scan.main(["--root", str(tmp_path)]) == 1
+    out = capsys.readouterr().out
+    assert re.search(r"^\s+knowledge/\s+missing tags: 2$", out, re.M), out
+    assert re.search(r"^\s+backlog/\s+missing tags: 1$", out, re.M), out
+    assert re.search(r"^\s+projects/\s+missing tags: 0$", out, re.M), out
+    assert "total missing tags: 3" in out
+    # The other half is untouched: rc 1 here comes from tags alone.
+    for d in ("knowledge/", "backlog/"):
+        assert re.search(rf"^\s+{re.escape(d)}\s+missing segment: 0$", out, re.M), out
+    assert "total missing segment: 0" in out
+    assert "knowledge/research/empty-tags.md" in out
+    assert "knowledge/research/no-tags-key.md" in out
+    assert "backlog/2-empty-tags.md" in out
+
+
+def test_scan_counts_a_scalar_tags_value_as_missing(tmp_path, capsys):
+    """A non-list `tags` is missing even though the board's readers forgive it.
+
+    `app/backlog_tags.normalize_tags` splits `tags: '[a, b]'` into a list so one
+    badly written row cannot blank Mission Control; that is a reader's tolerance,
+    not a licence to write one. Here the same value is a scalar to
+    `yaml.safe_load`, so the scanner names the file.
+    """
+    _conformant_vault(tmp_path)
+    (tmp_path / "projects/scalar-tags.md").write_text(
+        "---\ntype: project\nsegment: projects\ntags: projects\n---\n\n# Scalar\n")
+
+    assert segment_scan.main(["--root", str(tmp_path)]) == 1
+    out = capsys.readouterr().out
+    assert re.search(r"^\s+projects/\s+missing tags: 1$", out, re.M), out
+    assert "projects/scalar-tags.md" in out
 
 
 @pytest.mark.live_vault

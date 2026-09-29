@@ -27,6 +27,20 @@ follow — ``type: backlog`` plus ``segment: backlog`` (e.g.
 ``backlog/100-speaker-id-train-per-speaker-voice-profiles-and-improve-differentiation.md``)
 — and re-check the written file through the validator's own rule rather than
 only through the spelling of a key.
+
+#1804 added one more key to the same rule on the *create* paths: ``tags`` must
+be a non-empty list. ``scripts/vault/segment_scan.py`` now counts a file whose
+parsed front matter carries no ``tags``, an empty ``tags: []``, or a scalar, and
+12 board files were in that state — 11 with no key (both writers set ``tags``
+only ``if`` the caller named one) and one ``tags: []`` — newest written
+2026-09-29T02:23:47. Both writers now fall back to the one shared
+``app.backlog_tags.DEFAULT_NEW_TASK_TAGS``, for the reason ``type`` was fixed
+twice: an MCP-only guard leaves the HTTP route, which is what
+``agent-services/guardian/notify.py`` posts to, emitting the next one. The
+fallback is create-only — an update neither invents tags on a legacy file nor
+replaces tags a loop already stamped — and it is presence, not vocabulary: #868
+retired tag-vocabulary maintenance because no query-time consumer reads these
+strings.
 """
 
 from __future__ import annotations
@@ -39,6 +53,7 @@ import pytest
 import yaml
 
 from agent_mcp import backlog as BL
+from app import backlog_tags as BT
 from app.routers import backlog as BR
 
 # The strict frontmatter form validate_okf.py requires — the same object the
@@ -175,3 +190,123 @@ async def test_frontend_update_route_restores_segment_on_a_legacy_file(http_boar
     assert fm.get("segment") == "backlog"
     assert "type" not in fm
     assert fm.get("priority") == "high"
+
+
+# ── #1804: neither create path may emit an absent or empty `tags` ────────────
+
+def _tags_of(path: Path) -> list:
+    """The written file's `tags`, required to be a non-empty list.
+
+    Asserted on the parsed shape, not on the spelling of a line, because the
+    three shapes `scripts/vault/segment_scan.py` now counts as missing — no key,
+    `tags: []`, a scalar — are three different ways of failing this one check.
+    """
+    m = STRICT_FM_RE.match(path.read_text(encoding="utf-8"))
+    assert m, f"{path.name}: no parseable frontmatter block"
+    fm = yaml.safe_load(m.group(1))
+    tags = fm.get("tags")
+    assert isinstance(tags, list), f"{path.name}: tags is {type(tags).__name__} {tags!r}"
+    assert tags, f"{path.name}: tags is an empty list"
+    return tags
+
+
+def test_mcp_create_with_no_tags_writes_a_non_empty_tags_list(mcp_board):
+    """Clause 4: `backlog_write_task` with no `tags` argument still declares one."""
+    path = _mcp_create(mcp_board)
+    assert _tags_of(path) == list(BT.DEFAULT_NEW_TASK_TAGS)
+
+
+def test_mcp_create_answering_the_array_with_nothing_still_writes_a_list(mcp_board):
+    """`tags: []` from a caller is the same hole as no key, and gets the fallback.
+
+    The measured product of the old guard was exactly this file shape: 12 of
+    them under `~/obsidian/backlog`, 11 with no `tags` key and one `tags: []`,
+    newest born 2026-09-29T02:23:47 — after `segment_scan.py` first shipped.
+    """
+    path = _mcp_create(mcp_board, tags=[])
+    assert _tags_of(path) == list(BT.DEFAULT_NEW_TASK_TAGS)
+
+
+def test_mcp_create_keeps_the_tags_the_caller_named(mcp_board):
+    """The fallback fills a gap, it never overwrites provenance.
+
+    Losing a loop's `spawned-by-*` tag would un-count its own filings from
+    expiry and the scorecard's self-spawned gauge (`loop_spawn_tag`).
+    """
+    path = _mcp_create(mcp_board, tags=["spawned-by-autocode", "blocker"])
+    assert _tags_of(path) == ["spawned-by-autocode", "blocker"]
+
+
+def test_mcp_update_does_not_replace_tags_with_the_default(mcp_board):
+    """The guard is create-only, so the create/update branch has to be right.
+
+    Were `creating` ever true on an update, every status change would rewrite a
+    loop item's tags to the default and quietly erase who filed it.
+    """
+    path = _mcp_create(mcp_board, tags=["spawned-by-autocode"])
+    task_id = int(re.match(r"^(\d+)-", path.name).group(1))
+    result = json.loads(BL._handle_write({"task_id": task_id, "status": "in_progress"}))
+    assert result.get("success"), result
+    fm, _ = BL.parse_frontmatter(path.read_text(encoding="utf-8"))
+    assert fm.get("tags") == ["spawned-by-autocode"]
+
+
+def test_mcp_update_of_a_legacy_file_does_not_invent_tags(mcp_board):
+    """The other edge of create-only: an edit does not stamp a tag the file never had.
+
+    Same stance as `type` (#585) — healing the 12 legacy files was a seeded vault
+    change, not a side effect of whoever next moves their status.
+    """
+    legacy = mcp_board / "9-legacy-task.md"
+    legacy.write_text("---\nstatus: draft\nboard: lloyd\n---\n\n# Legacy task\n",
+                      encoding="utf-8")
+    assert json.loads(BL._handle_write({"task_id": 9, "status": "in_progress"}))["success"]
+    fm, _ = BL.parse_frontmatter(legacy.read_text(encoding="utf-8"))
+    assert "tags" not in fm
+    assert fm.get("segment") == "backlog"
+
+
+@pytest.mark.asyncio
+async def test_frontend_create_route_emits_a_non_empty_tags_list(http_board):
+    """Clause 5, coroutine side: the route builds its own `fm` dict, so it needs its own guard."""
+    resp = await BR.backlog_task_create(_FakeRequest(
+        {"name": "Created from the UI", "description": "Body.", "board_id": "lloyd"}))
+    assert resp.status_code == 200, resp.body
+    files = sorted(http_board.glob("*.md"))
+    assert len(files) == 1, files
+    assert okf_type_of(files[0]) == "backlog"
+    assert _tags_of(files[0]) == list(BT.DEFAULT_NEW_TASK_TAGS)
+
+
+@pytest.mark.asyncio
+async def test_frontend_create_route_keeps_the_tags_the_post_named(http_board):
+    """A POST that names tags gets those, not the fallback."""
+    resp = await BR.backlog_task_create(_FakeRequest(
+        {"name": "Alert with provenance", "description": "Body.", "board_id": "lloyd",
+         "tags": ["observability"]}))
+    assert resp.status_code == 200, resp.body
+    files = sorted(http_board.glob("*.md"))
+    assert len(files) == 1, files
+    assert _tags_of(files[0]) == ["observability"]
+
+
+def test_task_create_post_over_http_writes_a_non_empty_tags_list(http_board):
+    """The real seam: a POST down a TestClient-mounted router, as the UI and guardian send it.
+
+    `agent-services/guardian/notify.py` posts with no `tags` field at all, which
+    is the request shape that used to produce a tagless file, so the assertion
+    runs on the file the route wrote through FastAPI's own request parsing
+    rather than on a hand-built dict.
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    app = FastAPI()
+    app.include_router(BR.router)
+    with TestClient(app) as client:
+        resp = client.post("/api/backlog/task-create",
+                           json={"name": "Guardian alert", "description": "Body."})
+    assert resp.status_code == 200, resp.text
+    files = sorted(http_board.glob("*.md"))
+    assert len(files) == 1, files
+    assert _tags_of(files[0]) == list(BT.DEFAULT_NEW_TASK_TAGS)

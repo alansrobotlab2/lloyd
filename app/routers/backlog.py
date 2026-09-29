@@ -34,7 +34,7 @@ from agent_mcp._shared import parse_frontmatter_text
 from app.backlog_boards import BOARDS, DEFAULT_BOARD, UnknownBoard, check_board
 from app.backlog_move import now_stamp, record_status_move, utc_instant
 from app.backlog_status import PIPELINE_STATUSES
-from app.backlog_tags import NEEDS_HUMAN_TAG, normalize_tags
+from app.backlog_tags import NEEDS_HUMAN_TAG, new_task_tags, normalize_tags
 from app import frontmatter as FM
 
 
@@ -749,14 +749,19 @@ async def backlog_task_create(request: Request):
         "status": create_status,
         "priority": data.get("priority") or _DEFAULT_PRIORITY,
         "board": board_name,
+        # Same rule as the MCP create branch and the same fallback constant, so
+        # neither writer can emit the file `scripts/vault/segment_scan.py` now
+        # counts as `missing tags` (#1804). A POST naming no tags — every
+        # guardian alert and every plain new-task button press — used to land a
+        # file with no `tags` key at all: 12 of them on the board, newest born
+        # 2026-09-29T02:23:47. The caller's list still wins when it named one.
+        "tags": new_task_tags(data.get("tags")),
         "blocked": False,
         "assigned": False,
         "position": task_id * 1000,
         "created": now,
         "updated": now,
     }
-    if data.get("tags"):
-        fm["tags"] = normalize_tags(data["tags"])
     body = f"# {name}"
     if data.get("description"):
         body += f"\n\n{data['description']}"
