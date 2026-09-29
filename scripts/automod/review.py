@@ -2047,13 +2047,20 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
     # rather than about this review's arithmetic, so it keeps its charged refusal.
     if reasked and premise == "sound":
         # Anything else the author could act on: a clause the grader did not mark `met`,
-        # or a test-honesty finding. An unverified seam is deliberately NOT in here: the
+        # or a test-honesty finding that is blocking AND fixable inside this round. An
+        # unverified seam is deliberately NOT in here: the
         # re-ask re-grades the round, so a seam advisory arrives on the next turn instead
         # of being lost, and it is a note about the change's shape rather than a finding
         # the phantom number displaced.
+        # `honesty_is_blocking` is the same predicate `decide_by_grader` routes on.
+        # The term used to be `[h.get("clause") for h in honesty]`, and no honesty
+        # entry has ever had a `clause` key, so any note at all — an advisory one
+        # about a docstring number — stood in as a finding the author could act on
+        # and the re-ask below never happened (#1845).
         blocking = ([c["clause"] for c in clauses
                      if not c.get("citation_only") and c["verdict"] != "met"]
-                    + [h.get("clause") for h in honesty])
+                    + [f"honesty {h['file']}:{h['line']}" for h in honesty
+                       if honesty_is_blocking(h)])
         if not blocking:
             for c in reasked:
                 # The verbatim rail reason rides inside the entry, so the single `review`
@@ -2096,6 +2103,30 @@ def _judgments(raw: dict) -> dict:
     s = raw.get("same_as_prior")
     return {"actionable_in_round": a if isinstance(a, bool) else True,
             "same_as_prior": s if isinstance(s, bool) else False}
+
+
+def honesty_is_blocking(h: dict) -> bool:
+    """When a test-honesty finding may refuse the round: `blocking` AND fixable now.
+
+    One predicate, because two places have to answer it and answered differently
+    (#1845). It is `decide_by_grader`'s policy — a non-`blocking` severity and a
+    finding the author cannot fix in this round are both advisory — and the #1750
+    past-EOF re-ask in `parse_review` has to apply the same reading, because a
+    review with a non-empty `unreliable` never reaches `decide_by_grader` at all:
+    `rung_review` short-circuits on that list first. While each site spelled the
+    policy out on its own, the re-ask's version read a `clause` key that no honesty
+    entry has ever carried (the grader schema is `additionalProperties: False` with
+    no such property), so `[None]` was truthy and EVERY note counted as blocking.
+    Round SM_20260929_101355 is what that cost: two notes this file's own policy
+    calls advisory, the re-ask suppressed, and one of two review attempts spent —
+    220.7 s of grading plus a 206.3 s test re-run — on a clause whose only defect
+    was a number the grader misread.
+
+    The absent-tolerant defaults are `_judgments`' own, so a finding written before
+    those fields existed still blocks: demoting one takes a grader saying so.
+    """
+    return (h.get("severity", "blocking") == "blocking"
+            and bool(h.get("actionable_in_round", True)))
 
 
 def _prior_reviews_block(prior: list[dict]) -> str:
@@ -2189,13 +2220,16 @@ def decide_by_grader(parsed: dict, prechecks: list[dict],
     for h in parsed["test_honesty"]:
         rep = " [repeat]" if h.get("same_as_prior") else ""
         where = f"{h['file']}:{h['line']}: {h['problem']}{rep}"
-        if h.get("severity", "blocking") != "blocking":
+        # The decision is `honesty_is_blocking`, the same call the #1750 block-list
+        # makes; the branches below only choose which advisory sentence the finding
+        # rides in on, so the two surfaces cannot disagree about what blocks.
+        if honesty_is_blocking(h):
+            blocking.append(f"test honesty {where}")
+        elif h.get("severity", "blocking") != "blocking":
             # One spelling for every advisory honesty finding, precheck or grader.
             advisory.append(f"advisory {where}")
-        elif not h.get("actionable_in_round", True):
-            advisory.append(f"test honesty {where} (blocking, but not fixable in this round)")
         else:
-            blocking.append(f"test honesty {where}")
+            advisory.append(f"test honesty {where} (blocking, but not fixable in this round)")
     blocks_this_attempt = seams_block(seams_policy, attempt)
     for s in parsed["seams_unverified"]:
         text = s["seam"] if isinstance(s, dict) else str(s)

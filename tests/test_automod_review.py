@@ -1272,6 +1272,214 @@ def test_the_reread_still_loses_nothing_in_the_ledger(monkeypatch, tmp_path):
     assert any(reason in u for u in ev["unreliable"]), ev.get("unreliable")
 
 
+# ── #1845: an advisory test-honesty note may not cost the round its re-ask ────
+#
+# Round SM_20260929_101355 (#1812, 2026-09-29T10:35:13Z) is the shape these tests
+# hold: clause 1 demoted for a line past EOF and marked `citation_only`, clauses
+# 2-5 `met`, premise `sound`, and two `severity: advisory` test-honesty notes.
+# The block-list beside the re-ask read a `clause` key that no honesty entry has
+# ever carried, so it counted those two notes as findings the author could act
+# on, `unreliable` stayed empty, and the round paid for a review that had graded
+# nothing (attempt 1's 220.7 s plus a 206.3 s test re-run before attempt 2 landed
+# it). `decide_by_grader` had already called those same entries advisory.
+
+def _honesty(severity="advisory", *, actionable=True,
+             problem="the assert message restates the literal it compares"):
+    """One grader test-honesty finding, filed against a test file this diff changed.
+
+    The path matters as much as the severity: `parse_review` demotes any finding
+    about a non-test path to `advisory` whatever the grader wrote, so naming
+    `tests/test_x.py` is what makes a `severity: "blocking"` entry a test of the
+    severity and not an accidental test of the file."""
+    return {"file": "tests/test_x.py", "line": 2, "problem": problem,
+            "severity": severity, "actionable_in_round": actionable}
+
+
+def _phantom_plus_met_obj(*honesty):
+    """Two clauses in a `_one_tree`/`wt` worktree: clause 1 cites line 500 of a file
+    that cannot hold it, clause 2 is met on evidence inside the same file.
+
+    Both fixtures serve: `app/x.py` is 6 lines in `wt` and 1 in `_one_tree`, so the
+    phantom reason reads `(6 lines)` in one and `(1 lines)` in the other, and clause
+    2's `evidence_line` 1 is inside either way. Clause 2 present and `met` is what
+    makes this the live shape — the block-list asks about EVERY clause, not just the
+    demoted one."""
+    return {"premise": "sound",
+            "summary": "clause 1 graded on a line the named file cannot hold",
+            "clauses": [_past_eof_entry(1, note="the guard refuses and prints the flag"),
+                        _past_eof_entry(2, line=1, note="the dry run still prints")],
+            "test_honesty": list(honesty), "seams_unverified": []}
+
+
+_TWO_CONTRACT = {"id": 7, "title": "t", "body": "b", "path": "",
+                 "clauses": ["clause one holds", "clause two holds"]}
+
+
+def test_an_advisory_honesty_note_does_not_cost_the_round_its_past_eof_reask(wt):
+    """Clause 1: a note the file's own policy calls advisory leaves the re-ask intact.
+
+    `unreliable` is the whole of the no-attempt route, so an entry appearing there IS
+    the fix; the note is not lost, it rides on in `test_honesty` for the report.
+    """
+    parsed = RV.parse_review(_phantom_plus_met_obj(_honesty("advisory")), worktree=wt,
+                             changed_tests=["tests/test_x.py"], n_clauses=2)
+    c = parsed["clauses"][0]
+    assert c["verdict"] == "partial" and c.get("citation_only") is True, c
+    assert len(parsed["unreliable"]) == 1, (
+        f"the advisory note suppressed the re-ask: {parsed['unreliable']}")
+    assert "clause 1" in parsed["unreliable"][0], parsed["unreliable"]
+    assert PAST_EOF.format(line=500, eof=6, path="app/x.py") in parsed["unreliable"][0], \
+        parsed["unreliable"]
+    assert parsed["test_honesty"][0]["severity"] == "advisory", (
+        "the note must still reach the report, not be dropped to make the route work")
+    # And the same entry is advisory on the decide side too. A review routed to the
+    # re-ask never reaches `decide_by_grader` — the `unreliable` arm in `rung_review`
+    # returns first — so this call, not the rung, is where the two surfaces can be
+    # compared for this shape. The note may only ever append a tail to the identical
+    # refusal the review makes without it.
+    kind0, findings0 = RV.decide_by_grader(dict(parsed, test_honesty=[]), [])
+    kind, findings = RV.decide_by_grader(parsed, [])
+    assert kind == kind0 == "retry", (kind, kind0, findings)
+    assert findings.startswith(findings0 + "; "), (findings0, findings)
+    assert "advisory tests/test_x.py:2: " in findings[len(findings0):], findings
+
+
+def test_a_blocking_note_the_round_cannot_fix_also_leaves_the_reask(wt):
+    """Clause 2: `actionable_in_round: false` demotes too, exactly as
+    `decide_by_grader` already reads it — asserted by calling that function on the
+    same parsed review, so the two surfaces cannot drift back apart unnoticed."""
+    parsed = RV.parse_review(_phantom_plus_met_obj(_honesty("blocking", actionable=False)),
+                             worktree=wt, changed_tests=["tests/test_x.py"], n_clauses=2)
+    assert len(parsed["unreliable"]) == 1, (
+        f"a blocking-but-unfixable note suppressed the re-ask: {parsed['unreliable']}")
+    assert PAST_EOF.format(line=500, eof=6, path="app/x.py") in parsed["unreliable"][0], \
+        parsed["unreliable"]
+    # `decide_by_grader` on the SAME parsed review is the policy this has to match.
+    # The control is the same review with the note removed: the note may only ever
+    # append an advisory tail to an identical refusal, never add a blocking line —
+    # which is exactly the distinction the block-list was getting wrong.
+    kind0, findings0 = RV.decide_by_grader(dict(parsed, test_honesty=[]), [])
+    kind, findings = RV.decide_by_grader(parsed, [])
+    assert kind == kind0 == "retry", (kind, kind0, findings)
+    assert "clause 1 partial" in findings0, findings0
+    assert findings.startswith(findings0 + "; "), (findings0, findings)
+    tail = findings[len(findings0):]
+    assert "advisory test honesty tests/test_x.py:2" in tail, tail
+    assert "(blocking, but not fixable in this round)" in tail, tail
+
+
+def test_a_blocking_actionable_note_still_refuses_instead_of_re_asking(wt):
+    """Clause 3, both halves: a finding that is blocking AND fixable in this round
+    buys no re-ask (`unreliable` empty), and the author is still shown it while the
+    demoted clause is still refused as a partial."""
+    parsed = RV.parse_review(_phantom_plus_met_obj(_honesty("blocking")), worktree=wt,
+                             changed_tests=["tests/test_x.py"], n_clauses=2)
+    assert parsed.get("unreliable", []) == [], (
+        f"a fixable honesty finding was routed to the free re-gate: {parsed['unreliable']}")
+    c = parsed["clauses"][0]
+    assert c["verdict"] == "partial" and c.get("citation_only") is True, c
+    assert PAST_EOF.format(line=500, eof=6, path="app/x.py") in c["downgraded"], c
+    kind, findings = RV.decide_by_grader(parsed, [])
+    kind0, findings0 = RV.decide_by_grader(dict(parsed, test_honesty=[]), [])
+    assert kind == kind0 == "retry", (kind, kind0, findings)
+    assert "test honesty" not in findings0, (
+        "the line this test is about has to come from the honesty entry:\n" + findings0)
+    assert "test honesty tests/test_x.py:2: " in findings, (
+        "the finding the author can fix in this round was not shown to them:\n" + findings)
+    assert "clause 1 partial" in findings, findings
+
+
+def test_the_advisory_note_buys_the_reask_and_the_blocking_note_costs_an_attempt(
+        monkeypatch, tmp_path):
+    """Clause 4, both halves at the rung: the advisory shape is an `external_blocker`
+    that spends nothing, the blocking-actionable shape is a graded refusal that spends
+    attempt 1. One test because the pair is the whole of the change's value: routing
+    everything to the no-attempt arm would be as wrong as charging both."""
+    _one_tree(tmp_path)
+    reason = PAST_EOF.format(line=500, eof=1, path="app/x.py")
+
+    events = _arm(monkeypatch, tmp_path, grade=_grader(_phantom_plus_met_obj(
+        _honesty("advisory"))), contract=_TWO_CONTRACT)
+    ok, detail, data = _Gate(7, ["app/x.py", "tests/test_x.py"], tmp_path).rung_review()
+    assert ok is False and data["external_blocker"] is True, data
+    assert "keeps its attempt" in detail, detail
+    assert "no review attempt is spent" in detail, detail
+    assert "review_retry" not in data, (
+        "an advisory note sent the round down the charged-refusal path:\n" + detail)
+    assert reason in detail, detail
+    # The no-attempt arm writes one `review` event and nothing else. Which arm ran
+    # is not in that event — `self.event(...)` forwards only error/clauses/
+    # seams_unverified/test_honesty/unreliable, so `external_blocker` and
+    # `review_retry` above are the rung's `data`, not the ledger's — so what the
+    # record can prove is that the reason survived on the no-attempt path.
+    assert len(events) == 1, events
+    assert any(reason in u for u in events[0].get("unreliable", [])), events[0]
+
+    _arm(monkeypatch, tmp_path, grade=_grader(_phantom_plus_met_obj(
+        _honesty("blocking"))), contract=_TWO_CONTRACT)
+    ok, detail, data = _Gate(7, ["app/x.py", "tests/test_x.py"], tmp_path).rung_review()
+    assert ok is False, detail
+    assert data.get("external_blocker") is not True, (
+        "a finding the author can fix in this round was forgiven as the grader's "
+        "own arithmetic:\n" + detail)
+    assert data["review_retry"] is True and data["review_attempt"] == 1, data
+    assert "test honesty tests/test_x.py:2" in data["review_findings"], data
+
+
+def test_the_advisory_reask_still_puts_the_past_eof_reason_in_the_ledger(
+        monkeypatch, tmp_path):
+    """Clause 5, the record half: routing the case to the re-ask because of an
+    advisory note must not lose the reason, which the event carries twice over — in
+    `error` for a human and in `clauses[0]["downgraded"]` for the finalizer.
+
+    Same two places `test_the_reread_still_loses_nothing_in_the_ledger` pins for a
+    review with no honesty notes at all; this is the note-present half of that claim,
+    and the half that was false while the block-list counted any note as blocking."""
+    _one_tree(tmp_path)
+    reason = PAST_EOF.format(line=500, eof=1, path="app/x.py")
+    events = _arm(monkeypatch, tmp_path, grade=_grader(_phantom_plus_met_obj(
+        _honesty("advisory"))), contract=_TWO_CONTRACT)
+    _Gate(7, ["app/x.py", "tests/test_x.py"], tmp_path).rung_review()
+    review_events = [e for e in events if e["event"] == "review"]
+    assert len(review_events) == 1, events
+    ev = review_events[0]
+    assert ev["ok"] is False and ev["blocking"] is False, ev
+    assert reason in ev["error"], ev
+    phantom = next(c for c in ev["clauses"] if c["clause"] == 1)
+    assert phantom["citation_only"] is True and phantom["downgraded"] == [reason], phantom
+    assert any(reason in u for u in ev["unreliable"]), ev.get("unreliable")
+
+
+def test_an_advisory_note_beside_a_phantom_line_and_an_unmet_clause_is_a_charged_refusal(
+        monkeypatch, tmp_path):
+    """Clause 5, the refusal half: the re-ask stays conditional on the phantom line
+    being the review's ONLY defect, honesty notes included.
+
+    One phantom number, one genuinely unmet clause, one advisory note. The rung
+    short-circuits on `unreliable` before findings are delivered, so this round must
+    still be shown what is wrong and still pay for it — the advisory note changes
+    nothing here, which is why this test passes before the fix and after it."""
+    _one_tree(tmp_path)
+    reason = PAST_EOF.format(line=500, eof=1, path="app/x.py")
+    obj = _phantom_plus_met_obj(_honesty("advisory"))
+    obj["clauses"][1] = {"clause": 2, "verdict": "unmet", "evidence_path": "app/x.py",
+                         "evidence_line": 1, "test_node_id": "tests/test_x.py::test_it",
+                         "how_verified": "ran", "note": "the second path is not covered"}
+    events = _arm(monkeypatch, tmp_path, grade=_grader(obj), contract=_TWO_CONTRACT)
+    ok, detail, data = _Gate(7, ["app/x.py", "tests/test_x.py"], tmp_path).rung_review()
+    assert ok is False, detail
+    assert data.get("external_blocker") is not True, (
+        "the phantom citation swallowed the finding: the author would be told to "
+        "re-gate and never shown what is wrong")
+    assert data["review_retry"] is True and data["review_attempt"] == 1, data
+    assert "the second path is not covered" in data["review_findings"], data
+    assert reason in data["review_findings"], data
+    ev = [e for e in events if e["event"] == "review"][-1]
+    assert ev["blocking"] is True and ev["kind"] == "retry", ev
+    phantom = next(c for c in ev["clauses"] if c["clause"] == 1)
+    assert phantom["citation_only"] is True and phantom["downgraded"] == [reason], phantom
+
+
 def test_a_note_denying_added_tests_against_a_positive_delta_spends_no_attempt(
         monkeypatch, tmp_path):
     """#1442 clause 4: "This round's diff adds no such test", said of a diff
