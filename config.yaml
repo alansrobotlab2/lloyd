@@ -87,8 +87,8 @@ djev:
   # `LLOYD_DJEV_SHADOW=0` mutes it for a process, which every eval and every
   # pinned-corpus regression arm sets — a replay recorded as production
   # traffic would poison the label_mass distribution the floors are read off,
-  # and the lead seam lives inside `_vault_recall`, which the rerank arm
-  # calls directly.
+  # and an eval replays the very recalls, dedupes and entity gates the seams
+  # record.
   shadow:
     enabled: true
     # Small on purpose. The three seams fire a few hundred times a day
@@ -104,8 +104,10 @@ djev:
     # and forgetting its flag must not be the same as switching it off.
     seams:
       # Reranking, in agent_mcp/vault.py between the demote sort and the
-      # slice. The lead seam: both `vault_recall` and `memory_ops.recall`
-      # pass through it.
+      # slice. Reached only when djev is NOT the recall's ranker: the kill
+      # switch pulled to "qmd" with the engine still answering. While
+      # RECALL_RERANKER is "djev" it records nothing (app/djev_shadow.py).
+      # Keep it true — a ranker rollback is the one window it has.
       rerank: true
       # Write-time backlog dedupe, at the backlog_write_task caller that
       # holds the name and description — not at `merge_target`, which sees
