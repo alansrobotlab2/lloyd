@@ -104,7 +104,25 @@ SWEEP_DISALLOWED: tuple[str, ...] = (
     "research_propose", "research_next", "research_complete",
 )
 
-SWEEP_PROMPT = """\
+# One copy of the Bash-ceiling bullet, shared by PROMPT and SWEEP_PROMPT, so the
+# two cannot drift (#1800): the single-item path got it in 1750f88d (#1738) and the
+# sweep path never did — 52/52 post-landing single-item sessions carried it, 0/110
+# sweep sessions did, and 0 of those 110 ever passed `run_in_background=true`.
+# The ceiling text is verbatim in both prompts; a prompt-specific *shape* sentence
+# sits after it (see SWEEP_SHAPES_BULLET), never inside it.
+BASH_CEILING_BULLET = """\
+- **Bound a scan that can outlive the Bash call's 120 s ceiling.** A Bash call \
+with no `timeout` argument is killed at 120000 ms, and the two commands this pass \
+runs most are the ones that cross it: a recursive `grep -r` under `~/lloyd` (even \
+with the vendored trees excluded, the walk is minutes long) and a `*.json` \
+scan of `~/lloyd-data/sessions` (2590 files on 2026-09-28, growing daily). Both \
+are big corpora rather than slow code, so scoping never makes them fit — pass \
+`run_in_background=true` and `Read` the `output_file` it returns, because the \
+notification arrives on a later iteration of this same turn and the scan is \
+therefore never lost. Do not answer a ceiling you hit by asking for a bigger one: \
+a bound wide enough to cover a whole-tree walk is a turn spent on one command."""
+
+SWEEP_PROMPT_HEAD = """\
 You are SWEEPING {n} items from Lloyd's own backlog in one pass. The board holds \
 hundreds of open items and the loop lands about ten a day, so most of these will \
 wait weeks whatever you decide. Your job is to decide, cheaply, which are dead \
@@ -137,6 +155,18 @@ it is parked, visible, and a person can promote it.
 hour. `medium` = a few files, a day of a person's work. `large` = cross-cutting, \
 a new subsystem, or needs a design decision first.
 
+"""
+SWEEP_SHAPES_BULLET = """
+- **The shapes that cross it here are a chained evidence command and an \
+over-many-files scan.** `Read` a backlog item or a vault note and then `grep -rn \
+... ~/lloyd` in the same Bash call: the walk over Lloyd's tree, vendored directories \
+included, starts only after the cheap half has already looked like success. Or an \
+over-many-files scan — a count over every file in `~/obsidian/backlog` or \
+`~/lloyd-data/sessions`, thousands of files behind a command that reads like a \
+one-liner. Background that call and `Read` the file it wrote before you commit to a \
+verdict; a killed command is not evidence that the corpus is empty.
+"""
+SWEEP_PROMPT_TAIL = """
 Rules: you are read-only. Do not edit, write or commit anything, do not call \
 backlog_write_task, do not append findings, do not start an automod round. A \
 wrong `stale` or `duplicate_of` deletes a real finding, so cite what decides it; \
@@ -150,6 +180,9 @@ SWEEP_VERDICTS:
 #<id>: <stale | already_done | duplicate_of #<id> | keep> worth=<high|medium|low> size=<small|medium|large> — <one line of evidence>
 (one line per item; every item listed)
 """
+SWEEP_PROMPT = (SWEEP_PROMPT_HEAD + BASH_CEILING_BULLET
+                + SWEEP_SHAPES_BULLET + SWEEP_PROMPT_TAIL)
+
 
 # Appended to GROUP_PROMPT when `form_umbrellas` is off: the cluster is
 # still judged for duplicates and staleness, but nothing is consolidated.
@@ -160,6 +193,13 @@ UMBRELLAS ARE OFF for this run. `fold` is not available: judge every item \
 write `UMBRELLA: none`. Items that would have been folded are `keep`.
 """
 
+# Deliberately WITHOUT the Bash-ceiling bullet (#1800 ruling, recorded here so the
+# omission reads as a decision and not an oversight): the owed-check measurement that
+# asked for the sweep copy counted the group path at 1 session in the
+# 2026-09-24 -> 2026-09-29 window with 0 payload-gated timeouts, so there is no
+# observed timeout for this prompt to prevent and no tokens to spend preventing it.
+# If group traffic appears in that scan, the bullet is one `+ BASH_CEILING_BULLET`
+# away — the same constant the sweep uses, never a second hand-copied literal.
 GROUP_PROMPT = """\
 You are triaging {n} items from Lloyd's own backlog TOGETHER. A nightly pass \
 found them related ({reason}); most were filed by earlier automod runs and \
@@ -219,7 +259,7 @@ clauses are graded one by one at the gate by a reviewer who sees only the \
 umbrella, its clauses and the diff, so name observable behaviour, not mechanism.
 """
 
-PROMPT = """\
+PROMPT_HEAD = """\
 You are triaging one item from Lloyd's own backlog. It was written {age} days \
 ago, and the system has changed since. Your job is to find out whether it is \
 **still true** — not to fix it.
@@ -323,16 +363,8 @@ vendored. Use `git grep`, or `grep -r --exclude-dir=.venvs \
 --exclude-dir=llama.cpp --exclude-dir=qmd --exclude-dir=node_modules \
 --exclude-dir=.git`, and print the scoped command in the evidence so a re-run \
 reproduces it.
-- **Bound a scan that can outlive the Bash call's 120 s ceiling.** A Bash call \
-with no `timeout` argument is killed at 120000 ms, and the two commands this pass \
-runs most are the ones that cross it: a recursive `grep -r` under `~/lloyd` (even \
-with the vendored trees above excluded, the walk is minutes long) and a `*.json` \
-scan of `~/lloyd-data/sessions` (2590 files on 2026-09-28, growing daily). Both \
-are big corpora rather than slow code, so scoping never makes them fit — pass \
-`run_in_background=true` and `Read` the `output_file` it returns, because the \
-notification arrives on a later iteration of this same turn and the scan is \
-therefore never lost. Do not answer a ceiling you hit by asking for a bigger one: \
-a bound wide enough to cover a whole-tree walk is a turn spent on one command.
+"""
+PROMPT_TAIL = """
 - **Check for a newer item that already covers it.** Superseded is `stale`, \
 and the evidence is the newer item's number.
 - **An item making several claims gets a verdict per claim.** The verdict \
@@ -435,6 +467,8 @@ than half the time and twelve one time in five. If the work needs more, \
 confirm the part one small change can finish and append the rest to this item \
 under `## Findings` (step 6) — clauses past the cap are dropped, not graded.
 """
+PROMPT = PROMPT_HEAD + BASH_CEILING_BULLET + PROMPT_TAIL
+
 
 def _when(ts) -> str:
     try:

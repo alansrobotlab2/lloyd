@@ -310,6 +310,132 @@ def test_the_ceiling_rule_names_the_two_command_shapes_that_actually_time_out():
     assert "vendored" in rule, "the vendored walk is why scoping does not fix the time"
 
 
+# ---------------------------------------------------------------------------
+# #1800: the sweep path gets the same ceiling bullet, out of the same constant
+#
+# The bullet above shipped in `PROMPT` only (1750f88d, #1738), and the owed-check
+# measurement that asked for the sweep copy counted the gap: 52/52 post-landing
+# single-item sessions carried the bullet, 0/110 sweep sessions did, and 0 of those
+# 110 ever passed `run_in_background=true`. Sweep-attributable payload-gated
+# timeouts went 2/44 -> 2/29 sessions across that landing (0.045 -> 0.069 per
+# session, i.e. UP) while single-item fell 24/137 -> 2/52 (0.175 -> 0.038), which
+# is why the sweep is the source to fix next and not the group path: group ran 1
+# session in the same 2026-09-24 -> 2026-09-29 window, with 0 timeouts.
+# ---------------------------------------------------------------------------
+
+
+def test_the_sweep_prompt_carries_the_same_ceiling_and_the_same_remedy():
+    """Clause 1: a sweep greps for evidence too and dies on the same default.
+
+    Asserted through `_ceiling_rule`, the extractor the single-item tests use, so
+    the sweep copy is held to the same content as the single-item one: the ceiling
+    in both units, and backgrounding-plus-reading-back as the only remedy.
+    """
+    rule = _ceiling_rule(M.SWEEP_PROMPT)
+    assert "120 s" in rule, "the unit the model plans in"
+    assert "120000 ms" in rule, "and the unit the error message and the arg use"
+    assert "run_in_background=true" in rule
+    assert "output_file" in rule and "Read" in rule, (
+        "the remedy is to background the scan and read back what it wrote")
+
+
+def test_the_sweep_prompt_names_the_shapes_that_cross_the_ceiling_in_a_sweep():
+    """Clause 2: a sweep's own commands, not the single-item pass's.
+
+    The two shapes measured in the sweep's own timeouts: a chained evidence
+    command (`Read` the item or vault note, then grep under `~/lloyd` in the same
+    call), and an over-many-files scan of a corpus thousands of files deep.
+    Asserted against the whole prompt because they sit in the sweep's own sentence,
+    which follows the shared bullet — and the last assertion keeps that sentence out
+    of the shared text, so it cannot arrive in `PROMPT` by the back door.
+    """
+    for probe in ("chained evidence command", "over-many-files scan", "grep -rn",
+                  "vault note", "~/lloyd", "~/obsidian/backlog",
+                  "~/lloyd-data/sessions"):
+        assert probe in M.SWEEP_PROMPT, f"sweep prompt names no {probe!r} shape"
+    assert "over-many-files" not in _ceiling_rule(M.SWEEP_PROMPT), (
+        "the shapes are the sweep's own sentence, not part of the shared bullet")
+
+
+def test_the_ceiling_bullet_is_one_constant_both_prompts_share_verbatim():
+    """Clause 3: the two copies could not be edited apart even by accident.
+
+    `src.count(CEILING_HEAD) == 1` is the source-level half of the acceptance check
+    (`git grep -n "Bound a scan"` showing one hit); the equalities are the rendered
+    half — each prompt carries the constant byte for byte, so editing one copy is
+    editing both, which is the drift a second hand-copied bullet would reopen.
+    """
+    import inspect
+    src = inspect.getsource(M)
+    assert src.count(CEILING_HEAD) == 1, (
+        "the ceiling text exists more than once in the source: someone hand-copied "
+        "it instead of reusing BASH_CEILING_BULLET")
+    assert M.BASH_CEILING_BULLET in M.PROMPT
+    assert M.BASH_CEILING_BULLET in M.SWEEP_PROMPT
+    assert _ceiling_rule(M.PROMPT) == M.BASH_CEILING_BULLET
+    assert _ceiling_rule(M.SWEEP_PROMPT) == M.BASH_CEILING_BULLET
+
+
+def test_the_sweep_prompt_still_ends_with_its_verdict_block_after_the_bullet():
+    """Clause 4: guidance landing after "nothing after it" is guidance ignored.
+
+    `_SWEEP_LINE`/`_SWEEP_WORTH`/`_SWEEP_SIZE` parse the `SWEEP_VERDICTS:` block,
+    and the template is what the sweep is told to finish on, so the bullet has to
+    precede both — inserted between the steps and the `Rules:` paragraph.
+    """
+    bullet_at = M.SWEEP_PROMPT.index(M.BASH_CEILING_BULLET)
+    assert bullet_at < M.SWEEP_PROMPT.index("SWEEP_VERDICTS:")
+    assert bullet_at < M.SWEEP_PROMPT.index(
+        "Finish with exactly this block and nothing after it:")
+    assert M.SWEEP_PROMPT.rstrip().endswith("(one line per item; every item listed)")
+
+
+def test_a_two_item_sweep_render_carries_the_bullet_and_no_bigger_bound(backlog_dir):
+    """Clause 5, first half: the guidance reaches the sweep turn, not just the module.
+
+    Rendered the way `_execute_sweep` renders it — `SWEEP_PROMPT.format` over
+    `_render_cluster` (`workers/sources/autotriage.py:1384`) — for a two-item batch.
+    The millisecond set is #1738's guard carried over: exactly the 120000 default the
+    bullet warns about, so no bigger bound entered the sweep text either, and the
+    regex keeps an instruction like `timeout: 600000` out of it in prose form too.
+    """
+    write_item(backlog_dir, 1800, name="Sweep ceiling", body="Bound the scan.")
+    write_item(backlog_dir, 1801, name="Another item", body="An unrelated claim.")
+    members = [B.item_by_id(1800), B.item_by_id(1801)]
+    assert [m.id for m in members] == [1800, 1801], "the two fixtures did not land"
+    rendered = M.SWEEP_PROMPT.format(
+        n=2, batch_id=B.sweep_batch_id([m.id for m in members]),
+        items=M._render_cluster(members, 1500))
+    assert M.BASH_CEILING_BULLET in rendered, "the bullet did not survive .format"
+    assert set(re.findall(r"\b\d{6,}\b", rendered)) == {"120000"}, rendered
+    assert not re.search(r"timeout\s*[:=]\s*[\"']?\d", rendered), (
+        "the prompt must not answer a ceiling by asking for a bigger one")
+    assert "600000" not in rendered
+    assert rendered.rstrip().endswith("(one line per item; every item listed)"), (
+        "the rendered prompt no longer closes on the verdict template")
+
+
+def test_the_group_prompt_stays_without_the_bullet_and_the_ruling_is_in_code():
+    """Clause 5, second half: near-zero traffic, so the omission is a decision.
+
+    The group path ran 1 session in the 2026-09-24 -> 2026-09-29 window with 0
+    payload-gated timeouts, so there is nothing for that prompt to prevent. The
+    ruling is asserted as text in the module, above the literal, because an
+    unexplained absence reads as an oversight and gets "fixed" by whichever session
+    notices next — spending prompt tokens on a path with no observed failure.
+    """
+    import inspect
+    src = inspect.getsource(M)
+    assert CEILING_HEAD not in M.GROUP_PROMPT
+    assert M.BASH_CEILING_BULLET not in M.GROUP_PROMPT
+    assert "run_in_background" not in M.GROUP_PROMPT and "120000" not in M.GROUP_PROMPT
+    note_start = src.index("# Deliberately WITHOUT the Bash-ceiling bullet")
+    assert note_start < src.index('GROUP_PROMPT = """'), "the ruling must sit above the literal"
+    note = src[note_start:src.index('GROUP_PROMPT = """')]
+    assert "0 payload-gated timeouts" in note, "the note must carry the measurement"
+    assert "BASH_CEILING_BULLET" in note, (
+        "the note must say how to add it later: reuse the constant, not a copy")
+
 def test_summarize_counts_retirements_separately(backlog_dir, tmp_path):
     for i in (60, 61, 62):
         write_item(backlog_dir, i)
