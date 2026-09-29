@@ -2331,6 +2331,12 @@ def test_both_automod_stores_get_one_line_each_in_both_modes(rs, automod, capsys
     assert "1 reclaimed" in dirs_line, dirs_line
     assert "1 deleted" in branch_line, branch_line
     assert "1 unreachable held" in branch_line, branch_line
+    # The hold is a settled decision, so the line states it (#1837): a weekly report that
+    # keeps naming an open item number after the item closed is the alarm that outlives
+    # its own retraction, because only the ask is ever reprinted.
+    assert "never deleted" in branch_line, branch_line
+    assert "#1644" not in branch_line, branch_line
+    assert "ruling" not in branch_line.lower(), branch_line
     assert sorted(p.name for p in rs.AUTOMOD_WORK_ROOT.iterdir()) == before_dirs, \
         "a dry run removed a round home"
     assert _branches(automod) == before_branches, "a dry run deleted a branch"
@@ -2482,15 +2488,15 @@ def test_a_branch_goes_only_at_thirty_days_and_only_when_its_tip_is_in_main(rs,
     assert "automod/SM_DUE" not in surviving, "a 31-day branch whose tip is in main survived"
     for rid, why in (("SM_YOUNG", "29 days is inside the 30-day horizon"),
                      ("SM_HELD", "an unreachable tip is held at 40 days, not deleted"),
-                     ("SM_ANCIENT", "past the 90-day hold it is owed a ruling, not a delete"),
+                     ("SM_ANCIENT", "an unreachable tip is never deleted, whatever its age"),
                      ("SM_CURRENT", "current.json names this round as in flight"),
                      ("SM_WORKING", "a registered worktree means the round is live")):
         assert f"automod/{rid}" in surviving, f"{why} — but the branch was deleted"
     assert out["young"] == 1, out
     assert out["held_unreachable"] == 2, out
     assert out["due_ruling"] == 1, (
-        "SM_ANCIENT is past the 90-day hold and must be counted as owed the ruling "
-        "#1644 defers, not folded into the held total")
+        "SM_ANCIENT is past the 90-day reporting threshold and must be counted as its "
+        "own number, not folded into the held total")
     assert out["live"] == 1 and out["registered"] == 1, out
 
 
@@ -2774,3 +2780,180 @@ def test_no_store_the_sweep_resolves_lands_on_the_trajectory_corpus(tmp_path, mo
     named = _paths_landing_on(decoy, corpus)
     assert len(named) == 1 and named[0].startswith("TRAJECTORIES_DIR"), (
         f"the finder does not even name a corpus path planted in a stand-in module: {named}")
+
+
+# ── #1837: the branch line names the settled decision, not an open item ──────
+#
+# The ruling on unreachable `automod/*` tips is made — never deleted, they are the sole
+# record of a refused or aborted round — and 90 days is a reporting threshold, not a
+# deletion horizon. A weekly report that still advertises the question is the
+# alarm-that-survives-its-retraction class: the retraction is filed on one surface and
+# the ask keeps printing on the one a human reads. Task #79 shows this line to the
+# operator who approves `--apply`, so the line itself has to carry the answer and the
+# two measurements that would reopen it.
+
+
+def _hold_comment_block(src: str) -> str:
+    """The `#:` block that defines `BRANCH_UNREACHABLE_HOLD_DAYS`, and nothing else.
+
+    Sliced by walking back from the assignment over its own comment lines, so what is
+    graded is the definition site. A whole-file grep would stay green with the decision
+    moved into a README; the hold has to be documented where someone widening the age
+    is already looking.
+    """
+    lines = src.splitlines()
+    at = next((i for i, ln in enumerate(lines)
+               if ln.startswith("BRANCH_UNREACHABLE_HOLD_DAYS =")), -1)
+    assert at > 0, "the script no longer defines BRANCH_UNREACHABLE_HOLD_DAYS at module level"
+    start = at
+    while start > 0 and lines[start - 1].startswith("#:"):
+        start -= 1
+    assert start < at, (
+        "BRANCH_UNREACHABLE_HOLD_DAYS has no `#:` block beside it, so the hold is defined "
+        "with nothing on the same screen saying what the age means")
+    return "\n".join(lines[start:at])
+
+
+def _store_paragraph(doc: str, heading: str) -> str:
+    """One numbered store paragraph of the module docstring, cut on its own heading.
+
+    Same shape as `_exclusion_paragraph`: the slice ends at the paragraph's blank-line
+    terminator, so a sentence relocated into the Usage block below would change this
+    finder's output instead of leaving it reassuringly unchanged.
+    """
+    start = doc.find(heading)
+    assert start >= 0, f"the sweep's docstring no longer carries the `{heading}` store entry"
+    rest = doc[start:]
+    end = rest.find("\n\n")
+    assert end > 0, f"the `{heading}` paragraph runs to the end of the docstring"
+    return rest[:end]
+
+
+def _seed_two_held_tips(rs, automod):
+    """One unreachable tip held inside the 90-day threshold, one past it."""
+    _branch(automod, "SM_INSIDE", landed=False)
+    _branch(automod, "SM_PAST", landed=False)
+    _settle(rs, "SM_INSIDE", 40)
+    _settle(rs, "SM_PAST", 120)
+
+
+def test_the_reworded_line_keeps_the_held_total_and_the_threshold_count_apart(
+        rs, automod):
+    """Clause 2: with one unreachable tip inside the 90-day threshold and one past it, the
+    rendered line reports both as their own numbers — the series the settled decision names
+    as the thing to watch survives the reword.
+
+    Rendered from the rung's own counts rather than a hand-built dict: a fixture that
+    assembled `{"held_unreachable": 2, "due_ruling": 1}` itself would still pass if the
+    rung folded the two together on the way out, which is the failure being prevented.
+    """
+    _seed_two_held_tips(rs, automod)
+    counts = rs.sweep_automod_branches(apply=False, now=time.time(), repo=automod)
+    line = rs._branch_line(counts)
+
+    assert counts["held_unreachable"] == 2 and counts["due_ruling"] == 1, counts
+    assert "2 unreachable held" in line, line
+    assert "1 past 90d" in line, line
+    assert counts["deleted"] == 0, "holding past the threshold turned into a delete"
+
+
+def test_the_reopen_bound_sits_beside_the_hold_and_on_the_line_that_reports_it(rs,
+                                                                               automod):
+    """Clause 3: both places the never-delete hold is DEFINED carry the decision beside
+    both reopen bounds, and the printed line prints the same two numbers the constants
+    hold — so the prose, the code and the weekly report cannot drift apart.
+
+    The bounds live in code as well as prose on purpose: the ruling reached this board
+    through a writer that cuts a field at 500 characters, and its own text arrived here
+    truncated mid-sentence, so a bound that exists only in a paragraph is a bound that
+    can silently lose its second half.
+    """
+    src = _SCRIPT.read_text(encoding="utf-8")
+    block = " ".join(_hold_comment_block(src).split())
+    para = " ".join(_store_paragraph(rs.__doc__ or "", "12. refs/heads/automod/").split())
+
+    for text, where in ((block, "the `BRANCH_UNREACHABLE_HOLD_DAYS` block"),
+                        (para, "the docstring's branch store entry")):
+        assert "never deleted" in text.lower(), (
+            f"{where} no longer states the decision it is supposed to qualify: {text}")
+        assert str(rs.BRANCH_UNREACHABLE_REOPEN_TIPS) in text, (
+            f"{where} does not name the {rs.BRANCH_UNREACHABLE_REOPEN_TIPS}-tip bound")
+        assert f"{rs.BRANCH_UNREACHABLE_REOPEN_GIT_MB} MB" in text, (
+            f"{where} does not name the {rs.BRANCH_UNREACHABLE_REOPEN_GIT_MB} MB bound")
+
+    _seed_two_held_tips(rs, automod)
+    rendered = rs._branch_line(
+        rs.sweep_automod_branches(apply=False, now=time.time(), repo=automod))
+    assert f"{rs.BRANCH_UNREACHABLE_REOPEN_TIPS}" in rendered, rendered
+    assert f"{rs.BRANCH_UNREACHABLE_REOPEN_GIT_MB} MB" in rendered, rendered
+    assert "never deleted" in rendered, rendered
+
+
+def test_no_prose_asks_the_question_the_hold_already_answers(rs):
+    """Clause 4: the pending-ruling phrasing is gone from the script's prose, from the two
+    rung docstrings, and from this suite's own assertion messages.
+
+    Three shapes are searched for, not one, because the retraction can be re-worded back
+    into any of them: a sentence that calls the hold owed a decision, owed the decision a
+    named item defers, or due for that decision. Matching only one would wave the others
+    through. Each pattern is assembled from fragments — this file scans itself, so a
+    literal written out whole is one of the hits the scan forbids, and the node would
+    fail by naming the bug it exists to catch.
+
+    `held_unreachable` has to be PRESENT in every text scanned: a 0-hit result over a
+    file that had stopped mentioning the hold at all is an empty scan, not a reword.
+    """
+    pending = [re.compile("owed (?:a |the )?ruling"),
+               re.compile("1644" + " owes"),
+               re.compile("due for" + " the ruling")]
+    texts = [("the sweep script", _SCRIPT.read_text(encoding="utf-8")),
+             ("this suite", Path(__file__).resolve().read_text(encoding="utf-8"))]
+    for where, text in texts:
+        for pattern in pending:
+            hit = pattern.search(text)
+            assert hit is None, (
+                f"{where} still describes the hold as awaiting a decision "
+                f"({hit.group(0)!r} at offset {hit.start()}), which advertises a closed "
+                "question as an open one on the surface a human reads")
+        assert "held_unreachable" in text, (
+            f"{where} no longer mentions `held_unreachable`, so the absence above proves "
+            "nothing — the scan is empty, not clean")
+
+    rung_docs = {"sweep_automod_branches": rs.sweep_automod_branches.__doc__ or "",
+                 "_branch_line": rs._branch_line.__doc__ or ""}
+    assert all(rung_docs.values()), "a docstring that decided the hold was deleted"
+    for name, doc in rung_docs.items():
+        for pattern in pending:
+            assert pattern.search(doc) is None, (
+                f"`{name}`'s docstring still asks the question the hold answers")
+        assert "never deleted" in doc.lower(), (
+            f"`{name}`'s docstring describes the hold without stating the decision over "
+            "it, which is the figure-without-a-ruling shape #1837 is about")
+    assert "held_unreachable" in rung_docs["sweep_automod_branches"], (
+        "the rung docstring no longer names the count it is deciding, so its wording "
+        "could be about anything")
+
+
+def test_the_reworded_line_still_reports_only_what_the_rung_counted(rs, automod,
+                                                                    monkeypatch,
+                                                                    capsys):
+    """The reword must not have quietly bought its own numbers: every figure the line
+    prints comes from the rung over the seeded repo, including the two that describe an
+    empty store.
+
+    Seeded state has no unreachable tips at all, so the held and threshold figures print
+    as `0` — the case where a formatter is most tempting to special-case away, and the
+    reason the store's named outcomes are reported as their own numbers even at zero.
+    """
+    _say_this_tree_is_production(rs, monkeypatch, rs._TREE)
+    _settle(rs, "SM_LANDED_ONLY", 31)
+    _branch(automod, "SM_LANDED_ONLY", landed=True)
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py"])
+    assert rs.main() == 0
+    line = _store_line(capsys.readouterr().out, "automod/* branches")
+
+    assert "1 deleted" in line, line
+    assert "0 unreachable held" in line, line
+    assert "0 past 90d" in line, line
+    assert "automod/SM_LANDED_ONLY" in _branches(automod), (
+        "the dry run whose line this node rewords went and deleted the branch it counted")

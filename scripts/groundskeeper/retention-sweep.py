@@ -84,9 +84,13 @@ the transcript scratch home from backlog #566:
     only when `git merge-base --is-ancestor <tip> main` holds: that is the state that
     says the work is in the tree, and it is what makes an irreversible delete
     forensic-safe. A tip that is not reachable from main is a refused or aborted round
-    whose branch is the ONLY record of what it attempted, so it is held — past
-    BRANCH_UNREACHABLE_HOLD_DAYS (90) it is reported as due for the ruling #1644 owes on
-    whether those branches are ever deletable, and this sweep deletes none of them.
+    whose branch is the ONLY record of what it attempted, so it is held and NEVER
+    deleted: that is settled, not an open question, and no age makes a sole record
+    deletable. BRANCH_UNREACHABLE_HOLD_DAYS (90) is a reporting threshold, not a
+    deletion horizon — past it the tip is counted and printed, nothing more. The delete
+    question reopens only on a measurement: more than 1000 unreachable tips, or a
+    `.git` above 500 MB that an unreachable-branch pin is holding open. The held count
+    on the report line is the series to watch for the first of those.
 
 Neither store is under `DATA_ROOT`, and the second is not even on the filesystem: it is
 the live repo's refs. That is the hazard the production-checkout guard exists for — a
@@ -788,15 +792,30 @@ WORKTREE_DIR_MAX_AGE_DAYS = 7
 #: only once its tip is an ancestor of `main`, which is the state that says the work is
 #: in the tree and is what makes an irreversible delete forensic-safe.
 BRANCH_MAX_AGE_DAYS = 30
-#: An unreachable tip is HELD, never deleted, and past this age it is reported as due
-#: for the ruling #1644 owes. The horizon is the ruling's "keep unlanded branches 90 d",
-#: and the measured reason it is a hold rather than a deadline: of the 226 branch tips
-#: at triage, 37 are ancestors of `main` and 0 are reachable from `refs/automod/rounds/*`
-#: — `squash_onto` keeps the PRE-squash HEAD at the keep-ref while the branch moves to
-#: the squashed commit — so the unreachable set is 189 refused and aborted rounds whose
-#: branch is the only thing left saying what they tried. Deleting it is owed ruling 3 on
-#: that item, not this round's decision.
+#: An unreachable tip is HELD and NEVER deleted — settled, not an open question. The
+#: branch of a refused or aborted round is the only thing left saying what it attempted,
+#: and no age changes that. Measured reason at triage: of the 226 branch tips, 37 are
+#: ancestors of `main` and 0 are reachable from `refs/automod/rounds/*` — `squash_onto`
+#: keeps the PRE-squash HEAD at the keep-ref while the branch moves to the squashed
+#: commit — so the unreachable set is 189 refused and aborted rounds, every one of them
+#: a sole record.
+#:
+#: This age is therefore a REPORTING THRESHOLD, not a deletion horizon: past it the tip
+#: is counted (`due_ruling`) and printed, and nothing else happens to it. The delete
+#: question reopens only on a measurement — more than 1000 unreachable tips, or a `.git`
+#: directory above 500 MB that an unreachable-branch pin is holding open — and the held
+#: count on the weekly report line is the series to watch for the first of those. Both
+#: bounds are below, and the printed line prints them, so a reader of the report never
+#: has to open this file to learn what would change the answer.
 BRANCH_UNREACHABLE_HOLD_DAYS = 90
+#: Unreachable tips above which the never-delete decision is reopened for measurement,
+#: not for an opinion. 189 at triage; 1000 is a headroom of ~5x, chosen because the cost
+#: of holding is forensic and the cost of deleting a sole record is unrecoverable.
+BRANCH_UNREACHABLE_REOPEN_TIPS = 1000
+#: A `.git` above this many MB, with unreachable automod tips in it, is the other
+#: measurement that reopens the question: it says the hold is costing the repo itself,
+#: which is the only price the 90 d figure was ever standing in for.
+BRANCH_UNREACHABLE_REOPEN_GIT_MB = 500
 #: The ref a branch tip must be an ancestor of to count as landed.
 MAIN_REF = "main"
 #: Round ids are `SM_<YYYYMMDD>_<HHMMSS>`; the prefix also covers the `SM_TEST`,
@@ -1155,9 +1174,13 @@ def sweep_automod_branches(apply: bool, now: float, *, ledger: Path | None = Non
     The tip condition is the whole safety story: branch deletion is irreversible, and
     an ancestor of `main` is a round whose content is in the tree, so the branch is
     scaffolding. An unreachable tip is held and counted (`held_unreachable`, of which
-    `due_ruling` are past BRANCH_UNREACHABLE_HOLD_DAYS), because for a refused or
-    aborted round that branch is the only record of what was attempted and whether it
-    is ever deletable is the ruling #1644 owes, not this rung's call.
+    `due_ruling` are past BRANCH_UNREACHABLE_HOLD_DAYS) and NEVER deleted: for a refused
+    or aborted round that branch is the only record of what was attempted, which is a
+    settled decision rather than this rung's call to re-litigate. `due_ruling` is a
+    reporting count over a threshold, and the two measurements that would reopen the
+    question — `BRANCH_UNREACHABLE_REOPEN_TIPS` and `BRANCH_UNREACHABLE_REOPEN_GIT_MB` —
+    are recorded at their constants and printed on the report line; this rung acts on
+    neither of them.
 
     Same named-outcome shape as the worktree rung, plus `deleted`/`failed` for the
     `git branch -D` itself, whose exit status is checked by `worktree.delete_branch`
@@ -1375,22 +1398,30 @@ def _branch_line(b: dict) -> str:
     """One report line for the branch store, identical in both modes.
 
     The unreachable count is the one an operator reads first: at triage it is 189 of
-    226 tips, and it is the number the owed ruling on #1644 has to be made about. The
-    `past 90d` figure beside it is that ruling's due count — held, not deleted.
+    226 tips, and the decision over them is made — they are never deleted, because a
+    refused or aborted round's tip is the sole record of what it attempted. The
+    `past 90d` figure beside it counts how many have been held past the reporting
+    threshold, which is the series to watch: it reopens the question only above
+    BRANCH_UNREACHABLE_REOPEN_TIPS tips or a `.git` above BRANCH_UNREACHABLE_REOPEN_GIT_MB
+    MB, and this sweep deletes none of them at either figure. The line says all of that
+    so the weekly report cannot advertise a settled decision as an open question — the
+    alarm-that-survives-its-retraction shape, where the retraction is never reprinted
+    and only the ask is.
     """
     if b["skip"]:
         return (f"  automod/* branches >{BRANCH_MAX_AGE_DAYS}d & ancestor of "
                 f"{MAIN_REF}: {b['skip']} — nothing deleted")
     kept = [f"{b['young']} <{BRANCH_MAX_AGE_DAYS}d",
-            f"{b['held_unreachable']} unreachable held "
-            f"({b['due_ruling']} past {BRANCH_UNREACHABLE_HOLD_DAYS}d held for the"
-            " ruling #1644 owes)",
+            f"{b['held_unreachable']} unreachable held: never deleted, sole record "
+            f"({b['due_ruling']} past {BRANCH_UNREACHABLE_HOLD_DAYS}d)",
             f"{b['untracked']} no ledger row", f"{b['registered']} registered",
             f"{b['live']} live round"]
     if b["failed"]:
         kept.append(f"{b['failed']} FAILED to delete")
     return (f"  automod/* branches >{BRANCH_MAX_AGE_DAYS}d & ancestor of {MAIN_REF}: "
-            f"{b['deleted']} deleted (kept: {', '.join(kept)})")
+            f"{b['deleted']} deleted (kept: {', '.join(kept)}) "
+            f"— the delete question reopens only above {BRANCH_UNREACHABLE_REOPEN_TIPS} "
+            f"held tips or a .git above {BRANCH_UNREACHABLE_REOPEN_GIT_MB} MB")
 
 
 def main() -> int:
