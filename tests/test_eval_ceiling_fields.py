@@ -835,3 +835,104 @@ def test_the_skill_names_the_ceiling_and_the_veto():
     assert "0.80" in text, (
         "below 0.80 the disagreement set must be named, so a low ceiling is never "
         "reported without the labels that caused it")
+
+
+# ── #1823: `labels_unofferable`, the field the `_narrow` docstring promised ────
+#
+# `_narrow`'s docstring closed with "Raising the cap is the knob that converts exclusions
+# back into measurements, and `labels_unofferable` beside the ceiling says how many the
+# caps caused." `git grep -n "labels_unofferable"` before this round found that one
+# docstring line and nothing else: the field was never written, and the 2026-09-29
+# artifact's `ceiling` block carried only `kind`, `values`, `n`, `excluded`, `unmeasured`.
+# So the one number that tells a person whether widening `ENTITY_CAP` is worth a re-run
+# did not exist anywhere in the artifact.
+
+
+
+
+def _labeled_row(qid: str, ent_gold: list[str], ent_menu: list[str],
+                 ent_pick: list[str], doc_gold: list[str], doc_menu: list[str],
+                 doc_pick: list[str], **extra) -> dict:
+    """One row in the shape `label_corpus` writes, so `ceiling()` reads it as a real run.
+
+    `label_corpus` is driven over in `tests/test_eval_label_agreement.py`; what this file
+    owns is the artifact-as-consumed, and `ceiling()` is the function that assembles the
+    block, so the field is pinned where it is written and where disk hands it back.
+    """
+    return {"id": qid, "query": f"query {qid}", "category": "project",
+            "primary_entities": ent_gold, "primary_docs": doc_gold,
+            "entity_candidates": ent_menu, "doc_candidates": doc_menu,
+            "second_entities": ent_pick, "second_docs": doc_pick,
+            "entity_labels_offered": sum(
+                1 for g in ent_gold
+                if any(lac.entity_label_satisfied(g, [c]) for c in ent_menu)),
+            "doc_labels_offered": sum(
+                1 for g in doc_gold
+                if any(lac.doc_label_satisfied(g, [c]) for c in doc_menu)),
+            **extra}
+
+
+def test_ceiling_carries_labels_unofferable_per_leg_under_the_promised_name():
+    """Clause 2: the name the docstring uses is the name the block carries, per leg.
+
+    Both legs are present even when one has nothing to report, because a consumer reading
+    `ceiling["labels_unofferable"][leg]` must not KeyError on a quiet leg, and the split
+    beside the count is what makes the count actionable: 1 label excluded says little,
+    1-of-1 outside the cap says a wider cap recovers it.
+    """
+    art = {"queries": [
+        _labeled_row(
+            "a", ["Robot", "Raspberry Pi 5"], ["Robot"], ["Robot"],
+            ["memory/entities/robot.md"], ["memory/entities/robot.md"],
+            ["memory/entities/robot.md"],
+            entity_labels_unofferable=[
+                {"gold": "Raspberry Pi 5", "kind": lac.OUTSIDE_CAP}],
+            doc_labels_unofferable=[]),
+        # Nothing unofferable on this query: the legs' counts must still be there, at 0.
+        _labeled_row("b", ["Vision System"], ["Vision System"], ["Vision System"],
+                     ["memory/entities/vision.md"], ["memory/entities/vision.md"],
+                     ["memory/entities/vision.md"],
+                     entity_labels_unofferable=[], doc_labels_unofferable=[]),
+    ]}
+    block = lac.ceiling(art)
+    assert "labels_unofferable" in block, sorted(block)
+    assert block["labels_unofferable"] == {"entity": 1, "doc": 0}, \
+        block["labels_unofferable"]
+    detail = block["labels_unofferable_detail"]["entity"]
+    assert detail["total"] == 1 and detail["outside_cap"] == 1 \
+        and detail["absent_from_namespace"] == 0 and detail["unclassified"] == 0, detail
+    assert block["labels_unofferable_detail"]["doc"]["total"] == 0, \
+        block["labels_unofferable_detail"]["doc"]
+
+
+def test_labels_unofferable_survives_the_disk_round_trip_and_a_legacy_artifact():
+    """The field must read the same after JSON, and stay honest when it was never written.
+
+    A run writes the ceiling block once and every later reader — `--print`, the nightly
+    reporter, the owed-check job that decides whether to widen the cap — reads it out of
+    JSON, so a leg that recorded zero exclusions must not come back as missing and be
+    mistaken for an old artifact. The genuinely old shape is different and must not be
+    flattened into the same number: a pre-#1823 artifact carries no per-label field at
+    all, and reads as `None` (unmeasured), not as the reassuring 0 that a run with no
+    exclusions also produces. Collapsing those two is how an instrument reports a
+    measurement it never took.
+    """
+    art = {"queries": [_labeled_row(
+        "a", ["Robot"], ["Robot"], ["Robot"], ["memory/entities/robot.md"],
+        ["memory/entities/robot.md"], ["memory/entities/robot.md"],
+        entity_labels_unofferable=[], doc_labels_unofferable=[])]}
+    art["ceiling"] = lac.ceiling(art)
+
+    revived = json.loads(json.dumps(art))
+    assert revived["ceiling"]["labels_unofferable"] == {"entity": 0, "doc": 0}
+    assert lac.ceiling(revived)["labels_unofferable"] == {"entity": 0, "doc": 0}
+
+    legacy = {"queries": [{k: v for k, v in row.items()
+                           if "labels_unofferable" not in k}
+                          for row in art["queries"]]}
+    legacy["queries"][0]["primary_entities"] = ["Robot", "Nonexistent Entity"]
+    assert all("entity_labels_unofferable" not in row for row in legacy["queries"])
+    assert lac.ceiling(legacy)["labels_unofferable"] == {"entity": None, "doc": None}, \
+        "a run that recorded no reasons must not report that there were none"
+    assert lac.ceiling(legacy)["labels_unofferable_detail"] == {"entity": None,
+                                                                "doc": None}

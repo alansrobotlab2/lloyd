@@ -1738,3 +1738,300 @@ def test_the_audit_is_unchanged_when_the_fingerprints_agree_or_are_absent(tmp_pa
     assert ts.load_night(_write_baselines(
         tmp_path / "nullish", [("nightly-20260102", nullish)]) / "nightly-20260102.json"
     ).labels_sha256 is None, "a recorded null must read as no fingerprint, not as ''"
+
+# ── #1823: why a gold was unofferable is MEASURED, not asserted ───────────────
+#
+# The 2026-09-29 artifact excluded 50 entity gold labels as "never offered" and printed
+# one explanation for all of them — "the fix set is the fragmenting entity ids, not the
+# retriever" — computed from no namespace test anywhere in the file. Measured against the
+# live store, 52 of the 53 unofferable entity gold NAMES were in the namespace and had
+# been cut by this file's own `ENTITY_CAP = 40`; exactly one (`Nightly Reflection`) had no
+# namespace entity at all. Those halves have opposite owners — a cap is this instrument's
+# constant, a namespace absence is the store's — so an excluded label now carries which
+# half it is, `ceiling` carries the per-leg count the `_narrow` docstring has always
+# promised, and the sub-0.80 advisory prints the split instead of picking a side.
+
+import io                                     # noqa: E402
+from contextlib import redirect_stdout        # noqa: E402
+import eval.label_agreement_ceiling as lac    # noqa: E402
+
+# A namespace the fixture's query can see: `Robot` and `Vision System` match its tokens,
+# `Raspberry Pi 5` is a real name the tokens do not reach, `GPU` is filler that wins the
+# spare slot on the name tie-break. `Nonexistent Entity` is deliberately NOT in here.
+_NS = ["Robot", "Vision System", "Raspberry Pi 5", "GPU"]
+_VAULT = ["memory/entities/robot.md", "memory/entities/gpu.md",
+          "memory/entities/vision.md"]
+
+
+def _cap_queries() -> list[dict]:
+    """One query whose golds cover all three states the instrument must tell apart."""
+    return [{"id": "cap-drop", "query": "what does the vision robot run on",
+             "expect_entities": ["Robot", "Vision System", "Raspberry Pi 5",
+                                 "Nonexistent Entity"],
+             "expect_docs": ["memory/entities/robot.md", "memory/entities/gpu.md",
+                             "memory/entities/ghost.md"],
+             "kind": "project"}]
+
+
+def _first_labeler(request: dict) -> dict:
+    """A second labeler that always takes candidate #1 of each menu.
+
+    Agreement is then fully determined by the fixture, which is what makes the two rates
+    assertable: it agrees exactly where the primary's gold was the menu's first entry. The
+    empty guards matter because a query's menu may legitimately be empty, and an empty
+    pick list is a different outcome from a pick that was dropped as out of range.
+    """
+    # 1-based, because `build_prompt` numbers the menu from 1 and `parse_reply` drops
+    # anything outside 1..len(menu) rather than clamping it.
+    return {"text": '{{"entities": {}, "docs": {}}}'.format(
+        "[1]" if request["entity_candidates"] else "[]",
+        "[1]" if request["doc_candidates"] else "[]")}
+
+
+def _capped_artifact() -> dict:
+    """A real `label_corpus` run at cap=1, so golds are cut in both possible ways.
+
+    Through the actual narrowing, not a hand-built row: the classification is a property
+    of what the caps removed from THIS namespace. At cap=1 the menu for the fixture query
+    is exactly `['Robot']` / `['memory/entities/robot.md']` — measured, because
+    `_narrow` fills its slots by score then name, and `Raspberry Pi 5` loses both.
+    """
+    return lac.label_corpus(
+        queries=_cap_queries(), entity_names=_NS, vault_paths=_VAULT,
+        labeler=_first_labeler, labeler_identity={"command": "test"},
+        seed=7, entity_cap=1, doc_cap=1)
+
+
+def _legacy(art: dict) -> dict:
+    """`art` as a pre-#1823 artifact: no per-label reason on any row, and no split in
+    its `ceiling` block.
+
+    Both halves go, because a pre-#1823 file never wrote either — and `ceiling` is the
+    copy every later reader consumes, so leaving the block in while stripping the rows
+    would model a file that could not have been written.
+    """
+    rows = [{k: v for k, v in row.items()
+             if k not in ("entity_labels_unofferable", "doc_labels_unofferable")}
+            for row in art["queries"]]
+    out = dict(art, queries=rows)
+    # `print_summary` reads the artifact's own `ceiling` block, and `label_corpus` wrote
+    # one with the split in it; a pre-#1823 file would have had a block computed from
+    # rows that carried no reasons, which is exactly `ceiling()` over the stripped rows.
+    out["ceiling"] = lac.ceiling(out)
+    return out
+
+
+def test_an_unofferable_entity_gold_is_recorded_as_cap_or_namespace_membership():
+    """#1823 clause 1: an excluded gold says whether the store held its name.
+
+    `Vision System` and `Raspberry Pi 5` are namespace names the cap dropped, so they are
+    `outside_cap` — this instrument's own constant, convertible back into measurements by
+    raising a cap. `Nonexistent Entity` matches no name in the namespace, so it is
+    `absent_from_namespace` and no cap change can ever offer it. `Robot` is offered and
+    records nothing. Recorded per label, because the 2026-09-29 artifact read those two
+    states identically and attributed 50 of its own cap cuts to the entity store.
+    """
+    art = _capped_artifact()
+    row = art["queries"][0]
+    assert row["entity_candidates"] == ["Robot"], row["entity_candidates"]
+
+    kinds = {item["gold"]: item["kind"] for item in row["entity_labels_unofferable"]}
+    assert kinds == {"Vision System": lac.OUTSIDE_CAP,
+                     "Raspberry Pi 5": lac.OUTSIDE_CAP,
+                     "Nonexistent Entity": lac.ABSENT_FROM_NAMESPACE}, kinds
+
+    detail = art["ceiling"]["labels_unofferable_detail"]["entity"]
+    assert detail["total"] == 3 and detail["outside_cap"] == 2 \
+        and detail["absent_from_namespace"] == 1 and detail["unclassified"] == 0, detail
+    # The names are the actionable half: what a rename or a merge could ever reach.
+    assert detail["absent_labels"] == ["Nonexistent Entity"], detail
+
+    # The doc leg is classified against its own namespace, off its own cap:
+    # `memory/entities/gpu.md` is a real vault path the narrowing never reached,
+    # `memory/entities/ghost.md` is a path that does not exist.
+    docs = {item["gold"]: item["kind"] for item in row["doc_labels_unofferable"]}
+    assert docs == {"memory/entities/gpu.md": lac.OUTSIDE_CAP,
+                    "memory/entities/ghost.md": lac.ABSENT_FROM_NAMESPACE}, docs
+
+
+def test_an_unofferable_reason_is_left_unrecorded_rather_than_guessed():
+    """#1823 clause 1's negative half: nothing measured, nothing claimed, and the three
+    states that read alike must not collapse.
+
+    `classify_unofferable` against an empty namespace is not "absent from namespace" —
+    every label would answer that, and the advisory would tell a store-side story about a
+    cap. So the reason is left unrecorded. And a `ceiling()` that reports 0 for an
+    artifact whose rows carry no `{leg}_labels_unofferable` key at all would be reporting
+    a measurement it never took: a pre-#1823 artifact recorded NOTHING, while a run that
+    offered every gold recorded nothing TO record — `None` versus `0`, and a 0.0-style
+    silent zero is the failure mode this whole file is written against.
+    """
+    # An empty namespace is refused outright rather than returning an empty map: a
+    # returned {} would look like "nothing to classify", and a caller that forgot to
+    # check would write a clean artifact about labels it never tested.
+    with pytest.raises(ValueError, match="empty entity namespace"):
+        lac.classify_unofferable(["Raspberry Pi 5"], leg="entity", namespace=[])
+
+    art = _capped_artifact()
+    assert all(item["kind"] in (lac.OUTSIDE_CAP, lac.ABSENT_FROM_NAMESPACE)
+               for item in art["queries"][0]["entity_labels_unofferable"])
+
+    empty = lac.ceiling(_legacy(art))
+    assert empty["labels_unofferable"] == {"entity": None, "doc": None}, \
+        "an artifact that recorded nothing must not report a count of 0"
+    assert empty["labels_unofferable_detail"] == {"entity": None, "doc": None}, empty
+
+    everything_offered = {"queries": [
+        {"id": "x", "query": "Robot", "primary_entities": ["Robot"],
+         "entity_candidates": ["Robot"], "second_entities": ["Robot"],
+         "entity_labels_unofferable": []}]}
+    assert lac.ceiling(everything_offered)["labels_unofferable"]["entity"] == 0, \
+        "a run that offered every gold has a measured count of zero, not a gap"
+
+
+def test_the_sub_veto_advisory_prints_the_measured_split_and_no_other_fix_set():
+    """#1823 clause 3: the advisory reports the counts it has, and the old sentence is gone.
+
+    The retired text named the fragmenting-entity fix for every sub-veto run, for all 62
+    disagreements at once. The replacement prints the recorded split and points at the
+    entity store only for the labels the namespace test supports — here 1 of 3, where the
+    old line asserted that story for all of them, and 50 of the 53 in production. An
+    artifact that recorded nothing, with no namespace to re-derive it from, prints
+    UNMEASURED with the reason, which is the only honest thing it can print.
+    """
+    art = _capped_artifact()
+    assert lac.agreement(art)["entity_label_agreement"] < lac.AGREEMENT_VETO, \
+        "the fixture must sit under the veto, or the advisory is not what prints"
+    out = io.StringIO()
+    with redirect_stdout(out):
+        lac.print_summary(art)
+    text = out.getvalue()
+
+    assert lac.AGREEMENT_VETO == 0.80, "the advisory and the #654 veto drifted apart"
+    assert "BELOW 0.80" in text, text
+    assert "unofferable entity labels: 3 (3 distinct names) " \
+           "(reason as recorded by the run), of which:" in text, text
+    assert "2 (66.7%) outside the candidate cap" in text, text
+    assert "cap artefact, not a labelling disagreement" in text, text
+    assert "1 (33.3%) absent from the namespace: Nonexistent Entity" in text, text
+    assert "fix owner for those 2: ENTITY_CAP, this instrument's own constant" in text, text
+    assert "THIS is the fragmenting-entity fix set" in text, text
+    assert "the fix set is the fragmenting entity ids, not the retriever" not in text, \
+        "the unqualified conclusion this clause exists to remove"
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        lac.print_summary(_legacy(art))
+    got = buf.getvalue()
+    assert "UNMEASURED" in got and "records no reason for them" in got, got
+    assert "3 entity gold labels were never offered" in got, got
+    assert "outside the candidate cap" not in got and "absent from the namespace:" \
+        not in got, "a legacy artifact must not print a split it never measured"
+
+
+def test_the_agreement_line_prints_the_offered_rate_beside_the_all_gold_rate():
+    """#1823 clause 4: a cap artefact is distinguishable at the point of reading.
+
+    On the 2026-09-29 artifact the entity leg reads 0.3404 all-gold against 0.7273 among
+    the offered labels — the gap is the 50 cap-dropped golds, not the two labelers
+    choosing differently, and only the second figure says so. The all-gold rate stays the
+    number the #654 veto is evaluated on (a gold nobody was offered is not a gold one can
+    trust), so both are printed rather than one replacing the other. Here the fixture's
+    labeler takes candidate #1 every time, so all four entity golds agreed nowhere but the
+    one offered gold did: 0.25 (1/4) all-gold against 1.0 (1/1) among offered. A leg with
+    nothing offered prints None with its zero denominator, never a 0.0 that reads as a
+    measured floor.
+    """
+    art = _capped_artifact()
+    a = lac.agreement(art)
+    assert a["entity_labels"] == 4 and a["entity_labels_agreed"] == 1, a
+    assert a["entity_labels_offered"] == 1 and a["entity_label_agreement"] == 0.25, a
+    assert a["entity_label_agreement_when_offered"] == 1.0, \
+        "every label the menu DID carry was agreed — that is the whole distinction"
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        lac.print_summary(art)
+    lines = buf.getvalue().splitlines()
+    ent = next(l for l in lines if "entity" in l and "all-gold" in l)
+    assert "0.25 all-gold (1/4 labels)" in ent, ent
+    assert "1.0 among offered (1 were offered as candidates)" in ent, ent
+    doc = next(l for l in lines if "doc" in l and "all-gold" in l)
+    assert "0.3333 all-gold (1/3 labels)" in doc, doc
+    assert "1.0 among offered (1 were offered)" in doc, doc
+
+    # Nothing offered, golds present: the all-gold rate is a real measurement of 0.0,
+    # and the offered-only rate has no denominator at all. Printing `0.0` there would
+    # read as a measured floor on a leg the caps never carried — the same lie as the
+    # `None`-versus-`0` split in `test_an_unofferable_reason_is_left_unrecorded…`.
+    nothing = {"queries": [{"id": "q", "query": "q", "primary_entities": ["A"],
+                            "primary_docs": [], "entity_candidates": [],
+                            "doc_candidates": [], "second_entities": ["B"],
+                            "second_docs": [], "entity_labels_offered": 0,
+                            "doc_labels_offered": 0,
+                            "entity_labels_unofferable": [{"gold": "A", "kind": None}],
+                            "doc_labels_unofferable": []}]}
+    agree = lac.agreement(nothing)
+    assert agree["entity_label_agreement"] == 0.0, agree
+    assert agree["entity_label_agreement_when_offered"] is None, \
+        "an empty denominator must not read as a rate of zero"
+
+
+def test_a_re_derived_split_counts_labels_and_reports_names_separately():
+    """#1823 clause 3's units: a pre-#1823 artifact's split counts the same thing the
+    header beside it counts, and says the other figure separately.
+
+    One name can be gold for several queries — `kg-maintenance-tasks`, `backlog-363` and
+    nine more each repeat on the 2026-09-29 corpus — so a label set has two honest sizes,
+    and the reader needs both in the right places. `total`/`outside_cap`/
+    `absent_from_namespace` count LABELS (per query), which is what the disagreement dump
+    and `ceiling.excluded` count five lines away; `names` holds the distinct-name counts.
+    The first cut of this branch keyed everything on the name, so the same artifact
+    printed "unofferable entity labels: 31" above "disagreed entity labels: 62" and 31/44
+    beside the header's own 44/94: three readings of one 50-label set, each looking like a
+    rate. Measured on that artifact after the fix: 50 labels, 31 distinct, all 50
+    cap-dropped.
+    """
+    queries = [
+        # `Raspberry Pi 5` is gold on BOTH queries and no menu reaches it, so it is
+        # unofferable twice under one name; `Nonexistent Entity` is unofferable once and
+        # is not in the namespace at all. `Robot` is offered on both and is agreed.
+        {"id": "one", "query": "what does the robot run on",
+         "expect_entities": ["Robot", "Raspberry Pi 5", "Nonexistent Entity"],
+         "expect_docs": ["memory/entities/robot.md"]},
+        {"id": "two", "query": "the robot again",
+         "expect_entities": ["Robot", "Raspberry Pi 5"],
+         "expect_docs": ["memory/entities/robot.md"]},
+    ]
+    art = lac.label_corpus(queries=queries, entity_names=_NS, vault_paths=_VAULT,
+                           labeler=_first_labeler,
+                           labeler_identity={"command": "test"}, seed=7,
+                           entity_cap=1, doc_cap=1)
+    legacy = _legacy(art)
+    # `_NS` is the namespace tested against, and it deliberately does NOT hold
+    # `Nonexistent Entity` — appending it would make every label cap-dropped.
+    detail = lac.unofferable_detail(legacy, leg="entity", namespace=_NS)
+    # `Nonexistent Entity` is gold once; `Robot` twice, and the namespace holds it.
+    assert detail["total"] == 3, detail
+    assert detail["names"] == {"total": 2, "outside_cap": 1,
+                              "absent_from_namespace": 1}, detail["names"]
+    assert detail["outside_cap"] == 2 and detail["absent_from_namespace"] == 1, detail
+    assert detail["source"] == "namespace-tested-now", detail
+
+    # And the two readings the fix separates: the advisory's line and the header's.
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        lac.print_summary(legacy, entity_namespace=_NS)
+    text = buf.getvalue()
+    # Labels counted, names in brackets: `Raspberry Pi 5` is gold on both queries here,
+    # which is the repetition the reviewer's 31-vs-50 reading turned on.
+    assert "unofferable entity labels: 3 (2 distinct names) " \
+           "(reason tested against the namespace" in text, text
+    assert "2 (66.7%) outside the candidate cap" in text, text
+    assert "1 (33.3%) absent from the namespace: Nonexistent Entity" in text, text
+    # The header still counts all gold labels, and the split's percentages are of the
+    # unofferable set — a reader comparing them must be able to see which is which.
+    agree_line = next(l for l in text.splitlines() if "all-gold" in l and "entity" in l)
+    assert "0.4 all-gold (2/5 labels)" in agree_line, agree_line
+    # The advisory and the header now agree: one offered label, agreed, on each reading.
+    assert "agreement among the labels that WERE offered: 1.0 (2/2)" in text, text
