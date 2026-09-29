@@ -841,7 +841,10 @@ models:
     # Whether this slot accepts image input. Must match the engine: the
     # launcher strips the vision tower unless LANGUAGE_MODEL_ONLY=0 in
     # agent-llm-primary.conf. true with a text-only engine costs one refused
-    # request per turn (MultimodalRejectedError), never a dead turn.
+    # request per run (MultimodalRejectedError): the harness strips the
+    # images, retries, and latches tool-image attachment off for the rest of
+    # the run. A rejection with the latch already down (a caller-supplied
+    # image the strip cannot reach) still ends the turn.
     supports_vision: true
     image_token_estimate: 1300   # 1456x819 frame on this ViT (32x32 px per token); measured 640x360 = 220
     context_length: 262144
