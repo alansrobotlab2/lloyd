@@ -1006,6 +1006,11 @@ livekit:
     speed: 1.22
     sample_rate: 24000
     skip_empty: true
+    # Rewrite text for speech before synthesis (agent-services/tts_text.py).
+    # Measured 2026-09-28 (#1623, eval/run_tts_fidelity_eval.py, k=4): target
+    # tokens heard 90.9% vs 81.2% raw, control identical at 98.6%; paths are
+    # the one bucket that dipped (18/28 vs 20/28).
+    normalise_text: true
     # Silence appended to every utterance.  _stream_utterance returns once the
     # audio is *queued*, not played, so whatever ran next — an `interrupt()`
     # calling `clear_queue()`, the room going quiet — was cutting the last
