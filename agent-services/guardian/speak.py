@@ -29,7 +29,10 @@ see the nag, so without a shared record a persistent BROKEN state would say
 the same sentence out loud four times an hour forever, which is how you teach
 someone to unplug the speakers. See `policy.VOICE_REPEAT_SECONDS`.
 
-Failures are logged to `voice.log` in the guardian state dir. An alerting
+Failures are logged to `voice.log` in the guardian state dir, each line stamped
+with the LOCAL wall clock and an explicit UTC offset (`%z`, #1808) — marked, not
+converted, because the state dir's other artefacts stamp UTC and a reader that
+assumed it here would be hours wrong. An alerting
 channel that fails silently is the exact anti-pattern `notify.py`'s own
 docstring is about — and a *record* was all that `synth failed` had, which on
 2026-09-28 was the wrong amount: three utterances refused with `[Errno 111]
@@ -190,13 +193,23 @@ def load_config(state_dir: Path) -> dict:
 
 
 def _log(state_dir: Path, message: str) -> None:
+    # The stamp carries an explicit UTC offset (#1808) and the digits stay the
+    # LOCAL wall clock: `%z` marks which zone those digits are in, it does not
+    # convert them. Writing `datetime.now(timezone.utc)` here would satisfy the
+    # offset and move every line seven hours, which is the opposite of the fix —
+    # the 2026-09-28 outage is understood by lining these lines up with a human's
+    # memory of the evening. The marker matters because the file is machine-read
+    # against artefacts in the same state dir that DO mark UTC (`gstate.py:26`
+    # and `memwatch.py:210` both write a trailing `Z`), and because the three
+    # utterances refused at 11:50:51 and 11:51:18 that day read, taken as UTC, as
+    # an outage beginning 59 minutes before the outage.
     try:
         p = Path(state_dir) / LOG_NAME
         p.parent.mkdir(parents=True, exist_ok=True)
         if p.exists() and p.stat().st_size > _LOG_CAP:
             p.write_text("", encoding="utf-8")
         with open(p, "a", encoding="utf-8") as fh:
-            fh.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {message}\n")
+            fh.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} {message}\n")
     except Exception:
         pass
 

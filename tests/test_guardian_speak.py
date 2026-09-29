@@ -38,6 +38,7 @@ announcing an outage of the same supervised tree that hosts the TTS server.
 from __future__ import annotations
 
 import array
+import datetime
 import json
 import os
 import re
@@ -1067,3 +1068,138 @@ def test_sync_pushes_quiet_hours_from_the_guardian_block_not_livekit():
     out = svc.build(tts, {"quiet_hours": {"enabled": True, "start": 1, "end": 2}})
     assert out["quiet_hours"]["start"] == 1
     assert out["voice"] == "clone:dave_cullen"
+
+
+# ── the stamp on each log line (#1808) ────────────────────────────────
+# Everything above reads the MESSAGE of a log line; none of it read the stamp,
+# which is why the stamp could carry no zone for as long as it did. The file's
+# clock is the local wall clock — `timedatectl` says America/Los_Angeles,
+# PDT/-0700 — while its two sibling writers in the same state dir mark UTC
+# explicitly (`gstate.py:26` writes `%...Z`, `memwatch.py:210` writes
+# gmtime+`Z`). A reader that assumes UTC for the guardian's own artefacts is
+# right for those and hours wrong here.
+
+def _stamp_and_body(tmp_path) -> tuple[str, str]:
+    """The first `voice.log` line, split at its first space: stamp, message."""
+    text = (tmp_path / speak.LOG_NAME).read_text(encoding="utf-8")
+    stamp, _, body = text.splitlines()[0].partition(" ")
+    return stamp, body
+
+
+def test_a_log_line_stamps_an_explicit_utc_offset(tmp_path):
+    """#1808 clause 1: a machine-facing log must say which zone it is in.
+
+    The ambiguity is not hypothetical. The two `Connection refused` lines at
+    11:50:51 and 11:51:18 on 2026-09-28 — the refused utterance that was itself
+    the alert announcing `agent-supervisord` was unreachable — read as UTC sit
+    59 minutes BEFORE the outage they belong to. The signals pass read them as
+    PDT only because it stopped to check.
+    """
+    speak._log(tmp_path, "quiet hours — withholding speech")
+
+    stamp, _ = _stamp_and_body(tmp_path)
+    parsed = datetime.datetime.fromisoformat(stamp)
+    assert parsed.utcoffset() is not None, (
+        f"{stamp!r} carries no offset, so every later reader has to guess "
+        "whether it is local or UTC")
+
+
+def test_the_offset_never_moves_the_wall_clock_reading(tmp_path, monkeypatch):
+    """#1808 clause 2: marking the zone is not the same act as converting to UTC.
+
+    `datetime.now(timezone.utc)` would satisfy clause 1, keep this file's green
+    record, and silently shift every line by seven hours — and the incident this
+    item cites is understood only by lining these lines against a human's memory
+    of the evening. So the instant is frozen, and the digits are compared against
+    the LOCAL reading of that same instant, computed with the real `strftime`
+    captured before the patch so the comparison shares no code with the writer.
+    """
+    moment = time.time()
+    frozen = time.localtime(moment)
+    real_strftime = time.strftime
+    monkeypatch.setattr(time, "strftime",
+                        lambda fmt, *a: real_strftime(fmt, *(a or (frozen,))))
+
+    speak._log(tmp_path, "digits must be unchanged")
+
+    stamp, _ = _stamp_and_body(tmp_path)
+    parsed = datetime.datetime.fromisoformat(stamp)
+    assert parsed.strftime("%Y-%m-%dT%H:%M:%S") == real_strftime(
+        "%Y-%m-%dT%H:%M:%S", frozen), (
+        f"the stamp reads {stamp!r} but the local wall clock at that moment "
+        f"was {real_strftime('%Y-%m-%dT%H:%M:%S', frozen)!r} — the log must "
+        "keep writing local time and only MARK the zone")
+    assert parsed.utcoffset() == datetime.datetime.fromtimestamp(
+        moment, datetime.timezone.utc).astimezone().utcoffset(), (
+        f"{stamp!r} names the wrong offset for this machine")
+
+
+def test_log_swallows_an_unwritable_state_dir_and_returns_none(tmp_path):
+    """#1808 clause 3's first half: the alerting path may not raise.
+
+    Two ways of making the write fail, because they fail at different places —
+    a state dir that is a regular FILE makes `mkdir` raise `FileExistsError`
+    whatever user runs the suite, and a directory without write permission makes
+    the `open` fail. The permission half is skipped rather than passed vacuously
+    under root, where mode bits are advisory.
+    """
+    as_file = tmp_path / "not-a-dir"
+    as_file.write_text("in the way", encoding="utf-8")
+
+    assert speak._log(as_file, "must not raise") is None
+    assert not (tmp_path / speak.LOG_NAME).exists()
+
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root ignores mode bits, so the permission case proves nothing")
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o500)
+    try:
+        assert speak._log(locked, "must not raise either") is None
+        assert not (locked / speak.LOG_NAME).exists()
+    finally:
+        locked.chmod(0o700)
+
+
+def test_the_cap_truncates_above_it_before_appending_and_not_below(tmp_path):
+    """#1808 clause 3's second half, with its control: the size bound still fires.
+
+    `_LOG_CAP` had no test at all, and the bound is load-bearing enough that
+    `#1806` records its downside in prose: the log that documents a failed
+    channel is the one channel can fill. Two properties, because one alone is
+    satisfiable by an unconditional truncate — above the cap the file is emptied
+    BEFORE the new line is appended, and below it nothing is dropped.
+    """
+    log = tmp_path / speak.LOG_NAME
+    log.write_text("x" * (speak._LOG_CAP + 10), encoding="utf-8")
+
+    speak._log(tmp_path, "after the cap")
+    text = log.read_text(encoding="utf-8")
+    assert "xxxx" not in text, "a log past _LOG_CAP was not truncated"
+    assert text.count("\n") == 1, f"expected only the new line, got {text!r}"
+    assert text.endswith("after the cap\n"), (
+        "the truncate must happen before the append, not after it")
+
+    speak._log(tmp_path, "below the cap")
+    text = log.read_text(encoding="utf-8")
+    assert text.count("\n") == 2, f"appending below the cap dropped a line: {text!r}"
+    assert "after the cap" in text and "below the cap" in text
+
+
+def test_the_message_is_written_verbatim_after_the_stamp(tmp_path):
+    """#1808 clause 4: the stamp is a prefix, and only a prefix.
+
+    Every pre-existing assertion here reads the body — "degraded",
+    "unavailable", "duration ceiling", "quiet hours" — and this change edits
+    none of them. What they all lean on is that the text after the stamp is the
+    text that was handed in, so that is what is asserted, with the characters a
+    real alert carries: an em dash, a quoted path, and parentheses.
+    """
+    msg = "synth failed (TimeoutError) — read timed out on '/tmp/voice.wav' (twice)"
+
+    speak._log(tmp_path, msg)
+
+    stamp, body = _stamp_and_body(tmp_path)
+    assert body == msg, f"the body was altered: {body!r}"
+    assert (tmp_path / speak.LOG_NAME).read_text(encoding="utf-8").startswith(
+        stamp + " "), "the stamp must be the first token on the line"
