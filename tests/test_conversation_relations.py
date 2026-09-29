@@ -2033,31 +2033,86 @@ def test_the_band_bounds_are_inclusive_at_the_floor_and_exclusive_at_the_ceiling
     assert not cr.in_acceptance_band(fresh[2])
 
 
-def test_the_nightly_approve_command_in_the_skill_carries_the_band_flag(cr, monkeypatch):
-    """Clause 5: the nightly job runs whatever command this skill prints — task
-    #51 declares no command of its own — so a flag that is not on that line
-    means the band is off in production no matter what the code can do. Read
-    from `vault_root()`, which `app/data_root.py` derives the way `app.paths`
-    does; asserting rather than skipping when the file is absent, because a
-    skipped cross-surface check is an unenforced one.
+#: The skill page task #51's prompt is rendered from. `app/autonomy.py::_build_task_prompt`
+#: splices this file's body into the worker prompt and the task file declares no command of
+#: its own, so the flags on step 4's line are the flags production runs with — and a flag
+#: that is NOT on that line is off, however completely the script implements it. That
+#: one-way direction is why withdrawing a capability needs no code change and why this
+#: surface, not the parser, is where "is the band running?" is decided.
+_SKILL_RELPATH = ("skills", "conversation-relation-linking", "SKILL.md")
+_BAND_FLAGS = ("--approve-band", "--band-cap")
+#: The two things `cmd_approve` prints when it is run with the band on: the header
+#: (`conversation_relations.py:1510`) and the admitted-count suffix the floor line grows
+#: (`format_acceptance_band`, same file). Both are output a band-enabled run only.
+_BAND_OUTPUT_MARKERS = ("Band admission: ON", "admitted by the 0.7-0.85 band")
 
-    The same line is then executed against the real `main()` parser, so the
-    assertion is about a command that actually runs and not about a substring
-    somebody wrote.
-    """
+
+def _skill_text() -> str:
+    """The live skill page, read from `vault_root()` the way the prompt builder reads it.
+    Asserting rather than skipping when it is absent: a skipped cross-surface check is an
+    unenforced one."""
     from app.data_root import vault_root
 
-    skill = vault_root() / "skills" / "conversation-relation-linking" / "SKILL.md"
-    text = skill.read_text(encoding="utf-8")
+    skill = vault_root().joinpath(*_SKILL_RELPATH)
+    assert skill.is_file(), f"the page this job's prompt is rendered from is absent: {skill}"
+    return skill.read_text(encoding="utf-8")
+
+
+def _skill_section_lines(text: str, heading: str) -> list[str]:
+    """The lines of one section, from its heading to the next heading of any rank.
+
+    Scoping matters here: the band subsection sits INSIDE step 4, so a claim pinned
+    to "what step 4 tells the reporter to expect" is satisfied by nothing in the band
+    section, and a claim pinned to the band section cannot be met by a sentence in the
+    command step. Without this split the two regions could cover for each other.
+    """
+    lines = text.splitlines()
+    start = next((i for i, ln in enumerate(lines) if ln.startswith(heading)), None)
+    assert start is not None, f"the skill has no section starting {heading!r}"
+    # A heading is hashes FOLLOWED BY A SPACE. Prose in this skill opens lines with
+    # issue references (`#1653 owed-check ruling …`), and treating one as a heading
+    # truncates the section at the second line of its own paragraph — which is how this
+    # helper first read the band section as three lines and then reported it as a
+    # missing measurement.
+    heading_here = re.compile(r"#{1,6} ")
+    end = next((i for i, ln in enumerate(lines[start + 1:], start + 1)
+                if heading_here.match(ln)), len(lines))
+    return lines[start:end]
+
+
+def _flat(lines: list[str]) -> str:
+    """Section lines as one string: the skill wraps its prose, and a claim is a claim
+    across a line break, so matching must not depend on where somebody wrapped it."""
+    return " ".join(" ".join(lines).split())
+
+
+def test_the_nightly_approve_command_in_the_skill_leaves_the_band_off(cr, monkeypatch):
+    """#1841 clause 1: the nightly command no longer carries the band.
+
+    This node asserted the opposite until #1841 — `assert all("--approve-band" in ln
+    for ln in approve_lines)`, plus `seen[0]["band"] is True` — because #1653 clause 5
+    had just enabled the band and the flag's absence from this page was then the bug
+    being fixed. #1841's acceptance reverses that instruction on the evidence recorded
+    in the skill: "the nightly's approve command in the skill stops carrying
+    --approve-band (band dormant in code, its test inverted in the same change)". So
+    the flag stays implemented and stays tested — `test_the_cli_passes_the_band_flag_
+    into_the_approve_run` still drives `--approve-band` and `--band-cap 3` through
+    `main()` and still requires `band=True` — and what changed is which of the two
+    commands the page tells the nightly job to run.
+
+    The line is then handed to the real `main()` parser, as before, so the assertion is
+    about a command that actually runs rather than a substring somebody wrote: the
+    documented argv has to reach the approve run with the band OFF.
+    """
+    text = _skill_text()
 
     approve_lines = [ln.strip() for ln in text.splitlines()
                      if "conversation_relations.py --approve" in ln]
-    assert approve_lines, f"{skill} prints no approve command"
-    assert all("--approve-band" in ln for ln in approve_lines), approve_lines
+    assert approve_lines, "the skill prints no approve command at all"
+    assert not any(flag in ln for ln in approve_lines for flag in _BAND_FLAGS), (
+        f"the nightly command still carries a band flag, so the band is running in "
+        f"production: {approve_lines}")
 
-    # And the flags on that line are real flags of this script that reach the
-    # approve run: argv from the doc through the real `main()`, with only
-    # `cmd_approve` stubbed so nothing touches the live proposals file.
     doc_argv = approve_lines[0].split()
     assert doc_argv[0] == "python3", doc_argv
     assert doc_argv[1].endswith("conversation_relations.py"), doc_argv
@@ -2065,5 +2120,143 @@ def test_the_nightly_approve_command_in_the_skill_carries_the_band_flag(cr, monk
     monkeypatch.setattr(cr, "cmd_approve", lambda **kw: seen.append(kw))
     monkeypatch.setattr(sys, "argv", doc_argv[1:])
     cr.main()
-    assert seen and seen[0]["band"] is True, seen
-    assert seen[0]["band_cap"] == cr.BAND_DEFAULT_CAP, seen
+    assert seen == [{"band": False, "band_cap": cr.BAND_DEFAULT_CAP}], (
+        f"the command the skill prints did not reach the approve run as floor-only: {seen}")
+
+
+def test_the_band_section_says_the_band_is_off_and_names_the_way_back_on():
+    """#1841 clauses 2 and 3: the page says the band is not enabled, with the two
+    measurements that made it unmeetable, and can still be switched back on from here.
+
+    The numbers are what a reader needs to decide not to re-enable it by reflex, so
+    they are pinned with their denominators, and one denominator is checked against the
+    file it counts rather than taken from the prose: `eval/vault_recall_queries.yaml`
+    has 81 queries today, and prose claiming a different pool size is a stale claim
+    about the probe set, not a style choice. The other denominator — the band's 15
+    endpoints — is a live-store figure and is checked by the probe in the skill's own
+    band section, not here: a unit test that read the production graph would fail on
+    someone else's landing rather than on this diff.
+    """
+    band = _flat(_skill_section_lines(_skill_text(), "#### The 0.70"))
+    sentences = re.split(r"(?<=[.!?]) +", band)
+
+    # (clause 2, half 1) the status sentence, in the section a reader lands on.
+    assert "not enabled in the nightly" in band.lower(), (
+        f"the band section never says the nightly is not running it: {band}")
+
+    # (clause 2, half 2) measurement one: 0 of the 81 eval queries bridgeable.
+    bridge = [s for s in sentences if re.search(r"\b0 of the 81\b", s)]
+    assert bridge, f"the band section states no '0 of the 81 queries' measurement: {band}"
+    assert "both endpoints" in bridge[0].lower() and "gold" in bridge[0].lower(), bridge[0]
+    eval_yaml = Path(__file__).resolve().parents[1] / "eval" / "vault_recall_queries.yaml"
+    quoted = int(re.search(r"0 of the (\d+)\b", bridge[0]).group(1))
+    assert quoted == len(_eval_queries(eval_yaml)), (
+        f"the prose quotes a {quoted}-query probe set; {eval_yaml} has "
+        f"{len(_eval_queries(eval_yaml))}")
+
+    # (clause 2, half 3) measurement two: 0 band endpoints are a gold entity name. The
+    # apostrophe class is open because the vault's own typography is mixed.
+    endpoints = [s for s in sentences if re.search(r"\b0 of the band.s \d+ endpoints\b", s)]
+    assert endpoints, f"the band section states no '0 band endpoints are gold' measurement: {band}"
+    assert "gold" in endpoints[0].lower(), endpoints[0]
+
+    # (clause 3) the dormant capability is reachable again from this page alone: one
+    # command, with its optional cap, named in the section that explains the band.
+    assert "--approve-strong --approve-band" in band, (
+        f"the band section does not name the command that re-enables it: {band}")
+    assert re.search(r"--band-cap N", band), (
+        "the re-enable command is stated without its --band-cap N option")
+    # And it is stated ONLY there: the same flags on step 4's own command line would
+    # put the band back in production, which is clause 1's half of this pair.
+    step4 = _flat(_skill_section_lines(_skill_text(), "### 4. Auto-approve strong proposals"))
+    assert "--approve-strong --approve-band" not in step4, (
+        "the re-enable command leaked into the step 4 command block")
+
+
+def _eval_queries(eval_yaml: Path) -> list[dict]:
+    import yaml
+
+    return yaml.safe_load(eval_yaml.read_text(encoding="utf-8"))["queries"]
+
+
+def test_the_step4_report_block_promises_only_what_a_floor_only_night_prints(
+        cr, monkeypatch, capsys, tmp_path):
+    """#1841 clause 4, across the seam between the page and the process.
+
+    Step 4 is the step whose output task #51 reports, and until #1841 it told the
+    reporter that the floor line "gains a `| K admitted by the 0.7-0.85 band
+    (rank-capped, expiring)` suffix" and that the run prints a conditional
+    `Band admission: ON` header. A floor-only night prints neither, so the page was
+    describing output that could never arrive and a reporter hunting for it would read
+    its absence as a broken run.
+
+    This checks the promise two ways rather than grepping the page once: the four lines
+    the block lists are each run through `cmd_approve()` with no band flag and must
+    appear in that run's actual stdout, and the two band markers must not. Then the
+    band-enabled run over the same pool is the positive control — if the markers never
+    appear anywhere, the absence above is this test failing to print anything, not the
+    page being honest.
+    """
+    # `_skill_section_lines` stops at the next heading, so this slice is step 4 up to
+    # but not including the band subsection — which is where band output may legitimately
+    # be described, and is not what the reporter is told to carry.
+    step4 = _skill_section_lines(_skill_text(), "### 4. Auto-approve strong proposals")
+    # Step 4 fences two things: the command it tells you to run, and the report subset.
+    # The subset is the one that is not a command.
+    blocks: list[list[str]] = []
+    current: list[str] | None = None
+    for ln in step4:
+        if ln.strip().startswith("```"):
+            if current is None:
+                current = []
+            else:
+                blocks.append(current)
+                current = None
+            continue
+        if current is not None and ln.strip():
+            current.append(ln.strip())
+    subsets = [b for b in blocks if not any(x.startswith("python3") for x in b)]
+    assert len(subsets) == 1, f"step 4 fences more than one report subset: {blocks}"
+    block = subsets[0]
+    assert len(block) == 4, f"step 4's report subset is not four lines: {block}"
+
+    step4_flat = _flat(step4).lower()
+    for marker in _BAND_OUTPUT_MARKERS:
+        assert marker.lower() not in step4_flat, (
+            f"step 4 still tells the reporter to expect {marker!r}, which a "
+            f"floor-only night never prints")
+
+    def _approve(**kw) -> str:
+        proposals = tmp_path / "p.json"
+        proposals.write_text(json.dumps(
+            {"watermark": {}, "proposals": _band_pool(cr, [0.80]), "stats": {}}),
+            encoding="utf-8")
+        monkeypatch.setattr(cr, "PROPOSALS_FILE", proposals)
+        monkeypatch.setattr(cr, "RELATIONS_INDEX", tmp_path / "i.json")
+        # Landing is stubbed, and only landing: the band-enabled control approves a 0.80
+        # row, so letting `land_approved_edges` run for real would insert a fabricated
+        # edge into the production graph from a unit test. This node is about which
+        # LINES the command prints, and the line itself (`Edges landed in the store: N`)
+        # prints regardless of N, so stubbing the writer costs the assertion nothing.
+        monkeypatch.setattr(cr, "land_approved_edges", lambda proposals: 0)
+        capsys.readouterr()
+        cr.cmd_approve(**kw)
+        return capsys.readouterr().out
+
+    nightly = _approve()
+    for line in block:
+        label = line.split(":")[0].strip()
+        assert label in nightly, (
+            f"step 4 says to report {label!r}, but the command it documents did not "
+            f"print it: {nightly}")
+    for marker in _BAND_OUTPUT_MARKERS:
+        assert marker not in nightly, (
+            f"a band-free run printed {marker!r}: {nightly}")
+
+    enabled = _approve(band=True)
+    assert "Band admission: ON" in enabled, (
+        f"positive control failed: a band-enabled run printed no header, so the "
+        f"absence asserted above proves nothing: {enabled}")
+    assert _BAND_OUTPUT_MARKERS[1] in enabled, (
+        f"positive control failed: a band-enabled run grew no admitted-count suffix "
+        f"on the floor line: {enabled}")
