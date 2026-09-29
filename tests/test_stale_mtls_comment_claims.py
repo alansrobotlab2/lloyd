@@ -54,9 +54,39 @@ API_BASE_ANCHOR = "const API_BASE"
 
 #: Case-insensitive: the point is the mechanism being claimed, not one spelling.
 STALE_MECHANISM = re.compile(r"mtls", re.IGNORECASE)
-#: A `server.py:<digits>` citation is what rotted — the symbol is the durable
-#: reference, the line number is the one that moves under an unrelated edit.
-LINE_CITATION = re.compile(r"server\.py\s*:\s*\d")
+#: A `server.py:<digits>` or `messages.py:<digits>` citation is what rotted —
+#: the symbol is the durable reference, the line number is the one that moves
+#: under an unrelated edit. `messages.py` joined in #1766: both client comments
+#: that justify awaiting the kickoff POST sent a reader to line ranges that had
+#: drifted onto the turn's error path and an unrelated helper.
+LINE_CITATION = re.compile(r"(?:server|messages)\.py\s*:\s*\d")
+#: Only the `messages.py` half, for the doc corpus below: `architecture/` keeps
+#: some correct line citations, and this guard is about one rotted range.
+MESSAGES_CITATION = re.compile(r"messages\.py\s*:\s*\d")
+
+#: The sentences #1766 found, verbatim as they shipped, plus the `server.py`
+#: one this guard was written for — kept so `LINE_CITATION` is proven to fire on
+#: real wording rather than on a paraphrase. The first is
+#: `chrome-extension/src/background/service-worker.ts` and the second
+#: `chrome-extension/src/background/lloyd-client.ts`, both at `a7a22bfa`; the
+#: third is `architecture/automod.md`'s `_turn_budget` sentence at the same
+#: commit.
+LINE_CITATION_SAMPLES = (
+    "`/api/message/stream` enqueues the turn before it hands back the "
+    "StreamingResponse (app/routers/messages.py:1827, then :1837), so once this "
+    "POST has answered the backend already counts the session as active",
+    "Lloyd's /api/message/stream explicitly survives client disconnect "
+    "(messages.py:10, 924-935) — the consumer keeps running on the server even "
+    "though we never read the stream.",
+    "`messages._turn_budget` (`app/routers/messages.py:132`) clamps whatever a "
+    "worker asks for to `agent.max_turns_ceiling` (120).",
+)
+SERVER_CITATION_SAMPLE = (
+    "All calls hit http://127.0.0.1:8080 directly — the FastAPI mTLS middleware "
+    "at server.py:76-113 skips loopback, so no client cert is required."
+)
+
+AUTOMOD_DOC = "architecture/automod.md"
 
 BROWSER_PANEL = "architecture/browser-side-panel.md"
 AUTHORITY = "architecture/authority-surfaces.md"
@@ -231,7 +261,55 @@ def test_client_files_carry_no_stale_mechanism_or_line_citation():
 
     for rel_path, text in texts.items():
         assert not STALE_MECHANISM.search(text), f"{rel_path} still mentions the dropped mechanism"
-        assert not LINE_CITATION.search(text), f"{rel_path} still cites a server.py line range"
+        cited = LINE_CITATION.search(text)
+        assert not cited, (
+            f"{rel_path} still cites a python line range ({cited.group(0)!r}) — "
+            "cite the symbol")
+
+
+def test_the_line_citation_pattern_fires_on_the_wording_that_shipped():
+    """#1766 clause 2: the widened pattern matches every shipped sentence
+    verbatim, and still matches the `server.py` one it was written for — so the
+    absence assertions over the corpus cannot pass by matching nothing."""
+    assert len(LINE_CITATION_SAMPLES) == 3, "the fixtures are the three shipped sentences"
+    for sample in LINE_CITATION_SAMPLES:
+        assert LINE_CITATION.search(sample), f"LINE_CITATION went vacuous on: {sample!r}"
+        assert MESSAGES_CITATION.search(sample), f"MESSAGES_CITATION went vacuous on: {sample!r}"
+    assert LINE_CITATION.search(SERVER_CITATION_SAMPLE), (
+        "widening to messages.py dropped the server.py case")
+    assert not MESSAGES_CITATION.search(SERVER_CITATION_SAMPLE), (
+        "the doc-corpus pattern is meant to be the messages.py half alone")
+
+
+def test_automod_doc_names_turn_budget_by_symbol_not_a_line_range():
+    """#1766 clause 3: `architecture/automod.md` refers to
+    `messages._turn_budget` by symbol, with no `messages.py:<digits>` range —
+    its `:132` pointed at a `return 0.0` four lines above the def. The doc is
+    proven tracked and non-empty, the symbol present, and the pattern live on
+    real architecture docs before the absence is asserted."""
+    text = _tracked_text(AUTOMOD_DOC)
+    assert "messages._turn_budget" in text, (
+        f"{AUTOMOD_DOC} no longer names `messages._turn_budget` — the clamp moved or "
+        "the sentence was deleted, and the absence below would be vacuous")
+
+    listing = subprocess.run(
+        ["git", "-C", str(REPO), "grep", "-l", "-E", r"messages\.py[[:space:]]*:[[:space:]]*[0-9]",
+         "--", "architecture/"],
+        capture_output=True, text=True,
+    )
+    assert listing.returncode == 0, (
+        f"positive control: no architecture doc carries a messages.py line citation at "
+        f"all, so the pattern cannot be shown live: {listing.stderr.strip()}")
+    carriers = {ln.strip() for ln in listing.stdout.splitlines() if ln.strip()}
+    assert carriers - {AUTOMOD_DOC}, "the positive control found only the doc under test"
+    for rel_path in sorted(carriers - {AUTOMOD_DOC}):
+        assert MESSAGES_CITATION.search(_tracked_text(rel_path)), (
+            f"git grep found a citation in {rel_path} that MESSAGES_CITATION misses")
+
+    cited = MESSAGES_CITATION.search(text)
+    assert not cited, (
+        f"{AUTOMOD_DOC} cites a messages.py line range ({cited.group(0)!r}); refer to "
+        "the symbol")
 
 
 # ── #1759: the same stale claim, in the docs that describe the guard ────────── #

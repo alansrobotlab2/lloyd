@@ -24,10 +24,10 @@ doc that exists, and no doc did.
 
 | Path | What it is |
 |---|---|
-| `chrome-extension/src/background/service-worker.ts` | 317 lines: tab/navigation/session orchestration, the manual-check guard, the kickoff prompts |
+| `chrome-extension/src/background/service-worker.ts` | 318 lines: tab/navigation/session orchestration, the manual-check guard, the kickoff prompts |
 | `chrome-extension/src/background/url.ts` | 60 lines: `canonicalize()` and the YouTube tests |
 | `chrome-extension/src/background/tab-session-map.ts` | 92 lines: the `chrome.storage.session` wrapper holding the tab→session mapping |
-| `chrome-extension/src/background/lloyd-client.ts` | 79 lines: three backend calls, used by the service worker only |
+| `chrome-extension/src/background/lloyd-client.ts` | 81 lines: three backend calls, used by the service worker only |
 | `web/sidepanel.html` | the panel's HTML entry, 12 lines |
 | `web/src/sidepanel/main.tsx` | 10 lines: mount |
 | `web/src/sidepanel/SidePanelApp.tsx` | 211 lines: the panel UI, reusing `web/src/components/ChatPanel.tsx` and the rest of `web/src` |
@@ -197,3 +197,8 @@ on after the output directory had already been emptied.
   the extension README describe the peer-address gate instead of the retired
   certificate exemption, and §Getting to the backend no longer warns that they
   do not.
+- **2026-09-28 — hand-landed (#1766).** The two client comments that justify
+  awaiting the kickoff POST cite `post_message_stream` / `enqueue_turn` and the
+  module docstring of `app/routers/messages.py` instead of line ranges that had
+  drifted onto the turn's error path; `tests/test_stale_mtls_comment_claims.py`
+  now bans `messages.py:<digits>` in both client files as well.

@@ -210,7 +210,7 @@ alone, each now pinned by a test:
 | observer | none | — | attached, transcript kept |
 
 The ceiling is enforced at the endpoint, not by the source, and it binds:
-`messages._turn_budget` (`app/routers/messages.py:132`) clamps whatever a worker
+`messages._turn_budget` (in `app/routers/messages.py`) clamps whatever a worker
 asks for to
 `agent.max_turns_ceiling` (120). Triage asks for 90 and gets it; `autocode`
 asks for 150 — the value `workers.sources.autocode.max_turns` carries, and

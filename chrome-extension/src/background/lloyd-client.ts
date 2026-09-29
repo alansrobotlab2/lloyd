@@ -42,9 +42,11 @@ export async function patchBrowserMetadata(
 
 // Fire a real user-turn against the session and abandon the SSE response
 // immediately. Lloyd's /api/message/stream explicitly survives client
-// disconnect (messages.py:10, 924-935) — the consumer keeps running on
-// the server even though we never read the stream. We just need the POST
-// to land.
+// disconnect (app/routers/messages.py's module docstring, "Client
+// disconnect does not kill the SDK subprocess"; `post_message_stream`
+// enqueues the turn on the session's consumer, which is not tied to the
+// response) — the consumer keeps running on the server even though we
+// never read the stream. We just need the POST to land.
 export async function fireKickoff(
   sessionKey: string,
   text: string,
