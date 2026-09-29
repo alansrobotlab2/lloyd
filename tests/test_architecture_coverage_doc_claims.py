@@ -161,11 +161,49 @@ def cited_paths(text: str) -> list[tuple[Path, int | None]]:
     return out
 
 
+def git_ignored(paths) -> set[str]:
+    """Which of `paths` git reports as ignored, by pattern (empty set on error).
+
+    Why the resolution check honours a gitignore hit: a worktree contains only
+    what git carries, so a citation to a path `.gitignore` matches can never
+    resolve there — and a doc that says out loud that the file is untracked and
+    exists only on this box is describing the machine correctly. Before this, the
+    only tree the check could pass in was the live checkout, so the node failed
+    every round that touched this file from a worktree, and the failure read like
+    the round's own.
+    The trade, priced: a citation to a *fictional* path that happens to fall under
+    an ignore pattern is no longer reported. It is reported by nothing else either
+    (git has no record of such a file in any tree), so the exemption gives up a
+    case the check could not win anyway, and the fiction case stays covered by
+    `test_the_path_extractor_is_what_the_check_depends_on`.
+    """
+    rels = []
+    for p in paths:
+        try:
+            rels.append(str(Path(p).relative_to(ROOT)))
+        except ValueError:
+            continue
+    if not rels:
+        return set()
+    proc = subprocess.run(["git", "-C", str(ROOT), "check-ignore", "--stdin"],
+                          input="\n".join(rels), capture_output=True, text=True)
+    # rc 0 = at least one path ignored, rc 1 = none. Both are clean answers.
+    if proc.returncode not in (0, 1):
+        return set()
+    return {ROOT / line for line in proc.stdout.split("\n") if line.strip()}
+
+
+def unresolved_citations(cited) -> list:
+    """Cited paths that do not exist and are not git-ignored."""
+    ignored = git_ignored([p for p, _ in cited if not Path(p).exists()])
+    return [p for p, _ in cited if not Path(p).exists() and Path(p) not in ignored]
+
+
 @pytest.mark.parametrize("slug", NEW_DOCS)
 def test_every_path_a_new_doc_cites_resolves_in_the_working_tree(slug):
     cited = cited_paths(_text(slug))
     assert cited, f"{slug} cites no path at all — the doc has stopped being checkable"
-    missing = [str(p) for p, _ in cited if not p.exists()]
+    missing = [str(p) for p in unresolved_citations(cited)]
     too_short = [f"{p}:{n}" for p, n in cited
                  if p.exists() and n is not None
                  and len(p.read_text(encoding="utf-8", errors="replace").splitlines()) < n]
@@ -431,3 +469,125 @@ def test_the_gate_selection_drops_nothing_and_the_named_node_passes():
     assert len(named) == 1, (
         f"{NAMED_NODE} is not reported PASSED by name, so the node this item was "
         f"filed for has no recorded verdict: {named}")
+
+
+# ── #1760 clause 4: the deny-set rows cite symbols, not moved line numbers ────
+#
+# Row 3 of `authority-surfaces.md` pinned `PROTECTED_WRITE_ROOTS` to
+# `app/harness/protected_paths.py:148` and `write_deny_reason` to
+# `app/harness/protected_paths.py:195`, and the "Protected." bullet pinned the
+# vault-root agreement to `app/paths.py:109`. All three of those numbers were
+# already wrong or were going to be: the two in row 3 sat a constant-definition
+# away from their real lines, and the `app/paths.py` one had been copied there
+# from a comment in the very module it describes, which is how a rotting pointer
+# reaches the doc layer — `app/paths.py:11` was the number the code's own comment
+# carried, and line 11 is prose about `HOME=<round>/home`. A symbol citation cannot
+# drift that quietly: `app.paths.VAULT_ROOT` is either in the module or it is not.
+#
+# Scope is deliberate and is asserted, not assumed. The doc still cites line
+# numbers elsewhere (`app/harness/safety.py:372`, `agent_mcp/builtin_fs.py:238`,
+# `agent_mcp/vault.py:1608`), and this guard must leave them alone — a doc-wide
+# ban would be a different rule than the one clause 4 states, and would be
+# satisfied by deleting citations rather than replacing them.
+
+#: Matches `app/paths.py:<n>` and `<…>protected_paths.py:<n>` alike, which is
+#: exactly the set clause 4 names: the vault-root pointer, and the two pointers
+#: that stand in for `PROTECTED_WRITE_ROOTS` and `write_deny_reason`.
+PATHS_LINE_CITATION = re.compile(r"paths\.py:\d+")
+
+#: Any line citation at all, for the control that the doc still cites lines.
+ANY_LINE_CITATION = re.compile(r"[\w/.-]+\.py:\d+")
+
+#: The three citations as they stood at base `a820d20b`, kept as the fixture the
+#: reader has to catch.
+STALE_ROW3_CITATIONS = (
+    "`PROTECTED_WRITE_ROOTS` at `app/harness/protected_paths.py:148`, "
+    "`write_deny_reason` at `app/harness/protected_paths.py:195`")
+STALE_VAULT_CITATION = "`app/paths.py:109` is where `VAULT_ROOT` agrees with it."
+
+
+def _row3_and_protected_bullets(text: str) -> str:
+    """Row 3 of the ladder table plus the "Protected." bullet — the two places
+    clause 4 names, extracted so the assertion is about them and not about an
+    incidental line elsewhere in the file."""
+    row = re.search(r"^\| 3 \|.*$", text, re.MULTILINE)
+    bullet = re.search(r"^- \*\*\"Protected\.\"\*\*.*?(?=^- \*\*|\n## )",
+                       text, re.MULTILINE | re.DOTALL)
+    assert row and bullet, (
+        "row 3 or the \"Protected.\" bullet is missing or renamed, so the section "
+        "clause 4 governs is no longer there to be checked")
+    return row.group(0) + "\n" + bullet.group(0)
+
+
+def test_authority_surfaces_cites_the_denied_paths_by_symbol_not_line():
+    """Clause 4: no `paths.py:<line>` citation survives in the doc, and the two
+    sections that carried the three still name all three symbols.
+
+    The second half is what stops "no citations" being won by deletion: row 3 and
+    the bullet have to keep saying `PROTECTED_WRITE_ROOTS`, `write_deny_reason` and
+    `app.paths.VAULT_ROOT`, so the only green is one that still tells the reader
+    which module decides. The reader is then shown to catch each pre-fix spelling,
+    and to leave the doc's other line citations alone — the scope of the clause,
+    not an accident of the pattern.
+    """
+    text = _text("authority-surfaces.md")
+    assert PATHS_LINE_CITATION.findall(text) == [], PATHS_LINE_CITATION.findall(text)
+
+    scope = _row3_and_protected_bullets(text)
+    for symbol in ("PROTECTED_WRITE_ROOTS", "write_deny_reason", "app.paths.VAULT_ROOT"):
+        assert symbol in scope, (
+            f"{symbol} is no longer named where clause 4 says it must be cited by "
+            "symbol — a doc that cites nothing is an all-clear, not a fix")
+
+    stale = STALE_ROW3_CITATIONS + " … " + STALE_VAULT_CITATION
+    assert PATHS_LINE_CITATION.findall(stale) == ["paths.py:148", "paths.py:195",
+                                                  "paths.py:109"], (
+        "the reader does not see the citations this round removed, so the assertion "
+        "above is an empty pattern over an empty corpus")
+    others = [c for c in ANY_LINE_CITATION.findall(text)
+              if not c.endswith("paths.py:" + c.split(":")[-1])]
+    assert len(others) >= 3, (
+        f"the doc cites no other line numbers ({others}), so this guard could not "
+        "tell a scoped rule from a doc-wide ban")
+    assert any("safety.py:" in c for c in others) and any("vault.py:" in c for c in others), (
+        f"the untouched citations this round left alone are missing: {others}")
+
+
+#: The fixture the exemption exists for: `.gitignore:42` (`*.json`) keeps
+#: `chrome-extension/manifest.json` out of every tree, and
+#: `architecture/browser-side-panel.md:124` cites it while saying in the same
+#: paragraph that the manifest is absent from git. Cited path, real on this box,
+#: in no tree git can carry.
+IGNORED_CITATION = ROOT / "chrome-extension/manifest.json"
+FICTION_CITATION = ROOT / "app/paths/no_such_module_really.py"
+OUTSIDE_CITATION = HOME / "lloyd-data/eval/nope"
+
+
+def test_an_ignored_citation_is_exempt_and_a_fictional_one_is_not():
+    """The exemption control, in both directions, because an always-empty
+    `unresolved_citations` and a correctly-empty one look identical in the report.
+
+    Three citations, three verdicts: the git-ignored manifest is exempt, a
+    fabricated module under no ignore pattern is reported, and a path outside the
+    repo (`$LLOYD_DATA`-style, which is what the extractor resolves against home)
+    is reported rather than silently skipped — the exemption is about git's
+    coverage of *this* tree, not about paths it cannot see. Then the two
+    preconditions of the exemption are themselves asserted, so the node cannot
+    rot into a no-op: if `.gitignore` stops matching the manifest, or starts
+    matching the fabricated path, the exemption is no longer what is making the
+    main node green and this node says so.
+    """
+    cited = [(IGNORED_CITATION, None), (FICTION_CITATION, None), (OUTSIDE_CITATION, None)]
+    unresolved = [Path(p) for p in unresolved_citations(cited)]
+    assert IGNORED_CITATION not in unresolved, (
+        "the git-ignored manifest citation was still reported, so a doc that tells "
+        "the truth about an untracked file cannot pass from a worktree")
+    assert FICTION_CITATION in unresolved, "a fabricated repo path slipped through"
+    assert OUTSIDE_CITATION in unresolved, (
+        "a path outside the repo was exempted; the exemption is for git's blind "
+        "spots inside the tree, not for paths git never addresses")
+    assert IGNORED_CITATION in git_ignored([IGNORED_CITATION]), (
+        f"{IGNORED_CITATION} is no longer git-ignored, so the exemption is dead code "
+        "and the main node is passing for the wrong reason")
+    assert FICTION_CITATION not in git_ignored([FICTION_CITATION]), (
+        "the fabricated path is git-ignored, which makes it a useless negative control")

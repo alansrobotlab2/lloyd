@@ -32,7 +32,7 @@ ask.
 |---|---|---|---|
 | 1 | L0 classes and the block signal | `~/obsidian/lloyd/SOUL.md`, pinned by `app/prompt_surface.py` | What the model is told to refuse, and the exact signal it must emit. The prose is the vault identity file; the module holds what a trim may not drop (`GATE_HEADS`, `LOAD_BEARING`, the ceilings). Prompt, therefore the weakest layer — and it is **not** a trigger for the tool-choice eval: `Gate.PROMPT_SURFACE_PATHS` (`scripts/automod/gate.py:1303`) keys on `app/prompt_builder.py`, `app/prefetch.py` and the three loaded vault files, so a diff that loosens a ceiling here is scored by no behavioural rung |
 | 2 | Deterministic Bash denies | `app/harness/safety.py` | Is this command catastrophic (`check_bash_command` at `app/harness/safety.py:372`)? Installed as a default `PreToolUse` hook on every primary turn, Inner Voice on or off — it replaced the LLM-judgment lever that only ran when IV ran |
-| 3 | Protected trees, two policies | `app/harness/protected_paths.py` | What may be **destroyed** (the structural shell check that refuses a wholesale delete) and what may be **written** (the deny-set every MCP write lane now consults — `Write`/`Edit` through `agent_mcp/builtin_fs.py:238`, Bash through `check_bash_command`, and `vault_write` through `agent_mcp/vault.py:_protected_write_refusal` since #1757; `PROTECTED_WRITE_ROOTS` at `app/harness/protected_paths.py:148`, `write_deny_reason` at `app/harness/protected_paths.py:195`). `automod_vault_land` is the one exempt lane, by design: it validates the diff before it commits, which is what the refusal text offers a writer. One module, two questions, deliberately co-located so they cannot disagree about what is sacred |
+| 3 | Protected trees, two policies | `app/harness/protected_paths.py` | What may be **destroyed** (the structural shell check that refuses a wholesale delete) and what may be **written** (the deny-set every MCP write lane now consults — `Write`/`Edit` through `agent_mcp/builtin_fs.py:238`, Bash through `check_bash_command`, and `vault_write` through `agent_mcp/vault.py:_protected_write_refusal` since #1757; `PROTECTED_WRITE_ROOTS` and `write_deny_reason`, both defined in `app/harness/protected_paths.py`). `automod_vault_land` is the one exempt lane, by design: it validates the diff before it commits, which is what the refusal text offers a writer. One module, two questions, deliberately co-located so they cannot disagree about what is sacred |
 | 4 | The read-only sandbox | `agent_mcp/_tool_sandbox.py` | Is this session one that must never change the machine? Bench and eval sessions, enforced in `agent_mcp/main.py::call_tool` — the one function every tool call from every caller passes through, not in a runner, because runner copies live in worktrees |
 | 5 | Unattended tool bans | `app/tool_bans.py` | Which tools may an unattended turn call at all? Two tuples (`WORKER_AUTOMOD_BAN`, `WORKER_GRANT_MINT_BAN`), four readers: the shared worker turn path bakes both in (`workers/sources/_common.py:427`, `:433`), the chat router arms them off the session's own platform (`app/routers/turn_options.py:222-228`) — the automod ban for every non-user session except the one source whose job IS the loop (`AUTOMOD_DRIVER_SOURCES`, `app/routers/messages.py:589`), the grant ban wherever an authority scope is in force (`messages.py:564`) — the review grader's deny list spreads the automod ban (`workers/sources/arch_review.py:140`), and a `Task` child has to inherit it (`agent_mcp/builtin_task.py:378`) |
 | 6 | Scope-bound grants | `agent_mcp/builtin_grants.py` | Did a human mint authority for this specific scope, with an expiry? The interactive half is `grant_create`/`grant_list`/`grant_revoke`; the other half is `grants:` front matter on an autonomy task file, where editing the file *is* the grant. The protected-write escape in layer 3 (`allow_protected_writes`) is the same idea scoped to one call |
@@ -57,8 +57,10 @@ the useful part of the doc.
   reason is the cross-cutting trap in one sentence: `LLOYD_HOME` is
   *code*-relative, so inside a worktree it names the worktree, and a deny-set
   that followed the code would protect the copy while leaving the live tree open.
-  `app/paths.py:109` is where `VAULT_ROOT` agrees with it. What the constant does
-  *not* cover is the vault lane's own answer to "is this path allowed" —
+  `app.paths.VAULT_ROOT` is the constant the vault entry agrees with — a symbol, not a
+  line pointer, because the pointer that sat here was stale and this doc copied it on.
+  What the constant does *not* cover is the vault lane's own answer to "is this path
+  allowed" —
   `agent_mcp/vault.py:1608` decides by containment under `VAULT` alone and never
   asks `write_deny_reason`, so membership in the set does not mean the file is
   closed. The prompt's copy of the same rule is still prose, and prose is checked by
@@ -146,3 +148,12 @@ spends an unattended round discovering that.
   `tests/test_stale_mtls_comment_claims.py`, whose ban is on the claim shape — an
   exemption for some peer, or a surviving requirement to produce a certificate —
   so the history above stays writable while the drift cannot come back.
+- **2026-09-29 — symbol citations (#1760).** Row 3 cited `PROTECTED_WRITE_ROOTS` and
+  `write_deny_reason` by line number inside `app/harness/protected_paths.py`, and the
+  "Protected." bullet cited the vault-root agreement by line number inside
+  `app/paths.py`. Both numbers were copied from that module's own comment, and the
+  comment's number had already moved: the eleventh line of `app.paths` is prose about
+  the gate's `HOME` symlink farm, nowhere near `VAULT_ROOT`. Both places now cite the
+  symbol, and the module's comment states no size for the deny-set at all — the count
+  it carried said four while the tuple held five, which is the drift
+  `tests/test_protected_paths.py` now refuses against the module's own text.

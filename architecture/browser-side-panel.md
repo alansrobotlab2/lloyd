@@ -123,7 +123,8 @@ unpacked works on this machine because the manifest is present here. Nor is the
 build command above harmless without it: `vite.chrome.config.ts` empties `outDir`
 before bundling and copies `chrome-extension/manifest.json` in at the end of the
 bundle, ahead of the icon copy — so in a tree that has no manifest the run writes
-a fresh bundle over an emptied `dist/`, skips both the manifest and `dist/icons/`,
+a fresh bundle over an emptied `chrome-extension/dist/`, skips both the manifest and
+`chrome-extension/dist/icons/`,
 and dies on an ENOENT that names no path (#1701). Nothing else
 about this surface depends on the manifest's contents being described here, which
 is why this doc says *manifest* and does not cite a path to one: a citation to a
@@ -186,7 +187,7 @@ re-check.
   comment still point at the retired exemption (#1702/#1722), which is the same
   two-surfaces-one-rule failure one directory over. Re-measured and still true:
   all seven line counts in §The pieces, the three routes and their payloads, the
-  tracked `dist/` files, the manifest's absence from git, the build command, and
+  tracked `chrome-extension/dist/` files, the manifest's absence from git, the build command, and
   `measurement`'s silence on browser sessions. Filed: the rotted `messages.py`
   citations in the two client comments (#1766) and `spawnSession`'s unreachable
   `kickoff` default, the last seam of the retired auto-spawn path (#1767).

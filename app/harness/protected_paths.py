@@ -126,8 +126,11 @@ def protected_roots() -> list[Root]:
 # Entries are home-relative templates rather than `app.paths` constants:
 # `LLOYD_HOME` is *code*-relative, so inside a worktree it names the worktree,
 # and a deny-set that followed the code would protect the copy while leaving
-# the live tree open. `Path.home()/"obsidian"` is what `VAULT_ROOT` already is
-# (`app/paths.py:11`), so the vault entry agrees with it on this box today.
+# the live tree open. `Path.home()/"obsidian"` is what `app.paths.VAULT_ROOT`
+# already is — cited as a symbol, not a line number: the pointer that sat here
+# named a line that has long since become unrelated prose, and the doc that
+# copied it had to be corrected in turn. So the vault entry agrees with the
+# constant on this box today.
 #
 # The fifth entry exists because the fourth one's label promised more than the
 # fourth one covered. `~/.local/share/uv/python` is the store the real
@@ -692,8 +695,10 @@ def referenced_paths(command: str, cwd: str | None = None, _depth: int = 0) -> l
 # ---------------------------------------------------------------------------
 #
 # `agent_mcp/builtin_fs.py` asks `write_deny_reason` of every `Write` and
-# `Edit`, so since #1049 that lane refuses the four entries of
-# `PROTECTED_WRITE_ROOTS`. The Bash lane never asked the question at all: at
+# `Edit`, so since #1049 that lane refuses every entry of
+# `PROTECTED_WRITE_ROOTS` — no count spelled here, because the tuple grows and a
+# number in this sentence has already been wrong once. The Bash lane never asked
+# the question at all: at
 # HEAD `4bf96749` `safety.check_bash_command` ran four checks (the catastrophic
 # regex table, `check_protected_delete`, `check_sync_registration`,
 # `check_service_control`) and none of them resolves what a command *writes*,
