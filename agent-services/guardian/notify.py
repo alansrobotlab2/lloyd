@@ -546,9 +546,22 @@ class Notifier:
                 # What this still cannot see is the drift `7da1e0e4` wrote the
                 # name check against: a payload posting `title`/`body` instead of
                 # `name`/`description` gets a 200 and an id for the empty task it
-                # created. Detecting that needs the endpoint to echo the filed
-                # name, or a read-back of GET /api/backlog/task/{id} — owed scope
-                # ruling 2 on #1612, not this branch's to make.
+                # created, and nothing here will notice. That is a settled
+                # decision, not an open one: payload-drift detection declined
+                # 2026-09-29 (#1703): the echo variant shipped at 7da1e0e4 and was
+                # inert because task-create replies only {success, id}, and a
+                # read-back buys the same verdict one request later on the alert
+                # path — a best-effort 5 s channel whose dict `guardian.py` drops
+                # on the floor, so a read-back would only add a second way to
+                # report "not filed" about a task that was filed. The guard is the
+                # suite, which already runs on every edit to either side of this
+                # seam: `test_the_guardians_captured_body_files_itself_through_the_real_route`
+                # replays these bytes through the real route and asserts the task
+                # file it wrote — H1, `status`, `priority`, the alert text — which
+                # is the only surface that tells a real filing apart from the
+                # `# New Task` at `status: draft` a drifted payload produces.
+                # Weaken that written-file assertion, and live detection is owed
+                # again.
                 row_id = created.get("id")
                 return (created.get("success") is True
                         and isinstance(row_id, int)

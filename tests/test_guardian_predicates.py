@@ -23,6 +23,7 @@ including the `start`/`now`/`spawnerr`/`group` fields the predicate reads.
 from __future__ import annotations
 
 import contextlib
+import re
 import types
 import sys
 from pathlib import Path
@@ -1287,8 +1288,14 @@ def test_a_defaulted_name_from_the_board_reads_as_a_failed_filing(tmp_path):
     so reading it was reading a field that is always absent — onto `success` and a
     positive integer `id`. This reply still reads as a failure, because it carries
     no id. What it no longer proves is the drift itself: a payload that posts the
-    wrong keys gets an id for the empty task it created, and only a name echo or a
-    read-back of the filed task would catch that (owed ruling 2 on #1612).
+    wrong keys gets an id for the empty task it created, and production will not
+    catch that either — payload-drift detection declined 2026-09-29 (#1703): the
+    echo variant shipped at 7da1e0e4 and was inert because task-create replies only
+    {success, id}, and a read-back buys the same verdict one request later on the
+    alert path. What pins the seam instead is the written-file assertion in
+    `test_the_guardians_captured_body_files_itself_through_the_real_route`, which
+    reads the task file the real route wrote; weaken that and live detection is
+    owed again.
     `test_no_board_reply_lacking_a_positive_integer_id_reads_as_delivered` is where
     the reason this returns False is pinned."""
     with _stub_board(tmp_path, {"success": True, "name": "New Task"}) as (server, seen):
@@ -1398,8 +1405,13 @@ def test_the_guardians_captured_body_files_itself_through_the_real_route(
     way. The second half of this test demonstrates that on the same route — a payload
     sending `title`/`body` instead of `name`/`description` still gets `success: true`
     and a positive id, and writes `# New Task` at `status: draft`. Only the file
-    assertion tells those two filings apart, which is why it is in the test and why
-    production drift detection stays owed ruling 2 on #1612.
+    assertion tells those two filings apart, which is why it is in the test, and it
+    is the only guard either side of the seam will ever have: payload-drift
+    detection declined 2026-09-29 (#1703): the echo variant shipped at 7da1e0e4 and
+    was inert because task-create replies only {success, id}, and a read-back buys
+    the same verdict one request later on the alert path. This test's written-file
+    assertion is what pins that seam, so weakening it leaves production blind to key
+    drift and makes live detection owed again.
     """
     with _stub_board(tmp_path, {"success": True, "id": 999}) as (server, seen):
         res = _board_notifier(server, tmp_path).alert(
@@ -1467,6 +1479,220 @@ def test_a_reply_of_success_false_with_a_positive_id_fails_the_verdict(tmp_path)
 
     with pytest.raises(AssertionError, match="not True"):
         _assert_reply_reads_as_a_filing(reply)
+
+
+# ── The retired owed pointer (#1827) ──────────────────────────────────────────
+#
+# Three passages used to hand a decision to a round that would never come: the
+# guardian's filing call in `agent-services/guardian/notify.py`, and the two
+# docstrings of the tests that pin the guardian-to-board seam. Each said the
+# payload-drift check was owed to the closed item whose number is in
+# `RETIRED_ITEM` below — spelt in two pieces here because the acceptance grep for
+# that phrase covers this file too, and this file has to search for it without
+# carrying it. #1703 ruled on it on 2026-09-29 and both parents are `done`, so the
+# comments were the only surface still asking. What is left to protect is the
+# retraction: a future edit that writes the phrase again, or that empties the
+# passages it replaced, has to go red.
+
+RETIRED_ITEM = 1612
+RETIRED_POINTER = re.compile(r"ruling 2 on #" + str(RETIRED_ITEM))
+
+# The ruling each replaced passage has to carry, verbatim apart from wrapping.
+RULING = ("payload-drift detection declined 2026-09-29 (#1703): the echo variant "
+          "shipped at 7da1e0e4 and was inert because task-create replies only "
+          "{success, id}, and a read-back buys the same verdict one request later "
+          "on the alert path")
+# The one-line note the retraction owes the next reader: the decline is only
+# sound while the seam stays pinned, and this names what un-pins it.
+OWED_AGAIN = "owed again"
+SEAM_TEST = "test_the_guardians_captured_body_files_itself_through_the_real_route"
+
+
+# The three passages #1827 rewrote, addressed by the function whose body carries
+# them rather than by a line number: this test sits below two of them, so a range
+# quoted here moved in the very diff that wrote it. `None` as a path means this
+# file — the two test docstrings.
+PASSAGES = (
+    ("agent-services/guardian/notify.py", "_backlog_task",
+     "the guardian's filing call"),
+    (None, "test_a_defaulted_name_from_the_board_reads_as_a_failed_filing",
+     "the reply-side drift test"),
+    (None, SEAM_TEST, "the route-replay seam test"),
+)
+
+
+def _flat(text):
+    """Source text with each line's leading `#` dropped, every run of whitespace
+    collapsed and case folded, so a sentence that wraps across comment lines still
+    matches the sentence it was written as. Matching raw bytes would make this test
+    pass or fail on wrapping width, which is not what any of these clauses is about.
+
+    Comments have to be unwrapped rather than skipped, because in `notify.py` the
+    ruling *is* a comment: stripping comments out would leave nothing to find.
+    """
+    lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        lines.append(stripped.lstrip("#").strip() if stripped.startswith("#")
+                     else stripped)
+    return re.sub(r"\s+", " ", " ".join(lines)).lower()
+
+
+def _func_source(path, name):
+    """The source segment of function `name` in `path`, or "" if there is none.
+
+    Located by AST, not by slicing on the name: a mention of a function's name in a
+    docstring is not its body, and the whole point here is to grade the body."""
+    import ast
+
+    src = path.read_text(encoding="utf-8")
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return ast.get_source_segment(src, node) or ""
+    return ""
+
+
+def _asserts(path, name):
+    """The source of every `assert` statement inside function `name` in `path`.
+
+    Read off the AST rather than by searching the function's text, because that
+    function's own docstring *describes* the strings its assertions must contain: a
+    substring hit could then be prose that outlived the check it names, which is the
+    failure #1827 is retracting, one store closer to home. An `ast.Assert` is the
+    check, and nothing else."""
+    import ast
+
+    src = path.read_text(encoding="utf-8")
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return [re.sub(r"\s+", " ", ast.get_source_segment(src, n) or "")
+                    for n in ast.walk(node) if isinstance(n, ast.Assert)]
+    return []
+
+
+def _comments(path):
+    """Every comment token in `path`, unwrapped and collapsed — the prose a reader
+    of the source sees and the interpreter never does. Clause 4 of #1827 says the
+    ruling added to `notify.py` is a comment, so it has to be findable HERE."""
+    import io
+    import tokenize
+
+    text = path.read_text(encoding="utf-8")
+    kept = [tok.string.lstrip("#").strip()
+            for tok in tokenize.generate_tokens(io.StringIO(text).readline)
+            if tok.type == tokenize.COMMENT]
+    return re.sub(r"\s+", " ", " ".join(kept)).lower()
+
+
+def _string_literals(path):
+    """Every string literal in `path`'s syntax, collapsed — the other half of the
+    clause-4 check. A ruling parked in a docstring or a constant would be found
+    here and not in `_comments`, and would be a behaviour change in the file the
+    clause forbids one in: adjacent literals are already one `ast.Constant` here,
+    so wrapping the sentence across lines cannot smuggle it past this."""
+    import ast
+
+    parts = [node.value for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+             if isinstance(node, ast.Constant) and isinstance(node.value, str)]
+    return re.sub(r"\s+", " ", " ".join(parts)).lower()
+
+
+def test_the_retired_owed_pointer_is_gone_and_the_closed_ruling_is_in_its_place():
+    """#1827: an instruction must not outlive the decision that closed it.
+
+    Both directions are asserted, because either half alone is satisfiable by an
+    empty file. Absence (clause 1): the retired pointer appears nowhere in the two
+    files the acceptance grep names — the same two files, never the whole tree,
+    because that wording beside a different item number is a different decision and
+    lives elsewhere in the repo, and a fleet-wide red here would be this test
+    reporting someone else's open question. Re-adding it anywhere in either file
+    fails here first.
+
+    Presence (clauses 2 and 3): for each of the three replaced passages — located
+    by the function that carries it, `PASSAGES` — the closed ruling sentence, the
+    name of the test that owns the seam, and the note about what would make live
+    detection owed again. Addressing the passages rather than the files is what
+    stops the presence checks being satisfied by this test's own constants, which
+    live in the same file: a passage emptied of the ruling goes red even though
+    `RULING` is still a string further down.
+
+    Three more assertions keep the credit from being decorative.
+
+    Clause 4 says the ruling added to `notify.py` is a comment and nothing else, so
+    it is read twice: once out of the comment tokens, where the sentence has to be,
+    and once out of the string literals, where it must not be — prose in a docstring
+    or a constant is still a non-comment hunk and still describes a check nobody
+    runs from the call site. `_comments`/`_string_literals`, not one flattened blob,
+    because a sentence is prose in exactly one of those stores and the whole clause
+    is about which.
+
+    The seam all three passages credit is then checked at its own assertions —
+    `_asserts`, the `ast.Assert` nodes of `SEAM_TEST` — for the two written-file
+    checks it is credited with: the filed H1 equal to the alert title, and the
+    falsifying `== "# New Task"`. Not by searching the function's text: that function's
+    docstring already *describes* both strings, so a substring match there stays green
+    after the assertion itself is deleted, which is this item's whole failure mode
+    reproduced one store closer to home.
+
+    `SEAM_TEST` is named rather than given a line range for the same reason: the
+    range the acceptance clauses were written against moved when this round edited the
+    two docstrings above it, so a quoted range would have been false as it was typed.
+    """
+    repo = Path(__file__).resolve().parent.parent
+    notify = repo / "agent-services" / "guardian" / "notify.py"
+    here = Path(__file__).resolve()
+
+    for label, path in (("the guardian's filing call", notify),
+                        ("this contract test file", here)):
+        assert path.is_file(), f"{label} is not on disk at {path}"
+        hit = RETIRED_POINTER.search(_flat(path.read_text(encoding="utf-8")))
+        assert hit is None, (
+            f"{label} tells a future round the payload-drift check is owed (found "
+            f"{hit.group(0)!r}). #1703 declined it on 2026-09-29 and both parents "
+            "are done; what belongs in that sentence is the ruling, not the ask")
+
+    for rel, func, label in PASSAGES:
+        path = here if rel is None else repo / rel
+        segment = _func_source(path, func)
+        assert segment, f"{label}: no function {func!r} in {path}, so no passage"
+        flat = _flat(segment)
+        assert not RETIRED_POINTER.search(flat), (
+            f"{label} still hands the decision to a future round")
+        assert RULING.lower() in flat, (
+            f"{label} no longer states the closed ruling, so a reader of it learns "
+            f"only that something is missing. Expected: {RULING}")
+        assert SEAM_TEST.lower() in flat, (
+            f"{label} does not name {SEAM_TEST} as what pins the seam it declined "
+            "to police in production")
+        assert OWED_AGAIN in flat, (
+            f"{label} lost the note that weakening the written-file assertion makes "
+            "live drift detection owed again")
+
+    notify_comments = _comments(notify)
+    assert RULING.lower() in notify_comments, (
+        "the ruling in notify.py is not sitting in a comment, so clause 4's "
+        "no-non-comment-hunk rule is already broken: " + RULING)
+    assert SEAM_TEST in notify_comments, (
+        "notify.py names the seam test outside its comments, which would make a "
+        "production module depend on a test file")
+    notify_literals = _string_literals(notify)
+    assert RULING.lower() not in notify_literals, (
+        "the #1827 ruling is a docstring or string constant in notify.py, not a "
+        "comment — prose in a string is code the clause forbids, and prose in the "
+        "module docstring is prose no reader of the filing call ever reaches")
+
+    seam_asserts = _asserts(here, SEAM_TEST)
+    assert seam_asserts, (
+        f"{SEAM_TEST} is gone from this file or holds no assertion at all, so the "
+        "seam every replaced passage credits has no owner left to credit")
+    assert any('== "# [guardian] Service down, but no promotion to revert"' in a
+               for a in seam_asserts), (
+        "the filed file's H1 is no longer asserted there, so the reply's blindness "
+        "to key drift is now invisible at test time as well as in production — and "
+        "three comments would still be crediting it")
+    assert any('== "# New Task"' in a for a in seam_asserts), (
+        "the falsifying half of the seam test is gone: without the drifted "
+        "payload's defaulted H1, the H1 assertion above it proves nothing")
 
 
 def test_the_module_docstring_names_the_drill_that_exists_not_the_phantom():
