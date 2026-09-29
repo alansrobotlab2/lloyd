@@ -650,8 +650,11 @@ harness:
   # Per-turn record of what a chat turn wrote, with the pre-image beside it,
   # so the chat can say "changed 2 files" and offer to put them back.
   # `~/lloyd` is production — a saved file is a deploy — and until this
-  # existed an ordinary turn had no such line and no undo. Off for workers
-  # and direct run_query callers: they have no turn id and no reader.
+  # existed an ordinary turn had no such line and no undo. Autonomy and
+  # worker runs mint a turn id from their run id, so their writes are
+  # recorded too, and the run record's `## Change ledger` block is their
+  # reader (revert_run_writes is the manual undo). A bare run_query caller
+  # with no turn id still gets no ledger.
   change_ledger:
     enabled: true
     retention_days: 7
