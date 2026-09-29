@@ -36,11 +36,14 @@ claim is replayable from recorded replies.
 
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import re
 import subprocess
 import sys
+import time
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 from pathlib import Path
 
@@ -69,6 +72,39 @@ def _write_session(root: Path, name: str, messages: list[dict], source=None) -> 
     p = root / "sessions" / f"{name}.json"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(doc))
+    return p
+
+
+def _days_ago(n: int) -> str:
+    """An ISO timestamp `n` days before now, offset-aware like the real store."""
+    return (datetime.now(timezone.utc) - timedelta(days=n)).isoformat()
+
+
+def _write_gzipped_session(root: Path, name: str, messages: list[dict], *,
+                           last_active: str, source=None) -> Path:
+    """A transcript the retention sweep has archived: `.json.gz`, no `.json`.
+
+    `sweep_sessions` (`scripts/groundskeeper/retention-sweep.py:405-433`) gzips with
+    `shutil.copyfileobj` and then `path.unlink()`, and never `copystat`s, so the
+    archive's mtime is the day the sweep ran and the original is gone. This helper
+    leaves the mtime at *now* — the state of a sweep that ran this morning — which
+    is what makes an mtime-based age window fail here rather than pass by accident.
+    """
+    doc = {
+        "session_id": name,
+        "id": name,
+        "title": "",
+        "source": source,
+        "created_at": last_active,
+        "last_active": last_active,
+        "messages": messages,
+    }
+    p = root / "sessions" / f"{name}.json.gz"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with gzip.open(p, "wt", encoding="utf-8") as fh:
+        json.dump(doc, fh)
+    assert not (root / "sessions" / f"{name}.json").exists(), \
+        "an archived transcript has no live twin in this fixture"
     return p
 
 
@@ -1729,20 +1765,401 @@ def test_store_size_figures_in_the_table_are_always_paired_with_a_timestamp():
 # ------------------------------------------------- labeled corpus integrity -
 
 def test_hand_labeled_corpus_covers_the_item_s_minimum():
-    labels = uptake.load_labels()
-    positives = [l for l in labels if l["label"] == 1]
-    assert len(labels) >= 40, len(labels)
+    """What the tracked label file still has to carry, and what it now declares.
+
+    Rewritten in the same diff as the `spent` marker (#1848), because the shape of
+    this test was the live corpus contract: it called `load_labels()` and asserted
+    >= 40 items and >= 20 positives, which is only true of a set the loader hands
+    back as gradable. `hand-2026-09-11.json` is not gradable — all 46 of its turns
+    left the transcript store at the 2026-09-22 data-root cutover, and
+    `validate_labels` resolves 0 of 46 — so the loader now returns nothing for it
+    and this coverage minimum reads the FILE instead. The minimum is a property of
+    what was labeled and must keep holding for whoever relabels; the loader must
+    not resurrect it.
+
+    `labeled_by` used to be asserted equal to a string here. That assertion could
+    not fail for a fabricated corpus: the string is part of the file it is
+    checking. The claim "this was hand-labeled from real turns" is falsifiable only
+    against the transcript store, which is what the node
+    `test_validate_labels_fails_on_a_fabricated_or_stale_label` does.
+    """
+    doc = json.loads((REPO / "eval" / "uptake" / "labels"
+                      / "hand-2026-09-11.json").read_text())
+    items = doc["items"]
+    positives = [l for l in items if l["label"] == 1]
+    assert len(items) >= 40, len(items)
     assert len(positives) >= 20, len(positives)
     # Every label must point at a turn id of the documented shape, so a later
     # run can re-open the transcript behind it.
-    for l in labels:
+    for l in items:
         assert re.match(r"^.+#\d+$", l["turn_id"]), l
-    # `labeled_by` used to be asserted equal to a string here. That assertion
-    # could not fail for a fabricated corpus: the string is part of the file it is
-    # checking. The claim "this was hand-labeled from real turns" is falsifiable
-    # only against the transcript store, which is what the test below does.
+
+    # And the file declares itself spent, so no later triage re-reads it as live.
+    st = uptake.labels_status()
+    assert st["present"] is True and st["spent"] is True, st
+    assert st["n_items"] == len(items), st
+    assert st["n_resolved"] == 0, st
+    assert "2026-09-22" in st["spent_reason"], st
+    assert uptake.load_labels() == [], "a spent set must not load as a live corpus"
+
+    # The same floor, on the other branch: read off the FILE alone it proves only
+    # that the historical record is intact, so a relabel (the decision owed on
+    # #1676) could land a set too small to grade with and `load_labels()` would hand
+    # it to the probe as a live corpus with nothing red. Whenever the loader hands
+    # back a corpus at all, it has to clear the same minimum the file does.
+    if st["status"] == uptake.LABEL_STATUS_LIVE:
+        graded = uptake.load_labels()
+        assert len(graded) >= 40, f"live corpus is only {len(graded)} items"
+        assert len([l for l in graded if l["label"] == 1]) >= 20, \
+            "live corpus carries too few positives to grade"
 
 
+def test_human_turns_resolves_a_transcript_retention_gzipped(tmp_path):
+    """Clause 1: retention gzips and NEVER deletes, so `.json.gz` is the only copy
+    a label's turn will ever have — and uptake read only `.json` (#1848).
+
+    A store holding one session written only as `<id>.json.gz` must still yield
+    that turn, and its `turn_id` must be the bare id, because that is what the
+    labels carry: `Path("<id>.json.gz").stem` is `<id>.json`, and a turn id built
+    from that resolves against no label ever written. The label re-anchoring is run
+    through the real `validate_labels`, since re-anchoring is the whole use of the
+    corpus index.
+    """
+    sid = "20260815_101010_iv1a2b"
+    _write_gzipped_session(tmp_path, sid, [
+        _asst("I ran the migration and the queue is empty now."),
+        _user("that migration did not run, the queue is still full"),
+    ], last_active=_days_ago(40))
+    assert not list((tmp_path / "sessions").glob("*.json")), "archive-only fixture"
+
+    turns = uptake.human_turns(root=tmp_path, days=900)
+    assert [t.turn_id for t in turns] == [f"{sid}#1"], turns
+    assert turns[0].session == sid, turns[0]
+    assert turns[0].prev_assistant == "I ran the migration and the queue is empty now."
+
+    label = {"turn_id": f"{sid}#1", "label": 1,
+             "user_text": "that migration did not run, the queue is still full",
+             "prev_assistant": "I ran the migration and the queue is empty now."}
+    out = uptake.validate_labels([label], {t.turn_id: t for t in turns})
+    assert out["ok"] is True and out["n_resolved"] == 1 and out["n_unresolved"] == 0, out
+
+
+def test_human_turns_survives_a_store_that_is_nothing_but_archives(tmp_path):
+    """Clause 2: the durability property, not the single-turn case.
+
+    The sweep archives every conversation older than `SESSION_ARCHIVE_AGE_DAYS` and
+    every background run older than 30, so a store can end up with zero live files
+    — the end state of the same policy that produced the one-file fixture above.
+    If only `.json` is enumerated the corpus is then empty, `uptake_probe`
+    `_corpus_index` raises, and the label set is ungradable with nothing deleted:
+    the silent label expiry #1848 is about.
+    """
+    _write_gzipped_session(tmp_path, "20260701_090000_ivaaaa", [
+        _asst("Built it, the dashboard is up."),
+        _user("the dashboard 404s on me"),
+        _asst("Fixed — it was a stale port."),
+        _user("still 404s"),
+    ], last_active=_days_ago(200))
+    _write_gzipped_session(tmp_path, "20260705_111111_ivbbbb", [
+        _user("what is the disk usage"),
+    ], last_active=_days_ago(210))
+    assert not list((tmp_path / "sessions").glob("*.json")), "archive-only store"
+
+    turns = uptake.human_turns(root=tmp_path, days=900)
+    assert len(turns) == 3, [t.turn_id for t in turns]
+    assert {t.session for t in turns} == {"20260701_090000_ivaaaa",
+                                          "20260705_111111_ivbbbb"}, turns
+    assert [t.turn_id for t in turns if t.session.endswith("ivaaaa")] == [
+        "20260701_090000_ivaaaa#1", "20260701_090000_ivaaaa#2"], turns
+
+
+def test_a_gzipped_session_ages_on_its_own_last_active_not_the_gzip_date(tmp_path):
+    """Clause 3: reading `.gz` must not re-admit an archived session into the
+    rolling 30-day candidate pool.
+
+    `sweep_sessions` writes the archive with `shutil.copyfileobj` + `path.unlink()`
+    and never `copystat`s, so a `.json.gz`'s mtime is the day the sweep ran, while
+    the window filter in `human_turns` was mtime-based (`app/uptake.py:528-530`).
+    The fixture therefore leaves the archive's mtime at *now* and its `last_active`
+    at 45 days ago: an implementation that ages on mtime yields the turn at
+    `days=30` and fails here. The age signal uptake uses is the same one retention
+    ages on — the document's own `last_active` (`retention-sweep.py:324-337`).
+    """
+    p = _write_gzipped_session(tmp_path, "20260701_090000_ivcccc", [
+        _asst("Deployed and verified."),
+        _user("no you did not deploy anything"),
+    ], last_active=_days_ago(45))
+    mtime_age_days = (time.time() - p.stat().st_mtime) / 86400.0
+    assert mtime_age_days < 1.0, \
+        f"fixture no longer pins the trap: archive mtime is {mtime_age_days:.1f}d old"
+
+    assert uptake.human_turns(root=tmp_path, days=30) == [], \
+        "an archived session re-entered the rolling candidate pool"
+    fresh = uptake.human_turns(root=tmp_path, days=900)
+    assert [t.turn_id for t in fresh] == ["20260701_090000_ivcccc#1"], fresh
+
+
+def test_a_session_with_both_forms_is_read_once_from_the_live_file(tmp_path):
+    """The state a sweep interrupted between gzip and unlink leaves behind.
+
+    `sweep_sessions` gzips, re-reads the archive to prove it round-trips, and only
+    then unlinks — so a death in that window leaves `<id>.json` AND `<id>.json.gz`.
+    Enumerating both forms without resolving the pair would emit the same turn twice
+    under one `turn_id`, inflating the candidate pool and letting the older archived
+    prose win the dict-comprehension race in `_corpus_index`.
+    """
+    sid = "20260801_080000_ivdddd"
+    _write_gzipped_session(tmp_path, sid, [
+        _asst("very old prose that must not be read"),
+        _user("stale turn that must not be read"),
+    ], last_active=_days_ago(400))
+    # The live twin is written second, so the archive is also the FIRST file the
+    # enumeration sees: preference for the live form must not be an accident of
+    # which suffix the store happened to create first.
+    _write_session(tmp_path, sid, [
+        _asst("Deployed and verified."),
+        _user("no you did not deploy anything"),
+    ])
+
+    turns = uptake.human_turns(root=tmp_path, days=900)
+    assert [t.turn_id for t in turns] == [f"{sid}#1"], turns
+    assert turns[0].user_text == "no you did not deploy anything", turns[0]
+
+
+def test_a_damaged_archive_is_skipped_and_never_ends_the_corpus_walk(tmp_path):
+    """One rotten `.gz` must cost one session, not the corpus (#1848).
+
+    `read_session`'s docstring promises `None` for a transcript it cannot read, and
+    `human_turns` calls it in a single loop over every transcript in the store — so a
+    damage shape outside the caught list does not skip a file, it aborts the walk and
+    the corpus goes to zero with nothing deleted. `zlib.error` is exactly that shape:
+    measured on 2026-09-29, an archive whose 10-byte gzip header is valid but whose
+    payload is not a deflate stream raises `zlib.error` from the decompressor, which is
+    NOT an `OSError` (`issubclass(zlib.error, OSError)` is False) and so is not covered
+    by the `BadGzipFile` arm. A truncated archive (`EOFError`), a CRC mismatch
+    (`BadGzipFile`) and an empty file all already returned `None`; this is the fourth.
+    """
+    good = "20260710_090000_ivefff"
+    _write_gzipped_session(tmp_path, good, [
+        _asst("Migration done, the queue drained."),
+        _user("the queue is not drained, check again"),
+    ], last_active=_days_ago(60))
+
+    bad = tmp_path / "sessions" / "20260711_090000_ivgggg.json.gz"
+    bad.write_bytes(gzip.compress(b"{}")[:10] + b"not a deflate stream at all")
+
+    assert uptake.read_session(bad) is None, \
+        "a damaged archive escaped read_session instead of reporting itself unreadable"
+
+    turns = uptake.human_turns(root=tmp_path, days=900)
+    assert [t.turn_id for t in turns] == [f"{good}#1"], (
+        "one unreadable archive ended the walk over the whole store", turns)
+
+
+def test_the_archive_the_real_retention_sweep_writes_is_readable_by_uptake(tmp_path,
+                                                                           monkeypatch):
+    """The producer seam: the bytes come from `sweep_sessions`, not from this test.
+
+    Every other `.gz` fixture here writes its own archive, so they pin uptake's reader
+    against uptake's own idea of the format. The writer is a different program on a
+    different schedule — `scripts/groundskeeper/retention-sweep.py::sweep_sessions`,
+    run weekly, which gzips with `shutil.copyfileobj`, proves the archive round-trips
+    as JSON, then `path.unlink()`s the original without ever `copystat`ing it. If the
+    two ever disagree on the name or the bytes, retention silently expires the label
+    corpus, which is the whole failure #1848 is about. So this node runs the real
+    function and hands its output straight to `human_turns`.
+
+    Only `sweep_sessions` is called, and only after `SESSIONS_DIR` is redirected into
+    `tmp_path` — the same redirect discipline `tests/test_retention_sweep.py` holds,
+    asserted below rather than assumed, because every other module-level store
+    constant in that script still points at the live `~/lloyd-data` at import time.
+
+    The session is 100 days old by its own `last_active`, which is past
+    `SESSION_ARCHIVE_AGE_DAYS` (90) and inside `human_turns(days=900)` — so the same
+    run also re-pins clause 3 across the seam: the fresh archive mtime must NOT put a
+    retired conversation back in the 30-day candidate pool.
+    """
+    import importlib.util
+
+    script = REPO / "scripts" / "groundskeeper" / "retention-sweep.py"
+    spec = importlib.util.spec_from_file_location("retention_sweep_for_uptake", script)
+    sweep = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sweep)
+
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    monkeypatch.setattr(sweep, "SESSIONS_DIR", sessions)
+    assert sweep.SESSIONS_DIR == sessions, \
+        "the sweep's sessions store was not redirected: this would archive the real one"
+
+    sid = "20260620_090000_ivhhhh"
+    # Written the way the session writer writes it: `last_active` inside the first
+    # 4 KB, which is where `_session_age_days` reads it from. No `platform` key, so the
+    # sweep applies the conversation policy (90d) rather than the background one.
+    (sessions / f"{sid}.json").write_text(json.dumps({
+        "session_id": sid, "id": sid, "title": "", "source": None,
+        "created_at": _days_ago(101), "last_active": _days_ago(100),
+        "messages": [
+            {"role": "assistant", "content": [{"type": "text",
+                                               "text": "Deployed and verified."}]},
+            {"role": "user", "content": [{"type": "text",
+                                          "text": "no you did not deploy anything"}]},
+        ],
+    }))
+
+    n_archived, _ = sweep.sweep_sessions(True, time.time())
+    assert n_archived == 1, "the sweep did not archive the fixture session"
+    assert not (sessions / f"{sid}.json").exists(), "gzip-never-delete: original still live"
+    assert (sessions / f"{sid}.json.gz").exists(), "the sweep wrote no archive"
+
+    turns = uptake.human_turns(root=tmp_path, days=900)
+    assert [t.turn_id for t in turns] == [f"{sid}#1"], (
+        "uptake cannot read the archive the real sweep writes", turns)
+    assert turns[0].user_text == "no you did not deploy anything", turns[0]
+    assert uptake.human_turns(root=tmp_path, days=30) == [], \
+        "a freshly-archived conversation re-entered the 30-day candidate pool"
+
+
+def test_the_retention_skill_s_sessions_row_still_names_the_archive_reader():
+    r"""Clause 5: the row that promises "Never delete" has to say who reads the
+    archive, and the vault is a live tree no worktree guards.
+
+    `skills/retention-sweep/SKILL.md` is the operator's procedure for the weekly
+    sweep, so it is the surface where "gzip, never delete" is either load-bearing or
+    decorative: a future edit that drops the consumer half of that row leaves the
+    sweep archiving transcripts whose only reader enumerates `*.json`, and nothing in
+    this repo would notice. Same shape as
+    `test_the_skill_states_the_window_the_code_applies_and_the_ceiling_caveat`
+    above — the skill lives under `~/obsidian`, so a text assertion is the only
+    enforceable form available, and the suffix is asserted against
+    `uptake.SESSION_ARCHIVE_SUFFIX` rather than typed, so renaming the constant goes
+    red until the prose follows.
+
+    The row's own policy text is the positive control on the read: a truncated or
+    mis-matched read would satisfy every consumer assertion below as an accident.
+    """
+    skill = (Path(os.environ.get("LLOYD_VAULT", Path.home() / "obsidian"))
+             / "skills" / "retention-sweep" / "SKILL.md")
+    if not skill.exists():
+        # Same convention as the sibling above: the vault is not part of the
+        # checkout, so its absence is a named skip, not an error.
+        pytest.skip(f"vault skill not present at {skill}")
+    text = skill.read_text(encoding="utf-8")
+    rows = {ln.split("|")[1].strip(): ln
+            for ln in text.splitlines() if ln.startswith("| ") and ln.count("|") >= 3}
+    # Matched by substring, not by `endswith`: the cell is a code span
+    # (`~/lloyd-data/sessions/*.json`), and the sibling spill row is
+    # `~/lloyd-data/sessions/*.tool-results/`, which this pattern cannot hit.
+    row = next((ln for store, ln in rows.items()
+                if "sessions/*.json" in store), None)
+    assert row is not None, f"no sessions row in the store table: {sorted(rows)}"
+
+    # Positive control: the retention promise itself, unchanged by this clause.
+    assert "Never delete" in row, row
+    assert "SESSION_ARCHIVE_AGE_DAYS" in row, row
+    # The consumer half #1848 added: named reader, named archived form, named age.
+    assert "app/uptake.py" in row, row
+    assert f"<id>{uptake.SESSION_ARCHIVE_SUFFIX}" in row, (
+        f"the row no longer names the archived form uptake reads: "
+        f"`<id>{uptake.SESSION_ARCHIVE_SUFFIX}`")
+    assert "human_turns" in row and "lloyd_root" in row, (
+        "the row names only one of the two enumerations uptake walks; the store-"
+        "presence probe is the one that decides whether an archive-only store is a "
+        "corpus at all")
+    assert "last_active" in row and "gzip date" in row, (
+        "the row stopped saying an archive ages on the document's own stamp, which "
+        "is the only reason a `.gz` mtime cannot re-admit a retired session")
+
+
+def test_a_spent_label_set_is_never_loaded_as_a_live_corpus(tmp_path):
+    """Clause 4: `spent` has to be a state the loader reports, in three values.
+
+    The tracked corpus attests 46 hand labels that no longer resolve, and with no
+    field saying so every later triage re-read it as a corpus to grade (#1848,
+    following #1676). Three states must stay tellable apart — a live set, a spent
+    one, and no file at all — and the gradable path must see only the first:
+    `load_labels` returning `[]` for a spent set is also what it returns for an
+    absent one, so `labels_status` is what carries the difference.
+
+    The empty-corpus half is the regression this change would otherwise open:
+    `validate_labels([], {})` has nothing to fail on, so a spent set reaching the
+    probe's `labels_check` would have printed `ok: true` over zero labels — the
+    flattering verdict on a corpus that has rolled off the store.
+    """
+    def corpus_store(root: Path, **extra) -> Path:
+        d = root / "eval" / "uptake" / "labels"
+        d.mkdir(parents=True, exist_ok=True)
+        doc = {"schema": 1, "labeled_by": "hand:test", "n_items": 2,
+               "items": [{"turn_id": "20260801_080000_iv0001#1", "label": 1,
+                          "user_text": "you did not fix it", "prev_assistant": "Fixed."},
+                         {"turn_id": "20260801_080000_iv0001#2", "label": 0,
+                          "user_text": "thanks", "prev_assistant": "Fixed again."}]}
+        doc.update(extra)
+        (d / "hand-2026-08-01.json").write_text(json.dumps(doc))
+        return root
+
+    spent_root = corpus_store(tmp_path / "spent", status="spent",
+                              spent_reason="every turn rolled off at the "
+                                           "2026-09-22 data-root cutover",
+                              n_resolved=0)
+    live_root = corpus_store(tmp_path / "live")
+    absent_root = tmp_path / "absent"
+    absent_root.mkdir()
+
+    st = uptake.labels_status(spent_root)
+    assert st["present"] is True and st["status"] == "spent" and st["spent"] is True, st
+    assert st["n_items"] == 2 and st["n_resolved"] == 0, st
+    assert "2026-09-22" in st["spent_reason"], st
+    assert uptake.load_labels(spent_root) == [], \
+        "a spent set must never come back as a live gradable corpus"
+
+    live = uptake.labels_status(live_root)
+    assert live["spent"] is False and live["status"] == "live", live
+    assert len(uptake.load_labels(live_root)) == 2, live
+
+    gone = uptake.labels_status(absent_root)
+    assert gone["present"] is False and gone["status"] == "absent", gone
+    # Spent and absent are different verdicts on different remedies, and the
+    # loader's `[]` cannot carry that difference by itself.
+    assert gone["status"] == "absent" and st["status"] == "spent", (gone, st)
+    assert gone["present"] is False and st["present"] is True, (gone, st)
+
+    # Zero labels is never a passing corpus, whichever way it arose.
+    assert uptake.validate_labels(uptake.load_labels(spent_root), {})["ok"] is False, \
+        "an empty corpus graded as passing"
+    assert uptake.validate_labels([], {})["ok"] is False
+
+
+def test_the_probe_refuses_a_spent_label_set_instead_of_grading_nothing(tmp_path,
+                                                                        monkeypatch):
+    """Clause 4 across the probe seam: `[]` from a spent set must arrive as a refusal.
+
+    `uptake_probe.py` is a separate process — the CLI the probe is run as — and it is
+    the only consumer of the label corpus: it calls `uptake.load_labels()` and
+    re-assembles its own `labels_check` from the result
+    (`scripts/uptake_probe.py:347`, `:387`). A unit test of `load_labels` therefore
+    stops at the module boundary this claim crosses.
+
+    Before this change `validate_labels` had nothing to fail on over an empty list
+    (`ok = not unresolved and not mismatch`), so the spent set's `[]` reached the run
+    as `labels_ok: true` — the flattering verdict on the corpus that had rolled off,
+    printed by the one program built to catch it. The fixture's six turns all
+    RESOLVE, so the only thing wrong with this run is that the corpus is spent.
+    """
+    import scripts.uptake_probe as probe
+
+    _audit_env(monkeypatch, labels_resolve=True)
+    monkeypatch.setattr(uptake, "load_labels", lambda *a, **kw: [])
+    out = tmp_path / "uptake"
+
+    r = probe.run_classifier_eval()
+    assert r["labels_check"]["n"] == 0, r["labels_check"]
+    assert r["labels_check"]["ok"] is False, \
+        "zero labels graded as a passing corpus"
+    assert r["labels_ok"] is False, sorted(r)
+    assert probe.main(["--out-dir", str(out), "--days", "30"]) == 3
+    assert not list(out.glob("uptake-*.json")), \
+        "an uptake table written over a corpus that grades nothing"
 
 
 def test_validate_labels_fails_on_a_fabricated_or_stale_label(tmp_path, monkeypatch):
@@ -2739,6 +3156,46 @@ def test_a_worktree_holding_only_review_grader_sessions_falls_back(tmp_path, mon
     assert uptake.lloyd_root() == tmp_path / "prod"
     (d / "20260922_070000_ab12cd.json").write_text("{}")
     assert uptake.lloyd_root() == tmp_path
+
+
+def test_a_store_of_nothing_but_archives_is_still_recognised_as_a_corpus(tmp_path,
+                                                                         monkeypatch):
+    r"""#1848: the presence probe is the other half of reading the gzipped form.
+
+    The sweep archives every conversation past 90 days and every background run past
+    30, gzipping and unlinking, so a store can end up with no live `<id>.json` at all
+    — clause 2's own fixture. `human_turns` reading `.json.gz` buys nothing if
+    `_has_sessions` still globs `*.json`: the store reads as "not a corpus",
+    `lloyd_root()` falls back to a different root, and the surviving transcript set is
+    measured somewhere else or not at all. Both sides now walk one enumeration.
+
+    And an archived gate session must stay excluded. `_REVIEW_SESSION_RE` ended in
+    `\.json$`, so a sweep that archived `<id>_review_<hex>.json` would hand #1375's
+    grader records back as a user corpus one retention cycle later.
+    """
+    from app import paths
+
+    d = tmp_path / "sessions"
+    d.mkdir()
+    (d / "canary_1789667418_68bba5.json.gz").write_bytes(gzip.compress(b"{}"))
+    (d / "20260922_064347_review_f8b2.json.gz").write_bytes(gzip.compress(b"{}"))
+    monkeypatch.delenv("LLOYD_ROOT", raising=False)
+    monkeypatch.setattr(paths, "DATA_ROOT", tmp_path)
+    monkeypatch.setattr(paths, "production_data_root", lambda: tmp_path / "prod")
+
+    assert uptake._has_sessions(tmp_path) is False, \
+        "an archived grader record read as a user corpus (#1375 in .gz form)"
+    assert uptake.lloyd_root() == tmp_path / "prod"
+
+    _write_gzipped_session(tmp_path, "20260601_090000_iveeee", [
+        _asst("Built it, the report is at the usual path."),
+        _user("the report is not at that path"),
+    ], last_active=_days_ago(120))
+    assert not list(d.glob("*.json")), "archive-only fixture"
+    assert uptake._has_sessions(tmp_path) is True, \
+        "an archive-only store is not a corpus: the resolver falls back away from it"
+    assert uptake.lloyd_root() == tmp_path, \
+        "lloyd_root() fell back from a store uptake can read"
 
 
 # ------------------------------- #1195: what a `weighted_disputes` may mean --

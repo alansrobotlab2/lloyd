@@ -5,6 +5,9 @@
   "definition": "DISPUTE = the user reacts against what the agent just delivered: says it was wrong/false/broken, rejects or reverses it, reports a claimed-working result does not work, or re-asks for promised work. NOT = new request, follow-up question about content, approval, directive to proceed, small talk.",
   "n_positives": 23,
   "n_items": 46,
+  "status": "spent",
+  "spent_reason": "Every turn this set names rolled off the transcript store at the 2026-09-22 data-root cutover, so it is no longer gradable: uptake.validate_labels resolves n_resolved=0 of 46 against ~/lloyd-data/sessions/ (measured 2026-09-29 at HEAD 2391fd05, #1848). Do not re-grade it and do not relabel from it \u2014 the 32 session ids it cites are absent under both .json and .json.gz. The items and the engine_replay block below stay as the historical record of the 2026-09-11 precision measurement; rebuilding the corpus is the scope decision owed on #1676.",
+  "n_resolved": 0,
   "items": [
     {
       "turn_id": "20260822_232106_ive8da#2",

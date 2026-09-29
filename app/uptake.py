@@ -48,12 +48,14 @@ burned by a KG figure quoted as current an hour after it was true;
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import os
 import re
 import urllib.error
 import urllib.request
+import zlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -345,18 +347,31 @@ def _has_sessions(base: Path) -> bool:
     of them read as the corpus: `human_turns()` returned 0 and five
     `tests/test_uptake.py` nodes went red for that round only. Matched by name,
     like the canary, so no file is opened to decide.
+
+    One enumeration with `human_turns` (#1848): this probe walks the same
+    `_session_transcripts` list, live AND archived, because a store the sweep has
+    finished archiving holds only `<id>.json.gz`, and a presence probe that sees
+    only `<id>.json` would call that store empty and send `lloyd_root()` falling
+    back to a different root — the corpus survives clause 1-3 and this guard is
+    the one that would have thrown the survival away.
     """
-    d = base / "sessions"
-    return d.is_dir() and any(not _is_gate_session(p.name) for p in d.glob("*.json"))
+    return any(not _is_gate_session(p.name) for p in _session_transcripts(base))
 
 
 #: The review worker's session ids, minted by `scripts/automod/review.py::
-#: write_session` as `<%Y%m%d_%H%M%S>_review_<hex>`.
-_REVIEW_SESSION_RE = re.compile(r"^\d{8}_\d{6}_review_[0-9a-f]+\.json$")
+#: write_session` as `<%Y%m%d_%H%M%S>_review_<hex>`. Both suffixes, because the
+#: sweep that archives `<id>.json` (#1848) archives a grader record exactly like a
+#: user transcript: a name matched only live would let `..._review_f8b2.json.gz`
+#: through as a corpus, which is #1375 re-opened one retention cycle later.
+_REVIEW_SESSION_RE = re.compile(r"^\d{8}_\d{6}_review_[0-9a-f]+\.json(\.gz)?$")
 
 
 def _is_gate_session(name: str) -> bool:
-    """A session file the gate itself wrote into a round's tree, never a user's."""
+    """A session file the gate itself wrote into a round's tree, never a user's.
+
+    `canary_` is a prefix, so it still matches `canary_<ts>_<hex>.json.gz`; the
+    review pattern carries the archive suffix explicitly (see `_REVIEW_SESSION_RE`).
+    """
     return name.startswith("canary_") or bool(_REVIEW_SESSION_RE.match(name))
 
 
@@ -515,27 +530,126 @@ def _vault_context_titles(text: str) -> list[VaultCtx]:
     return out
 
 
+#: The archived form of a transcript. `scripts/groundskeeper/retention-sweep.py::
+#: sweep_sessions` gzips `<id>.json` to `<id>.json.gz` and unlinks the original, on
+#: a policy that is *gzip and never delete* — so an archive is the only copy a
+#: session will ever have. Uptake enumerated `*.json` only, which made the weekly
+#: sweep a silent label expiry: every label naming a session that got archived turned
+#: unresolvable the day it was archived, with nothing deleted and nothing reported
+#: (#1848; the same instrument already sat at 0-of-46 for #1676's unrelated reason).
+SESSION_ARCHIVE_SUFFIX = ".json.gz"
+SESSION_SUFFIXES = (".json", SESSION_ARCHIVE_SUFFIX)
+
+
+def _session_transcripts(root: Path) -> list[Path]:
+    """Every transcript in a store, live or archived, ordered by name.
+
+    A session present in BOTH forms — the state a sweep interrupted between
+    `gzip.open(...)` and `path.unlink()` leaves behind — resolves to the live file:
+    it is the current prose, and reading both would emit one `turn_id` twice and let
+    the older archived text win the `turn_id`-keyed index in `uptake_probe`.
+    """
+    d = root / "sessions"
+    by_session: dict[str, Path] = {}
+    for suffix in SESSION_SUFFIXES:                 # ".json" first, and it wins
+        for path in d.glob(f"*{suffix}"):
+            by_session.setdefault(session_id(path), path)
+    return sorted(by_session.values())
+
+
+def session_id(path: Path) -> str:
+    """The session id a transcript file names, with either suffix.
+
+    NOT `path.stem`: for an archive that is `<id>.json`, and a `turn_id` built from
+    it resolves against no label ever written, because labels carry the bare id.
+    """
+    name = path.name
+    for suffix in (SESSION_ARCHIVE_SUFFIX, ".json"):
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
+def read_session(path: Path) -> dict | None:
+    """One parsed session document, gzip-transparent; None if it cannot be read."""
+    try:
+        if path.name.endswith(SESSION_ARCHIVE_SUFFIX):
+            with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fh:
+                doc = json.load(fh)
+        else:
+            doc = json.loads(path.read_text(errors="replace"))
+    except (OSError, EOFError, UnicodeDecodeError, json.JSONDecodeError, zlib.error):
+        # `EOFError` is a truncated archive (a gzip that died mid-write);
+        # `BadGzipFile` is an `OSError`, so it needs no name of its own.
+        # `zlib.error` is the one damaged-archive shape that is NOT an `OSError`:
+        # a valid 10-byte header over bytes that are not a deflate stream raises it
+        # out of the decompressor (`Error -3 … invalid block type`, measured
+        # 2026-09-29). It has to be named here because `human_turns` reads every
+        # transcript in one loop — an escaping exception would end the walk, and one
+        # rotten member would cost the whole corpus, which is the opposite of the
+        # durability #1848 exists for.
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def _last_active_epoch(doc: Mapping[str, Any]) -> float | None:
+    """The session's own last-activity stamp, as an epoch, or None.
+
+    This is the field the sweep itself ages on (`_session_age_days`,
+    `retention-sweep.py:324-337`), so both surfaces answer "how old is this
+    session" from the same document key.
+
+    Offset-aware stamps (`2026-09-29T12:22:03.257459-07:00`) parse to one instant
+    everywhere. The store also holds naive ones — 611 of 3240 files carrying the key
+    on 2026-09-29, dated 2026-09-12 through 2026-09-28 — and there the two surfaces
+    part by design: this reads a naive stamp as UTC, the sweep's bare
+    `datetime.timestamp()` as box-local, so uptake ages such a session up to the
+    box's offset (7h here) EARLIER, which is the conservative direction for a window
+    and under 1% of the 30-day arm. Reconciling the two parses means deciding which
+    zone the writers of 09-12→09-28 meant, and this clause does not need that.
+    """
+    v = doc.get("last_active")
+    if not isinstance(v, str) or not v.strip():
+        return None
+    try:
+        ts = datetime.fromisoformat(v.strip())
+    except ValueError:
+        return None
+    return ts.replace(tzinfo=timezone.utc).timestamp() if ts.tzinfo is None \
+        else ts.timestamp()
+
+
 def human_turns(root: Path | str | None = None, days: int = 30) -> list[Turn]:
-    """Human-authored user turns from the last `days` of session JSONs.
+    """Human-authored user turns from the last `days` of session transcripts.
 
     Filtered three ways, each one earned by a shape actually seen in the data:
     interactive sessions only (session `source` unset), user messages with no
     inject `source`, and no bracketed scheduler/inner-voice prefix. Ordered by
     session name then position, so `turn_id` is reproducible.
+
+    Reads both `<id>.json` and the archived `<id>.json.gz` (#1848). The age window is
+    the file mtime, then — for an archive only — the document's own `last_active`:
+    an archive's mtime is the day the sweep ran, never older than the session, so
+    mtime alone is safe as a first cut but must not be the last word, or a transcript
+    archived in December re-enters the rolling 30-day candidate pool.
     """
     root = Path(root) if root else lloyd_root()
     cutoff = datetime.now(timezone.utc).timestamp() - days * 86400
     turns: list[Turn] = []
-    for path in sorted((root / "sessions").glob("*.json")):
+    for path in _session_transcripts(root):
         if path.stat().st_mtime < cutoff:
             continue
-        try:
-            doc = json.loads(path.read_text(errors="replace"))
-        except (OSError, json.JSONDecodeError):
+        doc = read_session(path)
+        if doc is None or doc.get("source"):
             continue
-        if not isinstance(doc, dict) or doc.get("source"):
-            continue
-        session = path.stem
+        if path.name.endswith(SESSION_ARCHIVE_SUFFIX):
+            own = _last_active_epoch(doc)
+            # An archive with no readable `last_active` keeps the mtime age, which
+            # is the sweep's date — the permissive direction, and the same fallback
+            # `_session_age_days` uses. It cannot invent a session, only keep one.
+            if own is not None and own < cutoff:
+                continue
+        session = session_id(path)
         if _synthetic_session(session):
             continue
         prev: str | None = None
@@ -1060,6 +1174,16 @@ def classify_dispute_raw(
 LABEL_GLOB = "eval/uptake/labels/hand-*.json"
 LABELER = "hand:alan-turns-2026-09-11"
 
+#: The three things the newest hand label set can BE (#1848). `spent` is the one that
+#: did not exist: `hand-2026-09-11.json` is 46 tracked items whose every turn left the
+#: transcript store at the 2026-09-22 data-root cutover — `validate_labels` resolves 0
+#: of 46 — and with nothing marking it spent, every later triage re-read it as a corpus
+#: to relabel and every probe run re-reported the same refusal to nobody. A set now
+#: declares itself spent in its own front matter and the loader honours that.
+LABEL_STATUS_LIVE = "live"
+LABEL_STATUS_SPENT = "spent"
+LABEL_STATUS_ABSENT = "absent"
+
 
 def labels_path(root: Path | str | None = None) -> Path | None:
     root = Path(root) if root else REPO
@@ -1067,16 +1191,63 @@ def labels_path(root: Path | str | None = None) -> Path | None:
     return files[-1] if files else None
 
 
-def load_labels(root: Path | str | None = None) -> list[dict[str, Any]]:
+def _label_file(root: Path | str | None = None) -> tuple[Path | None, Any]:
+    """The newest label file and its parsed document (None: absent or unreadable)."""
     path = labels_path(root)
     if not path:
-        return []
+        return None, None
     try:
-        doc = json.loads(path.read_text())
+        return path, json.loads(path.read_text())
     except (OSError, json.JSONDecodeError):
-        return []
+        return path, None
+
+
+def _label_items(doc: Any) -> list[dict[str, Any]]:
     items = doc.get("items") if isinstance(doc, dict) else doc
     return [i for i in (items or []) if isinstance(i, dict) and "turn_id" in i]
+
+
+def _label_status_of(doc: Any) -> str:
+    return LABEL_STATUS_SPENT if (
+        isinstance(doc, dict)
+        and str(doc.get("status") or "").strip().lower() == LABEL_STATUS_SPENT) \
+        else LABEL_STATUS_LIVE
+
+
+def labels_status(root: Path | str | None = None) -> dict[str, Any]:
+    """What the newest hand label set IS: a live corpus, a spent one, or nothing.
+
+    Three states, where the old loader collapsed them into two. `load_labels` answering
+    `[]` is the same bytes for "spent" and for "absent", and those are different
+    verdicts on different remedies — a spent set wants its `n_resolved: 0` believed and
+    a fresh corpus commissioned, an absent one wants the corpus found. An unreadable
+    file reads as live-but-broken rather than spent: nobody marked it, and
+    `load_labels` still hands back nothing for it.
+    """
+    path, doc = _label_file(root)
+    if path is None:
+        return {"present": False, "status": LABEL_STATUS_ABSENT, "spent": False,
+                "n_items": 0, "n_resolved": None, "spent_reason": None, "path": None}
+    status = _label_status_of(doc)
+    return {"present": True, "status": status, "spent": status == LABEL_STATUS_SPENT,
+            "n_items": len(_label_items(doc)),
+            "n_resolved": doc.get("n_resolved") if isinstance(doc, dict) else None,
+            "spent_reason": doc.get("spent_reason") if isinstance(doc, dict) else None,
+            "path": str(path)}
+
+
+def load_labels(root: Path | str | None = None) -> list[dict[str, Any]]:
+    """The live hand-labeled corpus: the newest set, unless it declares itself spent.
+
+    A spent set yields `[]` on purpose — the caller wants turns to grade and there are
+    none — and `labels_status` is what says which of *spent* or *absent* the caller is
+    looking at, so the empty list never carries that meaning by itself. Grading an
+    empty corpus is separately impossible: `validate_labels` refuses zero labels.
+    """
+    path, doc = _label_file(root)
+    if path is None or _label_status_of(doc) == LABEL_STATUS_SPENT:
+        return []
+    return _label_items(doc)
 
 
 def validate_labels(labels: Sequence[Mapping[str, Any]],
@@ -1130,7 +1301,11 @@ def validate_labels(labels: Sequence[Mapping[str, Any]],
             mismatch.append(tid)
 
     return {
-        "ok": not unresolved and not mismatch,
+        # Zero labels is not a passing corpus (#1848). With nothing to fail on, `ok`
+        # would go TRUE for a spent set (`load_labels` hands back `[]`) — the check
+        # whose stated job is refusing a corpus that silently shrank as transcripts
+        # rolled off would have been the thing that blessed its disappearance.
+        "ok": bool(labels) and not unresolved and not mismatch,
         "n": len(labels),
         "n_resolved": len(labels) - len(unresolved),
         # Uncapped totals, beside the id lists that are NOT (#1676). Both lists
