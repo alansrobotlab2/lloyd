@@ -846,6 +846,51 @@ def _explain_missing(scope: str, tool: str, rows: Iterable[dict],
     return ""
 
 
+#: The closing rule of a shadow, as one string. `_shadow_sentence` puts it
+#: after the ids, so whoever reads the mint echo (#1834) and whoever reads the
+#: denial a week later are reading the same words about the same mechanism —
+#: two paraphrases of a rule drift, and the drifted half is the one that stops
+#: telling anyone to widen or revoke.
+_SHADOW_RULE = (
+    "the predicate governs the pair, so a grant with no predicate cannot pay "
+    "for a call it refuses. Widen or revoke the bounded grant to restore that "
+    "— minting another predicate-less row leaves the shadow standing.")
+
+
+def _shadow_sentence(*, scope: str, tool: str, bounded: list[dict],
+                     broad: list[dict],
+                     reasons: dict[int, str] | None = None) -> str:
+    """One (scope, tool) pair's shadow, rendered as the sentence its reader sees.
+
+    Two callers, one sentence (#1834): `_explain_shadow` renders it for a call
+    that was just refused and has a per-row reason — it knows *why* the bounded
+    row did not pay — while `shadow_warning_for` renders it at mint time, where
+    no call exists yet and naming the rows is the whole of what can be said. A
+    caller without a reason passes none and gets the same ids, the same
+    predicates and the same rule, minus the parenthetical.
+
+    Both lists must already hold only live, unexpired, destination-less rows for
+    this pair. The sentence names ids and says one narrows the other, which a
+    #628 destination row explicitly does not do.
+    """
+    if not bounded or not broad:
+        return ""
+    given = reasons or {}
+    bits = []
+    for row in bounded:
+        predicate = str(row.get("arg_predicate") or "").strip()
+        reason = str(given.get(row["id"]) or "").strip()
+        # The predicate travels with the row in both branches: whoever reads
+        # this has to know what the bound is to change it, and a quota line
+        # alone makes them go look the row up.
+        named = f"#{row['id']} predicate={predicate!r}"
+        bits.append(f"{named} {reason}" if reason else named)
+    broad_ids = ", ".join(f"#{row['id']}" for row in broad)
+    return (f"the bounded grant(s) for '{tool}' in scope '{scope}' "
+            f"[{'; '.join(bits)}] shadow the predicate-less grant(s) "
+            f"{broad_ids} for the same scope and tool: {_SHADOW_RULE}")
+
+
 def _explain_shadow(*, scope: str, tool: str, bounded: list[dict],
                     broad: list[dict], args: dict) -> str:
     """Why a live predicate-less grant did not pay for this call (#1636).
@@ -863,33 +908,65 @@ def _explain_shadow(*, scope: str, tool: str, bounded: list[dict],
     because `check_grants` builds them from `store.live()`; the only reasons a
     bounded row there did not pay are a predicate this call does not satisfy and
     a spent quota, and both are said here.
+
+    What it contributes over `_shadow_sentence` is exactly that per-row reason,
+    which only a call can supply. The sentence itself lives there, so the mint
+    echo and this denial cannot diverge (#1834).
     """
-    bits = []
+    reasons: dict[int, str] = {}
     for row in bounded:
         predicate = str(row.get("arg_predicate") or "").strip()
         quota, consumed = row.get("quota"), row.get("consumed") or 0
         if quota is not None and consumed >= quota:
-            refused = f"is over quota ({consumed}/{quota})"
+            reasons[row["id"]] = f"is over quota ({consumed}/{quota})"
         elif not predicate_matches(predicate, args):
-            refused = "does not match this call"
-        else:
-            continue
-        # The predicate travels with the row in both branches: whoever reads
-        # this has to know what the bound is to change it, and a quota line
-        # alone makes them go look the row up.
-        bits.append(f"#{row['id']} predicate={predicate!r} {refused}")
-    if not bits:
+            reasons[row["id"]] = "does not match this call"
+    if not reasons:
         # Every bounded row could have paid and none did — a state the match
         # loop cannot reach. Say nothing and let the caller keep its own
         # explanation rather than assert a reason that is not true.
         return ""
-    broad_ids = ", ".join(f"#{row['id']}" for row in broad)
-    return (f"the bounded grant(s) for '{tool}' in scope '{scope}' "
-            f"[{'; '.join(bits)}] shadow the predicate-less grant(s) "
-            f"{broad_ids} for the same scope and tool: the predicate governs "
-            f"the pair, so a grant with no predicate cannot pay for a call it "
-            f"refuses. Widen or revoke the bounded grant to restore that — "
-            f"minting another predicate-less row leaves the shadow standing.")
+    return _shadow_sentence(scope=scope, tool=tool,
+                            bounded=[r for r in bounded if r["id"] in reasons],
+                            broad=broad, reasons=reasons)
+
+
+def shadow_warning_for(store: GrantStore, *, scope: str, tool_pattern: str,
+                       now: dt.datetime | None = None) -> str:
+    """The shadow standing over one (scope, tool) pair right now — or ''.
+
+    Ask it *after* a mint, from the two surfaces where a human is present to
+    read it: `grant_create` echoes the answer into the same result that says
+    `granted: true`, and `sync_task_grants` logs it with the task id. Minting is
+    the only moment anyone is there to hear that a predicate now governs a pair,
+    because the denial that would otherwise say it may not come for a week, or
+    may never come — a broad row minted on the strength of a shadow denial
+    changes nothing, and nothing about its own result says so (#1834).
+
+    It is a warning and nothing else: the mint is not refused, the pair is not
+    made unique, and no existing row is touched. Widening or revoking stays the
+    human's visible act, exactly as `_explain_shadow` says.
+
+    Eligibility is `check_grants`' own filter, re-applied rather than trusted:
+    `store.live()` selects on revocation and expiry only, so without the
+    destination check below a #628 destination row would be named here as
+    narrowing a tool that the shipped rule says it does not narrow. Asking after
+    the write is what makes the two directions one condition — a pair holding
+    both a bounded row and a predicate-less one is shadowed whichever of the two
+    was written last, and a pair holding only one side is not shadowed at all.
+    """
+    tool = normalize_tool_name(tool_pattern)
+    bounded: list[dict] = []
+    broad: list[dict] = []
+    for row in store.live(scope=scope, now=now):
+        if row["tool_pattern"] != tool:
+            continue
+        if str(row.get("destination") or "").strip():
+            continue
+        target = bounded if str(row.get("arg_predicate") or "").strip() else broad
+        target.append(row)
+    return _shadow_sentence(scope=scope, tool=tool, bounded=bounded,
+                            broad=broad)
 
 
 def _decide_destination(store: GrantStore, *, scope: str, tool: str,
@@ -1281,10 +1358,22 @@ def sync_task_grants(store: GrantStore, *, task_id: Any, scope: str,
                     and (r["arg_predicate"] or "") == spec["predicate"]]
         if existing:
             continue
-        store.mint(scope=scope, tool_pattern=spec["tool"],
-                   arg_predicate=spec["predicate"], quota=spec["quota"],
-                   issued_by=spec["issued_by"], expires_at=expiry,
-                   note=spec["note"] or f"autonomy task #{task_id}",
-                   minted_by=f"frontmatter:{task_id}", now=at)
+        row = store.mint(scope=scope, tool_pattern=spec["tool"],
+                         arg_predicate=spec["predicate"], quota=spec["quota"],
+                         issued_by=spec["issued_by"], expires_at=expiry,
+                         note=spec["note"] or f"autonomy task #{task_id}",
+                         minted_by=f"frontmatter:{task_id}", now=at)
+        # #1834: the frontmatter path is where nobody is standing there. A task
+        # that declares a broad `grants:` entry while a bounded row for the same
+        # pair is live has just written a row that changes nothing — the
+        # predicate governs the pair — and the `not live` warning above is the
+        # only other thing this function ever says. Same sentence the mint echo
+        # says, on this logger, so it reaches server.err with the task id.
+        warn = shadow_warning_for(store, scope=scope,
+                                  tool_pattern=spec["tool"], now=at)
+        if warn:
+            logger.warning("[grants] task #%s minted grant #%s for '%s' under a "
+                           "standing shadow: %s", task_id, row["id"],
+                           spec["tool"], warn)
         minted += 1
     return minted

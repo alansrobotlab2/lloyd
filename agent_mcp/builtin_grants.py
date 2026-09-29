@@ -78,8 +78,9 @@ async def _grant_create(args: dict[str, Any]) -> str:
         logger.warning("[grants] refused mint from session=%r", get_bound_session())
         return json.dumps({"error": refused})
 
+    store = _store()
     try:
-        row = _store().mint(
+        row = store.mint(
             scope=args.get("scope"),
             tool_pattern=args.get("tool"),
             arg_predicate=args.get("predicate") or "",
@@ -95,13 +96,27 @@ async def _grant_create(args: dict[str, Any]) -> str:
     logger.info("[grants] minted #%s scope=%s tool=%s expires=%s by %s",
                 row["id"], row["scope"], row["tool_pattern"],
                 row["expires_at"], row["issued_by"])
-    return json.dumps({
+    result: dict[str, Any] = {
         "granted": True, "grant_id": row["id"], "scope": row["scope"],
         "tool": row["tool_pattern"], "predicate": row["arg_predicate"],
         "quota": row["quota"], "expires_at": row["expires_at"],
         "note": ("This grant dies on its own date. Renewing it means minting a "
                  "new row — there is deliberately no renewal call."),
-    })
+    }
+    # #1834: this result is the one moment a human is reading. Asked off the
+    # store after the write, so it names rows that are really standing there,
+    # and it is additive — the grant is already written and stays written. A
+    # shadow that only ever shows up in a denial weeks later is a narrowing
+    # nobody agreed to; the same sentence the denial will say is cheap here.
+    from app.harness.policy import shadow_warning_for
+
+    warn = shadow_warning_for(store, scope=row["scope"],
+                              tool_pattern=row["tool_pattern"])
+    if warn:
+        logger.warning("[grants] minted #%s under a standing shadow: %s",
+                       row["id"], warn)
+        result["shadow_warning"] = warn
+    return json.dumps(result)
 
 
 async def _grant_list(args: dict[str, Any]) -> str:
