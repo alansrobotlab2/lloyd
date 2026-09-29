@@ -944,11 +944,17 @@ other session sources' — #896) and stages a candidate task under
   the module that skipped its own "a failure corpus is an infinite loop without
   markers" rule, and #1711 closed that on 2026-09-28: it now builds the same
   `done:` set and skips a `(task_id, round_id)` pair already retired under
-  `_ledger_key`. What that fix does not do is widen the selector's `limit = 5` —
-  marked rows still consume the slice, so with all five current rows marked the
-  input offers nothing until they age out of the 7-day window (~09-29/30) or new
-  sub-0.6 rows appear. Whether that silence is acceptable, or the filter belongs
-  before the slice, is still owed (#1711's owed-check).
+  `_ledger_key`. What that fix did not do is apply the test before the slice:
+  marked rows still spent the per-tick budget, so a tick whose head of the slice
+  was marked offered nothing while unmined losers waited behind it. That is what
+  the ruling on #1711's owed entry decided against, and #1774 applied it on
+  2026-09-29: `_recent_ledger_losers` now drops a retired pair inside the scan,
+  before `rows[:limit]`, and reports how many it dropped. Measured the same day,
+  the slice was three retired rows at composite 0.05 with three unmined 0.05 rows
+  directly behind them, and the input had offered nothing for 20.9 hours while 44
+  unmined losers sat inside the window. What #1774 did not move is the budget: the
+  selector is still asked for `max_enqueue_per_tick` rows and the caller still
+  asks once, so a scan that skips does not buy a wider slate.
 - **Every candidate carries a `calibration` block** — N trials against the
   canonical prompt, and whether the composite landed strictly inside the
   capability edge. A task the learner always passes and one it always fails both

@@ -150,21 +150,48 @@ BASELINE_ID_PREFIX = "BASELINE"
 USABLE_TRACE_STATUSES = frozenset({"success"})
 
 
-def _recent_ledger_losers(days: int = 7, limit: int = 5) -> list[dict]:
-    """Baseline losers inside `days`, worst first, at most `limit` of them.
+def _recent_ledger_losers(days: int = 7, limit: int = 5,
+                          done: Optional[set[str]] = None) -> list[dict]:
+    """Baseline losers inside `days`, worst first, at most `limit` UNMINED ones.
 
-    The enqueue path passes BOTH values explicitly (`_enqueue_ledger_losers`
-    threads `FAILURE_WINDOW_DAYS` and the resolved `max_enqueue_per_tick`), so
-    neither number here is what production runs at. They stayed defaults rather
-    than required args because the six direct selector calls and the four
-    `lambda *a, **k` stubs in `tests/test_workers_sources.py` call this bare —
-    and #1712 is precisely that a bare-call fallback became the live budget
-    because the one caller stopped passing it.
+    The enqueue path passes every value by keyword (`_enqueue_ledger_losers`
+    threads `FAILURE_WINDOW_DAYS`, the resolved `max_enqueue_per_tick` and the
+    `done:` set it already built), so neither number here is what production runs
+    at. They stayed defaults rather than required args because the direct selector
+    calls in `tests/test_workers_sources.py` call this bare — and because the
+    fallback danger #1712 found lives at the CALL SITE, where the name is now
+    passed explicitly rather than defaulted.
+
+    `done` holds the keys this source already retired under `_ledger_key`, and it
+    is honoured HERE, during the scan and before `rows[:limit]` — the shape
+    `_recent_failed_runs` has always had. #1711 put the same test in the caller,
+    AFTER the slice, which left a marked row spending per-tick budget: measured on
+    2026-09-29, `rows[:3]` was three marked rows at composite 0.05 with three
+    UNMARKED 0.05 rows directly behind them, and the input had offered nothing for
+    20.9 hours while 44 unmarked losers sat inside the window. Markers do not
+    expire and every autoresearch round mints fresh 0.05 rows, so that head-of-line
+    block refilled itself as fast as it aged out. #1711's owed entry settled the
+    selection-budget question it had left open, and settled it as *skip before the
+    slice* — not *ask for a wider slate*, which is the loop this function still
+    does not contain: `limit` rows out, no refetch.
+
+    A bare call returns marked rows, because a selector-level test sometimes wants
+    the raw slice; no production caller may make one, and the call site is pinned
+    in `tests/test_workers_doc_claims.py` so this default can never quietly become
+    the live route (#1712's failure, one layer down).
+
+    The scan counts what it skipped and logs it, because the caller can no longer:
+    a row dropped here never reaches it to be counted, and the `(N eligible,
+    M already mined)` line was the only surface that made a quiet tick explain
+    itself in `server.err`.
     """
+    if done is None:
+        done = set()
     if not LEDGER_PATH.exists():
         return []
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     rows = []
+    skipped = 0
     try:
         with LEDGER_PATH.open("r", encoding="utf-8") as f:
             for line in f:
@@ -202,11 +229,26 @@ def _recent_ledger_losers(days: int = 7, limit: int = 5) -> list[dict]:
                 if str(row.get("trace_status") or "") not in USABLE_TRACE_STATUSES:
                     continue
                 if (row.get("composite_score") or 1.0) < 0.6:
+                    # A pair this source already retired is not a candidate at
+                    # all, so it is dropped here rather than after the slice —
+                    # see the docstring for the 20.9-hour silence that cost.
+                    if _ledger_key(str(row.get("task_id") or ""),
+                                   str(row.get("round_id") or "")) in done:
+                        skipped += 1
+                        continue
                     rows.append(row)
     except Exception as e:
         logger.warning("Ledger read error: %s", e)
     rows.sort(key=lambda r: r.get("composite_score") or 1.0)
-    return rows[:limit]
+    offered = rows[:limit]
+    if skipped:
+        # Phrased so a `grep "already mined"` over server.err still finds the
+        # reason, which is how this silence was diagnosed at all. The count is
+        # the whole point: 0 offered with no number here is indistinguishable
+        # from a ledger that holds no losers.
+        logger.info("bench-mine: ledger slice skipped %d already mined row(s); "
+                    "%d offered against a %d budget", skipped, len(offered), limit)
+    return offered
 
 
 # ---------------------------------------------------------------------------
@@ -339,29 +381,32 @@ async def _enqueue_ledger_losers(queue: WorkQueue, src_cfg: dict, limit: int) ->
     # (tens of MB) line by line — blocking I/O + CPU. Keep it off the shared
     # event loop so it can't stall HTTP/UI. See [[project_gap_fill_event_loop_freeze]].
     #
-    # Filtered after the slice, on purpose. Marked rows still consume the
-    # selection budget, so a tick whose whole slate is marked enqueues nothing:
-    # the input goes quiet until those rows age out of the `FAILURE_WINDOW_DAYS`
-    # window or a new sub-0.6 baseline row appears. Asking the selector for more
-    # rows to make up the difference is a selection-budget decision #1711 leaves
-    # to the owed-check job, not something this filter may smuggle in as a loop.
+    # The marker set goes INTO the scan, not applied afterwards. #1711 filtered
+    # this same set after `rows[:limit]`, so a marked row spent budget it could
+    # not spend twice: on 2026-09-29 three marked rows at composite 0.05 filled a
+    # three-row slice and the tick enqueued nothing while 44 unmarked losers sat
+    # behind them — 20.9 hours of that, six ticks logging `enqueued 0 ledger items
+    # (3 eligible, 3 already mined)`. Markers never expire and every autoresearch
+    # round mints new 0.05 rows, so the blocked head refilled itself; #1711's owed
+    # entry ruled this out rather than waiting for the rows to age out.
     #
-    # Both kwargs are passed by name, the way `_enqueue_failed_runs` passes its
-    # pair positionally: `days` and `limit` are both ints, so a swapped
-    # positional slip here would still run and just mine a wider or narrower
-    # slate — which is how a knob reads as working while it is not (#1712).
+    # The budget that ruling did NOT change is `limit`, and that is why this stays
+    # one call: asking the selector for a wider slate "to make up" for skipped rows
+    # is the selection-budget decision this comment has now refused twice.
+    #
+    # All three args are passed by name: `days` and `limit` are both ints and
+    # `done` is the only set, so a positional slip here would still run and just
+    # mine a wider, narrower or entirely unfiltered slate — which is how a knob
+    # reads as working while it is not (#1712).
     losers = await asyncio.to_thread(_recent_ledger_losers,
-                                     days=FAILURE_WINDOW_DAYS, limit=limit)
+                                     days=FAILURE_WINDOW_DAYS, limit=limit,
+                                     done=done)
     queue.wm_set(NAME, "ledger_mtime", repr(mtime))
     if not losers:
         return
     enqueued = 0
-    marked = 0
     for row in losers:
         task_id = row.get("task_id", "")
-        if _ledger_key(str(task_id), str(row.get("round_id", ""))) in done:
-            marked += 1
-            continue
         dedup_key = f"bench-mine:{task_id}:{row.get('round_id','')}"
         new_id = queue.enqueue(
             source=NAME,
@@ -374,13 +419,15 @@ async def _enqueue_ledger_losers(queue: WorkQueue, src_cfg: dict, limit: int) ->
         )
         if new_id is not None:
             enqueued += 1
-    # Logged on a quiet tick too: a tick that filtered its whole slate is exactly
-    # the state #1711 sat in for days, and "enqueued 0" is only legible if the
-    # reason went to the log with it. An all-marked tick happens when the ledger
-    # moved, which is once per autoresearch round, not once per tick.
-    if enqueued or marked:
-        logger.info("bench-mine: enqueued %d ledger items (%d eligible, %d already mined)",
-                    enqueued, len(losers), marked)
+    # Logged whenever the scan returned anything, including a tick that enqueued
+    # nothing because every row was still deduped by a live item: a silent "0" is
+    # how #1711's stall read as a healthy queue for days. What this line does NOT
+    # claim is a skip count — since #1774 the dropped rows never reach this
+    # function to be counted, and the scan reports them (`bench-mine: ledger slice
+    # skipped N already mined row(s)`), which is the party that actually saw them.
+    if losers:
+        logger.info("bench-mine: enqueued %d ledger items (%d eligible)",
+                    enqueued, len(losers))
 
 
 async def _enqueue_failed_runs(queue: WorkQueue, src_cfg: dict, limit: int) -> None:

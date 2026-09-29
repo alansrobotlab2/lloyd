@@ -810,3 +810,137 @@ def test_bench_mine_docstring_states_the_route_for_a_stale_note():
     assert "#1710" in doc, (
         "the docstring stopped attributing the envelope-reading bug to the item "
         "that fixed it, so the warning has no failure a reader can go read")
+
+
+# ---------------------------------------------------------------------------
+# #1774 clause 2 — the marker set reaches the SCAN, and only one caller builds it.
+#
+# #1711 taught the ledger input to read its `done:` markers but applied them after
+# `rows[:limit]`, so a retired row still spent the per-tick budget; the live cost
+# on 2026-09-29 was 20.9 hours of silence against 44 unmined losers in the window.
+# Moving the test into the scan means the caller can no longer do its own
+# filtering, and the failure this node prevents is the quiet re-growth of that: a
+# second marker set built in the caller, or the `done=` argument dropped from the
+# call (which the scan's default absorbs silently, exactly as #1712's `or
+# MAX_ENQUEUE_PER_TICK` fallback absorbed a dropped `limit`).
+#
+# Graded on the SOURCE TEXT, like the doc tables in this file, because the fact is
+# about how the call reads: a behaviour test cannot see a `done=` that is absent,
+# only the slate it produces, and a fixture wide enough to hide it is a fixture
+# that no longer tests the budget.
+# ---------------------------------------------------------------------------
+
+#: The retired comment block, verbatim from the caller before #1774. Kept so the
+#: bans in the next node have a control: this text trips every one of them, so they
+#: are not empty patterns passing on empty corpora (#1689's rule).
+RETIRED_POST_SLICE_FILTER = (
+    "Filtered after the slice, on purpose. Marked rows still consume the "
+    "selection budget, so a tick whose whole slate is marked enqueues nothing")
+
+
+def _func_src(src: str, name: str) -> str:
+    """The source of one top-level function, by name.
+
+    Scoped to a function body rather than the whole module because
+    `wm_keys(NAME)` is legitimately built twice in this file — the ledger input
+    and the failed-runs input each build the set — and a module-wide count would
+    either fail on that or drift with an unrelated caller.
+    """
+    import ast
+
+    tree = ast.parse(src)
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            seg = ast.get_source_segment(src, node)
+            assert seg, f"{name} has no extractable source segment"
+            return seg
+    raise AssertionError(f"{name} is gone from the module — this node is blind")
+
+
+def test_the_marker_set_is_passed_into_the_scan_and_built_once():
+    """#1774: `_recent_ledger_losers(days=…, limit=…, done=…)` is called with all
+    three named, from a caller that keeps its shape and builds exactly one set.
+
+    The three pins are the three ways this fix quietly un-fixes itself: drop
+    `done=done` and the scan's default filters nothing while every existing
+    behaviour test still passes on a small fixture; build a second set in the
+    caller and the two halves disagree about what was mined; change the caller's
+    signature and §6's sentence about the resolved cap reaching both selectors is
+    false again (#1712's pin, still holding).
+    """
+    src = _BENCH_MINE_SRC.read_text(encoding="utf-8")
+    caller = _func_src(src, "_enqueue_ledger_losers")
+
+    # Control first: the retired comment must trip the ban it is banned by, and
+    # the extractor has to be looking at the function that held it.
+    retired = " ".join(RETIRED_POST_SLICE_FILTER.split())
+    assert "Filtered after the slice" in retired and "selection budget" in retired, (
+        "the retired text no longer trips its own bans, so the checks below are "
+        "vacuous and would pass on any module")
+    assert "Filtered after the slice" not in caller, (
+        "the caller is filtering after the slice again — that is the placement "
+        "#1711's owed entry ruled against, and the 20.9-hour silence that followed "
+        "it: retired rows spending a budget they cannot spend twice")
+
+    assert re.search(
+        r"async def _enqueue_ledger_losers\(queue: WorkQueue, src_cfg: dict, "
+        r"limit: int\) -> None:", src), (
+        "the ledger caller no longer takes (queue, src_cfg, limit): §6's cap "
+        "sentence claims the resolved value reaches both selectors, and this is "
+        "the seam that carries it")
+    assert re.search(
+        r"_recent_ledger_losers,\s*days=FAILURE_WINDOW_DAYS,\s*limit=limit,\s*"
+        r"done=done", caller), (
+        "the scan is no longer handed FAILURE_WINDOW_DAYS, the resolved cap and "
+        "the marker set by name — a dropped `done=done` is invisible to every "
+        "behaviour test on a small fixture, which is how #1712's budget fallback "
+        "hid for a month")
+    assert caller.count("wm_keys(NAME)") == 1, (
+        f"the ledger caller builds its marker set {caller.count('wm_keys(NAME)')} "
+        "times; the scan owns the filtering now, and a second set in the caller is "
+        "a second opinion about what was already mined")
+    assert "done = {k[len(\"done:\"):] for k in queue.wm_keys(NAME)" in caller, (
+        "the caller no longer builds the one set it passes in, so `done=done` "
+        "names something this function does not construct")
+
+
+def test_workers_jobs_says_the_filter_runs_before_the_slice():
+    """§6's sentence has to follow the placement, not just the existence, of the
+    filter: it currently promises the retired-rows-consume-budget behaviour as
+    live policy and defers the question to an owed-check that has since answered.
+
+    Both halves again: the retired claim banned (with a control that it trips the
+    ban), and the live claim required in the same section, because deleting a false
+    sentence is not the same edit as writing the true one (#1689/#1713).
+    """
+    flat = " ".join(_section(SEC6).split())
+
+    retired_claims = ("marked rows still consume the slice",
+                      "or the filter belongs before the slice, is still owed")
+    old = ("What that fix does not do is widen the selector's `limit = 5` — marked "
+           "rows still consume the slice, so with all five current rows marked the "
+           "input offers nothing until they age out of the 7-day window (~09-29/30) "
+           "or new sub-0.6 rows appear. Whether that silence is acceptable, or the "
+           "filter belongs before the slice, is still owed (#1711's owed-check).")
+    assert all(c in old for c in retired_claims), (
+        "the retired §6 text no longer trips its own bans, so the check below is "
+        "vacuous — it would pass on a section that never mentioned the slice")
+    for claim in retired_claims:
+        assert claim not in flat, (
+            f"§6 still states {claim!r} as the live behaviour: #1774 moved the "
+            "filter inside the scan, and this paragraph is what a re-triaging "
+            "reader would trust instead of the source")
+
+    live = [s for s in re.split(r"(?<=[.!?]) ", flat) if "rows[:limit]" in s]
+    assert live, (
+        "§6 no longer names `rows[:limit]` anywhere, so nothing here ties the "
+        "section to where the filter actually runs")
+    assert any("before" in s and "#1774" in s for s in live), (
+        "the slice sentence does not state that the retired pair is dropped before "
+        f"it and attribute the change: {[s[:90] for s in live]}")
+    budget = [s for s in re.split(r"(?<=[.!?]) ", flat)
+              if "max_enqueue_per_tick" in s and "#1774" in s]
+    assert budget, (
+        "§6 does not state, in the same breath as the change, that the budget did "
+        "NOT move — the half a reader is most likely to over-read as 'and now it "
+        "fetches a wider slate'")

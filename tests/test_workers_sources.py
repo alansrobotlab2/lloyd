@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
 import time
 from pathlib import Path
 
@@ -796,6 +797,15 @@ async def test_a_tick_whose_losers_are_all_marked_offers_nothing_and_widens_noth
 
     `_recent_ledger_losers` is spied on rather than run against a fixture here:
     this test is about how many times the enqueue path asks, and how wide it asks.
+
+    #1774 moved the marker filter from after the slice into the scan, which moved
+    this test's weight onto the spy: the enqueue path no longer looks at `done`
+    itself, so the spy has to honour the `done` kwarg or it is reporting a slate
+    the real scan would never have returned. That is not a weakening — with the
+    post-slice filter gone, a spy that ignored `done` would hand back three marked
+    rows and the `== []` assertion below would then FAIL, which is exactly the
+    regression an empty queue here exists to catch. So the kwarg is asserted as
+    received as well as honoured.
     """
     ledger = tmp_path / "ledger.jsonl"
     ledger.write_text("", encoding="utf-8")
@@ -817,7 +827,13 @@ async def test_a_tick_whose_losers_are_all_marked_offers_nothing_and_widens_noth
 
     def _spy(*args, **kwargs):
         calls.append((args, kwargs))
-        return list(rows)
+        # Honour the contract the scan now has: drop every row whose pair key is
+        # in the set the caller supplied. Spelled as the literal the watermark
+        # holds, not via `BM._ledger_key`, so this spy cannot agree with the
+        # producer about a format both invented (#625's one-sided contract).
+        done = kwargs.get("done") or set()
+        return [r for r in rows
+                if f"ledger:{r['task_id']}:{r['round_id']}" not in done]
 
     monkeypatch.setattr(BM, "_recent_ledger_losers", _spy)
 
@@ -825,12 +841,165 @@ async def test_a_tick_whose_losers_are_all_marked_offers_nothing_and_widens_noth
 
     assert q.list_items(source=BM.NAME) == [], "a marked-through-the-board tick enqueued anyway"
     assert len(calls) == 1, f"the candidate slice was fetched {len(calls)} times, not once"
+    assert "done" in calls[0][1], (
+        "the enqueue path did not pass the marker set at all, so nothing between "
+        "the queue's watermarks and the slice is filtering anything")
 
     asked = (calls[0][1].get("limit")
              if "limit" in calls[0][1]
              else (calls[0][0][1] if len(calls[0][0]) > 1 else default_limit))
     assert int(asked) <= int(default_limit), \
         f"the tick asked for {asked} candidates to make up for filtered ones"
+
+
+# ── the marker filter runs inside the scan, before the slice (#1774) ───
+#
+# #1711 taught the ledger input to read its own `done:` markers, but filtered
+# them AFTER `rows[:limit]`, so a marked row still spent the per-tick budget. On
+# 2026-09-29 that had the input silent for 20.9 hours: the slice was three marked
+# rows at composite 0.05 while three UNMARKED 0.05 rows sat directly behind them,
+# and six ledger-moving ticks logged `enqueued 0 ledger items (3 eligible, 3
+# already mined)`. Markers never expire and every autoresearch round mints new
+# 0.05 rows, so the head-of-line block refilled itself as fast as it aged out.
+# #1711's owed entry ruled the fix: skip a marked row during the scan, and leave
+# the per-tick budget where it is.
+# ------------------------------------------------------------------------
+
+
+def test_the_marker_filter_runs_before_the_slice_not_after(tmp_path, monkeypatch):
+    """Clause 1: three marked rows at 0.05 must not eat a `limit=3` slice.
+
+    The fixture is the live block itself — three rounds of one task at composite
+    0.05, worst-first, with an unmarked 0.05 and an unmarked 0.40 behind them —
+    because the bug was never "marked rows are offered" (that was #1711, and it is
+    fixed) but "marked rows are offered IN PLACE OF the unmarked ones" at the head
+    of the slice.
+    """
+    _fixture_ledger(tmp_path, monkeypatch, [
+        _ledger_row("BASELINE_1", "bench_x", 0.05, round_id="R_1"),
+        _ledger_row("BASELINE_2", "bench_x", 0.05, round_id="R_2"),
+        _ledger_row("BASELINE_3", "bench_x", 0.05, round_id="R_3"),
+        _ledger_row("BASELINE_4", "bench_y", 0.05, round_id="R_4"),
+        _ledger_row("BASELINE_5", "bench_z", 0.40, round_id="R_5"),
+    ])
+    # Seeded as the literal the watermark holds, not via `BM._ledger_key`: a test
+    # that built the key with the producer's own helper could not notice the
+    # producer changing the format, which is the #625 one-sided contract.
+    done = {f"ledger:bench_x:R_{n}" for n in (1, 2, 3)}
+
+    # Positive control on the fixture, and the acceptance check's failing half:
+    # ask the SAME selector with no marker set and the three marked rows come back
+    # as the whole slice. If this ever stops being true, the block below is
+    # grading nothing.
+    unfiltered = [(r["task_id"], r["round_id"])
+                  for r in BM._recent_ledger_losers(days=7, limit=3)]
+    assert unfiltered == [("bench_x", "R_1"), ("bench_x", "R_2"), ("bench_x", "R_3")], (
+        f"the fixture no longer reproduces the live block: with no marker set the "
+        f"slice is {unfiltered}, not the three marked 0.05 rows")
+
+    rows = BM._recent_ledger_losers(days=7, limit=3, done=done)
+
+    assert [(r["task_id"], r["round_id"]) for r in rows] == [
+        ("bench_y", "R_4"), ("bench_z", "R_5")], (
+        "a marked row still consumed budget in the slice: the scan returned "
+        f"{[(r['task_id'], r['round_id']) for r in rows]}")
+    # Two rows out of a budget of three, because only two unmarked losers exist:
+    # the fix spends the budget on rows worth mining, it does not invent rows.
+    assert len(rows) == 2, (
+        f"`limit=3` against two unmarked losers returned {len(rows)} rows — a "
+        "wider slate here is the selection-budget change #1711 did not authorise")
+
+
+async def test_an_unmarked_loser_behind_a_marked_head_reaches_the_queue(
+        tmp_path, monkeypatch, q):
+    """The same block at the queue's own seam, since a selector that fixes itself
+    while the enqueue path still drops the row fixes nothing.
+
+    Driven through `enqueue_if_due` with real watermarks and a real ledger file:
+    20.9 hours of production ticks is the evidence that the live tree behaves this
+    way, and no stub can reproduce that.
+    """
+    _fixture_ledger(tmp_path, monkeypatch, [
+        _ledger_row("BASELINE_1", "bench_x", 0.05, round_id="R_1"),
+        _ledger_row("BASELINE_2", "bench_x", 0.05, round_id="R_2"),
+        _ledger_row("BASELINE_3", "bench_x", 0.05, round_id="R_3"),
+        _ledger_row("BASELINE_4", "bench_y", 0.05, round_id="R_4"),
+        _ledger_row("BASELINE_5", "bench_z", 0.40, round_id="R_5"),
+    ])
+    for n in (1, 2, 3):
+        q.wm_set(BM.NAME, f"done:ledger:bench_x:R_{n}",
+                 json.dumps({"why": "mined"}))
+
+    await BM.enqueue_if_due(q, {})
+
+    pairs = sorted((i.payload["loser_task_id"], i.payload["round_id"])
+                   for i in _ledger_items(q))
+    assert pairs == [("bench_y", "R_4"), ("bench_z", "R_5")], (
+        f"the tick offered {pairs}: a marked head is still displacing the "
+        "unmarked rows behind it")
+
+
+async def test_a_tick_that_skips_marked_rows_logs_the_number_skipped(
+        tmp_path, monkeypatch, q, caplog):
+    """Clause 4: the number has to stay in `server.err`, because that line is how
+    the silence was found at all — every ledger-moving tick from 2026-09-27 to
+    2026-09-29 logged `(3 eligible, 3 already mined)` and nothing else did.
+
+    With the filter inside the scan the caller can no longer count what it never
+    received, so the scan reports it. Which side carries the number is the decision
+    #1774's owed entry leaves to the landing sha: the caller's line keeps an honest
+    eligible-only count, and the skip count comes from the only party that can see
+    it.
+    """
+    _fixture_ledger(tmp_path, monkeypatch, [
+        _ledger_row("BASELINE_1", "bench_x", 0.05, round_id="R_1"),
+        _ledger_row("BASELINE_2", "bench_x", 0.05, round_id="R_2"),
+        _ledger_row("BASELINE_3", "bench_x", 0.05, round_id="R_3"),
+        _ledger_row("BASELINE_4", "bench_y", 0.05, round_id="R_4"),
+    ])
+    for n in (1, 2, 3):
+        q.wm_set(BM.NAME, f"done:ledger:bench_x:R_{n}",
+                 json.dumps({"why": "mined"}))
+
+    with caplog.at_level(logging.INFO, logger="lloyd-workers.bench_mine"):
+        await BM.enqueue_if_due(q, {})
+
+    skip = [r.getMessage() for r in caplog.records
+            if "already mined" in r.getMessage() or "already-mined" in r.getMessage()]
+    assert skip, (
+        "a tick that dropped three already-mined rows logged nothing about it — "
+        "the quiet tick went illegible, which is how this bug ran for two days")
+    assert any("3" in m for m in skip), (
+        f"the log says rows were skipped but not how many: {skip}")
+    assert [i.payload["round_id"] for i in _ledger_items(q)] == ["R_4"], (
+        "the surviving row is not the unmarked one")
+
+
+async def test_an_all_marked_ledger_tick_says_so_in_the_log(
+        tmp_path, monkeypatch, q, caplog):
+    """The all-marked case on its own, against the real selector.
+
+    The spy-based test above proves the tick enqueues nothing and asks once; this
+    proves the tick is still EXPLAINABLE, with the count the scan itself saw. Zero
+    rows returned and no line in `server.err` is indistinguishable from a ledger
+    with no losers at all — the ambiguity #1711's log line existed to remove.
+    """
+    _fixture_ledger(tmp_path, monkeypatch, [
+        _ledger_row("BASELINE_1", "bench_x", 0.05, round_id="R_1"),
+        _ledger_row("BASELINE_2", "bench_x", 0.05, round_id="R_2"),
+    ])
+    for n in (1, 2):
+        q.wm_set(BM.NAME, f"done:ledger:bench_x:R_{n}",
+                 json.dumps({"why": "mined"}))
+
+    with caplog.at_level(logging.INFO, logger="lloyd-workers.bench_mine"):
+        await BM.enqueue_if_due(q, {})
+
+    assert _ledger_items(q) == [], "an all-marked slate enqueued anyway"
+    skip = [r.getMessage() for r in caplog.records
+            if "already mined" in r.getMessage() or "already-mined" in r.getMessage()]
+    assert skip and any("2" in m for m in skip), (
+        f"an all-marked tick logged {skip}; it must name the 2 rows it skipped")
 
 
 def test_the_ledger_marker_key_has_one_definition(tmp_path):
