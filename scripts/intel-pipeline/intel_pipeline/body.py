@@ -67,6 +67,40 @@ _FOOTER_LABEL_RE = re.compile(
 
 _URL_RE = re.compile(r"(?:https?://|www\.)\S", re.IGNORECASE)
 
+#: A contact address on a line of its own channel's copy: `collabs@nouralabs.com`.
+#: `_URL_RE` cannot see it — an address is not a `http://` or `www.` — and the
+#: rule-free footer of #1819 is made of exactly these.
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+
+#: `0:00 — Intro`, `0:41 — How Weco's AIDE²…`, `1:02:03`. A timestamp opening a line is
+#: a chapter marker, and a chapter list is the second half of the #1819 footer.
+_CHAPTER_LINE_RE = re.compile(r"^\s*\d{1,2}:\d{2}(?::\d{2})?\b")
+
+#: The second anchor class (#1819): the labels a channel writes over the block it puts
+#: at the end of a description when it writes NO rule line above it. AI Revolution ends
+#: with `📩 Brand Deals & Partnerships: …`, `✉️ General Inquiries: …` and a
+#: `What You'll See:` chapter list under a blank line, and `_RULE_LINE_RE` has nothing
+#: to find, so #1561's strip never fires and the whole description is published. Same
+#: discipline as `_FOOTER_LABEL_RE`: a CLOSED list of labels, not a "is this promo"
+#: classifier, because a classifier's mis-fire eats the description's opening paragraph
+#: (#856) and clause 4 (#1819) pins footer-less channel copy passing through untouched.
+#: `\W*?` skips the leading emoji, which is why `_FOOTER_LABEL_RE`'s `inquiries?\b` never
+#: matched `✉️ General Inquiries:` — `General` sits between the skipped characters and
+#: the label.
+_RULELESS_FOOTER_ANCHOR_RE = re.compile(
+    r"^\W*?(?:brand\s+deals?|general\s+inquiries?|business\s+inquiries?|collabs?\b"
+    r"|what\s+you.?ll\s+(?:see|cover|learn)|chapters?\b|timestamps?\b)\b", re.IGNORECASE)
+
+#: The anchor inside that block whose whole tail IS its list: a channel writing
+#: `What You'll See:` is announcing a chapter list, and the list runs to the end of the
+#: description. Below one of these the lines are not individually classified — the
+#: 2026-09-27 row's list is `How a suspected Gemini 4 Pro checkpoint is hiding in
+#: Arena`, prose to any line-matching rule — so this heading, and not a guessed shape,
+#: is what licenses removing the text under it.
+_CHAPTERS_HEADING_RE = re.compile(
+    r"^\W*?(?:what\s+you.?ll\s+(?:see|cover|learn)|chapters?\b|timestamps?\b)\b",
+    re.IGNORECASE)
+
 #: Ends a sentence: terminal punctuation, any closing quote or bracket after it. `…`
 #: counts, because `clip_body` ends a cut body with exactly that and a body that ran
 #: out of budget is still a body (#1561).
@@ -189,8 +223,52 @@ def _set_off(lines: list, idx: int) -> bool:
     return idx == 0 or not lines[idx - 1].strip()
 
 
+def _is_footer_tail_line(line: str) -> bool:
+    """A line of a rule-free footer: a promo label, a contact address, a URL, or a
+    timestamped chapter line. Narrow on purpose — inside an already-anchored block these
+    are the shapes a channel's closing block is made of, and anything else is prose the
+    strip must leave alone."""
+    return bool(_URL_RE.search(line) or _EMAIL_RE.search(line)
+                or _CHAPTER_LINE_RE.match(line)
+                or _RULELESS_FOOTER_ANCHOR_RE.match(line)
+                or _FOOTER_LABEL_RE.match(line))
+
+
+def _ruleless_footer_start(lines: list) -> Optional[int]:
+    """Where a promotional footer with NO separator rule above it starts, or None (#1819).
+
+    The candidate is the FIRST line that is a label from the closed anchor list and is set
+    off from the line above it — the same blank-line discriminator `_set_off` applies to a
+    rule, for the same reason: a channel's closing block sits under a blank, and prose
+    welded to the line above it is not a footer. First, not last, because the block starts
+    with its contact lines and a strip anchored on the `What You'll See:` heading below
+    them would publish the addresses.
+
+    Everything from there to the end has to be footer for anything to be removed: contact
+    and label lines, emails, URLs, `0:00 —` chapter lines (`_is_footer_tail_line`), or
+    chapter content once a `_CHAPTERS_HEADING_RE` heading has been reached — below such a
+    heading the list is the tail, so those lines are not classified one by one. The first
+    line that is none of those abandons this candidate, and the scan moves on to any later
+    anchor; a description that merely contains a contact line above more prose keeps all
+    of it.
+    """
+    for idx, line in enumerate(lines):
+        if not _RULELESS_FOOTER_ANCHOR_RE.match(line) or not _set_off(lines, idx):
+            continue
+        chapters = bool(_CHAPTERS_HEADING_RE.match(line))
+        for below in lines[idx + 1:]:
+            if not chapters and _CHAPTERS_HEADING_RE.match(below):
+                chapters = True
+            if chapters or not below.strip() or _is_footer_tail_line(below):
+                continue
+            break
+        else:
+            return idx
+    return None
+
+
 def strip_link_footer(text: str) -> str:
-    """Remove a trailing separator-rule link block from channel-authored text (#1561).
+    """Remove a trailing promotional footer from channel-authored text (#1561, #1819).
 
     A YouTube description routinely ends with the channel's own promotional footer —
     a `______` rule, then `My Links 🔗`, then an arrow and a Twitter handle — and the
@@ -209,6 +287,15 @@ def strip_link_footer(text: str) -> str:
       heading — and a strip that removed the underline would not be returning the text
       above the rule untouched, it would be re-rendering it.
 
+    #1819 added the second anchor, tried only when the text contains no set-off rule at
+    all: AI Revolution's footer is `📩 Brand Deals & Partnerships: …` over
+    `✉️ General Inquiries: …` and a `What You'll See:` chapter list, under a blank line
+    and with no rule anywhere, so an anchor that is only ever a rule cannot see the most
+    common footer on the feed. `_ruleless_footer_start` anchors on a closed list of those
+    labels instead, under the same set-off test, and removes the block only while its
+    lines keep looking like footer. A rule with prose under it still abstains outright:
+    the label scan runs after that `return`, never instead of it.
+
     What is kept is returned as it was: the strip removes the block and does not rewrap
     or re-case the prose it was attached to.
 
@@ -225,8 +312,13 @@ def strip_link_footer(text: str) -> str:
         if not tail or all(_is_link_block_line(ln) for ln in tail):
             return "\n".join(lines[:idx]).rstrip()
         # A rule with prose under it is section furniture, not a footer. Anything
-        # above that rule is the description too, so there is nothing to take off.
+        # above that rule is the description too, so there is nothing to take off —
+        # and no second anchor is tried, which is what keeps #1561's abstention whole.
         return text.rstrip()
+    # No set-off rule anywhere in the text: the shape #1561's anchor cannot reach (#1819).
+    start = _ruleless_footer_start(lines)
+    if start is not None:
+        return "\n".join(lines[:start]).rstrip()
     return text.rstrip()
 
 

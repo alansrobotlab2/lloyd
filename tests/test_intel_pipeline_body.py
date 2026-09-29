@@ -477,6 +477,18 @@ def test_youtube_summary_at_the_char_cap_is_cut_on_a_word_boundary_and_marked(in
     assert "My Links" not in summary and "_" not in summary
 
 
+#: The two footer-less descriptions #1269 clause 2 rules on, bound here so #1819
+#: clause 4 can pin the same two strings from the strip's side as well as the
+#: writer's. Names carry, values are the strings that were inline below.
+NO_FOOTER_DESCRIPTION = ("Two-week cadence on the humanoid stack, with the gait weights "
+                         "checked in and the sim-to-real gap measured on the bench.")
+
+#: An older row the pre-#1561 `[:500]` slice left ending mid-sentence, with no
+#: terminal punctuation at all — #1269 clause 2 publishes it as the summary.
+NO_FOOTER_CUT_MID_SENTENCE = ("The gait weights were checked in and the sim-to-real gap "
+                              "was measured on the bench before they started talking abo")
+
+
 def test_a_youtube_description_under_the_cap_is_still_passed_through_untouched(intel_state):
     """The other half of #1269 clause 2, which the strip and the clip must not
     disturb: a description with no footer and room under the cap reaches the entry as
@@ -488,15 +500,13 @@ def test_a_youtube_description_under_the_cap_is_still_passed_through_untouched(i
     emptiness ruling in `_entry_body` judges what THE STRIP removed, not whether the
     writer happens to like the sentence. Prefer `why` over that and this file would be
     quietly rewriting #1269's clause."""
-    description = ("Two-week cadence on the humanoid stack, with the gait weights "
-                   "checked in and the sim-to-real gap measured on the bench.")
+    description = NO_FOOTER_DESCRIPTION
     assert len(description) < LIMIT
     item = _yt(id="youtube:UCtest:vid3", summary=description, why="Scores 8/10: robotics")
     assert vw_mod._entry_body(item) == description
     assert description in _publish(intel_state, item)
 
-    cut_mid_sentence = ("The gait weights were checked in and the sim-to-real gap was "
-                        "measured on the bench before they started talking abo")
+    cut_mid_sentence = NO_FOOTER_CUT_MID_SENTENCE
     assert not cut_mid_sentence.rstrip().endswith((".", "!", "?", "…"))
     older = _yt(id="youtube:UCtest:vid4", summary=cut_mid_sentence,
                 why="Scores 8/10: robotics")
@@ -552,3 +562,180 @@ def test_github_template_and_trailer_only_bodies_keep_their_rulings(intel_state,
     assert "skipped (no body): 1" in out
     assert not list((intel_state / "vault" / "knowledge").rglob("*.md")), \
         "a trailer-only commit body reached the note"
+
+
+# ── #1819: a promotional footer with NO separator rule above it ──────────────
+#
+# #1561 anchored its strip on a separator rule and never looked past it:
+# `strip_link_footer` scans backwards for `_RULE_LINE_RE`, and AI Revolution publishes
+# no rule line at all — a blank line, two emoji contact lines, a blank, then a
+# `What You'll See:` heading and its `0:00 —` chapter list. With no candidate rule the
+# function returns its input unchanged, `_entry_body`'s `stripped == summary` branch
+# (vault_writer.py:427-428) hands the whole description back, and three sections of
+# `knowledge/ai-llms/youtube-digest.md` — `## 2026-09-27`, `## 2026-09-28`,
+# `## 2026-09-29` — carry the channel's contact block and chapter list as knowledge
+# prose. The strip has to be anchored on the footer's own labels as well as on a rule.
+
+#: The news paragraph of the 2026-09-29 row `The First Real RSI is Here and It's
+#: Evolving Fast`, and the two halves of the footer under it — split out so a clause
+#: can name the half it is asserting on. Copied out of
+#: `lloyd-data/_pipeline/vault-derived/memory/feeds/raw/2026-09-29.jsonl`.
+RSI_NEWS = (
+    "Weco’s AIDE² just showed what it calls the first real evidence of recursive "
+    "self-improvement, redesigning itself in eight days and beating the human-built "
+    "version. Meanwhile OpenAI’s Astra hits Critical cyber capability, Claude Sonnet "
+    "5.5 launches, and Gemini 4 nears release.")
+
+RSI_CONTACT = ("📩 Brand Deals & Partnerships: collabs@nouralabs.com\n"
+               "✉️ General Inquiries: airevolutionofficial@gmail.com")
+
+#: The chapter list, ending where the scanner's 500-character clip ran out — inside
+#: the list, which is the half of the defect the footer strip removes at source.
+RSI_CHAPTERS = ("What You'll See:\n"
+                "0:00 — Intro\n"
+                "0:41 — How Weco’s AIDE² redesigned itself in eight days and beat its "
+                "human-built…")
+
+#: The stored `summary` field of that row, verbatim: 495 characters, no rule line.
+RSI_RULE_FREE_ROW = f"{RSI_NEWS}\n\n{RSI_CONTACT}\n\n{RSI_CHAPTERS}"
+
+#: The same footer with nothing above it: the body that was only a channel's contact
+#: block, which the strip empties so the writer's footer-only ruling reaches it.
+RSI_RULE_FREE_FOOTER_ONLY = f"{RSI_CONTACT}\n\n{RSI_CHAPTERS}"
+
+#: What the feed actually sent for that video: the same footer over the same news,
+#: with the chapter list uncut. The stored row above is this clipped to 500 chars.
+RSI_RAW_DESCRIPTION = (
+    f"{RSI_NEWS}\n\n{RSI_CONTACT}\n\n"
+    "What You'll See:\n"
+    "0:00 — Intro\n"
+    "0:41 — How Weco’s AIDE² redesigned itself in eight days and beat its human-built "
+    "version.\n"
+    "2:31 — Why OpenAI’s Astra hitting Critical cyber capability matters.\n")
+
+#: What a reader must never see again in a digest section: the strings the grep that
+#: closed #1561, and the one chapter marker, all four in the recorded footer.
+RSI_FOOTER_MARKS = ("Brand Deals", "collabs@", "gmail.com", "What You'll See:", "0:00 —")
+
+
+def test_a_promo_footer_with_no_separator_rule_is_stripped_by_shape():
+    """Clause 1 (#1819): the recorded rule-free shape — news paragraph, blank, the two
+    contact lines, blank, `What You'll See:` and its `0:00 —` chapter lines, no
+    `____`/`====` anywhere — comes back as the news paragraph and exactly that.
+    #1561's rule anchor is blind to it, which is how the run published it whole."""
+    assert len(RSI_RULE_FREE_ROW) == 495, "the fixture stopped being the recorded row"
+    # The positive control that this really is the rule-FREE shape: #1561's anchor does
+    # not occur in the fixture, so whatever this strip removes was removed by the label
+    # anchor and not by a rule the old code could already have seen.
+    assert not _RULE_AT_LINE_START.search(RSI_RULE_FREE_ROW), \
+        "the fixture grew a separator rule and is no longer the shape under test"
+
+    stripped = body_mod.strip_link_footer(RSI_RULE_FREE_ROW)
+    assert stripped == RSI_NEWS, repr(stripped)
+    for mark in RSI_FOOTER_MARKS:
+        assert mark not in stripped, mark
+
+    # And a body that WAS nothing but the rule-free footer strips to nothing, which is
+    # what lets #1561's existing footer-only ruling cover the new anchor class too.
+    assert body_mod.strip_link_footer(RSI_RULE_FREE_FOOTER_ONLY) == ""
+
+
+#: `DIGEST_PROFILE` matches on `agent`, which this row's title and summary do not say:
+#: routing scores `title + " " + summary` only (`determine_vault_path`,
+#: vault_writer.py:245), never `why`. So the profile here matches on the row's own
+#: phrase, which routes it to the same `DIGEST_FILE` the real run used.
+RSI_DIGEST_PROFILE = {"topics": [{"name": "ai-llms", "weight": 0.9,
+                                  "keywords": ["self-improvement"]}]}
+
+
+def test_the_recorded_rule_free_row_lands_in_the_digest_as_its_news_paragraph(intel_state):
+    """Clause 2 (#1819): that same scored YouTube item written through
+    `write_item_to_vault` publishes the news paragraph as the entry's body, and the
+    published digest carries no contact line and no chapter line anywhere — the grep
+    that closed #1561 has to come back empty on a section written after this fix."""
+    why = "Scores 8/10: first claimed evidence of recursive self-improvement"
+    item = _yt(id="youtube:UCnouralabs:rsi29", summary=RSI_RULE_FREE_ROW, why=why,
+               title="The First Real RSI is Here and It’s Evolving Fast")
+    written = _publish(intel_state, item, profile=RSI_DIGEST_PROFILE)
+    digest = intel_state / "vault" / DIGEST_FILE
+    assert digest.is_file(), f"the item never reached {DIGEST_FILE}: {written[:200]!r}"
+    assert RSI_NEWS in written
+    assert why not in written, "the body fell through to `why` instead of the kept prose"
+    for mark in RSI_FOOTER_MARKS:
+        assert mark not in written, mark
+
+
+def test_the_1561_footer_rulings_are_unmoved_by_the_label_anchor():
+    """Clause 3 (#1819): the label anchor is additive, so every ruling #1561 pinned
+    still holds byte-for-byte — the rule + `My Links` strip, the setext-underline
+    abstention, and a footer-only summary rendering the scorer's `why`. The new scan
+    runs only on text with no separator rule in it at all."""
+    assert body_mod.strip_link_footer(
+        "Prose about the run.\n\n______\nMy Links 🔗\n➡️ Twitter: https://x.com/a") \
+        == "Prose about the run."
+    setext = "Prose about the run.\n####Subhead\n______"
+    assert body_mod.strip_link_footer(setext) == setext, "a setext underline was stripped"
+    assert vw_mod._entry_body(
+        _yt(id="youtube:UCtest:vid5", summary=FOOTER_ONLY,
+            why="Scores 8/10: covers the agent-safety keyword set")
+    ) == "Scores 8/10: covers the agent-safety keyword set"
+
+
+def test_a_footer_less_description_passes_through_byte_for_byte_both_ways():
+    """Clause 4 (#1819): the anchor list is a closed list of promo labels and not a
+    classifier that prefers `why` over genuine channel copy. Both footer-less
+    descriptions #1269 clause 2 rules on — the one ending in a period and the `[:500]`
+    relic ending with no punctuation at all, pinned at :502-504 — pass
+    `strip_link_footer` and `_entry_body` byte-for-byte, with `why` not substituted."""
+    for text in (NO_FOOTER_DESCRIPTION, NO_FOOTER_CUT_MID_SENTENCE):
+        assert body_mod.strip_link_footer(text) == text, repr(text[-40:])
+        rendered = vw_mod._entry_body(
+            _yt(id="youtube:UCtest:vid6", summary=text,
+                why="Scores 9/10: the robotics roundup"))
+        assert rendered == text, repr(rendered[-40:])
+
+
+def test_the_scanner_spends_its_500_characters_on_prose_not_the_rule_free_footer(
+        intel_state, monkeypatch):
+    """The process boundary #1819 crosses: `scan_youtube_channels` calls
+    `strip_link_footer` BEFORE `clip_body` (youtube_scanner.py:407), so the footer sat
+    inside the 500-character budget and the clip ran out inside the chapter list —
+    which is where the stored row's `human-built…` tail came from. With the label
+    anchor the footer is gone before the clip, the whole news paragraph survives, and
+    nothing is cut at all at this length."""
+    assert len(RSI_RAW_DESCRIPTION) > LIMIT, "the fixture is no longer over the cap"
+    # The control that this fixture reproduces the incident: clipped without the strip,
+    # the footer is what the budget bought.
+    unstripped = body_mod.clip_body(RSI_RAW_DESCRIPTION)
+    assert "Brand Deals" in unstripped and "What You'll See:" in unstripped
+
+    atom = f"""<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns:media="http://search.yahoo.com/mrss/"
+      xmlns:yt="http://www.youtube.com/xml/schemas/2015"
+      xmlns="http://www.w3.org/2005/Atom">
+ <entry>
+  <id>yt:video:RSI29</id>
+  <yt:videoId>RSI29</yt:videoId>
+  <yt:channelId>UCnouralabs</yt:channelId>
+  <title>The First Real RSI is Here and It’s Evolving Fast</title>
+  <link rel="alternate" href="https://www.youtube.com/watch?v=RSI29"/>
+  <media:description>{RSI_RAW_DESCRIPTION.replace("&", "&amp;")}</media:description>
+ </entry>
+</feed>"""
+    monkeypatch.setattr(yt_mod, "load_youtube_channels_config", lambda: [
+        {"handle": "@ai revolution", "name": "AI Revolution",
+         "channel_id": "UCnouralabs"}])
+    monkeypatch.setattr(yt_mod, "_http_get", lambda url, headers=None, timeout=None: atom)
+
+    items, coverage = yt_mod.scan_youtube_channels()
+
+    assert coverage.fetched == 1 and len(items) == 1
+    summary = items[0].summary
+    for mark in RSI_FOOTER_MARKS:
+        assert mark not in summary, mark
+    # The prose arrives whole: the footer no longer spends the budget, so at this
+    # length there is nothing left to cut and no ellipsis to mark it with.
+    assert summary == RSI_NEWS, repr(summary[-60:])
+    assert not summary.endswith(ELL)
+    # The prose is the channel's own, kept byte-for-byte as clause 1 keeps it.
+    assert summary.startswith("Weco’s AIDE² just showed")
