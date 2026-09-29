@@ -35,6 +35,23 @@ here: group ``composite_score`` by ``task_id`` over the ``BASELINE_*`` rows of
 removed it, measured false against that same ledger; a corpus that moves every
 night cannot be described by one number in permanent prose.)
 
+Recognising a verdict that was never of the task, and re-measuring one. A
+staged note's ``calibration`` block names the task its trials ran against in
+``task_id``, and #1710 made this module always fill that key — so a note with
+NO ``task_id`` predates that fix, and its mean came from trials against this
+module's own staging envelope (no prompt, no ``objective_checks``, the objective
+layer awarded by default) rather than against the task sitting in the note's
+body. ``scripts/maintenance/relabel_stale_bench_calibration.py`` (#1769) labels
+such a note ``review_status: uncalibrated`` with ``calibration.status:
+stale_envelope`` and voids the band verdict; that set cannot grow, because the
+writer stamps the key. To re-measure one of those notes on demand: read the
+note's BODY, parse it with ``_candidate_frontmatter`` — which takes the note's
+TEXT, not a path — and pass the result as ``task=``. Never call
+``calibrate_candidate(path)`` on a staged note: with no ``task=`` it falls back
+to ``_load_candidate(path)``, and the bench loader reads the file's FIRST front
+matter block, which on a staged note is the envelope. That is #1710 again — ten
+trials of GPU time spent proving something about a document that is not a task.
+
 A human promotion step moves the kept candidates into
 ``~/obsidian/lloyd/bench/``. Lloyd writing the tasks that grade Lloyd is the
 known self-grading failure mode; the human gate, the mechanical-check

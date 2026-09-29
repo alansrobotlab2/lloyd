@@ -735,3 +735,78 @@ def test_every_probe_mention_in_the_doc_names_the_probe_file():
         "the §Dispatch invariant is gone rather than reworded: clause 2 asks "
         "that 'probe' stop being a verb about the model server, not that the "
         "detectors' read-only guarantee stop being stated")
+
+
+# ---------------------------------------------------------------------------
+# #1769 clause 5 — the docstring that stops the next re-measurement from being
+# #1710 again.
+#
+# A stale staged note (no `calibration.task_id`) is re-measured by parsing its
+# BODY with `_candidate_frontmatter` and passing `task=`. Handing the
+# calibration entry point the note's PATH re-reads the staging envelope and
+# spends ten GPU trials on a document that is not a task. That route exists
+# nowhere a future caller can trip over it except in `bench_mine`'s module
+# docstring, so the docstring is the enforcement — which makes it prose that has
+# to be graded like the tables above.
+# ---------------------------------------------------------------------------
+
+def _module_docstring(path: Path) -> str:
+    """The MODULE docstring only, whitespace-flattened.
+
+    Extracted through the AST rather than read off the file text, because
+    `_candidate_frontmatter`, `task=` and `calibrate_candidate(path)` all appear
+    in this module's CODE as well — a whole-file `in` check would be satisfied by
+    the very call sites the docstring exists to warn about (#1689's rule for a
+    `not in` with no eyes, applied to a `in`).
+    """
+    import ast
+
+    doc = ast.get_docstring(ast.parse(path.read_text(encoding="utf-8")))
+    assert doc, f"{path.name} has no module docstring — the extractor found nothing"
+    return " ".join(doc.split())
+
+
+def test_bench_mine_docstring_states_the_route_for_a_stale_note():
+    """#1769: a reader who decides to re-measure the relabelled notes has to find
+    the `task=` route, the fact that `_candidate_frontmatter` takes text, and the
+    reason the path form is wrong — in that module, where they will look.
+
+    Pinned on the sentence, not the docstring, for the ban: the docstring also
+    *describes* the path fallback correctly, so a doc-wide "never" check could be
+    satisfied by an unrelated sentence while the actual instruction went back to
+    recommending the path form.
+    """
+    doc = _module_docstring(_BENCH_MINE_SRC)
+    # Positive control that the extractor has the right text: the module's own
+    # opening words, which no other string in the file carries.
+    assert doc.startswith("bench-mine source"), (
+        f"the extractor returned something that is not this module's docstring: "
+        f"{doc[:60]!r}")
+
+    assert "_candidate_frontmatter" in doc, (
+        "the function a stale note must be parsed with is unnamed again, so the "
+        "route is not findable from the module that owns it")
+    assert "TEXT, not a path" in doc, (
+        "`_candidate_frontmatter` takes text; without that stated, the obvious "
+        "call is the one that passes the Path and re-opens #1710")
+    assert "task=" in doc, "the argument the parsed task has to travel in is gone"
+    assert "uncalibrated" in doc and "stale_envelope" in doc, (
+        "the docstring no longer says how a note that was never measured of its "
+        "task is labelled, so a reader cannot tell a stale note from a real one")
+
+    ban = [s for s in re.split(r"(?<=[.!?]) ", doc) if "calibrate_candidate(path)" in s]
+    assert len(ban) == 1, (
+        f"the docstring states the path form in {len(ban)} sentences; one "
+        "sentence is the instruction this node grades, and two would let a "
+        "recommendation hide beside the warning")
+    assert "never" in ban[0].lower(), (
+        f"the sentence naming `calibrate_candidate(path)` no longer forbids it: "
+        f"{ban[0]!r}")
+    for fact in ("_load_candidate", "FIRST front matter block", "envelope"):
+        assert fact in ban[0], (
+            f"the warning sentence lost {fact!r}, which is the reason a later "
+            "reader needs to obey it rather than 'simplify' the call back to a "
+            "path — the exact edit #1710 exists to prevent")
+    assert "#1710" in doc, (
+        "the docstring stopped attributing the envelope-reading bug to the item "
+        "that fixed it, so the warning has no failure a reader can go read")

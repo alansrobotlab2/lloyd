@@ -1138,3 +1138,54 @@ def test_the_health_incomplete_count_is_never_invented_for_a_source_with_no_run(
     assert _health_of(client, "arch-review") is None, \
         "a source with no run in the window gets no block at all, so there is " \
         "no zero anywhere for a reader to mistake for 'checked, all complete'"
+
+
+# ---------------------------------------------------------------------------
+# #1769 — relabelling a staged note as uncalibrated must never block the one
+# decision that is a human's to make.
+#
+# `scripts/maintenance/relabel_stale_bench_calibration.py` puts 119 pre-#1710
+# notes into `review_status: uncalibrated`, and the promotion UI reads that
+# front matter through `GET /api/workers/pending`. The label exists to stop a
+# human promoting on a false band verdict; it must not become a gate that stops
+# a human promoting anyway, on the strength of having read the candidate task
+# themselves. The route has never read the staged note's `review_status` (it
+# stamps `promoted` on the LANDED copy and unlinks the staged one), so this is a
+# pin on behaviour as it stands — the regression it prevents is someone adding
+# the check later and silently stranding the relabelled queue.
+# ---------------------------------------------------------------------------
+
+def test_an_uncalibrated_note_still_promotes_its_task(monkeypatch, tmp_path):
+    """Clause 4's pin of #1769: a note the relabeller touched, whose task block IS
+    gradeable, lands exactly as the `pending` note in
+    `test_a_staged_candidate_lands_its_bench_task_block` does.
+
+    The staging envelope carries the whole stale shape — `status:
+    stale_envelope`, `in_band: null`, `measured_against`, no `task_id` — because
+    the thing being pinned is that none of those fields is consulted on the way
+    through.
+    """
+    fm = {**STAGING_FM, "review_status": "uncalibrated",
+          "calibration": {**STAGING_FM["calibration"],
+                          "status": "stale_envelope", "in_band": None,
+                          "measured_against": "staging envelope (pre-#1710)"}}
+    src = _staged(tmp_path, "060454-mined-from-run-38-20260911-050055.md",
+                  staging_fm=fm)
+    assert _yaml.safe_load(src.read_text().split("---", 2)[1])["review_status"] \
+        == "uncalibrated", "the fixture is not the note the relabeller produces"
+
+    out = _promote(_client(monkeypatch, tmp_path), src)
+    assert out["status"] == 200, (
+        f"a relabelled note was refused promotion: {out}")
+
+    dest = tmp_path / "vault" / "lloyd" / "bench"
+    tasks = load_bench_tasks(dest)
+    assert [str(t.get("id")) for t in tasks] == [TASK_ID], tasks
+    landed = (dest / f"{TASK_ID}.md").read_text(encoding="utf-8")
+    assert "review_status: promoted" in landed, (
+        "the landed copy must carry the human's decision")
+    for phrase in ("uncalibrated", "stale_envelope", "staging envelope", "null"):
+        assert phrase not in landed, (
+            f"the staging label ({phrase!r}) rode along into the graded bench, "
+            "where the bench loader would hand it to a runner as task metadata")
+    assert not src.exists(), "the staged note is consumed by the move, as ever"
