@@ -228,7 +228,100 @@ def _state_verdict(name: str, state: Optional[str]) -> tuple:
     return False, f"{state} (process state only — no probe declared)"
 
 
-def _process_state_row(name: str, state: Optional[str]) -> dict:
+# supervisord's own false words for a boolean option (supervisor/options.py
+# `readboolean`), so only one of these counts as "declared hand-started". Anything
+# else — `true`, a value that is neither, or no line at all — leaves STOPPED a
+# graded fault, which is the fail-closed direction: the excuse is granted on a
+# declaration that exists, never on a read that failed.
+_AUTOSTART_OFF = ("false", "0", "no", "off")
+
+_AUTOSTART_LINE = re.compile(r"autostart\s*[=:]\s*(\S+)", re.IGNORECASE)
+
+
+def _unit_dir() -> Path:
+    """The `conf.d` directory beside the supervisord.conf this run is reading.
+
+    Derived from `SUPervisor_CONF`, never hard-coded, because that constant is what
+    the `UNIT` seam re-points: a unit directory that stayed behind on the live tree
+    would make every test that names a throwaway supervisord.conf either unable to
+    reach its own units or, worse, graded against the box's real ones.
+    """
+    return Path(SUPervisor_CONF).resolve().parent / "conf.d"
+
+
+def _section_autostart(text: str, program: str) -> Optional[str]:
+    """The `autostart` value the `[program:<program>]` section of one unit declares.
+
+    Section-scoped, because that is what makes the declaration mean something. The
+    live candidate's own file carries a comment line reading
+    `; autostart=false for the same reason as ...` above its section, and a
+    whole-file substring test would read that as the declaration — which happens to
+    agree today and would disagree the moment a unit is switched on while an
+    explanatory comment survives. So: only a line inside the named program's own
+    section counts, only a `key=value` line (a `;`/`#` comment is not a declaration),
+    and a later line in the same section wins, as supervisord's own INI read does.
+
+    Returns the raw value word, or None when no such line was found.
+    """
+    wanted = f"program:{program}"
+    value: Optional[str] = None
+    in_wanted = False
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("[") and line.endswith("]"):
+            in_wanted = line[1:-1].strip() == wanted
+            continue
+        if not in_wanted or line[:1] in (";", "#"):
+            continue
+        found = _AUTOSTART_LINE.match(line)
+        if found:
+            value = found.group(1).strip().lower()
+    return value
+
+
+def _hand_started_unit(program: str) -> Optional[Path]:
+    """The unit in `conf.d` that declares this program hand-started, else None.
+
+    `autostart=false` is the operator's own declaration that supervisord must not
+    start this program at boot. On this box that is how a candidate is held while it
+    is measured against the service it would replace — GPU 2 carries one tenant, so
+    the candidate stays down until someone stops the live one and starts it by hand.
+    Such a program is loaded, so the derived pass rightly reports it (#1649); what it
+    must not do is grade "nobody started the candidate" as a fleet fault, because
+    that is the box working exactly as declared, and a `Fleet:` that reads degraded
+    on every single run is the noise #699 warns a reader past.
+
+    Read from the unit file rather than from a list of names in this script: the
+    declaration is the fact, the list would be a copy of it, and a copy is what made
+    the retired hand-maintained coverage list rot.
+    """
+    try:
+        units = sorted(_unit_dir().glob("*.conf"))
+    except OSError:
+        return None
+    for path in units:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if _section_autostart(text, program) in _AUTOSTART_OFF:
+            return path
+    return None
+
+
+def _process_state_row(name: str, state: Optional[str],
+                       declared: bool = False) -> dict:
+    """One derived row: `declared` says a `SERVICES` probe already reports it.
+
+    Only a program with no `SERVICES` entry can be excused as hand-started. A
+    declared entry in a non-RUNNING state is a fault whatever its unit declares:
+    someone wrote a probe for it because the box is supposed to be running it, and
+    `autostart=false` on such a unit (both GPU-2 tenants declare it) means the boot
+    reconcile brings it up, not that nobody cares. `agent-llm-secondary` while its
+    slot is switched off is the other excuse and it wins — `_state_verdict` owns
+    that wording, and it is config-derived, which is a stronger claim about this box
+    than a unit file that never changes.
+    """
     if state is None:
         # The fleet-wide answer gave this program no state field. Ask for that one
         # program before calling the reading broken — same command with a name
@@ -236,8 +329,27 @@ def _process_state_row(name: str, state: Optional[str]) -> dict:
         # state instead of a false alarm.
         state = _ask_program(name)
     healthy, status = _state_verdict(name, state)
-    return {"name": name, "category": FLEET_CATEGORY, "healthy": healthy,
-            "status": status, "exit_code": 0}
+    row = {"name": name, "category": FLEET_CATEGORY, "healthy": healthy,
+           "status": status, "exit_code": 0}
+    # STOPPED is the only state a declaration can excuse, and it is the only one
+    # this asks about: STARTING means supervisord is bringing it up, and BACKOFF,
+    # EXITED or FATAL mean a start was attempted and failed — a hand-started unit is
+    # expected to be down, never to be crash-looping. So the unit file is opened for
+    # a candidate at rest and for nothing else.
+    if not healthy and not declared and state == "STOPPED":
+        unit = _hand_started_unit(name)
+        if unit is not None:
+            # `healthy` stays False — the row is not claiming a stopped process is
+            # up — and `advisory` is what takes it out of the arithmetic
+            # (`_scored_rows`, the `Overall:` count and the category words), on the
+            # same declaration `ca-trust` uses (#1726). The word is the operator's:
+            # it says the stop was declared and where, so the row can be read without
+            # opening the conf.
+            row["advisory"] = True
+            row["verdict"] = "warn"
+            row["status"] = (f"STOPPED by design — {unit.name} declares "
+                             f"autostart=false, hand-started: reported, not counted")
+    return row
 
 
 def derived_supervisor_rows() -> list:
@@ -291,7 +403,11 @@ def derived_supervisor_rows() -> list:
         # must not silently drop.
         if name in declared and name not in off:
             continue
-        rows.append(_process_state_row(name, state))
+        # `name in declared` is passed down rather than re-derived there: a declared
+        # entry whose slot is switched off lands here for the row the declared pass
+        # was told to skip, and it must not be able to borrow the hand-started excuse
+        # (#1818 clause 2's other half).
+        rows.append(_process_state_row(name, state, name in declared))
     return rows
 
 
