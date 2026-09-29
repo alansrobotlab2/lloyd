@@ -52,4 +52,4 @@ After a code change, vite re-emits; click the extension's reload icon on the ext
 - `POST /api/message/stream` — fires the kickoff (response is abandoned; backend keeps running on disconnect, see [messages.py:10](../app/routers/messages.py)).
 - `GET /api/messages/{id}` — side panel uses this via [web/src/api.ts](../web/src/api.ts) to render the transcript.
 
-The Lloyd backend's mTLS middleware skips loopback ([server.py:76-113](../server.py)), so the extension's calls to `http://127.0.0.1:8080` need no client cert.
+The Lloyd backend gates `/api/*` on the peer address alone (`ApiPeerGate` → `_is_trusted_peer` in [server.py](../server.py)), and loopback is inside the trusted set, so the extension's calls to `http://127.0.0.1:8080` need no client certificate.

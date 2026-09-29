@@ -10,12 +10,10 @@ gate that replaced it landed on 2026-09-20: `ApiPeerGate` calls
 outright. So the comment named a layer that is not there, at a line range that
 holds something else, in the exact place a person editing a client looks.
 
-The corpus is `web/src/api.ts` alone. The service-worker file carried the same
-sentence verbatim and is in the same shape, but `chrome-extension/**` is not in
-`scripts/automod/spec.py`'s `ALLOWED_GLOBS`, so no round may write it — #1722
-carries that comment edit and the header node that goes with it. Add the path
-back to `CORPUS` when it lands: a corpus narrowed by a scope rule is the one
-thing here that is not about the comments.
+The corpus is both client files, named verbatim. The service-worker client's
+header was corrected by hand (#1722) — `chrome-extension/**` stays outside the
+loop's writable set, since there is no JS/TS test runner a round could be graded
+on — and its header node below pins the peer-address wording there too.
 
 The corpus widened to two architecture docs (#1759): `architecture/browser-side-panel.md`
 carried the same false mechanism ("`server.py` skips mTLS for loopback") in the
@@ -44,12 +42,13 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 
 WEB_API = "web/src/api.ts"
+SW_CLIENT = "chrome-extension/src/background/lloyd-client.ts"
 
 #: The files a client-side editor reads, whose comments must describe the gate
 #: that actually answers them. `git grep -n mTLS` over exactly these paths is the
-#: check the item recorded; see the module docstring for why one of the two is
-#: missing today.
-CORPUS = (WEB_API,)
+#: check the item recorded. Named verbatim, never a directory glob: a glob over
+#: `chrome-extension/` would drag in prose this guard was not written for.
+CORPUS = (WEB_API, SW_CLIENT)
 
 API_BASE_ANCHOR = "const API_BASE"
 
@@ -146,6 +145,36 @@ def _section(text: str, heading: str, stops: tuple[str, ...] = ("\n## ",)) -> st
     return rest[:min(ends)] if ends else rest
 
 
+def _leading_comment_block(text: str, must_mention: str) -> str:
+    """A file's opening `//` block — the header a reader sees first."""
+    lines = text.splitlines()
+    end = 0
+    while end < len(lines) and lines[end].lstrip().startswith("//"):
+        end += 1
+    block = "\n".join(lines[:end])
+    assert block.strip(), "the file has no opening comment block — the header moved"
+    assert must_mention in block.lower(), (
+        f"the opening block does not mention {must_mention!r} — wrong block, not the header"
+    )
+    return block
+
+
+def test_sw_client_header_names_the_peer_address_gate_and_no_cert():
+    """#1722 clause 1: the service-worker client's header must say loopback is
+    accepted by the peer-address gate, name the trusted set, and say no client
+    certificate is required — which is the true reason a loopback call works
+    without a cert."""
+    block = _leading_comment_block(_tracked_text(SW_CLIENT), "127.0.0.1:8080").lower()
+    assert "_is_trusted_peer" in block, (
+        "the header must name the gate that actually answers loopback"
+    )
+    assert "peer address" in block, "the header must state the rule is the peer address"
+    assert "trusted" in block, "the header must name the trusted-network set"
+    assert "loopback" in block and "server.trusted_networks" in block, (
+        "the header must say what the trusted set is: loopback plus the configured networks")
+    assert "no client certificate" in block, "the header must say loopback needs no cert"
+
+
 def test_web_api_base_comment_states_the_peer_rule_for_loopback():
     """Clause 2: the comment above `API_BASE` states the same peer-address rule
     for the loopback case, and no longer claims a Vite-injected client-cert
@@ -163,8 +192,8 @@ def test_web_api_base_comment_states_the_peer_rule_for_loopback():
 def test_web_api_comment_names_the_gate_and_that_loopback_needs_no_cert():
     """Clause 1: the two facts a client editor needs beside the URL — which
     symbol answers a loopback call, and that no certificate is involved. The
-    original clause put this on the service-worker header as well; that file is
-    outside the loop's writable set, so #1722 carries that half.
+    service-worker header carries the same two facts, pinned by
+    `test_sw_client_header_names_the_peer_address_gate_and_no_cert`.
     """
     block = _comment_block_above(_tracked_text(WEB_API), API_BASE_ANCHOR).lower()
     assert "server.py" in block, "the comment must name the module the gate lives in"
@@ -172,18 +201,18 @@ def test_web_api_comment_names_the_gate_and_that_loopback_needs_no_cert():
     assert "no client certificate" in block, "the comment must say loopback needs no cert"
 
 
-def test_web_api_file_carries_no_stale_mechanism_or_line_citation():
-    """Clause 3 (the `web/src/api.ts` half): the grep that catches the next stale
+def test_client_files_carry_no_stale_mechanism_or_line_citation():
+    """Clause 3 (both client files, #1722): the grep that catches the next stale
     rewrite. Neither the mechanism string nor a `server.py:<line>` range may
-    appear anywhere in the file — including the section header over the
+    appear anywhere in either file — including the section header over the
     still-live `/api/system/*` endpoints, which used to read
     `LAN access / mTLS`. The corpus is proven non-empty first and a positive
     control proves the pattern still matches real files elsewhere in the repo, so
     a 0-hit result is not a grep that searched nothing."""
-    for rel_path in CORPUS:
-        text = _tracked_text(rel_path)
-        assert not STALE_MECHANISM.search(text), f"{rel_path} still mentions the dropped mechanism"
-        assert not LINE_CITATION.search(text), f"{rel_path} still cites a server.py line range"
+    # Every corpus file proven tracked and non-empty, and the pattern proven
+    # live repo-wide, before a single absence is asserted.
+    texts = {rel_path: _tracked_text(rel_path) for rel_path in CORPUS}
+    assert set(texts) == {WEB_API, SW_CLIENT}, f"the corpus drifted: {sorted(texts)}"
 
     listing = subprocess.run(
         ["git", "-C", str(REPO), "grep", "-i", "-l", "mtls"],
@@ -194,11 +223,15 @@ def test_web_api_file_carries_no_stale_mechanism_or_line_citation():
     outside = hits - set(CORPUS) - {f"tests/{Path(__file__).name}"}
     assert len(outside) >= 3, (
         f"positive control: only {sorted(outside)} mention the mechanism repo-wide — "
-        "the pattern is matching too little to trust the 0 hits above"
+        "the pattern is matching too little to trust the 0 hits below"
     )
     assert any(name == "server.py" or name.startswith("architecture/") for name in outside), (
         "the live description of the drop (server.py / architecture/) must remain findable"
     )
+
+    for rel_path, text in texts.items():
+        assert not STALE_MECHANISM.search(text), f"{rel_path} still mentions the dropped mechanism"
+        assert not LINE_CITATION.search(text), f"{rel_path} still cites a server.py line range"
 
 
 # ── #1759: the same stale claim, in the docs that describe the guard ────────── #

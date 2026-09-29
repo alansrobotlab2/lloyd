@@ -2,9 +2,14 @@
 // only. The side panel uses the full `web/src/api.ts` (with all its
 // session helpers); the SW only needs three operations.
 //
-// All calls hit http://127.0.0.1:8080 directly — the FastAPI mTLS
-// middleware at server.py:76-113 skips loopback, so no client cert is
-// required.
+// All calls hit http://127.0.0.1:8080 directly. `server.py` gates /api/* on
+// the ASGI peer address and nothing else: `ApiPeerGate` asks `_is_trusted_peer`
+// about `scope["client"]` — never a `Host` or `X-Forwarded-For` header. The
+// trusted set is loopback plus the networks in `server.trusted_networks`
+// (default: the Tailscale CGNAT range), and a service worker's request arrives
+// from loopback. Where the request came from is itself the credential, so
+// no client certificate is required; client-cert auth was dropped from this
+// backend on 2026-06-14.
 
 const API_BASE = "http://127.0.0.1:8080/api"
 

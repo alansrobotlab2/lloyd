@@ -27,7 +27,7 @@ doc that exists, and no doc did.
 | `chrome-extension/src/background/service-worker.ts` | 317 lines: tab/navigation/session orchestration, the manual-check guard, the kickoff prompts |
 | `chrome-extension/src/background/url.ts` | 60 lines: `canonicalize()` and the YouTube tests |
 | `chrome-extension/src/background/tab-session-map.ts` | 92 lines: the `chrome.storage.session` wrapper holding the tab→session mapping |
-| `chrome-extension/src/background/lloyd-client.ts` | 74 lines: three backend calls, used by the service worker only |
+| `chrome-extension/src/background/lloyd-client.ts` | 79 lines: three backend calls, used by the service worker only |
 | `web/sidepanel.html` | the panel's HTML entry, 12 lines |
 | `web/src/sidepanel/main.tsx` | 10 lines: mount |
 | `web/src/sidepanel/SidePanelApp.tsx` | 211 lines: the panel UI, reusing `web/src/components/ChatPanel.tsx` and the rest of `web/src` |
@@ -95,12 +95,13 @@ Which networks are trusted, and what certificate mechanism was retired and when,
 belong to [[authority-surfaces]] (the Loopback entry) and to the transport history
 in [[mission-control]] and [[infrastructure]]; this doc points at them rather than
 copying them, so a change to the boundary has one place to be corrected. The
-extension's own two write-ups are not yet at that standard:
-`chrome-extension/README.md` and `chrome-extension/src/background/lloyd-client.ts`
-still send a reader to a `server.py` line range for an exemption that went out with
-the mechanism it exempted, and neither file is in the corpus
-`tests/test_stale_mtls_comment_claims.py` greps (#1702, blocked by #1722). On this
-point, read `server.py`, not them.
+extension's own two write-ups say the same thing: `chrome-extension/README.md`
+and the header of `chrome-extension/src/background/lloyd-client.ts` name
+`ApiPeerGate` → `_is_trusted_peer` and say no client certificate is required
+(#1722), and the header is in the corpus `tests/test_stale_mtls_comment_claims.py`
+greps beside `web/src/api.ts`. `chrome-extension/` stays outside automod's
+writable set — it has no JS/TS test runner a round could be graded on — so an
+edit there is hand-landed.
 
 ## Build, and what is in git
 
@@ -192,3 +193,7 @@ on after the output directory had already been emptied.
   `.gitignore` negations, the build refuses a missing manifest by path before it
   empties the output directory, and §Build now says so; the "not loadable on its own"
   paragraph is gone with the cause it described.
+- **2026-09-28 — hand-landed (#1722).** The service-worker client's header and
+  the extension README describe the peer-address gate instead of the retired
+  certificate exemption, and §Getting to the backend no longer warns that they
+  do not.
