@@ -3080,6 +3080,230 @@ def _daily_note_dir() -> Path:
     return Path.home() / "obsidian" / "memory"
 
 
+# ── #1798: a mismatch also files one coalesced backlog item ──────────────────
+
+#: The one item name this feature ever files. Coalescing is a prefix match on it, so
+#: the create and the refresh have to agree on it character for character.
+DAILY_NOTE_DROP_PREFIX = "[alerts] daily-note drop"
+_DAILY_NOTE_DROP_ITEM = f"{DAILY_NOTE_DROP_PREFIX} — alert lines are not landing"
+_DAILY_NOTE_DROP_BOARD = "lloyd"
+#: The client bound on the loopback call, and it is a bound rather than a default
+#: because `append_daily_alert_line` is `def` and is reached from a running event
+#: loop: `workers/sources/scheduled_task.py::_alert` awaits `discord_alert`, which
+#: calls `_survive_the_dropped_alert`, which calls this. A blocking `urlopen` on that
+#: stack freezes the worker's loop for the whole client timeout, on exactly the path
+#: where an alarm is already going out. Three seconds is generous for a localhost
+#: route and small enough that a wedged backend costs one stalled tick, not a stalled
+#: worker — the guardian posts this same route at 5.0 s (`notify.py:525`) and can
+#: afford it because it is its own process and ticks nothing.
+_BACKEND_ALERT_TIMEOUT_SECONDS = 3.0
+_MISMATCH_COUNT_RE = re.compile(r"^Mismatches observed:[ \t]*(\d+)", re.MULTILINE)
+
+
+def _backend_json(method: str, path: str, *, payload: Optional[dict] = None,
+                  params: Optional[dict] = None):
+    """One JSON round-trip against the backend's own HTTP API. None on any failure.
+
+    The route, not an in-process writer: `POST /api/backlog/task-create` is the one
+    backlog write every writer already shares — Mission Control's modal, the guardian
+    (`agent-services/guardian/notify.py:521`) and the MCP tool all pass the board map,
+    `check_board`, `_VALID_STATUSES` and the OKF front matter at
+    `app/routers/backlog.py:704`. A fifth writer inside `app/autonomy.py` is how
+    #1167's missing `segment` and #1517's two-clock stamp happened. It is also the
+    only route from the process this runs in: the scheduler tick that drops an alert
+    lives in `lloyd-agent-worker`, a separate supervisor program from `lloyd-backend`.
+
+    Returns the decoded body, or None for a non-2xx, an unparseable body, or any
+    exception — a refused connection included, which is the state most likely to
+    coincide with a dropped alert, since a backend that is down and a vault that is
+    misbehaving are the same outage wearing one coat. Never raises: the caller has an
+    alarm to deliver, and this is its side effect.
+    """
+    import urllib.parse
+    import urllib.request
+
+    base = (os.environ.get("LLOYD_BACKEND_URL")
+            or "http://127.0.0.1:8080").rstrip("/")
+    url = base + path
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    try:
+        req = urllib.request.Request(
+            url, data=data,
+            headers={"Content-Type": "application/json"} if data else {},
+            method=method)
+        with urllib.request.urlopen(req, timeout=_BACKEND_ALERT_TIMEOUT_SECONDS) as resp:
+            if not 200 <= resp.status < 300:
+                logger.warning("backlog route %s %s answered HTTP %s", method, path,
+                               resp.status)
+                return None
+            raw = resp.read().decode("utf-8", "replace")
+        return json.loads(raw) if raw.strip() else None
+    except Exception as exc:  # noqa: BLE001 — a side effect never owns the alarm
+        logger.warning("backlog route %s %s failed: %s", method, path, exc)
+        return None
+
+
+def _daily_note_drop_body(count: int, seen: str, note_path: Path, why: str,
+                          entry: str) -> str:
+    """The whole body of the coalesced item, regenerated on every mismatch.
+
+    Regenerated rather than patched, because `task-update`'s `description` field
+    replaces the ENTIRE body (`app/routers/backlog.py:600-617`): a body assembled by
+    editing the last one would need its own read-back to be right, and a botched edit
+    would cost the incident its account of itself. That is also what makes the
+    caller's `force_body_replace` honest — this text is the item's whole content and
+    this function is its only author — and what makes the trade visible: prose a
+    person adds to the item is overwritten by the next mismatch, which is the price of
+    a count that cannot drift.
+
+    The numbers a reader acts on are named as their own lines (`Mismatches observed`,
+    `Last seen`, `Note`) rather than folded into a sentence, because the refresh
+    re-reads the count from this text: a tally in prose is a tally nobody can advance
+    without guessing.
+    """
+    return (
+        "One or more daily-note alert lines were written and then not readable back, "
+        "so those alarms exist only in `~/lloyd-data/logs/server.err` and in no file a "
+        "person opens. This item is the coalesced record; it is refreshed, not "
+        "re-filed, while it stays open.\n"
+        f"\nMismatches observed: {count}\n"
+        f"Last seen: {seen}\n"
+        f"Note: {note_path}\n"
+        f"Most recent mismatch: {why}; line was `{entry[:400]}`\n"
+        "\n## What the check is\n\n"
+        "`append_daily_alert_line` (`app/autonomy.py`) appends `- HH:MM %Z — …` to "
+        "today's daily note and then re-reads the file (#1736), so a returned True "
+        "means the line was readable back at the moment it returned. This item is "
+        "filed on the False. The check only sees a mismatch that is true AT RETURN "
+        "TIME: a later whole-file rewrite composed from an older snapshot still "
+        "returns True, so this is not the same claim as \"an alarm can no longer be "
+        "lost\".\n"
+        "\n## What to check\n\n"
+        "- How many, over the logs: `grep -c \"daily-note alert line is NOT confirmed\""
+        " ~/lloyd-data/logs/server.err*`\n"
+        f"- Whether the note moved under the writer: `git -C ~/obsidian log --oneline"
+        f" --since=14.days -- memory/{note_path.name}`\n"
+        "- Whether the note is a symlink or an unreadable file (`/dev/null` and"
+        " mode 000 both produce this signature), and whether the vault itself is"
+        " healthy — a vault-wide failure takes this item's own file with it, since"
+        " `~/obsidian/backlog` and `~/obsidian/memory` are the same tree.\n")
+
+
+def _open_daily_note_drop_item() -> Optional[dict]:
+    # The status vocabulary is imported HERE, not at the top of the module, for a
+    # reason invisible from here: `tests/test_autonomy_jobs_doc_claims.py::
+    # test_the_pilot_frozenset_citation_resolves_to_the_line_it_names` requires that
+    # `architecture/autonomy-jobs.md` cite the line `EVIDENCE_PILOT_TASK_IDS` is really
+    # defined on (#1520), so ANY module-level insertion above it moves that line and
+    # turns that test red — measured here, a 5-line import at :85 moved 2493 to 2498 and
+    # failed the gate's tests rung. `app/backlog_status.py` is stdlib-only (#1494), so
+    # nothing about import order is being dodged: only line numbers are being kept.
+    from app.backlog_status import OPEN_STATUSES, canonical_status
+
+    """The one OPEN `[alerts] daily-note drop` row, or None if there is no such row.
+
+    Asked of the board's own list route (`app/routers/backlog.py:515`, `?q=` matched
+    over name and body) rather than answered by reading the backlog directory, for the
+    same reason the create goes over its route: the board is the thing that knows
+    whether an item is open. The open/closed line is what keeps a *closed* incident
+    from absorbing tomorrow's drop — a person who closed this item closed that
+    incident, and re-opening it by refresh would be the loop overruling them — and
+    `canonical_status` folds the retired spellings (`closed`, `cancelled`) onto the
+    vocabulary before that decision is made, because `app/backlog_status.py` exists
+    precisely for readers that got this line wrong in the expensive direction.
+
+    A None here on a transport failure means the next call FILES a new item rather
+    than refreshing, which is the safe direction of the two: a duplicate item is
+    visible and closeable, a silently stale count on the first one is neither.
+    """
+    rows = _backend_json("GET", "/api/backlog/tasks", params={
+        "board_id": _DAILY_NOTE_DROP_BOARD, "q": DAILY_NOTE_DROP_PREFIX})
+    if not isinstance(rows, list):
+        return None
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if not str(row.get("name") or "").startswith(DAILY_NOTE_DROP_PREFIX):
+            continue
+        if canonical_status(row.get("status")) in OPEN_STATUSES:
+            return row
+    return None
+
+
+def _file_daily_note_mismatch(note_path: Path, why: str, entry: str) -> None:
+    """File — or refresh — the one coalesced `[alerts] daily-note drop` item (#1798).
+
+    Why the board is the second surface: the mismatch means the alarm reached no file
+    a person reads, and the ERROR line that stays is in a rotating log. The other
+    candidate transport is the one Alan left deliberately unconfigured
+    (`discord.home_channel: null`, empty token), and `config.yaml` is off-limits to a
+    round, so #1736's owed ruling named a destination without being able to open one.
+    A backlog item is a surface the triage loop and the dashboard both walk, and it
+    coalesces: five drops in a week are one item that says five, not five items and
+    not five lines nobody greps.
+
+    Board and priority follow the guardian's own alert filing (`notify.py:514-519`,
+    `up_next` / `high`) so an auto-filed operational alert sits where the other
+    auto-filed alerts sit; whether `lloyd` is the right board for alerts at all is the
+    ruling owed on #1798, and is a one-line change here if it comes out otherwise.
+
+    Never raises, and it is called *after* the ERROR log for the same reason: this is
+    a side effect of a failure that already has its record, so no bug in this function
+    may cost the log line or the caller's False. Every branch is a `_backend_json`
+    that returns None on failure — a refused connection, a 500, a `{"success":
+    false}` — and the one remaining risk, a raised exception from assembling text, is
+    caught here rather than propagated to a scheduler tick.
+    """
+    try:
+        seen = datetime.datetime.now(
+            datetime.timezone.utc).isoformat(timespec="microseconds")
+        existing = _open_daily_note_drop_item()
+        if existing is None:
+            reply = _backend_json("POST", "/api/backlog/task-create", payload={
+                "name": _DAILY_NOTE_DROP_ITEM[:120],
+                "description": _daily_note_drop_body(1, seen, note_path, why, entry),
+                "board": _DAILY_NOTE_DROP_BOARD,
+                "status": "up_next",
+                "priority": "high",
+            })
+        else:
+            task_id = existing.get("id")
+            detail = _backend_json("GET", f"/api/backlog/task/{task_id}")
+            if not isinstance(detail, dict):
+                # No read-back, no honest count. Posting `1` here would move a tally
+                # that says 4 back to 1, which is worse than not refreshing: the
+                # ERROR line and the existing item both still stand.
+                logger.warning("daily-note mismatch: could not read backlog #%s to "
+                               "advance its count, so the item was left as it is",
+                               task_id)
+                return
+            description = str(detail.get("description") or "")
+            found = _MISMATCH_COUNT_RE.search(description)
+            count = (int(found.group(1)) if found else 0) + 1
+            reply = _backend_json("POST", "/api/backlog/task-update", payload={
+                "id": task_id,
+                "description": _daily_note_drop_body(count, seen, note_path, why,
+                                                     entry),
+                # True because this function wrote the whole body it is posting, from
+                # the text it just read back. Without it the route silently ignores a
+                # body shorter than the one on disk (`app/routers/backlog.py:600-617`)
+                # — and a later mismatch whose quoted line is shorter than the last
+                # one's IS shorter, so the guard would drop the refresh and leave the
+                # count stale, which is the failure clause 2 exists to catch.
+                "force_body_replace": True,
+            })
+        if not isinstance(reply, dict) or not reply.get("success"):
+            logger.warning("daily-note mismatch could not reach the backlog: %s",
+                           reply if reply is not None else "no reply from the backend")
+            return
+        logger.info("daily-note mismatch filed as backlog #%s on board %s",
+                    reply.get("id"), _DAILY_NOTE_DROP_BOARD)
+    except Exception as exc:  # noqa: BLE001 — the alarm outlives its side effect
+        logger.warning("daily-note mismatch could not file a backlog item: %s", exc)
+
+
 def append_daily_alert_line(body: str) -> bool:
     """Append `- HH:MM %Z — <body>` to today's daily note. True if it is in the note.
 
@@ -3104,10 +3328,10 @@ def append_daily_alert_line(body: str) -> bool:
     A mismatch is logged at ERROR, not WARNING, and the return value is the other
     half of it: `app.discord_notify._survive_the_dropped_alert` reads False and emits
     `the daily note refused the alert too; it exists only in this log line`, which is
-    the warning whose absence above is half of how the incident stayed silent. A
-    second person-facing surface for the mismatch is an owed ruling on #1736, not a
-    code change this round can make: `discord.home_channel` is null and the token
-    empty by Alan's decision, and `config.yaml` is off-limits to the loop.
+    the warning whose absence above is half of how the incident stayed silent. The
+    mismatch also files itself as one coalesced `[alerts] daily-note drop` backlog
+    item (#1798) — see `_file_daily_note_mismatch`, which is where the choice of board
+    and the reason it is not the Discord transport are written down.
 
     There is deliberately no marker or dedupe check here (#1727's triage: every
     producer already paces itself). `~/obsidian/memory/2026-09-27.md` carries 13
@@ -3176,6 +3400,12 @@ def append_daily_alert_line(body: str) -> bool:
                          "the alarm reaches no file a person reads, only this log "
                          "line, and the caller is told to say so: %r",
                          path, why, entry.strip())
+            # The second surface (#1798), and deliberately after the ERROR above: the
+            # log line is the record that already existed, so a filing that raises must
+            # not cost it, and `_file_daily_note_mismatch` catches its own exceptions
+            # for the same reason. A successful append never gets here, so a normal
+            # alert files nothing.
+            _file_daily_note_mismatch(path, why, entry.strip())
             return False
         return True
     except Exception as exc:  # noqa: BLE001 — a note is never worth the run

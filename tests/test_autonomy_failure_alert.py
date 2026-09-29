@@ -11,11 +11,16 @@ were missing: a duration-shaped signal, and a surface that works here.
 """
 import asyncio
 import datetime as dt
+import json
 import logging
 import os
 import re
 import sys
+import urllib.error
+from concurrent.futures import ThreadPoolExecutor
+import urllib.request
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -701,3 +706,537 @@ def test_two_alerts_the_same_day_both_stay_readable_because_this_is_no_dedupe(au
             if body in ln and ALERT_SHAPE.match(ln)]
     assert len(hits) == 2, (
         f"two alerts, two lines — the read-back dropped or merged one: {hits}")
+
+
+# ── #1798: a mismatch files one coalesced backlog item; the drop branch gets a witness
+#
+# The block above (#1736) made a dropped alert line return False and say so at ERROR,
+# and stopped there: the False went to a rotating log and nowhere a person opens,
+# because the other candidate transport is the one Alan left deliberately unconfigured
+# (`discord.home_channel: null`, empty token) and `config.yaml` is off-limits to a
+# round. What follows is the second surface — one `[alerts] daily-note drop` item on
+# the `lloyd` board, refreshed rather than re-filed while it stays open.
+#
+# Two fixtures make that testable with no live server and no live board.
+# `refused_backend` is module-wide and refuses every outbound call, so nothing in this
+# file can file on `~/obsidian/backlog` by accident; `board_server` replaces it with a
+# dispatcher into the REAL route functions over a `_BACKLOG_DIR` in tmp. That is the
+# shape #1703 settled for the guardian's poster in `tests/test_guardian_predicates.py`
+# — capture what the client sent, replay it into the one loader — for the reason it
+# stands: a hand-written stand-in for a route drifts from the route, and the drift is
+# the interesting part.
+
+#: The one name-prefix this feature files, and the coalescing key. Asserted here as
+#: a literal rather than imported from `autonomy.DAILY_NOTE_DROP_PREFIX` so a rename
+#: in the code has to be a decision in two places: coalescing is a prefix match, so a
+#: name the code changed silently would stop coalescing and start growing a file a day.
+ALERT_ITEM_PREFIX = "[alerts] daily-note drop"
+CREATE_PATH = "/api/backlog/task-create"
+UPDATE_PATH = "/api/backlog/task-update"
+TASKS_PATH = "/api/backlog/tasks"
+
+_FM_BLOCK = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
+
+
+class _Resp:
+    """One `urlopen` reply: the status attribute and the bytes, as a context manager."""
+
+    def __init__(self, payload, status: int = 200):
+        self.status = status
+        self._body = json.dumps(payload).encode("utf-8")
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _FakeRequest:
+    """Just the `json()` the two write routes await; they read no other request face."""
+
+    def __init__(self, payload):
+        self._payload = payload or {}
+
+    async def json(self):
+        return self._payload
+
+
+class _Board:
+    """The live backlog routes, writing to a directory in tmp, behind `urlopen`.
+
+    Deliberately thin: it maps a path onto the real coroutine and hands back a reply,
+    so the assertions land on what the route did to a file — front matter, board,
+    body — rather than on what a stand-in would have done. `_BACKLOG_DIR` is the
+    module's single directory constant and every helper here reads it as an attribute
+    at call time, which is what makes one `monkeypatch.setattr` enough; the board map
+    is positional over the corpus (`app/routers/backlog.py:244`), so with one board on
+    tmp the positional id and the name agree and neither needs the real filesystem.
+    """
+
+    def __init__(self, backlog_dir: Path, monkeypatch):
+        from app.routers import backlog as routes
+        from fastapi import HTTPException
+
+        self.routes = routes
+        self._HTTPException = HTTPException
+        self.dir = backlog_dir
+        self.dir.mkdir(parents=True, exist_ok=True)
+        #: [(method, path, payload)] in call order — the coalescing assertions read it
+        self.requests: list = []
+        #: Set to an exception class to make the create blow up in the transport.
+        self.fail_create = None
+        #: Set to a payload to answer a create with it verbatim, route unbuilt.
+        self.reply_create = None
+        #: Set True to make the item's own read-back 404 while the file stays put.
+        self.hide_detail = False
+
+        monkeypatch.setattr(routes, "_BACKLOG_DIR", self.dir)
+        monkeypatch.setattr(routes, "_board_index", lambda: ({"lloyd": 0}, {}))
+        monkeypatch.setattr(routes, "_backlog_board_map", lambda: {"lloyd": 0})
+        monkeypatch.setattr(urllib.request, "urlopen", self._dispatch)
+
+    def _dispatch(self, req, *args, **kwargs):
+        parsed = urlparse(req.full_url)
+        payload = json.loads(req.data.decode("utf-8")) if req.data else None
+        method = req.get_method()
+        self.requests.append((method, parsed.path, payload))
+        try:
+            result = self._route(method, parsed, payload)
+        except self._HTTPException as exc:
+            return _Resp({"detail": exc.detail}, exc.status_code)
+        if hasattr(result, "body"):        # a JSONResponse: already serialised
+            return _Resp(json.loads(result.body) if result.body else None,
+                         result.status_code)
+        return _Resp(result)
+
+    def _call(self, coro):
+        """Finish one route call, from whatever stack the caller is on.
+
+        Two shapes, because the router itself is two shapes: the corpus routes are
+        plain `def` so FastAPI threadpools them (`app/routers/backlog.py:426-433`
+        explains that a coroutine parsing 11 MB of YAML blocks the loop exclusively),
+        and only the two write routes are `async def`, because they await
+        `request.json()`. A non-coroutine is therefore already the answer.
+
+        For the coroutines: the real backend serves them on its own loop in its own
+        process. From a sync test `asyncio.run` is the whole job; from an async test the
+        caller already has a running loop and a nested `asyncio.run` is refused, so the
+        coroutine goes to a one-shot loop in a thread that is joined before returning.
+        Either way the reply is complete before `urlopen` returns, which is the property
+        the production caller depends on: the filing is a blocking call, not a
+        fire-and-forget.
+        """
+        if not asyncio.iscoroutine(coro):
+            return coro
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result(timeout=30)
+
+    def _route(self, method, parsed, payload):
+        path = parsed.path
+        if path == CREATE_PATH:
+            if self.fail_create:
+                raise self.fail_create("transport died mid-create")
+            if self.reply_create is not None:
+                return self.reply_create
+            return self._call(self.routes.backlog_task_create(_FakeRequest(payload)))
+        if path == UPDATE_PATH:
+            return self._call(self.routes.backlog_task_update(_FakeRequest(payload)))
+        if path == TASKS_PATH:
+            qs = parse_qs(parsed.query)
+            return self._call(self.routes.backlog_tasks(
+                board_id=qs.get("board_id", [None])[0],
+                q=qs.get("q", [None])[0]))
+        hit = re.fullmatch(r"/api/backlog/task/(\d+)", path)
+        if hit:
+            if self.hide_detail:
+                raise self._HTTPException(404, "Item not found")
+            return self._call(self.routes.backlog_task_detail(int(hit.group(1))))
+        raise AssertionError(f"unexpected backlog path {path!r} from the alert path")
+
+    def paths_of(self, path: str) -> list:
+        return [entry[1] for entry in self.requests if entry[1] == path]
+
+    def payload_of(self, path: str, index: int = 0):
+        same = [entry for entry in self.requests if entry[1] == path]
+        assert same, f"no call to {path}; the calls were {self.requests}"
+        return same[index][2]
+
+    def items(self) -> list:
+        """[(path, front_matter_with_identity, body)] for each file on this board.
+
+        The two identity fields are DERIVED here rather than read from the front matter,
+        because the route does not store them: `backlog_task_create` keeps the name in
+        the file's `# ` heading and the id in the filename (`{task_id}-slug.md`, the
+        pair `_backlog_parse_fm` reconstructs for every reader on the board). A test that
+        looked for `name:` in the front matter would be asserting a shape the board has
+        never written, and a filing that coalesced on the wrong name would still satisfy
+        it.
+        """
+        out = []
+        for path in sorted(self.dir.glob("*.md")):
+            raw = path.read_text(encoding="utf-8")
+            match = _FM_BLOCK.match(raw)
+            assert match, f"{path} has no front matter block at all: {raw[:120]!r}"
+            fm = yaml.safe_load(match.group(1))
+            body = raw[match.end():].strip()
+            heading = body.splitlines()[0] if body else ""
+            assert heading.startswith("# "), f"{path.name} has no H1: {heading!r}"
+            fm["name"] = heading[2:].strip()
+            fm["id"] = int(path.name.split("-", 1)[0])
+            out.append((path, fm, body))
+        return out
+
+
+@pytest.fixture(autouse=True)
+def refused_backend(monkeypatch):
+    """Refuse every outbound call this file makes, and record that it tried.
+
+    Not a convenience: without it, a test that drives the mismatch path with the
+    production default URL posts to the backend that is running right now, and a suite
+    run would file real items on the real `lloyd` board. Connection-refused is also
+    the honest default for a test that never asked for a backend at all.
+    """
+    attempts: list = []
+
+    def _refuse(req, *args, **kwargs):
+        attempts.append(getattr(req, "full_url", str(req)))
+        raise urllib.error.URLError(
+            ConnectionRefusedError(111, "Connection refused"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", _refuse)
+    return attempts
+
+
+@pytest.fixture
+def board_server(tmp_path, monkeypatch, refused_backend):
+    """The real routes on a tmp board, replacing the module-wide refusal."""
+    return _Board(tmp_path / "backlog", monkeypatch)
+
+
+def _clobber_on_write(monkeypatch, snapshot: str) -> None:
+    """Clobber the note with `snapshot` the moment the writer's append handle closes.
+
+    The 09-27 incident's own shape, reproduced the way the case above does it: the
+    writer reaches the note through the module-global `open`, so the seam is that name,
+    and the append itself runs for real. What the function then sees is write succeeded,
+    verify, line is not there — which is the state a False-returning mismatch exists to
+    report, and the reason the filing tests need the write to have actually happened.
+    """
+    real_open = open
+
+    class _SnapshotRewrite:
+        """The real handle, with someone else's stale-snapshot write at close."""
+
+        def __init__(self, handle, target):
+            self._handle, self._target = handle, target
+
+        def write(self, text):
+            return self._handle.write(text)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._handle.close()
+            self._target.write_text(snapshot, encoding="utf-8")
+            return False
+
+    monkeypatch.setattr(
+        autonomy, "open",
+        lambda file, mode="r", *a, **kw: _SnapshotRewrite(real_open(file, mode, *a, **kw), file)
+        if "a" in mode else real_open(file, mode, *a, **kw),
+        raising=False)
+
+
+def _note_keeping_nothing() -> Path:
+    """Today's note as a symlink to `/dev/null`: a write that is kept nowhere.
+
+    The mock-free mismatch the case above establishes — `exists()` is true, the append
+    succeeds, the read-back is `""` — used wherever a node is about what the mismatch
+    DOES rather than how it was produced.
+    """
+    path = _note_file(autonomy)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.unlink(missing_ok=True)
+    path.symlink_to(Path("/dev/null"))
+    return path
+
+
+def _field(body: str, label: str):
+    """The value of a `Label: value` line of the filed body — the lines the refresh reads."""
+    hit = re.search(rf"^{re.escape(label)}: (.*)$", body, re.MULTILINE)
+    assert hit, f"{label!r} is not a line of the filed body:\n{body}"
+    return hit.group(1).strip()
+
+
+def test_a_dropped_daily_note_line_files_one_backlog_item_on_the_lloyd_board(
+        aut, board_server, monkeypatch, caplog):
+    """Clause 1: the False now reaches a file a person opens, not only a log line.
+
+    The payload assertions are the contract the owed ruling is about — board `lloyd`,
+    and `up_next` / `high` so an auto-filed alert sits where the guardian's own alert
+    items sit (`agent-services/guardian/notify.py:514-519`) — and they are asserted on
+    what the code SENT as well as on the file the route wrote, because a board that
+    arrives defaulted and a board that arrives named are the same file and a different
+    decision.
+    """
+    path = _seed_note_with_body()
+    _clobber_on_write(monkeypatch, path.read_text(encoding="utf-8"))
+    with caplog.at_level(logging.ERROR, logger="lloyd-autonomy"):
+        assert autonomy.append_daily_alert_line(
+            "Autonomy #7 failed 3 times in a row (run #42)") is False
+
+    assert board_server.paths_of(CREATE_PATH) == [CREATE_PATH], board_server.requests
+    assert board_server.paths_of(UPDATE_PATH) == [], "a first drop has nothing to refresh"
+    sent = board_server.payload_of(CREATE_PATH)
+    assert sent["name"].startswith(ALERT_ITEM_PREFIX), sent
+    assert sent["board"] == "lloyd", sent
+    assert (sent["status"], sent["priority"]) == ("up_next", "high"), sent
+
+    items = board_server.items()
+    assert len(items) == 1, [str(p) for p, _, _ in items]
+    _, fm, body = items[0]
+    assert (fm["board"], fm["status"], fm["priority"]) == ("lloyd", "up_next", "high"), fm
+    assert fm["name"] == sent["name"], (fm, sent)
+    assert _field(body, "Mismatches observed") == "1", body
+    assert _note_file(autonomy).name in body, body
+    # The ERROR line is the record that already existed; the item is added to it, not
+    # swapped for it.
+    assert len(_error_lines(caplog)) == 1, _error_lines(caplog)
+
+
+def test_the_second_mismatch_refreshes_that_one_item_instead_of_filing_a_second(
+        aut, board_server, monkeypatch):
+    """Clause 2: five drops in a week are one item that says five.
+
+    Both fields the contract names advance: the count, and the `Last seen` stamp — read
+    back as a real datetime rather than compared as text, because two stamps that
+    differ only in their UTC-offset spelling would pass a string comparison while
+    telling the same instant twice, which is the whole purpose of the field.
+    """
+    path = _seed_note_with_body()
+    _clobber_on_write(monkeypatch, path.read_text(encoding="utf-8"))
+
+    assert autonomy.append_daily_alert_line("Autonomy #7 failed 3 times (run #42)") is False
+    first_body = board_server.items()[0][2]
+    first_seen = _field(first_body, "Last seen")
+
+    assert autonomy.append_daily_alert_line("Autonomy #7 failed 3 times (run #43)") is False
+
+    items = board_server.items()
+    assert len(items) == 1, [str(p) for p, _, _ in items]
+    _, fm, body = items[0]
+    assert body.count("Mismatches observed:") == 1, "the count is now in two places"
+    assert _field(body, "Mismatches observed") == "2", body
+    second_seen = _field(body, "Last seen")
+    assert (dt.datetime.fromisoformat(second_seen)
+            > dt.datetime.fromisoformat(first_seen)), (first_seen, second_seen)
+    assert fm["status"] == "up_next", fm
+
+    assert board_server.paths_of(CREATE_PATH) == [CREATE_PATH], board_server.requests
+    assert board_server.paths_of(UPDATE_PATH) == [UPDATE_PATH], board_server.requests
+    assert board_server.payload_of(UPDATE_PATH)["force_body_replace"] is True, \
+        "the refresh replaces a body this function authored whole, and the route " \
+        "ignores a shorter body without that flag"
+
+
+def test_a_closed_drop_item_does_not_absorb_the_next_mismatch(aut, board_server,
+        monkeypatch):
+    """The coalescing rule's other half: closing the item closes that incident.
+
+    Left out of the graded clauses by the triage and pinned anyway, because a refresh
+    that found a `done` item would silently reopen something a person closed — the loop
+    overruling the one reader who engaged with it. `status: done` here goes through the
+    route rather than the front matter, so it is the same close the board performs.
+    """
+    path = _seed_note_with_body()
+    _clobber_on_write(monkeypatch, path.read_text(encoding="utf-8"))
+    autonomy.append_daily_alert_line("Autonomy #7 failed 3 times (run #42)")
+    _, fm, closed_body = board_server.items()[0]
+    asyncio.run(board_server.routes.backlog_task_update(
+        _FakeRequest({"id": fm["id"], "status": "done"})))
+    before = board_server.items()
+    assert before[0][1]["status"] == "done", before[0][1]
+
+    assert autonomy.append_daily_alert_line("Autonomy #7 failed 3 times (run #44)") is False
+
+    items = board_server.items()
+    assert len(items) == 2, [str(p) for p, _, _ in items]
+    fresh = [entry for entry in items if entry[1]["status"] != "done"]
+    assert len(fresh) == 1, [entry[1] for entry in items]
+    assert _field(fresh[0][2], "Mismatches observed") == "1", fresh[0][2]
+    assert _field(_closed_body(board_server, fm["id"]), "Mismatches observed") == "1", \
+        "the closed incident keeps the tally it was closed with"
+
+
+def _closed_body(board: _Board, task_id: int) -> str:
+    for path, fm, body in board.items():
+        if fm["id"] == task_id:
+            return body
+    raise AssertionError(f"backlog #{task_id} vanished from the board")
+
+
+def test_an_alert_that_lands_files_nothing_and_opens_no_socket(aut, board_server):
+    """Clause 3: the filing hangs off the mismatch, so a delivered alert is silent.
+
+    Asserted against the board's directory AND against the transport: `requests` empty
+    is the stronger half, because an implementation that posted a create on every
+    append and let the route decide would leave this directory empty on a happy day
+    anyway, and only the call list shows it never reached for the backend at all.
+    """
+    assert autonomy.append_daily_alert_line(
+        "Autonomy #8 disabled after 3 failures (run #43)") is True
+    assert board_server.requests == [], board_server.requests
+    assert board_server.items() == [], [str(p) for p, _, _ in board_server.items()]
+    assert _bullet_lines(), "the line itself still landed, which is why nothing filed"
+
+
+def test_a_backlog_create_that_raises_still_returns_false_and_still_logs_the_error(
+        aut, board_server, caplog):
+    """Clause 4, mode 1: a bug in the new dependency may not cost the alarm.
+
+    A bare `RuntimeError` is the mode that matters most: `_backend_json` swallows the
+    transport's own exceptions by contract, so what reaches the caller uncaught in
+    production is a failure from this code's own logic, which is exactly what a
+    defensive `try` around the filing exists for.
+    """
+    _note_keeping_nothing()
+    board_server.fail_create = RuntimeError
+    with caplog.at_level(logging.ERROR, logger="lloyd-autonomy"):
+        assert autonomy.append_daily_alert_line(
+            "Autonomy #9 failed 3 times (run #44)") is False
+    # The attempt itself is the half a writer that never files would otherwise satisfy:
+    # the code reached for the board, the board blew up in the transport, and neither
+    # the exception nor a missing item cost the caller its False.
+    assert board_server.paths_of(CREATE_PATH) == [CREATE_PATH], board_server.requests
+    assert len(_error_lines(caplog)) == 1, _error_lines(caplog)
+    assert board_server.items() == [], [str(p) for p, _, _ in board_server.items()]
+
+
+def test_a_refused_backlog_connection_still_returns_false_and_still_logs_the_error(
+        aut, refused_backend, caplog):
+    """Clause 4, mode 2: the backend down, which is also the note's own bad day.
+
+    The one mode that is not hypothetical: a vault-backed backend that is unreachable
+    and a daily note that is being rewritten underneath the writer are frequently the
+    same outage, and this is the state in which the alert still has to get out.
+    `refused_backend` is the module-wide refusal, so the assertion here is that the
+    attempt happened and was absorbed.
+    """
+    _note_keeping_nothing()
+    with caplog.at_level(logging.ERROR, logger="lloyd-autonomy"):
+        assert autonomy.append_daily_alert_line(
+            "Autonomy #10 failed 3 times (run #45)") is False
+    assert refused_backend, "the alert path never reached for the backlog at all"
+    assert any(TASKS_PATH in url for url in refused_backend), refused_backend
+    assert len(_error_lines(caplog)) == 1, _error_lines(caplog)
+
+
+def test_a_backlog_create_answered_unsuccessful_still_returns_false_and_still_logs(
+        aut, board_server, caplog):
+    """Clause 4, mode 3: a 200 whose body says no is still a failure, and a quiet one.
+
+    `{"success": false}` arrives with HTTP 200 — every validation refusal in
+    `app/routers/backlog.py:704` does — so an implementation that looked only at the
+    status would log a filing that never happened, and the count would then be the
+    number of times the code believed it had filed.
+    """
+    _note_keeping_nothing()
+    board_server.reply_create = {"success": False, "error": "boom"}
+    with caplog.at_level(logging.ERROR, logger="lloyd-autonomy"):
+        assert autonomy.append_daily_alert_line(
+            "Autonomy #11 failed 3 times (run #46)") is False
+    assert board_server.paths_of(CREATE_PATH) == [CREATE_PATH], board_server.requests
+    assert len(_error_lines(caplog)) == 1, _error_lines(caplog)
+    assert board_server.items() == [], [str(p) for p, _, _ in board_server.items()]
+
+
+def test_a_drop_item_the_backend_cannot_be_read_back_is_left_as_it_stands(
+        aut, board_server, caplog):
+    """The refresh's own failure mode, which the never-raises clause covers in practice.
+
+    `force_body_replace` means a refresh is not additive: it overwrites the body with
+    whatever the caller assembled, so assembling one from an unread item would post a
+    body containing only this mismatch and move a tally that says 4 back to 1. Refusing
+    to refresh is the safe half — the ERROR line and the item's own last-known count
+    both still stand — and it must cost nothing else, including the append's False.
+    """
+    _note_keeping_nothing()
+    assert autonomy.append_daily_alert_line("Autonomy #12 failed (run #47)") is False
+    board_server.hide_detail = True
+    caplog.clear()
+    # WARNING, not ERROR: the half being asserted here is the refusal's own log line,
+    # and a level of ERROR would drop the record the assertion is about.
+    with caplog.at_level(logging.WARNING, logger="lloyd-autonomy"):
+        assert autonomy.append_daily_alert_line("Autonomy #12 failed (run #48)") is False
+    items = board_server.items()
+    assert len(items) == 1, [str(p) for p, _, _ in items]
+    assert _field(items[0][2], "Mismatches observed") == "1", items[0][2]
+    assert board_server.paths_of(UPDATE_PATH) == [], \
+        "a body assembled from nothing must not be posted over a tally it cannot see"
+    assert board_server.paths_of(TASKS_PATH) == [TASKS_PATH, TASKS_PATH], \
+        board_server.requests
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("advance its count" in msg for msg in warnings), warnings
+    assert len(_error_lines(caplog)) == 1, _error_lines(caplog)
+
+
+async def test_the_drop_branch_says_so_when_the_note_refuses_the_alert(aut, caplog):
+    """Clause 5: the witness `app/discord_notify.py:115-117` has never had.
+
+    Before #1736 the drop path appended and returned unconditionally, so the only
+    branch that ever KNEW an alarm had been lost kept its knowledge to itself; #1736
+    added the warning and left it unpinned, which is why the triage for this item could
+    say that deleting those three lines turned no test red. The assertion is on the
+    warning text, so deleting the `if not appended:` block — or downgrading it to a
+    debug line, which `at_level(WARNING)` would then drop — turns this node red.
+    """
+    from app import discord_notify
+
+    _seed_note_with_body()
+    _note_keeping_nothing()
+    with caplog.at_level(logging.WARNING, logger="lloyd-server"):
+        await discord_notify.discord_alert("watchdog says the fleet is silent")
+
+    warnings = [r.getMessage() for r in caplog.records
+                if r.name == "lloyd-server" and r.levelno == logging.WARNING]
+    assert any("the daily note refused the alert too" in msg for msg in warnings), \
+        f"the drop branch kept its knowledge to itself: {warnings}"
+    assert any("exists only in this log line" in msg for msg in warnings), warnings
+    assert not _bullet_lines(), "and the alarm is still not in the note"
+
+
+async def test_a_drop_files_its_item_from_inside_the_worker_s_running_loop(
+        aut, board_server):
+    """The process boundary this feature crosses, walked from the caller that has a loop.
+
+    The caller that drops an alert is an `async def` running in `lloyd-agent-worker`:
+    `workers/sources/scheduled_task.py:164` and `workers/fleet_watchdog.py:498` both
+    `await discord_alert`, which reaches `_survive_the_dropped_alert` and this writer — a
+    separate supervisor program from `lloyd-backend`, which is why the filing is a
+    cross-process POST. The filing is a blocking `urlopen` on that stack, bounded at
+    `autonomy._BACKEND_ALERT_TIMEOUT_SECONDS` = 3.0 rather than the guardian's 5.0, so
+    a wedged backend costs a stalled tick and not a stalled worker. This node is what
+    proves the whole async path completes and files: a version that nested
+    `asyncio.run` inside the running loop, or moved the post onto a thread nobody
+    joined, would fail here while every sync node above stayed green.
+    """
+    from app import discord_notify
+
+    assert autonomy._BACKEND_ALERT_TIMEOUT_SECONDS <= 3.0, \
+        "the client bound on a blocking call made from a running event loop"
+    _seed_note_with_body()
+    _note_keeping_nothing()
+    await discord_notify.discord_alert("watchdog says the fleet is silent")
+
+    items = board_server.items()
+    assert len(items) == 1, [str(p) for p, _, _ in items]
+    assert _field(items[0][2], "Mismatches observed") == "1", items[0][2]
