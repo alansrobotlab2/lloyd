@@ -22,15 +22,29 @@ const webDir = __dirname
 const extDir = path.resolve(webDir, "../chrome-extension")
 const extDist = path.join(extDir, "dist")
 
+const manifestSrc = path.join(extDir, "manifest.json")
+
+// The manifest is hand-written and copied, never generated (#1701). Check it
+// before anything else: `emptyOutDir` below wipes dist/ before `closeBundle`
+// runs, so a copy that fails there leaves an emptied dist/ behind and an
+// ENOENT that names no path. The icons loop further down guards the same way.
+function assertManifestPresent() {
+  if (!fs.existsSync(manifestSrc)) {
+    throw new Error(
+      `chrome-extension/manifest.json is missing (looked for ${manifestSrc}); ` +
+        "it is tracked since #1701 — restore it before building, dist/ was left untouched",
+    )
+  }
+}
+assertManifestPresent()
+
 function copyExtensionStatic() {
   return {
     name: "lloyd-chrome-copy-static",
     closeBundle() {
+      assertManifestPresent()
       fs.mkdirSync(extDist, { recursive: true })
-      fs.copyFileSync(
-        path.join(extDir, "manifest.json"),
-        path.join(extDist, "manifest.json"),
-      )
+      fs.copyFileSync(manifestSrc, path.join(extDist, "manifest.json"))
       const iconsSrc = path.join(extDir, "icons")
       if (fs.existsSync(iconsSrc)) {
         const iconsDst = path.join(extDist, "icons")

@@ -20,9 +20,10 @@ with nothing wrong:
   * the extracted set is asserted non-empty (an arms table that stopped
     parsing would otherwise pass on an empty intersection);
   * the check is shown to be able to fail, on text this file writes;
-  * paths resolve against the working tree, not `git ls-files` — the extension's
-    `manifest.json` is untracked, and a tracked-files check reports a real file
-    as missing. `$LLOYD_DATA/...` and `~/...` resolve under the data root and
+  * paths resolve against the working tree, not `git ls-files` — a doc may cite
+    a git-ignored runtime file (`data/tool_overrides.yaml`) that is real on this
+    box and absent from every worktree, and a tracked-files check reports it as
+    missing. `$LLOYD_DATA/...` and `~/...` resolve under the data root and
     the home directory, because the scored store moved there on 2026-09-22
     (`architecture/data-home.md`) and a repo-rooted check would call it absent.
 """
@@ -553,12 +554,12 @@ def test_authority_surfaces_cites_the_denied_paths_by_symbol_not_line():
         f"the untouched citations this round left alone are missing: {others}")
 
 
-#: The fixture the exemption exists for: `.gitignore:42` (`*.json`) keeps
-#: `chrome-extension/manifest.json` out of every tree, and
-#: `architecture/browser-side-panel.md:124` cites it while saying in the same
-#: paragraph that the manifest is absent from git. Cited path, real on this box,
-#: in no tree git can carry.
-IGNORED_CITATION = ROOT / "chrome-extension/manifest.json"
+#: The fixture the exemption exists for: a path `.gitignore` keeps out of every
+#: tree, which docs cite as real on this box. It was the extension's
+#: `manifest.json` until #1701 tracked it; `data/tool_overrides.yaml` is the same
+#: shape (ignored by its own rule, cited by `architecture/data-home.md` and
+#: others, present only in the live checkout).
+IGNORED_CITATION = ROOT / "data/tool_overrides.yaml"
 FICTION_CITATION = ROOT / "app/paths/no_such_module_really.py"
 OUTSIDE_CITATION = HOME / "lloyd-data/eval/nope"
 
@@ -567,20 +568,20 @@ def test_an_ignored_citation_is_exempt_and_a_fictional_one_is_not():
     """The exemption control, in both directions, because an always-empty
     `unresolved_citations` and a correctly-empty one look identical in the report.
 
-    Three citations, three verdicts: the git-ignored manifest is exempt, a
+    Three citations, three verdicts: the git-ignored runtime file is exempt, a
     fabricated module under no ignore pattern is reported, and a path outside the
     repo (`$LLOYD_DATA`-style, which is what the extractor resolves against home)
     is reported rather than silently skipped — the exemption is about git's
     coverage of *this* tree, not about paths it cannot see. Then the two
     preconditions of the exemption are themselves asserted, so the node cannot
-    rot into a no-op: if `.gitignore` stops matching the manifest, or starts
+    rot into a no-op: if `.gitignore` stops matching that file, or starts
     matching the fabricated path, the exemption is no longer what is making the
     main node green and this node says so.
     """
     cited = [(IGNORED_CITATION, None), (FICTION_CITATION, None), (OUTSIDE_CITATION, None)]
     unresolved = [Path(p) for p in unresolved_citations(cited)]
     assert IGNORED_CITATION not in unresolved, (
-        "the git-ignored manifest citation was still reported, so a doc that tells "
+        "the git-ignored citation was still reported, so a doc that tells "
         "the truth about an untracked file cannot pass from a worktree")
     assert FICTION_CITATION in unresolved, "a fabricated repo path slipped through"
     assert OUTSIDE_CITATION in unresolved, (

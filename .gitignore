@@ -73,6 +73,13 @@ __pycache__/
 !eval/engine_output/*/*.json
 # …and the constraint-conflict suite's per-engine baselines (#678).
 !eval/constraint_conflict/baselines/*.json
+# …and the Chrome side-panel extension's hand-written manifest (#1701), plus
+# the copy the build writes into the tracked dist/. Without them a fresh clone
+# carried a dist/ Chrome cannot load, and `copyExtensionStatic()` copies the
+# manifest rather than generating it, so nothing could rebuild it.
+# tests/test_chrome_extension_manifest_tracked.py pins both.
+!chrome-extension/manifest.json
+!chrome-extension/dist/manifest.json
 
 # ─── Secrets ────────────────────────────────────────
 .env

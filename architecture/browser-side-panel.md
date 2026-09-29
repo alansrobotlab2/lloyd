@@ -116,20 +116,17 @@ are committed files, so a rebuild shows up as a diff in a review. MV3 service
 workers cannot hot-reload, so after a rebuild the extension's reload icon on the
 extensions page is what picks it up; `--watch` only rewrites the bundle.
 
-**The built output in git is not loadable on its own.** The MV3 manifest is not
-tracked (#1701 owns the cause), so it is absent from a fresh checkout, from a
-worktree, and from the tracked build output Chrome is pointed at. Loading
-unpacked works on this machine because the manifest is present here. Nor is the
-build command above harmless without it: `vite.chrome.config.ts` empties `outDir`
-before bundling and copies `chrome-extension/manifest.json` in at the end of the
-bundle, ahead of the icon copy — so in a tree that has no manifest the run writes
-a fresh bundle over an emptied `chrome-extension/dist/`, skips both the manifest and
-`chrome-extension/dist/icons/`,
-and dies on an ENOENT that names no path (#1701). Nothing else
-about this surface depends on the manifest's contents being described here, which
-is why this doc says *manifest* and does not cite a path to one: a citation to a
-file that exists only in one checkout would be a claim its own test could not
-re-check.
+**The MV3 manifest is tracked, twice.** `chrome-extension/manifest.json` is the
+hand-written source and `chrome-extension/dist/manifest.json` is the copy the
+build writes beside the bundle; both need a negation in `.gitignore`, whose
+blanket `*.json` rule kept them out of every tree until #1701 — a fresh
+checkout got a built extension Chrome could not load.
+`tests/test_chrome_extension_manifest_tracked.py` pins both as tracked and not
+ignored. The build copies the manifest rather than generating it, so
+`vite.chrome.config.ts` checks for `chrome-extension/manifest.json` when the
+config loads and refuses with an error naming that path — before `emptyOutDir`
+touches the output directory, instead of the pathless ENOENT it used to die
+on after the output directory had already been emptied.
 
 ## What this doc does not cover
 
@@ -191,3 +188,7 @@ re-check.
   `measurement`'s silence on browser sessions. Filed: the rotted `messages.py`
   citations in the two client comments (#1766) and `spawnSession`'s unreachable
   `kickoff` default, the last seam of the retired auto-spawn path (#1767).
+- **2026-09-28 — hand-landed (#1701).** Both manifests are tracked through
+  `.gitignore` negations, the build refuses a missing manifest by path before it
+  empties the output directory, and §Build now says so; the "not loadable on its own"
+  paragraph is gone with the cause it described.
