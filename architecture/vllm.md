@@ -876,6 +876,38 @@ has still not been run as of 2026-09-11.
   a future counted window: (i) any counted window in which a chat turn carries a
   prefix miss, or (ii) any counted day exceeding §6.1's per-day budget of 97
   misses / 10.3M re-prefilled tokens.
+  What the ruling above does with a LATER day is now on the record, because
+  **2026-09-28 00:00 → 2026-09-29 00:00 UTC** fired **both** of its triggers,
+  and it is recorded here as a re-open that attribution then closed rather than
+  as grounds to chase. Trigger (i) fired: **1 of the day's 10 chat turns**
+  (`2026-09-28T03:42:25`) carried misses, and that turn's **3 misses cost
+  396,528 re-prefilled tokens**.
+  Trigger (ii) fired: **243 misses / 30,028,609 tokens** against §6.1's per-day
+  budget of **97 misses / 10.3M tokens**, the fleet baseline that sentence names
+  divided by the two days it spans. Read trigger (ii) before reading anything into it:
+  **231 of those 243 misses and 28,688,550 of the 30,028,609 tokens are
+  autocode**, and §6.1's budget is a **2026-09-08/09** fleet baseline computed
+  over a different load mix, so trigger (ii) firing on a day that is 95% one
+  autonomous kind is not by itself evidence for the upstream chase — it is at
+  least as much evidence the budget's denominator is the 09-08/09 fleet.
+  Attribution first, on the rule the 09-25 split above uses: of the day's
+  **242 miss events, 89 had free-pool churn in their gap and 153 did not**, and
+  all **3** of that chat turn's misses churned — two of them with the gap's KV
+  peak at or over the **0.60** gate (**0.897** over 634.7 s, **0.619** over
+  541.1 s), and the third at a shallow peak of **0.429** over 470.1 s with
+  **991,759** tokens computed inside the gap — past the **482,477** free blocks
+  that peak implies on this pool, so LRU reclaims a freed prefix regardless.
+  The ruling's
+  own condition for an upstream filing is a chat-turn miss with **neither**
+  churn **nor** a gate-level KV explanation, and this day produced none — so the
+  2026-09-28 re-open **closes on its own evidence**: the day's non-churn misses
+  are the same accepted loss, and no upstream report follows from it. The
+  extract that carries this day is committed as
+  `tests/fixtures/vllm_prefix_miss_2026-09-28.json`, because the status lines it
+  was counted from are byte-rotated (about 17 h per 10 MB file at this load) and
+  without the extract this paragraph would be unverifiable within the week; it
+  is a SECOND extract, and 09-28 does not displace 09-25 as the counted reading,
+  since a day whose chat turns carry a miss is a day that fails (a).
 - **Two-request windows, and what (d) counts.** `two_request_throughput`
   reads every status line the window has. Lines with `Running:` 2 or more:
   **2,895**, median **2464.8 tok/s** combined, slowest **9.2**. Lines under the

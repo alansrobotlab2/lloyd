@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -935,3 +936,275 @@ def test_the_derivation_reads_a_status_line_in_local_time():
             "reqs, Waiting: 0 reqs, GPU KV cache usage: 31.1%, Prefix cache hit rate: 64.9%")
     m = W._STATUS_RE.search(line)
     assert m and m.group(1) == "09-23 07:54:10" and m.group(4) == "4" and m.group(5) == "31.1"
+
+
+# ── #1812: the 2026-09-28 re-open, recorded as a derived reading ─────────
+# The ruling above closes with two triggers that can only fire on a counted day.
+# 2026-09-28 fired both, so §10 now carries what that day measured — and because
+# the paragraph's whole argument is the churn split and one chat turn's shape,
+# every figure in it is recomputed here over the extract it names.
+#
+# A SECOND extract constant, deliberately. `test_the_counted_reading_is_a_named_
+# full_utc_day_with_chat_in_it` pins `EXTRACT`'s window to the day §10 calls the
+# counted reading, and 2026-09-28 cannot be that day: its chat turns carry a
+# miss, which is criterion (a)'s failure and trigger (i)'s firing. Re-pointing
+# `EXTRACT` at it would move the counted reading with it and then demand pass/fail
+# marks this item does not ask for.
+
+REOPEN_EXTRACT = ROOT / "tests" / "fixtures" / "vllm_prefix_miss_2026-09-28.json"
+
+
+@pytest.fixture(scope="module")
+def reopen_raw() -> dict:
+    return json.loads(REOPEN_EXTRACT.read_text(encoding="utf-8"))
+
+
+@pytest.fixture(scope="module")
+def reopen(reopen_raw, cfg) -> dict:
+    return W.derive(reopen_raw, gate=float(cfg["workers"]["kv_gate"]["max_kv_usage"]))
+
+
+def _gap_events(ex: dict, gate: float) -> list[dict]:
+    """Each miss event that has a gap, with `derive`'s churn rule applied to it.
+
+    `derive` publishes only the aggregate (`misses_gap_churned_free_pool`), so the
+    per-event half of §10's split — which of that chat turn's three misses churned,
+    and which of them also sat at or over the gate — cannot be read from its output.
+    This walks the extract's own rows with `derive`'s own arithmetic: the gap's KV
+    peak, the tokens computed inside the gap, and the free blocks that peak implies
+    on this pool, churn when the first reaches the last. Nothing in the script is
+    edited to expose it, which #1812's step 6 forbids; instead the tally is checked
+    against the aggregate, so this walk cannot drift from the rule it copies.
+    """
+    samples = ex["kv_samples"]
+    (pool,) = ex["pool_tokens"]
+    out = []
+    for m in ex["misses"]:
+        start = m[0] - m[1] / 1000
+        if m[6] is None:
+            continue
+        # Status lines report the 10 s BEFORE their stamp, so a gap's lines run
+        # one interval past its end — `derive`'s bound, copied exactly.
+        g = [s for s in samples if m[6] <= s[0] <= start + W.STATUS_INTERVAL_S]
+        if not g:
+            continue
+        peak = max(s[1] for s in g) / 100
+        computed = sum(s[3] for s in g)
+        out.append({"kind": m[5], "gap_s": start - m[6], "peak": peak,
+                    "computed": computed, "free_at_peak": round((1 - peak) * pool),
+                    "churn": computed >= (1 - peak) * pool})
+    d = W.derive(ex, gate=gate)
+    assert len(out) == d["miss_events"] and \
+        sum(1 for e in out if e["churn"]) == d["misses_gap_churned_free_pool"], (
+        "this walk's churn rule no longer agrees with derive's aggregate, so "
+        "no per-event figure read off it is the split the doc cites")
+    return out
+
+
+def _reopen_bullet() -> str:
+    """§10's eviction bullet — the ruling and the re-open, one bullet, collapsed.
+
+    Scoped to the bullet rather than to §10 so every phrase these nodes demand is
+    one the eviction argument itself carries, and so the ruling's pinned wording and
+    the re-open that cites it are read from the same stretch of prose the reader
+    walks. Raw text is re-split here because `_section` collapses whitespace, which
+    would erase the bullet boundaries this needs.
+    """
+    raw = DOC.read_text(encoding="utf-8")
+    start = raw.index("- **Eviction: gate-level KV in most of the gaps")
+    end = raw.index("- **Two-request windows, and what (d) counts.**", start)
+    return " ".join(raw[start:end].split()).replace("**", "")
+
+
+def test_the_reopen_extract_is_committed_and_derives_the_cited_day(reopen_raw,
+                                                                   reopen):
+    """#1812 clause 1: the re-open's day is in the tree, not in /tmp.
+
+    §10's counted reading is built from engine status lines that are byte-rotated
+    (about 17 hours per 10 MB file at this load), so without the extract committed
+    every figure in the re-open becomes unverifiable inside a week — and the copy
+    this was counted into lived on tmpfs, where a reboot, not the ten-day sweep, is
+    what deletes it. The four values are the ones #1812 was filed with, so this also
+    catches a fixture swapped for one from some other window.
+    """
+    assert reopen_raw["window"] == ["2026-09-28", "2026-09-29"], (
+        "the re-open is pinned to a 00:00→00:00 UTC day, like the counted reading")
+    assert reopen["misses"] == 243
+    assert reopen["reprefill_tokens"] == 30028609
+    assert reopen["chat_turns"] == 10
+    assert reopen["chat_turns_with_misses"] == 1
+    tracked = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "--error-unmatch",
+         str(REOPEN_EXTRACT.relative_to(ROOT))],
+        capture_output=True, text=True)
+    assert tracked.returncode == 0, (
+        f"{REOPEN_EXTRACT.name} is on disk but not in git: an uncommitted fixture "
+        "is gone the moment the working copy is, which is the whole hazard this "
+        "item was filed over")
+    # And it is the extract the WRITER emitted, not a hand-assembled approximation
+    # of one: `--write-extract` serialises with `separators=(",", ":")` plus a
+    # trailing newline (scripts/vllm_prefix_miss_window.py's `main`), so re-dumping
+    # what the file parses to must reproduce its bytes exactly. Anything edited in a
+    # text editor — a row dropped, a number nudged — fails here even though it still
+    # parses, and this one-line file is why a citation into it is always line 1.
+    raw = REOPEN_EXTRACT.read_text(encoding="utf-8")
+    assert raw == json.dumps(reopen_raw, separators=(",", ":")) + "\n", (
+        f"{REOPEN_EXTRACT.name} is not byte-for-byte what "
+        "`vllm_prefix_miss_window --write-extract` writes for the rows it holds, "
+        "so the committed reading has been edited by hand")
+    assert len(raw.splitlines()) == 1, (
+        "the extract is one compact line; a multi-line fixture would make every "
+        "figure in it diffable by hand")
+
+
+def test_the_reopen_trigger_i_figures_are_the_extract_s(s10, reopen_raw, reopen):
+    """#1812 clause 2: trigger (i)'s numbers are read, not typed.
+
+    Trigger (i) — a chat turn carrying a prefix miss at all — is the condition the
+    ruling wrote the loss open for, so the paragraph that names it cannot be free to
+    say whatever it likes about that turn. Edit either figure in the doc and this
+    fails; edit the extract and the doc fails beside it. The turn's own stamp comes
+    from the extract's rows too, so the day cannot be quietly re-pointed either.
+    """
+    p = _reopen_bullet()
+    chat_row = [t for t in reopen_raw["turns"] if t[1] == "chat" and (t[2] or 0) > 0]
+    assert len(chat_row) == 1 == reopen["chat_turns_with_misses"]
+    assert f"{chat_row[0][0]}" in p, "the re-open must name the turn it counted"
+    assert f"{reopen['chat_turns_with_misses']} of the day's " \
+           f"{reopen['chat_turns']} chat turns" in p, (
+        f"the doc's trigger-(i) share is not the extract's "
+        f"({reopen['chat_turns_with_misses']} of {reopen['chat_turns']})")
+    misses, tokens = reopen["by_kind"]["chat"]
+    assert f"{misses} misses cost {tokens:,} re-prefilled tokens" in p, (
+        f"that turn's misses and tokens are not what the extract has "
+        f"({misses} / {tokens:,})")
+    assert f"{reopen_raw['window'][0]} 00:00 → {reopen_raw['window'][1]} 00:00 UTC" \
+        in p, ("the re-open has to name the window it counted, in the same shape "
+               "the counted reading uses")
+
+
+def test_the_reopen_budget_side_still_derives_from_6_1(s10, reopen):
+    """#1812 clause 3: trigger (ii) is a ratio, and each side keeps its own source.
+
+    The day's side is the new extract; the budget's side is §6.1's own baseline
+    sentence through `_per_day_budget`, the same helper that scales the bar's
+    aggregate threshold. So neither half can be re-cut by hand — editing the doc's
+    97 breaks against §6.1, editing its 243 breaks against the extract. Step 6 keeps
+    that baseline sentence untouched precisely so this comparison keeps meaning what
+    it says.
+    """
+    p = _reopen_bullet()
+    misses_per_day, tokens_per_day = _per_day_budget(_section(6))
+    assert (misses_per_day, tokens_per_day) == (97, 10.3), (
+        "§6.1's baseline moved, so every budget figure in §10 needs re-reading")
+    day_side = f"{reopen['misses']} misses / {reopen['reprefill_tokens']:,} tokens"
+    assert day_side in p, (
+        f"the day's side is not the extract's "
+        f"({reopen['misses']} / {reopen['reprefill_tokens']:,})")
+    assert f"{misses_per_day} misses / {tokens_per_day}M tokens" in p, (
+        f"the budget side is not what §6.1's sentence yields "
+        f"({misses_per_day} / {tokens_per_day}M)")
+    assert reopen["misses"] > misses_per_day \
+        and reopen["reprefill_tokens"] > tokens_per_day * 1e6, (
+        "the paragraph states trigger (ii) fired; the two derived sides must "
+        "agree that it did")
+
+
+def test_the_reopen_load_mix_caveat_is_derived_from_by_kind(s10, reopen):
+    """#1812 clause 4: a trigger fired over a different mix is not an upstream case.
+
+    The budget is a 2026-09-08/09 fleet baseline; this day is overwhelmingly one
+    autonomous kind, whose turns are long and whose prompts change. The doc names
+    which mix each side was measured over, and the share itself comes out of the
+    extract's `by_kind` — including the baseline's own date, which is read from §6.1
+    rather than retyped — so a reader cannot lift the ratio into an upstream report.
+    """
+    p = _reopen_bullet()
+    auto_misses, auto_tokens = reopen["by_kind"]["autocode"]
+    assert f"{auto_misses} of those {reopen['misses']} misses and " \
+           f"{auto_tokens:,} of the {reopen['reprefill_tokens']:,} tokens are " \
+           "autocode" in p, (
+        f"the caveat's share is not the extract's by_kind: "
+        f"{reopen['by_kind']['autocode']}")
+    assert f"{auto_misses / reopen['misses']:.0%}" in p, (
+        "the rounding has to be the extract's too, not a percentage someone "
+        "estimated beside the table")
+    m = _BASELINE_RE.search(_section(6))
+    assert m, "#1812 needs §6.1's baseline sentence, and step 6 keeps it"
+    assert f"2026-09-{m.group(1)}/{m.group(2)}" in p, (
+        "the caveat must name the baseline's own date range, derived from §6.1")
+    assert "not by itself evidence for the upstream chase" in p, (
+        "the caveat has to say what the trigger does NOT establish, or the next "
+        "reader treats a 95%-autocode day as a filing")
+
+
+def test_the_reopen_churn_split_and_chat_attribution_close_the_filing(s10, reopen,
+                                                                      reopen_raw,
+                                                                      cfg):
+    """#1812 clause 5: attribution ran before the chase, and it closed the question.
+
+    Three things, all derived. The split: 89 of the day's 242 miss events churned,
+    153 did not, on `derive`'s LRU rule. That chat turn: all three of its misses
+    churned, two of them with the gap's KV peak at or over the usage gate, and the
+    third at a shallow peak whose implied free blocks the gap's own tokens walked
+    anyway. The conclusion: the ruling's condition for an upstream filing is a
+    chat-turn miss with NEITHER churn NOR a gate-level KV explanation, this day
+    produced none, and the draft-group filing therefore stays closed on its own
+    evidence. The phrases the accepted-loss ruling is pinned by, and both trigger
+    sentences, survive verbatim — the re-open was written around them, not over them.
+    """
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    p = _reopen_bullet()
+    ev = _gap_events(reopen_raw, gate=gate)
+    chat = [e for e in ev if e["kind"] == "chat"]
+    assert len(chat) == reopen["by_kind"]["chat"][0] == 3
+    assert all(e["churn"] for e in chat), (
+        f"the doc says every chat miss churned; the extract says {chat}")
+    over = [e for e in chat if e["peak"] >= gate]
+    assert len(over) == 2, (
+        f"exactly two of the three should sit at or over the gate: "
+        f"{[(round(e['peak'], 3), e['gap_s']) for e in chat]}")
+
+    assert f"{reopen['miss_events']} miss events, " \
+           f"{reopen['misses_gap_churned_free_pool']} had free-pool churn in their " \
+           f"gap and {reopen['miss_events'] - reopen['misses_gap_churned_free_pool']} " \
+           "did not" in p, (
+        f"the split is not the extract's: "
+        f"{reopen['misses_gap_churned_free_pool']} / "
+        f"{reopen['miss_events'] - reopen['misses_gap_churned_free_pool']} of "
+        f"{reopen['miss_events']}")
+    for e in over:
+        assert f"{e['peak']:.3f}" in p and f"{e['gap_s']:.1f}" in p, (
+            f"an at-or-over-gate chat miss is cited by its own numbers: "
+            f"{round(e['peak'], 3)} over {round(e['gap_s'], 1)} s")
+    shallow = [e for e in chat if e["peak"] < gate]
+    assert len(shallow) == 1
+    s0 = shallow[0]
+    assert f"{s0['peak']:.3f}" in p and f"{s0['computed']:,}" in p \
+        and f"{s0['free_at_peak']:,}" in p, (
+        "the one miss below the gate is explained by its tokens against its own "
+        f"implied free blocks: {s0['computed']:,} vs {s0['free_at_peak']:,}")
+    assert "closes on its own evidence" in p, (
+        "the paragraph must state what the attribution concluded, not just its data")
+    assert reopen["misses_gap_over_90"] == 0 and \
+        "the day's non-churn misses are the same accepted loss" in p, (
+        "no miss crossed 0.90, so the accepted loss is the right conclusion — if "
+        "that ever changes the sentence and the figure must change together")
+
+    # The ruling's own words, and the triggers that caught the day: all intact.
+    for pinned in ("accepted as a bounded, documented loss",
+                   "the upstream unannotated draft-group annotation is not chased",
+                   "unmeasured rather than merely unfinished",
+                   "does not claim reuse is disabled",
+                   "capability chase with no measured gain"):
+        assert pinned in p, f"the re-open moved a pinned ruling phrase: {pinned}"
+    for trigger in ("Re-open conditions, both countable from a future counted "
+                    "window", "any counted window in which a chat turn carries a "
+                    "prefix miss", "any counted day exceeding §6.1's per-day "
+                    "budget of 97 misses / 10.3M re-prefilled tokens"):
+        assert trigger in s10, f"a re-open trigger sentence was edited: {trigger}"
+    # The re-open is inside the counted reading's span, which may carry exactly one
+    # pass/fail mark per criterion: the fired triggers are (i) and (ii), so none of
+    # a, b, c or d gained a second mark from this paragraph.
+    for letter in CRITERIA:
+        _verdict(_counted_reading(s10), letter)

@@ -1,0 +1,20 @@
+# The counted-day extracts are the tree's durable copy of a measurement that
+# otherwise disappears. architecture/vllm.md §10's figures come from engine status
+# lines that are byte-rotated (~17 h per 10 MB file at this load), so a counted day
+# is unverifiable within a week unless its extract is committed — and the working
+# copies have been landing in /tmp, which is tmpfs, where a reboot is what deletes
+# them (#1812).
+#
+# The root .gitignore ends every new JSON in the tree (`*.json`), which is right for
+# runtime data and wrong here: this is the directory whose whole job is to hold a
+# fixture per counted day. The two extracts that predate #1812 got in only because
+# someone force-added them past the rule, which is invisible to the next round and
+# had already left the 09-28 reading uncommitted. The negation below is the visible
+# version of that, scoped to the extract family rather than to all JSON, so a
+# stray runtime JSON in this directory is still ignored — and so counting the NEXT
+# day, which §10 owes, is one `git add` rather than a rule nobody can see.
+#
+# The root file itself is off-limits to the self-modification loop (denied in
+# scripts/automod/spec.py), so a file like this one is the only route that does not
+# end in a human typing `git add -f` for every counted day.
+!vllm_prefix_miss_*.json
