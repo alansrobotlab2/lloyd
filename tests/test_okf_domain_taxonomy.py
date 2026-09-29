@@ -261,7 +261,10 @@ LEGACY_949 = ("ai-agentic", "ai-agents", "ai-coding", "ai-eigenvectors",
 
 # Values the census found whose SUBJECT has no member of its own. Naming them here
 # is what makes clause 4 checkable: these are the warnings this round must not
-# silence, and #1642 owed 1 is the human ruling that decides their fate.
+# silence, and the 2026-09-29 ruling on #1642's owed entry 1 is what settles their
+# fate — none is promoted and none is folded, so each keeps warning. The bar that
+# replaced the open question is the block above `CANONICAL_DOMAINS`, pinned below
+# by `test_the_block_above_the_domain_set_records_the_made_ruling`.
 RESIDUAL_NO_HOME = (
     "tts-voice", "voice-tts", "embodied-ai", "gpu", "rag", "databases", "science",
     "skills", "autonomy", "nightly", "vlm", "voting", "web", "entrepreneurship",
@@ -421,7 +424,7 @@ def test_the_tranche_is_measured_on_the_live_vault_not_only_on_fixtures(tmp_path
     91 off-set values across 110 files, of which these 16 keys cover 24 files, leaving
     75 values / 86 files. What this node asserts is the part of that which stays true
     as the vault grows: no key of the alias map is still off-set, every value the
-    human has not ruled on is still off-set, and the set is still 47.
+    2026-09-29 ruling left off-set is still off-set, and the set is still 47.
 
     Skips, never fails, when `~/obsidian` is not readable — a vault it cannot see would
     make the census a measurement of nothing, which reads exactly like a pass.
@@ -466,3 +469,189 @@ def test_live_domain_guidance_names_only_known_domains():
     schema = (LIVE_VAULT / GUIDANCE[0]).read_text(encoding="utf-8")
     assert "general/`,etc." not in schema
     assert "CANONICAL_DOMAINS" in schema
+
+
+# ── #1854: the ruling is on the record, not still pending ────────────────────────
+#
+# #1642's owed entry 1 was ruled on 2026-09-29 — no residual off-set value
+# promoted, none given a guessed fold, and a promotion bar written down in place
+# of the open question — and owed entry 3 closed directory consolidation as a
+# final disposition. What that left behind were three comments in
+# `okf_taxonomy.py` and two in this file pointing at a ruling they called
+# unmade, which every later round and triage pass re-derives as an open
+# question. These nodes keep the record straight in both directions: the stale
+# pointers must stay gone, and the disposition, the bar and the two declined
+# subjects must stay legible in the block above `CANONICAL_DOMAINS`.
+
+import ast  # noqa: E402
+
+SRC_PATH = "scripts/vault/okf_taxonomy.py"
+TEST_PATH = "tests/test_okf_domain_taxonomy.py"
+# The commit the ruling postdates. `okf_taxonomy.py` was byte-identical to its
+# copy of that commit at this round's base, which makes it both the positive
+# control for the absence check and the reference for "comment text only".
+PRE_RULING = "7ec50f98"
+
+# The three phrasings that read as an open question. Written as adjacent
+# fragments on purpose: a scan of THIS file for the pattern must not match the
+# line that declares it, so no line below holds any of the three contiguously.
+STALE_RULING = re.compile(
+    r"has not been " r"made"
+    r"|owed " r"1"
+    r"|has not " r"ruled")
+
+
+def _git_blob(rev: str, rel: str) -> str:
+    """`rev`'s copy of `rel`, read out of the repo this checkout belongs to."""
+    r = subprocess.run(["git", "-C", str(ROOT), "show", f"{rev}:{rel}"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, f"git show {rev}:{rel} failed: {r.stderr[:200]}"
+    return r.stdout
+
+
+def _block_above(name: str) -> str:
+    """The run of `#` lines directly above the assignment to `name`, folded into one
+    whitespace-normalised line with every line's leading `#` marker removed.
+
+    Both folds matter: the prose gets re-wrapped whenever the file is edited, and a
+    sentence that straddles a line break only matches once the `# ` that split it is
+    gone — otherwise a multi-line phrase here would pin one particular wrap rather
+    than the claim the comment makes.
+    """
+    lines = (ROOT / SRC_PATH).read_text().splitlines()
+    at = next(i for i, line in enumerate(lines) if line.startswith(f"{name} ="))
+    start = at
+    while start > 0 and lines[start - 1].lstrip().startswith("#"):
+        start -= 1
+    body = [re.sub(r"^\s*#+\s*", "", line) for line in lines[start:at]]
+    return " ".join(" ".join(body).split())
+
+
+def _unsaid(block: str, *phrases: str) -> list[str]:
+    """The phrases `block` does not say, compared whitespace-flexibly, case-blind."""
+    return [p for p in phrases
+            if re.search(r"\s+".join(re.escape(w) for w in p.split()),
+                         block, re.I) is None]
+
+
+def test_no_comment_in_the_taxonomy_or_here_still_claims_the_ruling_is_open():
+    """Clause 1: `STALE_RULING` matches no line of `okf_taxonomy.py` — the three
+    sites this round rewrote are the `CANONICAL_DOMAINS` preamble, the no-home
+    residual sentence in the `DOMAIN_ALIASES` block, and the quantization
+    exclusion — and none of this file either (the `RESIDUAL_NO_HOME` comment and
+    the live-vault census docstring).
+
+    A zero-match absence check proves nothing unless the pattern can match, so the
+    same alternation is run against the pre-ruling blobs of both files and EVERY
+    alternative must find something there: the script blob carries the
+    not-yet-made sentence on one line and the owed-entry pointer on two, this
+    file's blob carries the owed-entry pointer and the has-not-ruled sentence on
+    one line each. Mistype an alternative and the control goes red; bring the
+    stale prose back and the first assert goes red.
+    """
+    offenders = {}
+    for rel in (SRC_PATH, TEST_PATH):
+        hits = [n for n, line in enumerate((ROOT / rel).read_text().splitlines(), 1)
+                if STALE_RULING.search(line)]
+        if hits:
+            offenders[rel] = hits
+    assert offenders == {}, f"stale-ruling pointers still on lines {offenders}"
+    before = _git_blob(PRE_RULING, SRC_PATH) + _git_blob(PRE_RULING, TEST_PATH)
+    for alt in STALE_RULING.pattern.split("|"):
+        assert alt in before, (
+            f"positive control broken at {PRE_RULING}: {alt!r} matches nothing "
+            f"there, so the zero-match assert above would pass on a vacuous pattern")
+
+
+def test_the_block_above_the_domain_set_records_the_made_ruling():
+    """Clause 2: the comment block above `CANONICAL_DOMAINS` says the ruling is
+    MADE and that no residual off-set value was promoted to canonical or given a
+    guessed fold — which is why the closed set is still the 47 that shipped.
+
+    Asserted as separate signals rather than one blob hash: the paragraph may be
+    re-wrapped for width without failing here, but it cannot quietly lose a claim.
+    """
+    block = _block_above("CANONICAL_DOMAINS")
+    missing = _unsaid(
+        block,
+        "were a human ruling",          # past tense: the question is closed
+        "Both are MADE",
+        "2026-09-29",
+        "the 47 members below are kept exactly as shipped",
+        "no residual off-set value is promoted to canonical",
+        "none is given a guessed fold",
+        "aliasing a value that has no member of its own",
+    )
+    assert missing == [], (
+        f"the block above CANONICAL_DOMAINS no longer says: {missing}")
+
+
+def test_the_same_block_records_the_promotion_bar_and_its_three_conditions():
+    """Clause 3: the bar is recorded with its threshold, so the next reader does not
+    re-open the disposition to ask whether a value deserves promotion. Three
+    conditions, and the third is about the shape of the change, not its size: (a)
+    the subject counts every spelling that would fold to it and must hold at least
+    3 notes on disk, (b) no current member may name that subject, (c) the edit is
+    one hand-written value added to the literal with the count in the commit
+    message — never a derived or bulk write."""
+    block = _block_above("CANONICAL_DOMAINS")
+    missing = _unsaid(
+        block,
+        "THE PROMOTION BAR",
+        "A residual value joins the set below",
+        "the 48th member",
+        "only when all three hold",
+        "(a) its SUBJECT, counting every spelling that would fold to it",
+        "holds >= 3 notes on disk",
+        "(b) no current member names that subject",
+        "(c) the change is one hand-written value added to the literal below",
+        "with its file count in the commit message",
+    )
+    assert missing == [], f"the promotion bar is incomplete: {missing}"
+
+
+def test_the_same_block_declines_the_two_subjects_that_clear_the_bar():
+    """Clause 4: voice/TTS at 5 files and retrieval/RAG at 3 are named as the only
+    two subjects clearing the bar today, both DECLINED as they stand at 8 files of
+    the ~2553 tagged notes, with the ~10 revisit trigger; and directory
+    consolidation is RULED OUT — the sentence must keep the words "not deferred",
+    because "deferred" is the word that would send the next round looking for the
+    migration that owes it.
+    """
+    block = _block_above("CANONICAL_DOMAINS")
+    missing = _unsaid(
+        block,
+        "exactly two subjects clear",
+        "voice/TTS",
+        "voice-mode`` 1 = 5 files",
+        "retrieval/RAG",
+        "retrieval`` 1 = 3 files",
+        "Both are DECLINED as they stand",
+        "8 files of the ~2553 tagged notes",
+        "either subject reaches ~10 notes",
+        "Directory consolidation is RULED OUT",
+        "not deferred",
+        "final disposition",
+    )
+    assert missing == [], f"the declined-by-ruling record is incomplete: {missing}"
+
+
+def test_the_ruling_rewrote_comment_text_and_nothing_else():
+    """Clause 5, the half the counts cannot pin: the AST of `okf_taxonomy.py` in
+    this tree is byte-for-byte the AST of the pre-ruling blob, so the only thing
+    that changed is comment text — comments are not in the AST, so adding a member
+    to `CANONICAL_DOMAINS` or a key to `DOMAIN_ALIASES` makes the two dumps
+    differ. `len() == 47` and `len() == 26` would also pass on a promotion paired
+    with a retirement, which is why this node asks for structural identity instead.
+
+    The values themselves stay pinned by the pre-existing nodes, unmodified:
+    `test_the_closed_set_is_the_same_47_values_that_shipped` (set equality against
+    `SHIPPED_47`, and `len(T.CANONICAL_DOMAINS) == 47`) and
+    `test_no_alias_key_shadows_another_or_diverges_from_a_canonical_member`
+    (`len(T._DOMAIN_ALIAS_LOOKUP) == len(T.DOMAIN_ALIASES) == 26`).
+    """
+    now = ast.dump(ast.parse((ROOT / SRC_PATH).read_text(), filename=SRC_PATH))
+    was = ast.dump(ast.parse(_git_blob(PRE_RULING, SRC_PATH), filename=SRC_PATH))
+    assert now == was, (
+        "okf_taxonomy.py changed beyond comment text since "
+        f"{PRE_RULING}, and this item is a comments-only ruling record")

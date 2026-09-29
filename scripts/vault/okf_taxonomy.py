@@ -325,9 +325,38 @@ def rejected_document_type(text: str) -> str | None:
 # notes on 2026-09-24, written out by hand. It is a literal on purpose and must
 # never be derived from the tree: a set built from "directories that hold
 # content" admits any invented value the moment its directory exists, which is
-# the defect being closed. Which of the ~99 long-tail values become canonical
-# rather than aliases, and the directory consolidation, are a human ruling that
-# has not been made — add a value here deliberately when it is.
+# the defect being closed.
+#
+# Which of those long-tail values become canonical instead of aliases, and
+# whether the thin ``knowledge/`` directories get consolidated, were a human
+# ruling. Both are MADE, on 2026-09-29, as #1642's owed entries 1 and 3. The
+# disposition, in full, so this file stops pointing a later reader at a question
+# that has been answered: the 47 members below are kept exactly as shipped — NO
+# residual off-set value is promoted to canonical and none is given a guessed
+# fold into one, because aliasing a value that has no member of its own would be
+# a promotion by another name. What the #1642 alias tranche left over is 75
+# values across 86 files, 3.4% of domain-bearing notes, and it is closed: no new
+# off-set value has entered since the write guard landed (``767f72d5``).
+#
+# THE PROMOTION BAR, so the question does not come back. A residual value joins
+# the set below — becoming the 48th member — only when all three hold:
+#   (a) its SUBJECT, counting every spelling that would fold to it, holds >= 3
+#       notes on disk;
+#   (b) no current member names that subject; and
+#   (c) the change is one hand-written value added to the literal below, with
+#       its file count in the commit message.
+# Applied to the 2026-09-29 census, exactly two subjects clear (a) and (b):
+# voice/TTS (``tts-voice`` 2 + ``voice-tts`` 2 + ``voice-mode`` 1 = 5 files) and
+# retrieval/RAG (``rag`` 2 + ``retrieval`` 1 = 3 files). Both are DECLINED as
+# they stand, at 8 files of the ~2553 tagged notes on disk then, and they are the
+# two to revisit if either subject reaches ~10 notes. Every other residual fails
+# (a) or (b): ``gpu`` + ``gpu-infrastructure``, ``vlm`` + ``vlm-edge`` and
+# ``databases`` + ``data-infrastructure`` reach 3 notes each, and the ruling
+# declines all three under (b).
+#
+# Directory consolidation is RULED OUT, not deferred: owed entry 3 closed it as a
+# final disposition (no folding, no thin-directory flag), so nothing is owed here
+# on a future vault migration and no round is to re-open it.
 CANONICAL_DOMAINS = frozenset({
     "youtube", "ai", "research", "robotics", "stack-updates", "observability",
     "inference", "tools", "evaluation", "software", "aveva", "ml",
@@ -353,17 +382,21 @@ CANONICAL_DOMAINS = frozenset({
 # qualify. A value with no member of its own — ``tts-voice``, ``embodied-ai``,
 # ``gpu``, ``rag``, ``databases``, ``science``, ``skills``, ``autonomy``,
 # ``nightly``, ``vlm``, ``voting``, ``web``, ``entrepreneurship``,
-# ``reverse-proxy`` — keeps warning: promoting it, or guessing which member it
-# should fold into, is the human ruling ``okf_taxonomy`` records as not made
-# (#1642 owed 1), and an alias is a promotion by another name.
+# ``reverse-proxy`` — keeps warning, and keeps warning BY RULING: #1642's owed
+# entry 1 (2026-09-29) ruled that none of them is promoted to canonical and none
+# is given a guessed fold. The bar that replaces that open question is above
+# ``CANONICAL_DOMAINS``; adding one of these to this map would be the promotion
+# that ruling declined, by another name.
 #
 # The same rule excludes values that ARE on disk, so each exclusion is a decision
 # and not an oversight (file counts from the #1642 census, re-run per value):
 #   ``3d-printing`` (1) — no member names printing, and ``hardware`` would be a guess.
 #   ``quantization``, ``llm-quantization``, ``model-quantization`` (1 each) — the
-#   ``model-optimization`` -> ``ml`` fold above is the item's own ruling, but whether a
-#   technique note belongs to ``ml`` or to one of the three members that name inference
-#   is owed 1, not a spelling fix.
+#   ``model-optimization`` -> ``ml`` fold above is the item's own ruling, and the
+#   2026-09-29 disposition declined the rest of the question: whether a technique
+#   note belongs to ``ml`` or to one of the three members that name inference is
+#   precisely the guessed fold that ruling refused, so these three stay off-set as
+#   a decision — and at 1 file each they sit under the >= 3 bar regardless.
 #   ``youtube-highlights`` (1) — TWO members are candidates, ``youtube`` and
 #   ``video-summaries``; choosing between them is a ruling, so it is not a fold.
 #   ``tooling-infra`` (1) — left off-set on purpose: the write guard and the validator
