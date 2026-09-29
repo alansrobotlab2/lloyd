@@ -771,9 +771,14 @@ has still not been run as of 2026-09-11.
   in it and the turns that never missed are not. So this page states no turn-mix figure and
   no chat-session count, because the extract
   cannot produce either: its turn rows are `[iso_ts, kind, misses, tokens]` with no session id
-  in them, and the kind is already resolved at extract time. Whether carrying raw ids would
-  make a turn mix derivable is a scope decision (#1719's owed entry 2), not a figure to write
-  in from elsewhere. 46 miss iterations
+  in them, and the kind is already resolved at extract time. Carrying raw session ids in the
+  extract is therefore decided against, not left open: raw ids would add no figure (a)-(d)
+  needs, and every question about a day that a raw id could answer is answerable by a live
+  query against `usage.db` — the one in (a)'s bullet is the standing example. Re-open
+  trigger, both halves required: some future bar clause needs a figure that is load-bearing
+  for acceptance *and* not answerable by a live `usage.db` query. At that point `extract` is
+  extended and this fixture re-cut in the same round, so this page never cites a figure the
+  extract cannot produce. 46 miss iterations
   logged, 42 of them fully cold (nothing cached) and 4 partial.
 - **(a) passes**, and now over a population one can point at. 0 of the day's 23 chat turns
   carries a prefix miss — the criterion the 09-23 reading could not test at all, since its
@@ -781,19 +786,41 @@ has still not been run as of 2026-09-11.
   session id `session_kind` (`scripts/vllm_prefix_miss_window.py:61-66`) classifies as
   `chat`, and that classifier counts `chat` by exclusion: an id is chat unless it starts
   `task:` or splits on `_` into four or more parts, whose third part is then the producer
-  slug (`20260925_041134_autocode_bd3f` → `autocode`). The two mints whose ids land in the
-  23 cover the conversations this engine serves: an Inner-Voice-on chat takes the
-  three-part `<ts>_iv<hex>` shape from `app/routers/sessions.py:724` (`suffix =
-  "iv" + secrets.token_hex(2)`), and a plain one `<ts>_<6 hex>` from
-  `app/routers/messages.py:2113` — three parts each, so neither is mistaken for a
-  producer's. 23 is therefore every turn that came from a chat-shaped id, and a turn whose
+  slug (`20260925_041134_autocode_bd3f` → `autocode`). The mint behind nearly every chat id
+  is `create_session`, which appends the literal `iv` to every chat session it pre-creates
+  (`app/routers/sessions.py:724`, `suffix = "iv" + secrets.token_hex(2)`). That line runs
+  ahead of anything the request body is asked, so the three-part `<ts>_iv<hex>` shape is
+  what a pre-created chat id *is*, not a mark of anything the caller opted into. The
+  `inner_voice` body flag is read later in that same handler and picks what a session does,
+  never what it is called — the association this bullet used to state the wrong way round,
+  and the reason no chat population can be read back out of an id's prefix. The other mint
+  is the message path's fallback (`app/routers/messages.py:2113`), reached only by a
+  `POST /message` arriving with no session id to append to; in ordinary operation the chats
+  this engine serves come through the mint above, so these are not two equally-weighted
+  sources of the 23. Three parts each, so neither is mistaken for a producer's. 23 is
+  therefore every turn that came from a chat-shaped id, and a turn whose
   id parses to another kind is invisible to (a) rather than counted in it. The mint that is
   *not* in the 23, though its shape looks like a chat id's, is `new_background_session_id`
   (`app/sessions_io.py:279`): its four-part ids carry a producer slug as that third part, so
   they are counted as whichever slug they name. #1719 was filed asking this bullet to cite
   that mint as the chat id's, which is how a chat population would end up naming background
-  turns. Whether 23 chat turns is enough of a day to satisfy (a) in practice is not a call
-  this page can make; it is the owed-check's, not a round's.
+  turns. **(a) is day-scoped — the mark names the day it is counted over — and its
+  population requirement is CLOSED.** The mark above is a claim about the day the window
+  covers, not about chat in general: it says no chat turn carried a miss on that day. And
+  (a) does discriminate, because chat turns carry misses on other days at a pooled rate
+  across the record. This page writes down neither that rate nor the per-day counts, because
+  both come out of the one read-only query below, and a hand-copied figure would be a number
+  that rots the week the record moves. That query selects chat exactly the way `session_kind` does — not
+  `task:`-prefixed, and too few `_`-separated parts to carry a producer slug — and prints
+  per-day chat turns beside the per-day count carrying at least one miss:
+  `sqlite3 -readonly ~/lloyd-data/usage.db "select substr(ts,1,10) as day, count(*) as chat_turns, sum(prefix_misses>0) as chat_turns_with_a_miss from usage where session_id not like 'task:%' and length(session_id)-length(replace(session_id,'_',''))<3 group by day order by day"`.
+  It is also the re-count. owed-check ruled on 2026-09-29 that 23 chat turns is the
+  machine's own chat volume and the busiest chat day in the re-derivable record — the record
+  being what that query can see, which starts where (b) says `usage.db` starts — and that a
+  day at that volume clears the bar's population requirement: closed, not open, and the
+  last time it is asked here as an open question. The ruling is owed-check's and stands
+  until a re-count moves it, and moving it means that query returning a day that beats this
+  one — a round does not get to re-ask the question instead of running it.
 - **Against §6.1, per day: (b) passes.** §6.1's baseline is 194 misses and
   20.6M tokens over *two* days (09-08/09) — 97 misses and 10.3M tokens a day.
   This window is 46 and 5.7M in *one* day, about 0.5x the misses and 0.5x the

@@ -21,7 +21,13 @@ either moved. Since #1627 it has a third duty, which is the one that bites:
   account: the deferral sentence that got the question re-filed three times stays
   gone, and the two re-open triggers are pinned to the same derivations as the
   criteria — trigger one to `chat_turns_with_misses`, trigger two to §6.1's
-  per-day budget — so neither figure can be re-cut by hand when it suits.
+  per-day budget — so neither figure can be re-cut by hand when it suits;
+* and since #1810 it holds (a)'s two mints and the population ruling to account: the
+  `iv` id prefix may never be bound to the Inner-Voice opt-in inside one clause (the
+  mint that appends it reads no body first), owed-check's ruling that a day at the
+  machine's own chat volume clears the population bar is on the record as CLOSED with
+  its owner and its expiry, and the one read-only `usage.db` query that would re-open
+  it is run here and checked against `session_kind` rather than admired.
 """
 
 from __future__ import annotations
@@ -326,6 +332,266 @@ def test_the_counting_day_may_be_full_of_worker_turns(reading, derived):
             "a figure `derive` returns, so it can only have been hand-written")
     assert not re.search(r"\d+ chat sessions?", reading, re.I), \
         "a chat-session count is not derivable (turn rows carry no session id)"
+
+
+# ── #1810: (a)'s mints say what the code does, and the population ruling is on
+# the record.
+#
+# The (a) bullet used to read "an Inner-Voice-on chat takes the three-part
+# `<ts>_iv<hex>` shape": `app/routers/sessions.py:724` is `suffix = "iv" +
+# secrets.token_hex(2)`, and it runs unconditionally inside `create_session`, ahead of
+# the line that first reads the body — so the prefix is what a pre-created chat id
+# HAS, and a reader following the old sentence would go looking for the chat population
+# in the wrong set of sessions and find the iv-shaped ones with the option off. The
+# other half of the item is that the population ruling owed-check made on 2026-09-29
+# ("23 chat turns … DO constitute a day that clears (a) … the last time that question is
+# asked") was never written here, so the page still deferred it.
+
+#: The wording §10 carried before #1810, verbatim. The ban below reads it, so the
+#: ban is demonstrably a check and not a description of the current text.
+_PRE_FIX_IV_CLAUSE = (
+    "The two mints whose ids land in the 23 cover the conversations this engine serves: "
+    "an Inner-Voice-on chat takes the three-part `<ts>_iv<hex>` shape from "
+    "`app/routers/sessions.py:724` (`suffix = \"iv\" + secrets.token_hex(2)`), and a plain "
+    "one `<ts>_<6 hex>` from `app/routers/messages.py:2113` — three parts each, so neither "
+    "is mistaken for a producer's.")
+
+#: Ways the bullet can point at the id prefix itself.
+_IV_PREFIX = re.compile(r'"iv"|_iv<|(?<!\w)iv(?!\w)')
+#: Ways it can point at the opt-in that does NOT decide that prefix.
+_IV_OPT_IN = re.compile(r"inner[ _-]?voice", re.I)
+#: Clause boundaries for the association ban. `_section` flattens the doc to single
+#: spaces, so `;` and `:`-free sentences are all there is; semicolon is a boundary too,
+#: because "the prefix is `iv`; it is not the inner_voice flag" would be a TRUE clause
+#: that the ban must not fire on, and joining two claims with `;` must not smuggle the
+#: association past a node that is about one clause being false.
+_CLAUSE_BREAK = re.compile(r"[.!?;]+\s+")
+
+
+def _iv_associations(text: str) -> list[str]:
+    """Clauses naming both the `iv` id prefix and the Inner-Voice opt-in.
+
+    The co-occurrence IS the misattribution: `create_session` appends the prefix
+    unconditionally, so any clause that presents the two as one statement — "an
+    Inner-Voice-on chat takes the `iv` shape" — states a condition the code does not
+    implement. The two true facts (this is the prefix; this is a separate flag read
+    later) are two clauses, and the bullet is written that way.
+    """
+    return [c.strip() for c in _CLAUSE_BREAK.split(text)
+            if _IV_PREFIX.search(c) and _IV_OPT_IN.search(c)]
+
+
+def test_criterion_a_never_binds_the_iv_prefix_to_the_inner_voice_opt_in(reading):
+    """Clause 2: the association is banned, and provably not by a test that cannot fire."""
+    offenders = _iv_associations(reading)
+    assert not offenders, \
+        f"(a) attributes the iv prefix to Inner-Voice opt-in in {offenders}"
+    # Non-vacuity, in-suite: the exact sentence this item was filed to delete.
+    restored = _iv_associations(_PRE_FIX_IV_CLAUSE)
+    assert len(restored) == 1, (
+        f"the ban cannot see the pre-fix wording ({restored}) — it is a description of "
+        "the current text, not a check on the next one")
+
+
+def test_criterion_a_names_create_session_as_the_mint_that_ignores_the_flag(reading):
+    """Clause 1: what the bullet says INSTEAD, checked against the code it cites.
+
+    Not just "the false phrase is absent": the bullet has to state the mint, its
+    unconditionality, and the fallback's role. `messages.py:2113` stays qualitative —
+    the fallback's share of the record is a `usage.db` figure, and this page's rule is
+    to cite the query rather than hand-copy the number.
+    """
+    b = _criterion_bullet(reading, "a")
+    assert "`app/routers/sessions.py:724`" in b and "`app/routers/messages.py:2113`" in b, \
+        "(a) must carry both chat mints by path and line: " \
+        "test_criterion_a_cites_both_chat_mints_and_no_four_part_one asserts the SET of " \
+        "cited paths and checks each line against the code; this pins neither was dropped"
+    mint = [c for c in _CLAUSE_BREAK.split(b) if "create_session" in c and _IV_PREFIX.search(c)]
+    assert mint, "(a) never states what `create_session` does to the id"
+    assert any("every chat session it pre-creates" in c for c in mint), \
+        f"the mint clause says {mint} — it must say the prefix is appended to EVERY " \
+        "pre-created chat session, which is what makes it not an opt-in"
+    assert "not a mark of anything the caller opted into" in b, \
+        "(a) must say the shape is not conditional on the request"
+    flag = [c for c in _CLAUSE_BREAK.split(b) if _IV_OPT_IN.search(c)]
+    assert flag and any("never what it is called" in c for c in flag), \
+        f"(a) mentions the opt-in in {flag} without saying it does not name the session"
+    fb = [c for c in _CLAUSE_BREAK.split(b) if "messages.py" in c]
+    assert fb and re.search(r"fallback[^\n]{0,160}no session id", fb[0]), \
+        f"(a) does not scope the fallback mint to a message with no session id: {fb}"
+    assert not re.search(r"\b(zero|0)\b", " ".join(fb)), \
+        "(a) quotes a live count for the fallback's contribution; state the role and " \
+        "cite the query, as the preamble to this item requires"
+
+
+#: The single read-only query §10 is allowed to carry for the chat population. It is
+#: `session_kind`'s rule in SQL: not `task:`-prefixed, and too few `_` parts to carry a
+#: producer slug. Verified row-for-row equal to `session_kind` over `usage.db`.
+_CHAT_QUERY = re.compile(r"`sqlite3 -readonly[^`]*`")
+_POPULATION_CLOSED = re.compile(r"population requirement is CLOSED")
+
+
+def test_the_population_ruling_is_closed_and_named_owed_checks(s10, reading, derived):
+    """Clause 3: owed-check's ruling replaces the deferral, with the derived count in it.
+
+    The number is `derived['chat_turns']`, so the ruling moves if the counted day is
+    ever re-cut — a ruling pinned to a hand-typed 23 would survive a fixture change
+    that had already invalidated it.
+    """
+    assert "not a call this page can make" not in s10, \
+        "§10 still defers the population question that owed-check ruled on 2026-09-29"
+    b = _criterion_bullet(reading, "a")
+    assert _POPULATION_CLOSED.search(b), "(a) does not record the population bar as CLOSED"
+    assert f"{derived['chat_turns']} chat turns is the machine's own chat volume and the " \
+           f"busiest chat day in the re-derivable record" in b, \
+        "the ruling must state its own count, and that count is the derived chat_turns"
+    assert re.search(r"owed-check ruled on \d{4}-\d\d-\d\d", b), \
+        "the ruling must be named as owed-check's and dated"
+    assert "day at that volume clears the bar's population requirement" in b, \
+        "the ruling must say the requirement is cleared, not restate it as a question"
+    assert "owed-check's and stands until a re-count moves it" in b, \
+        "the ruling must carry its own expiry: a re-count moves it, a round does not"
+
+
+def test_the_chat_population_is_day_scoped_and_re_derivable_by_one_query(reading):
+    """Clause 4: the discriminating claim, the day it is true of, and the ONE query.
+
+    Two rails here. The query: exactly one, read-only, and shaped so it actually
+    re-derives BOTH counts per day — chat turns and chat turns carrying a miss — with
+    the classifier spelled the way `session_kind` spells it. The prose: the clause that
+    asserts chat turns miss on other days carries no digit at all, because its number
+    is the query's output and a figure copied in here is a figure nobody re-runs.
+    """
+    b = _criterion_bullet(reading, "a")
+    q = _CHAT_QUERY.findall(reading)
+    assert len(q) == 1, f"§10 must cite exactly one read-only chat-population query, got {q}"
+    for clause in ("substr(ts,1,10)", "count(*)", "sum(prefix_misses>0)",
+                   "not like 'task:%'",
+                   "length(session_id)-length(replace(session_id,'_',''))<3",
+                   "group by day"):
+        assert clause in q[0], f"the query cannot re-derive (a)'s population without {clause}"
+    assert "`sqlite3 -readonly" in q[0], "the cited read must not be able to write usage.db"
+    assert re.search(r"\*\*\(a\) is day-scoped — the mark names the day", b), \
+        "(a) must say its mark is a claim about the day it is counted over"
+    discriminating = [c for c in _CLAUSE_BREAK.split(b) if "discriminate" in c]
+    assert discriminating and any("other days" in c for c in discriminating), \
+        f"(a) must be discriminating — chat turns carry misses on other days: {discriminating}"
+    rates = [c for c in _CLAUSE_BREAK.split(b) if "pooled" in c]
+    assert rates, "(a) must say the other-day misses are a measured pooled rate"
+    for c in rates:
+        assert not re.search(r"\d", c), \
+            f"the pooled-rate clause hand-wrote a figure ({c!r}); the query re-derives it"
+
+
+#: Ids that decide the WHERE clause, chosen so every branch of it is taken: the
+#: pre-created chat shape, the fallback's shape, a producer's four-part id, a deeper
+#: one, and two `task:` ids whose underscore count alone would otherwise pass them —
+#: which is why the exclusion needs its own witness (see the node below).
+_PROBE_IDS = ("20260925_041134_ivb794", "20260925_041134_a1b2c3",
+              "20260925_041134_autocode_bd3f", "20260925_041134_owedcheck_46d6_x",
+              "task:autonomy-42", "task:1", "")
+
+
+def test_the_cited_querys_chat_predicate_is_the_classifier():
+    """The WHERE clause, run over ids that force every branch — no database required.
+
+    Why this node exists beside the one that reads the production record: `usage.db`
+    holds ZERO `task:`-prefixed session ids today, so on that corpus the exclusion is
+    unexercised and deleting it from the doc's query changes no row. A check whose
+    denominator can be zero is not a check, so the branch gets a synthetic witness
+    instead, and the branch stays covered whatever the record does next.
+    """
+    import sqlite3
+
+    q = _CHAT_QUERY.search(_section(10))
+    assert q, "§10 cites no read-only chat-population query"
+    w = re.search(r"\bwhere\b(.+?)\bgroup by\b", q.group(0), re.S)
+    assert w, "the cited query has no WHERE clause to compare with the classifier"
+    con = sqlite3.connect(":memory:")
+    try:
+        con.execute("create table usage (ts text, session_id text, prefix_misses integer)")
+        con.executemany("insert into usage values ('2026-09-25T04:11:34',?,0)",
+                        [(i,) for i in _PROBE_IDS])
+        selected = {r[0] for r in con.execute(f"select session_id from usage where {w.group(1)}")}
+    finally:
+        con.close()
+    want = {i for i in _PROBE_IDS if W.session_kind(i) == "chat"}
+    assert want and len(want) < len(_PROBE_IDS), \
+        "the probe set stopped separating chat from non-chat, so this node proves nothing"
+    assert selected == want, (
+        f"§10's WHERE selects {sorted(selected)} where `session_kind` calls chat "
+        f"{sorted(want)} — the ruling and criterion (a) would count different turns")
+
+
+def test_the_cited_chat_query_selects_what_the_classifier_selects(reading):
+    """The one process boundary this ruling crosses, put under test rather than asserted.
+
+    (a)'s population is decided in Python (`session_kind`), the ruling's "busiest chat
+    day in the re-derivable record" is decided in SQL over `usage.db`, and the doc claims
+    they are the same set. Two languages, one population, no shared code — a grep cannot
+    see the disagreement, only a run can. So the query is read OUT of §10 (the test does
+    not carry its own copy, which is what would let the doc and the check drift), and the
+    per-day table it returns is compared to the per-day table the classifier implies.
+    Skipped where there is no database to ask, exactly as the extractor's node does.
+
+    Deliberately NOT pinned here: which day is the busiest. That is owed-check's re-count
+    to run as the record widens, and a suite assertion on it would be a test that goes red
+    for the one job that cannot fix it from a round.
+    """
+    import collections
+    import sqlite3
+
+    from app.paths import PRODUCTION_DATA_ROOT
+
+    cmd = _CHAT_QUERY.search(reading)
+    assert cmd, "§10 cites no `sqlite3 -readonly` command to re-derive the chat population"
+    m = re.search(r"sqlite3 -readonly\s+(\S+)[^\"]*\"(.+?)\"", cmd.group(0))
+    assert m, "the cited command must name a database and carry its SQL"
+    assert m.group(1).endswith("/usage.db"), \
+        f"the doc's command reads {m.group(1)}; it must name the usage database"
+    db = PRODUCTION_DATA_ROOT / "usage.db"
+    if not db.exists():
+        pytest.skip(f"no usage.db at {db}")
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        from_doc = {r[0]: (r[1], r[2]) for r in con.execute(m.group(2))}
+        implied: dict[str, list[int]] = collections.defaultdict(lambda: [0, 0])
+        for ts, sid, misses in con.execute("select ts, session_id, prefix_misses from usage"):
+            if W.session_kind(sid) == "chat":
+                implied[ts[:10]][0] += 1
+                implied[ts[:10]][1] += 1 if (misses or 0) > 0 else 0
+    finally:
+        con.close()
+    assert from_doc, "the doc's query returns no chat days, so it cannot re-derive anything"
+    assert sum(v[0] for v in from_doc.values()) >= 10, \
+        "the record must carry enough chat turns for the population ruling to be about anything"
+    assert from_doc == {d: tuple(v) for d, v in implied.items()}, (
+        "§10's query and `session_kind` do not select the same chat population — the "
+        "ruling and criterion (a) would then be counting different turns")
+
+
+def test_the_raw_ids_paragraph_records_a_decision_and_its_reopen_trigger(reading):
+    """Clause 5: the open question became a decision, with a trigger that is two things.
+
+    The old sentence parked the choice ("is a scope decision … not a figure to write in
+    from elsewhere"), so the next reader asked it again. The record now says the extract
+    is NOT extended, why, and the one combination that re-opens it — a figure both
+    load-bearing for acceptance and NOT answerable live, which is the conjunction that
+    keeps "we could add raw ids" from re-opening it on its own.
+    """
+    assert "Whether carrying raw ids would make a turn mix derivable is a scope decision" \
+        not in reading, "the raw-ids question is still parked as a question"
+    assert "Carrying raw session ids in the extract is therefore decided against, " \
+           "not left open" in reading, "(a)'s page must record the decision, not the option"
+    assert "would add no figure (a)-(d) needs" in reading, "and the reason: no criterion needs one"
+    assert "answerable by a live" in reading and "usage.db" in reading, \
+        "and the standing alternative: a live query answers what a raw id would"
+    assert "Re-open trigger, both halves required:" in reading, \
+        "the decision must say what would re-open it"
+    assert "load-bearing for acceptance *and* not answerable by a live `usage.db` query" \
+        in reading, "the trigger is a conjunction; either half alone is not enough"
+    assert "`extract` is extended and this fixture re-cut in the same round" in reading, \
+        "and what re-opening means: extract and fixture move together, not the prose alone"
 
 
 def test_criterion_b_is_marked_and_is_the_per_day_budget(reading, derived, s10):
