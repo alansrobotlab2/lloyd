@@ -26,10 +26,19 @@ with nothing wrong:
     missing. `$LLOYD_DATA/...` and `~/...` resolve under the data root and
     the home directory, because the scored store moved there on 2026-09-22
     (`architecture/data-home.md`) and a repo-rooted check would call it absent.
+
+A *command* is a citation of the same kind, and it needed an extractor of its
+own: `_CITATION` only fires on a span carrying a slash, so `run-fixtures-eval` —
+the verb `architecture/measurement.md` once asserted for
+`app/harness/supply_chain.py`, which never dispatched it — extracted as nothing,
+and the check above stayed green while an operator following the doc got a usage
+dump and exit 1 (#1792). The command half is at the bottom of this file and owes
+the same three proofs.
 """
 
 from __future__ import annotations
 
+import ast
 import collections
 import json
 import re
@@ -996,3 +1005,640 @@ def test_context_window_delegates_to_the_section_and_says_nothing_unmeasured():
         "the old disclosure carried a §-reference, so the reference check above "
         "would have passed on the text clause 5 removes — it is no longer a "
         "control")
+
+
+# ────────────────────────────────────────────────────────── command spellings
+#
+# The half above proves a doc's *path* resolves. It cannot see whether a doc's
+# *command* resolves: `_CITATION` only fires on a span with a slash in it, so
+# `run-fixtures-eval` — a verb `architecture/measurement.md` once asserted for
+# `app/harness/supply_chain.py`, which the module never dispatched — extracted
+# as nothing and the check stayed silent while an operator following the doc
+# got a usage dump and exit 1 (#1792). This is the same failure the path half
+# guards, one layer up: a citation that resolves to no code.
+#
+# A claim is graded only where the target module has a dispatch chain to grade
+# it against. A module that dispatches no subcommand at all (a library, or a
+# script with only flags) cannot be mis-cited as having one, and the alternative
+# — reporting a bare identifier beside such a module — reads a symbol citation
+# as a broken command. Corpus-wide over the 30 non-graded docs this scoping is
+# what makes the half quiet: see the finding appended to #1792.
+
+_COMMAND_SPAN = re.compile(r"`([^`\n]+)`")
+# `.py` path with an optional `:NNN` anchor — the same shape `cited_paths` takes.
+_PATH_SCRIPT = re.compile(r"\A(?P<mod>(?:[A-Za-z0-9_.\-]+/)+[A-Za-z0-9_\-]+\.py)"
+                          r"(?::\d+)?\Z")
+# `python -m` takes a dotted module, which has no slash and so never reaches
+# `cited_paths` at all.
+_DOTTED_MODULE = re.compile(r"\A(?P<mod>[A-Za-z_][A-Za-z0-9_]*"
+                            r"(?:\.[A-Za-z_][A-Za-z0-9_]*)+)\Z")
+_INTERPRETER = re.compile(r"(?:^|/)python\d*(?:\.\d+)?\Z")
+# A subcommand, as this tree spells them: lowercase words joined by hyphens
+# (`scan`, `write-baseline`, `board-decisions`). An underscore is excluded on
+# purpose: the only subcommand strings in the repo carrying one are private
+# helpers (`add_parser("_child")`), while every snake_case span a doc brackets
+# after a module is a *symbol* citation — `check_bash_command`,
+# `allow_protected_writes`, `check_deployed_copies`.
+_COMMAND_WORD = re.compile(r"\A[a-z][a-z0-9]*(?:-[a-z0-9]+)*\Z")
+# A bracket opened right after a module citation is the doc's own way of saying
+# "and these are its commands" — `supply_chain.py` (`fixtures`,
+# `scan --write-baseline`). Prose inside the bracket ends the list.
+_LIST_GAP = re.compile(r"\A[\s,]*\Z")
+
+
+def _script_module(tok):
+    """The repo file a `.py` path token names, or None."""
+    m = _PATH_SCRIPT.match(tok)
+    if not m:
+        return None
+    p = ROOT / m.group("mod")
+    return p if p.is_file() else None
+
+
+def _span_module_and_rest(span):
+    """(module file, the tokens after it) when a span names a module on disk.
+
+    Two shapes reach a module: `[interpreter] path/to/script.py …` and
+    `[interpreter] -m dotted.module …`, with the interpreter allowed anywhere in
+    front (`.venvs/lloyd/bin/python -m …`). The module must be the first token
+    after the interpreter and `-m`, so a span that merely *starts* with a cited
+    path (`server.py's USAGE constant`, `web/src/app/page.tsx:1095`) has nothing
+    left that can be a subcommand and is not a claim.
+    """
+    toks = span.split()
+    i = 0
+    while i < len(toks) and _INTERPRETER.search(toks[i]):
+        i += 1
+    module = None
+    if i < len(toks) and toks[i] == "-m" and i + 1 < len(toks):
+        dotted = _DOTTED_MODULE.match(toks[i + 1])
+        if dotted:
+            p = ROOT / (dotted.group("mod").replace(".", "/") + ".py")
+            module = p if p.is_file() else None
+        i += 2
+    elif i < len(toks) and (module := _script_module(toks[i])) is not None:
+        i += 1
+    return module, toks[i:]
+
+
+def _only_flags(rest):
+    """True when the leftover tokens are flags and the values they were given."""
+    i = 0
+    while i < len(rest):
+        if not rest[i].startswith("-"):
+            return False
+        i += 1
+        if i < len(rest) and not rest[i].startswith("-"):
+            i += 1                    # a value sitting right after its flag
+    return True
+
+
+def command_claims(text):
+    """Every code span in *text* that claims a subcommand of a module: (line,
+    span, module path, verb).
+
+    An inline claim is a span carrying the module and the verb together; a list
+    claim is a verb span sitting inside a bracket opened immediately after a
+    module citation on the same line. A module cited without a verb is recorded
+    only so the list form has something to hang on — nothing here is decided
+    about a module that is not on disk.
+    """
+    claims = []
+    for ln, line in enumerate(text.splitlines(), 1):
+        cited = None                  # module named to the left, on this line
+        listing = None                # module whose bracketed list we are in
+        opened = False                # the list was opened by this span's gap
+        prev_end = None
+        for m in _COMMAND_SPAN.finditer(line):
+            span = m.group(1)
+            gap = line[prev_end:m.start()] if prev_end is not None else ""
+            if listing is None and cited is not None and re.match(r"\A\s*[\(\[]", gap):
+                listing, opened = cited, True
+            module, rest = _span_module_and_rest(span)
+            if module is not None:
+                if rest and _COMMAND_WORD.match(rest[0]):
+                    claims.append((ln, span, module, rest[0]))
+                cited, listing, opened, prev_end = module, None, False, m.end()
+                continue
+            if listing is not None:
+                if ((opened or _LIST_GAP.match(gap)) and rest
+                        and _COMMAND_WORD.match(rest[0]) and _only_flags(rest[1:])):
+                    claims.append((ln, span, listing, rest[0]))
+                    opened, prev_end = False, m.end()
+                    continue
+                listing = None        # prose in the bracket ends the list
+            # Neither a command nor a verb inside someone else's list: the
+            # current module is gone, so a later bracket on this line cannot
+            # borrow it.
+            cited, opened, prev_end = None, False, m.end()
+    return claims
+
+
+# --------------------------------------------------------------------------- #
+# The dispatch chain, read by parsing — never by importing. `app.harness.
+# supply_chain` and `workers.sources.automod_regression` pull in enough of the
+# machine that importing them from a gate worktree is its own hazard, and this
+# file runs there (#1721). AST parsing has the same answer with no side effects.
+# --------------------------------------------------------------------------- #
+
+_USES_A_COMMAND = {"command", "cmd", "subcommand", "verb", "action"}
+_USAGE_VARIABLES = {"USAGE", "CLI", "HELP", "USAGE_TEXT", "EPILOG"}
+
+
+def _dispatch_slot(node):
+    """Is this expression the thing a subcommand gets compared against?"""
+    if isinstance(node, ast.Name):
+        return node.id.lower() in _USES_A_COMMAND
+    if isinstance(node, ast.Attribute):
+        return node.attr.lower() in _USES_A_COMMAND
+    if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant):
+        return str(node.slice.value).lower() in _USES_A_COMMAND
+    return False
+
+
+class _Chain(ast.NodeVisitor):
+    """Collects every subcommand a module can dispatch to, and what it forwards.
+
+    Four spellings cover this tree: argparse `add_parser("x")`, argparse
+    `add_argument("command", choices=(…))`, a comparison against a
+    command-shaped name (`if command == "gate"`), and a `match` over one. Plus
+    the `USAGE` string the module prints when it does not recognise a verb,
+    whose leading word per line is a verb it does.
+    """
+
+    def __init__(self):
+        self.verbs = set()
+        self.usage = ""
+        self.imports = []
+        self.forwards_main = False
+
+    @staticmethod
+    def _strings(node):
+        if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+            return [e.value for e in node.elts
+                    if isinstance(e, ast.Constant) and isinstance(e.value, str)]
+        return []
+
+    def visit_Assign(self, node):
+        for t in node.targets:
+            if isinstance(t, ast.Name) and t.id.upper() in _USAGE_VARIABLES:
+                v = node.value
+                if isinstance(v, ast.Constant) and isinstance(v.value, str):
+                    self.usage += v.value + "\n"
+        self.generic_visit(node)
+
+    def visit_Call(self, node):
+        f = node.func
+        if isinstance(f, ast.Attribute) and f.attr == "main":
+            self.forwards_main = True
+        elif isinstance(f, ast.Name) and f.id == "main":
+            self.forwards_main = True
+        if isinstance(f, ast.Attribute) and f.attr == "add_parser" and node.args:
+            first = node.args[0]
+            if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                self.verbs.add(first.value)
+        if isinstance(f, ast.Attribute) and f.attr == "add_argument" and node.args:
+            first = node.args[0]
+            positional = (isinstance(first, ast.Constant)
+                          and isinstance(first.value, str)
+                          and not first.value.startswith("-"))
+            if positional:
+                for kw in node.keywords:
+                    if kw.arg == "choices":
+                        self.verbs.update(self._strings(kw.value))
+        self.generic_visit(node)
+
+    def visit_Compare(self, node):
+        sides = [node.left, *node.comparators]
+        if any(_dispatch_slot(x) for x in sides):
+            for x in sides:
+                if isinstance(x, ast.Constant) and isinstance(x.value, str):
+                    self.verbs.add(x.value)
+            for op, other in zip(node.ops, node.comparators):
+                if isinstance(op, (ast.In, ast.NotIn)):
+                    self.verbs.update(self._strings(other))
+        self.generic_visit(node)
+
+    def visit_Match(self, node):
+        if _dispatch_slot(node.subject):
+            for case in node.cases:
+                stack = [case.pattern]
+                while stack:
+                    pat = stack.pop()
+                    if (isinstance(pat, ast.MatchValue)
+                            and isinstance(pat.value, ast.Constant)
+                            and isinstance(pat.value.value, str)):
+                        self.verbs.add(pat.value.value)
+                    for field in getattr(pat, "_fields", ()):
+                        child = getattr(pat, field)
+                        for c in (child if isinstance(child, list) else [child]):
+                            if isinstance(c, ast.pattern):
+                                stack.append(c)
+        self.generic_visit(node)
+
+    def visit_Import(self, node):
+        self.imports.extend(a.name for a in node.names)
+
+    def visit_ImportFrom(self, node):
+        if node.module:
+            self.imports.extend(f"{node.module}.{a.name}" for a in node.names)
+
+
+def _usage_words(usage):
+    """Verbs named by a module's usage string.
+
+    A command entry is an indented line sitting in the block's least-indented
+    column, and its first word is the verb — which is how the one usage block in
+    this tree that lists verbs at all formats them:
+    `app/harness/supply_chain.py:1772-1784` puts `scan`, `deps`, `provenance` and
+    `fixtures` at two spaces and their descriptions at eight. Everything else is
+    skipped: the unindented `usage:` synopsis, whose first word is not a verb;
+    the descriptions wrapped deeper than the entries, whose first words are prose
+    — :1782 and :1783 resume under `fixtures` beginning `the`, and read as
+    entries they would teach the checker that `the` is a subcommand, waving
+    through any doc that said so; and a `--flag`, which is a flag and not a
+    subcommand. A module that spells its verbs only here dispatches them exactly
+    as if the code compared them.
+    """
+    entries = [ln for ln in usage.splitlines() if ln[:1].isspace() and ln.strip()]
+    if not entries:
+        return set()
+    column = min(len(ln) - len(ln.lstrip()) for ln in entries)
+    words = set()
+    for ln in entries:
+        if len(ln) - len(ln.lstrip()) != column:
+            continue
+        first = ln.split()[0]
+        if _COMMAND_WORD.match(first):
+            words.add(first)
+    return words
+
+
+_chain_cache = {}
+
+
+def _chain_of(path):
+    """(verbs defined here, module it forwards to) for a repo file."""
+    src = path.read_text(encoding="utf-8", errors="replace")
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return set(), None
+    c = _Chain()
+    c.visit(tree)
+    verbs = c.verbs | _usage_words(c.usage)
+    forward = None
+    if not verbs and c.forwards_main:
+        # A forwarder (scripts/automod/regression_runner.py is 16 lines and 701
+        # bytes) names no verb itself. It is followed only when it dispatches
+        # nothing locally and calls a `main`, which is what a forwarder is; the
+        # deepest import name it holds is the module, not the package it sits
+        # in, so a shim is never confused with its own `__init__`.
+        named = sorted({i for i in c.imports if not i.startswith("_")},
+                       key=lambda n: (n.split(".")[-1] == path.stem,
+                                       n.count(".")),
+                       reverse=True)
+        for name in named:
+            p = ROOT / (name.replace(".", "/") + ".py")
+            if p.is_file() and p != path:
+                forward = p
+                break
+    return verbs, forward
+
+
+def dispatch_verbs(path, _seen=frozenset()):
+    """Every subcommand *path* can be invoked with, following one forwarding
+    import when the file itself dispatches nothing."""
+    if path in _chain_cache:
+        verbs, forward = _chain_cache[path]
+    else:
+        verbs, forward = _chain_of(path)
+        _chain_cache[path] = (verbs, forward)
+    if verbs or forward is None or forward in _seen:
+        return verbs
+    return dispatch_verbs(forward, _seen | {path})
+
+
+def undispatched_claims(text, label="<doc>"):
+    """Report lines for the command claims in *text* whose verb the module they
+    name does not dispatch.
+
+    A module with no dispatch chain at all is not graded against: a library or
+    a flag-only script cannot be mis-cited with a subcommand, and reporting a
+    bare identifier beside one would read a symbol citation as a broken
+    command.
+    """
+    reports = []
+    for ln, span, module, verb in command_claims(text):
+        known = dispatch_verbs(module)
+        if not known:
+            continue
+        if verb not in known:
+            reports.append(
+                f"{label}:{ln} cites `{span}`, but `{verb}` is not a subcommand "
+                f"of {module.relative_to(ROOT)} — its dispatch chain is "
+                f"{sorted(known)}, so an operator following the doc gets the "
+                f"module's usage dump and exit 1")
+    return reports
+
+
+def test_every_command_a_new_doc_names_is_dispatchable():
+    """The command half of the graded check (#1792, all four clauses)."""
+    graded = []
+    bad = []
+    for slug in NEW_DOCS:
+        text = _text(slug)
+        bad += undispatched_claims(text, slug)
+        graded += [(slug, ln, verb) for ln, span, module, verb
+                   in command_claims(text) if dispatch_verbs(module)]
+    joined = "\n".join(bad)
+    assert not bad, joined
+    assert graded, ("the command check graded nothing, which means the extractor "
+                    "found no command in four docs about measurement — the same "
+                    "vacuity the path half pins at its own extractor")
+    # What it graded, pinned so the aggregate above cannot be satisfied by
+    # one lucky span: both verbs the supply-chain row cites.
+    assert ("measurement.md", 73, "fixtures") in graded, graded
+    assert ("measurement.md", 73, "scan") in graded, graded
+
+
+def test_an_invented_subcommand_is_reported_and_a_real_one_is_not():
+    """Clause 1: a verb absent from the dispatch chain is reported; the verbs
+    the doc really cites are not.
+
+    Both halves run over text this test writes, so neither can be satisfied by
+    the corpus going quiet. `run-fixtures-eval` is the verb
+    `architecture/measurement.md:72` asserted before commit `d00f56d0` corrected
+    it by prose; `app/harness/supply_chain.py` dispatches `scan`, `deps`,
+    `provenance` and `fixtures` and falls through anything else to a usage dump
+    and exit 1 (`main`, app/harness/supply_chain.py:1787-1830).
+    """
+    module = ROOT / "app/harness/supply_chain.py"
+    row = ("| `supply-chain` | whether the scan ran | `app/harness/supply_chain.py` "
+           "(`fixtures`, `scan --write-baseline`) |\n")
+    invented = ("| `supply-chain` | whether the scan ran | `app/harness/supply_chain.py` "
+                "(`run-fixtures-eval`) |\n")
+    inline = "Run `python -m app.harness.supply_chain fixtures` to measure it.\n"
+
+    known = dispatch_verbs(module)
+    assert known == {"scan", "deps", "provenance", "fixtures"}, (
+        f"the chain harvested {sorted(known)} — the four verbs this module "
+        f"dispatches are those, and anything else came in through a usage "
+        f"string's description text rather than its command column")
+
+    real = [(ln, s, v) for ln, s, m, v in command_claims(row)]
+    assert real == [(1, "fixtures", "fixtures"), (1, "scan --write-baseline", "scan")], real
+    assert undispatched_claims(row) == [], (
+        "the verbs the doc really cites were reported: "
+        + "; ".join(undispatched_claims(row)))
+
+    claim = command_claims(invented)
+    assert claim == [(1, "run-fixtures-eval", module, "run-fixtures-eval")], claim
+    assert "run-fixtures-eval" not in known, (
+        "the invented verb resolved against the real dispatch chain, so the "
+        "report below proves nothing")
+    reports = undispatched_claims(invented, "measurement.md")
+    assert len(reports) == 1, reports
+    assert "run-fixtures-eval" in reports[0] and "app/harness/supply_chain.py" \
+        in reports[0], reports[0]
+
+    # The inline form resolves the same chain, and reports the same way.
+    assert command_claims(inline) == [(1, inline.split("`")[1], module, "fixtures")]
+    assert undispatched_claims(inline) == []
+    inline_bad = "Run `python -m app.harness.supply_chain run-fixtures-eval` now.\n"
+    assert len(undispatched_claims(inline_bad)) == 1, undispatched_claims(inline_bad)
+    assert undispatched_claims(
+        "Run `app/harness/supply_chain.py` to measure it.\n") == [], (
+        "a module cited with no verb was read as a command claim")
+
+
+def test_a_forwarding_shim_resolves_to_the_module_it_forwards_to():
+    """Clause 2: `regression_runner noise` passes through the 16-line shim.
+
+    `scripts/automod/regression_runner.py` is 16 lines and 701 bytes: it imports
+    `workers.sources.automod_regression` and calls its `main`. The verb lives at
+    `workers/sources/automod_regression.py:2226`
+    (`add_argument("command", choices=("run", "pending", "latest", "noise"))`)
+    and `:2233` (`if args.command == "noise":`), so a check that read only the
+    file the span names would report a correct doc as invented — the exact
+    mistake #1792's triage names at `architecture/automod.md:3602`. The control
+    below proves the hop is not a free pass.
+    """
+    shim = ROOT / "scripts/automod/regression_runner.py"
+    target = ROOT / "workers/sources/automod_regression.py"
+    assert shim.is_file() and target.is_file()
+    assert len(shim.read_text(encoding="utf-8").splitlines()) == 16, (
+        "the shim grew dispatch of its own, so this node no longer proves the "
+        "hop and needs re-scoping")
+
+    span = "python -m scripts.automod.regression_runner noise"
+    claims = command_claims(f"Run `{span}` first.\n")
+    assert claims == [(1, span, shim, "noise")], claims
+    assert "noise" in dispatch_verbs(shim), (
+        "`noise` did not resolve through the forwarder, so every doc citing the "
+        "shim would be reported as inventing it")
+    assert not _chain_of(shim)[0], "the shim dispatches locally now; the hop is unused"
+    assert dispatch_verbs(shim) == dispatch_verbs(target), (
+        "resolving through the shim produced a different chain than the target's "
+        "own, so the verb set is not the one the CLI accepts")
+
+    assert undispatched_claims(f"Run `{span}` first.\n") == [], (
+        "the doc line the triage names as correct was reported as invented")
+
+    # The hop is not a free pass: a verb the target does not dispatch is still
+    # reported, and reported against the module the doc named.
+    bogus = "`python -m scripts.automod.regression_runner regression-runner-bogus`\n"
+    reports = undispatched_claims(bogus)
+    assert len(reports) == 1, reports
+    assert "regression-runner-bogus" in reports[0]
+    assert "scripts/automod/regression_runner.py" in reports[0], reports[0]
+
+
+#: Every spelling of "these are my subcommands" this tree uses, and the verbs
+#: each is supposed to yield. A doc may cite a module that dispatches by any of
+#: them; a resolver that read only one would report the others as invented,
+#: which is the same mistake in the other direction.
+_DISPATCH_SOURCES = {
+    "add_parser": ('import argparse\n'
+                   'sp = ap.add_subparsers()\n'
+                   'sp.add_parser("audit")\n'
+                   'sp.add_parser("re-audit")\n', {"audit", "re-audit"}),
+    "positional-choices": ('ap.add_argument("command", choices=("run", "noise"))\n'
+                           'ap.add_argument("--format", choices=("text", "json"))\n',
+                           {"run", "noise"}),
+    "comparison": ('if command == "scan":\n    pass\n'
+                   'elif command != "deps":\n    pass\n', {"scan", "deps"}),
+    "membership": ('if cmd in ("grade", "compare"):\n    pass\n',
+                   {"grade", "compare"}),
+    "match-statement": ('match args.command:\n'
+                        '    case "prepare":\n        pass\n'
+                        '    case _:\n        pass\n', {"prepare"}),
+    # The `-h, --help` line is what argparse itself puts in the command column:
+    # a flag standing where a verb would be, and not a subcommand.
+    "usage-string": ('USAGE = """usage: thing.py <verb> [flags]\n'
+                     '\n'
+                     'commands:\n'
+                     '  scan [--write-baseline]\n'
+                     '  deps\n'
+                     '  -h, --help  show this help message and exit\n'
+                     '"""\n'
+                     'if command not in USAGE:\n    print(USAGE)\n', {"scan", "deps"}),
+}
+
+
+def test_each_dispatch_spelling_yields_its_verbs(tmp_path):
+    """The resolver reads the chain however the module spells it, and reads only
+    the chain: a flag's `choices` are values, not subcommands, and a `--flag`
+    sitting in the usage block's command column is not a verb either.
+
+    Each module here is one the test writes, so a spelling that stopped being
+    harvested fails on its own line rather than on a doc three months from now.
+    """
+    for name, (src, expected) in _DISPATCH_SOURCES.items():
+        p = tmp_path / f"{name}.py"
+        p.write_text(src, encoding="utf-8")
+        verbs, forward = _chain_of(p)
+        assert verbs == expected, (
+            f"{name}: harvested {sorted(verbs)}, want {sorted(expected)}")
+        assert forward is None, f"{name}: a module with verbs was read as a forwarder"
+    flag_only = tmp_path / "flag-only.py"
+    flag_only.write_text('ap.add_argument("--format", choices=("text", "json"))\n',
+                         encoding="utf-8")
+    assert _chain_of(flag_only)[0] == set(), (
+        "a flag's values were harvested as subcommands, so a doc citing "
+        "`--format json` would be graded as if `json` were a verb")
+
+
+def test_a_module_with_no_dispatch_chain_is_not_graded():
+    """The one thing that keeps this check off the back of a library: a module
+    that dispatches nothing has no chain to be wrong about, so nothing beside it
+    is claimed as a command.
+
+    `app/paths.py` resolves data roots and takes no subcommand at all. A doc may
+    bracket a function name beside it — `architecture/authority-surfaces.md:34`
+    brackets `check_bash_command` beside `app/harness/safety.py` for exactly this
+    reason — and the check that graded those as broken commands would be the
+    second tool on this item's list of things that report a doc wrong when it is
+    right.
+    """
+    paths = ROOT / "app/paths.py"
+    assert dispatch_verbs(paths) == set(), (
+        "app/paths.py has a dispatch chain now, so this node's example needs a "
+        "module that genuinely takes no subcommand")
+    line = "`app/paths.py` (`data`, `roots`)\n"
+    assert [c[3] for c in command_claims(line)] == ["data", "roots"], (
+        "the verbs were not even extracted, so the skip below proves nothing")
+    assert undispatched_claims(line) == [], undispatched_claims(line)
+
+
+def test_the_command_extractor_is_what_the_check_depends_on(tmp_path):
+    """Clause 3: extraction is proven before its verdicts are trusted, the way
+    `test_the_path_extractor_is_what_the_check_depends_on` does for paths.
+
+    The positive half reads the real docs and fails the moment the span grammar
+    stops matching what they actually contain, or a file moves out from under a
+    claim; the negative half runs over text this test writes, so it cannot be
+    satisfied by the corpus going quiet.
+    """
+    def claims_of(path):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        return {(path.name, ln, v) for ln, s, m, v in command_claims(text)
+                if dispatch_verbs(m)}
+
+    graded = set().union(*(claims_of(ARCH / slug) for slug in NEW_DOCS))
+    assert graded, ("the command extractor found no dispatchable command in the "
+                    "four graded docs, so the check over them is vacuous — the "
+                    "span grammar or the module spellings went stale")
+    corpus = set().union(*(claims_of(p) for p in sorted(ARCH.glob("*.md"))))
+    assert graded <= corpus, (
+        "the graded docs' claims vanished inside a corpus-wide run of the same "
+        "extractor, which means line numbers shifted under them")
+    assert ("measurement.md", 73, "fixtures") in corpus, corpus
+
+    tmp = tmp_path / "doc.md"
+    tmp.write_text("no commands here, just `app/paths.py` and `--dry-run`\n",
+                   encoding="utf-8")
+    assert claims_of(tmp) == set(), (
+        "the extractor reported a command in a file with none, so a non-empty "
+        "aggregate would not have caught it going blind")
+
+    tmp.write_text(
+        "Inline: `python -m app.harness.supply_chain run-fixtures-eval`.\n"
+        "Listed: `app/harness/supply_chain.py` (`run-fixtures-eval`).\n",
+        encoding="utf-8")
+    found = command_claims(tmp.read_text(encoding="utf-8"))
+    assert [c[3] for c in found] == ["run-fixtures-eval", "run-fixtures-eval"], found
+    assert all(c[2] == ROOT / "app/harness/supply_chain.py" for c in found), found
+    assert all("run-fixtures-eval" not in dispatch_verbs(c[2]) for c in found)
+
+
+def test_prose_and_fragment_flags_are_never_read_as_commands():
+    """Clause 4: the non-commands are not claimed, and the graded docs pass
+    unchanged.
+
+    `keep/raise/revert` is a decision; `---` and `^---$` are separators and
+    regexes; `--apply`, `--user`, `--dry-run` are flags cited out of band;
+    `--hf-overrides` and `--limit-mm-per-prompt {"image": 20}` carry JSON
+    values; `python3` is an interpreter, `npx vite build …` is not a module of
+    this tree. All of these are spans in the corpus — the triage counted 215
+    command-shaped ones across the 34 top-level docs — and none may reach the
+    report.
+    """
+    not_commands = [
+        "keep/raise/revert decisions per job class",
+        "---",
+        "^---$",
+        "|---|---|---|",
+        "--apply",
+        "--user",
+        "--dry-run",
+        "--parallel 1",
+        "--hf-overrides",
+        '--limit-mm-per-prompt {"image": 20}',
+        "python3",
+        "npx vite build -c vite.chrome.config.ts --watch",
+        "--help",
+        "--arms",
+        "paired(rows, base=\"summary_legacy\")",
+        "kickoff = false",
+        "POST /api/sessions/create",
+        "server.py's own `except Exception` is a bare",
+        "app/harness/safety.py",
+        "app/paths.py:16",
+        "eval/run_compaction_recall_eval.py --arms none",
+    ]
+    for span in not_commands:
+        assert command_claims(f"x `{span}` y\n") == [], span
+        assert command_claims(f"| a | `app/paths.py` | `{span}` |\n") == [], span
+
+    # Four lines, each isolating one rule of the extractor. Break a rule and
+    # the line that needs it goes red; that is the only reason they are here.
+    #
+    # A snake_case span in a module's own bracket is a symbol, not a verb, and
+    # a span that is not a verb ends the list — so the `scan` behind it is not
+    # read either. The corpus does this for real:
+    # `architecture/infrastructure.md:343` brackets `check_deployed_copies`
+    # beside `scripts/service_health_check.py`, and
+    # `architecture/authority-surfaces.md:34` brackets `check_bash_command`.
+    symbol = "`app/harness/supply_chain.py` (`check_deployed_copies`, `scan`)\n"
+    assert command_claims(symbol) == [], command_claims(symbol)
+    assert undispatched_claims(symbol) == [], undispatched_claims(symbol)
+
+    # A bracket that does not open on the module is a parenthetical, not the
+    # module's list of commands.
+    elsewhere = "`app/harness/supply_chain.py` runs the scan (`scan-baseline`)\n"
+    assert command_claims(elsewhere) == [], command_claims(elsewhere)
+
+    # A verb-shaped word with ordinary prose behind it is prose that began on
+    # the wrong foot, not `verb --flag value`.
+    chatty = "`app/harness/supply_chain.py` (`scan-baseline the tree`)\n"
+    assert command_claims(chatty) == [], command_claims(chatty)
+
+    # A span does not go looking for a module; the module is the token the verb
+    # follows, or every sentence naming a file would claim a subcommand.
+    looked_up = "`see app/harness/supply_chain.py scan-baseline for the arm`\n"
+    assert command_claims(looked_up) == [], command_claims(looked_up)
+
+    # And the four graded docs, unchanged.
+    for slug in NEW_DOCS:
+        assert undispatched_claims(_text(slug), slug) == [], slug
