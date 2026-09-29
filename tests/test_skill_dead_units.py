@@ -48,20 +48,26 @@ assert _SPEC and _SPEC.loader
 sl = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(sl)
 
-#: The skills on this box whose commands name a unit no unit root has, measured at
-#: this commit with `~/lloyd/.venvs/lloyd/bin/python -m pytest
-#: tests/test_skill_dead_units.py -q -s` printing the live result. Three, not one:
-#: the item predicted `groundskeeper-survey` (fixed by this round's vault commit, so
-#: it is now legitimately clean), `voice-mode` and `local-llm-gotchas`, and the check
-#: also caught `qmd-collection-management`, whose `systemctl --user restart
-#: openclaw-gateway.service` names a unit absent from `agent-services/systemd/`,
-#: `~/.config/systemd/user/` AND `/etc/systemd/system/` — while
-#: `stale-process-cleanup/SKILL.md:68` asserts that exact unit is what "host systemd"
-#: manages. The set is pinned exact, and exact in both directions, because the item's
-#: stated failure mode for this category is being "tuned down to zero": a check that
-#: silently stops naming its corpus is the bug, not the finding.
-EXPECTED_DEAD_UNIT_SKILLS = {"local-llm-gotchas", "qmd-collection-management",
-                             "voice-mode"}
+#: The skills on this box whose commands name a unit no unit root has. EMPTY as of
+#: backlog **#1803**, which is the fix this file used to refuse: the three names this
+#: set carried (`local-llm-gotchas`, `qmd-collection-management`, `voice-mode`) each
+#: told the agent to turn a service over with `systemctl --user` against a unit that
+#: has never existed on this box — `lloyd-vllm.service`, `openclaw-gateway.service`,
+#: `lloyd-voice-mode.service`, all `systemctl --user list-unit-files <u> --no-legend |
+#: wc -l` → 0 against the `agent-supervisord.service` control → 1 `enabled` and a
+#: denominator of 159 — and each now names the supervisor program that does exist
+#: (`agent-llm-primary`, `agent-qmd-daemon`, `agent-tts`/`agent-livekit-server`, under
+#: `supervisorctl -c ~/lloyd/agent-services/supervisor/supervisord.conf`).
+#:
+#: The set stays pinned exact, exact in both directions, so the anti-tuning pin #1580
+#: asked for survives the fix. What moved is where the check's ability to FIRE is
+#: proved: with a clean library, `named == set()` is one empty set matching another,
+#: so the old `assert hits` guard could no longer say anything true and is gone. The
+#: fire-proof is now two nodes that go red on every mutation that would let the
+#: equality pass vacuously — `test_a_command_naming_an_uninstalled_unit_is_reported`
+#: (fixture corpus) and `test_the_check_still_fires_against_the_real_unit_roots`
+#: (this box's real unit roots, so the corpus itself is what says the name is absent).
+EXPECTED_DEAD_UNIT_SKILLS: set[str] = set()
 
 #: A unit that is genuinely absent on this box — verified with
 #: `find ~/lloyd/agent-services/systemd ~/.config/systemd/user /etc/systemd/system
@@ -338,24 +344,34 @@ def test_a_unit_in_a_repo_subdirectory_counts_as_tracked(tmp_path):
     assert result["dead_unit"] == [], result["dead_unit"]
 
 
-def test_the_live_skills_the_check_names_are_the_expected_three():
-    """Both clause halves against the real corpus, and the anti-tuning pin.
+def test_the_live_skill_library_names_no_dead_unit_commands():
+    """Clause 5's first half, against the real corpus: the library is clean.
 
     Read-only: `lint(skill_records=…)` walks records and never reaches
     `REPORT_PATH.write_text`, which only `main()` calls — unlike
     `scripts/skill_lint.py:1332`, a vault write, so this node commits nothing to
-    `~/obsidian`.
+    `~/obsidian`. It is also the node that prints the number the acceptance check
+    quotes: `dead_unit=0` out of `~/lloyd/.venvs/lloyd/bin/python
+    ~/lloyd/scripts/skill_lint.py` is `len(result["dead_unit"])` over these same
+    records (`scripts/skill_lint.py:1798`).
 
-    Three directions, each failing differently. `groundskeeper-survey` must be absent,
-    which is the rewritten body holding clauses 1 and 2 against the check that named it
-    before the rewrite. The exact set must equal `EXPECTED_DEAD_UNIT_SKILLS`, the
-    anti-tuning pin: an empty `dead_unit` list reads as a clean library and is just as
-    well produced by a check narrowed until it names nothing, so carrying the measured
-    set is what says the check did not stay that way. And `ABSENT_UNIT` must be absent
-    — the positive control on the assertion itself, proving the scan resolves files
-    rather than matching a list.
+    The equality against `EXPECTED_DEAD_UNIT_SKILLS` is kept rather than replaced by
+    `assert not result["dead_unit"]` because it has to cut both ways: a fourth skill
+    that grows a `systemctl --user …` step reddens this node, and a `check_dead_units`
+    narrowed until it names nothing redds it too. What the fix took away is the
+    non-emptiness guard the old three-name baseline carried (`assert hits`), which
+    after #1803 asserted a bug as the expected state.
 
-    That a skill is *named* here says nothing about whether it is advertised:
+    What an empty set can never prove on its own is that the scan still fires, so it
+    does not have to: `test_a_command_naming_an_uninstalled_unit_is_reported` fires it
+    against a fixture corpus and
+    `test_the_check_still_fires_against_the_real_unit_roots` fires it against the real
+    roots this node resolves against. `groundskeeper-survey` stays asserted separately
+    because #1580's rewrite is the reason it is absent, and a rewrite that regressed
+    would otherwise be indistinguishable from the new baseline.
+
+    That a skill is *named* here or absent from here says nothing about whether it is
+    advertised:
     `tests/test_archived_skill_artifacts.py::test_bench_007_grades_an_advertised_skill`
     pins `status: active` and advertised-ness for the retired skill, and it is the
     reason the fix is a body rewrite rather than an archive.
@@ -366,11 +382,25 @@ def test_the_live_skills_the_check_names_are_the_expected_three():
     named = {item["name"] for item in result["dead_unit"]}
     assert named == EXPECTED_DEAD_UNIT_SKILLS, named
     assert "groundskeeper-survey" not in named
-    hits = [h for i in result["dead_unit"] for h in i["units"]]
-    assert hits, (
-        "the live corpus yielded nothing at all, so the equality above could be one "
-        "empty set matching another — a check that never fires gets a green run")
-    assert ABSENT_UNIT not in {h["unit"] for h in hits}
+
+
+def test_the_check_still_fires_against_the_real_unit_roots(tmp_path):
+    """Clause 5's other half: the empty baseline above is a clean library, not a
+    check that stopped resolving.
+
+    `ABSENT_UNIT` is linted from a one-skill tmp corpus against `default_unit_roots()`
+    — the real `agent-services/systemd/` and `~/.config/systemd/user/` pair — so the
+    absence is decided by the same corpus the live node above just called the other
+    192 skills clean. Widening `installed_units` to match anything, or dropping a
+    root, redds this node while leaving the empty-equality node green, which is the
+    pair that makes the empty set mean something.
+    """
+    body = f"```\nsystemctl --user restart {ABSENT_UNIT}\n```\n"
+    result = _lint(tmp_path, "post-fix-probe", body,
+                   extra_roots=sl.default_unit_roots())
+    hits = _findings(result, "post-fix-probe")
+    assert [h["unit"] for h in hits] == [ABSENT_UNIT], hits
+    _each_line_names_a_systemctl_call(hits, tmp_path / "skills", "post-fix-probe")
 
 
 # ── the skill this category was filed against ──────────────────────────────────
@@ -529,3 +559,270 @@ def test_the_two_skill_predicates_fire_on_the_text_the_item_was_filed_against():
     assert any("It runs nightly at 02:30" in c for c in claims), claims
     commands = _runnable_unit_commands(PRE_FIX_SKILL_BODY)
     assert len(commands) == 1 and "lloyd-groundskeeper-survey.service" in commands[0], commands
+
+
+# ── the three skills #1803 was filed against ────────────────────────────────────
+#
+# Same reason as the section above for pinning these here rather than in a
+# vault-side test file: the predicate is the production one, `check_dead_units` and
+# `command_contexts` from `scripts/skill_lint.py`, so a test and the lint can never
+# disagree about what a command context is or which names are dead. Each node below
+# also carries its own positive control — the same predicate run over the pre-#1803
+# bytes of that file, where it must FIRE — because a negative assertion against one
+# fixed vault file is the shape that passes forever whether or not it can fail (the
+# `test_the_two_skill_predicates_fire_on_the_text_the_item_was_filed_against`
+# precedent, two nodes up).
+
+#: The invocation the whole fix turns on. Written out in full in every skill because
+#: a bare `supervisorctl` has no endpoint on this box (its HTTP interface is the unix
+#: socket `/tmp/agent-supervisor.sock`, not localhost:9001) and refuses while every
+#: program is RUNNING — `skills/service-health-check/SKILL.md:227` records a run that
+#: reported a refusal as a health verdict. A `$CONF` variable would not survive being
+#: pasted into a fresh shell either, which is what these files are read to produce.
+SUPERVISOR_CONF = "~/lloyd/agent-services/supervisor/supervisord.conf"
+
+#: The units #1803 names, each verified absent three ways at triage:
+#: `systemctl --user list-unit-files <u> --no-legend | wc -l` → 0, against the
+#: `agent-supervisord.service` control → 1 row `enabled` and a denominator of 159;
+#: `find ~/lloyd/agent-services/systemd ~/.config/systemd/user /etc/systemd/system
+#: -maxdepth 2 -name '<u>*'` → no output, while `lloyd-qmd-cleanup*` returns three
+#: paths; and `supervisorctl -c <conf> status` showing the program that does exist.
+DEAD_UNITS_1803 = ("lloyd-vllm.service", "lloyd-tts.service",
+                   "lloyd-voice-mode.service", "lloyd-voice-mcp.service",
+                   "openclaw-gateway.service")
+
+LOCAL_LLM_SKILL = Path.home() / "obsidian" / "skills" / "local-llm-gotchas" / "SKILL.md"
+QMD_SKILL = (Path.home() / "obsidian" / "skills" / "qmd-collection-management"
+             / "SKILL.md")
+VOICE_MODE_SKILL = Path.home() / "obsidian" / "skills" / "voice-mode" / "SKILL.md"
+
+
+def _unit_bearing_commands(body: str) -> list[str]:
+    """Command contexts naming one of #1803's five dead units, in any form.
+
+    Deliberately wider than `check_dead_units`, which only counts a context holding
+    the verb `systemctl`: clause 3 forbids an *instruction* to run one of these units,
+    and `service <u> start` or `journalctl -u <u>` is just as dead a step while being
+    invisible to the lint. Prose stays out, for the #1580 reason — a skill has to be
+    able to say a unit is gone.
+    """
+    return [t for t in _command_texts(body)
+            if any(u in t for u in DEAD_UNITS_1803)]
+
+
+def _section(body: str, heading: str) -> str:
+    """One section's text, from `heading` to the next heading of any level."""
+    assert heading in body, f"{heading!r} is not a heading in this skill any more"
+    rest = body[body.index(heading) + len(heading):]
+    nxt = re.search(r"^#{1,4} ", rest, re.M)
+    return rest[: nxt.start()] if nxt else rest
+
+
+# The three sections as they stood when #1803 was filed, verbatim from the vault at
+# base `ce6dafcf` (`git -C ~/obsidian show HEAD:skills/<slug>/SKILL.md`). Predicates
+# are run over these too and must FIRE.
+
+PRE_FIX_MODEL_SWAP = """## Model Swap Procedure
+
+When switching to a new model or quantization:
+
+1. Stop the service: `systemctl --user stop lloyd-vllm.service`
+2. Verify GPU memory freed: `nvidia-smi` (check no processes on target GPU)
+3. Update the model path in the service config
+4. Start the service: `systemctl --user start lloyd-vllm.service`
+5. Verify model loaded: `curl -s http://127.0.0.1:8091/v1/models`
+
+**Do NOT use `systemctl restart`** -- the old model may not release VRAM fast enough,causing the new model load to fail. Always stop,verify,start.
+"""
+
+PRE_FIX_QMD_VERIFY = """## Verifying After Changes
+
+After any config or index.yml change:
+1. Restart the gateway: `systemctl --user restart openclaw-gateway.service`
+2. Wait for reindex: `qmd status` (chunk count should increase)
+3. Test search: `qmd query "test query"`
+"""
+
+PRE_FIX_VOICE_FRONT_MATTER = """---
+category: voice
+description: Start,stop,enable,disable,or check voice mode. Manages the voice pipeline
+  via supervisord services (agent-tts, agent-livekit-server) and the Lloyd backend.
+metadata:
+  openclaw:
+    requires:
+      bins:
+      - curl
+      - systemctl
+name: voice-mode
+segment: skills
+status: active
+tags:
+- skills
+type: notes
+timestamp: '2026-07-10T17:27:00'
+---
+# Skill: Voice Mode
+"""
+
+PRE_FIX_VOICE_CONTROL = """Voice mode runs as a systemd user service: `lloyd-voice-mode.service`. It depends on `lloyd-tts.service` (TTS on :8090) and `lloyd-vllm.service` (LLM on :8096).
+
+## Start voice mode
+
+```bash
+systemctl --user start lloyd-voice-mode.service
+sleep 4
+systemctl --user is-active lloyd-voice-mode.service && curl -s http://127.0.0.1:8092/v1/status
+```
+
+> **Important:** Do NOT launch `voice_mode.py` directly. Always use the systemd service. The service runs headless and manages process lifecycle,restart-on-failure,and dependency ordering automatically.
+
+## Stop voice mode
+
+```bash
+systemctl --user stop lloyd-voice-mode.service
+```
+
+## Check status
+
+```bash
+systemctl --user is-active lloyd-voice-mode.service
+curl -s http://127.0.0.1:8092/v1/status | python3 -m json.tool
+```
+"""
+
+
+def _bins(front_matter: dict) -> list[str]:
+    return front_matter["metadata"]["openclaw"]["requires"]["bins"]
+
+
+def test_local_llm_gotchas_model_swap_is_a_supervisor_stop_verify_start():
+    """Clause 1. The model swap turns the engine over under supervisor, and keeps the
+    guardrail that made the wrong commands worth keeping.
+
+    Two halves. First, no dead unit: `check_dead_units` on the whole file and
+    `_unit_bearing_commands` on its command contexts both have to come back empty, so
+    the skill is clean by the lint's own rule and by the wider one the lint cannot
+    see (`journalctl -u lloyd-vllm.service` is a dead step too). Second, the guardrail:
+    `local-llm-gotchas` did not merely name a dead unit, it prescribed stop → verify →
+    start and warned that a restart does not let the old model release VRAM in time.
+    That reason is about the model, not about systemd, so it survives the rewrite and
+    is asserted as an ORDER — the `nvidia-smi` check has to fall strictly between the
+    supervisor `stop agent-llm-primary` and the supervisor `start agent-llm-primary`.
+    A rewrite that pasted both commands adjacently would be green on a grep and would
+    have quietly dropped the thing the item said to keep.
+    """
+    body = LOCAL_LLM_SKILL.read_text(encoding="utf-8")
+    assert sl.check_dead_units(body) == [], sl.check_dead_units(body)
+    assert _unit_bearing_commands(body) == [], _unit_bearing_commands(body)
+
+    swap = _section(body, "## Model Swap Procedure")
+    stop = ("supervisorctl -c ~/lloyd/agent-services/supervisor/supervisord.conf "
+            "stop agent-llm-primary")
+    start = ("supervisorctl -c ~/lloyd/agent-services/supervisor/supervisord.conf "
+             "start agent-llm-primary")
+    assert stop in swap and start in swap, swap
+    freed = swap.index("nvidia-smi")
+    assert swap.index(stop) < freed < swap.index(start), (
+        "the VRAM-release check is no longer between the stop and the start, which is "
+        "the one reason the stop/start ritual existed")
+    assert "Do NOT use `supervisorctl restart`" in swap, (
+        "the guardrail was dropped instead of moved: it forbids the one command that "
+        "leaves no room for the verify step")
+    assert "8096" in swap, (
+        "the load-verification step no longer names the port the primary engine "
+        "listens on (`agent-services/bin/start-qwen38-flash-next.sh:6`)")
+
+
+def test_qmd_skill_restarts_the_qmd_daemon_under_supervisor():
+    """Clause 2. The post-change step restarts the program that serves qmd.
+
+    The old step restarted `openclaw-gateway.service`, a unit no unit root has, and
+    the gateway it names is not what indexes the vault on this box: `agent-qmd-daemon`
+    is (`agent-services/supervisor/conf.d/agent-qmd-daemon.conf` runs
+    `node …/qmd/dist/cli/qmd.js mcp --http --port 8181`). So the assertion is not just
+    that the dead name is gone but that the live program takes its place in the same
+    step, with the conf path that makes the command runnable.
+    """
+    body = QMD_SKILL.read_text(encoding="utf-8")
+    assert sl.check_dead_units(body) == [], sl.check_dead_units(body)
+    assert _unit_bearing_commands(body) == [], _unit_bearing_commands(body)
+
+    verify = _section(body, "## Verifying After Changes")
+    assert ("supervisorctl -c ~/lloyd/agent-services/supervisor/supervisord.conf "
+            "restart agent-qmd-daemon") in verify, verify
+
+
+def test_voice_mode_controls_the_voice_stack_under_supervisor():
+    """Clauses 3 and 4. The body says what its own front matter already said.
+
+    Four things, all on the live file. (a) No dead unit in any command context, and
+    `check_dead_units` clean — which covers the three names clause 3 lists
+    (`lloyd-voice-mode.service`, `lloyd-tts.service`, `lloyd-vllm.service`) plus the
+    two the table at base also carried. (b) The prohibition that sent a reader to
+    systemd — "Always use the systemd service" — and the sentence that asserted the
+    unit existed are gone, because a prohibition on the only route that exists is
+    worse than no route. (c) Start, stop, status and the GPU-change restart all name
+    `agent-tts` and `agent-livekit-server` under supervisor, and the program pair is
+    the same one the front-matter `description` already carried at base, so the body
+    was brought round to the description rather than the reverse. (d) The front matter
+    no longer requires `systemctl`, the binary clause 4 names, while still requiring
+    `curl` — so the node cannot pass by the `requires` block being deleted whole.
+    """
+    body = VOICE_MODE_SKILL.read_text(encoding="utf-8")
+    assert sl.check_dead_units(body) == [], sl.check_dead_units(body)
+    assert _unit_bearing_commands(body) == [], _unit_bearing_commands(body)
+
+    flat = _flat(body).lower()
+    assert "always use the systemd service" not in flat, flat[:400]
+    assert "runs as a systemd user service" not in flat, flat[:400]
+
+    for heading in ("## Start voice mode", "## Stop voice mode", "## Check status",
+                    "### Restarting after a GPU change"):
+        step = _section(body, heading)
+        assert "supervisorctl" in step, heading
+        assert "agent-tts" in step and "agent-livekit-server" in step, (
+            f"{heading} does not name the two supervisor programs: {step[:200]}")
+    assert SUPERVISOR_CONF in body, "no step spells the conf the conf-less call needs"
+
+    fm, _, err = sl.parse_frontmatter(body)
+    assert err is None, err
+    desc = fm["description"]
+    assert "agent-tts" in desc and "agent-livekit-server" in desc, desc
+    bins = _bins(fm)
+    assert "systemctl" not in bins, bins
+    assert "curl" in bins, f"the requires block went away, which is not the fix: {bins}"
+
+
+def test_the_1803_predicates_fire_on_the_text_the_item_was_filed_against():
+    """Positive control on all four clause predicates, against the base bytes.
+
+    Each predicate is run over the pre-#1803 text of its own file and has to name it:
+    the lint fires on the `systemctl --user` lines, `_unit_bearing_commands` fires on
+    the dead names, the ordering predicate finds no `agent-llm-primary` to order
+    against, the supervisor step predicate finds no program, and the front-matter
+    predicate finds `systemctl` in `bins`. Without this node every assertion in the
+    three nodes above would be a claim about a file plus a predicate that might match
+    nothing at all.
+    """
+    swap_hits = sl.check_dead_units(PRE_FIX_MODEL_SWAP)
+    assert [h["unit"] for h in swap_hits] == [
+        "lloyd-vllm.service", "lloyd-vllm.service"], swap_hits
+    assert len({h["line_no"] for h in swap_hits}) == 2, swap_hits
+    assert "agent-llm-primary" not in PRE_FIX_MODEL_SWAP
+
+    qmd_hits = sl.check_dead_units(PRE_FIX_QMD_VERIFY)
+    assert [h["unit"] for h in qmd_hits] == ["openclaw-gateway.service"], qmd_hits
+    assert "agent-qmd-daemon" not in PRE_FIX_QMD_VERIFY
+
+    voice_hits = sl.check_dead_units(PRE_FIX_VOICE_CONTROL)
+    assert {h["unit"] for h in voice_hits} == {"lloyd-voice-mode.service"}, voice_hits
+    assert len(_unit_bearing_commands(PRE_FIX_VOICE_CONTROL)) >= 4, voice_hits
+    assert "always use the systemd service" in _flat(PRE_FIX_VOICE_CONTROL).lower()
+    assert "supervisorctl" not in PRE_FIX_VOICE_CONTROL
+
+    pre_fm, _, pre_err = sl.parse_frontmatter(PRE_FIX_VOICE_FRONT_MATTER)
+    assert pre_err is None, pre_err
+    assert "systemctl" in _bins(pre_fm), _bins(pre_fm)
+    assert "agent-tts" not in PRE_FIX_VOICE_CONTROL, (
+        "the control text already names the programs, so clause 3's positive "
+        "assertions would not be proving the rewrite happened")
