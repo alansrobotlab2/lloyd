@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, browser, chrome-extension, sidepanel]
 type: reference
 status: implemented
-date: 2026-09-28
+date: 2026-09-29
 ---
 
 # Lloyd — the browser side panel
@@ -40,16 +40,26 @@ must not import the app's state.
 
 ## What one check does
 
-Pressing "Check it out, Lloyd" on a tab, in order:
+Pressing "Check it out, Lloyd" on a tab, in order. The button is the only entry
+point, and it is enabled only when the tab's URL passes `shouldSpawnSession`
+(`chrome-extension/src/background/url.ts`), which refuses `google.com` and its
+subdomains outright and every YouTube page that is not a video. That refusal
+lives in the button's `disabled` state, not in the service worker: the handler
+that actually mints the session tests only that the URL is http(s) (#1765).
 
 1. `POST /api/sessions/create` with `{platform: "browser", inner_voice: true}` —
    the tag is what makes these sessions findable (`app/routers/sessions.py`).
 2. `PATCH /api/sessions/{id}/metadata` with `{url, title}`, so the page the
    session is about travels with it.
 3. `POST /api/message/stream` with the kickoff — a page fetch and highlights, or
-   a transcript on `youtube.com`/`youtu.be`. The response is abandoned; the
-   backend keeps running on disconnect (`app/routers/messages.py`), which is the
-   only reason a fire-and-forget POST is a sound kickoff.
+   a transcript on `youtube.com`/`youtu.be`. The response *body* is closed unread
+   and the backend keeps running on disconnect (`app/routers/messages.py`), so
+   the turn outlives the call; but the POST is **awaited**, and step 4 waits on
+   it, because the handler enqueues the turn before it hands back its
+   `StreamingResponse`. An answered POST is therefore the barrier that puts the
+   panel's first `GET /status` inside the turn instead of racing it — fired and
+   forgotten, the panel reached a session whose turn did not exist yet and showed
+   no in-progress state for the entire kickoff.
 4. The panel switches to that session.
 
 Re-checking the **same canonical URL** re-focuses the existing session and does
@@ -84,7 +94,13 @@ exception made for the panel, and the panel is not the only certless caller.
 Which networks are trusted, and what certificate mechanism was retired and when,
 belong to [[authority-surfaces]] (the Loopback entry) and to the transport history
 in [[mission-control]] and [[infrastructure]]; this doc points at them rather than
-copying them, so a change to the boundary has one place to be corrected.
+copying them, so a change to the boundary has one place to be corrected. The
+extension's own two write-ups are not yet at that standard:
+`chrome-extension/README.md` and `chrome-extension/src/background/lloyd-client.ts`
+still send a reader to a `server.py` line range for an exemption that went out with
+the mechanism it exempted, and neither file is in the corpus
+`tests/test_stale_mtls_comment_claims.py` greps (#1702, blocked by #1722). On this
+point, read `server.py`, not them.
 
 ## Build, and what is in git
 
@@ -103,7 +119,12 @@ extensions page is what picks it up; `--watch` only rewrites the bundle.
 **The built output in git is not loadable on its own.** The MV3 manifest is not
 tracked (#1701 owns the cause), so it is absent from a fresh checkout, from a
 worktree, and from the tracked build output Chrome is pointed at. Loading
-unpacked works on this machine because the manifest is present here. Nothing else
+unpacked works on this machine because the manifest is present here. Nor is the
+build command above harmless without it: `vite.chrome.config.ts` empties `outDir`
+before bundling and copies `chrome-extension/manifest.json` in at the end of the
+bundle, ahead of the icon copy — so in a tree that has no manifest the run writes
+a fresh bundle over an emptied `dist/`, skips both the manifest and `dist/icons/`,
+and dies on an ENOENT that names no path (#1701). Nothing else
 about this surface depends on the manifest's contents being described here, which
 is why this doc says *manifest* and does not cite a path to one: a citation to a
 file that exists only in one checkout would be a claim its own test could not
@@ -112,7 +133,10 @@ re-check.
 ## What this doc does not cover
 
 - **The browser as a tool.** `agent_mcp/browser.py` — navigation, snapshots, the
-  SSRF guard that refuses private and loopback targets — is the agent driving a
+  SSRF guard that refuses private and internal hosts and lets loopback through on
+  purpose (`_host_block_reason` at `agent_mcp/browser.py:194` returns allow for a
+  hostname whose every resolved address is loopback, before `_is_private_host` is
+  reached) — is the agent driving a
   browser, and is [[tools]]. This doc is the human driving Lloyd from a tab, and
   the two share only a backend.
 - **Chat mechanics.** Sessions, titles, SSE and the `platform` tag are
@@ -146,3 +170,23 @@ re-check.
   that filed this; the panel's copy survived it, which is that doc's own
   two-docs-one-guard failure. `tests/test_stale_mtls_comment_claims.py` now
   covers both files, and keeps the true history in the two docs that tell it.
+- **2026-09-29 — corrected (arch-review, `a820d20b9e6f`).** §What one check does
+  called the kickoff a fire-and-forget POST and made the abandoned response the
+  reason that was sound. The POST has been **awaited**, deliberately, since
+  `93733270` (2026-09-10) — eighteen days before this doc was written — because
+  the enqueue lands before the `StreamingResponse` and the answered POST is what
+  lets the panel's first `/status` see the turn; the body is still cancelled
+  unread. The section now says what the await buys, and carries the one mechanism
+  it never mentioned: `shouldSpawnSession`'s blocklist of `google.com` and
+  non-video YouTube pages, which turns out to live in the button's `disabled`
+  state rather than in `handleManualCheck` (#1765). Two claims fixed beside it —
+  the `agent_mcp/browser.py` clause said its SSRF guard refuses loopback, and that
+  guard in fact allows loopback and refuses private/internal hosts — and
+  §Getting to the backend now warns that the extension's own README and client
+  comment still point at the retired exemption (#1702/#1722), which is the same
+  two-surfaces-one-rule failure one directory over. Re-measured and still true:
+  all seven line counts in §The pieces, the three routes and their payloads, the
+  tracked `dist/` files, the manifest's absence from git, the build command, and
+  `measurement`'s silence on browser sessions. Filed: the rotted `messages.py`
+  citations in the two client comments (#1766) and `spawnSession`'s unreachable
+  `kickoff` default, the last seam of the retired auto-spawn path (#1767).
