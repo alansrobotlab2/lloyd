@@ -620,8 +620,11 @@ def _surface_gate(changed):
     """A Gate with only what the prompt-surface rung touches actually set.
 
     Same shape as `_gate` in `tests/test_gate_prompt_surface_rung.py`: the rung
-    reads `report.changed_paths`, `round_id`, `item_id`, `live`, `python` and
-    `_child_env`, and constructing the real one would shell out to git.
+    reads `report.changed_paths`, `round_id`, `item_id`, `live`, `worktree`,
+    `python` and `_child_env`, and constructing the real one would shell out to
+    git. `worktree` is a sibling path and not `LIVE_ROOT` for the same reason it
+    is there: a gate handed one directory for both would pass any assertion about
+    which tree the eval was launched from (#1790).
     """
     from scripts.automod import gate as G
 
@@ -630,6 +633,8 @@ def _surface_gate(changed):
     g.round_id = "SM_20260928_234639"
     g.item_id = 1758
     g.live = G.LIVE_ROOT
+    g.worktree = (G.LIVE_ROOT.parent / "lloyd-work" / g.round_id
+                  / "home" / "lloyd")
     g.python = G.LIVE_ROOT / ".venvs" / "lloyd" / "bin" / "python"
     g._child_env = lambda root=None, **_kw: {}
     return g
@@ -681,8 +686,13 @@ def test_the_invariant_module_is_itself_a_prompt_surface(monkeypatch):
         f"the rung still skips a diff to the invariant module: {data}")
     assert any("run_tool_choice_eval.py" in " ".join(c) for c in calls), (
         f"the rung returned a score without launching the tool-choice eval: {calls}")
-    assert all(cwd == str(G.LIVE_ROOT) for cwd in cwds), (
-        f"the eval ran outside the live tree, so it scored a worktree: {cwds}")
+    # The candidate's tree, not the live checkout (#1790): the eval imports the
+    # `app/` of whichever tree its script resolved into, so a launch from
+    # `LIVE_ROOT` would score the shipped prompt and call it the round's.
+    assert all(cwd == str(defining.worktree) for cwd in cwds), (
+        f"the eval ran outside the round's worktree, so it scored the shipped"
+        f" prompt rather than this diff: {cwds}")
+    assert str(G.LIVE_ROOT) not in cwds
 
     # …and the delta-reuse path reaches the same answer, so a round that touched
     # the file cannot be handed an earlier head's score.

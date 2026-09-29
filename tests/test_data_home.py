@@ -136,6 +136,19 @@ def test_a_round_home_never_links_the_live_data_root(tmp_path, monkeypatch):
 
 
 def test_every_gate_child_gets_the_round_data_root_except_live_baselines(tmp_path, monkeypatch):
+    """Every child is isolated; the one that writes a live baseline is isolated
+    to PRODUCTION rather than left to resolve a data root for itself.
+
+    `live_data` used to mean "unset", which was only ever a way of saying
+    "inherit from the tree the script runs in" — safe while the prompt-surface
+    launch ran from the live checkout, and a record destined for the worktree's
+    own `.lloyd-data/` once #1790 moved that launch into the round's tree, since
+    rule 3 of `app.data_root` keeps any non-production checkout's data inside it.
+    Name the root, and the baseline lands where `compare_tool_choice.py` will
+    look for it after the worktree is gone:
+    `tests/test_gate_prompt_surface_rung.py::test_the_live_data_root_is_named_so_the_baseline_outlives_the_round`.
+    """
+    from app.data_root import production_data_root
     from scripts.automod import gate as GT
     from scripts.automod import worktree as W
     monkeypatch.setattr(W, "round_dir", lambda rid: tmp_path / rid)
@@ -145,7 +158,9 @@ def test_every_gate_child_gets_the_round_data_root_except_live_baselines(tmp_pat
     env = g._child_env()
     assert env["LLOYD_DATA"] == str(tmp_path / "SM_y" / "home" / "lloyd-data")
     assert Path(env["LLOYD_DATA"]).is_dir()
-    assert "LLOYD_DATA" not in g._child_env(live_data=True)
+    live = g._child_env(live_data=True)
+    assert live["LLOYD_DATA"] == str(production_data_root())
+    assert live["LLOYD_DATA"] != env["LLOYD_DATA"]
 
 
 def test_the_canary_gets_its_own_data_root(tmp_path):

@@ -1096,3 +1096,106 @@ def test_no_doc_in_the_corpus_still_claims_a_sole_opener():
         hits += [(str(path.relative_to(ROOT)), phrase)
                  for phrase in SOLE_OPENER_PHRASES if phrase in text]
     assert hits == [], f"sole-opener claims still standing: {hits}"
+
+
+# ── #1790: what the prompt_surface rung's two prose carriers and the doc say ──
+#
+# The clause exists because the comment outlived the layout it described. As
+# written by `d5edc6cb` (2026-09-12) the eval really did keep its baseline inside
+# the checkout, and `SM_20260908_165950` lost one that way, so the launch was
+# pinned to the live tree and the comment said why. `6426668b` moved runtime data
+# out of the tree ten days later and the comment stayed, and the sentence then
+# did what a stale comment always does: it justified a kwarg that had become the
+# defect, and `architecture/measurement.md` went and cited it as the reason. So
+# this is a prose pin with teeth — it names the phrase the comment used and the
+# fact the comment must now carry, and it reads the doc section rather than the
+# file, because a correct sentence in the wrong section is what #1790 was.
+
+#: The claim both carriers had, in their own words. Asserted absent from both.
+STALE_BASELINE_CLAIM = "next to the script"
+
+#: The post-`6426668b` fact each carrier has to state instead. The data-root half
+#: and the import half, because the comment conflated them: one is why the
+#: baseline survives a teardown, the other is why the cwd decides what is scored.
+REQUIRED_FACTS = ("6426668b", "EVAL_BASELINES_DIR")
+
+
+def _rung_source() -> str:
+    import inspect
+
+    from scripts.automod import gate as G
+    return inspect.getsource(G.Gate.rung_prompt_surface)
+
+
+def _measurement_gate_section() -> str:
+    """§Which measurement stands between a round and landing, and nothing else.
+    Extracted, because the doc mentions `prompt_surface` in its out-of-scope list
+    too, and a node that searched the file would pass on that line."""
+    text = (ROOT / "architecture/measurement.md").read_text(encoding="utf-8")
+    m = re.search(r"^## Which measurement stands between a round and landing$"
+                  r".*?(?=^## )", text, re.M | re.S)
+    assert m, ("architecture/measurement.md lost the section #1790 has to state "
+               "the rung's job in")
+    return m.group(0)
+
+
+def test_the_prompt_surface_carriers_say_why_the_worktree_is_safe_now():
+    """Clause 4: the comment, the test and the doc each carry the current reason,
+    and none of them still says the baseline lives beside the script.
+
+    Three surfaces, one fact. `inspect.getsource` is what makes the comment check
+    real — a comment inside the method is part of the method's source, so this
+    grades the words a future reader finds beside the kwarg and not a copy of them
+    kept somewhere greener. The test file is read rather than imported so the
+    assertion covers its docstring whether or not the node that owns it is
+    collected.
+    """
+    rung = _rung_source()
+    assert STALE_BASELINE_CLAIM not in rung, (
+        "rung_prompt_surface's comment is back to claiming the eval keeps its "
+        "baseline beside the script, the justification `6426668b` falsified")
+    assert "sys.path" in rung and "6426668b" in rung, (
+        "the comment no longer says what the cwd actually decides (which tree's "
+        f"`app/` the child imports) or when that stopped mattering: {rung[:200]!r}")
+    assert "live_data" in rung, (
+        "the comment no longer names the flag that keeps the baseline outside "
+        "both trees, which is the reason the worktree launch is safe")
+
+    test_src = (ROOT / "tests/test_gate_prompt_surface_rung.py").read_text(
+        encoding="utf-8")
+    assert STALE_BASELINE_CLAIM not in test_src, (
+        "the inversion's own file still recites the dead justification")
+    assert "6426668b" in test_src and "EVAL_BASELINES_DIR" in test_src, (
+        "the test's docstring states neither the date the layout ended nor where "
+        "the baseline really goes")
+
+    section = _measurement_gate_section()
+    assert "worktree" in section and "candidate" in section, (
+        "the gate section no longer says the rung scores the candidate's tree")
+    assert STALE_BASELINE_CLAIM not in section, (
+        "the doc is reciting the comment again, which is the whole failure mode "
+        "this clause exists to stop")
+    assert "live tree, not the worktree" not in section
+    for fact in REQUIRED_FACTS:
+        assert fact in section, f"the section no longer states {fact!r}"
+
+
+def test_the_measurement_doc_still_names_the_live_data_root_as_named():
+    """The doc's second half: it must say the data root is NAMED, because "the
+    child resolves production's root anyway" was the sentence that let an unset
+    variable read as a location.
+
+    `unset` is the word that made the old prose wrong — not false, but wrong in
+    the way that costs a round its record — so it is asserted absent from the
+    section, and the positive form is asserted present.
+    """
+    section = _measurement_gate_section()
+    assert "leaves `LLOYD_DATA` unset" not in section, (
+        "the doc is back to describing live_data as leaving the variable unset, "
+        "which is true of the code #1790 replaced and false of the code it left")
+    assert "names the production data root" in section, (
+        "the doc no longer says the live data root is exported by name, the one "
+        "thing that keeps a worktree launch's baseline findable")
+    assert ".lloyd-data" in section, (
+        "the doc no longer names where an inherited root would put the record — "
+        "inside the worktree, which is the whole reason it must not be inherited")

@@ -171,18 +171,26 @@ rung of `scripts/automod/gate.py` and nothing else.
   the rung says `no prompt-surface path in the diff` and skips.
 - It runs `eval/run_tool_choice_eval.py --label item<N>`, then
   `eval/compare_tool_choice.py --label item<N>`.
-- It runs **from the live tree, not the worktree** — for a reason the code no
-  longer gives. The comment at `scripts/automod/gate.py:1413` says the eval
-  writes its baseline next to the script so a worktree would take it down with
-  itself; that was true when it was written (`d5edc6cb`, 2026-09-12) and stopped
-  being true at `6426668b`, when runtime data left the tree —
-  `eval/run_tool_choice_eval.py:498` writes to `EVAL_BASELINES_DIR`, outside
-  both trees, and `_child_env` with `live_data` set leaves `LLOYD_DATA` unset so
-  the child resolves production's root anyway. What the cwd really picks is
-  which `app/` the eval imports: the script roots its own `sys.path` at the tree
-  it lives in, so the prompt surface under test is the shipped one, never the
-  worktree's — the rung fires on the candidate's diff and scores somebody
-  else's prompt (#1790).
+- It runs **from the round's worktree**, and the cwd is what makes the score the
+  candidate's: the command names the script by relative path, the script roots
+  its own `sys.path` at the tree it resolves into — ahead of the `PYTHONPATH`
+  `_child_env` exports — so the `app.*` it imports, and the prompt it scores, are
+  the round's. Pinned to the live checkout until #1790, which made the rung a
+  canary on the shipped tree wearing a gate's clothes: red on drift a round did
+  not cause, green over a round that regressed tool choice.
+- The baseline that run writes stays **outside both trees**, which is what lets
+  the launch sit in a worktree at all. It goes to `EVAL_BASELINES_DIR`
+  (`eval/run_tool_choice_eval.py:498`), and `_child_env` with `live_data` set
+  names the production data root in `LLOYD_DATA` rather than leaving it unset.
+  Unset was never a location; it was an instruction to inherit one from the tree
+  the script ran in, and a worktree keeps its data inside itself — rule 3 of
+  `app.data_root` — so the record would land in `<worktree>/.lloyd-data/`, be
+  deleted with the round, and leave the comparator answering `nothing to compare
+  against` about a rung that had just measured something. The reason the live cwd
+  used to give itself — that the baseline lived inside the checkout, true until
+  runtime data left it at `6426668b` (2026-09-22) — is gone from the comment,
+  from the test and from here, because the doc layer inherits whatever the
+  comment asserts.
 - Exit codes come from the script, not a copy of its contract: 0 pass, 1
   regression, 2 nothing to compare against — which is not a pass — and 3
   instrument failure, meaning the control set moved so the comparison certified

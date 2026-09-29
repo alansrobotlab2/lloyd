@@ -659,17 +659,23 @@ class Gate:
         a round out that way, and a thing this function did not do until
         2026-09-22. It is ON for the rungs that execute CANDIDATE TEST CODE
         (`tests`, the base probe, the flake re-confirm) and off elsewhere: the
-        other rungs run scripts this repo controls, and two of them
-        (`tool_choice`) deliberately work from the live tree. Fails open to the
+        other rungs run scripts this repo controls from the round's worktree,
+        which needs no home to be the round's in order to import the round's
+        code. Fails open to the
         real home, loudly and on the record — `self.home_isolation` rides onto
         the tests rung's data, because a silent downgrade here is
         indistinguishable from the isolation working.
 
-        `LLOYD_DATA` is the round's own data root on every call, whatever
-        `isolate_home` says: runtime data lives outside the tree, so the
-        worktree no longer isolates it by being where it is. `live_data` leaves
-        it unset for the live-tree scripts that write live baselines on purpose
-        (`tool_choice`), which then resolve production the way the backend does.
+        `LLOYD_DATA` is set on every call, whatever `isolate_home` says: runtime
+        data lives outside the tree, so the worktree no longer isolates it by
+        being where it is. Default is the round's own root. `live_data` names the
+        PRODUCTION root instead, for the scripts that write a live baseline on
+        purpose (`tool_choice`) — and it has to name it, not omit it. Unset made
+        the child inherit a data root from which tree it happened to run in, and
+        a worktree keeps its data inside itself (`app.data_root` rule 3), which
+        is where the baseline would go and die.
+        `tests/test_gate_prompt_surface_rung.py::test_the_live_data_root_is_named_so_the_baseline_outlives_the_round`
+        is that rule, and the reason this parameter is a name and not an absence.
         """
         scratch = W.round_dir(self.round_id) / "gate-state"
         (scratch / "automod").mkdir(parents=True, exist_ok=True)
@@ -691,7 +697,10 @@ class Gate:
             "LLOYD_GUARDIAN_STATE": str(scratch / "guardian"),
             "LLOYD_VOICE_ALERTS": "0",
         }
-        if not live_data:
+        if live_data:
+            from app.data_root import production_data_root
+            env["LLOYD_DATA"] = str(production_data_root())
+        else:
             data = W.round_data_root(self.round_id)
             data.mkdir(parents=True, exist_ok=True)
             env["LLOYD_DATA"] = str(data)
@@ -1387,6 +1396,13 @@ class Gate:
     def rung_prompt_surface(self):
         """Scored behavioural check, but only when the prompt surface moved.
 
+        Its job is to measure the candidate: the round's own tool-choice eval, on
+        the prompt the round built. Both halves are load-bearing — a run of the
+        shipped prompt is a canary about the shipped tree, and it was, until
+        #1790 moved the launch into the worktree. `architecture/measurement.md`
+        §Which measurement stands between a round and landing says the same thing
+        and is pinned to this method by `tests/test_automod_doc_claims.py`.
+
         This used to be four commands in the autocode prompt, and that placed
         it exactly wrong. The model ran it from inside its own turn, against
         the live engine, while its own 150k-token round was the other tenant —
@@ -1398,9 +1414,9 @@ class Gate:
         which is the one window in a round when nothing else of its own is on
         the engine.
 
-        Exit codes come from the live script, not from a copy of its contract
-        here: `compare_tool_choice.py` exits 0 pass / 1 regression / 2 nothing
-        to compare against, and #875's kept branch adds a 3. Anything non-zero
+        Exit codes come from the runner, not from a copy of its contract here:
+        `compare_tool_choice.py` exits 0 pass / 1 regression / 2 nothing to
+        compare against, and #875's kept branch adds a 3. Anything non-zero
         fails the rung and the message quotes what it said.
         """
         if not self._touches_prompt_surface():
@@ -1410,18 +1426,30 @@ class Gate:
         # back as the run that judged item 377, months later, in a directory
         # of bare timestamps; the round id is the fallback.
         label = f"item{self.item_id}" if self.item_id else f"gate-{self.round_id}"
-        # From the LIVE tree, not the worktree: the eval writes its baseline
-        # next to the script, and a baseline written inside a worktree is
-        # deleted with it (SM_20260908_165950's was).
+        # From the WORKTREE, because that is what decides which `app/` the eval
+        # imports: the script path is relative, and
+        # `eval/run_tool_choice_eval.py:62-64` roots `sys.path` at the tree the
+        # script itself resolves into, ahead of the worktree `PYTHONPATH`
+        # `_child_env` sets. Run from the live tree it scored the shipped prompt
+        # for any prompt-surface diff — a canary wearing a gate's clothes (#1790).
+        # Why it was pinned to the live tree for so long: the layout
+        # `6426668b` replaced on 2026-09-22, when SM_20260908_165950 lost a
+        # baseline written inside a worktree. Runtime data has been outside every
+        # tree since, and `_child_env(live_data=True)` names the live data root,
+        # so the record still lands where the comparator will find it after the
+        # round is deleted — see
+        # `tests/test_gate_prompt_surface_rung.py::test_the_live_data_root_is_named_so_the_baseline_outlives_the_round`.
         run = _run([str(self.python), "eval/run_tool_choice_eval.py",
                     "--label", label],
-                   cwd=self.live, env=self._child_env(live_data=True), timeout=1800)
+                   cwd=self.worktree, env=self._child_env(live_data=True),
+                   timeout=1800)
         if run.returncode != 0:
             tail = "\n".join((run.stdout + run.stderr).strip().splitlines()[-15:])
             return False, f"tool-choice eval failed to run: {tail}", {"label": label}
         cmp_ = _run([str(self.python), "eval/compare_tool_choice.py",
                      "--label", label],
-                    cwd=self.live, env=self._child_env(live_data=True), timeout=600)
+                    cwd=self.worktree, env=self._child_env(live_data=True),
+                    timeout=600)
         text = (cmp_.stdout + cmp_.stderr).strip()
         tail = "\n".join(text.splitlines()[-15:])
         data = {"label": label, "compare_exit": cmp_.returncode}
