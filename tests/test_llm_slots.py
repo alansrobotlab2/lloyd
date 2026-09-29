@@ -200,3 +200,152 @@ def test_only_supervisor_client_reads_the_raw_registries():
         "these read the unfiltered service registries directly and will list a "
         f"switched-off slot: {offenders}. Use supervisor_client.infra_services() "
         "/ lloyd_services() / all_services() instead.")
+
+
+# ── the two model rows' ports come from config, not from a second literal ──
+#
+# #1684 made the dispatch gate derive its probe URL from `models.<alias>.base_url`.
+# This registry was the other owner that ruling named: it still carried 8096 / 8091
+# as literals, while `workers/service_probe.py` ticks the outage streak off
+# `infra_services()` and `workers/sources/scheduled_task.py` re-derives the URL it
+# probes two lines later. A port move therefore left the gate answering on the new
+# port and the probe holding a streak on the old one that can never end.
+
+from app.config import MODEL_CONFIGS
+
+
+def test_one_config_value_moves_the_registry_row_and_the_dispatch_gate_together(
+        monkeypatch):
+    """Clauses 1: the surface that counts an outage and the surface that pauses
+    dispatch on it cannot name different ports for the same config value.
+
+    Asserted as ONE test over BOTH surfaces on purpose. Two tests, each checking its
+    own half against its own expectation, stay green while the halves disagree — and
+    the disagreement is the whole bug: the alert said ':8096 closed' for 90 minutes
+    about a port the engine had stopped serving a week earlier, beside a URL the
+    engine does serve.
+    """
+    from app import supervisor_client as sc
+    from workers.sources.scheduled_task import _primary_health_target
+
+    monkeypatch.setitem(MODEL_CONFIGS["primary"], "base_url", "http://127.0.0.1:9999")
+
+    row = sc.infra_services()["agent-llm-primary"]
+    url, url_source = _primary_health_target()
+
+    assert row[1] == 9999, f"registry row still probes the literal: {row}"
+    assert url.endswith(":9999/health"), f"gate moved without the registry: {url}"
+    assert f":{row[1]}" in url, (
+        f"probe port {row[1]} and gate port disagree — the outage streak would be "
+        f"unbounded: row={row} url={url}")
+    assert sc.model_port_source("agent-llm-primary") == "models.primary.base_url"
+
+
+def test_the_secondary_row_follows_its_own_alias_and_never_the_default(monkeypatch):
+    """Clause 2: the secondary's port is `models.secondary.base_url`, read directly.
+
+    The row has to be visible for this to say anything, so the slot is switched on the
+    way the fixture at the top of this file does it — `config.yaml` ships
+    `secondary_enabled: false`, and a test that asked about a hidden row would pass on
+    its absence rather than on its port. The primary keeps its own port in the same
+    call, which is what rules out the two readings that would otherwise look right:
+    `models.<model.default>` for both rows, or `resolve_model_alias`, either of which
+    puts the primary's port in the secondary's row.
+    """
+    from app import supervisor_client as sc
+
+    monkeypatch.setitem(CONFIG, "secondary_enabled", True)
+    monkeypatch.setitem(MODEL_CONFIGS["secondary"], "base_url", "http://127.0.0.1:9998")
+
+    services = sc.infra_services()
+
+    assert "agent-llm-secondary" in services, "fixture guard: the row must be visible"
+    assert services["agent-llm-secondary"][1] == 9998, services["agent-llm-secondary"]
+    assert services["agent-llm-secondary"][1] != 8091, "still the literal"
+    assert services["agent-llm-primary"][1] == 8096, (
+        "the primary's row moved with the secondary's config")
+    assert services["agent-llm-secondary"][1] != services["agent-llm-primary"][1]
+    assert sc.model_port_source("agent-llm-secondary") == "models.secondary.base_url"
+
+
+def test_the_fallback_answers_8096_and_8091_and_says_it_was_the_fallback(monkeypatch,
+                                                                        caplog):
+    """Clause 3: config silent is not no answer — and it is not a config answer.
+
+    Both shapes of silence are exercised: the lookup raising outright, and the alias
+    resolving with no endpoint behind it (both `base_url` and `env` cleared), which is
+    the shape a real config produces when someone moves a model to a remote endpoint
+    and the registry is left to answer for a port nobody named.
+    """
+    import logging
+
+    from app import supervisor_client as sc
+    from app import config as app_config
+
+    monkeypatch.setitem(CONFIG, "secondary_enabled", True)
+    monkeypatch.setitem(MODEL_CONFIGS["primary"], "base_url", "")
+    monkeypatch.setitem(MODEL_CONFIGS["primary"], "env", {})
+    monkeypatch.setitem(MODEL_CONFIGS["secondary"], "base_url", "")
+    monkeypatch.setitem(MODEL_CONFIGS["secondary"], "env", {})
+
+    with caplog.at_level(logging.WARNING):
+        services = sc.infra_services()
+
+    assert services["agent-llm-primary"] == ("LLM Primary", 8096), services
+    assert services["agent-llm-secondary"][1] == 8091, services
+    for sid in ("agent-llm-primary", "agent-llm-secondary"):
+        assert sc.model_port_source(sid) == sc.MODEL_PORT_FALLBACK_SOURCE, (
+            f"{sid} printed a port with no way to tell it was not config's")
+    assert sc.MODEL_PORT_FALLBACK_SOURCE != "models.primary.base_url"
+
+    # And the raising shape, same contract.
+    def boom(alias):
+        raise RuntimeError("config unreadable")
+    monkeypatch.setattr(app_config, "_get_model_cfg", boom)
+    raised = sc.infra_services()
+    assert raised["agent-llm-primary"][1] == 8096
+    assert raised["agent-llm-secondary"][1] == 8091
+    assert sc.model_port_source("agent-llm-primary") == sc.MODEL_PORT_FALLBACK_SOURCE
+
+    # Five callers unpack the value as a 2-tuple — mc_ui.py, services.py twice,
+    # dashboard.py and service_probe.py — so provenance travels BESIDE the value, never
+    # inside it. Checked on both branches, because the branch that tempts a third slot
+    # is the derived one: on the fallback path the code is still the old literal return.
+    monkeypatch.setattr(app_config, "_get_model_cfg",
+                        lambda alias: {"base_url": "http://127.0.0.1:9999"})
+    for shape in (services, sc.infra_services()):
+        for sid, value in shape.items():
+            assert isinstance(value, tuple) and len(value) == 2, f"{sid}: {value!r}"
+            display, port = value                   # the unpack those five sites do
+            assert display and (port is None or isinstance(port, int)), f"{sid}: {value!r}"
+
+
+def test_only_the_model_rows_are_derived_and_every_other_literal_stands(monkeypatch):
+    """Clause 4: this is a two-row change, not a general derivation.
+
+    djev, qmd and livekit keep their literals — their ports are not model endpoints,
+    and whether the same derivation should reach them is a ruling this item explicitly
+    scopes out. With the primary patched to an odd port, every other row must still
+    print its own number, or the fix would have moved services nobody asked about and
+    started probing them somewhere they do not live.
+    """
+    from app import supervisor_client as sc
+
+    monkeypatch.setitem(MODEL_CONFIGS["primary"], "base_url", "http://127.0.0.1:9999")
+    monkeypatch.setitem(CONFIG, "secondary_enabled", True)
+
+    infra = sc.infra_services()
+    lloyd = sc.lloyd_services()
+
+    assert infra["agent-djev"] == ("djev (DiffusionGemma)", 8011), infra["agent-djev"]
+    assert infra["agent-qmd-daemon"][1] == 8181
+    assert infra["agent-livekit-server"][1] == 7880
+    assert infra["agent-qmd-watcher"][1] is None
+    assert infra["agent-tts"][1] is None
+    assert infra["lloyd-agent-worker"][1] is None
+    assert lloyd["lloyd-backend"] == ("Lloyd Backend", 8080)
+    assert lloyd["lloyd-frontend"] == ("Lloyd Frontend", 5173)
+    assert lloyd["lloyd-mcp"] == ("Lloyd MCP", 8500)
+    for sid in ("agent-djev", "agent-qmd-daemon", "agent-livekit-server"):
+        assert sc.model_port_source(sid) is None, (
+            f"{sid} went through the model derivation")

@@ -63,16 +63,109 @@ _LLOYD_SERVICES = {
     "lloyd-mcp":        ("Lloyd MCP",      8500),
 }
 
+#: service_id → the model alias whose endpoint this row's port must follow. Only
+#: these two rows are model engines, and each row tracks ITS OWN alias — read
+#: directly, not through `model.default` and not through `resolve_model_alias`,
+#: because `models.primary.base_url` is the source of truth for the primary
+#: whether or not it is the default, and the secondary keeps its own port even
+#: while `secondary_enabled: false` hides the row (`app/llm_slots.py`).
+_MODEL_ROW_ALIASES = {
+    "agent-llm-primary": "primary",
+    "agent-llm-secondary": "secondary",
+}
+
+#: Where a row's port came from, recorded by `_model_row_port` on every call so a
+#: surface can say "8096, and that is the fallback, not config". A module-level
+#: marker rather than a third tuple slot because five callers unpack
+#: `(display, port)` as a 2-tuple — `app/routers/mc_ui.py`, `app/routers/services.py`
+#: twice, `app/routers/dashboard.py` and `workers/service_probe.py` — and widening
+#: the value to carry provenance would break all five to inform one.
+_MODEL_PORT_SOURCES: dict[str, str] = {}
+
+#: Names the fallback answer as such, the way `app/config.py` names its own
+#: (`DEFAULT_MODEL_BASE_URL_FALLBACK_KEY`). Same reason: an alert that says
+#: "not serving :8096" has to be able to say whether 8096 is where the engine
+#: lives or just where this file was written.
+MODEL_PORT_FALLBACK_SOURCE = "app/supervisor_client.py fallback literal (config unreadable)"
+
+
+def _model_row_port(service_id: str, display: str, literal_port):
+    """The port for one model row: config's endpoint if it has one, else the literal.
+
+    Resolved at CALL time, not once at import, for the same reason `llm_slots.visible`
+    filters at read time — the registry is a module-level constant and a port move is
+    a config edit plus a restart of whatever reads it. The two model rows are the only
+    rows whose port another module already derives: `workers/service_probe.py` ticks a
+    streak off this table while `workers/sources/scheduled_task.py` re-derives the
+    dispatch gate's probe URL from `models.<alias>.base_url`, so after a move the gate
+    answers on the new port while the probe holds a streak on the old one that can
+    never end — a false 'not serving :8096 closed' at the 30-minute grace, the row in
+    `mc_ui`'s `unhealthy_services` on every poll, and an elapsed figure from the dead
+    streak that pages on the first blip of the live port (#1684's owed-check, which
+    ruled this registry as the second owner). One config value now moves both.
+    """
+    alias = _MODEL_ROW_ALIASES.get(service_id)
+    if alias is None:
+        return (display, literal_port)
+    try:
+        from app.config import _get_model_cfg
+        cfg = _get_model_cfg(alias) or {}
+        endpoint = cfg.get("base_url") or (cfg.get("env") or {}).get("ANTHROPIC_BASE_URL")
+    except Exception:
+        endpoint = None
+    port = _port_of(endpoint) if endpoint else None
+    if port is None:
+        _MODEL_PORT_SOURCES[service_id] = MODEL_PORT_FALLBACK_SOURCE
+        return (display, literal_port)
+    _MODEL_PORT_SOURCES[service_id] = f"models.{alias}.base_url"
+    return (display, port)
+
+
+def _port_of(endpoint) -> int | None:
+    """Port from a base URL string, or None if it does not state one.
+
+    Deliberately narrow: this answers "which port does the registry probe", not "is
+    this a sane URL". Anything unparseable lands on the fallback with the source
+    marker set, which is the answer a caller can act on.
+    """
+    try:
+        text = str(endpoint)
+        body = text.split("://", 1)[-1].split("/", 1)[0]
+        host, _, tail = body.rpartition(":")
+        if ":" in body and tail.isdigit():
+            return int(tail)
+        return None
+    except Exception:
+        return None
+
+
+def model_port_source(service_id: str) -> str | None:
+    """Provenance of the last port this module answered for a model row.
+
+    `MODEL_PORT_FALLBACK_SOURCE` means the row printed its literal because config had
+    no endpoint for that alias; anything else names the config key. None for a row
+    that has not been asked for, and for a non-model row, which has no derivation to
+    have come from anywhere but the table.
+    """
+    return _MODEL_PORT_SOURCES.get(service_id)
+
 
 def infra_services() -> dict:
     """`_INFRA_SERVICES` minus the LLM slots config.yaml has switched off.
 
     Every surface that LISTS, COUNTS or AUDITS services goes through this.
     `app/llm_slots.py` says why there is one definition rather than six.
+
+    The two model rows carry their port from config (`_model_row_port`), so the probe
+    that counts an outage and the gate that pauses dispatch on it cannot be looking at
+    different ports. The value stays a `(display, port)` 2-tuple either way;
+    `model_port_source()` is how a caller learns which one it got.
     """
     from app import llm_slots
 
-    return llm_slots.visible(_INFRA_SERVICES)
+    visible = llm_slots.visible(_INFRA_SERVICES)
+    return {sid: _model_row_port(sid, display, port)
+            for sid, (display, port) in visible.items()}
 
 
 def lloyd_services() -> dict:
