@@ -7,9 +7,13 @@ automod state dir, which `autotriage`'s group mode consumes. No session: a
 clustering pass is arithmetic, not a judgement anyone needs to review.
 
 "Nightly" is expressed as the age of the last output rather than a wall-clock
-hour: the pool polls on `interval_seconds` from process start, so an hourly
-poll that runs only when `clusters.json` is older than `min_age_seconds`
-lands once a day whatever the restart cadence, and never twice.
+hour: the pool polls on `interval_seconds` from process start, so a restart
+cannot double up the 20 h `min_age_seconds` gate. That gate is not the only
+one: a file group triage has used up — nothing `select_cluster` would take —
+is rebuilt once it reaches the `exhausted_min_age_seconds` (2 h) floor, and
+every rebuild rewrites the file and resets its age, so with nothing clusterable
+in the pool the job rebuilds roughly every 2-3 h rather than daily. The ledger
+row carries `trigger: nightly|exhausted` for which of the two fired.
 """
 
 from __future__ import annotations

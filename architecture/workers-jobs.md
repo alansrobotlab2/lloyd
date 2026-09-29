@@ -361,9 +361,16 @@ Long version: [[arch-review]].
 
 ### `backlog-cluster` — the deterministic half of group triage
 
-**Wakes** hourly but runs only when `clusters.json` is older than
-`min_age_seconds` (20 h), so "nightly" is the age of the output rather than a
-wall-clock hour and a restart never doubles it up. **Executes** off the loop
+**Wakes** hourly and runs on either of two age gates; the ledger row records
+which one fired as `trigger: nightly|exhausted`. *nightly*: `clusters.json` is
+older than `min_age_seconds` (20 h), so "nightly" is the age of the output
+rather than a wall-clock hour and a restart never doubles it up. *exhausted*:
+the file is younger, but at least `exhausted_min_age_seconds` (2 h) old — that
+floor — and `select_cluster` has nothing left to take from it. The second gate
+is what runs the job on a caught-up board: every rebuild rewrites the file and
+resets its age, so while the clusterable pool is empty the age never reaches
+20 h and the rebuild lands every 2-3 h instead — 94 of the 98 runs logged
+2026-09-11→29 carry `trigger: exhausted`. **Executes** off the loop
 (`asyncio.to_thread`): a numpy pass over qmd's stored backlog vectors, plus
 shared file paths and parent links, plus an optional pair-judge on the
 secondary for ambiguous edges. **Writes** `clusters.json` in the automod state

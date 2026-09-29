@@ -1186,3 +1186,239 @@ def test_section2_stamps_its_read_and_keeps_the_remeasure_order():
     assert not stamp.group(1).startswith(SECTION2_WINDOW_END), (
         f"§2's read stamp ({stamp.group(1)}) is the window end, which is a claim "
         "about when the read happened being replaced by a claim about the window")
+
+
+# ---------------------------------------------------------------------------
+# #1783 — the `backlog-cluster` cadence: two gates, and all three prose surfaces
+# described one.
+#
+# `architecture/workers-jobs.md`, the module docstring in
+# `workers/sources/backlog_cluster.py` and the `config.yaml` comment above
+# `backlog-cluster:` each said the source runs *only* when `clusters.json` is
+# older than `min_age_seconds`, which reads as "nightly, once a day". The ledger
+# says otherwise: 94 of the 98 `backlog_cluster` rows logged 2026-09-11→29 carry
+# `trigger: exhausted`, exactly one is `nightly` (2026-09-19T06:12:40Z), and the
+# median gap is 3.13 h against a 20 h gate. The exhausted path is structurally
+# sticky — `execute` calls `write_clusters` on every pass, so each rebuild resets
+# the very age the gates measure, and an empty clusterable pool therefore never
+# reaches 72 000 s. The cadence is correct behaviour (ruled 2026-09-29) and the
+# prose was the defect, so each surface is graded in the file a reader actually
+# opens, and every duration in the prose is re-derived from the constant or the
+# config value it describes: a number may not rot beside the thing it names.
+# ---------------------------------------------------------------------------
+
+#: The retired §4 "Wakes" sentence, verbatim. Kept so the bans below have a
+#: control: this text trips every one of them, so none is an empty pattern
+#: passing on an empty corpus (#1689's rule for a `not in` with no eyes).
+RETIRED_CLUSTER_WAKES = (
+    "**Wakes** hourly but runs only when `clusters.json` is older than "
+    "`min_age_seconds` (20 h), so \"nightly\" is the age of the output rather "
+    "than a wall-clock hour and a restart never doubles it up.")
+
+#: The retired `config.yaml` comment, `#` markers stripped, same purpose.
+RETIRED_CLUSTER_COMMENT = (
+    "\"Nightly\" is the age of the last output: polled hourly, runs when the "
+    "file is older than min_age_seconds, so a restart never doubles it up.")
+
+CLUSTER_SUBSEC = "### `backlog-cluster`"
+
+
+def _subsec(prefix: str) -> str:
+    """One `### ` subsection of `workers-jobs.md`, heading line excluded.
+
+    Not `_section`: that cuts at the next `## `, so a §4 subsection would come
+    back carrying the remaining seven sources as well, and `exhausted` sitting in
+    the `owed-check` or `autocode` prose would then satisfy a cadence claim about
+    `backlog-cluster` for free — the free pass #1713 built `_section` to deny.
+    """
+    text = (ARCH / "workers-jobs.md").read_text(encoding="utf-8")
+    assert prefix in text, (
+        f"{prefix!r} is not a heading in workers-jobs.md — it moved, and a check "
+        "reading the wrong span is worse than one that fails loudly")
+    rest = text[text.index(prefix) + len(prefix):]
+    ends = [x for x in (rest.find("\n## "), rest.find("\n### ")) if x >= 0]
+    return rest[:min(ends)] if ends else rest
+
+
+def _comment_block_above(key: str, path: Path | None = None) -> str:
+    """The `#` comment lines sitting directly above `key:`, markers stripped.
+
+    Block-anchored rather than a whole-file grep: `config.yaml` is thousands of
+    comment lines, so `min_age_seconds` occurring anywhere in the file would make
+    the two-gate requirement free and the ban on the retired claim unenforceable.
+    """
+    lines = (path or ROOT / "config.yaml").read_text(encoding="utf-8").splitlines()
+    hits = [i for i, ln in enumerate(lines) if ln.strip() == key]
+    assert len(hits) == 1, (
+        f"{key!r} matched {len(hits)} lines; the anchor reads exactly one, or the "
+        "comment graded below is not the one beside the key")
+    i = hits[0]
+    block: list[str] = []
+    while i > 0 and lines[i - 1].lstrip().startswith("#"):
+        block.append(lines[i - 1].lstrip().lstrip("#").strip())
+        i -= 1
+    assert block, f"no comment block directly above {key} — deleted, not corrected"
+    return " ".join(" ".join(reversed(block)).split())
+
+
+def _cluster_cfg() -> dict:
+    """The live `backlog-cluster` source block, parsed from `config.yaml`."""
+    cfg = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
+    block = cfg["workers"]["sources"]["backlog-cluster"]
+    # If a gate key vanished the lookups below raise, which is the point: a test
+    # that cannot read the value cannot contradict the prose about it.
+    assert "min_age_seconds" in block and "exhausted_min_age_seconds" in block, block
+    return block
+
+
+def _hours(seconds: int) -> str:
+    """How all three prose surfaces spell a duration: `20 h`, `2 h`."""
+    assert seconds % 3600 == 0, f"{seconds} s is not a whole number of hours"
+    return f"{seconds // 3600} h"
+
+
+def test_workers_jobs_backlog_cluster_names_both_rebuild_gates():
+    """Clause 1: §Self-modification → `backlog-cluster` stated one of two gates.
+
+    Both halves are graded, because the fix is a correction and not a deletion:
+    the exclusive sentence is gone, AND the gate that actually runs the job is
+    stated with its key, its floor and its condition on `select_cluster`. The
+    durations are then re-derived from the module's own defaults, so "(2 h)" in
+    the prose and `DEFAULT_EXHAUSTED_MIN_AGE_SECONDS = 2 * 3600` cannot drift
+    apart without one of them going red.
+    """
+    from workers.sources import backlog_cluster as SRC
+
+    sec = " ".join(_subsec(CLUSTER_SUBSEC).split())
+    old = " ".join(RETIRED_CLUSTER_WAKES.split())
+    # Controls before bans: the retired sentence has to trip them, and the
+    # extractor has to be looking at a real section.
+    assert "runs only when" in old, (
+        "the retired sentence no longer trips its own ban, so the check below is "
+        "an empty pattern with nothing left to bite")
+    assert "exhausted" not in old, (
+        "the retired text already named the exhausted gate, so requiring it in "
+        "the section would be free")
+    assert len(sec) > 400, (
+        f"§backlog-cluster extracted only {len(sec)} chars — the span is wrong "
+        "and every check below is reading someone else's source")
+
+    assert "runs only when" not in sec, (
+        "§backlog-cluster is back to one gate: it also rebuilds a used-up "
+        "`clusters.json` at the exhausted floor, which is 94 of 98 ledger rows")
+    for live in ("`min_age_seconds` (20 h)", "`exhausted_min_age_seconds` (2 h)",
+                 "trigger: nightly|exhausted", "nothing left to take", "floor",
+                 "every 2-3 h", "resets its age"):
+        assert live in sec, (
+            f"§backlog-cluster no longer states {live!r} — the false sentence has "
+            f"to be replaced by the true one, not trimmed. Section opens "
+            f"{sec[:120]!r}")
+
+    # A run count in this file is a measurement of a store written continuously,
+    # so it travels with its window or it goes (#1713's §2 rule, same shape).
+    for m in re.finditer(r"\d+ of (?:the |its )?\d+ runs", sec):
+        tail = sec[m.end():m.end() + 60]
+        assert re.search(r"\d{4}-\d{2}-\d{2}", tail), (
+            f"§backlog-cluster states a run count with no date within 60 chars of "
+            f"it: {tail!r} — an undated count is the defect #1713 was filed for")
+
+    assert _hours(SRC.DEFAULT_MIN_AGE_SECONDS) == "20 h", (
+        "the nightly gate stopped being 20 h, so the doc's '(20 h)' is the stale "
+        "half of this node and the prose has to move with the constant")
+    assert _hours(SRC.DEFAULT_EXHAUSTED_MIN_AGE_SECONDS) == "2 h", (
+        "the exhausted floor stopped being 2 h, so the doc's '(2 h)' is the lie")
+
+
+def test_config_comment_beside_the_cluster_ages_describes_both_gates():
+    """Clause 3: the comment a person reads while editing the two ages.
+
+    The clause's other half — `#`-prefixed lines only, YAML token stream
+    byte-identical — is enforced by the gate itself: `scripts/automod/spec.py
+    :comment_only_change` moves a `config.yaml` diff into the `comment_only`
+    bucket only when `yaml.scan`'s token stream and the parsed document are both
+    identical, and refuses it otherwise, so the value the comment sits beside is
+    pinned by the rung rather than by a self-vacuating diff check here. What this
+    node pins is the durable half: the durations the comment states are the
+    durations the parsed keys carry, so moving `exhausted_min_age_seconds`
+    without touching the sentence beside it — the drift #1783 exists to end —
+    goes red here instead of shipping a comment that misdescribes its own knob.
+    """
+    from workers.sources import backlog_cluster as SRC
+
+    block = _comment_block_above("backlog-cluster:")
+    old = " ".join(RETIRED_CLUSTER_COMMENT.split())
+    assert ("polled hourly, runs when the file is older than min_age_seconds" in old
+            and "so a restart never doubles it up" in old), (
+        "the retired comment no longer trips its own bans, so the two checks "
+        "below would pass on any text")
+
+    for retired in ("polled hourly, runs when the file is older than "
+                    "min_age_seconds, so a restart never doubles it up",
+                    "runs only when"):
+        assert retired not in block, (
+            f"the comment is back to stating the 20 h gate as the only one "
+            f"({retired!r}) — the sentence 94 `trigger: exhausted` rows contradict")
+    for live in ("min_age_seconds", "exhausted_min_age_seconds", "select_cluster",
+                 "trigger: nightly|exhausted", "2-3 h", "resets"):
+        assert live in block, (
+            f"the comment no longer names {live!r}: {block[:180]!r} — it has to "
+            "describe both gates, not merely both keys")
+
+    cfg = _cluster_cfg()
+    assert _hours(cfg["min_age_seconds"]) == _hours(SRC.DEFAULT_MIN_AGE_SECONDS), (
+        "config and the source's default no longer agree on the nightly gate, so "
+        "one of the three prose surfaces is wrong whatever this node does")
+    assert _hours(cfg["exhausted_min_age_seconds"]) == _hours(
+        SRC.DEFAULT_EXHAUSTED_MIN_AGE_SECONDS), (
+        "config and the source's default no longer agree on the exhausted floor")
+    for stated in (_hours(cfg["min_age_seconds"]),
+                   _hours(cfg["exhausted_min_age_seconds"])):
+        assert stated in block, (
+            f"the comment never states {stated}, the value the key beside it now "
+            f"holds ({block[:180]!r}) — naming a key without its magnitude is how "
+            "7200 becomes 10800 while the prose still says 2 h")
+
+
+def test_the_cluster_docs_agree_on_the_triggers_and_the_exhausted_floor():
+    """Clause 4: `workers-jobs.md` sends the reader to [[automod]] §clustering,
+    so the short and the long version have to describe one set of triggers.
+
+    `architecture/automod.md` was already right — it has named both gates and
+    `trigger: nightly|exhausted` since 2026-09-14 — so it is the fixed point and
+    this round does not edit it. Alignment is graded over the passage that
+    carries the exhausted gate in each doc, not over the whole file: automod.md
+    spells `exhausted` twice more, about a stalled queue and about a triage cap,
+    and either mention would licence a whole-file token check that the cadence
+    claim itself could still be wrong under.
+    """
+    from workers.sources import backlog_cluster as SRC
+
+    jobs = " ".join(_subsec(CLUSTER_SUBSEC).split())
+    automod = (ARCH / "automod.md").read_text(encoding="utf-8")
+    paras = [p for p in (" ".join(p.split()) for p in automod.split("\n\n"))
+             if "exhausted_min_age_seconds" in p]
+    assert len(paras) == 1, (
+        f"automod.md states the exhausted floor in {len(paras)} paragraphs; this "
+        "node grades one passage, and two would let the disagreement hide in the "
+        "other half — the §2/§6 split #1713 exists to catch, in a second file")
+    long_version = paras[0]
+
+    for shared in ("exhausted_min_age_seconds", "trigger: nightly|exhausted"):
+        assert shared in long_version, (
+            f"the model doc stopped stating {shared!r}, so the fixed point moved "
+            "and both docs have to be re-read before this node means anything")
+        assert shared in jobs, f"§backlog-cluster lost {shared!r} again"
+
+    def floor_hours(text: str) -> str:
+        m = re.search(r"`exhausted_min_age_seconds` \((\d+) h\)", text)
+        assert m, (
+            f"a doc names the exhausted floor with no hours figure beside it: "
+            f"{text[:140]!r} — the shared number this node compares is gone")
+        return f"{m.group(1)} h"
+
+    got = (floor_hours(jobs), floor_hours(long_version))
+    assert got[0] == got[1] == _hours(SRC.DEFAULT_EXHAUSTED_MIN_AGE_SECONDS), (
+        f"the two docs state different exhausted floors {got}, or neither states "
+        f"{_hours(SRC.DEFAULT_EXHAUSTED_MIN_AGE_SECONDS)} — which of the three is "
+        "wrong should not be a reader's guess, and #1783 was filed precisely "
+        "because it was")

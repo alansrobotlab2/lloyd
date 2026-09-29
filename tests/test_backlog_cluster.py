@@ -444,3 +444,118 @@ def test_group_runs_with_umbrellas_off_do_not_remove_items_from_clustering(isola
     assert B.group_triaged_ids(S.LEDGER_PATH) == {1, 2, 3, 4}
     assert B.group_triaged_ids(S.LEDGER_PATH, binding_only=True) == {1, 3}
     assert sorted(i.id for i in _items()) == [2, 4]
+
+
+# ── #1783: the module's own account of its cadence ────────────────────────
+#
+# The docstring said an hourly poll that fires only past `min_age_seconds`
+# "lands once a day whatever the restart cadence, and never twice". It does not:
+# 94 of the 98 `backlog_cluster` rows logged 2026-09-11→29 carry
+# `trigger: exhausted`, exactly one is `nightly` (2026-09-19T06:12:40Z), median
+# gap 3.13 h, and every run since 2026-09-24 rebuilt over `clusters: 0`. The
+# cadence is the correct behaviour — ruled 2026-09-29, and the 2 h floor is
+# already pinned by
+# `test_a_used_up_file_is_rebuilt_early_but_not_more_often_than_the_floor` — so
+# the defect is the prose, and the node below grades it in both directions.
+
+#: The retired docstring paragraph, verbatim. Kept as the control for the bans:
+#: this text trips all three of them, so none is an empty pattern passing on an
+#: empty corpus (#1689's rule; the same shape
+#: `tests/test_workers_doc_claims.py` controls for at #1783).
+RETIRED_CADENCE_DOCSTRING = (
+    "\"Nightly\" is expressed as the age of the last output rather than a "
+    "wall-clock hour: the pool polls on `interval_seconds` from process start, "
+    "so an hourly poll that runs only when `clusters.json` is older than "
+    "`min_age_seconds` lands once a day whatever the restart cadence, and "
+    "never twice.")
+
+_SRC_PATH = (Path(__file__).resolve().parent.parent
+             / "workers" / "sources" / "backlog_cluster.py")
+
+
+def _module_docstring() -> str:
+    """The MODULE docstring only, whitespace-flattened, read through the AST.
+
+    Through `ast` rather than off the file text because `min_age_seconds`,
+    `select_cluster` and `exhausted` all appear in this module's CODE too —
+    `enqueue_if_due`'s own docstring has described the exhausted path correctly
+    throughout, so a whole-file `in` check would be satisfied by the very
+    paragraph that was never wrong and is not the surface #1783 was filed
+    against.
+    """
+    import ast
+    doc = ast.get_docstring(ast.parse(_SRC_PATH.read_text(encoding="utf-8")))
+    assert doc, "backlog_cluster.py has no module docstring — the extractor found nothing"
+    return " ".join(doc.split())
+
+
+def test_the_module_docstring_states_both_gates_and_the_real_cadence():
+    """Clause 2: the sentence that said "once a day" is the claim the ledger refutes.
+
+    Graded both ways, because deleting the lie is not the acceptance — the
+    docstring has to state what the 20 h gate is *and* what happens while the
+    clusterable pool is empty. The two durations it states are re-derived from
+    the module's own fallback constants, so the prose cannot go quiet while the
+    code moves, which is how "(20 h)" and 10800 would end up in one file.
+    """
+    from workers.sources import backlog_cluster as SRC
+
+    doc = _module_docstring()
+    old = " ".join(RETIRED_CADENCE_DOCSTRING.split())
+    # Control that the extractor has the right text: the module's opening words,
+    # which sit in no other string in the file.
+    assert doc.startswith("Nightly clustering of the open backlog"), (
+        f"the extractor returned something that is not this module's docstring: "
+        f"{doc[:60]!r}")
+
+    for banned in ("once a day", "runs only when", "never twice"):
+        assert banned in old, (
+            f"the retired docstring no longer trips its own ban on {banned!r}, so "
+            "the check below would be a ban on nothing")
+        assert banned not in doc, (
+            f"the docstring says {banned!r} again — the source runs 6 to 10 times "
+            "a day while the pool is empty (09-26: 8, 09-27: 10, 09-28: 8)")
+
+    for live in ("20 h `min_age_seconds`", "`exhausted_min_age_seconds` (2 h)",
+                 "`select_cluster`", "nothing clusterable", "resets its age",
+                 "every 2-3 h", "trigger: nightly|exhausted"):
+        assert live in doc, (
+            f"the docstring no longer states {live!r}: {doc[150:]!r} — the false "
+            "cadence has to be replaced by the true one, not removed")
+
+    assert f"{SRC.DEFAULT_MIN_AGE_SECONDS // 3600} h" in doc, (
+        "the docstring's nightly-gate hours no longer match "
+        "DEFAULT_MIN_AGE_SECONDS, whichever of the two moved")
+    assert f"{SRC.DEFAULT_EXHAUSTED_MIN_AGE_SECONDS // 3600} h" in doc, (
+        "the docstring's exhausted-floor hours no longer match "
+        "DEFAULT_EXHAUSTED_MIN_AGE_SECONDS")
+
+
+def test_a_rebuild_over_an_empty_pool_resets_the_age_the_gates_measure(isolated):
+    """Clause 2's causal half, pinned as behaviour rather than as wording.
+
+    `execute` calls `CL.write_clusters` on every pass, including the one that
+    found nothing, and both gates are ages — so an exhausted rebuild on an empty
+    board moves the file back out of reach of the 20 h gate. That is *why* the
+    cadence is 2-3 h and not a day, and why "once a day" cannot come back even as
+    a hypothetical. Make `write_clusters` conditional on a non-empty result and
+    this node goes red; the 2 h floor itself is pinned by
+    `test_a_used_up_file_is_rebuilt_early_but_not_more_often_than_the_floor`, and
+    the two nodes together are the whole observed cycle.
+    """
+    import time
+    from workers.sources import backlog_cluster as SRC
+
+    out = asyncio.run(SRC.execute(_Item({"judge": False, "trigger": "exhausted"})))
+    assert out["status"] == "success", "an exhausted pass over an empty pool failed"
+    assert CL.CLUSTERS_PATH.exists(), "an exhausted rebuild wrote no file at all"
+
+    _age(6 * 3600)          # past the 2 h floor, well short of the 20 h gate
+    out = asyncio.run(SRC.execute(_Item({"judge": False, "trigger": "exhausted"})))
+    assert out["status"] == "success"
+    age = time.time() - CL.CLUSTERS_PATH.stat().st_mtime
+    assert age < 60, (
+        f"the rebuild left `clusters.json` {age / 3600:.1f} h old: "
+        "`write_clusters` has gone conditional, so the mtime the two gates read is "
+        "no longer the last pass and the docstring's 'resets its age' is false "
+        "again — along with the reason the 20 h branch almost never fires")
