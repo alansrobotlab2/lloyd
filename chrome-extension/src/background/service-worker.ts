@@ -2,10 +2,11 @@
 //
 // One Lloyd session per (tab, URL). Sessions are **never auto-spawned** —
 // the "Check it out, Lloyd" button in the panel is the only trigger
-// (`request-session` message). Navigation tracking still runs so the
-// panel switches to the not-checked state when a tab moves to a new URL,
-// and so re-checking the same URL after a reload doesn't fire a second
-// kickoff (first guard in handleManualCheck).
+// (`request-session` message → handleManualCheck), and a session is always
+// minted together with its first turn. Navigation tracking still runs so the
+// panel switches to the not-checked state when a tab moves to a new URL, and
+// so re-checking the same URL after a reload doesn't fire a second first turn
+// (first guard in handleManualCheck).
 //
 // Mapping is held in chrome.storage.session so it survives SW restarts
 // within a browser session.
@@ -204,12 +205,14 @@ chrome.webNavigation.onHistoryStateUpdated.addListener(handleNavigation, {
   ],
 })
 
+// Mints the tab's session and always fires its first-turn message, then
+// focuses the panel on it. Its one caller is handleManualCheck; the module
+// header says why that is the only entry point.
 async function spawnSession(
   tabId: number,
   url: string,
   title: string,
   canonical: string,
-  kickoff = false,
 ) {
   let sessionKey: string
   try {
@@ -227,22 +230,20 @@ async function spawnSession(
   // arrives.
   patchBrowserMetadata(sessionKey, { url, title }).catch(() => undefined)
 
-  if (kickoff) {
-    // Awaited, deliberately, and before the panel is told which session to
-    // show. `/api/message/stream` enqueues the turn before it hands back the
-    // StreamingResponse (`post_message_stream` in app/routers/messages.py
-    // awaits `enqueue_turn`, then returns the StreamingResponse), so once this
-    // POST has answered the backend already counts the session as active —
-    // which means ChatPanel's first GET /status, fired the moment it mounts,
-    // lands inside the turn instead of racing it and losing. Fired
-    // fire-and-forget, the panel reached a session whose turn did not exist
-    // yet and then showed no in-progress state for the entire kickoff.
-    await fireKickoff(
-      sessionKey,
-      buildKickoffMessage(url),
-      `ext_tab_${tabId}`,
-    ).catch((err) => console.error("[lloyd-sw] fireKickoff failed:", err))
-  }
+  // Awaited, deliberately, and before the panel is told which session to
+  // show. `/api/message/stream` enqueues the turn before it hands back the
+  // StreamingResponse (`post_message_stream` in app/routers/messages.py
+  // awaits `enqueue_turn`, then returns the StreamingResponse), so once this
+  // POST has answered the backend already counts the session as active —
+  // which means ChatPanel's first GET /status, fired the moment it mounts,
+  // lands inside the turn instead of racing it and losing. Fired
+  // fire-and-forget, the panel reached a session whose turn did not exist
+  // yet and then showed no in-progress state for the entire first turn.
+  await fireKickoff(
+    sessionKey,
+    buildKickoffMessage(url),
+    `ext_tab_${tabId}`,
+  ).catch((err) => console.error("[lloyd-sw] fireKickoff failed:", err))
 
   // Notify the panel (if open in the tab's window).
   const tab = await chrome.tabs.get(tabId).catch(() => null)
@@ -268,13 +269,13 @@ async function handleManualCheck(windowId: number, tabId: number) {
     const cur = getMapping(tabId)
     if (cur && canonicalize(cur.url) === canonical) {
       // This tab's session is already for this exact URL — re-focus it
-      // instead of spawning a duplicate or re-firing the kickoff.
+      // instead of spawning a duplicate or re-firing the first turn.
       await pushFocus(windowId, tabId)
       return
     }
     // No session for this URL (first check, or navigated away and back)
-    // — spawn + kickoff.
-    await spawnSession(tab.id, tab.url, tab.title ?? "", canonical, true)
+    // — spawn, which also fires the first turn.
+    await spawnSession(tab.id, tab.url, tab.title ?? "", canonical)
   })
 
   await pushFocus(windowId, tabId)

@@ -24,7 +24,7 @@ doc that exists, and no doc did.
 
 | Path | What it is |
 |---|---|
-| `chrome-extension/src/background/service-worker.ts` | 318 lines: tab/navigation/session orchestration, the manual-check guard, the kickoff prompts |
+| `chrome-extension/src/background/service-worker.ts` | 319 lines: tab/navigation/session orchestration, the manual-check guard, the kickoff prompts |
 | `chrome-extension/src/background/url.ts` | 60 lines: `canonicalize()` and the YouTube tests |
 | `chrome-extension/src/background/tab-session-map.ts` | 92 lines: the `chrome.storage.session` wrapper holding the tab→session mapping |
 | `chrome-extension/src/background/lloyd-client.ts` | 81 lines: three backend calls, used by the service worker only |
@@ -59,7 +59,9 @@ that actually mints the session tests only that the URL is http(s) (#1765).
    `StreamingResponse`. An answered POST is therefore the barrier that puts the
    panel's first `GET /status` inside the turn instead of racing it — fired and
    forgotten, the panel reached a session whose turn did not exist yet and showed
-   no in-progress state for the entire kickoff.
+   no in-progress state for the entire kickoff. `spawnSession` has no way to
+   skip this step: it takes no flag for it, so a session is never minted
+   without its kickoff (#1767).
 4. The panel switches to that session.
 
 Re-checking the **same canonical URL** re-focuses the existing session and does
@@ -202,3 +204,8 @@ on after the output directory had already been emptied.
   module docstring of `app/routers/messages.py` instead of line ranges that had
   drifted onto the turn's error path; `tests/test_stale_mtls_comment_claims.py`
   now bans `messages.py:<digits>` in both client files as well.
+- **2026-09-28 — hand-landed (#1767).** `spawnSession` lost its unreachable
+  `kickoff = false` parameter and the `if` around the awaited kickoff; its one
+  call passes four arguments, and §What one check does now says a session is
+  never minted without its kickoff. `chrome-extension/dist/` rebuilt with the
+  command in §Build.
