@@ -206,8 +206,10 @@ def _refuse_the_production_tree() -> None:
         f"refusing to run the suite against the production tree at {production}. "
         f"A fixture teardown here deletes the running system, and on 2026-09-22 "
         f"one did — the whole tree in 35 seconds. Run from a throwaway checkout "
-        f"instead: `git worktree add --detach /tmp/lloyd-check HEAD && cd "
-        f"/tmp/lloyd-check && pytest ...`. To answer 'does this failure already "
+        f"instead, on disk and never under /tmp (a 1M-inode tmpfs that filled on "
+        f"2026-09-22 and 2026-09-29): `git worktree add --detach "
+        f"~/lloyd-work/check-$$ HEAD && cd ~/lloyd-work/check-$$ && pytest ...`, "
+        f"and `git worktree remove` it after. To answer 'does this failure already "
         f"exist at base?', that IS the supported route (see "
         f"scripts/automod/gate.py::_failures_at_base). If you are a human and "
         f"you mean it, set {LIVE_TREE_OPT_IN}=1.")

@@ -27,7 +27,8 @@ the model checkpoints, `agent-services/cert/`, `_pipeline/`, `sessions/`,
 `eval/baselines/`, `qmd/`. Recovery took a day. Run from a worktree:
 
 ```bash
-git worktree add --detach /tmp/lloyd-check HEAD && cd /tmp/lloyd-check && pytest -q
+git worktree add --detach ~/lloyd-work/check-$$ HEAD && cd ~/lloyd-work/check-$$ && pytest -q
+git worktree remove --force ~/lloyd-work/check-$$   # after
 ```
 
 `LLOYD_ALLOW_LIVE_TREE_TESTS=1` exists for a human who means it. A round must
@@ -68,10 +69,22 @@ Three rules now, pinned by `tests/test_gate_scratch_dirs.py`:
   round and die with it, so a gate run neither fills `/tmp` nor fails when
   something else has.
 
-What fills `/tmp` is still to be measured (`sudo du --inodes -d1 /tmp`); the
-suite's own leftovers are the suspect — a `timeout`-killed pytest never runs the
-`atexit` that removes conftest's `lloyd-test-*` roots, and a killed xdist run
-leaves `pytest-of-<user>/pytest-N/.lock` files that stop pruning.
+What filled `/tmp` on 09-29, measured by `du --inodes -x -d1 /tmp` at 100%:
+`/tmp/pytest-of-alansrobotlab` 666,565, `/tmp/claude-1000` (Claude Code's own
+scratch) 245,930, `torchinductor_*` 18,647, and some forty `/tmp/lloyd-check*`,
+`/tmp/mut*`, `/tmp/*478`-style worktrees of ~2,300 each — the worktree route this
+section used to print, which conftest's refusal message repeated. pytest keeps its
+last three runs' `basetemp` whole by default (`tmp_path_retention_policy = all`):
+one 600-test file set left 11,884 inodes, so three full-suite runs plus the
+leftovers of `timeout`-killed ones is most of the budget. Three changes:
+
+- `pytest.ini` sets `tmp_path_retention_policy = failed`: a passing test's
+  `tmp_path` is removed at session end, and only failures are kept to inspect.
+- The worktree route is `~/lloyd-work/check-<n>`, on disk, in this doc and in
+  conftest's refusal.
+- The guardian watches `/tmp` (`agent-services/guardian/tmpwatch.py`): an `error`
+  alert at 80% of inodes or bytes, `critical` at 95%, with the largest top-level
+  entries named, latched until it falls below 70%. It deletes nothing.
 
 ## Two kinds of test
 

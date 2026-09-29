@@ -359,7 +359,7 @@ def test_staging_profile_still_prints_every_check_it_judged(tmp_path):
     for name in STACK_DEPENDENT:
         assert f"[skip] {name}" in out, f"{name} should be reported as skipped in:\n{out}"
         assert f"[FAIL] {name}" not in out
-    assert "=> PASS (5/5)" in out
+    assert "=> PASS (6/6)" in out
 
 
 # ── clause 2: only a stack-independent check can say REFUSING ───────────
@@ -643,7 +643,7 @@ def test_an_unlanded_rollback_target_passes_when_pointed_at_the_repo_that_has_it
         f"\n{proc.stdout}\n{proc.stderr}")
     assert (f"[ok ] rollback target readable and real: {sha[:8]} "
             "via last_known_good.json") in proc.stdout, proc.stdout
-    assert "=> PASS (5/5)" in proc.stdout, proc.stdout
+    assert "=> PASS (6/6)" in proc.stdout, proc.stdout
 
 
 def test_a_rollback_target_absent_from_the_pointed_at_repo_fails_staging(tmp_path):
@@ -674,7 +674,7 @@ def test_a_rollback_target_absent_from_the_pointed_at_repo_fails_staging(tmp_pat
         f"stage a watchdog:\n{proc.stdout}")
     assert (f"[FAIL] rollback target readable and real: {sha[:8]} "
             "not in the object store") in proc.stdout, proc.stdout
-    assert "=> FAIL (4/5)" in proc.stdout, proc.stdout
+    assert "=> FAIL (5/6)" in proc.stdout, proc.stdout
 
 
 def test_the_staging_profile_still_judges_the_rollback_target_check(cold_stack,
@@ -704,7 +704,7 @@ def test_the_staging_profile_still_judges_the_rollback_target_check(cold_stack,
         "not in the object store" in out, out
     assert "[skip] rollback target readable and real" not in out, (
         f"an excluded check cannot refuse a candidate:\n{out}")
-    assert "=> FAIL (4/5)" in out, (
+    assert "=> FAIL (5/6)" in out, (
         f"five checks judged, this one failing, is the claim being made:\n{out}")
 
 

@@ -52,6 +52,7 @@ import rollback as rb    # noqa: E402
 import vaultwatch        # noqa: E402
 import datawatch         # noqa: E402
 import memwatch          # noqa: E402
+import tmpwatch          # noqa: E402
 from supervisor import SupervisorClient, SupervisordUnreachable  # noqa: E402
 
 
@@ -133,6 +134,7 @@ class Guardian:
         self._strays_checked_at = 0.0
         self._snapshots_checked_at = 0.0
         self.mem = memwatch.MemWatch(self.gdir, memwatch.unit_cgroup(policy.SUPERVISORD_UNIT))
+        self.tmp = tmpwatch.TmpWatch()
         # Every alarm the worker fleet has lives inside `WorkerPool._scheduler_loop`
         # (#1682), so the one that notices those alarms being switched off cannot
         # live there too. Same backend, same state dir, this process: no new
@@ -858,6 +860,26 @@ class Guardian:
         if path:
             log(f"memory pressure snapshot: {path}")
 
+    # ── /tmp headroom ──────────────────────────────────────────────────
+    def check_tmp(self) -> None:
+        """Alert before /tmp's fixed inode budget runs out (`tmpwatch.py`).
+
+        Both tree deletions happened with /tmp at 100% of its inodes, where
+        every mkdir fails while `df -h` reads healthy. Latched in memory: one
+        alert per crossing, one on escalation to critical, one clear below 70%.
+        Deletes nothing and never raises into the tick."""
+        try:
+            action, level, body = self.tmp.tick()
+        except Exception as exc:  # noqa: BLE001
+            log(f"tmpwatch failed (continuing): {exc}")
+            return
+        if action == "alert":
+            log(f"TMP HEADROOM ({level}): {body.splitlines()[0]}")
+            self.notifier.alert(level, tmpwatch.ALERT_TITLE, body, coalesce=True)
+        elif action == "resolve":
+            log(f"tmp headroom recovered: {body}")
+            self.notifier.resolve(tmpwatch.ALERT_TITLE, body)
+
     # ── vault tripwire ─────────────────────────────────────────────────
     def check_vault(self) -> None:
         """Trip on a mass deletion of the vault: stop sync, pause workers,
@@ -1224,6 +1246,9 @@ class Guardian:
         # And again: pressure building while supervisord is unreachable or the
         # stack is BROKEN is the moment the evidence is for.
         self.check_memory()
+        # And /tmp, for the same reason: a full /tmp is a state the stack
+        # cannot report from, because nothing in it can create a file.
+        self.check_tmp()
 
         if snap["supervisord"] == "unreachable":
             self.sup_down_streak += 1

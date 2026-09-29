@@ -170,6 +170,17 @@ def run(g, verbose: bool = True, profile: str = PROFILE_DAILY,
         return True, f"host full avg10={(host.get('full') or {}).get('avg10')}"
     checks.append(("memory-pressure recorder reads PSI", memory_pressure, False))
 
+    def tmp_headroom():
+        # The judgement on fixed readings, then a real statvfs of /tmp.
+        import tmpwatch as tw
+        if (tw.level_for(0.5), tw.level_for(0.85), tw.level_for(0.99)) != (None, "error", "critical"):
+            return False, "tmp headroom thresholds judge wrong"
+        r = tw.measure(tw.PATH)
+        if r.inodes_total <= 0:
+            return False, f"statvfs({tw.PATH}) reported no inode budget"
+        return True, f"{tw.PATH} {r.inodes_used:,}/{r.inodes_total:,} inodes ({r.inode_fraction:.0%})"
+    checks.append(("/tmp headroom watch measures", tmp_headroom, False))
+
     def endpoints():
         import probes
         import policy
