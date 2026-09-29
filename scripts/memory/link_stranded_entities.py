@@ -51,10 +51,30 @@ The value is imported from `app.kg_store`, not restated: `CARRY_EDGE_ORIGINS`
 used to be a literal in the export filter and #1151's rule is that a value
 several readers share lives with the writer.
 
-WHAT THIS TOOL DELIBERATELY DOES NOT DECIDE. The bare↔role-noun shape
-(`Browser` ↔ `Browser Tool`) is refused by the #320 merge policy, and whether
-linking it is wanted is a scope call no test can settle, so it is NOT suppressed
-here — #1019's post-landing clause puts it in front of a person before the first
+WHAT THE #1618 RULING SETTLED, AND WHAT THIS TOOL STILL DOES NOT DECIDE. The
+bare↔role-noun shape (`Browser` ↔ `Browser Tool`) is refused by the #320 merge
+policy, and #1618 ruled on 2026-09-29 whether linking it is wanted: the SHAPE is
+admitted, and the generic-role-noun CLASS is refused by a property measured off
+the store — never by a list of names, which is why nothing in this file knows the
+word `tool`. `find_proposals` therefore admits a candidate only when its TARGET
+passes the bound: fan-out (other registered entity names that embed it, under
+this module's own `MIN_TARGET_LEN` and `_boundary_re`) at most
+`TARGET_FAN_OUT_MAX` = 20, active degree at least `TARGET_DEGREE_MIN` = 1, and
+either at least `TARGET_FACTS_MIN` = 5 active facts or fan-out at most
+`TARGET_FAN_OUT_TRUSTED` = 2. The two refusals print their own denominators:
+`refused: dead target` is the degree condition (a target with no active edge is a
+second stranded node, not a hub — `tool`, `cache` and `automod` on the
+2026-09-29 store, each at fan-out 100, 24 and 13 with zero edges), and
+`refused: generic target` is the fan-out condition (`VLA` 79, `Inference` 43,
+`Prompt` 32, and `Guard`, which the facts/fan-out clause is there for: fan 5 with
+only 3 facts, so its name distinguishes nothing). Those thresholds were set by
+that measurement, which on the same store took the 18 embedding candidates at
+`--min-facts 10` to 11 admitted and 7 refused. The bound is not a verdict on any
+one name: `Genesis` at fan-out 1, 12 facts and degree 10 is admitted, and the
+`Tactile Genesis → Genesis` split it therefore still causes is #1019's cost to
+carry, not this bound's to refuse. What this tool still does not decide is the
+merge question #320 poses: the edge written here is connectivity and never an
+alias, and #1019's post-landing clause still puts a person in front of the first
 live `--apply`. The confidence is the store default (0.5) on purpose: the
 contract is connectivity, not retrieval rank, and the triage arithmetic measured
 that no `related_to` confidence reaches the top-5 neighbour cutoff anyway
@@ -98,6 +118,17 @@ assert EDGE_ORIGIN in CARRY_EDGE_ORIGINS, (
 
 MIN_TARGET_LEN = 3          # 1- and 2-char names match almost anything, letter by letter
 SEED = 1019
+
+# The #1618 target-side bound, ruled 2026-09-29 and applied by `find_proposals`.
+# The bare↔role-noun SHAPE is admitted; the generic-role-noun CLASS is refused by
+# a property measured off the store, so no list of names is kept by hand and
+# nothing in this file knows the word `tool`. Thresholds are the ones set by the
+# 2026-09-29 measurement (18 embedding candidates at `--min-facts 10`: 11
+# admitted, 7 refused), documented in the module docstring.
+TARGET_FAN_OUT_MAX = 20       # above this fan-out, the name is a suffix, not a thing
+TARGET_DEGREE_MIN = 1         # a target with no active edge links nothing to anything
+TARGET_FACTS_MIN = 5          # generic-shaped, but written about enough to keep
+TARGET_FAN_OUT_TRUSTED = 2    # at or below this fan-out, the name distinguishes itself
 
 
 @lru_cache(maxsize=8192)
@@ -166,6 +197,62 @@ def longest_embedded_name(name: str, index: dict[str, list[str]]) -> tuple[str, 
     return best
 
 
+# ── the #1618 target-side bound ──────────────────────────────────────────────
+
+def target_fan_out(target: str, names) -> int:
+    """How many OTHER registered entity names embed `target`, boundary-clean.
+
+    The generic-role-noun test, and the reason no word list is needed: `tool` is
+    generic not because someone wrote it down as one but because 100 registered
+    names contain it, so a link to `tool` says something about almost every
+    entity and about nothing in particular. A name shorter than `MIN_TARGET_LEN`
+    returns 0 rather than a count of the noise it would make — such a target can
+    never have been chosen as a target in the first place, since
+    `longest_embedded_name` refuses to rank one, and inventing a fan-out for it
+    here would let a number print that no matcher ever produced.
+
+    The registry, not an edge query: an edge query would measure half of this
+    tool's own output and make the count self-referential — one night's proposals
+    would raise the bar for the next.
+    """
+    tgt = (target or "").strip().lower()
+    if len(tgt) < MIN_TARGET_LEN:
+        return 0
+    rx = _boundary_re(tgt)
+    return sum(1 for n in names
+               if n and n.strip() != target.strip() and rx.search(n.strip().lower()))
+
+
+def target_admissibility(*, fan_out: int, degree: int, facts: int) -> str:
+    """`admitted`, `refused_dead_target` or `refused_generic_target`.
+
+    The dead check goes FIRST, and the order is not cosmetic: a name can be both
+    a dead end and a suffix — `tool` has 100 embedding names and no edges — and
+    each such target must land in exactly one row for the counts to partition the
+    embedding candidates. It is refused as a dead target because that is the
+    cheaper fact to state and the one the operator can act on: a hub the store has
+    no edge for is a gap in the graph, not a name that means too much.
+
+    A fan-out above `TARGET_FAN_OUT_MAX` is generic outright. Below it, the
+    name may still be a role noun that is simply rarely reused, which is where the
+    second half of the clause decides: `Guard` (fan-out 5, 3 facts) is refused
+    because nothing written about it distinguishes it, while `Scope Creep`
+    (fan-out 1, 4 facts) and `Hook` (fan-out 11, 6 facts) are admitted — the first
+    because its fan-out is inside `TARGET_FAN_OUT_TRUSTED`, the second because the
+    store has enough to say about it. Reaching the dead row can cost a target
+    everything else: `automod` on the 2026-09-29 store has 23 active facts and
+    fan-out 13, clears both numeric bars, and is still refused because it holds no
+    edge at all. The degree condition is not a proxy for the other two.
+    """
+    if degree < TARGET_DEGREE_MIN:
+        return "refused_dead_target"
+    if fan_out > TARGET_FAN_OUT_MAX:
+        return "refused_generic_target"
+    if facts < TARGET_FACTS_MIN and fan_out > TARGET_FAN_OUT_TRUSTED:
+        return "refused_generic_target"
+    return "admitted"
+
+
 # ── store reads ──────────────────────────────────────────────────────────────
 
 def active_fact_counts(st: KGStore) -> dict[str, int]:
@@ -201,10 +288,18 @@ def find_proposals(st: KGStore, *, min_facts: int = 0,
         "degree_zero_candidates": 0,
         "embed_a_name": 0,
         "proposed": 0,
+        "refused_generic_target": 0,
+        "refused_dead_target": 0,
         "skipped_no_entity_row": 0,
         "skipped_existing_edge": 0,
     }
     proposed: list[dict] = []
+    # The registry to scan for fan-out, and one cache per distinct target: the scan
+    # is over ~11.6k names, and a name can be a target of several candidates on one
+    # night (`Obsidian` is, on the store this bound was measured on), so without the
+    # cache one target is counted once per proposal for no extra information.
+    registry = registered
+    fan_out_by_target: dict[str, int] = {}
     for name, n_facts in sorted(facts.items(), key=lambda kv: (-kv[1], kv[0])):
         if n_facts < min_facts:
             continue
@@ -215,6 +310,19 @@ def find_proposals(st: KGStore, *, min_facts: int = 0,
         if hit is None:
             continue
         dens["embed_a_name"] += 1
+        target, substring = hit
+        # The #1618 bound, ahead of the two write-path skips: a target this tool
+        # must not link to is refused whether or not the write would have worked,
+        # so the report distinguishes "we decided no" from "we could not do it".
+        if target not in fan_out_by_target:
+            fan_out_by_target[target] = target_fan_out(target, registry)
+        kind = target_admissibility(
+            fan_out=fan_out_by_target[target],
+            degree=linked.get(target, 0),
+            facts=facts.get(target, 0))
+        if kind != "admitted":
+            dens[kind] += 1
+            continue
         if name.strip().lower() not in have_row:
             dens["skipped_no_entity_row"] += 1
             continue
@@ -223,7 +331,6 @@ def find_proposals(st: KGStore, *, min_facts: int = 0,
             # so this only fires if something wrote an edge mid-pass.
             dens["skipped_existing_edge"] += 1
             continue
-        target, substring = hit
         proposed.append({
             "source": name,
             "target": target,
@@ -245,7 +352,19 @@ def find_proposals(st: KGStore, *, min_facts: int = 0,
 def report_lines(dens: dict[str, int]) -> list[tuple[str, str, str, str]]:
     """(label, denominator key, denominator label, that denominator's label) —
     the report's shape in one place, so the counts and the sets they are slices of
-    cannot drift apart and a test can read the same table the terminal prints."""
+    cannot drift apart and a test can read the same table the terminal prints.
+
+    The two refusal rows are slices of `embed_a_name` for the same reason
+    `proposed` is, and they are NEW KEYS rather than a change to `proposed`
+    because `proposed` is what the nightly artefact parser reads
+    (`skills/autonomy-data-pipeline/SKILL.md`): a run that refuses seven
+    candidates must still report the eleven it proposed under the label the
+    pipeline already knows. Every row after `of-which embed a name` is one bucket
+    of that set — proposed, refused twice over for the two halves of the #1618
+    bound, and skipped twice over for the two write-path reasons — and the
+    invariant that they sum to it is pinned in
+    `tests/test_link_stranded_entities.py`.
+    """
     return [
         ("fact-holding entities", "fact_holding_entities", "", ""),
         ("degree-zero candidates", "degree_zero_candidates",
@@ -253,8 +372,19 @@ def report_lines(dens: dict[str, int]) -> list[tuple[str, str, str, str]]:
         ("of-which embed a name", "embed_a_name",
          "degree_zero_candidates", "degree-zero candidates"),
         ("proposed edges", "proposed", "embed_a_name", "embedding a name"),
-        ("skipped: no entities row", "skipped_no_entity_row", "", ""),
-        ("skipped: edge already live", "skipped_existing_edge", "", ""),
+        ("refused: generic target", "refused_generic_target",
+         "embed_a_name", "embedding a name"),
+        ("refused: dead target", "refused_dead_target",
+         "embed_a_name", "embedding a name"),
+        # The two write-path skips are slices of the same set: each is a candidate
+        # that embedded a name and got no further. Naming the denominator on their
+        # rows is what lets the PRINTED table be read as a partition of
+        # `embed_a_name`, rather than a list where four rows say whose slices they
+        # are and two decline to.
+        ("skipped: no entities row", "skipped_no_entity_row",
+         "embed_a_name", "embedding a name"),
+        ("skipped: edge already live", "skipped_existing_edge",
+         "embed_a_name", "embedding a name"),
     ]
 
 

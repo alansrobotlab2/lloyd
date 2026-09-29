@@ -75,7 +75,35 @@ FIXTURE_FACTS = {
     "RAG": 4,
     BARE: 3,
     "Cfg": 3,           # inside VICTIM at no boundary, so it links nothing
+    # A candidate added because the target bound takes one away: the edge that makes
+    # `TGS-RAG` an admissible TARGET also lifts it out of the degree-zero candidate
+    # pool, so its own proposal to `RAG` cannot survive #1618. `Obsidian Canvas`
+    # embeds `Obsidian` and holds the proposal count at four, so the write-path nodes
+    # below keep counting four edges and only the target-side story changes.
+    "Obsidian Canvas": 11,
 }
+
+# `find_proposals` now reads the TARGET's degree as well as its name, so a target
+# holding no edge is refused as dead and this fixture would propose nothing at all.
+# Three edges, one per target the four proposals use, each to a registered name with
+# no facts of its own — a partner holding facts would stop being a degree-zero
+# candidate and cost the pass a proposal (the `TGS-RAG` case above).
+#
+# Each target then clears the bound by a different half of its third condition, which
+# is what keeps the bound from being pinned by one shape alone: `TGS-RAG` fan-out 1 /
+# 5 facts, `Obsidian` fan-out 2 (`Obsidian Dataview`, `Obsidian Canvas`) / 5 facts,
+# `Browser` fan-out 1 (`Browser Tool`) / 3 facts — under `TARGET_FACTS_MIN`, admitted
+# only because its fan-out is at or below `TARGET_FAN_OUT_TRUSTED`.
+FIXTURE_EDGES = [("TGS-RAG", "Quartz Broker", "related_to"),
+                 (TARGET, "Zephyr Scheduler", "related_to"),
+                 (BARE, "Cobalt Registry", "related_to")]
+
+
+def link_fixture_edges(st) -> None:
+    """Write `FIXTURE_EDGES` through the store's own writer, not raw SQL."""
+    for s, d, ty in FIXTURE_EDGES:
+        st.edges.add({"source": s, "target": d, "type": ty,
+                      "origin": "manual", "evidence": "fixture scaffolding for #1832"})
 
 
 def _edge_count(st, name):
@@ -103,7 +131,12 @@ def _shown_number(out: str, label: str) -> int:
 def build_store(tmp_path) -> KGStore:
     """Registered entity rows plus a `facts_idx` in the shape the live tree
     indexes: one file per entity/category, `text_hash` unique per fact (that
-    index is what would reject a second insert of one fact), no expiry."""
+    index is what would reject a second insert of one fact), no expiry, and the
+    target-side edges in `FIXTURE_EDGES`.
+
+    Those edges are what the #1618 bound needs in order to exist: with no edge at
+    all every target here sits at degree zero, the bound refuses every proposal as a
+    dead target, and a fixture that cannot propose anything pins nothing."""
     st = KGStore(tmp_path / "kg.sqlite")
     for name, n_facts in FIXTURE_FACTS.items():
         st.entities.register(name)
@@ -117,6 +150,10 @@ def build_store(tmp_path) -> KGStore:
                  f"h-{name}-{category}-{i}", f"{name} claim number {i}",
                  0.9, "2026-09-18T00:00:00+00:00", "EXTRACTED",
                  f"{name}/{name}-{category}.md"))
+    for partner, kind in (("Quartz Broker", "system"), ("Zephyr Scheduler", "system"),
+                          ("Cobalt Registry", "system")):
+        st.entities.register(partner, kind=kind)
+    link_fixture_edges(st)
     return st
 
 
@@ -175,6 +212,11 @@ def test_equal_length_ties_break_alphabetically_so_two_runs_agree():
 def test_dry_run_proposes_one_edge_per_stranded_entity_and_writes_nothing(tmp_path, capsys):
     st = build_store(tmp_path)
     assert _edge_count(st, STRANDED) == 0, "fixture must start at degree zero"
+    # The count a dry run must NOT move: the fixture's own target scaffolding, which
+    # #1832 added so the bound has admissible targets to admit.
+    scaffold = st.edges.count(active_only=True)
+    assert scaffold == len(FIXTURE_EDGES), (
+        f"the fixture's scaffold is what a dry run must leave alone: {scaffold}")
     assert linker.main(["--db", str(st.path), "--sample", "0"]) == 0
     out = capsys.readouterr().out
 
@@ -184,13 +226,20 @@ def test_dry_run_proposes_one_edge_per_stranded_entity_and_writes_nothing(tmp_pa
     assert sorted(pairs) == sorted([
         (DUAL, TARGET),          # 16 facts at degree zero on the live store too
         (STRANDED, "TGS-RAG"),   # longest wins over the `RAG` nested inside it
-        ("TGS-RAG", "RAG"),      # `TGS-RAG` is itself stranded here, and embeds `RAG`
+        ("Obsidian Canvas", TARGET),   # the stand-in candidate, see below
         (ROLE_NOUN, BARE),       # bare/role noun: linked, not merged
     ]), pairs
+    # The proposal this file used to expect from `TGS-RAG` is gone, and that is the
+    # point of #1832: `TGS-RAG` embeds `RAG` and holds 5 facts, so before the target
+    # bound it was itself a proposed source. The edge that makes it a target worth
+    # linking to is the same edge that makes it linked — hence no longer a degree-zero
+    # candidate — and `Obsidian Canvas` stands in as a candidate of the same shape so
+    # this pass still lands four edges.
     for unnameable in (VICTIM, ALONE):
         assert unnameable not in [s for s, _ in pairs], unnameable
     assert "dry-run" in out, "the default mode must announce itself"
-    assert st.edges.count(active_only=True) == 0, "--apply was not passed; nothing may be written"
+    assert st.edges.count(active_only=True) == scaffold, (
+        "--apply was not passed; the only edges in the store may be the fixture's own")
     st.close()
 
 
@@ -209,7 +258,9 @@ def test_a_fact_label_with_no_entities_row_is_counted_and_not_linked(tmp_path):
     pairs, dens = linker.find_proposals(st)
     assert "TGS-RAG Implementation" not in [p["source"] for p in pairs]
     assert dens["skipped_no_entity_row"] == 1, dens
-    assert dens["embed_a_name"] == dens["proposed"] + dens["skipped_no_entity_row"], (
+    assert dens["embed_a_name"] == (dens["proposed"] + dens["skipped_no_entity_row"]
+                                    + dens["refused_generic_target"]
+                                    + dens["refused_dead_target"]), (
         "the slices must add up against the denominator they are drawn from")
     st.close()
 
@@ -251,11 +302,14 @@ def degree_zero_probe(st) -> list[str]:
 def test_the_probe_empties_only_after_apply(tmp_path, capsys):
     st = build_store(tmp_path)
     before = sorted(degree_zero_probe(st))
-    assert before == sorted([STRANDED, DUAL]), (
+    assert before == sorted([STRANDED, DUAL, "Obsidian Canvas"]), (
         "the fixture must reproduce #1019's premise before the fix: at degree zero, "
         "≥10 active facts, own name embedding another registered name. `CameraCfg` "
         "and `UniTacHand` are stranded with 11 facts each and neither is named, "
-        f"which is the set the probe's own rule defines: {before}")
+        "which is the set the probe's own rule defines. `Obsidian Canvas` is the "
+        "third hit #1832 adds: it stands in for the proposal `TGS-RAG` loses when "
+        "the edge that makes it an admissible target also makes it linked, so it is "
+        f"a candidate in its own right: {before}")
 
     assert linker.main(["--db", str(st.path), "--apply", "--sample", "0"]) == 0
     capsys.readouterr()
@@ -359,9 +413,10 @@ def test_the_carry_filter_keeps_a_manual_edge_after_a_re_derivation(tmp_path):
     kept = [e for e in st.edges.all(include_expired=False)
             if (e.get("provenance") or "") in carry
             or (e.get("origin") or "") in CARRY_EDGE_ORIGINS]
-    assert len(kept) == st.edges.count(active_only=True) == 4, (
-        "the store holds only linker-written edges, and every one must be carried "
-        "across a re-derivation")
+    assert len(kept) == st.edges.count(active_only=True) == 4 + len(FIXTURE_EDGES), (
+        f"the store holds the 4 linker-written edges plus the "
+        f"{len(FIXTURE_EDGES)} fixture edges the #1618 bound needs, and every one "
+        f"origin is carried across a re-derivation; kept {len(kept)}")
     st.close()
 
 
@@ -390,22 +445,38 @@ def test_counts_print_beside_the_denominators_they_are_a_slice_of(tmp_path, caps
     out = capsys.readouterr().out
 
     index = linker.build_target_index(st.entities.all())
-    fact_holding = len(linker.active_fact_counts(st))
-    degree_zero = sum(1 for k, v in linker.active_fact_counts(st).items()
-                      if st.edges.degree().get(k, 0) == 0)
-    embed = sum(1 for k in linker.active_fact_counts(st)
-                if linker.longest_embedded_name(k, index))
+    facts = linker.active_fact_counts(st)
+    linked = st.edges.degree()
+    fact_holding = len(facts)
+    degree_zero = sum(1 for k, v in facts.items() if linked.get(k, 0) == 0)
+    # An embedding CANDIDATE is a degree-zero fact holder, and the `FIXTURE_EDGES`
+    # scaffolding the #1618 bound needs lifts three fixture names above zero:
+    # `TGS-RAG`, `Obsidian` and `Browser` are targets now, so no matter how well their
+    # names embed somebody else's they are not candidates on their own night.
+    embed = sum(1 for k in facts
+                if linked.get(k, 0) == 0 and linker.longest_embedded_name(k, index))
 
     assert _shown_number(out, "fact-holding entities") == fact_holding
     assert _shown_number(out, "degree-zero candidates") == degree_zero
     assert _shown_number(out, "of-which embed a name") == embed
-    assert _shown_number(out, "proposed edges") == embed, (
-        "every embedding candidate is proposed, including `TGS-RAG` and `Browser Tool` "
-        "under the probe's 10-fact floor — the rule is not scoped to that floor")
+    _proposed, dens = linker.find_proposals(st)
+    slice_rows = ("proposed", "refused_generic_target", "refused_dead_target",
+                  "skipped_no_entity_row", "skipped_existing_edge")
+    assert sum(dens[k] for k in slice_rows) == dens["embed_a_name"], (
+        f"the report's rows must partition `embed_a_name`, and they sum to "
+        f"{sum(dens[k] for k in slice_rows)} of {dens['embed_a_name']}: {dens}")
+    assert _shown_number(out, "proposed edges") == dens["proposed"] == embed, (
+        "on this fixture every candidate's target clears the bound, so nothing is "
+        "refused and `proposed` still equals `embed_a_name` — a store where one "
+        "candidate does NOT clear it is "
+        "`test_a_target_refused_by_the_1618_bound_prints_its_own_denominators`, which "
+        "pins `proposed` strictly below `embed_a_name`. Every name here embeds another "
+        "boundary-cleanly, `Browser Tool` included, and none of it is scoped to the "
+        "probe's 10-fact floor")
     # The count is not printed alone: each slice row names the set it is drawn from.
     assert f"(of {fact_holding} fact-holding)" in out, out
     assert f"(of {degree_zero} degree-zero candidates)" in out, out
-    assert "(of 4 embedding a name)" in out, out
+    assert f"(of {embed} embedding a name)" in out, out
     assert "--apply" in out, "dry-run must name the flag that would change that"
     st.close()
 
@@ -422,7 +493,7 @@ def test_the_floor_moves_the_candidate_slice_not_the_corpus(tmp_path, capsys):
     capsys.readouterr()
     linker.main(["--db", str(st.path), "--min-facts", "13", "--sample", "0"])
     floored = capsys.readouterr().out
-    # Fixture counts are 16/12/11/11/5/5/4/4/3/3, so a floor of 13 leaves
+    # Fixture counts are 16/12/11/11/11/5/5/4/4/3/3, so a floor of 13 leaves
     # `Obsidian Dataview` alone as a candidate, and one proposal with it.
     assert _shown_number(floored, "fact-holding entities") == len(FIXTURE_FACTS), (
         "the corpus denominator does not move with the floor")
@@ -507,7 +578,9 @@ def test_apply_refuses_while_the_rebuild_write_flag_is_false(tmp_path, capsys, m
     measurement would make the guard the reason the tool reports nothing at all."""
     st = build_store(tmp_path)
     seeded = _seed_one_live_edge(st)
-    assert seeded == 1, "the freeze check needs a live edge to leave untouched"
+    assert seeded == len(FIXTURE_EDGES) + 1, (
+        f"the freeze check needs exactly one foreign edge on top of the "
+        f"{len(FIXTURE_EDGES)} the fixture scaffolds, to be held still")
     _write_flag(monkeypatch, False)
     capsys.readouterr()
 
@@ -643,3 +716,242 @@ def test_the_guard_reads_write_enabled_out_of_a_config_file(tmp_path, monkeypatc
                         {"knowledge_graph": "not a mapping"})
     assert linker.writes_disabled_by_rebuild() is False, (
         "a malformed config must fail open, not freeze the tool forever")
+
+
+# ── #1832 clause 1+2: the #1618 target-side bound ─────────────────────────────
+#
+# Every store below is built by `build_bound_store`, which takes the fact counts,
+# the edges and the extra registered names explicitly, because the bound is a
+# statement about three measured properties of a TARGET — fan-out, active degree,
+# active facts — and a fixture that shares `FIXTURE_FACTS` cannot hold one value
+# per property without the others moving underneath it.
+
+def build_bound_store(tmp_path, *, facts, edges=(), extra_names=(),
+                      name="kg.sqlite") -> KGStore:
+    """A store with exactly the fan-out / degree / facts a bound case needs.
+
+    `facts` is label → active fact count (registered and indexed); `edges` is
+    (source, target) pairs written with the `manual` origin so none of them is
+    ever confused with a linker write; `extra_names` registers a name with no
+    facts at all, which is how a fan-out partner is built — it must be a
+    registered name that embeds the target, and must not itself become a
+    candidate, which a fact-holding name would.
+    """
+    st = KGStore(tmp_path / name)
+    for label in (*facts, *extra_names):
+        st.entities.register(label)
+    for label, n in facts.items():
+        for i in range(n):
+            st._query(
+                "INSERT INTO facts_idx(entity, category, fact_id, text_hash, fact, "
+                "confidence, created_at, provenance, file_path) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (label, "event", f"fact-{label}-{i}", f"h-{label}-{i}",
+                 f"{label} claim {i}", 0.9, "2026-09-18T00:00:00+00:00",
+                 "EXTRACTED", f"{label}/{label}-{i}.md"))
+    for src, dst in edges:
+        st.edges.add({"source": src, "target": dst, "type": "related_to",
+                      "evidence": "fixture scaffolding for #1832"}, origin="manual")
+    return st
+
+
+def _proposed_pairs(st):
+    proposals, dens = linker.find_proposals(st, min_facts=1)
+    return [(p["source"], p["target"]) for p in proposals], dens
+
+
+def test_a_dead_or_generic_target_is_refused_and_only_the_good_one_is_proposed(tmp_path):
+    """Clause 1: degree 0 or fan-out above `TARGET_FAN_OUT_MAX` refuses the proposal.
+
+    Each of the three targets is built so exactly ONE property distinguishes it,
+    because a fixture where the refused target fails all three would pass even if
+    the bound only implemented one of them:
+
+      * `Gadget` — fan-out 21 (twenty registered partners plus the candidate),
+        8 facts, ONE active edge. It clears the facts bar and is reachable, so
+        only the fan-out ceiling can refuse it, and it must be refused as
+        GENERIC, not dead.
+      * `Cache` — fan-out 1 and 8 active facts, clearing both numeric bars, and
+        NO active edge. This is the live `automod` shape (23 facts, fan-out 13,
+        zero edges): the degree floor is what refuses it, and it must be refused
+        as DEAD, not generic.
+      * `Widget Factory` — fan-out 1, 6 facts, one active edge: the same name a
+        candidate embeds, reachable and worth linking to, so it is proposed.
+    """
+    st = build_bound_store(
+        tmp_path,
+        facts={
+            "My Gadget Notebook": 12,      # candidate -> Gadget
+            "Session Cache Design": 12,    # candidate -> Cache
+            "My Widget Factory Note": 12,  # candidate -> Widget Factory
+            "Gadget": 8, "Cache": 8, "Widget Factory": 6,
+        },
+        edges=[("Registry Node", "Gadget"), ("Registry Node", "Widget Factory")],
+        extra_names=[f"Gadget Alpha {i:02d}" for i in range(20)] + ["Registry Node"])
+
+    fan_out = {t: linker.target_fan_out(t, st.entities.all())
+               for t in ("Gadget", "Cache", "Widget Factory")}
+    assert fan_out == {"Gadget": 21, "Cache": 1, "Widget Factory": 1}, (
+        f"the fan-out gadget is what the case is named for: {fan_out}")
+
+    pairs, dens = _proposed_pairs(st)
+    assert pairs == [("My Widget Factory Note", "Widget Factory")], (
+        f"only the good target may be proposed: {pairs}")
+    assert dens["embed_a_name"] == 3, f"three candidates embed a name: {dens}"
+    assert dens["refused_generic_target"] == 1, (
+        f"`Gadget` is generic by fan-out alone, having an edge and 8 facts: {dens}")
+    assert dens["refused_dead_target"] == 1, (
+        f"`Cache` is dead by degree alone, clearing both numeric bars: {dens}")
+    assert dens["proposed"] == 1, dens
+    st.close()
+
+
+def test_a_low_fan_out_target_is_admitted_below_the_facts_floor_and_a_guard_shape_is_not(
+        tmp_path):
+    """Clause 2: `facts >= 5 OR fan_out <= 2`, with the live triples reproduced.
+
+    All three targets here already hold an active edge, so nothing below is the
+    degree floor's doing — the disjunction is the only rule left running:
+
+      * `Guard`  — fan-out 5, 3 facts, degree 1. Refused: five names wear the
+        word and the store has three facts to say about it, which is the shape
+        the live store's `Guard` has and the reason the disjunction exists at
+        all (fan-out inside the ceiling would otherwise have admitted it).
+      * `Scope Creep` — fan-out 1, 4 facts, degree 3. Admitted: under the facts
+        floor, but only one other name embeds it, so the name distinguishes.
+      * `Hook` — fan-out 11, 6 facts, degree 4. Admitted: inside the ceiling and
+        written about enough, which is what stops the ceiling alone from being
+        the whole rule.
+    """
+    st = build_bound_store(
+        tmp_path,
+        facts={
+            "Session Guard Wrapper": 12,   # candidate -> Guard
+            "Project Scope Creep Log": 12,  # candidate -> Scope Creep
+            "Git Hook Runner": 12,          # candidate -> Hook
+            "Guard": 3, "Scope Creep": 4, "Hook": 6,
+        },
+        edges=[("Registry Node", "Guard"),
+               ("Backlog Board", "Scope Creep"), ("Triage Job", "Scope Creep"),
+               ("Reviewer Note", "Scope Creep"),
+               ("Registry Node", "Hook"), ("Webhook Config", "Hook"),
+               ("Post Tool Use", "Hook"), ("Stop Hook", "Hook")],
+        extra_names=["Guard Rail 1", "Guard Rail 2", "Guard Rail 3", "Guard Rail 4",
+                     "Registry Node", "Backlog Board", "Triage Job", "Reviewer Note",
+                     "Webhook Config", "Post Tool Use", "Stop Hook"]
+                    + [f"Hook Line {i:02d}" for i in range(9)])
+
+    fan_out = {t: linker.target_fan_out(t, st.entities.all())
+               for t in ("Guard", "Scope Creep", "Hook")}
+    assert fan_out == {"Guard": 5, "Scope Creep": 1, "Hook": 11}, (
+        f"the three live triples, rebuilt: {fan_out}")
+    degree = st.edges.degree()
+    assert [degree.get(t, 0) for t in ("Guard", "Scope Creep", "Hook")] == [1, 3, 4], degree
+
+    pairs, dens = _proposed_pairs(st)
+    assert sorted(t for _, t in pairs) == ["Hook", "Scope Creep"], (
+        f"the low-fan-out and well-documented targets are admitted, `Guard` is not: "
+        f"{pairs}")
+    assert dens["refused_generic_target"] == 1 and dens["refused_dead_target"] == 0, (
+        f"`Guard` has an edge, so its refusal must be the generic class: {dens}")
+    st.close()
+
+
+def test_a_target_refused_by_the_1618_bound_prints_its_own_denominators(tmp_path, capsys):
+    """Clause 3: one candidate per class, and the report partitions `embed a name`.
+
+    Three candidates, three outcomes, and the arithmetic the item demands: the
+    rows after `of-which embed a name` are slices of it, they sum to it, and
+    `proposed` is strictly below it by the refused count. That last part is what
+    stops a run from printing two reassuring new rows while proposing every
+    candidate it always proposed — the pre-change store printed 18 proposed of 18
+    embedding, and a version of this tool that counted refusals without acting on
+    them would print exactly the same 18.
+    """
+    st = build_bound_store(
+        tmp_path,
+        facts={
+            "My Gadget Notebook": 12,      # generic: fan-out 21
+            "Session Cache Design": 12,    # dead: no edge at all
+            "My Widget Factory Note": 12,  # good
+            "Gadget": 8, "Cache": 8, "Widget Factory": 6,
+        },
+        edges=[("Registry Node", "Gadget"), ("Registry Node", "Widget Factory")],
+        extra_names=[f"Gadget Alpha {i:02d}" for i in range(20)] + ["Registry Node"])
+
+    assert linker.main(["--db", str(st.path), "--sample", "0", "--min-facts", "1"]) == 0
+    out = capsys.readouterr().out
+
+    embed = _shown_number(out, "of-which embed a name")
+    proposed = _shown_number(out, "proposed edges")
+    generic = _shown_number(out, "refused: generic target")
+    dead = _shown_number(out, "refused: dead target")
+    assert (embed, proposed, generic, dead) == (3, 1, 1, 1), out
+    assert proposed < embed, (
+        f"proposed must fall by the refused count; {proposed} of {embed} is the "
+        f"pre-change reading, which is what this bound exists to end")
+    assert embed - proposed == generic + dead == 2, (embed, proposed, generic, dead)
+
+    _, dens = linker.find_proposals(st, min_facts=1)
+    slices = {}
+    for label, key, den_key, _ in linker.report_lines(dens):
+        if den_key == "embed_a_name":
+            slices[label] = dens[key]
+    assert sorted(slices) == sorted([
+        "proposed edges", "refused: generic target", "refused: dead target",
+        "skipped: no entities row", "skipped: edge already live"]), slices
+    assert sum(slices.values()) == dens["embed_a_name"], (
+        f"the rows after `of-which embed a name` must partition it, and they sum to "
+        f"{sum(slices.values())} of {dens['embed_a_name']}: {slices}")
+
+    # The two new rows come out of `report_lines`, which is what makes them print
+    # on a store with nothing to refuse as well: `report_lines` builds them from the
+    # table, not from the proposals it found.
+    empty = build_bound_store(tmp_path, facts={}, name="empty.sqlite")
+    capsys.readouterr()
+    assert linker.main(["--db", str(empty.path), "--sample", "0"]) == 0
+    empty_out = capsys.readouterr().out
+    for label in ("refused: generic target", "refused: dead target"):
+        assert label in empty_out, f"{label} missing from an empty store's report:\n{empty_out}"
+        assert _shown_number(empty_out, label) == 0, empty_out
+    st.close()
+    empty.close()
+
+
+def test_the_module_docstring_says_the_bare_role_noun_shape_is_ruled(tmp_path):
+    """Clause 4: the page a person reads must not claim the shape is unruled.
+
+    The paragraph used to say "whether linking it is wanted is a scope call no
+    test can settle, so it is NOT suppressed here". #1618 settled it on
+    2026-09-29, so the sentence is a live falsehood on the surface an operator
+    reads before deciding whether to run the tool, and it is pinned here off
+    `__doc__` — the loaded module's own text, not a copy of it in this file.
+    """
+    doc = linker.__doc__
+    flat = " ".join(doc.split())
+
+    for stale in ("NOT suppressed", "unruled", "no test can settle"):
+        assert stale not in flat, (
+            f"the module docstring still tells a reader {stale!r}, which the #1618 "
+            f"ruling of 2026-09-29 contradicts")
+
+    assert "1618" in flat, "the docstring must name the ruling that decided it"
+    assert "TARGET_FAN_OUT_MAX" in flat and "TARGET_DEGREE_MIN" in flat \
+        and "TARGET_FACTS_MIN" in flat and "TARGET_FAN_OUT_TRUSTED" in flat, (
+        "the bound must be stated by the constant names, so a renumbered threshold "
+        "cannot leave the prose behind")
+    assert f"`TARGET_FAN_OUT_MAX` = {linker.TARGET_FAN_OUT_MAX}" in flat, flat[:600]
+    assert f"`TARGET_DEGREE_MIN` = {linker.TARGET_DEGREE_MIN}" in flat
+    assert f"`TARGET_FACTS_MIN` = {linker.TARGET_FACTS_MIN}" in flat
+    assert f"`TARGET_FAN_OUT_TRUSTED` = {linker.TARGET_FAN_OUT_TRUSTED}" in flat
+    # The shape is admitted and the CLASS refused — the distinction the ruling made,
+    # and the reason there is no word list in this module.
+    assert "never by a list of names" in flat, flat[:600]
+    # And the function's vocabulary is the report's vocabulary: what it returns is
+    # used directly as the denominator key, so a rename on one side and not the
+    # other would print a row of zeroes while refusing everything.
+    assert linker.target_admissibility(fan_out=1, degree=0, facts=50) \
+        == "refused_dead_target"
+    assert linker.target_admissibility(fan_out=99, degree=9, facts=50) \
+        == "refused_generic_target"
+    assert linker.target_admissibility(fan_out=1, degree=1, facts=1) == "admitted"
