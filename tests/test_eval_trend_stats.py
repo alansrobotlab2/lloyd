@@ -12,9 +12,10 @@ that the interval comes from resampling queries rather than from a normal-theory
 formula bolted onto the delta.
 
 *Live* tests re-run the audit over the real ``eval/baselines/nightly-*.json``.
-Those files are gitignored, so the audit resolves them through
-``default_baselines_dir()``, which falls back to the live checkout exactly like
-``app/uptake.py:224 lloyd_root()`` does for the logs it reads. The live tests pin
+Those files exist only under the data root — the repo copy holds the tracked
+non-nightly pins and never a nightly — so the audit resolves them through
+``default_baselines_dir()``, which falls back to the production data root exactly
+like ``app/uptake.py:363 lloyd_root()`` does for the logs it reads. The live tests pin
 the two numbers backlog #608's acceptance check is written in: **11 of 12**
 transitions withheld over 2026-09-04..2026-09-17, and the 09-09 "third
 consecutive night of entity-side decline. Not noise." verdict labelled
@@ -26,6 +27,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import subprocess
 import sys
@@ -791,11 +793,15 @@ def test_the_sizing_block_names_the_semantic_seeding_re_base(tmp_path, capsys):
 
 
 def test_the_audit_reads_the_live_tree_from_a_worktree(tmp_path, monkeypatch):
-    """``eval/baselines/`` is gitignored, so a round worktree has an empty one.
+    """A round worktree's own ``eval/baselines`` holds no ``nightly-*.json``.
 
-    An audit that read its own checkout would find zero nights and report a
-    flawless record. ``LLOYD_ROOT`` wins, else this checkout if it has the data,
-    else the live checkout — the same resolution ``app/uptake.py:224`` uses.
+    The directory is there — nine tracked pins, `.gitignore:134` ignores its
+    contents and :135/:137 allowlist two filename patterns back — but the nightly
+    files are not, so an audit that read its own tree would find zero nights and
+    report a flawless record. ``LLOYD_ROOT`` wins, else this process's data root
+    if it holds nightlies, else the production data root — the resolution
+    ``app/uptake.py:363 lloyd_root()`` uses for logs. (#1791: the script's own
+    ``--help`` used to describe this default as the checkout copy.)
     """
     monkeypatch.delenv("LLOYD_ROOT", raising=False)
     assert default_baselines_dir().is_dir()
@@ -986,3 +992,180 @@ def test_strict_exits_zero_when_every_pair_in_the_window_joins(tmp_path, capsys)
     d = _two_night_window(tmp_path, joinable=True)
     assert main(["--baselines", str(d), "--no-claims", "--strict"]) == 0, (
         "an all-joinable window must exit 0 under --strict")
+
+
+# ── the root the --baselines help advertises (#1791) ──────────────────────────
+#
+# A help string is a claim about a code path, and this one claimed the wrong
+# path: it told an operator the default was "the live checkout's eval/baselines,
+# which is gitignored and so absent from a worktree", while every branch of
+# `default_baselines_dir()` is a data root. An operator reading it from a gate
+# worktree concluded the flag pointed at the checkout and either passed
+# `--baselines eval/baselines` by hand — which `load_window` refuses with
+# `no nightly-*.json under …` (:266), handled at :941-944 as `ERROR:` + exit 2 —
+# or trusted a default that does not exist. These four nodes pin the string to
+# the resolver, in both directions: what the help may say, and what the code may
+# return.
+
+
+def _baselines_help_description() -> str:
+    """The printed description of ``--baselines``, from one real ``--help`` run.
+
+    A subprocess rather than an in-process parser call, because the thing under
+    test is what an operator's terminal shows — including whatever argparse's
+    wrapping does to it, which is why the block is re-joined before assertions.
+    """
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "eval_trend_stats.py"), "--help"],
+        capture_output=True, text=True, cwd=ROOT,
+        env={**os.environ, "COLUMNS": "400"})
+    assert proc.returncode == 0, proc.stderr[-400:]
+    lines = proc.stdout.splitlines()
+    at = [i for i, ln in enumerate(lines) if ln.strip().startswith("--baselines")]
+    assert at, f"--baselines is not in the help at all:\n{proc.stdout[:600]}"
+    body = []
+    for ln in lines[at[0] + 1:]:
+        if re.match(r"\A\s*-{1,2}\w", ln):
+            break
+        body.append(ln.strip())
+    desc = " ".join(" ".join(body).split())
+    assert desc, ("the --baselines option printed no description, so every "
+                  "assertion below this one would pass on an empty string")
+    return desc
+
+
+def _segments(desc: str) -> list[str]:
+    """The description split into sentence-sized pieces, paths intact."""
+    return [s.strip() for s in re.split(r"[.;]\s+", desc) if s.strip()]
+
+
+def _resolve_default_baselines(lloyd_root=None, data_root=None) -> Path:
+    """What ``default_baselines_dir()`` returns with the operator's state set to
+    *lloyd_root* / *data_root* (neither set = the bare fallback path).
+
+    Each call sets that state and restores it in a ``finally``, so an assertion
+    that fails cannot leave the next test resolving against a patched data root.
+    ``app.paths.EVAL_BASELINES_DIR`` is patched on the module: the resolver
+    imports it inside the function (`scripts/eval_trend_stats.py:1072`), so the
+    module attribute is the value it reads.
+    """
+    import app.paths as app_paths
+    had_env, saved_env = ("LLOYD_ROOT" in os.environ), os.environ.get("LLOYD_ROOT")
+    saved_data = app_paths.EVAL_BASELINES_DIR
+    try:
+        os.environ.pop("LLOYD_ROOT", None)
+        if lloyd_root is not None:
+            os.environ["LLOYD_ROOT"] = str(lloyd_root)
+        if data_root is not None:
+            app_paths.EVAL_BASELINES_DIR = Path(data_root)
+        return default_baselines_dir()
+    finally:
+        app_paths.EVAL_BASELINES_DIR = saved_data
+        os.environ.pop("LLOYD_ROOT", None)
+        if had_env:
+            os.environ["LLOYD_ROOT"] = saved_env
+
+
+def test_the_baselines_help_default_is_not_the_repo_copy(tmp_path):
+    """Clause 1: what --help calls the default, and what the code resolves, are
+    the same root — and neither is the checkout's `eval/baselines`.
+
+    The two halves are one clause because either alone passes on a lie: a help
+    string that merely omits the old words says nothing about the code, and a
+    resolver that never returns the repo copy says nothing about what the help
+    tells the operator to expect.
+    """
+    desc = _baselines_help_description()
+    assert "live checkout" not in desc.lower(), (
+        "the help still points at the checkout as the default: " + desc)
+
+    repo_copy = ROOT / "eval" / "baselines"
+    # Positive control: the left side of every inequality below has a real
+    # directory to be unequal to, and that directory is present and non-empty —
+    # the old string's "absent from a worktree" was false about the directory.
+    assert repo_copy.is_dir(), "the repo copy went missing; the comparison is vacuous"
+    assert [p for p in repo_copy.iterdir() if not p.name.startswith("nightly-")], (
+        "the repo copy holds nothing but nightlies now, so the help's account of "
+        "it needs rewriting")
+
+    assert _resolve_default_baselines() != repo_copy, (
+        "with no override the resolver now returns the repo copy, which is what "
+        "the help used to promise and the audit was written to avoid")
+    assert _resolve_default_baselines(lloyd_root=Path(tmp_path)) == (
+        Path(tmp_path) / "eval" / "baselines"), (
+        "LLOYD_ROOT is no longer the override the help says it is")
+
+
+def test_the_baselines_help_names_the_roots_the_resolver_actually_reads(tmp_path):
+    """Clause 2: the description names `app.paths.EVAL_BASELINES_DIR` and the
+    `LLOYD_ROOT` override, and both names still mean what the resolver does with
+    them.
+
+    Naming the symbol is only half: a help string can name `LLOYD_ROOT` while the
+    code ignores it. Each name is therefore checked against the branch it
+    describes — the override wins outright, and a populated data-root directory
+    is what the fallback consults before production.
+    """
+    desc = _baselines_help_description()
+    assert "EVAL_BASELINES_DIR" in desc, desc
+    assert "app.paths" in desc, desc
+    assert "LLOYD_ROOT" in desc, desc
+
+    override = tmp_path / "root"
+    (override / "eval" / "baselines").mkdir(parents=True)
+    assert _resolve_default_baselines(lloyd_root=override) == (
+        override / "eval" / "baselines"), (
+        "the help names LLOYD_ROOT as an override the resolver does not honour")
+    populated = tmp_path / "data" / "eval" / "baselines"
+    populated.mkdir(parents=True)
+    (populated / "nightly-20260101.json").write_text("{}", encoding="utf-8")
+    assert _resolve_default_baselines(data_root=populated) == populated, (
+        "the help names EVAL_BASELINES_DIR as the data root the resolver reads; "
+        "it read something else")
+
+
+def test_the_baselines_help_says_what_the_repo_copy_holds_and_why_the_fallback_exists():
+    """Clause 3: the repo copy is described as it is — tracked pins, never a
+    `nightly-*.json` — and the worktree caveat is the *reason* the production
+    data root is consulted, not a description of the default.
+
+    "gitignored and so absent from a worktree" was wrong twice: `.gitignore:134`
+    ignores `eval/baselines/*` but allowlists `skill-ab-*.md` and
+    `compaction-recall-*.json` at :135 and :137, so the directory is present in a
+    worktree and holds tracked pins; only the nightly pattern is missing.
+    """
+    desc = _baselines_help_description()
+    repo = [s for s in _segments(desc) if "repo copy" in s]
+    assert repo, "the description stopped accounting for the repo copy at all: " + desc
+    seg = repo[0]
+    assert "tracked" in seg and "pin" in seg, seg
+    assert "nightly-*.json" in seg, seg
+    assert "gitignored" not in seg.lower(), seg
+    assert "absent" not in desc.lower(), (
+        "the description still calls the repo copy absent, which it is not — "
+        "nine tracked pins sit in it in every worktree")
+    assert "worktree" in seg and "production" in seg, (
+        "the worktree caveat must sit with the production data root it explains: "
+        + seg)
+
+
+def test_the_measurement_doc_no_longer_reports_the_help_string_as_disagreeing():
+    """Clause 4: the doc's known-warts entry no longer asserts the disagreement.
+
+    The bullet in `architecture/measurement.md` closed with "--help still names
+    the repo copy as its default root where this doc names the data root; the
+    code backs the doc (#1791)". Left standing, the fix would leave a doc telling
+    the next reader the bug is live. The positive control beside the absence is
+    what keeps this from passing because the pattern went stale: the doc must
+    still state the true side (§Two roots / §The arms) and must still mention
+    #1791, now in the past tense with the fix named.
+    """
+    text = (ROOT / "architecture" / "measurement.md").read_text(encoding="utf-8")
+    assert "not from the repo copy" in text, (
+        "the doc no longer states which root the trend reads, so the absence "
+        "below proves nothing — it may just be that the whole passage went away")
+    assert "repo copy as its default" not in text, text
+    assert not re.search(r"--help.{0,160}still names", text, re.S), text
+    at = [ln for ln in text.splitlines() if "1791" in ln]
+    assert at, "the fix disappeared from the changelog entry that records it"
+    assert any("fix" in ln.lower() or "help" in ln.lower() for ln in at), at

@@ -910,8 +910,13 @@ def rescore_claim(claim: dict, by_label: dict[str, Night], reps: int, seed: int,
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--baselines", default=None,
-                    help="directory of nightly-*.json (default: the live checkout's "
-                         "eval/baselines, which is gitignored and so absent from a worktree)")
+                    help="directory of nightly-*.json (default: app.paths."
+                         "EVAL_BASELINES_DIR under this process's data root when it "
+                         "holds them, else production_data_root()/eval/baselines; a "
+                         "LLOYD_ROOT override wins over both. The repo copy is never "
+                         "the default: it holds tracked non-nightly pins and no "
+                         "nightly-*.json, so a run from a worktree falls back to the "
+                         "production data root rather than auditing zero nights)")
     ap.add_argument("--since", default=None, help="inclusive YYYY-MM-DD, compared on the run date")
     ap.add_argument("--days", type=int, default=0,
                     help="shorthand for --since: the last N days including today, "

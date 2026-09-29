@@ -244,9 +244,10 @@ round's own prefix twice per run. The full ladder is in [[automod]].
   the tree and unchanged: all thirteen arm names against `eval/*`, every cited
   path, the 61 planted names / 180 controls / 0 false blocks the eval itself
   reports, the 181 declared dependencies, and the four tool-choice exit codes.
-  `scripts/eval_trend_stats.py`'s `--help` still names the repo copy as its
-  default root where this doc names the data root; the code backs the doc
-  (#1791).
+  `scripts/eval_trend_stats.py`'s `--help` named the repo copy as the default
+  root where this doc named the data root; the code had always backed the doc, and
+  #1791 fixed the string, which now names `app.paths.EVAL_BASELINES_DIR` and the
+  `LLOYD_ROOT` override instead.
 - **2026-09-29 — §Arms that are flag values added (#1787).**
   `architecture/context-window.md` delegated two "ships off until compared"
   flags to this doc, and this doc named none of the arms involved: greps for
