@@ -798,6 +798,109 @@ BAND_EXPIRY_REASON = "band_admission_ttl"
 AUTO_APPROVE_AGE_HOURS = 48
 
 
+# ── Retiring the below-band pool at a bounded age (#1842) ────────────────────
+# A row under `BAND_FLOOR` is refused by both gates: too low for the floor, too
+# low for the band, and `awaiting_review` says plainly that no review route
+# exists. That is a correct verdict and it used to be the end of the row's story,
+# which is how the pool grew: measured 2026-09-29 over the live proposals file,
+# 18 of 150 pending rows sit under 0.70 and nothing about the file will ever
+# change that. Retiring one at an age bound turns an unbounded accumulation into
+# a bounded one *without* deciding the question #1364 left open — a retired row
+# records that the pipeline declined to adjudicate it, not that the score was
+# wrong. If the owed-check ruling is that the 0.53 mode should land as edges, the
+# change is to `BAND_FLOOR` and this gate simply stops catching those rows.
+REJECTED_STATUS = "rejected"
+REJECTED_REASON_FIELD = "rejected_reason"
+#: How many days a below-band row may stay pending before this run retires it.
+#: Comfortably longer than `AUTO_APPROVE_AGE_HOURS`, so no row is ever retired
+#: while some gate in this module could still have admitted it, and short enough
+#: that the pool has a ceiling instead of only the out-of-band wholesale file
+#: replacement that has bounded it so far.
+BELOW_FLOOR_RETIRE_DAYS = 30
+
+
+def below_floor_retirement_reason(
+        threshold: float = DEFAULT_AUTO_APPROVE_THRESHOLD,
+        days: int = BELOW_FLOOR_RETIRE_DAYS) -> str:
+    """Text naming both facts about a retired row: the gate it could not clear —
+    spelled with `awaiting_review_marker`, so the mark it carried while pending
+    and the record it leaves behind quote the same gate — and the age bound that
+    ended the wait. A row's `rejected` status without this text would read as a
+    verdict on its score rather than as an expiring patience."""
+    return (f"{awaiting_review_marker(threshold)}; retired unreviewed after "
+            f"{days} days pending")
+
+
+def _proposed_age_days(p: dict, now: datetime) -> Optional[float]:
+    """Days since `proposed_at`, or None when the row carries no age to measure.
+
+    Deliberately stricter than `_cooled_off`, which admits a row with no
+    `proposed_at` because *not landing it* is the safe failure there. Here the
+    safe failure is the other way: a missing or unparseable stamp is not evidence
+    that 30 days passed, so an undated row keeps its pending mark and stays
+    re-admittable until it carries a date that can age.
+    """
+    proposed_at = p.get("proposed_at", "")
+    if not proposed_at:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(proposed_at).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (now - dt).total_seconds() / 86400.0
+
+
+def below_band_and_aged_out(p: dict, *, now: datetime,
+                            floor: float = BAND_FLOOR,
+                            days: int = BELOW_FLOOR_RETIRE_DAYS) -> bool:
+    """True for the rows this gate retires: pending, scored by Stage 2, under the
+    band floor, and older than `days`.
+
+    `floor`, not `DEFAULT_AUTO_APPROVE_THRESHOLD`, is the line. The 0.70-0.84
+    band is a live route that can still admit a row, so a row above it is not
+    eligible no matter how old it is — retiring it would delete a decision the
+    band's recall A/B (#1653) has not finished making. Below 0.70 the row is
+    outside every route in this module, which is what makes ageing it out a
+    housekeeping act rather than a graph-quality one. The
+    `classification_source: llm` discipline is #773's again: a `co-access` row
+    under 0.70 has never been scored, and retiring unscored rows would
+    silently delete proposals Stage 2 has not read yet.
+    """
+    if p.get("status") != "pending":
+        return False
+    if p.get("classification_source") != LLM_CLASSIFICATION_SOURCE:
+        return False
+    if float(p.get("confidence", 0) or 0) >= floor:
+        return False
+    age = _proposed_age_days(p, now)
+    return age is not None and age > days
+
+
+def retire_below_band_unreviewed(
+        proposals: list[dict], *, now: Optional[datetime] = None,
+        threshold: float = DEFAULT_AUTO_APPROVE_THRESHOLD,
+        days: int = BELOW_FLOOR_RETIRE_DAYS) -> int:
+    """Move aged below-band rows to `status: "rejected"`; return how many.
+
+    Runs after both gates, so a row the floor or the band admitted is already
+    `approved` and cannot be seen here. It writes the proposals file only:
+    `land_approved_edges` skips any status but `approved` and Stage 2's candidate
+    filter requires `pending`, so a retired row inserts no edge, expires no edge
+    and is never re-classified. The `awaiting_review` mark goes with the pending
+    status — a row whose record says it retired must not also say it waits.
+    """
+    moment = now or datetime.now(timezone.utc)
+    retired = 0
+    for p in proposals:
+        if not below_band_and_aged_out(p, now=moment, days=days):
+            continue
+        p["status"] = REJECTED_STATUS
+        p[REJECTED_REASON_FIELD] = below_floor_retirement_reason(threshold, days)
+        p.pop(AWAITING_REVIEW_FIELD, None)
+        retired += 1
+    return retired
+
+
 def band_acceptance_marker(floor: float = BAND_FLOOR,
                            ceiling: float = BAND_CEILING) -> str:
     """Text naming the gate that admitted a band edge: its name, both numbers of
@@ -917,17 +1020,25 @@ def acceptance_band_counts(proposals: list[dict],
     # unreviewed gates admitted a row is the question the recall A/B has to
     # answer, and the row already carries the answer (#1653).
     band_admitted = sum(1 for p in proposals if p.get("accepted_by") == BAND_ACCEPTED_BY)
+    # Its own number, because retiring a row takes it out of `below_floor`: that
+    # count tests `status == "pending"`, so every retirement shrinks it by one and
+    # the pool #1364 made visible would silently empty while the same total rows
+    # sat one status over. The two numbers together are the honest statement of
+    # how big the dead end is (#1842).
+    retired = sum(1 for p in proposals if p.get("status") == REJECTED_STATUS)
     return {"auto_approved": auto_approved, "below_floor": below_floor,
-            "band_admitted": band_admitted}
+            "band_admitted": band_admitted, "retired": retired}
 
 
 def format_acceptance_band(proposals: list[dict],
                            threshold: float = DEFAULT_AUTO_APPROVE_THRESHOLD) -> str:
-    """One line, both counts, floor named. Printed by `--stats` and by the
-    approve run, which are the two surfaces task #51 reads and reports from;
+    """One line, every acceptance count, floor named. Printed by `--stats` and by
+    the approve run, which are the two surfaces task #51 reads and reports from;
     before this its report could say "auto-approved: 0" after a night that
     classified 28 rows and left all 28 inert, and nothing distinguished that
-    from a night with nothing to classify (#1364)."""
+    from a night with nothing to classify (#1364). The band suffix appears only
+    with a band row (#1653) and the retired suffix only with a retirement
+    (#1842), so a plain night still prints the sentence exactly as it shipped."""
     c = acceptance_band_counts(proposals, threshold)
     line = (f"Auto-approve floor {threshold:g}: auto-approved {c['auto_approved']} "
             f"| {c['below_floor']} LLM-classified below the floor, awaiting a "
@@ -937,6 +1048,13 @@ def format_acceptance_band(proposals: list[dict],
         # line exactly as #1364 shipped it.
         line += (f" | {c['band_admitted']} admitted by the {BAND_FLOOR:g}-"
                  f"{threshold:g} band (rank-capped, expiring)")
+    if c["retired"]:
+        # Same rule as the band suffix: a run that retired nothing grows no
+        # suffix, so every pre-#1842 assertion about this line's exact text still
+        # holds. When it does fire the number is the point — the `below_floor`
+        # count above has already stopped counting these rows.
+        line += (f" | {c['retired']} below-floor rows retired unreviewed after "
+                 f"{BELOW_FLOOR_RETIRE_DAYS}d")
     return line
 
 
@@ -962,6 +1080,11 @@ def auto_approve_strong(proposals: list[dict],
     band only on a non-inferior recall score, and that measurement needs the
     edges to exist first — the flag is what lets the A/B run without shipping
     the admission to every night.
+
+    Both gates leaving, `retire_below_band_unreviewed` ages out the rows neither
+    can ever admit — under `BAND_FLOOR`, LLM-scored, older than
+    `BELOW_FLOOR_RETIRE_DAYS` — to a terminal `rejected` status. The returned
+    count is admissions only, never retirements (#1842).
     """
     now = datetime.now(timezone.utc)
     approved = 0
@@ -999,6 +1122,12 @@ def auto_approve_strong(proposals: list[dict],
             p[BAND_EXPIRES_FIELD] = expires
             p.pop(AWAITING_REVIEW_FIELD, None)
             approved += 1
+
+    # Last, after both gates have had their chance at every row: the ones they
+    # cannot admit are aged out rather than left pending forever. Not folded into
+    # `approved` — a retirement is the opposite of an admission, and `cmd_approve`
+    # prints that counter as the night's landing count (#1842).
+    retire_below_band_unreviewed(proposals, now=now, threshold=threshold)
     return approved
 
 

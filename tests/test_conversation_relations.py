@@ -2260,3 +2260,217 @@ def test_the_step4_report_block_promises_only_what_a_floor_only_night_prints(
     assert _BAND_OUTPUT_MARKERS[1] in enabled, (
         f"positive control failed: a band-enabled run grew no admitted-count suffix "
         f"on the floor line: {enabled}")
+
+
+# ── #1842: retiring the below-band pool at a bounded age ─────────────────────
+#
+# A row under `BAND_FLOOR` is refused by both gates in `auto_approve_strong`: too
+# low for the 0.85 floor, too low for the 0.70-0.84 band. #1364 made that refusal
+# say so and left the status `pending`, which was right about the verdict and
+# wrong about the growth curve — measured 2026-09-29, 18 of 150 pending rows sit
+# under 0.70, and no code path in this module has ever removed a row, so the only
+# thing that has bounded the file is an out-of-band wholesale replacement.
+#
+# Fixture dates throughout: the live proposals file was recreated 2026-09-26 and
+# its oldest row is 3 days old, so 0 of the 18 rows are older than 30 days today.
+# Every age below is written into the row, never read from the live pool.
+
+def _classified_aged(cr, days: int, **over) -> dict:
+    """An LLM-scored pending row whose `proposed_at` is `days` old, so age is the
+    only thing a test is varying."""
+    return _classified_proposal(
+        cr, proposed_at=(cr.datetime.now(cr.timezone.utc)
+                         - cr.timedelta(days=days)).isoformat(), **over)
+
+
+def test_an_aged_below_band_row_is_retired_naming_the_gate_and_the_bound(cr):
+    """Clause 1: a 31-day-old 0.53 row ends the run terminal, and its record
+    quotes the gate it could not clear and the 30-day bound that ended the wait.
+
+    `rejected` is terminal by construction here, and the test pins that too:
+    `land_approved_edges` admits only `status: "approved"`, so the retired row can
+    neither land later nor be re-classified (Stage 2's filter asks for `pending`).
+    Exactly 30 days does NOT retire. That half is measured against a `now` the
+    test supplies, because a row built as `now - 30 days` from a fixture clock is
+    already a microsecond past the bound by the time the module reads it, and an
+    assertion about a boundary that never actually sat on the boundary would prove
+    nothing either way.
+    """
+    retired = _classified_aged(cr, 31, confidence=0.53)
+
+    assert cr.auto_approve_strong([retired]) == 0, (
+        "a retirement is not an admission and must not raise the approved count")
+
+    assert retired["status"] == cr.REJECTED_STATUS == "rejected", retired
+    reason = retired[cr.REJECTED_REASON_FIELD]
+    assert "below_auto_approve_floor@0.85" in reason, (
+        f"the record must name the gate it missed, in the words the wait mark "
+        f"used: {reason}")
+    assert "30" in reason, (
+        f"the record must name the age bound that retired it: {reason}")
+    assert cr.AWAITING_REVIEW_FIELD not in retired, (
+        f"a row whose record says it retired must not also say it waits: {retired}")
+    assert cr.land_approved_edges([retired]) == 0, (
+        "a retired row must not be able to land an edge later")
+
+    moment = cr.datetime.now(cr.timezone.utc)
+    at_the_bound = _classified_proposal(
+        cr, confidence=0.53, source="knowledge/bound.md",
+        target="knowledge/partner-bound.md",
+        proposed_at=(moment - cr.timedelta(days=30)).isoformat())
+    assert cr.retire_below_band_unreviewed([at_the_bound], now=moment) == 0, (
+        "30 days exactly is not MORE than 30 days: the bound must not eat a row "
+        "on its anniversary")
+    assert at_the_bound["status"] == "pending", at_the_bound
+    one_more_hour = dict(at_the_bound, proposed_at=(
+        moment - cr.timedelta(days=30, hours=1)).isoformat())
+    assert cr.retire_below_band_unreviewed([one_more_hour], now=moment) == 1, (
+        "and one hour past the bound it does retire, so the assertion above is a "
+        "bound and not a gate that never fires")
+
+
+def test_a_younger_below_band_row_stays_pending_and_keeps_its_wait_mark(cr):
+    """Clause 2: the same run leaves a 3-day 0.53 row exactly as #1364 shipped it.
+
+    The bound is what changes here, nothing else — same status, same
+    `awaiting_review` text, no `rejected_reason`. If the owed-check ruling on the
+    0.53 mode turns out to be "those should be edges", the young rows have to
+    still be in the pool to be re-admitted by a moved `BAND_FLOOR`.
+    """
+    young = _classified_aged(cr, 3, confidence=0.53)
+
+    assert cr.auto_approve_strong([young]) == 0
+    assert young["status"] == "pending", young
+    assert young[cr.AWAITING_REVIEW_FIELD] == cr.awaiting_review_marker(
+        cr.DEFAULT_AUTO_APPROVE_THRESHOLD), young
+    assert cr.REJECTED_REASON_FIELD not in young, young
+
+
+def test_retiring_a_below_band_row_inserts_no_edge_and_expires_none(store, cr):
+    """Clause 3: the store's total over EVERY row, expired included, is unchanged.
+
+    `active_only=False` is the reading that cannot be satisfied by an insert and a
+    delete cancelling out, which `active_only=True` could. A retired row also
+    carries no `edge_id`, so the landing path can never be handed it later.
+
+    The positive control is in the same node: an aged 0.95 row run against the
+    same store grows that same count by one, so the assertion above is a real
+    measurement and not an instrument that cannot see edges at all.
+    """
+    pool = [_classified_aged(cr, 40, confidence=0.53),
+            _classified_aged(cr, 3, confidence=0.53,
+                             source="knowledge/young.md",
+                             target="knowledge/partner-young.md")]
+    before = store.edges.count(active_only=False)
+
+    cr.auto_approve_strong(pool)
+    # The invariant below is only worth having if the retirement actually
+    # happened in this run: a node that passes by doing nothing is what this
+    # would be otherwise.
+    assert pool[0]["status"] == cr.REJECTED_STATUS, (
+        f"the 40-day 0.53 row must have retired in this run, or the unchanged "
+        f"store total below is a tautology: {pool[0]['status']}")
+    assert cr.land_approved_edges(pool) == 0, (
+        "a run whose only candidates are below-band rows must land nothing")
+
+    assert store.edges.count(active_only=False) == before, (
+        "retiring a proposal touched the edge table; retirement writes the "
+        "proposals file and nothing else")
+    assert store.edges.count(active_only=True) == before
+    for p in pool:
+        assert "edge_id" not in p, p
+
+    control = [_classified_aged(cr, 3, confidence=0.95,
+                                source="knowledge/control.md",
+                                target="knowledge/partner-control.md")]
+    cr.auto_approve_strong(control)
+    assert cr.land_approved_edges(control) == 1, (
+        "positive control failed: nothing landed, so the unchanged count above "
+        "proved nothing")
+    assert store.edges.count(active_only=False) == before + 1, (
+        "positive control failed: a landed edge did not move the count")
+
+
+def test_no_row_the_floor_or_the_band_can_still_admit_is_retired_however_old(cr):
+    """Clause 4: the retirement line is `BAND_FLOOR`, not the 0.85 floor.
+
+    A 0.95 row aged 400 days still auto-approves (past the 48 h wait, exactly as
+    before), and a 0.80 row aged 400 days still waits on the band gate with its
+    mark — retiring it would delete a decision the band's recall A/B (#1653) has
+    not finished making, which is why the band exists at all. Neither is
+    `rejected`, and the row that IS retired in the same call is only there to
+    prove the pass ran and made exactly one victim.
+    """
+    strong = _classified_aged(cr, 400, confidence=0.95)
+    in_band = _classified_aged(cr, 400, confidence=0.80,
+                              source="knowledge/in-band.md",
+                              target="knowledge/partner-in-band.md")
+    below = _classified_aged(cr, 400, confidence=0.53,
+                             source="knowledge/below.md",
+                             target="knowledge/partner-below.md")
+
+    # 2 admissions: the floor's 0.95 row and the band's 0.80 row. Age retired
+    # neither, because neither is under BAND_FLOOR.
+    assert cr.auto_approve_strong([strong, in_band, below], band=True) == 2
+    assert strong["status"] == "approved" and strong["accepted_by"] == cr.AUTO_ACCEPTED_BY
+    assert in_band["status"] == "approved" and in_band["accepted_by"] == cr.BAND_ACCEPTED_BY, (
+        "the band must still admit its own rows at any age, or this gate has "
+        "quietly become a floor raise")
+    assert below["status"] == cr.REJECTED_STATUS, below
+    statuses = [p["status"] for p in (strong, in_band, below)]
+    assert statuses.count(cr.REJECTED_STATUS) == 1, statuses
+
+    # And band OFF, the in-band row keeps waiting rather than being retired.
+    in_band_off = _classified_aged(cr, 400, confidence=0.80)
+    assert cr.auto_approve_strong([in_band_off]) == 0
+    assert in_band_off["status"] == "pending" and in_band_off[cr.AWAITING_REVIEW_FIELD]
+
+
+def test_the_approve_line_reports_retired_rows_beside_the_other_three_counts(
+        cr, tmp_path, monkeypatch, capsys, store):
+    """Clause 5: `below_floor` counts only `pending` rows, so every retirement
+    shrinks it by one. Without this suffix the pool #1364 made visible would
+    empty out of the report while the same rows sat one status over, and the owed
+    check on the 30-day bound would have nothing to read.
+
+    All four numbers in one run: 1 auto-approved, 1 still below the floor, 1 band
+    admission, 1 retirement. Landing is stubbed and only landing, as in #1653's
+    reporter test, because this node is about the line.
+    """
+    proposals = [
+        _classified_aged(cr, 40, confidence=0.53),
+        _classified_aged(cr, 3, confidence=0.53, source="knowledge/b.md",
+                         target="knowledge/c.md"),
+        _classified_aged(cr, 3, confidence=0.80, source="knowledge/c.md",
+                         target="knowledge/a.md"),
+        _classified_aged(cr, 3, confidence=0.95, source="knowledge/a.md",
+                         target="knowledge/c.md"),
+    ]
+    monkeypatch.setattr(cr, "PROPOSALS_FILE", _stage2_props(tmp_path, proposals))
+    monkeypatch.setattr(cr, "RELATIONS_INDEX", tmp_path / "i.json")
+    monkeypatch.setattr(cr, "land_approved_edges", lambda proposals: 0)
+
+    capsys.readouterr()
+    cr.cmd_approve(band=True)
+    out = capsys.readouterr().out
+
+    m = re.search(r"^Auto-approve floor (\S+): auto-approved (\d+) \| (\d+) "
+                  r"LLM-classified below the floor.*\| (\d+) admitted by the "
+                  r"(\S+) band \(rank-capped, expiring\) \| (\d+) below-floor rows "
+                  r"retired unreviewed after (\S+)$", out, re.M)
+    assert m, (
+        "the acceptance line does not carry the retired count beside the "
+        f"auto-approved, below-floor and band numbers:\n{out}")
+    assert m.groups() == ("0.85", "1", "1", "1", "0.7-0.85", "1", "30d"), (
+        f"expected 1 auto-approved, 1 still below the floor, 1 band admission and "
+        f"1 retired after 30d, got {m.groups()}:\n{out}")
+
+    # A run with nothing to retire grows no suffix, so the pre-#1842 sentence is
+    # still byte-identical and nothing downstream of this line has to relearn it.
+    young = [_classified_aged(cr, 3, confidence=0.53)]
+    assert cr.auto_approve_strong(young) == 0
+    plain = cr.format_acceptance_band(young)
+    assert "retired" not in plain, plain
+    assert plain == ("Auto-approve floor 0.85: auto-approved 0 "
+                     "| 1 LLM-classified below the floor, awaiting a review that "
+                     "does not exist"), plain
