@@ -37,22 +37,43 @@ def _gate(changed, item_id=None):
     return g
 
 
-@pytest.mark.parametrize("path", [
-    "app/prompt_builder.py",
-    "app/prefetch.py",
-    "lloyd/SOUL.md",
-    "lloyd/MEMORY.md",
-    "lloyd/USER.md",
-])
+#: Every path the trigger is supposed to fire on, read out of the gate's own
+#: tuples rather than re-typed here. #1758: this list was the second copy of the
+#: tuple, and the tuple gained `app/prompt_surface.py` while this copy could not
+#: notice — a parametrized list that has to be edited in step with the data it
+#: describes is the drift, not the check. The vault files are matched by
+#: basename, so they are exercised at the path a real diff carries.
+SURFACE_PATHS = (list(G.Gate.PROMPT_SURFACE_PATHS)
+                 + [f"lloyd/{v}" for v in G.Gate.PROMPT_SURFACE_VAULT])
+
+
+def test_the_trigger_list_covers_both_kinds_of_path():
+    """Deriving the parametrized list from the tuples removed the second copy —
+    and left the parametrization with nothing to check if both tuples were
+    emptied, since a test parametrized over an empty list simply does not run.
+
+    So the guard asserts something the derivation cannot guarantee: the trigger
+    still covers at least one code module AND at least one loaded vault file. Those
+    are the two ways a surface reaches the rung (full path, and basename for the
+    vault files), and emptying either tuple is exactly the edit that would silent
+    the rung for half the surface while the parametrized tests above went green
+    on what was left. The count is printed beside it because a denominator is only
+    informative next to the number.
+    """
+    code_paths = [p for p in SURFACE_PATHS if p.endswith(".py")]
+    vault_paths = [p for p in SURFACE_PATHS if p.endswith(".md")]
+    assert code_paths and vault_paths, (
+        f"the prompt-surface trigger covers only "
+        f"{'code' if code_paths else 'vault'} paths ({len(SURFACE_PATHS)} total: "
+        f"{SURFACE_PATHS}); the other half of the surface is unscored")
+
+
+@pytest.mark.parametrize("path", SURFACE_PATHS)
 def test_the_rung_fires_on_a_prompt_surface_path(path):
     assert _gate([path])._touches_prompt_surface() is True
 
 
-@pytest.mark.parametrize("path", [
-    "app/prompt_builder.py",
-    "app/prefetch.py",
-    "lloyd/SOUL.md",
-])
+@pytest.mark.parametrize("path", SURFACE_PATHS)
 def test_a_prompt_surface_edit_is_never_answered_by_reuse(path):
     """The reuse rule and the trigger must read one list. `_reuse_rule` used to
     spell the two paths out and match them exactly, so when the modules moved

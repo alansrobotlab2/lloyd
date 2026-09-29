@@ -47,6 +47,16 @@ ARMED_COUNT_RES = (
     re.compile(rf"\b({_NUM})\s+(?:metrics?\s+)?(?:are|were|is|was)\s+armed\b"),
 )
 
+# How many paths the `prompt_surface` rung triggers on, as a prose count. Both
+# shapes the corpus uses: "one of six path names" (the worker's limit block),
+# "one of six paths" (§13) and "for the six path names" (§8.1). A guard that read
+# only one shape is how the armed-set count rotted once (§8.1 said "the armed
+# three" beside "All seven are armed" for a week), so the count is read however it
+# is phrased and then checked against `Gate.PROMPT_SURFACE_PATHS +
+# PROMPT_SURFACE_VAULT` — never against a number carried here, which is the second
+# copy that goes stale.
+TRIGGER_COUNT_RE = re.compile(r"\b(?:one of|for the) ([a-z]+) paths?(?: names)?\b")
+
 # The comment header above the armed tuples. It shipped duplicated.
 ARMED_SET_HEADER = ("# What the armed set can and cannot see, MEASURED "
                     "rather than assumed.")
@@ -806,9 +816,13 @@ def test_the_worker_states_the_agent_loop_limit_beside_the_edge_set_limit():
     It must say two things, and the second is what stops the rewrite
     overcorrecting. A scored loop-side check DOES exist — the gate's
     `prompt_surface` rung — but only pre-landing, and only when the diff names one
-    of five paths. Those names are compared against the gate's own tuples, so the
-    prose cannot drift from the trigger the way a hand-copied list drifts from the
-    code it describes.
+    of the paths in the gate's own tuples. Both the names and the count the prose
+    states are read off those tuples, so the prose cannot drift from the trigger
+    the way a hand-copied list drifts from the code it describes — and so that
+    adding a trigger path moves the expectation with the code instead of turning a
+    correct fix into a red test. #1758 is that case: `app/prompt_surface.py`, the
+    module that defines the contract's ceilings, became the sixth, and the
+    `len(surface) == 5` that used to sit here refused it from the wrong side.
     """
     from scripts.automod.gate import Gate
 
@@ -818,9 +832,20 @@ def test_the_worker_states_the_agent_loop_limit_beside_the_edge_set_limit():
         "the worker never says what it cannot observe on the loop side"
     assert "prompt_surface" in src, "the one loop-side check is not named"
     surface = Gate.PROMPT_SURFACE_PATHS + Gate.PROMPT_SURFACE_VAULT
-    assert len(surface) == 5, f"the five-path claim no longer matches the gate: {surface}"
     for name in surface:
         assert name in src, f"{name} is a prompt-surface path but is not named in the worker"
+    # The count the prose states, checked against the gate's tuples rather than
+    # against a number this test also carries. A count in prose is a claim about
+    # the code, and §8.1's armed-set count is already pinned this way for exactly
+    # the reason it went wrong once: the code moved, the sentence stayed.
+    stated = TRIGGER_COUNT_RE.search(low)
+    assert stated, (
+        "the worker never states how many paths the prompt_surface rung triggers "
+        "on, so the count could not be checked against the gate")
+    assert NUMBER_WORDS.get(stated.group(1)) == len(surface), (
+        f"the worker says '{stated.group(1)}' trigger paths; "
+        f"Gate.PROMPT_SURFACE_PATHS + PROMPT_SURFACE_VAULT has {len(surface)}: "
+        f"{surface}")
 
     # Beside the edge-set limit: after the edge-blind measurement, inside the same
     # coverage block (which ends at FACT_LAYER_METRICS).
@@ -874,8 +899,20 @@ def test_architecture_states_the_loop_axis_and_stops_naming_the_check_behavioura
     assert "pre" in bullet and "landing" in bullet, \
         "the §13 loop bullet does not mark the surviving check as pre-landing only"
     assert "prompt_surface" in sec13, "§13 does not name the loop-side check that does exist"
-    for name in ("app/prompt_builder.py", "app/prefetch.py", "SOUL.md", "MEMORY.md", "USER.md"):
+    # Same rule as the worker's limit block: the names and the count come from
+    # the gate's tuples, so a trigger path added to the gate cannot leave the doc
+    # and this test standing on a five-name list that is no longer the trigger.
+    from scripts.automod.gate import Gate
+
+    surface = Gate.PROMPT_SURFACE_PATHS + Gate.PROMPT_SURFACE_VAULT
+    for name in surface:
         assert name in sec13, f"{name} is a prompt-surface path §13 does not name"
+    stated = TRIGGER_COUNT_RE.findall(_flat(DOC))
+    assert stated, "the doc never states how many paths the prompt_surface rung triggers on"
+    for word in stated:
+        assert NUMBER_WORDS.get(word) == len(surface), (
+            f"architecture/automod.md states {word} trigger paths; the gate has "
+            f"{len(surface)}: {surface}")
     # The last-known-good `eval` slot is the reader's endpoint: §13 has to say
     # what it covers and that a carried-over number is not this commit's.
     assert "eval` slot" in sec13, "§13 does not address the last-known-good eval slot"

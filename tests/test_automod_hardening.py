@@ -21,6 +21,7 @@ import os
 import subprocess
 import sys
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -572,20 +573,30 @@ def test_the_measurement_states_which_axis_it_measured(tmp_path):
     # limit block is asserted against `Gate.PROMPT_SURFACE_PATHS + PROMPT_SURFACE_
     # VAULT` in `test_automod_doc_claims`, so without this the constant shipped
     # into the record could sit on its own and drift from the trigger it describes.
-    # It is partial by construction and stays that way: the gate also matches the
-    # vault paths by BASENAME (`_touches_prompt_surface` tests `base` as well as
-    # `path`), so no assertion here proves that every name a future rung adds was
-    # written into the constant. What IS provable — and is the asymmetry worth
-    # guarding — is that the record never lists a path the rung does not trigger
-    # on, since a false "we did check that surface" is the misleading direction.
+    #
+    # The expected list is the gate's own tuples, and the comparison is an exact
+    # set equality over the names the record enumerates — never a hard-coded
+    # count. #1758 is the case that proves why: the trigger gained
+    # `app/prompt_surface.py`, and a `len(surfaces) == 5` written here would have
+    # refused the fix from the wrong side, while a name-set read off the tuples
+    # moves with the code and still refuses a name the rung does not fire on
+    # (a false "we did check that surface" is the misleading direction).
     from scripts.automod.gate import Gate
 
     surfaces = Gate.PROMPT_SURFACE_PATHS + Gate.PROMPT_SURFACE_VAULT
-    assert len(surfaces) == 5, f"the five-path claim no longer matches the gate: {surfaces}"
-    named = [name for name in surfaces if name.split("/")[-1].lower() in refused]
-    assert len(named) == len(surfaces), (
-        f"the payload omits a trigger the gate actually fires on: "
-        f"{[n for n in surfaces if n not in named]}")
+    listed = [s for s in axis["does_not_measure"] if "prompt_surface" in s]
+    assert len(listed) == 1, (
+        f"exactly one uncovered-axis line may enumerate the trigger paths: {listed}")
+    named = {tok.strip().strip("`").lower()
+             for tok in listed[0].split("only for", 1)[1].split("/")
+             if tok.strip().lower().endswith((".py", ".md"))}
+    expected = {n.split("/")[-1].lower() for n in surfaces}
+    assert named == expected, (
+        f"the record's trigger list is not the gate's: omits "
+        f"{sorted(expected - named)}, claims {sorted(named - expected)}")
+    # Derived equality already excludes an unlisted module; these stay as the
+    # named negative control — the check that fires when the *parser*, not the
+    # list, is what went wrong.
     for bogus in ("run_eval.py", "loop.py", "gate.py", "messages.py"):
         assert bogus not in refused, f"the payload claims {bogus} is a prompt surface"
 
@@ -596,6 +607,101 @@ def test_the_measurement_states_which_axis_it_measured(tmp_path):
     assert stored["pin"]["queries_fingerprint"] == "deadbeef", (
         "a test that only looked at the axis would pass while the fold dropped "
         "the measurement beside it")
+
+
+class _ChangedPaths:
+    """Just the one field `rung_prompt_surface` and its trigger read."""
+
+    def __init__(self, changed):
+        self.changed_paths = list(changed)
+
+
+def _surface_gate(changed):
+    """A Gate with only what the prompt-surface rung touches actually set.
+
+    Same shape as `_gate` in `tests/test_gate_prompt_surface_rung.py`: the rung
+    reads `report.changed_paths`, `round_id`, `item_id`, `live`, `python` and
+    `_child_env`, and constructing the real one would shell out to git.
+    """
+    from scripts.automod import gate as G
+
+    g = G.Gate.__new__(G.Gate)
+    g.report = _ChangedPaths(changed)
+    g.round_id = "SM_20260928_234639"
+    g.item_id = 1758
+    g.live = G.LIVE_ROOT
+    g.python = G.LIVE_ROOT / ".venvs" / "lloyd" / "bin" / "python"
+    g._child_env = lambda root=None, **_kw: {}
+    return g
+
+
+def test_the_invariant_module_is_itself_a_prompt_surface(monkeypatch):
+    """Clause 1 of #1758: `app/prompt_surface.py` defines what the loaded
+    contract may look like — `GATE_HEADS`, `LOAD_BEARING`, the three ratios,
+    `MEMORY_CEILINGS` — so a round that loosened one of them changed what the
+    model is told while leaving every file the model is told BY untouched. The
+    `prompt_surface` rung is the only behavioural check the loop has, and this
+    path was in none of the two tuples that decide it, so the rung answered
+    `{"skipped": True, "reason": "not touched"}` — a quiet skip, and
+    `QUIET_SKIP_RUNGS` means it wrote not even a ledger row.
+
+    What is asserted here is the decision, on both sides: the path that defines
+    the invariants now triggers, and a path that merely CONSUMES them
+    (`app/memory_ceiling.py`, which reads `MEMORY_CEILINGS` through
+    `app.prompt_surface`) still skips. Widening to every consumer would spend
+    the live-model eval (`rung_prompt_surface`, `timeout=1800`) on six more hot
+    paths, which is why the class-closure test in
+    `tests/test_prompt_surface_coverage.py` closes over definition sites only.
+    """
+    from scripts.automod import gate as G
+
+    # The data: the path is in the tuple that decides the rung.
+    assert "app/prompt_surface.py" in G.Gate.PROMPT_SURFACE_PATHS
+
+    # Records every command the rung issues. Asserting on the rung's reply string
+    # would prove nothing: its success message is the literal `"prompt surface
+    # eval: {tail(out, msg)}"`, so any text the fake returns satisfies a `"no
+    # regression" in msg` assertion whether or not an eval was ever launched. The
+    # behaviour clause 1 names is the eval being RUN, so the command is the thing
+    # to assert on.
+    calls, cwds = [], []
+
+    def _fake_run(cmd, **kw):
+        calls.append([str(c) for c in cmd])
+        cwds.append(str(kw.get("cwd")))
+        return types.SimpleNamespace(returncode=0, stdout="scored", stderr="")
+    monkeypatch.setattr(G, "_run", _fake_run)
+
+    # The trigger fires for the defining module…
+    defining = _surface_gate(["app/prompt_surface.py"])
+    assert defining._touches_prompt_surface() is True
+    ok, msg, data = defining.rung_prompt_surface()
+    assert ok is True
+    assert data.get("skipped") is not True, (
+        f"the rung still skips a diff to the invariant module: {data}")
+    assert any("run_tool_choice_eval.py" in " ".join(c) for c in calls), (
+        f"the rung returned a score without launching the tool-choice eval: {calls}")
+    assert all(cwd == str(G.LIVE_ROOT) for cwd in cwds), (
+        f"the eval ran outside the live tree, so it scored a worktree: {cwds}")
+
+    # …and the delta-reuse path reaches the same answer, so a round that touched
+    # the file cannot be handed an earlier head's score.
+    assert G.Gate._reuse_rule("prompt_surface", ["app/prompt_surface.py"]) is None
+
+    # A consumer still skips: the trigger is the definition site, not every
+    # reader of it. `calls` must not grow — a trigger that widened to consumers
+    # would spend a live-model eval (`timeout=1800`) on every ordinary round.
+    issued_before = len(calls)
+    consuming = _surface_gate(["app/memory_ceiling.py"])
+    assert consuming._touches_prompt_surface() is False
+    ok, msg, data = consuming.rung_prompt_surface()
+    assert ok is True and data.get("skipped") is True
+    assert "not touched" in data.get("reason", "")
+    assert len(calls) == issued_before, (
+        f"the rung launched an eval for a consumer of the invariants: {calls[issued_before:]}")
+    assert G.Gate._reuse_rule("prompt_surface",
+                             ["app/memory_ceiling.py"]) == (
+        "no prompt-surface path in the delta")
 
 
 def test_a_carried_over_eval_says_so_in_the_record(tmp_path):

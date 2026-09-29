@@ -30,7 +30,7 @@ ask.
 
 | # | Surface | Module | Question it answers |
 |---|---|---|---|
-| 1 | L0 classes and the block signal | `~/obsidian/lloyd/SOUL.md`, pinned by `app/prompt_surface.py` | What the model is told to refuse, and the exact signal it must emit. The prose is the vault identity file; the module holds what a trim may not drop (`GATE_HEADS`, `LOAD_BEARING`, the ceilings). Prompt, therefore the weakest layer — and it is **not** a trigger for the tool-choice eval: `Gate.PROMPT_SURFACE_PATHS` (`scripts/automod/gate.py:1303`) keys on `app/prompt_builder.py`, `app/prefetch.py` and the three loaded vault files, so a diff that loosens a ceiling here is scored by no behavioural rung |
+| 1 | L0 classes and the block signal | `~/obsidian/lloyd/SOUL.md`, pinned by `app/prompt_surface.py` | What the model is told to refuse, and the exact signal it must emit. The prose is the vault identity file; the module holds what a trim may not drop (`GATE_HEADS`, `LOAD_BEARING`, the ceilings). Prompt, therefore the weakest layer — and it **is** a trigger for the tool-choice eval: `Gate.PROMPT_SURFACE_PATHS` (`scripts/automod/gate.py`) keys on `app/prompt_builder.py`, `app/prefetch.py`, this module and the three loaded vault files, so a diff that loosens a ceiling here gets scored by the `prompt_surface` rung (#1758, after a round that raised `GATE_STACK_CEILING` or dropped a `LOAD_BEARING` entry used to clear the whole ladder unobserved). Which modules qualify is not hand-kept either: `tests/test_prompt_surface_coverage.py` derives every module that assigns one of those invariant names at module level and refuses a round whose definition site is unlisted |
 | 2 | Deterministic Bash denies | `app/harness/safety.py` | Is this command catastrophic (`check_bash_command` at `app/harness/safety.py:372`)? Installed as a default `PreToolUse` hook on every primary turn, Inner Voice on or off — it replaced the LLM-judgment lever that only ran when IV ran |
 | 3 | Protected trees, two policies | `app/harness/protected_paths.py` | What may be **destroyed** (the structural shell check that refuses a wholesale delete) and what may be **written** (the deny-set every MCP write lane now consults — `Write`/`Edit` through `agent_mcp/builtin_fs.py:238`, Bash through `check_bash_command`, and `vault_write` through `agent_mcp/vault.py:_protected_write_refusal` since #1757; `PROTECTED_WRITE_ROOTS` and `write_deny_reason`, both defined in `app/harness/protected_paths.py`). `automod_vault_land` is the one exempt lane, by design: it validates the diff before it commits, which is what the refusal text offers a writer. One module, two questions, deliberately co-located so they cannot disagree about what is sacred |
 | 4 | The read-only sandbox | `agent_mcp/_tool_sandbox.py` | Is this session one that must never change the machine? Bench and eval sessions, enforced in `agent_mcp/main.py::call_tool` — the one function every tool call from every caller passes through, not in a runner, because runner copies live in worktrees |
@@ -157,3 +157,11 @@ spends an unattended round discovering that.
   symbol, and the module's comment states no size for the deny-set at all — the count
   it carried said four while the tuple held five, which is the drift
   `tests/test_protected_paths.py` now refuses against the module's own text.
+- **2026-09-29 — row 1 rewritten (#1758).** The `stale` entry above corrected row 1
+  to say `app/prompt_surface.py` is *not* a prompt-surface trigger, which was true
+  at that tree and is the bug the item filed. `Gate.PROMPT_SURFACE_PATHS` now names
+  the module, so the row states the opposite of that correction: a diff here is
+  scored by the `prompt_surface` rung, and `tests/test_prompt_surface_coverage.py`
+  refuses a definition site left off that list. Read the two entries together — a
+  correction that is later superseded is still a dated record of the tree it
+  measured.

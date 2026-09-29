@@ -3469,9 +3469,10 @@ decision — `eval/run_eval.py` issues no model request, so a change that droppe
 turn accounting left all seven metrics unmoved and produced a clean report which
 then became the promotion's quality baseline. Not "nothing observes the loop":
 the gate runs a scored loop-side check (`prompt_surface`, §4) — but only
-*pre*-landing, and only for the five path names `app/prompt_builder.py`,
-`app/prefetch.py`, `SOUL.md`, `MEMORY.md`, `USER.md`. A loop-side change outside
-those five has no check at either end, which is why §13 states it and why the
+*pre*-landing, and only for the six path names `app/prompt_builder.py`,
+`app/prefetch.py`, `app/prompt_surface.py`, `SOUL.md`, `MEMORY.md`, `USER.md`. A
+loop-side change outside
+those six has no check at either end, which is why §13 states it and why the
 measurement artifact itself now carries the claim (`axis`: what it measured, and
 the two axes it did not).
 
@@ -4051,8 +4052,9 @@ from `denied.json` first).
   check by construction, and that green report is what the guardian folds into
   `last_known_good.json`'s `eval` slot as the promotion's quality baseline. Not
   "nothing observes the loop": the gate's `prompt_surface` rung scores tool
-  choice, but only *pre*-landing and only when the diff names one of five paths
-  (`app/prompt_builder.py`, `app/prefetch.py`, `SOUL.md`, `MEMORY.md`, `USER.md`), so a
+  choice, but only *pre*-landing and only when the diff names one of six paths
+  (`app/prompt_builder.py`, `app/prefetch.py`, `app/prompt_surface.py`, `SOUL.md`,
+  `MEMORY.md`, `USER.md`), so a
   tool-set or compaction change has no loop-side check at either end. Arming a
   post-landing loop-side axis needs a measured noise band first — a loop-side
   measurement carries variance the retrieval eval contributes none of, so

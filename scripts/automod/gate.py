@@ -1345,8 +1345,21 @@ class Gate:
     # code does. A behavioural regression here passes every other rung: the
     # tests are green, tsc is clean, the canary boots, and the model has
     # quietly stopped reaching for `http_search`.
+    #
+    # `app/prompt_surface.py` is here because it is the definition site of the
+    # contract's shape, not a renderer of it: `GATE_HEADS`, `LOAD_BEARING`, the
+    # three ratios and `MEMORY_CEILINGS` all live there (#1758). Raising
+    # `GATE_STACK_CEILING` or dropping a `LOAD_BEARING` entry changes what the
+    # identity file is allowed to look like while leaving the identity file
+    # itself untouched, so the vault trigger would not fire either — and
+    # `tests/test_prompt_surface_budget.py` IMPORTS these constants rather than
+    # restating them, so the `tests` rung agrees with whatever the round set.
+    # Which paths belong here is a property over an open set of modules, so a
+    # hand-kept tuple cannot close it alone: `tests/test_prompt_surface_coverage.py`
+    # derives every module that assigns one of those invariant names at module
+    # level and fails if any of them is unlisted here.
     PROMPT_SURFACE_PATHS = (
-        "app/prompt_builder.py", "app/prefetch.py",
+        "app/prompt_builder.py", "app/prefetch.py", "app/prompt_surface.py",
     )
     PROMPT_SURFACE_VAULT = ("SOUL.md", "MEMORY.md", "USER.md")
 
