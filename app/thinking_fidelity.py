@@ -236,16 +236,22 @@ def scan_file(path: Path) -> FileScan:
     return scan_messages(path, messages)
 
 
-def scan_store(root: Path) -> StoreScan:
-    """Scan every ``*.json`` session file under `root`.
+def scan_files(root: Path, paths: Iterable[Path]) -> StoreScan:
+    """Scan exactly the session files `paths` names, attributing them to `root`.
 
-    Read-only, and callers get it from `app.data_root.production_data_root()`
-    rather than `app.paths.SESSIONS_DIR`: under the test suite `SESSIONS_DIR` is
-    a scratch root with no sessions in it, which would make every live-store
-    guard below report "0 of 0" and call it clean.
+    The slice seam. `scan_store` is this call over every ``*.json`` under a
+    directory, and a caller that wants a *slice* of a store — one calendar day of
+    it, which is what `scripts/thinking_fidelity_scan.py --per-day` groups by
+    (#1770) — has to get its numbers through here rather than walk the store a
+    second way beside it: a tally re-implemented next to this one can drift in
+    any of the four counters, and the one it would drift in is `exempt`, which is
+    the e206f304 meta-session rule the per-day series exists to measure.
+
+    `root` is carried for the report, not for the walk: a day's scan says which
+    store the day came from, and has no directory of its own.
     """
     scan = StoreScan(root=root)
-    for path in sorted(root.glob("*.json")):
+    for path in paths:
         one = scan_file(path)
         scan.files += 1
         if one.unreadable:
@@ -260,3 +266,17 @@ def scan_store(root: Path) -> StoreScan:
         if one.exempt:
             scan.files_exempt_meta += 1
     return scan
+
+
+def scan_store(root: Path) -> StoreScan:
+    """Scan every ``*.json`` session file under `root`.
+
+    Read-only, and callers get it from `app.data_root.production_data_root()`
+    rather than `app.paths.SESSIONS_DIR`: under the test suite `SESSIONS_DIR` is
+    a scratch root with no sessions in it, which would make every live-store
+    guard below report "0 of 0" and call it clean.
+
+    Exactly `scan_files` over the sorted glob, so a slice taken through
+    `scan_files` and a whole store taken through here are the same arithmetic.
+    """
+    return scan_files(root, sorted(root.glob("*.json")))
