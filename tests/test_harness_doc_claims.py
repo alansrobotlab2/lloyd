@@ -391,3 +391,304 @@ def test_the_ships_off_list_no_longer_names_a_session_state_layout():
     assert _layout_names_in(ships_off, layouts) == []
     assert _layout_names_in(PREFIX_SHIPS_OFF_CLAUSE, layouts) == ["system_head"], (
         "the control no longer trips the predicate")
+
+
+# ── #1786: the code's own annotations must not claim which layout ships ──────
+#
+# `architecture/harness.md` was fixed for this rollout by the pass above; the
+# five annotations of the same switches inside the code were not, and four days
+# after `ca7eb481` all five still named `system_head` as what runs — including
+# the one in `config.yaml`, four lines above `session_state: system_tail`. The
+# doc was pinned and the code was not because this file reads only the doc, so
+# the same extraction is extended over the modules here.
+#
+# The failure mode is not a stale sentence a reader shrugs at. `system_head`
+# annotated as "today's layout, byte-identical" tells a reader the session state
+# rides at the head of the system prompt and the P1 tail mechanism is inert, and
+# invites a replay-diff or prefix-stability test to assert `system_head` output
+# while production renders `system_tail`. So the rule pinned here is structural
+# rather than a value to re-sync: an annotation may state what a layout COSTS the
+# prefix cache, and must not state which one is in force — `config.yaml` owns a
+# moving value, and an annotation that repeats it is stale the day someone flips
+# the switch. Each pre-fix phrase is kept verbatim below as a firing control, so
+# a green cannot come from a scan that matched nothing.
+
+LAYOUTS = ("system_head", "system_tail", "user_tail")
+
+#: Which one is in force, stated in an annotation. Each phrase binds a layout
+#: name (or the whole enum) to the present tense; a flip makes any of them a
+#: lie, which is exactly what #1786 found on all five sites at once.
+CLAIMS_A_LAYOUT_SHIPS_RES = [
+    re.compile(r"today'?s (?:layout|output|prompt|default)", re.I),
+    re.compile(r"\(today,?\s", re.I),
+    re.compile(r"shipped defaults?\s*\(", re.I),
+    re.compile(r"\b(?:ships|in force|is shipping)\b[^.]{0,40}\bsystem_head\b", re.I),
+    re.compile(r"\bsystem_head\b[^.]{0,40}\b(?:today|ships|in force)\b", re.I),
+]
+
+#: The five pre-fix annotations, verbatim, as the controls' inputs.
+PREFILLED_TAIL_CLAIM = (
+    "With the shipped defaults (`system_head`, freeze off) the tail is always "
+    '"\\" and every caller\'s `prefetched_text` is exactly what it was.')
+PREFILLED_LAYOUT_NOTE = (
+    "system_head — inside the system prompt, ahead of the harness hints "
+    "(today's layout, byte-identical).")
+PREFILLED_PLACEMENT_ARG = (
+    "`system_head` is today's output byte for byte; `user_tail` leaves the "
+    "state out entirely.")
+PREFILLED_FALLBACK_CLAIM = "anything unreadable or unknown is today's layout"
+PREFILLED_CONFIG_OPTION = "system_head (today, byte-identical)"
+
+#: What an annotation must say instead: the cost to the prefix cache. Every one
+#: of the three layouts has an honest answer, so requiring a marker of this set
+#: in each annotation is a demand for content, not for a phrase.
+CACHE_COST_MARKERS = ("prefix", "re-prefill", "re-prefills", "invalidate",
+                      "invalidates", "byte-stable", "byte-stability",
+                      "prefix-cache", "prefix-cached", "cache")
+
+APP_PROMPT_LAYOUT = "app/prompt_layout.py"
+APP_PROMPT_BUILDER = "app/prompt_builder.py"
+
+
+def _prose(rel: str, func: str | None = None) -> str:
+    """A module or function docstring, whitespace-flattened, read through `ast`.
+
+    Not a file-text grep: `prompt_builder.py` runs to some 1,900 lines and
+    mentions every layout name in code as well as prose, so a whole-file `in`
+    check would let the annotation that matters be satisfied by an unrelated
+    branch, and the line-wrapping #1786's triage recorded (`today's output`
+    straddling two lines) makes a one-line grep a false zero.
+    """
+    import ast
+    tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
+    if func is None:
+        got = ast.get_docstring(tree)
+    else:
+        node = next((n for n in ast.walk(tree)
+                     if isinstance(n, ast.FunctionDef) and n.name == func), None)
+        assert node is not None, f"no function {func!r} in {rel}"
+        got = ast.get_docstring(node)
+    assert got, f"{rel}{'.' + func if func else ''} has no docstring to read"
+    return " ".join(got.split())
+
+
+def _annotation_block(rel: str, anchor: str) -> str:
+    """The `#:` comment lines sitting directly above `anchor`, markers stripped."""
+    lines = (ROOT / rel).read_text(encoding="utf-8").splitlines()
+    hits = [i for i, ln in enumerate(lines) if ln.startswith(anchor)]
+    assert len(hits) == 1, (
+        f"{anchor!r} matched {len(hits)} lines in {rel}; the annotation graded "
+        "below is only trustworthy if the anchor reads exactly one")
+    block: list[str] = []
+    i = hits[0]
+    while i > 0 and lines[i - 1].lstrip().startswith("#:"):
+        block.append(lines[i - 1].lstrip().lstrip("#:").strip())
+        i -= 1
+    assert block, f"no `#:` annotation above {anchor} in {rel} — deleted, not fixed"
+    return " ".join(" ".join(reversed(block)).split())
+
+
+def _comment_block_above(rel: str, key: str) -> str:
+    """The `#` comment lines directly above `key:` in a YAML file."""
+    lines = (ROOT / rel).read_text(encoding="utf-8").splitlines()
+    hits = [i for i, ln in enumerate(lines) if ln.strip() == key]
+    assert len(hits) == 1, f"{key!r} matched {len(hits)} lines in {rel}"
+    block: list[str] = []
+    i = hits[0]
+    while i > 0 and lines[i - 1].lstrip().startswith("#"):
+        block.append(lines[i - 1].lstrip().lstrip("#").strip())
+        i -= 1
+    assert block, f"no comment block above {key} in {rel}"
+    return " ".join(" ".join(reversed(block)).split())
+
+
+def _half_reason(text: str, half: str, other: str) -> str:
+    """The words binding `half` of the turn tail to its reason.
+
+    Anchored on the half's LAST mention on purpose. This docstring's bullet list
+    maps each half to its switch earlier on, so a window taken from the FIRST
+    mention reads those pre-existing bullets — the split paragraph #1786 added
+    could then be deleted whole and the node would stay green, which is the gap
+    the gate's review rung named. From the anchor the window runs to whichever
+    comes first: the other half's mention, or the end of the sentence — where
+    "end of sentence" is a period followed by whitespace or the end of the text,
+    NOT a bare `". "`, which would close the window on the dot in `config.yaml`
+    and have the assert read the tail of a filename.
+
+    Two reasons stay separable because a docstring that explains both halves with
+    one shared clause cannot put a switch, or a reason, in one window only.
+    """
+    i = text.rindex(half) + len(half)
+    rest = text[i:]
+    ends = [m.end() for m in re.finditer(r"\.(?:\s|$)", rest)]
+    bounds = [j for j in (rest.find(other), *ends) if j >= 0]
+    return rest[:min(bounds)] if bounds else rest
+
+
+def _claims_a_layout_ships(text: str) -> list[str]:
+    return [p.pattern for p in CLAIMS_A_LAYOUT_SHIPS_RES if p.search(text)]
+
+
+def _priced(text: str, layout: str) -> bool:
+    """Does the annotation for `layout` state a cache cost?
+
+    Windowed on the annotation itself: the phrase `system_head` followed by the
+    text up to the next layout name, so a cache word earned by a neighbouring
+    layout's entry cannot carry this one.
+    """
+    start = text.find(layout)
+    assert start >= 0, f"{layout!r} is not annotated at all in this text"
+    rest = text[start + len(layout):]
+    nxt = [x for x in (rest.find(other) for other in LAYOUTS if other != layout)
+           if x >= 0]
+    window = rest[:min(nxt)] if nxt else rest
+    return any(marker in window for marker in CACHE_COST_MARKERS)
+
+
+def test_the_turn_tail_docstring_gives_two_reasons_and_names_no_shipped_layout():
+    """Clause 2: `app/prompt_layout.py` said the tail is always "" "with the
+    shipped defaults (`system_head`, freeze off)".
+
+    Two claims were fused there into one, and the fused form was wrong twice:
+    with `system_tail` in force the `<session_state>` half of the tail is empty
+    because the block moved inside the system prompt — a different fact from
+    `system_head` — and the `<memory_delta>` half is empty because
+    `freeze_memory` is off. The node therefore wants the reasons SPLIT (each
+    half's reason must name its own switch and not the other's, which is what
+    makes the sentence repairable rather than merely re-worded), the owner named
+    as `config.yaml`, and no claim about which layout ships.
+    """
+    doc = _prose(APP_PROMPT_LAYOUT)
+
+    for text, label in ((PREFILLED_TAIL_CLAIM, "the pre-fix tail claim"),
+                        (PREFILLED_LAYOUT_NOTE, "the pre-fix layout annotation"),
+                        (PREFILLED_PLACEMENT_ARG, "the pre-fix argument note"),
+                        (PREFILLED_CONFIG_OPTION, "the pre-fix config option"),
+                        (PREFILLED_FALLBACK_CLAIM, "the pre-fix fallback claim")):
+        assert _claims_a_layout_ships(" ".join(text.split())), (
+            f"{label} no longer trips the detector, so the check below on the "
+            "real docstring would be a ban on nothing")
+    assert _claims_a_layout_ships(doc) == [], (
+        f"the module docstring still asserts which layout ships: "
+        f"{_claims_a_layout_ships(doc)} — {doc[:180]!r}")
+
+    halves = {"<session_state>": "user_tail", "<memory_delta>": "freeze_memory"}
+    for tag, switch in halves.items():
+        assert f"`{tag}`" in doc, (
+            f"the docstring no longer names the `{tag}` half of the turn tail, "
+            "so there is no reason left to split")
+    state_half = _half_reason(doc, "`<session_state>`", "`<memory_delta>`")
+    delta_half = _half_reason(doc, "`<memory_delta>`", "`<session_state>`")
+    # Each half's window has to carry the REASON, not merely the switch: the
+    # pre-existing bullet list already maps each half to its switch and to
+    # `harness.prompt_layout.*`, so a window checked only for the switch name
+    # would stay green with the explanatory paragraph deleted entirely — the
+    # reading bug #1786 is about would come straight back.
+    assert "system prompt" in state_half, (
+        "the `<session_state>` half no longer says WHERE the block goes instead "
+        f"of the tail, which is the reason it is empty: {state_half[:160]!r}")
+    assert "snapshot" in delta_half, (
+        "the `<memory_delta>` half no longer says WHY an unfrozen memory leaves "
+        f"the note out: {delta_half[:160]!r}")
+    assert "user_tail" in state_half and "freeze_memory" not in state_half, (
+        "the `<session_state>` half of the tail is no longer explained by the "
+        f"placement switch alone: {state_half[:180]!r} — the two reasons have "
+        "been fused back into one, which is the conflation #1786 was filed on")
+    assert "freeze_memory" in delta_half and "user_tail" not in delta_half, (
+        "the `<memory_delta>` half of the tail is no longer explained by "
+        "`freeze_memory` alone: {delta_half[:180]!r} — that switch, not the "
+        "placement, is what leaves the delta note out")
+    assert "config.yaml" in doc, (
+        "the docstring states switch behaviour without naming the owner of the "
+        "moving value, so the next reader has nowhere to look it up")
+    # The same detector, aimed at the resolver's docstring in the other module:
+    # #1786 found five sites, and the one that called the system_head fallback
+    # "today's layout" is the one that tells a reader a silent fallback is what
+    # production renders anyway.
+    assert _claims_a_layout_ships(
+        _prose(APP_PROMPT_BUILDER, "session_state_layout")) == [], (
+        "the resolver's own docstring again calls its fallback what is in force")
+    assert '"\\"' in doc or '""' in doc, (
+        "the docstring no longer says what an empty tail is, which is the thing "
+        "callers of `turn_tail` actually want to know")
+
+
+def test_the_layout_annotations_price_a_cache_and_never_name_what_is_in_force():
+    """Clause 3: the `SESSION_STATE_LAYOUTS` annotation and the
+    `build_system_prompt` argument note both claimed a layout was current, and
+    the note named two of the three layouts — the one in force among them
+    nowhere.
+
+    Each annotation has to earn its place by saying what that placement costs
+    the prefix cache; that is stable across every flip, which is why it can be
+    written down at all. The argument note is additionally required to name all
+    three layouts: with `system_tail` missing, a reader choosing a value for
+    `config.yaml` had no idea the shipped option existed.
+    """
+    enum_note = _annotation_block(APP_PROMPT_BUILDER, "SESSION_STATE_LAYOUTS =")
+    arg_note = _prose(APP_PROMPT_BUILDER, "build_system_prompt")
+    arg_note = arg_note[arg_note.rindex("`session_state` —"):]
+
+    for text, label in ((PREFILLED_LAYOUT_NOTE, "the pre-fix layout annotation"),
+                        (PREFILLED_PLACEMENT_ARG, "the pre-fix argument note")):
+        assert _claims_a_layout_ships(" ".join(text.split())), (
+            f"{label} no longer trips the detector and the ban below is vacuous")
+    for text, label in ((enum_note, "the `SESSION_STATE_LAYOUTS` annotation"),
+                        (arg_note, "the `build_system_prompt` note")):
+        assert _claims_a_layout_ships(text) == [], (
+            f"{label} states which layout is in force "
+            f"({_claims_a_layout_ships(text)}) — it moved once already, on "
+            "2026-09-25, and a comment cannot hold a value")
+        for layout in LAYOUTS:
+            assert _priced(text, layout), (
+                f"{label} annotates {layout!r} without saying what it costs the "
+                f"prefix cache: {text[:200]!r}")
+    assert "`system_tail`" in arg_note and "system_tail" in enum_note, (
+        "the layout in force since 2026-09-25 is not named by one of the two "
+        "annotations, so a reader picking a value cannot see it")
+    assert "config.yaml" in enum_note, (
+        "the enum annotation names no owner for the moving value")
+
+
+def test_the_config_annotation_prices_the_options_and_leaves_the_value_to_config():
+    """Clause 5: `config.yaml` annotated `system_head (today, byte-identical)`
+    four lines above `session_state: system_tail`.
+
+    The same annotation contradicted the file it lives in, which is how the next
+    flip gets missed: a reader editing the value has the wrong answer in their
+    peripheral vision. The comment is therefore required to price the options and
+    state no shipped value at all — so it cannot go stale when the switch moves,
+    which is the property the gate's YAML token check protects by keeping this
+    edit to comment lines. `CONFIG` still resolving `session_state` is asserted
+    here from the runtime read, so a comment that quietly came with a value
+    change fails too.
+    """
+    block = _comment_block_above("config.yaml", "prompt_layout:")
+
+    assert _claims_a_layout_ships(PREFILLED_CONFIG_OPTION), (
+        "the pre-fix option label no longer trips the detector")
+    assert _claims_a_layout_ships(block) == [], (
+        f"the comment above `prompt_layout:` labels a layout as current "
+        f"({_claims_a_layout_ships(block)}); the value four lines below is the "
+        "only statement of what is in force")
+    for layout in LAYOUTS:
+        assert _priced(block, layout), (
+            f"the comment annotates {layout!r} without its cache cost: "
+            f"{block[:220]!r}")
+    assert not SHIPPED_PAIR_RE.search(block), (
+        "the comment block states a shipped `key: value` pair, so it is a second "
+        "place that has to be edited on every flip — the drift #1786 is about")
+
+    shipped = _shipped_config()["session_state"]
+    assert shipped in LAYOUTS, (
+        f"CONFIG resolves session_state to {shipped!r}, which is not one of "
+        f"{LAYOUTS} — the runtime and the enum have parted company")
+    value_line = [ln for ln in (ROOT / "config.yaml").read_text().splitlines()
+                  if ln.strip().startswith("session_state:")]
+    assert len(value_line) == 1, (
+        f"{len(value_line)} `session_state:` value lines in config.yaml; the "
+        "single value is what this clause leaves as the only statement of force")
+    assert value_line[0].strip() == f"session_state: {shipped}", (
+        f"config.yaml's own value line ({value_line[0]!r}) is not what CONFIG "
+        f"resolves ({shipped!r}) — an override or a second writer is in play, "
+        "and no annotation in this repo can be trusted to describe it")

@@ -11,8 +11,17 @@ whole previous conversation behind it — byte-stable from one turn to the next:
     and the memory files moved since the session's snapshot
     (`app/memory_snapshot.py`).
 
-With the shipped defaults (`system_head`, freeze off) the tail is always ""
-and every caller's `prefetched_text` is exactly what it was.
+Neither half is a property of this module, and no current value is stated
+here: what ships is `harness.prompt_layout` in `config.yaml`, and a docstring
+that repeats a switch goes stale the day someone moves it. The tail is "" only
+when both of its halves are, and they are empty for two independent reasons —
+the `<session_state>` half whenever the placement switch is anything but
+`user_tail` (the block rides inside the system prompt instead, so this module
+has nothing to carry), and the `<memory_delta>` half whenever
+`freeze_memory` is off (no snapshot is taken, so nothing has diverged to
+report). When both switches say so, `turn_tail` returns "" and every caller's
+`prefetched_text` is exactly what it was — which of the two is on is a
+`config.yaml` question, not one this file can answer.
 
 The four hand-built turn paths (stream, ambient, sync in `messages.py`;
 `voice.py`) call `turn_tail` + `append_turn_tail`, and `_run_turn` records the

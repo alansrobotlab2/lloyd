@@ -299,9 +299,14 @@ def _format_goal_block(goal: dict | None) -> str | None:
     )
 
 
-#: Where a turn's session state (goal, plan, todos) is rendered — P1.
-#:   system_head — inside the system prompt, ahead of the harness hints
-#:                 (today's layout, byte-identical).
+#: Where a turn's session state (goal, plan, todos) is rendered — P1. Each
+#: entry says only what that placement costs the prefix cache. Which one is in
+#: force is `harness.prompt_layout.session_state` in config.yaml and is
+#: deliberately not written here: a layout is a config value, and an annotation
+#: that names a current one goes stale on the next flip.
+#:   system_head — inside the system prompt, ahead of the harness hints, so the
+#:                 state and the static prompt share one prefix and a state edit
+#:                 re-prefills the hints and the conversation behind them.
 #:   system_tail — inside the system prompt, after everything static, as one
 #:                 `<session_state>` block. A todo edit then invalidates only
 #:                 the tail of the system prompt, not the hints under it.
@@ -316,9 +321,12 @@ def session_state_layout() -> str:
     """`harness.prompt_layout.session_state`, validated. Never raises.
 
     Read lazily, like `_memory_files_for`: this module is imported by CLI
-    scripts that never bring up the app package, and anything unreadable or
-    unknown is today's layout — a layout nobody asked for is the one outcome
-    worse than the old cache behaviour.
+    scripts that never bring up the app package. Anything unreadable or unknown
+    falls back to `system_head` — the pre-rollout placement, chosen because it
+    is the layout this switch shipped with, not because it is what is in force.
+    A typo in `config.yaml` therefore renders the old layout silently rather
+    than whatever was asked for; that is the cost of never raising, and the
+    reason the unknown case logs a warning.
     """
     try:
         from app.config import CONFIG
@@ -404,8 +412,12 @@ def build_system_prompt(
     session's frozen snapshot (`app/memory_snapshot.py`) reaches the prompt.
 
     `session_state` — the layout (`SESSION_STATE_LAYOUTS`); None reads
-    `harness.prompt_layout.session_state`. `system_head` is today's output
-    byte for byte; `user_tail` leaves the state out entirely.
+    `harness.prompt_layout.session_state`, whose value in force belongs to
+    `config.yaml` and is not stated here. The three differ only in what a state
+    edit costs the prefix cache: `system_head` shares the system prompt's
+    prefix with the static hints, `system_tail` puts the block after them so
+    only the tail is invalidated, and `user_tail` leaves the state out of the
+    system prompt entirely, which is the byte-stable one.
     """
     overlay = _resolve_overlay(overlay_dir)
     components: dict[str, str] = {}
