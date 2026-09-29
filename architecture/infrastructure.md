@@ -422,6 +422,26 @@ that directory or it will not exist in the pinned snapshot.
   `WatchdogSec=90` against a 5 s tick, so synthesis and playback happen in a
   detached child and `alert()` returns in milliseconds. What actually came
   out of the speaker is in `voice.log` in the guardian state dir.
+- **A synthesis failure leaves a record and a chirp, not only a log line.**
+  `_record_loss` writes `voice-loss.md` beside `voice.log`, naming the utterance
+  that was lost, the reason, and an `occurrences` count coalesced to one record
+  per hour (`LOSS_WINDOW`) — the 2026-09-23 cluster was five refusals in 76
+  minutes and five records would read as five incidents. It is a second file
+  rather than more log lines because `voice.log` truncates itself at `_LOG_CAP`,
+  and a direct write rather than the coalesced backlog item #1798 files, because
+  `[program:lloyd-backend]` shares `agent-supervisord` with the `[program:agent-tts]`
+  that refused: on 2026-09-28 the alert that failed at 11:51:18 was the one
+  announcing that tree unreachable, so a backlog-bound report dies in the outage
+  it would be reporting. `_audible_fallback` then hands the player
+  `attention_tone` — under a second, generated here from `math` and `array` —
+  because what survives that outage is the player (`/usr/bin/pw-play`), not the
+  synthesiser, and in-process speech needs binaries this box has not got
+  (espeak-ng, spd-say, festival, flite: none present, measured 2026-09-29). The
+  chirp's playback is capped at `FALLBACK_PLAY_TIMEOUT`, not at the normal
+  `audio + tail + 15 s`, and `speak_now` still returns False: the words were not
+  said, and they are on the toast, the journal, ALERT.md and the daily note
+  already. Pinned by the failure-path nodes in `tests/test_guardian_speak.py`,
+  which refuse through a real closed port rather than a stubbed exception.
 - **The child runs the venv python, and that is deliberate.** The
   stdlib-only rule exists so the watchdog cannot be taken down by what it
   watches; this child runs after the ledger, ALERT.md, the journal and the

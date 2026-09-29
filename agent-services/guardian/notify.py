@@ -259,7 +259,12 @@ class Notifier:
 
         Reports *dispatched*, not *heard*: synthesis and playback happen in a
         detached child so this cannot add seconds to a loop the unit watchdogs
-        at 90s. Whether the sound actually came out is in voice.log.
+        at 90s. Whether the sound actually came out is in voice.log — and when
+        it did not, `speak.py` has already written a durable record to
+        voice-loss.md and put a locally-generated chirp on the player, because
+        the utterance that got `[Errno 111]` at 2026-09-28 11:51:18 was the alert
+        announcing an outage of the same supervised tree that hosts the TTS
+        server, and a `voice.log` line was the only thing that knew (#1806).
 
         Below the `external` gate, for the same reason as the vault note and
         the backlog task: the drill runs a real guardian against a throwaway

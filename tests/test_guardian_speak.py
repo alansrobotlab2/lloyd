@@ -26,15 +26,25 @@ and the tests that need dispatch to proceed re-enable it with a stubbed
 `subprocess.Popen`. The playback tests below stub `subprocess.run` as well, so
 no `paplay` is ever spawned; the stream tests stub `urlopen` with an object that
 has the same `read(n)`/`close()` contract as `http.client.HTTPResponse`, so no
-TTS server is involved either.
+TTS server is involved either. The failure-path nodes at the end go the other way
+round on purpose: their endpoint is a real port that was bound and closed, so the
+`ECONNREFUSED` is genuine, and only the player subprocess is stubbed.
+
+That last group is #1806: a synth failure used to leave nothing but a
+`voice.log` line, and on 2026-09-28 the refused utterance was the alert
+announcing an outage of the same supervised tree that hosts the TTS server.
 """
 
 from __future__ import annotations
 
+import array
 import json
 import os
+import re
+import socket
 import sys
 import time
+import wave
 from pathlib import Path
 
 import pytest
@@ -551,6 +561,226 @@ def test_the_two_ceiling_keys_resolve_from_defaults(tmp_path):
     overlaid = speak.load_config(tmp_path)
     assert overlaid["speed"] == 1.1
     assert overlaid["max_audio_seconds"] == 60.0 and overlaid["synth_wall_clock"] == 90.0
+
+
+# ── when the synthesiser is the thing that broke (#1806) ──────────────
+#
+# On 2026-09-28 the guardian tried to say three sentences out loud and got
+# `[Errno 111] Connection refused` — 11:50:51 and 11:51:18, the second of them the
+# alert *announcing that agent-supervisord was unreachable* — and the only trace
+# that no sound came out was a line in `voice.log`, the log of the channel that
+# had just failed. The endpoint it posts to is `[program:agent-tts]`, inside the
+# same supervised tree whose unreachability was being announced, so the report
+# died with the thing it was reporting.
+#
+# The nodes below share one choice: the endpoint is a port that was bound and
+# closed, so the failure is a real `ECONNREFUSED` through a real `urllib`, not a
+# stubbed exception. Only the player subprocess is stubbed, because a test that
+# makes noise on Alan's speakers is not a test.
+
+_ALERT = "Guardian alert. supervisord was unreachable. Restarted agent"
+_OTHER_ALERT = "Guardian alert. Landed: #1750 promotion settled"
+
+
+def _refused_port() -> int:
+    """A port bound and immediately closed, so a connect gets ECONNREFUSED."""
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    return port
+
+
+def _refusing(monkeypatch, **over):
+    """`cfg` pointed at a refused port, a silent player, and witnesses.
+
+    `attempts` records every URL the module asked `urlopen` to open; the probe
+    forwards to the real function, so the refusal stays genuine and the list still
+    proves what the failure path asked of the network. `seen` is what the player
+    was handed — the WAV is read back from inside the stub, before `play` unlinks
+    it, which is the only moment it exists.
+    """
+    cfg = _voice_cfg(api_url=f"http://127.0.0.1:{_refused_port()}", **over)
+    attempts: list[str] = []
+    seen: dict = {"attempts": attempts, "cmd": None}
+    real_urlopen = speak.urllib.request.urlopen
+
+    def probe(req, timeout=None, *args, **kw):
+        attempts.append(req.full_url)
+        return real_urlopen(req, timeout=timeout, *args, **kw)
+
+    class _Proc0:
+        returncode = 0
+
+    def quiet_run(cmd, **kw):
+        seen["cmd"] = list(cmd)
+        seen["timeout"] = kw.get("timeout")
+        with wave.open(cmd[-1], "rb") as w:
+            seen["nframes"] = w.getnframes()
+            seen["sampwidth"] = w.getsampwidth()
+            seen["framerate"] = w.getframerate()
+            seen["nchannels"] = w.getnchannels()
+            seen["frames"] = w.readframes(w.getnframes())
+        return _Proc0()
+
+    monkeypatch.setattr(speak.urllib.request, "urlopen", probe)
+    monkeypatch.setattr(speak.subprocess, "run", quiet_run)
+    monkeypatch.setattr(speak.shutil, "which",
+                        lambda exe: "/usr/bin/pw-play" if exe == "pw-play" else None)
+    return cfg, seen
+
+
+def test_a_refused_synth_leaves_a_loss_record_outside_voice_log(tmp_path, monkeypatch):
+    """Clause 1. The record must name the utterance that was lost, and it must not
+    be a line in the log of the channel that failed: `voice.log` truncates itself
+    to empty at `_LOG_CAP` bytes, so a long burst can erase its own evidence.
+    `voice-loss.md` is a separate file, created by this path."""
+    cfg, _ = _refusing(monkeypatch)
+
+    assert speak.speak_now(_ALERT, cfg, tmp_path) is False
+
+    body = (tmp_path / speak.LOSS_NAME).read_text(encoding="utf-8")
+    assert body.splitlines()[0] == speak.LOSS_HEADING
+    assert _ALERT in body, "the record must name the alert that was lost"
+    assert "occurrences: 1" in body
+    assert "Connection refused" in body, "the record must carry the reason"
+    log = (tmp_path / speak.LOG_NAME).read_text(encoding="utf-8")
+    assert log.count("synth failed") == 1
+    assert speak.LOSS_NAME != speak.LOG_NAME
+
+
+def test_the_loss_record_needs_no_backend_api_to_be_written(tmp_path, monkeypatch):
+    """Clause 2. #1798's precedent posts to `/api/backlog/task-create`, but
+    `[program:lloyd-backend]` sits in the same supervised tree as
+    `[program:agent-tts]`: on 2026-09-28 they were unreachable together, so a
+    backlog-bound report would have gone down with the sound. Asserted both ways —
+    the record is on disk, and nothing on this path ever opened a URL that was not
+    the synth endpoint."""
+    cfg, seen = _refusing(monkeypatch)
+
+    assert speak.speak_now(_ALERT, cfg, tmp_path) is False
+
+    assert (tmp_path / speak.LOSS_NAME).is_file()
+    assert _ALERT in (tmp_path / speak.LOSS_NAME).read_text(encoding="utf-8")
+    assert seen["attempts"] == [f"{cfg['api_url']}/v1/audio/speech"], seen["attempts"]
+    assert not [u for u in seen["attempts"] if "/api/" in u], (
+        "the loss record must not depend on the backend API, which shares the outage")
+
+
+def test_a_second_failure_in_the_window_refreshes_the_one_record(tmp_path, monkeypatch):
+    """Clause 3. The 2026-09-23 cluster was five refusals between 14:47 and 16:03;
+    five records would read as five incidents and hide the one number that matters.
+    Inside `LOSS_WINDOW` the same record is refreshed — count to 2, both
+    utterances named — and past it the burst is over, so the next failure starts a
+    new record instead of counting an outage that ended last week."""
+    cfg, _ = _refusing(monkeypatch)
+
+    assert speak.speak_now(_ALERT, cfg, tmp_path) is False
+    assert speak.speak_now(_OTHER_ALERT, cfg, tmp_path) is False
+
+    body = (tmp_path / speak.LOSS_NAME).read_text(encoding="utf-8")
+    assert body.count(speak.LOSS_HEADING) == 1, "one record per burst, not one per failure"
+    assert "occurrences: 2" in body, body
+    assert _ALERT in body and _OTHER_ALERT in body
+    assert len(list(tmp_path.glob("voice-loss*"))) == 1
+
+    stale = re.sub(r"burst_started: [0-9.]+",
+                   f"burst_started: {time.time() - speak.LOSS_WINDOW - 1.0:.3f}", body)
+    (tmp_path / speak.LOSS_NAME).write_text(stale, encoding="utf-8")
+    assert speak.speak_now(_ALERT, cfg, tmp_path) is False
+    after = (tmp_path / speak.LOSS_NAME).read_text(encoding="utf-8")
+    assert after.count(speak.LOSS_HEADING) == 1
+    assert "occurrences: 1" in after, "a burst past its window starts over"
+
+
+def test_the_failure_path_returns_within_two_seconds_and_never_raises(
+        tmp_path, monkeypatch):
+    """Clause 4. This runs in a detached child of a unit carrying
+    `WatchdogSec=90` against a 5 s tick, and the chirp puts a player subprocess
+    behind it, so a refused endpoint must cost under 2 s and no exception may
+    reach `main` — the entry point the worker is spawned with, whose exit code
+    nobody reads. Both hostile surfaces are exercised: a raising player, and a
+    state dir that is a plain file so every write on the record path fails."""
+    cfg, seen = _refusing(monkeypatch)
+
+    started = time.monotonic()
+    assert speak.speak_now(_ALERT, cfg, tmp_path) is False
+    elapsed = time.monotonic() - started
+    assert elapsed < 2.0, f"the failure path took {elapsed:.2f}s"
+    assert 0 < seen["timeout"] <= 2.0, (
+        f"the chirp asked for {seen['timeout']}s of speakers, which is not a bound")
+
+    def hostile_run(cmd, **kw):
+        raise OSError("player exploded")
+    monkeypatch.setattr(speak.subprocess, "run", hostile_run)
+    assert speak.speak_now(_ALERT, cfg, tmp_path) is False       # nothing raised
+
+    # A state dir the record cannot be written into — a plain file where the
+    # directory has to be. Asserted through `speak_now`, not through `main`:
+    # `main` turns every exception into exit 1, so it reports the same result for
+    # a guarded writer and an unguarded one, and cannot pin the claim at all.
+    blocked = tmp_path / "not-a-directory"                       # a file, not a dir
+    blocked.write_text("in the way", encoding="utf-8")
+    assert speak.speak_now(_ALERT, cfg, blocked / "sub") is False
+    assert speak.main(["--state-dir", str(blocked / "sub"), "--text", _ALERT]) == 1
+
+
+def test_a_refused_synth_still_puts_locally_made_audio_in_the_player(
+        tmp_path, monkeypatch):
+    """Clause 5. The player survived that outage even though the synthesiser did
+    not — `pw-play` is a separate binary — and in-process speech is not available
+    here (espeak, espeak-ng, spd-say, festival, flite, pico2wave: all absent), so
+    the degraded attempt is a chirp built in this process from `math` and `array`.
+    Asserted on what the player was handed: one channel, 16-bit, the configured
+    rate, with real signal in it — after exactly one request to the endpoint, the
+    one that failed."""
+    cfg, seen = _refusing(monkeypatch)
+
+    assert speak.speak_now(_ALERT, cfg, tmp_path) is False
+
+    assert seen["cmd"] is not None, "the player was never invoked"
+    assert seen["cmd"][0] == "pw-play", seen["cmd"]
+    assert seen["nframes"] > 0 and seen["sampwidth"] == 2
+    assert seen["nchannels"] == 1
+    assert seen["framerate"] == int(cfg["sample_rate"])
+    pcm = array.array("h", seen["frames"])
+    assert max(abs(min(pcm)), max(pcm)) > 0, "the fallback audio was all silence"
+    heard = len(pcm) / float(cfg["sample_rate"])
+    assert 0.5 <= heard <= 2.0, f"the chirp was {heard:.2f}s"
+    assert seen["attempts"] == [f"{cfg['api_url']}/v1/audio/speech"], (
+        "the fallback must not go back to the endpoint that just refused")
+
+
+def test_a_synth_that_answers_with_no_audio_is_recorded_and_chirped(
+        tmp_path, monkeypatch):
+    """The other dead-silence shape: the server answers and hands back nothing.
+    From the room that is the same failure, and the 21 `synth failed` lines are
+    not all refusals — 19:45:47 on 2026-09-28 was a `TimeoutError` — so the
+    handling cannot be keyed on the connection error alone."""
+    cfg, seen = _refusing(monkeypatch)
+
+    class _Empty:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self, n: int = -1) -> bytes:
+            return b""
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(speak.urllib.request, "urlopen",
+                        lambda req, timeout=None: _Empty())
+    assert speak.speak_now(_ALERT, cfg, tmp_path) is False
+
+    body = (tmp_path / speak.LOSS_NAME).read_text(encoding="utf-8")
+    assert "synth returned no audio" in body and _ALERT in body
+    assert seen["nframes"] > 0, "the chirp did not reach the player"
 
 
 # ── wiring into the fan-out ───────────────────────────────────────────

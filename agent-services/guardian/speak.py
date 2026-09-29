@@ -31,13 +31,30 @@ someone to unplug the speakers. See `policy.VOICE_REPEAT_SECONDS`.
 
 Failures are logged to `voice.log` in the guardian state dir. An alerting
 channel that fails silently is the exact anti-pattern `notify.py`'s own
-docstring is about.
+docstring is about — and a *record* was all that `synth failed` had, which on
+2026-09-28 was the wrong amount: three utterances refused with `[Errno 111]
+Connection refused` at 11:50:51 and 11:51:18, the second of them the alert
+announcing that `agent-supervisord` was unreachable, and the only trace that the
+sound never came out was a line in the log of the channel that had just failed.
+So a refused synthesis now does two more things. It writes a durable loss record
+to `voice-loss.md` beside this log — a plain filesystem write, because the API
+that would otherwise file an item lives in `[program:lloyd-backend]`, the same
+supervised tree as `[program:agent-tts]`, so a backlog-bound report dies exactly
+when it is most needed — and it hands the local player a short chirp built in
+this process from the stdlib `math`/`array` pair, because what survives that
+outage is the *player* (`/usr/bin/pw-play`), not the synthesiser. In-process
+speech is not on offer on this box: `espeak`, `espeak-ng`, `spd-say`, `festival`,
+`flite` and `pico2wave` are all absent. The words are already on the toast, the
+journal, the daily note and now this record; the chirp's job is only that the
+room is not silent at the moment the alert was supposed to land.
 """
 
 from __future__ import annotations
 
+import array
 import fcntl
 import json
+import math
 import os
 import re
 import shutil
@@ -110,6 +127,33 @@ _LOG_CAP = 256 * 1024
 # besides the ceiling that sets that budget, so it has a name.
 _PLAY_SLACK_S = 15.0
 
+# ── when the synthesiser is the thing that broke ──────────────────────
+# The durable record of a lost utterance (#1806). Deliberately a *second file*
+# rather than more lines in `voice.log`: `voice.log` is the channel that just
+# failed, it is self-capped at `_LOG_CAP` (it truncates itself to empty at
+# 256 KiB, so a burst that outlives a maintenance pass erases the evidence), and
+# the item's whole complaint is that a lost alert left only that line behind.
+LOSS_NAME = "voice-loss.md"
+# One record per burst. `notify.py` hands `dispatch` a `voice_window` of 3600 s
+# (`notify.py:122`) and `policy.VOICE_REPEAT_SECONDS` is the same hour, so an
+# outage long enough to swallow several alerts is exactly the span during which
+# five lines about it are noise and one escalating record is the report.
+LOSS_WINDOW = 3600.0
+# What one record names. Bounded because this file is written by a failure path
+# that must not grow without limit — the same mistake `_LOG_CAP` exists to stop.
+LOSS_TEXT_KEEP = 5
+LOSS_TEXT_CHARS = 200
+LOSS_HEADING = "# Voice alert lost"
+
+# The locally-generated attention chirp. Under a second so that
+# `_FALLBACK_PLAY_TIMEOUT` can hold the whole failure path inside the 2.0 s the
+# watchdog contract needs, and a rising minor-third rather than one steady tone:
+# a steady tone is what a smoke alarm makes, and a room learns to ignore those.
+TONE_SECONDS = 0.9
+TONE_HZ = (740.0, 988.0)
+TONE_AMPLITUDE = 0.25          # of full scale: audible across a room, not a shriek
+FALLBACK_PLAY_TIMEOUT = 1.5    # ceiling on the chirp's own playback, see _audible_fallback
+
 
 def voice_enabled() -> bool:
     """Master mute, checked at dispatch time.
@@ -153,6 +197,68 @@ def _log(state_dir: Path, message: str) -> None:
             p.write_text("", encoding="utf-8")
         with open(p, "a", encoding="utf-8") as fh:
             fh.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {message}\n")
+    except Exception:
+        pass
+
+
+_LOSS_COUNT_RE = re.compile(r"^occurrences:\s*(\d+)\s*$", re.M)
+_LOSS_STARTED_RE = re.compile(r"^burst_started:\s*([0-9.]+)\s*$", re.M)
+_LOSS_SAID_RE = re.compile(r'^- "(.*)"$', re.M)
+
+
+def _record_loss(state_dir: Path, text: str, reason: str) -> None:
+    """Record a lost utterance somewhere other than `voice.log` (#1806).
+
+    One record per burst: a failure inside `LOSS_WINDOW` of the open one
+    REFRESHES it — `occurrences` goes up, the new utterance joins the named list,
+    `last_seen` moves — rather than appending a second report. That is the shape
+    #1798 landed for a dropped daily-note line, and it is what a burst needs:
+    the 2026-09-23 cluster was five refusals between 14:47 and 16:03, and five
+    records would have made the outage look like five incidents while burying the
+    one number that matters, how many times it tried.
+
+    Written under the same exclusive lock `should_speak` uses, because the two
+    producers are separate processes (the daemon and the nag oneshot) and a lost
+    record has to survive both of them. It is a direct filesystem write with no
+    HTTP anywhere: the backlog API that #1798 posts to is
+    `[program:lloyd-backend]`, which shares `agent-supervisord` with the TTS
+    server that just refused, so an outage-shaped failure would take the report
+    down with the sound. Never raises — a failure path that can raise is how a
+    voice channel ends up taking a watchdog with it.
+    """
+    now = time.time()
+    try:
+        d = Path(state_dir)
+        d.mkdir(parents=True, exist_ok=True)
+        line = " ".join(str(text).split())[:LOSS_TEXT_CHARS]
+        with open(d / LOSS_NAME, "a+", encoding="utf-8") as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            fh.seek(0)
+            body = fh.read()
+            count, started = 1, now
+            m_count, m_started = _LOSS_COUNT_RE.search(body), _LOSS_STARTED_RE.search(body)
+            if m_count and m_started and now - float(m_started.group(1)) <= LOSS_WINDOW:
+                count = int(m_count.group(1)) + 1
+                started = float(m_started.group(1))
+            said = [line] + [s for s in _LOSS_SAID_RE.findall(body)
+                             if s != line][:LOSS_TEXT_KEEP - 1]
+            fh.seek(0)
+            fh.truncate()
+            fh.write(
+                f"{LOSS_HEADING}\n"
+                f"\noccurrences: {count}"
+                f"\nlast_seen: {time.strftime('%Y-%m-%dT%H:%M:%S', time.localtime(now))}"
+                f"\nburst_started: {started:.3f}"
+                f"\nfirst_seen: {time.strftime('%Y-%m-%dT%H:%M:%S', time.localtime(started))}"
+                f"\nwindow_s: {LOSS_WINDOW:.1f}"
+                f"\nlast_error: {reason}"
+                "\n\nThese alerts were dispatched to the voice channel and never "
+                "reached the speakers. The words themselves went to the toast, the "
+                "journal, ALERT.md and the daily note; this is the record that the "
+                "spoken one was lost.\n"
+                "\n## What did not get said\n"
+                + "".join(f'- "{s}"\n' for s in said)
+            )
     except Exception:
         pass
 
@@ -457,7 +563,62 @@ def _player(path: str) -> list[str] | None:
     return None
 
 
-def play(pcm: bytes, cfg: dict) -> bool:
+def attention_tone(cfg: dict) -> bytes:
+    """A short chirp built here, from the stdlib alone: mono s16le PCM (#1806).
+
+    Nothing in this function opens a socket, which is the entire reason it
+    exists. Every failure the clauses are about is a failure *of* the TTS
+    endpoint — the 2026-09-28 refusals were reporting the outage of the same
+    `agent-supervisord` tree that hosts `[program:agent-tts]` — so the degraded
+    attempt cannot ask that endpoint for help. In-process *speech* would be the
+    better thing and is not available on this box: `espeak`, `espeak-ng`,
+    `spd-say`, `festival`, `flite` and `pico2wave` are all absent. The player is
+    not: `_player` resolves `/usr/bin/pw-play` / `paplay`, separate binaries that
+    answered throughout that outage.
+
+    Two ascending notes with a 12 ms envelope each, `TONE_AMPLITUDE` of full
+    scale. A steady tone is what a smoke alarm makes and a room learns to ignore
+    it; the alert's words are on four other surfaces, so this only has to say
+    "something is trying to reach you" without waking the house.
+    """
+    sr = max(1, int(cfg["sample_rate"]))
+    amp = TONE_AMPLITUDE * 32767.0
+    fade = max(1, int(0.012 * sr))
+    per = max(1, int(TONE_SECONDS / len(TONE_HZ) * sr))
+    out = array.array("h", bytes(2 * per * len(TONE_HZ)))
+    i = 0
+    for hz in TONE_HZ:
+        for n in range(per):
+            env = min(1.0, n / fade, (per - n) / fade)
+            out[i] = int(amp * env * math.sin(2.0 * math.pi * hz * n / sr))
+            i += 1
+    return out.tobytes()
+
+
+def _audible_fallback(cfg: dict, state_dir: Path) -> bool:
+    """Try the speakers anyway, locally, when the synthesiser refused (#1806).
+
+    Returns whether the *chirp* reached a player — deliberately not the same
+    question as `speak_now`'s return value, which stays False because the words
+    were not spoken. Bounded by `FALLBACK_PLAY_TIMEOUT` rather than by `play`'s
+    normal budget (`audio + tail + 15 s of slack`), because this runs on the
+    path a watchdog-adjacent process takes after the endpoint already failed and
+    15 s of slack for a noise that lasts under one second is not a bound.
+    """
+    try:
+        return play(attention_tone(cfg), cfg, timeout_cap=FALLBACK_PLAY_TIMEOUT)
+    except Exception as exc:
+        _log(state_dir, f"fallback chirp failed ({type(exc).__name__}: {exc})")
+        return False
+
+
+def play(pcm: bytes, cfg: dict, timeout_cap: float | None = None) -> bool:
+    """Write a WAV and hand it to whatever player this box has.
+
+    `timeout_cap` bounds the booking from above regardless of how long the audio
+    is; it is how the fallback chirp stays inside its own short budget while the
+    normal path keeps the ceiling-derived one (#1806).
+    """
     sr = int(cfg["sample_rate"])
     fd, path = tempfile.mkstemp(suffix=".wav", prefix="lloyd-guardian-")
     os.close(fd)
@@ -477,8 +638,11 @@ def play(pcm: bytes, cfg: dict) -> bool:
         # short timeout, and only the tail it carries is added on top.
         spoken_s = min(_pcm_seconds(len(pcm), sr), float(cfg["max_audio_seconds"]))
         tail_s = int(cfg.get("tail_silence_ms") or 0) / 1000.0
+        budget = spoken_s + tail_s + _PLAY_SLACK_S
+        if timeout_cap is not None:
+            budget = min(budget, float(timeout_cap))
         proc = subprocess.run(cmd, capture_output=True,
-                              timeout=spoken_s + tail_s + _PLAY_SLACK_S)
+                              timeout=budget)
         return proc.returncode == 0
     finally:
         try:
@@ -511,14 +675,27 @@ def _worker_python() -> str:
 
 
 def speak_now(text: str, cfg: dict, state_dir: Path) -> bool:
-    """Synthesise and play, blocking. This is what the detached worker runs."""
+    """Synthesise and play, blocking. This is what the detached worker runs.
+
+    Returns whether the *words* reached a speaker. Two ways to fail at that are
+    recorded beyond `voice.log` and answered with a chirp (#1806): the endpoint
+    refusing, and the endpoint answering with no audio — an HTTP 500 from a
+    half-alive TTS server is the same dead silence from the room's side. The
+    return value stays False in both cases: a chirp is not the alert, and the
+    loss record is the report.
+    """
     try:
         pcm = synthesize(text, cfg, state_dir)
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        _log(state_dir, f"synth failed ({type(exc).__name__}: {exc}) for {text[:60]!r}")
+        reason = f"{type(exc).__name__}: {exc}"
+        _log(state_dir, f"synth failed ({reason}) for {text[:60]!r}")
+        _record_loss(state_dir, text, reason)
+        _audible_fallback(cfg, state_dir)
         return False
     if not pcm:
         _log(state_dir, f"synth returned nothing for {text[:60]!r}")
+        _record_loss(state_dir, text, "synth returned no audio")
+        _audible_fallback(cfg, state_dir)
         return False
     try:
         audio = _with_tail(shape(pcm, cfg, state_dir), cfg)
