@@ -600,6 +600,36 @@ def test_a_human_only_confirmation_is_never_held(backlog_dir, ledger, monkeypatc
     assert out["held"] is False and B.held_confirmations(ledger) == {}
 
 
+def test_a_human_only_confirmation_stays_in_draft_owed_to_owed_check(backlog_dir, ledger,
+                                                                    monkeypatch):
+    """09-27 to 09-28 every one of these was orphaned: triage moved it to
+    `up_next`, the reconciler moved it back, and that move's take-back erased
+    the `decide` entry — a triaged draft that no pool and no job would read."""
+    from scripts.automod import owed as O
+    _ready(backlog_dir, ledger, 3)
+    write_item(backlog_dir, 7, days_old=300)
+    _stub_turn(monkeypatch, verdict="confirmed", acceptance="human-only: config.yaml")
+    asyncio.run(M.execute(_QItem({"group_triage": False, "implement_pool_floor": 40})))
+    assert _status(backlog_dir, 7)[0] == "draft"
+    B.reconcile_statuses(ledger)
+    fm, _ = B._split_frontmatter(B.item_by_id(7).path.read_text())
+    assert fm["status"] == "draft"
+    assert [e["kind"] for e in O.entries_of(fm)] == ["decide"], "owed-check must still see it"
+
+
+def test_a_move_to_draft_takes_back_only_what_was_tagged(backlog_dir, ledger):
+    """The reconciler passes the tag on every move; the owed `decide` entry goes
+    only with a real take-back (the tag on the item, or a move into the pool)."""
+    from scripts.automod import owed as O
+    write_item(backlog_dir, 7, days_old=3, status="up_next")
+    path = B.item_by_id(7).path
+    O.add_owed(path, ["decide this"], kind="decide")
+    assert B.set_status(7, "draft", "not for the loop", remove_tags=(B.NEEDS_HUMAN_TAG,))
+    assert O.entries_of(B._split_frontmatter(path.read_text())[0]), "untagged: kept"
+    assert B.set_status(7, "up_next", "back in the pool", remove_tags=(B.NEEDS_HUMAN_TAG,))
+    assert not O.entries_of(B._split_frontmatter(path.read_text())[0]), "into the pool: taken back"
+
+
 def test_room_releases_held_items_oldest_first_and_only_as_many_as_fit(backlog_dir, ledger):
     _ready(backlog_dir, ledger, 2)
     for iid in (10, 11, 12):

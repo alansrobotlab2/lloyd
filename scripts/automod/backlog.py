@@ -3524,6 +3524,12 @@ def _apply_status(path: Path, status: str, why: str, *,
         return False
     if fm.get("status") == status or fm.get("status") == "done":
         return False
+    # A take-back is the tag actually coming off, or the item going back into
+    # the implement pool. The reconciler passes the tag on every move, so
+    # without this a move to `draft` of an item that never carried it erased
+    # the `decide` entry the owed-check job needed to find it.
+    takes_back = NEEDS_HUMAN_TAG in remove_tags and (
+        NEEDS_HUMAN_TAG in normalize_tags(fm.get("tags")) or status == IMPLEMENT_POOL_STATUS)
     # What a move *writes* is `app.backlog_move`, shared with the Mission Control
     # route (#1023). What stays here is this writer's own policy about which moves
     # it accepts, and it cannot move into the shared recorder: `done` is terminal
@@ -3532,7 +3538,7 @@ def _apply_status(path: Path, status: str, why: str, *,
     if not record_status_move(fm, status, why, add_tags=add_tags,
                               remove_tags=remove_tags):
         return False
-    if NEEDS_HUMAN_TAG in remove_tags:
+    if takes_back:
         _take_back(fm)
     path.write_text(
         f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)}"
@@ -4952,6 +4958,12 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
             # The pool is full: judged real, parked until a slot opens.
             tags = [str(t) for t in (fm.get("tags") or [])]
             fm["tags"] = tags + ([HELD_TAG] if HELD_TAG not in tags else [])
+        elif is_human_only(acceptance):
+            # Stays where triage found it: the implementer skips it. Moved to
+            # `up_next`, the reconciler moved it straight back, and that move
+            # erased the owed `decide` entry written below — every human-only
+            # confirmation from 09-27 to 09-28 sat in `draft` owed to no one.
+            pass
         else:
             # Into the implement pool. Before 2026-09-09 a confirmed item
             # stayed wherever it was, and #353 landed while still `draft`.

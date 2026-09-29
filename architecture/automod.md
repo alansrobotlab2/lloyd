@@ -1822,6 +1822,15 @@ putting an item back in a pool) drops the item's `decide` entries in the same
 write (`backlog._take_back`). So owed-check never closes an item the loop is
 working again.
 
+A take-back is only a move that really takes the item back: the tag was on the
+item, or the move is into `up_next`. The reconciler passes the tag on every move.
+From 09-27 to 09-28 that erased the `decide` entry on every human-only
+confirmation. Triage had moved the item to `up_next`, and the reconciler's move
+back to `draft` counted as a take-back. The result was 13 triaged drafts that no
+pool and no job read. A human-only confirmation now stays in `draft`, and a move
+to `draft` of an untagged item keeps its owed list
+(`tests/test_autotriage.py::test_a_move_to_draft_takes_back_only_what_was_tagged`).
+
 **Guards are not approvals.** Lloyd approving his own choices does not relax the
 safety layers: vault protection, protected paths, the guardian, the bench
 sandbox. A protected path a change needs is ruled on like anything else. Either
