@@ -1314,6 +1314,70 @@ def render_size(result: dict) -> list[str]:
 USAGE_WINDOW_DAYS = 30
 
 
+#: How much shallower than the asked-for window the measured span has to be before
+#: the section says so in words. One day: a window missing its own oldest row by a
+#: few hours is the window working as asked, and crying wolf every run would train a
+#: reader past the notice. NOT a staleness or retirement threshold — #1815 clause 6
+#: forbids adding one, and what this gates is a sentence about the report's own
+#: depth, never a verdict about a skill.
+USAGE_SPAN_NOTICE_SLACK_DAYS = 1.0
+
+
+def measured_span_days(usage: dict):
+    """How many days the counted rows actually reach back, or None if unmeasurable.
+
+    `until - first_event` off the reader's own fields (#1815). `first_event` is the
+    oldest row that was COUNTED, so rows excluded as out-of-window or defective
+    cannot deepen the answer, and the number is a measurement of the store rather
+    than a restatement of the window that was asked for. It deliberately contains no
+    date: the depth comes from the rows, and a literal in here would be a second,
+    staler answer to the same question — which is how the heading came to claim
+    thirty days over a four-day store. `None` when either end is missing: an empty
+    window, or a hand-built dict from a caller that never asked the reader.
+    """
+    first, until = usage.get("first_event"), usage.get("until")
+    if not first or not until:
+        return None
+    try:
+        span = (dt.datetime.fromisoformat(str(until))
+                - dt.datetime.fromisoformat(str(first))).total_seconds() / 86400.0
+    except ValueError:
+        return None
+    return span if span >= 0 else None
+
+
+def _span_text(span) -> str:
+    """The measured span as report prose, with the shallow case named in words."""
+    if span is None:
+        return "span unmeasured (the reader reported no oldest counted row)"
+    return f"measured span {span:.1f} days"
+
+
+def is_shallow_window(days, span) -> bool:
+    """True when the counted rows fall more than the slack short of `days`."""
+    return span is not None and (float(days) - span) > USAGE_SPAN_NOTICE_SLACK_DAYS
+
+
+def usage_heading(days, span) -> str:
+    """The heading's span claim, and only the span the section can stand behind.
+
+    Three states, because the section makes three different claims (#1815): the rows
+    reach back as far as was asked, so the declared window is honest; they do not, so
+    the heading states the measured span instead, since a heading is the one line a
+    reader carries away and "over the last 30 days" over a four-day store held 123
+    `loaded share` percentages reading as 30-day rates; or the reader gave no oldest
+    counted row to measure against, and the heading says so rather than quietly
+    reprinting the ask as if it had been met.
+    """
+    if span is None:
+        label = f"last {days} days (span unconfirmed)"
+    elif is_shallow_window(days, span):
+        label = f"{span:.1f} measured days"
+    else:
+        label = f"last {days} days"
+    return f"### Usage over the {label} — `prefetch.skill_match`"
+
+
 def collect_usage_counts(days: int = USAGE_WINDOW_DAYS, root=None) -> dict:
     """Per-skill offers / loaded / ignored over the last `days`, from the real rows.
 
@@ -1371,9 +1435,18 @@ def usage_lines(usage: dict, known_names: list[str]) -> list[str]:
     An absent `usage` is its own case and is not silently empty either: a run that
     could not read the event log says so here, in words, rather than printing a
     table with nothing in it.
+
+    And the span every count below is over is the span the rows actually cover
+    (#1815), not the span that was requested: the store began when it began, so a
+    section headed "the last 30 days" printed a hundred-odd `loaded share`
+    percentages as 30-day rates while the rows reached back four days. `usage_heading`
+    states the measured span when the two disagree, `_span_text` repeats it on the
+    line carrying the counts, and the notice below says which of the two is being
+    measured — because a rate is only a rate over a stated span.
     """
     days = usage.get("days", USAGE_WINDOW_DAYS)
-    head = [f"### Usage over the last {days} days — `prefetch.skill_match`", ""]
+    span = measured_span_days(usage)
+    head = [usage_heading(days, span), ""]
     if usage.get("error"):
         return head + [f"NOT MEASURED: reading the injection telemetry failed — "
                        f"`{usage['error']}`. The absence above is a failure to read, "
@@ -1387,7 +1460,16 @@ def usage_lines(usage: dict, known_names: list[str]) -> list[str]:
     counts = usage.get("skills") or {}
     head.append(f"Read through `app.skill_telemetry.skill_injection_counts`: "
                 f"{usage.get('events', 0)} rows over {usage.get('sessions', 0)} sessions, "
-                f"{len(counts)} skills with at least one row.")
+                f"{len(counts)} skills with at least one row, {_span_text(span)}.")
+    if is_shallow_window(days, span):
+        head.append("")
+        head.append(f"**The window asked for is shallower than it sounds: the store holds "
+                    f"{span:.1f} days of `prefetch.skill_match` rows, not the last {days} "
+                    f"days**, and every count, share and offer rate in this section is over "
+                    f"those {span:.1f} measured days. The oldest counted row is "
+                    f"`{usage.get('first_event')}`; the depth is measured from the rows on "
+                    f"each run, so this sentence goes quiet by itself once the store is "
+                    f"deep enough — it is not a date anyone has to remember to update.")
     head.append("")
     head.append("| skill | offers | loaded | ignored | loaded share |")
     head.append("|---|---|---|---|---|")

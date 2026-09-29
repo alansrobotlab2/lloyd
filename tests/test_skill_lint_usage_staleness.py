@@ -21,12 +21,26 @@ What is NOT pinned here is a retirement threshold. The window is 30 days because
 that is the span `skill_injection_counts` takes, and the rows only begin 2026-09-25,
 so a 30-day window is not 30 days deep until ~2026-10-24 (#1603's owed list). The
 report prints counts; it does not decide which skill is dead.
+
+Since #1815 the same file also holds the section's *span* to account, which is the
+other half of not lying with a true number. The heading used to read "Usage over the
+last 30 days" while the rows beneath it reached back four days, so 123 `loaded share`
+percentages were four-day rates wearing thirty-day labels. `first_event` (the reader's
+measured depth) has to be the oldest row COUNTED and `None` over an empty store —
+pinned in `tests/test_skill_injection_telemetry.py` — and what the section prints with
+it is pinned here: the measured span on the line carrying the counts, the shortfall
+said in words when it exceeds a day, the declared window and no notice when the store
+really is that deep, and no date literal anywhere in the code that produces the depth.
 """
 
 from __future__ import annotations
 
+import ast
 import importlib.util
+import inspect
 import json
+import re
+import textwrap
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -223,6 +237,264 @@ def test_the_report_reads_the_window_through_the_shared_reader(tmp_path, monkeyp
     assert seen == {"root": tmp_path, "days": 13}, seen
     assert out["days"] == 13, (
         f"the renderer prints the window from the dict: {out}")
+
+
+#: Minutes-per-day, so a fixture's age is written as the span it is meant to be.
+MINUTES_PER_DAY = 1440.0
+
+#: An ISO calendar date standing in code, of the kind #1815 forbids in the span.
+_DATE = re.compile(r"\b20\d\d-\d\d-\d\d\b")
+
+
+def _rows_spanning(root: Path, ages_days: list[float], skill: str = "voice-mode") -> Path:
+    """One counted row per age in `ages_days`, oldest first.
+
+    Ages are in days back from `NOW`, which is the fixture's own clock, not the
+    reader's — `until` is `now()` at read time, so a span asserted to one decimal
+    here is stable by the three-order-of-magnitude margin between a fixture's age and
+    the milliseconds it takes pytest to get as far as the reader.
+    """
+    return _write_log(root, [
+        _match_row(skill, landed=(i % 2 == 0),
+                   ts=_ts(int(round(age * MINUTES_PER_DAY))))
+        for i, age in enumerate(ages_days)])
+
+
+def _line_with(lines: list[str], needle: str) -> str:
+    hits = [ln for ln in lines if needle in ln]
+    assert hits, f"no printed line carries {needle!r}:\n" + "\n".join(lines)
+    return hits[0]
+
+
+def _heading(lines: list[str]) -> str:
+    return _line_with(lines, "### Usage over the")
+
+
+def test_a_two_day_store_asked_for_thirty_days_prints_the_two_day_span(tmp_path):
+    """Clause 4, shallow half, and clause 3: the section states the span it measured.
+
+    The fixture's oldest counted row is two days back and the report asks for thirty,
+    so the pre-#1815 section printed a heading of "the last 30 days" over a two-day
+    measurement and a table of `loaded share` percentages that were two-day rates. The
+    three claims that had to change are checked separately: the heading names the
+    measured span and not the requested one, the counts line names it too (so the span
+    travels with the numbers rather than living in a heading a quoted table row leaves
+    behind), and the shortfall is said in words with the measured depth in it.
+    """
+    _rows_spanning(tmp_path, [2.0, 0.5, 0.01])
+    usage = sl.collect_usage_counts(days=30, root=tmp_path)
+    assert not usage.get("error"), usage
+    assert usage["events"] == 3, usage
+    lines = sl.usage_lines(usage, ["voice-mode"])
+    body = "\n".join(lines)
+
+    heading = _heading(lines)
+    # The printed span is derived here rather than written as the literal "2.0", so the
+    # node cannot tick over into a flake on a slow run (rows age from a module-level NOW
+    # while the reader's `until` is its own now()). What makes it non-tautological is the
+    # range: `first_event` pinned to `since`, which is the failure it guards, would derive
+    # ~30 days and fail here before the string comparison is ever reached.
+    span = (datetime.fromisoformat(usage["until"])
+            - datetime.fromisoformat(usage["first_event"])).total_seconds() / 86400.0
+    assert 1.99 <= span < 2.05, \
+        f"the store is not two days deep, so this node measures something else: {usage}"
+    shown = f"{span:.1f}"
+    assert f"{shown} measured days" in heading, heading
+    assert "last 30 days" not in heading, \
+        f"the heading still asserts the requested span as the measured one: {heading}"
+
+    counts = _line_with(lines, "rows over")
+    assert f"measured span {shown} days" in counts, counts
+    assert "3 rows" in counts and "1 sessions" in counts and "1 skills" in counts, counts
+
+    notice = _line_with(lines, "shallower")
+    assert f"{shown} days" in notice and "30" in notice, notice
+    assert f"{shown} measured days" in body, body
+    assert not any("Usage over the last 30 days" in ln for ln in lines), \
+        "the section presents a 30-day span as the span of these counts"
+
+
+def test_a_store_reaching_the_asked_window_prints_the_declared_window_and_no_notice(
+        tmp_path):
+    """Clause 4, deep half: the notice is about the store, and retires itself.
+
+    The rows here are written across forty days, which is the case the item named: the
+    window is genuinely covered, because the reader counts only rows inside it, so the
+    OLDEST COUNTED row is inside a day of `since` even though the file is older. Two
+    things are being pinned at once. The section must go quiet — a notice that fired
+    whether or not the store was deep would be wallpaper, and wallpaper gets skipped.
+    And the two forty-day rows must NOT deepen the reported span: if an excluded row
+    could move `first_event`, this section would claim depth the counts do not have,
+    which is the same overstatement wearing the other coat.
+
+    Ages come from the module-level `NOW` while the reader's `until` is its own
+    `now()`, so the measured span can only GROW by however long the run takes: the
+    notice cannot fire spuriously from that drift, and the span below is asserted as a
+    range rather than an exact string for the same reason.
+    """
+    _rows_spanning(tmp_path, [40.0, 30.5, 29.9, 13.9, 2.8, 0.003])
+    usage = sl.collect_usage_counts(days=30, root=tmp_path)
+    assert not usage.get("error"), usage
+    assert usage["events"] == 4, \
+        f"rows outside the window were counted: {usage['events']}"
+    lines = sl.usage_lines(usage, ["voice-mode"])
+
+    heading = _heading(lines)
+    assert "### Usage over the last 30 days" in heading, heading
+    assert "measured days" not in heading, heading
+    assert not any("shallower" in ln for ln in lines), \
+        "the shallow notice fired on a window the store does cover:\n" + "\n".join(lines)
+    counts = _line_with(lines, "rows over")
+    span = re.search(r"measured span ([0-9.]+) days", counts)
+    assert span, counts
+    # 29.9 is the age of the oldest COUNTED row, not of the file: the 40.0-day and
+    # 30.5-day rows are outside the window, and an excluded row deepening the span
+    # would be the overstatement again.
+    assert 29.9 <= float(span.group(1)) < 30.0, \
+        f"the printed span is not the counted rows': {counts}"
+
+
+def _strings_outside_docstrings(src: str) -> list[str]:
+    """Every string literal in `src` that is not the source's own docstring.
+
+    One scanner, shared by the scan and by its control (`test_a_literal_date_would_be_
+    caught`), because a control that re-implements the walk proves only that the
+    re-implementation works. Takes source text rather than a function object so a test
+    can hand it a snippet the repo does not contain — which is the only way to show this
+    scanner is not blind without putting a date into production code to prove it. The
+    first statement is skipped when it is a bare string, which is where a docstring
+    lives in both a module source and a `def` source; a date in prose about the code is
+    not a date the code computes from.
+    """
+    tree = ast.parse(textwrap.dedent(src))
+    head = tree.body[0].body[0] if isinstance(tree.body[0], ast.FunctionDef) else None
+    skip = {id(head.value)} if (head is not None and isinstance(head, ast.Expr)
+                                and isinstance(head.value, ast.Constant)
+                                and isinstance(head.value.value, str)) else set()
+    return [n.value for n in ast.walk(tree)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)
+            and id(n) not in skip]
+
+
+#: The production functions that turn an asked-for window into a reported span. If a
+#: date is going to be smuggled into the depth, it happens in one of these.
+def _span_producers() -> list:
+    return [sl.measured_span_days, sl.usage_heading, sl.is_shallow_window,
+            sl._span_text, sl.usage_lines]
+
+
+def test_the_span_is_measured_and_no_date_literal_produces_it():
+    """Clause 3's other half: the depth comes from the rows, so nothing here can rot.
+
+    The bug was a sentence in prose — a heading whose span came from `USAGE_WINDOW_DAYS`
+    while the rows underneath came from the store. Pinning the fix to a date would
+    recreate it one edit later, so what is pinned is that the code which turns a
+    window into a span contains no date at all. The scan is `_strings_outside_docstrings`
+    over each producer's source; `test_a_literal_date_would_be_caught` is the positive
+    control on that same scanner, without which "no date found" would be
+    indistinguishable from a scanner that reads nothing.
+    """
+    found = {fn.__name__: _strings_outside_docstrings(inspect.getsource(fn))
+             for fn in _span_producers()}
+    # A pure predicate (`is_shallow_window`) may honestly hold no string at all, so
+    # blindness is not asserted per function: it is answered by the corpus having
+    # literals to read at all, and by `test_a_literal_date_would_be_caught`, which runs
+    # the same scanner over a snippet whose code holds a date. The exemption is
+    # load-bearing too — `usage_lines` names 2026-09-25 in its own docstring, so a scan
+    # that stopped exempting prose would go red on a true sentence.
+    assert any(found.values()), f"the scan read no literals anywhere: {found}"
+    prose_dates = [d for fn in _span_producers() for d in [fn.__doc__ or ""]
+                   if _DATE.search(d)]
+    assert prose_dates, \
+        "no producer mentions a date in its docstring any more, so the exemption the " \
+        "control below pins has nothing to exempt here and could silently stop applying"
+    for name, literals in found.items():
+        for lit in literals:
+            assert not _DATE.search(lit), \
+                f"{name} builds its span from a date literal {lit!r}; the depth must " \
+                "come from the rows, or it goes stale exactly like the heading did"
+
+
+def test_a_literal_date_would_be_caught():
+    """Positive control on the scan, through the same scanner the scan uses.
+
+    Two edges, both able to fail. A date in *code* must be found: without this, the
+    scan's silence would be indistinguishable from a scanner that parses nothing, and
+    the item's "no date literal anywhere" would be a claim about a regex nobody checked.
+    A date in the *docstring* must NOT be found: `usage_lines` says 2026-09-25 in prose,
+    so an exemption that silently stopped applying would turn this suite red on a true
+    sentence, and the next editor's fix would be to delete the honest prose.
+    """
+    code_date = _strings_outside_docstrings(textwrap.dedent('''
+            def heading(days):
+                """Prose mentioning 2026-10-24 is exempt."""
+                return f"### Usage over the {'2026-10-24'} days"
+            '''))
+    assert any(_DATE.search(s) for s in code_date), \
+        f"the scanner cannot see a date inside an f-string; literals were {code_date}"
+
+    doc_only = _strings_outside_docstrings(textwrap.dedent('''
+            def heading(days):
+                """Prose mentioning 2026-10-24 is exempt."""
+                return f"### Usage over the last {days} days"
+            '''))
+    assert not [s for s in doc_only if _DATE.search(s)], \
+        f"the scanner reported a docstring date as code: {doc_only}"
+
+
+def test_an_unmeasurable_span_says_unmeasured_rather_than_reprinting_the_ask(
+        tmp_path):
+    """The defensive branch, so the honest path is not the only one that is tested.
+
+    The real reader cannot reach this state — it reports `first_event` whenever it
+    counts a row — but `usage_lines` takes a dict, and a caller that hands it counts
+    without an oldest row must not get a heading that asserts the requested span as if
+    it had been verified. This is the shape of every future caller that fabricates the
+    dict, and it is pinned here so the fallback stays a statement of ignorance rather
+    than decaying into the old confident heading.
+    """
+    hand = {"days": 30, "events": 7, "sessions": 2, "no_telemetry": False,
+            "skills": {"voice-mode": {"offers": 7, "loaded": 3, "ignored": 4,
+                                      "max_score": 9.0}},
+            "first_event": None, "until": None}
+    lines = sl.usage_lines(hand, ["voice-mode", "never-seen"])
+    heading = _heading(lines)
+    assert "span unconfirmed" in heading, heading
+    assert "2.0 measured" not in heading and "last 30 days (span unconfirmed)" in heading
+    counts = _line_with(lines, "rows over")
+    assert "span unmeasured" in counts, counts
+    assert not any("shallower" in ln for ln in lines), \
+        "a notice about depth fired off a depth that was never measured"
+
+
+def test_the_depth_fix_adds_no_retirement_threshold_and_no_verdict_about_a_skill():
+    """Clause 5's second half: the window got readable, nothing got decided.
+
+    #1815 is only allowed to make the depth legible. A staleness or retirement cutoff
+    is owed until the rows are thirty days deep, and it is a scope call (#1603's owed
+    entry), so this pins the two constants that could carry such a cutoff at the values
+    they already had, and pins that the new sentences about depth say nothing about any
+    skill's fate. The wording is checked as a negation: the section may, and does,
+    explain that no threshold is applied — what it may not do is start applying one.
+    """
+    assert sl.USAGE_WINDOW_DAYS == 30, sl.USAGE_WINDOW_DAYS
+    assert sl.USAGE_SPAN_NOTICE_SLACK_DAYS == 1.0, sl.USAGE_SPAN_NOTICE_SLACK_DAYS
+    body = "\n".join(sl.usage_lines(
+        {"days": 30, "events": 3, "sessions": 1, "no_telemetry": False,
+         "first_event": "2026-09-25T01:17:43+00:00",
+         "until": "2026-09-29T10:34:11+00:00",
+         "skills": {"voice-mode": {"offers": 3, "loaded": 1, "ignored": 2,
+                                   "max_score": 9.0}}},
+        ["voice-mode", "never-seen"]))
+    says_none_applied = "no retirement threshold is applied to this table yet"
+    assert says_none_applied in body, body
+    # The one allowed mention is the sentence saying no cutoff exists; strip it, and
+    # nothing else may talk about a skill's fate.
+    rest = body.replace(says_none_applied, "").lower()
+    for verdict in ("retire", "dead", "obsolete", "recommend removal", "stale"):
+        assert verdict not in rest, \
+            f"the depth section now renders a verdict ({verdict}) about a skill; the " \
+            "retirement cutoff is owed, not implemented"
 
 
 def test_the_window_the_report_asks_for_is_thirty_days():

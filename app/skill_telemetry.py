@@ -83,12 +83,24 @@ def skill_injection_counts(root, days: int = DEFAULT_DAYS) -> dict:
     Returns::
 
         {"window_days": days, "since": <iso>, "until": <iso>,
+         "first_event": <iso of oldest counted row, or None>,
          "events": <rows counted>, "sessions": <distinct sessions>,
          "skipped": <rows unusable>, "no_telemetry": <bool>,
          "skills": {<name>: {"offers": n, "loaded": n, "ignored": n,
                              "max_score": f}},
          "loaded_by_read": {<name>: n}, "reads": <skills_read calls counted>,
          "note": <one-line state of the window>}
+
+    `first_event` is the measured depth of the window: the ISO stamp of the oldest
+    `prefetch.skill_match` row that was actually counted, so `until - first_event`
+    is how far the evidence reaches rather than how far the ask reached. The two
+    are not the same for as long as the store is shallower than `days` — the store
+    began 2026-09-25, so a 30-day window has never been 30 days deep (#1815) — and
+    a caller that prints one while meaning the other is overstating its own
+    evidence. It is `None` when `events == 0`, never a substituted `since`, so a
+    window that measured nothing cannot be printed as a window that measured
+    exactly what it asked for. Rows excluded as out-of-window or defective do not
+    move it: this is the span of the count, not the span of the file.
 
     `loaded_by_read` (P5) counts `skills_read(name=…)` calls in the window, off
     the `brain1.tool_call_proposed` rows — the same rows
@@ -129,6 +141,11 @@ def skill_injection_counts(root, days: int = DEFAULT_DAYS) -> dict:
     sessions: set[str] = set()
     by_read: dict[str, int] = {}
     reads = 0
+    # Oldest row actually COUNTED, tracked on the far side of the window filter
+    # rather than derived from `since`: `since` is what was asked for, this is what
+    # there was. A caller printing "over the last N days" needs the second, because
+    # the two differ for as long as the store is shallower than the window (#1815).
+    first_counted: datetime | None = None
     for path in sorted(Path(root).glob(f"*{_SUFFIX}")):
         session_id = path.name[: -len(_SUFFIX)]
         with path.open("r", encoding="utf-8") as fh:
@@ -188,11 +205,20 @@ def skill_injection_counts(root, days: int = DEFAULT_DAYS) -> dict:
                     bucket["ignored"] += 1
                 events += 1
                 sessions.add(session_id)
+                if first_counted is None or when < first_counted:
+                    first_counted = when
 
     return {
         "window_days": days,
         "since": since.isoformat(timespec="seconds"),
         "until": until.isoformat(timespec="seconds"),
+        # The measured depth of the window, as opposed to its declared depth: the
+        # oldest row inside the window that was counted, ISO like `since`/`until`.
+        # `None` when `events == 0` — never `since` and never an epoch, because a
+        # caller that subtracts it would turn "no evidence at all" into "evidence
+        # exactly as deep as the ask", which is the overstatement #1815 is about.
+        "first_event": (first_counted.isoformat(timespec="seconds")
+                        if first_counted is not None else None),
         "events": events,
         "sessions": len(sessions),
         "skipped": skipped,

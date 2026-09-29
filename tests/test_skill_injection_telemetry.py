@@ -20,7 +20,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app.skill_telemetry import SKILL_MATCH_EVENT, skill_injection_counts  # noqa: E402
+from app.skill_telemetry import (  # noqa: E402
+    SKILLS_READ_TOOL, SKILL_MATCH_EVENT, TOOL_CALL_EVENT, skill_injection_counts)
 
 
 def _stamp(**delta) -> str:
@@ -54,6 +55,82 @@ def _read_all(res: dict) -> dict:
 
 
 # ── clause 4: per-skill offer / loaded / ignored over an N-day window ─────────
+
+# ── #1815 clause 1: the window's MEASURED depth, beside the window asked for ──
+
+def test_first_event_is_the_oldest_counted_row(tmp_path):
+    """`first_event` is how far the evidence reaches, not how far the ask reached.
+
+    skill-lint printed "over the last 30 days" over a store four days deep, and every
+    `loaded share` in that section read as a thirty-day rate. The field that fixes it is
+    only honest if it is the oldest row the reader actually COUNTED, so the fixture
+    seeds three rows the reader declines and puts each one older than the real answer:
+    one outside the window, one defective (no score), one of the other event type the
+    same reader parses. Any of the three leaking into `first_event` would deepen the
+    span the counts cannot support — the same overstatement, one field over.
+    """
+    oldest = _stamp(days=3, minutes=7)
+    _seed(tmp_path, "s-old", [_match("voice-mode", 9.0, True, ts=oldest)])
+    _seed(tmp_path, "s-new", [
+        _match("voice-mode", 8.0, True, ts=_stamp(minutes=5)),
+        _match("voice-mode", 7.0, False, ts=_stamp(days=1, minutes=30)),
+        # Three rows older than the real answer, each declined by a different rule:
+        # outside the window, defective (no score), and the other event type this
+        # reader parses. Any of them leaking into `first_event` would deepen the span
+        # the counts cannot support — the same overstatement, one field over.
+        _match("ghost-window", 4.0, True, ts=_stamp(days=35)),
+        {"ts": _stamp(days=25), "event": SKILL_MATCH_EVENT,
+         "data": {"skill": "ghost-defect"}},            # no score -> skipped
+        {"ts": _stamp(days=27), "event": TOOL_CALL_EVENT,
+         "data": {"name": SKILLS_READ_TOOL,
+                  "args": json.dumps({"name": "voice-mode"})}},
+    ])
+
+    res = skill_injection_counts(tmp_path, 30)
+
+    assert res["events"] == 3, res                       # the three real offer rows
+    assert res["skipped"] == 1, res                      # the unscored one
+    assert res["reads"] == 1, res
+    assert res["first_event"] == oldest[:19] + "+00:00", res
+    assert datetime.fromisoformat(res["first_event"]) > datetime.fromisoformat(
+        res["since"]), \
+        f"the measured depth was pinned to the asked-for floor: {res}"
+    assert set(res["skills"]) == {"voice-mode"}, res     # no ghost skill leaked in
+
+
+def test_first_event_is_none_when_the_window_counted_nothing(tmp_path):
+    """An empty store gets no span, so it cannot be printed as a full one.
+
+    `None` rather than `since`, and rather than an epoch: a caller that subtracts
+    `first_event` from `until` would otherwise turn "the store holds nothing" into
+    "the store is exactly as deep as you asked", which is the misreading #1815 exists
+    to stop. Two empty shapes are covered because they reach the same field by
+    different routes — a directory with no rows at all, and a directory full of rows
+    that the window excludes.
+    """
+    empty = skill_injection_counts(tmp_path / "absent", 30)
+    assert empty["events"] == 0 and empty["no_telemetry"] is True, empty
+    assert empty["first_event"] is None, empty
+    assert empty["first_event"] != empty["since"], empty
+
+    excluded = tmp_path / "out-of-window"
+    _seed(excluded, "s-x", [
+        _match("voice-mode", 5.0, True, ts=_stamp(days=90)),
+        {"ts": _stamp(days=91), "event": SKILL_MATCH_EVENT, "data": {"skill": "x"}},
+    ])
+    res = skill_injection_counts(excluded, 7)
+    assert res["events"] == 0 and res["first_event"] is None, res
+
+    only_reads = tmp_path / "pull-only"
+    _seed(only_reads, "s-y", [
+        {"ts": _stamp(minutes=2), "event": TOOL_CALL_EVENT,
+         "data": {"name": SKILLS_READ_TOOL,
+                  "args": json.dumps({"name": "voice-mode"})}}])
+    pulled = skill_injection_counts(only_reads, 7)
+    assert pulled["reads"] == 1 and pulled["events"] == 0, pulled
+    assert pulled["first_event"] is None, \
+        "a skills_read call deepened the offer window's span; the two are different rows"
+
 
 def test_three_seeded_skills_come_back_with_their_three_counts(tmp_path):
     """One full-body load, one excerpt load, one offer that never landed.
