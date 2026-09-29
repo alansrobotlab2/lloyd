@@ -752,3 +752,43 @@ def test_the_trace_line_never_moves_the_alarm_exit_code(tmp_path, monkeypatch):
     assert list(inspect.signature(khr._alarms).parameters) == [
         "store_stats", "hygiene", "duplicate_id_files", "baseline"], (
         "_alarms() gained an input that can carry the trace count to the exit code")
+
+
+# ── clause 5 (#1817): the counter has to see the writer that actually runs ────
+# Everything above feeds the counter a corpus this file wrote by hand. That is the
+# right shape for testing the counter and exactly why the line could read
+# `0 of 119,167 fact records` while a daily job condemned facts: nothing in this file
+# had ever asked what the improve loop's own write looks like to the report. So this
+# node runs the real writer into a temp root and hands the report THAT root.
+
+def test_the_daily_writer_s_mark_is_counted_by_the_report(tmp_path, monkeypatch):
+    """One `confidence` apply by the improve loop is traced >= 1 to the report.
+
+    Crosses the boundary the nightly line is built on: `agent_mcp.fact_improvement`
+    writes the markdown, `knowledge-health-report.py` reads it back through its own
+    loader. Before #1817 the pair was one-directional — the writer marked
+    `invalid_at` through a text match with no extras, so the counter had nothing to
+    find and the line measured a population the only writer that runs could not move.
+    """
+    import test_fact_improvement_confidence_trace as writer
+    fi = writer.fi
+
+    root = writer._built_tree(tmp_path, monkeypatch, list(writer._RECORDS))
+    planned = fi.plan_entity("Idcol")
+    action = next(a for a in planned["actions"] if a["kind"] == "confidence")
+    result = fi.apply_action(action, writer._iso(1))
+    assert result["expired_count"] == 1 and result["traces_written"] == 1, result
+
+    # The report's OWN loader, pointed at the root the writer just wrote — not this
+    # file's `_write`, which would only prove the counter matches this file's shape.
+    entities = khr.load_entities(root)
+    traced, total = khr.contradiction_trace_coverage(entities)
+    assert total == 4, f"the report lost records on read: {total}"
+    assert traced == 1, (
+        f"the writer left a trace and the counter found {traced}: the two halves "
+        "disagree about what a resolution record looks like")
+    # And it is the invalidated record that carries it, so the denominator the line
+    # prints (`of N fact records`) and the numerator are the same population.
+    marked = [f for groups in entities.values() for group in groups
+              for f in group["facts"] if f.get("invalid_at")]
+    assert len(marked) == 1 and marked[0].get("conflicts_with"), marked

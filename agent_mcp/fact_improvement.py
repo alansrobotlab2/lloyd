@@ -63,7 +63,12 @@ from app import paths as _paths
 from app.gitinfo import head_commit as _head_commit
 from app.paths import LLOYD_HOME, PIPELINE_DIR, VAULT_FACTS_ROOT, VAULT_ROOT
 from agent_mcp._shared import _find_entity_dir
-from agent_mcp.facts import _apply_fact_marks, _detect_contradictions_sync
+from agent_mcp.facts import (
+    _apply_fact_marks,
+    _CONTRADICTION_TRACE,
+    _contradiction_trace,
+    _detect_contradictions_sync,
+)
 from agent_mcp.retrieval import get_facts_sync as _get_facts_sync
 from app.kg_store import store as _store
 
@@ -958,6 +963,20 @@ def plan_entity(entity: str, max_actions: int = MAX_ACTIONS_PER_ENTITY) -> dict:
                   # action planned against a view that carried no attribution
                   # gets "" and the writer says so rather than guessing.
                   "loser_source_file": loser.get("source_file") or "",
+                  # And the same for the WINNER, because a contradiction has two
+                  # facts and the loser's own record cannot name the one it lost
+                  # to. The plan step computed this record three lines above and
+                  # until #1817 let it escape only as prose inside `reason`, which
+                  # is why the daily writer's marks carried no
+                  # `conflicts_with` field while the nightly count of that field
+                  # read `0 of 119,167 fact records`: apply-time had a text and a
+                  # sentence, and a trace needs a file and an id.
+                  "winner_id": winner.get("id"),
+                  "winner_source_file": winner.get("source_file") or "",
+                  # Whole, not the 70-character excerpt `reason` carries for the
+                  # reader: a trace's `fact` is what a later reader reads instead of
+                  # opening the winner's file, and it must be the claim, not a cut.
+                  "winner_fact": winner.get("fact", ""),
                   "reason": reason}
         # Dedupe on the fact text, not the id: ids are per-file counters, so
         # `fact-001` in three category files is three different facts and one
@@ -1082,31 +1101,120 @@ def apply_action(action: dict, now_iso: str) -> dict:
     recorded the mismatch as a finding — which is the kind of thing a record can
     say about itself while the code keeps doing the opposite.
     """
-    aim = _aim_substring(action["entity"], action)
-    if aim is None:
-        return {"expired_count": 0, "skipped": "no unique match for the condemned fact"}
-    entity_dir = _find_entity_dir(action["entity"])
-    if entity_dir is None:
-        return {"expired_count": 0, "skipped": "entity directory not found"}
-    if action["kind"] == "confidence":
+    is_confidence = action["kind"] == "confidence"
+    if is_confidence:
         field, reason_field = "invalid_at", "invalid_reason"
     else:
         field, reason_field = "expired_at", "expire_reason"
+    aim = _aim_substring(action["entity"], action)
+    if aim is None:
+        # Same keys as every other return, so a caller summing a run's actions reads a
+        # measured zero rather than a missing one it has to guess the meaning of.
+        return {"expired_count": 0, "skipped": "no unique match for the condemned fact",
+                "field": field, "traces_written": 0, "traces": [], "untraceable": 0}
+    entity_dir = _find_entity_dir(action["entity"])
+    if entity_dir is None:
+        return {"expired_count": 0, "skipped": "entity directory not found"}
+    # Two writers stamp contradiction-loser semantics onto `invalid_at`, and only one
+    # of them left a trace: `facts._fact_resolve_apply` (the MCP tool, no automated
+    # caller) marks by (file, id) and passes `extra_fields`, while this daily loop
+    # marked the same field through a text match with no extras at all, so its losers
+    # were unanswerable and the nightly `conflicts_with` count stayed blind to the
+    # only writer that runs. A `superseded` action is a different judgment — write
+    # order, not a contradiction — so it keeps `expired_at`/`expire_reason` and gains
+    # no trace. #1817 closes the gap by making the confidence route aim by identity,
+    # the route that can carry one.
     # The attribution is relative to FACTS_ROOT (`Entity/Entity-usage.md`), so
     # it resolves against the root — joining it to the entity dir would name a
     # path one level too deep and match nothing.
     scope = ([FACTS_ROOT / action["loser_source_file"]]
              if action.get("loser_source_file")
              else list(entity_dir.glob("*.md")))
+    # #1817: a `confidence` action whose loser carries an attribution is aimed by
+    # (file, id) — the one route `_apply_fact_marks` will attach an extra field on
+    # (`facts.py`, `if how == "identity" and extra:`, a documented restriction this
+    # change honours rather than widens). The trace is built BEFORE the call and
+    # travels inside the same atomic write as the mark: mark-then-field could leave a
+    # trace naming a winner on a fact whose mark then failed, and a mark with no trace
+    # is the state #1817 was filed to end. A `superseded` action, and a `confidence`
+    # loser planned against a view that carried no file, keep the text route exactly
+    # as before — re-aiming an id-less action at the WINNER's file could stamp the
+    # winner invalid by text match, which costs more than the trace it would buy.
+    key = None
+    if is_confidence and action.get("loser_id") and action.get("loser_source_file"):
+        key = (action["loser_source_file"], action["loser_id"])
+    trace = _confidence_trace(action) if (is_confidence and key) else None
+    reason = f"improve {action['kind']}: {action['reason']}"
+    marks = {key: [reason]} if key else {}
+    extras = {key: {_CONTRADICTION_TRACE: trace}} if trace else None
     applied = _apply_fact_marks(
-        {}, scope, field=field, stamp=now_iso, reason_field=reason_field,
-        text_matches={aim.lower(): ("phrase",
-                                    f"improve {action['kind']}: {action['reason']}")},
-        stop_after_first=True)
+        marks, scope,
+        field=field, stamp=now_iso, reason_field=reason_field,
+        text_matches=None if key else {aim.lower(): ("phrase", reason)},
+        stop_after_first=True, extra_fields=extras)
     if applied["marked"] == 0 and applied["unapplied"]:
-        return {"expired_count": 0, "error": str(applied["unapplied"][0]["reason"])}
+        # The accounting keys travel with EVERY return, including this one: a caller
+        # summing `traces_written` across a run's actions must not read a missing key
+        # as a zero it never measured, and an action that marked nothing has by
+        # definition written no trace and condemned nothing it cannot name.
+        return {"expired_count": 0, "field": field, "traces_written": 0,
+                "traces": [], "untraceable": 0,
+                "error": str(applied["unapplied"][0]["reason"])}
+    # Counted from what the write REPORTS, not from what was asked for, which is how
+    # `_fact_resolve_apply` counts its own (`traces_written = sum(... if key in
+    # traces)`, over `matched_facts`): an already-invalid fact lands in
+    # `already_marked` instead of `matched_facts` and gets no second trace, and an
+    # action that marked nothing has an empty `matched_facts`, so a rerun over one
+    # pair cannot inflate the nightly figure that reads this field.
+    # The record this action aimed, that the writer says it touched: the same test
+    # `_fact_resolve_apply:906-907` applies (`key in traces` over `matched_facts`), made
+    # per-record because this writer has exactly one key. A rerun lands the loser in
+    # `already_marked` instead, so it contributes nothing, and a report that names some
+    # other record cannot raise the count either — which keeps `len(traces) ==
+    # traces_written` true, the invariant a caller has to be able to rely on when it
+    # sums these across a run.
+    traces_written = (1 if trace is not None and key is not None and any(
+        (m.get("file"), m.get("id")) == (str(key[0]), str(key[1]))
+        for m in applied["matched_facts"]) else 0)
     return {"expired_count": applied["marked"], "field": field,
+            # What the nightly line counts, per action. The counter sums these, so the
+            # figure in the report and the figure in this run record are one
+            # measurement of one store rather than two claims about it.
+            "traces_written": traces_written,
+            "traces": ([trace] if traces_written else []),
+            # The #1817 name for the same fact as `_fact_resolve_apply`'s
+            # `untraceable`: a confidence pair that marked something but cannot name
+            # its winner is counted here, not silently absent from `traces_written`.
+            "untraceable": (1 if (is_confidence and trace is None
+                                  and applied["marked"]) else 0),
             "marked": applied["matched_facts"]}
+
+
+def _confidence_trace(action: dict) -> dict | None:
+    """The `conflicts_with` record for one planned `confidence` action, or None.
+
+    Rebuilds the winner as a fact view from the three keys the plan step now carries
+    (`winner_source_file`, `winner_id`, `winner_fact`) and hands it to
+    `facts._contradiction_trace`, the function that produced the record before — so
+    there is still exactly ONE builder of this shape in the tree, and the two writers
+    cannot drift into two spellings of a resolution.
+
+    None is the caller's `untraceable` case, and it is reached the same way
+    `_fact_resolve_apply:888-890` reaches it: a winner with neither a file nor an id
+    cannot be pointed at, and a trace naming nothing would be a record asserting a
+    resolution nobody can check. It is NOT an empty-string file — `_aim_identity`'s
+    spelling of that pair is a mark aimed at a directory, which is a bug, not a gap.
+    """
+    # Both halves or neither, which is `fact_identity`'s rule (`facts.py:296-300`
+    # returns None unless id AND source_file are present): an id with no file names
+    # every fact sharing that per-file counter, so it is not an address (#874).
+    if not (action.get("winner_source_file") and action.get("winner_id")):
+        return None
+    return _contradiction_trace(
+        {"source_file": action.get("winner_source_file"),
+         "id": action.get("winner_id"),
+         "fact": action.get("winner_fact")},
+        action["entity"], action.get("reason", ""), "")
 
 
 def _recall_detail(records: list[dict], summary: dict) -> dict:
