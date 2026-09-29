@@ -31,11 +31,10 @@ SETUP = ROOT / "SETUP.md"
 # Where the session exports actually live: app.paths.VAULT_SESSIONS_DIR under the
 # production data root, written by app/post_capture.py, indexed as `sessions`.
 SESSIONS_PATH = "/home/alansrobotlab/lloyd-data/_pipeline/vault-derived/sessions"
-# The one collection whose direction a person still has to decide: the daemon
-# dropped it in the 2026-09-19 edit, SETUP.md says facts reach retrieval through
-# the knowledge graph rather than qmd. Until that call is made it stays in the
-# template and stays reported as drift — which is the check working.
-UNDECIDED = "facts"
+# Dropped by the daemon in the 2026-09-19 edit and from the template on
+# 2026-09-28 (#1652): facts reach retrieval through the knowledge graph, and
+# `~/obsidian/facts` is an empty directory.
+DROPPED = "facts"
 
 
 def _patched(root: Path) -> tuple[Path, Path]:
@@ -150,12 +149,13 @@ def test_the_patched_setup_md_keeps_the_command_the_drift_check_prints(tmp_path)
     assert RESYNC_COMMAND in section
 
 
-def test_the_undecided_facts_collection_is_named_and_its_direction_left_open(tmp_path):
+def test_the_dropped_facts_collection_stays_dropped(tmp_path):
     tmpl, setup = _patched(tmp_path)
     colls = yaml.safe_load(tmpl.read_text())["collections"]
-    assert colls[UNDECIDED]["path"] == "/home/alansrobotlab/obsidian/facts"
+    assert DROPPED not in colls and len(colls) == 14, sorted(colls)
+    assert "/home/alansrobotlab/obsidian/facts" not in tmpl.read_text()
     section = _collections_section(setup.read_text())
-    assert UNDECIDED in section and "#1298" in section
+    assert "still lists `facts`" not in section and "open in #1298" not in section
 
 
 # --- the seam between the two halves --------------------------------------
@@ -174,11 +174,11 @@ def test_the_drift_check_reads_the_reconciled_template_as_in_sync(tmp_path):
     assert out["in_sync"] is True and out["drift_count"] == 0, out
 
 
-def test_the_drift_check_still_names_facts_until_its_direction_is_decided(tmp_path):
-    """Against a daemon that dropped `facts`, the check reports exactly that."""
+def test_the_drift_check_names_a_collection_the_daemon_dropped(tmp_path):
+    """Against a daemon missing one template collection, the check names it."""
     from scripts.maintenance.qmd_index_maintenance import config_drift
     tmpl, _ = _patched(tmp_path)
     colls = yaml.safe_load(tmpl.read_text())["collections"]
-    out = config_drift(tmpl, _live_like(tmp_path, colls, drop=(UNDECIDED,)))
-    assert [d["collection"] for d in out["drift"]] == [UNDECIDED], out
+    out = config_drift(tmpl, _live_like(tmp_path, colls, drop=("memory",)))
+    assert [d["collection"] for d in out["drift"]] == ["memory"], out
     assert out["drift"][0]["kind"] == "template_only"

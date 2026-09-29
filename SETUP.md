@@ -694,11 +694,10 @@ two that point into the data root (`~/lloyd-data`, [data-home](architecture/data
 
 The `models:` block pins the embed/expand/rerank GGUFs.
 
-The tracked copy also still lists `facts` at `~/obsidian/facts`, an empty
-directory; the daemon dropped that collection in the 2026-09-19 edit, and the
-real fact tree is `_pipeline/vault-derived/facts`, which reaches retrieval
-through the knowledge graph rather than qmd. Dropping it from the template is
-open in #1298 — until then the nightly drift report names it.
+There is no `facts` collection. The daemon dropped it in the 2026-09-19 edit,
+since `~/obsidian/facts` is an empty directory and the real fact tree
+(`_pipeline/vault-derived/facts`) reaches retrieval through the knowledge graph
+rather than qmd. The tracked copy dropped it on 2026-09-28 (#1652).
 
 If you change collections later, re-sync the tracked copy:
 
