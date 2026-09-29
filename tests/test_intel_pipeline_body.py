@@ -739,3 +739,208 @@ def test_the_scanner_spends_its_500_characters_on_prose_not_the_rule_free_footer
     assert not summary.endswith(ELL)
     # The prose is the channel's own, kept byte-for-byte as clause 1 keeps it.
     assert summary.startswith("Weco’s AIDE² just showed")
+
+
+# ── #1861: the channel's link block sits MID-description, and neither anchor reaches it ──
+#
+# #1561 anchored its strip on a separator rule and #1819 on a closed list of footer
+# labels, and both then required the block's WHOLE tail to be link lines — which is
+# #1561's abstention and stays. Nate B. Jones publishes no rule line, his `Full post:` +
+# Substack link and his `My Links 🔗` block sit at lines 2-9 of 41, and genuine prose
+# follows them, so both anchors abstain correctly and the block was published into
+# `knowledge/ai-llms/youtube-digest.md` (`## 2026-09-29`, SEC 2) as knowledge prose. It
+# also spent the scanner's clip budget, so the prose after it never reached the note.
+#
+# What removes it is not a wider label list — a list is how #1819 was cut to the labels
+# of one channel and the next channel reproduced the failure. It is that every line of
+# the block is a link and none of them is a sentence, which is already the property
+# #1561 tests a footer's tail for. A run holding one prose line is left byte-for-byte
+# alone: the same protection those clauses pin, applied wherever the block sits.
+
+#: The description `youtube:gbbPBr3OraQ` sent on 2026-09-29, verbatim from
+#: `yt-dlp --skip-download --print "%(description)s"`, minus that command's own trailing
+#: newline: 2218 characters, 41 lines. The channel's two link runs sit at lines 2-3 and
+#: 5-9; the prose the video is about runs from line 11; `Chapters:` and its list are
+#: lines 23-35.
+MUSE_RAW_DESCRIPTION = (
+    "I gave Meta's new AI assistant, Muse, the most boring job I had: find the subscriptions I forgot to cancel. It found $5,350 a year, and it has cancelled $1,285 a year of that so far. That same small job is why I think Amazon locked Muse out of its store.\n"
+    "\n"
+    "Full post:\n"
+    "https://natesnewsletter.substack.com/p/meta-muse-agentic-shopping?utm_source=youtube&utm_medium=video&utm_campaign=free-to-paid&utm_content=description\n"
+    "\n"
+    "My Links 🔗\n"
+    "👉🏻 Nate's Library MCP: https://unlock-ai.natebjones.com/guides/how-to-connect-nates-library?utm_source=youtube&utm_medium=video&utm_campaign=free-to-paid&utm_content=description\n"
+    "👉🏻 X: https://x.com/natebjones\n"
+    "👉🏻 TikTok: https://www.tiktok.com/@nate.b.jones\n"
+    "👉🏻 Instagram: https://www.instagram.com/nate.b.jones\n"
+    "\n"
+    "What's really happening inside Meta's Muse?\n"
+    "\n"
+    "The common story is that the company with the smartest model wins, but the real question is which assistant you trust with the recurring work of your life.\n"
+    "\n"
+    "In this video, I share the inside scoop on why Muse took off and who it threatens:\n"
+    "- What people are handing Muse, from subscriptions to insurance to kids' schedules\n"
+    "- How Muse makes AI usable for people who never cared about AI\n"
+    "- Why I read Amazon's block as a fight over its ad business\n"
+    "- Where Meta's money comes from if ordinary Muse use stays free\n"
+    "\n"
+    "Muse is early and asks for real trust with your data, and it is the clearest case yet that everyday usefulness decides who owns your attention.\n"
+    "\n"
+    "Chapters:\n"
+    "00:00 The subscriptions Muse found and cancelled\n"
+    "01:30 Real jobs people are handing to Muse\n"
+    "04:24 Beyond money: family schedules and logistics\n"
+    "05:58 Why Muse is easy for nontechnical people\n"
+    "11:17 Why Amazon locked Muse out\n"
+    "13:38 How Meta plans to make money from Muse\n"
+    "15:13 Amazon versus Walmart on AI shopping\n"
+    "17:54 What forgotten subscriptions are worth to businesses\n"
+    "19:14 Why the smartest model does not automatically win\n"
+    "22:36 The team Zuckerberg built to ship Muse\n"
+    "24:41 The platform Zuckerberg has always wanted\n"
+    "27:36 What Muse means for everyone else\n"
+    "\n"
+    "Listen to this video as a podcast.\n"
+    "\n"
+    "Spotify: https://open.spotify.com/show/0gkFdjd1wptEKJKLu9LbZ4\n"
+    "Apple Podcasts: https://podcasts.apple.com/us/podcast/ai-news-strategy-daily-with-nate-b-jones/id1877109372")
+
+#: The opening paragraph — the only part of that description the note was meant to carry.
+MUSE_OPENING = "I gave Meta's new AI assistant, Muse, the most boring job I had: find the subscriptions I forgot to cancel. It found $5,350 a year, and it has cancelled $1,285 a year of that so far. That same small job is why I think Amazon locked Muse out of its store."
+
+#: The question the video goes on to ask, below the channel's block. It has to SURVIVE
+#: the strip, and it is why a tail-only rule cannot work here: the block is not the tail,
+#: it is the middle of the description.
+MUSE_PROSE_HEAD = "What's really happening inside Meta's Muse?"
+
+#: The stored `summary` field of that row, verbatim: 454 characters, cut by `clip_body`
+#: inside the last arrow line so that line's URL is gone (`👉🏻 Nate's Library MCP:…`).
+#: This is the string a replay of `2026-09-29.jsonl` hands the writer.
+MUSE_STORED_SUMMARY = (
+    "I gave Meta's new AI assistant, Muse, the most boring job I had: find the subscriptions I forgot to cancel. It found $5,350 a year, and it has cancelled $1,285 a year of that so far. That same small job is why I think Amazon locked Muse out of its store.\n"
+    "\n"
+    "Full post:\n"
+    "https://natesnewsletter.substack.com/p/meta-muse-agentic-shopping?utm_source=youtube&utm_medium=video&utm_campaign=free-to-paid&utm_content=description\n"
+    "\n"
+    "My Links 🔗\n"
+    "👉🏻 Nate's Library MCP:…")
+
+#: The trailer the item names; all three marks are in the recorded row.
+MUSE_LINK_MARKS = ("Full post:", "My Links", "👉")
+
+#: `DIGEST_PROFILE` matches on `agent`, which this row's title and summary do not say
+#: (`determine_vault_path` scores `title + " " + summary`, never `why`), so this profile
+#: matches on the row's own word and routes to the same `DIGEST_FILE`.
+MUSE_DIGEST_PROFILE = {"topics": [{"name": "ai-llms", "weight": 0.9,
+                                  "keywords": ["subscriptions"]}]}
+
+
+def test_a_set_off_link_run_with_no_prose_line_is_removed_wherever_it_sits():
+    """Clause 1: a set-off run of two or more non-blank lines that holds no prose line —
+    every line a URL, a `_FOOTER_LABEL_RE` label, an arrow-prefixed pointer, or a line
+    that is only a short colon-terminated label — is removed from the middle of channel
+    text, and every line after the run comes back unchanged.
+    """
+    text = ("The video explains the rollout in three parts.\n\n"
+            "My Links 🔗\n"
+            "👉🏻 Repo: https://github.com/example/rollout\n"
+            "➡️ Docs: https://example.com/rollout\n\n"
+            "The second part covers the benchmark.")
+    assert body_mod.strip_link_footer(text) == (
+        "The video explains the rollout in three parts.\n\n"
+        "The second part covers the benchmark.")
+    # The run has to be a RUN. One label line above a paragraph is how a channel heads
+    # its own sections, and the two-line floor is what keeps it: this text differs from
+    # the one above only in that the arrow line is gone.
+    one_line = ("The video explains the rollout in three parts.\n\n"
+                "My Links 🔗\n\n"
+                "The second part covers the benchmark.")
+    assert body_mod.strip_link_footer(one_line) == one_line, \
+        "a single link line was removed: the floor is two or more non-blank lines"
+
+
+def test_the_recorded_muse_description_keeps_its_prose_and_loses_its_link_block():
+    """Clause 2: the recorded `gbbPBr3OraQ` description comes back with no `Full post:`,
+    no `My Links` and no `👉` line, and still carrying its opening paragraph and the
+    sentence `What's really happening inside Meta's Muse?` that sits BELOW the removed
+    block. Neither anchor can see it: #1561's needs a separator rule (the description has
+    none) and #1819's needs the block to be the whole tail (prose follows it)."""
+    assert len(MUSE_RAW_DESCRIPTION) == 2218, "the fixture stopped being the recorded row"
+    assert not _RULE_AT_LINE_START.search(MUSE_RAW_DESCRIPTION), \
+        "the fixture grew a separator rule and is no longer the shape under test"
+    stripped = body_mod.strip_link_footer(MUSE_RAW_DESCRIPTION)
+    for mark in MUSE_LINK_MARKS:
+        assert mark not in stripped, mark
+    assert stripped.startswith(MUSE_OPENING)
+    assert MUSE_PROSE_HEAD in stripped, "the prose after the block did not survive"
+
+
+def test_the_clip_budget_reaches_the_prose_once_the_mid_description_block_is_gone():
+    """The scanner-side half of the defect, across the boundary that decides it:
+    `scan_youtube_channels` calls `strip_link_footer` before `clip_body`
+    (youtube_scanner.py:407), so while the block survived the strip it spent the
+    500-character budget and the clip ended inside the block — which is why the stored
+    row is 454 characters of link block with no `What's really happening` prose in it.
+    With the block gone first, the budget buys the channel's prose instead."""
+    assert len(MUSE_STORED_SUMMARY) < len(MUSE_RAW_DESCRIPTION)
+    unstripped = body_mod.clip_body(MUSE_RAW_DESCRIPTION)
+    assert "My Links" in unstripped and MUSE_PROSE_HEAD not in unstripped, \
+        "the control: without the strip the clip still spends its budget on links"
+    summary = body_mod.clip_body(body_mod.strip_link_footer(MUSE_RAW_DESCRIPTION))
+    for mark in MUSE_LINK_MARKS:
+        assert mark not in summary, mark
+    assert MUSE_PROSE_HEAD in summary, repr(summary[:200])
+    # Still a clip, and still inside its budget. `clip_body` cuts at the last word
+    # boundary at or under `limit` and THEN appends its marker, so the shipped ceiling is
+    # `limit` plus that one character — a shape of that function, not of this round.
+    assert summary.endswith(body_mod.ELLIPSIS)
+    assert len(summary) <= body_mod.SUMMARY_LIMIT + len(body_mod.ELLIPSIS)
+
+
+def test_a_link_run_with_a_prose_line_inside_it_is_returned_byte_for_byte():
+    """Clause 3: the run rule is additive, and the protection it rests on is the one
+    #1561 and #1819 already pin. A set-off run with ONE prose line among its links is
+    returned exactly as sent, and the earlier rulings hold — a rule over `My Links` plus
+    `➡️ Twitter:` is stripped, a `____` with a prose paragraph under it keeps everything,
+    and a setext underline is not a promo rule."""
+    prose_in_run = ("The video explains the rollout in three parts.\n\n"
+                    "My Links 🔗\n"
+                    "👉🏻 Repo: https://github.com/example/rollout\n"
+                    "The benchmark section is the best part of it.\n\n"
+                    "Closing thoughts here.")
+    assert body_mod.strip_link_footer(prose_in_run) == prose_in_run, \
+        "a run holding a prose line was removed"
+    assert body_mod.strip_link_footer(
+        "Prose about the run.\n\n______\nMy Links 🔗\n➡️ Twitter: https://x.com/a") \
+        == "Prose about the run."
+    under_the_rule = ("Prose about the run.\n\n____\n\n"
+                      "A paragraph the channel wrote about the topic itself.")
+    assert body_mod.strip_link_footer(under_the_rule) == under_the_rule
+    setext = "Prose about the run.\n####Subhead\n______"
+    assert body_mod.strip_link_footer(setext) == setext, "a setext underline was stripped"
+
+
+def test_replaying_the_stored_muse_row_writes_no_link_block_to_the_digest(intel_state):
+    """Clause 4: the stored, already-clipped `summary` — 454 characters, ending inside an
+    arrow line with that line's URL cut off — loses its `My Links 🔗` + `👉🏻` run to the
+    same call, and written through `write_item_to_vault` the digest carries the opening
+    paragraph and none of the three link marks. A replay of `2026-09-29.jsonl` therefore
+    cannot reproduce the section this item was filed for.
+    """
+    assert len(MUSE_STORED_SUMMARY) == 454, "the fixture stopped being the stored row"
+    stripped = body_mod.strip_link_footer(MUSE_STORED_SUMMARY)
+    for mark in MUSE_LINK_MARKS:
+        assert mark not in stripped, mark
+    assert stripped == MUSE_OPENING, repr(stripped)
+
+    item = _yt(id="youtube:UC0C-17n9iuUQPylguM1d-lQ:gbbPBr3OraQ",
+               summary=MUSE_STORED_SUMMARY,
+               why="Scores 7/10: an assistant doing the subscription audit",
+               title="I Gave Meta's Muse The Most Boring Job I Had. "
+                     "It Found $5,350 A Year.")
+    written = _publish(intel_state, item, profile=MUSE_DIGEST_PROFILE)
+    digest = intel_state / "vault" / DIGEST_FILE
+    assert digest.is_file(), f"the item never reached {DIGEST_FILE}: {written[:200]!r}"
+    assert MUSE_OPENING in written
+    for mark in MUSE_LINK_MARKS:
+        assert mark not in written, mark

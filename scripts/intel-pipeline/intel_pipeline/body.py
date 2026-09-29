@@ -54,6 +54,22 @@ _SCAFFOLD_LINE_RE = re.compile(r"^\s*(?:#{1,6}\s|#{1,6}$|[-*+]\s*\[[ xX]?\])")
 #: a run of underscores inside text (`snake__case`, a table row) is not a rule.
 _RULE_LINE_RE = re.compile(r"^\s*[_=]{5,}\s*$")
 
+#: A line that is NOTHING but a short label closed by a colon: `Full post:`, `Links:`,
+#: `Podcast:`. No word may sit after the colon, so a real sentence cannot match it, and the
+#: 40-character ceiling is what keeps the first line of a wrapped paragraph out. It is the
+#: fourth shape a channel's link block is built from that `_URL_RE` and `_FOOTER_LABEL_RE`
+#: do not already cover: `My Links 🔗` is a label, the destination is a URL, and only the
+#: words pointing at them are neither (#1861).
+_RUN_LABEL_RE = re.compile(r"^\W*?[^:\n]{1,40}:\s*$")
+
+#: The arrows a pointer line starts with: `👉🏻 Nate's Library MCP: https://…`,
+#: `➡️ Twitter: https://…`. Compared as a prefix, not a pattern, so the skin-tone modifier
+#: on `👉🏻` and the variation selector on `➡️` both fall inside the match. Such a line
+#: normally carries its URL too and is already a link line; it earns its own test at the
+#: clip boundary, where `clip_body` has cut the URL off and left the pointer behind, which
+#: is exactly how #1861's stored row ends.
+_ARROW_PREFIX = ("👉", "➡", "→", "📌")
+
 #: The labels a creator writes above the links they sell: `My Links 🔗`, `Follow me`,
 #: `Business inquiries`, `Check out my Patreon`. Matched as a leading phrase after
 #: any emoji or bullet (`\W*?` skips both), because the label line usually carries no
@@ -234,6 +250,61 @@ def _is_footer_tail_line(line: str) -> bool:
                 or _FOOTER_LABEL_RE.match(line))
 
 
+def _is_link_run_line(line: str) -> bool:
+    """A line that is a link, a pointer to one, or a heading over some — and is not a
+    sentence.
+
+    Stricter than `_is_link_block_line`, which classifies lines INSIDE a block #1561 has
+    already anchored: there, the anchor carries the "this is promo" judgement and the tail
+    test only has to exclude prose. A run found without any anchor carries no such
+    evidence, so every shape in it has to be a link shape on its own: a URL, a label from
+    the closed `_FOOTER_LABEL_RE` list, an arrow-prefixed pointer, or a line that is nothing
+    but a short colon-terminated label (`Full post:`). Emails, `0:00 —` chapter lines and
+    plain prose are deliberately NOT link-run lines, which is what keeps a contact block or
+    a chapter list from being cut out of the middle of a description.
+    """
+    return bool(_URL_RE.search(line)
+                or _FOOTER_LABEL_RE.match(line)
+                or line.lstrip().startswith(_ARROW_PREFIX)
+                or _RUN_LABEL_RE.match(line))
+
+
+def _link_run_bounds(lines: list) -> Optional[tuple]:
+    """The `(start, end)` line indices of a set-off run of link lines, or None (#1861).
+
+    `end` is the first line AFTER the run, so `lines[start:end]` is the block and
+    `lines[:start] + lines[end:]` is everything the channel wrote around it.
+
+    A run is two or more non-blank link lines with at least one blank between them and the
+    line above (`_set_off`) and the line below. The floor of two is what makes it a RUN: a
+    lone `My Links 🔗` over a paragraph is how a description heads its own sections, and one
+    heading line is not evidence of a promo block.
+
+    Unlike the two footer anchors this does not require the rest of the text to be links.
+    #1561 and #1819 strip a FOOTER, so they must prove the whole tail is links — and that is
+    precisely why neither of them can see a link block sitting in the MIDDLE of a
+    description with the video's own prose below it, the shape that was published into the
+    digest on 2026-09-29. Every line after the run is returned unchanged.
+
+    The abstention is the run's own prose, not its surroundings: one sentence among the link
+    lines and there is no run to cut. That is the same protection `_ruleless_footer_start`
+    applies to a footer's tail, moved from "is this the end" to "is this a block".
+    """
+    for i, line in enumerate(lines):
+        if not line.strip() or not _is_link_run_line(line) or not _set_off(lines, i):
+            continue
+        j, non_blank, last = i + 1, 1, i
+        while j < len(lines) and (not lines[j].strip() or _is_link_run_line(lines[j])):
+            if lines[j].strip():
+                non_blank += 1
+                last = j
+            j += 1
+        closed_below = last + 1 >= len(lines) or not lines[last + 1].strip()
+        if non_blank >= 2 and closed_below:
+            return (i, j)
+    return None
+
+
 def _ruleless_footer_start(lines: list) -> Optional[int]:
     """Where a promotional footer with NO separator rule above it starts, or None (#1819).
 
@@ -316,10 +387,22 @@ def strip_link_footer(text: str) -> str:
         # and no second anchor is tried, which is what keeps #1561's abstention whole.
         return text.rstrip()
     # No set-off rule anywhere in the text: the shape #1561's anchor cannot reach (#1819).
+    #
+    # A footer is not the only block that can sit where an anchor cannot reach it. The same
+    # link block in the MIDDLE of a description, with the video's own prose below it, is
+    # what this function shipped into the digest on 2026-09-29 (#1861): both anchors above
+    # require the block to be the tail, and this one was not. Take the run out FIRST and let
+    # the footer anchor work over what is left, because the two cut different parts of one
+    # description and the recorded row needs both: the run at lines 2-9, the footer at its
+    # `Chapters:` heading. Any order that asks the footer question first returns
+    # `lines[:start]`, which still holds the block it never looked at.
+    run = _link_run_bounds(lines)
+    if run is not None:
+        lines = lines[:run[0]] + lines[run[1]:]
     start = _ruleless_footer_start(lines)
     if start is not None:
         return "\n".join(lines[:start]).rstrip()
-    return text.rstrip()
+    return "\n".join(lines).rstrip() if run is not None else text.rstrip()
 
 
 def ends_a_sentence(text: str) -> bool:
