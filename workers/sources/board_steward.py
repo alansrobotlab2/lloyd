@@ -440,10 +440,16 @@ def agreement(moves: list[dict], expected: dict[int, tuple], current: dict[int, 
     # Rate over the decisions BOTH sides made: the machine's pending moves and
     # the steward's moves on items the machine has an opinion about.
     judged = set(machine_moves) | {i for i in proposed if i in expected}
+    # No rate over an empty judged set (#1688). It used to read 1.0, and 76 of
+    # 93 live ticks judged nothing, so the record the `apply` flip is judged
+    # from read "agreement 100%" four ticks in five. `judged` is the count the
+    # flip is gated on; the set is not recoverable from the lists above (an
+    # `agree` on an item already at its wanted status is not a machine move).
     return {"agree": sorted(agree), "disagree": sorted(disagree),
             "no_opinion": sorted(no_opinion), "missed": sorted(missed),
             "machine_moves": len(machine_moves), "proposed": len(proposed),
-            "rate": (len(agree) / len(judged)) if judged else 1.0}
+            "judged": len(judged),
+            "rate": (len(agree) / len(judged)) if judged else None}
 
 
 def apply_moves(moves: list[dict], *, round_id: str = "") -> list[dict]:
@@ -571,8 +577,13 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     # ("…remain under guardian observati"). The counts are the corroborating
     # detail and the machine-derived half; read the judgment first and let the
     # counts be the part that truncates.
+    # A tick that judged nothing says so rather than printing a percentage
+    # (#1688): `rate` is None there, and "100%" over zero decisions is what
+    # made an empty run of ticks read as agreement.
+    rate = (f"{agree['rate']:.0%} of {agree['judged']} judged"
+            if agree["rate"] is not None else "not measured, 0 judged")
     counts = (f"{len(parsed['moves'])} move(s) {verb}, agreement "
-              f"{agree['rate']:.0%} ({len(agree['agree'])} agree, "
+              f"{rate} ({len(agree['agree'])} agree, "
               f"{len(agree['disagree'])} disagree, {len(agree['no_opinion'])} "
               f"where the machine abstains, {len(agree['missed'])} missed); "
               f"next pick #{parsed['next_pick'] or '—'}")

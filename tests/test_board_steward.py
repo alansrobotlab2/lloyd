@@ -77,6 +77,7 @@ def test_agreement_separates_agree_disagree_abstain_and_missed():
     assert a["missed"] == [2, 3]
     assert a["machine_moves"] == 3
     # rate is over decisions both sides made: {1,2,3} judged, 1 agrees
+    assert a["judged"] == 3
     assert a["rate"] == pytest.approx(1 / 3)
 
 
@@ -107,8 +108,19 @@ def test_events_include_each_shown_items_own_history(tmp_path):
     assert [e["item_id"] for e in out] == [898, 3], "898's old triage rides along; 7's does not"
 
 
-def test_agreement_is_perfect_when_nothing_should_move():
-    assert W.agreement([], {1: ("draft", "w")}, {1: "draft"})["rate"] == 1.0
+def test_agreement_has_no_rate_when_nothing_was_judged():
+    """#1688 clause 1. This used to assert `rate == 1.0`, and that line was the
+    bug: 76 of 93 live ticks judged nothing and every one of them read as
+    perfect agreement on the record the `apply` flip is judged from. Nothing
+    judged is no measurement, and the count says so."""
+    a = W.agreement([], {1: ("draft", "w")}, {1: "draft"})
+    assert a["rate"] is None
+    assert a["judged"] == 0
+    # One judged decision is a measurement again, whichever way it went.
+    one = W.agreement([{"item_id": 1, "status": "up_next"}], {1: ("up_next", "w")}, {1: "draft"})
+    assert one["judged"] == 1 and one["agree"] == [1] and one["rate"] == 1.0
+    missed = W.agreement([], {1: ("up_next", "w")}, {1: "draft"})
+    assert missed["judged"] == 1 and missed["missed"] == [1] and missed["rate"] == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -508,3 +520,60 @@ def _run_item():
     declined marker and `payload` for the task id.
     """
     return SimpleNamespace(source=W.NAME, payload={})
+
+
+# ── #1688: a tick that judged nothing reports no agreement percentage ─────
+
+def _steward_tick(board, monkeypatch, *, moves=(), expected=None):
+    """Run one dry-run tick on the ten-item board and return (result, ledger row).
+
+    `expected` replaces `desired_statuses` so a test can hand the machine an
+    opinion (or none) without building the ledger history that produces one.
+    """
+    import asyncio
+
+    from workers.sources import _common as C
+
+    _ten_item_board(board)
+    if expected is not None:
+        monkeypatch.setattr(B, "desired_statuses", lambda ledger: expected)
+
+    async def turn(prompt, **kw):
+        return {"text": "", "session_id": "s", "stop_reason": "stop", "num_turns": 1,
+                "structured": {"moves": list(moves), "next_pick": 0, "next_pick_reason": "",
+                               "summary": "net 0 today"}}
+    monkeypatch.setattr(C, "run_prompt_in_session", turn)
+    out = asyncio.run(W.execute(SimpleNamespace(payload={"apply": False})))
+    assert out["status"] == "success"
+    row = [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == "board_steward"][-1]
+    return out, row
+
+
+def test_a_tick_that_judged_nothing_says_agreement_was_not_measured(board, monkeypatch):
+    """#1688 clauses 2 and 3. The live row read `agreement 100% (0 agree, 0
+    disagree, 0 where the machine abstains, 0 missed)`; it now names the count
+    and prints no percentage, and the meta and the ledger row carry `judged: 0`
+    beside a `rate` of None."""
+    out, row = _steward_tick(board, monkeypatch, expected={})
+    assert "0 judged" in out["summary"]
+    assert "not measured" in out["summary"]
+    assert "%" not in out["summary"], out["summary"]
+    assert out["meta"]["agreement"]["judged"] == 0
+    assert out["meta"]["agreement"]["rate"] is None
+    assert row["agreement"]["judged"] == 0
+    assert row["agreement"]["rate"] is None
+
+
+def test_a_tick_that_judged_something_still_prints_the_percentage(board, monkeypatch):
+    """#1688 clauses 2 and 3, the other side: one agree, one missed — two
+    judged decisions, 50%, and the count rides in the meta and the ledger row
+    so the flip condition is a count rather than a rate."""
+    expected = {7: ("draft", "w"), 1: ("up_next", "w")}           # both are pending moves
+    moves = [{"item_id": 7, "status": "draft", "tags_add": [], "tags_remove": [], "note": "x"}]
+    out, row = _steward_tick(board, monkeypatch, moves=moves, expected=expected)
+    assert "agreement 50% of 2 judged" in out["summary"], out["summary"]
+    assert "not measured" not in out["summary"]
+    assert out["meta"]["agreement"]["judged"] == 2
+    assert out["meta"]["agreement"]["rate"] == pytest.approx(0.5)
+    assert row["agreement"]["judged"] == 2
+    assert row["agreement"]["rate"] == pytest.approx(0.5)

@@ -379,6 +379,14 @@ the cap. What the counts *say* is unchanged; only their position is.) Until a
 tick proposes a move it disagrees about, `apply` has nothing to be flipped on
 the strength of.
 
+Since #1688 the record no longer claims what it did not measure. `agreement()`
+carries `judged` — the decisions both sides made — on the run meta and the
+`board_steward` ledger row, and its `rate` is `None` when `judged` is 0; such a
+tick's summary reads `agreement not measured, 0 judged (…)` and one that judged
+something reads `agreement 50% of 2 judged (…)`. The flip is to be judged on a
+sum of `judged` over the ticks, not on `rate` (config.yaml's comment above the
+flip still names `rate`); the minimum is still to be chosen from real traffic.
+
 **It may never set `done`.** Closing is gated on a settled promotion whose
 outcome said `met` and stays mechanical in `close_settled_items`: a closed
 item is never re-triaged, so it is the one move the loop cannot recover from.

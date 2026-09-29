@@ -1602,8 +1602,8 @@ workers:
     # records how far its answer agrees with the machine's (`agreement()`,
     # on its `board_steward` ledger rows) and writes nothing. Flip to
     # `apply: true` only after a run of live ticks at `apply: false` whose
-    # `rate` stands over a minimum event count — `rate` reads 1.0 over zero
-    # judged decisions, so a few ticks prove nothing — and with the
+    # summed `judged` count clears a minimum and whose rate holds over it —
+    # a tick that judged nothing has no rate (#1688) — and with the
     # `autocode.status_pipeline` / `close_on_settle` handover decided as a
     # precondition of the flip, not as its consequence. With `apply: true`
     # it writes through the one status writer and `select_confirmed` takes
