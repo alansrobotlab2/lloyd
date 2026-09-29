@@ -1386,6 +1386,7 @@ def test_the_labelling_command_runs_end_to_end_with_a_stub_and_no_engine(tmp_pat
     assert proc.returncode == 0, f"{proc.stdout[-1200:]}\n{proc.stderr[-2500:]}"
     files = sorted(out.glob(lac.ARTIFACT_GLOB))
     assert len(files) == 1, f"expected one artifact, got {files}"
+    assert "*" not in files[0].name, f"the glob's wildcard leaked into {files[0].name}"
     art = json.loads(files[0].read_text(encoding="utf-8"))
     assert art["labeler"]["kind"] == "stub", (
         "the artifact must stamp that a stub produced it — the loader refuses one "

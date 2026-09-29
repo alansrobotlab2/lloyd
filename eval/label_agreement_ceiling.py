@@ -1213,7 +1213,9 @@ def main() -> int:
     out_dir = Path(args.out_dir) if args.out_dir else default_out_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    out_path = out_dir / f"{ARTIFACT_GLOB[:-5]}-{stamp}.json"
+    # The glob's own prefix, wildcard dropped: `ARTIFACT_GLOB[:-5]` kept the
+    # `*` and the first real run wrote `label-agreement-*-<stamp>.json`.
+    out_path = out_dir / f"{ARTIFACT_GLOB.split('*')[0]}{stamp}.json"
     out_path.write_text(json.dumps(art, indent=2, ensure_ascii=False),
                         encoding="utf-8")
 
