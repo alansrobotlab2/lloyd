@@ -27,7 +27,7 @@ LIVE="$HOME/lloyd"
 DATA="$HOME/lloyd-data"
 PY="$LIVE/.venvs/lloyd/bin/python"
 SC=("$HOME/.local/share/uv/tools/supervisor/bin/supervisorctl" -c "$LIVE/agent-services/supervisor/supervisord.conf")
-TIMERS=(lloyd-guardian-nag.timer lloyd-graph-backup.timer lloyd-groundskeeper-survey.timer lloyd-qmd-cleanup.timer lloyd-vault-backup.timer)
+TIMERS=(lloyd-cert-renew.timer lloyd-guardian-nag.timer lloyd-graph-backup.timer lloyd-qmd-cleanup.timer lloyd-vault-backup.timer)
 LOG="$HOME/lloyd-data-cutover-$(date +%Y%m%d-%H%M%S).log"
 exec > >(tee -a "$LOG") 2>&1
 
@@ -82,7 +82,13 @@ fi
 # ── 3. stop ──────────────────────────────────────────────────────────────────
 say "3. stopping the guardian, timers and agent-supervisord"
 systemctl --user stop lloyd-guardian
-systemctl --user stop "${TIMERS[@]}"
+# A unit this box never installed is "not loaded": systemctl still stops the rest
+# and exits non-zero, which under pipefail aborts the cutover with the fleet only
+# half quiesced and the trap restarting a stack that was never down. Tolerated the
+# way the two starts tolerate it — what keeps the tolerance from hiding a retired
+# name is the suite's check that every entry above resolves to a real unit file
+# (tests/test_data_home.py).
+systemctl --user stop "${TIMERS[@]}" || true
 systemctl --user stop agent-supervisord
 for i in $(seq 1 120); do
   systemctl --user is-active --quiet agent-supervisord || break; sleep 1

@@ -15,7 +15,10 @@ databases, `_pipeline/` and logs went with the code. They moved to
 * the guardian's knowledge-graph path (#1525): derived from this resolver by file
   path, because the watchdog runs system python on a staged snapshot and cannot
   import `app.paths`, and degrading to its own literal rather than failing to
-  boot when the resolver is missing or refuses.
+  boot when the resolver is missing or refuses;
+* the cutover script's timer fleet (#1793): every name it stops and starts around
+  the migration resolves to a unit file that exists, the tailnet renewal timer is
+  one of them, and its fleet stop survives a unit this box never installed.
 """
 from __future__ import annotations
 
@@ -1271,3 +1274,168 @@ def test_the_strays_cli_exits_nonzero_naming_an_unlisted_directory(tmp_path):
     assert out.returncode == 1, f"the cutover script would have said all clear:\n{out}"
     assert str(tree / "cache") in out.stdout, out.stdout
     assert str(tree / "README.md") not in out.stdout, "a tracked file reported as a stray"
+
+
+# ── the cutover script's timer fleet (#1793) ─────────────────────────────────
+#
+# `scripts/maintenance/cutover_data_home.sh` is bash, run once by a person on a
+# rebuilt box, and nothing here can import it. Three of its lines are what make the
+# timer fleet real: the `set -euo pipefail` that turns any non-zero status into an
+# aborted cutover, the `TIMERS=(…)` assignment that names the fleet, and the stop
+# that runs it. The nodes below take those lines out of the file verbatim and
+# execute them against a stub `systemctl` answering the way systemd answers a unit
+# that is not loaded, so a retired name or a missing tolerance fails here instead of
+# half-way through somebody's outage window with the guardian already down.
+
+CUTOVER = ROOT / "scripts" / "maintenance" / "cutover_data_home.sh"
+REPO_UNIT_DIR = ROOT / "agent-services" / "systemd"
+USER_UNIT_DIR = Path.home() / ".config" / "systemd" / "user"
+CERT_RENEW_TIMER = "lloyd-cert-renew.timer"
+#: #1012/#1574 deleted both halves of this unit on 2026-09-23 and the hand-kept
+#: fleet array went on naming it — the defect clause 2 exists to keep out.
+RETIRED_SURVEY_TIMER = "lloyd-groundskeeper-survey.timer"
+#: The array as it stood at this round's base 706ef5f6, quoted from #1793's triage
+#: rather than read out of git, so a rebase cannot move the control from under the
+#: node that runs it.
+PRE_FIX_TIMERS = ["lloyd-guardian-nag.timer", "lloyd-graph-backup.timer",
+                  RETIRED_SURVEY_TIMER, "lloyd-qmd-cleanup.timer",
+                  "lloyd-vault-backup.timer"]
+
+
+def _cutover_lines(*needles: str) -> list[str]:
+    """The one line of the cutover script containing each needle, verbatim.
+
+    Insisting on exactly one hit is what stops an extraction quietly grabbing the
+    wrong command: the same script also stops `lloyd-guardian` and
+    `agent-supervisord`, and starts this very fleet twice more.
+    """
+    lines = CUTOVER.read_text(encoding="utf-8").splitlines()
+    picked = []
+    for needle in needles:
+        hits = [ln.strip() for ln in lines if needle in ln]
+        assert len(hits) == 1, (
+            f"{needle!r} is on {len(hits)} line(s) of {CUTOVER.name}, so the "
+            "program built from it is not exercising a single command")
+        picked.append(hits[0])
+    return picked
+
+
+def _bash(program: str, *, stub_dir=None,
+          stub_log=None) -> subprocess.CompletedProcess:
+    """Run `program` under bash, optionally with a stub `systemctl` first on PATH."""
+    env = dict(os.environ)
+    if stub_dir is not None:
+        env["PATH"] = f"{stub_dir}{os.pathsep}{env['PATH']}"
+        env["STUB_LOG"] = str(stub_log)
+    return subprocess.run(["bash", "-c", program], capture_output=True, text=True,
+                          env=env)
+
+
+def _cutover_timers() -> list[str]:
+    """The TIMERS fleet as bash expands it, read from the script's own line."""
+    (timers_line,) = _cutover_lines("TIMERS=(")
+    out = _bash(f"{timers_line}\n" + "printf '%s\\n' \"${TIMERS[@]}\"")
+    assert out.returncode == 0, f"the TIMERS line is not valid bash:\n{out.stderr}"
+    return out.stdout.split()
+
+
+def _unresolved(names: list[str]) -> list[str]:
+    """Names with no unit file in the repo's unit dir or this box's user unit dir.
+
+    Membership, never equality against the repo set: `lloyd-graph-backup.timer` is
+    live on this box and tracked nowhere under `agent-services/systemd/`, and
+    `lloyd-data-snapshot.timer` sits outside the fleet on purpose because the script
+    links and enables it separately at its step 8.
+    """
+    return [n for n in names
+            if not ((REPO_UNIT_DIR / n).is_file() or (USER_UNIT_DIR / n).is_file())]
+
+
+def test_the_cutover_timer_fleet_carries_the_cert_renewal_timer():
+    """Clause 1: the renewal timer goes down and up with the rest of the fleet.
+
+    #1727 landed the renewal script and its units, but `install-services.sh:99-100`
+    are echo lines and `promote.py` only copies a unit and daemon-reloads, so
+    placement was never activation and no other list knew the timer existed. The
+    fleet array is the repo's only say in the matter: enabling the timer on goliath
+    is host state and stays with the operator (#1793's owed half).
+    """
+    timers = _cutover_timers()
+
+    assert CERT_RENEW_TIMER in timers, (
+        f"the cutover stops and starts {timers}: a rebuilt box comes back with "
+        "every timer except the one that renews the tailnet leaf")
+    assert timers.count(CERT_RENEW_TIMER) == 1, timers
+    named = [ln for ln in CUTOVER.read_text(encoding="utf-8").splitlines()
+             if CERT_RENEW_TIMER in ln]
+    assert len(named) == 1, (
+        f"the unit is spelled on {len(named)} lines; the item's own check is "
+        "`grep -c lloyd-cert-renew.timer scripts/maintenance/cutover_data_home.sh` "
+        "== 1, and the second line is prose the fleet array does not need")
+
+
+def test_every_cutover_timer_names_a_unit_file_that_exists():
+    """Clause 2: no name in the fleet points at a unit nothing on this box can load.
+
+    The array is kept by hand from memory of what the box runs, and #1012/#1574
+    deleted `lloyd-groundskeeper-survey` out from under it on 2026-09-23. Resolving
+    every name against a real unit file is the only check a hand-maintained list can
+    survive; the witness at the end is what proves this node can fail, by running
+    the same resolver over the array exactly as #1793 found it.
+    """
+    timers = _cutover_timers()
+
+    assert RETIRED_SURVEY_TIMER not in timers, (
+        f"{timers} still names a unit #1012 deleted: systemd answers a stop to it "
+        "with 'Unit not loaded' and a non-zero exit")
+    unresolved = _unresolved(timers)
+    assert unresolved == [], (
+        f"no unit file for {unresolved} in either {REPO_UNIT_DIR} or "
+        f"{USER_UNIT_DIR}")
+    assert (REPO_UNIT_DIR / CERT_RENEW_TIMER).is_file(), (
+        "the renewal timer has to be tracked in the repo and not merely installed "
+        "on this box, or the fleet this file pins exists on one machine")
+
+    assert _unresolved(PRE_FIX_TIMERS) == [RETIRED_SURVEY_TIMER], (
+        "the resolver did not flag the retired unit in the array as filed, so the "
+        "assertion above is passing on a check that matches nothing")
+
+
+def test_the_cutover_fleet_stop_survives_a_unit_that_is_not_loaded(tmp_path):
+    """Clause 3: stopping the fleet cannot abort the cutover over one dead name.
+
+    `set -euo pipefail` sits at the top of the script and both starts of this array
+    already carry `|| true`; the stop did not. systemd answers a stop naming a unit
+    that is not loaded by stopping the others and exiting non-zero, so the one edge
+    expected to happen — a timer this box never installed, as of this round the
+    retired survey timer — was the edge that abandoned a migration with the guardian
+    stopped and the timers half down. The control at the end strips the tolerance
+    from the same line to show which half of it is doing the work.
+    """
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir()
+    stub = stub_dir / "systemctl"
+    stub.write_text("#!/usr/bin/env bash\n"
+                    "printf 'systemctl %s\\n' \"$*\" >> \"$STUB_LOG\"\n"
+                    "exit 1\n", encoding="utf-8")
+    stub.chmod(0o755)
+
+    set_line, timers_line, stop_line = _cutover_lines(
+        "set -euo pipefail", "TIMERS=(", 'systemctl --user stop "${TIMERS[@]}"')
+
+    out = _bash("\n".join([set_line, timers_line, stop_line]),
+                stub_dir=stub_dir, stub_log=tmp_path / "stop.log")
+    assert out.returncode == 0, (
+        f"the fleet stop aborted the script (rc {out.returncode}):\n{out.stderr}")
+    called = (tmp_path / "stop.log").read_text(encoding="utf-8")
+    assert "--user stop" in called, called
+    for name in _cutover_timers():
+        assert name in called, f"{name} was not in the stop that ran:\n{called}"
+
+    intolerant = stop_line.replace(" || true", "")
+    assert intolerant != stop_line, "the stop line carries no tolerance to test"
+    control = _bash("\n".join([set_line, timers_line, intolerant]),
+                    stub_dir=stub_dir, stub_log=tmp_path / "control.log")
+    assert control.returncode != 0, (
+        "the stop survives a not-loaded unit even with the tolerance stripped, so "
+        "nothing here is pinning the tolerance")
