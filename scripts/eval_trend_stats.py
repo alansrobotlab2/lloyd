@@ -143,6 +143,27 @@ CORPUS_KEYS = ("facts", "edges_active", "entities")
 #: different name would read as a legacy artifact forever, silently.
 GOLD_LABELS_KEY = "labels_sha256"
 
+#: The five scored rates whose denominator #1663 re-defined on 2026-09-28, each keyed to
+#: the leg whose gold-bearing subset that rate now divides over. `eval/run_eval.py:911`
+#: (`GOLD_BEARING_LEGS`) is the same map at write time; it is restated here rather than
+#: imported because a trend tool has to be re-runnable over artifacts the current
+#: scorer no longer wrote, and a `run_eval` import drags the engine's whole config with
+#: it. #1822.
+GOLD_BEARING_LEGS = {
+    "entity_hit_rate": "entities",
+    "entity_hit_rate_retrieval_carried": "entities",
+    "doc_hit_rate": "docs",
+    "mrr_doc": "docs",
+    "ndcg10": "docs",
+}
+#: The `records[].expected` keys that say whether one query carries gold for one leg.
+#: A non-empty list is presence, which is what #1663 divides over — so the denominator
+#: is a property of the record and never of a number the artifact publishes about it.
+#: `summary.overall.ci95[<metric>].n` is deliberately NOT read: on every pre-re-base
+#: artifact it is the all-records n, so it says "nothing moved" precisely where the
+#: re-base happened.
+GOLD_EXPECTED_KEYS = ("entities", "docs")
+
 #: Nightly claims written into a run summary, re-scored by default. Each is a
 #: verdict that was published without an interval; the audit re-runs the test
 #: the sentence implicitly claims to have passed.
@@ -199,6 +220,14 @@ class Night:
     #: writer emits null only for a run that scored no gold at all, and either way
     #: there is nothing to compare, so the guard stays silent.
     labels_sha256: str | None = None
+    #: leg -> query ids whose own `expected` block carries gold for that leg, or None
+    #: when NO record in the artifact carried an `expected` block at all. Retained here
+    #: rather than recomputed downstream because it is the only record-level evidence
+    #: of what denominator a rate divided over, and `Night` used to keep `scores` alone
+    #: and drop it at load time (#1822). None and a leg of size 0 are different states:
+    #: the first is "this artifact says nothing about gold", the second is "no query
+    #: carries gold", and only the second is a measurement.
+    gold_ids: dict[str, set[str]] | None = None
 
     @property
     def ids(self) -> list[str]:
@@ -233,6 +262,12 @@ def load_night(path: Path) -> Night:
     if not isinstance(records, list) or not records:
         raise ValueError(f"{path.name}: no records[] — this is not a per-query baseline")
     scores: dict[str, dict] = {}
+    #: leg -> query ids whose own `expected` block carries gold for that leg, or None
+    #: until some record proves this artifact records gold at all. Built here because
+    #: `scores` keeps the `scoring` block alone: once this loop ends, the per-record
+    #: gold that decided each rate's denominator under #1663 is no longer reachable,
+    #: and a trend tool that cannot see it cannot see the re-base at all (#1822).
+    gold_ids: dict[str, set[str]] | None = None
     for rec in records:
         rid = rec.get("id")
         if rid is None:
@@ -243,6 +278,14 @@ def load_night(path: Path) -> Night:
         if not isinstance(scoring, dict):
             raise ValueError(f"{path.name}: record {rid!r} has no scoring block")
         scores[rid] = scoring
+        expected = rec.get("expected")
+        if isinstance(expected, dict):
+            if gold_ids is None:
+                gold_ids = {leg: set() for leg in GOLD_EXPECTED_KEYS}
+            for leg in GOLD_EXPECTED_KEYS:
+                vals = expected.get(leg)
+                if isinstance(vals, (list, tuple)) and len(vals) > 0:
+                    gold_ids[leg].add(rid)
     corpus = doc.get("corpus") if isinstance(doc.get("corpus"), dict) else None
     # Absent, null and empty all mean "this artifact records no gold fingerprint";
     # only a non-empty string is a stamp, and a guard that read `""` as a value would
@@ -250,7 +293,8 @@ def load_night(path: Path) -> Night:
     gold = doc.get(GOLD_LABELS_KEY)
     return Night(label=label, path=Path(path), ran_at=ran_at, corpus=corpus,
                  scores=scores,
-                 labels_sha256=gold if isinstance(gold, str) and gold else None)
+                 labels_sha256=gold if isinstance(gold, str) and gold else None,
+                 gold_ids=gold_ids)
 
 
 def load_window(baselines_dir: Path, since: str | None = None,
@@ -412,6 +456,13 @@ class Transition:
     #: no finding about — an equal pair, and a pair where either night carries no
     #: fingerprint at all, which is every artifact written before #1637.
     incomparable: str | None = None
+    #: Which of the five scored rates divide over a different gold subset on each side
+    #: of this pair (#1663, via `definition_break`), or None. An ANNOTATION and never a
+    #: refusal: it is not read by `auditable`, the pair stays joinable, and the
+    #: statistics print as they always did — #1663's owed-check ruled on 2026-09-29 that
+    #: the pre-re-base nights stay in the published window annotated rather than
+    #: dropped, which is the opposite of what `incomparable` above does.
+    definition_break: str | None = None
 
     @property
     def auditable(self) -> bool:
@@ -526,6 +577,36 @@ def _gold_moved(prev: Night, cur: Night, ids: list[str]) -> str | None:
             f"{GOLD_LABELS_KEY}={cur.labels_sha256} in {cur.label}")
 
 
+def definition_break(prev: Night, cur: Night) -> str | None:
+    """The five scored rates whose gold-bearing subset differs between two nights.
+
+    #1663 (`efcee660`) re-defined each of the five on 2026-09-28: a rate now divides
+    over the queries carrying gold for its own leg, where before it divided over every
+    record. Nothing in the id join can see that — an unchanged corpus keeps every id —
+    so the only thing a pair can be audited against is each record's own gold, which is
+    what the loader retains in ``Night.gold_ids``.
+
+    Deliberately NOT ``summary.overall.ci95[<metric>].n``: on a pre-re-base artifact
+    that field is the all-records n, so a pair straddling the re-base would show two
+    numbers that never moved while the subset every rate divides over had. Absence of an
+    ``expected`` block is silence, not a zero denominator, for the same reason the #1637
+    guard treats a missing fingerprint as nothing to compare: annotating every legacy
+    pair would spend the one line per window that means something.
+    """
+    if prev.gold_ids is None or cur.gold_ids is None:
+        return None
+    moved = []
+    for metric, leg in GOLD_BEARING_LEGS.items():
+        n_prev, n_cur = len(prev.gold_ids[leg]), len(cur.gold_ids[leg])
+        if n_prev != n_cur:
+            moved.append(f"{metric} {n_prev} -> {n_cur}")
+    if not moved:
+        return None
+    return (", ".join(moved) + " — the queries carrying gold for the named leg(s) "
+            "differ between these nights, so each rate above is a rate over a "
+            "different subset (#1663 denominator re-base, annotated not dropped)")
+
+
 def audit_transition(prev: Night, cur: Night, reps: int = BOOT_REPS,
                      seed: int = SEED) -> Transition:
     try:
@@ -555,7 +636,8 @@ def audit_transition(prev: Night, cur: Night, reps: int = BOOT_REPS,
             [_num(cur.scores[i], key) for i in ids],
             reps=reps, seed=seed)
     return Transition(prev=prev, cur=cur, n=len(ids), legs=legs,
-                      drift=corpus_diff(prev, cur))
+                      drift=corpus_diff(prev, cur),
+                      definition_break=definition_break(prev, cur))
 
 
 def _bit(scoring: dict, key: str) -> int:
@@ -742,6 +824,14 @@ def print_transition(t: Transition, alpha: float = ALPHA) -> None:
         return
     print(f"\n{head}  (n={t.n} paired queries)")
     print(f"  corpus diff: {fmt_drift(t.drift)}")
+    if t.definition_break:
+        # Annotation, printed before the numbers and never instead of them. The join
+        # cannot see a denominator change on an unchanged corpus, so without this line a
+        # night scored under #1663's per-leg gold subset reads as a two-percent move.
+        # The pair still counts as audited and its verdict still prints: #1663's
+        # owed-check ruled that pre-re-base nights stay in the window annotated, not
+        # dropped and not refused the way an incomparable pair is.
+        print(f"  DEFINITION BREAK: {t.definition_break}")
     for label, _ in BINARY_LEGS:
         leg = t.legs[label]
         lo, hi = leg["wilson"]
@@ -1025,7 +1115,24 @@ def main(argv: list[str] | None = None) -> int:
           "the answer to which seeding it used, as `semantic_seeding` "
           "{enabled, k} — recorded from #1547 on, and absent on every earlier "
           "night, which is why the older entity-side nights are pre-re-base by "
-          "absence rather than by a recorded off. The 80%-power decision "
+          "absence rather than by a recorded off. And a fifth re-base point, which is "
+          "also NOT a corpus change: #1663 (`efcee660`) re-defined the DENOMINATOR of "
+          "the five scored rates on 2026-09-28 — each now divides over the queries "
+          "carrying gold for its own leg instead of over every record — so "
+          "nightly-20260929 is the first night scored the new way and nightly-20260928 "
+          "the last scored the old. The measured step across that boundary was "
+          "entity_hit_rate 0.488 -> 0.636 (n 86 -> 66), doc_hit_rate 0.616 -> 0.671, "
+          "mrr_doc 0.305 -> 0.332, ndcg10 0.360 -> 0.392: a rate taken over a smaller, "
+          "gold-bearing denominator, not a system that got better. It moves the five "
+          "SCORED rates only — the recall series divided over the gold-bearing subset "
+          "already, so those cross the boundary and stay comparable — and the shift is "
+          "invisible to this tool's id join, because an unchanged corpus keeps every "
+          "id. So do not compare one of the five from before 2026-09-28 with one after "
+          "it, and read the DEFINITION BREAK line a pair prints when its two nights' "
+          "gold-bearing subsets differ as this boundary arriving inside your window: "
+          "the line names the legs that moved and is an annotation, never a refusal — "
+          "the pre-re-base nights stay in the published window annotated. The 80%-power "
+          "decision "
           "that used to sit behind this line is no longer open — see the n "
           "printed above.")
 

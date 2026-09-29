@@ -49,6 +49,7 @@ from scripts.eval_trend_stats import (  # noqa: E402
     CORPUS_KEYS,
     UnjoinableQueries,
     audit_transition,
+    definition_break,
     corpus_diff,
     default_baselines_dir,
     fmt_drift,
@@ -1169,3 +1170,239 @@ def test_the_measurement_doc_no_longer_reports_the_help_string_as_disagreeing():
     at = [ln for ln in text.splitlines() if "1791" in ln]
     assert at, "the fix disappeared from the changelog entry that records it"
     assert any("fix" in ln.lower() or "help" in ln.lower() for ln in at), at
+
+
+# ===========================================================================
+# #1822 — the #1663 denominator re-base: booked in the printed paragraph,
+# and annotated per pair from each record's own gold.
+# ===========================================================================
+
+FIVE_RATES = ("entity_hit_rate", "entity_hit_rate_retrieval_carried",
+              "doc_hit_rate", "mrr_doc", "ndcg10")
+GOLD_LEGS = ("entities", "docs")
+
+
+def _gold(night: dict, entities: set[str], docs: set[str]) -> dict:
+    """Give every record its own ``expected`` block, the way ``run_eval`` writes one.
+
+    Gold is per-query and per-leg, because that shape IS #1663's denominator: each
+    scored rate divides over the queries carrying gold for its own leg. A fixture
+    carrying one gold flag for the whole night could not tell a leg that moved from
+    a leg that did not, which is the half of the clause that names per-metric
+    annotation.
+    """
+    for rec in night["records"]:
+        rid = rec["id"]
+        rec["expected"] = {
+            "entities": [f"ENT-{rid}"] if rid in entities else [],
+            "docs": [f"knowledge/{rid}.md"] if rid in docs else [],
+        }
+    return night
+
+
+def _ci95(night: dict, n: int) -> dict:
+    """Stamp ``summary.overall.ci95[<metric>].n = n`` on all five rates.
+
+    Used as the OTHER candidate denominator: a pre-re-base artifact publishes the
+    all-records n there, so a pair can be built whose ci95 says nothing moved while
+    its records say the subset did. Deriving from the wrong field is then observable.
+    """
+    overall = night.setdefault("summary", {}).setdefault("overall", {})
+    overall["ci95"] = {m: {"n": n, "ci": [0.3, 0.6], "kind": "wilson"}
+                       for m in FIVE_RATES}
+    return night
+
+
+def _write_gold_pair(tmp_path: Path, prev_entities: set[str], prev_docs: set[str],
+                     cur_entities: set[str], cur_docs: set[str],
+                     prev_ci95_n: int | None = None,
+                     cur_ci95_n: int | None = None,
+                     with_expected: bool = True) -> Path:
+    """Two consecutive nights, identical scores and ids, differing only in gold.
+
+    Every record scores a hit both nights, so nothing but the gold subset can move
+    between them: any annotation that appears is the denominator's, not a delta's.
+    """
+    d = tmp_path / "baselines"
+    d.mkdir(parents=True, exist_ok=True)
+    entity = [1] * len(IDS)
+    ndcg, rr = [0.5] * len(IDS), [0.4] * len(IDS)
+    spec = [("nightly-20260101", 1, prev_entities, prev_docs, prev_ci95_n),
+            ("nightly-20260102", 2, cur_entities, cur_docs, cur_ci95_n)]
+    for label, day, ents, dcs, ci in spec:
+        night = _night_n(label, day, IDS, entity, entity, ndcg, rr, CORPUS_A)
+        if with_expected:
+            _gold(night, ents, dcs)
+        if ci is not None:
+            _ci95(night, ci)
+        (d / f"{label}.json").write_text(json.dumps(night), encoding="utf-8")
+    return d
+
+
+def _all_gold(n_ids: int = len(IDS)) -> set[str]:
+    return set(IDS[:n_ids])
+
+
+def test_the_sizing_block_names_the_denominator_re_base_as_a_fifth_point(tmp_path,
+                                                                        capsys):
+    """Clause 1: the printed paragraph books #1663 as a fifth re-base point.
+
+    #1663 (`efcee660`) re-defined the denominator of the five scored rates on
+    2026-09-28 and booked it in the skill and in `run_eval.py`'s own comment, and
+    stated there that `scripts/eval_trend_stats.py` "joins nights by
+    `records[].id` and a denominator change on an unchanged corpus is invisible to
+    it". This paragraph is the surface that invisibility was excused on; #1663's
+    owed-check ruled on 2026-09-29 that the record moves here, so the boundary is
+    asserted on the tokens a reader searches for plus the measured step, the way
+    the #1547 seeding point above is.
+    """
+    d = _write_paired_window(tmp_path, BIG_WINDOW_N)
+    assert main(["--baselines", str(d), "--reps", "200", "--no-claims"]) == 0
+    sizing = capsys.readouterr().out.split("POWER / QUERY-COUNT SIZING")[1]
+    for required in ("#1663", "efcee660", "2026-09-28", "fifth re-base point",
+                     "nightly-20260929"):
+        assert required in sizing, f"{required!r} missing from the sizing block"
+    assert "entity_hit_rate 0.488 -> 0.636" in sizing, (
+        "the re-base must carry the measured entity step, or a reader cannot tell "
+        "a definition change from a corpus change")
+    assert "n 86 -> 66" in sizing, "the denominator step is the whole point of #1663"
+    for step in ("doc_hit_rate 0.616 -> 0.671", "mrr_doc 0.305 -> 0.332",
+                 "ndcg10 0.360 -> 0.392"):
+        assert step in sizing, f"{step!r} missing from the fifth point"
+
+
+def test_the_fifth_re_base_point_sits_beside_the_four_it_must_not_displace(
+        tmp_path, capsys):
+    """Clause 2: the four named points survive, and the recall legs cross it.
+
+    A re-base paragraph that gains a point by losing one un-informs the reader who
+    needed the old one — the same "BESIDE, not instead of" bar the seeding test
+    above holds. The other half is scope: #1663 moved the five SCORED rates, while
+    the three recall averages already divided over the gold subset, so a trend on
+    those crosses the boundary. Prose that warns about "the metrics" generally
+    would strand three usable series on the wrong side of 2026-09-28.
+    """
+    d = _write_paired_window(tmp_path, BIG_WINDOW_N)
+    assert main(["--baselines", str(d), "--reps", "200", "--no-claims"]) == 0
+    sizing = capsys.readouterr().out.split("POWER / QUERY-COUNT SIZING")[1]
+    for other in ("#1319", "2026-09-21", "#1354", "2026-09-24", "second re-base point",
+                  "third re-base point", "#1486", "dbfde750", "2026-09-26",
+                  "fourth re-base point"):
+        assert other in sizing, f"{other!r} re-base lost from the paragraph"
+    assert "recall" in sizing.split("fifth re-base point")[1][:1200].lower(), (
+        "the fifth point must say what crosses the boundary; the recall series "
+        "already divided over the gold subset")
+    assert "nightly-20260928" in sizing, (
+        "the last pre-re-base night must be named, or the boundary has no left edge")
+
+
+def test_a_pair_differing_only_in_which_queries_carry_gold_is_annotated(tmp_path,
+                                                                       capsys):
+    """Clause 3: gold-subset drift is annotated, and the pair still joins.
+
+    The two nights score identically on every record and share every id; the only
+    thing that differs is which queries carry gold for which leg (entity leg 8 -> 5,
+    doc leg 8 -> 6). Before #1822 this pair printed no trace at all: the id join saw
+    an unchanged corpus and the #1637 gold guard stayed silent because neither
+    artifact carries a `labels_sha256`. It must come back naming all five rates AND
+    printing its ordinary McNemar and bootstrap lines — annotation only, never
+    `incomparable`, because #1663's owed-check ruled that pre-re-base nights stay in
+    the published window annotated rather than dropped.
+    """
+    d = _write_gold_pair(tmp_path, _all_gold(), _all_gold(),
+                         set(IDS[:5]), set(IDS[:6]))
+    assert main(["--baselines", str(d), "--reps", "200", "--no-claims"]) == 0
+    out = capsys.readouterr().out
+    line = [ln for ln in out.splitlines() if "DEFINITION BREAK" in ln]
+    assert line, f"no definition-break annotation printed for a moved gold subset:\n{out[:900]}"
+    ann = line[0]
+    for named in ("entity_hit_rate 8 -> 5", "entity_hit_rate_retrieval_carried 8 -> 5",
+                  "doc_hit_rate 8 -> 6", "mrr_doc 8 -> 6", "ndcg10 8 -> 6"):
+        assert named in ann, f"{named!r} not named in the annotation: {ann}"
+    assert "INCOMPARABLE" not in out, "an annotation must not refuse the pair"
+    assert "not joinable" not in out, "an annotation must not break the id join"
+    assert "exact McNemar p=" in out, "the joined statistics must still print"
+    assert "paired bootstrap 95% interval" in out, (
+        "the continuous legs must still print: annotation means the pair is "
+        "audited, only with its denominator named")
+    trans = audit_transition(*(load_window(d)[0:2]))
+    assert trans.joinable and trans.incomparable is None and trans.auditable
+    assert trans.legs, "an annotated pair still carries legs"
+
+
+def test_the_annotation_names_only_the_legs_whose_denominator_moved(tmp_path):
+    """Clause 3's other half: per-metric, not a blanket warning.
+
+    Here only the doc leg's subset shrinks (8 -> 6) and the entity leg is untouched,
+    so the two entity rates must stay out of the line. An annotation that named all
+    five rates on every pair would be indistinguishable from a footer and would
+    teach a reader to ignore it.
+    """
+    d = _write_gold_pair(tmp_path, _all_gold(), _all_gold(),
+                         _all_gold(), set(IDS[:6]))
+    prev, cur = load_window(d)
+    ann = definition_break(prev, cur)
+    assert ann, "the doc leg's denominator moved; silence here is the bug"
+    for named in ("doc_hit_rate 8 -> 6", "mrr_doc 8 -> 6", "ndcg10 8 -> 6"):
+        assert named in ann, f"{named!r} missing: {ann}"
+    for untouched in ("entity_hit_rate", "entity_hit_rate_retrieval_carried"):
+        assert untouched not in ann, f"{untouched!r} named though its leg did not move"
+
+
+def test_the_annotation_derives_from_record_gold_not_the_published_ci95_n(tmp_path):
+    """Clause 4: a pre-re-base artifact whose ci95 n IS the all-records n.
+
+    Both nights stamp ci95 n = 8 for all five rates — the all-records denominator
+    every pre-re-base nightly published — while their records say the entity leg's
+    gold-bearing subset went 8 -> 5. Deriving the denominator from
+    `summary.overall.ci95[<metric>].n` would find two equal numbers and print
+    nothing, which is exactly the invisibility #1663 booked the re-base for. The
+    loader is what has to retain `records[].expected`: `Night` used to keep only
+    `scores` and `labels_sha256`, so the per-leg gold was thrown away at load time.
+    """
+    d = _write_gold_pair(tmp_path, _all_gold(), _all_gold(),
+                         set(IDS[:5]), _all_gold(), prev_ci95_n=8, cur_ci95_n=8)
+    prev, cur = load_window(d)
+    assert prev.scores == cur.scores, "fixture guard: the two nights score identically"
+    for m in FIVE_RATES:
+        assert prev.path.read_text() and cur.path.read_text()
+    assert (json.loads(prev.path.read_text())["summary"]["overall"]["ci95"]
+            == json.loads(cur.path.read_text())["summary"]["overall"]["ci95"]), (
+        "fixture guard: ci95 must be identical, or the test proves nothing about "
+        "which field the denominator came from")
+    assert len(prev.gold_ids["entities"]) == 8 and len(cur.gold_ids["entities"]) == 5, (
+        "the loader must retain each leg's gold-bearing query ids")
+    ann = definition_break(prev, cur)
+    assert ann and "entity_hit_rate 8 -> 5" in ann, (
+        f"no annotation from record gold alone: {ann!r}")
+
+
+def test_a_moved_ci95_n_with_unchanged_record_gold_prints_no_annotation(tmp_path):
+    """Clause 4's negative control: the published n is NOT the derivation.
+
+    The mirror of the test above — ci95 n 8 vs 5, record gold identical — must print
+    nothing. Without it the pair above could be passing off the ci95 field as the
+    source and the clause would be unfalsifiable.
+    """
+    d = _write_gold_pair(tmp_path, _all_gold(), _all_gold(),
+                         _all_gold(), _all_gold(), prev_ci95_n=8, cur_ci95_n=5)
+    prev, cur = load_window(d)
+    assert definition_break(prev, cur) is None, (
+        "the annotation fired off a published denominator that no record's gold "
+        "moved behind — that is the ci95 route, not the records route")
+
+
+def test_a_pair_whose_records_carry_no_expected_block_prints_no_annotation(tmp_path):
+    """Absence of per-record gold is unknown, not a zero denominator.
+
+    Every artifact predating the `expected` block would read as a subset of size 0
+    side by side, and 0 against a real number is a difference — so the guard would
+    annotate every legacy pair in the window and the one line per window that means
+    something would be gone. Same shape as the #1637 guard's treatment of a missing
+    fingerprint: absence is silence, never a measurement.
+    """
+    d = _write_gold_pair(tmp_path, _all_gold(), _all_gold(),
+                         set(IDS[:5]), set(IDS[:6]), with_expected=False)
+    prev, cur = load_window(d)
+    assert prev.gold_ids is None and cur.gold_ids is None
+    assert definition_break(prev, cur) is None
