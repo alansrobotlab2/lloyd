@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Link stranded entities to the registered entity name inside their own name — #1019.
 
-Dry-run by default. Nothing is written without --apply.
+Dry-run by default. Nothing is written without --apply, and --apply is refused
+while `knowledge_graph.write_enabled` is false — the flag `kg_rebuild.py` sets
+for the duration of a rebuild freeze and restores at the end. That refusal is
+what `writes_disabled_by_rebuild` below is for; the dry run is never refused.
 
 WHY THIS EXISTS. An entity gets an edge only two ways, and both can miss it
 entirely: the extractor links entities *named inside a fact's prose*
@@ -269,6 +272,31 @@ def print_denominators(dens: dict[str, int], mode: str) -> None:
         print(f"  {label:26s} {dens[key]:>8,}{tail}")
 
 
+def writes_disabled_by_rebuild() -> bool:
+    """True while a knowledge-graph rebuild holds writes off the tree (#1833).
+
+    `kg_rebuild.py:145` flips `knowledge_graph.write_enabled` false and extracts
+    into a parallel tree it can rename `facts-quarantine-<ts>` at any moment;
+    `agent_mcp/facts.py::_writes_enabled` refuses fact writes in that window, and
+    an edge written here is the same hazard with a worse failure mode: a rebuild
+    re-derives the graph from fact prose, prose cannot reproduce a name-embedding
+    edge, and the pilot's work disappears with no error to read afterwards.
+
+    Read, and failed open, the way every other reader here does — a missing
+    config is not a rebuild, and dry-run is the default, so this can only ever
+    block an explicit `--apply`. The import is inside the function on purpose:
+    this module's two other app imports (`app.kg_store`, `app.paths`) do not pull
+    `app.config` in, so a hand run that started before a freeze still reads
+    `config.yaml` at the check point, after the multi-second `find_proposals`
+    pass, which is the window a freeze has to open in.
+    """
+    from app.config import CONFIG
+    try:
+        return not bool(CONFIG.get("knowledge_graph", {}).get("write_enabled", True))
+    except Exception:
+        return False
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="Link degree-zero entities to the registered entity name in their own name (#1019)")
@@ -289,6 +317,19 @@ def main(argv: list[str] | None = None) -> int:
     st = KGStore(args.db)
     proposed, dens = find_proposals(st, min_facts=args.min_facts, limit=args.limit)
     print_denominators(dens, "APPLYING" if args.apply else "dry-run")
+
+    # Outside the `if proposed:` branch below, and before the backup: an apply
+    # that found nothing must refuse just as loudly as one that found 18 edges,
+    # because `applied 0 edges (nothing proposed)` is the exact print a run whose
+    # freeze opened mid-pass would leave behind, and it reads as a clean graph.
+    if args.apply and writes_disabled_by_rebuild():
+        print("\nREFUSED --apply: writes are disabled (config.yaml "
+              "knowledge_graph.write_enabled = false), which kg_rebuild.py sets "
+              "while a rebuild runs. No edge was written and no backup was taken; "
+              "the denominators above are the dry-run reading of this store. "
+              "Re-run --apply once the rebuild lands.")
+        st.close()
+        return 2
 
     if proposed and args.sample:
         shown = min(args.sample, len(proposed))

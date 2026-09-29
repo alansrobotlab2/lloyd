@@ -20,6 +20,11 @@ The four clauses of #1019's acceptance are pinned here in the order the contract
 numbers them: the shape of one proposal (clause 1), the degree-zero probe going
 quiet on a fixture store (clause 2), the rebuild-durable stamp with its evidence
 pointer (clause 3), and the denominators beside the count (clause 4).
+
+The last section is #1833's write gate: the tool's `--apply` is a hand run over a
+production store, so it has to refuse while `kg_rebuild.py` holds
+`knowledge_graph.write_enabled` false, and every test in that section drives the
+real guard with a config the test owns — never by patching the predicate away.
 """
 import importlib.util
 import re
@@ -440,3 +445,201 @@ def test_the_denominators_survive_the_linker_being_pointed_at_an_empty_store(tmp
         assert _shown_number(out, label) == 0, out
     assert "nothing stranded" not in out, (
         "the tool prints counts, not a conclusion a reader could misread")
+
+
+# ── #1833: `--apply` is gated on knowledge_graph.write_enabled ───────────────
+#
+# Every test here drives the real `linker.writes_disabled_by_rebuild`. Patching
+# that predicate out — what `test_numeric_entity_sweep.py:373` does for the
+# markdown sweep — would leave the guard itself, and the key name it reads,
+# unpinned, so the config is replaced instead: a temp dict in most tests, a temp
+# `config.yaml` read back through the real loader in the last one.
+
+SEEDED_A = "Alpha Witness"   # a live edge from ANOTHER writer, see below
+SEEDED_B = "Beta Witness"
+
+
+def _write_flag(monkeypatch, enabled: bool) -> None:
+    """Install the config the guard reads, with the flag set to `enabled`.
+
+    `app.config.CONFIG` is the module-level dict `_load_config()` assigns at
+    import and that every write gate on this machine reads
+    (`agent_mcp/facts.py::_writes_enabled`, the #1573 sweep, now this guard), so
+    replacing it is the temp config: the predicate runs for real against a value
+    this test owns, and no file under the live tree is touched."""
+    import app.config
+    monkeypatch.setattr(app.config, "CONFIG",
+                        {"knowledge_graph": {"write_enabled": enabled}})
+
+
+def _seed_one_live_edge(st) -> int:
+    """One active edge written by a different origin, and the count it leaves.
+
+    Clause 2's `nothing was written` check needs a non-zero number to hold still:
+    on the bare fixture store both the pre-call and the post-call count are 0, and
+    `0 == 0` passes a run that wrote four edges. The pair is registered but holds
+    no facts, so it is neither a candidate nor an embedding target for anything in
+    the fixture — the tests below re-assert the proposal count at 4, which is what
+    makes that non-interference a measurement rather than an assumption."""
+    st.entities.register(SEEDED_A)
+    st.entities.register(SEEDED_B)
+    st.edges.add({"source": SEEDED_A, "target": SEEDED_B, "type": "related_to",
+                  "evidence": "written by another writer, before the freeze"},
+                 origin="fact_relate")
+    return st.edges.count(active_only=True)
+
+
+def _backup_traces(root) -> list[str]:
+    """Names of every file the apply path's backup route leaves under `root`.
+
+    `st.backup()` writes `store-backups/kg-stranded-<ts>.sqlite` beside the store,
+    so a refusal that landed after it would show up here even with the edge count
+    unchanged — which is the half of clause 2 the count cannot see."""
+    return sorted(p.name for p in Path(root).rglob("kg-stranded-*"))
+
+
+def test_apply_refuses_while_the_rebuild_write_flag_is_false(tmp_path, capsys, monkeypatch):
+    """Clause 1, with clause 2's silence: non-zero exit, a reason naming the flag
+    and the rebuild, after the denominators have printed, and before the backup.
+
+    The denominators come first on purpose. A person holding the pilot in a freeze
+    window still has to see how much the gate is holding back — refusing before the
+    measurement would make the guard the reason the tool reports nothing at all."""
+    st = build_store(tmp_path)
+    seeded = _seed_one_live_edge(st)
+    assert seeded == 1, "the freeze check needs a live edge to leave untouched"
+    _write_flag(monkeypatch, False)
+    capsys.readouterr()
+
+    rc = linker.main(["--apply", "--db", str(st.path), "--sample", "0"])
+    out = capsys.readouterr().out
+
+    assert rc == 2, f"a frozen --apply must exit non-zero; got {rc}\n{out}"
+    assert "write_enabled = false" in out, f"the reason must name the flag:\n{out}"
+    assert "rebuild" in out, f"the reason must name who sets the flag:\n{out}"
+    assert _shown_number(out, "proposed edges") == 4, (
+        f"the denominator block must still print above the refusal:\n{out}")
+    assert st.edges.count(active_only=True) == seeded, (
+        "the refused --apply wrote an edge into a store under rebuild")
+    assert _backup_traces(tmp_path) == [], (
+        "the refusal came after st.backup(): a snapshot of a store about to be "
+        "replaced is not a restore point")
+    st.close()
+
+
+def test_the_gate_releases_and_apply_writes_when_the_flag_is_true(tmp_path, capsys,
+                                                                  monkeypatch):
+    """Clause 3: with writes enabled the same call returns 0, writes its four
+    proposed edges onto the same store, and still takes the backup the refusal
+    skipped — the gate is a freeze check, not a new default for the tool."""
+    st = build_store(tmp_path)
+    seeded = _seed_one_live_edge(st)
+    _write_flag(monkeypatch, True)
+    capsys.readouterr()
+
+    rc = linker.main(["--apply", "--db", str(st.path), "--sample", "0"])
+    out = capsys.readouterr().out
+
+    assert rc == 0, f"the gate never released: rc={rc}\n{out}"
+    assert "REFUSED" not in out, f"the gate is permanently disabling the tool:\n{out}"
+    assert "applied 4 edges" in out, out
+    assert st.edges.count(active_only=True) == seeded + 4, (
+        "the four proposed edges are live beside the seeded one")
+    assert st.edges.find_active(STRANDED, "TGS-RAG", linker.EDGE_TYPE) is not None, (
+        "the row #1019 is named for is the one that must be linked by a released apply")
+    assert len(_backup_traces(tmp_path)) == 1, (
+        "a released apply takes the backup clause 2 says a refusal skips")
+    st.close()
+
+
+def test_the_dry_run_stays_available_under_a_freeze(tmp_path, capsys, monkeypatch):
+    """Clause 4: the flag being false must not blind anyone. Without `--apply` the
+    run still exits 0 and prints its denominators, so the freeze window can be
+    inspected while it is closed — which is exactly when the numbers are wanted."""
+    st = build_store(tmp_path)
+    seeded = _seed_one_live_edge(st)
+    _write_flag(monkeypatch, False)
+    capsys.readouterr()
+
+    rc = linker.main(["--db", str(st.path), "--sample", "0"])
+    out = capsys.readouterr().out
+
+    assert rc == 0, f"a dry run under a freeze must still run: rc={rc}\n{out}"
+    assert "dry-run" in out, out
+    assert "REFUSED" not in out, f"the refusal is for --apply only:\n{out}"
+    assert _shown_number(out, "proposed edges") == 4, out
+    assert st.edges.count(active_only=True) == seeded, "a dry run wrote"
+    assert _backup_traces(tmp_path) == [], "a dry run backed the store up"
+    st.close()
+
+
+def test_a_frozen_apply_with_nothing_to_propose_still_refuses(tmp_path, capsys,
+                                                              monkeypatch):
+    """Clause 5: the refusal is decided outside the `if proposed:` branch.
+
+    Before the gate, an `--apply` that proposed nothing printed
+    `applied 0 edges (nothing proposed)` and returned 0. That is the print a run
+    whose freeze opened mid-pass leaves behind, and it reads exactly like a graph
+    with nothing stranded — so the gate has to fire on the empty case too. The
+    second half pins that what is refusing is the flag, not the empty store: the
+    same store with writes enabled reaches the apply branch and prints the line."""
+    empty = tmp_path / "nothing.sqlite"
+    KGStore(empty).close()
+    _write_flag(monkeypatch, False)
+    capsys.readouterr()
+
+    rc = linker.main(["--apply", "--db", str(empty), "--sample", "0"])
+    out = capsys.readouterr().out
+
+    assert rc == 2, f"a frozen --apply with zero proposals must refuse too: rc={rc}\n{out}"
+    assert "applied 0 edges" not in out, (
+        f"the old success print survived on the empty branch:\n{out}")
+    assert "REFUSED --apply" in out, out
+    assert _backup_traces(tmp_path) == [], out
+
+    _write_flag(monkeypatch, True)
+    capsys.readouterr()
+    assert linker.main(["--apply", "--db", str(empty), "--sample", "0"]) == 0
+    assert "applied 0 edges" in capsys.readouterr().out, (
+        "an unfrozen empty store must still report 'nothing proposed', not a refusal")
+
+
+def test_the_guard_reads_write_enabled_out_of_a_config_file(tmp_path, monkeypatch):
+    """The seam the guard sits on: `kg_rebuild.py:145` writes the flag into
+    `config.yaml` from its own process, and a linker run started afterwards in a
+    different one has to see it. A test that only ever handed the guard a dict
+    would still pass if the guard read `write-enable:` or the wrong section,
+    because the dict was built from the same wrong guess; here the bytes come from
+    a temp file and the reader is the real `app.config._load_config`.
+    """
+    import app.config
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.delenv("LLOYD_CONFIG_OVERLAY", raising=False)
+    monkeypatch.setattr(app.config, "LLOYD_HOME", repo)
+    monkeypatch.setattr(app.config, "TOOL_OVERRIDES_PATH", repo / "tool_overrides.yaml")
+
+    def load(text: str) -> None:
+        (repo / "config.yaml").write_text(text, encoding="utf-8")
+        monkeypatch.setattr(app.config, "CONFIG", app.config._load_config())
+
+    load("knowledge_graph:\n  write_enabled: false\n  fact_write_gate: shadow\n")
+    assert linker.writes_disabled_by_rebuild() is True, (
+        "the guard does not read `knowledge_graph.write_enabled` out of the file "
+        "the rebuild writes — it is guarding nothing")
+
+    load("knowledge_graph:\n  write_enabled: true\n")
+    assert linker.writes_disabled_by_rebuild() is False, (
+        "the guard does not release when the rebuild restores the flag")
+
+    load("models: {}\n")
+    assert linker.writes_disabled_by_rebuild() is False, (
+        "a config with no knowledge_graph section is not a rebuild: default is enabled")
+
+    # Failing open is the precedent's behaviour and the only safe direction for a
+    # dry-run-by-default tool: an unreadable config must not disable the write path.
+    monkeypatch.setattr(app.config, "CONFIG",
+                        {"knowledge_graph": "not a mapping"})
+    assert linker.writes_disabled_by_rebuild() is False, (
+        "a malformed config must fail open, not freeze the tool forever")
