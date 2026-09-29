@@ -997,6 +997,18 @@ def test_the_rollup_counts_runs_whose_matrix_never_finished(q):
     assert rollup["unfinished_matrix"] == 6
     assert (rollup["total"], rollup["ok"]) == (7, 7), \
         "the existing buckets must keep counting every run as before"
+    # #1857: the same six runs have two different causes, and only one of them
+    # is the failure the #1687 alarm was built to expose. Five rounds were cut
+    # mid-matrix at the wall-clock deadline (`deadline_stopped: true`); the
+    # sixth dropped its tail in the pre-trial cost projection (#1605/#1715) and
+    # then ran what was left cleanly, which is the fix working as designed.
+    assert (rollup["deadline_cut"], rollup["matrix_shrunk"]) == (5, 1), \
+        "the count that exists to raise an alarm counts only the deadline cut; " \
+        "the projection shrink is the other key, not this alarm"
+    assert rollup["unfinished_matrix"] == \
+        rollup["deadline_cut"] + rollup["matrix_shrunk"], \
+        "the union keeps its meaning as the sum of the two causes, so the " \
+        "pre-split reading is still derivable from the block"
 
 
 def test_the_unfinished_matrix_count_needs_a_stored_result(q):
@@ -1022,6 +1034,74 @@ def test_the_unfinished_matrix_count_needs_a_stored_result(q):
     assert rollup["autoresearch"]["unfinished_matrix"] == 0
     assert rollup["arch-review"]["unfinished_matrix"] == 0, \
         "a source that never had a trial matrix reads as zero, not missing"
+
+
+def test_the_two_matrix_counts_are_disjoint_and_name_their_own_cause(q):
+    """#1857 clauses 2 and 3: a round that was cut AND shrunk is one deadline cut.
+
+    `scripts/autoresearch/run_round.py:1428` sets `deadline_stopped` from
+    `tasks_not_reached`, while `:1753` writes `matrix_dropped_tasks` from the
+    pre-trial projection — so a round whose matrix was shrunk up front and then
+    still ran out of time carries both keys. That round stopped at the deadline,
+    which is the state `deadline_cut` exists to count; putting it in
+    `matrix_shrunk` as well would double-count it and make the two keys read as
+    proportions of nothing.
+
+    Each cause therefore gets its own source here, so a key that widened to
+    cover the other's rows goes red rather than merely reading high: the
+    shrunk-only source must read `deadline_cut: 0`, and the round carrying both
+    keys must land in `deadline_cut` alone.
+    """
+    # Shrunk up front, then cut at the deadline anyway: both keys present.
+    _seed_run(q, "ar-both", "success", json.dumps(
+        {"round_id": "R_both", "deadline_stopped": True,
+         "tasks_not_reached": ["bench_010"],
+         "matrix_dropped_tasks": ["bench_017_audit_unresolved_task_skills"]}))
+    # Shrunk up front and ran what was left to the end: #1605's designed
+    # behaviour, and the row that has been saturating the #1687 alarm since.
+    _seed_run(q, "ar-shrunk", "success", json.dumps(
+        {"round_id": "R_shrunk", "deadline_stopped": False,
+         "matrix_dropped_tasks": ["bench_017_audit_unresolved_task_skills"]}))
+    # Cut at the deadline on a matrix the projection left whole.
+    _seed_run(q, "ar-cut", "success", json.dumps(
+        {"round_id": "R_cut", "deadline_stopped": True,
+         "tasks_not_reached": ["bench_010"], "matrix_dropped_tasks": []}))
+
+    rollup = q.run_rollup_by_source("2000-01-01T00:00:00+00:00")
+    read = {name: (rollup[name]["deadline_cut"], rollup[name]["matrix_shrunk"],
+                   rollup[name]["unfinished_matrix"])
+            for name in ("ar-both", "ar-shrunk", "ar-cut")}
+    assert read == {"ar-both": (1, 0, 1),      # both keys -> the cut alone
+                    "ar-shrunk": (0, 1, 1),    # shrink is not a deadline cut
+                    "ar-cut": (1, 0, 1)}, \
+        f"the two counts must be disjoint and each must answer for its own "\
+        f"cause, and the union must still cover either one: {read}"
+
+
+def test_the_split_counts_read_an_unstored_result_as_zero(q):
+    """#1857 clause 4: the new keys need `json_valid` exactly as the old one does.
+
+    Splitting one `SUM` into three is where a guard gets dropped by accident,
+    and an unguarded `json_extract` over `runs` raises `malformed JSON` on the
+    empty string the pool writes by default — which `/api/workers/health`
+    catches and answers with `health: null` for every source. So these four
+    blobs are the same ones
+    `test_the_unfinished_matrix_count_needs_a_stored_result` uses, and each new
+    key has to read every one of them as 0 instead of taking the rollup down.
+    """
+    _seed_run(q, "autoresearch", "success", "")                      # the default
+    _seed_run(q, "autoresearch", "failed", 'not json at all')        # unparseable
+    _seed_run(q, "autoresearch", "success", '{"deadline_stopped": tru')  # truncated
+    _seed_run(q, "arch-review", "success", '{"doc_update_rejected": ""}')
+    _seed_run(q, "youtube-digest", "success", 'null')  # valid JSON, no such keys
+
+    rollup = q.run_rollup_by_source("2000-01-01T00:00:00+00:00")
+    for name in ("autoresearch", "arch-review", "youtube-digest"):
+        row = rollup[name]
+        assert (row["deadline_cut"], row["matrix_shrunk"],
+                row["unfinished_matrix"]) == (0, 0, 0), \
+            f"{name}: a run that stored nothing about its matrix is neither cut " \
+            f"nor shrunk, and must not raise (read {row})"
 
 
 # ---------------------------------------------------------------------------

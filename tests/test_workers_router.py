@@ -1047,19 +1047,36 @@ _STOPPED = '{"round_id": "%s", "deadline_stopped": true, ' \
            '"tasks_not_reached": ["bench_015", "bench_010"]}'
 _FINISHED = '{"round_id": "%s", "deadline_stopped": false, ' \
             '"matrix_dropped_tasks": [], "promoted": false}'
+# #1857: the third shape the rollup now has to tell apart — the pre-trial cost
+# projection (#1605, with #1715's shrink fallback) dropped four tasks and the
+# round then ran what was left to the end, so `deadline_stopped` is false and
+# this is the fix working, not the failure #1687's alarm was built for.
+_SHRUNK = '{"round_id": "%s", "deadline_stopped": false, ' \
+          '"matrix_projection": {"fits": true}, "tasks_not_reached": [], ' \
+          '"matrix_dropped_tasks": ["bench_017_audit_unresolved_task_skills", ' \
+          '"bench_016_audit_skill_dead_paths"]}'
+# Shrunk up front AND cut at the deadline: `run_round.py:1428` derives
+# `deadline_stopped` from `tasks_not_reached` while `:1753` writes
+# `matrix_dropped_tasks` independently, so both keys can be on one round.
+_SHRUNK_AND_CUT = '{"round_id": "%s", "deadline_stopped": true, ' \
+                  '"tasks_not_reached": ["bench_010"], ' \
+                  '"matrix_dropped_tasks": ["bench_017_audit_unresolved_task_skills"]}'
 
 
-def _matrix_client(monkeypatch, tmp_path, in_window: dict[str, list[tuple[bool, str]]],
+def _matrix_client(monkeypatch, tmp_path,
+                   in_window: dict[str, list[tuple[bool | str, str]]],
                    *, outside_window: list[str] = ()):
     """A health endpoint over a REAL `WorkQueue`, not a stand-in.
 
-    `in_window` maps a source name to `(stopped, round_id)` pairs, one per run
-    completed now; `outside_window` names sources that get exactly one
-    `deadline_stopped` run dated 2020, so they are configured but unseen by the
-    window. The count these tests pin is computed by SQL over the stored
-    `response_json`, which the hand-written rollup dicts the fake queues in this
-    file return cannot exercise: it needs the real table, the real query and the
-    real serialised body.
+    `in_window` maps a source name to `(cause, round_id)` pairs, one per run
+    completed now, where `cause` is `True` for a deadline cut, `False` for a
+    round that ran its whole matrix, or a JSON template naming some other shape
+    (`_SHRUNK`, `_SHRUNK_AND_CUT`). `outside_window` names sources that get
+    exactly one `deadline_stopped` run dated 2020, so they are configured but
+    unseen by the window. The count these tests pin is computed by SQL over the
+    stored `response_json`, which the hand-written rollup dicts the fake queues
+    in this file return cannot exercise: it needs the real table, the real query
+    and the real serialised body.
     """
     queue = WorkQueue(tmp_path / "workers.db")
 
@@ -1070,8 +1087,10 @@ def _matrix_client(monkeypatch, tmp_path, in_window: dict[str, list[tuple[bool, 
                          response_json=response)
 
     for name, runs in in_window.items():
-        for stopped, round_id in runs:
-            record(name, (_STOPPED if stopped else _FINISHED) % round_id,
+        for cause, round_id in runs:
+            template = (cause if isinstance(cause, str)
+                        else _STOPPED if cause else _FINISHED)
+            record(name, template % round_id,
                    datetime.now(timezone.utc).isoformat())
     for name in outside_window:
         record(name, _STOPPED % "R_old", "2020-01-01T00:01:00+00:00")
@@ -1138,6 +1157,57 @@ def test_the_health_incomplete_count_is_never_invented_for_a_source_with_no_run(
     assert _health_of(client, "arch-review") is None, \
         "a source with no run in the window gets no block at all, so there is " \
         "no zero anywhere for a reader to mistake for 'checked, all complete'"
+
+
+def test_the_health_block_names_which_kind_of_matrix_did_not_finish(
+        monkeypatch, tmp_path):
+    """#1857 clause 5: `deadline_cut` and `matrix_shrunk` reach the payload, per
+    source, beside the window's `total` — and a source the window never saw
+    still gets no block at all.
+
+    `app/routers/workers.py:263` passes `rollup.get(name)` into `health`
+    verbatim, which is why the router needed no change and why this test is the
+    only thing standing between the new SQL columns and a reader who cannot see
+    them: the seam is the serialised body, so it is the body that gets asserted.
+
+    The numbers are the live shape measured 2026-09-29 over the 7-day window:
+    autoresearch had 7 deadline cuts and 9 rounds whose matrix the projection
+    shrank before any trial ran, and the deadline half had been dead for a day
+    while the union still read 16. Here `autoresearch` is 2 cuts + 1 shrink of 4,
+    `youtube-digest` is the post-fix case — 2 shrunk rounds, 0 cuts — and
+    `arch-review` has nothing in the window. A `0` in `deadline_cut` is only
+    evidence if `total` says a run was actually looked at, which is what the
+    `arch-review` half pins: no dict, so no invented zero for either new key.
+    """
+    client = _matrix_client(
+        monkeypatch, tmp_path,
+        {"autoresearch": [(True, "R_cut_1"), (_SHRUNK_AND_CUT, "R_both"),
+                          (_SHRUNK, "R_shrunk"), (False, "R_clean")],
+         "youtube-digest": [(_SHRUNK, "Y_0"), (_SHRUNK, "Y_1")]},
+        outside_window=["arch-review"])
+
+    health = _health_of(client, "autoresearch")
+    assert {"total", "ok", "deadline_cut", "matrix_shrunk",
+            "unfinished_matrix"} <= set(health), \
+        f"both new keys must travel in the same block as ok and total: {health}"
+    assert (health["total"], health["ok"]) == (4, 4), \
+        "every one of these runs returned cleanly, which is the reading that " \
+        "made the #1687 alarm necessary"
+    assert (health["deadline_cut"], health["matrix_shrunk"]) == (2, 1), \
+        "R_both carries both keys and is a deadline cut alone, so the two " \
+        "counts are disjoint in the payload as well as in the SQL"
+    assert health["unfinished_matrix"] == health["deadline_cut"] + \
+        health["matrix_shrunk"] == 3, \
+        "the union keeps its old meaning beside its two causes"
+
+    shrunk = _health_of(client, "youtube-digest")
+    assert (shrunk["total"], shrunk["deadline_cut"], shrunk["matrix_shrunk"]) == (
+        2, 0, 2), \
+        "a source that only ever shrinks its matrix must read deadline_cut 0 " \
+        "against a real total — that is the whole point of the split"
+    assert _health_of(client, "arch-review") is None, \
+        "and with no run in the window there is still no block, so neither new " \
+        "key can read as a zero that means 'looked, nothing incomplete'"
 
 
 # ---------------------------------------------------------------------------

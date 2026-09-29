@@ -1169,6 +1169,27 @@ class WorkQueue:
         # variant, so `ok: 5, failed: 0, fail_rate: 0.0` described a source that
         # had been unable to promote anything since the cap fix.
         #
+        # `unfinished` is the union of two causes that #1857 splits, because
+        # since #1715 they mean opposite things. `deadline_cut` is the state
+        # #1687 was filed for: `scripts/autoresearch/run_round.py:1428` sets
+        # `deadline_stopped` from `tasks_not_reached`, so the round stopped
+        # mid-matrix at its wall-clock deadline and every variant came back
+        # `should=False`. `matrix_shrunk` is that fix working as designed:
+        # `:1753` writes `matrix_dropped_tasks` out of the pre-trial cost
+        # projection (#1605, with #1715's shrink fallback) and the round then
+        # ran what was left to the end, writing its `round_summary`.
+        #
+        # Leaving them merged inverts the alarm rather than merely burying it.
+        # Measured 2026-09-29 over the live 7-day window, autoresearch read
+        # `unfinished_matrix: 16` = 7 deadline cuts + 9 projection shrinks, and
+        # filtered to runs completed after 2026-09-28T08:00Z it is 0 cuts and 9
+        # shrinks of 9 — every sampled round dropping the identical four
+        # `bench_01x_audit_*` tasks, so the shrink is permanent and the union
+        # would keep reading ~= `total` while the thing the count exists to
+        # expose stays at zero. The union is still emitted, unchanged and still
+        # exactly the sum of the two, because #1687's pins read it and so does
+        # anything already consuming the key.
+        #
         # `json_valid` is load-bearing, not hygiene: `response_json` defaults to
         # the empty string, and 1348 of the 1365 runs in the 7-day window as
         # measured on 2026-09-28 hold something sqlite cannot parse, so a bare
@@ -1176,7 +1197,12 @@ class WorkQueue:
         # answers with `health: null` for every source, trading a working week
         # for no data at all. `json_extract` gives an array back as its own JSON
         # text, so `<> '[]'` is the non-empty test and a missing key is NULL,
-        # which both `IS 1` and `IS NOT NULL` read as 0.
+        # which both `IS 1` and `IS NOT NULL` read as 0. The guard is on all
+        # three expressions, not just the original: splitting one `SUM` into
+        # three is exactly where an unguarded extract would ride back in.
+        # `IS NOT 1` is what keeps the two disjoint — it is true for a JSON
+        # `false` and for a missing key alike, so a round that was cut AND
+        # shrunk lands in `deadline_cut` alone.
         q = """SELECT source,
                       COUNT(*)                                   AS total,
                       SUM(status = 'success')                     AS ok,
@@ -1189,6 +1215,18 @@ class WorkQueue:
                                   AND json_extract(response_json,
                                                '$.matrix_dropped_tasks') <> '[]')
                            ELSE 0 END)                            AS unfinished,
+                      SUM(CASE WHEN json_valid(response_json) THEN
+                              json_extract(response_json,
+                                           '$.deadline_stopped') IS 1
+                           ELSE 0 END)                            AS deadline_cut,
+                      SUM(CASE WHEN json_valid(response_json) THEN
+                              json_extract(response_json,
+                                           '$.deadline_stopped') IS NOT 1
+                              AND json_extract(response_json,
+                                               '$.matrix_dropped_tasks') IS NOT NULL
+                              AND json_extract(response_json,
+                                               '$.matrix_dropped_tasks') <> '[]'
+                           ELSE 0 END)                            AS matrix_shrunk,
                       SUM(COALESCE(duration_seconds, 0))          AS seconds,
                       MAX(completed_at)                           AS last_completed
                FROM runs WHERE completed_at >= ? GROUP BY source"""
@@ -1208,6 +1246,14 @@ class WorkQueue:
                 # run in the window gets no dict at all from this method rather
                 # than a 0 that reads as "looked, nothing incomplete".
                 "unfinished_matrix": int(r["unfinished"] or 0),
+                # #1857: the two causes of that union, beside it rather than
+                # instead of it. `deadline_cut` alone is the failure #1687 was
+                # built to surface; `matrix_shrunk` is #1605/#1715's projection
+                # doing its job and is now every autoresearch round there is.
+                # Both need `total` beside them to mean anything, for the same
+                # reason the union above does.
+                "deadline_cut": int(r["deadline_cut"] or 0),
+                "matrix_shrunk": int(r["matrix_shrunk"] or 0),
                 # A rate over zero runs is not 0.0, it is unknown — and
                 # rendering "0% failing" for a source that has never run is
                 # the reading this panel exists to prevent.

@@ -487,6 +487,33 @@ def test_run_outcomes_cover_sources_the_config_does_not_name(queue):
     assert out["run_outcomes"]["sources_failing"] == 1
 
 
+def test_the_run_outcome_block_carries_the_two_matrix_causes(queue):
+    """#1857's other reader: `_run_outcomes` embeds each source's rollup dict
+    into `by_source` verbatim (`dashboard.py:452,476`), so the split keys arrive
+    here as well — this is the second process boundary the change crosses, the
+    2 s `GET /api/dashboard` poll rather than `/api/workers/health`.
+
+    The section itself sums only `total`/`ok`/`failed`/`skipped`, so what this
+    pins is the pass-through: a future field filter, or a re-keyed dict
+    comprehension in that section, dropping `deadline_cut` and `matrix_shrunk`
+    before anything is rendering them.
+    """
+    from workers.queue import new_run_id
+
+    at = datetime.now(timezone.utc).isoformat()
+    for blob in ('{"deadline_stopped": true, "matrix_dropped_tasks": ["bench_017"]}',
+                 '{"deadline_stopped": false, "matrix_dropped_tasks": ["bench_017"]}',
+                 '{"deadline_stopped": false, "matrix_dropped_tasks": []}'):
+        queue.record_run(new_run_id("autoresearch"), None, "autoresearch", "success",
+                         at, at, 1500.0, response_json=blob)
+
+    row = dash._workers()["run_outcomes"]["by_source"]["autoresearch"]
+    assert (row["total"], row["deadline_cut"], row["matrix_shrunk"],
+            row["unfinished_matrix"]) == (3, 1, 1, 2), \
+        f"the round carrying both keys is a deadline cut alone, so the two " \
+        f"causes stay disjoint in this payload too (read {row})"
+
+
 def test_no_per_source_field_named_failed_comes_from_queue_state(queue):
     """A queue row parked in `state='failed'` — the fossil shape the live
     payload carried — is still reported, under a queue-labelled name, and
