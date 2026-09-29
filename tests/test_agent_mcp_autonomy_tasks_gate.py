@@ -344,3 +344,77 @@ def test_the_architecture_sentence_about_the_name_rule_names_its_exceptions():
         assert "_TASK_NAME_RE" in para, (
             "the paragraph does not name the one pattern the rule lives in"
         )
+
+
+#: A finding-set `lint()` result, shaped like the one
+#: `tests/test_skill_lint_report_frontmatter.py` uses, so the bytes this node puts on
+#: disk come from the writer under test and not from a hand-typed fixture.
+SKILL_LINT_RESULT = {
+    "generated_at": "2026-09-29T01:45:33",
+    "total": 1,
+    "dead": [], "missing_desc": [], "drift": [], "duplicates": [],
+    "stale": [], "phantom": [],
+    "missing_script": [{"name": "demo-skill", "path": "/x/SKILL.md",
+                        "scripts": [{"path": "scripts/demo.py", "known_stale": ""}]}],
+}
+
+
+def _run_skill_lint_into(dirn: Path, monkeypatch) -> Path:
+    """`skill_lint.main()` with `REPORT_PATH` redirected into `dirn`."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "skill_lint", REPO / "scripts" / "skill_lint.py")
+    skill_lint = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(skill_lint)
+    report = dirn / "skill-lint-report.md"
+    monkeypatch.setattr(skill_lint, "REPORT_PATH", report)
+    monkeypatch.setattr(skill_lint, "lint", lambda: SKILL_LINT_RESULT)
+    assert skill_lint.main() == 0
+    return report
+
+
+def test_the_header_skill_lint_now_emits_does_not_make_the_report_a_task(
+        autonomy_tree, monkeypatch):
+    """#1826 clause 5: the report gains frontmatter and still is not a task.
+
+    `scripts/skill_lint.py` starts writing a `type: note` block into
+    `skill-lint-report.md` so `validate_okf.py` stops listing it. That is precisely
+    the file shape this gate exists to survive — the ones above use a hand-typed
+    `REPORT_WITH_LEGAL_FRONTMATTER`, and a hand-typed fixture freezes yesterday's
+    writer. So the bytes here are the ones `main()` really writes, produced by
+    running it with `REPORT_PATH` pointed at the scratch autonomy directory: the
+    writer and the listing are both live, and the assertion is what the listing does
+    with the real header.
+
+    `_parse_task_file` must STILL return a record for that file (no `id:`, `name:` or
+    `status:` key, so it projects to the `{id: 0, name: ""}` phantom row), which is
+    what makes `[42]` a verdict about the name gate rather than about the parser
+    giving up. `app/routers/dashboard.py`, the third reader of this directory, gates
+    on `path.name[:1].isdigit()` and rejects the name for the same reason.
+    """
+    _write(autonomy_tree, **{"42-task.md": TASK_42})
+    report = _run_skill_lint_into(autonomy_tree, monkeypatch)
+
+    assert report.is_file() and report.read_text(encoding="utf-8").startswith("---\n"), (
+        "the writer stopped emitting a header, so this node would pass on a report "
+        "that never had one to be confused by"
+    )
+
+    tasks = _tasks_via_mcp_seam()
+    assert [t["id"] for t in tasks] == [42], (
+        f"the skill-lint report joined the task listing: "
+        f"{[(t['id'], t['name']) for t in tasks]}"
+    )
+    assert (len(tasks), _blank_name_ids(tasks)) == (1, [])
+    assert "Skill Lint Report" not in json.dumps(tasks)
+
+    phantom = MCP._parse_task_file(report)
+    assert phantom is not None, (
+        "the parser stopped producing a record for the frontmattted report, so the "
+        "assertions above are measuring the parser and not the name gate"
+    )
+    assert (phantom["id"], phantom["name"], phantom["status"]) == (0, "", "draft"), (
+        "the emitted report no longer projects to the phantom row, so the fixture no "
+        "longer reproduces what the live probe measures"
+    )

@@ -439,6 +439,19 @@ def test_the_lint_report_and_totals_line_carry_the_missing_script_count(tmp_path
     totals = capsys.readouterr().out
     assert "missing_script=1" in totals, totals
 
+    # #1826 clause 4: the OKF header the same `main()` now prepends must ADD to those
+    # bytes, not shift them. Asserted against the file rather than the string because
+    # the header exists only on disk, and asserted as containment of the same three
+    # substrings graded above plus `endswith` of the rendered body — so a header that
+    # swallowed a paragraph, or a body re-flowed around it, reddens this node while
+    # the render-side asserts above stay green.
+    written = (tmp_path / "skill-lint-report.md").read_text(encoding="utf-8")
+    assert "| MISSING_SCRIPT (names a repo script absent from the tree) | **1** |" in written
+    assert "`demo-skill`" in written and "`scripts/demo.py`" in written
+    assert "All skills pass lint" not in written, written[-400:]
+    assert written.endswith(report), "the body on disk is not the body that was rendered"
+    assert written != report, "main() wrote no header at all"
+
 
 def _load_skill_lint():
     import importlib.util

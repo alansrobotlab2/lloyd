@@ -1840,6 +1840,45 @@ def render_report(result: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+#: The OKF header this script declares for the file it owns (#1826).
+#:
+#: `validate_okf.py` grades the file on disk, so a report written without a
+#: frontmatter block is a standing violation row no backfill can clear: the vault
+#: maintenance step that types missing frontmatter stamped this file twice (vault
+#: `8b064ccb` 09-18, `87d8f7db` 09-19) and the next lint firing overwrote both. The
+#: writer of an overwritten file owns its frontmatter, so the declaration lives with
+#: the write. `type` is the key the gate fails on; `segment` and `tags` are
+#: convention, pinned to the values the item and #1692's owed entry agree on.
+REPORT_FRONTMATTER_TYPE = "note"
+REPORT_FRONTMATTER_SEGMENT = "autonomy"
+REPORT_FRONTMATTER_TAGS = ["autonomy", "skill-lint"]
+
+
+def render_frontmatter(result: dict) -> str:
+    """The one `---` block that opens `REPORT_PATH`'s bytes.
+
+    `timestamp` is `result["generated_at"]` — the same value `render_report` puts in
+    the heading below it — and not a fresh `now()`: two sources would let a stale
+    header sit above a fresh body. `yaml.safe_dump` rather than hand-joined strings,
+    because the reader is `yaml.safe_load` and a scalar the emitter had to quote
+    (`timestamp`, which plain YAML resolves as a date) has to come back as the string
+    that was written. `default_flow_style=None` keeps `tags` on one line, the shape
+    the item names.
+    """
+    ts = str(result["generated_at"])
+    fields = {
+        "type": REPORT_FRONTMATTER_TYPE,
+        "segment": REPORT_FRONTMATTER_SEGMENT,
+        "tags": list(REPORT_FRONTMATTER_TAGS),
+        "summary": f"Skill-lint advisory report; {result['total']} live "
+                   f"skills scanned, generated {ts}.",
+        "timestamp": ts,
+    }
+    body = yaml.safe_dump(fields, sort_keys=False, allow_unicode=True,
+                          default_flow_style=None, width=1_000_000)
+    return f"---\n{body}---\n"
+
+
 def main() -> int:
     result = lint()
     # Git, so here and not in `lint()`: a test points `lint` at a temp root with
@@ -1847,7 +1886,11 @@ def main() -> int:
     vault = REPORT_PATH.parent.parent
     if (vault / ".git").exists() and "size" in result:
         result["size"]["spill_delta"] = spill_delta(vault)
-    report = render_report(result)
+    # Header here, not inside `render_report`: that function returns the report BODY
+    # for anyone who wants the prose, and the OKF block is a property of the file
+    # this function writes. Prepending, never replacing — the body's bytes are
+    # unchanged, they only start further down.
+    report = render_frontmatter(result) + render_report(result)
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     REPORT_PATH.write_text(report, encoding="utf-8")
     # Also emit a compact JSON alongside for tooling consumers.
