@@ -23,7 +23,14 @@ back rather than asserting on a return value:
 * **only the writer's own files** — `POLICY.md`, a name that is not a date, a date
   with the wrong extension, an impossible date, and a dated file outside
   `manifests/` all survive
-  (`test_pruning_touches_only_date_named_ndjson_inside_manifests`).
+  (`test_pruning_touches_only_date_named_ndjson_inside_manifests`);
+* **the notice says what the code does** (#1781) — the copy of `POLICY.md` in the
+  store is rewritten by the next recorded request when its contents differ from
+  shipped `RETENTION_POLICY`, and is not written at all when they do not, so the
+  file beside 3 GB of digests cannot go on describing a store that predates the
+  deletion rules above
+  (`test_recording_a_request_refreshes_a_notice_that_disagrees`,
+  `test_a_current_policy_notice_is_not_rewritten_by_recorded_requests`).
 
 Before this diff every test here fails at import for the same reason:
 `cm.prune_store`, `cm.retention_days` and `cm._sweep_if_new_day` do not exist on
@@ -35,6 +42,7 @@ that file.
 from __future__ import annotations
 
 import json
+import os
 import queue
 import threading
 from datetime import date, timedelta
@@ -356,3 +364,130 @@ def test_an_unreadable_store_is_counted_and_never_reaches_a_request(_store, monk
         base_url="http://127.0.0.1:8080", model="primary",
         payload={"messages": [{"role": "user", "content": "go"}]},
         session_id="retention", send_site="test_retention") is not None
+
+
+# ── the notice says what the code does (#1781) ─────────────────────────────
+#
+# Everything above is the deletion the notice never mentioned; these two are the
+# notice itself. `_write_policy` used to run `if not exists: write`, so the copy in
+# the live store froze on the build that happened to create the directory:
+# `~/.local/state/lloyd-request-manifests/POLICY.md` was 1,193 bytes dated
+# 2026-09-19 — the shipped text minus #1604's deletion bullet — while `prune_store`
+# beside it was deleting dated files daily. Clause 3's test above writes
+# `RETENTION_POLICY` into the store and proves pruning leaves it alone; these prove
+# the other two edges: a differing notice is replaced, and a matching one is not
+# touched at all.
+
+#: 2020-01-01T00:00:00Z in nanoseconds. A file's own mtime is what clause 2 is
+#: judged on, so it is set to an instant no writer thread could produce by
+#: working, and the assertion is "nothing touched this file" rather than "nothing
+#: happened within this clock tick".
+_EPOCH_2020_NS = 1_577_836_800_000_000_000
+
+
+def _notice_before_1604() -> str:
+    """The shipped notice with #1604's deletion bullet taken out.
+
+    That is exactly the text the live store carries: the AST diff between the
+    on-disk file and `RETENTION_POLICY` was measured as five added lines, all of
+    them this bullet. Built from the constant rather than transcribed so the
+    fixture is that one bullet's absence and nothing else, and cannot silently
+    drift into a paraphrase of the old notice.
+    """
+    lines = cm.RETENTION_POLICY.splitlines(keepends=True)
+    start = next(i for i, line in enumerate(lines)
+                 if line.startswith("* Dated files are DELETED"))
+    end = start + 1
+    while end < len(lines) and lines[end].startswith("  "):
+        end += 1  # the bullet's own continuation lines belong to it
+    return "".join(lines[:start] + lines[end:])
+
+
+def _record(_store: Path, content: str) -> None:
+    """One request through the door a send site uses, drained to disk.
+
+    The clause is about the recorded-request path, so it is driven by
+    `record_request` and the writer thread behind it — never by calling
+    `_write_policy` directly, which would test a function nothing calls that way.
+    """
+    assert cm.record_request(
+        base_url="http://127.0.0.1:8080", model="primary",
+        payload={"messages": [{"role": "user", "content": content}]},
+        session_id="notice", send_site="test_retention") is not None
+    assert cm.flush(timeout=5.0), "the writer thread did not drain what it was handed"
+
+
+def _manifest_lines(store: Path) -> int:
+    """Manifest lines the store actually holds, counted from disk."""
+    manifests = store / "manifests"
+    if not manifests.is_dir():
+        return 0
+    return sum(1 for path in manifests.glob("*.ndjson")
+               for line in path.read_text(encoding="utf-8").splitlines()
+               if line.strip())
+
+
+def test_recording_a_request_refreshes_a_notice_that_disagrees(_store):
+    """Clause 1: a notice whose contents differ from `RETENTION_POLICY` is left
+    byte-equal to it by the next recorded request.
+
+    Three stale shapes, chosen so that each one kills a comparison weaker than
+    byte-identity: the live store's pre-#1604 text (345 bytes shorter, which is
+    what the file at `~/.local/state/lloyd-request-manifests/POLICY.md` actually
+    holds), the shipped text with its window changed from 14 days to 28 — same
+    byte count, so it is the fixture that defeats an implementation comparing
+    sizes rather than contents — and a one-line stub. Each is asserted to differ
+    before the request, because a fixture that had quietly become the shipped text
+    would turn this into a test that cannot fail.
+    """
+    _store.mkdir(parents=True, exist_ok=True)
+    policy = _store / cm.POLICY_FILENAME
+    shipped = cm.RETENTION_POLICY.encode("utf-8")
+    pre_1604 = _notice_before_1604().encode("utf-8")
+    wrong_window = cm.RETENTION_POLICY.replace("default 14", "default 28",
+                                               1).encode("utf-8")
+    assert len(pre_1604) == 1193 and b"retention_days" not in pre_1604, (
+        "the pre-#1604 fixture has its deletion bullet back")
+    assert wrong_window != shipped and len(wrong_window) == len(shipped), (
+        "the one-number drift is supposed to be invisible to a size check")
+
+    for stale in (pre_1604, wrong_window, b"# retention policy\n"):
+        policy.write_bytes(stale)
+        assert policy.read_bytes() != shipped, "the stale fixture is not stale"
+
+        _record(_store, "refresh-me")
+
+        assert policy.read_bytes() == shipped, (
+            f"a {len(stale)}-byte notice survived a recorded request")
+        assert cm.stats()["write_errors"] == 0, cm.stats()
+
+    assert cm.stats()["lines_written"] == 3, cm.stats()
+    assert _manifest_lines(_store) == 3, "refreshing the notice cost the store a line"
+    assert cm.stats()["pruned_files"] == 0, "nothing here is a file to delete"
+
+
+def test_a_current_policy_notice_is_not_rewritten_by_recorded_requests(_store):
+    """Clause 2: when the notice already matches, recording requests rewrites it
+    zero times — contents identical and mtime unmoved.
+
+    The mtime is pinned to 2020-01-01 before the requests run, so an implementation
+    that rewrote the same bytes on every request would move it and fail: the clause
+    forbids the write, not merely a change of text. Two requests, because a
+    per-request write is the cost the clause is bounding, and the line count is
+    checked to prove the writer ran at all — an mtime that never moved because
+    nothing was ever drained would otherwise read as a pass.
+    """
+    _store.mkdir(parents=True, exist_ok=True)
+    policy = _store / cm.POLICY_FILENAME
+    policy.write_text(cm.RETENTION_POLICY, encoding="utf-8")
+    os.utime(policy, ns=(_EPOCH_2020_NS, _EPOCH_2020_NS))
+    assert policy.stat().st_mtime_ns == _EPOCH_2020_NS, "the clock could not be pinned"
+
+    for second in ("keep-1", "keep-2"):
+        _record(_store, second)
+
+    assert policy.stat().st_mtime_ns == _EPOCH_2020_NS, (
+        "a current notice was rewritten: the request path does file I/O per line")
+    assert policy.read_bytes() == cm.RETENTION_POLICY.encode("utf-8")
+    assert cm.stats()["lines_written"] == 2, cm.stats()
+    assert _manifest_lines(_store) == 2, "the requests did not reach the store"

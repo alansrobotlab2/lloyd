@@ -74,7 +74,10 @@ messages, not the rendered prompt.** Concretely:
   text and of user messages, and a length plus a hash is still a fingerprint of
   confidential content, so the store inherits the vault's confidentiality
   boundary. `POLICY.md`, holding this policy, is written into the store root on
-  first use so the bytes carry their own rules.
+  first use so the bytes carry their own rules, and refreshed on the next recorded
+  request whenever the copy on disk says something other than what this module
+  does — a notice that only ever gets written once freezes as a description of the
+  build that happened to create the directory (#1781).
 
 Never on the token path
 -----------------------
@@ -164,6 +167,10 @@ RETENTION_POLICY = (
     "outside every git-tracked tree; that is necessary and not sufficient - treat\n"
     "it with the same confidentiality as ~/obsidian.\n"
 )
+#: `RETENTION_POLICY` as bytes, so the steady-state check `_write_policy` runs on
+#: every recorded request is one read and one byte comparison — no second copy of
+#: the text to keep in step, and no encode per request.
+_POLICY_BYTES = RETENTION_POLICY.encode("utf-8")
 POLICY_FILENAME = "POLICY.md"
 DEFAULT_SUBDIR = "lloyd-request-manifests"
 
@@ -638,9 +645,43 @@ def _writer_loop() -> None:
 
 
 def _write_policy(root: Path) -> None:
-    if not (root / POLICY_FILENAME).exists():
+    """Put the policy in the store root, and refresh it when it has gone stale.
+
+    Write-if-stale, not write-if-absent (#1781). The notice is compared against
+    `_POLICY_BYTES` rather than merely checked for existence, because existence is
+    what made the contradiction permanent: the store created on 2026-09-19 holds a
+    1,193-byte notice whose only difference from shipped `RETENTION_POLICY` is the
+    bullet saying dated files are DELETED, so the file sitting in the store
+    described a store nothing pruned while `prune_store` beside it deleted one
+    daily, and no request could ever correct it.
+
+    The steady-state cost is one read of a ~1.5 KB file on the path that is already
+    appending a line under `flock`, and a notice that matches is written zero times
+    — not an mtime bump — so nothing here scales with the size of a request.
+    `tests/test_component_manifest_retention.py::test_a_current_policy_notice_is_not_rewritten_by_recorded_requests`
+    holds that line.
+
+    Anything that stops the notice being read counts as stale and is replaced: a
+    document nobody can open is not doing its job, and `POLICY.md` is this module's
+    own file. The refresh is still best-effort, because the notice must never cost a
+    request its manifest line — an `OSError` here is counted and logged and
+    `_append_line` runs regardless.
+    """
+    policy = root / POLICY_FILENAME
+    try:
+        if policy.read_bytes() == _POLICY_BYTES:
+            return
+    except OSError:
+        pass  # absent, unreadable, or not a file: every one is a notice to rewrite
+    try:
         root.mkdir(parents=True, exist_ok=True)
-        (root / POLICY_FILENAME).write_text(RETENTION_POLICY, encoding="utf-8")
+        policy.write_bytes(_POLICY_BYTES)
+    except OSError as exc:  # noqa: BLE001 — the notice loses, the line does not
+        _bump("write_errors")
+        logger.warning(
+            "component_manifest: could not refresh %s (%s: %s) — the policy notice "
+            "in the store may be stale; the manifest line it sits beside was "
+            "unaffected", policy, type(exc).__name__, exc)
 
 
 def _day_file(root: Path) -> Path:
