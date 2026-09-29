@@ -506,7 +506,8 @@ def _worker_run_options(max_turns: int, *, source: str | None = None,
 
 async def run_prompt_on_primary(prompt: str, max_turns: int = 20, *,
                                 source: str = "worker",
-                                title: str = "") -> TurnResult:
+                                title: str = "",
+                                extra_disallowed: Sequence[str] = ()) -> TurnResult:
     """Dispatch a prompt to the primary model at low vLLM priority.
 
     **Recorded, not observed.** This path calls `run_query` directly, so it
@@ -525,6 +526,11 @@ async def run_prompt_on_primary(prompt: str, max_turns: int = 20, *,
     `automod_start` still refuses a worker turn and the automod tools are
     still barred below: a round must be *observable*, and a transcript is not
     an observer.
+
+    `extra_disallowed` joins the deny list `_worker_run_options` already builds,
+    exactly as it does for the state-carried shape. No production source passes
+    one today; `eval/run_scratchpad_ab.py` (#1632) does, so its two arms run this
+    very path and differ by the one tool they are told they cannot call.
     """
     from app.harness import run_query
     from app.harness.events import trim_discarded
@@ -538,7 +544,8 @@ async def run_prompt_on_primary(prompt: str, max_turns: int = 20, *,
     # harness forwards in `_meta` (`app/harness/mcp_pool.py:836`,
     # `META_SESSION_ID`), and the file this anchor reads from is named by this one.
     # Two ids, two files, and the run would write notes nothing ever re-injected.
-    options = _worker_run_options(max_turns, source=source, session_id=session_id)
+    options = _worker_run_options(max_turns, source=source, session_id=session_id,
+                                  extra_disallowed=extra_disallowed)
     try:
         create_session(session_id, platform="worker", model="primary",
                        title=(title or f"{source} run")[:80], source=source,

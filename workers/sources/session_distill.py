@@ -251,11 +251,16 @@ def _turn_budget(item: QueueItem) -> int:
     return int((item.payload or {}).get("max_turns") or DEFAULT_MAX_TURNS)
 
 
-async def execute(item: QueueItem) -> dict[str, Any]:
-    session_path = item.payload.get("session_path", "")
-    session_name = Path(session_path).stem
+def distill_prompt(session_path: str) -> str:
+    """The prompt one distill turn runs, for the transcript at `session_path`.
 
-    prompt = (
+    A function rather than a literal inside `execute` so a measurement can run
+    this job's turn byte for byte: `eval/run_scratchpad_ab.py` (#1632) replays
+    it, and a copy of the prose there would drift the way
+    `scripts/replay_run_state.py::distill_prompt` already has (it predates the
+    guardrail and provenance paragraphs).
+    """
+    return (
         f"You are analyzing a saved Lloyd session transcript to distill what we can "
         f"learn from it. The session file is at: {session_path}\n\n"
         f"Read the file using the Read tool, then identify:\n"
@@ -285,6 +290,13 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         f"## Struggles\n- ...\n\n## Gaps\n- ...\n\n## Skill Candidates\n- ...\n\n"
         f"## Durable Facts\n- ...\n\n## Confidence\n<0.0-1.0>: <justification>\n"
     )
+
+
+async def execute(item: QueueItem) -> dict[str, Any]:
+    session_path = item.payload.get("session_path", "")
+    session_name = Path(session_path).stem
+
+    prompt = distill_prompt(session_path)
     turn = await run_prompt_on_primary(
         prompt, max_turns=_turn_budget(item), source=NAME,
         title=f"distill {session_name}")
