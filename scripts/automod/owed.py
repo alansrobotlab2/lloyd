@@ -182,6 +182,22 @@ def close_item(path: Path, why: str) -> bool:
     return True
 
 
+_PLACEHOLDER_NAMES = frozenset({"placeholder", "todo", "tbd", "follow-up", "follow up",
+                                "untitled", "none", "n/a", "name"})
+
+
+def is_real_follow_up(follow: dict) -> bool:
+    """A follow-up worth filing: a name that is not a stand-in, and a body.
+    The schema's `follow_up` object invites the model to fill it even for a
+    ruling that needs none; on 2026-09-28 that filed #1772, named
+    "Placeholder" with the body "Placeholder body"."""
+    name = _text(follow.get("name")).strip().strip(".").lower()
+    body = str(follow.get("body") or "").strip().lower()
+    if not name or name in _PLACEHOLDER_NAMES or "placeholder" in name:
+        return False
+    return bool(body) and not body.startswith("placeholder") and body not in _PLACEHOLDER_NAMES
+
+
 def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_id: int,
                   session_id: str = "", spawn_cap: int = 3, now: datetime | None = None) -> dict:
     """Write one owed-check answer onto the item. Returns what was done.
@@ -231,7 +247,7 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
         if out in ("ruling", "work", "reopen", "close") and _text(a.get("ruling")):
             record["ruling"] = _text(a.get("ruling"), 500)
         follow = a.get("follow_up") or {}
-        if out in ("work", "ruling") and _text(follow.get("name")) and len(filed) < spawn_cap:
+        if out in ("work", "ruling") and is_real_follow_up(follow) and len(filed) < spawn_cap:
             new = B.new_item(_text(follow.get("name"), 140),
                              f"{str(follow.get('body') or '').strip()}\n\n"
                              f"Filed by owed-check from #{item_id}'s owed entry: {e['what']}",
@@ -239,7 +255,8 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
             filed.append(new.id)
             record["follow_up"] = new.id
         elif out == "work":
-            # No follow-up could be filed (cap reached, or none named): still owed.
+            # No follow-up could be filed (cap reached, none named, or a
+            # placeholder): still owed.
             keep.append(_compact(e))
             notes.append(f"#{n} work owed but not filed this pass")
             continue
