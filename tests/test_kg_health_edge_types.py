@@ -8,6 +8,7 @@ snapshot is a file a person reads and a metric later reports quote, so the fold
 belongs before the count, not in whoever opens the JSON afterwards.
 """
 import importlib.util
+import inspect
 import json
 import sys
 import datetime as dt
@@ -237,40 +238,47 @@ def test_a_share_only_failure_is_attributed_to_share_and_not_to_an_under_floor_t
 
 
 def test_an_under_floor_type_is_named_as_its_own_condition():
-    """Clause 4, second fixture: one type under the floor, no type over the share limit.
+    """Clause 4 (#1544), second fixture, re-parameterised by #1820: one type under the
+    floor, no type over the share limit.
 
-    `conflicts_with` at 1 over 101 active edges is 2026-09-26's measurement modulo
-    the store's size — `mentions` there held 76.5%, but this fixture deliberately
-    spreads the rest so share is *not* failing (40 of 101 = 39.6%, under the 50%
-    limit) and the under-floor type is the only drift. The attribution must name the
-    type, so the line answers "which type, and because of which rule" instead of
-    leaving the count next to an unattributed FAIL.
+    This test used `conflicts_with (1)` as its failing example, which is the very type
+    #1820 rules on: `conflicts_with` is in `app.kg_store.EDGE_TYPES`, so a canonical
+    singleton is now named and never fails. The attribution property is unchanged, so
+    the fixture moves to `ships` — off-vocabulary, one edge, the type #1820 names and
+    the shape `conversation_relations.py:1119` can mint. `mentions` still holds 40 of
+    101 (39.6%, under the ceiling) so the under-floor type is the only drift, and the
+    attribution must still name it, so the line answers "which type, and because of
+    which rule" instead of leaving a count next to an unattributed FAIL.
     """
-    dist = {"mentions": 40, "uses": 35, "related_to": 25, "conflicts_with": 1}
+    assert "ships" not in kg_store.EDGE_TYPES, "the fixture stopped being off-vocabulary"
+    dist = {"mentions": 40, "uses": 35, "related_to": 25, "ships": 1}
     line = khr.edge_type_cardinality(dist)
 
     assert line.startswith("Edge-type cardinality: FAIL — "), line
-    assert "conditions failing: types below the 5-use floor (conflicts_with (1))" in line, line
+    assert "conditions failing: types below the 5-use floor (ships (1))" in line, line
     assert "dominant type share" not in _failing_segment(line), \
-        f"a 39.6% leader is not over the 50% limit: {_failing_segment(line)}"
+        f"a 39.6% leader is not over the ceiling: {_failing_segment(line)}"
 
 
 def test_both_conditions_are_attributed_together_and_a_clean_vocabulary_names_none():
-    """Attribution lists every failing condition, and PASS names none.
+    """Attribution lists every failing condition, and PASS names none (#1544 clause 4),
+    with the under-floor half of the joint fixture moved off-vocabulary by #1820.
 
-    The joint row (mentions 60 of 101 = 59.4% over the limit, `conflicts_with` at 1
-    under it) is the shape tomorrow's store has if `describes (1)` survives into it
-    alongside `conflicts_with (1)`; naming only the first would let a fix for one
-    condition hide the other. The clean row keeps the PASS wording
-    `test_cardinality_passes_a_spread_vocabulary_with_no_rare_type` pins.
+    The joint row (mentions 60 of 101 = 59.4% over the limit, `ships` at 1 under it) is
+    the shape tomorrow's store has if the classifier mints a junk type while the
+    dominant type is still drifting; naming only the first would let a fix for one
+    condition hide the other. It cannot be `conflicts_with` any more — canonical now
+    means named-and-not-failing, which is the other test's subject. The clean row keeps
+    the PASS wording `test_cardinality_passes_a_spread_vocabulary_with_no_rare_type`
+    pins.
     """
     # `previous` carries the share condition into this fixture: 59.4% is under the
     # 80% ceiling, so the joint row needs a lower previous night to be a joint row.
     both = khr.edge_type_cardinality(
-        {"mentions": 60, "uses": 35, "related_to": 5, "conflicts_with": 1},
+        {"mentions": 60, "uses": 35, "related_to": 5, "ships": 1},
         previous={"date": "2026-09-27", "share": 0.58})
     failing_both = _failing_segment(both)
-    assert failing_both.startswith("types below the 5-use floor (conflicts_with (1))"), both
+    assert failing_both.startswith("types below the 5-use floor (ships (1))"), both
     assert ("dominant type share (mentions 59.4% > previous night 2026-09-27 "
             "58.0%)") in failing_both, both
 
@@ -279,7 +287,7 @@ def test_both_conditions_are_attributed_together_and_a_clean_vocabulary_names_no
     assert _failing_segment(clean) == "none\n" or _failing_segment(clean) == "none", clean
 
 
-# ── #1658: a grace for new types, and a share that is measured as a trend ──────
+# ── #1658: a share measured as a trend; #1820: the floor reads vocabulary ───────
 #
 # Both halves of this gate were reporting a condition no reader could act on. The
 # floor caught `conflicts_with (1)` and `describes (1)` — one edge each, both minted
@@ -291,42 +299,118 @@ def test_both_conditions_are_attributed_together_and_a_clean_vocabulary_names_no
 # carries no information, so the reader stops reading the section — which is how a
 # real catch-all would get through.
 #
-# The tests below pin the two new rules AND the floor under them: the grace defers
-# (a 30-day-old singleton still fails), the ceiling still catches a runaway leader on
+# #1658 answered the first half with a 14-night grace, which only deferred it: those
+# two singletons do not grow, so the line would re-catch them as the window closed on
+# 2026-10-10. #1820 replaced the age split with the distinction the grace could not
+# draw — an under-floor type OUTSIDE `app.kg_store.EDGE_TYPES` fails at any count and
+# any age, a canonical one is named and never fails — and the ceiling-and-trend half
+# of #1658 is untouched, still pinned below: the ceiling catches a runaway leader on
 # its own with no history to compare against, a rising share still fails, and a PASS
 # still prints the measured share so "it passed" is never mistaken for "it stopped
 # measuring".
 NOW_1658 = dt.datetime(2026, 9, 28, 12, tzinfo=dt.timezone.utc)
-CONFLICTS_EDGE_2026_09_26 = "2026-09-26T05:11:43Z"     # edge id 44916, origin fact_relate
 NIGHT_BEFORE = {"date": "2026-09-27", "share": 0.765}  # 09-27 measured: 25,849/36,959 etc.
 
+#: Everything #1658's grace needed, by the names it had in the report. None of it
+#: survives #1820: the floor reads the store's own type vocabulary, so nobody reads a
+#: type's age, and a helper whose only caller is gone is not kept around in case.
+AGE_MACHINERY = ("EDGE_TYPE_GRACE_NIGHTS", "first_seen_by_type", "_nights_old")
 
-def test_a_type_younger_than_the_grace_is_exempt_from_the_floor_and_named_as_in_grace():
-    """#1658 clause 1, both halves. `conflicts_with` at 1 of 101 active edges, first
-    seen 2 days ago (its real date) → PASS, and it is named as in grace so the
-    exemption is visible rather than silent. First seen 30 days ago → FAIL naming
-    `types below the 5-use floor (conflicts_with (1))`, because a grace defers the
-    floor and does not remove it: these two singletons will not grow, so the line
-    re-catches them when the window closes and a human rules on the permanent floor.
+
+def test_the_under_floor_split_reads_vocabulary_and_no_age_machinery_survives():
+    """#1658 clause 1, re-parameterised to #1820's rule (#1820 clause 4): what keeps an
+    under-floor type out of the FAIL is that its type is in `app.kg_store.EDGE_TYPES`,
+    not that it is young — and the age machinery is deleted, not left in place unused.
+
+    The names are pinned absent from the report's own source rather than from its
+    namespace, because `hasattr` could not catch two of the three: `_nights_old` is a
+    closure inside `edge_type_cardinality` and was never a module attribute, and
+    `"in grace"` is a literal inside an f-string. A surviving copy of either would
+    still be a grace the code could fall back to, and the live line is only guaranteed
+    to stop saying `in grace` (owed-check 1) if the literal is gone.
     """
-    dist = {"mentions": 40, "uses": 35, "related_to": 25, "conflicts_with": 1}
-    fresh = khr.edge_type_cardinality(
-        dist, first_seen={"conflicts_with": CONFLICTS_EDGE_2026_09_26},
-        previous=NIGHT_BEFORE, now=NOW_1658)
-    assert fresh.startswith("Edge-type cardinality: PASS — "), fresh
-    assert "in grace" in fresh and "conflicts_with (1)" in fresh, fresh
-    assert "conditions failing: none" in fresh, fresh
-    # The exemption has to be stated as an exemption, not as a clean floor: PASS
-    # with `conflicts_with` simply absent would read as "no type is under the floor".
-    assert khr.EDGE_TYPE_GRACE_NIGHTS == 14, khr.EDGE_TYPE_GRACE_NIGHTS
+    src = (ROOT / "scripts" / "memory" / "knowledge-health-report.py").read_text(
+        encoding="utf-8")
+    for gone in (*AGE_MACHINERY, "in grace", "first_seen"):
+        assert gone not in src, f"{gone} still appears in the report"
+    # The behaviour behind the name: age is not an input at all, so no caller — the
+    # nightly report, a test, or tomorrow's repair script — can exempt a young type.
+    assert "first_seen" not in inspect.signature(khr.edge_type_cardinality).parameters
 
-    stale = khr.edge_type_cardinality(
-        dist, first_seen={"conflicts_with": "2026-08-29T05:11:43Z"},
-        previous=NIGHT_BEFORE, now=NOW_1658)
-    assert stale.startswith("Edge-type cardinality: FAIL — "), stale
-    assert ("conditions failing: types below the 5-use floor "
-            "(conflicts_with (1))") in stale, stale
-    assert "in grace" not in stale, stale
+
+def test_an_off_vocabulary_type_under_the_floor_fails_at_any_age_and_names_its_count():
+    """#1820 clause 1: the case the floor exists for, and the age cannot excuse it.
+
+    `ships` is one edge of a type outside `app.kg_store.EDGE_TYPES` — what the Stage-2
+    classifier proposes (`conversation_relations.py:1119`) or a rebuild payload carries
+    (`kg_rebuild.py:597`), neither of which consults the vocabulary and neither of which
+    the store rejects: `_Edges.add` only canonicalises the name it is given, and the
+    refusal lives in `_fact_relate` alone (`agent_mcp/facts.py:1025`). Nothing else in
+    the system reads the stored rows against the vocabulary — `tests/
+    test_edge_type_vocabulary.py:48-56` pins only that the DECLARED sets agree with
+    `EDGE_TYPES` — so this line is where such a type surfaces. It must fail on the night
+    it appears: the store was carrying `ships`, `informs`, `co_accessed`,
+    `upgrade_candidate_for` and `shares_mechanism_with` live over 53,902 edges as
+    recently as 2026-09-19 (#546's autotriage), so this is not a hypothetical shape.
+
+    Two shapes, both failing, because the clause asks for both: the dist with no age
+    information supplied at all, and the same dist arrived at the way the nightly report
+    does — from edge rows whose `created_at` is one day old, through
+    `compute_relationship_stats`, which is the seam a young type used to reach the gate.
+    `first_seen` is gone from the signature, so an age cannot be offered even by a
+    caller that still wanted to.
+    """
+    assert "ships" not in kg_store.EDGE_TYPES, "the fixture stopped being off-vocabulary"
+    dist = {"mentions": 40, "uses": 35, "related_to": 25, "ships": 1}
+
+    line = khr.edge_type_cardinality(dist)
+    assert line.startswith("Edge-type cardinality: FAIL — "), line
+    assert "ships (1)" in line, line
+    assert "conditions failing: types below the 5-use floor (ships (1))" in line, line
+
+    young = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)
+    rows = ([{"source": f"S{i}", "target": f"T{i}", "type": "mentions",
+              "created_at": young.isoformat()} for i in range(40)]
+            + [{"source": f"U{i}", "target": f"V{i}", "type": "uses",
+                "created_at": young.isoformat()} for i in range(35)]
+            + [{"source": f"R{i}", "target": f"W{i}", "type": "related_to",
+                "created_at": young.isoformat()} for i in range(25)]
+            + [{"source": "A", "target": "B", "type": "ships",
+                "created_at": young.isoformat()}])
+    from_store = khr.edge_type_cardinality(
+        khr.compute_relationship_stats(rows, {})["type_distribution"])
+    assert from_store.startswith("Edge-type cardinality: FAIL — "), from_store
+    assert "ships (1)" in from_store, from_store
+    with pytest.raises(TypeError):
+        khr.edge_type_cardinality(dist, first_seen={"ships": young.isoformat()})
+
+
+def test_a_canonical_type_under_the_floor_is_named_and_never_fails_the_line():
+    """#1820 clause 2: `fact_relate` refuses a type outside `EDGE_TYPES`, so a
+    canonical singleton is a legitimate first use and the line may only report it.
+
+    The distribution is 2026-09-29's live shape reduced to a testable size: two
+    approved types at one edge each (`conflicts_with` is edge 44916 and `describes` is
+    48187, both `expired_at` NULL on the live store) over a spread leader that is not
+    itself failing the share half. Before today this PASSed only because both were
+    inside the 14-night window and printed `in grace`; on 2026-10-10 the window closed
+    and the same two rows FAILed. Now the ruling is the one the row itself supports —
+    `fact_relate` would not have accepted a type outside `EDGE_TYPES`, so the store
+    could not have made these by accident — and the exemption survives the date because
+    it never depended on one. Both singletons stay NAMED on the line: reporting a rare
+    type and staying silent about it are the same loss of information in opposite
+    directions, and this line is the only place either appears.
+    """
+    for approved in ("conflicts_with", "describes"):
+        assert approved in kg_store.EDGE_TYPES, f"{approved} left the vocabulary"
+    line = khr.edge_type_cardinality({"mentions": 40, "uses": 35, "related_to": 25,
+                                      "conflicts_with": 1, "describes": 1})
+    assert line.startswith("Edge-type cardinality: PASS — "), line
+    under_floor_part = line.split("types under 5 uses", 1)[1].split(";")[0]
+    assert "conflicts_with (1)" in under_floor_part, line
+    assert "describes (1)" in under_floor_part, line
+    assert "conditions failing: none" in line, line
+    assert "in grace" not in line, line
 
 
 def test_the_share_fails_on_the_ceiling_or_a_rise_and_passes_a_falling_share():
@@ -338,12 +422,10 @@ def test_the_share_fails_on_the_ceiling_or_a_rise_and_passes_a_falling_share():
     the wrong way while sitting below any fixed line.
     """
     fell = khr.edge_type_cardinality({"mentions": 70, "uses": 30},
-                                     previous={"date": "2026-09-27", "share": 0.765},
-                                     now=NOW_1658)
+                                     previous={"date": "2026-09-27", "share": 0.765})
     assert fell.startswith("Edge-type cardinality: PASS — "), fell
     rose = khr.edge_type_cardinality({"mentions": 70, "uses": 30},
-                                     previous={"date": "2026-09-27", "share": 0.698},
-                                     now=NOW_1658)
+                                     previous={"date": "2026-09-27", "share": 0.698})
     assert rose.startswith("Edge-type cardinality: FAIL — "), rose
     assert ("dominant type share (mentions 70.0% > previous night 2026-09-27 "
             "69.8%)") in _failing_segment(rose), rose
@@ -393,15 +475,18 @@ def test_the_previous_night_is_day_aligned_and_no_history_only_lets_the_ceiling_
     count_rose = 24941 > 24505
     share_fell = (24941 / 33791) < prev["share"]
     assert count_rose and share_fell, "fixture no longer shows the trap"
+    # `now=` is gone from every `edge_type_cardinality` call in this file: #1820 deleted
+    # the only thing that read a clock (the grace window). Each assertion below is
+    # #1658's, unchanged, and `NOW_1658` still times `previous_dated_share` above.
     line = khr.edge_type_cardinality({"mentions": 24941, "uses": 5316,
                                       "related_to": 3534},
-                                     previous=prev, now=NOW_1658)
+                                     previous=prev)
     assert line.startswith("Edge-type cardinality: PASS — "), line
 
-    no_history = khr.edge_type_cardinality({"mentions": 70, "uses": 30}, now=NOW_1658)
+    no_history = khr.edge_type_cardinality({"mentions": 70, "uses": 30})
     assert no_history.startswith("Edge-type cardinality: PASS — "), no_history
     assert "no previous night" in no_history, no_history
-    runaway = khr.edge_type_cardinality({"mentions": 85, "uses": 15}, now=NOW_1658)
+    runaway = khr.edge_type_cardinality({"mentions": 85, "uses": 15})
     assert runaway.startswith("Edge-type cardinality: FAIL — "), runaway
     assert "dominant type share" in _failing_segment(runaway), runaway
 
@@ -416,34 +501,34 @@ def test_a_pass_still_prints_the_dominant_type_its_share_and_the_active_total():
     the whole section exists for.
     """
     passed = khr.edge_type_cardinality({"mentions": 70, "uses": 30},
-                                       previous={"date": "2026-09-27", "share": 0.765},
-                                       now=NOW_1658)
+                                       previous={"date": "2026-09-27", "share": 0.765})
     for fragment in ("mentions", "70.0%", "100 active edges"):
         assert fragment in passed, (fragment, passed)
-    assert khr.edge_type_cardinality({"mentions": 85, "uses": 15},
-                                     now=NOW_1658).startswith(
+    assert khr.edge_type_cardinality({"mentions": 85, "uses": 15}).startswith(
         "Edge-type cardinality: FAIL — ")
 
 
-def test_the_quoted_bound_is_the_one_that_can_fail_the_line_and_grace_lists_only_rare_types():
-    """#1658 clause 5, both halves.
+def test_the_quoted_bound_is_the_one_that_can_fail_the_line_and_the_floor_lists_only_rare_types():
+    """#1658 clause 5, both halves, with the second half re-pointed by #1820.
 
     The retired wording printed `(limit 50%)` beside a rule that no longer uses 50,
     which is worse than printing nothing: a reader reconciling "76.5% … (limit 50%)"
     against a PASS concludes the gate is broken and stops trusting the section. So the
     line quotes the ceiling that can actually fail it, and the word "limit" is gone
-    from it entirely. Second half: a type AT the floor is never decorated as in
-    grace — `related_to` at exactly the minimum is not exempt from anything, and a
-    grace note attached to a passing type would make the exemption look arbitrary.
+    from it entirely — unchanged by #1820, and asserted here with the grace kwarg
+    removed because there is no grace left to pass. Second half: what the under-floor
+    column lists is under-floor types and nothing else. `related_to` at 25 and
+    `mentions` at 40 are both above the 5-use minimum, so neither may appear in the
+    column, while the canonical `conflicts_with (1)` must: the column is the line's
+    only place a rare type is named, and #1820 made it the only place the canonical
+    ones are named at all.
     """
     line = khr.edge_type_cardinality(
         {"mentions": 40, "uses": 35, "related_to": 25, "conflicts_with": 1},
-        first_seen={"conflicts_with": CONFLICTS_EDGE_2026_09_26,
-                    "mentions": "2026-01-01T00:00:00Z"},
-        previous=NIGHT_BEFORE, now=NOW_1658)
+        previous=NIGHT_BEFORE)
     assert "(limit 50%)" not in line and "limit" not in line, line
     assert f"ceiling {khr.EDGE_TYPE_MAX_SHARE:.0%}" in line, line
-    grace_part = line.split("in grace", 1)[1].split(";")[0]
-    assert "conflicts_with" in grace_part, line
-    assert "related_to" not in grace_part and "mentions" not in grace_part, grace_part
-    assert "related_to" not in line.split("types under 5 uses")[1].split(";")[0], line
+    under_floor_part = line.split("types under 5 uses", 1)[1].split(";")[0]
+    assert "conflicts_with (1)" in under_floor_part, line
+    assert "related_to" not in under_floor_part and "mentions" not in under_floor_part, \
+        under_floor_part

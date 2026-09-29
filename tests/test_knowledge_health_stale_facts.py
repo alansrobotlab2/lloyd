@@ -558,11 +558,31 @@ def _drifted_edges() -> list[dict]:
 
 
 def test_cardinality_line_lists_rare_types_and_the_dominant_share():
+    """#546's list test, with the verdict's authorship pinned (#1820 clause 5).
+
+    This fixture always held two kinds of rare type, which is why it is the clause-5
+    fixture: `informs` and `ships` are names `app.kg_store.EDGE_TYPES` does not contain,
+    while `depends_on` does. Under #1658 all three sat in one bucket — the FAIL named
+    whichever of them were old enough to fail. Under #1820's rule the two junk names
+    still FAIL the line and are the only names in the failing conditions, and
+    `depends_on (3)` is still LISTED but contributes nothing to the verdict: the line
+    reports every type under the floor, because a reader who cannot see a rare approved
+    type cannot tell it from a store that stopped recording them. A fixture that
+    exercised only the canonical half could not tell those two behaviours apart, and
+    that ambiguity is what let a floor of 5 FAIL two legitimate `fact_relate` singletons
+    (`conflicts_with` 44916, `describes` 48187) for a month.
+
+    `uses (` staying absent is #546's own clause: 35 uses is above the floor, so a
+    type that passes the floor must not be decorated with a count that reads as rare.
+    """
     dist = {"mentions": 60, "uses": 35, "depends_on": 3, "informs": 1, "ships": 1}
     line = khr.edge_type_cardinality(dist)
     assert CARDINALITY_RE.match(line).group(1) == "FAIL"
     for rare in ("informs (1)", "ships (1)", "depends_on (3)"):
         assert rare in line
+    assert "conditions failing: types below the 5-use floor (informs (1), ships (1))" \
+        in line, line
+    assert "depends_on" not in line.split("conditions failing:")[1], line
     assert "uses (" not in line  # 35 uses is above the floor
     assert "dominant type mentions is 60.0% of 100 active edges" in line
 

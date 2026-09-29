@@ -26,7 +26,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from app.paths import PIPELINE_DIR, VAULT_FACTS_ROOT as FACTS_DIR, VAULT_KG_DB
-from app.kg_store import StoreUnavailable, store as _kg_store
+from app.kg_store import EDGE_TYPES, StoreUnavailable, store as _kg_store
 from scripts.reflection_archive import copy_gaps as _copy_gaps, reports_in as _reports_in
 
 DEFAULT_OUTPUT_DIR = PIPELINE_DIR / "reflection"
@@ -60,6 +60,16 @@ AGE_BAND_BOUNDS_DAYS = (90, 180, 365, 730, 3650)
 # Edge-type cardinality (#546): a type used fewer than this many times is a
 # one-off, and one type holding this share of active edges is a catch-all
 # absorbing relations that should have been typed.
+#: What makes an under-floor type a defect (#1820) is its name not being in
+#: `app.kg_store.EDGE_TYPES`, imported here so the report and the writer cannot
+#: disagree about what a real relation is. Two writers can persist a name that
+#: `_Edges.add` only spell-checks — `conversation_relations.py:1119` (the Stage-2
+#: classifier's proposed type) and `kg_rebuild.py:597` (a migration payload) — because
+#: the vocabulary refusal lives in `_fact_relate` alone (`agent_mcp/facts.py:1025`), and
+#: nothing else catches it. A name that IS in the set is a legitimate rare use, and is
+#: named on the line without failing it: the 2026-09-29 store measured 38,069 active
+#: edges across 12 types with nothing outside `EDGE_TYPES`, so a count-based floor was
+#: firing on approved types alone.
 EDGE_TYPE_MIN_USES = 5
 #: The ceiling on one type's share of active edges. It was 0.5 until #1658, and 0.5
 #: is not a bound that anything can act on: `mentions` sat at 69-92% for every night
@@ -72,17 +82,15 @@ EDGE_TYPE_MIN_USES = 5
 #: and 09-25 still FAIL (>0.8) and 09-26 and 09-27 PASS, so this is a looser bound
 #: with a sharper trigger, not a switch to always-green.
 EDGE_TYPE_MAX_SHARE = 0.8
-#: How many nights a new edge type is exempt from the floor (#1658). The floor is a
-#: "no one-off types" rule, and it was punishing exactly the opposite: both
-#: under-floor types on 2026-09-27 (`conflicts_with`, `describes`, one edge each)
-#: were written on 2026-09-26 through `fact_relate`, which REFUSES a type outside
-#: the canonical `EDGE_TYPES` set (`agent_mcp/facts.py:985-989`; set at
-#: `app/kg_store.py:505-515`). A legitimate first use of an approved type is what a
-#: grace period is for. It defers rather than resolves: these two singletons will
-#: not grow, so the floor re-catches them around 2026-10-10 and the permanent answer
-#: (a floor of 1 for types reachable only through `fact_relate`, or a per-type
-#: minimum) is the human call this function's docstring already reserves.
-EDGE_TYPE_GRACE_NIGHTS = 14
+#: What the floor rules on since #1820: the store's own type vocabulary, imported from
+#: `app.kg_store` so the report and the writer cannot disagree about what a real
+#: relation is. An under-floor type is a defect when its name is not in here —
+#: `conversation_relations.py:1119` (the classifier's proposed type) and
+#: `kg_rebuild.py:597` (a migration payload) can persist a name that
+#: `_Edges.add` only spell-checks, because the vocabulary refusal lives in
+#: `_fact_relate` alone (`agent_mcp/facts.py:1025`) — and a legitimate rare use when it
+#: is. The 2026-09-29 store measured 38,069 active edges across 12 types with nothing
+#: outside this set, which is why the floor was firing on approved types only.
 #: How far back to look for the previous night's share. Seven because the report is
 #: nightly and three nights of history is enough to catch a store that stopped being
 #: written; beyond a week the "previous night" is not a night anymore.
@@ -784,13 +792,11 @@ def generate_report(
 
     lines.append("## Relationship Type Distribution")
     lines.append("")
-    # Both inputs to the softened gate come from data the report already holds or
-    # can read: first-seen is derived from the `edges` argument (no new state), and
-    # the previous night's share from the kg_health snapshot series, DAY-aligned.
+    # The one input the line still takes comes from data the report can already read:
+    # the previous night's share, from the kg_health snapshot series, DAY-aligned. The
+    # floor's other input since #1820 is `EDGE_TYPES`, imported from the store itself.
     lines.append(edge_type_cardinality(type_dist,
-                                       first_seen=first_seen_by_type(edges),
-                                       previous=previous_dated_share(now),
-                                       now=now))
+                                       previous=previous_dated_share(now)))
     lines.append("")
 
     if type_dist:
@@ -995,33 +1001,6 @@ def _parse_edge_ts(value) -> datetime | None:
     return out
 
 
-def first_seen_by_type(edges: list[dict]) -> dict[str, str]:
-    """The oldest ACTIVE edge's `created_at` per type — a type's first appearance.
-
-    Derived from the edges the report already loaded rather than persisted, so the
-    report gains no state and cannot disagree with the store about what exists. The
-    caveat is real and is owed a ruling (#1658): taken over ACTIVE edges it slides
-    later whenever the oldest edge expires, so a type kept alive by one short-lived
-    edge at a time holds its grace forever. The alternative — a persisted first-seen
-    in the `kg_health` snapshot series — is the design call this round must not make
-    silently, and it is named on the item.
-
-    Expired edges are excluded for the same reason the floor counts active edges
-    only: a type whose edges are all gone is not using the store, and its
-    first-appearance is not a fact about the current graph.
-    """
-    out: dict[str, str] = {}
-    for edge in edges:
-        if not is_edge_active(edge) or not edge.get("created_at"):
-            continue
-        t = str(edge.get("type") or "unknown")
-        stamp = str(edge["created_at"])
-        known = out.get(t)
-        if known is None or stamp < known:
-            out[t] = stamp
-    return out
-
-
 def previous_dated_share(now: datetime | None = None,
                          metrics_dir: Path | None = None) -> dict | None:
     """The last night's dominant-type share, DAY-aligned, or None if none exists.
@@ -1072,54 +1051,52 @@ def previous_dated_share(now: datetime | None = None,
 
 
 def edge_type_cardinality(type_dist: dict[str, int], *,
-                          first_seen: dict[str, str] | None = None,
-                          previous: dict | None = None,
-                          now: datetime | None = None) -> str:
-    """The `Edge-type cardinality: PASS|FAIL` verdict line (#546, softened by #1658).
+                          previous: dict | None = None) -> str:
+    """The `Edge-type cardinality: PASS|FAIL` verdict line (#546, #1658, #1820).
 
     Report output only, never an alarm: the store as measured holds a dominant
     type and one-off types on most nights, and alarming on that pages about the
     graph's shape rather than about the store being broken. The two conditions are
     attributed separately on the FAIL line so a reader sees which one drifted.
 
-    #1658 changed what each condition is allowed to claim:
+    Two conditions, each stated as a fact about the graph that can be checked:
 
-    * The 5-use floor exempts a type for `EDGE_TYPE_GRACE_NIGHTS` from its first
-      appearance. It was punishing the thing it cannot distinguish — a legitimate
-      first use of a canonical type, written through `fact_relate`, which refuses a
-      type outside `EDGE_TYPES` — from a junk one-off. `first_seen` comes from
-      `first_seen_by_type`; pass nothing and nothing is in grace, which is what
-      every caller before #1658 effectively did.
+    * The 5-use floor fails on VOCABULARY (#1820). Under it, a type outside
+      `EDGE_TYPES` FAILs the line at any count and any age, named with its count; a
+      type inside `EDGE_TYPES` is named on the line and never contributes to the
+      verdict. Age decided this split until today and could not: `fact_relate` refuses
+      a type outside the vocabulary, so a canonical singleton is by construction a
+      legitimate first use, while the off-vocabulary name a Stage-2 classifier or a
+      rebuild payload can persist is the defect the floor exists to catch. Measured on
+      2026-09-29: all 38,069 active edges carry canonical types, so the only two types
+      the floor was failing — `conflicts_with (1)`, `describes (1)` — were approved
+      types, and the grace that exempted them expired on 2026-10-10, at which point the
+      line fails again on those same two singletons.
     * The share condition is a TREND, not a level: FAIL when the leader exceeds
       `EDGE_TYPE_MAX_SHARE` or when it is higher than the previous night's
       day-aligned share. A constant FAIL teaches nothing; a level that is falling
       while the line says FAIL nightly trains the reader to skip the section.
+      #1820 changed none of this half.
 
-    The weakening is bounded on purpose (`EDGE_TYPE_MAX_SHARE` still catches a
-    runaway catch-all at 0.8 on its own, a rise still FAILs, and the measured
-    dominant type, share and active-edge total are printed on every PASS), and the
-    limit quoted in the text is the bound that can actually fail the line.
+    The floor is a floor and not a vocabulary check: an off-vocabulary type AT or above
+    5 uses is not named by this line, and neither is a canonical one. `tests/
+    test_edge_type_vocabulary.py` asserts the DECLARED vocabularies agree with
+    `EDGE_TYPES`; nothing asserts the stored rows do, and that gap is owed a ruling
+    (#1820). `EDGE_TYPE_MAX_SHARE` still catches a runaway catch-all at 0.8 on its own,
+    a rise still FAILs, and the measured dominant type, share and active-edge total are
+    printed on every PASS, so the bound quoted in the text is the one that can fail the
+    line.
     """
     total = sum(type_dist.values())
     if not total:
         return "Edge-type cardinality: PASS — no active edges"
-    moment = now or datetime.now(timezone.utc)
-    moment = moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
 
-    def _nights_old(name: str) -> float | None:
-        stamp = _parse_edge_ts((first_seen or {}).get(name))
-        if stamp is None:
-            return None
-        return (moment - stamp).total_seconds() / 86400.0
-
+    # Canonical types are sorted with the rest and named on the line; only a name
+    # outside the vocabulary may contribute to the verdict.
     under = sorted(t for t, n in type_dist.items() if n < EDGE_TYPE_MIN_USES)
-    in_grace, below = [], []
-    for t in under:
-        old = _nights_old(t)
-        (in_grace if old is not None and 0 <= old < EDGE_TYPE_GRACE_NIGHTS
-         else below).append(t)
+    below = [t for t in under if t not in EDGE_TYPES]
 
-    rare = ", ".join(f"{t} ({type_dist[t]})" for t in below) or "none"
+    rare = ", ".join(f"{t} ({type_dist[t]})" for t in under) or "none"
     dominant, top = max(type_dist.items(), key=lambda kv: kv[1])
     share = top / total
 
@@ -1143,10 +1120,8 @@ def edge_type_cardinality(type_dist: dict[str, int], *,
         limit += f", previous night {previous['date']} {previous['share']:.1%}"
     else:
         limit += ", no previous night's share available"
-    grace = (f"; in grace (<{EDGE_TYPE_GRACE_NIGHTS} nights old): "
-             + ", ".join(f"{t} ({type_dist[t]})" for t in in_grace)) if in_grace else ""
     return (f"Edge-type cardinality: {verdict} — types under {EDGE_TYPE_MIN_USES} "
-            f"uses: {rare}{grace}; dominant type {dominant} is {share:.1%} of "
+            f"uses: {rare}; dominant type {dominant} is {share:.1%} of "
             f"{total:,} active edges ({limit}) — conditions failing: "
             f"{', '.join(failing) or 'none'}\n")
 
@@ -1274,12 +1249,11 @@ def main():
     print(f"  Files with duplicate fact IDs: {dup_id_files}")
     # The same measurement twice, deliberately: this stdout line and the report's
     # section are the two places a human reads the verdict, and they must not be
-    # computed from different inputs — the report's copy takes the grace and the
-    # trend, so a bare call here would print a second, stricter verdict on the run.
+    # computed from different inputs — the report's copy takes the previous night's
+    # trend, so a bare call here would print a second, laxer verdict on the run.
     stdout_cardinality = edge_type_cardinality(
         rel_stats["type_distribution"],
-        first_seen=first_seen_by_type(edges),
-        previous=previous_dated_share(now), now=now)
+        previous=previous_dated_share(now))
     print(f"  {stdout_cardinality}")
     print(f"  Reflection copies named but missing: {len(gaps)}")
     pv = hygiene.get("provenance") or {}
