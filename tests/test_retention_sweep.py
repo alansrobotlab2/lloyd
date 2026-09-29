@@ -1661,9 +1661,9 @@ def test_the_bare_invocation_deletes_the_pair_it_resolves(tmp_path):
     assert "0 deleted" in _groundskeeper_line(again.stdout)
 
 
-def test_the_skill_says_ten_stores_and_its_table_has_a_row_per_report_line(
-        rs, capsys, monkeypatch):
-    """Clause 4: `skills/retention-sweep/SKILL.md` says ten, and its table's rows are
+def test_the_skill_says_twelve_stores_and_its_table_has_a_row_per_report_line(
+        rs, _store_report):
+    """Clause 4: `skills/retention-sweep/SKILL.md` says twelve, and its table's rows are
     the report's lines.
 
     The table is the operator's list of what the weekly sweep bounds, and it said nine
@@ -1671,25 +1671,33 @@ def test_the_skill_says_ten_stores_and_its_table_has_a_row_per_report_line(
     on nine lines could still conclude the tree was bounded. Counting the rows against
     the lines the script actually prints is the check that keeps them together: a store
     added on one side and not the other fails here rather than reading as coverage.
+
+    It went stale anyway, in the direction this node was blind to: #1644 added two
+    stores and the prose stayed at ten for nine commits, because the count of report
+    lines came from the suffix selector that could not see them (`#1835`). The report
+    side of the comparison is now the `_store_report` fixture — the twelve lines
+    `main()` prints with both automod rungs in play — so this node reads one
+    measurement, not two.
     """
     skill = rs.vault_root() / "skills" / "retention-sweep" / "SKILL.md"
     if not skill.is_file():
         pytest.skip(f"the vault skill is not reachable from here: {skill}")
     text = skill.read_text(encoding="utf-8")
+    flat = " ".join(text.split())
 
     rows = {ln.split("|")[1].strip(): ln
             for ln in text.splitlines()
             if ln.startswith("| ") and ln.count("|") >= 3
             and not ln.split("|")[1].strip().lower().startswith("store")}
 
-    monkeypatch.setattr("sys.argv", ["retention-sweep.py"])
-    assert rs.main() == 0
-    report = _store_report_lines(capsys.readouterr().out)
-    assert len(report) == 10, f"the sweep prints {len(report)} store lines: {report}"
+    report = _store_report
+    assert len(report) == 12, f"the sweep prints {len(report)} store lines: {report}"
     assert len(rows) == len(report), (
         f"the skill lists {len(rows)} stores against {len(report)} report lines: "
         f"{sorted(rows)}")
-    assert "ten unbounded-growth stores" in text, "the skill still says nine"
+    assert "twelve unbounded-growth stores" in text, (
+        "the skill's description states a store count other than twelve")
+    assert "twelve in all" in text, "the skill's body states a store count other than twelve"
 
     pair_row = next((ln for store, ln in rows.items()
                      if "groundskeeper-queue.json" in store), None)
@@ -1698,18 +1706,53 @@ def test_the_skill_says_ten_stores_and_its_table_has_a_row_per_report_line(
     assert "GROUNDSKEEPER_QUEUE_MAX_AGE_DAYS" in pair_row, pair_row
     assert f">{rs.GROUNDSKEEPER_QUEUE_MAX_AGE_DAYS}d" in pair_row, pair_row
 
+    # The two stores #1644 added, which are the two this node's own count drifted on.
+    # Each row has to name the constant that decides its window, because the row is how
+    # an operator knows which knob a `0 reclaimed` was produced under.
+    dirs_row = next((ln for store, ln in rows.items() if "lloyd-work" in store), None)
+    assert dirs_row is not None, (
+        f"no row names the round directories the sweep reclaims: {sorted(rows)}")
+    assert "WORKTREE_DIR_MAX_AGE_DAYS" in dirs_row, dirs_row
+    assert f">{rs.WORKTREE_DIR_MAX_AGE_DAYS}d" in dirs_row, dirs_row
+
+    branch_row = next((ln for store, ln in rows.items()
+                       if "automod" in store and "round_id" in store), None)
+    assert branch_row is not None, (
+        f"no row names the round branches the sweep deletes: {sorted(rows)}")
+    assert "BRANCH_MAX_AGE_DAYS" in branch_row, branch_row
+    assert f">{rs.BRANCH_MAX_AGE_DAYS}d" in branch_row, branch_row
+    # The row states the #1644 ruling as SETTLED, with the two counts the line prints,
+    # because a row that calls a decided question open is an alarm that outlives its
+    # retraction: the retraction is never reprinted and only the ask is.
+    assert "never deleted" in branch_row.lower(), branch_row
+    assert "held_unreachable" in branch_row, branch_row
+    assert "due_ruling" in branch_row, branch_row
+    assert f"{rs.BRANCH_UNREACHABLE_HOLD_DAYS}d" in branch_row, branch_row
+    assert str(rs.BRANCH_UNREACHABLE_REOPEN_TIPS) in branch_row, branch_row
+    assert str(rs.BRANCH_UNREACHABLE_REOPEN_GIT_MB) in branch_row, branch_row
+
+    # And what a run from anywhere else prints, since that reader holds a report
+    # without these two rows in it and has to be able to tell that from a broken sweep.
+    assert "automod stores: REFUSED" in flat, (
+        "the skill never says what a non-production run prints in place of the two rows")
+    assert "ten store lines plus one refusal line" in flat, (
+        "the skill does not say that a refusal run reports ten stores by design")
+
 
 # ---------------------------------------------------------------------------
 # The third surface: what the worker is TOLD. (#1734)
 #
 # `app/autonomy.py::_build_task_prompt` splices the skill body AND
-# `Task description: {description}` into ONE prompt, so the weekly run of task #79
-# is handed "ten unbounded-growth stores" by SKILL.md and "Report all nine lines."
-# by its own task file in the same turn. The node above compares the skill to the
-# printed report and never opens the task file, so the drift lived in the one
-# surface no test read: `b3afdb99` (#1573) enumerated nine stores a day before
-# `d24c7ecd` bounded the groundskeeper queue pair as the tenth, and no commit since
-# re-numbered the list.
+# `Task description: {description}` into ONE prompt, so the weekly run of task #79 is
+# handed both counts in the same turn. #1734 caught the first such pair — SKILL.md said
+# "ten unbounded-growth stores" while the task file said "Report all nine lines.",
+# because `b3afdb99` (#1573) enumerated nine stores a day before `d24c7ecd` bounded the
+# groundskeeper queue pair as the tenth and no commit re-numbered the list. The same
+# shape recurred: #1644 bounded two more stores and both surfaces sat at ten against
+# twelve printed lines until #1835. The reason the second one hid is above
+# `_store_report_lines` — the guard compared the two prose surfaces against a report it
+# counted by a suffix rule that could not see the two new lines, so a check with three
+# surfaces to reconcile measured none of them.
 # ---------------------------------------------------------------------------
 
 #: The two sentences in the description that state a count. Both are load-bearing:
@@ -1730,17 +1773,143 @@ _STORE_COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six
                       "7": 7, "8": 8, "9": 9, "10": 10, "11": 11, "12": 12}
 
 
+#: The only two indented report lines that are not a store: the header naming the root
+#: the numbers describe, and the one line a refused automod rung prints in place of its
+#: two stores. Everything else `main()` indents is a store line, whatever it ends in.
+_NON_STORE_REPORT_PREFIXES = ("data root:", "automod stores:")
+
+
 def _store_report_lines(out: str) -> list[str]:
     """One line per bounded store, in the order `main()` printed them.
 
-    The store lines are the report; the header, the data-root line and the two
-    automod lines are not stores. This is the definition the skill-table node above
-    uses too — both readers of "how many stores are there" now take it from here, so
-    the two sides of a count comparison cannot be two different measurements.
+    The rule is POSITIVE: every indented report line is a store except the two named in
+    `_NON_STORE_REPORT_PREFIXES`. It used to be a suffix test — a line counted as a store
+    only if it ended `freed`, `candidate` or `removed (keep last 200)` — and a suffix
+    records how a line happens to be worded today, not what it is, so it failed both ways:
+
+    * **false green.** The two stores #1644 added print `~/lloyd-work round dirs >7d: …
+      (kept: …)` and `automod/* branches >30d & ancestor of main: …`, and matched no
+      suffix, so the selector reported ten stores against the twelve lines the sweep
+      printed and every count comparison below agreed with stale prose instead of the
+      report (`#1835`).
+    * **false red.** The lock-skip forms print `workers.db runs >30d: SKIPPED (database
+      locked …) — nothing pruned` and the automod equivalents end `— nothing reclaimed` /
+      `— nothing deleted`, none of them a recognised suffix either. On a locked
+      `workers.db` the old selector returned fewer lines than the skill's table has rows,
+      and the table node went red for a reason with nothing to do with the diff under
+      review.
+
+    A positive rule fails in neither direction: a new store is counted whatever its
+    wording, and a line that changes its wording while staying a store line stays
+    counted. This is the definition the skill-table node and the task-description node
+    both use, so the two sides of a count comparison cannot be two different measurements.
     """
     return [ln.strip() for ln in out.splitlines()
-            if ln.startswith("  ") and ln.strip().endswith(
-                ("freed", "candidate", "removed (keep last 200)"))]
+            if ln.startswith("  ")
+            and not ln.strip().startswith(_NON_STORE_REPORT_PREFIXES)]
+
+
+def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
+        rs, _store_report):
+    """#1835 clause 1: the twelve lines `main()` prints are twelve stores, and the two
+    the loop leaves outside the data root are among them.
+
+    This is the acceptance check itself, run against the real `main()`: the count a
+    full sweep reports, taken through the selector every count comparison in this file
+    reads. It exists because #1644's two stores printed `(kept: …)` and
+    `& ancestor of main: …` forms the suffix test could not see, so the sweep printed
+    twelve lines and the guard said ten for nine commits, agreeing with stale prose
+    rather than with the script.
+    """
+    assert len(_store_report) == 12, (
+        f"the sweep prints {len(_store_report)} store lines, not the twelve its report "
+        f"has since #1644: {_store_report}")
+
+    printed = [ln.split(":")[0] for ln in _store_report]
+    dirs_line = f"~/lloyd-work round dirs >{rs.WORKTREE_DIR_MAX_AGE_DAYS}d"
+    branch_line = (f"automod/* branches >{rs.BRANCH_MAX_AGE_DAYS}d "
+                   f"& ancestor of {rs.MAIN_REF}")
+    assert dirs_line in printed, f"the round-directory store is not in the report: {printed}"
+    assert branch_line in printed, f"the round-branch store is not in the report: {printed}"
+
+    # The mechanism of the drift, pinned rather than narrated: the only lines the OLD
+    # suffix rule could not see are exactly these two. `len(report) == 12` alone would
+    # still pass if somebody reintroduced a suffix test alongside a wording change, and
+    # it is the coincidence of a store line's wording with a store line's identity that
+    # made the count unreadable in the first place.
+    invisible = [ln for ln in _store_report
+                 if not ln.endswith(("freed", "candidate", "removed (keep last 200)"))]
+    assert sorted(ln.split(":")[0] for ln in invisible) == sorted([dirs_line,
+                                                                  branch_line]), (
+        "these store lines are invisible to an endswith(('freed','candidate',"
+        "'removed (keep last 200)')) rule, which is how #1835's drift happened: "
+        f"{[ln.split(':')[0] for ln in invisible]}")
+
+
+def test_an_indented_report_line_is_a_store_whatever_it_ends_in():
+    """#1835 clause 2: the rule cannot quietly become a suffix test again.
+
+    A synthetic report, so the case can be a wording no rung prints today: a thirteenth
+    store whose line ends `… awaiting the operator's ruling`, which matches none of the
+    three suffixes the old selector keyed on. The clause this replaces asked for a
+    mutate-and-restore — add a thirteenth `print` to `main()`, watch a node go red —
+    which no reviewer can grade out of a diff. This is the same protection with the
+    mutation folded into the fixture: any further indented line `main()` prints is a
+    store here the moment it exists, and a store line that rewords itself (a
+    `SKIPPED (database locked …) — nothing pruned`, an automod `— nothing reclaimed`)
+    stays counted instead of turning the table node red for an unrelated reason.
+    """
+    synthetic = "\n".join([
+        "[retention-sweep] DRY RUN",
+        "  data root: /home/alansrobotlab/lloyd-data",
+        "  task logs >30d:  0 deleted, 0 KiB freed",
+        "  ~/lloyd-work round dirs >7d: 0 reclaimed, 0.0 MiB freed (kept: 1 <7d)",
+        "  automod/* branches >30d & ancestor of main: 0 deleted (kept: 4 <30d)",
+        "  thirteenth store >1d: 3 looked at, awaiting the operator's ruling",
+        "  automod stores: REFUSED: not the production checkout — nothing touched",
+    ])
+    extra = "thirteenth store >1d: 3 looked at, awaiting the operator's ruling"
+    assert not extra.endswith(("freed", "candidate", "removed (keep last 200)")), (
+        "the fixture line has to be one the old suffix rule could not see, or this "
+        "node is testing nothing")
+
+    report = _store_report_lines(synthetic)
+
+    assert extra in report, f"an indented store line was dropped for how it ends: {report}"
+    assert len(report) == 4, (
+        f"expected the four store lines and neither the data-root header nor the "
+        f"automod refusal: {report}")
+    assert not any(ln.startswith(("data root:", "automod stores:")) for ln in report), (
+        f"the rule counted a line that is not a store: {report}")
+
+
+def test_a_run_outside_the_production_checkout_reports_ten_stores_and_one_refusal_line(
+        rs, monkeypatch, capsys):
+    """The other direction of the same rule: a refused rung prints one refusal line, and
+    that line is not a store.
+
+    Outside the production checkout both automod rungs collapse into
+    `  automod stores: REFUSED: …`, so a reader holding that output sees ten store lines
+    while the skill says twelve — and SKILL.md now says so in those words. This pins the
+    fact that sentence describes, so the note cannot rot into the reassuring half (just
+    "twelve", which makes every sandbox run look like it lost two stores) or the alarming
+    half ("the sweep is broken"). `test_an_automod_rung_refuses_outside_the_production_checkout`
+    owns the predicate itself and the `NOT_PRODUCTION_EXIT` half; what is new here is the
+    COUNT, which is the number a report is written from.
+    """
+    out = _dry_run_report(rs, monkeypatch, capsys, refused=True)
+    report = _store_report_lines(out)
+
+    assert len(report) == 10, f"a refusal run should report ten stores: {report}"
+    refusal = [ln.strip() for ln in out.splitlines()
+               if ln.strip().startswith("automod stores:")]
+    assert len(refusal) == 1, f"expected one automod refusal line, got: {refusal}"
+    assert "REFUSED" in refusal[0], refusal[0]
+    assert not any("automod stores:" in ln for ln in report), (
+        f"the refusal line was counted as a store: {report}")
+    assert not any("lloyd-work round dirs" in ln or "automod/* branches" in ln
+                   for ln in report), (
+        f"a refused rung's store line appeared in the report: {report}")
 
 
 def _store_label(line: str) -> str:
@@ -1844,12 +2013,44 @@ def _assert_description_names_the_reported_stores(description: str, report: list
     return items
 
 
-@pytest.fixture()
-def _store_report(rs, tmp_path, monkeypatch, capsys) -> list[str]:
-    """The store lines production `main()` prints over the fixture data root."""
+#: The sentence `main()` prints in place of the two automod store lines when the tree it
+#: runs in is not the production checkout — shaped as `automod_rung_refusal` shapes its
+#: own, since the report line is the operator's only notice of the refusal.
+_REFUSAL_SENTENCE = ("REFUSED: this sweep is running from /somewhere/else/lloyd, not the "
+                     "production checkout /home/alansrobotlab/lloyd — no branch or round "
+                     "directory was touched")
+
+
+def _dry_run_report(rs, monkeypatch, capsys, *, refused: bool = False) -> str:
+    """`main()`'s whole stdout as a dry run, over the fixture's redirected stores.
+
+    `refused=True` stands in for the one tree this suite cannot itself be: a run
+    somewhere that is not the production checkout, where `automod_rung_refusal` declines
+    both automod rungs because a round's worktree shares the live repository's refs. The
+    plain `rs` fixture already answers that question *yes* — deliberately, over
+    redirected constants, so a node about `sessions/*.json` does not end on exit 2 for a
+    branch delete it never asked about — which is what lets the twelve lines below be
+    produced from `tmp_path` alone: `AUTOMOD_WORK_ROOT` is an empty directory,
+    `AUTOMOD_REPO` an empty repository, and the ledger trio absent files, so the two
+    rungs are reading a machine that has never run the loop. This is a dry run, which
+    deletes nothing from any tree by design (#1415).
+    """
+    if refused:
+        monkeypatch.setattr(rs, "automod_rung_refusal", lambda tree=None: _REFUSAL_SENTENCE)
     monkeypatch.setattr("sys.argv", ["retention-sweep.py"])
     assert rs.main() == 0
-    return _store_report_lines(capsys.readouterr().out)
+    return capsys.readouterr().out
+
+
+@pytest.fixture()
+def _store_report(rs, monkeypatch, capsys) -> list[str]:
+    """The store lines production `main()` prints: twelve, both automod rungs among them.
+
+    The two stores #1644 added print only where a run is allowed to touch them, so the
+    count the skill table and the task description are compared against has to come from
+    a run that is — see `_dry_run_report` for what makes that safe here.
+    """
+    return _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
 
 
 def _task79_front_matter(rs) -> tuple[str, str] | None:
@@ -1873,13 +2074,16 @@ def _task79_front_matter(rs) -> tuple[str, str] | None:
 
 def test_the_task_description_names_every_store_the_sweep_prints(
         rs, _store_report):
-    """#1734 clauses 1–3: the prompt-rendered description and the report are one list.
+    """#1734 clauses 1–3, at #1835's twelve: the prompt-rendered description and the
+    report are one list.
 
-    Task #79's front matter is half of the prompt the weekly worker gets, and it
-    enumerated nine stores while the sweep printed ten — so the run was instructed,
-    in the same turn it was told about ten stores, to report nine lines. This reads
-    the shipped file through the loader the scheduler uses and compares its counts
-    and its order against the lines `main()` printed above.
+    Task #79's front matter is half of the prompt the weekly worker gets. #1734 caught
+    it enumerating nine stores while the sweep printed ten, so the run was instructed,
+    in the same turn it was told about ten stores, to report nine lines; #1835 caught
+    the same drift a second time, with both sides at ten against twelve printed lines.
+    This reads the shipped file through the loader the scheduler uses and compares its
+    counts and its order against the lines `main()` printed above — which is why the
+    comparison target is the twelve-line `_store_report`, not a number written here.
     """
     fm = _task79_front_matter(rs)
     if fm is None:
@@ -1893,8 +2097,16 @@ def test_the_task_description_names_every_store_the_sweep_prints(
 
     items = _assert_description_names_the_reported_stores(description, _store_report,
                                                           "autonomy/79-retention-sweep.md")
-    assert len(items) == len(_store_report) == 10, (
+    assert len(items) == len(_store_report) == 12, (
         f"the guard compared {len(items)} items against {len(_store_report)} lines")
+
+    # Clause 5 of #1835: the two stores the self-modification loop leaves behind it are
+    # enumerated LAST because they print last, and each item carries the words the
+    # printed line uses for it — `~/lloyd-work` + `dirs`, `automod/*` + `branches` —
+    # since the guard matches item i against the i-th line by first and last word.
+    assert "~/lloyd-work" in items[10][1] and "dirs" in items[10][1], items[10]
+    assert "automod/*" in items[11][1] and "branches" in items[11][1], items[11]
+    assert items[10][0] == 11 and items[11][0] == 12, items[10:]
 
     # Clause 2, on the tenth store's own terms: the groundskeeper pair sits where the
     # sweep prints it, between the session spill dirs and `workers.db runs`, and names
@@ -1926,22 +2138,24 @@ def test_the_store_count_guard_refuses_a_description_that_disagrees_with_the_rep
     mismatch and not about the guard's shape.
     """
     labels = [_store_label(line) for line in _store_report]
-    good = ("The script is the only actor. ten stores are bounded, and the report "
+    good = ("The script is the only actor. twelve stores are bounded, and the report "
             "names them in this order: "
             + "; ".join(f"{i + 1} {lab}, bounded at the window in the line"
                         for i, lab in enumerate(labels))
-            + ". Report all ten lines.")
+            + ". Report all twelve lines.")
     _assert_description_names_the_reported_stores(good, _store_report, "control fixture")
 
-    # (a) the #1734 drift itself: the prose says nine while ten lines are printed.
-    nine = good.replace("ten stores are bounded", "nine stores are bounded")
+    # (a) the #1734 drift itself, one store-count down: the prose says nine where twelve
+    # lines are printed. It is stated as a `replace` off the control, so this fixture
+    # cannot keep passing on a stale count of its own if the report grows again.
+    nine = good.replace("twelve stores are bounded", "nine stores are bounded")
     with pytest.raises(AssertionError, match="says nine") as raised:
         _assert_description_names_the_reported_stores(nine, _store_report, "fixture nine")
-    assert "10 store lines" in str(raised.value), raised.value
+    assert "12 store lines" in str(raised.value), raised.value
 
     # (b) the same lie on the instruction half only: counts in prose fixed, the
     # sentence the worker obeys left at nine.
-    tell_nine = good.replace("Report all ten lines", "Report all nine lines")
+    tell_nine = good.replace("Report all twelve lines", "Report all nine lines")
     with pytest.raises(AssertionError, match="says nine"):
         _assert_description_names_the_reported_stores(tell_nine, _store_report,
                                                       "fixture report-all")
@@ -1954,7 +2168,8 @@ def test_the_store_count_guard_refuses_a_description_that_disagrees_with_the_rep
                                                       "fixture dropped item")
 
     # (d) and the order half, where every count is right: swapping two adjacent items
-    # keeps ten and ten but puts the queue's words on the runs line.
+    # keeps twelve claimed and twelve enumerated, but puts the queue's words on the runs
+    # line.
     swapped = (good.replace(f"9 {labels[8]},", f"9 {labels[9]},")
                    .replace(f"10 {labels[9]},", f"10 {labels[8]},"))
     with pytest.raises(AssertionError, match="out of step"):
