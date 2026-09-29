@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, eval, bench, measurement]
 type: reference
 status: implemented
-date: 2026-09-28
+date: 2026-09-29
 ---
 
 # Lloyd — the measurement surface
@@ -14,10 +14,11 @@ from the surface here: the arms under `eval/`, the runners at its top level, and
 the bench task corpus in the vault. This doc says where a number lives, what
 produced it, and which of them stands between a round and landing.
 
-It was filed as #1699 because the surface had no owner. Nineteen architecture
-docs cite `eval/` paths; `testing.md` is explicitly the pytest suite and nothing
+It was filed as #1699 because the surface had no owner. Twenty other
+architecture docs cite `eval/` paths (nineteen of them when the item was
+filed); `testing.md` is explicitly the pytest suite and nothing
 else, and `evaluation-engine.md` was retired in the OpenClaw purge. An area cited
-from nineteen places and owned by none is how one doc came to name an eval arm
+from that many places and owned by none is how one doc came to name an eval arm
 that had never been created and treat it as an authority — the directory is still
 absent from `eval/`, which is the point of the incident (#1421), and which is why
 it is not cited here as a path: a doc that cites a directory it should know is
@@ -33,7 +34,7 @@ missing has written the drift into the file that is supposed to catch it.
 | `$LLOYD_DATA/eval/baselines/` | every baseline a run produced since the runtime data root moved | the runners themselves |
 
 `app/paths.py:100` is the one definition — `EVAL_BASELINES_DIR = DATA_ROOT /
-"eval" / "baselines"` — and `eval/run_eval.py:1995` writes its record there, not
+"eval" / "baselines"` — and `eval/run_eval.py:2055` writes its record there, not
 beside the script. The repo's `eval/baselines/` keeps a tracked handful (the
 context-rot, compaction-recall and skills-index pins, for instance) so a reader
 knows the *shape*; the directory that answers "what has actually been measured
@@ -69,7 +70,7 @@ a row naming a deleted arm both fail.
 | `memory_eval` | memory-recall question set `v1` | `eval/memory_eval_build.py`, `eval/run_memory_eval.py` |
 | `review_calibration` | labelled review-rung outcomes, including a first cut and a deliberately test-stripped one, so the grader can be calibrated against known verdicts | `scripts/automod/review_tools.py` |
 | `secondary-routing` | keep/raise/revert decisions per job class for routing generation to the secondary engine | `eval/secondary_routing_eval.py`, `app/secondary_models.py` |
-| `supply-chain` | whether the install-provenance predicate blocks the distribution names that do not exist without blocking one that does, and whether an advisory scan ran at all — 61 planted names replayed through the shipped code against a faked registry and a pinned clock, over 180 of the repo's 181 declared dependencies as the false-block control, 0 of them blocked (#1610) | `app/harness/supply_chain.py` (`run-fixtures-eval`, `scan --write-baseline`), `tests/test_supply_chain_provenance_fixtures.py` |
+| `supply-chain` | whether the install-provenance predicate blocks the distribution names that do not exist without blocking one that does, and whether an advisory scan ran at all — 61 planted names replayed through the shipped code against a faked registry and a pinned clock, over 180 of the repo's 181 declared dependencies as the false-block control, 0 of them blocked (#1610) | `app/harness/supply_chain.py` (`fixtures`, `scan --write-baseline`), `tests/test_supply_chain_provenance_fixtures.py` |
 | `uptake` | whether injected context reached the turn that needed it, with hand labels under `eval/uptake/labels/` | `app/uptake.py` |
 
 The corpora are the point of the arms; the scripts that read them mostly live one
@@ -105,9 +106,18 @@ rung of `scripts/automod/gate.py` and nothing else.
   the rung says `no prompt-surface path in the diff` and skips.
 - It runs `eval/run_tool_choice_eval.py --label item<N>`, then
   `eval/compare_tool_choice.py --label item<N>`.
-- It runs **from the live tree, not the worktree**, because the baseline is
-  written next to the run and a baseline written inside a worktree is deleted
-  with it (`SM_20260908_165950`'s was).
+- It runs **from the live tree, not the worktree** — for a reason the code no
+  longer gives. The comment at `scripts/automod/gate.py:1413` says the eval
+  writes its baseline next to the script so a worktree would take it down with
+  itself; that was true when it was written (`d5edc6cb`, 2026-09-12) and stopped
+  being true at `6426668b`, when runtime data left the tree —
+  `eval/run_tool_choice_eval.py:498` writes to `EVAL_BASELINES_DIR`, outside
+  both trees, and `_child_env` with `live_data` set leaves `LLOYD_DATA` unset so
+  the child resolves production's root anyway. What the cwd really picks is
+  which `app/` the eval imports: the script roots its own `sys.path` at the tree
+  it lives in, so the prompt surface under test is the shipped one, never the
+  worktree's — the rung fires on the candidate's diff and scores somebody
+  else's prompt (#1790).
 - Exit codes come from the script, not a copy of its contract: 0 pass, 1
   regression, 2 nothing to compare against — which is not a pass — and 3
   instrument failure, meaning the control set moved so the comparison certified
@@ -144,8 +154,23 @@ round's own prefix twice per run. The full ladder is in [[automod]].
 ## Review log
 
 - **2026-09-28 — created (#1699).** Inventory taken at `f7cf29f4`: the twelve
-  arms above are `eval/`'s directories minus `baselines`, `measurements` and
+  arms then listed were `eval/`'s directories minus `baselines`, `measurements` and
   `__pycache__`, and the item's own figures had already drifted (it said 52
   scripts where `eval/` holds 65, and twelve arms where three of its fifteen
   directories are artifacts). Both roots were read from `app/paths.py` and
   `eval/run_eval.py` rather than from the item's prose.
+- **2026-09-29 — stale.** Three pointers had moved and one reason had been
+  overtaken: `eval/run_eval.py` writes its baseline at line 2055, not 1995; the
+  supply-chain arm is driven by that module's `fixtures` command, not by the
+  Python function whose name the row quoted in its place (#1792); and the
+  live-tree bullet's "baseline written next to the run" predates the data-home
+  move, so what the rung now does is fire on the candidate's diff and score the
+  live tree's prompt surface (#1790). The table is thirteen rows — the twelve in
+  the entry above is the count before `supply-chain` arrived with #1610 on
+  2026-09-28 — and the citing-docs figure is twenty, not nineteen. Re-read from
+  the tree and unchanged: all thirteen arm names against `eval/*`, every cited
+  path, the 61 planted names / 180 controls / 0 false blocks the eval itself
+  reports, the 181 declared dependencies, and the four tool-choice exit codes.
+  `scripts/eval_trend_stats.py`'s `--help` still names the repo copy as its
+  default root where this doc names the data root; the code backs the doc
+  (#1791).
