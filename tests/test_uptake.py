@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
 from urllib.parse import urlparse
 from pathlib import Path
@@ -1934,6 +1935,177 @@ def test_knowledge_write_skill_cites_a_per_entry_uptake_figure():
     assert "retrieval_gate" in text or "noise band" in text
 
 
+#: The two sentences #1816 removed from the skills that tell a nightly run how this
+#: store is used. They are exact strings because they are the exact sentences a run
+#: reads: `skill-lint` told a triager to wait for injection telemetry that
+#: `scripts/skill_lint.py` prints in the report of the same run, and `skill-tracking`
+#: quoted a `presence_source` carrying a marker that stopped being true when #435
+#: shipped (`3774e27b`, 2026-09-24) and #1603 deleted it (`0f72d9b0`). Split the way
+#: `test_the_note_and_source_constants_name_the_injection_telemetry_not_a_pending_item`
+#: splits its copy, so a grep for the retired marker lands on this guard, not on a
+#: second copy of the claim.
+_RETIRED_TELEMETRY_CLAIMS = ("(#435" + " pending)", "not yet emitted")
+
+#: Retired claims that belong to one file's history rather than to all three.
+#: `skill-lint` alone sent a triager to a backlog item for score-gated match events
+#: that `app/prefetch.py:_emit_skill_match_events` has written since #435; the other
+#: two never carried that sentence, so they are not graded against it. Split from the
+#: value marker's string the same way the accepted wording split it — the number is
+#: concatenated so this file never contains, verbatim, a string the acceptance grep is
+#: looking for in the vault.
+_EXTRA_RETIRED_CLAIMS = {"skill-lint": ("future work in " + "#334",)}
+
+#: First scorer generation whose skill rows can carry `SKILL_PRESENCE_TELEMETRY`.
+#: Two commits, seven days apart, made this number: `81410485` (2026-09-21, #1195)
+#: stamped `SCORER_GENERATION = 2`, and `0f72d9b0` (2026-09-28, #1603) added the
+#: channel — its diff names the stamp zero times, so the stamp does NOT witness the
+#: channel. The residual that leaves: a generation-2 table built in that one-week
+#: window is stamped high enough to lose the allowance while carrying no
+#: `prefetch:skill_match` row legitimately, and the node below would go red on it.
+#: That is the chosen direction of failure — a loud red on a stale artifact is
+#: re-derivable in five minutes, a silently-excused absence is what #1816 was filed
+#: for — and no committed artifact can trip it today: all three files under
+#: `eval/uptake/` are unstamped, which reads as generation 1 here. The owed entry on
+#: #1816 is the next probe run, whose table is stamped AND carries the rows, which is
+#: the case that closes the allowance for good.
+FIRST_GENERATION_WITH_SKILL_TELEMETRY = 2
+
+
+def _skill_copy(slug: str) -> str:
+    """One vault skill's `SKILL.md`, read in full.
+
+    A named reader rather than a bare `read_text` because almost every assertion
+    here is an absence assertion ("the retired claim is not in it"), and an absence
+    assertion over an empty or truncated read is true of nothing. The length floor is
+    the positive control on the read itself.
+    """
+    path = Path.home() / "obsidian" / "skills" / slug / "SKILL.md"
+    text = path.read_text(encoding="utf-8")
+    assert len(text) > 400, (
+        f"{path} came back {len(text)} characters, so every 'the claim is gone' "
+        "assertion below is being graded against an unread file")
+    return text
+
+
+def _required_telemetry_phrases() -> dict[str, dict[str, str]]:
+    """Per skill, the sentences its prose must contain to be describing skill-injection
+    telemetry as shipped — one entry per ACCEPTANCE-CLAUSE HALF, keyed by the half so a
+    failure names the half rather than a string.
+
+    Held as data, not as inline asserts, so the guard has two readers with different
+    jobs: `test_the_skill_s_descriptions_of_the_table_match_what_the_code_emits` runs
+    it over the live vault files (marked `live_vault`, because a nightly job owns those
+    bytes — see `pytest.ini`), and
+    `test_the_telemetry_phrase_guard_fails_for_each_half_it_owns` runs it over
+    conforming and single-mutation copies so the gate, which deselects `live_vault`,
+    still executes the guard itself. Where a phrase mirrors a code name it is taken
+    from the module that owns the name, never retyped.
+    """
+    from app import prefetch
+
+    clause4 = {
+        # Clause 4, half 1: names the channel #435 shipped.
+        "names the injection channel": uptake.SKILL_PRESENCE_TELEMETRY,
+        # Clause 4, half 2: names the route that remains for a pre-telemetry log.
+        "names the proxy route": uptake.SKILL_PRESENCE_PROXY,
+        # Clause 4, half 3: a skill row's channel is per-row, not per-table.
+        "says the channel is per-row": "per-row",
+        # Clause 4, half 4: the split is published, and where.
+        "names the published split": "coverage.by_presence_source",
+        # Clause 4, half 5: tables committed before 2026-09-28 carry the marked string.
+        "dates the marked-string tables": "before 2026-09-28",
+    }
+    return {
+        "nightly-reflection-knowledge-write": dict(clause4),
+        "skill-tracking": {
+            **clause4,
+            # Clause 3: offer/ignore counts pointed at the reader that computes them.
+            "points counts at their reader": "skill_injection_counts",
+            # Clause 3's kept half: the management log still has no per-load writer.
+            "keeps the no-writer claim": "no code writes them",
+        },
+        "skill-lint": {
+            # Clause 1: the STALE section reads the measured per-skill counts.
+            "names the event it reads": prefetch.SKILL_MATCH_EVENT,
+            "points counts at their reader": "skill_injection_counts",
+            # Clause 1's only named limit, and clause 2's first.
+            "names the top-K reporting ceiling": "SKILL_REPORT_TOP_K",
+            # Clause 2: why the age comparison is unreachable at all.
+            "keeps the early-return truth": "check_stale",
+            "names the status that triggers it": "status: active",
+            # Clause 2: the measured age that replaces the assertion — both fields,
+            # published by `stale_context` regardless of status.
+            "cites the measured age": "max_age_days",
+            "cites the threshold verdict": "oldest_could_trip",
+            # Clause 2's second limit: `landed` is a render fact, not uptake.
+            "says landed is a render fact": "render",
+            "says landed is not uptake": "not uptake",
+        },
+    }
+
+
+def _assert_describes_shipped_telemetry(slug: str, body: str) -> None:
+    """The guard: what one `SKILL.md` must not say, and must say, about injection telemetry.
+
+    The retired claims first — the two every file is graded against, plus whatever that
+    file's own history carries — then one assertion per required half. Both directions
+    are absence-and-presence pairs on purpose: deleting the retired sentence alone lets
+    a skill go back to describing a channel nobody emits, and the required phrases alone
+    would pass on a file that also still tells a triager to wait for #435.
+    """
+    for claim in _RETIRED_TELEMETRY_CLAIMS + _EXTRA_RETIRED_CLAIMS.get(slug, ()):
+        assert claim not in body, (
+            f"skills/{slug}/SKILL.md still tells a run {claim!r}: the injection "
+            "telemetry has been emitted since #435 (`3774e27b`) and reported by "
+            "`scripts/skill_lint.py` since #1603 (`0f72d9b0`)")
+    for half, phrase in _required_telemetry_phrases()[slug].items():
+        assert phrase in body, (
+            f"skills/{slug}/SKILL.md no longer {half} — the phrase {phrase!r} is gone, "
+            "and the sentence it lived in is what a nightly run follows. If the wording "
+            "genuinely changed, edit the phrase table in _required_telemetry_phrases in "
+            "the same change, and keep the half it maps to true")
+
+
+def _emitted(src: str, table: dict) -> bool:
+    """Does this committed table carry a row for `src`?
+
+    Prefix match, not equality: the committed tables spell the skill proxy with a
+    trailing `(… pending)` marker that `PRESENCE_SOURCE_RENAMES` maps forward, and the
+    skill quotes the unmarked value — the one sentence has to cover both spellings.
+    """
+    return any(str(row.get("presence_source", "")).startswith(src)
+               for row in table.get("entries", []))
+
+
+def _cited_channel_is_unmeasurable_here(src: str, table: dict) -> bool:
+    """May a committed table legitimately carry no row for a channel a skill cites?
+
+    Two ways, and each is a fact about the artifact rather than about the citation.
+
+    * The injected-note channel may declare its own half unreachable in
+      `coverage.prefetch_notes` — the exemption #1603 shipped, keyed now to the
+      channel it actually describes. Keyed to the whole `prefetch:` prefix it also
+      swallowed `prefetch:skill_match`, which would have kept the generation gate
+      below openable by an unrelated note-side silence.
+    * The skill-injection channel may postdate the table: a declared generation below
+      FIRST_GENERATION_WITH_SKILL_TELEMETRY.
+
+    Anything else — `always_in_force:system_prompt`, or the note channel when the
+    notes say it *was* emitted — has no exemption, so an absent row is the
+    contradiction it looks like.
+    """
+    notes = table.get("coverage", {}).get("prefetch_notes", {})
+    if (src == uptake.NOTE_PRESENCE_EMITTED
+            and notes.get("presence_source") == uptake.NOTE_PRESENCE_UNREACHABLE):
+        return True
+    if src == uptake.SKILL_PRESENCE_TELEMETRY:
+        declared = table.get("scorer_generation")
+        # Absent means generation 1, the reading `gate()` and the glossary at
+        # `coverage.scorer_generation` both take for a table predating the field.
+        return (1 if declared is None else int(declared)) < FIRST_GENERATION_WITH_SKILL_TELEMETRY
+    return False
+
+
 @pytest.mark.live_vault
 def test_the_skill_s_descriptions_of_the_table_match_what_the_code_emits():
     """Seam: the consumer lives in the vault, the producer lives here, and the
@@ -1941,9 +2113,18 @@ def test_the_skill_s_descriptions_of_the_table_match_what_the_code_emits():
     the row fields and the `presence_source` values it expects to read; if the
     code renames one, the consolidator reads `undefined`, decides on nothing, and
     its completion note still looks like it cited a figure. So the skill's own
-    vocabulary is checked against the committed artifact, not against memory."""
-    skill = Path.home() / "obsidian/skills/nightly-reflection-knowledge-write/SKILL.md"
-    text = skill.read_text()
+    vocabulary is checked against the committed artifact, not against memory.
+
+    #1816 widened the same seam to the two skills that describe this store's USAGE
+    half — `skill-lint` and `skill-tracking`. Both still told a run the injection
+    telemetry did not exist while `scripts/skill_lint.py` was printing per-skill
+    offers/loaded/ignored from it, and one quoted a presence_source value carrying a
+    `(… pending)` marker six days after the event shipped it. A triager obeying them
+    waits for a signal that is already on disk, so the retired sentence is pinned
+    absent here, per file, with the vocabulary that replaced it pinned present."""
+    bodies = {slug: _skill_copy(slug) for slug in
+              ("nightly-reflection-knowledge-write", "skill-lint", "skill-tracking")}
+    text = bodies["nightly-reflection-knowledge-write"]
     files = sorted((REPO / "eval" / "uptake").glob("uptake-*.json"))
     j = json.loads(files[-1].read_text())
     row_keys = set(j["entries"][0])
@@ -1973,24 +2154,223 @@ def test_the_skill_s_descriptions_of_the_table_match_what_the_code_emits():
     assert uptake.SKILL_PRESENCE_PROXY in quoted, (
         "the skill stopped describing the proxy route at all, so the prefix check "
         "below has no skill-channel row to grade")
+    # #1816 clause 4 put the injection channel in the same sentence. Asserted present
+    # because the generation exemption below has a purpose only while some skill
+    # actually cites the channel: without this line the loop grades a source nobody
+    # quotes, and the exemption is never exercised.
+    assert uptake.SKILL_PRESENCE_TELEMETRY in quoted, (
+        "the skill no longer names the injection channel, so the route #435 shipped "
+        "has no consumer being held to its own name")
     assert quoted, "skill quotes no presence_source at all"
     for src in quoted:
-        emitted = any(s.startswith(src) for s in sources)
-        # A source may legitimately have no rows, but only if the table says so
-        # in so many words. "The skill describes it and the data is silent" is
-        # how an unmeasurable half turns into a clean-looking zero.
-        declared_unevaluable = (
-            src.startswith("prefetch:")
-            and j["coverage"]["prefetch_notes"]["presence_source"]
-            == uptake.NOTE_PRESENCE_UNREACHABLE)
-        assert emitted or declared_unevaluable, (
-            f"skill cites {src}; table emits {sorted(sources)} and does not "
-            "declare that half unevaluable")
+        # A source may legitimately have no rows, but only for an artifact-level
+        # reason the table itself gives. "The skill describes it and the data is
+        # silent" is how an unmeasurable half turns into a clean-looking zero.
+        assert _emitted(src, j) or _cited_channel_is_unmeasurable_here(src, j), (
+            f"skill cites {src}; table emits {sorted(sources)} and gives no "
+            "artifact-level reason for its silence")
 
     # And the gate it is told to run must be callable under that name.
     if "app.uptake" in text and "retrieval_gate" in text:
         from app.uptake import retrieval_gate  # noqa: F401
         assert callable(retrieval_gate)
+
+    # ---- the three skills that describe this store's USAGE half (#1816) ---------
+    # `skill-lint` reports per-skill offer/load/ignore counts, `skill-tracking` tells
+    # a retirement pass which channels exist, and the consolidator above reads the
+    # table: none of the three can be graded against a committed artifact for the
+    # claims in question, so each is graded by the shared phrase guard — one assertion
+    # per acceptance-clause half, over the file `_skill_copy` proves it read.
+    for slug, body in bodies.items():
+        _assert_describes_shipped_telemetry(slug, body)
+
+    # The half clause 3 keeps rather than merely re-words: the management log is still
+    # a management log. Pinned once as prose by the guard, and once here as the code
+    # fact the prose rests on, so a writer appearing in the tree turns the skill's
+    # sentence red instead of leaving it quietly, wrongly true.
+    tracking = bodies["skill-tracking"]
+    assert "no code writes them" in tracking
+    # Tracked non-test modules only: this file names the log to forbid writing it,
+    # and a sentence about a writer is not one. A path assembled by concatenation at
+    # runtime would slip past a substring scan — what this rules out is a module that
+    # names the file, which is how every real writer here refers to its store.
+    tracked = subprocess.run(["git", "-C", str(REPO), "ls-files", "-z", "*.py"],
+                             capture_output=True, text=True, check=True).stdout.split("\0")
+    writers = [rel for rel in tracked
+               if rel and not rel.startswith("tests/")
+               and any(stem in (REPO / rel).read_text(encoding="utf-8", errors="replace")
+                       for stem in ("skills-usage", "skills_usage"))]
+    assert not writers, (
+        f"these python modules now name skills-usage.jsonl: {sorted(writers)}. The "
+        "management log has acquired a writer, so skill-tracking's 'no code writes "
+        "them' sentence is false and has to be rewritten in the same change")
+
+
+def _table(generation, notes: str, rows: tuple[str, ...] = (
+        uptake.SKILL_PRESENCE_PROXY, uptake.NOTE_PRESENCE_EMITTED)) -> dict:
+    """A committed-table stand-in: `rows` for its `entries`, one declared generation,
+    one note-channel declaration — the three things the node actually reads.
+
+    `generation=None` is how a pre-field artifact looks on disk: the key is absent, not
+    zero. `rows` defaults to a pair carrying no skill-injection row, which is the case
+    the allowance exists for; a caller that wants the row present passes it explicitly.
+    Every field here is read by something — `entries` by `_emitted`, the rest by
+    `_cited_channel_is_unmeasurable_here` — so nothing in the fixture is decoration.
+    """
+    t = {"entries": [{"presence_source": r} for r in rows],
+         "coverage": {"prefetch_notes": {"presence_source": notes}}}
+    if generation is not None:
+        t["scorer_generation"] = generation
+    return t
+
+
+def test_the_skill_telemetry_allowance_is_keyed_to_the_declared_generation():
+    """The exemption that keeps the node above green against a pre-channel artifact
+    must be a property of that artifact, and it must close.
+
+    #1816's triage named the failure mode this pins: an allowance written as "the
+    skill cites a prefetch: channel the table doesn't emit" is a permanently open
+    escape hatch — every later table that simply lacks the rows would be excused, and
+    the quoted-source check #1603 added would grade nothing. So this drives both halves
+    of the node's decision (`_emitted`, then the excuse), across generations, in both
+    directions, with no date and no filename anywhere in it: below the channel's first
+    generation the silence is excused, at or above it the same silence is a failure, and
+    a table that really does carry the row needs no excuse at any generation.
+    """
+    telemetry = uptake.SKILL_PRESENCE_TELEMETRY
+    emitted_notes = uptake.NOTE_PRESENCE_EMITTED
+    silent_notes = uptake.NOTE_PRESENCE_UNREACHABLE
+
+    # The row check itself, which is the first half of the node's `or`. A table whose
+    # rows carry the channel passes without reaching for an excuse, at either
+    # generation; one that does not, does not — so the exemption is never what let a
+    # present row through, and a present row is never what hid an absent one.
+    assert _emitted(telemetry, _table(FIRST_GENERATION_WITH_SKILL_TELEMETRY,
+                                      emitted_notes,
+                                      rows=(uptake.SKILL_PRESENCE_PROXY, telemetry)))
+    assert _emitted(telemetry, _table(None, emitted_notes, rows=(telemetry,)))
+    assert not _emitted(telemetry, _table(FIRST_GENERATION_WITH_SKILL_TELEMETRY,
+                                          emitted_notes))
+    # Prefix, not equality, and only in the direction that matters: the committed
+    # tables spell the proxy with the retired marker `PRESENCE_SOURCE_RENAMES` maps
+    # forward, and the skill quotes the unmarked value. (Assembled, not literal, so
+    # this file does not contain the string the acceptance grep hunts in the vault.)
+    marked = uptake.SKILL_PRESENCE_PROXY + " (" + "#435 pending)"
+    assert _emitted(uptake.SKILL_PRESENCE_PROXY,
+                    _table(1, emitted_notes, rows=(marked,)))
+    assert not _emitted(uptake.SKILL_PRESENCE_TELEMETRY,
+                        _table(1, emitted_notes, rows=(marked,)))
+
+    # Opens below the channel's generation — both for an unstampable artifact (key
+    # absent, which the glossary reads as generation 1) and for an explicit 1.
+    assert _cited_channel_is_unmeasurable_here(telemetry, _table(None, emitted_notes))
+    assert _cited_channel_is_unmeasurable_here(telemetry, _table(1, emitted_notes))
+    # Closes at and above it: there the rows must exist, or the node fails.
+    assert not _cited_channel_is_unmeasurable_here(
+        telemetry, _table(FIRST_GENERATION_WITH_SKILL_TELEMETRY, emitted_notes))
+    assert not _cited_channel_is_unmeasurable_here(
+        telemetry, _table(FIRST_GENERATION_WITH_SKILL_TELEMETRY + 1, emitted_notes))
+    # Closing is not the note exemption's job. Before this round the exemption was
+    # keyed to the whole `prefetch:` prefix, so a table that said only "no injected
+    # note block in this window" would also have excused a missing skill channel —
+    # the hole that left the generation gate openable from outside it.
+    assert not _cited_channel_is_unmeasurable_here(
+        telemetry, _table(FIRST_GENERATION_WITH_SKILL_TELEMETRY, silent_notes))
+    # The note channel keeps its own exemption, at every generation, because it is
+    # the channel that declaration is about.
+    assert _cited_channel_is_unmeasurable_here(
+        uptake.NOTE_PRESENCE_EMITTED,
+        _table(FIRST_GENERATION_WITH_SKILL_TELEMETRY, silent_notes))
+    assert not _cited_channel_is_unmeasurable_here(
+        uptake.NOTE_PRESENCE_EMITTED, _table(1, emitted_notes))
+    # A channel with no exemption at all is never excused by either half.
+    assert not _cited_channel_is_unmeasurable_here(
+        "always_in_force:system_prompt", _table(None, silent_notes))
+    # The constant cannot sit above the scorer that is actually running, or the
+    # allowance would outlive the thing it waits for and stay open forever.
+    assert FIRST_GENERATION_WITH_SKILL_TELEMETRY <= uptake.SCORER_GENERATION, (
+        f"the allowance opens below generation "
+        f"{FIRST_GENERATION_WITH_SKILL_TELEMETRY} but the scorer in this tree is "
+        f"generation {uptake.SCORER_GENERATION}")
+
+    # Keyed to the declaration, not to a filename or a date: the SAME committed
+    # artifact, read off disk, changes verdict when its own stamp moves and when the
+    # stamp is stripped. Nothing here asserts which generation today's newest table
+    # is — the day a probe commits a stamped one, this stays true and the node above
+    # starts demanding real rows, which is the hand-off the item records as owed.
+    newest = json.loads(sorted(
+        (REPO / "eval" / "uptake").glob("uptake-*.json"))[-1].read_text())
+    assert not _cited_channel_is_unmeasurable_here(
+        telemetry, {**newest, "scorer_generation": FIRST_GENERATION_WITH_SKILL_TELEMETRY})
+    assert _cited_channel_is_unmeasurable_here(
+        telemetry, {k: v for k, v in newest.items() if k != "scorer_generation"})
+
+
+#: Minimum phrase count per skill, one per acceptance-clause half the file owns:
+#: clause 4's five for the two files it names, plus clause 3's two for
+#: `skill-tracking`, and clause 1's three plus clause 2's six for `skill-lint`. A
+#: floor rather than an enumeration because the enumeration is
+#: `_required_telemetry_phrases` itself — this is here to notice when a half is
+#: deleted out of it, which would otherwise shrink the guard silently.
+_MIN_PHRASES_PER_SKILL = {"nightly-reflection-knowledge-write": 5,
+                          "skill-tracking": 7, "skill-lint": 9}
+
+
+def test_the_telemetry_phrase_guard_fails_for_each_half_it_owns():
+    """The guard itself, executed by a gate rather than only by a vault pass.
+
+    #1816's review named the hole: every phrase assertion lived inside
+    `test_the_skill_s_descriptions_of_the_table_match_what_the_code_emits`, which is
+    `live_vault` and therefore deselected by `TESTS_MARK_EXPR` — so a round could
+    neuter the phrase table or the retired-claim loop and the gate would see nothing.
+    That node stays marked, because it reads the live vault, which a nightly job owns
+    and `pytest.ini` keeps off a hard rung. This one is unmarked and reads no vault at
+    all: it drives the same guard over bodies built in memory, so what it pins is the
+    machinery — that each half is enforced, that the retired claims are enforced, and
+    that the table cannot quietly shrink.
+
+    The positive case is a satisfiability check on the phrase set, not evidence about
+    the vault: a body containing exactly the required phrases passes. Whether the
+    live files match that set is the marked node's job, and it is run by the nightly
+    full-suite pass, not by a round.
+    """
+    contract = _required_telemetry_phrases()
+    assert set(contract) == set(_MIN_PHRASES_PER_SKILL), (
+        "the phrase guard's coverage changed shape: the skills it grades and the "
+        "per-skill floors no longer agree")
+    for slug, phrases in contract.items():
+        assert len(phrases) >= _MIN_PHRASES_PER_SKILL[slug], (
+            f"{slug}: the guard demands {len(phrases)} phrases, below the "
+            f"{_MIN_PHRASES_PER_SKILL[slug]} acceptance-clause halves this file owns "
+            "(clause 4 for the two presence-source skills, clause 3 for "
+            "skill-tracking, clauses 1-2 for skill-lint). A deleted half is a retired "
+            "sentence waiting to come back")
+        values = sorted(set(phrases.values()), key=len, reverse=True)
+        for i, a in enumerate(values):
+            for b in values[i + 1:]:
+                assert a not in b, (
+                    f"{slug}: {a!r} is contained in {b!r}, so dropping one silently "
+                    "drops the other and the per-half mutants below prove nothing")
+        conforming = "\n".join(f"- {v}" for v in values)
+        _assert_describes_shipped_telemetry(slug, conforming)
+
+        # One mutant per half: the guard must fail, and fail naming THAT half. A guard
+        # that enforced two of five would pass any single-phrase check that stops at
+        # the first failure, so each mutant is graded on its own.
+        for half, phrase in phrases.items():
+            mutant = conforming.replace(f"- {phrase}", "- (this sentence removed)")
+            assert mutant != conforming
+            with pytest.raises(AssertionError) as caught:
+                _assert_describes_shipped_telemetry(slug, mutant)
+            assert half in str(caught.value), (
+                f"dropping {slug}'s {half!r} did not produce the failure naming it")
+
+        # And the retired direction, per claim this file is graded against.
+        for claim in _RETIRED_TELEMETRY_CLAIMS + _EXTRA_RETIRED_CLAIMS.get(slug, ()):
+            with pytest.raises(AssertionError) as caught:
+                _assert_describes_shipped_telemetry(slug, conforming + "\n" + claim)
+            assert claim in str(caught.value)
+
 
 
 # ------------------------------------------- presence: the persisted block --
