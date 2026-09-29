@@ -918,6 +918,126 @@ class ProvenanceResult:
         return self.refusals[0][1].reason if self.refusals else None
 
 
+#: The one durable record of what this guard decided (#1839). The log lines around
+#: a decision are worthless as a record: `server.err` + `.1..10` is 11 × ~10 MB
+#: spanning 2.6 days on 2026-09-29, and during a busy automod round one file closes
+#: in minutes. Worse, the deny branch emits no log line at all — a refusal survives
+#: only as the caller's boundary line, which truncates the command to an 80-char
+#: excerpt and never names the failed registry fact per distribution. So the trend
+#: #688 step 6 asks for ("blocks per week, overrides used") has no source. This file
+#: is that source, beside `registry-cache.json` because it is the same kind of thing:
+#: small, local, and about what the registry said.
+PROVENANCE_JOURNAL_NAME = "provenance.jsonl"
+
+#: The only five outcomes a parsed name may carry in the journal. `denied` and
+#: `overridden` are the two the trend counts; `declared` and `cleared` say the name
+#: needed nothing; `unvetted` is the fail-open half — allowed on an unknown, which
+#: must never be folded into `cleared` or an outage reads as a clean tree.
+JOURNAL_OUTCOMES = ("declared", "cleared", "denied", "overridden", "unvetted")
+
+
+def provenance_journal_path() -> Path:
+    """Where the decision journal lives: the registry cache's own directory.
+
+    One override moves both files, because they are one store split by format. A
+    second helper with its own env var would be a second thing to forget in a test,
+    and the failure mode of forgetting it is a test writing into the live data root.
+    """
+    override = os.environ.get("LLOYD_SUPPLY_CHAIN_CACHE_DIR", "").strip()
+    if override:
+        return Path(override) / PROVENANCE_JOURNAL_NAME
+    try:
+        from app.paths import DATA_ROOT
+        return Path(DATA_ROOT) / "supply-chain" / PROVENANCE_JOURNAL_NAME
+    except Exception:  # noqa: BLE001 — same fail-open as the cache's own resolution
+        return Path(os.path.expanduser(
+            f"~/.cache/lloyd/supply-chain/{PROVENANCE_JOURNAL_NAME}"))
+
+
+def journal_entries(result: ProvenanceResult) -> list[dict[str, Any]]:
+    """Project a :class:`ProvenanceResult` onto one entry per parsed name.
+
+    A projection, not a second decision: the journal is derived from the same object
+    the caller is acting on, so it cannot report an outcome the caller did not see.
+    An overridden install therefore reads `overridden`, not the `cleared` it also
+    earned — the decision worth counting is the one that needed a reason.
+
+    The `not-needed` entries `check_install_provenance` appends when
+    :data:`OVERRIDE_ENV` was present but changed nothing keep their own entries,
+    spelled exactly as they are in `result.overrides`. Folding them away would
+    under-count the reflexive-override habit those rows exist to measure.
+
+    Only the two facts a reader needs in order to act are copied: `fact` and
+    `reason` on a denial (the registry fact that failed is the whole reason to keep
+    the row), and `override` on an override, verbatim — a reason cut to a word limit
+    is a reason nobody can judge afterwards.
+    """
+    entries: list[dict[str, Any]] = []
+    by_name: dict[str, dict[str, Any]] = {}
+
+    def _add(request: InstallRequest, outcome: str) -> None:
+        entry = {"name": request.name, "ecosystem": request.ecosystem,
+                 "verb": request.verb, "outcome": outcome}
+        entries.append(entry)
+        by_name[entry["name"]] = entry
+
+    for request in result.declared:
+        _add(request, "declared")
+    for request in result.cleared:
+        _add(request, "cleared")
+    for request in result.unvetted:
+        _add(request, "unvetted")
+    for request, verdict in result.refusals:
+        _add(request, "denied")
+        by_name[request.name]["fact"] = verdict.fact
+        by_name[request.name]["reason"] = verdict.reason
+    for name, reason in result.overrides:
+        entry = by_name.get(name)
+        if entry is None or entry["outcome"] != "cleared":
+            entry = {"name": name, "ecosystem": "", "verb": "", "outcome": "overridden"}
+            entries.append(entry)
+        else:
+            entry["outcome"] = "overridden"
+        entry["override"] = reason
+    return entries
+
+
+def _journal_decision(command: str, session_id: str | None, session_class: str,
+                      result: ProvenanceResult, *, path: Path | None = None) -> None:
+    """Append one JSON line for one decision. Never raises, never delays (#1839).
+
+    Fail-open like the rest of the guard, and for the same reason: a journal that
+    can block a dispatch, or turn its own broken into a refusal, is worse than no
+    journal. Building the row is inside the `except` too — a projection that trips
+    over an unexpected shape must cost one lost row, not the command. Its failure is
+    a log line naming the loss, which is itself subject to the rotation this file
+    exists to escape; that is accepted, because the caller's refusal is already a
+    witness to the decision and only the durable copy is missing.
+    """
+    import logging
+    try:
+        target = path if path is not None else provenance_journal_path()
+        row = {
+            "at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "session": str(session_id) if session_id else None,
+            "session_class": session_class,
+            "command": str(command or "")[:200],
+            "names": journal_entries(result),
+        }
+        unknown = sorted({e["outcome"] for e in row["names"]} - set(JOURNAL_OUTCOMES))
+        if unknown:  # a future branch that invented an outcome: say so, still write
+            logging.getLogger("lloyd-supply-chain").warning(
+                "supply-chain: provenance journal carries outcome(s) outside %s: %s",
+                list(JOURNAL_OUTCOMES), unknown)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+    except Exception as exc:  # noqa: BLE001 — the guard outlives its own journal
+        logging.getLogger("lloyd-supply-chain").warning(
+            "supply-chain: provenance journal write failed (%s: %s); the decision "
+            "stands and only this row is lost", type(exc).__name__, str(exc)[:160])
+
+
 def check_install_provenance(command: str, session_id: str | None, *,
                              parent_of: Callable[[str], str | None] | None = None,
                              registry: Any = None,
@@ -948,10 +1068,15 @@ def check_install_provenance(command: str, session_id: str | None, *,
     if not requests:
         return result
 
-    if _attended_by_session_id(session_id, parent_of=parent_of):
+    attended = _attended_by_session_id(session_id, parent_of=parent_of)
+    if attended:
         # The person's own turn is the cheap override this design keeps, and the
         # registry is never consulted for it: an interactive Bash call must not
-        # pay a network round trip for a decision a human is present to make.
+        # pay a network round trip for a decision a human is present to make. It
+        # also gets no journal row — there is no decision here to record, only a
+        # name nobody looked up, and #1839 leaves "should attended installs be
+        # journalled at all" an explicit open ruling rather than answering it by
+        # accident with a row full of unknowns.
         return result
 
     known = dependency_set if dependency_set is not None else read_dependency_set(root)
@@ -1034,6 +1159,13 @@ def check_install_provenance(command: str, session_id: str | None, *,
             result.overrides.extend(("not-needed", value) for value in unused)
             logger.info("supply-chain: %s present but nothing new to override: %s",
                         OVERRIDE_ENV, unused[0][:160])
+    # One row per decision that actually decided something, after every branch above
+    # has had its say: reached only past the two early returns (nothing parsed, or
+    # attended), so a command with no install request and a chat turn write nothing.
+    # Unattended by construction here — the attended path returned above — and the
+    # class is carried as a field rather than hardcoded so a later ruling that
+    # journals chat turns too finds the field already correct.
+    _journal_decision(text, session_id, "attended" if attended else "unattended", result)
     return result
 
 

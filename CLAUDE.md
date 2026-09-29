@@ -114,9 +114,17 @@ facts read off PyPI: never published, first released under 90 days ago, or fewer
 than 2 releases.** A chat session is never refused (the operator already decides
 what runs) and pays no registry lookup; a name the check could not examine — npm
 or cargo, a `git+` URL, an unreachable or timing-out PyPI — is reported UNVETTED,
-never as clean. An override is `LLOYD_DEP_OVERRIDE="<why>"` on that one command:
-it lets the install through and is recorded per distribution name, so the
-overrides are countable rather than folklore.
+never as clean. An override is `LLOYD_DEP_OVERRIDE="<why>"` on that one command, and
+it lets the install through. **What makes the decisions countable is the journal, not
+the env var:** every unattended check that parsed at least one install request appends
+one line to `$DATA_ROOT/supply-chain/provenance.jsonl` — offset-bearing UTC stamp,
+session class, and one entry per distribution name with outcome
+`declared|cleared|denied|overridden|unvetted`, the failed registry fact on a denial and
+the override reason verbatim on an override. That file is where *blocks per week* and
+*overrides used* are read from, because the logs cannot carry them: `server.err` plus
+its ten rotations span 2.6 days, and the deny path emitted no log line of its own at
+all. The write is fail-open like the guard itself — a broken journal costs a row and a
+warning, never a dispatch.
 
 `check_bash_command` refuses in a fixed order — protected-delete deny-set,
 sync-registration, service-restart (#1455), protected-write deny-set (#1530) —
