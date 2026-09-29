@@ -15,6 +15,7 @@ patches it explicitly.
 import atexit
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -297,6 +298,117 @@ def _promoter_cannot_reach_the_live_backend(monkeypatch):
         monkeypatch.setattr(promote, "ROUNDS_UNREADABLE_POLLS", 1)
     except Exception:
         pass
+
+
+#: The commands a test must never be allowed to execute (#1853). Chosen by COMMAND
+#: name, never by a later token: `app/harness/service_control.py:186` (systemctl) and
+#: `:202` (pkill/killall) reduce an argv to a verdict the same way on the production
+#: side, and matching a later token would refuse `tests/test_data_home.py:1404`, which
+#: stops a whole fake fleet through `subprocess.run(["bash", "-c", program])` (its
+#: runner, `tests/test_data_home.py:1330`) with a STUB `systemctl` first on PATH — there
+#: the command name is `bash`, and the word `systemctl` sits inside one quoted token of
+#: the program. `supervisorctl` is deliberately NOT in this set: a bare `supervisorctl
+#: status` is a read the suite asks for on purpose (`tests/test_service_control_guard.py`
+#: answers it ALLOWED), so refusing the name would refuse the query, not the change.
+DANGEROUS_SUBPROCESS_COMMANDS = frozenset({"systemctl", "pkill", "killall"})
+
+
+class LiveServiceControlRefused(RuntimeError):
+    """A test asked to run one of `DANGEROUS_SUBPROCESS_COMMANDS`, and did not stub it.
+
+    A `RuntimeError` subclass so a node that only expects "it refused" catches it
+    without importing anything, and a node that wants to name which guard fired can
+    catch this. The message carries the whole argv: the point of the error is that the
+    reader can see WHICH command was reached for.
+    """
+
+
+def _dangerous_subprocess_command(cmd: object) -> str | None:
+    """The command `cmd` would execute, if it is a refused one; else None.
+
+    `cmd` is what `subprocess.run`/`subprocess.call` received as argv: a list/tuple
+    whose first element is the program, or one string for a shell. The DECIDING field
+    is the command name — argv[0]'s basename for a list, the first token's basename for
+    a string — so `/usr/bin/pkill` is refused exactly as `pkill` is, and an absolute
+    path never smuggles a danger word past the set. The string is split on whitespace,
+    not with `shlex`: an unbalanced quote inside a shell program must not raise here,
+    because this function runs on the way to commands that are about to run for real.
+    """
+    if isinstance(cmd, (list, tuple)):
+        if not cmd:
+            return None
+        first = cmd[0]
+    elif isinstance(cmd, (str, bytes, os.PathLike)):
+        first = cmd
+    else:
+        return None
+    first = first if isinstance(first, str) else os.fsdecode(first)
+    if isinstance(cmd, (str, bytes, os.PathLike)):
+        first = first.split(maxsplit=1)[0] if first.strip() else ""
+    name = os.path.basename(first)
+    return name if name in DANGEROUS_SUBPROCESS_COMMANDS else None
+
+
+@pytest.fixture(autouse=True)
+def _no_live_service_control_in_tests(monkeypatch):
+    """No test may restart the supervisor, kill the sync or reload systemd for real.
+
+    Three commands reach the machine instead of the checkout, all of them on the
+    guarded names' ordinary path. `tick()` issues a real
+    `subprocess.run(["systemctl", "--user", "restart", policy.SUPERVISORD_UNIT])` as
+    soon as `sup_down_streak` passes `policy.SUPERVISORD_DOWN_STREAK` (3) —
+    `agent-services/guardian/guardian.py:1233-1236`, `policy.py:54` — `_stop_sync`
+    issues a real `pkill -f "sync --path …"` at `guardian.py:1054`, and the promoter
+    reaches `systemctl --user daemon-reload` (`scripts/automod/promote.py:586`) and
+    `systemctl --user restart lloyd-guardian` (`:595`) through its own thin `_run`
+    wrapper (`promote.py:542`), which calls the module-global `subprocess.run`.
+
+    Until #1853 the only protection was each test remembering its own
+    `monkeypatch.setattr(subprocess, "run", fake_run)`, so it existed exactly where
+    someone had already been bitten: the two nodes that drive the supervisord branch
+    stub it themselves (`tests/test_guardian_pool_watch.py:357`,
+    `tests/test_guardian_predicates.py:1080`), the first of those saying why in a
+    comment (:344-350 — "a red node of that shape restarts production's supervisor
+    from inside the gate's pytest run"), while the promoter's nodes defend the WRAPPER
+    and not the call (`tests/test_automod_hardening.py:1091`, `:1116` stub `P._run`).
+    A new module that stubs neither re-inherits the trap, which is what spent the
+    implement turns of `SM_20260928_190007`. And `_refuse_the_production_tree` (this
+    file, `:160`) already refuses to run the suite against the production tree, which is
+    precisely why that is not an answer: a worktree isolates files, not
+    `systemctl --user`.
+
+    Two names are wrapped, and why those two is worth keeping exact. `check_output`
+    reaches the guard through the module-global `run`, and `check_call` through the
+    module-global `call` — measured on this interpreter (CPython 3.12.14), where
+    `check_call` calls `call` and `call` calls `Popen`, so `check_call` does NOT pass
+    through `run`. `Popen` is deliberately not wrapped: the tests that use it stub it
+    separately (`tests/test_guardian_speak.py:214`, `:233`, `:258`), and wrapping the
+    two module-level entry points covers every way the suite spells these three
+    commands today.
+
+    A node that installs its own stub still wins: its `monkeypatch.setattr` runs after
+    this fixture's and `undo()` pops in reverse, so the existing per-node interceptions
+    keep their behaviour untouched and this fixture is only the floor beneath them —
+    which is what keeps `tests/test_guardian_vaultwatch.py`'s four nodes that run the
+    real sync/backup/restore scripts (`:158`, `:189`, `:217`, `:225`) running them.
+    """
+    real_run, real_call = subprocess.run, subprocess.call
+
+    def _refuse_or_forward(original, *args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args")
+        danger = _dangerous_subprocess_command(cmd)
+        if danger is not None:
+            raise LiveServiceControlRefused(
+                f"refused to run {danger} from a test, which would reach the machine "
+                f"and not this checkout: argv={cmd!r}. Stub it in the node "
+                f"(monkeypatch.setattr(subprocess, \"run\", fake_run)) — see "
+                f"tests/conftest.py::_no_live_service_control_in_tests. #1853")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run",
+                        lambda *a, **k: _refuse_or_forward(real_run, *a, **k))
+    monkeypatch.setattr(subprocess, "call",
+                        lambda *a, **k: _refuse_or_forward(real_call, *a, **k))
 
 
 @pytest.fixture(autouse=True)
