@@ -3304,6 +3304,85 @@ def _file_daily_note_mismatch(note_path: Path, why: str, entry: str) -> None:
         logger.warning("daily-note mismatch could not file a backlog item: %s", exc)
 
 
+# ---------------------------------------------------------------------------
+# The witness for a confirmed daily-note append (#1799)
+#
+# `append_daily_alert_line` can only ever say "the line was readable back at the
+# moment I returned" — that is what `landed` buys, and it is why the 2026-09-27
+# 21:14 fleet-watchdog alarm stayed lost: the note's mtime moved ten minutes later
+# with content byte-identical to HEAD, which is a rewrite this read-back cannot see
+# because it had already said True. The writer cannot witness its own line after
+# the return, so this writes one JSONL row per CONFIRMED append and the delayed
+# check lives in the health script
+# (`~/obsidian/skills/system-health-check/system_health_check.py`, component
+# `daily_note_appends`), which re-reads the last 48 h of rows and names the note
+# path and the row's sha for any line that is no longer in its note.
+#
+# One row per append, never a dedupe (#1727, and the same reason the read-back is
+# a presence test for THIS line only): `~/obsidian/memory/2026-09-27.md` carries 13
+# same-shaped alert lines in one day, and a ledger that collapsed them into one row
+# would hide 12 re-fires from the very check that exists to catch a loss.
+#
+# The row carries the sha of the whole line and only a prefix of its text, so the
+# delayed check compares hashes rather than reconstructing text from a hint: a
+# `line_sha256` that matches no line of the note is the evidence, and the prefix is
+# for the human reading the report.
+# ---------------------------------------------------------------------------
+
+#: Override for the witness ledger, honoured at every call. Same shape as
+#: `LLOYD_DAILY_NOTE_DIR`: the default is the live data root, and a fixture that
+#: proved an alarm by writing into the production ledger would be forging evidence.
+DAILY_NOTE_APPEND_LEDGER_ENV = "LLOYD_DAILY_NOTE_APPEND_LEDGER"
+
+#: How much of the line's text goes into the row as a human-readable hint.
+WITNESS_ENTRY_PREFIX_CHARS = 80
+
+
+def _daily_note_append_ledger() -> Path:
+    """The JSONL ledger of confirmed daily-note appends, resolved per call.
+
+    `DATA_ROOT/alerts/daily-note-appends.jsonl`, which on this box is
+    `~/lloyd-data/alerts/daily-note-appends.jsonl` — under the data root rather
+    than beside the notes, because the thing being recorded is an observation
+    about a vault file, and an observation that lives inside the tree it observes
+    is destroyed by whatever destroyed the file.
+    """
+    raw = os.environ.get(DAILY_NOTE_APPEND_LEDGER_ENV, "").strip()
+    if raw:
+        return Path(os.path.expanduser(raw))
+    from app.paths import DATA_ROOT
+    return DATA_ROOT / "alerts" / "daily-note-appends.jsonl"
+
+
+def _witness_daily_note_append(note_path: Path, entry: str, now) -> None:
+    """Append one witness row for an append the read-back already confirmed.
+
+    Returns nothing and raises nothing into the caller — a witness that can break
+    the writer is worse than no witness, because the caller is a scheduler tick
+    and `append_daily_alert_line`'s contract is that a note never changes what the
+    run record or the next tick says. A failed witness is a WARNING naming the
+    ledger: the gap it opens is that this line can never be checked later, which is
+    the state the delayed leg reads as fewer rows examined, never as a loss.
+    """
+    import hashlib
+    try:
+        line = entry.strip("\n")
+        row = {
+            "ts": now.astimezone(datetime.timezone.utc).isoformat(),
+            "note_path": str(note_path),
+            "line_sha256": hashlib.sha256(line.encode("utf-8")).hexdigest(),
+            "entry_prefix": line[:WITNESS_ENTRY_PREFIX_CHARS],
+        }
+        ledger = _daily_note_append_ledger()
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        with open(ledger, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+    except Exception as exc:  # noqa: BLE001 — never witness-worthy, never fatal
+        logger.warning("could not write the daily-note append witness row to %s: %s "
+                       "— this append can never be checked for a later loss",
+                       _daily_note_append_ledger(), exc)
+
+
 def append_daily_alert_line(body: str) -> bool:
     """Append `- HH:MM %Z — <body>` to today's daily note. True if it is in the note.
 
@@ -3322,8 +3401,14 @@ def append_daily_alert_line(body: str) -> bool:
     signature — this check returns True and the alarm is still gone. So the claim is
     "a returned True means the line was there when we returned", NOT "an alarm can no
     longer be lost". Settling which of the two mechanisms the 09-27 instance was is
-    owed on #1736; no instrument on this box witnesses these appends today
-    (`~/obsidian/memory/audit/writes.jsonl` records only the `vault_write` route).
+    owed on #1736. What DOES witness these appends after the return is a second
+    surface, added for exactly that gap (#1799): a confirmed append writes one row
+    to `~/lloyd-data/alerts/daily-note-appends.jsonl`, and the `daily_note_appends`
+    leg of the system health check re-reads the last 48 h of those rows and reports
+    any line whose sha is no longer in its note. It witnesses appends made after it
+    landed, so it cannot settle the 2026-09-27 instance — that is owed there.
+    (`~/obsidian/memory/audit/writes.jsonl` is still not this: it records only the
+    `vault_write` route.)
 
     A mismatch is logged at ERROR, not WARNING, and the return value is the other
     half of it: `app.discord_notify._survive_the_dropped_alert` reads False and emits
@@ -3407,6 +3492,11 @@ def append_daily_alert_line(body: str) -> bool:
             # alert files nothing.
             _file_daily_note_mismatch(path, why, entry.strip())
             return False
+        # Confirmed, so it gets a witness row (#1799). After the read-back, never
+        # before it: a row for a line that never landed would make the delayed
+        # check report a loss the writer itself caused, which is the alarm this
+        # ledger exists to make credible.
+        _witness_daily_note_append(path, entry, now)
         return True
     except Exception as exc:  # noqa: BLE001 — a note is never worth the run
         logger.warning("could not write a daily-note alert line: %s", exc)
