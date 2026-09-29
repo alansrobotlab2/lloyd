@@ -1066,6 +1066,14 @@ def test_the_coverage_numbers_reach_no_promotion_decision(round_env, monkeypatch
         assert "lint_valid" not in blob, "coverage reached the promotion predicate"
         assert "matrix_coverage" not in blob
         assert "freed_window_serial_only" not in blob
+        # #1828 clause 4: the two keys this item adds are figures too, and the last
+        # scored round is the one of them a reader could plausibly want in a
+        # predicate. The spy is on the call, so this is the same claim the ones above
+        # make — nothing about what the round gave up reaches the argument.
+        assert "sacrificed_runtime_last_scored_round" not in blob, \
+            "the per-task history reached the promotion predicate"
+        assert "reopen_ledger" not in blob
+        assert "no scored history" not in blob
 
     assert result["matrix_coverage"]["lint_valid_total"] == 18, \
         "the numbers exist, so the assertions above ruled out a real path"
@@ -1073,3 +1081,203 @@ def test_the_coverage_numbers_reach_no_promotion_decision(round_env, monkeypatch
         assert set(d) == {"variant_id", "mean_composite", "targeted_delta",
                           "heldout_delta", "normalized_gain", "should_promote",
                           "reason", "validity"}, set(d)
+
+
+# ── #1828: the re-open line has to name where its two figures are read from ──────
+#
+# #1716 put the standing budget-versus-coverage ruling's re-open condition into every
+# shrunk round report, but stated only the threshold: "3 consecutive rounds ... the
+# round's decision delta on one of them lands inside that task's own p90 spread".
+# Neither figure had a source. The only p90 in the tree was `derive_trial_priors`'s,
+# which is a per-ARM duration prior — a cost, not a score — so the condition could be
+# argued from memory and measured from nothing. These nodes pin the source being named
+# (clause 1), the payload entry that answers the "sacrifice the SAME task across
+# rounds" half without a hand-search of `ledger.jsonl` (clause 2), and the unknown
+# wording owed to a task that has never scored (clause 3).
+
+
+def _history_ledger(path: Path, rows: list[tuple[str, str, object]]) -> Path:
+    """Seed `path` with the per-trial rows of rounds BEFORE the one under test.
+
+    Each row is `(task_id, round_id, score)`, and a `None` score is the unrankable
+    trial — `trial_ledger_row` nulls the field rather than writing 0.0, which is the
+    exact state clause 3 is about. `variant_id` is set because that is what makes a row
+    a trial row at all: the spec / split / decision / summary rows carry none, and a
+    decision row's `round_id` would make every task on the bench look as though it ran
+    in that round.
+
+    No `duration_seconds`, on purpose. Those keys are what `derive_trial_priors` reads,
+    so a seeded duration would move the arm priors and with them the shrink that the
+    nodes below depend on; a row without one is dropped by that derivation and is still
+    a complete scored trial row for the query this item is about.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(
+        json.dumps({"round_id": rid, "variant_id": f"V_seed_{rid}", "task_id": tid,
+                    "harness": "sdk", "trace_status": "success",
+                    run_round.REOPEN_SCORE_FIELD: score}) + "\n"
+        for tid, rid, score in rows), encoding="utf-8")
+    return path
+
+
+def test_the_reopen_line_names_the_ledger_rows_both_figures_are_read_from(
+        round_env, monkeypatch):
+    """Clause 1: on a round that shrank, the re-open line states where the delta and
+    the spread come from, and the report says which round each victim was last scored
+    in.
+
+    The bench, the arms and the budget are the #1716 node's, so the shrink is the same
+    one (`bench_017` and `bench_016` go, both serial-arm). What is added is a history:
+    `bench_016` scored in two earlier rounds and `bench_017` in one, and the line has to
+    credit each with the later of them — "most recent", not "first seen", which is the
+    half a reader needs to count three consecutive rounds.
+
+    The assertions are on the report text, not on the constant, because the clause is
+    about what a reader of a round report sees: the threshold phrases #1716 pinned stay
+    in place (the line is amended, not replaced) and the source now travels with them.
+    """
+    _history_ledger(round_env.paths.ledger_path, [
+        ("bench_016", "R_20260928_041936", 0.4),
+        ("bench_016", "R_20260929_082451", 0.6),
+        ("bench_017", "R_20260928_041936", 0.5),
+    ])
+    _bench(round_env, _SCHEDULED_19)
+    _quiet_proposer(monkeypatch, 3)
+    loaded = {tid for tid, _r, _c in _SCHEDULED_19}
+    _drive_round(monkeypatch, valid_ids=loaded - {"bench_s1"})
+    result = asyncio.run(run_round.run(targets=["prompts"], budget_minutes=30))
+    assert "error" not in result, result
+    assert result["matrix_dropped_tasks"] == ["bench_017", "bench_016"], \
+        "the precondition: this round shrank and gave up two serial-arm tasks"
+
+    report = Path(result["summary_file"]).read_text(encoding="utf-8")
+    line = [ln for ln in report.splitlines()
+            if ln.startswith("- re-open condition")][0]
+    # The threshold #1716 put there is still there — this is an amendment.
+    assert "3 consecutive rounds" in line and "inside that task's own p90 spread" in line
+    # ...and it now names the one place each figure exists.
+    assert "trial ledger" in line, line
+    assert "cfg.paths.ledger_path" in line, line
+    assert "`round_id` + `task_id`" in line, line
+    assert run_round.REOPEN_SCORE_FIELD in line, line
+    assert "p90 minus p10" in line, line
+    assert f"{run_round.REOPEN_MIN_SCORED_ROWS} scored rows" in line, line
+
+    cov = result["matrix_coverage"]
+    assert cov["reopen_ledger"] == str(round_env.paths.ledger_path)
+    assert cov["sacrificed_runtime_last_scored_round"] == {
+        "bench_017": "R_20260928_041936",     # the one round it scored in
+        "bench_016": "R_20260929_082451",     # the LATER of its two
+    }, cov["sacrificed_runtime_last_scored_round"]
+    last = cov["sacrificed_runtime_last_scored_round"]
+    assert result["round_id"] not in last.values(), \
+        ("the round that dropped a task never ran it, so its own id must not be "
+         "credited as that task's last run")
+    # WHICH tasks the entry covers is the report's own definition of runtime coverage,
+    # not a second definition beside it. Every key is a task the bench marks
+    # `requires_runtime: true`, and the entry is exactly as wide as the runtime coverage
+    # the shrink costed — `runtime_planned` minus `runtime_started`, the two counts on
+    # the report line above the re-open note. A reader can check the two keys against
+    # each other arithmetically instead of by trusting which one they read first.
+    runtime_ids = {md.stem for md in round_env.paths.bench_dir.glob("*.md")
+                   if "requires_runtime: true" in md.read_text(encoding="utf-8")}
+    assert set(last) <= runtime_ids, f"{sorted(last)} not all runtime: {sorted(runtime_ids)}"
+    assert len(last) == cov["runtime_planned"] - cov["runtime_started"], \
+        f"{sorted(last)} vs {cov['runtime_planned']} planned - {cov['runtime_started']} started"
+
+    figures = [ln for ln in report.splitlines()
+               if ln.startswith("- re-open figures are read from")][0]
+    assert str(round_env.paths.ledger_path) in figures, figures
+    assert "bench_016: R_20260929_082451" in figures, figures
+    assert "bench_017: R_20260928_041936" in figures, figures
+
+
+def test_a_sacrificed_runtime_task_that_never_scored_reads_as_no_scored_history(
+        round_env, monkeypatch):
+    """Clause 3: an unknown stays unknown. A task with trial rows but no SCORED ones is
+    the interesting case, because it did run — it just never produced a number the
+    condition could use.
+
+    `bench_017`'s seeded rows are all null-scored and sit in a round LATER than
+    `bench_016`'s, so a query that counted rows regardless of score would print that
+    later id and look plausible. What it must print instead is `NO_SCORED_HISTORY` —
+    never a delta of 0 (the null is not a zero, the same rule `trial_ledger_row` writes
+    it for), never a round id, never `0 of 0`. The same node then calls the query
+    directly for the two states no single round can stage: a box with no ledger at all,
+    and a ledger that is present but unreadable, which are different unknowns and get
+    different strings.
+    """
+    _history_ledger(round_env.paths.ledger_path, [
+        ("bench_016", "R_20260929_082451", 0.6),
+        ("bench_017", "R_20260929_120000", None),      # ran, never scored
+        ("bench_017", "R_20260929_130000", None),
+    ])
+    _bench(round_env, _SCHEDULED_19)
+    _quiet_proposer(monkeypatch, 3)
+    loaded = {tid for tid, _r, _c in _SCHEDULED_19}
+    _drive_round(monkeypatch, valid_ids=loaded - {"bench_s1"})
+    result = asyncio.run(run_round.run(targets=["prompts"], budget_minutes=30))
+    assert "error" not in result, result
+
+    last = result["matrix_coverage"]["sacrificed_runtime_last_scored_round"]
+    assert last["bench_016"] == "R_20260929_082451", last
+    assert last["bench_017"] == run_round.NO_SCORED_HISTORY == \
+        "no scored history on this box", last
+    assert isinstance(last["bench_017"], str)
+    assert not last["bench_017"].startswith("R_"), \
+        "an unscored task was credited with a round it never scored in"
+    assert last["bench_017"] not in ("0", "0.0", 0, None, ""), last
+
+    report = Path(result["summary_file"]).read_text(encoding="utf-8")
+    figures = [ln for ln in report.splitlines()
+               if ln.startswith("- re-open figures are read from")][0]
+    assert "bench_017: no scored history on this box" in figures, figures
+    assert "0 of 0" not in figures and " bench_017: 0" not in figures, figures
+
+    # The two states a round under test cannot stage, on the query itself.
+    missing = run_round.last_scored_round_by_task(
+        round_env.paths.ledger_path.parent / "nowhere.jsonl", ["bench_017"])
+    assert missing == {"bench_017": run_round.NO_SCORED_HISTORY}, \
+        "a box with no ledger has no scored history — that is the true answer"
+    corrupt = round_env.paths.ledger_path.parent / "corrupt.jsonl"
+    corrupt.write_bytes(b"\xff\xfe\x00 not json at all \xff")
+    assert run_round.last_scored_round_by_task(corrupt, ["bench_017"]) == {
+        "bench_017": run_round.LEDGER_UNREADABLE}
+    assert run_round.LEDGER_UNREADABLE != run_round.NO_SCORED_HISTORY, \
+        "not knowing and knowing there is nothing are different claims"
+    assert run_round.last_scored_round_by_task(
+        round_env.paths.ledger_path, []) == {}, "no victims, no entries"
+
+
+def test_the_last_scored_round_entry_is_in_the_payload_on_a_round_that_did_not_shrink(
+        round_env, monkeypatch):
+    """Clause 2's other half: the key travels with the rest of `matrix_coverage`, so a
+    reader guards one payload shape rather than learning which rounds are interesting.
+
+    The fixture's two-task bench under the scheduled 30-minute budget does not shrink at
+    all, which is the state the key has to survive: it is `{}` there, not absent and not
+    `None`, and the full key set is the same one a shrunk round sends. The report still
+    prints no coverage lines for a round that gave up nothing — an empty history list on
+    that page would read as "these tasks have never run", which is precisely what the
+    unknown string exists to stop.
+    """
+    _history_ledger(round_env.paths.ledger_path, [("bench_a1", "R_20260928_041936", 0.5)])
+    _quiet_proposer(monkeypatch, 0)
+    _drive_round(monkeypatch)
+    result = asyncio.run(run_round.run(targets=["prompts"], budget_minutes=30))
+    assert "error" not in result, result
+    assert result["matrix_dropped_tasks"] == [], "the precondition: no shrink"
+
+    cov = result["matrix_coverage"]
+    assert cov["shrunk"] is False
+    assert set(cov) == {"shrunk", "lint_valid_total", "lint_valid_started",
+                        "runtime_planned", "runtime_started", "freed_direct_seconds",
+                        "freed_serial_seconds", "freed_window_serial_only",
+                        "reopen_condition", "reopen_ledger",
+                        "sacrificed_runtime_last_scored_round"}
+    assert cov["sacrificed_runtime_last_scored_round"] == {}
+    assert cov["reopen_ledger"] == str(round_env.paths.ledger_path)
+
+    report = Path(result["summary_file"]).read_text(encoding="utf-8")
+    assert "- re-open figures are read from" not in report
+    assert "- coverage given up by the shrink" not in report

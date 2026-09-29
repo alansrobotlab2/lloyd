@@ -17,7 +17,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from app.harness.bench_corpus import probe_ledger_fields
 
@@ -842,20 +842,114 @@ def _projection_text(proj: dict[str, Any]) -> str:
 #: number to compare. The condition therefore travels with the figures it is measured
 #: on: a reader holding the coverage line is one round away from deciding, and should
 #: not have to remember the threshold out of a commit message.
+#: #1828: it still stated only the threshold, so a reader holding it could not tell
+#: whether the condition had been met without first inventing a measurement. Both
+#: figures now name where they are read from — this box's trial ledger, the per-task
+#: rows the round already writes and already derives its cost priors from — because
+#: that is the only place either one exists. `derive_trial_priors` is per-ARM cost
+#: (`duration_seconds`), so it is not the spread's source and the note must not be
+#: read as pointing at it.
+#:
+#: Which field the spread is taken over, and how many rows make it mean something,
+#: are definitional choices this round states rather than measures, and #1828 owes
+#: them to the owed-check ruling. `composite_score` is chosen because it is what a
+#: round's verdict is computed from, and its cost is stated rather than hidden: on
+#: the live ledger 869 of 2109 trial rows carry it null (an unrankable trial, which
+#: `trial_ledger_row` nulls rather than zeroing), and 8 of the 22 benched tasks have
+#: no scored row at all — those tasks cannot support the condition on either side,
+#: which is the honest answer, not a reason to pick a softer column.
+REOPEN_SCORE_FIELD = "composite_score"
+REOPEN_MIN_SCORED_ROWS = 20
+
 REOPEN_CONDITION_NOTE = (
     "re-open condition for the standing budget-vs-coverage ruling (#1605, put in the "
-    "report by #1716): propose raising autoresearch.max_duration_seconds / "
-    "autoresearch.max_variants as a SEPARATE item only after 3 consecutive rounds "
-    "sacrifice the SAME requires_runtime task(s) and the round's decision delta on "
-    "one of them lands inside that task's own p90 spread. A shrink that moves no "
-    "verdict is a budget opinion, not a measurement."
+    "report by #1716, measurement source named by #1828): propose raising "
+    "autoresearch.max_duration_seconds / autoresearch.max_variants as a SEPARATE item "
+    "only after 3 consecutive rounds sacrifice the SAME requires_runtime task(s) and "
+    "the round's decision delta on one of them lands inside that task's own p90 "
+    "spread. Both figures are read from one place: this box's trial ledger — the same "
+    "file the round derives its cost priors from, `cfg.paths.ledger_path` — over that "
+    f"task's per-trial rows keyed `round_id` + `task_id`, on the field "
+    f"{REOPEN_SCORE_FIELD} (null on an unrankable trial, so null is not a score). The "
+    "delta is that field's per-round mean for the round's best variant minus its mean "
+    "for the `BASELINE_*` variant, for that task alone; the spread is the same field's "
+    "p90 minus p10 over every scored row that task has on this box. A task with fewer "
+    f"than {REOPEN_MIN_SCORED_ROWS} scored rows has no spread to land inside, so it "
+    "supports the condition on neither side. A shrink that moves no verdict is a "
+    "budget opinion, not a measurement."
 )
+
+#: What the last-scored-round entry says when there is no such round, and when the
+#: file it would have read from could not be read. Two different unknowns, because
+#: the two licences different conclusions: no history is a fact about this box, an
+#: unreadable ledger is a fact about this round's ability to know. Rendering either
+#: as a round id, a delta of 0 or a `0 of 0` is the failure #1716's `lint_valid_total
+#: is None` guard already refuses for the lint denominator, one key over.
+NO_SCORED_HISTORY = "no scored history on this box"
+LEDGER_UNREADABLE = "ledger unreadable — last scored round unknown"
+
+
+def last_scored_round_by_task(ledger_path: Path,
+                              task_ids: Iterable[str]) -> dict[str, str]:
+    """The most recent round each of `task_ids` produced a SCORED trial row in.
+
+    Importable and read-only, like `derive_trial_priors`, and over the same file: the
+    re-open condition above is measured on ledger rows, and the round that sacrifices
+    a task is the last program holding the ids worth measuring, so the answer travels
+    with them instead of leaving the reader to re-derive the query. It decides
+    nothing — `matrix_coverage` calls it and the payload carries what it returns.
+
+    A per-trial row is one with a `variant_id` (the spec / split / decision / summary
+    rows have none, and a decision row's `round_id` would make every task look like it
+    ran this round). A SCORED one is a row whose `REOPEN_SCORE_FIELD` holds a real
+    number: `trial_ledger_row` nulls that field on an unrankable trial rather than
+    writing 0.0, so a task benched only unrankably has run without ever having scored,
+    and reads as `NO_SCORED_HISTORY` rather than as the round it was dropped in.
+
+    "Most recent" is append order, which is the file's chronology — `ledger_append`
+    only ever adds at the end, and `derive_trial_priors` reads the same rows the same
+    way. Every requested id comes back, unknown included: an entry that simply is not
+    there is how a reader ends up reading "no data" as zero.
+    """
+    want = {str(t) for t in task_ids}
+    if not want:
+        return {}
+    try:
+        text = Path(ledger_path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        # A ledger that is simply absent is a box with no history — a true answer, and
+        # the same distinction `derive_trial_priors` draws by falling back rather than
+        # crashing. One that is there and cannot be read knows nothing, and says
+        # something else: it must not be rendered as the absence of trials.
+        unknown = (NO_SCORED_HISTORY if not Path(ledger_path).is_file()
+                   else LEDGER_UNREADABLE)
+        return {t: unknown for t in want}
+    latest: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if row.get("variant_id") is None:      # spec / split / decision / summary
+            continue
+        tid = str(row.get("task_id") or "")
+        if tid not in want:
+            continue
+        score = row.get(REOPEN_SCORE_FIELD)
+        round_id = row.get("round_id")
+        if (isinstance(score, (int, float)) and not isinstance(score, bool)
+                and isinstance(round_id, str) and round_id):
+            latest[tid] = round_id             # later rows win: append order
+    return {t: latest.get(t, NO_SCORED_HISTORY) for t in want}
 
 
 def matrix_coverage(
     pre_fit_tasks: list[dict[str, Any]], dropped_ids: list[str],
     valid_ids: set[str] | None, planned: dict[str, Any], started: dict[str, Any],
-    *, harness: str,
+    *, harness: str, ledger_path: Path,
 ) -> dict[str, Any]:
     """What a matrix shrink gave up, in the two currencies #1605's ruling is written
     against, so the ruling can be re-opened on a number instead of a recollection.
@@ -885,6 +979,17 @@ def matrix_coverage(
     `split_tasks_by_harness`, the same routing the projection used — so a round with no
     serial work at all reads False rather than vacuously True.
 
+    `sacrificed_runtime_last_scored_round` (#1828) names, for each dropped task the
+    shrink costed on the serial arm, the most recent round that task produced a scored
+    trial row in — the first half of the re-open condition's "3 consecutive rounds
+    sacrifice the SAME task", answerable from the payload instead of by hand-searching
+    `ledger.jsonl`. Read-only off `ledger_path`, the file the round already reads for
+    its priors, and computed before this round's own rows are appended: the round that
+    sacrificed a task never ran it, so its own round id must not appear as that task's
+    last run. An unscored task gets `NO_SCORED_HISTORY`, never a round id and never a
+    delta of 0, for the same reason `lint_valid_total` gets `None` above. It is present
+    on an unshrunk round as `{}`, like every other key here.
+
     Report and payload only. Nothing here is an input to `evaluate_promotion`, which is
     called with the config, the two summaries and the split and nothing else.
     """
@@ -898,8 +1003,17 @@ def matrix_coverage(
     lint_valid_started = (None if valid_ids is None
                           else len(started_ids & {str(v) for v in valid_ids}))
     dropped_tasks = [t for t in pre_fit_tasks if str(t.get("id")) in dropped]
-    dropped_direct, _dropped_serial, _dropped_skipped = split_tasks_by_harness(
+    dropped_direct, dropped_serial, _dropped_skipped = split_tasks_by_harness(
         dropped_tasks, harness)
+    # The same bucket the two `*_runtime` keys below count, because that is what THIS
+    # report calls a requires_runtime task: `runtime_planned` is `planned["sdk_tasks"]`.
+    # Enumerating victims by the task's own `requires_runtime` field instead would make
+    # the two disagree in the one state where it matters — a bench with no non-runtime
+    # task, where `split_tasks_by_harness` moves the runtime tasks onto the DIRECT arm,
+    # `planned["sdk_tasks"]` reads 0, and a reader would see "0 requires_runtime task(s)
+    # started of 0 planned" beside a list naming two of them. Here both read the same
+    # way: no serial arm, so no runtime coverage freed, and no entry to explain it.
+    sacrificed_runtime = {str(t.get("id")) for t in dropped_serial}
     return {
         "shrunk": bool(dropped),
         "lint_valid_total": lint_valid_total,
@@ -912,6 +1026,11 @@ def matrix_coverage(
                                       - started["sdk_seconds"], 1),
         "freed_window_serial_only": bool(dropped_tasks) and not dropped_direct,
         "reopen_condition": REOPEN_CONDITION_NOTE,
+        # Where the condition's two figures are read from, resolved to this box's
+        # actual file rather than left as the config key the note quotes.
+        "reopen_ledger": str(ledger_path),
+        "sacrificed_runtime_last_scored_round": last_scored_round_by_task(
+            ledger_path, sacrificed_runtime),
     }
 
 
@@ -920,11 +1039,19 @@ def _coverage_text(cov: dict[str, Any]) -> list[str]:
     because the reader's question is "was the shrink worth it, and on what pool": the
     two counts, then which arm's window they bought, then what would re-open the
     budget ruling that let the shrink stand.
+
+    A fourth, when this round gave up a serial-arm task (#1828): the same ruling's
+    threshold is counted over rounds that sacrifice the SAME task, so the line carries
+    the round each victim was last scored in, beside the ledger the figure came from.
+    Absent when the shrink took only direct-arm tasks, because then there is no
+    sacrificed task to report a history for — an empty list on the line would read as
+    "these tasks have never run", which is what the unknown string exists to prevent.
     """
     valid = ("lint-valid coverage unknown (bench lint unreadable, so no pool was read)"
              if cov["lint_valid_total"] is None else
              f"{cov['lint_valid_started']} lint-valid task(s) started of "
              f"{cov['lint_valid_total']} on the bench")
+    last_scored = cov["sacrificed_runtime_last_scored_round"]
     return [
         f"- coverage given up by the shrink: {valid}; "
         f"{cov['runtime_started']} requires_runtime task(s) started of "
@@ -934,6 +1061,10 @@ def _coverage_text(cov: dict[str, Any]) -> list[str]:
         f"— freed by the serial agent-loop arm alone: "
         f"{'yes' if cov['freed_window_serial_only'] else 'no'}",
         f"- {cov['reopen_condition']}",
+        *([f"- re-open figures are read from {cov['reopen_ledger']}, per-trial rows; "
+           f"last scored round per sacrificed requires_runtime task: "
+           + ", ".join(f"{tid}: {last_scored[tid]}" for tid in sorted(last_scored))]
+          if last_scored else []),
     ]
 
 
@@ -1238,7 +1369,11 @@ async def run(
     # deadline cut below: "handed to the runners" is the shrink's decision, and a
     # task the deadline later failed to reach is a second, separately reported loss.
     matrix_coverage_report = matrix_coverage(
-        pre_fit_tasks, matrix_dropped, valid_ids, planned, projection, harness=harness)
+        pre_fit_tasks, matrix_dropped, valid_ids, planned, projection, harness=harness,
+        # The round's one ledger read for this, taken where the other one is
+        # (`derive_trial_priors`, 20 lines up): before this round's own trial rows are
+        # appended, so a task's entry is its history and not this round's id.
+        ledger_path=cfg.paths.ledger_path)
     logger.info("trial matrix: %s (window %s, fits %s)", _projection_text(projection),
                 "no budget" if window is None else f"{window:.0f} s", projection["fits"])
     if matrix_dropped:
