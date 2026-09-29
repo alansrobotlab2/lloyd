@@ -1814,6 +1814,49 @@ def test_hand_labeled_corpus_covers_the_item_s_minimum():
             "live corpus carries too few positives to grade"
 
 
+def test_labels_path_and_load_labels_never_resolve_a_packet(tmp_path):
+    """#1849 clause 5: a `packet-<date>.json` sitting in the labels directory can
+    never be the corpus the gate grades.
+
+    This is true by construction today because `LABEL_GLOB` is `hand-*.json`, and
+    it is pinned here as a guard against the ONE change that would break it: the
+    glob widening to `*.json` (or to `*hand*.json`, or dropping the prefix) so the
+    builder's unlabelled output — every `label` null — becomes the corpus. The
+    packet is planted with a LATER date than the hand file on purpose: `labels_path`
+    takes `files[-1]`, so a widened glob resolves to the packet and this goes red
+    instead of passing by alphabetical accident.
+    """
+    labels = tmp_path / "eval" / "uptake" / "labels"
+    labels.mkdir(parents=True)
+    hand = {"schema": 1, "labeled_by": "hand:alan-turns-test", "status": "live",
+            "n_positives": 1, "n_items": 1,
+            "items": [{"turn_id": "s1#1", "label": 1, "reason": "reversal",
+                       "user_text": "no, that is wrong", "labeled_by": "hand:x",
+                       "ts": "2026-09-20T10:00:00+00:00", "prev_assistant": "done"}]}
+    packet = {"schema": 1, "packet": True, "created": "2099-01-01",
+              "n_items": 1, "n_candidates": 1,
+              "items": [{"turn_id": "s1#2", "label": None, "reason": None,
+                         "user_text": "no, that is wrong too",
+                         "ts": "2026-09-21T10:00:00+00:00",
+                         "prev_assistant": "done too"}]}
+    (labels / "hand-2026-09-11.json").write_text(json.dumps(hand))
+    (labels / "packet-2099-01-01.json").write_text(json.dumps(packet))
+
+    assert uptake.LABEL_GLOB == "eval/uptake/labels/hand-*.json", uptake.LABEL_GLOB
+    got = uptake.labels_path(root=tmp_path)
+    assert got is not None and got.name == "hand-2026-09-11.json", got
+    loaded = uptake.load_labels(root=tmp_path)
+    assert [l["turn_id"] for l in loaded] == ["s1#1"], loaded
+    assert uptake.labels_status(root=tmp_path)["status"] == uptake.LABEL_STATUS_LIVE
+
+    # And the same refusal holds when a packet is the ONLY file there: a labels
+    # directory with nothing but an unlabelled packet has no corpus, and the probe
+    # must read "no label set" (which it refuses on) rather than a corpus of nulls.
+    (labels / "hand-2026-09-11.json").unlink()
+    assert uptake.labels_path(root=tmp_path) is None, "a packet alone is a corpus?"
+    assert uptake.load_labels(root=tmp_path) == []
+
+
 def test_human_turns_resolves_a_transcript_retention_gzipped(tmp_path):
     """Clause 1: retention gzips and NEVER deletes, so `.json.gz` is the only copy
     a label's turn will ever have — and uptake read only `.json` (#1848).
