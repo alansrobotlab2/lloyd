@@ -77,30 +77,37 @@ reads as off too: `source_inner_voice` falls back to False since #1015, when
 ## 2. What actually ran
 
 Seven days to 2026-09-28 (`runs.completed_at >= '2026-09-21'`), read
-2026-09-28T05:32Z from `~/lloyd-data/workers.db` — the same window §6 quotes, so
-one doc reports one measurement. (Its mining counts are a couple of runs lower:
-§6 read the same window ~1 h earlier, and the pool is still writing rows.) Rows
-are the registered sources; `ok` / `failed` / `skipped` are the three statuses a
-run can end in, and the residue is `interrupted` (2 `autocode`, 1
-`scheduled-task`). `runs` is pruned at 30 days, so re-measure before quoting
-this table — what it is for is the gap between what a source's config implies
-and what its row says.
+2026-09-29T02:19Z from `~/lloyd-data/workers.db`. That predicate has a start and
+**no upper bound**, so the window is whatever the store held at the moment of the
+read and the stamp below is the second half of the number, not a caption: this is
+the same window §6 quotes, and §6 read it earlier, so its two mining figures sit
+under these rows by exactly the runs that landed in between — `bench-mine` 118 ok
+of 163 against 123 of 169 here (+6 runs, +5 ok), `session-distill` 28 ok of 29
+against 34 of 43 (+14 runs, +6 ok). Neither section is wrong; quoting one without
+its stamp is. Rows are the registered sources; `ok` is `status = 'success'`, and
+`failed` / `skipped` are the other two statuses a run can end in, with the residue
+`interrupted` (3 `autocode`, 1 `scheduled-task`). `runs` is pruned at 30 days, so
+re-measure before quoting this table — what it is for is the gap between what a
+source's config implies and what its row says. The stamp before this one,
+`2026-09-28T05:32Z`, is the cautionary case: thirteen hours old by the time this
+section's own `automod-regression` row was checked against the store, it had that
+source reporting nothing at all while the window already held two runs of it.
 
 | source | family | runs | ok | failed | skipped | avg |
 |---|---|---|---|---|---|---|
-| `autotriage` | self-mod | 451 | 340 | 0 | 111 | 175 s |
-| `autocode` | self-mod | 327 | 270 | 21 | 34 | 1402 s |
-| `bench-mine` | mining | 165 | 120 | 32 | 13 | 145 s |
-| `board-steward` | self-mod | 144 | 100 | 17 | 27 | 84 s |
-| `scheduled-task` | dispatch | 136 | 131 | 4 | 0 | 529 s |
-| `autoresearch` | self-mod | 53 | 18 | **35** | 0 | 1493 s |
+| `autotriage` | self-mod | 654 | 419 | 0 | 235 | 143 s |
+| `autocode` | self-mod | 438 | 371 | 26 | 38 | 1312 s |
+| `board-steward` | self-mod | 171 | 124 | 20 | 27 | 86 s |
+| `bench-mine` | mining | 169 | 123 | 33 | 13 | 148 s |
+| `scheduled-task` | dispatch | 159 | 154 | 4 | 0 | 518 s |
+| `owed-check` | self-mod | 61 | 51 | 10 | 0 | 232 s |
+| `autoresearch` | self-mod | 58 | 23 | **35** | 0 | 1379 s |
 | `youtube-digest` | intake | 53 | 39 | 14 | 0 | 149 s |
-| `backlog-cluster` | self-mod | 31 | 31 | 0 | 0 | 3 s |
-| `session-distill` | mining | 30 | 29 | 1 | 0 | 160 s |
-| `owed-check` | self-mod | 22 | 22 | 0 | 0 | 325 s |
-| `deep-research` | intake | 19 | 18 | 1 | 0 | 437 s |
-| `arch-review` | self-mod | 18 | 18 | 0 | 0 | 868 s |
-| `automod-regression` | self-mod | **0** | — | — | — | — |
+| `session-distill` | mining | 43 | 34 | 9 | 0 | 135 s |
+| `backlog-cluster` | self-mod | 38 | 38 | 0 | 0 | 4 s |
+| `deep-research` | intake | 21 | 20 | 1 | 0 | 418 s |
+| `arch-review` | self-mod | 20 | 20 | 0 | 0 | 827 s |
+| `automod-regression` | self-mod | 2 | 2 | 0 | 0 | 0.5 s |
 
 - **The mining pair's cap deaths are history, and so is the code that set the
   cap.** Over the 7 days to 2026-09-11 both failed most of their runs at
@@ -109,28 +116,59 @@ and what its row says.
   Both budgets are config now: `workers.sources.bench-mine.max_turns` (#896,
   2026-09-24) and `workers.sources.session-distill.max_turns` (#1460,
   2026-09-25), each carried in the queue payload so an item runs under the
-  budget it was enqueued with. Over these same 7 days to 2026-09-28
-  `session-distill` is 29 ok of 30 and its one failure is `stop_reason=stop,
-  turns=14` — no `session-distill` row in `runs` names `max_turns` at all —
-  while 30 of `bench-mine`'s 32 failures are one `ConnectError` burst on
-  2026-09-24 and 2 are cap deaths. An empty turn is correctly a failure
-  ([[workers]] §4); the budget was what was wrong, and moving it was free.
+  budget it was enqueued with. Over these same 7 days to 2026-09-28, at the stamp
+  above, `session-distill` is 34 ok of 43 and still has no row naming
+  `max_turns`: 7 of its 9 failures are one `ConnectError` burst on 2026-09-28
+  18:51–19:14Z and the other two are empty responses at `stop_reason=stop`
+  (`turns=14`, `turns=1`) — while 30 of `bench-mine`'s 33 failures are one
+  `ConnectError` burst on 2026-09-24 and 3 are cap deaths, 2 of them in §6's
+  earlier read of this same open-ended window. An empty turn is correctly a
+  failure ([[workers]] §4); the budget was what was wrong, and moving it was free.
 - **The two mining sources are still one shape, and the shared shape is the
   diagnosis**: both are `run_prompt_on_primary` with a budget read from
   `src_cfg` into the payload and a `write_staging_note` at the end. §6 is what
   they have in common; this is what it costs.
-- **`autoresearch` is the row not doing what its config implies**: 35 of its 53
+- **`autoresearch` is the row not doing what its config implies**: 35 of its 58
   ended `TimeoutError: exceeded max_duration_seconds=1800`, all of them the
   pre-#1546 shape §4 walks; rounds since that cap raise complete.
-- **`automod-regression` has no row to read**, which is the design working: the
-  promoter starts the detached runner itself, so this source's poll fires only
-  for a runner that never started — §4 measured the same zero on 2026-09-27.
-- **The store on this box begins 2026-09-22T20:03Z** (the 2026-09-22 data
-  wipe), so no window `runs` can show holds the old names §7 lists. One
-  unregistered name does write rows: `queue-maintenance`, 19 of them here, from
-  the pool's own maintenance sweep (`workers/maintenance.py`). It is not in
-  `SOURCE_REGISTRY`, so it has no row above — whether it should is an open
-  question, not a fact this table settles.
+- **`automod-regression` has two rows, both `success`, and the row above used to
+  say zero.** A zero here is the source declining to offer anything, never the
+  store failing to hold a row, and two functions decide that between them:
+  `enqueue_if_due()` declines the offer silently unless `_runner_needed()` is true
+  — `pending_promotions()` non-empty **and** no `runner_alive()`
+  (`workers/sources/automod_regression.py:367`) — because offering unconditionally
+  would write ninety-six "nothing to measure" rows a day over the handful worth
+  reading; and `start_runner()`, the job body, re-checks and returns
+  `_skipped("no promotion is waiting to be measured")` (`:1175`, skip `:1183`). So
+  **a zero means no promotion was pending in the window** — or one was and a runner
+  was already on it, which is the same `_runner_needed()` answer — and it is a
+  declined offer, so unlike a `queued → skipped` transition elsewhere in this table
+  it leaves no row at all. "Nothing to mine, which is the design working" is the
+  reading that let the placeholder pass for health. These two rows started the detached runner for
+  promotion `e6213520` at 18:59:33Z and 19:14:57Z on 2026-09-28 (pids 940170,
+  982144), each recording a pid and each completing without writing a
+  `guardian_check` row — the `check_runner` half of §4's walk, which is what #1706
+  fixed. §4 measured the same zero on 2026-09-27 and read it the same wrong way.
+- **One unregistered name does write rows: `queue-maintenance`, 22 of them as of
+  2026-09-29T02:19Z** — dated because it grows: `run_sweep()` calls
+  `queue.record_run()` when it acts, and the sweep fires every 900 s, so rows
+  accumulate on however many sweeps find something (those 22 span 5 days; the
+  undated "19 of them" this line carried went stale inside a day). What the count is
+  NOT: `avg 0.0 s` is a bookkeeping pass, not 22 worker turns, and a sweep that
+  changed nothing records nothing but a watermark — so no row is not a stalled sweep.
+  The name is deliberately not a registered work source: the comment above `SOURCE =
+  "queue-maintenance"` in `workers/maintenance.py` says so ("nothing enqueues into
+  it"), so there is no queue and no runner claim, and its rows arrive from the
+  scheduler's own sweep instead of from `run_worker`. That is also why the gap this
+  table exists to catch — a configured source with no row — cannot be expressed
+  for it at all: it has no `workers.sources` block, and
+  `test_config_configures_only_registered_sources` fails the moment one is added,
+  because the registry is what a `workers.sources` key may name. So its missing row
+  here, and its missing row in §1's 13-name roster, are the design working — unlike
+  a zero in the `automod-regression` row above, which is not.
+- **The store on this box begins 2026-09-22T20:03Z** (the 2026-09-22 data wipe), so
+  no window `runs` can show holds the old names §7 lists, and a "7 days" window
+  here has never been shortened by pruning.
 
 ---
 

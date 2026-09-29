@@ -944,3 +944,245 @@ def test_workers_jobs_says_the_filter_runs_before_the_slice():
         "§6 does not state, in the same breath as the change, that the budget did "
         "NOT move — the half a reader is most likely to over-read as 'and now it "
         "fetches a wider slate'")
+
+
+# ---------------------------------------------------------------- `runs` §2 — #1775
+#
+# §2's table is a measurement with three failure modes: the sentence that explains
+# a row's absence can rot into an inference the code contradicts
+# (`automod-regression`: "no row to read, which is the design working", when
+# `start_runner()` skips precisely because no promotion is waiting); an unbounded
+# SQL predicate plus a count can go stale while looking dated (the window has no
+# upper bound, and `queue-maintenance`'s count grows every 900-second sweep); and
+# the read stamp can be left behind by the pool, which is how §2 came to report
+# `automod-regression` as nothing at all thirteen hours after its first row.
+#
+# The nodes below are §2-scoped because `_section()` is the whole reason that
+# matters: a section-local check fails when the fact moves elsewhere in the doc or
+# vanishes, where a whole-file grep is silent about both. None of them quotes a
+# run count — `runs` is pruned at 30 days (`app/routers/workers.py:93`), so a
+# number in a test is a green suite holding a dead claim.
+#
+# And they deliberately do NOT read `~/lloyd-data/workers.db` to check the table is
+# still true, which is the obvious next node and is unsound here: since 2026-09-22
+# `gate._child_env` points `$HOME` at the round's own home (`tests/conftest.py:140`),
+# and that home has its own EMPTY `lloyd-data/workers.db` — first measured by
+# tripping over it, where the gate's store held 654 autotriage rows and the round
+# home held 0. A doc test reaching for the live store is one env change away from
+# asserting that a real measurement is a lie. Freshness of §2's numbers is the
+# owed-check job's, over a window of real churn, with the store in front of it.
+
+#: A conclusion is banned, not the words that carried it. The two below were
+#: §2's readings of an empty row and of a missing row; each was wrong, and each is
+#: wrong wherever the doc puts it, so both are banned across the FILE while the
+#: facts they dressed up are required inside §2.
+#:
+#: Deliberately absent from this tuple: "the design working". §2 keeps that phrase
+#: twice after #1775 — of `automod-regression` declining to offer at all
+#: (`enqueue_if_due` → `_runner_needed()`), and of `queue-maintenance` writing rows
+#: without being a work source — and both uses are now backed by the code the node
+#: below re-reads.
+#: Banning the phrase would have been the wrong fix: it is a legitimate conclusion,
+#: it was only ever illegitimate as an inference from an absence. What is banned is
+#: the two specific absences-inferred-as-health, each of which was a false sentence
+#: wherever it appeared.
+BANNED_SECTION2_CONCLUSIONS = (
+    "whether it should is an open question",
+    "has no row to read",
+)
+
+#: The window §2's table was measured over. Clause 5's "window end at 2026-09-28"
+#: is about the END of the prose window; the SQL predicate keeps its unbounded
+#: `>=` and its date, and §6's copy of the same date keeps its prose ("the 7 days
+#: to 2026-09-11", "days to 2026-09-28"), which `test_section2_and_section6_report_one_measurement`
+#: holds equal across the two sections.
+SECTION2_WINDOW_END = "2026-09-28"
+SECTION2_SQL_FLOOR = "2026-09-21"
+
+
+def _sec2_prose() -> str:
+    """§2 with its table rows dropped, so a count-check can run over the prose.
+
+    The table is exempt because its header stamp governs every cell in it, and the
+    node that pins that stamp is below; the prose is where a count outlives its
+    measurement.
+    """
+    return "\n".join(ln for ln in _section(SEC2).splitlines()
+                     if not ln.lstrip().startswith("|"))
+
+
+def test_section2_says_why_queue_maintenance_is_not_a_row():
+    """Clause 1 + 2: the open question is gone, replaced by the settled reason.
+
+    Self-checking on the corpus: `BANNED_SECTION2_CONCLUSIONS` is asserted non-empty
+    up front, so a refactor that drops the banned strings from the tuple cannot
+    quietly turn this node into a no-op.
+    """
+    assert BANNED_SECTION2_CONCLUSIONS, "the ban list itself was emptied"
+
+    sec2 = _section(SEC2)
+    doc = " ".join((ARCH / "workers-jobs.md").read_text(encoding="utf-8").split())
+    for banned in BANNED_SECTION2_CONCLUSIONS:
+        assert " ".join(banned.split()) not in doc, (
+            f"the doc still concludes {banned!r} somewhere: it is wrong wherever "
+            "it lands — an unregistered name's absence is a design fact, and a "
+            "zero row is only ever a skip")
+
+    assert "queue-maintenance" in sec2, (
+        "§2 stopped mentioning the one unregistered name that writes rows, so the "
+        "14 names in the store against 13 rows reads as an omission again")
+
+    flat = " ".join(sec2.split())
+    assert "registered" in flat, (
+        "§2 no longer says what a row of its table is, which is the half of the "
+        "reason a 14th name has no row")
+    assert "workers/maintenance.py" in sec2, (
+        "the settled reason has to name the module that records the rows, or a "
+        "reader cannot check it")
+    assert "nothing enqueues into it" in flat, (
+        "§2 lost the maintenance module's own words for why it is not a work "
+        "source — the reason has to be quotable, not paraphrased away")
+    for token in ("work source", "workers.sources"):
+        assert token in flat, (
+            f"§2's queue-maintenance reason lost {token!r}: the point is that it "
+            "is deliberately not a work source AND has no config block, and either "
+            "half alone lets a reader re-file the open question")
+
+
+def test_section2_explains_what_a_zero_in_the_automod_regression_row_means():
+    """Clause 3: the placeholder zero is gone and the inference is now the code's.
+
+    Cross-checked against the source it describes: `start_runner()` really is this
+    source's poll, and it really returns `_skipped(...)` when `pending_promotions()`
+    is empty. Without that cross-check this is a better-worded guess, and the
+    previous wording was exactly as fluent and exactly as wrong.
+    """
+    sec2 = _section(SEC2)
+
+    # The bullet is found by the function it is required to name, not by the source
+    # name: §2 mentions `automod-regression` three times before any bullet — in the
+    # header stamp's own cautionary sentence and in the table row — so selecting on
+    # the source name returns the table and grades the wrong text (found while
+    # falsifying this node: the pre-fix §2 passed an early version of it).
+    bullet = [b for b in sec2.split("\n- ") if "start_runner" in b]
+    assert len(bullet) == 1, (
+        f"§2 has {len(bullet)} bullets naming `start_runner()`, which is the "
+        "clause-3 bullet's identity — with none the bullet is gone, and with two "
+        "this node cannot tell which one to grade")
+    b = " ".join(bullet[0].split())
+
+    assert "start_runner()" in b or "start_runner`" in b, (
+        "the bullet no longer names the function in backticks-as-a-call, so its "
+        "line cite cannot be followed")
+    assert "_runner_needed" in b, (
+        "§2 lost the poll-side gate, so its zero reads only as a recorded skip: "
+        "`_runner_needed()` declines the OFFER, which writes no row at all, while "
+        "`start_runner()`'s skip does write one — the difference between a zero "
+        "with rows behind it and a zero nobody can see")
+    assert "pending_promotions()" in b, (
+        "the condition behind the skip is gone: a zero means an empty "
+        "`pending_promotions()` result, and nothing else")
+    assert "no promotion was pending" in b, (
+        "the bullet lost the sentence that IS clause 3: what a zero means")
+
+    # "the design working" is not banned outright — §2's queue-maintenance bullet
+    # uses it as a settled conclusion, correctly. In THIS bullet it may only appear
+    # as a quotation being refuted, which is mechanical to check: inside quotes.
+    hits = [k for k in range(len(b)) if b.startswith("design working", k)]
+    assert hits, (
+        "the bullet no longer quotes the reading it exists to refute, so the loop "
+        "below has nothing to grade and the false conclusion could return "
+        "unopposed — keep the refutation in the bullet (#1689's rule for a loop "
+        "over a possibly-empty set)")
+    for i in hits:
+        before, after = b[:i], b[i + len("design working"):]
+        assert before.count('"') % 2 == 1 and after.count('"') % 2 == 1, (
+            "the automod-regression bullet asserts \"the design working\" as its "
+            f"own conclusion rather than quoting it as the refuted reading: …{b[max(0, i - 90):i + 40]}…")
+
+    src = (ROOT / "workers" / "sources" / "automod_regression.py").read_text(
+        encoding="utf-8")
+    assert "def _runner_needed(" in src and "def start_runner(" in src, (
+        "one of the two functions §2's bullet cites is gone from the module, so "
+        "the bullet and the code disagree about what this source's poll is")
+    assert "no promotion is waiting to be measured" in src, (
+        "start_runner's skip reason changed wording, so §2's quotation of it is "
+        "stale — re-read the module, do not edit the doc to match this test")
+
+
+def test_section2_carries_no_undated_count():
+    """Clause 4, generalized: a count in §2 has to be dated or gone.
+
+    Two halves, because clause 4 offers a choice and a one-sided test can be passed
+    by the half this item did not take. (a) If §2 still states its
+    queue-maintenance count it must sit beside an `as of <ISO>Z>` stamp —
+    "19 of them here" was true for about eleven hours and grew on every 900-second
+    sweep. (b) No other bare count appears in §2's prose: the table is exempt
+    because the header stamp governs its cells and the node below checks it against
+    the store.
+
+    The scan runs per bullet, not per section: §2's bullets sit in one block
+    separated by `- ` lines, so splitting only on blank lines would let the one
+    dated bullet license every undated count in the list — the vacuity this node
+    exists to catch. Dated means a WINDOW or a READ STAMP, not any date string: the
+    bullet this clause was filed against opened "The store on this box begins
+    2026-09-22T20:03Z", so `2026-..-..T` as the marker would have licensed the very
+    count that went stale. A wipe date is not a measurement window.
+    """
+    prose = _sec2_prose()
+
+    qm_bullets = [b for b in prose.split("\n- ") if "queue-maintenance" in b]
+    assert qm_bullets, "§2 no longer mentions queue-maintenance at all"
+    qm_bullet = " ".join(qm_bullets[0].split())
+    stated = re.search(r"\b(\d+)\s+of them\b", qm_bullet)
+    if stated:
+        assert re.match(r"[^0-9]{0,12}as of\s*\d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z",
+                        qm_bullet[stated.end():stated.end() + 40]), (
+            f"§2's queue-maintenance count ({stated.group(1)}) is undated again: it "
+            "grows every sweep interval, and the clause's alternative was to drop it")
+
+    UNITS = {"", "s", "ms", "runs", "run", "ok", "of", "items", "notes", "rows",
+             "days", "%"}
+    DATED = re.compile(r"(?:days to|as of|read|through|until)\s*`?\d{4}-\d{2}-\d{2}")
+    bare = re.compile(r"(?<![\w.`/#:-])(\d{3,})(?!\d)([^0-9]{1,3})")
+    undated = []
+    for block in prose.split("\n\n"):
+        for para in block.split("\n- ")[1:]:        # per bullet
+            if DATED.search(para):
+                continue
+            for m in bare.finditer(para):
+                if m.group(2).strip() in UNITS:
+                    undated.append(m.group(0).strip())
+        if not block.lstrip().startswith("- ") and not DATED.search(block):
+            for m in bare.finditer(block):
+                if m.group(2).strip() in UNITS:
+                    undated.append(m.group(0).strip())
+    assert not undated, (
+        f"undated count(s) in §2 prose: {undated} — every number in a store that is "
+        "pruned at 30 days and written continuously is a measurement, and a "
+        "measurement with neither a window nor a read stamp is the defect this item "
+        "was filed for")
+
+
+def test_section2_stamps_its_read_and_keeps_the_remeasure_order():
+    """Clause 5: the stamp, the window, and the instruction that makes them useful.
+
+    The stamp must not merely exist: a stamp that equals the window end is the old
+    bug wearing the fix, because it claims the read happened at the boundary
+    instead of saying when it did.
+    """
+    sec2 = _section(SEC2)
+    assert "re-measure before quoting this table" in " ".join(sec2.split()), (
+        "§2 lost the instruction that tells a reader the table is a snapshot — the "
+        "stamps below are decoration without it")
+    assert SECTION2_WINDOW_END in sec2, (
+        f"§2's window end moved off {SECTION2_WINDOW_END}, which is the date §6 "
+        "and `test_section2_and_section6_report_one_measurement` quote")
+    assert SECTION2_SQL_FLOOR in sec2, "§2 lost its SQL floor, so its window is unnamed"
+    stamp = re.search(r"read\s+(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})Z", sec2)
+    assert stamp, (
+        "§2 restated no read stamp — the sentence 're-measure' instructs but does "
+        "not date, which is what let the automod-regression zero age thirteen hours")
+    assert not stamp.group(1).startswith(SECTION2_WINDOW_END), (
+        f"§2's read stamp ({stamp.group(1)}) is the window end, which is a claim "
+        "about when the read happened being replaced by a claim about the window")
