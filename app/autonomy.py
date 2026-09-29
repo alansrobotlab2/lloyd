@@ -399,7 +399,37 @@ _POOL_TIMEOUT_MARGIN = 30
 _INFRA_EXC_NAMES = frozenset({
     "ConnectError", "ConnectTimeout", "ReadError", "ReadTimeout", "PoolTimeout",
     "RemoteProtocolError", "ConnectionRefusedError", "ConnectionResetError",
+    # The aggregator did not answer `tools/list`, so the turn never started —
+    # the same outage class as the eight names above, arriving one layer up.
+    # Every raise site of this one class is a server-side condition:
+    # `MCPPool.open()` after its own bounded retries (harness/mcp_pool.py:543),
+    # the loop's refusal to run a toolless turn (harness/loop.py:419), and a
+    # tool-name collision between two servers (harness/tool_schema.py:191).
+    # None of them is a task's own exception, which is why the name can sit in
+    # this set at all: charged as `task` it consumed `failure_count` and could
+    # retire a nightly task at `max_retries` for a restart it did not cause —
+    # `run_53_20260929_031704` died at 13.0s with `tool_errors: 0`,
+    # `changes_files: 0`, `failure_kind: task`, and left #53 one more landing
+    # window from retirement. Nothing here adds a second infra route: the
+    # classification lands on the path #1085 already built (`_INFRA_CEILING`,
+    # the flat `_FAILURE_BACKOFF_BASE` cooldown, `infra_failure_count`), and it
+    # changes no dependency reading — `_record_failure` writes `last_run` for
+    # neither kind, which `_is_dependency_met` is the only reader of.
+    "ToolDiscoveryError",
 })
+
+
+def _failure_kind_of(exc: BaseException) -> str:
+    """Which side of the retry budget an exception belongs to: `infra` or `task`.
+
+    A function rather than the inline expression it replaces, for one reason: the
+    only other way to reach this decision in a test was to duplicate the
+    expression there, which proves nothing about the set. `run_task`'s exception
+    handler and `tests/test_autonomy_discovery_infra_kind.py` now read the same
+    set through the same door, so a name added to or dropped from
+    `_INFRA_EXC_NAMES` is decided once (#1807).
+    """
+    return "infra" if type(exc).__name__ in _INFRA_EXC_NAMES else "task"
 # Consecutive infra-classified failures one task may collect inside one declared
 # period before it rests until the start of its next one (#1085). `1d1bbb6`
 # established that an infra failure must not spend the retry budget "so an
@@ -4398,7 +4428,12 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
             tool_errs_md = (f"\n\n## Tool/script errors before failure "
                             f"({len(tool_errors)})\n\n{joined}")
         # A model-server outage shouldn't burn the retry budget of every task.
-        kind = "infra" if type(e).__name__ in _INFRA_EXC_NAMES else "task"
+        # `ToolDiscoveryError` reaches this same line when the aggregator was
+        # mid-restart for a landing: it is in `_INFRA_EXC_NAMES`, and it is the
+        # reason the classification is a function now, so that the test which
+        # drives a real discovery failure through the raise site is charged by
+        # the same code a real dispatch is (#1807).
+        kind = _failure_kind_of(e)
         return await _record_failure(
             task, task_id, run_id, started_at, now,
             summary=error_msg,
@@ -4827,12 +4862,28 @@ def compute_health(rows: list[dict], tasks: list[dict], days: int,
         # its `duration_seconds` lands in `wasted_hours` below and a restart
         # shows up in the number that exists to catch wasted GPU.
         failed = status != "success" or (empty and not artifact_backed)
+        # Which side of the line a failure belongs to, read off the record's own
+        # verdict: `_record_failure` puts `failure_kind` into the meta the pool
+        # stores on this row, and an absent field means `task` — the same default
+        # `_fast_task_failure_seconds` reads at :3527, so the two readers of the
+        # field cannot disagree about a row that predates it (#1807).
+        #
+        # `failures` deliberately keeps counting EVERY non-success row. It is the
+        # numerator of `fail_rate` and the gate on `wasted_hours`, and a dispatch
+        # that died in a landing's MCP restart did spend its wall clock: dropping
+        # those rows out of that number would make an outage week read as cheap,
+        # which is the opposite of what the field exists to catch. What the split
+        # adds is the half the total cannot say — how much of a task's failure
+        # count is the task's own, which is the only half that decides whether the
+        # task is broken.
+        infra_failure = failed and str(meta.get("failure_kind") or "task") == "infra"
         # #1507: the run record's own verdict, never a substring of the text —
         # a report that mentions the token is a reporting run.
         silent = run_is_silent(meta, response)
 
         e = by_task.setdefault(tid, {
             "task_id": tid, "runs": 0, "successes": 0, "failures": 0,
+            "task_failures": 0, "infra_failures": 0,
             "timeouts": 0, "empty": 0, "silent": 0, "silent_indicator_runs": 0,
             "max_turns_runs": 0, "tool_error_runs": 0,
             "runs_with_bundle": 0, "runs_without_bundle": 0,
@@ -4869,6 +4920,13 @@ def compute_health(rows: list[dict], tasks: list[dict], days: int,
         e["gpu_hours"] += duration / 3600.0
         if failed:
             e["failures"] += 1
+            # The split, and it is exhaustive by construction: one `failed` row
+            # lands in exactly one of the two, so `task_failures + infra_failures
+            # == failures` for every row and every task. `consecutive_failures`
+            # is deliberately NOT split — it is the streak of runs that did not
+            # produce work, whatever the reason, and changing it would move a
+            # stall alarm's reading for a reason outside this item.
+            e["infra_failures" if infra_failure else "task_failures"] += 1
             e["wasted_hours"] += duration / 3600.0
             if e["_streak_open"]:
                 e["consecutive_failures"] += 1
@@ -4946,7 +5004,12 @@ def compute_health(rows: list[dict], tasks: list[dict], days: int,
     seen = {t["task_id"] for t in out_tasks}
     idle = [{"task_id": str(t.get("id")), "name": t.get("name"),
              "status": t.get("status"), "frequency": t.get("frequency"),
-             "runs": 0, "successes": 0, "failures": 0, "timeouts": 0, "empty": 0,
+             # The same key set a running row carries, so a consumer flattening
+             # `tasks` and `idle_tasks` into one table reads a zero rather than a
+             # KeyError off a task that simply did not run.
+             "runs": 0, "successes": 0, "failures": 0,
+             "task_failures": 0, "infra_failures": 0,
+             "timeouts": 0, "empty": 0,
              "silent": 0, "fail_rate": None, "silent_rate": None, "gpu_hours": 0.0,
              "unobserved_in_window": True,
              "wasted_hours": 0.0, "avg_seconds": 0.0, "max_seconds": 0.0,
@@ -5012,6 +5075,13 @@ def compute_health(rows: list[dict], tasks: list[dict], days: int,
             "runs": total_runs,
             "failures": total_fail,
             "fail_rate": round(total_fail / total_runs, 3) if total_runs else 0.0,
+            # Summed from the per-task rows, the same way `failures` above is, so
+            # the split and the total it partitions cannot be computed twice and
+            # drift. A fleet whose `failures` are all `infra_failures` is an
+            # outage; one whose are all `task_failures` is a broken task, and the
+            # two readings call for different people (#1807).
+            "task_failures": sum(t["task_failures"] for t in out_tasks),
+            "infra_failures": sum(t["infra_failures"] for t in out_tasks),
             "gpu_hours": round(sum(t["gpu_hours"] for t in out_tasks), 2),
             "wasted_hours": round(sum(t["wasted_hours"] for t in out_tasks), 2),
             "empty_runs": sum(t["empty"] for t in out_tasks),

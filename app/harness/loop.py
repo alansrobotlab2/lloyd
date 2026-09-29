@@ -1471,16 +1471,28 @@ def active_run_count() -> int:
 # ---------------------------------------------------------------------------
 
 
-async def _build_pool(options: RunOptions) -> MCPPool:
-    """Resolve options.mcp_servers (or sensible default) to a process-shared pool.
+async def _open_pool_for_run(options: RunOptions) -> MCPPool:
+    """Resolve options.mcp_servers (or sensible default) and open the shared pool.
 
-    Empty mcp_servers falls back to the unified lloyd-mcp aggregator on
-    its default URL — almost every code path wants that anyway.
+    Split out of `_build_pool` because this is the one call a run makes before
+    it can do anything else, and until #1807 the only way to reach it in a test
+    was to drive a whole turn. `ToolDiscoveryError` is raised from inside it and
+    classified a layer away in `app/autonomy.py`, so the kind a discovery death
+    was CHARGED under had never been exercised against the code that RAISED it —
+    which is exactly how `ToolDiscoveryError` came to be missing from
+    `_INFRA_EXC_NAMES` while the eight transport errors beside it were there.
+    Empty mcp_servers falls back to the unified lloyd-mcp aggregator on its
+    default URL — almost every code path wants that anyway.
     """
     cfg = dict(options.mcp_servers)
     if not cfg:
         cfg = DEFAULT_LLOYD_MCP_SERVERS
-    pool = await get_or_open_pool(cfg)
+    return await get_or_open_pool(cfg)
+
+
+async def _build_pool(options: RunOptions) -> MCPPool:
+    """The pool for one turn: opened, and fresh enough to advertise."""
+    pool = await _open_pool_for_run(options)
     # P12: re-list tools once the catalog is older than
     # `harness.mcp_pool.discovery_ttl_s`. Here, at the turn boundary and only
     # here, so a turn's advertised tools never change under it. It never

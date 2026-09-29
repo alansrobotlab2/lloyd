@@ -170,9 +170,46 @@ DEFAULT_DISCOVERY_TTL_S = 300.0
 # per TTL, and the turn proceeds on the catalog it already had.
 DISCOVERY_REFRESH_TIMEOUT_S = 10.0
 
+# How many times ONE `MCPPool.open()` asks the HTTP servers for their tools,
+# and the two bounds that keep the retry a retry (#1807).
+#
+# `automod_land` restarts MCP before the backend — by design, 105 `promoted`
+# events across 09-28/29 — and a scheduler dispatch that fired inside that
+# window reached an aggregator that could not answer `tools/list` yet. Discovery
+# found nothing, this file raised `ToolDiscoveryError`, and the run was over in
+# 13 seconds while being charged to the TASK as a `failure_kind: task` failure
+# (`run_53_20260929_031704`: `tool_errors: 0`, `changes_files: 0`). The pool was
+# already evicted for the next caller, but a scheduled run has no next caller.
+#
+# A few seconds is the whole recovery: the restart is a supervisor stop/start
+# of a process that boots in seconds. The budget is the bound that matters when
+# the server is not refusing but HANGING — three attempts against a socket that
+# accepts and says nothing would otherwise cost three connect timeouts, and the
+# run's own `timeout_seconds` is what this must never outrun.
+DISCOVERY_MAX_ATTEMPTS = 3
+DISCOVERY_RETRY_BUDGET_SECONDS = 15.0
+# The gap between attempts. Deliberately shorter than the budget so the attempt
+# cap is the usual stop and the budget is the backstop;
+# `tests/test_mcp_pool_discovery_failure.py` pins both, the budget against a
+# fast-forwarded clock.
+DISCOVERY_RETRY_DELAY_SECONDS = 3.0
+
 # Transports that carry the 2026-07-28 stateless protocol. Nothing is pinned
 # to a connection for these, so the pool does not hold one open.
 HTTP_TRANSPORT_TYPES = ("http", "streamable-http", "streamable_http", "sse")
+
+
+async def _discovery_pause(seconds: float) -> None:
+    """The gap between two discovery attempts.
+
+    A function for one line's sake: a test that counts attempts needs the wait
+    out of its own run WITHOUT editing the bound it is testing. Zeroing
+    `DISCOVERY_RETRY_DELAY_SECONDS` from a fixture would leave no way to assert
+    what that constant says in production, which is half of what #1807's clause
+    2 asks for. `tests/test_mcp_pool_discovery_failure.py` intercepts this
+    instead, and asserts that the wait asked for is the declared one.
+    """
+    await asyncio.sleep(seconds)
 
 
 # ---------------------------------------------------------------------------
@@ -422,19 +459,51 @@ class MCPPool:
             # catalog in ONE assignment at the end (P12). A `_reopen` keeps the
             # previous catalog until then, so a call resolving its route while
             # discovery runs sees the old table, never a half-built or empty one.
+            # `DISCOVERY_MAX_ATTEMPTS` passes over the servers still missing,
+            # and only while `DISCOVERY_RETRY_BUDGET_SECONDS` of wall clock is
+            # left. The retry exists for one shape — every HTTP server refusing
+            # at once, which is what a landing's MCP restart looks like from
+            # here — so it runs only while nothing has been found yet, and a
+            # PARTIAL failure keeps the timing it had before #1807: a degraded
+            # catalog is a usable one, and this loop is not about making it
+            # whole. `found` accumulating across passes is what expresses that.
+            #
+            # The next caller already re-discovered (the eviction below), but a
+            # single dispatch has no next caller: `autonomy.run_task` iterates
+            # one generator, and the run that began inside the restart window
+            # was over 13 seconds after it started.
             failed: list[str] = []
             found: list[tuple[str, list[dict[str, Any]]]] = []
-            for server_name, cfg in self._http_configs.items():
-                try:
-                    async with self._http_session(cfg) as session:
-                        tools = await self._list_tools(server_name, session)
-                except Exception as exc:
+            pending = dict(self._http_configs)
+            deadline = time.monotonic() + DISCOVERY_RETRY_BUDGET_SECONDS
+            attempt = 0
+            while True:
+                attempt += 1
+                failed = []
+                for server_name, cfg in pending.items():
+                    try:
+                        async with self._http_session(cfg) as session:
+                            tools = await self._list_tools(server_name, session)
+                    except Exception as exc:
+                        logger.warning(
+                            "mcp_pool: failed to discover %s (attempt %d/%d): %s",
+                            server_name, attempt, DISCOVERY_MAX_ATTEMPTS, exc,
+                        )
+                        failed.append(server_name)
+                        continue
+                    found.append((server_name, tools))
+
+                if not failed or found or attempt >= DISCOVERY_MAX_ATTEMPTS:
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
                     logger.warning(
-                        "mcp_pool: failed to discover %s: %s", server_name, exc
-                    )
-                    failed.append(server_name)
-                    continue
-                found.append((server_name, tools))
+                        "mcp_pool: giving up retrying %s after %d attempts — the "
+                        "%.0fs discovery budget is spent",
+                        ", ".join(failed), attempt, DISCOVERY_RETRY_BUDGET_SECONDS)
+                    break
+                await _discovery_pause(min(DISCOVERY_RETRY_DELAY_SECONDS, remaining))
+                pending = {name: self._http_configs[name] for name in failed}
 
             # stdio servers: a subprocess must outlive the call, so those
             # keep the owner-task pattern.
@@ -472,6 +541,14 @@ class MCPPool:
             # `open()` raises, so the next caller rebuilds and re-discovers.
             # Raising here also leaves the previous catalog in place, which is
             # what a `_reopen` that fails wants.
+            #
+            # By the time this line is reached the HTTP servers have already
+            # had `DISCOVERY_MAX_ATTEMPTS` passes between them, so what raises is
+            # a server that stayed down across the whole bounded window and not
+            # one that was mid-restart for a second. The retry covers the HTTP
+            # transport only: a stdio server that fails lands exactly where it
+            # landed before #1807, because rebuilding an owner task per attempt
+            # is a bigger change than the landing window asks for.
             catalog = _build_catalog(found)
             if failed and not catalog.routes:
                 raise ToolDiscoveryError(

@@ -2438,19 +2438,26 @@ def test_the_health_payload_keeps_every_key_today_s_consumers_read(aut, monkeypa
 
     assert old_fleet_keys <= set(h["fleet"]), (
         f"the fleet block lost {sorted(old_fleet_keys - set(h['fleet']))}")
-    # Three keys have been let in since that snapshot, each by a named decision
-    # rather than silently: #1401's two clamp keys, and #713's
-    # `evidence_unevaluable_reason`, which is the sentence explaining a null
-    # `refuted_or_insufficient_rate`. The fleet rate stopped being its own sum
-    # (#713) precisely so it could not disagree with the artifact rollup, and a
-    # null a consumer cannot explain is the trap #1401 exists to close. Anything
-    # else this set grows by fails here naming itself, which is what the
-    # containment assertion is for.
+    # Five keys have been let in since that snapshot, each by a named decision
+    # rather than silently: #1401's two clamp keys, #713's
+    # `evidence_unevaluable_reason` — the sentence explaining a null
+    # `refuted_or_insufficient_rate` — and #1807's `task_failures` /
+    # `infra_failures`, which split `failures` by who owns it. `failures` and
+    # `fail_rate` are untouched by that split, so every consumer reading the
+    # headline number reads the same number as before; the two new keys exist
+    # because a fleet reporting `failures: 25` cannot say whether 25 tasks are
+    # broken or the box was down, and the second is what a 13-second
+    # `ToolDiscoveryError` in a landing window started being counted as.
+    # The fleet rate stopped being its own sum (#713) precisely so it could not
+    # disagree with the artifact rollup, and a null a consumer cannot explain is
+    # the trap #1401 exists to close. Anything else this set grows by fails here
+    # naming itself, which is what the containment assertion is for.
     assert set(h["fleet"]) - old_fleet_keys == {
-        "oldest_input", "window_clamped_to_hours",
-        "evidence_unevaluable_reason"}, (
+        "oldest_input", "window_clamped_to_hours", "evidence_unevaluable_reason",
+        "task_failures", "infra_failures"}, (
         f"the fleet block gained {sorted(set(h['fleet']) - old_fleet_keys)} — "
-        "the clause permits the two clamp keys and #713's unevaluable reason")
+        "the clause permits the two clamp keys, #713's unevaluable reason and "
+        "#1807's infra/task split")
     assert isinstance(h["fleet"]["runs"], int)
     assert isinstance(h["fleet"]["fail_rate"], float)
     assert h["fleet"]["runs"] == sum(t["runs"] for t in h["tasks"]), (
