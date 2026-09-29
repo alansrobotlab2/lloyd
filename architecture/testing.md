@@ -33,6 +33,46 @@ git worktree add --detach /tmp/lloyd-check HEAD && cd /tmp/lloyd-check && pytest
 `LLOYD_ALLOW_LIVE_TREE_TESTS=1` exists for a human who means it. A round must
 never set it.
 
+## 2026-09-29: the gate deleted the tree, and the cause was a full `/tmp`
+
+The production tree went a second time, at 15:01:42 PDT, seventeen seconds into
+round `SM_20260929_213114`'s gate — not during a test run. `Gate.rung_static`
+built its pyflakes scratch path as `Path(_run(["mktemp", "-d"]).stdout.strip())`.
+`/tmp` is a tmpfs capped at 1,048,576 inodes and every one was in use (99 GB of
+bytes free; the round's own transcript measured it at 15:01), so `mktemp -d`
+failed with an empty stdout, `Path("")` was the gate's working directory —
+`~/lloyd`, inherited from the aggregator that supervisord starts there — and the
+rung's `finally: shutil.rmtree(with_base, ignore_errors=True)` removed everything
+under it. The rung **passed** (`ignore_errors` ate the failing `rmdir('.')`); the
+`tests` rung then failed on `.venvs/lloyd/bin/python` being gone. The 09-22
+deletion above was attributed to a fixture teardown nobody ever identified, in a
+round whose gate `tests` rung had just errored on 24 nodes — which is what a full
+`/tmp` does to every `tmp_path` fixture — so the same mechanism is the likelier
+cause of both.
+
+Three rules now, pinned by `tests/test_gate_scratch_dirs.py`:
+
+- **A scratch directory is created, never computed.** `gate._scratch_dir` is
+  `tempfile.mkdtemp` under `<round>/gate-state/scratch/`: it raises when it
+  cannot create the directory (and `Gate._rung` records an exception as a FAILED
+  rung), and what it returns is a directory that did not exist a moment ago. No
+  Python under `scripts/`, `app/`, `agent_mcp/` or `workers/` may build a path
+  from a quoted `mktemp` argv.
+- **A scratch directory is removed only if it is one.** `gate._drop_scratch`
+  refuses a relative or empty path, anything that is not a direct child of the
+  round's scratch parent, and anything that is or contains the working
+  directory, `$HOME`, the live tree, `~/lloyd-work` or the round dir. It raises
+  rather than logs.
+- **The gate's children get `TMPDIR=<round>/gate-state/tmp`.** pytest's basetemp,
+  conftest's scratch roots and every test's `tempfile` land on disk under the
+  round and die with it, so a gate run neither fills `/tmp` nor fails when
+  something else has.
+
+What fills `/tmp` is still to be measured (`sudo du --inodes -d1 /tmp`); the
+suite's own leftovers are the suspect — a `timeout`-killed pytest never runs the
+`atexit` that removes conftest's `lloyd-test-*` roots, and a killed xdist run
+leaves `pytest-of-<user>/pytest-N/.lock` files that stop pruning.
+
 ## Two kinds of test
 
 **Synthetic** tests build their fixture and pass on any machine. Most of the

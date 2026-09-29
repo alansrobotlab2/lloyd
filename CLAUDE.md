@@ -196,6 +196,13 @@ python -m scripts.automod.rehearse --yes-i-mean-it  # prove rollback still works
 - **The test suite never runs against production.** `tests/conftest.py`
   refuses the live tree; the gate sets `HOME` to `<round>/home`; the guard
   reads production off the passwd entry, never `Path.home()` (§4.3a).
+- **Never delete a path you computed; delete only a directory you created.**
+  On 2026-09-29 `mktemp -d` failed on a full `/tmp` (1M inodes), its empty
+  stdout became `Path("")` = the gate's cwd = `~/lloyd`, and the static rung's
+  `rmtree` deleted production. Scratch is `gate._scratch_dir` / `_drop_scratch`
+  under the round dir, children get `TMPDIR` there, and no quoted `mktemp`
+  argv may exist in the tree (`tests/test_gate_scratch_dirs.py`).
+  `architecture/testing.md` "2026-09-29".
 - **A worker turn may not restart, stop or hand-boot a service or engine, nor
   run `round land` from Bash** — `service_control` refuses it for background
   sessions; a chat session is never refused (§10.1, §3.2f.1).

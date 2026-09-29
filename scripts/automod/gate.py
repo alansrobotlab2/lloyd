@@ -60,6 +60,7 @@ import re
 import shutil
 from collections import Counter
 import subprocess
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -177,6 +178,71 @@ def _tsc_findings(web: Path, timeout: float = 300) -> Counter:
     tsc = web / "node_modules" / ".bin" / "tsc"
     r = _run([str(tsc), "--noEmit", "-p", "."], cwd=web, env=_node_env(), timeout=timeout)
     return _parse_tsc(r.stdout + r.stderr)
+
+
+#: Where a gate's scratch directories live: under the round, on disk, deleted
+#: with the worktree. Never `/tmp`, and never a path read off a subprocess.
+SCRATCH_SUBDIR = ("gate-state", "scratch")
+
+
+def _scratch_dir(round_id: str, purpose: str) -> Path:
+    """A fresh, empty directory this gate owns, or an exception. Never `''`.
+
+    On 2026-09-29 the `static` rung built its scratch path as `Path(...)` over
+    the stripped stdout of a `mktemp -d` subprocess. `/tmp` had run out of inodes
+    (1,048,576 of 1,048,576 used, 99 GB of bytes free), so mktemp printed its
+    error to stderr, exited 1, and left stdout EMPTY. `Path("")` is `Path(".")`,
+    the gate's working directory — inherited from the aggregator, which
+    supervisord starts in `~/lloyd`. The rung wrote the base copies of the
+    changed files into the live tree, ran pyflakes over them, and then its
+    `finally: shutil.rmtree(with_base, ignore_errors=True)` deleted the
+    production checkout: `.git`, `.venvs`, `qmd`, every tracked file, in the
+    seventeen seconds between 15:01:25 and 15:01:42 PDT. The rung PASSED,
+    because `ignore_errors` swallowed the `rmdir('.')` that could not complete,
+    and the `tests` rung then failed on the venv's python being gone. The same
+    shape fits 2026-09-22, which was attributed to a fixture teardown that was
+    never identified and whose gate `tests` rung had just errored on 24 nodes —
+    what a full `/tmp` does to every `tmp_path` fixture.
+
+    So: `tempfile.mkdtemp`, which raises when it cannot create the directory
+    and otherwise returns a directory it CREATED, so an rmtree of it can only
+    ever remove something new. And under the round dir, on disk, so `/tmp`'s
+    state is not this gate's problem and the leftovers die with the round.
+    """
+    parent = W.round_dir(round_id).joinpath(*SCRATCH_SUBDIR)
+    parent.mkdir(parents=True, exist_ok=True)
+    path = Path(tempfile.mkdtemp(prefix=f"{purpose}-", dir=parent))
+    if not path.is_absolute() or path.resolve().parent != parent.resolve():
+        raise RuntimeError(f"scratch dir landed outside {parent}: {path}")
+    return path
+
+
+def _drop_scratch(path: Path | str, round_id: str) -> None:
+    """Remove a directory `_scratch_dir` made, and refuse anything else.
+
+    The refusal is the point. A delete whose target is computed can be handed
+    the wrong target, and the roots below are what a wrong target has actually
+    been on this box: the working directory (2026-09-29), `Path.home()/"lloyd"`
+    (2026-09-22). Raises rather than logging, because a rung that cannot clean
+    up is a rung that should be read as broken, and `Gate._rung` records an
+    exception as a FAILED rung.
+    """
+    raw = str(path or "")
+    if raw in ("", ".", "..") or not Path(raw).is_absolute():
+        raise RuntimeError(f"refusing to remove a relative or empty scratch path: {raw!r}")
+    real = Path(raw).resolve()
+    parent = W.round_dir(round_id).joinpath(*SCRATCH_SUBDIR).resolve()
+    if real == parent or real.parent != parent:
+        raise RuntimeError(f"refusing to remove {real}: not a scratch dir under {parent}")
+    forbidden = {Path("/"), Path.home().resolve(), LIVE_ROOT.resolve(),
+                 Path(W.WORK_ROOT).resolve(), W.round_dir(round_id).resolve()}
+    try:
+        forbidden.add(Path.cwd().resolve())
+    except OSError:  # the cwd itself is gone — nothing to protect there
+        pass
+    if real in forbidden or any(root.is_relative_to(real) for root in forbidden):
+        raise RuntimeError(f"refusing to remove {real}: it is or contains a protected root")
+    shutil.rmtree(real, ignore_errors=True)
 
 
 def _canary_lock_held() -> bool:
@@ -680,6 +746,14 @@ class Gate:
         scratch = W.round_dir(self.round_id) / "gate-state"
         (scratch / "automod").mkdir(parents=True, exist_ok=True)
         (scratch / "guardian").mkdir(parents=True, exist_ok=True)
+        # Every child's temp files go under the round too (`TMPDIR`): pytest's
+        # basetemp, conftest's scratch roots, whatever a test hands `tempfile`.
+        # `/tmp` on this box is a 1M-inode tmpfs that the suite's own leftovers
+        # have filled twice (2026-09-22, 2026-09-29), and a full `/tmp` turns
+        # every `tmp_path` fixture into an error — the 24-error `tests` rung of
+        # 09-22 — and worse (see `_scratch_dir`). On disk, and gone with the
+        # round, it is neither a shared resource nor a growing one.
+        (scratch / "tmp").mkdir(parents=True, exist_ok=True)
         home = Path.home()
         if isolate_home:
             try:
@@ -696,6 +770,7 @@ class Gate:
             "LLOYD_AUTOMOD_STATE": str(scratch / "automod"),
             "LLOYD_GUARDIAN_STATE": str(scratch / "guardian"),
             "LLOYD_VOICE_ALERTS": "0",
+            "TMPDIR": str(scratch / "tmp"),
         }
         if live_data:
             from app.data_root import production_data_root
@@ -1241,7 +1316,9 @@ class Gate:
             return True, "compiled; imports clean; no python changed", {}
 
         head_findings = _pyflakes(self.python, self.worktree, changed_py)
-        with_base = Path(_run(["mktemp", "-d"]).stdout.strip())
+        # `_scratch_dir`, never a path read off a subprocess: see its docstring
+        # for the day this line deleted the production tree.
+        with_base = _scratch_dir(self.round_id, "pyflakes-base")
         try:
             # Same files as they stood at the merge base, so a pre-existing
             # finding on an untouched line cannot fail the gate. The tree has
@@ -1255,7 +1332,7 @@ class Gate:
             base_findings = _pyflakes(self.python, with_base,
                                       [p for p in changed_py if (with_base / p).exists()])
         finally:
-            shutil.rmtree(with_base, ignore_errors=True)
+            _drop_scratch(with_base, self.round_id)
 
         new = head_findings - base_findings
         if new:
@@ -1308,7 +1385,10 @@ class Gate:
         if new:
             return False, (f"{sum(new.values())} new tsc error(s): "
                            f"{sorted(new)[:4]}"), {"new": sorted(new)}
-        out_dir = Path(_run(["mktemp", "-d"]).stdout.strip())
+        # Same rule as `rung_static`: a created directory, never a path read off
+        # a subprocess — `vite build --emptyOutDir` on `Path("")` would empty the
+        # working directory before the rmtree even ran.
+        out_dir = _scratch_dir(self.round_id, "vite-build")
         probe: dict = {}
         try:
             ok, tail = _vite_build(web, out_dir)
@@ -1317,7 +1397,7 @@ class Gate:
                 # Never :5173 — that dev server serves the live tree (docstring).
                 probe = self._frontend_probe(out_dir)
         finally:
-            shutil.rmtree(out_dir, ignore_errors=True)
+            _drop_scratch(out_dir, self.round_id)
         if not ok:
             return False, f"vite build failed: {tail}", {}
         tested, vt_tail = _vitest_run(web)
