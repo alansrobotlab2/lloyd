@@ -2,8 +2,12 @@
 """skill_verdicts.py — a keyed ledger of skill-candidate verdicts (backlog #530).
 
 The nightly skill pipeline adjudicates candidates and then forgets it. Every
-disposition is written down — `REVIEW-LOG.md`, and a `status:` line in each
-candidate's frontmatter — and none of it is read back before the next run.
+disposition used to be written down — in a markdown review log, and in a `status:` line
+in each candidate's frontmatter — and none of it was read back before the next run.
+This module replaced the log with two JSONL surfaces: the live ledger
+(`_pipeline/skills/reviews/verdicts.jsonl` under the data root) and its durable mirror
+(`~/obsidian/memory/skill-verdicts/verdicts.jsonl`), and there is no markdown view of
+either — nothing here writes one (#1795).
 `mine-trajectories.py` regenerates a date-stamped candidate file per pattern each
 night, so yesterday's `reviewed_no_skill` never reaches today's input, and the
 consolidator's own skip list (`nightly-skill-consolidation/SKILL.md` 1.3) named only
@@ -122,7 +126,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.paths import LIVE_CHECKOUT, PIPELINE_DIR  # noqa: E402
 
-# Append-only. Under the data root's `_pipeline/`, same as `REVIEW-LOG.md` beside it.
+# Append-only, under the data root's `_pipeline/`. This JSONL and the durable copy
+# below are the ledger's only two surfaces; there is no markdown view beside them.
 DEFAULT_STORE = PIPELINE_DIR / "skills" / "reviews" / "verdicts.jsonl"
 DEFAULT_CANDIDATES = PIPELINE_DIR / "skills" / "candidates"
 

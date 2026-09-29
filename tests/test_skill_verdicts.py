@@ -3043,3 +3043,182 @@ def test_a_pinned_input_with_shell_metacharacters_is_reported_not_disposed(tmp_p
     assert "NEEDS_RERECORD" in out, out
     assert "DISPOSED" not in out, out
     assert len(store.read_text().splitlines()) == 1, "a screened key was still written"
+
+
+# ── the surfaces the prose names (#1795) ─────────────────────────────────────
+#
+# #718 closed the store half of this: `verdicts.jsonl` exists, is mirrored, and both
+# runbooks mandate read-back. What survived is the description — six lines across four
+# surfaces pointing a reader at a markdown review log in `reviews/` as the readable view
+# of the ledger, and the one sentence that read like a correction
+# (`nightly-skill-consolidation/SKILL.md:75`) was itself the sentence asserting the file
+# still exists. It does not, and no writer can produce it: `record` appends to exactly
+# two destinations, `DEFAULT_STORE` and `DEFAULT_MIRROR`, both JSONL.
+# `eval/iv/recovered-2026-08-22..09-21.jsonl:197` preserves a 2026-09-09 `ls` of
+# `_pipeline/skills/reviews/` in which that markdown was the *sole* file and the JSONL
+# was unreadable — the two surfaces swapped, and the prose kept describing the retired
+# one. These nodes keep it swapped the other way, and obey the rail themselves: the
+# file's name does not appear anywhere below, because a dead path quoted even to be
+# denied is a path a later grep-and-follow run walks.
+
+VAULT_SKILLS = Path.home() / "obsidian" / "skills"
+#: The live ledger, which lives under the data root's `_pipeline/` (`PIPELINE_DIR`).
+LIVE_LEDGER_REL = "_pipeline/skills/reviews/verdicts.jsonl"
+PHANTOM = "REVIEW-" + "LOG"
+
+def _read(p: Path) -> str:
+    assert p.is_file(), f"{p} is not in the tree; a missing file passes every absence below"
+    return p.read_text(encoding="utf-8")
+
+
+def test_no_surface_names_a_markdown_review_log_as_reading_material():
+    """Clauses 1-4's shared rail: nothing points a reader at a markdown ledger.
+
+    The acceptance grep is over *tracked* files and the vault's skills, so it is run
+    here rather than trusted from a shell: a phantom path quoted even to be denied is a
+    path a later grep-and-follow run walks, which is how #718's "demoted" sentence left
+    two live skills still sending #57 to a file that is not there. `eval/iv` is excluded
+    — it is the archived transcript that *proves* the file once existed, and rewriting a
+    recovered session would destroy the evidence.
+    """
+    hits = subprocess.run(
+        ["git", "grep", "-l", PHANTOM, "--", ":!eval/iv", ":!*__pycache__*"],
+        cwd=_ROOT, capture_output=True, text=True)
+    assert hits.returncode in (0, 1), hits.stderr
+    assert not [f for f in hits.stdout.split() if f.strip()], (
+        "a tracked file still names the retired markdown ledger: " + hits.stdout)
+
+    skills = subprocess.run(
+        ["grep", "-rl", PHANTOM, str(VAULT_SKILLS)],
+        capture_output=True, text=True)
+    assert skills.stdout.strip() == "", skills.stdout
+    for slug in ("nightly-skill-consolidation", "trajectory-skill-mining"):
+        text = _read(VAULT_SKILLS / slug / "SKILL.md")
+        assert "human-readable" not in text.lower(), (
+            f"{slug} still advertises a human-readable markdown ledger")
+    assert "human-readable" not in _read(_ROOT / "scripts/skill_verdicts.py").lower()
+
+
+def test_the_skills_name_the_two_jsonl_surfaces_that_exist():
+    """Clauses 1 and 3's positive half: each skill points at the live JSONL, the vault
+    mirror, and the README that is actually the prose of this store.
+
+    Absence alone would be satisfied by deleting the Key-paths bullet outright, which
+    would leave the next run with no ledger to read at all.
+    """
+    cons = _read(VAULT_SKILLS / "nightly-skill-consolidation" / "SKILL.md")
+    mine = _read(VAULT_SKILLS / "trajectory-skill-mining" / "SKILL.md")
+    for text, label in ((cons, "nightly-skill-consolidation"),
+                        (mine, "trajectory-skill-mining")):
+        assert LIVE_LEDGER_REL in text, f"{label} lost the live ledger"
+        assert "memory/skill-verdicts/verdicts.jsonl" in text, (
+            f"{label} does not name the durable mirror")
+        assert "memory/skill-verdicts/README.md" in text, (
+            f"{label} names no prose surface for a human reader")
+
+    # The three named paths are the three files that exist — a doc naming a fourth
+    # surface, or a surface that moved, is the same class of bug from the other side.
+    assert (production_data_root() / LIVE_LEDGER_REL).is_file()
+    assert (Path.home() / "obsidian/memory/skill-verdicts/verdicts.jsonl").is_file()
+    assert (Path.home() / "obsidian/memory/skill-verdicts/README.md").is_file()
+    assert not list((production_data_root() / "_pipeline/skills/reviews").glob("*.md")), (
+        "a markdown file appeared in reviews/, so 'no markdown ledger exists' is now "
+        "the false half of this sentence and the prose needs the generator decision")
+
+
+def test_the_09_06_rejections_are_pointed_at_the_rows_that_carry_them():
+    """Clause 2: the Phase 0 citation points at the rows carrying those verdicts, and
+    the rows it promises are there, are terminal, and are dated 09-10 — never 09-06.
+
+    The item this fixes claimed the rejections were *lost*; they are not. The 16
+    tool/error rows of the 2026-09-10 pass cover the 15 pattern keys the 09-06 batch
+    became, and all 15 carry a `TERMINAL_VERDICTS` value, so Phase 0's SKIP still fires
+    for every one. Had the reword said "gone", the next run would re-adjudicate 15
+    patterns from scratch — the cost #530 exists to remove. The count is pinned from the
+    ledger side too: a passage claiming a key the ledger does not carry would tell the
+    next run to SKIP on a pattern nothing ever decided.
+    """
+    import scripts.skill_verdicts as sv  # noqa: PLC0415 - constant under test
+
+    cons = _read(VAULT_SKILLS / "nightly-skill-consolidation" / "SKILL.md")
+    passage = cons[cons.index("Phase 0"):cons.index("**0.0")]
+    TERMINAL = sv.TERMINAL_VERDICTS
+
+    ledger = production_data_root() / LIVE_LEDGER_REL
+    rows = [json.loads(l) for l in ledger.read_text(encoding="utf-8").splitlines()
+            if l.strip()]
+    d10 = [r for r in rows if r["decided_at"].startswith("2026-09-10")]
+    tool = [r for r in d10 if not r["pattern_key"].startswith("seq-")]
+    keys = sorted({r["pattern_key"] for r in tool})
+    assert len(d10) == 21 and len(tool) == 16 and len(keys) == 15, (
+        len(d10), len(tool), len(keys))
+    assert min(r["decided_at"] for r in rows) == "2026-09-10T01:50:37Z"
+    assert not [r for r in rows if r["decided_at"].startswith("2026-09-06")], (
+        "the ledger gained 09-06 rows, so the passage's 'provenance is gone' is false")
+
+    # The passage points, in words the reader can act on: the file, the date, the
+    # timestamp, every one of the 15 keys, and what was lost.
+    assert "verdicts.jsonl" in passage, (
+        "the passage no longer names the file the verdicts live in: " + passage)
+    assert "2026-09-10" in passage and "01:50:37" in passage, passage
+    assert "21 rows" in passage and "16" in passage and "15 keys" in passage, passage
+    for k in keys:
+        assert k in passage, f"{k} is in the ledger but not named by the passage"
+        latest = max((r for r in tool if r["pattern_key"] == k),
+                     key=lambda r: r["decided_at"])
+        assert latest["verdict"] in TERMINAL, (k, latest["verdict"])
+    assert "provenance" in passage.lower(), (
+        "the passage must say what was lost, not only what survived")
+
+
+def test_the_module_describes_its_own_write_surfaces(tmp_path):
+    """Clause 4: the docstring names the two paths the two store constants actually
+    point at, and the comment above `DEFAULT_STORE` no longer claims a third.
+
+    This is the join, not a word search. The prose is a claim about what `record` opens
+    (`DEFAULT_STORE`, `DEFAULT_MIRROR`), so each backticked path in the docstring is
+    compared to the constant that writes it — a docstring that drifts off the constant
+    fails here even if the sentence still reads well. And `record` is run for real into
+    a tmp pair to prove those two destinations are the only places a row lands, which is
+    what makes a docstring naming a markdown log a claim about an append that does not
+    exist.
+    """
+    import scripts.skill_verdicts as sv  # noqa: PLC0415 - module under test
+
+    src = _read(_ROOT / "scripts/skill_verdicts.py")
+    doc = src.split('"""')[1]
+
+    live_rel = "_pipeline/skills/reviews/verdicts.jsonl"
+    assert f"`{live_rel}`" in doc, doc[:700]
+    assert str(sv.DEFAULT_STORE).endswith("skills/reviews/verdicts.jsonl"), sv.DEFAULT_STORE
+    assert str(sv.DEFAULT_STORE).endswith(str(sv.PIPELINE_DIR / "skills/reviews"
+                                               / "verdicts.jsonl"))
+    assert "`~/obsidian/memory/skill-verdicts/verdicts.jsonl`" in doc, doc[:700]
+    assert sv.DEFAULT_MIRROR == (Path.home() / "obsidian" / "memory" / "skill-verdicts"
+                                 / "verdicts.jsonl"), sv.DEFAULT_MIRROR
+
+    comment = src[src.rindex("#", 0, src.index("DEFAULT_STORE =")):
+                  src.index("DEFAULT_STORE =")]
+    named = [tok for tok in comment.replace(",", " ").split()
+             if tok.strip("`.:" "").endswith(".md")]
+    assert not named, (
+        "the comment above DEFAULT_STORE names a markdown file as a surface: " + comment)
+    assert "two surfaces" in comment, comment
+
+    # Both destinations redirected by env (`_resolve_store` :268, `_mirror_path` :283),
+    # so this run cannot append a probe row to the live ledger or the vault mirror.
+    store, mirror = tmp_path / "v.jsonl", tmp_path / "m.jsonl"
+    os.environ["SKILL_VERDICTS_STORE"] = str(store)
+    os.environ["SKILL_VERDICTS_MIRROR"] = str(mirror)
+    try:
+        rc = sv.main(["record", "--pattern", "Bash/prose-check", "--verdict",
+                      "reviewed_no_skill", "--reason", "surface count",
+                      "--occurrences", "3", "--evidence-cmd",
+                      "echo prose-check: 3 keys"])
+    finally:
+        os.environ.pop("SKILL_VERDICTS_STORE", None)
+        os.environ.pop("SKILL_VERDICTS_MIRROR", None)
+    assert rc == 0
+    assert store.is_file() and mirror.is_file(), "record did not write both surfaces"
+    md = [p for p in tmp_path.iterdir() if p.suffix == ".md"]
+    assert not md, f"record wrote a markdown file after all: {[p.name for p in md]}"

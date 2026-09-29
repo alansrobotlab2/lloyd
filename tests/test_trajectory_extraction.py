@@ -859,8 +859,9 @@ def test_corrupt_watermark_falls_back_to_the_default(isolated_output):
 # `is_error` is the input to skill authoring: `trajectory-skill-mining` opens a
 # skill-writing branch on ">= 2 pending error candidates". Keyword-matching the
 # *text a tool returned* made that counter fiction — in the 2026-09-06→08 window
-# 234 steps were flagged and 188 had nothing behind them (review verdicts:
-# `_pipeline/skills/candidates/REVIEW-LOG.md`), including a `Read/timeout`
+# 234 steps were flagged and 188 had nothing behind them (the review verdicts were
+# recorded in a markdown log since retired; the same verdicts re-recorded 2026-09-10
+# are in `_pipeline/skills/reviews/verdicts.jsonl`), including a `Read/timeout`
 # candidate for a tool with no timeout path, where the word came from the file
 # being read. Authoring off those would have emitted the miner's own hardcoded
 # mitigation strings as skills, the damage class that got 11 skills archived on

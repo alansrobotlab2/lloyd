@@ -220,8 +220,10 @@ ERROR_CATEGORIES = [
 # and set `is_error` on its own, which is what made the trajectory error signal
 # unreadable: it matched the text a tool *returned*, not whether the call
 # failed. Measured over the 2026-09-06→08 window, 196 of 234 flagged steps were
-# flagged by these patterns alone and 188 of the 234 had nothing behind them
-# (`_pipeline/skills/candidates/REVIEW-LOG.md`); a `Read/timeout` skill
+# flagged by these patterns alone and 188 of the 234 had nothing behind them (the
+# markdown review log that recorded it is retired — its successor, carrying the same
+# verdicts re-recorded 2026-09-10, is `_pipeline/skills/reviews/verdicts.jsonl`);
+# a `Read/timeout` skill
 # candidate was even filed for a tool with no timeout path, because the word
 # came from the file being read. See backlog #389.
 MENTION_ERROR_PATTERNS = [
