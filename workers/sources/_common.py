@@ -223,7 +223,8 @@ def write_staging_note(
     return path
 
 
-def reconcile_fact_writes(session_id: str, claimed) -> dict:
+def reconcile_fact_writes(session_id: str, claimed,
+                          claimed_raw: Optional[str] = None) -> dict:
     """Compare a turn's self-reported fact count with what the store holds.
 
     A worker turn that keeps `fact_add` (deep-research, youtube-digest) reads
@@ -248,6 +249,14 @@ def reconcile_fact_writes(session_id: str, claimed) -> dict:
     self-report that leaves those out is honest, not wrong. Reconciling call
     records would cry wolf on every refusal.
 
+    `claimed` is the number the source settled on for that self-report, which
+    for a structured verdict whose count was not a number is the RESULT
+    block's (#1773). `claimed_raw` is the token the finalizer's object actually
+    carried, and is passed only when that token was not a number: it goes out
+    as `facts_claimed_raw` so a null `facts_claimed` reads as "neither path
+    gave a number, and here is what the object said" instead of "the turn
+    claimed nothing", which is a different finding entirely.
+
     Returns `{}` — no claim at all — when the comparison cannot be made: no
     session id, or a store that will not answer. A detector that fires because
     the index was down is one nobody reads.
@@ -268,6 +277,8 @@ def reconcile_fact_writes(session_id: str, claimed) -> dict:
     except (TypeError, ValueError):
         claimed_n = None
     out["facts_claimed"] = claimed_n
+    if claimed_raw is not None:
+        out["facts_claimed_raw"] = str(claimed_raw)
     if claimed_n is not None and claimed_n != written:
         out["facts_mismatch"] = {"written": written, "claimed": claimed_n}
     return out

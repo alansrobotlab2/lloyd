@@ -911,7 +911,9 @@ def fact_store(tmp_path, monkeypatch):
 
 
 def _turn_writing_facts(text: str, *, writes: Path, add: list[str],
-                        refusals: int = 0, session: str = FACTS_SESSION):
+                        refusals: int = 0, session: str = FACTS_SESSION,
+                        structured: dict | None = None,
+                        write_gate: str = ""):
     """A turn that writes facts through the real tool, under its own session id.
 
     `refusals` is how many further calls the store refuses as restatements:
@@ -920,13 +922,25 @@ def _turn_writing_facts(text: str, *, writes: Path, add: list[str],
     *written* and not calls made — the triage's own session
     `20260927_185948_deepresearch_4e62.json` carries 14 `fact_add` records
     against `FACTS: 12`, and a call-count detector would flag that honest turn.
+
+    `structured` is the finalizer's object for the same turn, so a node can set
+    the block and the object against each other (#1773).
+
+    `write_gate="off"` is for a node writing enough findings that the #1487
+    paraphrase gate would judge each one against the file it is filling: a
+    NOOP on any single fact would move the store count the node fixes, and that
+    verdict is a different feature's test. The verbatim refusal above is
+    untouched by it — it lands before the gate.
     """
     calls = {"n": 0}
 
     def _add(entity: str, category: str, body: str) -> dict:
         calls["n"] += 1
-        return FACTS._fact_add({"entity": entity, "category": category,
-                                "fact": body, "confidence": 0.9})
+        params = {"entity": entity, "category": category,
+                  "fact": body, "confidence": 0.9}
+        if write_gate:
+            params["write_gate"] = write_gate
+        return FACTS._fact_add(params)
 
     async def run(prompt, **kwargs):
         run.seen = kwargs
@@ -941,7 +955,7 @@ def _turn_writing_facts(text: str, *, writes: Path, add: list[str],
         finally:
             current_session_id.reset(token)
         return {"text": text, "session_id": session, "stop_reason": "stop",
-                "num_turns": 12, "errors": [], "structured": None,
+                "num_turns": 12, "errors": [], "structured": structured,
                 "structured_error": ""}
     run.seen = {}
     run.calls = calls
@@ -1039,3 +1053,224 @@ def test_the_reconciler_is_shared_and_silent_when_it_cannot_measure():
     assert COMMON.reconcile_fact_writes("", "3") == {}, (
         "with no session there is nothing to attribute; inventing a zero-count "
         "mismatch on every legacy turn would bury the real ones")
+
+
+# ────── A garbled structured count falls back to the block (#1773) ───────────
+# The finalizer transcribes the turn's RESULT block into a JSON object under
+# guided decode, and the transcription has been measured losing the numbers:
+# live topics 14/15/17/19/20 carry `facts=]}`, `facts=sources`,
+# `facts=result` and an absent `facts` in the field that should hold a count,
+# while the transcripts of topics 19 and 20 state `FACTS: 12` and `FACTS: 15`.
+# What that costs is not the finish note — it is #1709's reconciliation:
+# `_common` coerces the claim with `int()`, and a claim that will not coerce
+# sets `facts_claimed` to null and flags nothing, so 2 of 2 post-#1709 runs
+# were blind, including one where claim and store agreed. The upstream cause is
+# the decode itself (out of scope here); what these nodes pin is that a lost
+# number is rescued from the block it was transcribed from, field by field, and
+# that the token it replaced is kept, so `facts_claimed: null` can never again
+# read as "the turn claimed nothing" when it means "the object lost it".
+
+#: Twelve distinct findings: a store holding twelve for one session has to be
+#: twelve facts, not one fact written twelve times.
+_TWELVE_FINDINGS = [
+    "speculative decoding needs a draft model sharing the target's vocabulary",
+    "n-gram drafting reaches the same win without a second model",
+    "the acceptance rate, not the draft length, sets the speedup ceiling",
+    "a rejected draft token still costs a verification step",
+    "large batch sizes dilute the win because verification is memory bound",
+    "KV-cache sharing between draft and target is optional, not required",
+    "Medusa heads are a fine-tune, not an extra forward pass per token",
+    "the drafter's context window has to match the target's",
+    "speculative sampling leaves the target distribution unchanged",
+    "tree attention verifies several drafts in one pass",
+    "an over-long draft is truncated rather than penalised",
+    "the win shrinks on a model already saturating GPU memory",
+]
+
+
+async def test_a_junk_structured_fact_count_is_recovered_from_the_block(
+        registry, queue, notes, fact_store, monkeypatch):
+    """Clause 1, replaying topic 19: the object's count is the word `facts`,
+    the turn's own block says twelve, and the store holds twelve for that
+    session. The recorded claim is twelve, nothing is flagged, and the finish
+    note reads `facts=12` instead of the garbled token."""
+    payload, topic_id, path = _payload(registry, notes)
+    turn = _turn_writing_facts(
+        _block(path, "12"), writes=path, add=_TWELVE_FINDINGS,
+        structured=_obj(facts="facts", sources="sources"), write_gate="off")
+    monkeypatch.setattr(D, "run_prompt_in_session", turn)
+
+    out = await D.execute(_item(payload))
+    assert out["status"] == "success"
+    assert turn.calls["n"] == 12, "the store has to hold the twelve being claimed"
+    assert out["meta"]["facts_written"] == 12
+    assert out["meta"]["facts_claimed"] == 12, (
+        "the block's FACTS: 12 is the claim when the object's is a key name")
+    assert out["meta"]["facts_claimed_raw"] == "facts"
+    assert "facts_mismatch" not in out["meta"], (
+        f"a recovered claim that agrees with the store was flagged: "
+        f"{out['meta'].get('facts_mismatch')}")
+    row = registry.get(topic_id)
+    assert row["extra"]["facts_claimed"] == 12
+    assert row["outcome_note"].startswith("facts=12 sources=4; session "), (
+        f"the note still carries the garbled token: {row['outcome_note']}")
+
+
+async def test_a_recovered_count_that_understates_the_store_is_flagged(
+        registry, queue, notes, fact_store, monkeypatch):
+    """Clause 2: the same garbled object, but the block claims three over a
+    store holding five. Recovering the count is what makes the mismatch check
+    answer again — before #1773 this shape stored `facts_claimed: null` and
+    raised no flag at all, which is how a live run wrote fifteen facts and
+    looked reconciled."""
+    payload, topic_id, path = _payload(registry, notes)
+    turn = _turn_writing_facts(
+        _block(path, "3"), writes=path, add=_TWELVE_FINDINGS[:5],
+        structured=_obj(facts="facts", sources="sources"), write_gate="off")
+    monkeypatch.setattr(D, "run_prompt_in_session", turn)
+
+    out = await D.execute(_item(payload))
+    assert out["meta"]["facts_written"] == 5
+    assert out["meta"]["facts_claimed"] == 3
+    assert out["meta"]["facts_mismatch"] == {"written": 5, "claimed": 3}
+    assert registry.get(topic_id)["extra"]["facts_mismatch"] == {
+        "written": 5, "claimed": 3}, "the finish record is where the flag lives"
+
+
+async def test_the_claim_is_null_only_when_neither_path_gives_a_number(
+        registry, queue, notes, fact_store, monkeypatch):
+    """Clause 3: `facts` in the object and `FACTS: facts` in the block, so no
+    path yields an integer. `facts_claimed` is null with the object's token
+    beside it, and an unusable claim still sets no mismatch — a detector that
+    fires because it could not read would be one nobody reads. The second half
+    is the other side of "only": a claim the object got right is left alone and
+    carries no raw token."""
+    payload, topic_id, path = _payload(registry, notes)
+    turn = _turn_writing_facts(
+        _block(path, "facts"), writes=path, add=_TWELVE_FINDINGS[:2],
+        structured=_obj(facts="facts", sources="sources"), write_gate="off")
+    monkeypatch.setattr(D, "run_prompt_in_session", turn)
+
+    out = await D.execute(_item(payload))
+    assert out["meta"]["facts_written"] == 2
+    assert out["meta"]["facts_claimed"] is None
+    assert out["meta"]["facts_claimed_raw"] == "facts", (
+        "a null has to say the object was unreadable, not that the turn "
+        "claimed nothing")
+    assert "facts_mismatch" not in out["meta"]
+    assert registry.get(topic_id)["extra"]["facts_claimed_raw"] == "facts"
+
+    payload2, _, path2 = _payload(registry, notes, topic="Draft-verification cost")
+    turn2 = _turn_writing_facts(
+        _block(path2, "2"), writes=path2, add=_TWELVE_FINDINGS[6:8],
+        session="20260928_deep_facts_clean",
+        structured=_obj(facts="2"), write_gate="off")
+    monkeypatch.setattr(D, "run_prompt_in_session", turn2)
+    out2 = await D.execute(_item(payload2))
+    assert out2["meta"]["facts_written"] == 2 and out2["meta"]["facts_claimed"] == 2
+    assert "facts_claimed_raw" not in out2["meta"], (
+        "the raw key means 'the object held no number', so a clean claim "
+        "must not carry it")
+
+
+async def test_only_the_counts_fall_back_and_the_object_still_decides_the_rest(
+        registry, queue, notes, fact_store, monkeypatch):
+    """Clause 4, first half: the object says `duplicate` with a real
+    `duplicate_of`, the block says `written` with a usable count, and the two
+    disagree. The outcome, the note and the duplicate pointer are the object's
+    — the block is consulted for the count and nothing else, and
+    `verdict_source` still says `structured`."""
+    payload, topic_id, path = _payload(registry, notes)
+    turn = _turn_writing_facts(
+        _block(path, "2"), writes=path, add=_TWELVE_FINDINGS[2:4],
+        structured=_obj("duplicate", note="duplicate of facts",
+                        duplicate_of="knowledge/research/2026-09-20-earlier.md",
+                        facts="facts", sources="sources"), write_gate="off")
+    monkeypatch.setattr(D, "run_prompt_in_session", turn)
+
+    out = await D.execute(_item(payload))
+    assert out["meta"]["result"] == "duplicate", (
+        "the block's RESULT line is not a vote on the outcome")
+    assert out["meta"]["verdict_source"] == "structured"
+    assert out["meta"]["facts_claimed"] == 2, (
+        "the count is the one field the block does get to answer")
+    assert out["meta"]["facts_claimed_raw"] == "facts"
+    row = registry.get(topic_id)
+    assert row["status"] == "duplicate"
+    assert row["outcome_note"] == (
+        "duplicate of knowledge/research/2026-09-20-earlier.md; "
+        f"facts=2 sources=4; session {FACTS_SESSION}")
+
+
+async def test_a_junk_count_with_no_result_block_stays_null_rather_than_raising(
+        registry, queue, notes, fact_store, monkeypatch):
+    """Clause 4, second half: the finalizer answered with a garbled count and
+    the turn left no block to rescue it from. `parse_result` returns None for
+    that, the run still settles, and the claim is a null rather than an
+    exception out of the reconciler."""
+    payload, topic_id, path = _payload(registry, notes)
+    turn = _turn_writing_facts(
+        "The research is written up; the note is at the path above.",
+        writes=path, add=_TWELVE_FINDINGS[4:6],
+        structured=_obj("written", facts="facts", sources="sources"),
+        write_gate="off")
+    monkeypatch.setattr(D, "run_prompt_in_session", turn)
+
+    out = await D.execute(_item(payload))
+    assert out["status"] == "success" and out["meta"]["result"] == "written"
+    assert out["meta"]["verdict_source"] == "structured"
+    assert out["meta"]["facts_written"] == 2
+    assert out["meta"]["facts_claimed"] is None
+    assert out["meta"]["facts_claimed_raw"] == "facts"
+    assert registry.get(topic_id)["status"] == "written"
+
+
+async def test_a_recovered_claim_still_writes_nothing_and_changes_no_outcome(
+        registry, queue, notes, fact_store, monkeypatch):
+    """Clause 5: with the recovered claim at three against a store holding
+    five the detector is awake again, and it stays a detector. `facts_written`
+    is the store's own `count_by_session` and not the claim; the markdown fact
+    file and the index still hold exactly the five facts the turn wrote, none
+    of them expired or invalidated and no row added by the check; and the topic
+    settles as `written` with the flag recorded beside it."""
+    payload, topic_id, path = _payload(registry, notes)
+    turn = _turn_writing_facts(
+        _block(path, "3"), writes=path, add=_TWELVE_FINDINGS[7:12],
+        structured=_obj(facts="facts", sources="sources"), write_gate="off")
+    monkeypatch.setattr(D, "run_prompt_in_session", turn)
+
+    out = await D.execute(_item(payload))
+    assert out["meta"]["facts_mismatch"] == {"written": 5, "claimed": 3}
+    assert out["meta"]["facts_written"] == 5, (
+        "the store's count, never the turn's claim")
+    idx = kg_store.store().facts_idx
+    assert idx.count_by_session(FACTS_SESSION) == 5
+    assert idx.count() == 5, "the detector wrote a row into the fact store"
+    rows = idx.for_session(FACTS_SESSION)
+    assert len(rows) == 5
+    for row in rows:
+        assert not row["expired_at"] and not row["invalid_at"], (
+            f"the detector expired a fact: {row['fact'][:40]}")
+    files = sorted(fact_store.rglob("*.md"))
+    assert len(files) == 1 and "**Fact Count:** 5" in (
+        files[0].read_text(encoding="utf-8")), "the markdown store moved"
+    assert out["status"] == "success" and out["meta"]["result"] == "written"
+    assert registry.get(topic_id)["status"] == "written", (
+        "a mismatch must not change the topic's outcome")
+
+
+def test_only_the_junk_count_falls_back_and_a_clean_object_never_reads_the_block():
+    """Per field, and nothing more. With both counts usable the structured
+    path does not look at the block at all (the end-to-end pin is
+    `test_a_structured_verdict_wins_and_the_regex_is_never_reached`); with one
+    unusable, only that one is taken from the block and the object's own number
+    for the other field is left standing."""
+    turn_text = ("done.\nRESULT: written\nNOTE: /x/a.md\nFACTS: 12\nSOURCES: 4\n")
+    parsed = D.parse_verdict(turn_text, _obj(facts="facts"))
+    assert parsed["facts"] == "12" and parsed["sources"] == "5"
+    assert parsed["facts_raw"] == "facts" and "sources_raw" not in parsed
+    assert parsed["result"] == "written" and parsed["source"] == "structured"
+
+    clean = D.parse_verdict(turn_text, _obj())
+    assert clean["facts"] == "3" and clean["sources"] == "5"
+    assert "facts_raw" not in clean and "sources_raw" not in clean

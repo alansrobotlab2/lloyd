@@ -205,6 +205,56 @@ def _from_structured(obj: dict) -> Optional[dict]:
     }
 
 
+#: The two fields that are counts rather than prose.
+_COUNT_FIELDS = ("facts", "sources")
+
+
+def _as_int(value) -> Optional[int]:
+    """The number a count field means, or None when it says nothing.
+
+    The predicate is "not an integer", not a token blacklist: the finalizer's
+    guided decode has been measured putting a key name (`facts=sources`), a
+    piece of JSON punctuation (`facts=]}`) and nothing at all (the field
+    absent) into the same slot, on topics 14/15/17/19/20.
+    """
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _recover_counts(parsed: dict, text: str) -> dict:
+    """Rescue a count the finalizer garbled from the turn's RESULT block (#1773).
+
+    The object still decides everything it is good at: `result`, `note` and
+    `duplicate_of` stay exactly as the finalizer said them. Only a count that
+    is not a number is taken from the block, field by field — and the replaced
+    token is kept as `<field>_raw`, because a registry row that says
+    `facts_claimed: null` after the turn wrote twelve facts is the bug this
+    function exists to kill, and the raw token is what tells the next reader
+    that the finalizer, not the turn, lost the number.
+
+    The block is read only when a count needs rescuing. With clean counts the
+    structured path must not consult it at all
+    (`test_a_structured_verdict_wins_and_the_regex_is_never_reached`), and a
+    turn with no block leaves the count unusable rather than raising:
+    `parse_result` returns None for that, and for a block whose own RESULT line
+    is out of vocabulary.
+    """
+    if all(_as_int(parsed.get(key)) is not None for key in _COUNT_FIELDS):
+        return parsed
+    block = parse_result(text or "")
+    out = dict(parsed)
+    for key in _COUNT_FIELDS:
+        if _as_int(out.get(key)) is not None:
+            continue
+        out[f"{key}_raw"] = str(out.get(key) or "")
+        rescued = (block or {}).get(key) or ""
+        if _as_int(rescued) is not None:
+            out[key] = rescued
+    return out
+
+
 def parse_verdict(text: str, structured: Optional[dict] = None) -> Optional[dict]:
     """The turn's outcome, from the finalizer's object or from the RESULT block.
 
@@ -214,11 +264,16 @@ def parse_verdict(text: str, structured: Optional[dict] = None) -> Optional[dict
     (`max_turns`, a cancel) and can fail on one that did. `source` says which
     path answered, so a finalizer that quietly stopped working does not look
     exactly like one that works.
+
+    The one field the object does not get to lose is a count:
+    `_recover_counts` takes a non-numeric `facts`/`sources` back out of the
+    block, so `reconcile_fact_writes` is never handed a key name and quietly
+    disarmed (#1773).
     """
     if isinstance(structured, dict):
         parsed = _from_structured(structured)
         if parsed is not None:
-            return {**parsed, "source": "structured"}
+            return {**_recover_counts(parsed, text), "source": "structured"}
     parsed = parse_result(text)
     return {**parsed, "source": "regex"} if parsed is not None else None
 
@@ -463,8 +518,13 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     # #1709: `FACTS:` is the turn grading its own homework. Reconcile it against
     # the store's own write record before the finish record is written — the
     # same posture as the vault diff above: report, never revert.
+    # #1773: `parsed["facts"]` is already the recovered count when the
+    # finalizer's was not a number, and `facts_raw` is what it said instead —
+    # recorded so `facts_claimed: null` can only mean "no number on either
+    # path", never "the object garbled it and the check stopped".
     facts_audit = await asyncio.to_thread(
-        reconcile_fact_writes, session_id, parsed["facts"] if parsed else "")
+        reconcile_fact_writes, session_id, parsed["facts"] if parsed else "",
+        claimed_raw=parsed.get("facts_raw") if parsed else None)
     if facts_audit.get("facts_mismatch"):
         logger.warning(
             "deep-research #%s claimed %s facts, the store holds %s for session %s",
