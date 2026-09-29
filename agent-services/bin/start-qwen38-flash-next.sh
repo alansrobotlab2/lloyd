@@ -306,10 +306,16 @@ fi
 # 1,984 tokens per request (96.0% reuse vs 99.3%), i.e. 3.3% -- NOT the whole cache.
 # Not worth patching the venv to fix.
 #
-# Also measured, and the reason an obvious test misleads: cross-request reuse needs
-# TWO warm-up passes before it engages (passes 1-2 cache nothing, pass 3+ hits ~96%
-# and runs ~18x faster). A 2-pass A/B shows 0% on BOTH arms and proves nothing.
-# Mechanism behind the warm-up not yet identified.
+# Also measured ON THIS BOOT, and the reason an obvious test misleads: cross-request
+# reuse needed TWO warm-up passes before it engaged on the 2026-09-06 qwen4_exp MTP
+# boot this table comes from -- passes 1-2 cached nothing there, so a 2-pass A/B
+# showed 0% on BOTH arms and proved nothing. That two-pass figure has never been
+# re-timed on a later boot, and the one run since contradicts it as a rule: the
+# 2026-09-21 bench on a primary carrying production traffic measured ONE cold pass
+# (pass 2 cached 54,400 of its own 60,005-token prompt, 90.7%, 5.95 s cold against
+# 0.54 s warm). The cold-pass count belongs to the boot and its load, not to every
+# boot -- trap 2 of agent-services/bin/bench-prefix-reuse.py is the live reading.
+# Mechanism behind the warm-up is still unidentified.
 #
 # Reproduce with agent-services/bin/bench-prefix-reuse.py (decode x3 then a 5-pass
 # reuse probe reading usage.prompt_tokens_details.cached_tokens, which is

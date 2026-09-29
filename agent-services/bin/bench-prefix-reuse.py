@@ -50,31 +50,37 @@ Two traps this script exists to avoid:
      else's traffic (needs --enable-prompt-tokens-details, which the start script
      passes).
 
-  2. Reuse needs TWO warm-up passes before it engages: passes 1-2 cache nothing,
-     pass 3+ hits ~96% and runs ~18x faster. A 2-pass A/B reports 0% on both arms
-     and proves nothing. Hence PASSES = 5 below; do not lower it.
+  2. Reuse engages after ONE cold pass: measured under production load on
+     2026-09-21, pass 1 cached nothing and pass 2 cached 54,400 of its own
+     60,005-token prompt (90.7%), 5.95 s cold against 0.54 s warm -- 11.0x. A run
+     that stops at the first warm hit still mis-times the one after it, so the
+     margin is what is load-bearing here: keep PASSES = 5 below.
 
-     UNVERIFIED ON THE CURRENT BUILD as of 2026-09-28. That two-pass figure is a
-     2026-09-06 constant, written on the qwen4_exp MTP boot (9a0a1d8) and never
-     re-timed since on an idle current-build boot -- and #605's 2026-09-21 pass
-     table, taken on a primary carrying production traffic, contradicts it as
-     written: cached_tokens 0 on pass 1 but 54,400 of that pass's own 60,005-token
-     prompt already on pass 2 (d_hits 54,400, 90.7%), ONE cold pass rather than
-     two, and cached_tokens 0 again on pass 5 after 1,349,507 tokens of other
-     traffic crossed its window. Load swings it the other way as well: the
-     2026-09-13 probe under production load read 0% reuse for all 5 passes on both
-     endpoints while lifetime reuse read 85.9%. How many passes start cold is
-     therefore eviction- and load-dependent, not a property of this build, and
-     PASSES = 5 stands as a safety margin around an unverified figure rather than
-     because two cold passes were measured on it. Settle the figure by running
-     this script against an idle, freshly booted engine and reading cached_tokens
-     per pass -- #1635 owes that run and the ruling on it.
+     The TWO warm-up passes figure that used to head this bullet is unverified on
+     the current build as of 2026-09-29: it is a 2026-09-06 constant, written on
+     the qwen4_exp MTP boot (9a0a1d8) and never re-timed on a boot of this build
+     since. The 2026-09-21 pass table is what contradicts it as written:
+     cached_tokens 0 on pass 1 but 54,400 of that pass's own 60,005-token prompt
+     already on pass 2 (d_hits 54,400, 90.7%), ONE cold pass rather than two --
+     and cached_tokens 0 again on pass 5 after 1,349,507 tokens of other traffic
+     crossed its window. Load swings it the other way as well: the 2026-09-13
+     probe under production load read 0% reuse for all 5 passes on both endpoints
+     while lifetime reuse read 85.9%. Load can only ADD cold passes, never remove
+     one, so the loaded 2026-09-21 run bounds the idle case at one cold pass: how
+     many passes start cold is eviction- and load-dependent, not a property of
+     this build, and PASSES = 5 stands as the safety margin around that bound.
+     The idle, freshly booted run this bullet used to send a reader to was retired
+     on 2026-09-29 by #1635's ruling on it: that window closes within minutes of a
+     boot only Alan gates (_restart_primary, scripts/automod/promote.py:1880), the
+     figure is uncapturable outside it, and no dedicated restart is ever warranted
+     for a number this bullet already bounds from the loaded side.
 
 Usage:
     .venvs/lloyd/bin/python agent-services/bin/bench-prefix-reuse.py <tag> [--json out.json]
 
-Run it against an idle, freshly booted engine -- a long-running engine under load
-measured 60.3 tok/s where a fresh one measured 181.9.
+Run it on a quiet engine if you can: a long-running engine under load measured
+60.3 tok/s where a fresh one measured 181.9, so read the decode median as a loaded
+figure unless you booted for it. Reuse needs no such boot -- see trap 2 above.
 """
 
 import argparse
