@@ -693,6 +693,133 @@ def test_a_bracket_in_a_string_or_a_filter_inside_a_call_moves_nothing(tmp_path)
     assert "EXPECTED_CHAR" in found[0]["problem"] and "line 1" in found[0]["problem"]
 
 
+def _seed_repo(tag, tmp_path, seed_line):
+    """A file that seeds a constant and then asserts a call still returns it,
+    with the seed written however the caller wants — used by the #1864 nodes to
+    vary only the way the constant enters a call."""
+    return _delta_repo(
+        tmp_path, tag=tag, base_src=_MIRROR_BASE,
+        post_src='PAYLOAD = "seeded identity"\n'                            # 1
+                 '\n'                                                       # 2
+                 'def _seed(target):\n'                                     # 3
+                 f'    {seed_line}\n'                                       # 4
+                 '\n'                                                       # 5
+                 'def test_a_refused_write_left_the_file_alone():\n'        # 6
+                 '    assert read_back() == PAYLOAD\n')                     # 7
+
+
+def test_a_seed_constant_written_by_a_fixture_elsewhere_is_no_mirror(tmp_path):
+    """#1864 clauses 1 and 2: a constant the file hands to a call as a whole
+    argument is that file's own seed data, and the assertion re-reading it after
+    a refused operation is the contract — it is not a mirror.
+
+    Both false positives of 2026-09-29 have this shape, and
+    `tests/test_builtin_fs_protected_write.py` is the hard one: none of its five
+    firing tests calls `write_text(ORIGINAL)` itself — the writes live in the
+    `home()` and `linked_home()` fixtures — so only a FILE-scope reading silences
+    it, and that is what the seed call in `_seed` above is for: a different
+    function from the assertion. The keyword form (`content=PAYLOAD`) is the same
+    act. Then the three controls, each of which keeps the detector alive: a
+    `PAYLOAD` that never enters any argument list is `FALLBACK_LAYOUT` and fires
+    once, at the assertion's own line, naming the constant's; `assert
+    parse(PAYLOAD) == PAYLOAD` fires, because the round-trip-that-cannot-fail is
+    the worst case in the corpus and counting its input side as a seed would
+    silence it; and a seed call that can only take `PAYLOAD + "!"` fires too,
+    because a constant fed into arithmetic is being used as an expectation, not
+    handed over as one.
+    """
+    r, base = _seed_repo("seedpos", tmp_path, "target.write_text(PAYLOAD)")
+    assert _mirrors(RV.honesty_prechecks(r, base, ["tests/test_a.py"],
+                                         n_clauses=1)) == []
+
+    r2, base2 = _seed_repo("seedkw", tmp_path, "target.write(content=PAYLOAD)")
+    assert _mirrors(RV.honesty_prechecks(r2, base2, ["tests/test_a.py"],
+                                         n_clauses=1)) == []
+
+    r3, base3 = _delta_repo(
+        tmp_path, tag="seedctl", base_src=_MIRROR_BASE,
+        post_src='PAYLOAD = "seeded identity"\n'                            # 1
+                 '\n'                                                       # 2
+                 'def test_the_constant_that_is_never_an_input():\n'        # 3
+                 '    assert read_back() == PAYLOAD\n')                     # 4
+    found = _mirrors(RV.honesty_prechecks(r3, base3, ["tests/test_a.py"],
+                                          n_clauses=1))
+    assert len(found) == 1, found
+    assert found[0]["line"] == 4, found
+    assert "PAYLOAD" in found[0]["problem"] and "line 1" in found[0]["problem"]
+
+    r4, base4 = _delta_repo(
+        tmp_path, tag="seedrt", base_src=_MIRROR_BASE,
+        post_src='PAYLOAD = "seeded identity"\n'                            # 1
+                 '\n'                                                       # 2
+                 'def test_the_round_trip_that_cannot_fail():\n'             # 3
+                 '    assert parse(PAYLOAD) == PAYLOAD\n')                   # 4
+    found = _mirrors(RV.honesty_prechecks(r4, base4, ["tests/test_a.py"],
+                                          n_clauses=1))
+    assert len(found) == 1, found
+    assert found[0]["line"] == 4, found
+
+    r5, base5 = _seed_repo("seedexpr", tmp_path, 'target.write_text(PAYLOAD + "!")')
+    found = _mirrors(RV.honesty_prechecks(r5, base5, ["tests/test_a.py"],
+                                          n_clauses=1))
+    assert len(found) == 1, found
+    assert found[0]["line"] == 7, found
+
+
+def test_prose_that_spells_a_write_buys_the_constant_no_exclusion(tmp_path):
+    """#1864 clause 3: the seed scan reads `_code_only`'s blanked text, so a
+    comment, a string literal and a module docstring all spelling
+    `write_text(PAYLOAD)` are not the file putting a value into the world.
+
+    Without that, a round could silence any mirror it was blamed for by writing
+    one line of comment above the assertion — the exclusion would be a phrase, not
+    a property of the code. The control is the same file with that call as real
+    code, which is what makes the silence here about the prose and not about a
+    detector that stopped running."""
+    r, base = _delta_repo(
+        tmp_path, tag="prosewrite", base_src=_MIRROR_BASE,
+        post_src='PAYLOAD = "seeded identity"\n'                            # 1
+                 '# the fixture used to write it: target.write_text(PAYLOAD)\n'   # 2
+                 'HINT = "target.write_text(PAYLOAD)"\n'                     # 3
+                 "'''A docstring naming target.write_text(PAYLOAD) as if it were"
+                 " code.'''\n"                                               # 4
+                 '\n'                                                        # 5
+                 'def test_the_mirror_is_still_a_mirror():\n'                # 6
+                 '    assert read_back() == PAYLOAD\n')                      # 7
+    found = _mirrors(RV.honesty_prechecks(r, base, ["tests/test_a.py"],
+                                          n_clauses=1))
+    assert len(found) == 1, found
+    assert found[0]["line"] == 7 and "PAYLOAD" in found[0]["problem"], found
+
+    r2, base2 = _seed_repo("prosectl", tmp_path, "target.write_text(PAYLOAD)")
+    assert _mirrors(RV.honesty_prechecks(r2, base2, ["tests/test_a.py"],
+                                         n_clauses=1)) == []
+
+
+def test_the_severity_ruling_is_written_where_the_constant_lives():
+    """#1864 clause 4: the comment above `_CONSTANT_MIRROR_SEVERITY` used to
+    defer the question to "a week of real rounds" and no round ever came to
+    answer it. The measurement was made on 2026-09-29 and the block has to carry
+    its result: 1/3 precision, 3 firings, 78 graded rounds, the fixture-seed
+    class, and that the window was one day rather than the week it asked for.
+
+    A prose pin, deliberately, because the artefact under test IS prose: it is
+    the sentence the next reader consults about whether to promote the severity,
+    and a stale deferral there invites a re-measure of a question already closed.
+    The severity itself is pinned as a value, not as text, by
+    `tests/test_review_policy.py`."""
+    src = (ROOT / "scripts" / "automod" / "review.py").read_text()
+    block = (src.split("# ── the constant-mirroring assertion", 1)[1]
+                .split("_CONSTANT_MIRROR_SEVERITY", 1)[0])
+    assert "week of real rounds" not in block, block
+    assert "settled by" not in block, "the block still defers the decision"
+    for fact in ("2026-09-29", "1/3", "3 firings", "78 graded rounds",
+                 "fixture seed"):
+        assert fact in block, (fact, block)
+    assert "one day" in block.lower(), "the window it actually measured is named"
+    assert '_CONSTANT_MIRROR_SEVERITY = "advisory"' in src
+
+
 def test_a_constant_mirror_the_base_already_carried_is_not_blamed(tmp_path):
     """Clause 3: the delta is the same arithmetic as the five patterns. A base
     that already carried one mirrored assertion is blamed for none, and one

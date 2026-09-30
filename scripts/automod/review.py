@@ -484,9 +484,18 @@ def added_test_denials(parsed: dict, *, added_tests: int) -> list[str]:
 # text, a mock that deletes an API's error modes) needs to understand what the
 # code means, which is the grader's job and stays its job.
 #
-# Advisory severity, deliberately: #866 and #1204 are what a `blocking` one
-# costs, and whether this earns a refusal is settled by a week of real rounds,
-# not by the commit that adds it.
+# Advisory severity, and the question of whether it earns a refusal has now been
+# ANSWERED rather than deferred: promotion to `blocking` was refused on
+# 2026-09-29 at 1/3 precision — 3 firings across 78 graded rounds
+# (SM_20260928_231348, SM_20260929_050729, SM_20260929_065906), and both misses
+# were a constant the file itself hands to a setup call as fixture seed data,
+# which is the class `_constants_handed_in` now removes. #866 and #1204 are what
+# a `blocking` one costs. That denominator is small because the traffic window
+# was one day: the detector landed 2026-09-28T21:58Z and was measured
+# 2026-09-29T21:52Z. #1864 carries the longer-window re-measure as a fact about
+# how thin this one is, not as this comment still waiting on an answer. The
+# finding has had a structured home on the ledger event since `gate.py` persists
+# `prechecks`.
 _CONSTANT_MIRROR_SEVERITY = "advisory"
 _CONSTANT_ASSIGN_RX = re.compile(r"^(?P<name>[A-Z][A-Z0-9_]*)\s*(?::[^=]+)?=(?!=)")
 _IMPORT_STMT_RX = re.compile(r"^(?:from\s[\w.]+\s)?import\b")
@@ -498,6 +507,14 @@ _COMPARISON_OPS: tuple[str, ...] = ("==", "!=", "<=", ">=", "is not", "is", "<",
 # the compared value something the code produced rather than something the test
 # already had in hand.
 _CALL_RX = re.compile(r"[^\W\d_]\s*\(")
+# The head of a call: a name, optionally dotted, plus its open bracket. Located
+# with `finditer` so its arguments can be walked, which `_CALL_RX` cannot do —
+# that one only answers "does this operand contain a call anywhere".
+_CALL_OPEN_RX = re.compile(r"[^\W\d_]\s*(?:\.\s*[^\W\d_]+\s*)*\(")
+# A WHOLE argument that is a bare constant name, or a keyword whose value is one
+# (`content=PAYLOAD`). No verb list and no parameter-name list in it, on purpose:
+# see `_constants_handed_in`.
+_ARG_CONST_RX = re.compile(r"^(?:\w+\s*=\s*)?(?P<name>[A-Z][A-Z0-9_]*)$")
 
 
 # Token types whose text is prose rather than code. Python 3.12 splits an
@@ -612,6 +629,65 @@ def _assertion_statements(code: str) -> list[tuple[int, str]]:
     return out
 
 
+def _constants_handed_in(code: str) -> set[str]:
+    """The constants this file passes to a call as a WHOLE argument, outside its
+    own `assert` statements — its fixture seed set, over blanked `code`.
+
+    `PAYLOAD` in `p.write_text(PAYLOAD)`, in `_index_file(INDEX_BEFORE)`, or as a
+    `content=PAYLOAD` keyword counts wherever in the file it appears. FILE scope
+    is the whole point: the writes that make a constant an input live in a
+    fixture several functions away from the assertion that re-reads the file
+    afterwards (`tests/test_builtin_fs_protected_write.py` seeds through
+    `home()`/`linked_home()` and asserts in five tests that a REFUSED write left
+    the seed alone), so a per-function rule leaves every one of those firing.
+    Neither the verb nor the parameter name is matched against a list, because
+    the seed helper is `_index_file`, not `write_text`, and a hand-kept allowlist
+    over the open set of names tests give their fixtures cannot close a property
+    it has to hold for all of them.
+
+    Two cuts keep the detector's own shape alive. Only a WHOLE argument counts:
+    `_tall_doc(ONE_PASS_CHARS + 5_000)` feeds the constant into arithmetic, which
+    is what a genuine expectation constant is for, and earns nothing. And an
+    argument inside an assertion never counts, because `assert parse(PAYLOAD) ==
+    PAYLOAD` is the round-trip-that-cannot-fail this detector exists to catch —
+    reading its input side as a fixture would silence the worst case in the
+    corpus. The safe direction is over-count, so a constant used BOTH as a seed
+    and as the compared expectation is silenced anyway (`ORIGINAL`, the miss that
+    cost 2026-09-29 its promotion); the shape that must keep firing is the one
+    that never appears in any argument list, `FALLBACK_LAYOUT`.
+
+    Blanked `code` is the input, so a `# write_text(PAYLOAD)` comment, a docstring
+    that names one, or a string literal spelling it buys no exclusion.
+    """
+    assert_lines: set[int] = set()
+    for line, stmt in _assertion_statements(code):
+        assert_lines.update(range(line, line + stmt.count("\n") + 1))
+    out: set[str] = set()
+    n = len(code)
+    for m in _CALL_OPEN_RX.finditer(code):
+        if code.count("\n", 0, m.start()) + 1 in assert_lines:
+            continue
+        chunks, start, depth, j = [], m.end(), 1, m.end()
+        while j < n:
+            ch = code[j]
+            if ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                depth -= 1
+                if depth == 0:
+                    chunks.append(code[start:j])
+                    break
+            elif ch == "," and depth == 1:
+                chunks.append(code[start:j])
+                start = j + 1
+            j += 1
+        for chunk in chunks:
+            am = _ARG_CONST_RX.match(chunk.strip())
+            if am:
+                out.add(am.group("name"))
+    return out
+
+
 def _match_comparison(text: str, i: int) -> str:
     """The comparison operator starting at `i`, or "" — longest first, and a
     word operator only at a word boundary, so `assert issue == 1` is read once
@@ -664,10 +740,19 @@ def _mirrored_assertions(code: str) -> list[tuple[int, int, str, str]]:
     a call on the other. The statement text is the delta's identity — an
     assertion whose text is unchanged between base and HEAD is the base's, not
     this round's.
+
+    A constant the file hands to a call as a whole argument is excluded: it is
+    that file's own seed data, and the assertion re-reading it after a refused
+    operation is the contract, not the mirror. See `_constants_handed_in`.
     """
     constants = _module_constants(code)
     if not constants:
         return []
+    seeded = _constants_handed_in(code)
+    if seeded:
+        constants = {n: ln for n, ln in constants.items() if n not in seeded}
+        if not constants:
+            return []
     out: list[tuple[int, int, str, str]] = []
     for line, stmt in _assertion_statements(code):
         operands = _comparison_operands(stmt)
