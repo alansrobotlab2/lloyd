@@ -1,0 +1,88 @@
+{
+ "generated_at": "2026-09-30T21:20:00Z",
+ "source": "usage.db per-day aggregation; the record itself starts 2026-09-22T20:17:56, so 09-22 and the collection day are partial and excluded",
+ "source_min_ts": "2026-09-22T20:17:56",
+ "source_max_ts": "2026-09-30T20:55:48",
+ "query": "select substr(ts,1,10) day, count(*), sum(prefix_misses), sum(reprefill_tokens) from usage group by day order by day",
+ "chat_predicate": "session_kind(sid) == 'chat' (scripts/vllm_prefix_miss_window.py), the same classifier \u00a710's counted reading uses \u2014 NOT the underscore heuristic",
+ "note": "Frozen per-day witness for the trigger-(ii) routine-exceedance premise (#1919). \u00a710 copies none of these figures; this file exists so the premise is re-derivable after the row churn inside usage.db makes the same aggregation impossible. autocode_share is kept because the premise's original wording ('the current autocode-heavy mix') was measured false: autocode never leads half a day's turns here, and 09-25/09-26 are led by bench at 0.646 / 0.565.",
+ "days": [
+  {
+   "day": "2026-09-23",
+   "turns": 219,
+   "misses": 172,
+   "reprefill_tokens": 16084128,
+   "chat_turns": 4,
+   "chat_turns_with_misses": 0,
+   "top_session_kind": "autocode",
+   "top_session_kind_share": 0.315,
+   "autocode_share": 0.315
+  },
+  {
+   "day": "2026-09-24",
+   "turns": 285,
+   "misses": 318,
+   "reprefill_tokens": 32231517,
+   "chat_turns": 4,
+   "chat_turns_with_misses": 1,
+   "top_session_kind": "review",
+   "top_session_kind_share": 0.295,
+   "autocode_share": 0.288
+  },
+  {
+   "day": "2026-09-25",
+   "turns": 443,
+   "misses": 46,
+   "reprefill_tokens": 5664101,
+   "chat_turns": 23,
+   "chat_turns_with_misses": 0,
+   "top_session_kind": "bench",
+   "top_session_kind_share": 0.646,
+   "autocode_share": 0.005
+  },
+  {
+   "day": "2026-09-26",
+   "turns": 706,
+   "misses": 70,
+   "reprefill_tokens": 8122918,
+   "chat_turns": 11,
+   "chat_turns_with_misses": 0,
+   "top_session_kind": "bench",
+   "top_session_kind_share": 0.565,
+   "autocode_share": 0.061
+  },
+  {
+   "day": "2026-09-27",
+   "turns": 627,
+   "misses": 201,
+   "reprefill_tokens": 25082453,
+   "chat_turns": 4,
+   "chat_turns_with_misses": 2,
+   "top_session_kind": "bench",
+   "top_session_kind_share": 0.309,
+   "autocode_share": 0.078
+  },
+  {
+   "day": "2026-09-28",
+   "turns": 526,
+   "misses": 243,
+   "reprefill_tokens": 30028609,
+   "chat_turns": 10,
+   "chat_turns_with_misses": 1,
+   "top_session_kind": "review",
+   "top_session_kind_share": 0.325,
+   "autocode_share": 0.232
+  },
+  {
+   "day": "2026-09-29",
+   "turns": 541,
+   "misses": 139,
+   "reprefill_tokens": 16403836,
+   "chat_turns": 3,
+   "chat_turns_with_misses": 1,
+   "top_session_kind": "autotriage",
+   "top_session_kind_share": 0.257,
+   "autocode_share": 0.166
+  }
+ ]
+}

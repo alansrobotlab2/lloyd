@@ -912,6 +912,25 @@ has still not been run as of 2026-09-11.
   without the extract this paragraph would be unverifiable within the week; it
   is a SECOND extract, and 09-28 does not displace 09-25 as the counted reading,
   since a day whose chat turns carry a miss is a day that fails (a).
+
+  Trigger (ii) is a tripwire calibrated to a fleet, not a quota this machine is
+  expected to hold. Its two figures are §6.1's 09-08/09 fleet baseline divided by the
+  two days that reading spans, and no per-kind mix for that fleet survives anywhere: the
+  `usage.db` every per-day query on this page reads starts where (b) says it starts, which
+  is after §6.1 was measured. So at the current load mix a counted day exceeds that budget
+  routinely, and the two paragraphs above are the exception rather than the pattern — they
+  are the two days this page has attributed, while the same per-day query prints chat turns
+  carrying a miss on other days too, and trigger (i) is not called until the churn join says
+  whether any of those is unexplained. The ruled consequence, so that the next over-budget day is
+  not litigated again: **a day that fires (ii) and not (i) earns the load-mix and
+  churn attribution this bullet already prescribes and produces no new §10 paragraph.**
+  2026-09-28 stays the worked exemplar for the (ii) side because it is the day where
+  both triggers fired and the attribution was done in full, not because over-budget is
+  rare. The budget's home stays §6.1's baseline sentence: nothing here edits it, and
+  re-pointing it at this machine's mix is owed-check's to rule — a re-point requires a
+  measured current-mix baseline naming the input that restores **97 misses / 10.3M
+  tokens a day**, which is that baseline divided by the two days it spans, before any
+  figure in §6.1 moves.
 - **Two-request windows, and what (d) counts.** `two_request_throughput`
   reads every status line the window has. Lines with `Running:` 2 or more:
   **2,895**, median **2464.8 tok/s** combined, slowest **9.2**. Lines under the

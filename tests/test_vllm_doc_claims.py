@@ -1371,6 +1371,287 @@ def test_the_reopen_churn_split_and_chat_attribution_close_the_filing(s10, reope
         _verdict(_counted_reading(s10), letter)
 
 
+# ── #1919: trigger (ii) is a tripwire, and an (ii)-only day is closed by attribution ──
+#
+# Both paragraphs above record a day the page attributed, so before #1919 nothing said what an
+# unattributed over-budget day earns. `usage.db`'s per-day fleet totals — the standing §10 query
+# returns per-day CHAT turns and cannot answer this — put five of the seven complete days from
+# 09-23 through 09-29 over §6.1's per-day budget (09-25 and 09-26 are the two under it;
+# `tests/fixtures/usage_day_totals_2026-09-23_29.json` holds those bytes, and the node that
+# reads them recomputes the five). Two claims the item and my first draft both made are NOT
+# supported by those bytes and are not in the rule either: the mix is not autocode-heavy (the
+# largest autocode share on any of the seven days is 31.5% of turns, on 09-23, while bench
+# leads three of the seven days and review two), and firing trigger (i) is not what the two
+# paragraphs represent
+# — chat turns carrying a miss appear on four of the seven days, and trigger (i) waits on the
+# churn join, whose engine status lines byte-rotate (~17 h per 10 MB file) and so cannot be
+# re-joined for a past day unless that day's extract was committed. So the premise the rule
+# can rest on
+# is the exceedance frequency and the fact that §6.1's fleet mix is unrecorded here. What these
+# nodes pin is the rule's WORDING, deliberately not the frequency: a per-day series copied into
+# §10 is the item's forbidden shape and the half that rots when the record moves, while the
+# witness with history is the fixture, not the page.
+
+_RULE_ANCHOR = "Trigger (ii) is a tripwire"
+#: Three shapes are forbidden in the rule's prose, because the item's clause 1 is "no per-day
+#: figures copied into the doc": a measured day's own totals in this page's spelling
+#: ("243 misses / 30,028,609 tokens"), a day COUNT whether spelled or numeric, and a date
+#: sharing a sentence with a fleet total (a date plus "139 misses" is one day of a series even
+#: with no comma in it). The positive controls at the end of the node are what make all three
+#: checks rather than descriptions.
+_DAY_TOTALS = re.compile(r"\d+ misses / \d{1,3},\d{3}")
+_DAY_COUNT = re.compile(r"\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|"
+                        r"twelve) of (?:the )?(?:\d+|one|two|three|four|five|six|seven|eight|"
+                        r"nine|ten|eleven|twelve) (?:complete |working |full )?days\b", re.I)
+_A_DATE = re.compile(r"\b20\d\d-\d\d-\d\d\b|\b\d\d-\d\d/\d\d\b|\b0?9-\d\d\b")
+#: Session-kind names, as `scripts.vllm_prefix_miss_window.session_kind` spells them, plus the
+#: hyphenated compound this item's wording used. None may appear in the RULE's prose, whose claim
+#: is about the standing mix: the committed witness is the only mix data that exists for these
+#: days, and on TURNS no kind reaches 50%. Bare "chat" is deliberately NOT in here — (a)'s bullet
+#: legitimately talks about chat turns, and a rail that fires on ordinary prose trains the next
+#: editor to delete the rail rather than the claim. A day's own MISS split (the 09-28 paragraph's
+#: "231 of those 243 misses ... are autocode") is outside this scope and stays writable there.
+_SESSION_KIND_CLAIMS = ("autocode", "autotriage", "owedcheck", "bench", "review", "chat-heavy")
+_A_TOTAL = re.compile(r"\d+[,.]?\d*[MKk]?\s*(?:misses|tokens)", re.I)
+
+_ROUTINE_EXCEEDANCE = re.compile(
+    r"current [\w -]*load mix a counted day exceeds (?:that|the) budget "
+    r"(routinely|on most days|more often than not)")
+#: The consequence and BOTH halves of it, in one sentence. Split across two sentences does not
+#: count: #1918's neighbouring node was filed against a trigger whose halves could be edited
+#: apart, and here the halves are the rule — "fires (ii) and not (i)" without "no new §10
+#: paragraph" is a rule that still admits a paragraph every second day, and attribution
+#: without it is an instruction nothing on the page can be checked against.
+_RULE_CONSEQUENCE = re.compile(
+    r"a day that fires \(ii\) and not \(i\)[^.]*load-mix[^.]*churn[^.]*attribution"
+    r"[^.]*no new §10 paragraph", re.I)
+_BASELINE_WINDOW = re.compile(r"Fleet baseline over (\d\d-\d\d/\d\d)")
+#: §6.1's baseline sentence, byte-for-byte as it stands. It is the budget's source and #1919
+#: requires it untouched, so the whole sentence is pinned rather than re-derived: the numbers
+#: alone would still pass with the window, the denominator's meaning, or the "valid data only"
+#: qualifier quietly edited, and all three change what 97 / 10.3M would mean.
+_S6_BASELINE = ("Fleet baseline over 09-08/09, valid data only: 194 of 1,754 iterations at "
+                "≥100k re-prefilled ≥50k uncached tokens — 20.6M tokens, ~34 minutes of "
+                "prefill, none at iteration 1–2.")
+
+
+def _rule_prose() -> str:
+    """The tail of the eviction bullet: #1919's rule, whole, collapsed.
+
+    Scoped from the rule's own opening words to the bullet's end, over `_reopen_bullet`'s
+    bounds, so what these nodes demand is carried by the RULE. A sentence parked anywhere else
+    in §10 would not do — and the 09-28 paragraph already carries a load-mix caveat, so a
+    pin reading the whole bullet could be satisfied by prose that predates this item.
+    """
+    p = _reopen_bullet()
+    start = p.find(_RULE_ANCHOR)
+    assert start >= 0, (
+        "the eviction bullet no longer carries the (ii)-only rule, so the page is back to "
+        "deciding per over-budget day whether it earned a paragraph — which is what #1919 "
+        "was filed to settle")
+    return p[start:]
+
+
+def test_the_rule_names_its_budget_as_6_1_s_reading_and_says_it_is_routinely_exceeded():
+    """#1919 clause 1: the rule grounds the trigger in §6.1's dated baseline, names the
+    divisor that produces the two figures, and says a counted day exceeds them routinely at
+    the current mix — WITHOUT copying a per-day series in.
+
+    The date range is read out of §6.1's own sentence, so "which fleet" cannot be edited in
+    one place and left in the other. The frequency claim is a WORDING pin and not a
+    measurement on purpose: the item's check 2 forbids per-day figures in §10, the standing
+    query in (a)'s bullet returns chat turns rather than fleet totals and so cannot back the
+    claim at all, and a second read-only query would break the one-query rail the same span
+    enforces. What the numbers would add is rot: 5 of 7 days is a fact about a record that
+    grows, while the rule's claim is about the mix.
+    """
+    r = _rule_prose()
+    s6 = _section(6)
+    m = _BASELINE_WINDOW.search(s6)
+    assert m, "§6.1 no longer states its baseline over a dated range, so the rule cannot cite it"
+    assert f"§6.1's {m.group(1)} fleet baseline" in r, (
+        f"the rule must name the fleet its budget is calibrated to, as §6.1 dates it "
+        f"({m.group(1)}) — an undated '§6.1's baseline' is the same open-ended-superlative "
+        "defect #1918 fixed one bullet earlier")
+    days = int(_BASELINE_RE.search(s6).group(2)) - int(_BASELINE_RE.search(s6).group(1)) + 1
+    assert f"divided by the {_word(days)} days" in r, (
+        f"the two figures are a quotient; the rule has to name its divisor "
+        f"({_word(days)}, from §6.1's own range), because that divisor is the input a "
+        "re-point has to state to keep meaning the same thing")
+    assert _ROUTINE_EXCEEDANCE.search(r), (
+        "the rule does not say a counted day exceeds the budget routinely at the current "
+        "load mix — without that sentence the trigger reads like a rare exception, which is "
+        "what made every firing look like it needed a paragraph")
+    assert "load mix" in r, (
+        "the sentence must say the exceedance is a function of the LOAD MIX, not of volume "
+        "alone — that qualifier is what makes the attribution the consequence owes sufficient, "
+        "and the dated fleet it is contrasted against is pinned above out of §6.1's own window")
+    # The rule grounds the routine exceedance in §6.1's fleet mix being UNRECORDED on this page,
+    # and names no session kind. Measured from usage.db on 2026-09-30 over the seven complete
+    # days, and recorded in the committed witness: autocode never reaches half a day's TURNS
+    # (max 31.5%, on 09-23) — bench leads 09-25 at 64.6% and 09-26 at 56.5%. So "the current
+    # autocode-heavy mix", the wording this item filed, is false as a statement about the mix,
+    # and an earlier draft of this paragraph carried it through a GREEN suite run. The fix is a
+    # rail, not a memory. Scope is the reason it is safe: the 09-28 paragraph, outside this
+    # scope, legitimately records 231 of that day's 243 misses as autocode — a kind can dominate
+    # one attributed day's MISS split while never leading that day's turns, which is exactly the
+    # distinction a standing-mix claim must not blur.
+    named = [k for k in _SESSION_KIND_CLAIMS if k in r]
+    assert not named, \
+        f"the rule names a session kind ({named}) in a sentence about the STANDING mix; measured " \
+        f"on 2026-09-30 no kind leads these days' turns at 50% (autocode's max is 31.5%), so the " \
+        "sentence has to rest on §6.1's fleet mix being unrecorded here instead"
+    probe = _rule_prose() + " at the current autocode-heavy mix"
+    assert [k for k in _SESSION_KIND_CLAIMS if k in probe], \
+        "the mix rail matched not even 'autocode-heavy', so the assert above is vacuous"
+    # Three shapes count as "a per-day series", because the phrase is not one format: a
+    # totals pair in this page's spelling, a day COUNT in either spelling, and a date sharing
+    # a sentence with a fleet total (which is one day of a series with its comma removed).
+    assert not _DAY_TOTALS.search(r), (
+        "the rule copied a per-day totals pair into §10; the frequency is a wording claim and "
+        "the numbers belong to usage.db and to the committed witness")
+    assert not _DAY_COUNT.search(r), (
+        "the rule copied a per-day COUNT into §10 — \"5 of 7 complete days\" and \"five of the "
+        "seven complete days\" are both a series, and the count is the half that moves as the "
+        "record widens")
+    dated = [s for s in _CLAUSE_BREAK.split(r) if _A_DATE.search(s) and _A_TOTAL.search(s)]
+    assert not dated, \
+        f"a date shares a sentence with a fleet total, which IS a per-day series: {dated[:2]}"
+    # Positive controls: a `not` grep says nothing alone, since a pattern can be empty against
+    # the corpus in three ways and all three read as clean. Each probe must trip what is named.
+    probe = ("5 of 7 complete days ran 243 misses / 30,028,609 tokens. Five of the seven "
+             "complete days ran 139 misses. On 2026-09-29 the fleet ran 139 misses.")
+    assert _DAY_TOTALS.search(probe), "the totals rail matched not even a totals pair"
+    assert _DAY_COUNT.search(probe), \
+        "the day-count rail matched neither the numeric nor the spelled count"
+    assert [s for s in _CLAUSE_BREAK.split(probe)
+            if _A_DATE.search(s) and _A_TOTAL.search(s)], \
+        "the date-plus-total rail matched not even an explicit \"On 2026-09-29 the fleet ran " \
+        "139 misses\" sentence"
+
+
+def test_an_only_trigger_two_day_earns_attribution_and_no_new_paragraph():
+    """#1919 clause 2: the ruled consequence for the ordinary day, both halves in one
+    sentence, and no verdict mark smuggled in with it.
+
+    The one-halved forms are asserted as negatives because they are the two ways this rule
+    decays into the status quo: keep the attribution and drop the no-new-paragraph and every
+    over-budget day is a paragraph again; keep the paragraph ban and drop the attribution and
+    the page forbids the paragraph without saying what the day is instead — which is the
+    reading a future reader would settle by filing the day anyway.
+    """
+    r = _rule_prose()
+    assert _RULE_CONSEQUENCE.search(r), (
+        "the rule does not state, in one sentence, that a day firing only (ii) earns the "
+        f"load-mix and churn attribution AND produces no new §10 paragraph. Rule opens: "
+        f"{r[:120]!r}")
+    assert not _RULE_CONSEQUENCE.search(
+        "a day that fires (ii) and not (i) is closed with no new §10 paragraph"), \
+        "a paragraph-ban-only clause passes the pin, so the attribution half could vanish"
+    assert not _RULE_CONSEQUENCE.search(
+        "a day that fires (ii) and not (i) earns the load-mix and churn attribution"), \
+        "an attribution-only clause passes the pin, which is exactly the per-day-paragraph " \
+        "behaviour the rule exists to stop"
+    assert not _RULE_CONSEQUENCE.search(
+        "a day that fires (ii) and not (i) earns the load-mix and churn attribution. "
+        "It also produces no new §10 paragraph"), \
+        "halves split across two sentences pass the pin, so they could be edited apart"
+    assert not re.search(r"\((a|b|c|d)\) (passes|fails)", r), \
+        "the rule marks a criterion pass/fail inside the span where _verdict allows exactly " \
+        "one such mark — the fired triggers are roman, as the 09-28 paragraph's are"
+
+
+def test_the_budget_keeps_its_home_in_6_1_and_a_repoint_must_name_its_input():
+    """#1919 clause 3: where the budget lives, and what moving it would take.
+
+    The two figures are composed from `_per_day_budget`, so if §6.1's baseline is ever
+    re-cut the rule's figures have to move with it and this node is what says so. §6.1 is
+    pinned byte-for-byte because the item's whole posture is that the baseline STAYS until
+    owed-check rules: the rule is a reading of the budget, not a new budget, and a re-point
+    that does not state the divisor it is replacing would leave the two per-day figures
+    unattributable to any measurement.
+    """
+    r = _rule_prose()
+    s6 = _section(6)
+    assert _S6_BASELINE in s6, (
+        "§6.1's baseline sentence changed — it is the budget's source, #1919 keeps it "
+        "standing, and its bytes are what (b)'s budget divides")
+    assert _per_day_budget(s6) == (97, 10.3), "the derivation the rule quotes is not §6.1's"
+    assert _RULE_ANCHOR not in s6, \
+        "the rule moved into §6.1, where it would read as part of the baseline it cites"
+    assert re.search(r"[Tt]he budget's home (?:is|stays|remains|has been) §6\.1", r), \
+        "the rule does not say where the budget lives; without that, 'the budget is stale' " \
+        "becomes a licence to edit whichever figure fired"
+    assert re.search(r"re-?point", r, re.I) and "current-mix baseline" in r, \
+        "the rule does not name what a re-point needs: a measured current-mix baseline"
+    assert re.search(r"naming the input (?:that|which) restores", r), \
+        "the re-point's own disclosure clause is missing — the item requires the new " \
+        "baseline to state what it replaced"
+    misses_per_day, tokens_per_day = _per_day_budget(s6)
+    assert f"{misses_per_day} misses / {tokens_per_day}M tokens a day" in r, (
+        f"the restored figures the re-point must name are §6.1's ({misses_per_day} / "
+        f"{tokens_per_day}M), composed here from the derivation rather than hand-typed")
+
+
+def test_the_rule_keeps_2026_09_28_as_the_worked_exemplar_and_the_ruling_verbatim(reopen):
+    """#1919 clause 4: the new prose sits AFTER the exemplar and displaces nothing.
+
+    09-28's day-side figures are composed from its committed extract, and the budget side
+    from §6.1, so this node fails if the exemplar's arithmetic is edited away as well as if
+    the four ruling phrases are reworded. The exemplar-reference half is what makes the rule
+    itself falsifiable here rather than merely additive: a rule that quietly promotes itself
+    over the exemplar — "this is now the general case, see the rule" — drops the one day on
+    the page whose attribution is fully worked, and the sentence that says which day is the
+    worked example is a claim about the page, so pinning it is a wording check, not a
+    measurement.
+    """
+    p = _reopen_bullet()
+    r = _rule_prose()
+    assert "fired both of its triggers" in p, \
+        "2026-09-28 is no longer recorded as the day that fired both triggers"
+    assert f"{reopen['misses']} misses / {reopen['reprefill_tokens']:,} tokens" in p, \
+        "the exemplar's own day-side totals are gone from the bullet, so the rule's " \
+        "exemplar claim points at a paragraph that no longer shows its arithmetic"
+    for pinned in ("accepted as a bounded, documented loss",
+                   "the upstream unannotated draft-group annotation is not chased",
+                   "unmeasured rather than merely unfinished",
+                   "capability chase with no measured gain"):
+        assert pinned in p, f"the new prose moved a pinned ruling phrase: {pinned}"
+    assert re.search(r"2026-09-28 [^.]*\b(?:stays|stands|remains|is recorded)\b[^.]*exemplar",
+                     r), "the rule does not name 2026-09-28 as the worked exemplar"
+    assert not re.search(r"(?:supersed|replaces|displaces|obsolete)s? 2026-09-28", r), \
+        "the rule displaces the exemplar it was supposed to keep"
+
+
+def test_the_rule_breaks_neither_the_one_mark_nor_the_one_query_rule(reading):
+    """#1919 clause 5: the rule is inside the span that may carry exactly one pass/fail mark
+    per criterion and exactly one read-only population query, and it adds neither.
+
+    Same shape as #1921's rails node, because the failure it guards is the same one and it is
+    a failure of THIS prose, not of the pre-existing counts: a rule sentence that cited a
+    per-day totals query would leave `test_the_chat_population_is_day_scoped_and_re_derivable_by_one_query`
+    red in a file its author never opened, and the way to see that coming is to check the two
+    counts the span is capped at from inside the node that changes them.
+    """
+    r = _rule_prose()
+    assert not _CHAT_QUERY.search(r), (
+        "the rule cites a second read-only query inside the counted reading's span, where "
+        "(a)'s bullet already owns the only one — cite it, or put a fleet-totals query "
+        "outside the span (§11) if one is ever needed")
+    assert not re.search(r"\((a|b|c|d)\) (passes|fails)", r), \
+        "the rule added a pass/fail mark for a criterion"
+    marks = sum(len(re.findall(rf"\({letter}\) (passes|fails)", reading))
+                for letter in CRITERIA)
+    assert marks == 4, (
+        f"positive control: the span carries {marks} marks, not one per criterion — the ban "
+        "above was tested against a span that had already drifted")
+    queries = _CHAT_QUERY.findall(reading)
+    assert len(queries) == 1, \
+        f"positive control: the span carries {len(queries)} queries, not one"
+    for letter in CRITERIA:
+        _verdict(reading, letter)
+
+
 # ── #1921: the 2026-09-29 re-open, and the first day the filing condition is met ─
 #
 # The ruling #1720 closed with names one exception that would re-open it: a chat-turn
@@ -1673,3 +1954,79 @@ def test_the_filing_chat_miss_is_one_event_with_its_measured_attribution(filing,
     assert "first counted day on which the condition is met" in p, (
         "the claim is that this is the first COUNTED day to meet the condition — not the "
         "only day, which the uncounted 09-27 has not been checked against")
+
+
+#: The frozen per-day witness behind the routine-exceedance claim (#1919 clause 6): the day
+#: totals `usage.db` gave on 2026-09-30, kept because the row churn the same database keeps
+#: makes the same totals a moving target with no history.
+_DAY_WITNESS = ROOT / "tests" / "fixtures" / "usage_day_totals_2026-09-23_29.json"
+
+
+def test_the_routine_exceedance_witness_is_committed_and_states_the_premise(derived):
+    """#1919 clause 6: the frequency claim's bytes are in the tree, and the premise comes out
+    of those bytes plus §6.1's parsed budget — not out of a chat session's memory.
+
+    The seam is doc prose to committed evidence, which is the seam this whole module exists to
+    close: §10 copies no per-day figure at all (clause 1's three rails above refuse it), so
+    without this fixture the sentence under the rule — five of the seven complete days over
+    budget — would be a claim with nothing to re-measure against once usage.db's rows churn.
+    Two independent sources meet here: the fixture's own day totals, and the threshold parsed
+    from §6.1's baseline sentence by `_per_day_budget`, which the rule's budget half already
+    asserts. The node cannot check the fixture against the live database — usage.db is runtime
+    data, outside any round's write surface and outside this repo — and does not claim to: the
+    cross-check it CAN run is the committed 09-25 extract, whose chat-turn count is an
+    independent measurement of one of these seven days.
+    """
+    import subprocess
+
+    tracked = subprocess.run(["git", "ls-files", "--error-unmatch",
+                              str(_DAY_WITNESS.relative_to(ROOT))],
+                             cwd=ROOT, capture_output=True, text=True)
+    assert tracked.returncode == 0, (
+        f"{_DAY_WITNESS.name} is on disk but not in git: the root .gitignore ends every new "
+        "JSON, and a witness that only exists in one worktree is not evidence — that is "
+        "exactly how #1812's 09-28 reading went missing")
+    wit = json.loads(_DAY_WITNESS.read_text(encoding="utf-8"))
+    days = wit["days"]
+    assert [d["day"] for d in days] == [f"2026-09-{n:02d}" for n in range(23, 30)], (
+        "the witness must hold the complete days its claim counts; a window edited at either "
+        "end is how a 5-of-7 becomes a 5-of-6 without any figure changing")
+    miss_budget, tok_budget = _per_day_budget(_section(6))
+    over = [d["day"] for d in days
+            if d["misses"] > miss_budget or d["reprefill_tokens"] > tok_budget * 1_000_000]
+    assert len(over) == 5, (
+        f"the premise under the (ii)-only rule is that the budget is exceeded routinely; the "
+        f"committed day totals give {len(over)} of {len(days)} days over "
+        f"{miss_budget} misses / {tok_budget}M tokens")
+    assert [d["day"] for d in days if d["day"] not in over] == ["2026-09-25", "2026-09-26"], \
+        "the two days under budget are part of the premise; if they moved, 'routinely' is " \
+        "the wrong word and the rule's sentence has to change with the data"
+    busiest = max(days, key=lambda d: d["misses"])
+    assert busiest["day"] == "2026-09-24", (
+        f"the worst day in the witness moved to {busiest['day']}, and #1919's item text quotes "
+        "09-24 as the 318 / 32.23M day — the rule does not cite it, but the ruling that "
+        "re-points the budget will")
+    cross = [d for d in days if d["day"] == "2026-09-25"][0]
+    assert cross["chat_turns"] == derived["chat_turns"] and \
+           cross["chat_turns_with_misses"] == derived["chat_turns_with_misses"], (
+        f"the witness says 09-25 carried {cross['chat_turns']} chat turns with "
+        f"{cross['chat_turns_with_misses']} carrying a miss, but the committed 09-25 extract "
+        f"derives {derived['chat_turns']} / {derived['chat_turns_with_misses']}: two copies of "
+        "the same day disagree, so neither can be trusted for the premise")
+    assert [d["day"] for d in days if d["chat_turns_with_misses"]] == [
+            "2026-09-24", "2026-09-27", "2026-09-28", "2026-09-29"], (
+        "four days in the witness carry a chat turn with a miss, which is why the rule cannot "
+        "claim the two paragraphs are 'the days that fired trigger (i)' — chat misses are "
+        "trigger (i)'s candidate set, not its verdict, which needs the churn join")
+    # The mix half of the premise, measured rather than assumed. What is FALSE is
+    # "autocode-heavy": the largest autocode share on any of these seven days is 0.315 (09-23),
+    # while bench leads 09-25 at 0.646 and 09-26 at 0.565. So days ARE sometimes led by one
+    # session kind — just never by autocode — which is why the rule's sentence names no kind and
+    # rests the exceedance on §6.1's fleet being unrecorded here instead.
+    assert max(d["autocode_share"] for d in days) < 0.5, (
+        "autocode leading half a day's turns would put a 'current autocode-heavy mix' wording "
+        "back in play; measured max on 2026-09-30 was 0.315, on 09-23")
+    assert sorted(d["top_session_kind"] for d in days).count("bench") == 3 and \
+           sorted(d["top_session_kind"] for d in days).count("review") == 2, \
+        "bench leading three of the seven days and review two is the load-mix fact the rule " \
+        "replaces 'autocode-heavy' with; if the leaders moved, the sentence needs re-measuring"

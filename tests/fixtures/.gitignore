@@ -17,4 +17,13 @@
 # The root file itself is off-limits to the self-modification loop (denied in
 # scripts/automod/spec.py), so a file like this one is the only route that does not
 # end in a human typing `git add -f` for every counted day.
+#
+# The second family below is not a status-line extract: it is the frozen per-day
+# fleet totals (turns / misses / re-prefill tokens / chat turns / session-kind mix)
+# that §10's trigger-(ii) routine-exceedance claim rests on, read out of `usage.db`
+# before the row-level churn the same database keeps makes the same claim
+# un-re-derivable (#1919). It gets its own negation rather than a vllm_prefix_miss_*
+# name because those bytes never came from a status line, and a fixture named for the
+# wrong source is worse than one that is ignored.
 !vllm_prefix_miss_*.json
+!usage_day_totals_*.json
