@@ -78,13 +78,26 @@ def test_the_anchor_survives_an_edit_to_the_end_of_a_line():
     assert a == b and len(a) <= ml.ANCHOR_CHARS and a == a.strip()
 
 
-def test_curate_flag_is_the_ceiling_minus_the_margin(tmp_path):
+def test_curate_flag_is_the_tight_limit_minus_the_margin(tmp_path):
+    """#1895 moved the trigger from `ceiling - HEADROOM_BYTES` down to
+    `tight_limit - HEADROOM_BYTES` — 12,083 B for USER.md, 19,456 B for MEMORY.md.
+
+    The two assertions this node carried before #1895 are kept verbatim: a file at
+    the OLD trigger point still prints the marker, which is exactly clause 4's
+    "no file that prints CURATE today stops printing it" leg. What changed is where
+    the marker starts, so the new assertions are the new boundary and its −1."""
     ceiling = 16_384
+    assert ml.tight_limit("USER.md") == int(0.8 * ceiling) == 13_107
     pad = "x" * (ceiling - ml.HEADROOM_BYTES - len(USER.encode()) + 1)
     rep = ml.status(_dir(tmp_path, user=USER + pad))["USER.md"]
     assert rep["ceiling"] == ceiling and rep["curate"] is True
     rep2 = ml.status(_dir(tmp_path / "b", user=USER))["USER.md"]
     assert rep2["curate"] is False and rep2["headroom"] == ceiling - len(USER.encode())
+
+    on = "x" * (13_107 - ml.HEADROOM_BYTES - len(USER.encode()))
+    assert ml.status(_dir(tmp_path / "c", user=USER + on))["USER.md"]["curate"] is False
+    over = "x" * (13_107 - ml.HEADROOM_BYTES - len(USER.encode()) + 1)
+    assert ml.status(_dir(tmp_path / "d", user=USER + over))["USER.md"]["curate"] is True
 
 
 def test_status_writes_nothing(tmp_path):
@@ -257,3 +270,80 @@ def test_the_curation_skill_writes_a_row_the_parser_reads():
         row = re.sub(r"<[^>]*>", lambda _: anchor, tmpl, count=1)
         rows = ml.ledger_rows(row + "\n")
         assert len(rows) == 1 and rows[0]["anchor"] == anchor, (row, rows)
+
+
+# ── #1895: the CURATE trigger sits under the TIGHT limit, not the ceiling ────
+#
+# `status` printed the marker at `ceiling - 1 KiB` (24,576 B for MEMORY.md) while
+# the index went red at 20,480 B and the write guard now refuses growth there.
+# Live on 2026-09-30: `MEMORY.md: 19918 / 25600 B (headroom 5682)` printed with no
+# marker at all, 562 B — under one night's ~870 B append — from a validator nobody
+# was being told to fix. The trigger moved down to `tight_limit - 1 KiB`; it can
+# only ever widen who is asked, never silence a file that was already asking.
+
+MEMORY_HEAD = "---\ntype: note\n---\n# Lloyd Long-Term Memory\n\n## Section\n"
+
+
+def _memories_with(tmp_path, memory_bytes: int):
+    """A memories dir whose MEMORY.md is exactly `memory_bytes` of short bullets."""
+    d = _dir(tmp_path)
+    text = MEMORY_HEAD
+    line = "- [project] filler entry that is comfortably short\n"
+    while len(text.encode()) + len(line.encode()) < memory_bytes:
+        text += line
+    rem = memory_bytes - len(text.encode())
+    if rem:
+        text += "#" * (rem - 1) + "\n"
+    assert len(text.encode()) == memory_bytes, "fixture is not the size asked for"
+    (d / "MEMORY.md").write_text(text, encoding="utf-8")
+    return d
+
+
+def test_curate_fires_for_the_live_index_at_its_current_size(tmp_path):
+    """Clause 4: MEMORY.md at its live 19,918 B is 5,682 B inside its ceiling and
+    562 B from the 20,480 B tight limit, so it must print CURATE now — the old
+    trigger (24,576 B) is the reason it did not, and the assertion that it would
+    not is what makes this node pin the change and not the status quo."""
+    live_size = 19_918
+    rep = ml.status(_memories_with(tmp_path, live_size))["MEMORY.md"]
+    assert rep["ceiling"] == 25_600 and rep["tight_limit"] == 20_480
+    assert rep["tight_limit"] - ml.HEADROOM_BYTES == 19_456 < live_size
+    assert rep["curate"] is True
+    assert live_size <= rep["ceiling"] - ml.HEADROOM_BYTES, \
+        "the fixture moved inside the OLD trigger, so this node proves nothing"
+
+
+def test_status_prints_the_marker_for_the_index_and_shows_the_limit(capsys, tmp_path):
+    """What the nightly reads, not just the field: the §2a-ter step opens on the
+    printed `-> CURATE`, and the number it is measured against is printed beside
+    it so a run cannot read the marker and then re-derive the trigger by hand."""
+    d = _memories_with(tmp_path, 19_918)
+    assert ml.main(["status", "--memories-dir", str(d)]) == 0
+    line = [ln for ln in capsys.readouterr().out.splitlines()
+            if ln.startswith("MEMORY.md:")][0]
+    assert line.startswith("MEMORY.md: 19918 / 25600 B"), line
+    assert "tight limit 20480" in line and line.endswith("-> CURATE"), line
+
+
+def test_the_marker_only_widens_and_never_silences(tmp_path):
+    """A file one byte past the OLD trigger keeps the marker, and so does USER.md
+    at its live 16,373 B — 4,299 B under its own ceiling, over its own tight limit,
+    and the file §2a-ter exists to make the curator act on."""
+    old_trigger = 25_600 - ml.HEADROOM_BYTES
+    rep = ml.status(_memories_with(tmp_path / "a", old_trigger + 1))["MEMORY.md"]
+    assert rep["bytes"] == old_trigger + 1 and rep["curate"] is True
+
+    pad = "x" * (16_373 - len(USER.encode()))
+    user_rep = ml.status(_dir(tmp_path / "b", user=USER + pad))["USER.md"]
+    assert user_rep["bytes"] == 16_373 and user_rep["curate"] is True
+
+
+def test_curate_stays_off_while_the_index_has_room_to_append(tmp_path):
+    """The other side of the tripwire: at 19,456 B — the trigger itself — the
+    marker is still off, so the nightly is not called every hour, and the file it
+    calls it has room left in it (one night's ~870 B median append) before the
+    write guard starts refusing."""
+    rep = ml.status(_memories_with(tmp_path / "q", 20_480 - ml.HEADROOM_BYTES))["MEMORY.md"]
+    assert rep["curate"] is False
+    rep2 = ml.status(_memories_with(tmp_path / "w", 20_480 - ml.HEADROOM_BYTES + 1))["MEMORY.md"]
+    assert rep2["curate"] is True

@@ -57,7 +57,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import validate_memory_index as vmi  # noqa: E402
 
 VAULT_ROOT = Path.home() / "obsidian"
-DEFAULT_TARGET = int(ps.MEMORY_MD_INDEX_CEILING_BYTES * vmi.DEFAULT_TIGHTNESS)
+# The ratio is #1895's app-side constant, imported rather than restated or read
+# through the validator, so the target this consolidator builds to is the number
+# the write guard refuses growth past. The INDEX ceiling is named explicitly (not
+# the live one) so a rebuild of the overlay is reproducible across the deploy flip.
+DEFAULT_TARGET = int(ps.MEMORY_MD_INDEX_CEILING_BYTES * mc.MEMORY_TIGHTNESS)
 PROMPT_FILES = ("SOUL.md", "USER.md")
 
 #: Units whose every entry is a ruling or a house rule — `feedback`, kept whole.
@@ -243,7 +247,7 @@ def render_index(front: str, head: list[str], units: list[Unit], cap: int) -> st
             slug = u.slugs[u.entry_part[i]]
             link = f" → topics/{slug}"
             prefix = f"- [{e.kind}] "
-            line_room = vmi.INDEX_LINE_MAX_CHARS - len(prefix) - len(link)
+            line_room = mc.INDEX_LINE_MAX_CHARS - len(prefix) - len(link)
             # A ruling gets the whole line whatever the budget: the budget is
             # balanced on the project lines, never on the ones the index may not cut.
             room = line_room if e.kind == "feedback" else min(cap, line_room)
@@ -260,7 +264,7 @@ def build(src: Path, target: int = DEFAULT_TARGET) -> tuple[str, dict[str, str],
         for e in u.entries:
             e.kind = classify(u, e)
     topics = assign_topics(units)
-    lo, hi, best = 24, vmi.INDEX_LINE_MAX_CHARS, None
+    lo, hi, best = 24, mc.INDEX_LINE_MAX_CHARS, None
     while lo <= hi:
         mid = (lo + hi) // 2
         idx = render_index(front, head, units, mid)

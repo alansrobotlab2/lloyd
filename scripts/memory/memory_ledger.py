@@ -53,11 +53,20 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
+from app.memory_ceiling import tight_limit  # noqa: E402
+
 #: How much of an entry identifies it. Long enough that two entries in one
 #: file never share it (checked: 0 collisions in USER.md and MEMORY.md on
 #: 2026-09-25), short enough that an edit to the end of a line keeps its row.
 ANCHOR_CHARS = 60
-#: Below the ceiling by this much, the curator runs (one KiB of headroom).
+#: Below the file's TIGHT limit (`app.memory_ceiling.tight_limit` — 80% of its
+#: ceiling for MEMORY.md, the line `validate_memory_index.py --mode full` holds the
+#: index to) the curator runs, so it acts while there is still room to write: one
+#: KiB of headroom (#1895 moved the trigger down from the full ceiling, which sat
+#: 4,096 B past the line the index is already red over — live `status` printed no
+#: marker for a 19,918 B MEMORY.md with 562 B left before the next append trips
+#: the validator). Every file that printed CURATE under the old trigger still
+#: prints it: this only widens who is asked.
 HEADROOM_BYTES = 1024
 
 LEDGERS = {"USER.md": "user-md-ledger.md", "MEMORY.md": "memory-md-ledger.md"}
@@ -141,6 +150,8 @@ def ledger_rows(text: str) -> list[dict]:
 
 def status(memories_dir: Path) -> dict:
     from app.prompt_surface import memory_ceiling
+    # `tight_limit` derives the same number the write guard refuses growth past
+    # and the validator reports the index red over — one definition, three readers.
     report = {}
     for name, ledger_name in LEDGERS.items():
         path = memories_dir / name
@@ -162,10 +173,11 @@ def status(memories_dir: Path) -> dict:
         unreachable = set(unrepresentable)
         unchecked = sorted((r for r in rows if r["anchor"] in live),
                            key=lambda r: r["checked"] or "")
+        limit = tight_limit(name)
         report[name] = {
-            "bytes": size, "ceiling": ceiling,
+            "bytes": size, "ceiling": ceiling, "tight_limit": limit,
             "headroom": None if ceiling is None else ceiling - size,
-            "curate": ceiling is not None and size > ceiling - HEADROOM_BYTES,
+            "curate": limit is not None and size > limit - HEADROOM_BYTES,
             "entries": len(entries), "ledger": str(lpath), "rows": len(rows),
             "without_row": [a for a in entries if a not in have and a not in unreachable],
             "unrepresentable": unrepresentable,
@@ -191,7 +203,8 @@ def main(argv=None) -> int:
         if r.get("missing"):
             print(f"{name}: missing")
             continue
-        print(f"{name}: {r['bytes']} / {r['ceiling']} B (headroom {r['headroom']}), "
+        print(f"{name}: {r['bytes']} / {r['ceiling']} B (headroom {r['headroom']}, "
+              f"tight limit {r['tight_limit']}), "
               f"{r['entries']} entries, {r['rows']} ledger rows"
               + ("  -> CURATE" if r["curate"] else ""))
         print(f"  without a row: {len(r['without_row'])}; "

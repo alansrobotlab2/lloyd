@@ -34,6 +34,7 @@ from pathlib import Path
 
 import pytest
 
+from app import memory_ceiling as mc
 from app import prompt_builder as pb
 from app import prompt_surface as ps
 from app.prompt_surface import (
@@ -610,10 +611,20 @@ def test_memory_add_still_writes_an_entry_that_stays_under_the_ceiling(name, mem
     which is not hypothetical: the unlanded draft this replaced documented a
     shrink exemption it did not implement, so every write to an already-over file
     failed whatever it did to the size.
+
+    Updated by #1895, which moved the write tripwire for `MEMORY.md` from its
+    ceiling to its tight limit — `int(0.8 * 25,600)` = 20,480 B. The starting size
+    this node used (`ceiling - 400` = 25,200 B, entry landing at 25,233 B) is now
+    refused on purpose: acceptance clause 1 is exactly "a growing write above
+    `int(0.8 * memory_ceiling(\"MEMORY.md\"))` is refused", so the largest legal
+    landing for the index is its tight limit and that is where its fixture starts.
+    `USER.md` keeps the original start: the new bounds are scoped to the index and
+    clause 3 requires a write to USER.md right up to its ceiling to go on working.
     """
     session, root = memories_root
     ceiling = ps.MEMORY_CEILINGS[name]
-    (root / name).write_text("# Heading\n\n" + "x" * (ceiling - 400) + "\n",
+    limit = (mc.tight_limit(name) if name == mc.INDEX_MEMORY_FILE else ceiling)
+    (root / name).write_text("# Heading\n\n" + "x" * (limit - 400) + "\n",
                              encoding="utf-8")
 
     out = session._memory_add({"file": name, "entry": "- a remembered thing"})

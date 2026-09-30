@@ -48,13 +48,18 @@ if str(ROOT) not in sys.path:
 from app import prompt_surface as ps  # noqa: E402
 from app import memory_ceiling as mc  # noqa: E402
 
-#: Longest legal index line, in characters. An index line is a pointer with a
-#: hook, not the entry: past this it is the detail again, paid for every turn.
-INDEX_LINE_MAX_CHARS = 300
+# Both bounds are DEFINED under `app/` (#1895) — `app/memory_ceiling.py` is the
+# write guard that has to refuse the same two conditions this script reports, and
+# the day the numbers live here the writer and the reader disagreed by construction
+# and only the nightly run noticed. Re-exported under the old names so
+# `consolidate_memory_index.py`, this file's own `--tightness` default and every
+# caller keep resolving them, and so `git grep -n INDEX_LINE_MAX_CHARS` now points
+# at `app/` first.
+INDEX_LINE_MAX_CHARS = mc.INDEX_LINE_MAX_CHARS
 
 #: Share of the ceiling a consolidated index may fill. The rest is the room the
 #: nightly writers append into before the next dream pass tightens it again.
-DEFAULT_TIGHTNESS = 0.80
+DEFAULT_TIGHTNESS = mc.MEMORY_TIGHTNESS
 
 #: `→ topics/<slug>` (the arrow is the index's own grammar; `->` is accepted too).
 LINK_RE = re.compile(r"(?:→|->)\s*topics/([A-Za-z0-9_./-]+?)(?:\.md)?(?=[\s,;)`]|$)")
@@ -109,8 +114,8 @@ def check(root: Path, *, ceiling: int, mode: str = "full",
         if untyped:
             errors.append(f"{untyped} top-level entries carry no [type] tag "
                           f"({', '.join(ps.ENTRY_TYPES)})")
-        long = [ln for ln in ps.body(text).split("\n")
-                if ln.startswith(("- ", "* ")) and len(ln) > INDEX_LINE_MAX_CHARS]
+        # The same predicate the write guard refuses on, not a copy of it.
+        long = mc.overlong_index_lines(text)
         report["long_lines"] = len(long)
         if long:
             errors.append(f"{len(long)} index lines over {INDEX_LINE_MAX_CHARS} chars; "

@@ -477,3 +477,204 @@ def test_a_topic_write_still_lands_under_memory_with_the_index_untouched(memorie
     assert topic.read_text(encoding="utf-8").endswith("- why: the ledger backfill rows\n")
     assert res["path"] == str(topic), res
     assert (root / "MEMORY.md").read_text(encoding="utf-8") == index
+
+
+# ── #1895: the index's own bounds on the WRITE path ──────────────────────────
+#
+# Both bounds existed on the read side only until #1895: `git grep -n
+# INDEX_LINE_MAX_CHARS` named the validator and the consolidator and no writer,
+# while `memory_write_error` stopped at the 25,600 B ceiling. Vault git measured
+# `lloyd/MEMORY.md` at 20,466 B (09-25) → 23,941 B (09-29 07:58Z) — 3,461 B over
+# the 20,480 B tight limit for ~15 h with nothing refusing the appends, and the
+# red `test_the_live_memory_index_validates` node nobody noticed until Pre-Flight.
+# These nodes pin the write-side tripwire, the 300-character line cap, and that
+# neither one reaches USER.md, topic files, lookalikes, or a shrinking repair.
+
+INDEX_HEAD = "---\ntype: note\n---\n# Lloyd Long-Term Memory\n\n## Section\n"
+
+
+def _index_of_size(size: int) -> str:
+    """An index body whose UTF-8 size is exactly `size` bytes of short bullets."""
+    text = INDEX_HEAD
+    line = "- [project] filler entry that is comfortably short\n"
+    while len(text.encode()) + len(line.encode()) < size:
+        text += line
+    rem = size - len(text.encode())
+    if rem:
+        text += "#" * (rem - 1) + "\n"   # a comment can never trip the line cap
+    assert len(text.encode()) == size, "fixture is not the size asked for"
+    return text
+
+
+def test_the_index_bounds_are_defined_once_under_app_and_shared():
+    """Clause 2: `git grep -n INDEX_LINE_MAX_CHARS` now names a file under `app/`,
+    and both scripts resolve the cap and the 0.8 ratio through it instead of
+    carrying their own copy — the reader and the writer cannot disagree by
+    construction any more, which is the whole defect #1895 is about."""
+    import subprocess
+
+    hits = subprocess.run(["git", "grep", "-n", "INDEX_LINE_MAX_CHARS", "--", "app"],
+                          cwd=ROOT, capture_output=True, text=True)
+    assert hits.returncode == 0 and "app/memory_ceiling.py" in hits.stdout, hits.stdout
+    vmi = _vmi()
+    assert vmi.INDEX_LINE_MAX_CHARS == ceiling.INDEX_LINE_MAX_CHARS == 300
+    assert vmi.DEFAULT_TIGHTNESS == ceiling.MEMORY_TIGHTNESS == 0.80
+    for rel in ("scripts/memory/validate_memory_index.py",
+                "scripts/memory/consolidate_memory_index.py"):
+        src = (ROOT / rel).read_text(encoding="utf-8")
+        assert not re.search(
+            r"^(?:INDEX_LINE_MAX_CHARS|DEFAULT_TIGHTNESS)\s*=\s*[\d.]", src, re.M), \
+            f"{rel} restates one of the numbers instead of importing it"
+        assert re.search(r"\bmc\.(INDEX_LINE_MAX_CHARS|MEMORY_TIGHTNESS)\b", src), rel
+
+
+def test_a_growing_index_past_the_tight_limit_is_refused_and_routed(memories_root):
+    """Clause 1: 20,480 B (80% of the live 25,600 B ceiling) is on the write path,
+    and the refusal is the route — detail to `lloyd/memory/<slug>.md`, the index
+    gets one ≤300-char `→ topics/<slug>` line — not just a number, because a bare
+    byte count is what sends a writer to trim an unrelated entry (§2a-bis)."""
+    session, root = memories_root
+    limit = ceiling.tight_limit("MEMORY.md")
+    assert limit == int(0.8 * ceiling.memory_ceiling("MEMORY.md")) == 20_480
+    (root / "MEMORY.md").write_text(_index_of_size(limit - 512), encoding="utf-8")
+
+    msg = ceiling.memory_write_error(root / "MEMORY.md", _index_of_size(limit + 665))
+    assert msg is not None, "growth past the tight limit was allowed"
+    assert "20,480" in msg and "21,145" in msg, msg          # the line, and the size
+    assert "lloyd/memory/<slug>.md" in msg and "topics/<slug>" in msg, msg
+    assert "300" in msg, msg                                 # the hook it routes to
+    # The same append landing exactly ON the line is the largest legal write.
+    assert ceiling.memory_write_error(root / "MEMORY.md", _index_of_size(limit)) is None
+
+
+def test_an_index_line_past_the_cap_is_refused_at_301_characters(memories_root):
+    """Clause 2's boundary: the cap is `>` and not `>=`. The live index's longest
+    top-level line is 299 characters of 88, so the first refusal a nightly writer
+    ever meets is this one, and it has to name the number as precisely as the byte
+    rule does."""
+    session, root = memories_root
+    cap = ceiling.INDEX_LINE_MAX_CHARS
+    ok = "- [project] " + "a" * (cap - len("- [project] "))
+    assert len(ok) == cap, "fixture is not exactly at the cap"
+    (root / "MEMORY.md").write_text(INDEX_HEAD + ok + "\n", encoding="utf-8")
+
+    assert ceiling.memory_write_error(
+        root / "MEMORY.md", INDEX_HEAD + ok + "\n") is None
+    over = ok + "b"
+    msg = ceiling.memory_write_error(root / "MEMORY.md", INDEX_HEAD + over + "\n")
+    assert msg and f"{cap + 1:,} characters" in msg and f"{cap}-character" in msg, msg
+    assert "lloyd/memory/<slug>.md" in msg and "topics/<slug>" in msg, msg
+
+
+def test_the_write_guard_and_the_validator_measure_the_same_long_lines(memories_root):
+    """Clause 2's predicate: dash bullets and star bullets at column zero, an
+    indented line never, in `prompt_surface.body` — one function behind both the
+    refusal and the validator's `long_lines` count, so they cannot drift."""
+    session, root = memories_root
+    cap = ceiling.INDEX_LINE_MAX_CHARS
+    text = (INDEX_HEAD
+            + "- [project] " + "a" * (cap + 40) + "\n"
+            + "  - nested detail far longer than a top-level line " + "b" * (cap + 200) + "\n"
+            + "* an untyped star bullet " + "c" * (cap + 5) + "\n")
+    lines = ceiling.overlong_index_lines(text)
+    assert len(lines) == 2 and lines[0].startswith("- ") and lines[1].startswith("* "), lines
+
+    (root / "MEMORY.md").write_text(text, encoding="utf-8")
+    vmi = _vmi()
+    report = vmi.check(root, ceiling=4 * ceiling.memory_ceiling("MEMORY.md"), mode="full")
+    assert report["long_lines"] == len(lines), report
+    assert any("index lines over 300 chars" in e for e in report["errors"]), report["errors"]
+    assert ceiling.memory_write_error(root / "MEMORY.md", text + "- x\n") is not None
+
+
+def test_an_index_past_its_bounds_can_still_be_repaired(memories_root):
+    """Clause 3's shrink escape, now over two more bounds: the file that is
+    already past the line — the 09-29 state, 23,941 B with an over-long line — has
+    to stay writable by the very trim that fixes it, or the guard refuses its own
+    repair and the only writer left is the one it is refusing. Escape is strictly
+    smaller, so rewriting the same bytes over is not a repair."""
+    session, root = memories_root
+    limit = ceiling.tight_limit("MEMORY.md")
+    long_line = "- [project] " + "a" * (ceiling.INDEX_LINE_MAX_CHARS + 100)
+    over = _index_of_size(limit + 3461) + long_line + "\n"
+    (root / "MEMORY.md").write_text(over, encoding="utf-8")
+
+    assert len(over.encode()) > limit, "fixture is not over the tight limit"
+    smaller = _index_of_size(limit + 1000) + long_line + "\n"
+    assert ceiling.memory_write_error(root / "MEMORY.md", smaller) is None, \
+        "a shrinking write that keeps the over-long line was refused"
+    assert ceiling.memory_write_error(
+        root / "MEMORY.md", _index_of_size(limit + 1000)) is None
+    assert ceiling.memory_write_error(root / "MEMORY.md", over) is not None, \
+        "an identical rewrite of an over-limit index is not a shrink"
+
+
+def test_the_new_bounds_leave_user_md_topic_files_and_lookalikes_alone(
+        memories_root, monkeypatch):
+    """Clause 3: nothing allowed today may start refusing. Live `USER.md` is
+    16,373 of its own 16,384 B and carries 17 top-level bullets over 300 chars, so
+    a rule that reached it would refuse every non-shrinking write the moment it
+    shipped — freezing the one file §2a-ter tells the curator to act on."""
+    session, root = memories_root
+    # A ceiling small enough that the fixture sits BETWEEN USER.md's tight limit
+    # and its ceiling: only there does a wrongly-scoped rule bite, and the live
+    # file (16,373 of 16,384 B) sits in exactly that band today.
+    monkeypatch.setitem(ps.MEMORY_CEILINGS, "USER.md", 600)
+    user = "---\ntype: note\n---\n# User\n\n" + "- [user] " + "u" * 500 + "\n"
+    (root / "USER.md").write_text(user, encoding="utf-8")
+    size = len(user.encode())
+    assert ceiling.tight_limit("USER.md") < size < ceiling.memory_ceiling("USER.md"), size
+    assert ceiling.overlong_index_lines(user), "fixture must carry an over-cap line"
+    assert ceiling.memory_write_error(root / "USER.md", user + "- [user] more\n") is None
+
+    topic = root / "memory" / "voice.md"
+    topic.parent.mkdir(exist_ok=True)
+    topic.write_text("- detail\n", encoding="utf-8")
+    assert ceiling.memory_write_error(topic, "- detail\n- more detail\n") is None
+
+    lookalike = root.parent / "sandbox" / "MEMORY.md"
+    lookalike.parent.mkdir(exist_ok=True)
+    lookalike.write_text("short\n", encoding="utf-8")
+    assert ceiling.memory_write_error(lookalike, _index_of_size(40_000)) is None
+
+
+@pytest.mark.live_vault
+def test_the_live_index_refuses_growth_and_the_live_user_md_does_not():
+    """The reporting copy of both rules, measured on the live vault.
+
+    Marked `live_vault` and so not run by the gate (pytest.ini): a nightly job owns
+    these two files, and an assertion pinned to their current bytes would fail the
+    next author for the previous writer's change. It re-measures the numbers rather
+    than quoting them, so it stays true as the files move — and it skips, rather
+    than passes, on the leg that has stopped meaning anything.
+    """
+    mem = Path.home() / "obsidian" / "lloyd"
+    if not (mem / "MEMORY.md").is_file():
+        pytest.skip("no vault")
+    text = (mem / "MEMORY.md").read_text(encoding="utf-8")
+    limit = ceiling.tight_limit("MEMORY.md")
+    # Short lines only, so the ONLY rule that can fire is the byte one: an
+    # over-long probe line would be refused for the wrong reason and still pass.
+    probe = text
+    unit = "- [project] filler entry that is comfortably short\n"
+    while len(probe.encode()) <= limit:
+        probe += unit
+    size = len(probe.encode())
+    assert size > limit and not ceiling.overlong_index_lines(probe), "probe setup"
+    msg = ceiling.memory_write_error(mem / "MEMORY.md", probe)
+    assert msg is not None, f"a {size:,} B MEMORY.md was allowed"
+    assert f"{limit:,}" in msg and str(limit) in msg.replace(",", ""), msg
+    assert f"{size:,}" in msg, msg
+    assert "lloyd/memory/<slug>.md" in msg and "topics/<slug>" in msg, msg
+    # The file as it stands, written back unchanged, is inside both bounds or the
+    # byte rule is the only thing that can refuse it — never the line rule.
+    same = ceiling.memory_write_error(mem / "MEMORY.md", text)
+    assert same is None or f"{limit:,}" in same, same
+
+    user = (mem / "USER.md").read_text(encoding="utf-8")
+    user_bytes = len(user.encode("utf-8"))
+    if user_bytes <= ceiling.tight_limit("USER.md"):
+        pytest.skip("USER.md is inside its own tight limit: the freeze leg is vacuous")
+    if ceiling.memory_ceiling("USER.md") - user_bytes >= 2:
+        assert ceiling.memory_write_error(mem / "USER.md", user + "#\n") is None, \
+            "the index rules reached USER.md and froze the curator's own file"
