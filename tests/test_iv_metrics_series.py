@@ -1985,3 +1985,217 @@ def test_the_percentile_keys_leave_the_recorder_row_intact(tmp_path):
     assert cost["latency_ms_per_call_n"] == 2, cost
     assert (cost["latency_ms_per_call_p50"], cost["latency_ms_per_call_p90"],
             cost["latency_ms_per_call_p99"]) == (100, 300, 300), cost
+
+
+# ── #1874: the miss_rate denominator reaches the row ──────────────────────────
+
+#: One grader report, the shape `iv_grade.py` builds: `_grade_terminal_noops`
+#: returns at `:273-276` as `{"terminal_noops_with_a_following_user_message":
+#: checked, "followed_by_correction": missed, "miss_rate": round(missed/checked, 3)
+#: if checked else None, "miss_examples": [...]}`. 2 of 50 calls dropped at the
+#: 12.0 s deadline; 1 of 4 checked terminal noops was followed by a correction.
+_REPORT_1874 = {
+    "scope": {"session": "all", "since": "2026-09-29T01:00:00",
+              "first": "2026-09-29T01:04:11", "last": "2026-09-30T02:59:02"},
+    "cost": {"observations": 120, "turns": 40, "llm_calls": 50,
+             "input_tokens_per_turn": 8100, "observer_ms_per_turn": 412,
+             "models": {"primary": 50},
+             "errors": {"timeout after 12.0s": 2}},
+    "precision_proxy": {"landed_rate": 0.955, "stranded": 3},
+    "recall_proxy": {"terminal_noops_with_a_following_user_message": 4,
+                     "followed_by_correction": 1, "miss_rate": 0.25,
+                     "miss_examples": []},
+}
+
+#: The keys `_row` emitted before #1874, read off the shipped dict at base
+#: 8cdf9d16 (`since`…`models`, `recorded_at`). Clause 3 is "purely additive", so
+#: the row's key set must be exactly this set plus the two new counts.
+_KEYS_BEFORE_1874 = {
+    "since", "until", "window_hours", "first", "last", "observations", "turns",
+    "llm_calls", "dropped_verdicts", "timeout_by_deadline", "error_total",
+    "dropped_rate", "landed_rate", "miss_rate", "observer_ms_per_turn",
+    "input_tokens_per_turn", "threshold", "threshold_source", "window_rows",
+    "flagged", "models", "recorded_at",
+}
+
+
+def _row_1874(report: dict) -> dict:
+    return iv_metrics_record._row(report, window_hours=26.0,
+                                  threshold=RULED_BOUND,
+                                  threshold_source="default", window_rows=7)
+
+
+def test_row_stores_the_two_miss_counts_the_grader_emits():
+    """#1874 clause 1: the counts beside the ratio become row fields.
+
+    `recall_proxy` of 4 checked / 1 corrected / 0.25 emits `miss_checked` 4 and
+    `miss_corrected` 1, both plain `int`s — the numbers `iv_grade.py:273-276`
+    already computed and `_row` used to drop, keeping only `miss_rate`.
+    """
+    row = _row_1874(_REPORT_1874)
+    assert row["miss_checked"] == 4, row.get("miss_checked")
+    assert row["miss_corrected"] == 1, row.get("miss_corrected")
+    for key in ("miss_checked", "miss_corrected"):
+        assert type(row[key]) is int, f"{key}={row[key]!r} is not an int"
+    assert row["miss_rate"] == pytest.approx(0.25)
+
+
+def test_miss_rate_is_null_in_the_row_exactly_when_nothing_was_checked():
+    """#1874 clause 2: the iff the null ratio could not carry on its own.
+
+    With `terminal_noops_with_a_following_user_message: 0` and
+    `miss_rate: None` the row reads `miss_checked == 0`, `miss_corrected == 0` and
+    `miss_rate is None`; with the count at 4 the rate is a number. Asserted in both
+    directions over both rows, because the failure this field exists to prevent is
+    a null that means two different things — the last four live rows each pair
+    `miss_rate: null` with a *scored* `landed_rate` and 164-1118 `llm_calls`.
+    """
+    unmeasured = _row_1874({**_REPORT_1874, "recall_proxy": {
+        "terminal_noops_with_a_following_user_message": 0,
+        "followed_by_correction": 0, "miss_rate": None, "miss_examples": []}})
+    measured = _row_1874(_REPORT_1874)
+
+    assert unmeasured["miss_checked"] == 0
+    assert unmeasured["miss_corrected"] == 0
+    assert unmeasured["miss_rate"] is None
+    assert isinstance(measured["miss_rate"], float)
+
+    for label, row in (("unmeasured", unmeasured), ("measured", measured)):
+        assert (row["miss_rate"] is None) == (row["miss_checked"] == 0), (
+            f"{label}: miss_rate={row['miss_rate']!r} with "
+            f"miss_checked={row['miss_checked']!r} breaks the iff")
+
+
+def test_the_miss_counts_are_added_without_changing_any_existing_field():
+    """#1874 clause 3: additive means every old key keeps its name and its value.
+
+    The golden half is the value each field of `_REPORT_1874` had before the
+    change: 2 dropped of 50 calls = 0.04, `landed_rate` 0.955, `flagged` False
+    against the ruled 0.05 bound. The key set must be the pre-#1874 set plus
+    exactly `miss_checked` and `miss_corrected` — a renamed or dropped field, or a
+    third field riding along, goes red here.
+
+    The behavioural half is that the alert path cannot see the new fields: two
+    rows differing only in the two counts (same 0.25 ratio, 4/1 against 400/100)
+    agree on `flagged`, and `breach_basis` is computed from `dropped_rate` and
+    `window_rows` alone.
+    """
+    row = _row_1874(_REPORT_1874)
+    assert set(row) == _KEYS_BEFORE_1874 | {"miss_checked", "miss_corrected"}, (
+        f"extra={set(row) - _KEYS_BEFORE_1874}, "
+        f"missing={_KEYS_BEFORE_1874 - set(row)}")
+
+    expected = {
+        "since": "2026-09-29T01:00:00", "window_hours": 26.0,
+        "first": "2026-09-29T01:04:11", "last": "2026-09-30T02:59:02",
+        "observations": 120, "turns": 40, "llm_calls": 50,
+        "dropped_verdicts": 2, "timeout_by_deadline": {"timeout after 12.0s": 2},
+        "error_total": 2, "dropped_rate": pytest.approx(0.04),
+        "landed_rate": pytest.approx(0.955), "miss_rate": pytest.approx(0.25),
+        "observer_ms_per_turn": 412, "input_tokens_per_turn": 8100,
+        "threshold": pytest.approx(RULED_BOUND), "threshold_source": "default",
+        "window_rows": 7, "flagged": False, "models": ["primary"],
+    }
+    for key, want in expected.items():
+        assert row[key] == want, f"{key}: {row[key]!r} != {want!r}"
+    # `until` and `recorded_at` are clock stamps, so their shape is what is
+    # stable, not their value: local for `until` (#835), UTC for `recorded_at`.
+    assert _near_local_now(row["until"]), row["until"]
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00",
+                        row["recorded_at"]), row["recorded_at"]
+
+    loud = _row_1874({**_REPORT_1874, "recall_proxy": {
+        "terminal_noops_with_a_following_user_message": 400,
+        "followed_by_correction": 100, "miss_rate": 0.25,
+        "miss_examples": []}})
+    assert loud["miss_checked"] == 400 and loud["miss_corrected"] == 100
+    assert loud["flagged"] == row["flagged"] is False
+    assert iv_metrics_record.breach_basis(row, [0.1] * 7) == (
+        iv_metrics_record.breach_basis(loud, [0.1] * 7)) == [0.1] * 7 + [0.04]
+    assert iv_metrics_record.over_bound(
+        {"llm_calls": 50, "threshold": RULED_BOUND,
+         "dropped_verdicts": 2}) is False
+
+
+def test_a_series_of_rows_without_the_new_keys_still_reads_clean(tmp_path):
+    """#1874 clause 4: rows written before the change keep their meaning.
+
+    Nothing backfills, so the 17 live rows stay in the file without
+    `miss_checked`/`miss_corrected` forever, and the reader that decides tonight's
+    alert must not stumble over them. A seed row of exactly today's shape — one
+    real appended row with the two new keys stripped, which is what a pre-#1874
+    row is — yields the same `_prior_series` triple as the same file with them
+    present (the reader reads `dropped_rate`, `threshold` and `window_rows`), and
+    the row appended on top of it records `malformed_prior_rows == 0` for real,
+    through the documented pipeline rather than a call into the helper.
+    """
+    repo = _make_repo(tmp_path)
+    _make_db(repo, [{"created_at": NOW_LOCAL - datetime.timedelta(hours=2)}])
+    out = repo / "_pipeline" / "reflection" / "iv-metrics.jsonl"
+    since = _iso(NOW_LOCAL - datetime.timedelta(hours=26))
+
+    first = _call(since=since, repo=repo, out=out, extra=["--hours 26"])
+    assert first.returncode == 0, first.stderr
+    shipped = _rows_of(out)[0]
+    legacy = {k: v for k, v in shipped.items()
+              if k not in ("miss_checked", "miss_corrected")}
+    assert "miss_checked" not in legacy and "miss_rate" in legacy
+    out.write_text(json.dumps(legacy) + "\n")
+
+    keep = iv_metrics_record.DEFAULT_WINDOW_ROWS
+    legacy_as_shipped = out.with_suffix(".withkeys")
+    legacy_as_shipped.write_text(json.dumps(shipped) + "\n")
+    assert (iv_metrics_record._prior_series(out, keep)
+            == iv_metrics_record._prior_series(legacy_as_shipped, keep))
+    rates, malformed, prior_breach = iv_metrics_record._prior_series(out, keep)
+    assert malformed == 0, "a legacy-shaped row is not a malformed row"
+    assert rates == ([shipped["dropped_rate"]]
+                     if shipped["dropped_rate"] is not None else [])
+    assert prior_breach is False
+
+    second = _call(since=since, repo=repo, out=out, extra=["--hours 26"])
+    assert second.returncode == 0, second.stderr
+    rows = _rows_of(out)
+    assert len(rows) == 2, rows
+    assert rows[0] == legacy, "the older row is appended to, never rewritten"
+    assert rows[1]["malformed_prior_rows"] == 0, rows[1]["malformed_prior_rows"]
+    assert ("miss_checked" in rows[1] and "miss_corrected" in rows[1]), rows[1]
+
+    # And `_prior_breaching` still re-derives a breach from a legacy row's own
+    # `threshold`/`window_rows`: three priors at 0.20 plus a 0.30 newest row is a
+    # median of 0.2 over four rates, over the ruled 0.05 bound, with no new key
+    # anywhere in the file.
+    breaching = out.with_suffix(".breach")
+    with breaching.open("w", encoding="utf-8") as fh:
+        for _ in range(3):
+            fh.write(json.dumps({"since": "h", "dropped_rate": 0.20}) + "\n")
+        fh.write(json.dumps({"since": "b", "dropped_rate": 0.30,
+                             "threshold": RULED_BOUND,
+                             "window_rows": 7}) + "\n")
+    assert iv_metrics_record._prior_series(breaching, keep)[2] is True
+
+
+def test_the_newly_appended_row_carries_all_three_miss_fields(tmp_path):
+    """The seam the item turns on, end to end: grader stdout to jsonl line.
+
+    The two counts are only worth storing if they survive the documented pipe
+    (`iv_grade.py --json | iv_metrics_record.py`), so this runs it as two real
+    processes over a fixture `usage.db` with no session transcripts: the grader
+    checked nothing, so the newest row reads `miss_checked == 0`,
+    `miss_corrected == 0` and `miss_rate: null` — the ambiguous null now carrying
+    its own reason — while all three keys are present.
+    """
+    repo = _make_repo(tmp_path)
+    _make_db(repo, [{"created_at": NOW_LOCAL - datetime.timedelta(hours=2),
+                     "trigger": "result", "action": "noop"}])
+    out = repo / "_pipeline" / "reflection" / "iv-metrics.jsonl"
+
+    result = _call(since=_iso(NOW_LOCAL - datetime.timedelta(hours=26)),
+                   repo=repo, out=out, extra=["--hours 26"])
+
+    assert result.returncode == 0, result.stderr
+    row = _rows_of(out)[-1]
+    assert {"miss_checked", "miss_corrected", "miss_rate"} <= set(row), row
+    assert row["miss_checked"] == 0 and row["miss_corrected"] == 0
+    assert row["miss_rate"] is None
+    assert (row["miss_rate"] is None) == (row["miss_checked"] == 0)

@@ -228,6 +228,18 @@ def _numeric(value) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _count(value) -> int:
+    """A grader's count as an `int`, 0 when the report carries none at all.
+
+    `iv_grade.py:273-276` emits both miss counts unconditionally, so for a row the
+    nightly job produces 0 means "the grader compared transcripts and found no
+    terminal noop with a following user message" — never "no denominator was
+    written". The rate itself is stored verbatim, so coercion can neither invent a
+    scored night nor erase one (#1874).
+    """
+    return int(value) if _numeric(value) else 0
+
+
 def breach_basis(row: dict, prior_rates: list) -> list[float]:
     """The rates the median is taken over: the last `window_rows` prior rates plus this
     row's own — empty when the row has no rate, which is what "nothing to breach" means.
@@ -258,7 +270,11 @@ def _row(report: dict, *, window_hours: float | None, threshold: float,
     rate, `recall_proxy` the miss rate. `landed_rate`/`miss_rate` arrive as `None`
     when there was nothing to score — no injects, or no session transcript to
     compare — and are stored as null rather than 0.0, so an unmeasurable night can
-    never be read as "scored and clean". A wrong `--hours` likewise cannot
+    never be read as "scored and clean". Because a null ratio on its own cannot say
+    which of those it was, `miss_checked` and `miss_corrected` store the two counts
+    `iv_grade.py:273-276` emits beside the ratio, and the grader sets that ratio to
+    `None` exactly when its checked count is 0 — so in the row `miss_rate` is null
+    if and only if `miss_checked` is 0 (#1874). A wrong `--hours` likewise cannot
     masquerade as a real change: the grader reports the bound it was handed, not
     the span it covered, so the requested span sits beside `since`.
     """
@@ -285,8 +301,14 @@ def _row(report: dict, *, window_hours: float | None, threshold: float,
         "timeout_by_deadline": by_deadline,
         "error_total": error_total,
         "dropped_rate": _rate(dropped, llm_calls),
-        # quality proxies, straight from the grader
+        # quality proxies, straight from the grader. The two counts beside
+        # `miss_rate` are the denominator the ratio alone hides: with `llm_calls`
+        # scored on the same night, `miss_rate: null` otherwise reads the same for
+        # "no terminal noop had a following user message" and "there was no
+        # transcript to compare" (#1874).
         "landed_rate": precision.get("landed_rate"),
+        "miss_checked": _count(recall.get("terminal_noops_with_a_following_user_message")),
+        "miss_corrected": _count(recall.get("followed_by_correction")),
         "miss_rate": recall.get("miss_rate"),
         # cost
         "observer_ms_per_turn": cost.get("observer_ms_per_turn"),
