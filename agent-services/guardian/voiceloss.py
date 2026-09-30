@@ -59,8 +59,8 @@ from pathlib import Path
 import gstate
 import speak
 
-#: Where the watermark lives: last-escalated occurrences, in the guardian's own
-#: state dir, one small JSON per cursor — the shape `gstate.py:29` `read_json` and
+#: Where the watermark lives: the last-escalated burst AND its occurrences, in the
+#: guardian's own state dir, one small JSON per cursor — the shape `gstate.py:29` `read_json` and
 #: `:36` `write_json_atomic` already exist for, and the shape `last_settled.json`
 #: and `eval_last.json` are. On disk rather than in a `Guardian` attribute because
 #: the escalation must survive a guardian restart: a process that forgets what it
@@ -191,10 +191,20 @@ class VoiceLossEscalator:
                 return self._report("no-record")
             cursor = gstate.read_json(self.cursor_path) or {}
             seen = _occurrences(cursor.get("occurrences"))
-            if record["occurrences"] <= seen:
+            if not _new_work(record, cursor):
                 # Nothing new has been lost since the last time this acted, so the
                 # board already carries this burst. This is the branch that keeps a
-                # 5 s loop from re-filing one incident 720 times a hour.
+                # 5 s loop from re-filing one incident 720 times a hour — and it is
+                # the branch #1913 was filed against, because comparing the count
+                # ALONE also silenced every later outage whose burst was no bigger
+                # than one already escalated. See `_new_work`.
+                if record.get("burst_started") is not None and _burst_key(cursor) is None:
+                    # A cursor that predates #1913 holds a count with no burst and
+                    # can therefore never agree with a later one. Adopt the burst in
+                    # front of us — the count in that file was copied from it — so
+                    # the NEXT burst has something to differ from. No board call:
+                    # adopting is not escalating.
+                    self._stamp_burst(record, cursor)
                 return self._report("unchanged", occurrences=record["occurrences"],
                                     escalated=seen)
             if not self._attempt_is_due(cursor, now):
@@ -346,17 +356,19 @@ class VoiceLossEscalator:
         return self.dir / CURSOR_NAME
 
     def _attempt_is_due(self, cursor: dict, now: float) -> bool:
-        until = cursor.get("next_attempt_ts")
-        try:
-            return now >= float(until or 0.0)
-        except (TypeError, ValueError):
-            return True
+        return now >= _attempt_ts(cursor)
 
     def _retry(self, cursor: dict, now: float, reason: str, **extra) -> dict:
         """Say "not delivered", keep the escalation owed, and bound the retry."""
         gstate.write_json_atomic(self.cursor_path, {
             "schema": 1,
             "occurrences": _occurrences(cursor.get("occurrences")),
+            # Carried, not recomputed: this cursor describes what was ESCALATED,
+            # and this path escalated nothing. Dropping the key here would cost a
+            # new burst its alarm — after `retry_seconds` the record's count is
+            # still under the old watermark, and with no burst to compare against
+            # the owed escalation would fall back to that comparison and go quiet.
+            "last_escalated_burst_ts": cursor.get("last_escalated_burst_ts"),
             "next_attempt_ts": now + self.retry_seconds,
             "last_attempt": gstate.now_iso(),
             "last_reason": reason,
@@ -368,6 +380,12 @@ class VoiceLossEscalator:
         gstate.write_json_atomic(self.cursor_path, {
             "schema": 1,
             "occurrences": int(record["occurrences"]),
+            # WHICH burst this count belongs to. `occurrences` alone cannot say:
+            # the writer resets it to 1 for a new burst, so a watermark that is
+            # only a number is an all-time high that a later, smaller incident can
+            # never get past (#1913). None when the record carries no
+            # `burst_started`, which is the count-only case `_new_work` documents.
+            "last_escalated_burst_ts": record.get("burst_started"),
             "action": action,
             "item_id": item_id,
             "last_seen": record.get("last_seen"),
@@ -375,10 +393,110 @@ class VoiceLossEscalator:
             "next_attempt_ts": 0.0,
         })
 
+    def _stamp_burst(self, record: dict, cursor: dict) -> None:
+        """Give a burst-less cursor the burst its count belongs to.
+
+        Not a delivery, so nothing is posted and `escalated_at` is left where it
+        was: the row was already filed, and a fresh timestamp would claim
+        otherwise. What it fixes is the upgrade path — the live cursor on this
+        machine is `{"occurrences": 2, "action": "created", "item_id": 1911}`, a
+        watermark with no burst, and without one the count stays an all-time high
+        that a smaller incident can never cross. The write happens once, on the
+        first tick after the field ships, and only for a cursor that lacks it.
+        """
+        gstate.write_json_atomic(self.cursor_path, {
+            "schema": 1,
+            "occurrences": _occurrences(cursor.get("occurrences")),
+            "last_escalated_burst_ts": record.get("burst_started"),
+            "action": cursor.get("action"),
+            "item_id": cursor.get("item_id"),
+            "last_seen": cursor.get("last_seen"),
+            "escalated_at": cursor.get("escalated_at"),
+            "burst_adopted_at": gstate.now_iso(),
+            "next_attempt_ts": _attempt_ts(cursor),
+        })
+
     def _report(self, reason: str, **extra) -> dict:
         out = {"reason": reason}
         out.update(extra)
         return out
+
+
+# ── what counts as new work ───────────────────────────────────────────
+def _new_work(record: dict, cursor: dict) -> bool:
+    """Has this record lost anything the board has not already been told about?
+
+    Two things can be new, and #1913 is the one the old check could not see:
+
+    * **a longer burst of the same incident** — `occurrences` over the watermark
+      the cursor carries. That is #1904's comparison, and it stays: it is what
+      stops a 5 s loop re-filing one incident 720 times an hour.
+    * **a different burst entirely** — `burst_started` other than the burst the
+      cursor last escalated. `speak._record_loss` counts from 1 again once a
+      failure lands outside `LOSS_WINDOW` (`speak.py:308-313`), so a second
+      outage is a record with a SMALLER count than the incident before it. A
+      count-only comparison then reads the new incident as "nothing new" forever:
+      production's cursor sits at `occurrences: 2` (item #1911), so any later
+      burst of one or two lost alerts was silenced — and 24 `synth failed` lines
+      across 8 separate days in `voice.log` are almost all bursts that small.
+
+    The two keys are read from ONE cursor write, so both sides of each comparison
+    are quantities the same file produced — the defect was a per-burst count
+    measured against an all-time high-water mark.
+
+    The count comparison still answers on its own when a side names no burst, and
+    the two cases are deliberately not symmetric:
+
+    * a RECORD with no `burst_started` (`_parse_loss_body` reads None) has no
+      identity to compare against, so only its count can move it;
+    * a CURSOR with no `last_escalated_burst_ts` is a pre-#1913 watermark: a count
+      with no burst attached. Escalating on that guess would post a fresh alarm on
+      every guardian restart, so the tick stays quiet and adopts the burst in front
+      of it (`_stamp_burst`) — the charitable reading, because the watermark was
+      copied from that very record. One quiet tick later the key exists, and every
+      burst after it is compared rather than assumed.
+    """
+    count = int(record["occurrences"])
+    if count > _occurrences(cursor.get("occurrences")):
+        return True                             # a longer burst of one incident
+    burst, escalated = record.get("burst_started"), _burst_key(cursor)
+    if burst is None or escalated is None:
+        # Either side can fail to name a burst, and the two failures mean opposite
+        # things. A RECORD with no `burst_started` has no identity to compare, so
+        # only its count can move (and `tick` has no burst to adopt for it). A
+        # CURSOR with no key is a pre-#1913 watermark: `tick` adopts the burst in
+        # front of it and stays quiet, so this stays False — a record that has
+        # already been escalated at its own count must not post on every tick.
+        return False
+    return float(burst) != escalated            # a different outage, however small
+
+
+def _burst_key(cursor: dict) -> float | None:
+    """The burst a cursor says it escalated, or None when it names no burst.
+
+    None covers the pre-#1913 file, a hand-edited one, and a value that is not a
+    number at all — every one of them "no burst on record", never a comparison.
+    The record side needs no reader: `_parse_loss_body` already parses
+    `burst_started` to a float, and both sides then hold the same 3-decimal value
+    the record itself carries.
+    """
+    try:
+        return float(cursor.get("last_escalated_burst_ts"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _attempt_ts(cursor: dict) -> float:
+    """When the next board attempt is allowed; 0.0 means now.
+
+    One reader for the retry gate and for the writer that preserves it. An
+    unreadable value is 0.0, not a held-back tick: a garbled cursor must never be
+    what keeps an alarm from being posted.
+    """
+    try:
+        return float(cursor.get("next_attempt_ts") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 # ── small readers with no opinion ─────────────────────────────────────

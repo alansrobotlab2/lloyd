@@ -581,6 +581,9 @@ def test_the_two_ceiling_keys_resolve_from_defaults(tmp_path):
 
 _ALERT = "Guardian alert. supervisord was unreachable. Restarted agent"
 _OTHER_ALERT = "Guardian alert. Landed: #1750 promotion settled"
+# A third, distinct sentence: to show a new burst names only ITS losses, the ones
+# it must not name have to be words that appear nowhere else in the record.
+_THIRD_ALERT = "Guardian alert. Worker pool is not running"
 
 
 def _refused_port() -> int:
@@ -692,6 +695,42 @@ def test_a_second_failure_in_the_window_refreshes_the_one_record(tmp_path, monke
     after = (tmp_path / speak.LOSS_NAME).read_text(encoding="utf-8")
     assert after.count(speak.LOSS_HEADING) == 1
     assert "occurrences: 1" in after, "a burst past its window starts over"
+
+
+def test_a_new_burst_names_only_the_alerts_it_lost(tmp_path, monkeypatch):
+    """#1913 clause 3, the writer half: the count reset, but the named list did not.
+
+    `speak._record_loss` gated `occurrences` on the window and carried `prior`
+    forward unconditionally, so the repro's burst B — one alert lost three hours
+    after burst A's two — wrote `occurrences: 1` quoting all three. A record is the
+    report of ONE incident and #1904 put a reader on it that posts the list to the
+    board, so the file that should have started a new alarm read as the tail of one
+    that had already been closed, and named alerts nobody had lost in hours. One
+    window test bounds both halves now, because two tests that disagree about when a
+    burst ended is exactly how the old code was written.
+    """
+    cfg, _ = _refusing(monkeypatch)
+
+    assert speak.speak_now(_ALERT, cfg, tmp_path) is False
+    assert speak.speak_now(_OTHER_ALERT, cfg, tmp_path) is False
+    in_window = speak.read_loss_record(tmp_path)
+    assert in_window["occurrences"] == 2 and set(in_window["said"]) == {
+        _ALERT, _OTHER_ALERT}, in_window
+
+    body = (tmp_path / speak.LOSS_NAME).read_text(encoding="utf-8")
+    stale = re.sub(r"burst_started: [0-9.]+",
+                   f"burst_started: {time.time() - speak.LOSS_WINDOW - 1.0:.3f}", body)
+    (tmp_path / speak.LOSS_NAME).write_text(stale, encoding="utf-8")
+    assert speak.speak_now(_THIRD_ALERT, cfg, tmp_path) is False
+
+    record = speak.read_loss_record(tmp_path)
+    assert record["occurrences"] == 1, record
+    assert record["said"] == [_THIRD_ALERT], (
+        f"a new burst names only its own losses: {record['said']}")
+    raw = (tmp_path / speak.LOSS_NAME).read_text(encoding="utf-8")
+    for stale_said in (_ALERT, _OTHER_ALERT):
+        assert stale_said not in raw, (
+            f"the ended burst's alert is still quoted by the new record: {stale_said!r}")
 
 
 def test_the_failure_path_returns_within_two_seconds_and_never_raises(

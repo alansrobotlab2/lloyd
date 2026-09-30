@@ -276,7 +276,10 @@ def _record_loss(state_dir: Path, text: str, reason: str) -> None:
     #1798 landed for a dropped daily-note line, and it is what a burst needs:
     the 2026-09-23 cluster was five refusals between 14:47 and 16:03, and five
     records would have made the outage look like five incidents while burying the
-    one number that matters, how many times it tried.
+    one number that matters, how many times it tried. Past the window the burst is
+    over and the next failure starts a NEW record — count back to 1, and the named
+    list restarts with its own utterance, because a record that counted one
+    incident and quoted another is evidence nobody can act on (#1913).
 
     Written under the same exclusive lock `should_speak` uses, because the two
     producers are separate processes (the daemon and the nag oneshot) and a lost
@@ -303,11 +306,19 @@ def _record_loss(state_dir: Path, text: str, reason: str) -> None:
             fh.seek(0)
             prev = _parse_loss_body(fh.read())
             count, started = 1, now
-            if (prev and prev["burst_started"] is not None
-                    and now - prev["burst_started"] <= LOSS_WINDOW):
+            in_window = bool(prev and prev["burst_started"] is not None
+                             and now - prev["burst_started"] <= LOSS_WINDOW)
+            if in_window:
                 count = prev["occurrences"] + 1
                 started = prev["burst_started"]
-            prior = prev["said"] if prev else []
+            # One window test decides BOTH halves of a new burst (#1913). Counting
+            # from 1 while quoting the ended burst's utterances made the new record
+            # evidence for the outage that already finished: the repro's burst B,
+            # one lost alert three hours after burst A's two, read
+            # `occurrences: 1` and named all three utterances. A record is the
+            # report of one incident, so what it names is bounded by the same
+            # window that bounds what it counts.
+            prior = prev["said"] if in_window else []
             said = [line] + [s for s in prior if s != line][:LOSS_TEXT_KEEP - 1]
             fh.seek(0)
             fh.truncate()

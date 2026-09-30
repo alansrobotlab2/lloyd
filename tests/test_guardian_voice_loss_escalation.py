@@ -55,6 +55,7 @@ import speak  # noqa: E402
 import voiceloss  # noqa: E402
 
 from app import backlog_status  # noqa: E402
+from app.paths import VAULT_ROOT  # noqa: E402
 
 # Route names spelled as literals, not as `voiceloss._CREATE_PATH`. The clauses
 # name the routes; a test that read them back off the module under test would
@@ -70,6 +71,18 @@ TASKS = "/api/backlog/tasks"
 # 5 → test_a_refused_backend_costs_nothing_and_the_child_is_untouched.
 # The acceptance check's stamp half (%z, the item's own clause 5) is pinned in
 # tests/test_guardian_speak.py::test_the_loss_record_stamps_its_clock_with_an_offset.
+#
+# #1913 adds a second axis to the same four outcomes — a burst LATER than the one
+# already escalated, whose count is smaller — and pins it in
+# test_a_later_burst_smaller_than_the_watermark_refreshes_the_open_row (clause 1),
+# test_the_burst_just_refreshed_is_quiet_on_the_two_ticks_after_it (clause 2),
+# test_the_shipped_cursor_adopts_its_burst_quietly_and_then_hears_the_next_one,
+# seeded from the committed witness bytes,
+# test_an_escalation_the_board_refused_keeps_the_burst_it_owes, and
+# test_a_later_burst_after_the_row_was_closed_reports_rather_than_silence, with the
+# writer half in tests/test_guardian_speak.py::
+# test_a_new_burst_names_only_the_alerts_it_lost. Clause 4 — the witness bytes
+# themselves — is test_the_committed_witness_bytes_are_the_cursor_the_item_quotes.
 
 _OCCURRENCES = re.compile(r"^Occurrences:[ \t]*(\d+)", re.M)
 _LAST_SEEN = re.compile(r"^Last seen:[ \t]*(\S+)", re.M)
@@ -380,7 +393,12 @@ def test_an_unchanged_record_files_nothing_on_a_later_tick(tmp_path, monkeypatch
 
     assert third["reason"] == "unchanged", third
     assert len(board.requests) == requests_after_first, (
-        "a cursor written by anything else must hold just as firmly")
+        "an unchanged record must not even be looked up, let alone posted to")
+    assert gstate.read_json(esc.cursor_path)["last_escalated_burst_ts"] == \
+        speak.read_loss_record(tmp_path)["burst_started"], (
+        "#1913: that cursor names a count and no burst, so the quiet tick adopted "
+        "the burst in front of it instead of escalating a guess — holding firmly "
+        "and being able to tell the NEXT burst apart are both true of one tick")
     assert esc.cursor_path.name == "voice_loss_cursor.json"
     assert (tmp_path / "voice_loss_cursor.json").is_file(), (
         "the watermark is on disk in the guardian state dir, not in memory")
@@ -451,6 +469,328 @@ def test_the_child_that_lost_the_words_makes_no_backend_call(tmp_path, monkeypat
         "the child must not reach the backlog route: it dies with the sound")
     body = (tmp_path / speak.LOSS_NAME).read_text(encoding="utf-8")
     assert "occurrences: 1" in body and _LOST in body, body
+
+
+# ── #1913: a LATER burst is a new incident, whatever its count ────────
+# `speak._record_loss` resets `occurrences` to 1 once a failure lands outside
+# `LOSS_WINDOW`, so every later outage carries a SMALLER count than the incident
+# the cursor escalated. #1904 compared the count alone, so past the first
+# escalated burst the answer was `unchanged` forever — and the record quoted the
+# ended burst's utterances while it said so. The nodes below are that pair — the
+# comparison reads the burst the cursor escalated, and the writer names only what
+# its own burst lost — plus the bytes the claim was measured on (clause 4) and the
+# one path where the new rule could quietly undo the old one: a refused delivery.
+
+#: The witness bytes for the state the item calls production: the cursor as the
+#: shipped guardian wrote it, copied out of
+#: `~/.local/state/lloyd-guardian/voice_loss_cursor.json` and committed on the
+#: vault's main (clause 4). Copied rather than imitated because the live file is
+#: overwritten by the next delivery — the pre-#1913 shape, a count with no burst
+#: attached, has no history anywhere else once the staged copy is replaced — and
+#: because the upgrade node below SEEDS itself from these bytes, so a shape that
+#: drifted fails here rather than turning a production cursor into a surprise.
+#: Same route the other witness-reading suites take
+#: (`test_component_manifest_retention.py::_WITNESS`).
+_WITNESS = VAULT_ROOT / "backlog" / "data" / "voice_loss_cursor.json"
+
+
+def _witness_cursor() -> dict:
+    """The committed cursor bytes, parsed — or a failure that names the fix.
+
+    Fails rather than skipping, the choice
+    `test_component_manifest_retention.py::_witness_turn_start_median` makes for
+    the same reason: the upgrade node's premise and the figure clause 4 quotes both
+    rest on these bytes, and a skipped check would leave `occurrences: 2` sitting
+    in the item with nothing re-measurable behind it.
+    """
+    assert _WITNESS.is_file(), (
+        f"{_WITNESS} is absent, so the cursor the item quotes cannot be "
+        "re-derived; it is committed on the vault's main as 5bdb2132")
+    return json.loads(_WITNESS.read_text(encoding="utf-8"))
+
+
+def test_the_committed_witness_bytes_are_the_cursor_the_item_quotes():
+    """Clause 4: the quoted production state is re-derived from committed bytes.
+
+    What the item quotes about the cursor is three fields — `occurrences: 2`,
+    `action: created`, `item_id: 1911` — and all three were read out of
+    `~/.local/state/lloyd-guardian/voice_loss_cursor.json`, a file the next delivery
+    overwrites. Here they are asserted against the copy the clause asked for.
+
+    Clause 4's command, `wc -l < backlog/data/voice_loss_cursor.json`, prints 8, and
+    that 8 is the file's own newline count and nothing more: `gstate.write_json_atomic`
+    (`gstate.py:36`) writes `json.dumps(payload, indent=2)` with no trailing newline,
+    so this cursor's 7 fields plus the braces are 9 lines held by 8 newlines. It is
+    pinned so the bytes stay checkable by the command the clause names — NOT as a
+    count of incidents or lost alerts, which it has no relation to. The number that
+    decides an alarm is `occurrences`, asserted below.
+
+    The absence last is the point of committing the file at all: no
+    `last_escalated_burst_ts`. That key is what #1913 adds, and its absence on the
+    bytes the running guardian wrote is the proof that production's watermark was a
+    bare count — the state in which any burst of 1 or 2 lost spoken alerts never
+    alarms, for good.
+    """
+    raw = _WITNESS.read_bytes()
+    cursor = _witness_cursor()
+
+    newlines = raw.count(b"\n")
+    assert newlines == 8, (
+        f"`wc -l < {_WITNESS}` prints {newlines}, not the 8 the clause quotes")
+    assert not raw.endswith(b"\n"), "indent=2 with no trailing newline, as " \
+                                    "`gstate.write_json_atomic` writes it"
+    assert cursor["schema"] == 1, cursor
+    assert cursor["occurrences"] == 2, (
+        f"the item's whole premise is that production sits AT this watermark: {cursor}")
+    assert cursor["action"] == "created", cursor
+    assert cursor["item_id"] == 1911, cursor
+    assert "last_escalated_burst_ts" not in cursor, (
+        f"these bytes are the PRE-#1913 cursor; a burst key here means the witness "
+        f"was overwritten by a newer one and no longer shows the blind watermark: {cursor}")
+
+
+def _seed_escalated_burst(esc, *, reason: str, occurrences: int,
+                          item_id: int) -> dict:
+    """Escalate what is on disk and hand back the cursor that write left behind.
+
+    Called rather than hand-written, because the field under test is WHICH burst a
+    watermark belongs to: a literal here would be an opinion about the shape
+    `_write_cursor` produces rather than that shape. `reason` is the outcome the
+    caller expects and is pinned here, not at the call site, so a helper that let
+    any outcome through cannot hand back a cursor from an escalation that never
+    happened; the cursor's `action` carries the same string the tick reported.
+    """
+    report = esc.tick()
+    assert report["reason"] == reason, report
+    cursor = gstate.read_json(esc.cursor_path)
+    assert cursor["occurrences"] == occurrences, cursor
+    assert cursor["action"] == reason, cursor
+    assert cursor["item_id"] == item_id, cursor
+    return cursor
+
+
+def _lose_a_later_burst(state_dir: Path, clk, *texts: str) -> None:
+    """Lose alerts in a NEW burst: the clock moves past `LOSS_WINDOW` first.
+
+    The gap is the whole scenario. Six hundred seconds — what the #1904 nodes
+    advance — is INSIDE the window, so those records keep counting and the reset
+    that silenced the alarm never happens on that path.
+    """
+    clk.now += speak.LOSS_WINDOW + 1.0
+    _burst(state_dir, *texts)
+
+
+def test_a_later_burst_smaller_than_the_watermark_refreshes_the_open_row(
+        tmp_path, monkeypatch, board):
+    """#1913 clause 1: the cursor is at 2, the new burst is at 1, and the row still
+    moves — one update, to the open row's id, with the flag, carrying THIS burst's
+    count and last-seen.
+
+    This is the live state, not a construction: `voice_loss_cursor.json` holds
+    `{"occurrences": 2, "item_id": 1911}` while 24 `synth failed` lines spread over
+    8 separate days in `voice.log` are almost all bursts of 1 to 3. Against the
+    shipped comparison every one of them reports `unchanged` and posts nothing, for
+    good; the burst identity is what makes a 1-alert outage audible again.
+    """
+    clk = _clock(monkeypatch, time.time())
+    _burst(tmp_path, _LOST, _LOST_2)
+    esc = _escalator(board, tmp_path)
+    assert esc.tick(now=clk.now)["reason"] == "created"
+    filed_id = board.next_id - 1
+    board.rows = [{"id": filed_id, "name": voiceloss.ITEM_NAME, "status": "draft",
+                   "board": "lloyd"}]
+
+    _lose_a_later_burst(tmp_path, clk, _LOST_3)
+    report = esc.tick(now=clk.now)
+
+    assert report["reason"] == "refreshed", (
+        f"a new burst below the watermark was read as nothing new: {report}")
+    updates = board.calls(UPDATE)
+    assert len(updates) == 1, f"expected one update, got {len(updates)}"
+    assert updates[0]["payload"]["id"] == filed_id, updates[0]["payload"]
+    assert updates[0]["payload"].get("force_body_replace") is True, (
+        "the new burst's body IS shorter than the one it replaces, and the route "
+        "drops a shorter body while answering 200")
+    assert len(board.calls(CREATE)) == 1, "a new incident refreshes; it does not duplicate"
+    body = _body(updates[0])
+    assert _count(body) == 1, f"the board must carry this burst's count: {body}"
+    assert _last_seen(body) > _last_seen(_body(board.calls(CREATE)[0])), (
+        "the board must say when THIS burst was last seen, not the one before it")
+    assert _LOST_3 in body, body
+    for stale in (_LOST, _LOST_2):
+        assert stale not in body, f"the new burst quotes the ended one: {stale!r}"
+
+
+def test_the_burst_just_refreshed_is_quiet_on_the_two_ticks_after_it(
+        tmp_path, monkeypatch, board):
+    """#1913 clause 2: the count check is now the weaker of two, so the anti-spam
+    half has to be pinned where it is weakest — right after a burst change, when
+    the watermark went DOWN (2 → 1) and the record is 1.
+
+    `tick()` runs every `policy.TICK_SECONDS`. A burst-identity rule that forgot
+    the count, or wrote its cursor without the burst it just delivered, would post
+    an update every 5 s to the same row for the rest of the process's life; two
+    ticks is the minimum that sees a cursor that failed to advance at all.
+    """
+    clk = _clock(monkeypatch, time.time())
+    _burst(tmp_path, _LOST, _LOST_2)
+    esc = _escalator(board, tmp_path)
+    assert esc.tick(now=clk.now)["reason"] == "created"
+    board.rows = [{"id": board.next_id - 1, "name": voiceloss.ITEM_NAME,
+                   "status": "draft", "board": "lloyd"}]
+    _lose_a_later_burst(tmp_path, clk, _LOST_3)
+    assert esc.tick(now=clk.now)["reason"] == "refreshed"
+    requests, updates_after = len(board.requests), len(board.calls(UPDATE))
+
+    for step in (5.0, 10.0):
+        again = esc.tick(now=clk.now + step)
+        assert again["reason"] == "unchanged", f"tick +{step}s: {again}"
+
+    assert len(board.requests) == requests, (
+        "one unmodified record must not be looked up twice, let alone posted twice")
+    assert len(board.calls(UPDATE)) == updates_after == 1
+    assert len(board.calls(CREATE)) == 1, (
+        "the burst that was refreshed is the only incident this node ever files")
+    cursor = gstate.read_json(esc.cursor_path)
+    assert cursor["last_escalated_burst_ts"] == \
+        speak.read_loss_record(tmp_path)["burst_started"], (
+        f"the quiet ticks only hold because the cursor names the burst it "
+        f"delivered: {cursor}")
+
+
+def test_the_shipped_cursor_adopts_its_burst_quietly_and_then_hears_the_next_one(
+        tmp_path, monkeypatch, board):
+    """The upgrade this change has to survive, run on the bytes the shipped
+    guardian actually wrote: `_WITNESS`, the copy of
+    `~/.local/state/lloyd-guardian/voice_loss_cursor.json` that clause 4 asked for,
+    whose `occurrences: 2` / `action: created` / `item_id: 1911` shape carries no
+    burst key at all.
+
+    Seeded from the file rather than transcribed into a literal, because this node
+    is the one that decides what the new code does to a cursor it did not write: if
+    the real file has a field this node never passed through, that is a bug in
+    production and a literal would have hidden it.
+
+    Two properties, one after the other, because they pull opposite ways. A tick
+    over the record that watermark was copied from must stay SILENT — a cursor with
+    no burst is not a new outage, and a guardian that escalates on every restart is
+    a new way to spam the board. And it must not stay blind: the quiet tick adopts
+    that burst, so the NEXT one has something to differ from and is escalated.
+    """
+    clk = _clock(monkeypatch, time.time())
+    _burst(tmp_path, _LOST, _LOST_2)
+    esc = _escalator(board, tmp_path)
+    shipped = _witness_cursor()
+    assert "last_escalated_burst_ts" not in shipped, (
+        f"this node is the upgrade FROM the blind shape: {shipped}")
+    gstate.write_json_atomic(esc.cursor_path, shipped)
+    board.rows = [{"id": 1911, "name": voiceloss.ITEM_NAME, "status": "draft",
+                   "board": "lloyd"}]
+
+    first = esc.tick(now=clk.now)
+
+    assert first["reason"] == "unchanged", (
+        f"a watermark with no burst is not a new outage: {first}")
+    assert board.calls(CREATE) == [] and board.calls(UPDATE) == [], (
+        "adopting is not escalating: nothing was lost since that row was filed")
+    adopted = gstate.read_json(esc.cursor_path)
+    burst_a = speak.read_loss_record(tmp_path)["burst_started"]
+    assert adopted["last_escalated_burst_ts"] == burst_a, (
+        f"the blind cursor must learn the burst its count belongs to: {adopted}")
+    assert (adopted["action"], adopted["item_id"]) == ("created", 1911), (
+        f"adopting must not rewrite what the cursor points at: {adopted}")
+
+    _lose_a_later_burst(tmp_path, clk, _LOST_3)
+    second = esc.tick(now=clk.now)
+
+    assert second["reason"] == "refreshed", (
+        f"one quiet tick was all the upgrade needed; a later burst is news: {second}")
+    assert len(board.calls(UPDATE)) == 1 and len(board.calls(CREATE)) == 0
+
+
+def test_a_later_burst_after_the_row_was_closed_reports_rather_than_silence(
+        tmp_path, monkeypatch, board):
+    """A new burst against a CLOSED row is reported `closed-suppressed`, not
+    `unchanged` — and files nothing.
+
+    The second half is not this item's to change: #1904's clause and
+    `test_a_closed_voice_loss_item_is_neither_refreshed_nor_re_opened` rule that a
+    person who closed `[alerts] voice loss` ended that incident, and whether a
+    genuinely new burst should be allowed to file a fresh row is a ruling still
+    owed on #1904. What #1913 fixes is the half below that ruling: the burst must
+    at least REACH the board and be named in the guardian's log, instead of being
+    swallowed by a count comparison before anyone looks.
+    """
+    clk = _clock(monkeypatch, time.time())
+    _burst(tmp_path, _LOST, _LOST_2)
+    board.rows = [{"id": 1911, "name": voiceloss.ITEM_NAME, "status": "done",
+                   "board": "lloyd"}]
+    esc = _escalator(board, tmp_path)
+    cursor_a = _seed_escalated_burst(esc, occurrences=2, item_id=1911,
+                                     reason="closed-suppressed")
+
+    _lose_a_later_burst(tmp_path, clk, _LOST_3)
+    report = esc.tick(now=clk.now)
+
+    assert report["reason"] == "closed-suppressed", (
+        f"a new incident was never put in front of the ruling: {report}")
+    assert board.calls(CREATE) == [], "closing an incident stays closed (#1904 clause 3)"
+    assert board.calls(UPDATE) == []
+    cursor_b = gstate.read_json(esc.cursor_path)
+    assert cursor_b["last_escalated_burst_ts"] != cursor_a["last_escalated_burst_ts"], (
+        f"the suppressed burst must still move the watermark, or every tick after "
+        f"it re-reads one incident: {cursor_a} -> {cursor_b}")
+
+
+def test_an_escalation_the_board_refused_keeps_the_burst_it_owes(
+        tmp_path, monkeypatch, board):
+    """A refused delivery stays owed INCLUDING its burst: `_retry` copies the cursor
+    it is overwriting, and a retry cursor with no burst is a blind one.
+
+    This is where the two halves of #1913 could cancel each other. `_retry` writes
+    `occurrences` back as the OLD watermark, so after a refusal the record's count
+    sits at or under it and only the burst can say the work is still owed. Drop the
+    carry at `voiceloss.py:371` and the retry cursor names no burst, `tick` reads
+    that as the pre-#1913 shape, and its rule for that shape is to adopt quietly —
+    so the refused burst is adopted instead of delivered, and no count assertion in
+    this file goes red. Measured on the round's own worktree: deleting that one line
+    leaves all the other nodes green.
+
+    The refused tick and the delivered one are separate escalators over the SAME
+    state dir, which is how it happens in production: the backend is down on one
+    tick of the 5 s loop and answering on a later one, and the cursor is what
+    carries the debt between them.
+    """
+    clk = _clock(monkeypatch, time.time())
+    _burst(tmp_path, _LOST, _LOST_2)
+    esc = _escalator(board, tmp_path)
+    assert esc.tick(now=clk.now)["reason"] == "created"
+    filed_id = board.next_id - 1
+    board.rows = [{"id": filed_id, "name": voiceloss.ITEM_NAME, "status": "draft",
+                   "board": "lloyd"}]
+    owed_burst = gstate.read_json(esc.cursor_path)["last_escalated_burst_ts"]
+
+    _lose_a_later_burst(tmp_path, clk, _LOST_3)          # count 1, under watermark 2
+    down = voiceloss.VoiceLossEscalator(
+        tmp_path, base_url=f"http://127.0.0.1:{_refused_port()}")
+    refused = down.tick(now=clk.now)
+
+    assert refused["reason"] == "unreachable", (
+        f"a new burst under the watermark never reached the route at all: {refused}")
+    retry = gstate.read_json(down.cursor_path)
+    assert retry["occurrences"] == 2, (
+        f"an undelivered escalation stays owed at the old watermark: {retry}")
+    assert retry["last_escalated_burst_ts"] == owed_burst, (
+        f"and it keeps the burst it owes; without this the next tick adopts the "
+        f"burst instead of delivering it: {retry}")
+
+    delivered = esc.tick(now=retry["next_attempt_ts"] + 1.0)
+
+    assert delivered["reason"] == "refreshed", (
+        f"the debt survived the refusal or it did not: {delivered}")
+    updates = board.calls(UPDATE)
+    assert len(updates) == 1 and updates[0]["payload"]["id"] == filed_id, updates
+    assert _count(_body(updates[0])) == 1, _body(updates[0])
 
 
 # ── the seams the change crosses, pinned once ─────────────────────────
