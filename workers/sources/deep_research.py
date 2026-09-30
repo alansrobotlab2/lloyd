@@ -278,6 +278,35 @@ def parse_verdict(text: str, structured: Optional[dict] = None) -> Optional[dict
     return {**parsed, "source": "regex"} if parsed is not None else None
 
 
+def _pointer_shaped(value: str) -> bool:
+    """True when a `duplicate_of` value has the shape of a pointer to a document.
+
+    The finalizer's guided decode emits key names and punctuation as VALUES when it
+    runs out of real text — the same corruption #1773 rescued the counts from, and
+    `duplicate_of` is the field that rescue deliberately left alone
+    (`_recover_counts`: "result, note and duplicate_of stay exactly as the finalizer
+    said them"). So `duplicate of facts` reached the outcome note of four topics that
+    finished `written`, and a truthy garbage token suppressed the downgrade that
+    exists precisely for a duplicate with no usable pointer.
+
+    The test is SHAPE, not a list of the tokens seen, because the token set is the
+    decoder's vocabulary and grows whenever a key is renamed: a value is a pointer if
+    it names a path, which is what a vault note is — either it has a directory
+    separator or it is a markdown filename. Four live rows show what is accepted
+    (`knowledge/research/2026-09-26-discrete-event-…md`) and what is not (`null`,
+    `facts”,14,`, `facts`). A rejected token is not dropped: the caller keeps it
+    verbatim as `duplicate_of_raw` for whoever reads the row next.
+
+    The predicate deliberately does NOT accept a bare registry id (`14`, `topic 14`).
+    The prompt this source sends asks for "DUPLICATE_OF: <the note or topic that
+    already covers it>", so one day a genuine duplicate may arrive that way and be
+    downgraded to `nothing_found`. No such value has ever been observed in the
+    registry, and widening the grammar is a ruling, not a default — see #1875's owed
+    entry 3.
+    """
+    return "/" in value or value.endswith(".md")
+
+
 def _note_is_real(path: Path) -> bool:
     try:
         return path.is_file() and len(path.read_bytes()) >= _MIN_NOTE_BYTES
@@ -567,16 +596,28 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         return await give_up_or_retry(
             f"claimed written but {path.name} is not on disk; session {session_id}",
             {"session_id": session_id, "claimed_written": True})
-    if result == "duplicate" and not parsed["duplicate_of"]:
+    # ONE shape test, computed once, feeding both places a pointer is used, so the
+    # note and the downgrade can never disagree about whether the value was usable.
+    # `_pointer_shaped` carries why this is a shape rule rather than a token list.
+    pointer = str(parsed["duplicate_of"] or "").strip()
+    usable_pointer = _pointer_shaped(pointer)
+    if pointer and not usable_pointer:
+        # Rejected as a pointer, recorded VERBATIM: the token names the decode field
+        # that leaked, which is the clue the next reader needs, and it is gone once
+        # the value is dropped on the floor.
+        extra["duplicate_of_raw"] = pointer
+
+    if result == "duplicate" and not usable_pointer:
         # An unsupported "we already know this" is indistinguishable from
-        # giving up, so record it as the latter and say why.
+        # giving up, so record it as the latter and say why. A garbage token is
+        # exactly that case (#1875): it used to read as a pointer and skip this.
         result = "nothing_found"
         extra["downgraded_from"] = "duplicate"
 
     note = (f"facts={parsed['facts'] or '?'} sources={parsed['sources'] or '?'}; "
             f"session {session_id}")
-    if parsed["duplicate_of"]:
-        note = f"duplicate of {parsed['duplicate_of']}; {note}"
+    if usable_pointer:
+        note = f"duplicate of {pointer}; {note}"
     row = await asyncio.to_thread(
         store.finish, int(topic_id), result,
         artifact_path=str(path) if result == "written" else "",

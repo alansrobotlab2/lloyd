@@ -1274,3 +1274,167 @@ def test_only_the_junk_count_falls_back_and_a_clean_object_never_reads_the_block
     clean = D.parse_verdict(turn_text, _obj())
     assert clean["facts"] == "3" and clean["sources"] == "5"
     assert "facts_raw" not in clean and "sources_raw" not in clean
+
+
+# ---------------------------------------------------------------------------
+# #1875: a non-path-shaped duplicate_of is treated as absent at both use sites
+# ---------------------------------------------------------------------------
+# The finalizer's guided decode emits key names and punctuation as VALUES when it
+# runs out of real text. #1773 rescued the COUNTS from that (`_recover_counts`) and
+# deliberately left `duplicate_of` as the finalizer said it, so four live topics
+# (#14/#15/#19/#23, all `status=written`) shipped an outcome note reading
+# `duplicate of null` / `duplicate of facts”:14,` / `duplicate of facts`, and a
+# truthy garbage token would have suppressed the downgrade that exists for a
+# duplicate with no usable pointer. Topic 23 is the one with receipts:
+# `duplicate of facts; facts=11 sources=8; session 20260929_190734_deepresearch_a3d5`
+# — the same row where #1773's rescue fixed the count and left the pointer garbled.
+
+
+async def test_a_written_topic_with_a_garbage_duplicate_pointer_keeps_a_clean_note(
+        registry, queue, notes, monkeypatch):
+    """Clause 1: topic 23's shape settles with no `duplicate of` prefix at all.
+
+    `result=written` with `duplicate_of="facts"` — a token, not a pointer — must
+    produce the note the counts alone would have produced. The bug did not make the
+    topic's status wrong; it made the note say something false about a document that
+    does not exist, and the registry is where a human reads the outcome.
+    """
+    payload, topic_id, path = _payload(registry, notes)
+    monkeypatch.setattr(D, "run_prompt_in_session", _turn(
+        f"RESULT: written\nNOTE: {path}\nFACTS: 11\nSOURCES: 8\n", writes=path,
+        structured=_obj("written", duplicate_of="facts",
+                        facts="11", sources="8")))
+
+    out = await D.execute(_item(payload))
+    assert out["status"] == "success" and out["meta"]["result"] == "written"
+    row = registry.get(topic_id)
+    assert row["status"] == "written"
+    assert row["outcome_note"] == "facts=11 sources=8; session 20260908_deep_x", (
+        "the note is the counts and the session, with nothing prepended")
+    assert "duplicate of" not in row["outcome_note"], (
+        "a garbage token reached the outcome note again — topic 23's shipped string")
+
+
+async def test_a_duplicate_with_an_unparseable_pointer_downgrades(registry, queue,
+                                                                  notes, monkeypatch):
+    """Clause 2: `result=duplicate` + `duplicate_of="],}"` is `nothing_found`.
+
+    The downgrade at `deep_research.py` exists for "we already know this" with no
+    evidence, and its own test (`test_an_unsupported_duplicate_is_downgraded`) covers
+    the EMPTY pointer. A garbage token is the same evidentiary state wearing a truthy
+    value, and before this change it skipped the branch entirely — the topic then
+    shipped as a duplicate pointing at nothing, which is the outcome the branch was
+    written to prevent.
+    """
+    payload, topic_id, _path = _payload(registry, notes)
+    monkeypatch.setattr(D, "run_prompt_in_session", _turn(
+        "RESULT: duplicate\nDUPLICATE_OF: ],}\n",
+        structured=_obj("duplicate", duplicate_of="],}")))
+
+    out = await D.execute(_item(payload))
+    assert out["meta"]["result"] == "nothing_found", (
+        "a token that names no document is not evidence of a duplicate")
+    row = registry.get(topic_id)
+    assert row["status"] == "nothing_found"
+    assert row["extra"]["downgraded_from"] == "duplicate"
+
+
+async def test_the_rejected_pointer_token_is_kept_verbatim_and_the_object_still_wins(
+        registry, queue, notes, monkeypatch):
+    """Clause 3: rejection is not deletion, and the verdict stays the object's.
+
+    Three things at once, because they are three ways the same fix could quietly
+    lose information: the token survives as `duplicate_of_raw` (it names which decode
+    field leaked — the clue the next reader needs, and it is gone if the value is
+    dropped); `verdict_source` stays `structured`; and the settled result still comes
+    from the object, which here DISAGREES with the text block. The block says
+    `nothing_found`; the object says `written`; the row says `written`.
+    """
+    payload, topic_id, path = _payload(registry, notes)
+    monkeypatch.setattr(D, "run_prompt_in_session", _turn(
+        f"RESULT: nothing_found\nNOTE: {path}\n", writes=path,
+        structured=_obj("written", duplicate_of="facts", facts="4", sources="2")))
+
+    out = await D.execute(_item(payload))
+    row = registry.get(topic_id)
+    assert row["status"] == "written", (
+        "the text block decided the outcome, not the structured object")
+    assert row["extra"]["verdict_source"] == "structured"
+    assert row["extra"]["duplicate_of_raw"] == "facts", (
+        "the rejected token has to be readable by whoever comes next")
+    assert "duplicate_of_raw" in out["meta"], "the same token on the worker's own meta"
+
+
+async def test_a_path_shaped_pointer_still_prefixes_the_note_and_still_counts(
+        registry, queue, notes, monkeypatch):
+    """Clause 4: the legitimate half is untouched, on BOTH paths.
+
+    `test_only_the_counts_fall_back_and_the_object_still_decides_the_rest` already
+    pins the byte-exact prefixed note (`outcome_note ==
+    "duplicate of knowledge/research/2026-09-20-earlier.md; facts=2 sources=4; …"`,
+    green unchanged by this diff); this node pins the other half, which no existing
+    test covers: a `duplicate` result carrying a path-shaped pointer must NOT be
+    downgraded. Before the change that held by accident — any
+    truthy value skipped the branch; after it, it holds because the shape test says
+    the pointer is usable, which is the distinction the whole item turns on.
+    """
+    payload, topic_id, _path = _payload(registry, notes)
+    pointer = "knowledge/research/2026-09-26-discrete-event-simulation.md"
+    monkeypatch.setattr(D, "run_prompt_in_session", _turn(
+        f"RESULT: duplicate\nDUPLICATE_OF: {pointer}\n",
+        structured=_obj("duplicate", duplicate_of=pointer, facts="1", sources="6")))
+
+    out = await D.execute(_item(payload))
+    assert out["meta"]["result"] == "duplicate", (
+        "a real pointer is exactly what the downgrade asks for and must survive")
+    row = registry.get(topic_id)
+    assert row["status"] == "duplicate"
+    assert "downgraded_from" not in row["extra"]
+    assert row["outcome_note"] == (
+        f"duplicate of {pointer}; facts=1 sources=6; session 20260908_deep_x")
+    assert "duplicate_of_raw" not in row["extra"], (
+        "an accepted pointer is not a rejected one; recording it as raw would say "
+        "the shape test ran against a value it accepted")
+
+
+async def test_the_shape_test_rejects_a_token_nobody_has_seen(registry, queue,
+                                                             notes, monkeypatch):
+    """Clause 5: the gate is a shape rule, so an unseen token fails the same way.
+
+    `facts”:14,` is topic 15's shipped corruption and appears NOWHERE in this diff —
+    not in the predicate, not in a test list of bad values. So does `null` (topic 14's)
+    and a bare registry id, which the prompt's wording does invite and which is
+    accepted as a POINTER only if someone rules on it (#1875 owed entry 3). If the
+    gate were an enumeration, this node would pass for the tokens it names and stay
+    blind to the next key the decoder renames — which is how `duplicate_of` became the
+    live corruption surface after #1773 closed the counts.
+
+    Asserted first end to end — an unseen token settling a topic with an unprefixed
+    note — and then as grammar, over the shipped predicate in both directions: the
+    four live corruptions plus values nobody has observed are rejected, and the one
+    shape that names a document is accepted. That pair is the whole rule, so neither
+    half can drift alone.
+    """
+    # End to end first: a token this diff never mentions in its own prose has to
+    # settle the topic with an unprefixed note. The node fails on behaviour, not
+    # on a symbol it happens to be missing.
+    payload, topic_id, path = _payload(registry, notes)
+    monkeypatch.setattr(D, "run_prompt_in_session", _turn(
+        f"RESULT: written\nNOTE: {path}\nFACTS: 6\nSOURCES: 3\n", writes=path,
+        structured=_obj("written", duplicate_of="null", facts="6", sources="3")))
+    out = await D.execute(_item(payload))
+    row = registry.get(topic_id)
+    assert out["meta"]["result"] == "written"
+    assert row["outcome_note"] == "facts=6 sources=3; session 20260908_deep_x"
+    assert row["extra"]["duplicate_of_raw"] == "null"
+
+    # Then the grammar itself, both directions, over the shipped predicate.
+    rejected = ["facts", "null", "facts”:14,", "],}", "14", "topic 14",
+                "sources", "note", "knowledge", "true", "."]
+    accepted = ["knowledge/research/a.md", "a.md", "/x/y",
+                "knowledge/research/2026-09-26-discrete-event-simulation.md"]
+    assert all(not D._pointer_shaped(v) for v in rejected), (
+        [v for v in rejected if D._pointer_shaped(v)])
+    assert all(D._pointer_shaped(v) for v in accepted), (
+        [v for v in accepted if not D._pointer_shaped(v)])
+
