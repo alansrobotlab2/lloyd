@@ -1049,6 +1049,59 @@ def test_section2_says_why_queue_maintenance_is_not_a_row():
             "half alone lets a reader re-file the open question")
 
 
+def test_section2_table_names_only_registered_sources():
+    """#1775: the ruling that `queue-maintenance` gets no row of §2's table, as a check.
+
+    The store holds rows under a name the registry has never carried — `run_sweep()`
+    books one into `runs` from `workers/maintenance.py`, from the scheduler's own
+    sweep rather than from a runner claim. §2's table is the one place in this doc
+    whose rows read as "this source ran through the queue", so that name is a standing
+    temptation to add a row to it, and #1775's ruling was that none is added: the sweep
+    is deliberately not a work source, nothing enqueues into it, and §2's prose bullet —
+    the one that dates its count — IS the record. Prose in a closed item stays prose;
+    this node is the same ruling as an assertion, so the row now fails a test instead
+    of passing a suite.
+
+    The two asserts are deliberately asymmetric, and the asymmetry is the ruling. The
+    name has to be in §2's prose and must not be in its parsed table, both at once.
+    That is also why the check cannot be a ban on the name anywhere in the section:
+    §2's text names it twice, both times in that bullet, so
+    `queue-maintenance not in _section(SEC2)` is satisfied by the very sentence the
+    ruling points at — and would still pass on a doc that had gone on to add the row.
+    `_sec2_prose()` drops table rows, so the bullet assert cannot be licensed by a row;
+    `_table_after` parses the table and nothing else, so the table assert cannot be
+    satisfied by prose.
+
+    Subset, never equality. A registered source that ran nothing inside §2's single
+    dated window legitimately has no row, so `rows == _registry()` would go red on a
+    quiet week over a doc that is telling the truth; equality against the registry is
+    `test_workers_jobs_roster_is_the_registry`'s claim, on §1's roster, where every
+    source belongs whatever it did that week. At this table's stamp the two sets do
+    coincide, which is a fact about one window and the reason it is not asserted here.
+
+    Names only. Every column but the first is a run count from a window that moves on
+    every sweep, and `test_section2_carries_no_undated_count` is the node that deals
+    with numbers; this one reads the first column and nothing else.
+    """
+    rows = _table_after(ARCH / "workers-jobs.md", SEC2)
+    assert rows, "§2 has no per-source table to check"
+    registered = _registry()
+
+    unregistered = rows - registered
+    assert not unregistered, (
+        f"§2's run table carries {sorted(unregistered)}, which SOURCE_REGISTRY does "
+        "not name. A row is a claim that a queued source ran; #1775 ruled that an "
+        "unregistered bookkeeping name like `queue-maintenance` is recorded in this "
+        "section's prose bullet instead — and "
+        "test_config_configures_only_registered_sources is already there to refuse "
+        "the other way round, a config block for a name no runner claims")
+
+    assert "queue-maintenance" in _sec2_prose(), (
+        "§2's prose no longer records `queue-maintenance`, which is where #1775 put "
+        "the record: clearing the bullet would leave the table's silence looking "
+        "tidy while destroying the only account of why the name has rows but no row")
+
+
 def test_section2_explains_what_a_zero_in_the_automod_regression_row_means():
     """Clause 3: the placeholder zero is gone and the inference is now the code's.
 
