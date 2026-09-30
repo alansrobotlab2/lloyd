@@ -22,6 +22,12 @@ either moved. Since #1627 it has a third duty, which is the one that bites:
   gone, and the two re-open triggers are pinned to the same derivations as the
   criteria — trigger one to `chat_turns_with_misses`, trigger two to §6.1's
   per-day budget — so neither figure can be re-cut by hand when it suits;
+* and since #1921 it holds the accepted-loss ruling's own FILING condition to account:
+  2026-09-29 is the first counted day on which a chat-turn miss had neither free-pool
+  churn nor a gate-level KV gap, and its extract is the third in the tree — every figure
+  in that paragraph, down to the gap's KV peak against the gate and its tokens against
+  the free pool the peak implies, is recomputed over it here, with `EXTRACT` and
+  `REOPEN_EXTRACT` left pointing at the days they already grade;
 * and since #1810 it holds (a)'s two mints and the population ruling to account: the
   `iv` id prefix may never be bound to the Inner-Voice opt-in inside one clause (the
   mint that appends it reads no body first), owed-check's ruling that a day at the
@@ -856,8 +862,12 @@ def test_the_two_request_population_is_the_raw_status_lines():
     """The population and the slow count recomputed straight off the extract's
     rows, independent of the derivation: the numbers §10 quotes are those
     lines, the exclusion cannot swallow one, and there is at least one slow
-    window on each day for the exclusion to be about at all."""
-    for path in (EXTRACT, OLD_EXTRACT):
+    window on each day for the exclusion to be about at all. #1921 adds the
+    2026-09-29 extract, whose paragraph prints the same four figures: a day
+    that re-uses (d)'s rule is a day (d)'s rule has to be independently true
+    of, and re-checking it here is why that day's (d) claim is not merely
+    `derive` agreeing with itself."""
+    for path in (EXTRACT, OLD_EXTRACT, FILING_EXTRACT):
         ex = json.loads(path.read_text(encoding="utf-8"))
         t0, t1 = W._epoch(ex["window"][0]), W._epoch(ex["window"][1])
         raw = [s for s in ex["kv_samples"] if t0 <= s[0] < t1]
@@ -974,7 +984,10 @@ def _gap_events(ex: dict, gate: float) -> list[dict]:
     peak, the tokens computed inside the gap, and the free blocks that peak implies
     on this pool, churn when the first reaches the last. Nothing in the script is
     edited to expose it, which #1812's step 6 forbids; instead the tally is checked
-    against the aggregate, so this walk cannot drift from the rule it copies.
+    against the aggregate, so this walk cannot drift from the rule it copies. #1921 adds
+    `n_lines` — how many status lines the gap spans at all — because its paragraph says
+    the one chat miss's gap is "a single engine status line", and a claim about a gap that
+    thin is only worth checking if the line count comes from the same join.
     """
     samples = ex["kv_samples"]
     (pool,) = ex["pool_tokens"]
@@ -992,6 +1005,7 @@ def _gap_events(ex: dict, gate: float) -> list[dict]:
         computed = sum(s[3] for s in g)
         out.append({"kind": m[5], "gap_s": start - m[6], "peak": peak,
                     "computed": computed, "free_at_peak": round((1 - peak) * pool),
+                    "n_lines": len(g),
                     "churn": computed >= (1 - peak) * pool})
     d = W.derive(ex, gate=gate)
     assert len(out) == d["miss_events"] and \
@@ -1208,3 +1222,307 @@ def test_the_reopen_churn_split_and_chat_attribution_close_the_filing(s10, reope
     # a, b, c or d gained a second mark from this paragraph.
     for letter in CRITERIA:
         _verdict(_counted_reading(s10), letter)
+
+
+# ── #1921: the 2026-09-29 re-open, and the first day the filing condition is met ─
+#
+# The ruling #1720 closed with names one exception that would re-open it: a chat-turn
+# miss with NEITHER free-pool churn NOR a gate-level KV explanation. 2026-09-28 fired
+# both triggers and produced none (#1812). 2026-09-29 fired both triggers and produced
+# exactly one, so §10 now carries that day — and it had to be counted the day it
+# happened, because the engine status lines (c) and (d) are read from live in an
+# 11-file byte rotation, and because the working copies of these extracts have
+# historically landed on tmpfs, where a reboot is what deletes them (#1812).
+#
+# A THIRD extract constant, for the reason #1812 added a second one:
+# `test_the_counted_reading_is_a_named_full_utc_day_with_chat_in_it` pins `EXTRACT` to
+# the day §10 calls the counted reading, and 09-29 cannot be that day — its chat turns
+# carry a miss. Re-pointing `EXTRACT` or `REOPEN_EXTRACT` would move a reading this file
+# already grades, so both keep pointing where they do.
+#
+# Two rails the new paragraph has to respect, and is checked against rather than
+# trusted: `_verdict` allows exactly one pass/fail mark per criterion inside the counted
+# reading's span, and `test_the_chat_population_is_day_scoped_and_re_derivable_by_one_query`
+# allows exactly one read-only population query in it. The paragraph is placed AFTER the
+# two-request bullet, so `_reopen_bullet()` — which runs from the eviction bullet up to
+# that one — keeps reading only 2026-09-28's text, and #1812's five nodes are untouched.
+
+FILING_EXTRACT = ROOT / "tests" / "fixtures" / "vllm_prefix_miss_2026-09-29.json"
+
+
+@pytest.fixture(scope="module")
+def filing_raw() -> dict:
+    return json.loads(FILING_EXTRACT.read_text(encoding="utf-8"))
+
+
+@pytest.fixture(scope="module")
+def filing(filing_raw, cfg) -> dict:
+    return W.derive(filing_raw, gate=float(cfg["workers"]["kv_gate"]["max_kv_usage"]))
+
+
+def _filing_bullet() -> str:
+    """§10's 2026-09-29 paragraph, whole and collapsed.
+
+    Raw text rather than `_section`, and bounded at the draft-group bullet: the span
+    has to stop there so a phrase demanded of THIS day cannot be satisfied by the
+    09-25 or 09-28 prose several paragraphs earlier.
+    """
+    raw = DOC.read_text(encoding="utf-8")
+    start = raw.index("- **The 2026-09-29 re-open")
+    end = raw.index("- **The unannotated draft group.**", start)
+    return " ".join(raw[start:end].split()).replace("**", "")
+
+
+def test_the_filing_extract_is_committed_and_is_a_third_extract(filing_raw, filing):
+    """#1921 clauses 1 and 3: the day is in the tree, and it moved nothing.
+
+    The five hard values are the ones #1921 was filed with, exactly as #1812 pinned
+    its own four: they catch a fixture swapped for one from some other window, which
+    a byte-identity check alone cannot, since a hand-built extract for a different
+    day is still byte-identical to itself. The tracked-file check is the hazard the
+    item was filed over — an uncommitted fixture is gone with the working copy. And
+    clause 3 is behavioural, not a literal: the older two constants still resolve to
+    the days §10 grades them on, and the counted reading still names 09-25.
+    """
+    assert filing_raw["window"] == ["2026-09-29", "2026-09-30"], (
+        "the filing day is pinned to a 00:00→00:00 UTC window, like the other readings")
+    assert filing["misses"] == 139
+    assert filing["reprefill_tokens"] == 16403836
+    assert filing["chat_turns"] == 3
+    assert filing["chat_turns_with_misses"] == 1
+    tracked = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "--error-unmatch",
+         str(FILING_EXTRACT.relative_to(ROOT))],
+        capture_output=True, text=True)
+    assert tracked.returncode == 0, (
+        f"{FILING_EXTRACT.name} is on disk but not in git: the status lines it was "
+        "counted from are in a byte rotation, so an uncommitted fixture means the day "
+        "silently stops being countable — which is what #1921 was filed to prevent")
+    raw = FILING_EXTRACT.read_text(encoding="utf-8")
+    assert raw == json.dumps(filing_raw, separators=(",", ":")) + "\n", (
+        f"{FILING_EXTRACT.name} is not byte-for-byte what "
+        "`vllm_prefix_miss_window --write-extract` writes for the rows it holds, "
+        "so the committed reading has been edited by hand")
+    assert len(raw.splitlines()) == 1, (
+        "the extract is one compact line; a multi-line fixture would make every "
+        "figure in it diffable by hand")
+    assert len({EXTRACT, OLD_EXTRACT, REOPEN_EXTRACT, FILING_EXTRACT}) == 4, (
+        "the four readings are four fixtures: a re-pointed constant moves a day this "
+        "file already grades")
+    assert json.loads(EXTRACT.read_text(encoding="utf-8"))["window"] == ["2026-09-25",
+                                                                        "2026-09-26"]
+    assert json.loads(REOPEN_EXTRACT.read_text(
+        encoding="utf-8"))["window"] == ["2026-09-28", "2026-09-29"]
+    assert EXTRACT.name in _counted_reading(_section(10)), (
+        "the counted reading no longer names 2026-09-25's extract, so 09-29 displaced it")
+    assert FILING_EXTRACT.name in _filing_bullet()
+    assert f"{FILING_EXTRACT.name}:1" not in _section(10), (
+        "§10 cites a line inside the extract, which is one line long — #1812's "
+        "attempt-1 finding. Cite the test node that derives the figure instead")
+
+
+def test_the_filing_day_round_trips_and_the_fixture_outlives_the_lines(filing_raw):
+    """The committed copy is the database's, and it is already the only copy of half of it.
+
+    Two surfaces, one claim. The turn and miss rows come back out of `usage.db` and
+    the event logs, so re-running `extract` over the same window must return them
+    unchanged — a snapshot that no longer matches the record behind it is a fabricated
+    one. The KV samples come from the engine's rotating status lines, and there the
+    only honest assertion one way: re-reading the disk can lose rows now and can never
+    invent one, so whatever the logs still hold must be lines the fixture already
+    carries. That subset relation IS the item's point — after the rotation moves past
+    this day, the fixture is the only copy of those lines left in the world.
+    """
+    from app.paths import PRODUCTION_DATA_ROOT
+
+    db = PRODUCTION_DATA_ROOT / "usage.db"
+    if not db.exists():
+        pytest.skip(f"no usage.db at {db}")
+    got = W.extract(filing_raw["window"][0], filing_raw["window"][1],
+                    data_root=PRODUCTION_DATA_ROOT)
+    if not got["turns"]:
+        pytest.skip(f"{db} holds no turns for {filing_raw['window']}")
+    assert got["turns"] == filing_raw["turns"], "the counted day's turns are not the database's"
+    assert got["misses"] == filing_raw["misses"], "the counted day's misses are not the database's"
+    assert set(map(tuple, got["kv_samples"])) <= set(map(tuple, filing_raw["kv_samples"])), (
+        "the engine log reports a status line for this window that the committed "
+        "extract does not hold, so the fixture is not what `extract` emitted")
+
+
+def test_the_filing_day_figures_are_the_derivation(filing, filing_raw, cfg):
+    """#1921 clause 2: every figure the 09-29 paragraph cites is `derive`'s, at the gate
+    `config.yaml` runs.
+
+    Each assertion is a PHRASE, so editing 139, 16,403,836, 3 or 1 in the doc without the
+    extract moving fails here — the check #1921 was filed to have. The renderings are the
+    doc's own (`:,` for thousands, `.2f` for the KV quartile, `.3f` for a gap peak, `.1f`
+    for seconds, `_n` where the page writes a comma-grouped count), so a re-rounded or
+    re-comma'd figure cannot pass as "the same number", and the two sides of trigger (ii)
+    keep their separate sources: the day's from this extract, the budget's from §6.1's own
+    sentence through `_per_day_budget`.
+    """
+    p = _filing_bullet()
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    assert f"{filing_raw['window'][0]} 00:00 → {filing_raw['window'][1]} 00:00 UTC" in p, (
+        "the paragraph must name its window in the shape the other readings use")
+    assert f"{filing['chat_turns_with_misses']} of the day's {filing['chat_turns']} chat turns" in p
+    assert f"{filing['misses']} misses / {filing['reprefill_tokens']:,} tokens" in p
+    misses_per_day, tokens_per_day = _per_day_budget(_section(6))
+    assert f"{misses_per_day} misses / {tokens_per_day}M tokens" in p
+    assert filing["misses"] > misses_per_day \
+        and filing["reprefill_tokens"] > tokens_per_day * 1e6, (
+        "the paragraph says the day is over the budget on both sides; the two derived "
+        "sides have to agree that it is")
+    auto_misses, auto_tokens = filing["by_kind"]["autocode"]
+    assert (f"{auto_misses} of those {filing['misses']} misses and {auto_tokens:,} of the "
+            f"{filing['reprefill_tokens']:,} tokens are autocode") in p
+    assert f"{auto_misses / filing['misses']:.0%}" in p, "the share's rounding is the extract's"
+    m = _BASELINE_RE.search(_section(6))
+    assert m and f"2026-09-{m.group(1)}/{m.group(2)}" in p, (
+        "the caveat must name the baseline's own date range, derived from §6.1")
+    assert f"{_n(filing['kv_samples'])} such lines" in p
+    assert (f"KV p50 {filing['kv_p50']:.2f} / p90 {filing['kv_p90']:.2f} / max "
+            f"{filing['kv_max']:.2f}") in p
+    assert f"`Running:` {_n(filing['running_p50'])} at the median" in p
+    assert f"of {_n(filing['two_request_windows'])} lines with two requests resident" in p
+    assert f"median {filing['two_request_tok_s_p50']} tok/s" in p
+    assert f"slowest {filing['two_request_tok_s_min']}" in p
+    assert f"the {filing['two_request_under_stall']} under the bar's " \
+           f"{W.STALL_TOK_S:.0f} tok/s" in p
+    assert f"{filing['two_request_under_stall_cold_in_flight']} of them with a cold " \
+           "re-admission" in p
+    assert f"{filing['two_request_under_stall_cold_prefill']} with a chunked prefill" in p
+    assert f"gap p50 {filing['gap_s_p50']:.1f} s" in p
+    assert f"p50 {filing['miss_kv_gap_p50']:.3f} / p90 {filing['miss_kv_gap_p90']:.3f}" in p
+    assert f"max {filing['miss_kv_gap_max']:.3f}" in p
+    assert (f"{filing['misses_gap_over_gate']} of {filing['miss_events']} at or over the "
+            f"{gate:.2f} gate") in p
+    assert (f"of the day's {filing['miss_events']} miss events, "
+            f"{filing['misses_gap_churned_free_pool']} had free-pool churn in their gap and "
+            f"{filing['miss_events'] - filing['misses_gap_churned_free_pool']} did not") in p
+    assert ("none over 0.90" in p) == (filing["misses_gap_over_90"] == 0), (
+        "the 0.90 sentence and the derived count disagree")
+    assert f"{_n(filing['pool_tokens'])}-token pool" in p, (
+        "the free-pool arithmetic is against this pool, so the paragraph names it")
+
+
+def test_the_filing_paragraph_breaks_neither_the_one_mark_nor_the_one_query_rule(reading):
+    """#1921 clause 4: the paragraph lives inside the span that may carry exactly one
+    mark per criterion and exactly one population query — and it carries neither.
+
+    The positive control beside each ban is what makes this a check rather than a
+    description: the same two patterns DO find the four marks and the one query the page
+    already has. Without it, a paragraph that had been deleted, or a pattern that had
+    drifted off the page's spelling, would satisfy the bans just as well.
+    """
+    p = _filing_bullet()
+    for letter in CRITERIA:
+        assert not re.search(rf"\({letter}\) (passes|fails)", p), (
+            f"the 09-29 paragraph marks ({letter}) pass/fail inside the counted reading's "
+            "span, where _verdict allows exactly one such mark — write prose verdicts, as "
+            "the 09-28 paragraph does")
+    marks = sum(len(re.findall(rf"\({letter}\) (passes|fails)", reading)) for letter in CRITERIA)
+    assert marks == 4, (
+        f"positive control: the span carries {marks} marks, not one per criterion, so the "
+        "ban above was tested against nothing")
+    assert not _CHAT_QUERY.search(p), (
+        "the 09-29 paragraph cites a second read-only population query; cite the one in "
+        "(a)'s bullet instead, as this paragraph's own rule is to quote the extract")
+    queries = _CHAT_QUERY.findall(reading)
+    assert len(queries) == 1, (
+        f"positive control: the counted reading carries {len(queries)} queries, not one")
+
+
+def test_the_filing_day_verdicts_are_derived_and_the_two_reopens_agree(filing, filing_raw,
+                                                                      reopen, reopen_raw,
+                                                                      cfg, s10):
+    """#1921's Change 3: the verdicts are read off the derivation, 09-25 is not displaced,
+    and "produced one" does not contradict 09-28's "produced none".
+
+    The verdict sentences are prose, not marks, so they are pinned the way
+    `test_the_eviction_branch_named_is_the_one_the_gaps_support` pins its heading: as a
+    biconditional against the numbers. The disagreement between the two re-open
+    paragraphs is then not a wording matter at all — it comes out of the two extracts,
+    which say all three of 09-28's chat misses churned and that 09-29's one did not and
+    never reached the gate.
+    """
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    p = _filing_bullet()
+    misses_per_day, tokens_per_day = _per_day_budget(_section(6))
+    assert ("criterion (a) does not hold" in p) == (filing["chat_turns_with_misses"] > 0), (
+        f"(a)'s prose verdict disagrees with chat_turns_with_misses="
+        f"{filing['chat_turns_with_misses']}")
+    assert ("criterion (b) does not hold" in p) == (
+        filing["misses"] > misses_per_day
+        and filing["reprefill_tokens"] > tokens_per_day * 1e6), (
+        "(b)'s prose verdict disagrees with the day against §6.1's budget")
+    assert ("(c) and (d) both hold" in p) == (
+        filing["kv_p50"] < gate and filing["two_request_under_stall_not_cold"] == 0), (
+        "(c)/(d)'s prose verdict disagrees with the KV median and (d)'s counted lines")
+    assert "does not displace 2026-09-25 as the counted reading" in p
+    assert "produced none" in _reopen_bullet() and "produced one" in p, (
+        "each re-open states its own conclusion; neither may be softened into agreeing "
+        "with the other")
+    r = [e for e in _gap_events(reopen_raw, gate=gate) if e["kind"] == "chat"]
+    f = [e for e in _gap_events(filing_raw, gate=gate) if e["kind"] == "chat"]
+    assert len(r) == 3 and all(e["churn"] for e in r), (
+        f"09-28's paragraph rests on all three of its chat misses churning: {r}")
+    assert len(f) == 1 and not f[0]["churn"] and f[0]["peak"] < gate, (
+        f"09-29's paragraph rests on its one chat miss having neither: {f}")
+    for letter in CRITERIA:
+        _verdict(_counted_reading(s10), letter)
+
+
+def test_the_filing_chat_miss_is_one_event_with_its_measured_attribution(filing, filing_raw,
+                                                                        cfg):
+    """#1921 clause 5: the day's one chat miss, attributed by measurement, row by row.
+
+    `_gap_events` walks `derive`'s own churn rule per event and asserts its tally
+    against `derive`'s aggregate, so these are the same numbers the criteria are marked
+    on and not a second opinion. The filing condition is `not churn AND peak under the
+    gate`, and the paragraph has to carry all six measured quantities #1921 names —
+    iteration, prompt tokens, cache_read, gap length, gap KV peak against the gate, and
+    the tokens computed inside the gap against the free pool that peak implies — as one
+    event on one day: a second chat miss, or a different turn, would make the sentence a
+    different claim.
+    """
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    p = _filing_bullet()
+    chat = [e for e in _gap_events(filing_raw, gate=gate) if e["kind"] == "chat"]
+    row = [m for m in filing_raw["misses"] if m[5] == "chat"]
+    assert len(row) == len(chat) == filing["by_kind"]["chat"][0] \
+        == filing["chat_turns_with_misses"] == 1, (
+        f"the paragraph is about ONE event; the extract has rows={row} events={chat} "
+        f"by_kind={filing['by_kind'].get('chat')}")
+    r0, = row
+    e0, = chat
+    assert not e0["churn"] and e0["peak"] < gate, (
+        "the condition the ruling named is neither churn nor a gate-level peak, and this "
+        f"event has one of them: peak={e0['peak']} churn={e0['churn']}")
+    assert f"iteration {r0[2]}" in p
+    assert f"{r0[3]:,} tokens" in p
+    assert f"cache_read {r0[4]}" in p
+    assert f"{e0['gap_s']:.1f} s" in p
+    assert ("a single engine status line" in p) == (e0["n_lines"] == 1), (
+        f"the gap spans {e0['n_lines']} status lines; the paragraph's claim about how thin "
+        "the evidence is has to follow that")
+    assert f"{e0['peak']:.3f}" in p
+    assert f"under the {gate:.2f} gate" in p
+    assert f"{e0['computed']:,}" in p
+    assert f"{e0['free_at_peak']:,}" in p
+    turn = [t for t in filing_raw["turns"] if t[1] == "chat" and (t[2] or 0) > 0]
+    assert len(turn) == 1, f"the extract has {len(turn)} chat turns carrying a miss"
+    assert f"`{turn[0][0]}`" in p, "the paragraph must name the one turn it counted"
+    # The stamp is named twice — once at trigger (i), once in the attribution — so
+    # naming it somewhere on the page is not enough: the sentence that carries the
+    # measured attribution has to carry the stamp of THAT turn, or the iteration,
+    # token count and gap below could be quietly re-pointed at a different one.
+    attrib = [s for s in p.split(". ") if "iteration" in s]
+    assert len(attrib) == 1 and turn[0][0] in attrib[0], (
+        "the sentence making the iteration claim does not name the turn the extract "
+        f"counted ({turn[0][0]}), so the attribution is not pinned to an event")
+    assert "neither free-pool churn nor a gate-level KV explanation" in p
+    assert "one event on one day" in p
+    assert "first counted day on which the condition is met" in p, (
+        "the claim is that this is the first COUNTED day to meet the condition — not the "
+        "only day, which the uncounted 09-27 has not been checked against")
