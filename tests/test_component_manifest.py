@@ -680,24 +680,103 @@ def test_a_component_dict_reaches_the_line_only_through_prompt_builder(monkeypat
     from app import prompt_builder
 
     # One call, no call between: it returns the rendered prompt AND hands the
-    # same named dict to the registry, so each recorded body must be found in
-    # the rendered string byte for byte. That is the assertion that fails if the
-    # hook moves, the key changes, or the dict is rebuilt rather than recorded.
+    # same named dict to the registry. #1880 moved the digest to note time, so the
+    # bodies are no longer in hand to test `body in rendered` — the walk below
+    # says the same thing from the pair alone, and says more: it re-slices
+    # `rendered` by the recorded byte lengths in the recorded order, so every
+    # digest has to be the digest of exactly the next bytes of the prompt and
+    # every byte of the prompt has to belong to a recorded component. That fails
+    # if the hook moves, the key changes, the dict is rebuilt rather than
+    # recorded, or an unrecorded block is silently injected between components.
     rendered = prompt_builder.build_system_prompt(
         session_id="seam-test", overlay_dir=_overlay(tmp_path),
         goal={"text": "record every model request"})
     registry = cm.components_for("seam-test").get("components") or {}
     assert registry, "prompt_builder handed nothing to the registry"
-    for name, body in registry.items():
-        assert body and body in rendered, f"{name} was recorded but is not in the prompt"
+    raw = rendered.encode("utf-8")
+    pos = 0
+    for name, pair in registry.items():
+        assert isinstance(pair, dict) and set(pair) == {"sha256", "bytes"}, (
+            f"{name}: the registry holds {type(pair).__name__}, not a digest pair")
+        assert pair["bytes"] > 0, f"{name} recorded an empty body"
+        piece = raw[pos:pos + pair["bytes"]]
+        assert ("sha256:" + hashlib.sha256(piece).hexdigest() == pair["sha256"]
+                and piece), (
+            f"{name} was recorded but its bytes are not the next bytes of the "
+            "rendered prompt: the hook moved, the key changed, or the dict was "
+            "rebuilt rather than recorded")
+        pos += pair["bytes"] + len(b"\n\n")          # join("\n\n"), prompt_builder:598
+    assert pos - 2 == len(raw), (
+        f"the recorded components account for {pos - 2} of the rendered prompt's "
+        f"{len(raw)} bytes, so something was injected that the manifest never saw")
 
     _drive_turn(monkeypatch, session_id="seam-test")
     line = _lines(Path(os.environ["LLOYD_MANIFEST_STORE"]))[0]
     got = {c["name"]: c for c in line["components"]}
     assert set(got) == set(registry), sorted(got)
-    for name, body in registry.items():
-        assert got[name]["sha256"] == cm.digest_text(body), name
-        assert got[name]["bytes"] == cm._size(body), name
+    for name, pair in registry.items():
+        assert got[name] == {"name": name, "sha256": pair["sha256"],
+                            "bytes": pair["bytes"]}, name
+
+
+def test_the_registry_path_emits_the_rows_a_raw_dict_would():
+    """#1880 clause 2: the digest moved, the record did not.
+
+    One component set goes out two ways — through `note_components`, which is how
+    `prompt_builder` hands it over once per turn and what the registry now holds
+    as a digest pair, and inline as `components=`, which is how a send site
+    without a session hands over the text it is injecting. `_build_line` reads
+    both, so the two `components` arrays have to agree in names, order, `sha256`
+    and `bytes` row for row, read back off the store rather than off a return
+    value. The only field allowed to differ is `components_captured`, because
+    that is what the two paths genuinely are.
+
+    The expected digest is `hashlib` over the literal, not `cm.digest_text`: an
+    expectation derived from the same helper that builds the row passes while
+    both drift, which is the one thing a digest test must never do.
+    """
+    bodies = {"SOUL.md": "# SOUL\n\nREGISTRY-PAIR-SENTINEL identity\n",
+              "harness_hints": "hints paragraph\n",
+              "memories": "# MEMORY.md\n\nan older component\n"}
+
+    cm.note_components("registry-path", bodies)
+    assert cm.record_request(
+        base_url="http://stub:8096", model="m", session_id="registry-path",
+        iteration=1, send_site="tests/test_component_manifest.py",
+        payload={"model": "m", "messages": [{"role": "user", "content": "go"}]})
+    assert cm.record_request(
+        base_url="http://stub:8096", model="m", session_id="nothing-noted-for-this-one",
+        iteration=1, send_site="tests/test_component_manifest.py",
+        components=bodies,
+        payload={"model": "m", "messages": [{"role": "user", "content": "go"}]})
+    cm.flush(timeout=5.0)
+
+    by_session = {ln["session_id"]: ln
+                  for ln in _lines(Path(os.environ["LLOYD_MANIFEST_STORE"]))}
+    assert {"registry-path", "nothing-noted-for-this-one"} <= set(by_session), (
+        sorted(by_session))
+    registry_row = by_session["registry-path"]
+    inline_row = by_session["nothing-noted-for-this-one"]
+
+    assert registry_row["components"] == inline_row["components"], (
+        "the same component set emits different rows depending on which path it "
+        f"travelled: {registry_row['components']} vs {inline_row['components']}")
+    assert [c["name"] for c in registry_row["components"]] == list(bodies), (
+        "the array lost render order")
+    for row in registry_row["components"]:
+        body = bodies[row["name"]].encode("utf-8")
+        assert row == {"name": row["name"],
+                       "sha256": "sha256:" + hashlib.sha256(body).hexdigest(),
+                       "bytes": len(body)}, row
+    assert registry_row["components_captured"] == cm._TURN_START, (
+        registry_row["components_captured"])
+    assert inline_row["components_captured"] == cm._SEND_SITE, (
+        inline_row["components_captured"])
+    # And the registry half really came from a pair, not from text that happened
+    # to still be resident: the entry it read holds no body.
+    stored = cm.components_for("registry-path")["components"]
+    assert all(set(v) == {"sha256", "bytes"} for v in stored.values()), stored
+    assert not any(b in json.dumps(stored, sort_keys=True) for b in bodies.values())
 
 
 def test_a_session_prompt_builder_never_built_is_reported_unrecorded(monkeypatch, tmp_path):

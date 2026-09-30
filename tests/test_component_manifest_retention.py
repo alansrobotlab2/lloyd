@@ -44,6 +44,8 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
+import statistics
 import threading
 from datetime import date, timedelta
 from pathlib import Path
@@ -51,6 +53,7 @@ from pathlib import Path
 import pytest
 
 from app import component_manifest as cm
+from app.paths import VAULT_ROOT
 
 #: Day offsets are measured back from this fixed "today", so a test says "13 days
 #: old" instead of naming a date that stops being 13 days old next month. `_today`
@@ -491,3 +494,208 @@ def test_a_current_policy_notice_is_not_rewritten_by_recorded_requests(_store):
     assert policy.read_bytes() == cm.RETENTION_POLICY.encode("utf-8")
     assert cm.stats()["lines_written"] == 2, cm.stats()
     assert _manifest_lines(_store) == 2, "the requests did not reach the store"
+
+
+# --------------------------------------------------------------------------- #
+# #1880 clause 5: the bound stays 1024, stays a pure count, and its comment is
+# priced in the unit the entries are actually stored in.
+# --------------------------------------------------------------------------- #
+
+#: The four component names the 2026-09-30 store actually carries on a
+#: `turn_start` line (`SOUL.md`, `memories`, `skills_index`, `harness_hints`). A
+#: session's entry is what those four cost digested, so this is the residency the
+#: comment above `MAX_SESSIONS` is obliged to state — priced at the median session
+#: size the witness bytes below carry, never at a number typed in here.
+_MEASURED_NAMES = ("SOUL.md", "memories", "skills_index", "harness_hints")
+
+#: The witness bytes for those figures: the first 3,018 lines of the 2026-09-30
+#: manifest store — the window the triage scan read, and the store is append-only
+#: so those lines are those bytes — reduced to `ts`, `session_id`,
+#: `components_captured` and `components[].{name, bytes}`, with no digest, message
+#: or model field. Committed because the live store rotates under 14-day retention
+#: and a figure measured off it has no history to be checked against (clause 6).
+#: Provenance and the re-derivation command:
+#: `~/obsidian/backlog/data/2026-09-30.components-witness.md`.
+_WITNESS = VAULT_ROOT / "backlog" / "data" / "2026-09-30.ndjson"
+
+
+def _witness_turn_start_median():
+    """(turn_start lines, distinct sessions, median component bytes) from the bytes.
+
+    Reads the committed witness rather than the live store, and fails rather than
+    skipping if it is missing: the figures in the `MAX_SESSIONS` comment are only
+    as good as these bytes, and a skipped check would leave a quoted 42,662 sitting
+    in the source with nothing behind it.
+    """
+    assert _WITNESS.is_file(), (
+        f"{_WITNESS} is absent, so the residency figures quoted in "
+        "app/component_manifest.py cannot be re-derived")
+    peak: dict[str, int] = {}
+    n_turn_start = 0
+    for raw in _WITNESS.read_text(encoding="utf-8").splitlines():
+        line = json.loads(raw)
+        if line.get("components_captured") != "turn_start":
+            continue
+        n_turn_start += 1
+        sid = line.get("session_id") or ""
+        total = sum(int(c.get("bytes") or 0) for c in line.get("components") or [])
+        peak[sid] = max(peak.get(sid, 0), total)
+    assert n_turn_start == 2332 and len(peak) == 114, (
+        f"the witness no longer holds the window the item quotes: "
+        f"{n_turn_start} turn_start lines over {len(peak)} sessions")
+    return n_turn_start, len(peak), statistics.median(peak.values())
+
+
+def _component_entry_bytes():
+    """(bytes for one stored pair, bytes for a whole session's entry), measured.
+
+    The unit is canonical JSON — the same encoding the module digests components
+    in — because that is the only byte cost a reader of the comment can check.
+    Measured by handing `note_components` the shape the witness bytes describe (the
+    four observed names at the observed median size), so if the seam is ever
+    removed and raw text comes back through the door these numbers grow by two
+    orders of magnitude and every band in the node that reads them goes red.
+    """
+    cm._reset_registry()
+    median = int(_witness_turn_start_median()[2])
+    cm.note_components("priced", {n: "x" * (median // len(_MEASURED_NAMES))
+                                  for n in _MEASURED_NAMES})
+    entry = cm.components_for("priced")["components"]
+    assert entry, "note_components stored nothing to price"
+    pair = len(cm.canonical_json(entry[_MEASURED_NAMES[0]]).encode("utf-8"))
+    whole = len(cm.canonical_json(entry).encode("utf-8"))
+    assert pair > 0 and whole >= pair, (pair, whole)
+    return pair, whole
+
+
+def _sentences(comment: str) -> "list[str]":
+    """A comment block as sentences, with the `#:` prefixes folded away.
+
+    Sentence-scoped, because a block-wide figure search is satisfiable by any
+    number of the right size anywhere in the block: the block above `MAX_SESSIONS`
+    carries the retired cap 128 and four observed session counts, and a bare
+    "some figure near 98" check passes on those alone without the comment saying
+    anything about a pair.
+    """
+    flat = " ".join(line.lstrip("#").strip() for line in comment.splitlines())
+    return [s.strip() for s in re.split(r"(?<=[.!?])\s+", flat) if s.strip()]
+
+
+def _figures(text: str) -> "list[int]":
+    return [int(n.replace(",", "")) for n in re.findall(r"\d[\d,]*", text)]
+
+
+def _comment_above(symbol: str) -> str:
+    """The comment block sitting directly above `symbol` in the real source."""
+    lines = Path(cm.__file__).read_text(encoding="utf-8").splitlines()
+    at = next((i for i, ln in enumerate(lines)
+               if ln.startswith(f"{symbol} =")), None)
+    assert at is not None, f"{symbol} is not a module-level constant any more"
+    start = at
+    while start > 0 and lines[start - 1].lstrip().startswith("#"):
+        start -= 1
+    return "\n".join(lines[start:at])
+
+
+def test_the_bound_stays_1024_and_stays_a_pure_count():
+    """#1880 clause 5, first half: the number holds and nothing age-shaped entered.
+
+    The cap's rationale moved underneath it — a session's entry now costs a
+    digest pair where it cost 42,662 B of component text, so the residency
+    pressure #1782 counted is gone and the bound could eventually be *raised*.
+    Ruling that is owed work (#1782 entry 4), not this round's. What no round
+    may do is quietly change the *kind* of bound: the autonomy and research
+    rounds that run for hours are exactly the sessions an age- or activity-based
+    expiry blanks, which is why the file has carried "the bound is a count, not
+    an age" since #1782.
+
+    So: fill the registry, backdate the newest hundred entries by a year, then
+    push three more sessions through. The three that leave are the three oldest
+    in insertion order; the backdated hundred stay; the size is exactly the cap.
+    Under any expiry the backdated entries leave first, and this node reads that
+    difference rather than trusting the code's intent.
+    """
+    assert cm.MAX_SESSIONS == 1024, (
+        f"MAX_SESSIONS is {cm.MAX_SESSIONS}: this node is the guard that the "
+        "number owed a ruling from #1782 entry 4 is still the number in the file")
+
+    for n in range(cm.MAX_SESSIONS):
+        cm.note_components(f"count-{n}", {"system_prompt": "p"})
+    assert len(cm._registry) == cm.MAX_SESSIONS, len(cm._registry)
+    for n in range(cm.MAX_SESSIONS - 100, cm.MAX_SESSIONS):
+        cm._registry[f"count-{n}"]["at"] -= 365 * 86_400
+
+    for n in range(3):
+        cm.note_components(f"late-{n}", {"system_prompt": "p"})
+
+    assert len(cm._registry) == cm.MAX_SESSIONS, (
+        f"the registry holds {len(cm._registry)} entries against a cap of "
+        f"{cm.MAX_SESSIONS}, so the bound is no longer the count it states")
+    assert cm.stats()["evictions"] == 3, cm.stats()
+    for n in range(3):
+        assert cm.components_for(f"count-{n}") == {}, (
+            f"count-{n} survived while something else left: the eviction order "
+            "is no longer insertion order")
+        assert cm.components_for(f"late-{n}"), "the newest entries were the ones dropped"
+    for n in range(cm.MAX_SESSIONS - 100, cm.MAX_SESSIONS):
+        assert cm.components_for(f"count-{n}"), (
+            f"count-{n} was a year stale and left anyway: that is an expiry, and "
+            "the bound is a count")
+    assert cm.components_for("count-500"), "an entry left with nothing over the cap"
+    cm._reset_registry()
+
+
+def test_the_comment_prices_the_registry_in_digest_pairs_and_names_the_way_back():
+    """#1880 clause 5, second half: the residency comment says what is stored now.
+
+    Before #1880 the block above `MAX_SESSIONS` priced the cap in entries and in
+    *component text*, because that is what an entry held, and said nothing about
+    the unit entries are made of now — so a reader could not tell a megabyte of
+    digests from forty-four megabytes of SOUL.md. Four things are pinned here, over
+    the comment as it stands in `app/component_manifest.py`, each scoped to the
+    sentence that has to carry it (`_sentences`) rather than to the block:
+
+    * a sentence about a **pair** carrying 98 — the measured canonical-JSON cost of
+      one stored `{sha256, bytes}` pair — and 449, the cost of a whole entry;
+    * a sentence about the **worst case** carrying 459,776 = 1024 × 449;
+    * a sentence about a **median** carrying the 42,662 B the committed witness
+      bytes measure, so the raw-text cost the comment warns about is a number off
+      those bytes and not a number in circulation;
+    * the literal `dict(components)`, the assignment that put the raw text in the
+      registry, named as the input that restores that cost if the digest seam is
+      ever removed — the convention #1782 set for the prefetch half.
+
+    Exact figures, sentence-scoped, and both halves matter. Sentence-scoped because
+    block-wide this check is satisfiable by the retired cap 128 and the observed
+    session counts 826/646/591 the same block carries: a mutation that deleted the
+    pair figure and the worst-case figure and left those came out green under the
+    block-wide version. Exact because "a hundred bytes or so" is a sentence about a
+    pair that prices nothing — within a 3× band it passed too.
+    """
+    pair, whole = _component_entry_bytes()
+    median = int(_witness_turn_start_median()[2])
+    block = _comment_above("MAX_SESSIONS")
+    assert block.strip(), "MAX_SESSIONS has no comment block above it any more"
+    sentences = _sentences(block)
+    assert any("1024" in s for s in sentences), block
+    assert "dict(components)" in block, (
+        "the comment lost the input it must name: `entry[\"components\"] = "
+        "dict(components)` is the line that puts raw component text back in the "
+        "registry, and the clause requires the comment to say so")
+
+    def _in(needle: str) -> "list[int]":
+        return [n for s in sentences if needle in s for n in _figures(s)]
+
+    def _says(figures: "list[int]", want: int, what: str, where: str) -> None:
+        assert want in figures, (
+            f"no sentence about {where} states {what} as the measured {want} B "
+            f"(it states {figures})")
+
+    pairs = _in("pair")
+    _says(pairs, pair, "one stored digest pair", "a pair")
+    _says(pairs, whole, "a whole session's entry", "a pair")
+    _says(_in("worst case"), cm.MAX_SESSIONS * whole,
+          "the cap's whole residency", "the worst case")
+    _says(_in("median"), median,
+          "the raw-text cost per session, off the committed witness bytes", "a median")
+    cm._reset_registry()

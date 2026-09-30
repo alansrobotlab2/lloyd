@@ -189,12 +189,28 @@ DEFAULT_SUBDIR = "lloyd-request-manifests"
 #: dropping live sessions every day and every line it dropped read
 #: `components_captured: "unrecorded"`. 1024 is 1.24x the busiest observed day
 #: (826 on 2026-09-26) — headroom, not a margin of safety, which is why the counter
-#: below matters more than the number; the
-#: bound stays a pure count, with no age- or activity-based expiry, because the
-#: failure mode it must not repeat is a silent blank. `stats()["evictions"]` is
-#: now the readable consequence rather than an inference, and the injected
-#: prefetch block is held as a digest pair (`note_components`), not as text, so
-#: eight times the entries is not eight times the confidential text resident.
+#: below matters more than the number: `stats()["evictions"]`, published on the
+#: backend's read-only `GET /health` as `manifest`, is the readable consequence
+#: rather than an inference. The bound stays a pure count, with no age- or
+#: activity-based expiry, because the failure mode it must not repeat is a silent
+#: blank on a round that is still running.
+#:
+#: What an entry costs, in the unit it is stored in: an entry is a name and a
+#: `{sha256, bytes}` pair per component, one such pair being 98 B of canonical JSON
+#: and a whole four-component session's entry 449 B — priced at the four names the
+#: 2026-09-30 store carries, `SOUL.md`, `memories`, `skills_index`, `harness_hints`.
+#: So the worst case the cap allows is 1024 × 449 = 459,776 B of digests: under half
+#: a megabyte, and it does not move however long a session's prompts run. Those
+#: figures are re-measured from the committed witness bytes by the clause-5 node in
+#: `tests/test_component_manifest_retention.py`, so a change to what is stored moves
+#: the test and the comment together rather than the comment alone. What buys them is
+#: `note_components` digesting on the way in (#1880), prefetch included (#1782). The
+#: input that puts the old cost back is `entry["components"] = dict(components)`:
+#: holding raw component text instead of the pair costs 42,662 B median per session
+#: over the same 2,332 `turn_start` lines, which at 1024 entries is ~43.7 MB of
+#: confidential prompt text resident in a server that also serves the requests asking
+#: for it. Whether 1024 is still the right cap now an entry is a pair is an open
+#: ruling, not a settled one (#1782 entry 4, owed after live traffic).
 MAX_SESSIONS = 1024
 
 _UNRECORDED = "unrecorded"
@@ -416,6 +432,45 @@ def _size(text: str) -> int:
     return len(text.encode("utf-8", "replace"))
 
 
+#: The keys of one stored component: a digest and the byte count it was taken
+#: over. Nothing else is stored, because nothing else is needed to emit a row.
+_DIGEST_KEYS = frozenset({"sha256", "bytes"})
+
+
+def _digest_pair(value: Any) -> "dict[str, Any] | None":
+    """The `{sha256, bytes}` pair for a component, however it arrives.
+
+    Two shapes reach this, and the reader serves both without the emitted row
+    showing which one came:
+
+    * raw text, from a send site that holds the prompt it is injecting on *this*
+      call and has no registry entry to be read from
+      (`record_request(components=...)`: `app/inner_voice/observer.py:31`,
+      `app/secondary_models.py:46`, and the `tools` caller of
+      `components_from_payload`);
+    * a pair already digested at note time, from the registry — `note_components`
+      digests on the way in (#1880), which is what keeps the process-lifetime
+      registry free of component text *and* moves the hashing off the token
+      stream: `note_components` runs once per user turn
+      (`app/prompt_builder.py:590`) while `record_request` runs once per
+      iteration, so this is work moved backwards, not work added.
+
+    A pair is passed through with its values coerced, never re-digested: the row
+    a session's bytes produced is the row whichever side computed it, which is
+    what `test_the_registry_path_emits_the_rows_a_raw_dict_would` in
+    `tests/test_component_manifest.py` pins. Returns None for anything else, and
+    the caller records the row as unhashable rather than inventing a digest.
+    """
+    if isinstance(value, str):
+        return {"sha256": digest_text(value), "bytes": _size(value)}
+    if isinstance(value, dict) and _DIGEST_KEYS <= set(value):
+        try:
+            return {"sha256": str(value["sha256"]), "bytes": int(value["bytes"])}
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 # ── per-session component registry ────────────────────────────────────────
 #
 # `prompt_builder.build_system_prompt` has the named component dict and no
@@ -424,6 +479,13 @@ def _size(text: str) -> int:
 # this table, keyed by the session id both sides already have. Peeking (not
 # popping) is deliberate: a turn has many iterations and its component dict is
 # built once per turn.
+#
+# What crosses is the name and the digest, never the body: an entry is
+# `{components: {name: {sha256, bytes}}, prefetch: {sha256, bytes} | "", at}`
+# (#1880, prefetch from #1782), so the residency of this table is the megabyte
+# priced above `MAX_SESSIONS` and not the tens of megabytes of prompt text that
+# a session asked for. `_digest_pair` is the reader that accepts a raw-text dict
+# too, because a send site has no entry here to be read from.
 
 _registry: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
 _registry_lock = threading.Lock()
@@ -431,20 +493,34 @@ _registry_lock = threading.Lock()
 
 def note_components(session_id: str, components: "dict[str, str] | None", *,
                     prefetch_text: str | None = None) -> None:
-    """Remember the component dict for `session_id`. Never raises.
+    """Remember the component digests for `session_id`. Never raises.
 
     Called from `prompt_builder` with the same ordered dict that produced the
     system prompt, and from the chat router with the prefetched context block.
 
-    The prefetch is digested **here** and only the `{sha256, bytes}` pair is
-    kept: the block is vault text, and the registry is a process-lifetime table,
-    so holding it as a string meant the retrieved context of up to `MAX_SESSIONS`
-    sessions sat in the heap of a server that also serves the requests that asked
-    for it. The emitted manifest line is unaffected — it already carried exactly
-    this pair, computed at emit time — which is what the two prefetch nodes in
-    `tests/test_component_manifest_prefetch_seam.py` pin: the pair in the
-    registry, and the identical object on the line. An empty block still stays
-    absent rather than becoming a hash of `""`, as the negative node there shows.
+    Both halves are digested **here** and only the `{sha256, bytes}` pair is kept.
+    The prefetch was first (#1782): the block is vault text, and the registry is a
+    process-lifetime table, so holding it as a string meant the retrieved context
+    of up to `MAX_SESSIONS` sessions sat in the heap of a server that also serves
+    the requests that asked for it. The components followed in #1880, and they were
+    the larger half — 42,662 B median per session against 25,324 B of prefetch over
+    the 2,332 `turn_start` lines of the 2026-09-30 store. The components figure is
+    re-derivable from the committed witness bytes the clause-5 node reads
+    (`~/obsidian/backlog/data/2026-09-30.ndjson`); the prefetch figure is not, as
+    `prefetch.bytes` is not among the fields that extract keeps, and stands as
+    measured on the live store that day. The resident text was `SOUL.md`,
+    `memories`, `skills_index` and `harness_hints`. Holding that meant
+    1024 sessions' worth of the system prompt sat in the same heap, which is the
+    residency argument `MAX_SESSIONS` carries, stated above it.
+
+    The emitted manifest line is unaffected — it already carried exactly this pair,
+    computed at emit time, and `_digest_pair` passes a stored pair straight through
+    — which is what the nodes in `tests/test_component_manifest_prefetch_seam.py`
+    pin for both halves: the pair in the registry, and the identical object on the
+    line. An empty prefetch block still stays absent rather than becoming a hash of
+    `""`, as the negative node there shows. Hashing moves off the token stream, not
+    onto it: this runs once per user turn (`app/prompt_builder.py:590`),
+    `record_request` once per iteration.
     """
     if not session_id or not enabled():
         return
@@ -453,7 +529,11 @@ def note_components(session_id: str, components: "dict[str, str] | None", *,
         with _registry_lock:
             entry = _registry.setdefault(session_id, {})
             if components is not None:
-                entry["components"] = dict(components)
+                entry["components"] = {
+                    name: (_digest_pair(value)
+                           or {"sha256": f"unhashable:{type(value).__name__}",
+                               "bytes": 0})
+                    for name, value in components.items()}
             if prefetch_text is not None:
                 body = prefetch_text or ""
                 entry["prefetch"] = ("" if not body
@@ -468,9 +548,11 @@ def note_components(session_id: str, components: "dict[str, str] | None", *,
         logger.debug("component_manifest: registry write failed: %s", exc)
     if dropped:
         # Outside the lock and after the try: a drop is not an error, it is a
-        # rate, and `stats()["evictions"]` is where a report reads it instead of
-        # opening the store. One increment per entry dropped, so the number is
-        # the count of sessions whose next line reads `unrecorded`.
+        # rate. `stats()["evictions"]` is the number, and as of #1880 it reaches
+        # anything outside this process through `GET /health` (`manifest`), which
+        # is what "readable without opening the confidential store" was always
+        # supposed to mean. One increment per entry dropped, so the number is the
+        # count of sessions whose next line reads `unrecorded`.
         _bump("evictions", dropped)
 
 
@@ -486,6 +568,19 @@ def components_for(session_id: str) -> dict[str, Any]:
     with _registry_lock:
         entry = _registry.get(session_id)
         return dict(entry) if entry else {}
+
+
+def registry_occupancy() -> int:
+    """How many sessions the registry holds, against `MAX_SESSIONS`.
+
+    The denominator `stats()["evictions"]` needs: three drops say nothing until
+    you know whether the table was sitting at 1024 or at eight. Takes the writers'
+    own lock, so it is a reading and not an estimate. Published on `GET /health`
+    as `manifest.sessions`, and holding only the count keeps that route clear of
+    anything naming a session.
+    """
+    with _registry_lock:
+        return len(_registry)
 
 
 def _reset_registry() -> None:
@@ -612,7 +707,15 @@ def _bump(key: str, amount: int = 1) -> None:
 
 
 def stats() -> dict[str, int]:
-    """Counters a report reads. `write_errors` is the one the acceptance names."""
+    """Counters a report reads. `write_errors` is the one the acceptance names.
+
+    `evictions` is the drop rate of the `MAX_SESSIONS` bound. A test reads it
+    here; anything outside this process reads the same numbers on the backend's
+    read-only `GET /health`, under `manifest` (`app/routers/health.py`). That
+    section is #1880: before it the only way to see a session get dropped was to
+    import this module into a scratch process, which the store's own `POLICY.md`
+    tells you not to do lightly.
+    """
     with _stats_lock:
         return dict(_stats)
 
@@ -980,10 +1083,16 @@ def _build_line(*, base_url: str, model: str, payload: dict[str, Any],
     captured = _TURN_START if remembered else (_SEND_SITE if components
                                                else _UNRECORDED)
     component_rows = []
-    for name, text in named.items():
-        body = text or ""
-        component_rows.append({"name": name, "sha256": digest_text(body),
-                               "bytes": _size(body)})
+    for name, value in named.items():
+        # Two shapes, one reader (see `_digest_pair`): the registry's pairs, and
+        # raw text from a send site that has no entry to be read from. The row is
+        # the same either way — `components_captured` is the field that says which
+        # path it came down, and it is unchanged by this.
+        pair = _digest_pair(value)
+        if pair is None:
+            _bump("hash_errors")
+            pair = {"sha256": f"unhashable:{type(value).__name__}", "bytes": 0}
+        component_rows.append({"name": name, **pair})
 
     scalar = {k: v for k, v in payload.items() if k not in ("messages", "tools")}
     line: dict[str, Any] = {

@@ -22,8 +22,15 @@ store. Everything patched below is either I/O the test has no business doing
 or an unrelated RunOptions input — each named at the patch site, and none of them
 is the thing under test.
 
-Against HEAD before the diff this file fails at import of
-`app.component_manifest`, like every other manifest test.
+The file now carries the same seam for the components (#1880):
+`test_the_registry_holds_every_component_as_a_pair_and_no_component_text`, which
+digests the system-prompt half the way this file digests the retrieved half, and
+is the node clause 1 of that item names.
+
+Read the closing note in each node as dated: "against HEAD before the diff" in
+the #1782 nodes means the commit before #1782 landed, not this round. Against
+the commit before #1880 the component node fails — the registry still holds raw
+component text there, which is the item's own premise.
 """
 
 from __future__ import annotations
@@ -305,6 +312,75 @@ def test_the_registry_holds_the_pair_and_the_line_carries_what_it_always_carried
     assert rows[0]["prefetch"] == expected, (
         "the line's prefetch object changed when the digest moved to note time — "
         "the one thing this change was not allowed to do")
+
+
+def test_the_registry_holds_every_component_as_a_pair_and_no_component_text(monkeypatch):
+    """#1880 clause 1: the same seam, extended to the components.
+
+    The node above digests the prefetch block at note time and leaves the
+    components alone, where `entry["components"] = dict(components)` keeps the
+    raw text. That is the larger half of the resident confidential text: the
+    2026-09-30 window measures 42,662 B median per session in components against
+    25,324 B of prefetch (the components off the committed witness bytes,
+    `~/obsidian/backlog/data/2026-09-30.ndjson`, re-derived by the clause-5 node in
+    `tests/test_component_manifest_retention.py`; the prefetch off the live store
+    that day), over the four names that actually appear there (`SOUL.md`,
+    `memories`, `skills_index`, `harness_hints`). So the seam #1782 landed covered
+    25,324 of the 67,986 bytes — just over a third — while the comment above
+    `MAX_SESSIONS` read the whole concern as closed.
+
+    Both halves, exactly as the prefetch node does them: the entry holds
+    `{sha256, bytes}` per component, no component's text appears anywhere in the
+    JSON-serialised entry, and the emitted line is the one it always emitted.
+    The expected digest is `hashlib` over the literal rather than
+    `cm.digest_text`, so the writer and this node cannot drift together.
+    """
+    session_id = "20260919_121318_seamchat"
+    para = ("identity paragraph standing in for the tens of kilobytes a real\n"
+            "component of the system prompt runs to\n")
+    bodies = {"SOUL.md": "COMPONENT-SEAM-SENTINEL\n" + para * 20,
+              "memories": "MEMORIES-SEAM-SENTINEL\n" + para * 10}
+    cm.note_components(session_id, bodies)
+
+    entry = cm.components_for(session_id)
+    stored = entry.get("components") or {}
+    assert set(stored) == set(bodies), (
+        f"the registry holds {sorted(stored)}, not what was handed over")
+    serialised = json.dumps(entry, sort_keys=True)
+    for name, body in bodies.items():
+        raw = body.encode("utf-8")
+        expected = {"sha256": "sha256:" + hashlib.sha256(raw).hexdigest(),
+                    "bytes": len(raw)}
+        pair = stored[name]
+        assert isinstance(pair, dict) and set(pair) == {"sha256", "bytes"}, (
+            f"{name}: the registry holds {type(pair).__name__}, not a digest pair")
+        assert pair == expected, (
+            f"{name}: the stored pair is not the digest of the body that was "
+            f"handed over: {pair}")
+        assert body not in serialised, f"{name}'s text is still resident"
+    # Non-vacuity, in both directions: the entry really is the pair set (the
+    # digests are in there) and it really is smaller than the text it replaced,
+    # which is the whole point of storing it this way.
+    assert all(stored[n]["sha256"] in serialised for n in stored), serialised
+    assert len(serialised) < sum(len(b.encode("utf-8")) for b in bodies.values()), (
+        "the serialised entry is bigger than the component text, so the size "
+        "assertions above are not measuring what they claim")
+
+    rows = _send_one(session_id, monkeypatch)
+    assert len(rows) == 1, rows
+    line = rows[0]
+    assert line["components_captured"] == cm._TURN_START, line["components_captured"]
+    assert ({c["name"]: {k: v for k, v in c.items() if k != "name"}
+             for c in line["components"]}
+            == {name: {"sha256": "sha256:"
+                       + hashlib.sha256(b.encode("utf-8")).hexdigest(),
+                       "bytes": len(b.encode("utf-8"))}
+                for name, b in bodies.items()}), (
+        "the line's component rows moved when the digest moved to note time — "
+        "the one thing this change is not allowed to do")
+    written = json.dumps(line)
+    for body in bodies.values():
+        assert body not in written, "component text reached the store"
 
 
 def test_a_turn_with_no_injected_block_records_no_prefetch_component(monkeypatch):

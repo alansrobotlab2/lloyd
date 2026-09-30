@@ -38,6 +38,7 @@ import uuid
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from app import component_manifest as _manifest
 from app.config import CONFIG, MODEL_CONFIGS, service_url
 from app.gitinfo import head_branch, head_commit
 from app.paths import LLOYD_HOME
@@ -89,6 +90,40 @@ def _missing_routes(request: Request) -> list[str]:
     return sorted(REQUIRED_ROUTES - mounted)
 
 
+def _manifest_section() -> dict:
+    """The request-manifest registry's own diagnostics: counters and two gauges.
+
+    #1880 put `component_manifest.stats()` on this route. The counters have
+    existed since #1782 and the round that added them called them "readable
+    without opening the confidential store", which was true of the test that
+    pinned them and of nothing else — no router imported the module, so reading a
+    drop meant importing Lloyd's internals into a scratch process, against a store
+    whose own POLICY.md asks to be treated like ~/obsidian. `/health` is already
+    the pure in-memory root GET the guardian and the self-mod promoter poll.
+
+    What goes out is numbers only: every `stats()` counter, `enabled`, and
+    `sessions` against `max_sessions` so `evictions` reads as a rate rather than
+    an event count. No component name, no session id, no digest — the route is
+    polled every few seconds and logged by whoever polls it, so widening what it
+    says about a request is not free.
+
+    Never raises: a module that cannot report its own counters is a line in the
+    section, not a 500 on the box's liveness route, and not a `checks_failed`
+    entry either — the guardian must not restart a healthy backend because a
+    diagnostic could not be read.
+    """
+    try:
+        section: dict = dict(_manifest.stats())
+        section["enabled"] = _manifest.enabled()
+        section["sessions"] = _manifest.registry_occupancy()
+        section["max_sessions"] = _manifest.MAX_SESSIONS
+        return section
+    except Exception as exc:  # noqa: BLE001 — diagnostics never break liveness
+        logger.warning("health: component_manifest stats failed: %s: %s",
+                       type(exc).__name__, exc)
+        return {"error": type(exc).__name__}
+
+
 def _health_payload(request: Request) -> tuple[dict, int]:
     checks_failed: list[str] = []
 
@@ -130,6 +165,7 @@ def _health_payload(request: Request) -> tuple[dict, int]:
         "routers": {"required_present": not missing, "missing": missing},
         "turns": turns,
         "workers": {"enabled": workers_enabled},
+        "manifest": _manifest_section(),
         "checks_failed": checks_failed,
     }
     return payload, (200 if status == "ok" else 503)

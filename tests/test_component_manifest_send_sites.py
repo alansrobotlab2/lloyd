@@ -500,3 +500,50 @@ def test_the_routed_jobs_record_their_system_prompt(stub_engine, monkeypatch):
         "the recorded digest is not the title job's own system prompt")
     assert by_name["system_prompt"]["bytes"] == len(
         secondary_models._TITLE_SYSTEM.encode("utf-8"))
+
+
+def test_a_digest_pair_handed_over_inline_reads_as_the_same_row_as_the_text():
+    """#1880 clause 3: one reader, two shapes, this path included.
+
+    `note_components` digests the components at note time now, so what the
+    registry hands `_build_line` is a `{sha256, bytes}` pair; a send site has no
+    entry to be read from and still hands over the text it is injecting on this
+    call. The reader has to serve both without the row showing which arrived —
+    which is the same dual shape the prefetch block has been through since
+    #1782, and the reason this file's four sites keep passing after a change
+    made only to the registry.
+
+    Both shapes go through `record_request`, the function the sites named at the
+    top of this file actually call, carrying the observer's own `send_site`
+    string, and the arrays are compared as they landed in the store. The
+    expectation is `hashlib` over the literal by way of `_sha`, never the
+    module's own digest helper.
+    """
+    text = "judge this event against the goal card\n"
+    pair = {"sha256": _sha(text), "bytes": len(text.encode("utf-8"))}
+
+    assert cm.record_request(base_url="http://127.0.0.1:8096", model="dual-text",
+                             payload={"model": "m", "messages": [
+                                 {"role": "user", "content": "go"}]},
+                             send_site=SITES["observer"],
+                             components={"system_prompt": text})
+    assert cm.record_request(base_url="http://127.0.0.1:8096", model="dual-pair",
+                             payload={"model": "m", "messages": [
+                                 {"role": "user", "content": "go"}]},
+                             send_site=SITES["observer"],
+                             components={"system_prompt": pair})
+    cm.flush(timeout=8.0)
+
+    by_model = {ln["model"]: ln for ln in _lines()
+                if ln["send_site"] == SITES["observer"]}
+    assert {"dual-text", "dual-pair"} <= set(by_model), sorted(by_model)
+    assert by_model["dual-text"]["components"] == by_model["dual-pair"]["components"], (
+        "the row depends on which shape arrived: "
+        f"{by_model['dual-text']['components']} vs {by_model['dual-pair']['components']}")
+    assert by_model["dual-text"]["components"] == [
+        {"name": "system_prompt", "sha256": _sha(text),
+         "bytes": len(text.encode("utf-8"))}], by_model["dual-text"]["components"]
+    for model in ("dual-text", "dual-pair"):
+        assert by_model[model]["components_captured"] == cm._SEND_SITE, (
+            f"{model}: a dict handed over inline is this call's own answer, "
+            "however it was digested")
