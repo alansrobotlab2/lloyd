@@ -113,6 +113,47 @@ def _resolve_cwd(raw: Any) -> tuple[str | None, str | None]:
     return path, None
 
 
+def _start_cwd() -> str | None:
+    """The directory this call should start in when none was given.
+
+    Delegates the whole decision — which key, which file, whether the directory is
+    still usable, whether it sits inside the live checkout — to `app.session_cwd`, the
+    module the three writers stamp through. That is the seam this file must not own: a
+    policy copied here is a policy that drifts from the mint, and the drift reappears
+    as a worker writing into the production tree.
+
+    The session record IS the session: a round turn's Bash calls run under the
+    implement turn's id, a grader's under the record `review.write_session` mints, an
+    autonomy task's under the id `new_worker_session` mints. So a turn's start
+    directory travels with the thing this tool already resolves, and nothing has to be
+    threaded through a spawn to get it there.
+
+    None is today's exact behaviour (the server's own directory) and is returned for a
+    call with no session, a session that recorded nothing, and a record this process
+    cannot read. Only the import is guarded: a backend older than this module must not
+    lose its Bash tool over a missing file, which is not a failure the resolver itself
+    can produce.
+    """
+    sid = get_bound_session()
+    if not sid:
+        return None
+    try:
+        from app import session_cwd
+    except ImportError:
+        return None
+    return session_cwd.resolved_for(sid)
+
+
+def _effective_cwd(cwd: str | None) -> str | None:
+    """The precedence the whole tool obeys: argument, then session, then inherit.
+
+    One function because the value it returns is handed to three different spawn
+    paths from one place — background, the bwrap child, the foreground shell — and a
+    precedence with three copies is a precedence with three chances to drift.
+    """
+    return cwd if cwd is not None else _start_cwd()
+
+
 async def _bash(args: dict[str, Any]) -> str:
     command = args.get("command", "")
     if not command or not isinstance(command, str):
@@ -146,6 +187,18 @@ async def _bash(args: dict[str, Any]) -> str:
     cwd, err = _resolve_cwd(args.get("cwd"))
     if err:
         return err
+    # #1906: the ONE place the start directory is applied, before the argument
+    # forks into its three spawn paths (background :160, the bwrap child via
+    # `bwrap_argv(command, cwd)` :187, the foreground shell :205 — all of which take
+    # `cwd` from here). With no argument, `_resolve_cwd` returned None and all three
+    # inherited this process's cwd, which for every worker is the LIVE CHECKOUT;
+    # that is how a grader's `.t/<hash>/r<item>/` fixture and a probe's
+    # `eval/uptake/classifier-report.json` came to sit on production `main`, with an
+    # hourly datawatch alert as the only notice, hours later and never attributed.
+    # Applying it here rather than in each path is what keeps foreground, background
+    # and sandbox from drifting apart — three copies of a precedence are three
+    # chances to get one wrong, and the wrong one shows up as a stray write again.
+    cwd = _effective_cwd(cwd)
 
     sandboxed = _tool_sandbox.current_sandboxed.get()
     snap = None

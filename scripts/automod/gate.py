@@ -1076,7 +1076,88 @@ class Gate:
         print(f"[{'PASS' if ok else 'FAIL'}] {name} ({res.seconds:.1f}s) {res.detail[:160]}")
         return ok
 
+    def start_live_strays(self) -> None:
+        """Snapshot the live checkout's untracked paths, before any rung writes.
+
+        #1906: a worker whose Bash starts in the live tree leaves files there, and the
+        only notice was datawatch's hourly "Runtime data is being written into the
+        code tree" alert — hours later, naming no round. The gate process runs for
+        every round and touches that tree anyway, so it is the one place that can say
+        which round a path appeared during. Called first, so the baseline cannot be
+        polluted by this round's own canary or candidate venv.
+
+        Records nothing when the tree cannot be read: a missing baseline has to stay
+        missing so `end_live_strays` can report `unknown`. An empty list substituted
+        here would publish the loudest possible false clean — every pre-existing stray
+        credited to no one, and read as proof the fix worked.
+        """
+        try:
+            from app import live_strays
+            self._live_strays_base = live_strays.untracked(self.live)
+        except Exception as exc:  # noqa: BLE001 — the ladder outranks the witness
+            self._live_strays_base = live_strays.UNREADABLE
+            print(f"[live-strays] baseline unreadable: {type(exc).__name__}: {exc}")
+
+    def end_live_strays(self) -> None:
+        """Append what appeared in the live tree during this round, and to whom.
+
+        One `round_live_strays` row per round, in the promotion ledger the guardian and
+        the owed-check job already read. An empty list is the good outcome and is
+        written anyway: the owed measure is the per-round record, and a clean run that
+        records nothing is indistinguishable from a check that never ran.
+
+        The baseline is the tree as `round.start` recorded it in this round's own
+        directory, not the tree as the gate first saw it. The gate opens AFTER the
+        implement turn, so subtracting only its own snapshot leaves a path the implement
+        turn wrote inside both reads and therefore unnamed — the one window in which a
+        worker whose Bash starts in the tree actually writes, and the difference between
+        the round naming its own stray and an hourly datawatch alert naming the tree
+        five hours later. Where no round baseline exists, the gate's snapshot is still a
+        real window and is recorded as one, but labelled: `stray_window` says
+        `gate_ladder_only` and `implement_turn_measured` says false, so a clean ladder
+        can never be read as a clean round.
+        """
+        try:
+            from app import live_strays
+            now = live_strays.untracked(self.live)
+            # `appeared` returns the paths, or None when either reading is missing — the
+            # type carries the difference, so an empty list here always means the two
+            # reads really happened and were equal.
+            paths = live_strays.appeared(live_strays.read_baseline(self.round_id), now)
+            window = "since_round_start"
+            if paths is None:
+                paths = live_strays.appeared(
+                    getattr(self, "_live_strays_base", live_strays.UNREADABLE), now)
+                window = "gate_ladder_only"
+            row = {"event": "round_live_strays", "round_id": self.round_id}
+            if paths is None:
+                row["stray_status"] = "unknown"
+                row["stray_reason"] = ("live tree unreadable at gate end" if now is None
+                                       else "no baseline for this round: neither its "
+                                            "round_start record nor the gate's own "
+                                            "snapshot could be subtracted")
+            else:
+                row["stray_status"] = "recorded"
+                row["stray_window"] = window
+                row["implement_turn_measured"] = window == "since_round_start"
+                row["strays"] = paths[:20]
+                row["stray_count"] = len(paths)
+            S.append_event(row)
+            if paths:
+                print(f"[live-strays] {self.round_id} left {len(paths)} untracked "
+                      f"path(s) in {self.live}: {', '.join(paths[:5])}")
+            elif paths is None:
+                print(f"[live-strays] {self.round_id}: unknown "
+                      f"({row['stray_reason']})")
+        except Exception as exc:  # noqa: BLE001 — the verdict outranks the witness
+            print(f"[live-strays] {self.round_id}: record failed "
+                  f"{type(exc).__name__}: {exc}")
+
     def run(self) -> GateReport:
+        # The live tree is snapshotted before the first rung. It is the FALLBACK
+        # baseline — the primary one is the set `round.start` recorded, which reaches
+        # back over the implement turn that runs before this process exists (#1906).
+        self.start_live_strays()
         # `canary_smoke` is ALWAYS on the ladder. It used to be omitted when
         # `skip_smoke` was passed, so a skipped rung left no trace at all: the
         # report listed seven rungs and a reader had to know the eighth existed
@@ -1133,6 +1214,9 @@ class Gate:
                     return self.report
             self.report.ok = True
         finally:
+            # Recorded before the rest of the teardown, while the paths this round
+            # wrote are still the freshest thing in the tree.
+            self.end_live_strays()
             # A gate that stopped before the review rung judged nothing: the
             # prefetch leaves no event and spends no attempt.
             self._discard_review_prefetch("the gate stopped before the review rung")

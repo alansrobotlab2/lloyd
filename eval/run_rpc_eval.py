@@ -188,6 +188,7 @@ async def run_one(task: dict[str, Any], arm: str, *, model: str) -> dict[str, An
     from app.harness import HookRegistry, install_default_safety_hook, rpc_policy
     from app.harness import run_query
     from app.run_recorder import record_events
+    from app.session_cwd import stamp_new_session
     from app.sessions_io import create_session, new_background_session_id
     from scripts.autoresearch.bench_runner_sdk import build_options
 
@@ -197,6 +198,13 @@ async def run_one(task: dict[str, Any], arm: str, *, model: str) -> dict[str, An
         create_session(session_id, platform="worker", model=model,
                        title=f"rpc eval {task['id']} · {arm}"[:80], source="rpc-eval",
                        inner_voice=False, preview=task["prompt"][:60])
+        # #1906. This arm's turn is explicitly handed Bash by
+        # `hooks.add_pre_tool_use(None, _allow_read_only_and_bash(), …)` two lines
+        # below, and a session minted here passes through no other mint — so with no
+        # start directory its relative paths resolve against the MCP server's cwd,
+        # which is the live production checkout. `stamp_new_session` never raises: an
+        # eval that cannot lay a scratch runs where it always ran.
+        stamp_new_session(session_id)
         hooks = HookRegistry()
         install_default_safety_hook(hooks)
         hooks.add_pre_tool_use(None, _allow_read_only_and_bash(), fail_closed=True)

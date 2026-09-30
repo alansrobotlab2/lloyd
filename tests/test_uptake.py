@@ -4082,3 +4082,100 @@ def test_the_probe_stamps_the_engine_that_answered_and_refuses_a_rerouted_measur
     out = probe.stamp_engine(_block())
     assert out["engine"] == "secondary" and out["engine_rerouted"] is False
     assert out["passed"] is True and out["metrics"]["measured"] is True
+
+
+def _rerouted_provenance(monkeypatch) -> None:
+    """Force the incident's own cause: the secondary alias resolves to something
+    else, so `stamp_engine` marks every block the floor reads `measured: False`.
+
+    The committed `config.yaml` ships `secondary_enabled: false`, which is what made
+    the nightly run unmeasured on 2026-09-30 — so this pin is the live condition, not
+    a hypothetical. (`_audit_env` pins the OPPOSITE, because that suite is about the
+    precision floor and must not be decided by the retired engine slot.)
+    """
+    import scripts.uptake_probe as probe
+    monkeypatch.setattr(probe, "engine_provenance", lambda: {
+        "alias": uptake.SECONDARY_MODEL, "endpoint": "http://127.0.0.1:9/v1",
+        "resolved_model": "agent-llm-primary", "rerouted": True})
+
+
+def test_an_unmeasured_classifier_report_is_not_published_into_the_tracked_eval_dir(
+        tmp_path, monkeypatch, capsys):
+    """#1906 clause 5: the probe keeps an unmeasured sentinel out of `eval/uptake/`,
+    while still printing the STOP line and still exiting 3.
+
+    On 2026-09-30 the nightly uptake task wrote `eval/uptake/classifier-report.json`
+    into the live checkout carrying `"measured": false` — the secondary alias had
+    rerouted, so nothing about the secondary was measured at all. `.gitignore`
+    un-ignores `eval/uptake/*.json` on purpose, so that a REAL report is reviewable;
+    the same rule turned a sentinel into an untracked file in production and an hourly
+    datawatch alert that named no writer.
+
+    The publish decision belongs to the probe, not to an ignore pattern, and the
+    operator's signal must not move with it: exit 3 and the STOP line are asserted
+    here on the same call. The DEFAULT output directory is what is under test (driven
+    by moving `REPO`), because that default is the tracked path.
+    """
+    import scripts.uptake_probe as probe
+
+    _always_not_engine(monkeypatch)
+    _rerouted_provenance(monkeypatch)
+    repo = tmp_path / "repo"
+    (repo / "eval").mkdir(parents=True)
+    monkeypatch.setattr(probe, "REPO", repo)
+
+    assert probe.main(["--days", "30"]) == 3, "the run must still exit 3"
+    err = capsys.readouterr().err
+    assert "STOP:" in err, f"the operator's signal must survive the withhold: {err}"
+
+    tracked = repo / "eval" / "uptake" / "classifier-report.json"
+    assert not tracked.exists(), (
+        "an unmeasured sentinel was published into the tracked eval dir")
+    assert list((repo / "eval").iterdir()) == [], (
+        "the probe must not create the tracked dir in order to write nothing into it")
+
+
+def test_a_chosen_out_dir_still_keeps_the_unmeasured_report(tmp_path, monkeypatch):
+    """The withhold is about the TRACKED directory only. An operator who passes
+    `--out-dir` chose where their artifacts go and still gets the sentinel, with a
+    note saying what it is — so the diagnostic is not lost, it just stops landing in
+    production."""
+    import scripts.uptake_probe as probe
+
+    _always_not_engine(monkeypatch)
+    _rerouted_provenance(monkeypatch)
+    out = tmp_path / "operator-chose-this"
+
+    assert probe.main(["--days", "30", "--out-dir", str(out)]) == 3
+    written = json.loads((out / "classifier-report.json").read_text())
+    assert written["classifier"]["measured"] is False, written
+    assert "coverage record" in written["note"], (
+        f"a kept-aside sentinel must say what it is: {written['note']}")
+
+
+def test_the_command_line_the_nightly_task_runs_takes_the_same_decision(
+        tmp_path, monkeypatch, capsys):
+    """The process boundary the incident actually crossed.
+
+    The writer on 2026-09-30 was an autonomy run invoking this file as a script, which
+    is `if __name__ == "__main__": raise SystemExit(main())` — `main()` with NO argv, so
+    `argparse` reads `sys.argv[1:]` and `--out-dir` stays None, which is the branch that
+    resolves to the tracked `eval/uptake/`. The two nodes above hand `main` an explicit
+    argv and so pin the decision one call inside that boundary; this one leaves `argv`
+    defaulted and drives the same `sys.argv` a `python scripts/uptake_probe.py --days 30`
+    would present. Same withhold, same exit code, same STOP line.
+    """
+    import scripts.uptake_probe as probe
+
+    _always_not_engine(monkeypatch)
+    _rerouted_provenance(monkeypatch)
+    repo = tmp_path / "repo"
+    (repo / "eval").mkdir(parents=True)
+    monkeypatch.setattr(probe, "REPO", repo)
+    monkeypatch.setattr(sys, "argv", ["scripts/uptake_probe.py", "--days", "30"])
+
+    assert probe.main() == 3, "the un-defaulted argv path must still exit 3"
+    err = capsys.readouterr().err
+    assert "STOP:" in err, f"the operator's signal must survive the withhold: {err}"
+    assert not (repo / "eval" / "uptake" / "classifier-report.json").exists(), (
+        "the nightly command line published an unmeasured sentinel into the tracked dir")

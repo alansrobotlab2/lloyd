@@ -1169,6 +1169,22 @@ def write_run_tests(scratch: Path, *, worktree: Path, python: Path, env: dict) -
 
 
 def write_session(sessions_dir: Path, *, item_id: int, round_id: str, model: str) -> str:
+    """Mint a grading session, and give it a start cwd OUTSIDE the live checkout.
+
+    This is the one mint both grading routes pass through — the code-grade route
+    (`grade` -> `run_grader`, whose `round_id` is the real round) and the vault-review
+    grade (`grade_vault` -> `run_grader`, which passes `round_id="vault"`) — so one
+    stamp covers a round's grader and a vault grader alike. Doing it per call site
+    would need two and invite a third.
+
+    Why it is needed here at all: the grader's Bash inherits this MCP server's cwd,
+    which is `~/lloyd`, and the grader for SM_20260930_031934 was handed
+    `TMPDIR=~/lloyd-work/.t/05431072c3` and still built its fixture at the RELATIVE
+    path `.t/05431072c3/r1873` — nine files on live `main`, alerted hourly by
+    datawatch, writer never identified (#1906). The round's own scratch dir is NOT
+    used as the start directory: the gate sweeps it when the grade ends, and a
+    deleted working directory breaks every later Bash call on that session.
+    """
     session_id = f"{time.strftime('%Y%m%d_%H%M%S')}_review_{secrets.token_hex(2)}"
     sessions_dir.mkdir(parents=True, exist_ok=True)
     # Local wall clock with its offset, as `app.sessions_io.session_now_iso`
@@ -1187,6 +1203,18 @@ def write_session(sessions_dir: Path, *, item_id: int, round_id: str, model: str
         "messages": [], "created_at": now, "last_active": now,
         "preview": "", "message_count": 0,
     }), encoding="utf-8")
+    # Stamped after the file exists, because `app.session_cwd.stamp_new_session` refuses
+    # to mint a half-populated session record — `write_session` above is its only writer.
+    # It swallows every failure of its own (a scratch it cannot create, a record caught
+    # mid-write), so a grader left unstamped keeps today's behaviour, inheriting the
+    # server's cwd, instead of costing the round its grade. The guard left here is for
+    # the import alone: this module runs inside the gate, and `run_grader` imports
+    # `app.paths` lazily for the same reason.
+    try:
+        from app.session_cwd import stamp_new_session
+        stamp_new_session(session_id, sessions_dir=sessions_dir)
+    except ImportError:  # noqa: S110 — a tree predating the convention inherits, as it did
+        pass
     return session_id
 
 

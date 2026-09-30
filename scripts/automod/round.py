@@ -150,13 +150,101 @@ def start(goal: str, *, base: str | None = None, force: bool = False,
                 arm = RB.arm_for_round(S.read_events(limit=2000), int(item_id))
             except Exception:  # noqa: BLE001 — bookkeeping, never the round
                 arm = {}
+        # #1906 clause 3+4, two facts about the tree this round is about to work in.
+        # `start_cwd`: the directory the round turn's Bash starts in when it names
+        # none, which is where a RELATIVE write goes. It was the live checkout, which
+        # is how a grader's `.t/<hash>/r<item>/` fixture landed on `main`.
+        # `live_untracked`: the checkout's untracked paths BEFORE the first rung,
+        # which is the only thing that can tell a path this round wrote from a stray
+        # that was already there — `live_dirty_paths` below cannot, because it is a
+        # snapshot with nothing to subtract. None means the read failed, and the gate
+        # reports `unknown` rather than crediting the round with a clean tree.
+        # `app.live_strays` pulls only stdlib, so an ImportError here means the candidate
+        # tree is broken, and a round opened against a broken tree must not proceed.
+        # Guarding the import would push that failure into the `except` below and report
+        # an unreadable TREE, which is a different claim.
+        from app import live_strays
+        try:
+            found = live_strays.untracked(LIVE_ROOT)
+        except Exception:  # noqa: BLE001 — an unreadable tree must not refuse a round
+            found = live_strays.UNREADABLE
+        # A failed read writes NO baseline. `found or set()` — the shape this shipped in —
+        # was the bug: `untracked` returns None on a failed read and never raises, so `or
+        # set()` handed the failure path an empty set, the row recorded
+        # `live_untracked_recorded: true`, the empty set was written as this round's
+        # baseline, and the gate subtracted it at the end: every path already in the tree
+        # came out as this round's writing. `live_strays.UNREADABLE` is None, so `is
+        # None` below covers both ways the read can fail — the documented None return and
+        # an OSError from a missing binary — and an unreadable tree can only ever produce
+        # `live_untracked_recorded: false` plus no baseline file.
+        if found is None:
+            baseline, baseline_ok = [], False
+            baseline_count, baseline_truncated = -1, False
+        else:
+            baseline_count = len(found)
+            baseline = sorted(found)[:20]
+            baseline_truncated = baseline_count > len(baseline)
+            baseline_ok = True
+        # Two facts, two failures. The ledger row's sample is capped at twenty so a human
+        # can read it; the set the gate subtracts at the end of this round is not capped,
+        # and it lives in this round's own directory. If THAT write fails the tree read
+        # above still succeeded and still says so — folding the two into one `try`
+        # reports a good read as a failed one, the same conflation this module exists to
+        # stop. A gate working from the capped sample instead would convict this round of
+        # every stray past the twentieth: twenty-one pre-existing paths, twenty named as
+        # this round's writing.
+        # `S.ROUNDS_DIR` is passed explicitly, not defaulted, because it is the name the
+        # rest of this module's bookkeeping answers to: a caller that redirects the state
+        # directory gets both the ledger and the baseline there, and the gate's reader
+        # (which passes the same name) sees the same file.
+        # `found is None` short-circuits the whole call: a round that could not read the
+        # tree must not lay a baseline file, because the gate reads that FILE and not this
+        # row, and an empty file subtracts to nothing whatever the row says.
+        try:
+            baseline_recorded = (found is not None
+                                 and live_strays.write_baseline(
+                                     rid, found, S.ROUNDS_DIR) is not None)
+        except Exception:  # noqa: BLE001 — bookkeeping never refuses a round
+            baseline_recorded = False
         S.append_event({"event": "round_start", "round_id": rid, "base": base,
                         "goal": goal[:500], "worktree": str(wt),
+                        "start_cwd": str(wt),
+                        "live_untracked": baseline,
+                        # The sample is capped at 20, so the row must say how many and
+                        # whether it was cut: 20 entries that are really 40 would
+                        # otherwise read as a complete account of the tree, and the
+                        # subtraction the gate does is against `live_strays.untracked`,
+                        # which is NOT capped. `live_untracked_recorded` is written
+                        # either way, so an unreadable tree is a recorded FALSE and not
+                        # an absent key that an empty list could impersonate.
+                        "live_untracked_count": baseline_count,
+                        "live_untracked_truncated": baseline_truncated,
+                        "live_untracked_recorded": baseline_ok,
+                        # Whether the UNCAPPED set reached this round's own directory,
+                        # which is the set the gate subtracts. Distinct from
+                        # `live_untracked_recorded`: the read and the write fail
+                        # separately, and a gate facing a missing file must report
+                        # `unknown`, not diff the capped twenty and convict this round
+                        # of the paths the cap dropped.
+                        "live_baseline_recorded": baseline_recorded,
                         "opened_by": opened_by, **({"session_id": session_id} if session_id else {}),
                         **({"item_id": int(item_id)} if item_id else {}),
                         **arm,
                         **resumed,
                         **({"live_dirty_paths": dirty[:20]} if dirty else {})})
+        # #1906 clause 3, the autocode kind: the session that opened this round starts
+        # its Bash IN THE WORKTREE. This is the item's own proposal — a round turn's
+        # relative writes belong where its diff lives — and it is the only one of the
+        # three session kinds that has a better answer than a scratch directory.
+        # `stamp` is what makes it a rule rather than a suggestion: it refuses a
+        # directory inside the live checkout, and a worktree under `~/lloyd-work` is
+        # not one, so the write happens here and nowhere in the tree.
+        if session_id:
+            try:
+                from app.session_cwd import stamp as _stamp_cwd
+                _stamp_cwd(session_id, wt)
+            except Exception:  # noqa: BLE001 — a round opens even if the scratch fails
+                pass
         out_d = {"round_id": rid, "worktree": str(wt), "base": base,
                  "branch": f"automod/{rid}",
                  # The implementer's verify command has to be runnable from the

@@ -3882,6 +3882,41 @@ def _records_trigger(fn):
     return wrapper
 
 
+def _stamp_session_start_cwd(session_id: str, task_id) -> str | None:
+    """Record where this run's session's Bash starts when it names no directory.
+
+    Why it belongs beside this mint and not the worker one: a scheduled autonomy turn
+    never passes through `workers.sources._common.new_worker_session`. The pool's
+    `scheduled-task` source hands the job straight to `run_task`
+    (`workers/sources/scheduled_task.py:407`), and `run_task` mints its own session two
+    lines below with `platform="autonomy"`. So a stamp on the worker mint covers every
+    worker source and none of the 221 `platform: autonomy` session records on this box —
+    among them `20260930_010013_autonomy_80fe`, the nightly uptake probe whose
+    unmeasured `eval/uptake/classifier-report.json` landed in the tracked tree and
+    started this item (#1906).
+
+    The value lands in the session's own record, the one key
+    `agent_mcp/builtin_bash.py::_start_cwd` reads, because that tool resolves a session
+    and not a spawn: nothing has to be threaded through the harness to get it there.
+    `app.session_cwd.stamp_new_session` refuses a directory inside the live checkout and
+    refuses to mint a session record of its own, so this is a no-op on a run whose
+    `create_session` failed rather than a half-written record — and it swallows its own
+    failure, which is why the log line below fires on the returned None instead of
+    around an exception: a run that silently kept the server's cwd is the case this
+    item's writer was never able to be found for.
+
+    Returns the recorded directory, or None. A run never fails over its start directory:
+    without one the turn keeps today's behaviour (it inherits the server's cwd), which
+    is the bug this is closing but not a reason to lose the task's output.
+    """
+    from app import session_cwd
+    written = session_cwd.stamp_new_session(session_id)
+    if written is None:
+        logger.warning("Task #%s: recorded no start cwd for %s; its Bash inherits "
+                       "the server's directory", task_id, session_id)
+    return written
+
+
 @_records_trigger
 async def run_task(task_id, *, max_duration: int | None = None) -> dict:
     """Execute a single autonomy task via Claude Agent SDK."""
@@ -3997,6 +4032,11 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
             inner_voice=task_inner_voice,
             preview=str(task.get("description") or task.get("name") or ""),
         )
+        # #1906, immediately after the record exists — `stamp` reads and rewrites that
+        # JSON, so a record that was never created is a silent no-op, and a failure
+        # here is its own log line rather than the "could not create its session" one
+        # below (which would say something that did not happen).
+        _stamp_session_start_cwd(session_id, task_id)
     except Exception as exc:  # noqa: BLE001 — a record is not the run
         logger.warning("Task #%s: could not create its session %s: %s",
                        task_id, session_id, exc)

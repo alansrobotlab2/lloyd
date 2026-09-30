@@ -632,6 +632,7 @@ async def run_trial(
     prompt = task.get("prompt") or task.get("_body") or ""
     if probe_prompt:
         prompt = (prompt + "\n\n" + probe_prompt) if prompt else probe_prompt
+    from app.session_cwd import stamp_new_session
     from app.sessions_io import create_session, new_background_session_id
 
     trial_id = _trial_session_id(variant_id, task_id)
@@ -693,6 +694,16 @@ async def run_trial(
                        source="bench", inner_voice=False, preview=prompt[:60])
     except Exception as exc:  # noqa: BLE001 — the record, never the trial
         logger.warning("bench_runner_sdk: could not create session %s: %s", session_id, exc)
+
+    # #1906. A bench trial is a `platform="worker"` turn with the ordinary tool set, so
+    # its Bash reaches the same resolver as any worker's — and this mint reaches no other
+    # one. Without a start directory its relative writes resolve against the MCP
+    # server's cwd, which is the live checkout, and a trial that scatters fixtures into
+    # `main` also poisons the very measurement it is making: the next trial's `git status`
+    # and the guardian's datawatch both read that tree. Outside the `try` above for the
+    # same reason as `run_prompt_on_primary`: a run whose record failed has nothing to
+    # stamp, and its failure must not be logged as "could not create session".
+    stamp_new_session(session_id)
 
     options = build_options(
         model=model, overlay_dir=overlay_dir, session_id=session_id,

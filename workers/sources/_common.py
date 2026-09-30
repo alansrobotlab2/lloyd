@@ -578,6 +578,19 @@ async def run_prompt_on_primary(prompt: str, max_turns: int = 20, *,
         logger.warning("could not create session %s for %s: %s",
                        session_id, source, exc)
 
+    # #1906, at the mint the second review found unstamped. This path has a session
+    # record AND a Bash tool — `workers/sources/bench_mine.py:934`, `bench_mine.py:955`
+    # and `workers/sources/session_distill.py:300` each run their turn through here —
+    # but it does not come through `new_worker_session`, so the stamp that gives a
+    # worker its scratch never reached it and every relative path it wrote resolved
+    # against the MCP server's cwd: the live production checkout. Placed after the
+    # `except` for the reason `app/autonomy.py::run_task` gives for the same choice: a
+    # run whose `create_session` raised has no record to stamp, and a cwd failure
+    # logged from inside that `try` would read as "could not create session", which
+    # did not happen. `ensure_session_start_cwd` swallows its own failures, so a turn
+    # that cannot get a scratch keeps today's behaviour rather than losing its run.
+    ensure_session_start_cwd(session_id)
+
     messages = [{"role": "user", "content": prompt}]
     out = TurnResult()
     out.session_id = session_id
@@ -781,10 +794,20 @@ def new_worker_session(*, title: str, source: str, model: str = "primary",
     `last_active` nor `message_count`, so a worker session sorted by its file
     mtime while every chat session sorted by its conversation.
     """
+    from app.session_cwd import stamp_new_session
     from app.sessions_io import create_session, new_background_session_id
-    return create_session(
-        new_background_session_id(source), platform="worker", model=model,
+    session_id = new_background_session_id(source)
+    created = create_session(
+        session_id, platform="worker", model=model,
         title=title, source=source, inner_voice=inner_voice)
+    # #1906: a worker's Bash inherits the cwd of the MCP server, which is the live
+    # checkout, so a relative write from a nightly task landed on production `main`
+    # — the uptake probe's unmeasured `eval/uptake/classifier-report.json` arrived
+    # exactly this way. Stamped at the mint rather than in each source, because the
+    # sources are many and the tool they share is one. A session that still wants the
+    # tree names it absolutely in its own `cwd` argument, which outranks this.
+    stamp_new_session(session_id)
+    return created
 
 
 async def _cancel_session_turn(backend: str, session_id: str) -> bool:
@@ -801,6 +824,44 @@ async def _cancel_session_turn(backend: str, session_id: str) -> bool:
     except Exception as exc:
         logger.warning("could not cancel worker turn in %s: %s", session_id, exc)
         return False
+
+
+def ensure_session_start_cwd(session_id: str) -> str | None:
+    """Give a worker or round turn's session a start cwd OUTSIDE the live checkout.
+
+    Two call sites, both of them a turn that has a session but no stamp on it yet:
+    `run_prompt_in_session` calls it for every session it was handed (`session_id=`, or
+    a warm autocode continuation) whose record predates the key or came from a route
+    that never minted one, and `run_prompt_on_primary` calls it immediately after its
+    own `create_session` — that path does not pass through `new_worker_session`, so
+    without this its turns (`bench_mine.py:934`, `bench_mine.py:955`,
+    `session_distill.py:300`) would still inherit the server's directory: `~/lloyd`,
+    where a relative write is a production write. An autocode round that opened a round
+    is restamped to its worktree by `scripts/automod/round.py::start`, above this
+    helper's read-first check and therefore never overwritten by it.
+
+    What this function does NOT reach, stated because the last review was spent finding
+    out the hard way: a scheduled autonomy run never enters `run_prompt_in_session` at
+    all. `workers/sources/scheduled_task.py:407` calls `app.autonomy.py::run_task`,
+    which mints and stamps its own `platform="autonomy"` session through
+    `app/autonomy.py::_stamp_session_start_cwd`.
+
+    Returns the directory recorded, or None when it could not be written; a turn with
+    no scratch keeps today's behaviour rather than failing.
+    """
+    try:
+        from app.session_cwd import read, stamp_new_session
+        already = read(session_id)
+        if already:
+            # Already named — and `read` only returns a directory that is outside the
+            # live checkout and still exists. An autocode round that opened a round has
+            # one pointing at its worktree, and that is a better answer than a scratch:
+            # overwriting it here would send the resumed turn's relative writes back to
+            # a directory with no diff in it.
+            return already
+    except Exception:  # noqa: BLE001 — a missing scratch is not a reason to fail a turn
+        return None
+    return stamp_new_session(session_id)
 
 
 async def run_prompt_in_session(prompt: str, *, title: str, source: str,
@@ -892,6 +953,7 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
     if not session_id:
         session_id = new_worker_session(title=title, source=source,
                                         inner_voice=inner_voice, model=model)
+    ensure_session_start_cwd(session_id)
     # #534 — whose authority this turn borrows, carried across the loopback
     # POST. `policy.current_scope` is a contextvar the pool binds around the
     # claimed job, and it is correct HERE, in the pool's own task; the backend

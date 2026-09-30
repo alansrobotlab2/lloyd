@@ -629,12 +629,28 @@ def main(argv: list[str] | None = None) -> int:
                   + ("" if not args.ignore_precision_floor else
                      " (--ignore-precision-floor does not reach the label check)"),
                   file=sys.stderr)
-            if not args.dry_run:
+            # #1906: an UNMEASURED report is not a result, and the tracked eval dir is
+            # where a result lives. `.gitignore` deliberately un-ignores
+            # `eval/uptake/*.json` so a real report shows up as a reviewable change;
+            # that same rule made the nightly task's sentinel land as an untracked file
+            # in the live checkout, which is what the guardian's "code tree" alert
+            # fired on. The publish decision belongs to the probe, not to ignore
+            # patterns: the STOP line and exit 3 below are unchanged.
+            unmeasured = not classifier_block.get("measured")
+            if unmeasured and not args.out_dir:
+                print("withheld: classifier-report.json is not written to the tracked "
+                      "eval/uptake/ — its `measured` is false, so it is a record of "
+                      "the probe's own coverage, not an outcome. Pass --out-dir to "
+                      "keep it somewhere you chose.", file=sys.stderr)
+            elif not args.dry_run:
                 out_dir.mkdir(parents=True, exist_ok=True)
                 (out_dir / "classifier-report.json").write_text(
                     json.dumps({"classifier": classifier_block,
-                                "note": "emitted because the run did not clear the floor; "
-                                        "no uptake table exists for this run"}, indent=2) + "\n")
+                                "note": ("emitted because the run did not clear the floor; "
+                                         "no uptake table exists for this run")
+                                        + (" — and `measured` is false, so this is a "
+                                           "coverage record, not an outcome"
+                                           if unmeasured else "")}, indent=2) + "\n")
             return 3
         audit = {
             "audit_only": True,
