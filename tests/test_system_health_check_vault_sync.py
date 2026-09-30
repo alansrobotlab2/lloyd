@@ -1233,9 +1233,12 @@ def test_a_recorded_client_state_is_a_state_of_its_own_not_roundtrip_skipped(rig
     # "weaker evidence" class beside `roundtrip-skipped`, not with the failures.
     assert block["kind"] == "unproven", block
     assert shc.VAULT_SYNC_AS_RECORDED not in shc.VAULT_SYNC_CANNOT_SYNC
-    # The overall rollup still keys on the one green state (#1752's owed ruling), so
-    # a named record changes the row, not the box's exit status.
-    assert payload["overall_status"] == "degraded" and proc.returncode == DEGRADED_EXIT
+    # #1865: the rollup keys on `kind` plus the record the row carries, not on the one
+    # green state, so a row that quotes a caught-up client record no longer claims the
+    # box's exit code. It was `degraded` / DEGRADED_EXIT here while the reduction was
+    # `state == VAULT_SYNC_GREEN` — which, with the round trip refused for every
+    # session, made DEGRADED the steady state of every agent turn on this box.
+    assert payload["overall_status"] == "healthy" and proc.returncode == 0, (payload, proc.returncode)
 
     text = rig.run("--component", "vault_sync", fmt="text").stdout
     assert f"obsidian-sync — {shc.VAULT_SYNC_AS_RECORDED}" in text, text
@@ -1330,3 +1333,283 @@ def test_the_recorded_state_writes_no_last_sync_success_record(rig):
              round_trip=True)
     assert rig.state_file.exists() is True
     assert "round trip" in json.loads(rig.state_file.read_text())["observed_by"]
+
+
+# --------------------------------------------------------------- #1865
+# "`vault_sync` overall keys on kind + row evidence, not green-alone": the rollup
+# asks a predicate (`vault_sync_is_outage`) instead of `state == VAULT_SYNC_GREEN`,
+# so the reachable best state an agent turn has — `synced-as-recorded`, whose own
+# row says the client uploaded seconds ago with an empty queue — no longer prints
+# DEGRADED on every run (#444's always-firing alarm one level up), while every
+# cannot-sync state and every unproven row that cannot quote a caught-up record
+# still does.
+CLEAN_RECORD = {"manifest_version": "19582",
+                "newest_sync_at": "2026-09-30T00:00:00Z",
+                "newest_sync_age_seconds": 42,
+                "pending": 0, "markdown_missing": 0}
+CLEAN_GAPS = {"status": "measured", "total": 268, "markdown": 0, "non_markdown": 268}
+
+
+def _as_recorded(record=None, gaps=None):
+    """The live row shape, built by the shipped constructor so `kind` and `healthy`
+    come from the code rather than from this file."""
+    row = shc._sync_result(shc.VAULT_SYNC_AS_RECORDED, "client-record-current",
+                           "manifest v19582 says so")
+    if record is not None:
+        row["client_record"] = record
+    if gaps is not None:
+        row["uncovered_files"] = gaps
+    return row
+
+
+def _overall(row):
+    return shc.compute_overall(disk=[], services=[], endpoints=[],
+                               vault_sync=row, components=["vault_sync"])
+
+
+def test_a_caught_up_record_makes_the_row_not_an_outage():
+    """The row the probe reaches on a committing box is `unproven`, non-green, and
+    NOT an outage: it quotes a measured manifest with an empty queue, no markdown
+    left behind, and a newest upload inside CLIENT_RECORD_MAX_AGE_SECONDS."""
+    row = _as_recorded(record=dict(CLEAN_RECORD), gaps=dict(CLEAN_GAPS))
+    assert row["kind"] == "unproven" and row["healthy"] is False, row
+    assert shc.vault_sync_is_outage(row) is False, row
+    healthy, reasons = _overall(row)
+    assert healthy is True and reasons == [], reasons
+
+
+def test_counting_the_component_and_failing_the_box_are_separate_questions():
+    """`checked += 1` stays unconditional, so a run whose only component is a
+    non-outage vault_sync row passes because it measured something — and an empty
+    selection still fails with its own reason (#1191 must not come back wearing the
+    new shape)."""
+    row = _as_recorded(record=dict(CLEAN_RECORD), gaps=dict(CLEAN_GAPS))
+    healthy, reasons = _overall(row)
+    assert healthy is True and reasons == [], reasons
+    empty = shc.compute_overall(disk=[], services=[], endpoints=[],
+                                vault_sync=row, components=[])
+    assert empty == (False, ["no components were checked"]), empty
+
+
+@pytest.mark.parametrize("shape", [
+    "no-record-at-all", "record-empty", "pending-not-zero", "markdown-missing",
+    "manifest-unknown-missing", "manifest-unknown-unreadable",
+    "record-age-missing", "record-stale", "record-undated"])
+def test_an_unproven_row_without_caught_up_evidence_is_still_an_outage(shape):
+    """Each shape clause 1 names, hand-built: the probe can only emit
+    `synced-as-recorded` through `_client_is_keeping_up`, so a row that contradicts
+    itself is unreachable from the manifest and only a predicate that reads the row
+    can be tested against it. `no-record-at-all` is the case the probe DOES reach —
+    every `roundtrip-skipped` row — and the two `manifest-unknown` shapes are
+    `state-db-missing` / `state-db-unreadable`, where the figures are None and a
+    zero would read as "nothing at risk" (#1753)."""
+    record, gaps = dict(CLEAN_RECORD), dict(CLEAN_GAPS)
+    if shape == "no-record-at-all":
+        row = _as_recorded()
+    elif shape == "record-empty":
+        row = _as_recorded(record={}, gaps=gaps)
+    elif shape == "pending-not-zero":
+        record["pending"] = 3
+        row = _as_recorded(record=record, gaps=gaps)
+    elif shape == "markdown-missing":
+        record["markdown_missing"] = 1
+        gaps["markdown"] = 1
+        row = _as_recorded(record=record, gaps=gaps)
+    elif shape == "manifest-unknown-missing":
+        gaps = {"status": "unknown", "reason": "state-db-missing",
+                "detail": "no state.db in the registration",
+                "total": None, "markdown": None, "non_markdown": None}
+        row = _as_recorded(record=record, gaps=gaps)
+    elif shape == "manifest-unknown-unreadable":
+        gaps = {"status": "unknown", "reason": "state-db-unreadable",
+                "detail": "DatabaseError: file is not a database",
+                "total": None, "markdown": None, "non_markdown": None}
+        row = _as_recorded(record=record, gaps=gaps)
+    elif shape == "record-age-missing":
+        record["newest_sync_age_seconds"] = None
+        row = _as_recorded(record=record, gaps=gaps)
+    elif shape == "record-stale":
+        record["newest_sync_age_seconds"] = shc.CLIENT_RECORD_MAX_AGE_SECONDS + 1
+        row = _as_recorded(record=record, gaps=gaps)
+    else:
+        record["newest_sync_at"] = None
+        record["newest_sync_age_seconds"] = None
+        row = _as_recorded(record=record, gaps=gaps)
+    assert row["kind"] == "unproven", (shape, row)
+    assert shc.vault_sync_is_outage(row) is True, (shape, row)
+    healthy, reasons = _overall(row)
+    assert healthy is False, (shape, reasons)
+    assert reasons[0].startswith("vault_sync: "), reasons
+    assert "synced-as-recorded" in reasons[0], (shape, reasons)
+
+
+def test_the_record_age_bound_is_the_constant_and_not_a_smaller_number():
+    """The bound the predicate applies is CLIENT_RECORD_MAX_AGE_SECONDS, the same one
+    `_client_is_keeping_up` gates the state on: exactly at the bound is not an outage,
+    one second past it is. A predicate with its own, tighter number would fail a box
+    the state still calls recorded."""
+    at_bound = _as_recorded(record={**CLEAN_RECORD, "newest_sync_age_seconds":
+                                    shc.CLIENT_RECORD_MAX_AGE_SECONDS},
+                            gaps=dict(CLEAN_GAPS))
+    past = _as_recorded(record={**CLEAN_RECORD, "newest_sync_age_seconds":
+                                shc.CLIENT_RECORD_MAX_AGE_SECONDS + 1},
+                        gaps=dict(CLEAN_GAPS))
+    assert shc.CLIENT_RECORD_MAX_AGE_SECONDS == 86400, "the fixture assumes 24 h"
+    assert shc.vault_sync_is_outage(at_bound) is False, at_bound
+    assert shc.vault_sync_is_outage(past) is True, past
+
+
+@pytest.mark.parametrize("state", shc.VAULT_SYNC_CANNOT_SYNC)
+def test_every_cannot_sync_state_is_an_outage_and_keeps_its_reason_text(state):
+    """All six cannot-sync states fail the box, and the reason line still names
+    state, reason and detail exactly as the green-alone rollup did — the message a
+    human reads must not have changed along with who decides to print it."""
+    row = shc._sync_result(state, f"why-{state}", "the detail a human reads")
+    assert row["kind"] == "cannot-sync", row
+    assert shc.vault_sync_is_outage(row) is True, row
+    healthy, reasons = _overall(row)
+    assert healthy is False, (state, reasons)
+    assert reasons == [f"vault_sync: vault sync state {state} "
+                       f"(reason why-{state}: the detail a human reads)"], reasons
+
+
+def test_a_probe_that_returned_no_row_is_an_outage_not_an_empty_pass():
+    """`vault_sync is None` with the component selected used to fall into the
+    green-alone comparison and raise; it must stay a named outage."""
+    healthy, reasons = _overall(None)
+    assert healthy is False, reasons
+    assert reasons == ["vault_sync: the vault sync probe produced no result"], reasons
+
+
+def test_the_green_row_is_never_an_outage():
+    """The `synced` row keeps passing for the same reason it always did — an observed
+    round trip — and the predicate does not widen green to reach the caught-up shape."""
+    assert shc.vault_sync_is_outage(shc._sync_result("synced", "round-trip-observed")) is False
+    assert shc.vault_sync_is_outage(
+        shc._sync_result("nothing-to-sync", "sentinel-unwritable")) is True
+    assert shc.vault_sync_is_outage(
+        shc._sync_result(shc.VAULT_SYNC_ROUNDTRIP_SKIPPED, "round-trip-not-attempted")) is True
+    assert shc.vault_sync_is_outage(
+        shc._sync_result(shc.VAULT_SYNC_UNPROVABLE_E2E, "e2e-vault")) is True
+
+
+def test_a_caught_up_row_exits_zero_with_the_row_still_reading_non_green(rig):
+    """Clauses 2 and 4 across the real process boundary, one run: the box is
+    HEALTHY/exit 0 and the row is unchanged — `[✗]`, `unproven`, `healthy: false`,
+    its own state named, the four measurements quoted, and the inbound-replication
+    gap still stated. Nothing here softens the row; only the exit code moved."""
+    rig.plant_state_db(local=RECORDED, server=RECORDED, synced_ago=90,
+                       version="4242", vault_id=RECORDED_ID)
+    payload, proc = rig.json("--component", "vault_sync",
+                             spec=rig.spec(vault_id=RECORDED_ID))
+    block = payload["vault_sync"]
+    assert block["state"] == shc.VAULT_SYNC_AS_RECORDED, block
+    assert block["kind"] == "unproven" and block["healthy"] is False, block
+    assert payload["overall_status"] == "healthy" and proc.returncode == 0, payload
+    assert payload["reasons"] == [], payload
+    text = rig.run("--component", "vault_sync", fmt="text",
+                   spec=rig.spec(vault_id=RECORDED_ID)).stdout
+    assert f"[✗] obsidian-sync — {shc.VAULT_SYNC_AS_RECORDED}" in text, text
+    assert "Overall: HEALTHY" in text, text
+    assert "[!] vault_sync:" not in text, text        # no reason line beside a healthy row
+    assert "unproven" == block["kind"], block
+    assert block["client_record"]["manifest_version"] == "4242", block
+    assert block["client_record"]["pending"] == 0, block
+    assert block["client_record"]["markdown_missing"] == 0, block
+    assert 90 <= block["client_record"]["newest_sync_age_seconds"] < 3600, block
+    assert block["uncovered_files"]["status"] == "measured", block
+    assert "inbound" in block["detail"].lower() and "never" in block["detail"].lower()
+
+
+def test_a_healthy_overall_still_never_says_the_row_is_clean(rig):
+    """The line this change must not cross: no vault_sync row prints as clean. The
+    text row's own `[✓]` icon is reserved for `synced`, and a JSON consumer that
+    branches on `vault_sync.healthy` still sees false on a healthy box."""
+    rig.plant_state_db(local=RECORDED, server=RECORDED, synced_ago=90)
+    payload = rig.json("--component", "vault_sync")[0]
+    assert payload["overall_status"] == "healthy"
+    assert payload["vault_sync"]["healthy"] is False, payload["vault_sync"]
+    text = rig.run("--component", "vault_sync", fmt="text").stdout
+    assert "[✓] obsidian-sync" not in text, text
+
+
+@pytest.mark.parametrize("shape", ["stale-record", "queue-not-empty",
+                                   "markdown-without-server-row",
+                                   "manifest-missing", "manifest-unreadable"])
+def test_a_record_that_cannot_answer_for_the_client_still_exits_degraded(rig, shape):
+    """Clause 3's reachable half: each of these is a real manifest (or the absence
+    or corruption of one), and every one of them lands on a row that carries no
+    caught-up record, so the box is DEGRADED, exit 3, with state + reason + detail
+    in the reason line."""
+    kwargs = {"local": RECORDED, "server": RECORDED, "synced_ago": 90}
+    if shape == "stale-record":
+        kwargs["synced_ago"] = shc.CLIENT_RECORD_MAX_AGE_SECONDS + 3600
+    elif shape == "queue-not-empty":
+        kwargs["pending"] = 3
+    elif shape == "markdown-without-server-row":
+        kwargs["local"] = [*RECORDED, "lloyd/never-uploaded.md"]
+    reg = rig.plant_state_db(**kwargs)
+    if shape == "manifest-missing":
+        (reg / "state.db").unlink()
+    elif shape == "manifest-unreadable":
+        (reg / "state.db").write_bytes(b"not a sqlite file at all, just noise\n")
+    payload, proc = rig.json("--component", "vault_sync")
+    block = payload["vault_sync"]
+    assert block["healthy"] is False, block
+    assert shc.vault_sync_is_outage(block) is True, block
+    assert payload["overall_status"] == "degraded", payload
+    assert proc.returncode == DEGRADED_EXIT, proc.returncode
+    expected = (f"vault_sync: vault sync state {block['state']} "
+                f"(reason {block['reason']}: {block['detail']})")
+    assert expected in payload["reasons"], payload["reasons"]
+    if shape in ("manifest-missing", "manifest-unreadable"):
+        assert block["uncovered_files"]["status"] == "unknown", block
+        assert block["uncovered_files"]["reason"] == (
+            "state-db-missing" if shape == "manifest-missing"
+            else "state-db-unreadable"), block
+
+
+def test_an_unlinked_vault_is_still_degraded_through_the_predicate(rig):
+    """A cannot-sync state across the process boundary — unlinked vault, exit 3,
+    the state and reason named — so the new gate cannot have swallowed the #538
+    case it was built to keep."""
+    payload, proc = rig.json("--component", "vault_sync", spec=rig.spec(linked=False))
+    block = payload["vault_sync"]
+    assert block["state"] == "not-configured" and block["kind"] == "cannot-sync", block
+    assert payload["overall_status"] == "degraded" and proc.returncode == DEGRADED_EXIT
+    assert any(r.startswith("vault_sync: vault sync state not-configured "
+                            "(reason not-configured:") for r in payload["reasons"]), payload
+
+
+def test_the_green_path_still_holds_through_the_new_reduction(rig):
+    """The `synced` row remains healthy end to end — row, JSON and exit status —
+    with the round trip in place, so nothing about green changed."""
+    rig.plant_state_db(local=RECORDED, server=RECORDED, synced_ago=90)
+    payload, proc = rig.json("--component", "vault_sync",
+                             spec=rig.spec(registry=True, replicate=True),
+                             round_trip=True)
+    block = payload["vault_sync"]
+    assert block["state"] == shc.VAULT_SYNC_GREEN and block["kind"] == "green", block
+    assert block["healthy"] is True, block
+    assert payload["overall_status"] == "healthy" and proc.returncode == 0
+
+
+def test_the_predicate_docstring_carries_its_rationale_and_its_precedents():
+    """Clause 5's docstring half: the reason this gate exists (#538's mask, #444's
+    always-firing alarm, #1752's unreachable green) and the three predicates it
+    copies its shape from are named where the next reader edits it."""
+    doc = shc.vault_sync_is_outage.__doc__ or ""
+    for token in ("#538", "#444", "#1752", "voice_media_is_outage",
+                  "daily_note_appends_is_loss", "_client_is_keeping_up"):
+        assert token in doc, token
+    assert "#1865" in doc, doc
+
+
+def test_both_docs_state_that_a_non_green_row_does_not_imply_exit_3():
+    """Clause 5's docs half: an agent that reads either file before quoting a
+    verdict has to meet the rule there, not only in the script's docstring."""
+    format_doc = (SCRIPT.parent / "output-format.md").read_text()
+    for text, name in ((SKILL.read_text(), "SKILL.md"), (format_doc, "output-format.md")):
+        assert "does not by itself imply exit 3" in text, name
+        assert "#1865" in text, name
+        assert "client_record" in text, name
