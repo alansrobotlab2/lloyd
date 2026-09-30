@@ -854,6 +854,124 @@ def split_post_landing_clauses(clauses) -> tuple[list[str], list[str]]:
 
 _CLAUSE_LINE = re.compile(r"^\s*(\d{1,2})[.)]\s+(.*\S)\s*$")
 
+# ── a witness that lives in no history ───────────────────────────────────────
+#
+# A measurement item's claim is a number read off a live store — rows of a
+# jsonl, a count out of a db — and those paths live under the data root, where
+# `git rev-parse --show-toplevel` exits 128 (`fatal: not a git repository`)
+# while `~/lloyd` and `~/obsidian` both report a toplevel. So the bytes a claim
+# was read off have no history anywhere: that is how #1621's 44-row report sat
+# on one disk until #1756 committed it to `backlog/data/…jsonl` at `5c5e6826`.
+# #1756's owed ruling (2026-09-30T02:14:09, run `20260929_190733_owedcheck_16ba`)
+# settled the policy — a standing rule, on the ITEM-AUTHORING side, not the
+# review prompt — so it lives here, on the path that writes a confirmed
+# contract, and it is a function rather than a prompt bullet because four of
+# this item's five checks are behaviour of the emitted clause list, which no
+# test can pin through what a model does with a sentence.
+#
+# What the mechanism cannot reach: the trigger is a probe on a path the item
+# NAMES. An item quoting a live store's numbers with no path at all (a row
+# count pasted into prose) is out of this rule's reach, and #1869 leaves that
+# half to owed-check.
+
+#: The extensions whose bytes a report gets read off — the same set the #1869
+#: prevalence scan ran over `~/obsidian/backlog/*.md`.
+WITNESS_EXTS = ("jsonl", "json", "csv", "ndjson", "db", "sqlite", "sqlite3",
+                "log", "txt", "parquet", "tsv")
+#: An absolute or `~`/`$HOME`-rooted path with one of those extensions, as it
+#: appears in an item body or a triage evidence block. Brackets and `+` are in
+#: the class because a pytest fixture path can hold them.
+WITNESS_PATH_RX = re.compile(
+    r"(?:~|\$HOME)?/(?:[\w.\-\[\]+]*/)*[\w.\-\[\]+]+\.(?:%s)\b"
+    % "|".join(WITNESS_EXTS))
+#: A clause that already says where the bytes go. The two shapes that claim
+#: takes here: the archive convention below, or an explicit vault path. Missing
+#: one and adding a second clause is the safe direction; skipping the clause
+#: because a stray word looked like an archive is the bug all over again.
+_ARCHIVE_MENTION_RX = re.compile(r"backlog/data/|obsidian/", re.IGNORECASE)
+#: Where witness bytes go — the convention #1756 used. Vault-relative, so the
+#: clause reads the same from any checkout.
+WITNESS_ARTIFACT_DIR = "backlog/data"
+#: Formats one line per record, so a line count IS the quoted report.
+_LINE_WITNESS_EXTS = frozenset({"jsonl", "ndjson", "csv", "tsv", "txt", "log"})
+_SQL_WITNESS_EXTS = frozenset({"db", "sqlite", "sqlite3"})
+
+
+def in_git_tree(path) -> bool:
+    """True when `path` sits inside some git repository's working tree.
+
+    The trigger is this probe, not a string match on the data root: what makes
+    a witness unarchived is that no history covers it, which is a property of
+    the directory rather than of one machine's path layout. A path not written
+    yet is probed at its nearest existing ancestor — a file the next run will
+    create is still inside, or outside, a tree.
+    """
+    import subprocess
+    target = Path(str(path)).expanduser()
+    here = target if target.is_dir() else target.parent
+    while not here.exists() and here != here.parent:
+        here = here.parent
+    if not here.exists():
+        return False
+    return subprocess.run(["git", "-C", str(here), "rev-parse", "--show-toplevel"],
+                          capture_output=True, text=True).returncode == 0
+
+
+def _rederive_command(artifact: str, ext: str) -> str:
+    """A shell command that recomputes the report from the COMMITTED bytes."""
+    if ext in _SQL_WITNESS_EXTS:
+        return (f"python3 -c \"import sqlite3;print(sqlite3.connect('{artifact}')"
+                f".execute('select count(*) from sqlite_master').fetchone()[0])\"")
+    return f"wc -l < {artifact}"
+
+
+def add_witness_artifact_clause(clauses, text, *, probe=in_git_tree,
+                                artifact_dir: str = WITNESS_ARTIFACT_DIR) -> list[str]:
+    """One clause asking for the witness bytes, when a named witness has none.
+
+    `clauses` is the contract as it stands on the way to the item; `text` is
+    everything the item states (body, evidence, acceptance prose). The input
+    list is never mutated. Fires only when all three hold:
+
+      * no clause already names where the bytes go (`_ARCHIVE_MENTION_RX`);
+      * `probe` says a path the item names is in no git tree — those bytes
+        exist in no history anywhere;
+      * the contract has room: at `MAX_CLAUSES` the list comes back UNCHANGED,
+        because a generated clause must never evict, truncate or reorder one
+        that was authored.
+
+    Exactly one clause goes on, for the first out-of-tree path in reading
+    order, worded over committed bytes with no time shape — `POST_LANDING_RX`
+    would otherwise move it out of the graded contract, where it does no good.
+    Its command is `wc -l` for a line format (the report a jsonl is quoted
+    from), a sqlite count for a store, and `wc -l` for anything else, which
+    names the artifact honestly while a parquet's real report command stays
+    whatever the item itself quoted.
+    """
+    every = list(clauses or ())
+    if any(_ARCHIVE_MENTION_RX.search(str(c)) for c in every):
+        return every
+    seen: set[str] = set()
+    witness = ""
+    for tok in WITNESS_PATH_RX.findall(str(text or "")):
+        if tok in seen:
+            continue
+        seen.add(tok)
+        if not probe(tok):
+            witness = tok
+            break
+    if not witness or len(every) >= MAX_CLAUSES:
+        return every
+    artifact = f"{artifact_dir}/{Path(witness).name}"
+    ext = Path(witness).suffix.lower().lstrip(".")
+    every.append(
+        f"The witness bytes have no history: copy `{witness}` to `{artifact}` in "
+        f"the vault (an extract reproducing the same numbers is fine) and "
+        f"re-derive the quoted report from the committed bytes with "
+        f"`{_rederive_command(artifact, ext)}` — that output is the figure the "
+        f"item quotes.")
+    return every
+
 
 def split_clause_lines(text: str, *, limit: int = READ_MAX_CLAUSES) -> list[str]:
     """Numbered lines (`1. …`, `2) …`) into clauses; unnumbered prose is one
@@ -4981,6 +5099,15 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
     # arrives with time cannot be graded before landing, and holding a round
     # to one can only refuse it. #859 was refused twice on "needs a day of
     # post-change traffic" with its mechanism complete on both commits.
+    if verdict == "confirmed":
+        # The witness rule: after the cap, so it can only take a slot that is
+        # genuinely spare, and before the post-landing split, so a generated
+        # clause carrying a time shape is caught by the same backstop an
+        # authored one is instead of slipping past it. The item's own front
+        # matter is what the review rung reads (`acceptance_clauses_of` prefers
+        # it to the ledger row the caller writes from its own copy).
+        clauses = add_witness_artifact_clause(
+            clauses, f"{body}\n{evidence}\n{acceptance}")
     clauses, moved_later = split_post_landing_clauses(clauses)
     human = clean_clauses(list(human_clauses) + moved_later)
     if verdict == "confirmed" and clauses:

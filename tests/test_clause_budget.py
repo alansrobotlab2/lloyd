@@ -206,3 +206,71 @@ def test_clauses_past_the_budget_are_kept_as_text_on_the_row_and_the_item(isolat
     assert row["clauses_dropped_text"] == NINE[B.MAX_CLAUSES:]
     text = p.read_text()
     assert "not graded, not part of the contract" in text and NINE[-1] in text
+
+
+# ── #1869: the witness clause fits the budget or does not go on ───────────────
+
+def _witness_under(tmp_path: Path) -> Path:
+    """A witness path the probe itself says is in no git tree."""
+    d = tmp_path / "lloyd-data" / "_pipeline" / "reflection"
+    d.mkdir(parents=True)
+    p = d / "iv-metrics.jsonl"
+    p.write_text('{"llm_calls": 164, "miss_rate": null}\n' * 17)
+    assert B.in_git_tree(p) is False, p
+    return p
+
+
+def test_a_contract_already_at_the_cap_gains_no_witness_clause(tmp_path, isolated):
+    """The rule takes a spare slot or none: a full contract comes back exactly
+    as the cap left it, so a generated clause can never evict, truncate or
+    reorder one that triage authored.
+
+    The control beside it is the same body and the same helper with one slot
+    spare, which does fire — so an unchanged list here is the budget declining
+    the clause, not the trigger missing the path.
+    """
+    witness = _witness_under(tmp_path)
+    body = (f"Live run 2026-09-30 over `{witness}` printed 17 rows with "
+            "`miss_rate` null in 9.")
+    at_cap = NINE[:B.MAX_CLAUSES]
+    # The two halves of the guard, over the SAME body: with one slot spare the
+    # helper fires, at `MAX_CLAUSES` it does not. Without the first line the
+    # second could be the no-witness branch instead of the budget.
+    spare = B.add_witness_artifact_clause(at_cap[:B.MAX_CLAUSES - 1], body)
+    assert spare[:B.MAX_CLAUSES - 1] == at_cap[:B.MAX_CLAUSES - 1] and \
+        len(spare) == B.MAX_CLAUSES and "backlog/data/" in spare[-1], (
+        "with one slot spare the same body does fire", spare)
+    assert B.add_witness_artifact_clause(list(at_cap), body) == at_cap, (
+        "a full contract is returned clause for clause, in order")
+
+    # And through the writer, with the witness in the body `record_verdict`
+    # reads: nine authored clauses cap to six, and the rule adds nothing.
+    p = write_item(isolated, 21, body=body)
+    B.record_verdict(B.item_by_id(21), "confirmed", f"`{witness}` re-measured",
+                     acceptance="x", acceptance_clauses=NINE)
+
+    graded = _fm(p)["acceptance_clauses"]
+    assert graded == NINE[:B.MAX_CLAUSES], graded
+    assert not any("backlog/data/" in c for c in graded), graded
+
+
+def test_a_contract_with_room_ends_at_or_below_the_cap(tmp_path, isolated):
+    """Five authored clauses (the single-triage ask) plus the witness clause is
+    six — `MAX_CLAUSES`, not seven — with the authored ones in their own order
+    in front."""
+    witness = _witness_under(tmp_path)
+    body = f"`{witness}` holds the 17 rows the item quotes."
+    five = [f"clause {i}" for i in range(1, B.SINGLE_MAX_CLAUSES + 1)]
+    assert len(five) == B.SINGLE_MAX_CLAUSES
+
+    p = write_item(isolated, 22, body=body)
+    B.record_verdict(B.item_by_id(22), "confirmed", "real", acceptance="x",
+                     acceptance_clauses=five)
+
+    graded = _fm(p)["acceptance_clauses"]
+    assert graded[:B.SINGLE_MAX_CLAUSES] == five, graded
+    # Five authored plus the witness clause is six — `MAX_CLAUSES` itself, and
+    # the literal on the right is the seven the cap would have to have been cut
+    # to in order to hold them all.
+    assert len(graded) == B.MAX_CLAUSES == 6 and len(graded) != 7, graded
+    assert "backlog/data/iv-metrics.jsonl" in graded[-1], graded[-1]
