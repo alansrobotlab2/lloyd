@@ -1472,6 +1472,77 @@ def test_reported_offers_are_capped_at_skill_report_top_k(monkeypatch, tmp_path)
         f"sk{i:02d}" for i in range(8)], "the cap is what reaches the log, not just the slice"
 
 
+def test_a_below_rank_8_skill_emits_no_row_however_often_it_would_apply(tmp_path, monkeypatch):
+    """#1923 clause 1: the cap is a censoring, so a missing row is not a measurement.
+
+    Twelve skills clear `SKILL_REPORT_FLOOR` on one query and that same turn is run
+    five times — the shape a real library is full of, with 93 of the 193 skills sitting
+    below rank 8 on 2026-09-28. `_reported_offers` keeps the top
+    `SKILL_REPORT_TOP_K` = 8, so across the five turns every kept skill has five rows
+    and every excluded skill has none, although each of them scored above the floor
+    every single time. The log is therefore silent about a skill that would have
+    applied on every turn, which is exactly why no usage table built from these rows
+    can state such a skill's liveness at any window depth (#1815). Widen the slice, or
+    drop it, and the below-rank-8 counts stop being zero — that is what makes this
+    node able to fail.
+    """
+    offers = _skm_offers(*[(12.0 - 0.1 * i, f"sk{i:02d}") for i in range(12)])
+    for n in range(5):
+        _skm_turn(tmp_path, monkeypatch, offers, f"censor-{n}")
+
+    seen: dict[str, int] = {}
+    for n in range(5):
+        for name in _skm_matches(tmp_path, f"censor-{n}"):
+            seen[name] = seen.get(name, 0) + 1
+
+    assert {f"sk{i:02d}": seen.get(f"sk{i:02d}", 0) for i in range(8)} == \
+        {f"sk{i:02d}": 5 for i in range(8)}, f"a kept skill lost a turn: {seen}"
+    assert {f"sk{i:02d}": seen.get(f"sk{i:02d}", 0) for i in range(8, 12)} == \
+        {f"sk{i:02d}": 0 for i in range(8, 12)}, \
+        f"a below-rank-8 skill reached the log, so the ceiling stopped censoring: {seen}"
+    assert sum(seen.values()) == 5 * prefetch.SKILL_REPORT_TOP_K, seen
+
+
+def test_the_top_k_record_names_the_censor_and_the_1815_liveness_ruling():
+    """#1923 clause 1's other half: the consequence is written where a reader meets
+    the cap, on both surfaces that are readable at runtime.
+
+    `_reported_offers`' docstring and the `SKILL_REPORT_TOP_K` comment block above the
+    constant are the two places a reader of the emitter can look. Each has to cite
+    #1815, each has to carry the phrase `however often it would have applied` —
+    asserted verbatim against both, so neither can say the ceiling without saying
+    what it hides — and each has to say the consequence in words: a missing row is a
+    reading this instrument cannot make, never a liveness reading. The docstring
+    additionally names the constant it cuts on and the block additionally says that no
+    threshold is derivable at any window depth, so the next reader neither re-derives
+    the ruling from three files nor re-proposes a retirement cutoff from the rows. The
+    behaviour is pinned by
+    `test_a_below_rank_8_skill_emits_no_row_however_often_it_would_apply`; this node
+    pins that the ruling travels with it, and that raising K stays the #435 scope call
+    rather than becoming a lint-side fix.
+    """
+    import inspect
+
+    phrase = "however often it would have applied"
+
+    doc = prefetch._reported_offers.__doc__ or ""
+    assert "#1815" in doc, doc
+    assert "SKILL_REPORT_TOP_K" in doc, doc
+    assert phrase in doc, doc
+    assert "liveness" in doc, doc
+
+    src = inspect.getsource(prefetch)
+    block = src[src.index("# `SKILL_REPORT_TOP_K` then bounds"):
+                src.index("SKILL_REPORT_FLOOR = 0.0")]
+    assert "#1815" in block, block
+    assert "emits no `prefetch.skill_match` row" in block, block
+    assert phrase in block, block
+    assert "liveness reading" in block, block
+    assert "no staleness or retirement threshold is derivable" in block, block
+    assert "#435" in block, \
+        "raising K must stay flagged as #435's needs-human scope call, not a fix here"
+
+
 # ── #1482 rider 1: the <facts> block ordered by query relevance ─────────────
 
 def _relevance_facts_tree(tmp_path, monkeypatch, facts):

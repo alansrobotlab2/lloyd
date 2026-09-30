@@ -1308,9 +1308,19 @@ def render_size(result: dict) -> list[str]:
 
 #: The window the STALE bucket reports usage over. Thirty days because that is the
 #: span `app.skill_telemetry.skill_injection_counts` is written to take and the
-#: span a "has this skill stopped being offered?" claim needs; it is NOT yet a
-#: retirement threshold, because the rows themselves only begin 2026-09-25 and a
-#: 30-day window is not 30 days deep until ~2026-10-24 (#1603, owed).
+#: span a "has this skill stopped being offered?" claim needs.
+#:
+#: It is NOT a retirement threshold, and no depth of rows makes it one. The reason
+#: is the reporting ceiling, not this store's shallowness: `prefetch.skill_match`
+#: is written only for the skills the scorer ranked into
+#: `SKILL_REPORT_TOP_K = 8` (`app/prefetch.py`), so a skill below rank 8
+#: contributes no rows to ANY window and the table cannot separate an unused skill
+#: from an unranked one at any depth — #1815 ruled that no cutoff follows from it.
+#:
+#: The depth note below is about this window alone, not about that ruling: the
+#: rows begin 2026-09-25, so thirty days of them do not exist until ~2026-10-24
+#: (#1603, owed), which bounds the span the printed counts cover and nothing more.
+#: `USAGE_SPAN_NOTICE_SLACK_DAYS` is what turns THAT into a printed sentence.
 USAGE_WINDOW_DAYS = 30
 
 
@@ -1489,7 +1499,9 @@ def usage_lines(usage: dict, known_names: list[str]) -> list[str]:
                 "it")
     head.append("would have applied. Absence here cannot separate an unused skill from an "
                 "unranked")
-    head.append("one, which is why no retirement threshold is applied to this table yet.")
+    head.append("one. The reporting ceiling is the reason, not the depth of this window: "
+                "`SKILL_REPORT_TOP_K = 8` bounds what these rows can ever say about a skill, "
+                "so no retirement threshold follows from this table at any window depth.")
     if unmeasured:
         head.append("")
         head.append(f"{USAGE_UNMEASURED_LABEL}: " + ", ".join(f"`{n}`" for n in unmeasured))

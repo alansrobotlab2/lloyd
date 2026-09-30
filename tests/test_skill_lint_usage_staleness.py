@@ -18,9 +18,12 @@ is full of (93 of 193 skills on 2026-09-28) and cannot be produced by any fixtur
 that only writes rows for the skills it names.
 
 What is NOT pinned here is a retirement threshold. The window is 30 days because
-that is the span `skill_injection_counts` takes, and the rows only begin 2026-09-25,
-so a 30-day window is not 30 days deep until ~2026-10-24 (#1603's owed list). The
-report prints counts; it does not decide which skill is dead.
+that is the span `skill_injection_counts` takes, and the rows begin 2026-09-25, so
+thirty days of them do not exist until ~2026-10-24 (#1603's owed list) — but the
+reason the table yields no cutoff at all is the reporting ceiling, not that date:
+`SKILL_REPORT_TOP_K = 8` (`app/prefetch.py`) means a skill below rank 8 contributes
+no rows to ANY window, so no depth makes it measurable (#1815). The report prints
+counts; it does not decide which skill is dead.
 
 Since #1815 the same file also holds the section's *span* to account, which is the
 other half of not lying with a true number. The heading used to read "Usage over the
@@ -40,11 +43,16 @@ import importlib.util
 import inspect
 import json
 import re
+import sys
 import textwrap
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+
+#: `app.prefetch` is the WRITER at the other end of the event log this file reads, so
+#: the seam nodes below emit through it rather than hand-writing its rows.
+sys.path.insert(0, str(ROOT))
 
 
 def _load():
@@ -471,11 +479,13 @@ def test_the_depth_fix_adds_no_retirement_threshold_and_no_verdict_about_a_skill
     """Clause 5's second half: the window got readable, nothing got decided.
 
     #1815 is only allowed to make the depth legible. A staleness or retirement cutoff
-    is owed until the rows are thirty days deep, and it is a scope call (#1603's owed
-    entry), so this pins the two constants that could carry such a cutoff at the values
-    they already had, and pins that the new sentences about depth say nothing about any
-    skill's fate. The wording is checked as a negation: the section may, and does,
-    explain that no threshold is applied — what it may not do is start applying one.
+    is owed and is a scope call (#1603's owed entry), and no depth settles it either:
+    `SKILL_REPORT_TOP_K = 8` means a skill below rank 8 contributes no rows to any
+    window at all, which is the reason the table yields no cutoff (#1815). So this
+    pins the two constants that could carry such a cutoff at the values they already
+    had, and pins that the new sentences about depth say nothing about any skill's
+    fate. The wording is checked as a negation: the section may, and does, explain
+    that no threshold is applied — what it may not do is start applying one.
     """
     assert sl.USAGE_WINDOW_DAYS == 30, sl.USAGE_WINDOW_DAYS
     assert sl.USAGE_SPAN_NOTICE_SLACK_DAYS == 1.0, sl.USAGE_SPAN_NOTICE_SLACK_DAYS
@@ -486,7 +496,7 @@ def test_the_depth_fix_adds_no_retirement_threshold_and_no_verdict_about_a_skill
          "skills": {"voice-mode": {"offers": 3, "loaded": 1, "ignored": 2,
                                    "max_score": 9.0}}},
         ["voice-mode", "never-seen"]))
-    says_none_applied = "no retirement threshold is applied to this table yet"
+    says_none_applied = "no retirement threshold follows from this table at any window depth"
     assert says_none_applied in body, body
     # The one allowed mention is the sentence saying no cutoff exists; strip it, and
     # nothing else may talk about a skill's fate.
@@ -502,10 +512,162 @@ def test_the_window_the_report_asks_for_is_thirty_days():
     it in prose — and stated here so nobody mistakes it for a threshold.
 
     Thirty days is the span `skill_injection_counts` is written to take. It is not a
-    staleness cutoff, and cannot be one yet: the rows begin 2026-09-25, so the
-    window is not 30 days deep before ~2026-10-24, and `SKILL_REPORT_TOP_K = 8`
-    means a low-scoring skill contributes no rows to any window at all.
+    staleness cutoff and never becomes one: `SKILL_REPORT_TOP_K = 8` means a
+    low-scoring skill contributes no rows to any window at all (#1815), and the rows
+    beginning 2026-09-25 only says the window is not 30 days deep before
+    ~2026-10-24 (#1603's owed entry) — a fact about the span, never about a verdict.
     """
     assert sl.USAGE_WINDOW_DAYS == 30, sl.USAGE_WINDOW_DAYS
     assert sl.USAGE_UNMEASURED_LABEL == "unmeasured"
     assert sl.USAGE_UNMEASURED_LABEL not in ("zero", "never used", "dead")
+
+
+def test_the_emitter_censors_a_below_rank_8_skill_and_the_table_says_unmeasured(
+        tmp_path, monkeypatch):
+    """#1923 clauses 3 and 4, across the whole boundary: emitter → JSONL → reader →
+    rendered section.
+
+    Twelve offers scoring above `SKILL_REPORT_FLOOR` are handed to the real
+    `prefetch._emit_skill_match_events`, which writes a row for eight of them and
+    nothing at all for four — that is `scored[:SKILL_REPORT_TOP_K]` in
+    `app/prefetch.py` doing the censoring, not a fixture's choice. Two more rows are
+    then appended at 29.9 and
+    14.0 days back so the store genuinely covers the whole 30-day window: a reader who
+    found the section shallow-notice-free has no depth left to blame, and that is
+    precisely the state in which a cutoff gets re-proposed. The answer must still be
+    `USAGE_UNMEASURED_LABEL` beside the named ceiling and never a zero row, because
+    rank 9 emits nothing at any depth (#1815).
+
+    Three ways this can fail, one per thing it pins: drop the slice in
+    `_reported_offers` and the four censored skills start emitting, which reddens the
+    row-count assertions; re-word the no-threshold sentence back to the store's depth
+    and the ceiling assertion reddens; let a fate word (retire, dead, obsolete) into
+    any other rendered line and the closing negation reddens. The negation is the one
+    `test_the_depth_fix_adds_no_retirement_threshold_and_no_verdict_about_a_skill`
+    pins over a shallow hand-built dict; repeated here over the deep one because that
+    is the render where a cutoff would next be proposed.
+    """
+    from app import prefetch
+
+    log_root = tmp_path / "event_logs"
+    monkeypatch.setattr("app.event_log.EVENT_LOGS_DIR", log_root)
+    monkeypatch.setattr("app.event_log.BLOBS_DIR", log_root / "blobs")
+    offers = [(12.0 - 0.1 * i, {"name": f"sk{i:02d}"}) for i in range(12)]
+    prefetch._emit_skill_match_events("s-one", offers, [])
+
+    with (log_root / "s-one.events.jsonl").open("a", encoding="utf-8") as fh:
+        for age_days in (29.9, 14.0):
+            fh.write(_match_row("sk00", landed=False,
+                                ts=_ts(int(round(age_days * MINUTES_PER_DAY)))) + "\n")
+
+    usage = sl.collect_usage_counts(days=30, root=log_root)
+    assert not usage.get("error"), usage
+    assert usage["events"] == 8 + 2, \
+        f"rows reached the log past the top-8 ceiling: {usage['events']}"
+    assert sorted(usage["skills"]) == [f"sk{i:02d}" for i in range(8)], usage["skills"]
+
+    names = [f"sk{i:02d}" for i in range(12)]
+    lines = sl.usage_lines(usage, names)
+    body = "\n".join(lines)
+    assert not any("shallower" in ln for ln in lines), \
+        "the store covers the whole window, so depth is not the reason any more:\n" + body
+
+    listed = _line_with(lines, f"{sl.USAGE_UNMEASURED_LABEL}: ")
+    for i in range(8, 12):
+        assert f"`sk{i:02d}`" in listed, \
+            f"sk{i:02d} is below rank 8 and so was never measured: it must read " \
+            f"{sl.USAGE_UNMEASURED_LABEL}, not be absent from the section\n{listed}"
+    assert "`sk00`" not in listed, listed
+    for i in range(8, 12):
+        assert f"| `sk{i:02d}` | 0" not in body, \
+            f"sk{i:02d} printed as a zero-offer row, about which the emitter wrote nothing"
+
+    no_threshold = _line_with(lines, "no retirement threshold")
+    assert "SKILL_REPORT_TOP_K = 8" in no_threshold, \
+        f"the no-threshold sentence must name the ceiling, not the depth: {no_threshold}"
+    assert not _DATE.search(no_threshold), \
+        f"the no-threshold sentence dates itself: {no_threshold}"
+    # The one allowed mention is that sentence. Strip it and no other rendered line of
+    # a 30-day-deep section may talk about a skill's fate either — the re-wording added
+    # its reason, not a verdict.
+    rest = body.replace("no retirement threshold follows from this table at any "
+                        "window depth", "").lower()
+    for verdict in ("retire", "dead", "obsolete", "recommend removal", "stale"):
+        assert verdict not in rest, \
+            f"the section renders a verdict ({verdict}) about a skill; the cutoff is " \
+            f"owed, not implemented\n{body}"
+
+
+def _window_comment_block() -> str:
+    """The `#:` comment block above `USAGE_WINDOW_DAYS`, sliced out of the source.
+
+    A `#:` comment is unreachable to the AST walk `test_the_span_is_measured_and_no_
+    date_literal_produces_it` uses, so slicing the file's text between the block's own
+    opening line and the assignment it documents is the only way to hold this prose to
+    account. The two `index` calls raise rather than returning empty if either
+    boundary moves, so the slice cannot silently read nothing.
+    """
+    src = (ROOT / "scripts" / "skill_lint.py").read_text(encoding="utf-8")
+    start = src.index("#: The window the STALE bucket reports usage over.")
+    end = src.index("USAGE_WINDOW_DAYS = 30")
+    assert start < end, "the comment no longer sits above the constant it documents"
+    return src[start:end]
+
+
+def test_the_usage_window_comment_names_the_ceiling_as_the_reason_and_not_the_depth():
+    """#1923 clause 2: the comment a reader meets `USAGE_WINDOW_DAYS` at is the prose
+    no report shows, so it is pinned by slicing it out of the file `sl` was loaded from.
+
+    What has to be in it: the ceiling `SKILL_REPORT_TOP_K = 8` named as the reason no
+    staleness or retirement cutoff follows, the statement that a below-rank-8 skill
+    contributes no rows to ANY window, the #1815 citation, and the ~2026-10-24 depth
+    note confined to the span the printed counts cover. What has to be gone is the old
+    licence — `NOT yet` a threshold, which read as a date on which a cutoff became
+    derivable. Restoring that sentence turns this node red, and so does deleting the
+    ceiling half, which is the thing the clause exists to add.
+    """
+    block = _window_comment_block()
+    assert "Thirty days because" in block, block
+    assert "no depth of rows makes it one" in block, block
+    assert "SKILL_REPORT_TOP_K = 8" in block, block
+    assert "not this store's shallowness" in block, block
+    assert "no rows to ANY window" in block, block
+    assert "#1815" in block, block
+    assert "NOT yet" not in block, f"the comment licenses a cutoff again: {block}"
+
+    depth_note = block[block.index("The depth note"):]
+    assert "about this window alone" in depth_note, depth_note
+    assert "2026-10-24" in depth_note, depth_note
+    assert "bounds the span the printed counts cover" in depth_note, depth_note
+    assert "threshold" not in depth_note, \
+        f"the depth note reached back into the verdict: {depth_note}"
+
+
+def test_the_values_the_ceiling_ruling_rests_on_are_unchanged():
+    """#1923 clause 4: the ruling is that no cutoff follows, so nothing may have
+    quietly become one while the prose saying so was rewritten.
+
+    All four values in one node because they are one claim: `prefetch.SKILL_REPORT_TOP_K`
+    is the ceiling that censors the rows, `USAGE_WINDOW_DAYS` is the span the counts
+    cover, `USAGE_SPAN_NOTICE_SLACK_DAYS` is the only depth tolerance in the file and
+    it gates a sentence about the report rather than a verdict about a skill, and the
+    label a no-row skill gets says the instrument could not see it. The rendered half
+    below is the other half of the clause: the label still prints beside the ceiling
+    that produces it, so the word explains itself to a reader of the report alone.
+    """
+    from app import prefetch
+
+    assert prefetch.SKILL_REPORT_TOP_K == 8, prefetch.SKILL_REPORT_TOP_K
+    assert sl.USAGE_WINDOW_DAYS == 30, sl.USAGE_WINDOW_DAYS
+    assert sl.USAGE_SPAN_NOTICE_SLACK_DAYS == 1.0, sl.USAGE_SPAN_NOTICE_SLACK_DAYS
+    assert sl.USAGE_UNMEASURED_LABEL == "unmeasured", sl.USAGE_UNMEASURED_LABEL
+
+    body = "\n".join(sl.usage_lines(
+        {"days": 30, "events": 3, "sessions": 1, "no_telemetry": False,
+         "first_event": "2026-09-25T01:17:43+00:00",
+         "until": "2026-09-29T10:34:11+00:00",
+         "skills": {"voice-mode": {"offers": 3, "loaded": 1, "ignored": 2,
+                                   "max_score": 9.0}}},
+        ["voice-mode", "never-seen"]))
+    assert f"{sl.USAGE_UNMEASURED_LABEL}: `never-seen`" in body, body
+    assert "SKILL_REPORT_TOP_K = 8" in body, body

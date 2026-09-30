@@ -91,6 +91,17 @@ _HARD_CONSTRAINT_RE = re.compile(
 # ~770 rows a busy session's whole log holds today. Raising K is a scope call a
 # person owns — see the `needs-human` clause on #435 — not something to widen
 # silently from here.
+#
+# What the bound costs is the other half of this record, and #1815 ruled on it:
+# a skill scoring below rank 8 emits no `prefetch.skill_match` row
+# however often it would have applied. Its absence from a window of these rows is
+# this instrument censoring — a reading the instrument cannot make, never a
+# liveness reading. 93 of the 193 library skills sat below rank 8 on 2026-09-28.
+# Deepening the store does not buy the reading back: more days deepen the record of
+# ranks 1-8 only, and leave a below-rank-8 skill with no rows at all, so
+# no staleness or retirement threshold is derivable from these rows at any
+# window depth. `scripts/skill_lint.py` therefore renders such a skill under
+# `USAGE_UNMEASURED_LABEL = "unmeasured"`, beside the ceiling that produced it.
 SKILL_REPORT_FLOOR = 0.0
 SKILL_REPORT_TOP_K = 8
 SKILL_MATCH_EVENT = "prefetch.skill_match"
@@ -651,6 +662,12 @@ def _reported_offers(scored: list[tuple[float, dict]]) -> list[tuple[float, dict
     not written, which is what keeps the emitter at ≤ 8 rows per turn instead of
     the measured median of 88. `_search_skills` is sorted, so the slice is the
     highest-scoring ones; ties keep corpus order, so the cut is deterministic.
+
+    And the cost of the cut, which #1815 ruled on: a skill below rank 8 emits no
+    row however often it would have applied, so no table read back from these
+    rows can state such a skill's liveness. Absence here is the censoring, never
+    a measurement of zero, and no retirement threshold follows from the rows at
+    any window depth — deeper rows deepen ranks 1-8 only.
     """
     return scored[:SKILL_REPORT_TOP_K]
 
