@@ -33,7 +33,13 @@ either moved. Since #1627 it has a third duty, which is the one that bites:
   mint that appends it reads no body first), owed-check's ruling that a day at the
   machine's own chat volume clears the population bar is on the record as CLOSED with
   its owner and its expiry, and the one read-only `usage.db` query that would re-open
-  it is run here and checked against `session_kind` rather than admired.
+  it is run here and checked against `session_kind` rather than admired;
+* and since #1918 it holds the SHAPE of that ruling's grounding to account: the superlative
+  it rests on names the window it is dated to instead of "the re-derivable record" (an
+  undated superlative widens itself every time a turn is logged), its re-open trigger is the
+  conjunction that can actually falsify it — a day at or above the counted volume on which a
+  chat turn carries a miss — stated with no figure of its own, and pinned as wording only,
+  so no day of traffic can redden it. Which day is busiest is still deliberately not pinned.
 """
 
 from __future__ import annotations
@@ -437,6 +443,49 @@ def test_criterion_a_names_create_session_as_the_mint_that_ignores_the_flag(read
 _CHAT_QUERY = re.compile(r"`sqlite3 -readonly[^`]*`")
 _POPULATION_CLOSED = re.compile(r"population requirement is CLOSED")
 
+#: The window §10's population superlative is dated to: the record owed-check's ruling was
+#: measured over, which #1918 froze into a claim with an end date. A superlative with no
+#: date in it re-scopes itself every time the record grows — that is what left a standing
+#: re-count as its only guard. The COUNT in that same sentence is deliberately not here:
+#: it is `derived['chat_turns']`, so re-cutting the fixture moves the figure while the
+#: window stays where the measurement was actually taken.
+_POP_WINDOW_END = "2026-09-30"
+_SUPERLATIVE = re.compile(
+    r"(\d+) chat turns is the machine's own chat volume and the busiest chat day "
+    r"in the record up to (\d{4}-\d\d-\d\d)")
+
+#: The falsifier that replaced the beat-N re-open clause, by half. Half one: a day whose
+#: chat volume is AT OR ABOVE the counted one. Half two: a chat turn on that day carrying a
+#: miss. Either half alone cannot un-meet "a day at that volume clears the bar's population
+#: requirement" — volume alone is the retired trigger (a busier miss-free day only says the
+#: machine chats more), and a miss alone is §10's accepted-loss trigger one, which fires on
+#: any chat-turn miss and moves no population ruling.
+_FALSIFIER_VOLUME = re.compile(r"a day at or above (?:that|the counted) volume")
+_FALSIFIER_MISS = re.compile(r"chat turn carries (?:a|at least one) (?:chat )?miss")
+
+#: The wording #1918 replaced, verbatim. The nodes below read it, so each pin is
+#: demonstrably a check on the next edit and not a description of the current text.
+_PRE_1918_SUPERLATIVE = (
+    "busiest chat day in the re-derivable record — the record being what that query can "
+    "see, which starts where (b) says `usage.db` starts")
+_PRE_1918_REOPEN = "moving it means that query returning a day that beats this one"
+#: The two one-halved forms, spelled out so the conjunction pin is falsifiable: the first
+#: is the retired trigger with its volume half kept, the second is trigger one's wording.
+_VOLUME_ONLY_FALSIFIER = "moving it means that query returning a day at or above that volume"
+_MISS_ONLY_FALSIFIER = ("moving it means that query returning a day on which a chat turn "
+                        "carries a miss")
+
+
+def _population_falsifiers(text: str) -> list[str]:
+    """Clauses of `text` stating (a)'s re-count falsifier — BOTH halves in the one clause.
+
+    Clause-scoped, not paragraph-scoped: halves parked in two separate sentences can be
+    edited apart, and a reader who lands on the volume sentence alone would take it for the
+    retired trigger — which is exactly the reading #1918 was filed to make impossible.
+    """
+    return [c.strip() for c in _CLAUSE_BREAK.split(text)
+            if _FALSIFIER_VOLUME.search(c) and _FALSIFIER_MISS.search(c)]
+
 
 def test_the_population_ruling_is_closed_and_named_owed_checks(s10, reading, derived):
     """Clause 3: owed-check's ruling replaces the deferral, with the derived count in it.
@@ -444,20 +493,109 @@ def test_the_population_ruling_is_closed_and_named_owed_checks(s10, reading, der
     The number is `derived['chat_turns']`, so the ruling moves if the counted day is
     ever re-cut — a ruling pinned to a hand-typed 23 would survive a fixture change
     that had already invalidated it.
+
+    #1918 added the other half of the sentence's honesty: the superlative has to name the
+    window it is the busiest day OF, with a date in it. "The busiest chat day in the
+    re-derivable record" was true only of the record as short as it happened to be on the
+    day it was written, and nothing in the text said which record that was, so the claim
+    silently widened every time a turn was logged and a standing re-count was the only
+    thing standing between the page and a false superlative. The count still comes from the
+    derivation; only the window is pinned as prose, because the window is when the
+    measurement was taken and no fixture knows that.
     """
     assert "not a call this page can make" not in s10, \
         "§10 still defers the population question that owed-check ruled on 2026-09-29"
     b = _criterion_bullet(reading, "a")
     assert _POPULATION_CLOSED.search(b), "(a) does not record the population bar as CLOSED"
-    assert f"{derived['chat_turns']} chat turns is the machine's own chat volume and the " \
-           f"busiest chat day in the re-derivable record" in b, \
-        "the ruling must state its own count, and that count is the derived chat_turns"
+    m = _SUPERLATIVE.search(b)
+    assert m, (
+        "(a)'s superlative is not window-explicit: it must read \"N chat turns is the "
+        "machine's own chat volume and the busiest chat day in the record up to <date>\" — "
+        f"undated, it means whatever the record means next week. Bullet opens: {b[:150]!r}")
+    assert int(m.group(1)) == derived["chat_turns"], \
+        f"(a) states its own count as {m.group(1)}, but the derivation over the named " \
+        f"extract says {derived['chat_turns']} — the ruling has to move with the data"
+    assert m.group(2) == _POP_WINDOW_END, \
+        f"(a) dates its window to {m.group(2)}; the record this ruling was measured over " \
+        f"ends {_POP_WINDOW_END}, and the clause has to name the window it was read from"
+    assert _PRE_1918_SUPERLATIVE not in b, \
+        "the undated superlative is back — 'the re-derivable record' names no window, so " \
+        "the day after this one's turns land the sentence is a different claim"
     assert re.search(r"owed-check ruled on \d{4}-\d\d-\d\d", b), \
         "the ruling must be named as owed-check's and dated"
     assert "day at that volume clears the bar's population requirement" in b, \
         "the ruling must say the requirement is cleared, not restate it as a question"
     assert "owed-check's and stands until a re-count moves it" in b, \
         "the ruling must carry its own expiry: a re-count moves it, a round does not"
+
+
+def test_the_population_recount_trigger_falsifies_the_ruling_not_the_calendar(reading, derived):
+    """#1918 clause 2: the re-count's trigger is the observation that can un-meet the
+    ruling, and it is stated as a measurement rather than as a second hand-typed figure.
+
+    The retired clause fired on volume alone ("a day that beats this one"). Over the record
+    the ruling was measured through, every day that carries a chat miss sits well below the
+    counted volume and no day above it does — so the clause could only ever be fired by a
+    day that changed nothing about (a), and could never be fired by the thing that actually
+    would: the population thinning out, or the same volume arriving with a miss on it. The
+    replacement is the conjunction of the two columns the cited query already prints. It
+    carries no digit of its own, because its volume half points back at the derived count
+    named earlier in the bullet — so a re-cut fixture moves the bar without anyone editing
+    a number into this sentence, and the re-count stays one query.
+    """
+    b = _criterion_bullet(reading, "a")
+    assert _PRE_1918_REOPEN not in b and "beats this one" not in b, \
+        "the beat-N clause is still (a)'s re-open trigger"
+    fired = _population_falsifiers(b)
+    assert len(fired) == 1, (
+        "(a) must state its falsifier exactly once, in one clause: "
+        f"{[c for c in _CLAUSE_BREAK.split(b) if 're-count' in c or 'volume' in c]}")
+    for c in fired:
+        assert not re.search(r"\d", c), \
+            f"the falsifier hand-wrote a figure ({c!r}); its volume half is the derived " \
+            f"{derived['chat_turns']} named up-bullet, not a number copied down here"
+    q = _CHAT_QUERY.findall(reading)
+    assert len(q) == 1, \
+        f"the falsifier has to stay answerable by the ONE query §10 already cites, got {q}"
+
+
+def test_the_population_falsifier_is_a_conjunction_with_no_eye_on_the_record(reading, monkeypatch):
+    """#1918 clause 3: drop either half of the falsifier and this node goes red — and no
+    day of traffic can do it instead.
+
+    The conjunction is the whole of what makes the trigger a falsifier, and #1918's
+    predecessor is the proof: a trigger with one half sat there for a fortnight unable to
+    fire. So the half-alone forms are checked rather than assumed. The volume-only form is
+    verbatim the retired trigger, so a pin that accepted it would let six deleted words
+    restore the defect; the miss-only form is §10's accepted-loss trigger one, which moves
+    no population ruling.
+
+    And nothing here may depend on `usage.db`. The module already has a node that runs the
+    cited query over the production record and skips when no database is there; a WORDING
+    pin reading that same database would go red the week a chat turn misses, over a defect
+    no round can fix from a commit. So the entire verdict below is computed with `sqlite3`
+    unreachable — that is how "wording only" becomes something the suite proves instead of
+    something the docstring claims.
+    """
+    import sqlite3
+
+    def _no_record(*_a, **_k):
+        raise AssertionError("the wording pin reached a database; it must read §10 alone")
+
+    monkeypatch.setattr(sqlite3, "connect", _no_record)
+    b = _criterion_bullet(reading, "a")
+    assert len(_population_falsifiers(b)) == 1, \
+        "(a)'s falsifier is not one clause carrying both halves; the two one-halved " \
+        "forms asserted below are the ways it can decay"
+    assert not _population_falsifiers(_VOLUME_ONLY_FALSIFIER), \
+        "a volume-only clause passes the pin, so the retired beat-N trigger could come " \
+        "back by deleting the miss half of the sentence"
+    assert not _population_falsifiers(_MISS_ONLY_FALSIFIER), \
+        "a miss-only clause passes the pin, which would make (a)'s re-count the same " \
+        "condition as the accepted-loss ruling's trigger one"
+    assert _population_falsifiers(_VOLUME_ONLY_FALSIFIER
+                                  + " on which a chat turn carries a miss"), \
+        "the pin cannot see a real conjunction at all, so nothing above it is a check"
 
 
 def test_the_chat_population_is_day_scoped_and_re_derivable_by_one_query(reading):
@@ -534,16 +672,18 @@ def test_the_cited_chat_query_selects_what_the_classifier_selects(reading):
     """The one process boundary this ruling crosses, put under test rather than asserted.
 
     (a)'s population is decided in Python (`session_kind`), the ruling's "busiest chat
-    day in the re-derivable record" is decided in SQL over `usage.db`, and the doc claims
+    day in the record up to <date>" is decided in SQL over `usage.db`, and the doc claims
     they are the same set. Two languages, one population, no shared code — a grep cannot
     see the disagreement, only a run can. So the query is read OUT of §10 (the test does
     not carry its own copy, which is what would let the doc and the check drift), and the
     per-day table it returns is compared to the per-day table the classifier implies.
     Skipped where there is no database to ask, exactly as the extractor's node does.
 
-    Deliberately NOT pinned here: which day is the busiest. That is owed-check's re-count
-    to run as the record widens, and a suite assertion on it would be a test that goes red
-    for the one job that cannot fix it from a round.
+    Deliberately NOT pinned here: which day is the busiest, or how many turns it carries.
+    #1918 dated the superlative, so widening the record can no longer refute it from this
+    page, and the re-count that WOULD move the ruling now needs a day at or above the
+    counted volume carrying a chat miss. A suite assertion on either figure would be a test
+    that goes red for the one job that cannot fix it from a round.
     """
     import collections
     import sqlite3

@@ -815,12 +815,16 @@ has still not been run as of 2026-09-11.
   per-day chat turns beside the per-day count carrying at least one miss:
   `sqlite3 -readonly ~/lloyd-data/usage.db "select substr(ts,1,10) as day, count(*) as chat_turns, sum(prefix_misses>0) as chat_turns_with_a_miss from usage where session_id not like 'task:%' and length(session_id)-length(replace(session_id,'_',''))<3 group by day order by day"`.
   It is also the re-count. owed-check ruled on 2026-09-29 that 23 chat turns is the
-  machine's own chat volume and the busiest chat day in the re-derivable record — the record
-  being what that query can see, which starts where (b) says `usage.db` starts — and that a
-  day at that volume clears the bar's population requirement: closed, not open, and the
-  last time it is asked here as an open question. The ruling is owed-check's and stands
-  until a re-count moves it, and moving it means that query returning a day that beats this
-  one — a round does not get to re-ask the question instead of running it.
+  machine's own chat volume and the busiest chat day in the record up to 2026-09-30 — the
+  record being what that query can see, which starts where (b) says `usage.db` starts and
+  ends at the date just named — and that a day at that volume clears the bar's population
+  requirement: closed, not open, and the last time it is asked here as an open question.
+  The ruling is owed-check's and stands until a re-count moves it, and moving it means that
+  query returning a day at or above that volume on which a chat turn carries a miss — both
+  halves read off the two columns that query already prints, because a larger day with no
+  miss only says the machine chats more, and a miss on a smaller day is trigger one's to
+  fire, not this ruling's to move. A round does not get to re-ask the question instead of
+  running it.
 - **Against §6.1, per day: (b) passes.** §6.1's baseline is 194 misses and
   20.6M tokens over *two* days (09-08/09) — 97 misses and 10.3M tokens a day.
   This window is 46 and 5.7M in *one* day, about 0.5x the misses and 0.5x the
