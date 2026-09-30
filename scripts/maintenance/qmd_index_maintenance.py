@@ -563,6 +563,57 @@ def capacity_verdict(vec0: dict | None) -> bool:
             and vec0.get("dead_mib", 0) >= CAPACITY_DEAD_MIB_FLOOR)
 
 
+#: What the person owes, in their own words: what to build, and the one thing that
+#: must not happen. Kept out of VEC0_REBUILD_RULED_OUT because that string is the
+#: *ruling*, printed on every run fired or not, and this is the *instruction* that
+#: only exists once the trigger has fired.
+CAPACITY_WHAT_TO_DO = (
+    "rebuild a side copy re-embedded in full and swap it in while the daemon "
+    "serves the old one, BY HAND (the 2026-09-21 procedure: 1.25 GB -> 481 MB at "
+    "56% occupancy). Never in place: an in-place vec0 drop leaves the serving "
+    "daemon with no vector leg for the whole re-embed.")
+
+
+def capacity_owed(vec0: dict | None, footprint: dict | None) -> dict:
+    """The owed-to-a-person entry a fired capacity verdict leaves behind (#1897).
+
+    Built from the same measured numbers the verdict fired on, so the report says
+    what is owed in the units a person can act on instead of a bare boolean:
+    occupancy, dead MiB and the footprint a rebuild would reclaim, beside the
+    ruling that forbids this job from doing it.
+
+    The entry exists because a verdict nobody can service has to reach a surface a
+    person reads. Until #1897 the fired case was one JSON field and the summary's
+    `capacity verdict True` suffix, on a run that still exited 0 — both exit lines
+    read only `daemon_healthy`. That is the same defect #958 fixed for a dead
+    daemon in this file: the condition an unattended run cannot service must move
+    the exit code, which is how the fleet health tool sees it at all.
+    """
+    return {
+        "owed_to": "a person, by hand — this job will not do it",
+        "because": VEC0_REBUILD_RULED_OUT,
+        "what_to_do": CAPACITY_WHAT_TO_DO,
+        "occupancy": (vec0 or {}).get("occupancy"),
+        "dead_mib": (vec0 or {}).get("dead_mib"),
+        "footprint_bytes": (footprint or {}).get("total"),
+    }
+
+
+def _exit_code(report: dict) -> int:
+    """The run's exit status: a dead daemon or a fired capacity verdict is red.
+
+    The capacity half is #1897. A fired verdict means work is owed that this job is
+    ruled out of doing, so a green run would be reporting a health it does not have
+    — and the nightly run is then red every night until a person performs the
+    rebuild, which is the mechanism and not a regression: the alternative is the
+    2026-09-30 state, six nightly readings of a strictly decaying occupancy and no
+    signal anywhere. A False verdict on a healthy daemon still exits 0.
+    """
+    if report.get("need_capacity"):
+        return 1
+    return 0 if report["daemon_healthy"] else 1
+
+
 def inspect_index() -> dict:
     """Read orphan counts straight from SQLite (read-only, daemon can be up)."""
     fp = index_footprint(INDEX)
@@ -908,18 +959,27 @@ def main() -> int:
             f"(max {guard['max_pending']:,}); configured embed model "
             f"{guard['configured_embed_model']}")
     report["need_prune"], report["need_embed"] = need_prune, need_embed
-    # Reported, never acted on: see VEC0_REBUILD_RULED_OUT.
+    # Reported, never acted on: see VEC0_REBUILD_RULED_OUT. #1897 added the second
+    # half of "reported": a fired verdict now also carries what is owed, to whom,
+    # and on what numbers, and it moves the exit code through `_exit_code`.
     report["need_capacity"] = capacity_verdict(before.get("vec0"))
     report["vec0_rebuild"] = VEC0_REBUILD_RULED_OUT
+    if report["need_capacity"]:
+        report["capacity_owed_to_a_person"] = capacity_owed(
+            before.get("vec0"), before.get("footprint"))
 
     if args.dry_run or not (need_prune or need_embed):
         if args.dry_run:
             report["actions"].append("dry-run")
-        elif not guard["tripped"] and not report["actions"]:
+        elif not guard["tripped"] and not report["need_capacity"] \
+                and not report["actions"]:
             # A refused guard already recorded its own reason; "nothing to do"
             # would contradict the line above it in the same report. Same reasoning
             # now covers #1598: a run that freed a 1.25 GB stale backup from the
             # index directory did something, whatever the index itself needed.
+            # And #1897: a fired capacity verdict is work owed, even though the
+            # action is a person's — the job's own list of commands stays empty,
+            # it is not a run with nothing to do.
             report["actions"].append("none — nothing to do")
         # Doing nothing is not evidence that retrieval is up, so this branch
         # measured it too: it used to `return 0` without ever calling
@@ -937,7 +997,7 @@ def main() -> int:
         if not args.dry_run:
             _write_report(report, started)
         _emit(report, args.json)
-        return 0 if report["daemon_healthy"] else 1
+        return _exit_code(report)
 
     # ---- Mutating section. The daemon stays up throughout (see the contract). ----
     try:
@@ -1011,10 +1071,12 @@ def main() -> int:
     _write_report(report, started)
 
     _emit(report, args.json)
-    # Only fail loudly if retrieval is actually down. Indexed, not `.get(..., True)`:
-    # the `finally` above always sets the key, and both exits now read a measured
-    # boolean, so a missing measurement crashes instead of passing.
-    return 0 if report["daemon_healthy"] else 1
+    # Indexed, not `.get(..., True)`: the `finally` above always sets the key, and
+    # both exits now read a measured boolean, so a missing measurement crashes
+    # instead of passing. `_exit_code` adds #1897's second condition — a run that
+    # pruned or embedded and still finds vec0 mostly dead slots owes the rebuild
+    # too, and must not report health while it does.
+    return _exit_code(report)
 
 
 def _emit(r: dict, as_json: bool) -> None:
@@ -1055,6 +1117,19 @@ def _emit(r: dict, as_json: bool) -> None:
               f"   capacity verdict {r.get('need_capacity')}")
     elif v.get("error"):
         print(f"  vec0 occupancy    not measured: {v['error']}")
+    owed = r.get("capacity_owed_to_a_person")
+    if owed:
+        # Its own line, and the run's exit status (#1897). The `capacity verdict
+        # True` suffix above is a measurement; this is the part a person can act
+        # on — who owes the fix, on what numbers, and the fact that it is theirs
+        # and BY HAND. A fired verdict that only printed the suffix is how the
+        # condition rode six green nightly runs to 2026-09-30 without an owner.
+        print(f"  capacity OWED     {owed['owed_to']}: "
+              f"{100*owed['occupancy']:.1f} % occupancy, "
+              f"{owed['dead_mib']:,.0f} MiB dead, footprint "
+              + (f"{owed['footprint_bytes']:,} B"
+                 if owed.get("footprint_bytes") is not None else "not measured"))
+        print(f"                    {owed['what_to_do']}")
     # Both figures, on one line (#1545): the pre-run count alone is the number
     # the job decided on, and a reader comparing two nightly reports cannot tell
     # a cleared backlog from a skipped embed without what it became.

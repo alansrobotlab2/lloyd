@@ -637,7 +637,16 @@ def test_the_capacity_verdict_fires_on_the_sept_18_shape_while_prune_does_not(
         monkeypatch, tmp_path):
     """Reachability, in the style of test_orphan_prune_is_reachable_on_ratio_alone:
     at the index shape that motivated #844 the orphan triggers say nothing to do,
-    and the capacity verdict has to say otherwise on its own."""
+    and the capacity verdict has to say otherwise on its own.
+
+    Two assertions here stated the PRE-#1897 behaviour and are updated, not deleted:
+    `m.main() == 0` and `actions == ["none — nothing to do"]`. Both held only
+    because a fired verdict rode a green run and the run called itself idle; #1897
+    makes it exit non-zero and stops calling a run that owes a rebuild idle. The
+    reachability claim this node was written for is unchanged, and the exit code it
+    now asserts is the point of the change — see
+    test_a_fired_capacity_verdict_exits_non_zero for the 2026-09-30 shape.
+    """
     t, l = _pair(tmp_path)
     monkeypatch.setattr(m, "TEMPLATE_CONFIG", t)
     monkeypatch.setattr(m, "LIVE_CONFIG", l)
@@ -649,12 +658,20 @@ def test_the_capacity_verdict_fires_on_the_sept_18_shape_while_prune_does_not(
     monkeypatch.setattr(m, "pending_embeddings", lambda: 0)
     monkeypatch.setattr(m, "daemon_healthy", lambda retries=10: True)
     monkeypatch.setattr(sys, "argv", ["qmd_index_maintenance.py"])
-    assert m.main() == 0
+    # #1897: the fired verdict is what makes the run red. Before it this line read
+    # `== 0`, which is the whole defect — the shape that motivated #844 was green
+    # every night it was live.
+    assert m.main() == 1
     report = json.loads(next((tmp_path / "reflection").glob("*.json")).read_text())
     assert report["need_prune"] is False
     assert report["need_capacity"] is True
-    # Reported, never acted on: the no-op branch ran and says why rebuild is not its job.
-    assert report["actions"] == ["none — nothing to do"]
+    # Never acted on, and no longer called idle either: the mutating section did not
+    # run, so `actions` is empty rather than the "nothing to do" line — work IS owed,
+    # it is just a person's to do. SEPT_18_SHAPE carries no `footprint` key, which is
+    # also the case this change has to survive: the owed entry records None, and the
+    # summary says `footprint not measured` instead of printing a made-up 0 B.
+    assert report["actions"] == []
+    assert report["capacity_owed_to_a_person"]["footprint_bytes"] is None
     assert "ruled out" in report["vec0_rebuild"] and "side copy" in report["vec0_rebuild"]
 
 
@@ -1313,3 +1330,243 @@ def test_a_dry_run_leaves_the_directory_byte_identical_to_what_an_acting_run_wou
     acting = _retention_run(monkeypatch, tmp_path, d, tmp_path / "repo", dry_run=False)
     assert acting["stray_retention"]["deleted"] == ["index.sqlite.bak-z"]
     assert "index.sqlite.bak-z" not in _listing(d)
+
+
+# ── #1897: a fired capacity verdict escalates instead of riding a green run ──
+#
+# The trigger (#844) and its threshold pair are pinned above and are not re-specified
+# here. What was missing is everything downstream of the verdict: `report["need_capacity"]`
+# was set under a comment saying "Reported, never acted on", and both exit lines read
+# only `daemon_healthy`, so the night occupancy crosses 0.25 the nightly run (#81)
+# stays GREEN and the whole trace is one JSON field plus the summary's
+# `capacity verdict True` suffix. These nodes pin the escalation — exit code, owed
+# entry, summary line, and that escalating mutates nothing.
+
+#: The live 2026-09-30 nightly artifact, transcribed where it matters
+#: (`~/lloyd-data/_pipeline/reflection/qmd-index-maintenance-2026-09-30.json`):
+#: 35,981 live rows in 106,496 allocated slots = occupancy 0.3379, 275.4 MiB dead,
+#: footprint main 726,282,240 + wal 729,985,752 + shm 1,441,792 = 1,457,709,784 B,
+#: and `need_capacity: false`. The dead-MiB floor (256) was cleared between 09-28 and
+#: 09-29; only the ratio holds the verdict False, and across six nightly readings
+#: occupancy fell 0.514 → 0.3379, so at the measured 0.0343/day it crosses 0.25 in
+#: about 2.6 days — which is why the escalation is worth landing before it does.
+#: `documents: 12_410` is the embed-guard denominator and is in the artifact, so it
+#: is in the fixture too: at `pending_embeddings` 0 the guard cannot trip either way,
+#: and a shape that omits the one field a later node would need to trip it is a shape
+#: that quietly decides what the next node is allowed to ask.
+SEPT_30_SHAPE = {
+    "index_bytes": 1_457_709_784,
+    "footprint": {"total": 1_457_709_784, "main": 726_282_240,
+                  "wal": 729_985_752, "shm": 1_441_792},
+    "vectors_total": 35_981, "vectors_orphaned": 78, "vectors_live": 35_903,
+    "orphan_ratio": 0.0022, "documents": 12_410,
+    "vec0": {"chunks": 104, "allocated_slots": 106_496, "live_rows": 35_981,
+             "occupancy": 0.3379, "allocated_mib": 416.0, "dead_mib": 275.4},
+}
+
+#: The same snapshot with the ratio pushed over the trigger and nothing else moved,
+#: so every assertion below is about the verdict and not about the shape around it.
+FIRED_SHAPE = {**SEPT_30_SHAPE,
+               "vec0": {**SEPT_30_SHAPE["vec0"], "occupancy": 0.2379}}
+
+
+def _run_over_shape(monkeypatch, tmp_path, shape: dict, capsys,
+                    tag: str = "run", probe_via_sh: bool = False):
+    """`main()` end to end over a supplied `inspect_index` snapshot.
+
+    Everything the index side would touch is stubbed the way `_run_main` stubs it —
+    a nonexistent fixture INDEX so the acting stray delete has nothing to delete,
+    zero pending embeds, a healthy daemon — and unlike that helper this one does NOT
+    assert the exit code: the exit code is the thing under test. Returns the run's
+    rc, the report it wrote, and what it printed.
+
+    `tag` puts each call in its own `REPORT_DIR`. `_write_report` names the file by
+    `started.date()`, so two runs in one `tmp_path` land on the same dated path and
+    the second replaces the first — a node that runs the quiet shape to prove it
+    stays green and then reads that report has read a different run's bytes.
+    """
+    t, l = _pair(tmp_path)
+    monkeypatch.setattr(m, "TEMPLATE_CONFIG", t)
+    monkeypatch.setattr(m, "LIVE_CONFIG", l)
+    monkeypatch.setattr(m, "REPORT_DIR", tmp_path / f"reflection-{tag}")
+    monkeypatch.setattr(m, "INDEX", tmp_path / "qmd" / "index.sqlite")
+    monkeypatch.setattr(m, "inspect_index", lambda: dict(shape))
+    monkeypatch.setattr(m, "pending_embeddings", lambda: 0)
+    if not probe_via_sh:
+        monkeypatch.setattr(m, "daemon_healthy", lambda retries=10: True)
+    monkeypatch.setattr(sys, "argv", ["qmd_index_maintenance.py"])
+    rc = m.main()
+    out = capsys.readouterr().out
+    reports = sorted((tmp_path / f"reflection-{tag}").glob("qmd-index-maintenance-*.json"))
+    assert len(reports) == 1, f"expected exactly one dated report, got {reports}"
+    return rc, json.loads(reports[0].read_text()), out
+
+
+def test_a_fired_capacity_verdict_exits_non_zero(monkeypatch, tmp_path, capsys):
+    """Clause 1, the half that was missing: the #958 pattern in this same file.
+
+    The verdict fires on the 09-30 shape with occupancy pushed one trigger-width
+    under 0.25 (0.2379, dead 275.4 MiB ≥ 256), on a daemon reported HEALTHY — and
+    the run must not exit 0. This is the exact state 2026-10-03 is projected to be
+    in, where every nightly run since then stayed green.
+    """
+    rc, report, _ = _run_over_shape(monkeypatch, tmp_path, FIRED_SHAPE, capsys)
+    assert report["need_capacity"] is True and report["daemon_healthy"] is True
+    assert rc != 0, f"a fired verdict exited {rc}: the fleet would read this green"
+
+
+def test_a_quiet_capacity_verdict_on_a_healthy_daemon_still_exits_zero(monkeypatch, tmp_path, capsys):
+    """Clause 1's other half: the escalation is a tripwire, not a red-by-default.
+
+    Measured on the live 2026-09-30 snapshot itself — occupancy 0.3379, 275.4 MiB
+    dead, so the floor is already cleared and only the ratio keeps the verdict
+    False. A run today must stay green, or this change floods the fleet with
+    failures for a condition that has not fired.
+    """
+    rc, report, out = _run_over_shape(monkeypatch, tmp_path, SEPT_30_SHAPE, capsys)
+    assert report["need_capacity"] is False
+    assert rc == 0, out
+    assert "capacity OWED" not in out
+
+
+def test_the_exit_rule_reads_both_conditions_and_nothing_else():
+    """`_exit_code` on its own, so the pair of conditions is pinned without a run.
+
+    A fired verdict is red whatever the daemon says; an unfired one is red only
+    when retrieval is down, which is #958's rule and still is.
+    """
+    assert m._exit_code({"need_capacity": True, "daemon_healthy": True}) == 1
+    assert m._exit_code({"need_capacity": True, "daemon_healthy": False}) == 1
+    assert m._exit_code({"need_capacity": False, "daemon_healthy": True}) == 0
+    assert m._exit_code({"need_capacity": False, "daemon_healthy": False}) == 1
+    # A run that never measured capacity (no vec0 tables) is not a fired run.
+    assert m._exit_code({"daemon_healthy": True}) == 0
+
+
+def test_a_fired_verdict_reports_what_is_owed_and_on_what_numbers(monkeypatch, tmp_path, capsys):
+    """Clause 2: the owed-to-a-person entry, carrying the measured numbers.
+
+    A bare boolean cannot be actioned. The entry has to hold the ruling
+    (`VEC0_REBUILD_RULED_OUT`, unchanged), the instruction naming the side copy and
+    the hand swap, and the three figures a person needs to size the job —
+    occupancy, dead MiB and the footprint total the rebuild would reclaim.
+    """
+    rc, report, _ = _run_over_shape(monkeypatch, tmp_path, FIRED_SHAPE, capsys,
+                                    tag="fired")
+    owed = report["capacity_owed_to_a_person"]
+    assert owed["occupancy"] == 0.2379 and owed["dead_mib"] == 275.4
+    assert owed["footprint_bytes"] == 1_457_709_784
+    assert owed["because"] == m.VEC0_REBUILD_RULED_OUT
+    assert owed["owed_to"] == "a person, by hand — this job will not do it"
+    assert "side copy" in owed["what_to_do"] and "BY HAND" in owed["what_to_do"]
+    assert "swap" in owed["what_to_do"] and "Never in place" in owed["what_to_do"]
+    # The unfired case records no owed entry at all: nothing is owed.
+    # Its own REPORT_DIR (`tag`): `_write_report` names the file by date, so a second
+    # run in the same dir would have replaced the report above rather than adding one.
+    _, quiet, _ = _run_over_shape(monkeypatch, tmp_path, SEPT_30_SHAPE, capsys,
+                                  tag="quiet")
+    assert "capacity_owed_to_a_person" not in quiet
+
+
+def test_the_summary_prints_the_owed_entry_and_the_by_hand_instruction(monkeypatch, tmp_path, capsys):
+    """Clause 3: the human summary, not only the `capacity verdict True` suffix.
+
+    Asserted on the printed lines and not on the report, because the summary is
+    what a person reads when the nightly run goes red.
+    """
+    rc, _, out = _run_over_shape(monkeypatch, tmp_path, FIRED_SHAPE, capsys)
+    owed = [ln for ln in out.splitlines() if "capacity OWED" in ln]
+    assert len(owed) == 1, out
+    assert "a person, by hand" in owed[0]
+    assert "23.8 % occupancy" in owed[0], owed[0]
+    assert "275 MiB dead" in owed[0], owed[0]
+    assert "1,457,709,784 B" in owed[0], owed[0]
+    instruction = [ln for ln in out.splitlines() if "BY HAND" in ln]
+    assert len(instruction) == 1 and "side copy" in instruction[0], out
+    assert "Never in place" in instruction[0], out
+    # The measurement line is still there beside it — the owed line replaces nothing.
+    assert "capacity verdict True" in out, out
+
+
+def test_a_fired_verdict_escalates_without_touching_the_index(monkeypatch, tmp_path, capsys):
+    """Clause 4: the escalation is a report and an exit code, never an action.
+
+    Nothing may be added to `actions`, and no mutating subprocess may run: not
+    `cleanup`, not `embed`, and certainly not an in-place vec0 drop, which is the
+    outcome VEC0_REBUILD_RULED_OUT exists to prevent. `actions` is empty rather than
+    "none — nothing to do", because work IS owed — just not this job's.
+
+    `daemon_healthy` is deliberately NOT stubbed here (the helper's `probe_via_sh`),
+    so `_sh` is exercised on the path it actually takes: the fired run does spawn one
+    subprocess, the read-only health probe curl at :733, and asserting `calls == []`
+    would have asserted that away rather than asserting the mutating commands are
+    absent. So the assertion is on the commands, and the probe's presence is asserted
+    too — a run that skipped the probe would be a different run.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(m, "_sh", lambda cmd, timeout, env=None: calls.append(cmd) or (0, ""))
+    rc, report, _ = _run_over_shape(monkeypatch, tmp_path, FIRED_SHAPE, capsys,
+                                    tag="mutating", probe_via_sh=True)
+    assert rc != 0 and report["need_capacity"] is True
+    assert report["actions"] == [], report["actions"]
+    mutating = [c for c in calls
+                if any(w in c for w in ("cleanup", "embed", "vacuum", "reindex"))]
+    assert mutating == [], f"the fired path ran a mutating command: {mutating}"
+    assert [c for c in calls if c and c[0] == "curl"] == \
+        [["curl", "-s", "-m", "3", "-o", "/dev/null", m.DAEMON_PROBE_URL]], calls
+    assert report["daemon_healthy"] is True
+    assert report["need_prune"] is False and report["need_embed"] is False
+    assert "after" not in report, "the mutating section ran on a fired verdict"
+    # And the numbers it escalated on are the ones it measured, unchanged.
+    assert report["before"]["vec0"] == FIRED_SHAPE["vec0"]
+
+
+#: Where #1897's witness lives once committed. `~/lloyd-data/_pipeline/reflection/`
+#: is gitignored AND under the retention sweep, so the six nightly readings the
+#: projection is drawn from had no history: the item quoted numbers nobody could
+#: re-measure a month from now.
+WITNESS_REL = Path("backlog") / "data" / "qmd-index-maintenance-2026-09-30.json"
+
+
+def test_the_committed_witness_agrees_with_the_fixture_this_change_is_pinned_to(
+        monkeypatch):
+    """The projection in #1897 must be re-derivable from bytes that have history.
+
+    Reads the artifact through `board_presence.vault_root()` (env
+    `LLOYD_OBSIDIAN_VAULT`, read per call, so a caller can point it at a fixture
+    vault). The skip is for the one case with nothing to check: a checkout with no
+    vault directory at all, which `tests/board_presence.py` rules must never be
+    permanently red. A vault that exists and holds no witness is a FAILURE and not a
+    skip — the copy IS the deliverable, so a node that skipped when it was absent
+    would pass on exactly the regression it is here for (the copy never landed, or a
+    later sweep took it) and would only ever catch drift between two files that are
+    both present. What it then pins is the pair that matters: the committed witness
+    reproduces every figure the item quotes, AND the fixture the other nodes run on
+    is the same shape, so a transcription cannot drift from the bytes it came from.
+    """
+    from board_presence import VAULT_ROOT_ENV, vault_root
+
+    root = vault_root()
+    if not root.is_dir():
+        pytest.skip(f"no vault directory at {root} (set {VAULT_ROOT_ENV} to point at "
+                    f"one): there is no board here for the witness to live on")
+    witness = root / WITNESS_REL
+    assert witness.is_file(), (
+        f"#1897's witness is not committed at {witness}. Without it the six nightly "
+        f"readings behind the 0.25 projection live only in gitignored "
+        f"~/lloyd-data/_pipeline/reflection/, which the retention sweep bounds — the "
+        f"numbers this change is pinned to would have no history to check against.")
+    art = json.loads(witness.read_text())
+    v, f = art["before"]["vec0"], art["before"]["footprint"]
+    assert (v["occupancy"], v["dead_mib"]) == (0.3379, 275.4)
+    assert (v["live_rows"], v["allocated_slots"]) == (35_981, 106_496)
+    assert f["total"] == 1_457_709_784 == f["main"] + f["wal"] + f["shm"]
+    assert art["need_capacity"] is False, "the witness is the fired-but-green night"
+
+    assert SEPT_30_SHAPE["vec0"] == v, "fixture drifted from the committed witness"
+    assert SEPT_30_SHAPE["footprint"] == f
+    # Re-derived, not quoted: at the measured 0.0343/day (the true last-3-day rate —
+    # (0.4407 - 0.3379) / 3; the item's 0.013/day divided a 2-day span by 3), 0.3379
+    # reaches the 0.25 trigger in under three days, which is why the escalation is
+    # worth landing before it does rather than after.
+    assert (0.3379 - 0.25) / 0.0343 < 3.0
