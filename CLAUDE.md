@@ -149,8 +149,10 @@ MISSING BINARY — or an unmirrored database — as a coverage gap in
 `eval/supply-chain/baseline.yaml`, never as zero advisories. Since 2026-09-30
 (#1838) `osv-scanner` v2.6.0 is in `~/.local/bin` (the checksummed GitHub asset;
 PyPI has no such name) with its PyPI database in `$DATA_ROOT/supply-chain/osv-db`,
-and the baseline reads **91 advisories across 14 locked packages** — the first real
-count, hidden until then by a parser that read a JSON shape upstream never printed.
+and the first real count was **91 advisories across 14 locked packages**, hidden until
+then by a parser that read a JSON shape upstream never printed. #1908 upgraded 12 of
+them to their first fixed versions (3 left: torch 2.11 pins `setuptools<82`, so the
+two move together).
 `--offline` over an empty database exits 0 with no findings, so the wrapper refuses
 a database with no `all.zip`.
 
