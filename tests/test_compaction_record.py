@@ -85,6 +85,25 @@ def _one(db) -> dict:
     return rows[0]
 
 
+def _one_written(db) -> dict:
+    """The one usage row, read by a reader that CANNOT create the database.
+
+    `sqlite3.connect(path)` on a missing path creates an empty file, and
+    `SELECT * FROM usage` on a file with no tables raises `no such table` — so a
+    plain reader can only ever fail one way, and #1866's four junk cases failed
+    with exactly that misleading message while the real story was that
+    `record_usage` had written into a directory pytest had replaced and returned
+    success anyway. `mode=ro` never creates a file, so the two shapes finally
+    say different things: `unable to open database file` is "the store never
+    made this", `no such table` is "the store made an empty one".
+    """
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    rows = [dict(r) for r in conn.execute("SELECT * FROM usage")]
+    assert len(rows) == 1, f"expected exactly one usage row, got {len(rows)}"
+    return rows[0]
+
+
 def _read(db) -> dict | None:
     """The stored compaction record, parsed, or None where the column is NULL."""
     raw = _one(db)["compaction"]
@@ -325,11 +344,19 @@ def test_junk_never_costs_the_turn_its_usage_row(store, junk):
     row too, and several callers wrap it in a `try` that reports "failed to
     record usage" and moves on. So the compaction dimension degrades to NULL and
     the tokens still land — same containment as `_skills_column` for #783.
+
+    Read through `_one_written`, from the path the STORE names: the row must
+    exist because the store put it there, not because the assertion opened a
+    connection to a missing file and thereby manufactured both the file and the
+    empty `usage` table whose absence it then reported. Nine cases share pytest
+    9's recycled `tmp_path` name (brackets stripped, `""` and `"[]"` collide), so
+    this node is also the one that catches a connection cache writing into a
+    replaced file — see `usage_store._conn`.
     """
     usage_store.record_usage(session_id="s", model="primary",
                              input_tokens=77, output_tokens=3,
                              compaction=junk)
-    row = _one(store)
+    row = _one_written(usage_store.DB_PATH)
     assert row["compaction"] is None
     assert row["input_tokens"] == 77, "accounting failed but the tokens must not"
 

@@ -403,7 +403,9 @@ def test_the_skill_gate_block_is_executed_rather_than_mirrored():
     this node drives the block twice — no lock, and a lock stamped now — and requires the
     two answers to differ, each in its own declared way. With no lock the block must name
     itself unevaluable and print the *fixture's* lock path, which a probe whose roots were
-    never rewritten cannot know; with a lock stamped this instant it must fall through to
+    never rewritten cannot know — and the assertion below is that it names THIS
+    fixture's path, not merely a path under some directory called `tmp`;
+    with a lock stamped this instant it must fall through to
     the time gate and report an elapsed-hours figure under 0.5 h, which is arithmetic on
     the mtime the harness wrote microseconds earlier rather than a verdict recited from a
     file.
@@ -419,9 +421,19 @@ def test_the_skill_gate_block_is_executed_rather_than_mirrored():
     assert "unevaluable" in missing_evidence, (
         f"a lock-free gate printed a verdict instead of naming itself unevaluable: "
         f"{missing_evidence}")
-    assert ".consolidate-lock" in missing_evidence and "/tmp" in missing_evidence, (
-        f"the block did not report the fixture's lock path, so it was not run against the "
-        f"fixture memory root: {missing_evidence}")
+    named = re.search(r"LOCK_MISSING: (\S+)", missing_evidence)
+    assert named is not None, (
+        f"a lock-free block named no lock path at all: {missing_evidence}")
+    # The FIXTURE's own path — not "any path under a directory called tmp". That
+    # was the check here, and it stopped being about the Phase-0 block the moment
+    # 8296cb25 moved a gate child's TMPDIR to `~/lloyd-work/.t/<hash>`: only the
+    # block reading the memory root it was handed can name this exact path, and a
+    # block run against somebody else's roots names a /tmp path just as happily.
+    expected = R.PROBE_ROOTS[-1] / ".consolidate-lock"
+    assert Path(named.group(1)).resolve() == expected, (
+        "the block named a lock outside the memory root the probe handed it, so "
+        "the execution evidence is not evidence about the fixture the roots were "
+        f"rewritten into (expected {expected}): {missing_evidence}")
 
     fresh, fresh_evidence = R._probe_consolidation({"args": {"lock": "fresh"}})
     assert fresh != missing, (

@@ -692,11 +692,23 @@ def _rewrite_gate_roots(source: str, memory_root, sessions) -> str:
     return source
 
 
+#: The memory root of the most recent `_probe_consolidation` run.
+#: The probe owns that directory — it hands its two roots into the Phase-0 block,
+#: runs the result, and removes the whole fixture before returning — so a test
+#: that wants to require "the block named THIS fixture's lock path" has to be
+#: told where the fixture was. One entry, replaced each run rather than appended,
+#: so the list cannot accumulate directories that no longer exist; a list rather
+#: than a third element of the `(status, evidence)` tuple every row handler here
+#: consumes.
+PROBE_ROOTS: list[Path] = []
+
+
 def _probe_consolidation(row):
     args = row.get("args", {})
     with fixture_root("consolidation") as root:
         memory_root = root / "lloyd"
         memory_root.mkdir()
+        PROBE_ROOTS[:] = [memory_root]
         sessions = root / "sessions"
         sessions.mkdir()
         if args.get("lock") == "fresh":

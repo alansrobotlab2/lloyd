@@ -16,8 +16,11 @@ same shape. These tests pin the two rules that make it impossible:
 from __future__ import annotations
 
 import errno
+import json
+import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -173,11 +176,77 @@ SUN_PATH_MAX = 107
 def test_production_child_tmpdir_leaves_room_for_chromiums_socket():
     """The 2026-09-29 regression: `<round>/gate-state/tmp` was 64 bytes, 45 more
     for Chromium's socket is 109, and every Playwright test's browser aborted.
-    Computed against the real work root and a real-length round id."""
-    path = G._child_tmp_root() / ("0" * 10)
+    Computed against the real work root and a real-length round id.
+
+    `resolve()`d, because a gate child runs with `HOME` pointed at its round
+    home and `ensure_round_home` symlinks every entry of the real home except
+    `lloyd`/`lloyd-data` — so `lloyd-work` is in there, pointing at the real
+    work root. Unresolved, `G._child_tmp_root()` under that HOME spells
+    `<round home>/lloyd-work/.t`, 79 bytes of a directory that IS production's
+    44-byte root under the round's name, and this node fails on the length of
+    a symlink while the socket it exists to protect sits 63 bytes inside the
+    kernel's limit. The parent builds the child's TMPDIR in the real root and
+    hands down the short path, so what earns the check is that directory. What
+    a child's own env can do with the long spelling is the next node."""
+    path = G._child_tmp_root().resolve() / ("0" * 10)
     assert len(str(path)) <= G.MAX_CHILD_TMPDIR
     assert len(str(path)) + len(CHROMIUM_SOCKET_TAIL) <= SUN_PATH_MAX
     assert G.MAX_CHILD_TMPDIR + len(CHROMIUM_SOCKET_TAIL) <= SUN_PATH_MAX
+
+
+def test_a_round_home_symlink_resolves_the_childs_tmp_root_back_to_the_real_one(
+        tmp_path):
+    """Why the node above resolves, measured in a CHILD PROCESS.
+
+    `WORK_ROOT` is `Path.home() / "lloyd-work"` bound at IMPORT time
+    (`worktree.py:25`), so no `monkeypatch.setenv("HOME", ...)` inside this
+    process can reproduce what the relocation does — only a process that starts
+    with `HOME` already pointed at a round home evaluates it the way a gate
+    child does. That is the boundary this node has to cross, so it crosses it: a
+    `gate.py` child is exactly what the socket path gets built inside of.
+
+    The child's own `_child_tmp_root()` under a deep fake HOME overruns
+    `MAX_CHILD_TMPDIR`, and resolving it lands back on the real root — one
+    directory, two spellings. That is the case for measuring the resolved path
+    and against shortening `WORK_ROOT`, which decides where every round's
+    worktree and `.t` scratch live and which #1866 owes a ruling on."""
+    fake_home = tmp_path / ("home" + "x" * 40)       # a deep round home, as real
+    fake_home.mkdir()
+    real_root = W.WORK_ROOT / G.CHILD_TMP_DIRNAME    # bound here, at real HOME
+    os.symlink(W.WORK_ROOT, fake_home / "lloyd-work")
+
+    # The REAL root is named in from here: inside the child, `WORK_ROOT` is
+    # itself computed under the relocated HOME, so the child cannot tell the two
+    # spellings apart — that is precisely the blindness this node is about.
+    script = (
+        "import json, sys; sys.path.insert(0, %r)\n"
+        "from scripts.automod import gate as g\n"
+        "r = g._child_tmp_root()\n"
+        "print(json.dumps({'spelling': str(r), 'resolved': str(r.resolve()),\n"
+        "                  'len': len(str(r / ('0' * 10))),\n"
+        "                  'budget': g.MAX_CHILD_TMPDIR}))\n"
+        % str(ROOT))
+    out = subprocess.run([sys.executable, "-c", script],
+                         env={**os.environ, "HOME": str(fake_home),
+                              "PYTHONPATH": str(ROOT)},
+                         capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    got = json.loads(out.stdout)
+
+    assert got["spelling"].startswith(str(fake_home)), (
+        "WORK_ROOT is bound at import, so a child is the only way to evaluate "
+        f"it under a relocated HOME; this child did not: {got}")
+    assert got["len"] > got["budget"], (
+        "the defect this item is about is that the child's own spelling of the "
+        f"root overruns the budget; if that ever stops happening, delete this "
+        f"node rather than the resolve(): {got}")
+    # Both sides resolved. Under a test process whose HOME is a round home,
+    # `real_root` is ITSELF the round's spelling of this directory — the same
+    # blindness the child shows one level up — so only resolved spellings can be
+    # compared at all, and what is measured is the directory, never its name.
+    assert got["resolved"] == str(Path(real_root).resolve()), (
+        "the child's long spelling is the parent's scratch directory under the "
+        f"round home's name, not a second area that also has to fit: {got}")
 
 
 def test_the_kernel_accepts_a_socket_at_the_longest_allowed_tmpdir():

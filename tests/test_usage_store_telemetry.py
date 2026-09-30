@@ -97,3 +97,29 @@ def test_by_class_is_stored_as_json():
 def test_an_unknown_telemetry_column_is_a_caller_error():
     with pytest.raises(TypeError):
         _record(ttft_ms=5)
+
+
+def test_a_file_replaced_under_the_store_is_written_to_the_new_one(tmp_path,
+                                                                   monkeypatch):
+    """A connection is cached per thread and reopened when `DB_PATH` MOVES; the
+    same path holding a DIFFERENT file is the other half of that transition, and
+    SQLite never complains about it — it writes into the unlinked inode, and
+    `record_usage` returns exactly as though the row had landed.
+
+    pytest 9 produces this between two param cases that share a `tmp_path`
+    basename (it strips brackets, so `""` and `"[]"` collide), which is how four
+    of #1866's junk-compaction nodes lost a row while the store reported
+    success. The reader here is read-only on purpose: `sqlite3.connect` on a
+    missing path creates one, which would hide the whole defect.
+    """
+    db = tmp_path / "usage.db"
+    monkeypatch.setattr(usage_store, "DB_PATH", db)
+    usage_store.record_usage(session_id="first", model="m", input_tokens=1)
+    assert db.exists(), "the first write should have created the file"
+    db.unlink()                                    # same path, now no file
+    usage_store.record_usage(session_id="second", model="m", input_tokens=2)
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    sessions = [r[0] for r in conn.execute("SELECT session_id FROM usage")]
+    assert sessions == ["second"], (
+        "a write after the file was replaced must land in the file that sits at "
+        f"the path now, not in the inode the cached handle held: {sessions}")

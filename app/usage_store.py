@@ -6,6 +6,7 @@ for the Usage dashboard (4-hour window, 7-day window, time-series).
 """
 
 import json
+import os
 import sqlite3
 import threading
 from datetime import datetime, timedelta
@@ -19,21 +20,44 @@ _local = threading.local()
 
 
 def _conn() -> sqlite3.Connection:
-    """Thread-local SQLite connection, reopened if `DB_PATH` has moved.
+    """Thread-local SQLite connection, reopened if the file behind `DB_PATH`
+    is not the one this handle writes to.
 
-    Reopening on a moved path is what lets a test point the store at a
-    scratch file: the cache is per thread, and a connection a worker thread
-    opened earlier would otherwise go on writing wherever it first pointed.
+    Comparing the PATH is not enough, and the half-truth cost two rounds of
+    #1866: a same-path-but-replaced file keeps a live handle pointed at the
+    old file, SQLite goes on writing to the unlinked inode without complaint,
+    and `record_usage` returns success for a row that exists nowhere. pytest
+    9 does exactly that to a test: it hands two param cases the SAME
+    `tmp_path` directory name (`test_x__0` for both `""` and `"[]"`, brackets
+    stripped) while giving the second a FRESH, EMPTY directory, so the
+    fixture's `usage.db` is simply gone at the second case. The reopen-on-moved-
+    path rule alone covers a path that changes; this covers the path that
+    doesn't.
+
+    The check is one `os.stat` per connection use. A file that has vanished
+    (`FileNotFoundError`) counts as replaced: reconnecting recreates it, which
+    is what a caller that asked to record a row expects.
     """
     path = str(DB_PATH)
     conn = getattr(_local, "conn", None)
-    if conn is None or getattr(_local, "path", None) != path:
-        conn = sqlite3.connect(path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        _init_schema(conn)
-        _local.conn = conn
-        _local.path = path
+    if conn is not None and getattr(_local, "path", None) == path:
+        try:
+            same_file = os.stat(path).st_ino == getattr(_local, "ino", None)
+        except OSError:
+            same_file = False
+        if same_file:
+            return conn
+        conn.close()
+    conn = sqlite3.connect(path, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    _init_schema(conn)
+    _local.conn = conn
+    _local.path = path
+    try:
+        _local.ino = os.stat(path).st_ino
+    except OSError:
+        _local.ino = None      # unreadable: the next call reconnects and retries
     return conn
 
 
