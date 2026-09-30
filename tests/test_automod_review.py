@@ -2689,3 +2689,259 @@ def test_a_commit_the_vault_holds_is_not_an_unresolved_citation(repo, tmp_path, 
                      1, repo=r)
     assert parsed["unreliable"] == [] and "citation_unresolved" not in parsed["clauses"][0]
     assert RV.unresolved_shas(f"see {vsha}", r, also=()) == [vsha], "the code repo alone lacks it"
+
+
+# ── the second reader on a block (#1903) ─────────────────────────────────
+#
+# A pass stands on one vote; a block is put to a second reader that can only
+# demote it. These pin the rule that decides WHICH blocks are put to it, which
+# entries it is shown, and what its answer may and may not do. The rung's own
+# half — the ledger row, the refunded attempt — is in tests/test_automod_gate.py.
+
+_CLAUSES_1903 = ["the block is confirmed before it costs an attempt",
+                 "the confirming reader sees only the named finding"]
+
+
+def _confirm_parsed(*, clauses=None, honesty=(), seams=(), premise="sound",
+                    summary="SUMMARY_SENTINEL the first reader approved nothing else",
+                    amendments_ok=True, amendments_note=""):
+    """A parsed grader verdict, in the shape `_grade_entries` reads."""
+    return {"premise": premise,
+            "clauses": list(clauses or [{"clause": 1, "verdict": "unmet",
+                                         "note": "ENTRY_ONE_SENTINEL no second reader exists"}]),
+            "test_honesty": list(honesty), "seams_unverified": list(seams),
+            "summary": summary, "downgraded": [],
+            "amendments_ok": amendments_ok, "amendments_note": amendments_note}
+
+
+def _honesty_entry(**kw):
+    h = {"file": "tests/test_x.py", "line": 9, "problem": "`or True` makes it vacuous"}
+    h.update(kw)
+    return h
+
+
+def test_the_confirm_policy_defaults_off_and_only_says_on_when_config_says_on(monkeypatch):
+    """Off is the shipped setting, and off means the reader is never called.
+
+    Two spellings are accepted, and every other value — including a config with
+    no `automod.review.confirm` key at all, which is what every checkout has
+    today — is off. A config that cannot be read is off too: this switch may
+    add a grader turn to a refusal, it may never break the rung that reads it.
+    """
+    import app.config as C
+
+    monkeypatch.setattr(C, "CONFIG", {"automod": {"review": {"seams_block": "never"}}})
+    assert RV.confirm_policy() is False
+    monkeypatch.setattr(C, "CONFIG", {"automod": {"review": {"confirm": "on"}}})
+    assert RV.confirm_policy() is True
+    monkeypatch.setattr(C, "CONFIG", {"automod": {"review": {"confirm": True}}})
+    assert RV.confirm_policy() is True
+    for off in (False, "off", "", None, "sometimes"):
+        monkeypatch.setattr(C, "CONFIG", {"automod": {"review": {"confirm": off}}})
+        assert RV.confirm_policy() is False, off
+
+    class _Boom(dict):
+        def get(self, *a, **k):
+            raise RuntimeError("config unreadable")
+
+    monkeypatch.setattr(C, "CONFIG", _Boom())
+    assert RV.confirm_policy() is False, "a broken config never turns the reader on"
+
+
+def test_the_second_reader_is_offered_the_entries_the_decision_itself_produced():
+    """The entries put to the reader are the entries the refusal is made of.
+
+    Both blocking entries here are synthesized from the grader's CLAUSE VERDICTS
+    — it filed no finding of its own — which is the case that would otherwise be
+    answered `not_asked`: `clause 2 partial (downgraded: not graded)` is written
+    by the decision rule when a `met` was thrown out for lack of evidence, and a
+    refusal made only of those must still be put to a second reader.
+    """
+    parsed = _confirm_parsed(clauses=[
+        {"clause": 1, "verdict": "unmet", "note": "no second reader exists"},
+        {"clause": 2, "verdict": "partial", "downgraded": ["not graded"],
+         "note": "the pin is not in this diff"},
+    ])
+    d = RV.decide_with_entries(parsed, [])
+    assert d["kind"] == "retry"
+    assert [e["kind"] for e in d["blocking"]] == ["clause", "clause"]
+    assert [e["text"] for e in d["blocking"]] == [
+        "clause 1 unmet: no second reader exists",
+        "clause 2 partial (downgraded: not graded): the pin is not in this diff"]
+    # Byte-for-byte the entries the refusal is made of: the join is the only
+    # other place they are written, so nothing can drift between the two.
+    assert d["findings"] == RV.decide_by_grader(parsed, [])[1]
+    for e in d["blocking"]:
+        assert e["text"] in d["findings"]
+    plan = RV.confirm_plan(d["kind"], d["blocking"], confirm_on=True)
+    assert plan["ask"] is True and plan["reason"] == "ask"
+    assert [e["text"] for e in plan["entries"]] == [e["text"] for e in d["blocking"]]
+
+
+def test_a_python_computed_or_contract_refusal_is_never_put_to_the_reader():
+    """Every exemption names its reason on the record, and none is a judgment.
+
+    A Python pattern found a test-honesty fact; an `unsatisfiable` clause and a
+    refused amendment are defects of the CONTRACT, not of this diff; `unsound`
+    is a call about the ITEM. A reader aimed at "is this finding real about the
+    diff" cannot un-find a pattern, un-refuse an amendment or re-judge the item,
+    so none of these is asked — and each refusal says which rule spared it.
+    """
+    def plan_of(parsed, pre=(), amendments=None, **kw):
+        d = RV.decide_with_entries(parsed, pre, amendments=amendments, **kw)
+        return RV.confirm_plan(d["kind"], d["blocking"], confirm_on=True), d
+
+    cases = {}
+    # A blocking entry a Python pattern found, not a grader judgment.
+    cases["all_python_computed"] = plan_of(
+        _confirm_parsed(clauses=[{"clause": 1, "verdict": "met", "note": ""}]),
+        pre=[_honesty_entry()])
+    # Same fact from the grader's own list, at blocking severity and fixable.
+    cases["all_python_computed_grader_filed"] = plan_of(
+        _confirm_parsed(clauses=[{"clause": 1, "verdict": "met", "note": ""}],
+                        honesty=[_honesty_entry(severity="blocking",
+                                                actionable_in_round=True,
+                                                testable_before_landing=True)]))
+    cases["unsatisfiable_clause"] = plan_of(_confirm_parsed(clauses=[
+        {"clause": 1, "verdict": "unsatisfiable", "note": "no diff can satisfy this"}]))
+    cases["amendment_refused"] = plan_of(
+        _confirm_parsed(clauses=[{"clause": 1, "verdict": "unmet", "note": "n"}],
+                        amendments_ok=False, amendments_note="the clause is restored"),
+        amendments=[{"clause": 1, "round_id": "SM_X", "text": "weaker"}])
+    cases["premise_unsound"] = plan_of(_confirm_parsed(premise="unsound"))
+    # A block with no clause verdict in it is not the thing this reader is for.
+    cases["no_clause_verdict"] = plan_of(
+        _confirm_parsed(clauses=[{"clause": 1, "verdict": "met", "note": ""}],
+                        seams=[{"seam": "the loopback POST"}]), policy="always")
+    # A refusal that is nothing but advisories never reaches a second reader.
+    cases["not_a_refusal"] = plan_of(_confirm_parsed(
+        clauses=[{"clause": 1, "verdict": "post_landing", "note": "wait for landing"}]))
+    # The policy itself, off: the reader is not called and nothing is offered.
+    cases["policy_off"] = (RV.confirm_plan("retry", [{"text": "clause 1 unmet: x",
+                                                      "kind": "clause"}], confirm_on=False), None)
+
+    for expected, (plan, decision) in cases.items():
+        want = expected.split("_grader")[0]
+        assert plan["ask"] is False, f"{expected}: must not be put to a reader"
+        assert plan["entries"] == [], expected
+        assert plan["reason"] == want, f"{expected}: reason was {plan['reason']}"
+        assert plan["reason"] in RV.NOT_ASK_REASONS, plan["reason"]
+    assert "test honesty tests/test_x.py:9" in cases["all_python_computed"][1]["findings"]
+    assert "clause 1 unsatisfiable as written" in cases["unsatisfiable_clause"][1]["findings"]
+    assert "amendment of clause(s) 1 refused" in cases["amendment_refused"][1]["findings"]
+    # The positive control beside these negatives is the one entry that IS put
+    # to a reader: a refusal built of nothing but an unrecognised entry shape
+    # is not asked about either, which proves the classifier is reading the
+    # entries and not just failing open.
+    odd = RV.decide_with_entries(_confirm_parsed(clauses=[
+        {"clause": 1, "verdict": "met", "note": ""}]), [])
+    odd["blocking"] = [{"text": "something this rule has no spelling for", "kind": "other"}]
+    assert RV.confirm_plan("retry", odd["blocking"], confirm_on=True)["reason"] == "no_clause_verdict"
+    assert RV.confirm_plan("retry", [{"text": "clause 1 unmet: x", "kind": "clause"}],
+                           confirm_on=True)["ask"] is True, "the classifier is not failing closed"
+
+
+def test_the_reader_sees_the_diff_and_the_one_named_entry_and_nothing_of_the_first_reading():
+    """What the second reader is shown, asserted against unique sentinels.
+
+    Two blocking entries, asked about one at a time: the prompt for entry 1
+    carries entry 1 and the diff, and must not carry entry 2's text, nor the
+    first reading's summary. Both absences are load-bearing — a reader shown
+    the first reader's conclusions is being primed, not consulted, and a reader
+    shown a second finding can retire the wrong one.
+    """
+    parsed = _confirm_parsed(clauses=[
+        {"clause": 1, "verdict": "unmet", "note": "ENTRY_ONE_SENTINEL no reader is wired"},
+        {"clause": 2, "verdict": "unmet", "note": "ENTRY_TWO_SENTINEL the other finding"},
+    ])
+    d = RV.decide_with_entries(parsed, [])
+    plan = RV.confirm_plan(d["kind"], d["blocking"], confirm_on=True)
+    sent: list[dict] = []
+
+    def fake_run(**kw):
+        sent.append(kw)
+        return {"ok": True, "error": "", "session_id": "sess_confirm",
+                "structured": {"retire": True, "reason": "checked the diff, the pin is there"}}
+
+    reader = RV.confirm_reader(round_id="SM_1903", item_id=1903, clauses=_CLAUSES_1903,
+                              diff="DIFF_SENTINEL +def confirm_refusal():", run_grader_fn=fake_run)
+    got = RV.confirm_refusal(d, plan, reader=reader)
+
+    assert got["outcome"] == RV.OVERTURNED and got["asked"] == 2
+    assert len(sent) == 2, "one turn per blocking entry, not one per diff"
+    first = sent[0]["prompt"]
+    assert "ENTRY_ONE_SENTINEL" in first and "DIFF_SENTINEL" in first
+    assert "the block is confirmed before it costs an attempt" in first, "the clause it must judge against"
+    assert "ENTRY_TWO_SENTINEL" not in first, "entry 2 is a different question"
+    for kw in sent:
+        assert "SUMMARY_SENTINEL" not in kw["prompt"], "the first reading's summary is not evidence"
+        assert kw["final_schema"] is RV.CONFIRM_SCHEMA
+        assert kw["round_id"] == "SM_1903" and kw["item_id"] == 1903
+
+
+def test_a_second_reader_may_retire_only_the_entry_it_was_named():
+    """Demote-only, in both directions, and fail-closed on every bad answer.
+
+    The reader is asked about ONE entry, so its answer is attached to that entry
+    and no other: it cannot retire a finding it was not shown, cannot retire one
+    that a Python pattern found, and cannot add a finding (there is nowhere for
+    one to go). Anything short of a JSON `true` upholds, so a confused or broken
+    second reader costs a grader turn and changes nothing.
+    """
+    parsed = _confirm_parsed(clauses=[
+        {"clause": 1, "verdict": "unmet", "note": "first"},
+        {"clause": 2, "verdict": "unmet", "note": "second"},
+    ])
+    d = RV.decide_with_entries(parsed, [])
+    plan = RV.confirm_plan(d["kind"], d["blocking"], confirm_on=True)
+    asked: list[str] = []
+
+    def retire_first_only(text):
+        asked.append(text)
+        return {"retire": text == d["blocking"][0]["text"],
+                "reason": "the pin is on the line the note names",
+                "new_blocking_finding": "clause 9 unmet: invented"}
+
+    got = RV.confirm_refusal(d, plan, reader=retire_first_only)
+    assert asked == [e["text"] for e in d["blocking"]], "asked about exactly the blocking entries"
+    assert got["outcome"] == RV.UPHELD, "entry 2 stands, so the refusal stands"
+    assert [v["verdict"] for v in got["votes"]] == ["retired", "upheld"]
+    assert got["reason"] == ("clause retired: the pin is on the line the note names; "
+                            "clause upheld: the pin is on the line the note names")
+    assert len(got["votes"]) == 2, "an invented finding in the answer is recorded nowhere"
+    assert "invented" not in got["reason"]
+
+    # An entry no Python pattern found can be retired; one can never be asked
+    # about, so it can never be retired even by a reader that would.
+    mixed = RV.decide_with_entries(
+        _confirm_parsed(clauses=[{"clause": 1, "verdict": "unmet", "note": "first"}]),
+        [_honesty_entry()])
+    got2 = RV.confirm_refusal(mixed, RV.confirm_plan("retry", mixed["blocking"], confirm_on=True),
+                             reader=lambda t: {"retire": True, "reason": "everything is fine"})
+    assert got2["outcome"] == RV.UPHELD and got2["asked"] == 1
+    assert [v["entry"] for v in got2["votes"]] == ["clause 1 unmet: first"], \
+        "the honesty entry is never offered, so it can never be retired"
+    assert "test honesty" in mixed["findings"], "the honesty finding is still what refuses"
+
+    for bad in ({"retire": "true", "reason": "a string is not a true"},
+               {"retire": 1, "reason": "an int is not a true"},
+               {"reason": "no retire key at all"},
+               {"retire": False, "reason": "the finding stands"},
+               "not even a dict", {}):
+        got3 = RV.confirm_refusal(d, plan, reader=lambda t, b=bad: b)
+        assert got3["outcome"] == RV.UPHELD, bad
+
+    def boom(text):
+        raise RuntimeError("the reader died")
+
+    got4 = RV.confirm_refusal(d, plan, reader=boom)
+    assert got4["outcome"] == RV.UPHELD and "RuntimeError" in got4["reason"]
+
+    # Past the cap an entry is never asked about, so it cannot be overturned.
+    many = RV.decide_with_entries(_confirm_parsed(clauses=[
+        {"clause": n, "verdict": "unmet", "note": f"note {n}"}
+        for n in range(1, RV.CONFIRM_MAX_ENTRIES + 2)]), [])
+    got5 = RV.confirm_refusal(many, RV.confirm_plan("retry", many["blocking"], confirm_on=True),
+                             reader=lambda t: {"retire": True, "reason": "all clear"})
+    assert got5["asked"] == RV.CONFIRM_MAX_ENTRIES, "the offered entries are capped"
+    assert got5["outcome"] == RV.UPHELD, "an entry never asked about is never retired"

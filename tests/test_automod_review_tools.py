@@ -208,3 +208,134 @@ def test_the_backfill_grants_the_same_standing_and_no_more(world, tmp_path):
     assert all(p["severity"] == "blocking" for p in keep["prechecks"] if "or True" in p["problem"]), keep["prechecks"]
     assert all("demoted_from" not in p for p in keep["prechecks"]), keep["prechecks"]
     assert keep["kind"] == "retry" and keep["honesty_note"] == "", keep["kind"]
+
+
+# ── replaying the #1903 confirmation pass over recorded blocks ────────────
+
+def _review_row(round_id, *, kind="retry", blocking=True, findings, head, item_id=9, ts=1.0):
+    return {"event": "review", "round_id": round_id, "item_id": item_id, "ok": True,
+            "kind": kind, "blocking": blocking, "attempt": 1, "ts": ts,
+            "head": head, "findings": findings, "clauses": [], "test_honesty": [],
+            "seams_unverified": [], "downgraded": [], "summary": "", "amendments_ok": True}
+
+
+def _append(world, *rows):
+    for r in rows:
+        S.append_event(r, path=world["ledger"])
+
+
+_TWO_CLAUSE_BLOCKS = ("clause 1 unmet: CONFIRM_ONE_SENTINEL no second reader is wired; "
+                      "clause 2 partial (downgraded: not graded): the pin is not in this diff")
+
+
+def test_replay_confirm_counts_the_blocks_a_second_reader_would_overturn(world):
+    """The number the config switch is decided on, out of recorded events only.
+
+    One block made of two synthesized clause entries is askable; a block that is
+    only a Python-computed test-honesty finding is not, and says so; a pass and
+    a non-review row are not blocks at all. The injected reader retires
+    everything it is shown, so exactly one recorded block would have become a
+    pass — and nothing on disk changed to say so.
+    """
+    _append(world,
+            _review_row("SM_A", findings=_TWO_CLAUSE_BLOCKS, head=world["commit"]),
+            _review_row("SM_B", findings="test honesty tests/test_m.py:2: `or True`",
+                        head=world["commit"]),
+            _review_row("SM_C", kind="pass", blocking=False, findings="met 2 of 2",
+                        head=world["commit"]),
+            {"event": "promoted", "round_id": "SM_A", "commit": world["commit"]})
+    before = world["ledger"].read_text()
+    # No append of any kind is allowed, so the guard is the loudest thing here.
+    def _no_append(*a, **k):
+        raise AssertionError("replay-confirm must not write to the ledger")
+    monkeypatched = S.append_event
+    S.append_event = _no_append
+    try:
+        res = RT.replay_confirm(ledger=world["ledger"], repo=world["repo"],
+                                reader=lambda t: {"retire": True, "reason": "the pin is there"})
+    finally:
+        S.append_event = monkeypatched
+
+    assert res["blocking"] == 2 and res["askable"] == 1
+    assert res["overturned"] == 1 and res["judged"] == 1
+    assert res["not_ask_reasons"] == {"all_python_computed": 1}
+    row = next(r for r in res["rows"] if r["round_id"] == "SM_A")
+    assert [e["text"] for e in row["entries"]] == [
+        "clause 1 unmet: CONFIRM_ONE_SENTINEL no second reader is wired",
+        "clause 2 partial (downgraded: not graded): the pin is not in this diff"]
+    assert row["outcome"] == RV.OVERTURNED and len(row["votes"]) == 2
+    assert row["votes"][0]["kind"] == "clause" and row["votes"][0]["verdict"] == "retired"
+    assert world["ledger"].read_text() == before, "a replay is a measurement, not a verdict"
+
+
+def test_replay_confirm_without_a_reader_measures_the_population_not_a_verdict(world):
+    """No model runs in CI, so the overturn count is UNMEASURED — not zero.
+
+    Reporting 0 here would read as "the second reader would have overturned
+    nothing", which is the exact sentence the owed check on #1903 exists to
+    produce, and would settle it with an arm that judged nothing.
+    """
+    _append(world, _review_row("SM_A", findings=_TWO_CLAUSE_BLOCKS, head=world["commit"]))
+    res = RT.replay_confirm(ledger=world["ledger"], repo=world["repo"])
+    assert res["blocking"] == 1 and res["askable"] == 1 and res["judged"] == 0
+    assert res["overturned"] is None and res["upheld"] is None
+    row = res["rows"][0]
+    assert row["ask"] is True and row["reason"] == "ask"
+    assert "outcome" not in row
+    assert [e["kind"] for e in row["entries"]] == ["clause", "clause"]
+
+
+def test_replay_confirm_says_which_recorded_block_it_cannot_recover(world):
+    """`findings` is stored truncated at 2000 characters, so an entry set that
+    ran past the cut is reported rather than replayed as a shorter block — and a
+    head whose objects are gone is reported as `diff_unrecoverable`."""
+    _append(world,
+            _review_row("SM_LONG", findings=("clause 1 unmet: n" + "; clause 2 unmet: n" * 700),
+                        head=world["commit"]),
+            _review_row("SM_GONE", findings="clause 1 unmet: gone", head="0f" * 20))
+    res = RT.replay_confirm(ledger=world["ledger"], repo=world["repo"],
+                            reader=lambda t: {"retire": True, "reason": "r"})
+    assert res["blocking"] == 2 and res["askable"] == 1
+    # Nothing could be judged, so the count is unmeasured rather than zero.
+    assert res["judged"] == 0 and res["overturned"] is None
+    by = {r["round_id"]: r for r in res["rows"]}
+    assert by["SM_LONG"]["skipped"] == "stored_findings_truncated"
+    assert by["SM_GONE"]["skipped"] == "diff_unrecoverable"
+    assert res["not_ask_reasons"] == {"stored_findings_truncated": 1}
+
+
+def test_the_replay_confirm_cli_reports_it_and_writes_nothing(world, tmp_path, capsys):
+    # ts is epoch seconds on a ledger row, and `--since` is a date: a row dated
+    # 1970 would be filtered out by a 2020 floor, so this one is dated 2026.
+    _append(world, _review_row("SM_A", findings=_TWO_CLAUSE_BLOCKS, head=world["commit"],
+                              ts=1777000000.0))
+    before = world["ledger"].read_text()
+    rc = RT.main(["replay-confirm", "--since", "2020-01-01"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "1 recorded block(s); 1 would be put to the second reader" in out, out
+    assert "UNMEASURED" in out, "the default arm judges nothing and must say so"
+    assert world["ledger"].read_text() == before
+
+
+def test_the_known_true_calibrate_block_is_never_offered_to_the_reader(world, tmp_path):
+    """The calibration case that exists to catch a released defect still refuses.
+
+    `--strip-tests` turns a landed round into a known-bad case by deleting its
+    test files; the decision rule must still block, and every blocking entry it
+    writes for that case comes from an evidence rail that checked the tree — the
+    grader is stubbed to call the diff fully met, so only Python can disagree.
+    `confirm_plan` therefore answers `all_python_computed`: no second reader, in
+    the gate or in a replay, can retire the one block the eval directory knows
+    is true, because a reader is never asked about it.
+    """
+    fx = tmp_path / "fixtures"
+    RT.write_fixture(name="stripped", round_id="SM_9", expect_kind="retry", expect_unmet=[],
+                     expect_honesty=True, strip_tests=True, ledger=world["ledger"],
+                     fixture_dir=fx, note="known-bad by construction")
+    rows = RT.calibrate(repo=world["repo"], fixture_dir=fx, grader=_stub(_met()))
+    assert rows and rows[0]["kind"] == "retry", rows
+    entries = RV.blocking_entries_from_text(rows[0]["findings"])
+    assert entries, rows[0]["findings"]
+    assert all(e["kind"] in RV.PYTHON_COMPUTED_ENTRY_KINDS for e in entries), entries
+    assert RV.confirm_plan("retry", entries, confirm_on=True)["reason"] == "all_python_computed"

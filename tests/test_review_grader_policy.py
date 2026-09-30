@@ -424,12 +424,17 @@ def test_the_code_rung_threads_the_policy_and_its_own_attempt():
     was missing. `Gate.rung_review` is the live call; the vault grader now passes
     the same pair. A rung that stopped passing either would decide a seam on the
     default (`first`, attempt 1) and re-create the bug on the surface that was
-    already right."""
+    already right.
+
+    #1903 renamed the call the rung makes — the decision now comes back with its
+    blocking entries as a list, for the second reader — so the needle names the
+    call by its NEW spelling. Both arguments it asserts are the same two, and a
+    rung that dropped either still fails here exactly as it did before."""
     import inspect
 
     from scripts.automod.gate import Gate
     src = inspect.getsource(Gate.rung_review)
-    at = src.index("RV.decide(")
+    at = src.index("RV.decide_with_entries(")
     call = src[at:at + 200]
     assert "attempt=attempt" in call, call
     assert "policy=RV.seams_policy()" in call, call

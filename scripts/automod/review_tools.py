@@ -417,6 +417,152 @@ def redecide(*, since_ts: float, ledger: Path | None = None,
             "note": REDECIDE_NOTE if approximate else ""}
 
 
+# ── replaying the #1903 confirmation pass over recorded blocks ───────────
+
+#: The `findings` a `review` row keeps is truncated to this many characters by
+#: `rung_review`, so a block whose entries ran past it cannot be recovered.
+STORED_FINDINGS_CAP = 2000
+
+
+def _row_diff(repo: Path, head: str, _cache: dict) -> tuple[str, bool]:
+    """The diff a recorded review graded, recovered from the repo by `head`.
+
+    `git merge-base main <head>` is the round's base as long as the round was
+    cut off `main`, which every gate round is; the branch outlives the round
+    because `automod_abort` keeps it. `(text, found)` — `(“”, False)` means the
+    object is gone, and a row whose diff cannot be shown to a reader is
+    reported as `diff_unrecoverable` rather than graded against nothing.
+    """
+    if not head or head in _cache:
+        return _cache.get(head, ("", False))
+    mb = _git(repo, "merge-base", "main", head)
+    ok = mb.returncode == 0
+    base = mb.stdout.strip() if ok else ""
+    out: tuple[str, bool] = ("", False)
+    if base:
+        d = _git(repo, "diff", f"{base}..{head}")
+        if d.returncode == 0:
+            out = (d.stdout[:RV.DIFF_CAP_CHARS], True)
+    _cache[head] = out
+    return out
+
+
+def replay_confirm(*, since_ts: float = 0.0, ledger: Path | None = None,
+                   repo: Path | None = None, reader=None, reader_factory=None,
+                   limit: int | None = None,
+                   findings_cap: int = STORED_FINDINGS_CAP) -> dict:
+    """What the #1903 second reader would have done to the blocks on record.
+
+    Reads `review` events, keeps the ones that blocked, recovers their blocking
+    entries from the stored joined decision text, and runs the SAME
+    `RV.confirm_plan` + `RV.confirm_refusal` the live rung runs over them. It
+    asks the config switch nothing — the point is what turning it on would have
+    changed — so `confirm_on=True` is passed in, and a `reader=None` measures
+    the askable population without judging any of it.
+
+    **No model runs here unless the caller hands one in**, and nothing is
+    written: no ledger append, no backfill file. This is the number the switch
+    is decided on, so it is a measurement of recorded events, not a verdict on
+    a round.
+
+    `reader` is `callable(entry_text) -> {"retire": bool, "reason": str}`.
+    With `reader=None` the result's `overturned` is `None`: unjudged, which is
+    not the same sentence as zero.
+    """
+    from scripts.automod import state as S
+    path = ledger or S.LEDGER_PATH
+    repo = repo or LIVE_ROOT
+    rows: list[dict] = []
+    diffs: dict = {}
+    asking = reader is not None or reader_factory is not None
+    if path.exists():
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if ev.get("event") != "review" or not ev.get("ok"):
+                continue
+            if float(ev.get("ts") or 0) < since_ts:
+                continue
+            recorded = ev.get("kind") or ("retry" if ev.get("blocking") else "pass")
+            if recorded != "retry":
+                continue
+            text = str(ev.get("findings") or "")
+            if not text.strip():
+                continue
+            entries = RV.blocking_entries_from_text(text)
+            row = {"round_id": ev.get("round_id"), "item_id": ev.get("item_id"),
+                   "attempt": ev.get("attempt"), "ts": ev.get("ts"),
+                   "head": str(ev.get("head") or ""), "entries": entries}
+            if len(text) >= findings_cap:
+                row["skipped"] = "stored_findings_truncated"
+            else:
+                plan = RV.confirm_plan("retry", entries, confirm_on=True)
+                row["ask"] = bool(plan["ask"])
+                row["reason"] = plan["reason"]
+                row["offered"] = [e["text"] for e in plan["entries"]]
+                if plan["ask"] and asking:
+                    diff, found = _row_diff(repo, row["head"], diffs)
+                    if not found:
+                        row["skipped"] = "diff_unrecoverable"
+                    else:
+                        row["diff_chars"] = len(diff)
+                        verdict = RV.confirm_refusal(
+                            {"blocking": entries, "findings": text}, plan,
+                            reader=(reader_factory(row, diff) if reader_factory
+                                    else reader))
+                        row["outcome"] = verdict["outcome"]
+                        row["confirm_reason"] = verdict["reason"]
+                        row["votes"] = verdict["votes"]
+            rows.append(row)
+            if limit and len(rows) >= limit:
+                break
+    askable = [r for r in rows if r.get("ask")]
+    judged = [r for r in askable if "outcome" in r]
+    reasons: dict[str, int] = {}
+    for r in rows:
+        if not r.get("ask"):
+            key = str(r.get("reason") if r.get("ask") is False
+                      else r.get("skipped") or "skipped")
+            reasons[key] = reasons.get(key, 0) + 1
+    return {"rows": rows, "blocking": len(rows), "askable": len(askable),
+            "not_ask_reasons": reasons, "judged": len(judged),
+            "overturned": (sum(1 for r in judged if r["outcome"] == RV.OVERTURNED)
+                           if judged else None),
+            "upheld": (sum(1 for r in judged if r["outcome"] == RV.UPHELD)
+                       if judged else None),
+            "diffs_recovered": len([d for d in diffs.values() if d[1]]),
+            "limit": limit}
+
+
+def live_replay_reader(row: dict, diff: str, *, run_grader_fn=None,
+                       contract_fn=None):
+    """A `replay_confirm` reader that asks the live grader about one entry.
+
+    Used only when `--engine grader` is passed: the default arm runs no model,
+    because this number decides a config switch and CI has to exercise the route
+    without a GPU. It is `RV.confirm_reader` with the round's clauses filled
+    from the backlog, so a replay asks the second reader exactly what the live
+    rung would have asked it.
+
+    The clauses shown are the item's CURRENT text. A round whose item was
+    amended or re-triaged since is therefore asked about with slightly newer
+    wording than the first reader used — which is why the printed verdicts
+    carry the first reader's own entry text beside the vote, and why this is
+    evidence for a human decision rather than a self-executing one.
+    """
+    contract_fn = contract_fn or RV.item_contract
+    clauses: list[str] = []
+    try:
+        clauses = list((contract_fn(int(row.get("item_id") or 0)) or {}).get("clauses") or [])
+    except Exception:  # noqa: BLE001 — a missing item still gets a diff-only read
+        pass
+    return RV.confirm_reader(round_id=f"replay:{row.get('round_id')}",
+                             item_id=int(row.get("item_id") or 0),
+                             clauses=clauses, diff=diff, run_grader_fn=run_grader_fn)
+
+
 def _since_ts(text: str) -> float:
     from datetime import datetime, timezone
     dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
@@ -450,6 +596,18 @@ def main(argv=None) -> int:
     r.add_argument("--no-approximate", action="store_true",
                    help="do not approximate rule 2 on recorded downgrades")
     r.add_argument("--json", action="store_true")
+    rc = sub.add_parser("replay-confirm",
+                        help="#1903: over recorded review events, how many blocks a second "
+                             "reader would have overturned. Runs no model unless --engine "
+                             "grader, and appends nothing to any store.")
+    rc.add_argument("--since", default=None, help="ISO time; naive means UTC. Default: all rows")
+    rc.add_argument("--engine", default="none", choices=["none", "grader"],
+                    help="`none` counts which recorded blocks WOULD be put to the second "
+                         "reader and judges none of them; `grader` asks the live grader once "
+                         "per offered entry (that is the owed check on #1903, not CI)")
+    rc.add_argument("--limit", type=int, default=None,
+                    help="stop after this many recorded blocking rows")
+    rc.add_argument("--json", action="store_true", help="print the per-row result too")
     args = ap.parse_args(argv)
 
     if args.cmd == "fixture":
@@ -469,6 +627,33 @@ def main(argv=None) -> int:
     if args.cmd == "backfill":
         rows = backfill(limit=args.limit, only_items=args.item or None)
         print(f"\n{len(rows)} graded → {backfill_path()}")
+        return 0
+    if args.cmd == "replay-confirm":
+        out = replay_confirm(since_ts=(_since_ts(args.since) if args.since else 0.0),
+                             reader_factory=(live_replay_reader
+                                             if args.engine == "grader" else None),
+                             limit=args.limit)
+        if args.json:
+            print(json.dumps(out, indent=2, default=str))
+            return 0
+        for row in out["rows"]:
+            flag = "asked" if row.get("ask") else f"not asked: {row.get('reason') or row.get('skipped')}"
+            vote = ""
+            if row.get("outcome"):
+                vote = f" → {row['outcome']} ({row.get('confirm_reason', '')[:90]})"
+            print(f"{row.get('round_id')} #{row.get('item_id')} attempt {row.get('attempt')}: "
+                  f"{len(row.get('entries') or [])} blocking entr(ies), {flag}{vote}")
+        reasons = ", ".join(f"{k}: {v}" for k, v in sorted(out["not_ask_reasons"].items()))
+        print(f"\n{out['blocking']} recorded block(s); {out['askable']} would be put to the "
+              f"second reader")
+        if reasons:
+            print(f"not put to it: {reasons}")
+        if out["overturned"] is None:
+            print("No reader ran: the overturn count is UNMEASURED, not zero "
+                  "(--engine grader to measure it)")
+        else:
+            print(f"of {out['judged']} judged block(s): {out['overturned']} would be overturned, "
+                  f"{out['upheld']} would stand")
         return 0
     if args.cmd == "redecide":
         out = redecide(since_ts=_since_ts(args.since), seams_policy=args.seams_policy,

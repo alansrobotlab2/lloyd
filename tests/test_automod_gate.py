@@ -1965,3 +1965,191 @@ def test_the_same_quoted_pattern_still_refuses_a_round_that_leaves_the_checker_a
     assert all("demoted_from" not in p for p in blocking), blocking
     assert ok is False and "review sent it back" in detail, detail
     assert data["honesty_note"] == "", "nothing to explain when nothing was demoted"
+
+
+
+# ── the second reader on a review refusal (#1903) ──────────────────────────
+#
+# What the rung puts on the ledger and what it costs. Which blocks are askable,
+# what the reader is shown, and what its answer may do are pinned in
+# tests/test_automod_review.py; here the question is the row and the attempt.
+
+# A refusal made of one synthesized clause verdict — the grader filed no finding
+# of its own, which is the shape that refused SM_20260916_032218,
+# SM_20260922_100227 and SM_20260924_104224, and the shape the reader exists for.
+from scripts.automod import review as RV
+
+# A refusal whose ONLY blocking entry is a vacuous-assertion finding: the shape
+# the precheck finds by regex, which no reader looking at the diff can retire.
+_UNMET_HONESTY = {"premise": "sound", "summary": "GATE_SUMMARY_SENTINEL",
+                  "clauses": [{"clause": 1, "verdict": "met", "note": "as graded",
+                               "evidence_path": "", "evidence_line": 0,
+                               "test_node_id": "", "how_verified": ""}],
+                  "test_honesty": [{"file": "tests/test_x.py", "line": 4,
+                                    "pattern": "`or True`", "severity": "blocking",
+                                    "actionable_in_round": True,
+                                    "problem": "the assertion can never fail"}],
+                  "seams_unverified": []}
+
+
+_UNMET_ONE = {"premise": "sound", "summary": "GATE_SUMMARY_SENTINEL nothing else approved",
+              "clauses": [{"clause": 1, "verdict": "unmet", "note": "GATE_ENTRY_SENTINEL no "
+                           "second reader is wired", "evidence_path": "", "evidence_line": 0,
+                           "test_node_id": "", "how_verified": ""}],
+              "test_honesty": [], "seams_unverified": []}
+
+
+def _confirm_reader(monkeypatch, *, retire=True, answer=None, error=""):
+    """Put the policy on and replace the grader transport the reader uses.
+
+    `RV.grade` (the first pass) stays the stub `_stub_grader` installed, so the
+    only turns counted here are the reader's.
+    """
+    from scripts.automod import review as RV
+    turns: list[dict] = []
+
+    def run_grader(**kw):
+        turns.append(kw)
+        if error:
+            return {"ok": False, "error": error, "text": "", "session_id": "sess_confirm"}
+        return {"ok": True, "error": "", "session_id": "sess_confirm",
+                "structured": answer if answer is not None
+                else {"retire": retire, "reason": "checked the diff: the pin is on the line it names"}}
+    monkeypatch.setattr(RV, "confirm_policy", lambda: True)
+    monkeypatch.setattr(RV, "run_grader", run_grader)
+    # One clause, so the refusal under test is one entry long and the reader's
+    # turn count is the thing being counted rather than a missing clause.
+    monkeypatch.setattr(RV, "item_contract", lambda iid, ledger=None: {
+        "id": iid, "title": "t", "body": "b", "path": "",
+        "clauses": ["a grader-judgement refusal is confirmed before it costs an attempt"]})
+    return turns
+
+
+def test_a_refusal_whose_entries_are_all_retired_is_a_pass_that_spent_no_attempt(
+        tmp_path, monkeypatch):
+    """Clause 4, the overturn half, on the field the charging walk keys on.
+
+    Every blocking entry is retired: the rung returns a pass, its row carries
+    `blocking: false` — the field the walk at `gate.py:2485-2496` counts — and
+    the vote with its one-line reason is on that same row. The detail says which
+    kind of pass it is, so "1 met of 2" is not the same sentence as the round
+    that was never refused.
+    """
+    events, _ = _stub_grader(monkeypatch, tmp_path, _UNMET_ONE)
+    turns = _confirm_reader(monkeypatch)
+    ok, detail, data = _ReviewGate(tmp_path).rung_review()
+
+    assert ok is True, "a refusal with nothing left standing is a pass"
+    assert len(turns) == 1, "one blocking entry, one reader turn"
+    assert turns[0]["final_schema"] is RV.CONFIRM_SCHEMA
+    ev = events[-1]
+    assert ev["blocking"] is False and ev["kind"] == "pass", ev
+    assert ev["review_confirm"] == "overturned"
+    assert ev["review_confirm_votes"][0]["verdict"] == "retired"
+    assert "no review attempt spent" in detail and "GATE_SUMMARY_SENTINEL" in detail
+    assert "review_retry" not in data and data.get("review_attempt") == 1
+
+    # The attempt, measured by the walk that charges it. The walk counts the
+    # rows with `blocking: true` and asks at `spent + 1`, so an overturned row
+    # leaves the round at the attempt it was on before the grading turn: the
+    # next grade is still attempt 1 of 2, not 2 of 2.
+    monkeypatch.setattr(G.S, "read_events", lambda limit=100: list(events))
+    ctx = _ReviewGate(tmp_path)._review_prepare()
+    assert isinstance(ctx, dict), ctx
+    assert ctx["attempt"] == 1, ctx
+
+
+def test_an_upheld_refusal_is_todays_refusal_plus_the_recorded_vote(tmp_path, monkeypatch):
+    """Clause 4, the uphold half: the sentence and the charge do not move.
+
+    The reader looked and the finding stood. The refusal the author reads, the
+    attempt it spends, and the row's `blocking` are what the rung produces with
+    the policy off; the only difference is `review_confirm: upheld` and the
+    reader's reason beside it.
+    """
+    events, _ = _stub_grader(monkeypatch, tmp_path, _UNMET_ONE)
+    turns = _confirm_reader(monkeypatch, retire=False)
+    ok, detail, data = _ReviewGate(tmp_path).rung_review()
+
+    assert ok is False
+    assert len(turns) == 1
+    ev = events[-1]
+    assert ev["blocking"] is True and ev["kind"] == "retry", ev
+    assert ev["review_confirm"] == "upheld"
+    assert "GATE_ENTRY_SENTINEL" in ev["findings"]
+    assert "clause upheld" in ev["review_confirm_reason"]
+    assert data["review_retry"] is True and data["review_attempt"] == 1
+    assert "review sent it back" in detail
+
+    # And the charge: one `blocking: true` row on record, so the next grade is
+    # attempt 2 of the round's two — the same number the rung charged before a
+    # second reader existed.
+    monkeypatch.setattr(G.S, "read_events", lambda limit=100: list(events))
+    ctx = _ReviewGate(tmp_path)._review_prepare()
+    assert isinstance(ctx, dict), ctx
+    assert ctx["attempt"] == 2, ctx
+
+
+def test_a_refusal_is_never_put_to_a_second_reader_while_the_policy_is_off(
+        tmp_path, monkeypatch):
+    """Clause 1 at the rung: off reproduces today's single-vote behaviour.
+
+    Same grader output, same refusal — and no reader turn, no `review_confirm`
+    field on the row and none in the rung data. A field whose absence a later
+    reader could mistake for a vote is worse than no field.
+    """
+    from scripts.automod import review as RV
+    events, _ = _stub_grader(monkeypatch, tmp_path, _UNMET_ONE)
+    turns = _confirm_reader(monkeypatch)
+    monkeypatch.setattr(RV, "confirm_policy", lambda: False)   # the shipped default
+    ok, detail, data = _ReviewGate(tmp_path).rung_review()
+
+    assert ok is False and "review sent it back" in detail
+    assert turns == [], "policy off means no second grader turn, ever"
+    ev = events[-1]
+    assert ev["blocking"] is True and ev["kind"] == "retry"
+    assert not [k for k in ev if k.startswith("review_confirm")], ev
+    assert not [k for k in data if k.startswith("review_confirm")], data
+
+
+def test_a_refusal_the_code_computed_is_not_put_to_the_reader(tmp_path, monkeypatch):
+    """Clause 1's exemption at the rung: a fact about the tree gets no vote.
+
+    A vacuous assertion the precheck found is not a grader judgment about this
+    diff, so with the policy on and a reader that would retire anything, the
+    refusal stands, no reader turn is spent, and the row names why.
+    """
+    events, _ = _stub_grader(monkeypatch, tmp_path, _UNMET_HONESTY)
+    turns = _confirm_reader(monkeypatch)
+    ok, detail, data = _ReviewGate(tmp_path).rung_review()
+
+    assert ok is False
+    assert turns == [], "a pattern a Python check found is never offered"
+    ev = events[-1]
+    assert ev["blocking"] is True
+    assert ev["review_confirm"] == "not_asked" and ev["review_confirm_reason"] == \
+        "all_python_computed", ev
+    assert "test honesty" in ev["findings"]
+
+
+def test_a_reader_that_cannot_answer_leaves_the_refusal_exactly_as_it_was(
+        tmp_path, monkeypatch):
+    """An unreachable second reader is an outage on the record, not a pass.
+
+    Every failure mode of the reader — a backend that refuses the turn, an object
+    with no `retire` in it, a reader that raises — upholds. The refusal, its
+    sentence and its charge are today's, and the reason says the reader could not
+    be reached rather than that it judged.
+    """
+    for kwargs in ({"error": "the backend refused the turn"},
+                   {"answer": {"reason": "no retire key at all"}},
+                   {"answer": None, "retire": "yes please"}):
+        events, _ = _stub_grader(monkeypatch, tmp_path, _UNMET_ONE)
+        turns = _confirm_reader(monkeypatch, **kwargs)
+        ok, detail, data = _ReviewGate(tmp_path).rung_review()
+        assert ok is False, kwargs
+        assert len(turns) == 1, kwargs
+        ev = events[-1]
+        assert ev["blocking"] is True and ev["kind"] == "retry", (kwargs, ev)
+        assert ev["review_confirm"] == "upheld", (kwargs, ev)
+        assert "review sent it back" in detail, kwargs

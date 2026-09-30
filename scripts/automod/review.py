@@ -1496,8 +1496,16 @@ def run_grader(*, prompt: str, item_id: int, round_id: str, backend: str | None 
                sessions_dir: Path | None = None, timeout: float = REVIEW_TIMEOUT_S,
                model: str = "primary", max_turns: int = REVIEW_MAX_TURNS,
                unavailable_wait_s: float = DEFAULT_UNAVAILABLE_WAIT_S,
+               final_schema: dict | None = None,
+               final_schema_prompt: str = "",
                on_session=None) -> dict:
     """POST one grading turn to the live backend and collect its `done`.
+
+    `final_schema` defaults to `REVIEW_SCHEMA`, the full clause-by-clause
+    review; the confirm reader of #1903 passes `CONFIRM_SCHEMA` instead, the
+    one-question shape, and gets the same retry-an-unavailable-backend
+    behaviour for it. A turn that costs a `retire`/`uphold` vote should not
+    buy a different transport than a turn that grades a diff.
 
     **Retries an unavailable backend, and only before the stream opens.** A
     503 or a refused connection *before any event was yielded* means the
@@ -1528,7 +1536,8 @@ def run_grader(*, prompt: str, item_id: int, round_id: str, backend: str | None 
     while True:
         _grade_once(report, backend=backend, payload_prompt=prompt,
                     session_id=session_id, timeout=timeout, model=model,
-                    max_turns=max_turns)
+                    max_turns=max_turns, final_schema=final_schema,
+                    final_schema_prompt=final_schema_prompt)
         if report["ok"] or not _is_unavailable(report["error"]):
             break
         if report.get("saw_event"):
@@ -1551,7 +1560,9 @@ def run_grader(*, prompt: str, item_id: int, round_id: str, backend: str | None 
 
 
 def _grade_once(report: dict, *, backend: str, payload_prompt: str, session_id: str,
-                timeout: float, model: str, max_turns: int) -> None:
+                timeout: float, model: str, max_turns: int,
+                final_schema: dict | None = None,
+                final_schema_prompt: str = "") -> None:
     """One POST. Fills `report` in place; never raises."""
     prompt = payload_prompt
     report["error"] = ""
@@ -1563,8 +1574,8 @@ def _grade_once(report: dict, *, backend: str, payload_prompt: str, session_id: 
         "grant_scope": "worker:automod-review",
         "extra_disallowed": list(REVIEW_DENY),
         "deadline_seconds": float(timeout),
-        "final_schema": REVIEW_SCHEMA,
-        "final_schema_prompt": (
+        "final_schema": final_schema or REVIEW_SCHEMA,
+        "final_schema_prompt": (final_schema_prompt or
             "Restate your review as one JSON object matching the schema. One entry "
             "per acceptance clause, in order. This is a transcription of what you "
             "found, not a new judgment; a `met` without evidence_path, test_node_id "
@@ -2290,10 +2301,18 @@ def _prior_reviews_block(prior: list[dict]) -> str:
     return "\n".join(out) + "\n\n"
 
 
-def decide_by_grader(parsed: dict, prechecks: list[dict],
-                     amendments: list[dict] | None = None, *, attempt: int = 1,
-                     seams_policy: str = "first") -> tuple[str, str]:
-    """`(kind, findings)` with the grader's own judgments deciding.
+def _grade_entries(parsed: dict, prechecks: list[dict],
+                   amendments: list[dict] | None = None, *, attempt: int = 1,
+                   policy: str = "first") -> tuple[str, list[str], list[str]]:
+    """`(kind, blocking entries, advisory entries)` — the decision, unjoined.
+
+    This is the whole verdict rule in one place. `decide_by_grader` joins it
+    into the `(kind, findings)` text the rung and the ledger have always
+    carried; `decide_with_entries` hands the same entries over as a list, for
+    the second reader of #1903, which has to be shown ONE of them. Both read
+    this one function, so the entry a refusal is put to a reader on is
+    byte-for-byte an entry that refusal is made of — no second list that could
+    drift from the first.
 
     An unmet/partial clause refuses. A test-honesty finding refuses only when
     the grader called it `blocking` AND fixable inside the round; a seam only
@@ -2319,7 +2338,7 @@ def decide_by_grader(parsed: dict, prechecks: list[dict],
     `review_tools redecide --seams-policy` can replay history.
     """
     if parsed["premise"] == "unsound":
-        return "unsound", parsed["summary"] or "the grader judged the premise unsound"
+        return "unsound", [], []
     blocking: list[str] = []
     advisory: list[str] = []
     if amendments and not parsed.get("amendments_ok", True):
@@ -2361,7 +2380,7 @@ def decide_by_grader(parsed: dict, prechecks: list[dict],
             advisory.append(f"advisory {where}")
         else:
             advisory.append(f"test honesty {where} (blocking, but not fixable in this round)")
-    blocks_this_attempt = seams_block(seams_policy, attempt)
+    blocks_this_attempt = seams_block(policy, attempt)
     for s in parsed["seams_unverified"]:
         text = s["seam"] if isinstance(s, dict) else str(s)
         s = s if isinstance(s, dict) else {}
@@ -2375,19 +2394,382 @@ def decide_by_grader(parsed: dict, prechecks: list[dict],
         elif not s.get("actionable_in_round", True):
             advisory.append(f"seam unverified (not actionable in this round): {text}")
         elif not blocks_this_attempt:
-            if (seams_policy or "").strip().lower() == "never":
+            if (policy or "").strip().lower() == "never":
                 advisory.append(f"seam unverified (advisory under seams_block=never): {text}")
             else:
                 advisory.append(f"seam unverified (attempt {attempt}, not refusing again): {text}")
         else:
             blocking.append(f"seam unverified: {text}")
-    if not blocking:
+    return ("pass" if not blocking else "retry"), blocking, advisory
+
+
+def _decision_text(kind: str, blocking: list[str], advisory: list[str],
+                   parsed: dict) -> str:
+    """The findings string a decision is reported by. One builder, so the
+    text a refusal is refused with and the text a confirmed refusal keeps are
+    the same bytes."""
+    if kind == "unsound":
+        return parsed["summary"] or "the grader judged the premise unsound"
+    if kind == "pass":
         summary = parsed["summary"]
         if advisory:
             summary = (summary + " — " if summary else "") + "; ".join(advisory)
-        return "pass", summary
-    return "retry", "; ".join(blocking + [a if a.startswith("advisory ") else f"advisory {a}"
-                                          for a in advisory])
+        return summary
+    return "; ".join(blocking + [a if a.startswith("advisory ") else f"advisory {a}"
+                                 for a in advisory])
+
+
+def decide_by_grader(parsed: dict, prechecks: list[dict],
+                     amendments: list[dict] | None = None, *, attempt: int = 1,
+                     policy: str = "first") -> tuple[str, str]:
+    """`(kind, findings)` with the grader's own judgments deciding.
+
+    The join of `_grade_entries`; every rule that answers what refuses lives
+    there. See it for the severity and seams policies this function reports.
+    """
+    kind, blocking, advisory = _grade_entries(parsed, prechecks, amendments,
+                                              attempt=attempt, policy=policy)
+    return kind, _decision_text(kind, blocking, advisory, parsed)
+
+
+def decide_with_entries(parsed: dict, prechecks: list[dict],
+                        amendments: list[dict] | None = None, *, attempt: int = 1,
+                        policy: str = "first") -> dict:
+    """`decide_by_grader`, plus the blocking entries it joined.
+
+    `{"kind", "findings", "blocking": [{"text", "kind"}], "advisory"}`. The
+    `findings` text is identical to `decide_by_grader`'s — this adds a list
+    beside it and changes no verdict — because the second reader of #1903 has
+    to be shown an entry the decision itself produced, including a
+    `clause N unmet` or `clause N partial (downgraded: …)` synthesized from
+    the clause verdicts when the grader filed no finding of its own.
+    """
+    kind, blocking, advisory = _grade_entries(parsed, prechecks, amendments,
+                                              attempt=attempt, policy=policy)
+    return {"kind": kind, "findings": _decision_text(kind, blocking, advisory, parsed),
+            "blocking": [{"text": b, "kind": blocking_entry_kind(b)} for b in blocking],
+            "advisory": list(advisory)}
+
+
+# ── the second reader on a block (#1903) ─────────────────────────────────
+#
+# A refusal is the expensive verdict this rung makes. It spends one of a
+# round's two review attempts and sends the diff back through a full
+# implementer run; spending both kills the round. A false PASS costs a
+# landing that the other nine rungs, the observation window and the guardian
+# are all still standing over; a false BLOCK costs the loop work it has
+# already paid for and answers nothing. So the two verdicts do not get the
+# same evidentiary bar: a pass stands on one vote, a block is put to a second
+# reader that can only DEMOTE it. Three named rounds are in
+# `rung_review`'s own comment (`SM_20260916_032218`, `SM_20260922_100227`,
+# `SM_20260924_104224`): refusals on synthesized clause-partials that the
+# second reader had in fact approved, each of which spent an attempt of two.
+#
+# Two rails already excuse a block whose SHAPE is unusable — an unreadable
+# clause verdict or an unusable object returns `external_blocker` and charges
+# nothing (#1442, #1750). What is left is the well-formed, readable blocking
+# verdict that is wrong on the merits, and that is the only thing this
+# mechanism is for. It is off by default and stays off until
+# `review_tools replay-confirm` says what it would have overturned; the switch
+# is that number, not this comment.
+
+#: How many blocking entries one refused commit may be re-read. Each is a
+#: grader turn, so the cap bounds the latency a confirmation adds to a refusal.
+CONFIRM_MAX_ENTRIES = 4
+#: Only these two kinds of blocking entry are put to the second reader. A
+#: `test honesty` entry is a fact a Python pattern found and a `computed`
+#: clause entry is a fact a Python evidence rail found, an `unsatisfiable`
+#: clause is a defect in the contract, and a refused amendment is a settled
+#: vote — none of them is a grader judgment about THIS diff, and a reader
+#: cannot un-find a pattern or un-refuse an amendment.
+OFFERABLE_ENTRY_KINDS = ("clause", "seam")
+#: Entry kinds whose blocking force is a computation over the tree, not a
+#: reading of it. A refusal made only of these is never put to a reader.
+PYTHON_COMPUTED_ENTRY_KINDS = ("honesty", "computed")
+#: What the record says when the refusal was never put to a second reader.
+NOT_ASKED = "not_asked"
+OVERTURNED = "overturned"
+UPHELD = "upheld"
+#: The reasons a refusal is not put to the reader, named in the record.
+NOT_ASK_REASONS = ("policy_off", "premise_unsound", "not_a_refusal", "unsatisfiable_clause",
+                   "amendment_refused", "all_python_computed", "no_clause_verdict")
+
+# The shapes `decide_by_grader` writes, recognised off the text it wrote rather
+# than from a parallel list built alongside it: the entry IS the record.
+_ENTRY_UNSATISFIABLE_RX = re.compile(r"^clause \d+ unsatisfiable\b")
+_ENTRY_CLAUSE_RX = re.compile(r"^clause \d+ ")
+#: A `met` the gate threw out for lack of admissible evidence, spelled into the
+#: entry as `(downgraded: …)`. `not graded` is the one downgrade that is NOT a
+#: finding about the diff — it means the grader's object carried no readable
+#: verdict for that clause, which is the shape that refused
+#: SM_20260916_032218, SM_20260922_100227 and SM_20260924_104224. Every other
+#: reason in that tag (`test_node_id not in a test file this diff changed`,
+#: an evidence line past EOF, `graded by the landing`) is a Python rail that
+#: checked the tree, so the entry is Python-computed and is never offered: a
+#: reader cannot retire a fact by preferring its own reading of the diff.
+_ENTRY_DOWNGRADE_RX = re.compile(r"^clause \d+ \w+ \(downgraded: (?P<why>[^)]*)\)")
+NOT_GRADED = "not graded"
+BLOCKING_ENTRY_PREFIXES = ("clause ", "test honesty ", "seam unverified: ", "advisory ",
+                           "amendment of clause")
+#: `; ` is how `_decision_text` joins entries, so a piece starts where a known
+#: entry spelling starts. Recovery is for the OFFLINE replay only — the live
+#: rung gets the list from `decide_with_entries` and parses nothing.
+_ENTRY_SPLIT_RX = re.compile(r";\s*(?=(?:clause \d+ |test honesty |seam unverified: "
+                             r"advisory |amendment of clause))")
+
+
+def blocking_entry_kind(text: str) -> str:
+    """Which shape a blocking entry is, off its own text.
+
+    `clause` for a clause verdict the grader itself reached (including one
+    downgraded `not graded`, which says the grader never answered for that
+    clause); `computed` for a clause entry whose force comes from a Python
+    evidence rail; `honesty`, `unsatisfiable`, `amendment`, `seam`, `advisory`;
+    and `other` for anything unrecognised. `other` is never offered to a reader:
+    a spelling this function does not know is a judgment it cannot name, and the
+    demote-only vote does not get to retire what it cannot read.
+    """
+    t = (text or "").strip()
+    if t.startswith("advisory "):
+        return "advisory"
+    if t.startswith("amendment of clause"):
+        return "amendment"
+    if _ENTRY_UNSATISFIABLE_RX.match(t):
+        return "unsatisfiable"
+    if t.startswith("test honesty "):
+        return "honesty"
+    if _ENTRY_CLAUSE_RX.match(t):
+        m = _ENTRY_DOWNGRADE_RX.match(t)
+        if m and m.group("why").strip() != NOT_GRADED:
+            return "computed"
+        return "clause"
+    if t.startswith("seam unverified: "):
+        return "seam"
+    return "other"
+
+
+def blocking_entries_from_text(findings: str) -> list[dict]:
+    """Recover the blocking entries from a joined decision text (replay only).
+
+    The ledger stores the joined `findings` string, not the list, so
+    `review_tools replay-confirm` splits it back at the entry spellings. Two
+    losses it cannot avoid and says so rather than hiding: a clause note that
+    itself contains `; test honesty ` splits into one entry too many, and a
+    row written before the list existed is capped at the 2000 characters
+    `rung_review` stored.
+    """
+    out = []
+    for piece in _ENTRY_SPLIT_RX.split(findings or ""):
+        p = piece.strip()
+        if not p:
+            continue
+        kind = blocking_entry_kind(p)
+        if kind not in ("advisory",):
+            out.append({"text": p, "kind": kind})
+    return out
+
+
+def confirm_policy_value(raw) -> bool:
+    """Is this config value a switch-on? Tolerant of both spellings."""
+    if isinstance(raw, bool):
+        return raw
+    return str(raw or "").strip().lower() in ("on", "true", "yes", "1")
+
+
+def confirm_policy() -> bool:
+    """`automod.review.confirm`, OFF unless config says otherwise. Never raises.
+
+    Off is the shipped setting and reproduces today's single-vote behaviour
+    exactly: no reader is asked, and no `review_confirm*` field is written on
+    any review row. Turning it on is an edit to `config.yaml`, which the
+    self-modification loop may not land — the switch is a human's, and
+    `review_tools replay-confirm` is the number a human decides it on.
+    """
+    try:
+        from app.config import CONFIG
+        return confirm_policy_value(((CONFIG.get("automod") or {}).get("review") or {})
+                                    .get("confirm", False))
+    except Exception:
+        return False
+
+
+def confirm_plan(kind: str, blocking: list[dict], *, confirm_on: bool) -> dict:
+    """Whether this refusal goes to the second reader, and with which entries.
+
+    `{"ask", "reason", "entries"}`. The reason is always one of
+    `NOT_ASK_REASONS` or `"ask"`, and it rides on the ledger row, so a refusal
+    that was never put to a reader says which rule spared it. Every exemption
+    is fail-closed toward today's behaviour: the reader is an extra chance for
+    a block to be retired, never a new way to refuse.
+    """
+    if not confirm_on:
+        return {"ask": False, "reason": "policy_off", "entries": []}
+    if kind == "unsound":
+        return {"ask": False, "reason": "premise_unsound", "entries": []}
+    if kind != "retry":
+        return {"ask": False, "reason": "not_a_refusal", "entries": []}
+    kinds = [e.get("kind") for e in blocking]
+    if "unsatisfiable" in kinds:
+        return {"ask": False, "reason": "unsatisfiable_clause", "entries": []}
+    if "amendment" in kinds:
+        return {"ask": False, "reason": "amendment_refused", "entries": []}
+    offered = [e for e in blocking if e.get("kind") in OFFERABLE_ENTRY_KINDS]
+    if not offered:
+        return {"ask": False,
+                "reason": ("all_python_computed"
+                           if kinds and all(k in PYTHON_COMPUTED_ENTRY_KINDS for k in kinds)
+                           else "no_clause_verdict"),
+                "entries": []}
+    if not any(e.get("kind") == "clause" for e in offered):
+        # A block made only of seam findings is not a clause verdict, and the
+        # contract this reader exists for is the clause verdicts.
+        return {"ask": False, "reason": "no_clause_verdict", "entries": []}
+    return {"ask": True, "reason": "ask", "entries": offered[:CONFIRM_MAX_ENTRIES]}
+
+
+CONFIRM_SCHEMA: dict = {
+    "type": "object",
+    "title": "automod_review_confirm",
+    "properties": {
+        "retire": {"type": "boolean",
+                   "description": ("true ONLY if you checked the diff and the named finding is "
+                                   "not real, or is real but does not stop this diff landing. "
+                                   "false if the finding stands or you could not check it.")},
+        "reason": {"type": "string",
+                   "description": ("One line: what you checked in the diff, and what it showed. "
+                                   "It is quoted back as the vote.")},
+    },
+    "required": ["retire", "reason"],
+    "additionalProperties": False,
+}
+
+CONFIRM_SCHEMA_PROMPT = (
+    "Restate your answer as one JSON object matching the schema: `retire` and a "
+    "one-line `reason`. Answer about the ONE finding you were named. Do not "
+    "retire it because the diff looks good elsewhere; do not raise any other "
+    "finding, which this vote cannot record anyway.")
+
+
+def build_confirm_prompt(*, entry: str, diff: str, clauses: list[str],
+                         diff_truncated: bool = False) -> str:
+    """The second reader's whole input: one named entry, and the diff.
+
+    Deliberately narrow, and the narrowness is the mechanism. It gets the
+    item's acceptance clauses (a finding that a clause is unmet cannot be
+    judged without the clause) and this ONE blocking entry. It does not get
+    the first reader's notes on any other clause, its summary, its count of
+    met clauses, or the fact that the diff was refused at all — the first
+    reader's conclusions prime agreement, which is the failure being removed.
+    """
+    parts = [
+        "You are the second reader on ONE finding about ONE diff. Someone else "
+        "graded this diff against an item's acceptance clauses; you have not seen "
+        "their verdict, their notes on any other clause, or their summary. You are "
+        "given the finding and the diff, and nothing else about the first reading.",
+        "",
+        "Assume the finding is mistaken until the diff shows it is right. Answer "
+        "exactly one question about the finding named below: is it real, and does "
+        "it block THIS diff from landing? You may retire this one finding; you "
+        "cannot add a finding, and you cannot retire any other. A finding you "
+        "could not check against the diff is NOT retired — say what you could not "
+        "check.",
+        "",
+        f"<finding_to_check>\n{entry}\n</finding_to_check>",
+        "",
+        "<acceptance_clauses>",
+    ]
+    for i, c in enumerate(clauses or [], 1):
+        parts.append(f"clause {i}: {c}")
+    parts += ["</acceptance_clauses>", ""]
+    if diff_truncated:
+        parts.append("(the diff is truncated: the tail is not shown)")
+    parts += ["<diff>", diff or "(no diff)"]
+    return "\n".join(parts)
+
+
+def confirm_reader(*, round_id: str, item_id: int, clauses: list[str], diff: str,
+                   diff_truncated: bool = False, run_grader_fn=None):
+    """A reader that asks the live grader about one entry at a time.
+
+    Returns `callable(entry_text) -> {"retire", "reason"}`. Same weights as
+    the first pass, so agreement is not independent evidence — #1903's own
+    risk note says so, and it is why the policy ships off and why `djev` on
+    GPU 2 is the alternative second engine rather than this one. `run_grader_fn`
+    is the seam a test injects; nothing here runs a model unless asked to.
+    """
+    run_grader_fn = run_grader_fn or run_grader
+
+    def read(entry_text: str) -> dict:
+        prompt = build_confirm_prompt(entry=entry_text, diff=diff, clauses=clauses,
+                                     diff_truncated=diff_truncated)
+        res = run_grader_fn(prompt=prompt, item_id=item_id, round_id=round_id,
+                            final_schema=CONFIRM_SCHEMA,
+                            final_schema_prompt=CONFIRM_SCHEMA_PROMPT,
+                            max_turns=10, timeout=min(REVIEW_TIMEOUT_S, 300.0))
+        if not isinstance(res, dict):
+            return {"retire": False, "reason": "the second reader returned no object"}
+        out = {"retire": False, "reason": "", "session_id": res.get("session_id") or ""}
+        if not res.get("ok"):
+            err = str((res or {}).get("error") or "no response")[:200]
+            out["reason"] = f"the second reader did not answer: {err}"
+            return out
+        obj = res.get("structured")
+        if not isinstance(obj, dict):
+            out["reason"] = "the second reader returned an unusable object"
+            return out
+        out["retire"] = obj.get("retire") is True
+        out["reason"] = str(obj.get("reason") or "no reason given")
+        return out
+
+    return read
+
+
+def confirm_refusal(decision: dict, plan: dict, *, reader,
+                    max_entries: int = CONFIRM_MAX_ENTRIES) -> dict:
+    """Put each offered entry to a reader that can only retire the one it names.
+
+    Demote-only and fail-closed in every direction:
+    - one call per offered entry, and the verdict is attached to THAT entry;
+      an answer that names, retires or excuses anything else is ignored, so a
+      reader cannot add an entry or retire one it was not shown;
+    - only a JSON `true` retires; an error, an unusable object, a missing key
+      or a string all uphold;
+    - entries the cap left unasked stay blocking;
+    - the refusal becomes a pass only when NOTHING blocking is left standing,
+      which requires that no exempt entry (a Python-computed honesty finding,
+      an `unsatisfiable` clause, a refused amendment) was in it at all.
+
+    Returns `{"outcome": not_asked|overturned|upheld, "reason", "votes",
+    "asked"}`. On `upheld` the findings text the rung reports is today's,
+    untouched: a vote that lost does not soften the sentence the author has to
+    answer, it only records that the vote happened.
+    """
+    if not plan.get("ask"):
+        return {"outcome": NOT_ASKED, "reason": str(plan.get("reason") or ""),
+                "votes": [], "asked": 0}
+    offered = list(plan.get("entries") or [])[:max_entries]
+    votes: list[dict] = []
+    for ent in offered:
+        text = str(ent.get("text") or "")
+        try:
+            ans = reader(text)
+        except Exception as exc:  # noqa: BLE001 — a reader that dies upholds
+            ans = {"retire": False,
+                   "reason": f"the second reader raised {type(exc).__name__}"}
+        ans = ans if isinstance(ans, dict) else {}
+        retire = ans.get("retire") is True
+        vote = {"entry": text, "kind": str(ent.get("kind") or ""),
+                "verdict": "retired" if retire else "upheld",
+                "reason": str(ans.get("reason") or "no reason given")[:300]}
+        if ans.get("session_id"):
+            vote["session_id"] = str(ans["session_id"])
+        votes.append(vote)
+    retired = {v["entry"] for v in votes if v["verdict"] == "retired"}
+    standing = [b for b in (decision.get("blocking") or [])
+                if b.get("text") not in retired]
+    outcome = OVERTURNED if not standing else UPHELD
+    reason = "; ".join(f"{v['kind']} {v['verdict']}: {v['reason']}" for v in votes)[:400]
+    return {"outcome": outcome, "reason": reason, "votes": votes, "asked": len(votes)}
 
 
 def seams_block(policy: str, attempt: int) -> bool:
@@ -2438,7 +2820,7 @@ def decide(parsed: dict, prechecks: list[dict],
     fixture most review tests ran under, and was retired on Alan's ruling.
     """
     return decide_by_grader(parsed, prechecks, amendments,
-                            attempt=attempt, seams_policy=policy)
+                            attempt=attempt, policy=policy)
 
 
 def summarize_clauses(parsed: dict) -> str:

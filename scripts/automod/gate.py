@@ -2342,8 +2342,27 @@ class Gate:
                 "retry_after_s": 120,
                 "review_session": res.get("session_id"), **concurrency}
         amendments = contract.get("amendments") or []
-        kind, findings = RV.decide(parsed, pre, amendments=amendments,
-                                   attempt=attempt, policy=RV.seams_policy())
+        decision = RV.decide_with_entries(parsed, pre, amendments=amendments,
+                                          attempt=attempt,
+                                          policy=RV.seams_policy())
+        kind, findings = decision["kind"], decision["findings"]
+        # #1903: a block is the expensive verdict this rung makes — it spends
+        # one of a round's two review attempts and buys a whole implementer
+        # run — so it may be put to a second, demote-only reader. Under the
+        # shipped policy (off) that is `not_asked` with reason `policy_off`,
+        # no reader is called, and none of the `review_confirm*` fields below
+        # is written: the rung behaves exactly as it did before this line.
+        confirm = self._review_confirm(contract, decision)
+        confirm_fields = ({} if not confirm["policy_on"] else {
+            "review_confirm": confirm["outcome"],
+            "review_confirm_reason": confirm["reason"],
+            "review_confirm_votes": [{**v, "entry": str(v.get("entry") or "")[:200]}
+                                      for v in confirm["votes"]]})
+        # An overturned block is recorded as the pass it became, because
+        # `blocking` is the field `_review_prepare`'s walk counts to charge an
+        # attempt: this row says `blocking: false`, so the round's spent count
+        # is exactly what it was before this grading turn.
+        recorded = "pass" if confirm["outcome"] == RV.OVERTURNED else kind
         S.append_event({**base_event, "ok": True, "premise": parsed["premise"],
                         "clauses": parsed["clauses"], "test_honesty": parsed["test_honesty"],
                         "seams_unverified": [s["seam"] if isinstance(s, dict) else s
@@ -2358,14 +2377,19 @@ class Gate:
                         "downgraded": parsed["downgraded"], "summary": parsed["summary"],
                         "amendments_ok": parsed.get("amendments_ok", True),
                         "amendments_note": parsed.get("amendments_note", ""),
-                        "blocking": kind != "pass", "kind": kind,
-                        "findings": findings[:2000]})
+                        "blocking": recorded != "pass", "kind": recorded,
+                        "findings": findings[:2000], **confirm_fields})
+        # Decided on the PRE-confirmation kind: ratifying an amendment is the
+        # first reader's call about the contract, and a demote-only vote on a
+        # clause entry is not a second vote on it. (`amendment_refused` is one
+        # of the never-ask reasons anyway, so a refusal holding a refused
+        # amendment is never put to the reader at all.)
         self._settle_amendments(amendments, parsed, kind)
         if kind == "unsound":
             return False, f"review: premise unsound{tree_note} — {findings}", {
                 "review_premise_unsound": True, "review_summary": findings[:800],
-                "review_session": res.get("session_id"), **validated}
-        if kind == "retry":
+                "review_session": res.get("session_id"), **confirm_fields, **validated}
+        if kind == "retry" and confirm["outcome"] != RV.OVERTURNED:
             contract_refusal = any(c.get("verdict") == "unsatisfiable" for c in parsed["clauses"])
             if contract_refusal:
                 nxt = ("this refusal spends no attempt — amend the unsatisfiable clause(s) "
@@ -2377,11 +2401,15 @@ class Gate:
                        if attempt < RV.REVIEW_MAX_PER_ROUND else
                        "abort and report — the item comes back with these findings and your branch")
                 shown = f"{attempt}/{RV.REVIEW_MAX_PER_ROUND}"
+            # The sentence and the charged attempt are the ones this rung
+            # produces with the policy off, byte for byte: a second reader that
+            # upheld the finding adds a recorded vote, never a softer refusal
+            # and never a second attempt.
             return False, (f"review sent it back ({shown}; {nxt}){tree_note}: {findings}"
                            f"{honesty_suffix}"), {
                 "review_retry": True, "review_findings": findings[:1500],
                 "review_attempt": attempt, "review_session": res.get("session_id"),
-                "honesty_note": honesty_note, **validated}
+                "honesty_note": honesty_note, **confirm_fields, **validated}
         # On a PASS, record the grader's `post_landing` clauses onto the item.
         # Written here rather than by the implementer because it is a fact the
         # grader established about a change that is about to land, not a claim
@@ -2415,8 +2443,16 @@ class Gate:
                                       advisory_seams, advisory_findings)
         except Exception as exc:  # noqa: BLE001 — a note is not the gate
             print(f"[warn] could not record review advisories: {exc}")
+        # A pass the first reader refused and the second one retired has to
+        # read differently in `gate.json` and in the landing report from one
+        # nobody refused, the same way an honesty-demoted pass does: two
+        # identical "met 5 of 5" sentences would hide which one cost a vote.
+        overturn_note = ""
+        if confirm["outcome"] == RV.OVERTURNED:
+            overturn_note = (f" — every blocking entry was retired by the second reader"
+                             f" ({confirm['reason'][:200]}); no review attempt spent")
         return True, (f"review: {RV.summarize_clauses(parsed)} of {len(contract['clauses'])} "
-                      f"clause(s); {parsed['summary'][:160]}{honesty_suffix}"), {
+                      f"clause(s); {parsed['summary'][:160]}{honesty_suffix}{overturn_note}"), {
                           "review_session": res.get("session_id"),
                           "clauses": parsed["clauses"], "review_attempt": attempt,
                           "post_landing_clauses": marked,
@@ -2424,7 +2460,40 @@ class Gate:
                           "advisory_findings": advisory_findings,
                           "honesty_note": honesty_note,
                           "amendments_ratified": [a.get("clause") for a in amendments],
-                          **validated}
+                          **confirm_fields, **validated}
+
+    def _review_confirm(self, contract: dict, decision: dict, *,
+                        run_grader_fn=None) -> dict:
+        """Put a grader-judgement block to a second, demote-only reader (#1903).
+
+        Thin wiring only: `RV.confirm_plan` decides whether this refusal is
+        askable and with which of its own blocking entries, `RV.confirm_reader`
+        asks about one entry at a time, `RV.confirm_refusal` folds the votes
+        into `overturned` / `upheld` / `not_asked`. Every rule lives there, so
+        the same functions answer the same question for
+        `review_tools replay-confirm`, which runs them over recorded events
+        with an injected reader instead of a live model.
+
+        The reader is shown the round's own diff against the round's base, read
+        here rather than from the grader's snapshot: that checkout is released
+        before the decision is made (`_drop_snapshot` in the `finally` above),
+        and the worktree is at the head the grader graded.
+
+        A failure here must never be a new refusal, so it is not allowed to be
+        one: nothing outside `RV.confirm_refusal`'s fail-closed reading can
+        change a verdict, and an exception from the reader upholds the entry.
+        """
+        from scripts.automod import review as RV
+        on = RV.confirm_policy()
+        plan = RV.confirm_plan(decision["kind"], decision["blocking"], confirm_on=on)
+        if not plan["ask"]:
+            return {"policy_on": on, "outcome": RV.NOT_ASKED,
+                    "reason": plan["reason"], "votes": [], "asked": 0}
+        diff, truncated = RV.diff_text(self.worktree, self.base)
+        reader = RV.confirm_reader(round_id=self.round_id, item_id=self.item_id,
+                                   clauses=list(contract["clauses"]), diff=diff,
+                                   diff_truncated=truncated, run_grader_fn=run_grader_fn)
+        return {"policy_on": on, **RV.confirm_refusal(decision, plan, reader=reader)}
 
     def _review_prepare(self):
         """Everything the review rung decides before it asks a grader.
