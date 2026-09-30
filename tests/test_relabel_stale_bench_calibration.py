@@ -204,15 +204,25 @@ def _sweep(root: Path) -> list[Path]:
     """The check #1769 states: notes with no `calibration.task_id` whose
     `review_status` still asserts a band verdict.
 
-    Scoped to the queue's own surface — every `*.md` in a date directory, with
-    `_`-prefixed subtrees left out the way `GET /api/workers/pending` leaves them
-    out — which is what makes the sweep and the script's walk one denominator
-    rather than two that only happen to agree today.
+    The WALK comes from the script — `rs.iter_notes`, the same function the run
+    uses, which is also the walk `GET /api/workers/pending` approximates — and
+    only the verdict is recomputed here. #1769 recorded what two walkers cost:
+    `iter_notes` skips `README.md` and this loop did not, and the README fixture
+    had no front matter, so PyYAML rejected it and the disagreement stayed hidden.
+    A README with valid front matter claiming a verdict is a note to the old loop
+    and not a note to the script, so `--apply` exits 0 while the check that is
+    supposed to certify it reports one file. One walker, one denominator;
+    `test_a_readme_with_front_matter_is_excluded_by_both_sides_of_the_check` pins
+    it. The independent live sweep the owed step re-runs is the same reading over
+    the same tree, not a second convention.
+
+    A note whose envelope will not parse is skipped here, exactly as that live
+    PyYAML sweep skips it: this check is the owed measurement, and what it cannot
+    read is asserted by name in the unreadable-note tests, not silently omitted
+    from a total.
     """
     out = []
-    for p in sorted(root.rglob("*.md")):
-        if any(part.startswith(("_", ".")) for part in p.relative_to(root).parts):
-            continue
+    for p in rs.iter_notes(root):
         try:
             fm = _fm(p)
         except Exception:
@@ -527,3 +537,188 @@ def test_no_call_to_the_calibration_entry_point_under_scripts_maintenance():
     names = {n.func.id for n in ast.walk(tree)
              if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
     assert needle not in called | names, "this script calls the calibrator directly"
+
+
+# ---------------------------------------------------------------------------
+# #1873 clause 1 — a SKIP is a report, never a clean bill of health
+#
+# #1769 landed the relabel but recorded that its own post-check could not catch
+# the one note class it exists for: `still_asserting` parsed every note with
+# PyYAML inside `try: … except Exception: continue`, so an unreadable note never
+# entered `before` or `after`, `after` came back empty, and `--apply` printed
+# `post-check OK — 0 notes …` and returned 0. Since that exit 0 is the only
+# certificate the owed live run gets, "0 notes assert a verdict" had quietly come
+# to mean "0 PARSEABLE notes assert one".
+# ---------------------------------------------------------------------------
+
+def _unreadable_note(path: Path, *, review_status: str | None,
+                     truncated: bool = False) -> str:
+    """Write an unreadable note and return its bytes.
+
+    Two unreadable shapes, one per test below, and the difference between them is
+    the whole clause:
+
+      * `review_status="pending"` (default) — the front matter will not parse
+        (`  calibration: [unclosed` is bad indentation over an unclosed flow
+        sequence), yet the BYTES carry a band verdict with no `task_id` behind it.
+        A reader of the file sees `review_status: pending`; a reader that starts
+        with `yaml.safe_load` sees nothing at all.
+      * `truncated=True` — the file stops mid-envelope with no closing `---`, so
+        the envelope splice itself returns None. This is the shape the old
+        post-check could not COUNT: `yaml.safe_load(split_front_matter(…)[0])`
+        raises `TypeError` on `None[0]`, and `except Exception: continue` ate it.
+        Its bytes carry `review_status: out_of_band`.
+      * `review_status=None` — an unreadable note claiming no verdict, the exact
+        fixture #1769 left behind (`test_unreadable_notes_are_reported_and_left_alone`
+        pins that behaviour, and it is the control inside the tests below: the fix
+        has to fail on the first note and ONLY the first note).
+
+    Written verbatim rather than through `_note`, because a note whose front
+    matter round-trips through PyYAML is the readable case by definition.
+    """
+    lines = ["---", "source: bench-mine"]
+    if review_status is not None:
+        lines.append(f"review_status: {review_status}")
+    lines += ["generated_at: '2026-09-27T00:05:45.978938+00:00'",
+              "rationale: derived from baseline loss on bench_007_skill_invocation",
+              "  calibration: [unclosed"]
+    if not truncated:
+        lines += ["---", "", "The candidate task, which no apply may rewrite.", ""]
+    raw = "\n".join(lines) + ("\n" if not truncated else "")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(raw, encoding="utf-8")
+    return raw
+
+
+def _failure_lines(out: str) -> list[str]:
+    """The run's own failure lines — the ones that name notes it could not clear."""
+    return [ln for ln in out.splitlines() if "STILL assert" in ln]
+
+
+def test_apply_exits_2_when_an_unreadable_note_still_asserts_a_verdict(tmp_path):
+    """Clause 1: a note the apply could not relabel, whose bytes still read as a
+    band verdict with no task behind them, is named on stdout and the run exits 2.
+
+    Before #1873 this same tree produced `SKIP 040404-unparseable-verdict.md: front
+    matter does not parse`, then `relabel: post-check OK — 0 notes …`, then exit 0
+    — the certificate covering every note except the one that needed it. Now the
+    note is named twice (its SKIP line, and the failure line) and the exit code is
+    2. The bytes are still not touched: clause 1 changes what a skip PROVES, not
+    what a skip DOES, and inventing front matter over somebody's document is still
+    the worse option.
+
+    The unreadable note that claims nothing (`040405-unreadable-quiet.md`) shares
+    the tree on purpose. It stays byte-identical and stays out of the failure
+    line, which is what separates "the guard reads the note" from "the guard gives
+    up on unreadable notes" — a fix that failed any run containing an unreadable
+    file would pass the exit-code half of this test and fail this half.
+    """
+    root = tmp_path / "bench-mine"
+    loud = root / "2026-09-27" / "040404-unparseable-verdict.md"
+    quiet = root / "2026-09-27" / "040405-unreadable-quiet.md"
+    loud_raw = _unreadable_note(loud, review_status="pending")
+    quiet_raw = _unreadable_note(quiet, review_status=None)
+
+    dry = _run("--root", str(root))
+    assert dry.returncode == 0, (
+        "a dry run writes nothing, so it makes no claim to fail on; the guard "
+        f"belongs to the mode that wrote\n{dry.stdout}")
+    assert loud.name in dry.stdout, "the unreadable note must be named in a dry run"
+    assert _failure_lines(dry.stdout), (
+        "a dry run must still report the note it cannot clear, or the operator "
+        f"reading the dry run sees a clean tree\n{dry.stdout}")
+
+    r = _run("--root", str(root), "--apply")
+    assert r.returncode == 2, (
+        "--apply left a note asserting a band verdict it cannot name and exited "
+        f"{r.returncode}: that exit 0 is the certificate #1769 never had\n{r.stdout}")
+    assert loud.name in r.stdout, r.stdout
+    failed = _failure_lines(r.stdout)
+    assert len(failed) == 1, f"expected one failure line, got {failed}\n{r.stdout}"
+    assert loud.name in failed[0] and quiet.name not in failed[0], (
+        f"the failure is the note that asserts a verdict, not every unreadable "
+        f"note: {failed[0]}")
+    assert "POST-CHECK FAILED" in r.stdout, r.stdout
+    for p, raw in ((loud, loud_raw), (quiet, quiet_raw)):
+        assert p.read_text(encoding="utf-8") == raw, f"{p.name} was rewritten"
+
+
+def test_apply_exits_2_on_a_truncated_note_the_post_check_cannot_count(tmp_path):
+    """The unreadable shape the old post-check could not even enumerate, so its
+    exit 0 was unfalsifiable by construction (#1769 blind spot 1, second file).
+
+    A note truncated mid-envelope has no closing `---`. `split_front_matter`
+    returns None for it, the post-check's `yaml.safe_load(split(…)[0])` then
+    raises `TypeError` on `None[0]`, and `except Exception: continue` swallowed
+    that — so at no point in the run was this file in the denominator, `after`
+    was empty, and `--apply` returned 0 over a note reading
+    `review_status: out_of_band` with no `calibration.task_id` anywhere in it.
+    The envelope is now taken whole when there is no closing fence, so the note is
+    in the denominator, named, and the run exits 2.
+    """
+    root = tmp_path / "bench-mine"
+    p = root / "2026-09-27" / "041741-truncated-envelope.md"
+    raw = _unreadable_note(p, review_status="out_of_band", truncated=True)
+    assert "task_id" not in raw and raw.count("---") == 1, (
+        "fixture drift: this note has to be truncated and task-less")
+
+    r = _run("--root", str(root), "--apply")
+    assert r.returncode == 2, (
+        f"a note with no closing fence still asserts a verdict; got "
+        f"{r.returncode}\n{r.stdout}")
+    assert p.name in r.stdout, r.stdout
+    assert _failure_lines(r.stdout), r.stdout
+    assert p.read_text(encoding="utf-8") == raw, "the truncated note was rewritten"
+
+
+# ---------------------------------------------------------------------------
+# #1873 clause 3 — the check and the run walk the tree once, not twice
+# ---------------------------------------------------------------------------
+
+def test_a_readme_with_front_matter_is_excluded_by_both_sides_of_the_check(tmp_path):
+    """One denominator: the sweep is the script's walker, not a second `rglob`.
+
+    #1769 recorded the divergence — `iter_notes` skips `README.md` because
+    `GET /api/workers/pending` skips it (`app/routers/workers.py`: the same
+    `artifact.name == "README.md"` test over the same tree), while the test-side
+    `_sweep` did not, and the fixture README happened to carry no front matter at
+    all, so PyYAML rejected it and the two walkers agreed by accident. Give that
+    README valid front matter claiming a band verdict and the accident is gone:
+    the sweep counts a note the script never opens, so `--apply` would exit 0
+    while the very check meant to certify it reports one.
+
+    `_sweep` now walks through `rs.iter_notes`, which is why the two lists below
+    are the same list rather than two lists that happen to match. The lower-case
+    `readme.md` is the control: the exclusion is the queue's exact name test, not
+    a name prefix, so that file IS a note to both walkers and does get relabelled.
+    """
+    root = tmp_path / "bench-mine"
+    stale = _note(root / "2026-09-27" / "000545-pending-in-band.md",
+                  calibration=_calibration())
+    readme = _note(root / "2026-09-27" / "README.md", calibration=_calibration())
+    lower = _note(root / "2026-09-27" / "readme.md", calibration=_calibration())
+    readme_raw = readme.read_bytes()
+
+    readme_fm = _fm(readme)
+    assert readme_fm["review_status"] in STILL_ASSERTING, (
+        "fixture drift: this README has to claim a band verdict")
+    assert "task_id" not in (readme_fm.get("calibration") or {}), (
+        "fixture drift: and it has to be stale, so a naive walker would sweep it "
+        "as a note — #1769's README fixture had no front matter at all, which is "
+        "why the two walkers only agreed by accident")
+
+    assert _sweep(root) == [stale, lower], (
+        "the sweep and iter_notes disagree on which files are notes: "
+        f"{_sweep(root)} vs {rs.iter_notes(root)}")
+    assert rs.iter_notes(root) == [stale, lower], (
+        f"iter_notes changed its own denominator: {rs.iter_notes(root)}")
+
+    r = _run("--root", str(root), "--apply")
+    assert r.returncode == 0, r.stdout
+    assert _sweep(root) == [], (
+        f"the queue's surface must be empty of band claims: {_sweep(root)}")
+    assert readme.read_bytes() == readme_raw, (
+        "README.md is not a note: it must not be relabelled")
+    assert _fm(lower).get("review_status") == UNCALIBRATED, (
+        "readme.md is a note: the exclusion is the exact name README.md, the "
+        "queue's own test, not a case-insensitive prefix")

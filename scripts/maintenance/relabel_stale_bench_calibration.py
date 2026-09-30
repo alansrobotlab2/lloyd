@@ -71,6 +71,13 @@ Exit 0: the run made a claim it can back. Exit 2: no staging root at that path
 `--apply` after which some note STILL asserts a band verdict — the post-check
 re-reads the same sweep the item states, so the script grades its own work rather
 than reporting the number of writes it attempted.
+
+That last clause is what #1873 tightened. The post-check used to parse every note
+with PyYAML and `continue` past the ones that would not parse, which made "0
+notes still assert a verdict" mean "0 PARSEABLE notes assert one" — a certificate
+with a hole exactly the shape of the note that most needs one. An unreadable note
+is now read line by line instead (`asserts_band_verdict`), and a note no reading
+can clear is named and fails the run: `SKIP` is a report, never a clean bill.
 """
 from __future__ import annotations
 
@@ -179,6 +186,15 @@ def iter_notes(root: Path) -> list[Path]:
     deeper and read as absent, and `_`/`.`-prefixed subtrees are left out exactly
     as `GET /api/workers/pending` leaves them out — `_rejected/` is not this
     queue's surface, and `README.md` is not a note.
+
+    This is the ONE walk over the tree, and `tests/test_relabel_stale_bench_calibration.py`
+    sweeps through it rather than through its own `rglob`: with two walkers, the
+    check that grades the run and the run itself can disagree on which files exist
+    — a `README.md` carrying valid front matter, `review_status: pending` and no
+    `calibration.task_id` is a note to a bare `rglob` and not a note here, so the
+    apply exits 0 while the check that is supposed to certify it reports one
+    (#1769 blind spot 2, #1873 clause 3). The name match is `p.name == "README.md"`
+    on purpose, the same test `app/routers/workers.py` applies to the same tree.
     """
     out = []
     for p in sorted(root.rglob("*.md")):
@@ -190,6 +206,65 @@ def iter_notes(root: Path) -> list[Path]:
     return out
 
 
+def envelope_of(raw: str) -> str:
+    """The FIRST front matter block's text — the only place a band verdict lives.
+
+    A note with no closing fence has no body either, and all of its bytes are the
+    envelope half: that truncated shape is one of the two #1873 refuses to
+    certify. A file that never opened a fence (`README.md`) has no envelope at
+    all, so nothing in its prose can read as a verdict.
+    """
+    split = split_front_matter(raw)
+    if split is not None:
+        return split[0]
+    return raw if raw.startswith("---") else ""
+
+
+def asserts_band_verdict(raw: str) -> bool:
+    """Would a reader of these bytes see a band verdict no task stands behind?
+
+    One predicate, read two ways in this order, and it is the ONLY reading of the
+    question in this file — `still_asserting` and `relabel_tree` both call it, so
+    a note cannot be a SKIP on one side and clean on the other:
+
+      1. PyYAML's reading of the envelope, when it yields a mapping: no
+         `calibration.task_id` (#1710's key) and a `review_status` in
+         `STILL_ASSERTING`. This is the reading the item's own independent sweep
+         makes, so a nested key or a multi-line scalar cannot invent a verdict.
+      2. When PyYAML gives no mapping — a front matter block that does not parse,
+         a truncated note with no closing fence, an envelope whose top level is a
+         list — a scan of the envelope's own lines: a `review_status:` naming one
+         of `STILL_ASSERTING`, with no `task_id:` line anywhere in the envelope.
+
+    Half 2 is #1769's blind spot. The old `still_asserting` wrapped half 1 in
+    `except Exception: continue`, so every note half 2 exists for was skipped,
+    never entered `before` or `after`, and the exit-0 post-check counted the file
+    it could not read as a note that had been fixed.
+    """
+    env = envelope_of(raw)
+    if not env.strip():
+        return False
+    try:
+        fm = yaml.safe_load(env)
+    except Exception:
+        fm = None
+    if isinstance(fm, dict):
+        return is_stale(fm) and fm.get("review_status") in STILL_ASSERTING
+    seen_task_id = False
+    found_verdict = False
+    for line in env.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#") or ":" not in stripped:
+            continue
+        key, _, value = stripped.partition(":")
+        key, value = key.strip(), value.split(" #")[0].strip()
+        if key == "task_id":
+            seen_task_id = True
+        elif key == "review_status" and value in STILL_ASSERTING:
+            found_verdict = True
+    return found_verdict and not seen_task_id
+
+
 def still_asserting(root: Path) -> list[Path]:
     """Notes with no `calibration.task_id` whose `review_status` still claims a
     band verdict — #1769's check, read from disk, and the ONLY denominator this
@@ -198,16 +273,18 @@ def still_asserting(root: Path) -> list[Path]:
     Both the dry-run's "what would change" line and the post-`--apply` check call
     THIS function, so the number the script reports as fixed is the number it
     then verifies, rather than a count of writes and a count of files that happen
-    to agree.
+    to agree. Both now call it through `asserts_band_verdict`, which is the
+    reading that survives a note PyYAML cannot parse; the `except Exception:
+    continue` this function used to carry is what let an unreadable note be
+    counted as clean (#1769 blind spot 1, #1873 clause 1).
     """
     out = []
     for p in iter_notes(root):
         try:
-            fm = yaml.safe_load(split_front_matter(
-                p.read_text(encoding="utf-8"))[0]) or {}
-        except Exception:
+            raw = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
             continue
-        if is_stale(fm) and fm.get("review_status") in STILL_ASSERTING:
+        if asserts_band_verdict(raw):
             out.append(p)
     return out
 
@@ -220,39 +297,61 @@ def relabel_tree(root: Path, *, apply: bool) -> list[dict]:
     identical, which is what makes a re-run open nothing for writing. Nothing is
     written unless `apply`, and with `apply` a note is written only when the
     rewrite actually differs from what is on disk.
+
+    A note that cannot be relabelled is `skipped` and stays byte-identical —
+    inventing front matter over a document nobody wrote is worse than an
+    unlabelled note. What #1873 clause 1 changes is what a skip may PROVE: when
+    the note's own envelope still reads as a band verdict with no task behind it,
+    the record carries `asserting=True`, and `main` turns that into exit 2. Before
+    that, an unreadable note was a `SKIP` line under a `post-check OK` line and
+    `return 0`, so the certificate the item describes covered every note except
+    the one it could not check.
     """
     records: list[dict] = []
     for p in iter_notes(root):
-        rec = {"path": p, "action": "skipped", "why": ""}
+        rec = {"path": p, "action": "skipped", "why": "", "asserting": False}
         records.append(rec)
+        # The same bytes, read through the same predicate, as `still_asserting` —
+        # one note, one denominator, so a skip here can never be a clean reading
+        # there. Held in a local, not on the record: a note that started out
+        # asserting and was successfully relabelled has nothing left to assert.
+        asserting = False
         try:
-            raw = p.read_text(encoding="utf-8")
+            raw = p.read_text(encoding="utf-8", errors="replace")
+            asserting = asserts_band_verdict(raw)
         except OSError as exc:
             rec["why"] = f"unreadable ({type(exc).__name__})"
             continue
         try:
             new = relabelled_text(raw)
         except Unreadable as exc:
-            rec["why"] = str(exc)
-            continue
+            rec["why"] = f"unreadable ({type(exc).__name__}): {exc}"
         except Exception as exc:                                    # noqa: BLE001
             rec["why"] = f"relabel failed ({type(exc).__name__})"
-            continue
-        if new is None:
-            rec.update(action="measured", why="calibration.task_id is present")
-            continue
-        if new == raw:
-            rec.update(action="already", why="labelled already; bytes identical")
-            continue
-        if not apply:
-            rec.update(action="relabelled", why="dry-run: nothing written")
-            continue
-        try:
-            p.write_text(new, encoding="utf-8")
-        except OSError as exc:
-            rec["why"] = f"write failed ({type(exc).__name__})"
-            continue
-        rec.update(action="relabelled", why="")
+        else:
+            if new is None:
+                rec.update(action="measured",
+                           why="calibration.task_id is present")
+                continue
+            if new == raw:
+                rec.update(action="already",
+                           why="labelled already; bytes identical")
+                continue
+            if not apply:
+                rec.update(action="relabelled", why="dry-run: nothing written")
+                continue
+            try:
+                p.write_text(new, encoding="utf-8")
+            except OSError as exc:
+                rec["why"] = f"write failed ({type(exc).__name__})"
+            else:
+                rec.update(action="relabelled", why="")
+                continue
+        if asserting:
+            # Left on disk still claiming a verdict it cannot name: a write
+            # failure or an envelope no reader can parse. `main` fails the run.
+            rec["asserting"] = True
+            rec["why"] += "; still asserting a band verdict it cannot name"
     return records
 
 
@@ -301,16 +400,27 @@ def main(argv=None) -> int:
           f"(has calibration.task_id) {counted['measured']}, unreadable/skipped "
           f"{counted['skipped']}")
 
+    # A note this run could not relabel and could not clear: named whether or
+    # not the sweep can read it either, so the SKIP line is never the last word.
+    left = [rec for rec in records if rec["asserting"]]
+    if left:
+        print(f"relabel: {len(left)} note(s) could not be relabelled and STILL "
+              f"assert a band verdict (no calibration.task_id, review_status in "
+              f"{list(STILL_ASSERTING)}) "
+              f"{'after --apply' if applying else 'in this dry run'}: "
+              f"{sorted(str(r['path'].relative_to(root)) for r in left)[:20]}")
+
     after = still_asserting(root)
     if not applying:
         print(f"relabel: dry-run check — {len(before)} note(s) with no "
               f"calibration.task_id still assert a band verdict "
               f"(review_status in {list(STILL_ASSERTING)}); nothing written")
         return 0
-    if after:
-        print(f"relabel: POST-CHECK FAILED — {len(after)} note(s) still assert a "
-              f"band verdict after --apply: "
-              f"{[str(p.relative_to(root)) for p in after[:20]]}")
+    if after or left:
+        unresolved = {str(p.relative_to(root)) for p in after}
+        unresolved |= {str(r["path"].relative_to(root)) for r in left}
+        print(f"relabel: POST-CHECK FAILED — {len(unresolved)} note(s) still "
+              f"assert a band verdict after --apply: {sorted(unresolved)[:20]}")
         return 2
     print(f"relabel: post-check OK — 0 notes with no calibration.task_id carry "
           f"review_status in {list(STILL_ASSERTING)} (was {len(before)})")
