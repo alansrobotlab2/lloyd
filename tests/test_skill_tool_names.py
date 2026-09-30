@@ -50,6 +50,7 @@ and `AGENT_MENTION_EXEMPT`, both of which the tests below do consult.
 
 from __future__ import annotations
 
+import ast
 import os
 import re
 import subprocess
@@ -451,9 +452,15 @@ def _truncated(cand: str, tail: str = "") -> bool:
 #: NEW entry here is a regression; `autonomy/85-*` and `secondary-routing-eval`
 #: are deliberately NOT in it — they are what item #1240 fixed, and
 #: `test_the_secondary_routing_nightly_docs_are_clean` keeps them out.
+#:
+#: The three docs that named `scripts/vault/okf_taxonomy.CANONICAL_TYPES` came
+#: out of this set on 2026-09-30 (#1899). They were never drift: `okf_taxonomy.py`
+#: is in the checkout and binds `CANONICAL_TYPES`, which is what
+#: `_dotted_module_ref` now proves before it lets a dotted reference go. A dotted
+#: reference whose module or member really is absent still arrives here as a red
+#: row, so nothing is exempted by writing its shape off.
 PATH_KNOWN_UNFIXED: set[str] = {
     "skills/ai-engineer-monitor/SKILL.md::vault:autonomy/75-ai-engineer-youtube-monitor.md",
-    "skills/deep-research/SKILL.md::repo:scripts/vault/okf_taxonomy.CANONICAL_TYPES",
     "skills/documentation-digester/SKILL.md::repo:agent-services/llm/llama.cpp",
     "skills/documentation-digester/SKILL.md::repo:agent-services/llm/llama.cpp/build/bin/llama-server",
     "skills/entity-resolution-sweep/SKILL.md::repo:agent_mcp/memory.py",
@@ -463,13 +470,11 @@ PATH_KNOWN_UNFIXED: set[str] = {
     "skills/file-read-resilience/SKILL.md::vault:agents/idler/gateway.py",
     "skills/historical-knowledge-refresh/SKILL.md::repo:scripts/memory/extract-session-log.py",
     "skills/iv-plan-review/SKILL.md::repo:app/middleware/session_auth.py",
-    "skills/medium-research/SKILL.md::repo:scripts/vault/okf_taxonomy.CANONICAL_TYPES",
     "skills/memory-path-scoping/SKILL.md::repo:scripts/memory/next-gen-memory/context_bundle.py",
     "skills/plan-mode-authoring/SKILL.md::repo:app/middleware/session_auth.py",
     "skills/plan-mode-authoring/SKILL.md::repo:web/src/components/TagChip.tsx",
     "skills/poisoned-worker-troubleshoot/SKILL.md::vault:logs/autonomy_runs/run_",
     "skills/powerpoint/SKILL.md::repo:scripts/office/soffice.py",
-    "skills/quick-research/SKILL.md::repo:scripts/vault/okf_taxonomy.CANONICAL_TYPES",
     "skills/system-health-check/SKILL.md::repo:tests/test_health_skill_docs_live_fleet.py",
     "skills/system-health-check/SKILL.md::repo:tests/test_system_health_check_frontend_endpoint.py",
     "skills/system-health-check/SKILL.md::repo:tests/test_system_health_check_skill_fleet.py",
@@ -493,6 +498,91 @@ def _is_template(rel: str) -> bool:
     """A path that could not be opened by anyone, so it cannot be drift."""
     return (any(t in rel for t in ("<", "{", "*", "YYYY", "MM-DD", "..."))
             or rel.endswith(("-", ".", "/")))
+
+
+#: What may follow the last dot of a `app/module.MEMBER` reference: an
+#: identifier. Anything else (`.cpp`, `.tsx`, `.wav`) is a file extension and
+#: stays a file claim, which is what keeps `references/ed/ed_001.wav` and
+#: `web/src/components/TagChip.tsx` red under this rule.
+_MEMBER_TAIL = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _bound_names(module: Path) -> frozenset[str]:
+    """The names `module` binds at its own top level, read from its AST.
+
+    Definitions, classes, assignments and imports — the module's own namespace,
+    which is what a reader following `app/module.MEMBER` finds. Deliberately not
+    a grep: a comment or a docstring that mentions `MEMBER` does not make the
+    reference resolvable. A name bound only inside a `try:` or an `if` is not
+    top-level and stays red, which is the pre-existing verdict for it, not a new
+    one. An unreadable file or one that will not parse answers nothing, and
+    nothing exempts — the fail-closed rule `_tree_ignores` follows.
+    """
+    try:
+        tree = ast.parse(module.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, SyntaxError, ValueError, RecursionError):
+        return frozenset()
+    out: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            out.add(node.name)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for tgt in targets:
+                out.update(n.id for n in ast.walk(tgt) if isinstance(n, ast.Name))
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                out.add(alias.asname or alias.name.split(".")[0])
+    return frozenset(out)
+
+
+def _dotted_module_ref(rel: str, candidates: list[Path]) -> bool:
+    """True when `rel` is a Python dotted reference the checkout really resolves.
+
+    `candidates` is the same list the file-existence probe just refused — one
+    place the named file would have been, per root the scan knows.
+
+    A doc that names ``app/run_acceptance.grade_run`` points at a member of
+    `app/run_acceptance.py`, not at a file called `run_acceptance.grade_run` —
+    a name no checkout can contain, because Python modules are files with ONE
+    dot. `BACKTICKED` takes the whole token and the existence probe then looks
+    for that file, so a reference that is correct Python was reported as drift:
+    `autonomy/76-queue-health-check.md` reddened three nodes at base on
+    2026-09-30 (item #1899), and three `PATH_KNOWN_UNFIXED` entries for
+    `scripts/vault/okf_taxonomy.CANONICAL_TYPES` are the same shape, grandfathered
+    on 2026-09-18 rather than fixed.
+
+    This is a resolution, not an exemption, and that is the difference from the
+    arrow form #1454 refused: nothing here matches a *syntactic* shape and lets
+    it through. The rule fires only when the tree proves BOTH halves — the module
+    file exists AND it binds that name at its own top level — so a phantom member
+    of a real module stays red. That is the #1240 defect one level deeper than
+    the missing script: instructions naming something no run can call. Exemptions
+    this file already accepts widen on a property of the tree (`_tree_ignores`)
+    or on the text not being a claim at all (`_truncated`); this one narrows on
+    the module's own contents.
+
+    Last dot only, so `app/pkg/mod.ATTR` and `app/pkg.ATTR` (through a package
+    `__init__.py`) resolve and a two-member tail like `app/mod.Class.method`
+    keeps the old verdict rather than guessing. `repo:` rows only — a Python
+    module lives in the checkout, and a `vault:` row's tree is the vault.
+    """
+    head, _, member = rel.rpartition(".")
+    if not head or "/" not in head or not _MEMBER_TAIL.fullmatch(member):
+        return False
+    stem = head[head.rindex("/") + 1:]
+    for named in candidates:
+        # `named` is where the reference said the FILE would be, one candidate per
+        # root the scan probes (repo root, then the skill's own folder), so the
+        # module sits beside it under its own name — `app/pkg/mod.ATTR` asks
+        # `app/pkg/mod.py`, and a skill-local `scripts/pkg.ATTR` asks inside the
+        # skill, exactly as the file-existence probe two lines above does.
+        module = named.parent / f"{stem}.py"
+        if not module.is_file():
+            module = named.parent / stem / "__init__.py"
+        if module.is_file() and member in _bound_names(module):
+            return True
+    return False
 
 
 def _named_paths(body: str, skill_dir: Path | None) -> set[tuple[str, str]]:
@@ -679,6 +769,11 @@ def _unresolved_rows() -> dict[str, Path]:
     edit here can. `_landed_after_base` says why the merge-base, not the base
     itself, is the second side of that comparison. Never applied outside a
     worktree, where the tree IS what the vault was written against.
+
+    A `repo:` path that is absent AS A FILE is not yet drift: `_dotted_module_ref`
+    asks the checkout whether the reference instead resolves as a Python dotted
+    name, and only an answer of "no module, or no member" makes it a row (#1899).
+    A `vault:` row is never asked, because a Python module lives in the checkout.
     """
     _OUT_OF_SCOPE.clear()
     bad: dict[str, Path] = {}
@@ -694,8 +789,11 @@ def _unresolved_rows() -> dict[str, Path]:
                 roots = [ROOT / rel]
                 if skill_dir is not None:
                     roots.append(skill_dir / rel)
-            if not any(r.exists() for r in roots):
-                bad[f"{label}::{tree}:{rel}"] = path
+            if any(r.exists() for r in roots):
+                continue
+            if tree == "repo" and _dotted_module_ref(rel, roots):
+                continue
+            bad[f"{label}::{tree}:{rel}"] = path
     ignored = _tree_ignores(ROOT, [_row_parts(r)[1] for r in bad
                                    if _row_parts(r)[0] == "repo"])
     if ignored:
@@ -1061,6 +1159,110 @@ def test_the_qmd_row_is_dropped_by_the_rule_and_not_by_a_ledger_entry():
         f"the exemption was enumerated instead of derived: {enumerated} — item #1403 "
         "clause 2 is that no `skills/qmd-index-maintenance/SKILL.md::repo:qmd/...` "
         "row goes in here")
+
+
+#: A member `keep.py` binds nowhere, so the row for it must survive the dotted rule.
+_PHANTOM_MEMBER = "not_bound_anywhere_1899"
+
+
+def _fixture_checkout_with_python_modules(tmp_path: Path) -> Path:
+    """A stand-in checkout holding one module, one package, and nothing else.
+
+    Real files in a real tree, not a mocked namespace: the dotted reference is
+    resolved by reading a module's AST off disk, so the control has to cross that
+    boundary — the same reason `_fixture_checkout_with_its_own_ignore_rules` runs
+    a real `git init` rather than stubbing the ignore answer.
+    """
+    repo = tmp_path / "checkout"
+    (repo / _TRACKED_TREE).mkdir(parents=True)
+    (repo / _TRACKED_TREE / "keep.py").write_text(
+        "keep_me = 1\n\n\ndef keep_fn():\n    return 2\n", encoding="utf-8")
+    (repo / _TRACKED_TREE / "pkg_1899").mkdir()
+    (repo / _TRACKED_TREE / "pkg_1899" / "__init__.py").write_text(
+        "pkg_member = 3\n", encoding="utf-8")
+    (repo / ".gitignore").write_text("/ignored_by_the_tree/\n", encoding="utf-8")
+    _git(repo, "init", "-q")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "init")
+    return repo
+
+
+def test_a_dotted_reference_resolves_only_when_its_module_and_its_member_do(
+        tmp_path, monkeypatch):
+    """#1899, all four verdicts in ONE scan of one fixture.
+
+    A doc naming `tracked_source/keep.keep_me` names a member of a module the
+    checkout has — `BACKTICKED` handed the whole token to a probe that then looked
+    for a FILE called `keep.keep_me`, which no checkout can contain. The two
+    resolved rows and the two unresolvable ones are planted in the same document
+    and read by the same call, and the assertion is `==`, so the rule cannot widen
+    without failing here: a scanner that excused dotted references by *shape*
+    would drop the phantom-member row, and #1454 is the precedent for refusing
+    that (a doc that merely looks self-correcting carries a phantom into every run
+    that reads it). A phantom member of a real module is that defect one level
+    deeper — instructions naming something no run can call.
+    """
+    repo = _fixture_checkout_with_python_modules(tmp_path)
+    doc = tmp_path / "9999-dotted.md"
+    doc.write_text(
+        "---\nname: dotted\ntype: autonomy\n---\n# Dotted Task\n\n"
+        f"Step 1 names a member the module binds: `~/lloyd/{_TRACKED_TREE}/keep.keep_me`.\n\n"
+        "Step 2 names a member of the same module that binds no such name: "
+        f"`~/lloyd/{_TRACKED_TREE}/keep.{_PHANTOM_MEMBER}`.\n\n"
+        "Step 3 names a member of a module the tree has never held: "
+        f"`~/lloyd/{_TRACKED_TREE}/no_such_module_1899.keep_me`.\n\n"
+        f"Step 4 names a member through a package: `~/lloyd/{_TRACKED_TREE}/pkg_1899.pkg_member`.\n",
+        encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "ROOT", repo)
+    monkeypatch.setattr(sys.modules[__name__], "_doc_files",
+                        lambda: [("autonomy/9999-dotted.md", doc)])
+
+    drift = _unresolved() - PATH_KNOWN_UNFIXED
+    assert drift == {f"autonomy/9999-dotted.md::repo:{_TRACKED_TREE}/keep.{_PHANTOM_MEMBER}",
+                     f"autonomy/9999-dotted.md::repo:{_TRACKED_TREE}/no_such_module_1899.keep_me"}, (
+        f"the dotted rule resolved or refused the wrong half of the four refs: {sorted(drift)}")
+    assert _OUT_OF_SCOPE == {}, "the dotted refs were set aside rather than resolved"
+
+
+def test_the_dotted_corpus_references_resolve_by_the_rule_and_not_by_a_ledger_entry():
+    """#1899 against the real trees, because a fixture green proves only the rule
+    exists — not that it fires on the four references that made this necessary.
+
+    Three of them (`scripts/vault/okf_taxonomy.CANONICAL_TYPES`, in
+    `deep-research`, `medium-research` and `quick-research`) sat in
+    `PATH_KNOWN_UNFIXED` as debt since 2026-09-18; the fourth,
+    `app/run_acceptance.grade_run`, reddened three nodes at base on 2026-09-30.
+    All four leave this file's view because the checkout answers for them, so the
+    ledger must stay empty of them — an entry there would be the #1317 failure
+    shape again, a property re-broken by hand-writing its exceptions. And the
+    scanner must still SEE the reference: a green that came from the pattern
+    missing it would look identical here and be worth nothing, which is what
+    `test_the_path_check_anchored_to_a_path_that_really_exists` is for one level up.
+    """
+    ref = "scripts/vault/okf_taxonomy.CANONICAL_TYPES"
+    for skill in ("deep-research", "medium-research", "quick-research"):
+        skill_dir = VAULT / "skills" / skill
+        refs = {rel for _tree, rel in _named_paths(
+            (skill_dir / "SKILL.md").read_text(encoding="utf-8", errors="replace"),
+            skill_dir)}
+        assert ref in refs, (
+            f"{skill} no longer names the dotted reference this rule exists for, so "
+            f"the green below proves nothing; got {sorted(refs)}")
+
+    module = ROOT / "scripts/vault/okf_taxonomy.py"
+    assert module.is_file() and "CANONICAL_TYPES" in _bound_names(module), (
+        f"the module the three skills name ({module}) stopped binding the member "
+        "they name — those rows are real drift again, and the right fix is the docs")
+
+    rows = {r for r in _unresolved() if r.endswith(f"::repo:{ref}")}
+    assert not rows, (
+        f"the rule stopped resolving live docs, and three skills are red at base "
+        f"again: {sorted(rows)}")
+    assert not [e for e in PATH_KNOWN_UNFIXED if "okf_taxonomy" in e], (
+        "the dotted references were exempted by enumeration instead of resolved: "
+        "a row the rule already resolves is sitting in PATH_KNOWN_UNFIXED")
+    assert "autonomy/76-queue-health-check.md::repo:app/run_acceptance.grade_run" \
+        not in _unresolved(), "#1899's own row is back"
 
 
 #: The three paths the fence control below plants: one that landed on the live
