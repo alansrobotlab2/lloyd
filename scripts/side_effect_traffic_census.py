@@ -159,8 +159,9 @@ def parse_stamp(raw: Any) -> datetime | None:
     A naive stamp is therefore read as *local*
     time, which is the only reading that agrees with its writer; treating it as
     UTC shifts the whole transcript corpus by the box's offset (here 7-8 hours),
-    which is the same skew this repo already logged for `git log --since`,
-    `find -newermt` and `ALERT.md`'s `written:` field.
+    which is the same skew this repo logged for `git log --since` and
+    `find -newermt`. `ALERT.md`'s `written:` field was the third member until
+    #1912 put an explicit offset on it.
     """
     text = str(raw or "").strip()
     if not text:

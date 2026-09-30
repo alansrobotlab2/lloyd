@@ -307,7 +307,8 @@ def _row_time(value):
     if parsed.tzinfo is None:
         # A naive stamp is read as UTC, the way every other reader on this box
         # reads one. The alternative — refusing — would drop rows the writer
-        # honestly produced; the known cost is the offset-less `ALERT.md`
-        # `written:` field, which is not this file's format.
+        # honestly produced. `ALERT.md`'s `written:` stamp is no longer the
+        # exposure that reading had: #1912 marked its zone, so this branch now
+        # absorbs only a stamp whose writer has not marked one yet.
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed

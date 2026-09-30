@@ -294,8 +294,17 @@ class Notifier:
     def _alert_file(self, level: str, title: str, text: str) -> bool:
         try:
             self.state_dir.mkdir(parents=True, exist_ok=True)
+            # `astimezone()` with no argument attaches the machine's zone to the
+            # LOCAL reading: the digits, microseconds included, are untouched and
+            # only the zone is named (#1912 — the same shape speak.py's `%z` got
+            # from #1808). Writing this stamp naive on a box at -0700 left the
+            # one artefact a human reads during an outage open to two readings,
+            # and this repo's own comments held both of them seven hours apart:
+            # `scripts/side_effect_traffic_census.py::parse_stamp` reads a naive
+            # stamp as local, `app/skill_telemetry.py` reads one as UTC.
             (self.state_dir / "ALERT.md").write_text(
-                f"# {title}\n\nlevel: {level}\nwritten: {datetime.now().isoformat()}\n\n{text}\n",
+                f"# {title}\n\nlevel: {level}\n"
+                f"written: {datetime.now().astimezone().isoformat()}\n\n{text}\n",
                 encoding="utf-8",
             )
             return True
