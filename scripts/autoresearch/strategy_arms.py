@@ -190,6 +190,11 @@ def run_arm_trial(
     }
     try:
         from app.prompt_builder import build_system_prompt
+        # Built with no `session_id` on purpose (#1879): an arm's chain runs from
+        # a task dict to a bare `requests.post` and never holds a session, so
+        # there is no id to thread and nothing to key the registry on. What names
+        # this prompt is the send — `bench_runner.chat_completion` digests the
+        # system message it is about to post, which covers every call this makes.
         system_prompt = build_system_prompt(overlay_dir=overlay_dir)
         text = _ARM_FNS[arm](trace, budget, task, system_prompt, model,
                              adviser_model, timeout_seconds)

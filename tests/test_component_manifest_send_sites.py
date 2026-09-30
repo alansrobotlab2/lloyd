@@ -19,6 +19,7 @@ model, no token spend — and reads back what landed in the store.
 from __future__ import annotations
 
 import asyncio
+import collections
 import hashlib
 import json
 import os
@@ -547,3 +548,726 @@ def test_a_digest_pair_handed_over_inline_reads_as_the_same_row_as_the_text():
         assert by_model[model]["components_captured"] == cm._SEND_SITE, (
             f"{model}: a dict handed over inline is this call's own answer, "
             "however it was digested")
+
+
+# ── #1879: the senders whose system prompt was built with no session key ─────
+#
+# Every node above reaches the manifest through a site that describes itself.
+# The residual this section closes is the opposite shape, and it is the larger
+# one: 359 of the 2,626 `app/harness/client.py::stream_chat` lines written on
+# 2026-09-30 — 13.7% of that send site's lines — read `components_captured:
+# "unrecorded"`, and the 29 distinct session ids carrying those 359 lines
+# emitted no `turn_start` line whatsoever that day (13 autonomy, 7 benchmine, 8
+# bench, 1 sessiondistill). Those are exactly the sessions the nightly
+# prompt-diff consumer reviews and cannot see. The 29 ids and their 359 lines are
+# committed at `backlog/data/2026-09-30.stream-chat-residual.ndjson`;
+# `scripts/maintenance/components_unrecorded_tally.py <day>` regenerates the same
+# report for any day the live store still holds, which is the check the item
+# originally named as a /tmp script.
+#
+# One guard is the cause: `note_components` runs only inside the
+# `if session_id:` block at `app/prompt_builder.py:586`, and the four callers
+# below built their system prompt without passing the session id they already
+# held — so nothing was ever keyed for the session that was about to send. The
+# three sites that hold a session id are now threaded, and the two autoresearch
+# bench sites, whose send is a bare `requests.post` with no session at any level
+# of their chain, describe their prompt at the post the way `observer.py` and
+# `secondary_models.py` do.
+#
+# The threaded nodes are driven end to end on purpose. The registry handoff
+# between `prompt_builder` (which writes) and `client.py::stream_chat` (which
+# reads) is the one boundary in this mechanism with no call chain across it, so
+# a node that looked only at the registry would keep passing if the hook were
+# renamed, and a node that called `record_request` by hand would never show a
+# caller that forgot to thread its id.
+
+
+STREAM_SITE = "app/harness/client.py::stream_chat"
+BENCH_SEND_SITE = "scripts/autoresearch/bench_runner.py::chat_completion"
+
+
+def _sent_system_message(payload: dict) -> str:
+    """The system message the stub engine was handed — the bytes about to go out."""
+    for msg in (payload or {}).get("messages") or []:
+        if msg.get("role") == "system":
+            return str(msg.get("content") or "")
+    raise AssertionError(f"the stub captured no system message: {payload}")
+
+
+def _stream_lines(session_id: str) -> list[dict]:
+    return [ln for ln in _lines()
+            if ln["send_site"] == STREAM_SITE and ln["session_id"] == session_id]
+
+
+def _first_stream_line(session_id: str) -> dict:
+    lines = _stream_lines(session_id)
+    assert lines, (
+        f"no {STREAM_SITE} line for session {session_id!r} in "
+        f"{[ln['send_site'] for ln in _lines()]}")
+    return min(lines, key=lambda ln: (ln["iteration"] is None,
+                                      ln["iteration"] or 0))
+
+
+def _assert_records_the_sent_prompt(line: dict, system_text: str) -> None:
+    """The line names the components, and each digest is the sent bytes.
+
+    The expectation is `hashlib` over the system message the stub captured,
+    re-sliced by the byte counts the line itself carries — never
+    `cm.digest_text`, which would pass while both sides drifted. A caller that
+    appends its own text after `build_system_prompt` returns (the worker path
+    adds the denied-tools block, the SDK path a planted policy) is allowed: what
+    is pinned is that every recorded digest is the digest of the next bytes of
+    the prompt on the wire, in order, from the first byte.
+    """
+    assert line["components_captured"] == cm._TURN_START, (
+        f"{line['send_site']} captured {line['components_captured']!r}, not "
+        f"{cm._TURN_START!r}: the session's components never reached the registry")
+    assert line["components"], "the line carries no component list at all"
+    raw = system_text.encode("utf-8")
+    pos = 0
+    for row in line["components"]:
+        assert row["sha256"].startswith("sha256:") and row["bytes"] > 0, row
+        piece = raw[pos:pos + row["bytes"]]
+        assert piece and ("sha256:" + hashlib.sha256(piece).hexdigest()
+                          == row["sha256"]), (
+            f"{row['name']}: the recorded digest is not the digest of the bytes "
+            f"the engine was sent at offset {pos}")
+        pos += row["bytes"] + len(b"\n\n")          # components joined by "\n\n"
+    assert pos - 2 <= len(raw), (
+        f"the recorded components account for {pos - 2} bytes, more than the "
+        f"{len(raw)} bytes actually sent")
+
+
+_DONE_LINES = [
+    "data: " + json.dumps({"choices": [{"delta": {"content": "all done"}}]}) + "\n\n",
+    "data: " + json.dumps({"choices": [{"delta": {},
+                                        "finish_reason": "stop"}]}) + "\n\n",
+    "data: " + json.dumps({"choices": [], "usage": {"prompt_tokens": 11,
+                                                    "completion_tokens": 2}}) + "\n\n",
+    "data: [DONE]\n\n",
+]
+
+
+class _StreamResp:
+    def __init__(self, lines: list[str]):
+        self.status_code = 200
+        self._lines = lines
+
+    async def aiter_lines(self):
+        for line in self._lines:
+            yield line
+
+    async def aread(self) -> bytes:
+        return b""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return False
+
+
+class _Engine:
+    """`httpx.AsyncClient` at the socket: records every payload, streams `script`.
+
+    `stream_chat` builds its own URL, headers and body against this, so the
+    payload in `.streamed` is the one that would have gone to the engine, and the
+    manifest line written beside it is the code under test's own answer.
+    """
+
+    streamed: "list[dict]" = []
+    posted: "list[dict]" = []
+    script: "list[list[str]]" = []
+
+    def __init__(self, **_kw):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return False
+
+    def stream(self, _method, _url, headers=None, json=None, **_kw):
+        _Engine.streamed.append(json)
+        idx = len(_Engine.streamed) - 1
+        return _StreamResp(_Engine.script[idx] if idx < len(_Engine.script)
+                           else _DONE_LINES)
+
+    async def post(self, _url, json=None, **_kw):
+        _Engine.posted.append(json)
+        return _Resp(_body())
+
+
+class _Pool:
+    @property
+    def discovered(self):
+        return [("lloyd-mcp", [{"name": "Bash", "description": "shell",
+                                "inputSchema": {"type": "object",
+                                                "properties": {}}}])]
+
+    async def call_tool(self, name, args, *, session_id="", **_kw):
+        return {"content": "FAKE_RESULT", "is_error": False}
+
+
+def _install_engine_stub(monkeypatch, turns: int = 1):
+    """Real loop, real `stream_chat`, fake socket. Returns the recording engine.
+
+    `.streamed` is the positive control every node below reads: one payload there
+    beside one line in the store is what makes the line evidence rather than a
+    leftover.
+    """
+    _Engine.posted, _Engine.streamed = [], []
+    _Engine.script = [list(_DONE_LINES) for _ in range(turns)]
+
+    pool = _Pool()
+
+    async def _build_pool(_options):
+        return pool
+
+    monkeypatch.setattr("app.harness.loop._build_pool", _build_pool)
+    monkeypatch.setattr("app.harness.client.httpx.AsyncClient", _Engine)
+    monkeypatch.setattr("app.harness.finalizer.httpx.AsyncClient", _Engine)
+    return _Engine
+
+
+def _drive_options(engine, options, prompt: str = "go") -> dict:
+    """Send `options` through the real loop and return the payload the engine saw."""
+    from app.harness.loop import run_query as real_run_query
+
+    async def _drain():
+        return [e async for e in real_run_query(
+            [{"role": "user", "content": prompt}], options)]
+
+    asyncio.run(_drain())
+    cm.flush(timeout=8.0)
+    assert engine.streamed, (
+        "no request crossed the seam, so a manifest line here would be evidence "
+        "of nothing")
+    return engine.streamed[-1]
+
+
+# ── the autonomy path (clause 1) ────────────────────────────────────────────
+
+@pytest.fixture
+def autonomy_env(tmp_path, monkeypatch):
+    """Isolate what `autonomy.run_task` touches outside the turn it builds.
+
+    The same seam set `tests/test_autonomy_turn_budget.py` drives the real
+    `run_task` with: task files, session and event directories, and the
+    `config.yaml` the global budget is read out of. Left real here because the
+    clause is about what `run_task` itself does with the id it mints: the real
+    prompt builder, the real loop, the real `stream_chat`.
+    """
+    from app import autonomy
+
+    (tmp_path / "config.yaml").write_text(
+        "agent:\n  max_turns: 60\nmodel:\n  default: primary\n")
+    monkeypatch.setattr(autonomy, "LLOYD_HOME", tmp_path)
+    monkeypatch.setattr("app.sessions_io.SESSIONS_DIR", tmp_path / "sessions")
+    monkeypatch.setattr("app.event_log.EVENT_LOGS_DIR", tmp_path / "events")
+    monkeypatch.setattr("app.event_log.BLOBS_DIR", tmp_path / "events" / "blobs")
+    monkeypatch.setenv("LLOYD_GRANT_DB", str(tmp_path / "grants.db"))
+    monkeypatch.setattr(autonomy, "_find_task_file", lambda tid: tmp_path / "x.md")
+    monkeypatch.setattr(autonomy, "_parse_task_file", lambda p: {
+        "id": 24, "name": "Task 24", "skill_name": "s", "status": "up_next",
+        "timeout_seconds": 300, "description": "record the prompt"})
+    monkeypatch.setattr(autonomy, "_load_skill_content", lambda s: "SKILL")
+    monkeypatch.setattr(autonomy, "_update_task_field", lambda *a, **k: None)
+    monkeypatch.setattr(autonomy, "_append_activity_log", lambda *a, **k: None)
+    monkeypatch.setattr(autonomy, "_get_model_env", lambda m: {})
+    monkeypatch.setattr(autonomy, "_write_run_record", lambda **kw: None)
+    monkeypatch.setattr(autonomy, "_task_inner_voice", lambda t: False)
+    monkeypatch.setattr("app.mcp_discovery._get_disallowed_tools",
+                        lambda *a, **k: [])
+    monkeypatch.setattr("app.mcp_discovery._get_harness_kwargs", lambda: {})
+    monkeypatch.setattr("app.harness.mcp_pool.DEFAULT_LLOYD_MCP_SERVERS", {},
+                        raising=False)
+    return tmp_path
+
+
+def test_an_autonomy_run_records_turn_start_for_the_session_it_mints(
+        autonomy_env, monkeypatch):
+    """Clause 1: `app/autonomy.py:4011` passes the run's `session_id`.
+
+    `run_task` mints the id at `app/autonomy.py:3920` and already hands it to
+    `RunOptions`, so the streaming line has always carried a session — it was
+    the prompt build that never learned of it, and 13 of the 29 unrecorded
+    sessions on 2026-09-30 were autonomy runs. This drives `run_task` for real
+    and reads its first `stream_chat` line back off the store.
+    """
+    from app import autonomy
+    import app.harness as harness
+
+    engine = _install_engine_stub(monkeypatch)
+    captured: dict = {}
+    from app.harness.loop import run_query as real_run_query
+
+    async def _run_query(messages, options):
+        captured["options"] = options
+        async for evt in real_run_query(messages, options):
+            yield evt
+
+    monkeypatch.setattr(harness, "run_query", _run_query)
+    asyncio.run(autonomy.run_task(24))
+    cm.flush(timeout=8.0)
+
+    options = captured["options"]
+    assert getattr(options, "session_id", ""), (
+        "the run built its options with no session id, so there is no session to "
+        "attribute a manifest line to")
+    assert engine.streamed, (
+        "the autonomy turn never crossed the seam, so its manifest line would be "
+        "evidence of nothing")
+    first = _first_stream_line(options.session_id)
+    _assert_records_the_sent_prompt(
+        first, _sent_system_message(engine.streamed[0]))
+    assert cm.registry_occupancy() == 1, (
+        "the run's prompt was noted for more than one session key")
+
+
+# ── the worker path (clause 2) ──────────────────────────────────────────────
+
+def _worker_env(monkeypatch, tmp_path):
+    """Isolate the files a background turn writes, and nothing else.
+
+    The one helper every in-process worker turn builds its options through is
+    `_worker_run_options`, so this drives the real path once and the fix covers
+    each source that shares it — the measured residual's `benchmine`, `bench`
+    and `sessiondistill` sessions among them, including the `sessiondisti…`
+    session the filing's own source list did not name.
+    """
+    from app import autonomy
+
+    monkeypatch.setattr("app.sessions_io.SESSIONS_DIR", tmp_path / "sessions")
+    monkeypatch.setattr("app.event_log.EVENT_LOGS_DIR", tmp_path / "events")
+    monkeypatch.setattr("app.event_log.BLOBS_DIR", tmp_path / "events" / "blobs")
+    monkeypatch.setenv("LLOYD_GRANT_DB", str(tmp_path / "grants.db"))
+    monkeypatch.setattr(autonomy, "_get_model_env", lambda m: {})
+    monkeypatch.setattr("app.routers.automod.drain_active", lambda: False)
+    return tmp_path
+
+
+def test_a_worker_turn_records_turn_start_for_the_session_it_mints(monkeypatch, tmp_path):
+    """Clause 2: `_worker_run_options` passes the `session_id` it is handed.
+
+    `run_prompt_on_primary` mints the session id, passes it to the options
+    builder for the scratchpad anchor and the budget anchor, and then sends — and
+    the prompt build beside those still had no id, which is how 8 benchmine and 1
+    sessiondistill sessions landed in the 2026-09-30 residual. One kwarg on that
+    one call covers every source that builds through the helper.
+    """
+    from workers.sources import _common as wc
+
+    _worker_env(monkeypatch, tmp_path)
+    engine = _install_engine_stub(monkeypatch)
+
+    result = asyncio.run(wc.run_prompt_on_primary(
+        "prove the prompt was recorded", max_turns=2, source="benchmine"))
+    cm.flush(timeout=8.0)
+
+    assert result.session_id, "the worker turn minted no session to attribute"
+    assert engine.streamed, (
+        "the worker turn never crossed the seam, so its manifest line would be "
+        "evidence of nothing")
+    first = _first_stream_line(result.session_id)
+    _assert_records_the_sent_prompt(first, _sent_system_message(engine.streamed[0]))
+    assert cm.registry_occupancy() == 1, (
+        "the worker's prompt was noted for more than one session key")
+
+
+# ── the autoresearch harness-routed path (clause 3) ─────────────────────────
+
+def test_an_autoresearch_trial_records_turn_start_for_its_session(
+        monkeypatch, tmp_path):
+    """Clause 3: `build_options` passes the `session_id` it already takes.
+
+    The SDK runner takes the trial's session id as a keyword argument and hands
+    it to `RunOptions` two lines below the prompt build, so the trial's lines
+    always named a session whose prompt the manifest had never seen — 8 `bench`
+    sessions of the 359 unrecorded lines. The overlay dir is the runner's own
+    knob for the prompt, so the build is deterministic without reading the vault.
+    """
+    from scripts.autoresearch import bench_runner_sdk as sdk
+
+    monkeypatch.setattr("app.mcp_discovery._get_disallowed_tools",
+                        lambda *a, **k: [])
+    monkeypatch.setattr("app.mcp_discovery._get_harness_kwargs", lambda: {})
+    monkeypatch.setattr("app.mcp_discovery._get_mcp_servers", lambda: {})
+    engine = _install_engine_stub(monkeypatch)
+
+    sid = "20260930_070000_bench_1879aa"
+    options = sdk.build_options(
+        model="primary", overlay_dir=_overlay_dir(tmp_path), session_id=sid,
+        max_agent_turns=2, sandbox_stateful_tools=False)
+    assert options.session_id == sid, "the trial's options lost the id"
+
+    _drive_options(engine, options, prompt="answer the bench task")
+    first = _first_stream_line(sid)
+    _assert_records_the_sent_prompt(first, _sent_system_message(engine.streamed[0]))
+    assert cm.registry_occupancy() == 1, (
+        "the trial's prompt was noted for more than one session key")
+
+
+def _overlay_dir(tmp_path: Path) -> Path:
+    """An overlay carrying its own SOUL.md, so no vault read is needed to build."""
+    overlay = tmp_path / "prompts"
+    overlay.mkdir(parents=True, exist_ok=True)
+    (overlay / "SOUL.md").write_text(
+        "# SOUL\n\nSOUL-SENTINEL identity body for the bench manifest test.\n",
+        encoding="utf-8")
+    return overlay
+
+
+# ── the two direct autoresearch sites (clause 4) ────────────────────────────
+
+def _assert_names_the_sent_prompt(line: dict, system_text: str) -> None:
+    """The inline path: one component, named at the send, digesting the sent text.
+
+    A site with no session key cannot use the registry, so its answer is handed
+    over inline as the payload is built — the `observer.py` / `secondary_models.py`
+    shape. The expected digest is `hashlib` over the system message the fake
+    socket captured, never `cm.digest_text`.
+    """
+    assert line["components_captured"] == cm._SEND_SITE, (
+        f"captured {line['components_captured']!r}, not {cm._SEND_SITE!r}")
+    body = system_text.encode("utf-8")
+    assert line["components"] == [{"name": "system_prompt",
+                                   "sha256": "sha256:" + hashlib.sha256(body).hexdigest(),
+                                   "bytes": len(body)}], line["components"]
+
+
+def _stub_bench_socket(monkeypatch):
+    """Stand in for the bench runner's `requests.post` and record the payloads."""
+    import requests
+
+    posted: list[dict] = []
+
+    def _post(url, headers=None, json=None, timeout=None, **_kw):
+        posted.append(json)
+        return _Resp({"choices": [{"message": {"content": "bench answer"},
+                                   "finish_reason": "stop"}],
+                      "usage": {"completion_tokens": 4}})
+
+    monkeypatch.setattr(requests, "post", _post)
+    return posted
+
+
+def test_a_direct_bench_trial_names_the_prompt_it_sends(monkeypatch, tmp_path):
+    """Clause 4a: `scripts/autoresearch/bench_runner.py:163` has no session key.
+
+    Its send is `chat_completion`'s bare `requests.post`, three levels above any
+    session concept, so the prompt is named at the send instead of threaded down.
+    Two facts are pinned: the line says which prompt went out, and the registry
+    holds nothing — the inline path digests and forgets, so no raw context text
+    stays resident. (This send does not pass through `stream_chat`, so it cannot
+    move that site's residual; it is here for provenance symmetry, which is what
+    the triage ruled these two sites down to.)
+    """
+    from scripts.autoresearch import bench_runner as br
+
+    posted = _stub_bench_socket(monkeypatch)
+    monkeypatch.setattr(br, "_endpoint_for", lambda m: "http://stub:8096")
+    monkeypatch.setattr(br, "_resolved_model_name", lambda m: "stub-model")
+    cm.reset_stats()
+
+    trace = br._run_one_sync({"id": "t1", "prompt": "say the thing"},
+                            "variant-a", _overlay_dir(tmp_path), "primary", 30)
+    cm.flush(timeout=8.0)
+
+    assert trace["status"] == "success", trace["error"]
+    assert len(posted) == 1, posted
+    lines = [ln for ln in _lines() if ln["send_site"] == BENCH_SEND_SITE]
+    assert len(lines) == 1, (
+        f"expected exactly one manifest line for the bench send, got {len(lines)}")
+    _assert_names_the_sent_prompt(lines[0], _sent_system_message(posted[0]))
+    assert cm.registry_occupancy() == 0, (
+        "the bench send left its prompt resident in the registry; the inline "
+        "path digests and forgets")
+    assert "SOUL-SENTINEL" not in json.dumps(lines[0]), (
+        "the written line carries raw context text, not a digest")
+
+
+def test_a_strategy_arm_trial_names_the_prompt_of_every_call_it_sends(
+        monkeypatch, tmp_path):
+    """Clause 4b: `scripts/autoresearch/strategy_arms.py:193`, same send, same rule.
+
+    The `advise` arm is the one that tests the fallback rather than letting it
+    coast: it spends three calls through the shared `chat_completion` and they do
+    **not** send the same prompt — the draft and the revision carry the
+    overlay-built system prompt, the adviser call carries `ADVISER_SYSTEM`. So each
+    manifest line is compared with the payload at its own index, and the adviser's
+    digest is required to differ from the draft's: a fallback that digested one
+    prompt for the whole trial would pass a node that compared every line to the
+    first payload, and fails this one.
+    """
+    from scripts.autoresearch import bench_runner as br
+    from scripts.autoresearch import strategy_arms as sa
+
+    posted = _stub_bench_socket(monkeypatch)
+    monkeypatch.setattr(br, "_endpoint_for", lambda m: "http://stub:8096")
+    monkeypatch.setattr(br, "_resolved_model_name", lambda m: "stub-model")
+    cm.reset_stats()
+
+    trace = sa.run_arm_trial({"id": "t2", "prompt": "say the thing"}, "advise",
+                             ceiling=2000, model="primary",
+                             overlay_dir=_overlay_dir(tmp_path))
+    cm.flush(timeout=8.0)
+
+    assert trace["status"] == "success", trace["error"]
+    assert len(posted) == 3, (
+        f"the advise arm is three calls (draft, adviser, revise); the stub saw "
+        f"{len(posted)}, so the pairing below would prove nothing")
+    lines = [ln for ln in _lines() if ln["send_site"] == BENCH_SEND_SITE]
+    assert len(lines) == len(posted), (
+        f"{len(lines)} manifest lines for {len(posted)} bench calls")
+    for line, payload in zip(lines, posted):
+        _assert_names_the_sent_prompt(line, _sent_system_message(payload))
+    digests = [ln["components"][0]["sha256"] for ln in lines]
+    assert digests[0] == digests[2], (
+        "the draft and the revision send the same system prompt, so their lines "
+        "must agree on one digest")
+    assert digests[1] != digests[0], (
+        "the adviser call got the draft's digest: the fallback named the trial, "
+        "not the request")
+    assert digests[1] == "sha256:" + hashlib.sha256(
+        sa.ADVISER_SYSTEM.encode("utf-8")).hexdigest(), (
+        "the adviser line does not digest the prompt the adviser actually received")
+    assert cm.registry_occupancy() == 0, (
+        "the arm left its prompt resident in the registry")
+
+
+# ── the chat and voice builders are unchanged (clause 5) ────────────────────
+
+def test_the_chat_and_voice_builders_still_hand_their_session_to_the_prompt(
+        monkeypatch, tmp_path):
+    """Clause 5: `app/routers/turn_options.py:203` and `:211` still pass it.
+
+    The two builders that were always correct are pinned from both sides, because
+    this round edits the builder they call: the id reaches `build_system_prompt`
+    for a spoken turn as well as a typed one, and a prompt built the way they
+    build it really does come back as `turn_start` capture once it is sent.
+    """
+    from app.prompt_builder import build_system_prompt as real_build
+    from app.routers import turn_options as topts
+
+    seen: list[dict] = []
+
+    def _record(**kwargs):
+        seen.append(kwargs)
+        return "CHAT SYSTEM PROMPT"
+
+    monkeypatch.setattr(topts, "build_system_prompt", _record)
+    monkeypatch.setattr(topts, "_memory_snapshot",
+                        _FrozenMemories())
+    monkeypatch.setattr(topts, "_prompt_layout", _Layout())
+    monkeypatch.setattr(topts, "_get_model_env", lambda m: {})
+    monkeypatch.setattr(topts, "_get_harness_kwargs", lambda: {})
+    monkeypatch.setattr(topts, "_get_mcp_servers", lambda: {})
+    monkeypatch.setattr(topts, "_get_disallowed_tools", lambda *a, **k: [])
+    _stub_messages_helpers(monkeypatch)
+    monkeypatch.setattr("app.routers.voice._voice_extra_body", lambda: {})
+
+    for kind in ("stream", "voice"):
+        seen.clear()
+        build = topts.build_turn_options(
+            topts.SessionSnapshot(session_id="chat-1879",
+                                  path=tmp_path / "chat-1879.json"),
+            {}, kind, text="say the thing")
+        assert seen, f"kind={kind}: the builder never built a system prompt"
+        assert seen[0].get("session_id") == "chat-1879", (
+            f"kind={kind}: build_system_prompt got {seen[0].get('session_id')!r}")
+        assert build.system_prompt == "CHAT SYSTEM PROMPT"
+        assert build.options.system_prompt == "CHAT SYSTEM PROMPT"
+
+    # And the capture behaviour itself: the real builder, called the way the chat
+    # path calls it, then the real send — still turn_start, still with digests.
+    from app import prompt_builder
+
+    prompt_builder.build_system_prompt(session_id="chat-1879",
+                                       overlay_dir=_overlay_dir(tmp_path))
+    engine = _install_engine_stub(monkeypatch)
+    _drive_options(engine, RunOptions(model="primary", session_id="chat-1879",
+                                      tool_search_enabled=False,
+                                      system_prompt=real_build(
+                                          session_id="chat-1879",
+                                          overlay_dir=_overlay_dir(tmp_path))))
+    first = _first_stream_line("chat-1879")
+    _assert_records_the_sent_prompt(first, _sent_system_message(engine.streamed[0]))
+
+
+class _FrozenMemories:
+    def frozen_memories(self, session_id, platform=""):
+        return "", ""
+
+
+class _Layout:
+    def mem_kwargs(self, frozen_mem):
+        return {}
+
+    def turn_tail(self, todos, plan, goal, memory_note):
+        return ""
+
+
+def _stub_messages_helpers(monkeypatch):
+    """Neutralise the authority/reviewer helpers, which are not this clause.
+
+    They live on `app.routers.messages` and read grants, session metadata and
+    the action-reviewer config — all of them choices about what a turn may do,
+    none about how its prompt is recorded. Patching them keeps the assertion
+    about `build_system_prompt`'s arguments, which is what the clause names.
+    """
+    from app.routers import messages as m
+
+    monkeypatch.setattr(m, "_authority_scope_for",
+                        lambda *a, **k: "", raising=False)
+    monkeypatch.setattr(m, "_ban_grant_minting", lambda *a, **k: None,
+                        raising=False)
+    monkeypatch.setattr(m, "_ban_automod_for_workers", lambda *a, **k: None,
+                        raising=False)
+    monkeypatch.setattr(m, "_install_action_review", lambda *a, **k: None,
+                        raising=False)
+    monkeypatch.setattr(m, "_turn_budget", lambda *a, **k: 60, raising=False)
+    monkeypatch.setattr(m, "_clamp_priority", lambda p, **k: 0, raising=False)
+    monkeypatch.setattr(m, "_tool_surface", lambda p: "chat", raising=False)
+    monkeypatch.setattr(m, "_final_schema_for", lambda *a, **k: None,
+                        raising=False)
+    monkeypatch.setattr(m, "_effect_scope_for", lambda *a, **k: "",
+                        raising=False)
+
+
+# ── the check itself, and the bytes it was measured on (clause 6) ─────────────
+
+WITNESS = "backlog/data/2026-09-30.stream-chat-residual.ndjson"
+
+
+def _vault_root() -> Path:
+    """`LLOYD_OBSIDIAN_VAULT` if set, else `~/obsidian` — the same resolution
+    `tests/board_presence.py` uses, so this node asks about the vault the rest of
+    the suite is asking about."""
+    raw = os.environ.get("LLOYD_OBSIDIAN_VAULT")
+    return Path(raw).expanduser() if raw else Path.home() / "obsidian"
+
+
+def test_the_committed_witness_bytes_rederive_the_numbers_the_item_quotes():
+    """Clause 6: the figures #1879 quotes are a sum of rows that are on disk.
+
+    The item's numbers were measured on a live, append-only, 14-day-retained store,
+    which is why they had no history. They are now committed as a projection — one
+    row per unrecorded session, one per send site — and this node re-derives every
+    quoted figure from those bytes, so an edit to the witness that changes a number
+    goes red. The day file itself is 107 MB of chat digests and prompt-part names
+    and cannot go in a repo; #1880 projected for the same reason.
+    """
+    path = _vault_root() / WITNESS
+    assert path.is_file(), (
+        f"{path} is missing: the bytes #1879's acceptance was measured on are gone, "
+        "and the item's figures have no witness")
+    rows = [json.loads(line) for line in
+            path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    sessions = [r for r in rows if r["kind"] == "session"]
+    sites = [r for r in rows if r["kind"] == "send_site"]
+
+    assert len(rows) == 33, (
+        f"`wc -l < {WITNESS}` must be the figure the item quotes, got {len(rows)}")
+    assert len(sessions) == 29, (
+        f"the residual was 29 distinct session ids, the witness has {len(sessions)}")
+    assert sum(r["unrecorded_lines"] for r in sessions) == 359, (
+        "the per-session rows no longer sum to the 359 lines the item quotes")
+    assert all(r["turn_start_lines"] == 0 for r in sessions), (
+        "a session in the witness emitted a turn_start line, which is the "
+        "cross-check that made the residual unthreaded-site traffic rather than "
+        "registry eviction")
+
+    by_site = {r["send_site"]: r for r in sites}
+    sc = by_site[STREAM_SITE]
+    assert (sc["lines"], sc["unrecorded_lines"]) == (2626, 359), sc
+    assert round(100.0 * sc["unrecorded_lines"] / sc["lines"], 1) == 13.7, (
+        "the residual percentage the item quotes is not the one these bytes say")
+    assert all(r["unrecorded_lines"] == 0 for site, r in by_site.items()
+               if site != STREAM_SITE), (
+        "a site that passes components= inline is carrying unrecorded lines in the "
+        "witness, so 0% for the components sites is no longer what was measured")
+
+    mix = collections.Counter(
+        r["session_id"].split("_")[2] if len(r["session_id"].split("_")) >= 4
+        else "chat"
+        for r in sessions)
+    assert dict(mix) == {"autonomy": 13, "bench": 8, "benchmine": 7,
+                         "sessiondisti": 1}, (
+        f"the source mix over the 29 ids is {dict(mix)}; the triage's line said 14 "
+        "autonomy / 8 benchmine / 8 bench / 1 sessiondisti, which sums to 31")
+
+
+def _load_tally():
+    """Import `scripts/maintenance/components_unrecorded_tally.py` by path."""
+    import importlib.util
+
+    script = (Path(__file__).resolve().parent.parent
+              / "scripts" / "maintenance" / "components_unrecorded_tally.py")
+    spec = importlib.util.spec_from_file_location("cm_tally", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_residual_check_splits_a_restart_boundary_from_an_unthreaded_site(
+        tmp_path, capsys):
+    """The check has to answer the question the residual ruling turns on.
+
+    Claim 3 says the leftover after this fix should be restart-boundary only, and a
+    manifest line carries its own `session_id` — so asking the manifest whether that
+    id "appears in the day" answers yes by construction and the bucket can never
+    fill. This drives the script over a scratch store whose sessions dir knows three
+    of four residual sessions, and requires all three buckets to come out distinct.
+    """
+    tally_mod = _load_tally()
+    store = tmp_path / "manifests"
+    store.mkdir()
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+
+    def _row(sid, captured, site=STREAM_SITE):
+        return json.dumps({"ts": "2026-09-30T01:00:00+00:00", "session_id": sid,
+                           "send_site": site, "components_captured": captured})
+
+    known = ["20260929_010000_autonomy_aaaa", "20260929_010001_autonomy_bbbb",
+             "20260929_010002_bench_cccc"]
+    for sid in known:
+        (sessions / f"{sid}.json").write_text("{}", encoding="utf-8")
+    lines = ([_row(known[0], "unrecorded")] * 2 + [_row(known[1], "unrecorded")]
+             + [_row(known[2], "turn_start"), _row(known[2], "unrecorded")]
+             + [_row("20260929_010003_ghost_ffff", "unrecorded")]
+             + [_row("", "turn_start", site="app/secondary_models.py")])
+    (store / "2026-09-30.ndjson").write_text("\n".join(lines) + "\n",
+                                             encoding="utf-8")
+
+    rc = tally_mod.report(str(store), ["2026-09-30"], json_out=False,
+                          sessions_dir=str(sessions))
+    printed = capsys.readouterr().out
+    assert rc == 0, printed
+    assert "SESSION STORE UNREADABLE" not in printed, printed
+
+    rep = tally_mod.tally(tally_mod.day_rows(str(store), "2026-09-30"),
+                          session_ids=tally_mod.known_sessions(str(sessions)))
+    assert rep["stream_chat"] == {"lines": 6, "unrecorded": 5,
+                                  "pct": 100.0 * 5 / 6}, rep["stream_chat"]
+    assert rep["attribution"] == {
+        "unthreaded_send_site": sorted(known[:2]),
+        "restart_boundary": ["20260929_010003_ghost_ffff"],
+        "registry_eviction": [known[2]],
+    }, rep["attribution"]
+
+    # The zero-denominator rail: a window with lines and no stream_chat line must
+    # not come back looking like a clean day.
+    (store / "2026-09-29.ndjson").write_text(
+        _row("", "turn_start", site="app/secondary_models.py") + "\n",
+        encoding="utf-8")
+    capsys.readouterr()
+    rc = tally_mod.report(str(store), ["2026-09-29", "2026-01-01"], json_out=False,
+                          sessions_dir=str(sessions))
+    empty = capsys.readouterr().out
+    assert rc == 2, (
+        "a day with no stream_chat line and a day with no file both returned 0 — "
+        "the check can report a clean result over nothing")
+    assert "NO stream_chat LINE" in empty, empty

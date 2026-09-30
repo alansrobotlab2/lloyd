@@ -470,7 +470,14 @@ def build_options(
     harness_kwargs = dict(_get_harness_kwargs())
     harness_kwargs["tool_search_enabled"] = False
 
-    system_prompt = build_system_prompt(overlay_dir=overlay_dir)
+    # `session_id` (#1879) is the trial's own, two lines below in the
+    # `RunOptions` it returns. Left out of the build, the trial's every
+    # `stream_chat` line named a session whose prompt parts the manifest had
+    # never seen — `note_components` only runs inside the builder's
+    # `if session_id:` block — which is where the `bench` sessions of the
+    # 2026-09-30 unrecorded residual came from.
+    system_prompt = build_system_prompt(overlay_dir=overlay_dir,
+                                        session_id=session_id)
     if system_append:
         system_prompt = system_prompt.rstrip() + "\n\n" + system_append.strip() + "\n"
 

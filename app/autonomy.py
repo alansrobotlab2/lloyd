@@ -4008,7 +4008,15 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
         from app.mcp_discovery import _get_disallowed_tools, _get_harness_kwargs
         from app.prompt_builder import build_system_prompt
 
-        system_prompt = build_system_prompt(platform="autonomy")
+        # `session_id` (#1879) is the run's own, minted at the top of this
+        # function and already carried down to `RunOptions`. Without it the
+        # builder skips `note_components` — that call sits inside its
+        # `if session_id:` block — so every `stream_chat` line the run sent read
+        # `components_captured: "unrecorded"` and the nightly prompt-diff
+        # consumer could see none of its prompt parts: 13 of the 29 unrecorded
+        # sessions on 2026-09-30 were autonomy runs.
+        system_prompt = build_system_prompt(platform="autonomy",
+                                            session_id=session_id)
 
         config = yaml.safe_load((LLOYD_HOME / "config.yaml").read_text()) or {}
         # Resolve the tool surface through the same helpers the chat and voice

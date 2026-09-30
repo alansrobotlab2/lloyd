@@ -413,7 +413,15 @@ def _worker_run_options(max_turns: int, *, source: str | None = None,
     # Worker platform: no USER.md. ~20k tokens of who Alan is, on a turn
     # nobody reads, judged against an acceptance contract rather than
     # against his preferences.
-    system_prompt = build_system_prompt(platform="worker")
+    # `session_id` (#1879) is the same id the budget anchor and the scratchpad
+    # anchor below are keyed on, so the prompt the builder records here is filed
+    # under the session that is about to send it: `note_components` sits inside
+    # the builder's `if session_id:` block, and with no id every `stream_chat`
+    # line a worker turn sent read `components_captured: "unrecorded"`. The
+    # state-carried caller passes an empty id — its template is built before any
+    # session exists — and an empty id keeps meaning "nothing to key", exactly
+    # like the scratchpad rule above, so no template is mis-attributed.
+    system_prompt = build_system_prompt(platform="worker", session_id=session_id)
 
     # `app.config.CONFIG`, not a fresh `yaml.safe_load` of config.yaml. Reading
     # the file directly skips all three things the loader does: `${VAR}`

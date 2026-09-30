@@ -114,17 +114,38 @@ def chat_completion(
     """
     endpoint = _endpoint_for(model)
     model_name = _resolved_model_name(model)
+    payload: dict[str, Any] = {
+        "model": model_name,
+        "messages": messages,
+        "temperature": 0.3,
+        "max_tokens": max_tokens,
+        "chat_template_kwargs": {"enable_thinking": False},
+        "priority": AUTORESEARCH_PRIORITY,
+    }
+    # #1879: name the prompt this call injects. A direct trial has no session at
+    # any level of its chain — the `build_system_prompt` call in `_run_one_sync`
+    # and in `strategy_arms.run_arm_trial` has no id to pass, and the caller is a
+    # bench task dict rather than a session — so the system message is described
+    # at the send instead, the way `app/inner_voice/observer.py` and
+    # `app/secondary_models.py` describe their own. `components_from_payload`
+    # digests the system message and nothing else: the digest goes to the store,
+    # the text stays here, and no session-keyed table gains a key no session
+    # owns. This send is a bare `requests.post`, so it writes no `stream_chat`
+    # line — what it fixes is prompt provenance for the bench fleet, not that
+    # site's residual.
+    try:
+        from app.component_manifest import components_from_payload, record_request
+        record_request(base_url=endpoint, model=model_name, payload=payload,
+                       send_site="scripts/autoresearch/bench_runner.py"
+                                 "::chat_completion",
+                       components=components_from_payload(payload))
+    except Exception as exc:  # noqa: BLE001 — a manifest is never worth the request
+        import logging
+        logging.getLogger("lloyd-bench").debug("bench manifest skipped: %s", exc)
     resp = requests.post(
         f"{endpoint}/v1/chat/completions",
         headers={"Authorization": "Bearer no-key-required"},
-        json={
-            "model": model_name,
-            "messages": messages,
-            "temperature": 0.3,
-            "max_tokens": max_tokens,
-            "chat_template_kwargs": {"enable_thinking": False},
-            "priority": AUTORESEARCH_PRIORITY,
-        },
+        json=payload,
         timeout=timeout_seconds,
     )
     resp.raise_for_status()
