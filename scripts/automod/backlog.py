@@ -881,9 +881,23 @@ WITNESS_EXTS = ("jsonl", "json", "csv", "ndjson", "db", "sqlite", "sqlite3",
 #: An absolute or `~`/`$HOME`-rooted path with one of those extensions, as it
 #: appears in an item body or a triage evidence block. Brackets and `+` are in
 #: the class because a pytest fixture path can hold them.
+#:
+#: The leading boundary is what #1889 added. With the `~`/`$HOME` prefix merely
+#: optional and the `/` mandatory, the pattern matched the TAIL of any relative
+#: path — #1886's body names `chrome-extension/manifest.json` and the old
+#: pattern returned `/manifest.json`. A URL's path was the second shape cut the
+#: same way: `https://docs.example.com/run/report.jsonl` yielded a token beginning
+#: `//docs.example.com/...`, since an empty segment satisfies the directory
+#: repetition and the character before the first slash was a colon. A root form
+#: now has to start at home, at `$HOME`, or at a `/` preceded by no path
+#: character, no slash and no colon — so neither a relative tail nor a URL's path
+#: yields a token. `tests/test_witness_artifact_clause.py` pins both directions:
+#: the two shapes that must not match, and the three real spellings — `~/…ndjson`
+#: (#1879), `$HOME/…log` (#1884) and `/home/…/promotions.jsonl` — that must still
+#: match whole.
 WITNESS_PATH_RX = re.compile(
-    r"(?:~|\$HOME)?/(?:[\w.\-\[\]+]*/)*[\w.\-\[\]+]+\.(?:%s)\b"
-    % "|".join(WITNESS_EXTS))
+    r"(?:(?:~|\$HOME)|(?<![\w.\-\[\]+/:]))"
+    r"/(?:[\w.\-\[\]+]*/)*[\w.\-\[\]+]+\.(?:%s)\b" % "|".join(WITNESS_EXTS))
 #: A clause that already says where the bytes go. The two shapes that claim
 #: takes here: the archive convention below, or an explicit vault path. Missing
 #: one and adding a second clause is the safe direction; skipping the clause
@@ -897,6 +911,23 @@ _LINE_WITNESS_EXTS = frozenset({"jsonl", "ndjson", "csv", "tsv", "txt", "log"})
 _SQL_WITNESS_EXTS = frozenset({"db", "sqlite", "sqlite3"})
 
 
+def _witness_target(path) -> Path:
+    """`path` as a file on this machine, with both home spellings resolved."""
+    import os
+    return Path(os.path.expandvars(str(path))).expanduser()
+
+
+def _witness_is_on_disk(path) -> bool:
+    """True when the named witness is readable bytes on THIS disk, right now.
+
+    The rule asks a round to `copy` those bytes, so the request is only real if
+    they are there. This is not the git-tree probe in another guise: the probe
+    answers whether a history covers a file, and this answers whether there is a
+    file for it to cover.
+    """
+    return _witness_target(path).is_file()
+
+
 def in_git_tree(path) -> bool:
     """True when `path` sits inside some git repository's working tree.
 
@@ -905,9 +936,15 @@ def in_git_tree(path) -> bool:
     the directory rather than of one machine's path layout. A path not written
     yet is probed at its nearest existing ancestor — a file the next run will
     create is still inside, or outside, a tree.
+
+    The ancestor walk is also why the probe cannot answer "does this path
+    exist": a name that resolves to nothing anywhere walks up to `/`, where
+    `rev-parse` exits 128, which reads exactly like "out of every tree". #1886
+    was handed a clause ordering `/manifest.json` to be copied on precisely that
+    reading. So callers ask `_witness_is_on_disk` first and this only after it.
     """
     import subprocess
-    target = Path(str(path)).expanduser()
+    target = _witness_target(path)
     here = target if target.is_dir() else target.parent
     while not here.exists() and here != here.parent:
         here = here.parent
@@ -934,8 +971,14 @@ def add_witness_artifact_clause(clauses, text, *, probe=in_git_tree,
     list is never mutated. Fires only when all three hold:
 
       * no clause already names where the bytes go (`_ARCHIVE_MENTION_RX`);
-      * `probe` says a path the item names is in no git tree — those bytes
-        exist in no history anywhere;
+      * the bytes are on this disk: a token that resolves to no file is
+        dropped, because the clause would order a round to copy nothing. #1886
+        got one on `/manifest.json` — a token the old unanchored pattern cut out
+        of the relative `chrome-extension/manifest.json`, which then walked
+        through `in_git_tree` as "in no tree" for the separate reason that the
+        path does not exist;
+      * `probe` says such a path is in no git tree — those bytes exist in no
+        history anywhere;
       * the contract has room: at `MAX_CLAUSES` the list comes back UNCHANGED,
         because a generated clause must never evict, truncate or reorder one
         that was authored.
@@ -947,6 +990,16 @@ def add_witness_artifact_clause(clauses, text, *, probe=in_git_tree,
     from), a sqlite count for a store, and `wc -l` for anything else, which
     names the artifact honestly while a parquet's real report command stays
     whatever the item itself quoted.
+
+    What this function cannot do is undo a clause it already emitted. A
+    `vault`-surface item has no amendment route at all: `amend_clause` resolves
+    the graded review through `last_graded_review(ledger, round_id)`, and no
+    `vault_review` row in the ledger carries a `round_id` (0 of 291 on
+    2026-09-30), while the vault grader writes no per-clause verdicts in
+    structured form at all — `met` is the only value ever recorded there, so the
+    `verdict == "unsatisfiable"` guard can never fire for a vault clause. That
+    leaves a bad generated clause sitting in the item's own front matter with
+    nothing to clear it but editing the item, which is what #1889 does for #1886.
     """
     every = list(clauses or ())
     if any(_ARCHIVE_MENTION_RX.search(str(c)) for c in every):
@@ -957,6 +1010,8 @@ def add_witness_artifact_clause(clauses, text, *, probe=in_git_tree,
         if tok in seen:
             continue
         seen.add(tok)
+        if not _witness_is_on_disk(tok):
+            continue
         if not probe(tok):
             witness = tok
             break
