@@ -117,10 +117,48 @@ def store(tmp_path: Path) -> Path:
 
 @pytest.fixture()
 def small_store(tmp_path: Path) -> Path:
-    """40 human turns but only 3 candidates: over the item floor, under it."""
+    """40 human turns with only 3 candidates, so exactly ONE floor binds.
+
+    3 candidates + 37 sampled non-candidates is 40 packet items, which clears
+    `MIN_ITEMS`, so the only shortfall here is `MIN_CANDIDATES`. Naming both
+    floors in the docstring is what makes the refusal test below meaningful: if a
+    future floor change made the item count short as well, the test would have to
+    name two shortfalls and this fixture would say so.
+    """
     _write_store(tmp_path, "s_a", _msgs(3, 37))
     assert len(_corpus(tmp_path)) == 40
     assert len(uptake.candidate_disputes(_corpus(tmp_path))) == 3
+    return tmp_path
+
+
+@pytest.fixture()
+def floor_store(tmp_path: Path) -> Path:
+    """The clause's OWN numbers, exactly: 15 candidates among 40 human turns.
+
+    `store` clears every floor by a wide margin (20 of 70), which means it cannot
+    tell 15 from 14 or 40 from 41 — a `MIN_CANDIDATES` lowered to 14, or a
+    `MIN_ITEMS` raised to 41, leaves the whole suite green. This fixture is the
+    boundary those two constants are documented at, so the pair of tests reading
+    it (writes at 15/40, refuses at 14/40) is what pins their values. 15
+    candidates + the 25 non-candidates that survive the sample is exactly
+    `MIN_ITEMS`, which is the coincidence the clause relies on and so the thing
+    worth asserting rather than assuming.
+    """
+    _write_store(tmp_path, "s_floor", _msgs(15, 25))
+    turns = _corpus(tmp_path)
+    cands = uptake.candidate_disputes(turns)
+    assert len(turns) == 40, len(turns)
+    assert len(cands) == 15, len(cands)
+    return tmp_path
+
+
+@pytest.fixture()
+def one_candidate_short(tmp_path: Path) -> Path:
+    """14 candidates among the same 40 human turns: the floor, minus one."""
+    _write_store(tmp_path, "s_under", _msgs(14, 26))
+    turns = _corpus(tmp_path)
+    assert len(turns) == 40, len(turns)
+    assert len(uptake.candidate_disputes(turns)) == 14
     return tmp_path
 
 
@@ -167,11 +205,50 @@ def test_the_default_labels_dir_is_eval_uptake_labels_under_the_repo(store,
             / "packet-2026-11-19.json").is_file(), out
 
 
+def test_emit_writes_at_the_clause_s_own_floor_of_fifteen_candidates(
+        floor_store):
+    """Clause 1 AT its numbers: `>= 15 candidates among >= 40 human turns` has to
+    mean 15 and 40 WORK, not merely that 20 and 70 do. `store` clears both floors
+    by a wide margin, so it cannot tell 15 from 14; this fixture can.
+
+    15 candidates plus the 25 non-candidates the sample takes is exactly 40 items,
+    which is the coincidence the clause's floors rest on — assert it rather than
+    assume it, because a packet that came in at 39 items would refuse and nobody
+    reading a green suite would know the builder never runs at its own trigger.
+    """
+    rc, out, err = _run("--root", str(floor_store),
+                        "--labels-dir", str(_labels(floor_store)),
+                        "--date", "2026-11-19")
+    assert rc == 0, (out, err)
+    doc = json.loads((_labels(floor_store) / "packet-2026-11-19.json")
+                     .read_text())
+    items = doc["items"]
+    cand_ids = {t.turn_id for t in uptake.candidate_disputes(_corpus(floor_store))}
+
+    assert len(cand_ids) == audit.MIN_CANDIDATES, (cand_ids, audit.MIN_CANDIDATES)
+    # MIN_ITEMS == 40 is what makes a 15-candidate packet reach the item floor at
+    # all; if it were raised to 41 this emit would refuse and this assert is the
+    # one that says so, alongside the refusal neighbour below.
+    assert len(items) == doc["n_items"] == audit.MIN_ITEMS, (len(items),
+                                                            audit.MIN_ITEMS)
+    assert cand_ids <= {it["turn_id"] for it in items}
+    for it in items:
+        assert set(it) == ITEM_KEYS, sorted(it)
+
+
 def test_the_sample_is_spread_across_the_corpus_not_a_head_slice(store):
     """Clause 1's "stratified" half. Sessions sort by name, so `s_a`'s 54 turns
-    come first and a head-slice would never reach the last turn of `s_c`. The
-    systematic sample takes endpoints, so the store's LAST turn must be in the
-    packet — a `pool[:want]` reading of "sample" fails here."""
+    come first and a head-slice of the 50-strong non-candidate pool would never
+    reach `s_c`. The systematic sample takes endpoints, so the LAST non-candidate
+    turn in corpus order — `s_c`'s last plain request — must be in the packet; a
+    `pool[:want]` reading of "sample" fails here.
+
+    Not the store's last turn overall: `_msgs` writes each session's plain
+    requests before its cue turns, so the corpus's actual last turn is a
+    CANDIDATE and lands in the packet under the every-candidate rule no matter how
+    the sample is drawn. Testing that turn would prove nothing about sampling, so
+    this one reads the non-candidate list, which is what the sample draws from.
+    """
     rc, out, err = _run("--root", str(store), "--labels-dir", str(_labels(store)),
                         "--date", "2026-11-19")
     assert rc == 0, (out, err)
@@ -255,6 +332,33 @@ def test_a_packet_written_by_a_previous_run_is_never_rewritten(store, tmp_path):
 
 
 # ---------------------------------------------------------------- clause 3 --
+
+def test_one_candidate_short_of_the_floor_refuses_and_says_which_floor(
+        one_candidate_short):
+    """Clause 3 at its exact number: 14 candidates among 40 human turns is ONE
+    short of `MIN_CANDIDATES`, so the refusal must name that shortfall and no
+    other. `small_store` fails by a wide margin (3 candidates) and so cannot tell
+    a floor of 15 from one of 4 — this node and the exact-floor emit above are the
+    pair that pins the constant at 15.
+
+    Only one shortfall may be named: 14 + 26 sampled = 40 items clears
+    `MIN_ITEMS`, so a refusal that also printed `packet items ... < 40` would mean
+    the item floor had moved, and the sentence the operator reads would blame the
+    wrong floor for the refusal.
+    """
+    labels = _labels(one_candidate_short)
+    rc, out, err = _run("--root", str(one_candidate_short),
+                        "--labels-dir", str(labels), "--date", "2026-11-19")
+    assert rc == audit.EXIT_BELOW_FLOOR, (out, err)
+    assert "candidates 14 < 15" in err, err
+    # The preamble always recites both floors ("needs >= 40 packet items from
+    # >= 15 candidates"); it is the SHORTFALL list in the parenthetical that may
+    # name only one, so match a shortfall entry rather than the word "items".
+    assert re.search(r"packet items \d+ <", err) is None, err
+    assert "human_turns(days=900) = 40" in out + err, out + err
+    assert "wrote nothing" in err, err
+    assert not labels.exists(), list(labels.iterdir())
+
 
 def test_emit_refuses_below_the_candidate_floor_and_writes_nothing(small_store):
     """Clause 3: 40 human turns but 3 candidates -> non-zero, no packet, both
