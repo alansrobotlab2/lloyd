@@ -1350,7 +1350,7 @@ asked to restate the review as one JSON object.
 def grade_vault(*, item_id: int, paths: list[str], diff: str,
                 vault: Path | None = None, backend: str | None = None,
                 sessions_dir: Path | None = None, timeout: float = REVIEW_TIMEOUT_S,
-                model: str = "primary") -> tuple[str, str, list[dict]]:
+                model: str = "primary", attempt: int = 1) -> tuple[str, str, list[dict]]:
     """`(kind, findings, clauses)` for a vault round's staged edit — the
     `vault_round.GRADER` contract. `skipped` when the grader cannot run.
 
@@ -1366,6 +1366,19 @@ def grade_vault(*, item_id: int, paths: list[str], diff: str,
     with its verdict from the sha. Every `skipped` return carries a distinct
     reason string, which `land()` writes to the ledger — #955's merged finding
     was that six different abstentions all arrived as one unlabelled word.
+
+    `attempt` is which grading of this round this is, and the seam decision is
+    read from it and from `seams_policy()` like everywhere else that decides one
+    (#1868). Before this parameter existed the call was `decide(parsed, [])`, so
+    both fell to their defaults and a vault round blocked a testable seam on
+    whatever `seams_block` was set to — under the shipped `never`, four rounds
+    after that setting landed still carried the blocking spelling, including #1621
+    refused on its SECOND attempt, which no policy permits at all. The vault
+    surface requires no test suite yet the shared schema still *asks* the grader
+    for `seams_unverified`, so this route was the only one left that could refuse
+    on a seam the operator had ruled non-blocking. `vault_round` passes the count
+    it already computes for the ledger row, so the grader's prior-review prompt and
+    this decision cannot disagree about which attempt this is.
     """
     from scripts.automod import backlog as B, state as S, vault_round as VR
     vault = Path(vault or VR.VAULT)
@@ -1402,7 +1415,12 @@ def grade_vault(*, item_id: int, paths: list[str], diff: str,
         if c["clause"] in landing and c["verdict"] != "post_landing":
             c["downgraded"] = [f"graded by the landing, not by this review: {c['verdict']}"]
             c["verdict"] = "post_landing"
-    kind, findings = decide(parsed, [])
+    # The one configured measurement of seam severity, and this round's real
+    # attempt — the same two arguments `gate.py` passes at its own rung
+    # (`RV.decide(..., attempt=attempt, policy=RV.seams_policy())`). Hard-coding
+    # either here would let a vault round refuse on a setting the operator has
+    # already overridden, which is what #1868 spent #1621's attempts on.
+    kind, findings = decide(parsed, [], attempt=attempt, policy=seams_policy())
     graded = {c["clause"]: c["verdict"] for c in parsed["clauses"]}
     # One row per clause of the contract as it stood when graded, so a reader
     # needs no second lookup of a contract that may have changed since; a

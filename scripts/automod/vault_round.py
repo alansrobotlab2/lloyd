@@ -437,11 +437,19 @@ GRADER = None
 VAULT_REVIEW_MAX = 2
 
 
-def _vault_review(norm: list[str], item_id: int) -> tuple[str, str, list[dict]]:
+def _vault_review(norm: list[str], item_id: int,
+                  attempt: int = 1) -> tuple[str, str, list[dict]]:
     """`(kind, findings, clauses)` from the grader over the staged diff. Never
     raises; an unusable grader is `("skipped", why, [])` and the landing
     proceeds — a vault edit is already validated through the real loaders,
     and a grader outage must not hold every skill edit hostage.
+
+    `attempt` is which grading of this round this is, and it goes to the grader
+    (#1868): the seam-severity decision inside `grade_vault` is a function of it,
+    so a round graded on its second attempt has to be decided as attempt 2.
+    `land()` passes the same count it would write to the ledger for a refusal,
+    which is the only reason that number existed before this parameter — the
+    grader itself was told nothing and fell back to 1.
 
     On a `skipped` the `findings` slot is the REASON, and every cause has its
     own wording: no grader wired, the grader raising, the grader not answering,
@@ -473,7 +481,7 @@ def _vault_review(norm: list[str], item_id: int) -> tuple[str, str, list[dict]]:
             if (_git("cat-file", "-e", f"HEAD:{p}").returncode != 0 and (VAULT / p).exists()
                     and not _in_index(p)):
                 diff += f"\n+++ new file {p}\n" + (VAULT / p).read_text(encoding="utf-8", errors="replace")
-        res = tuple(GRADER(item_id=item_id, paths=norm, diff=diff))
+        res = tuple(GRADER(item_id=item_id, paths=norm, diff=diff, attempt=attempt))
         graded = res[2] if len(res) > 2 else []
         clauses = [{"clause": int(c["clause"]), "verdict": str(c["verdict"]),
                     **({"subject": str(c["subject"])} if c.get("subject") else {})}
@@ -598,8 +606,26 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
                          "so it was not consulted (module CLI, autoresearch promote)")
     clauses: list[dict] = []
     landing: set[int] = set()
+    # What the reviewer said about a round it did NOT refuse. A seam the policy
+    # makes advisory lands here, and this is the only surface a passing round's
+    # finding ever reaches: a refusal writes `findings` on its own row and then
+    # reverts, so without this field the advisory sentence is discarded at the
+    # point it first matters (#1868 clause 4 — a seam that no longer blocks has to
+    # survive the pass as a post-landing check, or making it advisory is the same
+    # as deleting the rail). `review_findings`, not `findings`: on a `skipped` the
+    # grader's findings slot holds the skip reason, which `review_reason` already
+    # carries, and one field meaning two things is what that field was fixed for.
+    # Empty findings write no key, so an absent key means "nothing reported" and
+    # never "reported as nothing".
+    review_findings: str = ""
     if item_id is not None:
-        kind, findings, clauses = _vault_review(norm, int(item_id))
+        # Which grading of this round this is, computed BEFORE the grader runs.
+        # `_vault_review_attempts` counts this item's prior blocking reviews, and
+        # the grader has to decide the seam on the same number the refusal row
+        # would carry — a round on its second attempt decided as attempt 1 is how
+        # #1621 was refused twice under a policy that permits neither (#1868).
+        attempts = _vault_review_attempts(int(item_id)) + 1
+        kind, findings, clauses = _vault_review(norm, int(item_id), attempts)
         review = kind
         # The grader marks the clauses it refused to grade because they are about
         # this commit; the contract read is the belt to that brace, for the
@@ -608,8 +634,13 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
         landing |= set(_landing_clause_indices(int(item_id)))
         if kind == "skipped":
             review_reason = findings
+        elif kind == "pass":
+            # A refusal never gets here (it raises, and its own row carries the
+            # text), and a `skipped` puts the skip REASON in that slot, which
+            # `review_reason` already carries — so this is only ever a pass's
+            # advisories.
+            review_findings = findings
         if kind in ("retry", "unsound"):
-            attempts = _vault_review_attempts(int(item_id)) + 1
             final = kind == "unsound" or attempts >= VAULT_REVIEW_MAX
             # First refusal: the edits stay in place so the model can fix them
             # and land again. Second, or an unsound premise: revert, with the
@@ -680,6 +711,10 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
                     "paths": norm, "validated": buckets["validated"],
                     "review": review, "review_reason": review_reason,
                     "review_clauses": review_clauses, "landing_clauses": landing_rows,
+                    # Only when the reviewer said something about a round it
+                    # passed: an advisory seam must outlive the pass, and this is
+                    # the row a post-landing reader looks at.
+                    **({"review_findings": review_findings} if review_findings else {}),
                     # The attribution `round_landing_rows` falls back to when the
                     # caller passed no item_id. A CLI/autoresearch land has no
                     # turn and so no session; it writes no key, which is honest.
@@ -689,6 +724,7 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
     return {"ok": True, "commit": sha, "paths": norm, "validated": buckets["validated"],
             "review": review, "review_reason": review_reason,
             "landing_clauses": landing_rows,
+            **({"review_findings": review_findings} if review_findings else {}),
             **({"skill_gate": skill_gate} if skill_gate else {})}
 
 

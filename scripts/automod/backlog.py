@@ -2856,6 +2856,12 @@ def vault_review_outcome(ledger: Path, vault_commits: list[str], *,
         return None
     return {"acceptance": "met", "landed": True, "source": "vault_review",
             "deferred_to": [], "spawned": [],
+            # What the reviewer said about a round it passed (#1868). This dict is
+            # the record that closes a vault item, so it is where a seam the policy
+            # made advisory reaches whoever finishes the item: the row on the ledger
+            # is the witness, and without this key the witness had no reader.
+            **({"review_findings": str(ev["review_findings"])}
+               if ev.get("review_findings") else {}),
             "clause_outcomes": [{"clause": i, "outcome": "met", "deferred_to": [],
                                  "evidence": f"vault review of {sha[:8]}"}
                                 for i in sorted(verdicts)],

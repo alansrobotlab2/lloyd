@@ -660,3 +660,164 @@ def test_the_contract_refusal_survives_the_vault_routes_fresh_interpreter(vault,
     light = json.loads(_contract_errors_in_a_fresh_interpreter(["lloyd/SOUL.md"], vault)
                        .stdout.strip().splitlines()[-1])
     assert not [e for e in light if "over the 50% ceiling" in e], light
+
+
+# ── #1868: the vault round's seam decision reads the configured policy ────────
+#
+# `grade_vault` used to call `decide(parsed, [])`, so `attempt` and `policy`
+# fell to their defaults (`1` and `first`) whatever config.yaml said. With the
+# shipped `seams_block: never` that refused rounds the operator had ruled a
+# seam could never refuse: 4 `vault_review` ledger rows carry the blocking
+# spelling after that setting shipped, and #1621's pair (attempt 1 AND attempt
+# 2) is the proof both arguments were defaulted, because `seams_block` returns
+# False for any policy at attempt 2. These tests run the REAL `grade_vault` with
+# only `run_grader` replaced, so the policy has to be read through
+# `seams_policy()` → the shared CONFIG, exactly as the code rung reads it.
+
+#: The one grader object these tests need: both clauses met, and the only
+#: defect a testable, actionable, never-before-seen seam. The default readings of
+#: `parse_review` are what makes it blocking-shaped (#84 in
+#: test_review_grader_policy.py pins them), so this is a real grader answer and
+#: not a fixture invented to be refused.
+GRADER_SAYS_MET_WITH_ONE_SEAM = {
+    "premise": "sound", "summary": "content is fine", "test_honesty": [],
+    "seams_unverified": [{"seam": "the dashboard reads the ledger the job writes",
+                          "testable_before_landing": True,
+                          "actionable_in_round": True, "same_as_prior": False}],
+    "clauses": [
+        {"clause": 1, "verdict": "met", "evidence_path": "skills/foo/SKILL.md",
+         "evidence_line": 1, "test_node_id": "", "how_verified": "read", "note": "named"},
+    ]}
+
+
+def _seams_policy_set(monkeypatch, policy: str) -> None:
+    """Set `automod.review.seams_block` through the config `seams_policy()` reads,
+    not by patching the function: the bug was a caller bypassing that reader, so a
+    test that patched the reader could not fail it."""
+    from app.config import CONFIG
+    automod = dict(CONFIG.get("automod") or {})
+    review = dict(automod.get("review") or {})
+    review["seams_block"] = policy
+    automod["review"] = review
+    monkeypatch.setitem(CONFIG, "automod", automod)
+
+
+def _grade_once(items, monkeypatch, *, attempt: int):
+    """One real `grade_vault` over a one-clause item, grader answer fixed."""
+    import scripts.automod.review as RV
+    write_item(items, 411, ["the skill names the retry rule"])
+    monkeypatch.setattr(RV, "run_grader",
+                        lambda **kw: {"ok": True, "structured": GRADER_SAYS_MET_WITH_ONE_SEAM})
+    return RV.grade_vault(item_id=411, paths=["skills/foo/SKILL.md"], diff="x",
+                          attempt=attempt)
+
+
+def test_the_shipped_seams_policy_means_a_vault_round_cannot_refuse_on_a_seam(vault, items,
+                                                                              monkeypatch):
+    """Clause 1, on the shipped setting: config.yaml says `never`, so a vault
+    round whose clauses are met and whose only defect is a testable, actionable
+    seam must not be a `retry` — and the seam must still be in the findings, in
+    the advisory spelling, because advisory is a report and not a deletion.
+    """
+    _seams_policy_set(monkeypatch, "never")
+    kind, findings, clauses = _grade_once(items, monkeypatch, attempt=1)
+    assert kind == "pass", f"`seams_block: never` refused anyway: {kind} — {findings}"
+    assert "seam unverified (advisory under seams_block=never)" in findings, findings
+    assert "the dashboard reads the ledger the job writes" in findings, findings
+    assert [c["verdict"] for c in clauses] == ["met"], clauses
+
+
+def test_a_vault_round_decides_a_seam_by_the_attempt_it_is_given(vault, items, monkeypatch):
+    """Clause 2: `first` blocks attempt 1 and advises on attempt 2, so threading
+    is demonstrably real and not a hard-wired `never`. Same grader answer, same
+    policy, only the attempt differs — which is the only shape that distinguishes
+    `attempt=attempt` from no argument at all."""
+    _seams_policy_set(monkeypatch, "first")
+    first_kind, first_findings, _ = _grade_once(items, monkeypatch, attempt=1)
+    assert first_kind == "retry", first_findings
+    assert first_findings.startswith("seam unverified: "), first_findings
+
+    second_kind, second_findings, _ = _grade_once(items, monkeypatch, attempt=2)
+    assert second_kind == "pass", (
+        f"attempt 2 refused on a policy that permits refusal on attempt 1 only: "
+        f"{second_findings}")
+    assert "seam unverified (attempt 2, not refusing again)" in second_findings, second_findings
+
+
+def test_the_round_tells_the_grader_which_attempt_this_is(vault, items, monkeypatch):
+    """Clause 3, across the `land()` → `_vault_review` → `GRADER` boundary: the
+    attempt count `land()` already computes for the ledger row has to reach the
+    grader, or a round graded after one refusal is decided as if it were the
+    first. A prior blocking row for the item is what makes this attempt 2, which
+    is how the count is produced in production."""
+    seen: list[int] = []
+
+    def _grader(**kw):
+        seen.append(kw["attempt"])
+        return ("pass", "content met, no advisories", [])
+
+    monkeypatch.setattr(V, "GRADER", _grader)
+    write_item(items, 412, ["the skill names the retry rule"])
+    (vault / "skills" / "foo" / "SKILL.md").write_text("---\nname: foo\n---\n# foo v2\n")
+    out = V.land(["skills/foo/SKILL.md"], "skill: foo v2 (#412)", item_id=412)
+    assert out["ok"], out
+    assert seen == [1], seen
+
+    S.append_event({"event": "vault_review", "item_id": 412, "kind": "retry",
+                    "blocking": True, "attempt": 1, "findings": "seam unverified: x"})
+    (vault / "skills" / "foo" / "SKILL.md").write_text("---\nname: foo\n---\n# foo v3\n")
+    out = V.land(["skills/foo/SKILL.md"], "skill: foo v3 (#412)", item_id=412)
+    assert out["ok"], out
+    assert seen == [1, 2], (
+        f"the second grading was decided as attempt {seen[-1]}; the grader needs the "
+        "same count the ledger row would carry")
+
+
+def test_an_advisory_surviving_a_pass_is_recorded_on_the_landing(vault, items, monkeypatch):
+    """Clause 4: making a seam advisory is only a report if the report is kept, in
+    both places a reader of this item has. A refused round writes `findings` on its
+    own row and then reverts, so a PASSING round's findings had nowhere to go at all
+    — they were computed and dropped at the call site. This lands a real
+    `grade_vault` pass carrying a real advisory seam and reads it back off the
+    `vault_land` event AND off `backlog.vault_review_outcome`, the record that
+    closes a vault item: an advisory on an event nobody queries is the same as a
+    deleted rail."""
+    import scripts.automod.backlog as B
+    import scripts.automod.review as RV
+    _seams_policy_set(monkeypatch, "never")
+    write_item(items, 413, ["the skill names the retry rule"])
+    monkeypatch.setattr(RV, "run_grader",
+                        lambda **kw: {"ok": True, "structured": GRADER_SAYS_MET_WITH_ONE_SEAM})
+    monkeypatch.setattr(V, "GRADER", RV.grade_vault)
+    (vault / "skills" / "foo" / "SKILL.md").write_text("---\nname: foo\n---\n# foo retry rule\n")
+    out = V.land(["skills/foo/SKILL.md"], "skill: foo names the retry rule (#413)", item_id=413)
+    assert out["ok"] and out["review"] == "pass", out
+    assert "seam unverified (advisory under seams_block=never)" in out["review_findings"], out
+    ev = _events("vault_land")[-1]
+    assert "the dashboard reads the ledger the job writes" in ev["review_findings"], ev
+    outcome = B.vault_review_outcome(S.LEDGER_PATH, [out["commit"]])
+    assert outcome and outcome["acceptance"] == "met", outcome
+    assert "the dashboard reads the ledger the job writes" in outcome["review_findings"], (
+        f"the record that closes the item dropped the advisory the review passed: {outcome}")
+
+
+def test_a_pass_with_nothing_to_report_records_no_findings_field(vault, items, monkeypatch):
+    """The positive control for the clause-4 key's absence rule: a pass whose
+    findings string is EMPTY — the reviewer said nothing beyond its verdict — gets
+    no `review_findings` on the event or on the outcome, so a reader can tell "the
+    reviewer had no finding" from "the field was written empty", and the landing
+    rows this key predates stay exactly what they were. A pass that DID say
+    something writes it verbatim, summary or not: the key is "the reviewer's report
+    of a round it passed", not "the advisories only".
+    """
+    import scripts.automod.backlog as B
+    monkeypatch.setattr(V, "GRADER", lambda **kw: (
+        "pass", "", [{"clause": 1, "verdict": "met"}]))
+    write_item(items, 414, ["the skill names the retry rule"])
+    (vault / "skills" / "foo" / "SKILL.md").write_text("---\nname: foo\n---\n# foo v9\n")
+    out = V.land(["skills/foo/SKILL.md"], "skill: foo v9 (#414)", item_id=414)
+    assert out["ok"] and "review_findings" not in out, out
+    ev = _events("vault_land")[-1]
+    assert "review_findings" not in ev, ev
+    outcome = B.vault_review_outcome(S.LEDGER_PATH, [out["commit"]])
+    assert outcome and "review_findings" not in outcome, outcome

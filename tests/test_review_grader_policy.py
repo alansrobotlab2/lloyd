@@ -393,3 +393,43 @@ def test_redecide_reads_full_seam_judgments_when_the_event_carries_them():
     parsed, _ = RT.parsed_from_event({**old, "seams_untestable": ["s"]})
     assert parsed["seams_unverified"] == [{"seam": "s", "testable_before_landing": False,
                                            "actionable_in_round": True, "same_as_prior": False}]
+
+
+# ── #1868: the vault route now reads the policy too, so pin the code route's ──
+# ── verdicts against drift from the other side of the same decision.          ──
+
+@pytest.mark.parametrize("policy,verdicts", [
+    ("never", ("pass", "pass")),
+    ("first", ("retry", "pass")),
+    ("always", ("retry", "retry")),
+])
+def test_the_seam_matrix_is_one_measurement_for_every_caller(policy, verdicts):
+    """The three `seams_block` values at attempts 1 and 2, in one place. The
+    vault route used to answer this question with a caller-supplied constant
+    (`decide(parsed, [])` → `policy="first"`, `attempt=1`) while the code rung
+    read the config, and the two surfaces disagreed about what blocks: 4
+    `vault_review` rows carry the blocking spelling after
+    2026-09-24 shipped `seams_block: never`. The row that fixes the vault half
+    is this matrix, so it has to name all six verdicts and not just the two the
+    other tests happen to exercise."""
+    got = tuple(RV.decide(_parsed(seams_unverified=[_seam()]), [],
+                          attempt=attempt, policy=policy)[0]
+                for attempt in (1, 2))
+    assert got == verdicts, f"{policy}: {got}"
+
+
+def test_the_code_rung_threads_the_policy_and_its_own_attempt():
+    """#1868's clause 5 is that the code rung is UNTOUCHED, which is only a
+    property worth pinning if a reader can see the two arguments the vault route
+    was missing. `Gate.rung_review` is the live call; the vault grader now passes
+    the same pair. A rung that stopped passing either would decide a seam on the
+    default (`first`, attempt 1) and re-create the bug on the surface that was
+    already right."""
+    import inspect
+
+    from scripts.automod.gate import Gate
+    src = inspect.getsource(Gate.rung_review)
+    at = src.index("RV.decide(")
+    call = src[at:at + 200]
+    assert "attempt=attempt" in call, call
+    assert "policy=RV.seams_policy()" in call, call
