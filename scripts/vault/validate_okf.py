@@ -38,6 +38,11 @@ gate FAILED a spec-conformant index — "no parseable frontmatter block" — whi
 PASSING `projects/inner-voice-paper/index.md`, which is conformant-looking to
 the gate only because it disobeys §8 by carrying frontmatter.
 
+A subtree can be out of scope the same way: `EXCLUDE_PATHS` skips `backlog/data/`
+by vault-relative path prefix (#1934), the witness-extract directory an item's
+owed-witness clause writes into. `segment_scan.py` imports `iter_md`, so one
+exemption settles both this gate and the `segment:`/`tags:` scan.
+
 Run in CI / a healthcheck / the nightly conformance task, and before any bulk
 vault edit.
 
@@ -62,6 +67,29 @@ EXCLUDE_DIRS = {"templates", "images", ".git", ".obsidian", ".trash"}
 # frontmatter in them, so they can never be concept documents — matching on
 # filename is what "at any depth" means here, the same rule as `tags.md`. #450.
 EXCLUDE_FILES = {"tags.md", "index.md", "log.md"}
+# Whole subtrees that are out of scope for every gate, by VAULT-RELATIVE PATH
+# PREFIX (#1934). `backlog/data/` holds what an item's owed-witness clause
+# commits: the frozen extract itself (`voice.log`, `usage.db`, `*.ndjson`) and
+# the `.md` sidecar that names its commit and md5. The sidecars are minted by
+# `scripts/automod/backlog.py`'s auto-witness clause, so their population is
+# open-set — the offender count grew 4 → 5 between #1934's filing and its
+# triage — and no writer-side check can pin a frontmatter convention on files
+# whose count is decided by whoever files a measurement item next. The ruling
+# is therefore a scope call, the same verdict as a reserved filename: these are
+# not concept documents. Not a defect to be repaired after the fact by a
+# nightly that edits bytes whose provenance is their checksum.
+#
+# A prefix, deliberately NOT an entry in EXCLUDE_DIRS: that set is matched
+# against each path COMPONENT below (:94), so a bare `"data"` there would also
+# take a future `knowledge/x/data/` out of the gate. `iter_md` applies this one
+# to the path relative to the scan root, which is the vault root, so it is
+# anchored at `backlog/data/` and nowhere else.
+#
+# One skip, both gates: `segment_scan.py:54` imports `iter_md` from here, so
+# the OKF gate and the `segment:`/`tags:` scan clear on the same exemption.
+# `okf_migrate.iter_md` keeps its own copies of the two sets above
+# (okf_migrate.py:79-80) and does NOT carry this one — recorded on #1934.
+EXCLUDE_PATHS = ("backlog/data/",)
 STRICT_FM_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
 
 # The vocabulary is #370's 12 canonical values plus what already exists on disk
@@ -91,6 +119,9 @@ def iter_md(root: Path, only_dir: str | None):
             continue
         rel = p.relative_to(root)
         if any(part in EXCLUDE_DIRS for part in rel.parts):
+            continue
+        rel_posix = rel.as_posix()
+        if any(rel_posix.startswith(prefix) for prefix in EXCLUDE_PATHS):
             continue
         if p.name in EXCLUDE_FILES or p.name.startswith("_"):
             continue

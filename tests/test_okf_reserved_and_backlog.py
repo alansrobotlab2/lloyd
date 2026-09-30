@@ -182,3 +182,78 @@ def test_both_clis_take_a_root_and_scan_the_tree_they_are_given(tmp_path):
     assert scanned_count(live_mig.stdout) > 0, (
         "with no --root the migrator must still scan the live vault root:\n"
         + live_mig.stdout)
+
+
+# ── #1934: `backlog/data/` is exempt from the OKF gate by path prefix ────────
+
+#: A witness sidecar: prose with NO front matter block. This is the shape
+#: `backlog/data/usage.db.witness.md` has, and it was the only OKF violation in
+#: `backlog` — 1,877 files scanned, 1 violation, measured 2026-09-30. The four
+#: other sidecars there carry a block and omit only `segment:`/`tags:`, which the
+#: segment scan counts; both halves clear on the one skip in `iter_md`.
+WITNESS = ("# usage.db witness\n\n"
+           "Frozen extract; its provenance is the commit and md5 named in the "
+           "body, not a front matter key.\n")
+
+
+def witness_tree(tmp_path: Path) -> Path:
+    """A fixture vault whose only note is a frontmatter-less sidecar in `backlog/data/`."""
+    root = tmp_path / "vault"
+    (root / "backlog" / "data").mkdir(parents=True)
+    (root / "backlog" / "data" / "usage.db.witness.md").write_text(
+        WITNESS, encoding="utf-8")
+    return root
+
+
+def test_backlog_data_is_not_scanned_for_conformance(tmp_path):
+    """The gate skips the whole `backlog/data/` subtree, so a sidecar with no
+    front matter is neither a violation nor a counted concept file — on a
+    full-tree scan and on the `--dir backlog` scan the conformance task runs.
+
+    Before #1934 the same tree printed `VIOLATIONS : 1` naming that file and
+    exited 1. The ruling is that a witness sidecar is not a concept document at
+    all — its body is the load-bearing frozen extract and its provenance is a
+    checksum — so the subtree is exempt, rather than having keys stamped into
+    it after the fact by a nightly.
+    """
+    root = witness_tree(tmp_path)
+    for args in (("--root", str(root)),
+                 ("--root", str(root), "--dir", "backlog")):
+        proc = run(VALIDATE, *args)
+        assert proc.returncode == 0, (
+            f"validator exited {proc.returncode} on `{' '.join(args)}` with only "
+            f"an exempt sidecar in the tree:\n{proc.stdout}\n{proc.stderr}")
+        assert "VIOLATIONS : 0" in proc.stdout, proc.stdout
+        assert scanned_count(proc.stdout) == 0, (
+            f"a file under backlog/data was counted as a concept document on "
+            f"`{' '.join(args)}`:\n{proc.stdout}")
+
+
+def test_no_path_outside_backlog_data_leaves_the_okf_gate(tmp_path):
+    """Control: the exemption is the path `backlog/data`, not a directory named `data`.
+
+    Three byte-identical frontmatter-less notes at three places. Only the one
+    under `backlog/data/` is skipped; the one directly under `backlog/` and the
+    one in `knowledge/data/` are both reported, so every path outside the exempt
+    subtree is still graded. The second of the two is what a bare `"data"` in
+    `EXCLUDE_DIRS` would have let through — that set matches a directory name at
+    any depth, so only a vault-relative path prefix leaves the gate whole over
+    every other tree in the vault.
+    """
+    root = witness_tree(tmp_path)
+    (root / "backlog" / "1934-item.md").write_text(WITNESS, encoding="utf-8")
+    (root / "knowledge" / "data").mkdir(parents=True)
+    (root / "knowledge" / "data" / "orphan.md").write_text(
+        WITNESS, encoding="utf-8")
+
+    proc = run(VALIDATE, "--root", str(root))
+    assert proc.returncode == 1, (
+        "two frontmatter-less concept notes outside the exempt subtree are real §3 "
+        f"violations:\n{proc.stdout}")
+    assert "VIOLATIONS : 2" in proc.stdout, proc.stdout
+    assert "backlog/1934-item.md: no parseable frontmatter block" in proc.stdout
+    assert "knowledge/data/orphan.md: no parseable frontmatter block" in proc.stdout
+    reported = proc.stdout.split("OKF violations", 1)[-1]
+    assert "backlog/data/" not in reported, (
+        f"the exempt sidecar was reported beside the two real violations:\n"
+        f"{proc.stdout}")

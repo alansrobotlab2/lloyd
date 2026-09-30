@@ -29,6 +29,18 @@ to declare `tags` too or it would no longer be the conformant tree they read.
 Presence only: #868 retired tag-vocabulary maintenance in 2026-09-22 because no
 query-time consumer reads these strings.
 
+#1934 then ruled `backlog/data/` — where an item's owed-witness clause commits a
+frozen extract and the `.md` sidecar describing it — out of scope for both this
+scan and the OKF gate, by vault-relative path prefix (`validate_okf.EXCLUDE_PATHS`,
+applied in the shared `iter_md`, which this script imports). The sidecars are
+minted by `scripts/automod/backlog.py`'s auto-witness clause over an open-set
+corpus, and the offender count grew 4 → 5 between that item's filing and its
+triage, so no writer-side check could have pinned the keys; the ruling is a scope
+call, not a repair. Three nodes pin the scope: the exempt subtree at rc 0 with
+`--list` naming no `backlog/data/` path, the identical bytes directly under
+`backlog/` still counted at rc 1, and a `data/` directory under `projects/` still
+counted — that last one is what a directory-name exemption would have passed.
+
 The template checks read the live vault's skills, so they carry `live_vault`: the
 gate deselects them, and they go red if a nightly skills pass drops the key again.
 """
@@ -298,8 +310,100 @@ def test_scan_counts_a_scalar_tags_value_as_missing(tmp_path, capsys):
     assert "projects/scalar-tags.md" in out
 
 
+# ── #1934: `backlog/data/` is out of scope by path prefix, not repaired ───────
+
+#: The shape four of the live witness sidecars have: a real front matter block
+#: declaring `type`/`item`/`timestamp`, and neither convention key.
+WITNESS_FM = ("---\ntype: note\nitem: 1903\ntimestamp: '2026-09-30T16:42:43'\n"
+              "---\n\n# confirm-replay witness\n\n"
+              "Extract bytes: vault commit 0d96fdb0, md5 0a1b2c3d.\n")
+
+#: The shape `backlog/data/usage.db.witness.md` has: no front matter block at
+#: byte 0 at all, which is the same file that was the one OKF violation in
+#: `backlog` (1,877 scanned / 1 violation, measured 2026-09-30).
+WITNESS_NO_FM = ("# usage.db witness\n\n"
+                 "Frozen extract; its provenance is the commit and md5 named "
+                 "in this body.\n")
+
+
+def test_scan_exits_0_with_keyless_witness_sidecars_under_backlog_data(tmp_path, capsys):
+    """`backlog/data/` is exempt by path, so a keyless sidecar there is not a defect.
+
+    Both shapes the live sidecars have are here: one block declaring `type` but
+    neither key, and one with no block at all. Every scanned directory keeps its
+    zero count, `--list` names no path under `backlog/data/`, and the scan exits
+    0. That is the branch #1934 took — keys on a subtree no writer can pin, ruled
+    out of scope instead — and it is why the live-vault node below exits 0
+    without a nightly hand-editing bytes whose provenance is their checksum.
+    """
+    _conformant_vault(tmp_path)
+    (tmp_path / "backlog/data").mkdir()
+    (tmp_path / "backlog/data/2026-09-30.confirm-replay-witness.md").write_text(
+        WITNESS_FM, encoding="utf-8")
+    (tmp_path / "backlog/data/usage.db.witness.md").write_text(
+        WITNESS_NO_FM, encoding="utf-8")
+
+    assert segment_scan.main(["--root", str(tmp_path), "--list"]) == 0
+    out = capsys.readouterr().out
+    for d in ("knowledge/", "projects/", "memory/", "backlog/"):
+        assert re.search(rf"^\s+{re.escape(d)}\s+missing segment: 0$", out, re.M), out
+        assert re.search(rf"^\s+{re.escape(d)}\s+missing tags: 0$", out, re.M), out
+    assert "total missing: 0" in out
+    assert "backlog/data/" not in out, out
+
+
+def test_scan_still_counts_a_keyless_note_directly_under_backlog(tmp_path, capsys):
+    """Non-vacuity: what zeroes the tree above is the exempt path, not the file.
+
+    The same bytes in both places — one sidecar under `backlog/data/`, one note at
+    `backlog/3-keyless.md`, a real backlog item's location — and only the second
+    is named: `backlog/` reports one missing of each key and the scan exits 1. If
+    the skip were drawn too broadly this is the tree that would exit 0, and the
+    exemption would be a way for a keyless item to hide one directory down.
+    """
+    _conformant_vault(tmp_path)
+    (tmp_path / "backlog/data").mkdir()
+    (tmp_path / "backlog/data/x.witness.md").write_text(WITNESS_FM, encoding="utf-8")
+    (tmp_path / "backlog/3-keyless.md").write_text(WITNESS_FM, encoding="utf-8")
+
+    assert segment_scan.main(["--root", str(tmp_path), "--list"]) == 1
+    out = capsys.readouterr().out
+    assert re.search(r"^\s+backlog/\s+missing segment: 1$", out, re.M), out
+    assert re.search(r"^\s+backlog/\s+missing tags: 1$", out, re.M), out
+    assert "backlog/3-keyless.md" in out
+    assert "backlog/data/x.witness.md" not in out, out
+    assert "total missing: 2" in out
+
+
+def test_a_directory_named_data_outside_backlog_is_not_exempt(tmp_path, capsys):
+    """The exemption is the path `backlog/data`, not any directory called `data`.
+
+    `projects/data/` is an ordinary concept directory, so a keyless note in one is
+    still named and the scan still exits 1. This is the node a bare `"data"` entry
+    in `validate_okf.EXCLUDE_DIRS` would have failed: that set is matched against
+    every path component, so it would have exempted `knowledge/<anything>/data/`
+    as well — and because the OKF gate shares the same skip, the widening would
+    have quietly taken those trees out of conformance checking too.
+    """
+    _conformant_vault(tmp_path)
+    (tmp_path / "projects/data").mkdir()
+    (tmp_path / "projects/data/keyless.md").write_text(WITNESS_FM, encoding="utf-8")
+
+    assert segment_scan.main(["--root", str(tmp_path), "--list"]) == 1
+    out = capsys.readouterr().out
+    assert re.search(r"^\s+projects/\s+missing segment: 1$", out, re.M), out
+    assert "projects/data/keyless.md" in out
+
+
 @pytest.mark.live_vault
-def test_scan_exits_0_on_the_live_vault():
+def test_scan_exits_0_on_the_live_vault(capsys):
     if not (Path.home() / "obsidian").is_dir():
         pytest.fail("the live vault is not at ~/obsidian")
-    assert segment_scan.main(["--root", str(Path.home() / "obsidian")]) == 0
+    # `--list` so a failure names its offender rather than only counting it, and
+    # so the exempt subtree is pinned on the very tree #1934 ruled about: the
+    # sidecars under `backlog/data/` are still keyless there, on purpose.
+    assert segment_scan.main(["--root", str(Path.home() / "obsidian"),
+                              "--list"]) == 0
+    out = capsys.readouterr().out
+    assert "backlog/data/" not in out, out
+    assert "total missing: 0" in out, out
