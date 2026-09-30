@@ -368,3 +368,169 @@ def test_answering_a_legacy_tagged_item_keeps_its_unanswered_decisions(isolated)
     O.apply_verdict(p, O.entries_of(fm_of(p)),
                     [{"n": 1, "outcome": "settled", "evidence": "e"}], item_id=98)
     assert [e["what"] for e in O.entries_of(fm_of(p))] == ["two"]
+
+
+# ── #1909: the tick takes a batch, and an emptied open item does not survive ────
+
+def test_a_tick_offers_several_due_items_oldest_first_one_row_each(isolated, tmp_path):
+    """#1909 clause 4: the drain is bounded by items per TICK, not per session.
+
+    Four owing items, their oldest entry aged 20 → 12 → 6 → 2 days: the tick takes
+    three and the one it leaves for the next tick is the NEWEST, because the pool
+    that needed draining on 2026-09-30 was 191 due entries across 76 items, a tick
+    that reached one item settled maybe two entries, and 92 new entries were filed
+    the same day. Each item gets exactly one queue row and the dedup key is per
+    item — the old board-wide key is what turned a retry into a second row for the
+    same item (#1418) — so a second tick adds nothing while those three are live.
+    """
+    from workers.queue import WorkQueue
+    q = WorkQueue(tmp_path / "owed-batch.db")
+    _owing(isolated, 11, ["read the run for #11"], since="2026-09-25T00:00:00")
+    _owing(isolated, 12, ["read the run for #12"], since="2026-09-10T00:00:00")
+    _owing(isolated, 13, ["read the run for #13"], since="2026-09-18T00:00:00")
+    _owing(isolated, 14, ["read the run for #14"], since="2026-09-12T00:00:00")
+
+    asyncio.run(OC.enqueue_if_due(q, {"apply": True}))
+    rows = sorted((r for r in q.list_items(source=OC.NAME) if r.state == "queued"),
+                  key=lambda r: r.id)
+    assert [r.payload["item_id"] for r in rows] == [12, 14, 13], \
+        "a batch has to lead with what has waited longest"
+    assert len({r.dedup_key for r in rows}) == 3, "one row per item, keyed per item"
+    assert q.has_live(f"{OC.DEDUP_KEY}:12") and not q.has_live(OC.DEDUP_KEY)
+    asyncio.run(OC.enqueue_if_due(q, {"apply": True}))
+    assert len(q.list_items(source=OC.NAME)) == 3, "a retry reuses the live row"
+
+
+def test_the_batch_size_is_configuration_not_a_one_way_door(isolated, tmp_path):
+    """`batch: 1` reproduces the old one-item tick, and an unset `batch` keeps the
+    source's default, so widening the drain is a config edit and not a round."""
+    from workers.queue import WorkQueue
+    assert OC.DEFAULT_BATCH >= 3
+    q = WorkQueue(tmp_path / "owed-one.db")
+    _owing(isolated, 11, ["read the run for #11"], since="2026-09-25T00:00:00")
+    _owing(isolated, 12, ["read the run for #12"], since="2026-09-10T00:00:00")
+    _owing(isolated, 13, ["read the run for #13"], since="2026-09-18T00:00:00")
+    asyncio.run(OC.enqueue_if_due(q, {"apply": True, "batch": 1}))
+    rows = q.list_items(source=OC.NAME)
+    assert len(rows) == 1
+    assert rows[0].payload["item_id"] == 12
+
+
+def test_an_open_item_whose_last_entry_settles_is_closed_not_left_a_draft(isolated):
+    """#1909 clause 5: the sweep that empties the list is the sweep that closes.
+
+    A `decide` entry on a draft — the shape a `human-only:` guard leaves behind —
+    ruled `settled` with evidence: the entry goes, the list is empty, and the item
+    used to stay a draft in exactly that state with nothing owed on it, invisible
+    to a job that visits only items that DO owe something. It now closes as
+    `owed-check` settled, the move the hand sweep made to 11 items on 2026-09-30
+    morning, with the closing evidence on `completed_via`.
+
+    The two ways a list empties WITHOUT the question being answered keep the item
+    open: an entry ruled `outside` is a thing only a person can do, and one sent
+    for recheck still owes its re-reading.
+    """
+    p, entries = _owing(isolated, 100, ["decide: is the CA check still owed?"],
+                        status="draft")
+    out = O.apply_verdict(p, entries,
+                          [{"n": 1, "outcome": "settled", "evidence": "exited 0 on 09-28"}],
+                          item_id=100)
+    fm = fm_of(p)
+    assert O.entries_of(fm) == [] and out["moved"] == "closed"
+    assert fm["status"] == "done" and fm["closed_by"] == "owed-check"
+    assert "exited 0 on 09-28" in str((fm.get("activity_log") or [])[-1]), \
+        "the close has to say which ruling closed it"
+    assert fm.get("completed"), "a close stamps `completed:` like every other closer"
+
+    p2, e2 = _owing(isolated, 101, ["decide: is the CA check still owed?"], status="draft")
+    out2 = O.apply_verdict(p2, e2,
+                           [{"n": 1, "outcome": "outside", "evidence": "needs a person"}],
+                           item_id=101)
+    assert not out2["moved"] and fm_of(p2)["status"] == "draft", \
+        "an entry only a human can do is still owed"
+
+    p3, e3 = _owing(isolated, 102, ["recheck: re-read the live run"], status="draft")
+    out3 = O.apply_verdict(p3, e3,
+                           [{"n": 1, "outcome": "recheck", "evidence": "nothing ran since",
+                             "recheck_after": (datetime.now(timezone.utc)
+                                               + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")}],
+                           item_id=102)
+    assert not out3["moved"] and fm_of(p3)["status"] == "draft", \
+        "an entry awaiting its re-reading is still owed"
+    assert O.entries_of(fm_of(p3)), "and the entry is still on the list"
+
+
+def test_a_row_settles_the_item_it_was_queued_for_not_the_oldest_one(isolated, tmp_path,
+                                                                     monkeypatch):
+    """The other half of the boundary: the queue row carries its item across into the
+    session.
+
+    A tick that offers several items while `max_inflight` is 1 runs the rows one
+    after another, and an `execute` that re-picked "the oldest owing item" at claim
+    time would point every session at whatever was oldest when it started — the
+    second row would answer for an item nobody queued for it. The payload names the
+    item, so the row that says #13 measures #13 even while the older #12 is still
+    owing, and #12 keeps its entry unanswered.
+    """
+    from workers.queue import WorkQueue
+    from workers.sources import _common as C
+    q = WorkQueue(tmp_path / "owed-execute.db")
+    p12 = write_item(isolated, 12, status="done",
+                     extra={"owed": [{"what": "read run 90 for #12", "kind": "check",
+                                      "since": "2026-09-05T00:00:00"}]})
+    p13, _ = _owing(isolated, 13, ["read run 91 for #13"], since="2026-09-20T00:00:00")
+    asyncio.run(OC.enqueue_if_due(q, {"apply": True}))
+    rows = q.list_items(source=OC.NAME)
+    assert len(rows) == 2, "the tick offered both items"
+
+    fake = _fake_session({"entries": [{"n": 1, "outcome": "settled",
+                                       "evidence": "run 91 at 07:00 shows it"}],
+                          "summary": "settled"})
+    monkeypatch.setattr(C, "run_prompt_in_session", fake)
+    row = next(r for r in rows if r.payload["item_id"] == 13)
+    out = asyncio.run(OC.execute(_Job(row.payload)))
+    assert out["status"] == "success" and out["summary"].startswith("#13:"), \
+        "the session measured the item its row named"
+    assert "read run 91 for #13" in fake.calls[0]["prompt"]
+    assert "read run 90 for #12" not in fake.calls[0]["prompt"]
+    assert O.entries_of(fm_of(p13)) == []
+    assert [e["what"] for e in O.entries_of(fm_of(p12))] == ["read run 90 for #12"], \
+        "the older item is still owed, unanswered"
+
+
+def test_a_row_whose_item_stopped_owing_before_it_ran_spends_no_session(isolated, tmp_path,
+                                                                       monkeypatch):
+    """A batch can be overtaken: an earlier session, or a hand sweep, settles the
+    item between the tick and the claim. That row is skipped and runs no session —
+    it must not fall through to some other item still on the board."""
+    from workers.queue import WorkQueue
+    from workers.sources import _common as C
+    q = WorkQueue(tmp_path / "owed-gone.db")
+    p, entries = _owing(isolated, 14, ["read the run for #14"], since="2026-09-20T00:00:00")
+    p15, _ = _owing(isolated, 15, ["read the run for #15"], since="2026-09-21T00:00:00")
+    asyncio.run(OC.enqueue_if_due(q, {"apply": True}))
+    row = next(r for r in q.list_items(source=OC.NAME) if r.payload["item_id"] == 14)
+    # An earlier pass (a hand sweep, or the session queued before this one) settles
+    # it while this row sits in the queue.
+    O.apply_verdict(p, entries, [{"n": 1, "outcome": "settled", "evidence": "swept by hand"}],
+                    item_id=14)
+    fake = _fake_session({"entries": [], "summary": "should not run"})
+    monkeypatch.setattr(C, "run_prompt_in_session", fake)
+    out = asyncio.run(OC.execute(_Job(row.payload)))
+    assert out["status"] == "skipped" and not fake.calls
+    assert [e["what"] for e in O.entries_of(fm_of(p15))] == ["read the run for #15"], \
+        "and it did not answer for the other item either"
+
+
+def test_a_row_queued_before_the_item_id_existed_still_finds_the_oldest_item(isolated,
+                                                                            monkeypatch):
+    """A row queued by the previous code carries no `item_id`, so the upgrade needs
+    no drain of the queue: `execute` falls back to the oldest-owing pick it made
+    before batching."""
+    from workers.sources import _common as C
+    _owing(isolated, 15, ["read run 92 for #15"], since="2026-09-20T00:00:00")
+    fake = _fake_session({"entries": [{"n": 1, "outcome": "settled", "evidence": "run 92"}],
+                          "summary": "settled"})
+    monkeypatch.setattr(C, "run_prompt_in_session", fake)
+    out = asyncio.run(OC.execute(_Job({"apply": True})))
+    assert out["status"] == "success" and out["summary"].startswith("#15:")

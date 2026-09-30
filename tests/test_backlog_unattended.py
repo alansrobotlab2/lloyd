@@ -856,6 +856,127 @@ def test_the_marker_normalisation_does_not_match_it_mid_sentence():
     assert B.is_human_only("not human-only: a person may still land this") is False
 
 
+# ── #1909: the marker's VALUE has to name a guard, not just the prefix ──────────
+
+#: Both live rows this node is named for. `human-only: none. Done when …` is
+#: #527's triage; the second is #1881's, whose item was a vault-prose contract
+#: (`step-2a-ter-curation.md` is a skills doc, a surface the loop may land) that
+#: sat parked on a decision no one asked for.
+NO_PATH_MARKERS = (
+    "human-only: not required", "human-only: none", "Human-Only: n/a",
+    "human-only:", "human-only: -", "human-only: nothing",
+    "`human-only: not required`",
+    "human-only: not required. Done when step-2a-ter-curation.md §1 and §5 both "
+    "name the 32,768 B topic ceiling and the topic_size_error refusal",
+    "human-only: none. Done when the #39 knowledge-write job emits a batched "
+    "daily proposal file instead of committing USER.md/MEMORY.md/SOUL.md",
+)
+
+#: Values that DO name a guard, including the wrapped forms #1698 pinned. Every
+#: one of these is a live triage row's value, not an invented one.
+GUARDED_MARKERS = (
+    "human-only: config.yaml", "`human-only: ~/lloyd-data/x.jsonl` (siblings)",
+    "`human-only: ~/lloyd-data/x.jsonl`", '"human-only: scripts/automod/spec.py"',
+    "'human-only: config.yaml'", "human-only: `.gitignore` — a person replaces line 92",
+    "human-only: config.yaml needs the key",
+    "human-only: agent-services/supervisor/conf.d/agent-djev.conf (a protected path)",
+)
+
+
+@pytest.mark.parametrize("acceptance", NO_PATH_MARKERS)
+def test_a_human_only_marker_naming_no_path_is_not_a_guard(acceptance):
+    """#1909 clause 1: the prefix alone is not a guarded contract.
+
+    The prompt tells triage to name the path; a model that concludes no path is
+    needed still writes the prefix and its value then says `not required` or
+    `none`. Reading the prefix alone called that a path the loop may not write,
+    which is how #1881 — a vault-prose item — was parked. The value's HEAD
+    segment is what states the guard, so `none. Done when <contract>` parses as
+    no guard while `config.yaml — <contract>` stays one.
+    """
+    assert B.is_human_only(acceptance) is False, acceptance
+
+
+@pytest.mark.parametrize("acceptance", GUARDED_MARKERS)
+def test_a_marker_that_names_a_path_is_still_a_guard(acceptance):
+    """The control #278 still needs: a contract that names a protected path is
+    never handed an implement round to discover that with."""
+    assert B.is_human_only(acceptance) is True, acceptance
+
+
+def test_a_no_path_marker_dispatches_the_item_and_owes_no_decision(isolated):
+    """#1909 clause 2: #1881's row, end to end — verdict to pool to dispatch.
+
+    Before: `record_verdict` parked the confirmed item where it found it (`draft`)
+    and minted a `decide` owed entry reading "its contract needs a path the loop
+    may not write: human-only: not required", and `select_confirmed` skipped the
+    row, so nothing on the board said the item was landable. Now it moves into
+    the implement pool and is picked, and a sibling whose value DOES name
+    config.yaml still parks with its decision — the marker still means something.
+    """
+    parked = write_item(isolated, 1882, status="draft")
+    p = write_item(isolated, 1881, status="draft")
+    acc = ("human-only: not required. Done when step-2a-ter-curation.md §1 and §5 both "
+           "name the 32,768 B topic ceiling and the topic_size_error refusal")
+    guard = "human-only: config.yaml (`knowledge_graph.write_enabled` at line 564)"
+
+    assert B.record_verdict(B.item_by_id(1881), "confirmed", "the premise still holds",
+                            acceptance=acc) is not None
+    assert B.record_verdict(B.item_by_id(1882), "confirmed", "the premise still holds",
+                            acceptance=guard) is not None
+    fm = _fm(p)
+    assert fm["status"] == "up_next", "a contract naming no path is implementable work"
+    assert O.entries_of(fm) == [], "no decision owed to anyone for a path no one named"
+    parked_fm = _fm(parked)
+    assert parked_fm["status"] == "draft", "a real guarded path still parks"
+    assert _owed_kinds(1882) == ["decide"], "and still owes the decision it parks on"
+
+    # The dispatch boundary: the ledger row the triage worker writes beside the
+    # verdict is what `select_confirmed` and `human_only_ids` read.
+    for iid, a in ((1881, acc), (1882, guard)):
+        S.append_event({"event": "backlog_triage", "item_id": iid, "verdict": "confirmed",
+                        "check": "grep -n '32768\\|topic_size_error' the skill doc",
+                        "evidence": "both still missing", "acceptance": a},
+                       path=S.LEDGER_PATH)
+    assert B.human_only_ids(S.LEDGER_PATH) == {1882: guard}
+    picked = B.select_confirmed(S.LEDGER_PATH)
+    assert picked is not None and picked[0].id == 1881, \
+        "the no-path item was still skipped by the dispatch filter"
+
+
+def test_a_held_path_that_names_no_path_is_never_owed(isolated):
+    """#1909 clause 3: #1843's `apply \\`None\\`: None`, from 2026-09-29T18:20:20Z.
+
+    The finalizer reported `{"path": "None", "reason": "None"}` — the word, not
+    JSON null — so the old `if not rel` guard saw a truthy four-character string,
+    wrote it into the item's `human_paths`, and the board gained an owed entry of
+    kind `path` that names no file: nothing an owed-check ruling can act on. A
+    placeholder value is dropped where it is reported, both at the item write and
+    at the landing sweep's reader of the same report, and a real path reported
+    beside the placeholders is still owed exactly once, reason and all.
+    """
+    p = write_item(isolated, 1843, status="done")
+    placeholders = [{"path": "None", "reason": "None"}, {"path": "", "reason": "x"},
+                    {"path": None, "reason": None}, {"path": "n/a", "reason": ""}]
+    assert B.record_human_paths(1843, placeholders, round_id="SM_1843") == []
+    fm = _fm(p)
+    assert not fm.get("human_paths"), "no path was written to the item either"
+    assert O.entries_of(fm) == []
+    assert B.human_paths_owed(placeholders + ["", "null"]) == []
+
+    assert B.record_human_paths(1843, placeholders + [
+        {"path": "config.yaml", "reason": "needs a new key"}], round_id="SM_1843") \
+        == ["config.yaml"]
+    assert [e["what"] for e in O.entries_of(_fm(p))] == ["apply `config.yaml`: needs a new key"]
+    assert _owed_kinds(1843) == ["path"]
+    # The sweep reads the same report off the ledger through the same renderer,
+    # so the two producers cannot disagree about the entry text and stack a
+    # near-duplicate past `add_owed`'s dedupe.
+    assert B.human_paths_owed([{"path": "None", "reason": "None"},
+                               {"path": "config.yaml", "reason": "needs a new key"}]) \
+        == ["apply `config.yaml`: needs a new key"]
+
+
 def test_the_implementer_prompt_has_a_vault_route_and_renders_the_surface(isolated, monkeypatch):
     write_item(isolated, 2, status="up_next")   # confirmed items sit in the implement pool
     S.append_event({"event": "backlog_triage", "item_id": 2, "verdict": "confirmed",

@@ -1795,7 +1795,10 @@ his own choices now."
 list (`scripts/automod/owed.py`: `what`, `kind` = check | path | decide,
 `since`, `recheck_after`, `rechecks`). The `owed-check` worker source
 (`workers/sources/owed_check.py`, `workers.sources.owed-check`) runs one
-visible session per item with a due entry. The session measures each entry
+visible session per item with a due entry, and its tick offers up to `batch`
+such items at once (`DEFAULT_BATCH`, oldest owed entry first, one queue row per
+item — #1909: one item per tick could not drain what the loop was filing). The
+session measures each entry
 against the live system, then answers with one of these:
 
 - `settled`, with the evidence;
@@ -1809,6 +1812,14 @@ against the live system, then answers with one of these:
 
 The apply step is the only writer; the session cannot edit files or write the
 board.
+
+**An empty `owed` list on an open item is a closed item.** When the answers that
+settle the last entry are applied, the same write closes the item
+(`closed_by: owed-check`) — the sweep that empties the list is the sweep that
+knows why. An entry ruled `outside` or sent for recheck keeps the item open:
+the question is still live. Before #1909 the close only happened on an explicit
+`close` answer, so #1751 sat open with every entry settled until a hand sweep
+found it, and a `decide` entry ruled settled left its draft item owing nothing.
 
 **`outside` is the one thing that reaches Alan**: sudo on the host, a secret he
 holds, hardware, money. It moves to `owed_outside`, which `board_health.owed.outside`

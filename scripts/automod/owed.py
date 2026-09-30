@@ -287,6 +287,25 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
                 else f"reopen refused: {exc}"[:200]
     elif item_move == "close" and is_open:
         moved = "closed" if close_item(path, move_why) else ""
+    elif is_open and settled and not keep and not outside:
+        # #1909: the sweep that empties the list is the sweep that closes. An open
+        # item with nothing owed was a hole, not a neutral state — #1751 sat in it
+        # until a hand sweep on 2026-09-30 found its entries already settled, and
+        # a `decide` entry on a draft (what a `human-only:` guard leaves behind)
+        # ruled settled left the same hole. The job visits only items that owe
+        # something, so nothing else was ever going to look at it again, and the
+        # draft it stayed in is re-offered to triage for ever.
+        #
+        # `not keep` alone would not do: an entry ruled `outside` leaves `keep`
+        # empty and is still a debt, and one sent for recheck or left as unfiled
+        # `work` stays in `keep`. This is the only place the emptiness is acted on,
+        # so it is stated once, at the write.
+        last = settled[-1]
+        moved = "closed" if close_item(
+            path, "every owed entry is settled — the last "
+                  f"({last['outcome']}) at {str(last['at'])[:10]}: "
+                  f"{last.get('evidence') or last.get('ruling') or 'no detail given'}"[:400],
+        ) else ""
     return {"remaining": len(keep), "settled": len(settled), "outside": len(outside),
             "filed": filed, "moved": moved, "notes": notes}
 

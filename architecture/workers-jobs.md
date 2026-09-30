@@ -439,7 +439,9 @@ item is never re-triaged, so it is the one move the loop cannot recover from.
 ### `owed-check` — settle what an item still owes
 
 **Wakes** every 120 s and, when any item has a due entry on its `owed` list
-(`scripts/automod/owed.py`), enqueues one job (`owed-check:item`). **Executes**
+(`scripts/automod/owed.py`), enqueues up to `batch` jobs — `owed-check:item:<id>`,
+one row per item, oldest owed entry first, `batch` defaulting to 3 (#1909: one
+item per tick settled fewer entries a day than the loop filed). **Executes**
 as one session on the **primary** per item: it measures each owed entry
 against the live system (run records, `server.err`, the ledger, the code) and
 answers per entry with one of `settled`, `recheck` (a date, clamped to 30 days;

@@ -255,8 +255,48 @@ HUMAN_ONLY_PREFIX = "human-only:"
 HUMAN_ONLY_WRAPPERS = "\"'`\u2018\u2019\u201c\u201d"
 
 
+# What the marker may say where it names no path. The prompt tells triage to
+# "name the path" (`workers/sources/autotriage.py`), and a model that decides no
+# path is needed still writes the prefix: #1881's row is
+# `human-only: not required. Done when step-2a-ter-curation.md §1 and §5 …`, a
+# vault-prose contract the loop can land, and #527's is `human-only: none. Done
+# when …`. Reading the prefix alone parked both at `draft` with a `decide` owed
+# entry reading "its contract needs a path the loop may not write: human-only:
+# not required" (#1909). Compared against the value's HEAD segment only — see
+# `_human_only_head` — so a contract that names a path anywhere in its first
+# segment (`config.yaml`, `.gitignore`, `~/lloyd-data/x.jsonl`) stays guarded.
+HUMAN_ONLY_NO_PATH = frozenset({
+    "", "-", "\u2013", "\u2014", "none", "none required", "nothing",
+    "nothing required", "no", "nope", "nil", "n/a", "na", "no path",
+    "no path required", "no path needed", "no path named", "no guarded path",
+    "no protected path", "not a path", "not a protected path", "not required",
+    "not needed", "not applicable",
+})
+
+# Segment terminators: where the value's first claim ends. A value is written as
+# "``<what is guarded> — <what is done when>``" or "``<no-path word>. Done when
+# …``", so the head is what states the guard and the tail is the contract.
+_HUMAN_ONLY_SEGMENTS = (". ", " \u2014 ", " - ", ": ", "; ", "\n")
+
+
+def _human_only_head(acceptance) -> str | None:
+    """The marker's value up to its first segment terminator, lowercased and
+    stripped of wrappers and trailing punctuation — or None if the acceptance
+    does not open with the marker at all. The wrapper tolerance of #1698 happens
+    here, so every reader still agrees through `is_human_only`."""
+    text = str(acceptance or "").strip().strip(HUMAN_ONLY_WRAPPERS).strip()
+    low = text.lower()
+    if not low.startswith(HUMAN_ONLY_PREFIX):
+        return None
+    value = low[len(HUMAN_ONLY_PREFIX):].strip()
+    for sep in _HUMAN_ONLY_SEGMENTS:
+        head, _, _rest = value.partition(sep)
+        value = head
+    return value.strip().strip(HUMAN_ONLY_WRAPPERS).strip().rstrip(" .:;\u2014-")
+
+
 def is_human_only(acceptance) -> bool:
-    """Does this acceptance open with the human-only marker?
+    """Does this acceptance open with the human-only marker *and name a guard*?
 
     Tolerates the markdown wrapping the prompt documents the marker in (see
     `HUMAN_ONLY_WRAPPERS`). Normalising here rather than at the call sites is
@@ -264,9 +304,67 @@ def is_human_only(acceptance) -> bool:
     the ledger's `human_only_ids`, `acceptance_clauses_of`' clause splitting,
     `record_verdict`'s parking decision and the autotriage hold-on gate all
     ask this one question (#1698).
+
+    A marker whose value names no path is not a guard (#1909): it is triage
+    answering "name the path" with "there is none", and treating it as one parks
+    a landable item with a decision no one asked for. The false-False risk — a
+    value whose head says `none` and whose tail then names a protected path — is
+    the cheap direction: the gate's `check_scope` over `DENIED_GLOBS` is what
+    actually stops those bytes landing (`architecture/authority-surfaces.md`
+    §Human-only paths), and a round that runs into one reports it in
+    `human_paths` and the owed entry is written then, authored instead of
+    invented. The false-True risk is an item nothing ever comes back for.
     """
-    text = str(acceptance or "").strip()
-    return text.strip(HUMAN_ONLY_WRAPPERS).strip().lower().startswith(HUMAN_ONLY_PREFIX)
+    head = _human_only_head(acceptance)
+    return head is not None and head not in HUMAN_ONLY_NO_PATH
+
+
+#: The words a model writes when it means "no value". #1843's implementer
+#: reported `{"path": "None", "reason": "None"}` — the *word*, not JSON null — so
+#: the `str(hp.get("path") or "").strip()` guard was satisfied by a four-character
+#: truthy string, the item's `human_paths` front matter gained
+#: `{"path": "None", "reason": "None"}`, and the board has carried an owed entry of
+#: kind `path` reading "apply `None`: None" since 2026-09-29T18:20:20Z: an entry
+#: naming no file, that no one can rule on and no owed-check can settle (#1909).
+NO_PATH_VALUES = frozenset({
+    "", "-", "\u2013", "\u2014", "?", "none", "none.", "no path", "no file",
+    "nothing", "null", "nil", "nan", "undefined", "n/a", "na", "not applicable",
+    "unknown", "tbd", "todo",
+})
+
+
+def usable_path(value) -> str:
+    """The path a reported entry claims, or "" when it names none.
+
+    Empty, whitespace, JSON null and the literal placeholder words a decoder
+    produces for an absent value all come back "", so no writer downstream can
+    mint an entry from them. A real path is returned with its wrappers off and
+    nothing else touched: this is a placeholder filter, not a path validator, and
+    a path that does not exist is a different problem with its own reporter.
+    """
+    text = str(value or "").strip().strip(HUMAN_ONLY_WRAPPERS).strip()
+    return "" if text.lower().rstrip(" .:;,") in NO_PATH_VALUES else text
+
+
+def human_paths_owed(human_paths) -> list[str]:
+    """The `apply \\`<path>\\`: <reason>` owed lines for a round's report of paths
+    the loop may never write, with anything that names no path dropped.
+
+    Both producers of this debt — the landing sweep reading a finished round's
+    outcome, and `record_human_paths` writing the item's front matter — render
+    through here, so the same path produces the same entry text and `add_owed`'s
+    dedupe collapses the two writes instead of stacking a near-duplicate."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for hp in (human_paths or []):
+        raw_path = hp.get("path") if isinstance(hp, dict) else hp
+        reason = str(hp.get("reason") or "") if isinstance(hp, dict) else ""
+        rel = usable_path(raw_path)
+        if not rel or rel in seen:
+            continue
+        seen.add(rel)
+        out.append(f"apply `{rel}`: {reason.strip()[:300].strip() or 'no reason given'}")
+    return out
 
 # Verdicts that retire an item rather than producing work. Both are wins.
 RETIRING = {"already_done", "stale"}
@@ -3265,9 +3363,11 @@ def _close_settled_items(ledger: Path, boards: tuple[str, ...] | None, *,
         human = list(human_clauses_of(None, fm))
         # A path the loop may never write is the same shape of debt as a
         # post-landing check: the round did what it could, and the rest is
-        # owed. Reported rather than hidden, which is what `git add -f` was.
-        paths_owed = [f"apply `{hp.get('path')}`: {hp.get('reason')}"
-                      for hp in (outcome.get("human_paths") or [])]
+        # owed. Reported rather than hidden, which is what `git add -f` was —
+        # and only the entries that name a path are owed at all, so a round
+        # whose finalizer answered `{"path": "None"}` mints an entry a person
+        # can act on rather than "apply `None`: None" (#1909).
+        paths_owed = human_paths_owed(outcome.get("human_paths"))
         for idx in (outcome.get("post_landing_clauses") or []):
             human.append(f"confirm clause {idx} now that the change is live")
         tags: tuple[str, ...] = ()
@@ -3467,27 +3567,35 @@ def record_human_paths(item_id: int, human_paths: list[dict],
     path = paths[0]
     fm, _ = _split_frontmatter(path.read_text(encoding="utf-8"))
     existing = list(fm.get("human_paths") or [])
-    seen = {str(e.get("path") if isinstance(e, dict) else e) for e in existing}
-    added: list[str] = []
+    seen = {usable_path(e.get("path") if isinstance(e, dict) else e) for e in existing}
+    added: list[dict] = []
     for hp in human_paths:
         if not isinstance(hp, dict):
             continue
-        rel = str(hp.get("path") or "").strip()
+        # `usable_path`, not a truthiness test on the raw value: #1843's
+        # finalizer reported the literal word `"None"`, which is truthy, so the
+        # old `if not rel` guard let it through and the item gained a `path`
+        # owed entry reading "apply `None`: None" — an entry naming no file,
+        # which no owed-check can settle (#1909).
+        rel = usable_path(hp.get("path"))
         if not rel or rel in seen:
             continue
-        existing.append({"path": rel, "reason": str(hp.get("reason") or "")[:300]})
+        entry = {"path": rel, "reason": str(hp.get("reason") or "").strip()[:300]}
+        existing.append(entry)
         seen.add(rel)
-        added.append(rel)
+        added.append(entry)
     if not added:
         return []
     update_frontmatter(
         path, {"human_paths": existing},
         activity=(f"round {round_id or '?'} needed paths the loop may not write, "
-                  f"owed to the owed-check job: " + ", ".join(f"`{x}`" for x in added)))
+                  f"owed to the owed-check job: "
+                  + ", ".join(f"`{e['path']}`" for e in added)))
     from scripts.automod import owed as O
-    O.add_owed(path, [f"apply `{e['path']}`: {e['reason']}" for e in existing
-                      if isinstance(e, dict) and str(e.get("path")) in added], kind="path")
-    return added
+    # The same renderer the landing sweep uses, so the two writes for one path
+    # carry identical text and `add_owed`'s dedupe collapses them.
+    O.add_owed(path, human_paths_owed(added), kind="path")
+    return [e["path"] for e in added]
 
 
 def work_title_for_round(ledger: Path, round_id: str) -> str:

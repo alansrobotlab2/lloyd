@@ -91,9 +91,16 @@ not a round's work, whatever its clauses say. `config.yaml`, runtime `data/**`,
 set — as `DENIED_GLOBS` in `scripts/automod/spec.py`, enforced by `check_scope`
 on the round's changed paths, which is what actually stops the bytes landing —
 and the marker for it is `human-only:` at the head of a triage acceptance
-(`HUMAN_ONLY_PREFIX`, `is_human_only` in `scripts/automod/backlog.py`). The skip
-that consumes it sits in the implement-pool selection, so a human-only item is
-never handed an attempt; the same predicate decides whether clause splitting
+(`HUMAN_ONLY_PREFIX`, `is_human_only` in `scripts/automod/backlog.py`). The marker
+guards only when its value names a path: `human-only: not required` is triage
+answering the prompt's "name the path" with "there is none", and since #1909 that
+is read as an ordinary contract rather than a guard, because reading the prefix
+alone parked landable items with a decision no one had asked for. What a round
+actually reports at the end — its `human_paths` — is owed only when it names a
+path too (`usable_path`, `human_paths_owed`): #1843 carried "apply \`None\`: None"
+for a day off a finalizer that reported the word. The skip
+that consumes the marker sits in the implement-pool selection, so a human-only item
+is never handed an attempt; the same predicate decides whether clause splitting
 letters a contract and whether the hold-on gate in `workers/sources/autotriage.py`
 holds. When any of those readers disagrees, an item that only a person can fix
 spends an unattended round discovering that.

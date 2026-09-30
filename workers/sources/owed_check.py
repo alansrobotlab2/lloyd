@@ -16,11 +16,19 @@ leftover work written as prose on closed items, and 10 that needed his hands.
 Alan's ruling the same day: "i don't want any more needs-human … lloyd can
 approve his own choices now." This job is that sweep, run continuously.
 
-Bounds: one item per job; `max_turns`; the session may read and run commands
+Bounds: one item per job, up to `batch` jobs per tick (`DEFAULT_BATCH`, and
+one queue row per item); `max_turns`; the session may read and run commands
 but not edit files or write the board (the apply step is the only writer);
 at most `spawn_cap` follow-up items per item; a recheck is clamped to 30 days
 and an entry rechecked `owed.MAX_RECHECKS` times is ruled on, not rescheduled.
 With `apply: false` it records its answer in the ledger and writes nothing.
+
+Why the tick takes a batch and not one item (#1909): on 2026-09-30 the board
+held 191 due entries across 76 items, a tick that reached one item settled
+maybe two entries, and 92 new entries were filed the same day — the job could
+not drain faster than the loop filled it, so four hours of hand sweeping closed
+in one morning what the job had not reached in a day. One item per *session*
+stays: the bound that moved is items per tick, never entries per session.
 """
 
 from __future__ import annotations
@@ -38,6 +46,14 @@ NAME = "owed-check"
 DEFAULT_PRIORITY = 72
 LONG_LIVED = True
 DEDUP_KEY = "owed-check:item"
+#: Items one tick offers to the queue. The bound that ever mattered was items per
+#: SESSION — one session measures and rules on one item's due entries — and it
+#: stays. What #1909 moved is items per TICK: on 2026-09-30 the board held 191 due
+#: entries across 76 items, a tick that reached one item settled maybe two entries,
+#: and 92 new entries were filed the same day, so the pool grew while the job ran
+#: clean. A hand sweep cleared in two hours what the tick had not reached in a day.
+#: Overridable per source config as `batch`; `batch: 1` is the old behaviour.
+DEFAULT_BATCH = 3
 DEFAULT_MODEL = "primary"
 DEFAULT_MAX_TURNS = 40
 DEFAULT_SPAWN_CAP = 3
@@ -170,12 +186,23 @@ def parse_answer(structured: Any, due_numbers: set[int]) -> dict | None:
             "summary": " ".join(str(structured.get("summary") or "").split())[:400]}
 
 
-def _next_owing(skip: set[int] = frozenset()):
+def _next_owings(count: int, skip: set[int] = frozenset()) -> list:
+    """The next `count` items owing something, oldest owed entry first — the
+    order `owing_items` already puts them in."""
     from scripts.automod import owed as O
+    out = []
     for owing in O.owing_items():
-        if owing.item.id not in skip:
-            return owing
-    return None
+        if owing.item.id in skip:
+            continue
+        out.append(owing)
+        if len(out) >= max(1, int(count)):
+            break
+    return out
+
+
+def _next_owing(skip: set[int] = frozenset()):
+    owing = _next_owings(1, skip)
+    return owing[0] if owing else None
 
 
 def _dry_answered() -> set[int]:
@@ -188,22 +215,36 @@ def _dry_answered() -> set[int]:
 
 
 async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
+    """Offer up to `batch` items to the queue, oldest owed entry first.
+
+    Each row carries the `item_id` it was made for: once a tick offers several, an
+    executor that re-picked "the oldest owing item" at claim time would have every
+    session in the batch settle the same item, and the second and third would find
+    nothing owed. The dedup key is per item, which is also what the old board-wide
+    key got wrong: it coalesced every retry into one row for whichever item was
+    offered first (#1418).
+
+    `max_inflight` still runs one session at a time; batching moves items per TICK,
+    never entries per session — a session measures and rules on its one item's due
+    entries, then the next row's turn comes.
+    """
     apply = bool(src_cfg.get("apply", False))
     skip = set() if apply else await asyncio.to_thread(_dry_answered)
-    owing = await asyncio.to_thread(_next_owing, skip)
-    if owing is None:
-        return None
-    new_id = queue.enqueue(
-        source=NAME, kind="item",
-        payload={"apply": apply,
-                 "model": str(src_cfg.get("model", DEFAULT_MODEL)),
-                 "max_turns": int(src_cfg.get("max_turns", DEFAULT_MAX_TURNS)),
-                 "spawn_cap": int(src_cfg.get("spawn_cap", DEFAULT_SPAWN_CAP))},
-        priority=int(src_cfg.get("priority", DEFAULT_PRIORITY)),
-        dedup_key=DEDUP_KEY,
-    )
-    if new_id is not None:
-        logger.info("Enqueued owed-check id=%d (next: #%d)", new_id, owing.item.id)
+    batch = max(1, int(src_cfg.get("batch", DEFAULT_BATCH) or 1))
+    offered = await asyncio.to_thread(_next_owings, batch, skip)
+    for owing in offered:
+        new_id = queue.enqueue(
+            source=NAME, kind="item",
+            payload={"item_id": owing.item.id,
+                     "apply": apply,
+                     "model": str(src_cfg.get("model", DEFAULT_MODEL)),
+                     "max_turns": int(src_cfg.get("max_turns", DEFAULT_MAX_TURNS)),
+                     "spawn_cap": int(src_cfg.get("spawn_cap", DEFAULT_SPAWN_CAP))},
+            priority=int(src_cfg.get("priority", DEFAULT_PRIORITY)),
+            dedup_key=f"{DEDUP_KEY}:{owing.item.id}",
+        )
+        if new_id is not None:
+            logger.info("Enqueued owed-check id=%d for #%d", new_id, owing.item.id)
     return None
 
 
