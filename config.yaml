@@ -506,6 +506,10 @@ harness:
     token_estimate: 1500
     dedup_max_consecutive: 2
   stream_chunk_timeout_seconds: 60
+  # Request manifests (app/component_manifest.py): the primary's chat template,
+  # hashed into every line so a template change shows in the prompt diff.
+  component_manifest:
+    chat_template_path: ~/lloyd/agent-services/llm/models/Inferact-Qwen3.8-Flash-Next-NVFP4/chat_template.jinja
   # A broken stream (stall, dropped connection, bad SSE line, 5xx) is
   # re-requested at most max_attempts times a turn, and only while the
   # iteration has sent no tool-call delta. A 4xx is never retried. 0 disables.
