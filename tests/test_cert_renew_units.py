@@ -9,8 +9,12 @@ So this pins the two files as configuration: parsed through the same INI shape
 systemd reads, the service must be a oneshot that runs that script, and the timer
 must be a recurring one that wants `timers.target`.
 
-Installing and enabling them is host state and stays with the operator; these
-assertions hold whether or not the units are linked.
+Installing the units is configuration; enabling them is host state this module
+never reads, so the test does not pin enabledness — a box that has not linked
+them must not go red here. Enabling is the SETUP.md:1520 route:
+`systemctl --user enable --now lloyd-cert-renew.timer`. The drift #1891 found
+sitting behind that handoff — a timer installed but never enabled — is what
+`scripts/maintenance/check-unit-enabledness.sh` checks, over every repo timer.
 
 Run: .venvs/lloyd/bin/python -m pytest tests/test_cert_renew_units.py
 """
