@@ -42,8 +42,12 @@ later history cannot yet have been undone, so it is excluded from the
 denominator rather than counted as a clean landing, and `0 landings` renders as
 `0/0 (no landings)` rather than `0%` — the zero-denominator rule. The window is
 the ledger's own span, so the arms are only comparable from the first ledger row
-on (`2026-09-06` as measured at file time), with the human arm's older months
-labelled as having no ledger counterpart.
+on (`2026-09-06` as measured at file time). What lies before it is reported, not
+folded in: `human_history_from` is the oldest human-arm commit of the whole of
+`main` — measured at filing, `30646b61` at 2026-04-04 — and one line of the
+report names how many commits predate `comparable_from` (358 then, every one of
+them human-arm), so the reader sees the months no rate covers instead of
+reading the window start as the human arm's whole reach (#1870).
 """
 
 from __future__ import annotations
@@ -251,7 +255,11 @@ def by_author(*, now: float | None = None, since_days: float | None = None,
 
     `since_days=None` means the whole ledger span, which is the widest window in
     which both arms have a counterpart; the human arm's older months are labelled
-    as having no ledger at all rather than folded into the comparison.
+    as having no ledger at all rather than folded into the comparison — labelled,
+    that is, from unfiltered history: the whole of `main` is fetched once and the
+    rates window it, while `human_history_from` and `pre_comparable_excluded`
+    read the unfiltered list, so the reach line reports how far the human arm
+    actually goes rather than where the window happens to start (#1870).
     """
     repo = Path(repo or LIVE_ROOT)
     now = now or datetime.now(timezone.utc).timestamp()
@@ -261,8 +269,13 @@ def by_author(*, now: float | None = None, since_days: float | None = None,
     since = led_from if since_days is None else max(led_from, now - since_days * 86400)
 
     shas = landing_shas(events)
-    commits = [c for c in assign_arms(SC._git_log(repo, since), shas)
-               if since <= c["ct"] <= now]
+    history = assign_arms(SC._git_log(repo, 0.0), shas)
+    commits = [c for c in history if since <= c["ct"] <= now]
+    human_reach = [c["ct"] for c in history if c["arm"] == HUMAN]
+    # Commits older than the first ledger row are in no rate's k or n: before
+    # the ledger exists there is nothing to pair them with.
+    pre_comparable = ([c for c in history if c["ct"] < led_from] if stamps else [])
+    pre_arms = sorted({c["arm"] for c in pre_comparable})
     agent_lands = [e for e in events if e.get("event") == "promoted"
                    and str(e.get("commit") or "") and since <= SC._ts(e) <= now]
 
@@ -298,10 +311,16 @@ def by_author(*, now: float | None = None, since_days: float | None = None,
                    "ledger_to": (_iso(led_to) if stamps else None),
                    "ledger_rows": len(events),
                    # The arms overlap only from the first ledger row: the human
-                   # arm's history before it has no counterpart at all.
+                   # arm's history before it has no counterpart at all. The
+                   # reach is the oldest HUMAN-arm commit of the WHOLE of
+                   # `main`'s history — a window-filtered list, or a min over
+                   # both arms, cannot report it (#1870).
                    "comparable_from": (_iso(led_from) if stamps else None),
-                   "human_history_from": (_iso(min(c["ct"] for c in commits))
-                                          if commits else None)},
+                   "human_history_from": (_iso(min(human_reach))
+                                          if human_reach else None),
+                   "pre_comparable_excluded": len(pre_comparable),
+                   "pre_comparable_single_arm": (pre_arms[0]
+                                                 if len(pre_arms) == 1 else None)},
         "by_author": arms,
         "week_strata": [{"week": k, **v} for k, v in sorted(strata.items())],
         "rollback_triggers": rollback_triggers,
@@ -319,10 +338,16 @@ def by_author(*, now: float | None = None, since_days: float | None = None,
 
 def render(row: dict[str, Any]) -> str:
     w = row["window"]
+    single = w["pre_comparable_single_arm"]
+    excluded_line = (f"{w['pre_comparable_excluded']} commits on main before the "
+                     f"first ledger row are excluded from every rate: "
+                     + (f"single-arm ({single}), " if single else "")
+                     + "no ledger counterpart to compare against")
     out = [f"landed-change outcomes by author — {w['from']} → {w['to']} "
            f"({w['days']} d, {w['ledger_rows']} ledger rows)",
            f"comparable from {w['comparable_from']} (first ledger row); "
            f"human arm history reaches {w['human_history_from']}",
+           excluded_line,
            ""]
     out.append(f"{'measure':22s} {'agent':>34s}   {'human':>34s}")
     a, h = row["by_author"][AGENT], row["by_author"][HUMAN]

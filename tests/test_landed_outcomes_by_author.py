@@ -323,3 +323,149 @@ def test_the_row_goes_to_the_automod_state_dir_not_into_the_checkout(
     out = LO.record({"generated_at": "2026-09-28T12:00:00Z"}, dest)
     assert out == dest and json.loads(dest.read_text())["generated_at"]
     assert SC.LIVE_ROOT not in dest.resolve().parents
+
+
+# ── #1870: the human arm's true reach, and the months no rate covers ──────
+
+def _init_repo(path: Path) -> Path:
+    path.mkdir()
+    subprocess.run(["git", "-C", str(path), "init", "-q"], check=True,
+                   capture_output=True)
+    subprocess.run(["git", "-C", str(path), "config", "commit.gpgsign", "false"],
+                   check=True, capture_output=True)
+    return path
+
+
+def _reach_fixture(repo: Path, *, with_old_history: bool = True,
+                   loop_old_commit: bool = True) -> list[dict]:
+    """The in-window shape fixed: two landings (days 10 and 7, whose `promoted`
+    rows open the ledger at day 10), one human commit (day 9) and one human
+    cleanup (day 8) that removes an agent line within 7 d, and the day-7 landing
+    removing a human line — so by hand `later_undo_7d` is 1/2 on each arm and
+    `revert_commits` 0/2, and a k/n equality can never be two empties.
+
+    `with_old_history` prepends commits that predate the ledger's first row: two
+    human (days 45 and 30) plus, when `loop_old_commit`, a day-60 commit under
+    the loop identity — agent-arm with no ledger row, older than every human
+    commit. A reach taken as a min over BOTH arms reports day 60; a reach taken
+    from the window-filtered list, the shipped bug, reports day 10; the correct
+    one is the human arm's day-45 date from the whole of the history.
+    """
+    if with_old_history:
+        if loop_old_commit:
+            _commit(repo, "old_loop.py", "LOOP_OLD = 1\n", author=LOOP_MAIL,
+                    days_ago=60)
+        _commit(repo, "old_human.py", "OLD_HUMAN = 1\n", author=HUMAN_MAIL,
+                days_ago=45)
+        _commit(repo, "old_two.py", "OLD_TWO = 2\n", author=HUMAN_MAIL,
+                days_ago=30)
+    l1 = _commit(repo, "a.py", "AGENT_KEPT = 1\nAGENT_UNDONE = 2\n",
+                 author=AGENT_MAIL, days_ago=10)
+    _commit(repo, "c.py", "HUMAN_KEPT = 1\nHUMAN_UNDONE = 2\n",
+            author=HUMAN_MAIL, days_ago=9)
+    _commit(repo, "a.py", "AGENT_KEPT = 1\n", author=HUMAN_MAIL, days_ago=8,
+            message="clean up after the loop")
+    l2 = _commit(repo, "c.py", "HUMAN_KEPT = 1\n", author=AGENT_MAIL, days_ago=7,
+                 message="drop the dead constant")
+    return [_promoted(l1, round_id="RL1", days_ago=10),
+            _promoted(l2, round_id="RL2", days_ago=7)]
+
+
+def _epoch(iso: str) -> float:
+    return datetime.strptime(iso, "%Y-%m-%dT%H:%M:%SZ").replace(
+        tzinfo=timezone.utc).timestamp()
+
+
+def test_human_reach_is_the_oldest_human_commit_of_all_history_not_the_window(
+        repo: Path):
+    """#1870 clause 1: `human_history_from` is the oldest HUMAN-arm commit of the
+    whole of `main`'s history — the day-45 one here — strictly earlier than
+    `comparable_from` (day 10, the window start) and not the day-60 loop-identity
+    commit either: a min over both arms would credit the person with the loop's
+    history."""
+    events = _reach_fixture(repo, with_old_history=True)
+    w = LO.by_author(now=NOW, repo=repo, events=events)["window"]
+    assert _epoch(w["human_history_from"]) == NOW - 45 * DAY
+    assert _epoch(w["human_history_from"]) < _epoch(w["comparable_from"])
+    assert _epoch(w["human_history_from"]) < _epoch(w["from"])
+    assert _epoch(w["comparable_from"]) == NOW - 10 * DAY
+
+
+def test_render_prints_the_unfiltered_reach_and_not_the_window_start(
+        repo: Path):
+    """#1870 clause 2: the `human arm history reaches` line prints that
+    unfiltered date (day 45), which is neither the window `from` nor
+    `comparable_from` (both day 10) while older human history exists."""
+    events = _reach_fixture(repo, with_old_history=True)
+    row = LO.by_author(now=NOW, repo=repo, events=events)
+    reach = row["window"]["human_history_from"]
+    lines = [ln for ln in LO.render(row).splitlines()
+             if "human arm history reaches" in ln]
+    assert len(lines) == 1, LO.render(row)
+    assert f"human arm history reaches {reach}" in lines[0]
+    assert reach != row["window"]["from"]
+    assert reach != row["window"]["comparable_from"]
+    assert _epoch(reach) == NOW - 45 * DAY
+
+
+def test_report_carries_one_line_naming_the_excluded_pre_ledger_count(
+        repo: Path):
+    """#1870 clause 3: exactly one line names the count of commits older than
+    `comparable_from` — the fixture's two human commits (days 45, 30), all of
+    them one arm — and says they are excluded from every rate for want of a
+    ledger counterpart."""
+    events = _reach_fixture(repo, with_old_history=True, loop_old_commit=False)
+    row = LO.by_author(now=NOW, repo=repo, events=events)
+    assert row["window"]["pre_comparable_excluded"] == 2
+    assert row["window"]["pre_comparable_single_arm"] == LO.HUMAN
+    text = LO.render(row)
+    excl = [ln for ln in text.splitlines() if "excluded from every rate" in ln]
+    assert len(excl) == 1, text
+    assert "2 commits" in excl[0]
+    assert "single-arm (human)" in excl[0]
+    assert "no ledger counterpart" in excl[0]
+
+
+def test_pre_ledger_commits_move_no_rate_k_or_n(tmp_path: Path):
+    """#1870 clause 4: the same in-window fixture with three pre-ledger commits
+    (two human, one agent) reports the SAME k/n as the repo without them:
+    `later_undo_7d` 1/2 and `revert_commits` 0/2 on each arm, and the arms'
+    commit counts stay 2/2 — if the excluded commits leaked into a denominator
+    they would read 2/5 (agent n) and 2/4 or worse."""
+    with_old = _init_repo(tmp_path / "repo-with-old")
+    plain = _init_repo(tmp_path / "repo-plain")
+    row_old = LO.by_author(
+        now=NOW, repo=with_old,
+        events=_reach_fixture(with_old, with_old_history=True))
+    row_plain = LO.by_author(
+        now=NOW, repo=plain,
+        events=_reach_fixture(plain, with_old_history=False))
+    assert (row_old["window"]["pre_comparable_excluded"],
+            row_plain["window"]["pre_comparable_excluded"]) == (3, 0)
+    for arm in (LO.AGENT, LO.HUMAN):
+        for key in ("later_undo_7d", "revert_commits"):
+            a = row_old["by_author"][arm][key]
+            b = row_plain["by_author"][arm][key]
+            assert (a["k"], a["n"]) == (b["k"], b["n"]), (arm, key, a, b)
+    # The equalities are over measured numbers, not two empty rates.
+    assert (row_old["by_author"][LO.AGENT]["later_undo_7d"]["k"],
+            row_old["by_author"][LO.AGENT]["later_undo_7d"]["n"]) == (1, 2)
+    assert (row_old["by_author"][LO.HUMAN]["later_undo_7d"]["k"],
+            row_old["by_author"][LO.HUMAN]["later_undo_7d"]["n"]) == (1, 2)
+    assert (row_old["by_author"][LO.AGENT]["revert_commits"]["k"],
+            row_old["by_author"][LO.AGENT]["revert_commits"]["n"]) == (0, 2)
+    assert (row_old["by_author"][LO.HUMAN]["revert_commits"]["k"],
+            row_old["by_author"][LO.HUMAN]["revert_commits"]["n"]) == (0, 2)
+    assert (row_old["by_author"][LO.AGENT]["commits"],
+            row_old["by_author"][LO.HUMAN]["commits"]) == (2, 2)
+
+
+def test_the_report_leaves_the_repo_it_measured_clean(repo: Path):
+    """#1870 clause 5: running the whole report — unfiltered history fetch and
+    all — over a fixture repo with pre-ledger history leaves
+    `git status --porcelain` empty in that repo."""
+    events = _reach_fixture(repo, with_old_history=True)
+    LO.render(LO.by_author(now=NOW, repo=repo, events=events))
+    dirty = subprocess.run(["git", "-C", str(repo), "status", "--porcelain"],
+                           capture_output=True, text=True).stdout
+    assert dirty == ""
