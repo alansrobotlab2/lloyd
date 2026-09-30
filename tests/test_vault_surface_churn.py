@@ -174,14 +174,99 @@ def test_the_no_round_path_checks_the_surface_too(isolated):
         {"item_id": 597, "closed": False, "acceptance": None}]
 
 
+#: A turn's own refusal that names what it refused: the half of #575 that keeps
+#: standing. `clause_outcomes` carries a real `not_met`, so
+#: `outcome_carries_no_claim` is False and the turn's word outranks the review.
+REFUSED_CLAUSE = {"acceptance": "not_met", "landed": True, "deferred_to": [],
+                  "summary": "clause 5 is not on disk", "spawned": [],
+                  "clause_outcomes": [{"clause": 5, "outcome": "not_met",
+                                       "evidence": "clause 5's file is absent"}]}
+
+#: The same word with nothing behind it — #1896's finalizer (`finalizer_tokens:
+#: 481`, `clause_outcomes: []`) 25 s after its vault review graded all five
+#: clauses met, and #1725's at 2026-09-28T08:26Z. `outcome_carries_no_claim` is
+#: True on this shape: the module's own predicate says it states nothing.
+CLAIMLESS_NOT_MET = {"acceptance": "not_met", "landed": True, "deferred_to": [],
+                     "summary": "", "spawned": []}
+
+
 def test_an_outcome_the_turn_reported_is_never_overridden(isolated):
+    """#575's guarantee in the form that means something: a refusal that names
+    its clause outranks an all-`met` review, and the item is left open for it.
+
+    Re-pointed by #1910. The fixture used to be `{"acceptance": "not_met", ...}`
+    with no `clause_outcomes` key at all — byte-for-byte the shape
+    `outcome_carries_no_claim` declares states nothing — so the node was pinning
+    "a verdict naming no clause can never be overridden", which is the half of
+    #575 #1910 exists to undo: that reading is what left #1896 open on a note
+    naming no clause while its review had graded all five met. The half worth
+    keeping is that a refusal the turn can substantiate is never overridden by
+    the reviewer, and that is what this node now asserts.
+    """
     p = write_item(isolated, 581)
-    _vault_turn(581, round_id=None, stop_reason="stop",
-                outcome={"acceptance": "not_met", "landed": True, "deferred_to": [],
-                         "summary": "", "spawned": []})
+    _vault_turn(581, round_id=None, stop_reason="stop", outcome=REFUSED_CLAUSE)
+    assert B.vault_review_outcome(S.LEDGER_PATH, ["588339ab0000"]), \
+        "the review graded all five met; the turn's named refusal still decides"
     out = B.close_settled_items(S.LEDGER_PATH)
     assert out == [{"item_id": 581, "closed": False, "acceptance": "not_met"}]
-    assert _fm(p)["status"] == "up_next"
+    fm = _fm(p)
+    assert fm["status"] == "up_next", "the turn's word decides: left open, not closed"
+    assert "clause(s) [5]" in fm["activity_log"][-1], \
+        "the note names the clause it refused, not nothing"
+
+
+def test_a_claim_less_not_met_beside_an_all_met_vault_review_closes_on_the_review(isolated):
+    """#1910 clause 1: #1896's landing, 2026-09-30T12:03Z.
+
+    The finalizer answered `not_met` with an empty `clause_outcomes` a quarter of
+    a minute after the vault review had graded all five clauses met, and the sweep
+    took the empty word: `item_landed` recorded `acceptance: not_met` with
+    `acceptance_source: None`, the item moved to `draft` with its one unattended
+    attempt spent, and the note read "reported the acceptance check not met"
+    naming no clause. A hand re-check that morning found all five clauses true on
+    disk. The review's verdict decides it now.
+    """
+    p = write_item(isolated, 1896)
+    _vault_turn(1896, round_id=None, stop_reason="stop", outcome=CLAIMLESS_NOT_MET)
+    assert B.outcome_carries_no_claim(CLAIMLESS_NOT_MET), \
+        "the fixture is the shape this module itself calls a non-claim"
+    out = B.close_settled_items(S.LEDGER_PATH)
+    assert out == [{"item_id": 1896, "closed": True, "acceptance": "met"}]
+    fm = _fm(p)
+    assert fm["status"] == "done" and fm["automod_landed"] == "588339ab0000"
+    ev = _events("item_landed")[-1]
+    assert ev["acceptance"] == "met" and ev["acceptance_source"] == "vault_review", ev
+
+
+def test_a_claim_less_not_met_beside_an_unpromoted_round_still_yields_a_row(isolated):
+    """#1910 clause 3: the second vault path, #1725 (`afbb9251`, 2026-09-28T08:26Z).
+
+    A vault turn that opened a code round which never promoted, reporting a
+    claim-less `not_met`, produced *no* `item_landed` row at all: the guard on the
+    second vault branch skipped it, so the landed vault commit was invisible to the
+    sweep — no `automod_landed` marker, no activity note, nothing for a human to
+    read. The all-met vault review decides it here too.
+    """
+    p = write_item(isolated, 1725)
+    _vault_turn(1725, round_id="SM_1725", stop_reason="stop", outcome=CLAIMLESS_NOT_MET)
+    assert _events("promoted") == [], "the tests-only round never promoted"
+    out = B.close_settled_items(S.LEDGER_PATH)
+    assert out == [{"item_id": 1725, "closed": True, "acceptance": "met"}], out
+    ev = _events("item_landed")[-1]
+    assert ev["commit"] == "588339ab0000", "the vault commit: the only thing that landed"
+    assert ev["acceptance"] == "met" and ev["acceptance_source"] == "vault_review", ev
+    assert _fm(p)["status"] == "done"
+
+
+def test_a_refusal_that_names_its_clause_beside_an_unpromoted_round_yields_no_row(isolated):
+    """The guard the clause-3 fix keeps standing: a refusal the turn can
+    substantiate is still not the sweep's to override, so the vault landing
+    beside an unpromoted round is still skipped and nothing is recorded."""
+    p = write_item(isolated, 1726)
+    _vault_turn(1726, round_id="SM_1726", stop_reason="stop", outcome=REFUSED_CLAUSE)
+    assert B.close_settled_items(S.LEDGER_PATH) == []
+    assert _events("item_landed") == []
+    assert "automod_landed" not in _fm(p)
 
 
 def test_a_round_and_a_reported_met_closes_only_with_the_reviews_agreement(isolated):

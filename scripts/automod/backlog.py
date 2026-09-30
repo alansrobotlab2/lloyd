@@ -2911,28 +2911,38 @@ def settled_landings(ledger: Path) -> list[dict]:
             continue
         if not vault:
             continue
-        # The two vault branches below keep the raw `reported` test (#1318
-        # deliberately stopped at the code-round path). #575 pins that a vault
-        # landing's reported outcome is never overridden —
-        # `tests/test_vault_surface_churn.py::test_an_outcome_the_turn_reported_is_never_overridden`,
-        # whose fixture is a `not_met` with no `clause_outcomes` at all, exactly
-        # the shape `usable` discards — and a vault round has no gate review rung
-        # to stand in for it anyway. Widening it there would trade a landed
-        # code-round fix for that guarantee.
+        # #1910: the vault branches take `usable`, the same test the code-round
+        # path above takes, not the bare truthiness of the reported word. #575's
+        # guarantee — a vault landing's reported outcome is never overridden — is
+        # about a refusal the turn can substantiate, and its pinned node
+        # (`tests/test_vault_surface_churn.py::test_an_outcome_the_turn_reported_is_never_overridden`)
+        # now carries a `clause_outcomes` row naming the clause it refused, with
+        # the left-open, turn's-word-decides assertion it always had. What the raw
+        # `reported` test let through on top of that was the degenerate shape: #1725
+        # (`afbb9251`, 2026-09-28T08:26Z) and #1896 (`90f33684`, 2026-09-30T12:03Z)
+        # both landed a `not_met` whose `clause_outcomes` was empty beside a vault
+        # review that had graded all five clauses `met`, and each item was decided
+        # on a verdict this module's own `outcome_carries_no_claim` calls a
+        # non-claim — left open on a note naming no clause, its one unattended
+        # attempt spent, its recorded post-landing checks never written.
         if not rid:
             out.append({"item_id": int(d["item_id"]), "round_id": "", "commit": vault[-1],
                         "settled_at": d.get("created_at"), "landed_ts": d.get("ts"),
-                        "outcome": outcome if reported else (graded_for(d, vault) or outcome),
+                        "outcome": outcome if usable else (graded_for(d, vault) or outcome),
                         "vault": True})
             continue
-        if rid in promoted_any or reported not in (None, "", "met"):
+        # Only a substantiated non-`met` verdict suppresses this row. A claim-less
+        # `not_met` used to `continue` here, which left a landed vault commit with
+        # no `item_landed` row at all — no marker, no activity note, nothing for a
+        # human to read, let alone a decision.
+        if rid in promoted_any or (usable and reported not in (None, "", "met")):
             continue
         graded = graded_for(d, vault)
         if graded is None:
             continue
         out.append({"item_id": int(d["item_id"]), "round_id": "", "commit": vault[-1],
                     "settled_at": d.get("created_at"), "landed_ts": d.get("ts"),
-                    "outcome": outcome if reported else graded, "vault": True})
+                    "outcome": outcome if usable else graded, "vault": True})
 
     # A settled promotion with no `finished` implement row is a landing too
     # (#1318). The finalizer runs after the promotion, so it can die with the
@@ -3161,9 +3171,15 @@ def close_landed(item: Item, *, commit: str, round_id: str, settled_at: str,
     item.path.write_text(
         f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)}"
         f"---\n{body.rstrip()}{section}", encoding="utf-8")
-    if close and fm.get("human_clauses"):
-        # What the item itself records as owed survives any close, whoever the
-        # caller is — the reason the tag used to be kept "unasked".
+    if fm.get("human_clauses"):
+        # What the item itself records as owed is owed from the moment its landing
+        # is recorded, whoever the caller is and whether or not this call closes.
+        # A close has to carry it past the close — the reason the tag used to be
+        # kept "unasked" — and #1910 is the other half: a landing that LEAVES THE
+        # ITEM OPEN owes it too, and gating this write on `close` is how #1896's
+        # four recorded post-landing checks reached the `item_landed` row at
+        # 12:03:11Z and never reached the board. `add_owed` dedupes by text, so
+        # the sweep's own write beside this one cannot ask twice.
         from scripts.automod import owed as O
         O.add_owed(item.path, human_clauses_of(None, fm), kind="check",
                    activity="owed after landing")
@@ -3309,7 +3325,17 @@ def _close_settled_items(ledger: Path, boards: tuple[str, ...] | None, *,
             close_landed(item, commit=landing["commit"], round_id=landing["round_id"],
                          settled_at=str(landing.get("settled_at") or ""), close=close, why=why,
                          tags=tags)
-            if acc == "met" and (human or paths_owed):
+            if human or paths_owed:
+                # #1910: what the item owes is not conditional on the landing
+                # closing. The `met` branch mints these entries because a close
+                # must not lose them (#1210); a `not_met`, `deferred` or
+                # refused close mints them because the debt exists from the
+                # landing either way — #1896's four recorded checks were read
+                # into its `item_landed` row and written nowhere a job reads,
+                # because this line required the close. The status move beside
+                # it mints a `decide` entry; these are the `check`/`path` ones,
+                # and `add_owed`'s dedupe means `close_landed`'s unasked write
+                # and this one still ask for each check once.
                 from scripts.automod import owed as O
                 O.add_owed(item.path, human, kind="check", activity="owed after landing")
                 O.add_owed(item.path, paths_owed, kind="path", activity="owed after landing")

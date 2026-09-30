@@ -4516,3 +4516,48 @@ def test_the_rehearsal_predicts_the_closures_the_real_sweep_writes(isolated):
     assert real == {601: True, 602: False, 50: True, 2: True}
     for item_id, will_close in real.items():
         assert (_fm(items[item_id])["status"] == "done") is will_close, item_id
+
+
+# ===========================================================================
+# A landing that leaves an item open still writes what that item owes (#1910)
+#
+# #1896 (vault land 90f33684, 2026-09-30T12:03:11Z): triage wrote four
+# post-landing checks into the item's front-matter `human_clauses`, the sweep
+# read them — they are exactly the `human_clauses` array on the `item_landed`
+# row it stamped — and wrote nothing to the board, because both owed writers
+# were gated on the landing *closing*: `close_landed`'s
+# `if close and fm.get("human_clauses")` and the sweep's
+# `if acc == "met" and (human or paths_owed)`. The item told the ledger what it
+# owed and told the board nothing, so the owed-check job saw only the single
+# `decide` entry the status move minted, and #1725 and #1896 had to be closed by
+# hand sweeps that re-read the front matter themselves.
+# ===========================================================================
+
+def test_a_landing_that_leaves_the_item_open_still_owes_its_recorded_checks(isolated):
+    """#1910 clause 4: the four checks #1896 recorded and never received."""
+    items = _board(isolated, {"id": 1896, "status": "up_next", "human_clauses": [OWED_CHECK]})
+    _landed(1896, "SM_1896", _sha(1896), outcome=NOT_MET)
+
+    assert B.close_settled_items(S.LEDGER_PATH) == [
+        {"item_id": 1896, "closed": False, "acceptance": "not_met"}]
+    fm = _fm(items[1896])
+    assert fm["status"] != "done", "a `not_met` still closes nothing"
+    assert [(e["kind"], e["what"]) for e in O.entries_of(fm)] == [("check", OWED_CHECK)], \
+        "a left-open landing still puts the item's own checks on its owed list"
+
+    # The status move's decision entry rides beside them, not instead of them —
+    # and that entry alone is the whole owed list #1896 actually had.
+    O.add_owed(items[1896], ["a human rules which clause to re-offer"], kind="decide")
+    assert [e["kind"] for e in O.entries_of(_fm(items[1896]))] == ["check", "decide"]
+
+    # The `met` landing that later closes the same item owes them once, not twice:
+    # three writers can reach this one list (this sweep, `close_landed`'s unasked
+    # write at close, and the sweep's own `met` branch), and the dedupe is what
+    # stops the owed-check job being asked the same check twice.
+    _landed(1896, "SM_1896b", "ffeeffeeffee", outcome=MET)
+    assert B.close_settled_items(S.LEDGER_PATH) == [
+        {"item_id": 1896, "closed": True, "acceptance": "met"}]
+    closed = _fm(items[1896])
+    assert closed["status"] == "done"
+    assert [e["what"] for e in O.entries_of(closed) if e["kind"] == "check"] == [OWED_CHECK], \
+        "owed exactly once across the left-open write and the close"
