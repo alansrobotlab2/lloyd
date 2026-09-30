@@ -1873,6 +1873,25 @@ def test_the_mutes_close_the_live_fan_out_and_every_fixture_sets_them(tmp_path):
     guardian = tmp_path / "live-guardian"
     guardian.mkdir()
     shutil.copy2(GUARDIAN / "notify.py", guardian / "notify.py")
+    # `notify.py` is not self-contained since #1887: it imports `daily_note`, the
+    # shared fresh-daily-note header, as a SIBLING module (`agent-services` is not a
+    # package). Copying `notify.py` alone therefore produced a fake deployment the
+    # machine never has — `agent-services/bin/guardian-stage.sh` copies `*.py`, so the
+    # pinned snapshot at ~/.local/state/lloyd-guardian/bin always holds both files, and
+    # this fixture claims to reproduce that layout. Carried from the source rather than
+    # named, so the next sibling `notify.py` grows travels with it automatically and the
+    # fake layout cannot lag the real one again.
+    import ast as _ast
+    _siblings = set()
+    for _n in _ast.walk(_ast.parse((GUARDIAN / "notify.py").read_text())):
+        if isinstance(_n, _ast.Import):
+            _siblings |= {a.name.split(".")[0] for a in _n.names}
+        elif getattr(_n, "module", None) and getattr(_n, "level", 1) == 0:
+            _siblings.add(_n.module.split(".")[0])
+    for _mod in sorted(_siblings):
+        _src = GUARDIAN / f"{_mod}.py"
+        if _src.is_file():
+            shutil.copy2(_src, guardian / _src.name)
     driver = tmp_path / "live_announce_driver.py"
     driver.write_text(_LIVE_ANNOUNCE_DRIVER, encoding="utf-8")
 

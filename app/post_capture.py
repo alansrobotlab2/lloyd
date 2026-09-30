@@ -24,7 +24,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-import yaml
+# The one origin of a fresh daily note's front matter, shared with the watchdog
+# (#1887). `yaml` left this file with the `safe_dump` it used to hold, and the builder
+# is stdlib-only on purpose: the watchdog has to render the same block with no venv.
+from app import daily_note
 
 from app.paths import SESSIONS_DIR
 from app.sessions_io import (is_conversation_session, is_user_session,
@@ -473,22 +476,16 @@ def _append_daily_note(session_id: str, summary: str,
         # every pre-existing daily note uses this shape — see memory/2026-06-14.md.
         # The old header was `segment: agents` with no `type`, which was wrong
         # twice: the file lives under memory/, and each new calendar day was
-        # born a conformance violation (item #519). Dumped rather than spelled
-        # so the frontmatter is strict-parseable by construction, with the same
-        # kwargs scripts/vault/okf_migrate.py uses to repair the older ones.
-        frontmatter = yaml.safe_dump(
-            {
-                "segment": "memory",
-                "tags": ["memory", "daily-notes"],
-                "type": "note",
-                "timestamp": now.strftime("%Y-%m-%dT%H:%M:%S"),
-            },
-            sort_keys=False,
-            allow_unicode=True,
-            default_flow_style=False,
-        ).rstrip()
+        # born a conformance violation (item #519). The block itself comes from
+        # `app/daily_note` (which is `agent-services/guardian/daily_note.py`, #1887)
+        # rather than from a `safe_dump` here: this route, `append_daily_alert_line`
+        # and the watchdog's `_vault_note` all create this one file, and two copies
+        # of the literal in two modules is how the watchdog's third, headerless
+        # writer stayed unwitnessed. Byte-for-byte the same text — the equivalence
+        # with `yaml.safe_dump` and its okf_migrate kwargs is pinned against a live
+        # dump in tests/test_daily_note_shared_header.py, not asserted here.
         daily_path.write_text(
-            f"---\n{frontmatter}\n---\n\n# {today} Daily Notes\n\n## Sessions\n{entry}",
+            daily_note.fresh_header(now, today) + "\n## Sessions\n" + entry,
             encoding="utf-8",
         )
     else:

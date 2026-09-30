@@ -3475,26 +3475,24 @@ def append_daily_alert_line(body: str) -> bool:
     what decides the filename. A note that does not exist yet gets the same
     OKF-conformant header that function gives a fresh one — `type` is required by
     `scripts/vault/validate_okf.py`, and a note whose first line came from an
-    alert must not be a conformance violation on arrival.
+    alert must not be a conformance violation on arrival. Since #1887 that header is
+    not merely the same SHAPE but the same call: `app.daily_note.fresh_header`, one
+    builder shared with `_append_daily_note` and the watchdog's `_vault_note`. This
+    function used to hold a second, independent copy of the literal, which is how a
+    third writer with no header at all went unnoticed.
     """
     from zoneinfo import ZoneInfo
+
+    from app.daily_note import fresh_header
 
     try:
         now = datetime.datetime.now(ZoneInfo("America/Los_Angeles"))
         entry = f"\n- {now.strftime('%H:%M %Z')} — {body}\n"
         path = _daily_note_dir() / f"{now.strftime('%Y-%m-%d')}.md"
         if not path.exists():
-            frontmatter = yaml.safe_dump(
-                {"segment": "memory", "tags": ["memory", "daily-notes"],
-                 "type": "note",
-                 "timestamp": now.strftime("%Y-%m-%dT%H:%M:%S")},
-                sort_keys=False, allow_unicode=True, default_flow_style=False,
-            ).rstrip()
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(
-                f"---\n{frontmatter}\n---\n\n"
-                f"# {now.strftime('%Y-%m-%d')} Daily Notes\n{entry}",
-                encoding="utf-8")
+            path.write_text(fresh_header(now, now.strftime("%Y-%m-%d")) + entry,
+                            encoding="utf-8")
         else:
             with open(path, "a", encoding="utf-8") as handle:
                 handle.write(entry)

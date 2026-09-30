@@ -36,6 +36,14 @@ import urllib.request
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+# Sibling module — stdlib only, and staged alongside this file by
+# `agent-services/bin/guardian-stage.sh`'s `guardian/*.py` glob. #1887: `_vault_note`
+# used to `open(note, "a")` a note that did not exist, which CREATED the day's file
+# from a blank lead and a `##` heading with no front matter at all, so the fresh-note
+# header lives in `daily_note.py` and every writer of `memory/<date>.md` gets its
+# block from that one place.
+import daily_note  # noqa: E402
+
 # ── The daily note's incident format (#1536) ──────────────────────────────
 #
 # `_vault_note`'s own section header, as a constant because the coalescing has to
@@ -302,12 +310,29 @@ class Notifier:
         opens a section on the first finding and REFRESHES that same section on every
         later finding of the same incident, so one incident is one section no matter
         how many checks it outlives.
+
+        When the day's note does not exist yet it is CREATED with the shared
+        front-matter header (`daily_note.fresh_header`, #1887) before the section is
+        appended — the same block `app/post_capture._append_daily_note` gives a fresh
+        note. It used to be created by the `open(note, "a")` below, from a blank lead
+        and a `##` heading and no front matter, which made an alert that fired before
+        any session capture a conformance violation on arrival:
+        `scripts/vault/segment_scan.py` scores a file it cannot parse as missing BOTH
+        required keys, and `memory/2026-09-30.md` reached
+        `test_scan_exits_0_on_the_live_vault` that way. A note that already exists is
+        not touched by this branch at all — its own header stays.
         """
         try:
             note = self._daily_note()
             if note is None:
                 return False
-            body = note.read_text(encoding="utf-8") if note.exists() else ""
+            exists = note.is_file()
+            if not exists:
+                note.parent.mkdir(parents=True, exist_ok=True)
+                note.write_text(daily_note.fresh_header(self._stamp(),
+                                                        self._today().isoformat()),
+                                encoding="utf-8")
+            body = note.read_text(encoding="utf-8") if exists else ""
             open_at = self._daily_open_at(body, title) if coalesce else None
             if open_at is not None:
                 start, end = open_at
@@ -430,6 +455,17 @@ class Notifier:
         retraction can be observed at all (#1590).
         """
         return datetime.now().date()
+
+    def _stamp(self) -> datetime:
+        """The instant a fresh daily note's `timestamp:` front-matter key records.
+
+        A method beside `_today()` for the same reason (#1590): a test standing on a
+        given day must not also be standing on a given second, or the block it
+        compares is a measurement of the wall clock. `_today()` answers the FILENAME
+        and this answers the KEY, and #1887's whole point is that the two agree with
+        what the session-capture writer puts in the same note.
+        """
+        return datetime.now()
 
     def _scan_days(self) -> list[date]:
         """The days whose daily notes `resolve` retracts across, newest first."""
