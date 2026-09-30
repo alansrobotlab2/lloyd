@@ -34,6 +34,31 @@ the verb `architecture/measurement.md` once asserted for
 and the check above stayed green while an operator following the doc got a usage
 dump and exit 1 (#1792). The command half is at the bottom of this file and owes
 the same three proofs.
+
+**Two rulings about that command half, shipped here because they are the reason
+it is shaped as it is (#1890).**
+
+*It grades every top-level `architecture/*.md`, not the four docs of #1699.*
+`NEW_DOCS` stays what it always was — the four docs whose *path* assertions,
+index rows and "does not cover" sections this file pins — but a wrong *verb*
+fails the same way wherever it is written: `workers/sources/arch_review.py`
+makes every doc a review unit, and a command claim in one of the other thirty
+sends an operator to the same usage dump and exit 1. Grading four of thirty-four
+docs was prevention that protected 2 of the corpus's 15 command spans; the other
+13 went ungraded, and the one report the corpus-wide sweep produced
+(`harness.md:1573`) was in an ungraded doc. So the command sweep reads the glob.
+The cost is that a newly written doc joins the surface the moment it lands, which
+is the point: `test_the_command_sweep_covers_every_architecture_doc` names the
+count so a glob that stopped finding the corpus cannot pass quietly.
+
+*A module with no dispatch chain is still skipped, and that is not an exemption.*
+Nothing beside a library or a flag-only script can be a subcommand, and reporting
+a bare identifier there would read a symbol citation as a broken command —
+`architecture/authority-surfaces.md:34` brackets `check_bash_command` beside
+`app/harness/safety.py` for exactly that reason. The skip is keyed on the module
+having no chain, never on which doc or which module is being read, so it is not a
+list of names: `test_a_module_with_no_dispatch_chain_is_not_graded` pins it, and
+`test_the_widened_sweep_is_shown_able_to_fail` pins the other side.
 """
 
 from __future__ import annotations
@@ -57,6 +82,14 @@ HOME = Path.home()
 #: a new doc elsewhere must not silently join the surface this file grades.
 NEW_DOCS = ("measurement.md", "context-window.md", "authority-surfaces.md",
             "browser-side-panel.md")
+
+#: How many top-level architecture docs exist. The command sweep reads the glob,
+#: not this number; the number is the vacuity guard, because a `glob("*.md")`
+#: that found no corpus — a moved directory, a wrong `ROOT` — would otherwise let
+#: a sweep over "every doc" pass by sweeping nothing. A doc landing here moves
+#: the number, and that is the sweep admitting its new subject, which is the
+#: #1890 ruling: every doc is graded, so every doc has to be in the surface.
+ARCH_DOC_SURFACE = 34
 
 #: The heading every one of the four carries, in the words clause 3 asks for.
 NOT_COVERED = "What this doc does not cover"
@@ -427,20 +460,23 @@ def test_the_gate_selection_drops_nothing_and_the_named_node_passes():
     One `-v` run under the gate's mark expression answers every half:
 
     - `--collect-only` with and without `-m "not live_vault and not
-      fault_injection"` collect the same 23 nodes, so nothing in this file was
-      moved out of the gate's reach;
-    - the run reports **22 PASSED lines**, one per node collected less this one, so
-      a skipped or xfailed node cannot hide inside a passing exit code;
+      fault_injection"` collect the same nodes, so nothing in this file was moved
+      out of the gate's reach;
+    - the run reports one **PASSED line** per node collected less this one, so a
+      skipped or xfailed node cannot hide inside a passing exit code;
     - the node #1763 files — `test_every_path_a_new_doc_cites_resolves_in_the_working_tree`
-      `[authority-surfaces.md]` — is among those 22 and is reported PASSED **by
+      `[authority-surfaces.md]` — is among them and is reported PASSED **by
       name**, which is the verdict this item was filed for;
     - exit code 0, and no `skipped`/`xfailed` anywhere in the output.
 
     This node is the one exclusion, and it is a recursion guard, not a dodge: a node
     that runs its own file runs itself again — measured at 298 live pytest processes
-    before it was bounded. The arithmetic carries that honestly (23 collected, 22
-    reported), and this node's own verdict is what the gate's full-suite run records
-    with no exclusion in it.
+    before it was bounded. The arithmetic carries that honestly, and every count
+    below is derived from collection rather than quoted from a triage — the numbers
+    this paragraph used to carry (23 collected, 22 reported) had been stale since
+    #1792 added to the file, and a stale count here is a count nobody can use to
+    notice a node going missing. This node's own verdict is what the gate's
+    full-suite run records with no exclusion in it.
     """
     from scripts.automod.gate import TESTS_MARK_EXPR
 
@@ -1021,8 +1057,11 @@ def test_context_window_delegates_to_the_section_and_says_nothing_unmeasured():
 # it against. A module that dispatches no subcommand at all (a library, or a
 # script with only flags) cannot be mis-cited as having one, and the alternative
 # — reporting a bare identifier beside such a module — reads a symbol citation
-# as a broken command. Corpus-wide over the 30 non-graded docs this scoping is
-# what makes the half quiet: see the finding appended to #1792.
+# as a broken command. Every top-level doc is swept (#1890), so this scoping,
+# not a list of docs or modules, is what keeps the half quiet: of the corpus's 15
+# command spans, 3 sit beside a module with no chain and are skipped on that
+# property alone — see the finding appended to #1792 and the two rulings in this
+# file's docstring.
 
 _COMMAND_SPAN = re.compile(r"`([^`\n]+)`")
 # `.py` path with an optional `:NNN` anchor — the same shape `cited_paths` takes.
@@ -1143,17 +1182,60 @@ def command_claims(text):
 
 _USES_A_COMMAND = {"command", "cmd", "subcommand", "verb", "action"}
 _USAGE_VARIABLES = {"USAGE", "CLI", "HELP", "USAGE_TEXT", "EPILOG"}
+#: The argument vector itself, under either spelling this tree uses: a bare
+#: `argv` for a `main(argv=None)` helper, or `sys.argv` in a script that reads
+#: it directly.
+_ARGV_NAME = "argv"
+
+
+def _is_argv(node):
+    """Is this expression the argument vector — `argv`, `sys.argv`?"""
+    if isinstance(node, ast.Name):
+        return node.id.lower() == _ARGV_NAME
+    if isinstance(node, ast.Attribute):
+        return node.attr.lower() == _ARGV_NAME
+    return False
 
 
 def _dispatch_slot(node):
-    """Is this expression the thing a subcommand gets compared against?"""
+    """Is this expression the thing a subcommand gets compared against?
+
+    Two ways a subscript is one, and they name different halves of it: the
+    *index* being command-named is a lookup table (`DISPATCH[command]`), while
+    the *base* being the argument vector is a stdlib-only script reading its own
+    positional arguments (`agent-services/rpc/lloyd_rpc.py:243`,
+    `if len(argv) < 2 or argv[0] not in ("call", "map")`). Only the index case
+    was read, so the RPC client's chain harvested the one verb that also turned
+    up in a `verb == "call"` comparison and reported `map`, which
+    `architecture/harness.md:1573` correctly cites, as invented (#1890). A
+    positional integer index is required: `sys.argv[1:]` is a slice, not a slot.
+    """
     if isinstance(node, ast.Name):
         return node.id.lower() in _USES_A_COMMAND
     if isinstance(node, ast.Attribute):
         return node.attr.lower() in _USES_A_COMMAND
     if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant):
-        return str(node.slice.value).lower() in _USES_A_COMMAND
+        if str(node.slice.value).lower() in _USES_A_COMMAND:
+            return True
+        return _is_argv(node.value) and isinstance(node.slice.value, int)
     return False
+
+
+def _verb_like(value) -> bool:
+    """Is this compared constant a subcommand, as opposed to a flag or prose?
+
+    The span grammar already refuses a flag on the doc side (`_COMMAND_WORD`
+    needs a leading lowercase letter, which is why `-h, --help` never enters a
+    chain from a usage string). The same grammar has to decide the code side, or
+    harvesting `sys.argv` turns a flag check into a whole dispatch chain:
+    `agent-services/services/idle-worker/check-github-releases.py:184` compares
+    `sys.argv[1] == "--init"`, and read naively that module's chain would be one
+    flag — grading every verb anyone ever cites against it, and reporting a doc
+    that cited `scan` beside a module that takes no subcommand at all. With the
+    flag dropped that module has no chain and is skipped, which is the sentence
+    `undispatched_claims` already applies to a library (#1890 clause 3).
+    """
+    return isinstance(value, str) and bool(_COMMAND_WORD.match(value))
 
 
 class _Chain(ast.NodeVisitor):
@@ -1161,9 +1243,11 @@ class _Chain(ast.NodeVisitor):
 
     Four spellings cover this tree: argparse `add_parser("x")`, argparse
     `add_argument("command", choices=(…))`, a comparison against a
-    command-shaped name (`if command == "gate"`), and a `match` over one. Plus
-    the `USAGE` string the module prints when it does not recognise a verb,
-    whose leading word per line is a verb it does.
+    command-shaped name *or a positional of `argv`/`sys.argv`*
+    (`if command == "gate"`, `if argv[0] not in ("call", "map")`), and a `match`
+    over one. Plus the `USAGE` string the module prints when it does not
+    recognise a verb, whose leading word per line is a verb it does. A compared
+    constant counts only if `_verb_like` says so: a flag is not a subcommand.
     """
 
     def __init__(self):
@@ -1212,11 +1296,11 @@ class _Chain(ast.NodeVisitor):
         sides = [node.left, *node.comparators]
         if any(_dispatch_slot(x) for x in sides):
             for x in sides:
-                if isinstance(x, ast.Constant) and isinstance(x.value, str):
+                if isinstance(x, ast.Constant) and _verb_like(x.value):
                     self.verbs.add(x.value)
             for op, other in zip(node.ops, node.comparators):
                 if isinstance(op, (ast.In, ast.NotIn)):
-                    self.verbs.update(self._strings(other))
+                    self.verbs.update(v for v in self._strings(other) if _verb_like(v))
         self.generic_visit(node)
 
     def visit_Match(self, node):
@@ -1342,24 +1426,176 @@ def undispatched_claims(text, label="<doc>"):
     return reports
 
 
-def test_every_command_a_new_doc_names_is_dispatchable():
-    """The command half of the graded check (#1792, all four clauses)."""
+def test_the_command_sweep_covers_every_architecture_doc():
+    """Clause 1 (#1890): the graded surface is the corpus, not the four #1699 docs.
+
+    `NEW_DOCS` protected 2 of the corpus's 15 command spans, both in
+    `measurement.md`; the other 13 sat in 7 docs no node read, and the report the
+    corpus-wide sweep produced was one of them. The sweep now reads
+    `ARCH.glob("*.md")`, the same glob `workers/sources/arch_review.py::doc_slugs`
+    uses to decide what is a review unit at all — a doc cannot be reviewed by a
+    cadence it is not in, and it cannot be graded by a check that is not in it
+    either. `ARCH_DOC_SURFACE` is what stops "the sweep reads the glob" from
+    meaning "the sweep reads whatever it happens to find".
+    """
+    docs = sorted(ARCH.glob("*.md"))
+    assert len(docs) == ARCH_DOC_SURFACE, (
+        f"the glob found {len(docs)} top-level architecture docs, want "
+        f"{ARCH_DOC_SURFACE}. The sweep grades the glob's output, so a count that "
+        f"moved means either a doc landed (update the constant and the sweep now "
+        f"grades it too) or this file is reading the wrong tree")
+
     graded = []
-    bad = []
-    for slug in NEW_DOCS:
-        text = _text(slug)
-        bad += undispatched_claims(text, slug)
-        graded += [(slug, ln, verb) for ln, span, module, verb
+    for p in docs:
+        text = p.read_text(encoding="utf-8", errors="replace")
+        graded += [(p.name, ln, verb) for ln, span, module, verb
                    in command_claims(text) if dispatch_verbs(module)]
-    joined = "\n".join(bad)
-    assert not bad, joined
-    assert graded, ("the command check graded nothing, which means the extractor "
-                    "found no command in four docs about measurement — the same "
-                    "vacuity the path half pins at its own extractor")
-    # What it graded, pinned so the aggregate above cannot be satisfied by
-    # one lucky span: both verbs the supply-chain row cites.
+
+    assert graded, ("the command sweep graded nothing across "
+                    f"{len(docs)} docs about this machine, which means the "
+                    "extractor or the resolver went stale — the same vacuity the "
+                    "path half pins at its own extractor")
+    # The widening itself: claims outside the four docs are being graded, not
+    # skipped. Anything that narrowed the sweep back — a per-doc exemption, a
+    # re-introduced `for slug in NEW_DOCS` — empties this set.
+    outside = sorted({g for g in graded if g[0] not in NEW_DOCS})
+    assert outside, (
+        "every graded command claim came from the four #1699 docs, so the other "
+        f"{ARCH_DOC_SURFACE - len(NEW_DOCS)} docs are grading nothing")
+
+    # What it graded, pinned so the aggregate above cannot be satisfied by one
+    # lucky span: both verbs the supply-chain row cites (#1792's pins, kept).
     assert ("measurement.md", 73, "fixtures") in graded, graded
     assert ("measurement.md", 73, "scan") in graded, graded
+
+
+def test_no_architecture_doc_cites_a_command_its_module_does_not_dispatch():
+    """Clause 4 (#1890): the corpus decides clean, and nothing is excused by name.
+
+    Zero reports is only worth something if the sweep is the one that graded
+    twelve claims to get there, so this node pins the shape of the pass alongside
+    it: which docs contributed a graded claim, and which claims were skipped —
+    the latter because the skip is the one place a false negative can hide, and
+    `undispatched_claims` excuses a claim on exactly one property, that the module
+    cited has no dispatch chain at all. A fourth name entering `excused` means a
+    citation stopped being graded and nobody read why; a name leaving `graded_by`
+    means a doc's claims went ungraded, which is what an exemption list looks
+    like from the inside.
+    """
+    docs = sorted(ARCH.glob("*.md"))
+    assert len(docs) == ARCH_DOC_SURFACE, (
+        f"{len(docs)} top-level docs, want {ARCH_DOC_SURFACE} — see the sweep node")
+
+    bad, graded_by, excused = [], set(), []
+    for p in docs:
+        text = p.read_text(encoding="utf-8", errors="replace")
+        bad += undispatched_claims(text, p.name)
+        for ln, span, module, verb in command_claims(text):
+            if dispatch_verbs(module):
+                graded_by.add(p.name)
+            else:
+                excused.append((p.name, verb))
+
+    assert not bad, "\n".join(bad)
+    assert graded_by == {"automod.md", "harness.md", "infrastructure.md",
+                         "measurement.md", "research-pipeline.md", "voice.md"}, (
+        f"graded claims came from {sorted(graded_by)}; harness.md among them is "
+        f"the point of #1890 — its `lloyd_rpc.py` row was the report the widening "
+        f"existed to settle")
+    assert sorted(excused) == [("djev.md", "rerank"),
+                               ("harness.md", "structure"),
+                               ("mission-control.md", "route")], (
+        "a command claim was skipped, or stopped being skipped, and the only "
+        "legitimate reason is the cited module having no dispatch chain: "
+        "check whether that module grew one, not whether the doc is on a list")
+
+
+def test_an_argv_positional_test_is_read_as_a_dispatch_chain():
+    """Clause 2 (#1890): `argv[0] not in ("call", "map")` IS the dispatch chain.
+
+    `agent-services/rpc/lloyd_rpc.py` is stdlib-only and takes no argparse: it
+    checks its first positional argument against a tuple at :243 and branches on
+    `verb == "call"` at :261. Reading only the second spelling is why its chain
+    came back as `{'call'}` and `architecture/harness.md:1573`, which correctly
+    cites `call` and `map` with `concurrency`, was reported as inventing `map` —
+    a doc graded wrong by the reader, the exact mistake #1792 was filed to stop.
+    The synthetic half is the `argv-positional` and `sys-argv-positional` rows of
+    `_DISPATCH_SOURCES`, run by `test_each_dispatch_spelling_yields_its_verbs`.
+    """
+    rpc = ROOT / "agent-services/rpc/lloyd_rpc.py"
+    assert dispatch_verbs(rpc) == {"call", "map"}, (
+        f"lloyd_rpc.py harvested {sorted(dispatch_verbs(rpc))}; its usage dump at "
+        f":240 prints `call` and `map` and its guard is "
+        f"`argv[0] not in (\"call\", \"map\")`, so a chain missing either one "
+        f"reports a correct doc as invented")
+
+    # The doc line that was reported: graded against the corpus's own extractor,
+    # this is the report #1890 removes.
+    assert undispatched_claims(_text("harness.md"), "harness.md") == [], (
+        "harness.md reports again: " + "; ".join(
+            undispatched_claims(_text("harness.md"), "harness.md")))
+
+
+def test_a_flag_shaped_token_is_never_harvested_as_a_verb():
+    """Clause 3 (#1890): harvesting `argv` must not turn a flag into a subcommand.
+
+    `agent-services/services/idle-worker/check-github-releases.py:184` reads
+    `if len(sys.argv) > 1 and sys.argv[1] == "--init"`, and naively that module's
+    entire dispatch chain is one flag. Grading against a one-flag chain is worse
+    than grading nothing: every verb anyone ever brackets beside that module is
+    then reported as invented, and the doc that said `scan` beside a script that
+    takes `--init` or nothing would be sent off to fix a line that is right. With
+    the flag dropped the module has no chain, and the sentence
+    `undispatched_claims` already applies to a library covers it.
+    """
+    assert not _verb_like("--init") and not _verb_like("-i"), (
+        "a flag-shaped token was accepted as a subcommand, which is the harvest "
+        "this node exists to refuse")
+    assert _verb_like("board-pass") and not _verb_like("check_deployed_copies"), (
+        "_verb_like stopped being the same grammar the doc side uses: hyphen-joined "
+        "lowercase verbs in, snake_case symbols and flags out")
+
+    flag_only = ROOT / "agent-services/services/idle-worker/check-github-releases.py"
+    assert dispatch_verbs(flag_only) == set(), (
+        f"check-github-releases.py harvested {sorted(dispatch_verbs(flag_only))}; "
+        f"it compares only `sys.argv[1] == \"--init\"`, so it takes no subcommand "
+        f"and must be skipped rather than graded against one flag")
+
+    # Positive control: the verbs beside it ARE extracted, so the empty report
+    # below is the chain-less skip and not the extractor going blind.
+    line = ("`agent-services/services/idle-worker/check-github-releases.py` "
+            "(`scan`, `board-pass`)\n")
+    assert [c[3] for c in command_claims(line)] == ["scan", "board-pass"], (
+        "the extraction itself found nothing, so the skip proves nothing")
+    assert undispatched_claims(line) == [], undispatched_claims(line)
+
+
+def test_the_widened_sweep_is_shown_able_to_fail(tmp_path):
+    """Clause 5 (#1890): wider must not mean weaker — a doc nobody has ever
+    heard of still gets reported on the first run.
+
+    The tmp doc is outside `NEW_DOCS` and outside `ARCH/` entirely, so this is
+    the widened function being shown to decide something the corpus cannot: the
+    invented verb is reported, the verb the module really dispatches is not, and
+    neither verdict depends on the doc's name. It is the same call the sweep
+    makes, on text no pin covers.
+    """
+    doc = tmp_path / "a-doc-that-does-not-exist-yet.md"
+    assert doc.name not in NEW_DOCS and not (ARCH / doc.name).exists(), (
+        "the fixture doc joined the graded corpus, so this is not an unseen doc")
+
+    doc.write_text("Run `python -m app.harness.supply_chain run-fixtures-eval` "
+                   "to refresh it.\n", encoding="utf-8")
+    reports = undispatched_claims(doc.read_text(encoding="utf-8"), doc.name)
+    assert len(reports) == 1, reports
+    assert "run-fixtures-eval" in reports[0] \
+        and "app/harness/supply_chain.py" in reports[0], reports[0]
+
+    doc.write_text("Run `python -m app/harness.supply_chain fixtures --limit 5` "
+                   "to refresh it.\n", encoding="utf-8")
+    assert undispatched_claims(doc.read_text(encoding="utf-8"), doc.name) == [], (
+        "a verb the module really dispatches was reported in a doc the sweep has "
+        "no pin for, so the widened surface now reports correct docs")
 
 
 def test_an_invented_subcommand_is_reported_and_a_real_one_is_not():
@@ -1473,6 +1709,20 @@ _DISPATCH_SOURCES = {
     "match-statement": ('match args.command:\n'
                         '    case "prepare":\n        pass\n'
                         '    case _:\n        pass\n', {"prepare"}),
+    # A stdlib-only script with no argparse: the verb is whichever positional of
+    # the argument vector it likes, and both `argv` and `sys.argv` spellings occur
+    # in this tree (`agent-services/rpc/lloyd_rpc.py:243` is the real one).
+    "argv-positional": ('if len(argv) < 2 or argv[0] not in ("call", "map"):\n'
+                        '    return 2\n', {"call", "map"}),
+    "sys-argv-positional": ('if sys.argv[1] == "board-pass":\n    pass\n'
+                            'elif sys.argv[2] in ("flush", "land"):\n    pass\n',
+                            {"board-pass", "flush", "land"}),
+    # The same subscript shape, compared against a flag: a module whose only
+    # argv comparison is `--init` takes no subcommand, so its chain is empty and
+    # the module is skipped — not graded against one flag. (`agent-services/
+    # services/idle-worker/check-github-releases.py:184` is the real one.)
+    "argv-flag-only": ('if len(sys.argv) > 1 and sys.argv[1] == "--init":\n'
+                       '    initialize_state()\n', set()),
     # The `-h, --help` line is what argparse itself puts in the command column:
     # a flag standing where a verb would be, and not a subcommand.
     "usage-string": ('USAGE = """usage: thing.py <verb> [flags]\n'
