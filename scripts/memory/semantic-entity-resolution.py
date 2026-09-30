@@ -162,6 +162,40 @@ MERGE_ROLE_TOKENS = {
     "tool", "toolkit", "framework", "module", "component", "version",
 }
 
+# Release-suffix words that mean "this name is a edition of the other one"
+# (#1894). Deliberately NOT a downgrade list — see `name_shape_review_flag`.
+# `alpha`/`beta`/`rc` are absent on purpose: they are stage words riding on a
+# project's own name rather than identifiers of a release, and `Voice Mode` vs
+# `Voice Mode Alpha` is the non-fire example #1175 clause 4 pins.
+MERGE_RELEASE_CODA_TOKENS = {
+    "vl", "lm", "plus", "pro", "max", "ultra", "mini", "lite", "turbo",
+}
+# Roman numerals up to the range a product line actually reaches.
+MERGE_ROMAN_NUMERALS = {
+    "i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x",
+}
+# A bare number (`Mythos 5`, `ISO 13849-1`) or an explicit version marker
+# (`Parakeet v3`). `name_tokens` already splits on `-`, `_` and `.`, so
+# `Mamba-1` leaves `1` and `v3` arrives whole.
+VERSION_TOKEN_PATTERN = re.compile(r"(?:\d+|v\d+)", re.IGNORECASE)
+# Codas `name_tokens` cannot see at all: `[a-z0-9]+` makes `BrowseComp+` and
+# `BrowseComp` tokenize identically, so the release marker in these two rows
+# lives only in the raw text and needs its own scan. `-` and `_` are NOT here —
+# they are separators the rest of this file crosses on purpose (`alfie_vr` vs
+# `Alfie VR System`, #1175), and reading one as a version would flag half the
+# hyphenated vocabulary.
+RELEASE_SYMBOL_CHARS = set("+∞")
+# The role→product class (#1894 owed entry 2): `orchestrator` vs `Orchestrator
+# AI`. Conventionally the same referent, and widening the flag to it is a
+# ruling this file must not make for a human, so an expansion whose extra token
+# is one of these words is declined rather than flagged.
+NAME_EXPANSION_PRODUCT_SUFFIXES = {
+    "ai", "inc", "io", "co", "labs", "tech", "cloud", "hub",
+}
+# Flag names, as they land in `review_flag` on a proposal row.
+REVIEW_FLAG_VERSION_SUFFIX = "version_suffix_mismatch"
+REVIEW_FLAG_BARE_NAME = "bare_name_expansion"
+
 # Stopwords in entity names — skip during tokenization for Jaccard
 NAME_STOPWORDS = {
     "the", "a", "an", "of", "for", "to", "in", "on", "by", "and", "or",
@@ -865,6 +899,119 @@ def merge_allowed(a: str, b: str, neighbors: dict[str, set[str]]) -> tuple[bool,
     return True, "ok"
 
 
+# ---------------------------------------------------------------------------
+# Review-only name-shape flags (#1894) — NOT part of `merge_allowed`
+# ---------------------------------------------------------------------------
+#
+# Why a flag and not a seventh guard. The 2026-09-30 run's 48 merge-action rows
+# hold eleven pairs where one name is the other plus a release token — `Mythos 5`,
+# `Mamba-1`, `Medusa-1`, `Parakeet v3`, `Cosmos Reason 1`, `SeeDance 2`,
+# `PRISM-VL`, `ISO 13849-1`, `BrowseComp+`, `RobotArena∞`, and `Megatron-LM` via
+# the `lm` coda word — all of them `guard_reason: null`, so the plan reads "48
+# merges cleared every guard" while a fifth of it is base-vs-release. The item's
+# own scan counted ten because it looked for digit/`v3`/`+`/`∞` shapes and not for
+# a release WORD; `Megatron-LM` is the extra row, and it is the case that settles
+# the design: #1175 clause 4 forbids the GUARD from firing on it because it is
+# conventionally the SAME referent as `Megatron`, so a label a person can dismiss
+# is the half that is defensible and a downgrade would be the noise #1175 refused.
+# The classes genuinely differ the other way too — `ISO 13849` vs `ISO 13849-1` are
+# two different standards — which is the other half of the proof. These functions
+# are therefore called from the emitter only. Wiring one into `merge_allowed` would
+# be exactly the change #1175 clause 4 forbids.
+
+
+def is_release_token(token: str) -> bool:
+    """Does this leftover token name a release rather than a thing?"""
+    tok = (token or "").lower()
+    return (bool(VERSION_TOKEN_PATTERN.fullmatch(tok))
+            or tok in MERGE_ROMAN_NUMERALS
+            or tok in MERGE_RELEASE_CODA_TOKENS)
+
+
+def has_release_symbol(name: str) -> bool:
+    """Does the raw name carry a release marker `name_tokens` throws away?"""
+    return bool(RELEASE_SYMBOL_CHARS & set(name or ""))
+
+
+def is_version_suffix_asymmetry(a: str, b: str) -> bool:
+    """Is one name the other plus release tokens, and nothing else? (#1894)
+
+    Two shapes, because the marker is visible in two different places:
+
+    * Token containment with a version-only remainder — `Mythos` / `Mythos 5`,
+      `ISO 13849` / `ISO 13849-1`. Every extra token must be a release token, so
+      `Voice Mode` / `Voice Mode Alpha` (`alpha`) and `Knowledge` / `Knowledge
+      Library` (`library`) stay unflagged; `Knowledge Library` is this file's own
+      known-good duplicate, and flagging it would train a reader to ignore the
+      column. Nothing is required of the SHORT side's tokens: `13849` is itself
+      a number, and demanding a version-free short side would drop the one pair
+      that proves a version suffix can mean two different entities.
+    * Equal tokens with a release symbol on one side — `BrowseComp+`,
+      `RobotArena∞`. Both tokenise identically, so only the raw text can tell
+      them apart, and the alphanumerics have to match for this to fire at all.
+
+    Both orientations are tested, so the answer never depends on which name the
+    proposal lists first, and equal tokens with no symbol on either side are not
+    an asymmetry.
+    """
+    ta, tb = name_tokens(a), name_tokens(b)
+    for small, big, raw_small, raw_big in ((ta, tb, a, b), (tb, ta, b, a)):
+        if not small:
+            continue
+        if small < big:
+            extra = big - small
+            if extra and all(is_release_token(t) for t in extra):
+                return True
+        elif small == big and has_release_symbol(raw_big) != has_release_symbol(raw_small):
+            return True
+    return False
+
+
+def is_bare_name_expansion(a: str, b: str) -> bool:
+    """Is one name a single token and the other that token plus one more word?
+
+    `Jason` vs `Jason Ma`: a one-token name is not a name identity, so a `same`
+    verdict here can quietly fold every `Jason` in the graph into one person.
+    The class is stated as an expansion rather than as a given name because
+    nothing on this box can tell a surname from a common noun without a
+    dictionary — `Knowledge` / `Knowledge Library` therefore does get flagged,
+    which a flag can afford and a guard could not, and the test pins it so the
+    cost stays visible.
+
+    Declined, in this order of preference: a role noun or stopword extra token
+    (`Browser` / `Browser Tool` — #1175 owns that row and already labels it), a
+    release token (`Parakeet v3` — the version flag is the more specific word),
+    and a product suffix (`orchestrator` / `Orchestrator AI` — owed entry 2 says
+    whether that class is in scope, and it has not been answered). Two names of
+    two tokens each, distinct (`Jason Ma` / `Kim Ma`), share no containment and
+    cannot fire.
+    """
+    ta, tb = name_tokens(a), name_tokens(b)
+    for small, big in ((ta, tb), (tb, ta)):
+        if len(small) != 1 or len(big) != 2 or not small < big:
+            continue
+        extra = next(iter(big - small))
+        if (is_release_token(extra) or extra in MERGE_ROLE_TOKENS
+                or extra in NAME_STOPWORDS or extra in NAME_EXPANSION_PRODUCT_SUFFIXES):
+            continue
+        return True
+    return False
+
+
+def name_shape_review_flag(a: str, b: str) -> str | None:
+    """The one word for which name-shape class this `same` pair is in, or None.
+
+    Review labelling only: no caller of this may treat a non-None answer as a
+    reason to withhold a merge (#1894 clause 3, and #1175 clause 4 before it).
+    Version first because it is the more specific reading of the same pair.
+    """
+    if is_version_suffix_asymmetry(a, b):
+        return REVIEW_FLAG_VERSION_SUFFIX
+    if is_bare_name_expansion(a, b):
+        return REVIEW_FLAG_BARE_NAME
+    return None
+
+
 def pick_canonical(a: str, b: str, neighbors: dict[str, set[str]]) -> tuple[str, str]:
     """Return (canonical, variant)."""
     deg_a = entity_degree(a, neighbors)
@@ -1242,15 +1389,30 @@ def main() -> int:
     # and its revert path — the four things that made the 2026-09-03
     # 151-merge mistake recoverable.
     proposals = []
+    review_flags: Counter[str] = Counter()
     for r, action in [(x, "merge") for x in to_merge] + [(x, "alias_only") for x in to_alias]:
         canonical, variant = pick_canonical(r["a"], r["b"], neighbors)
+        # Labelling only. `action` above is already decided — by the guards in
+        # `merge_allowed` — and nothing below reads this field, so a flagged row
+        # reaches the sweep as exactly the action it earned (#1894 clause 3).
+        flag = name_shape_review_flag(r["a"], r["b"])
+        if flag:
+            review_flags[flag] += 1
         proposals.append({
             "canonical": canonical, "variant": variant, "action": action,
             "verdict": r["verdict"], "confidence": r["confidence"],
             "reason": r.get("reason", ""), "guard_reason": r.get("guard_reason"),
+            "review_flag": flag,
             "cached": r.get("cached", False),
             "proposed_at": datetime.now(timezone.utc).isoformat(),
         })
+    if review_flags:
+        # Beside the guard-downgrade block above and in the same shape, because
+        # the question a future run asks of either is "did the clause fire at
+        # all" — a flag nobody counts is a flag nobody can prove is alive.
+        print("  review flags (labelling only, no merge withheld):")
+        for k, n in review_flags.most_common():
+            print(f"    {k:<30} {n}")
     # No artifact-named row may reach the sweep from any path, including
     # `--from-candidates` / `--replay`, which skip candidate generation (#729).
     proposals = filter_artifact_proposals(proposals)

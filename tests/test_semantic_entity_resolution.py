@@ -1163,3 +1163,291 @@ def test_summary_line_carries_the_compaction():
     assert line.count("\n") == 0
     assert "compact" not in ser.run_summary(1, 0, None, 1, 4.0), \
         "a replay judges nothing and reports no compaction"
+
+
+# ---------------------------------------------------------------------------
+# #1894 — review-only name-shape flags: base-vs-release and bare-vs-expanded
+# ---------------------------------------------------------------------------
+
+# Clause 1's own list, in the order the item gives it, plus the roman-numeral
+# coda the acceptance names. `Megatron`/`Megatron-LM` is here as a TRUE case
+# because a flag is not a downgrade: #1175 forbids firing the guard on it, and
+# this class is exactly the one a reviewer should see the word about.
+VERSION_CODA_PAIRS = [
+    ("Mythos", "Mythos 5"),
+    ("Mamba", "Mamba-1"),
+    ("Parakeet", "Parakeet v3"),
+    ("PRISM", "PRISM-VL"),
+    ("ISO 13849", "ISO 13849-1"),
+    ("BrowseComp", "BrowseComp+"),          # invisible to `name_tokens`
+    ("RobotArena", "RobotArena∞"),          # ditto
+    ("Cosmos Reason", "Cosmos Reason II"),
+]
+
+# Must stay unflagged. The first two are clause 1's own False cases and each is
+# a different failure mode: `alpha` is a stage word riding on a project's own
+# name, and `Knowledge Library` is this file's known-good duplicate. The rest
+# are the pairs whose token sets are equal or whose separator is not a version
+# marker — the shapes a naive `extra token exists` rule would catch by accident.
+NOT_VERSION_CODA = [
+    ("Voice Mode", "Voice Mode Alpha"),
+    ("Knowledge", "Knowledge Library"),
+    ("Browser", "Browser"),
+    ("Mythos", "Mythos"),
+    ("alfie_vr", "Alfie VR System"),
+    ("Browser Tool", "browser-tool"),
+    # The #1175 row, so the version predicate and `merge_allowed` agree on it: the
+    # leftover `version` is a ROLE noun, which is the class that guard owns. It is
+    # also the only role token that is not simultaneously a stopword, so deleting
+    # the role-token exclusion would be invisible on every other pair here — this
+    # is the one that makes that branch falsifiable.
+    ("Browser", "Browser Version"),
+]
+
+
+def test_version_suffix_predicate_fires_only_on_release_codas():
+    """clause 1 — one name is the other plus a release token, and nothing else.
+
+    Asserted in both orientations: a proposal lists canonical first only after
+    `pick_canonical` runs, and the flag is computed on the judged pair.
+    """
+    for a, b in VERSION_CODA_PAIRS:
+        for pair in ((a, b), (b, a)):
+            assert ser.is_version_suffix_asymmetry(*pair) is True, pair
+    for a, b in NOT_VERSION_CODA:
+        for pair in ((a, b), (b, a)):
+            assert ser.is_version_suffix_asymmetry(*pair) is False, pair
+    # The symbol codas need the raw text: with the token sets equal, a rule
+    # built on `name_tokens` containment cannot see `+` or `∞` at all. This is
+    # the witness that the True results above are not coming from tokens.
+    assert ser.name_tokens("BrowseComp+") == ser.name_tokens("BrowseComp")
+    assert ser.has_release_symbol("BrowseComp+") and not ser.has_release_symbol("BrowseComp")
+    # And a release token is not merely "a leftover token that is not a word".
+    assert ser.is_release_token("5") and ser.is_release_token("v3") and ser.is_release_token("vl")
+    assert not ser.is_release_token("alpha") and not ser.is_release_token("library")
+
+
+def test_bare_name_expansion_flags_a_one_token_name_and_not_two_full_names():
+    """clause 2 — `Jason` vs `Jason Ma` is a name-identity question, this is not one."""
+    for pair in (("Jason", "Jason Ma"), ("Jason Ma", "Jason")):
+        assert ser.name_shape_review_flag(*pair) == ser.REVIEW_FLAG_BARE_NAME, pair
+    # Two distinct full names: no containment, so nothing fires.
+    for pair in (("Jason Ma", "Kim Ma"), ("Kim Ma", "Jason Ma")):
+        assert ser.name_shape_review_flag(*pair) is None, pair
+    # The classes the predicate declines on purpose, each for its own stated
+    # reason: #1175 owns a role-noun remainder, the version word is more
+    # specific than the name-shape one, and role→product is owed entry 2's
+    # ruling — which has not been given, so it must stay unflagged here.
+    # `Tool MCP` / `Tool MCP Service` is #1175's own row from the run report, and it
+    # is the witness that the role-noun exclusion is read at all: `tool` happens to
+    # sit in `NAME_STOPWORDS` as well, so `Browser`/`Browser Tool` alone would stay
+    # green with `MERGE_ROLE_TOKENS` deleted from the predicate — and the two classes
+    # would share a row whose label changes whenever #1175's list grows.
+    for pair in (("Browser", "Browser Tool"), ("Tool MCP", "Tool MCP Service")):
+        assert ser.name_shape_review_flag(*pair) is None, pair
+    assert ser.name_shape_review_flag("Parakeet", "Parakeet v3") == ser.REVIEW_FLAG_VERSION_SUFFIX
+    assert ser.name_shape_review_flag("orchestrator", "Orchestrator AI") is None
+    assert ser.name_shape_review_flag("On-device", "On-Device AI") is None
+    # The honest cost of having no surname dictionary on this box, pinned so a
+    # widening of the class cannot hide it: a bare common noun vs its compound
+    # is flagged too. A flag can pay for that; a guard could not.
+    assert ser.name_shape_review_flag("Knowledge", "Knowledge Library") == ser.REVIEW_FLAG_BARE_NAME
+
+
+def test_review_flags_never_change_what_merge_allowed_returns(monkeypatch):
+    """clause 3 — labelling is not deciding: no flagged pair loses its merge.
+
+    Facts are monkeypatched to TWO per entity, not zero: still inside what the
+    guards permit (`MERGE_VARIANT_MAX_FACTS` is 3, the combined cap 25), so the
+    mass rules below the name rules actually run over these pairs instead of
+    passing on an empty store — `(True, "ok")` from a zero-facts stub would be
+    true no matter what the flag did. The node's own witness is the last block:
+    raise those same facts past the cap and the guard DOES downgrade, which is
+    what makes every `(True, "ok")` above a statement about the flag rather than
+    about an empty store.
+    """
+    monkeypatch.setattr(ser, "count_facts", lambda e: 2)
+    for a, b in VERSION_CODA_PAIRS + [("Jason", "Jason Ma"), ("Jason Ma", "Kim Ma")]:
+        for pair in ((a, b), (b, a)):
+            assert ser.merge_allowed(*pair, {}) == (True, "ok"), pair
+
+    # #1175 clause 4, unchanged: a non-role remainder and an identical pair keep
+    # not firing `suffix_asymmetry`, and the role-noun class still does.
+    for a, b in [("Voice Mode", "Voice Mode Alpha"), ("Knowledge", "Knowledge Library"),
+                 ("RAG", "RAG Notes"), ("Browser Tool", "browser-tool"), ("Browser", "Browser")]:
+        for pair in ((a, b), (b, a)):
+            assert ser.merge_allowed(*pair, {})[1] != "suffix_asymmetry", pair
+    assert ser.merge_allowed("Browser", "Browser Tool", {}) == (False, "suffix_asymmetry")
+
+    # The witness: with the store read raised past the variant cap, a flagged
+    # pair is downgraded by the GUARD, not by the label — so the passes above
+    # were the guards deciding, and this module cannot go green by feeding
+    # `merge_allowed` nothing to decide about.
+    monkeypatch.setattr(ser, "count_facts", lambda e: ser.MERGE_VARIANT_MAX_FACTS + 2)
+    assert ser.merge_allowed("Mythos", "Mythos 5", {}) == (False, "variant_too_many_facts")
+
+
+# Pairs for the whole-run seam. All three score above `--min-score 2.0` (each
+# pair is a 5-char stem share plus a 0.5 Jaccard = 2.5, except the control's
+# stopword-dropped 1.0 Jaccard = 4.0), and every neighbour set is disjoint so
+# `shared_neighbors` stays 0 and the pool is exactly these three pairs.
+FLAG_RUN_ENTITIES = ["Mythos", "Mythos 5", "Jason", "Jason Ma", "Tool MCP", "Tool MCP Service"]
+FLAG_RUN_NEIGHBORS = {name: {f"nb-{i}"} for i, name in enumerate(FLAG_RUN_ENTITIES)}
+FLAG_RUN_ARGV = ["--min-score", "2.0"]
+
+
+def _flag_run(tmp_path, monkeypatch, capsys):
+    """One run with a version pair, a bare-name pair and an unflagged control."""
+    _drive_main(tmp_path, monkeypatch, FLAG_RUN_ARGV,
+                entities=FLAG_RUN_ENTITIES, neighbors=FLAG_RUN_NEIGHBORS)
+    return capsys.readouterr().out
+
+
+def _row_lines(path: Path) -> dict:
+    return {(r["canonical"], r["variant"]): r
+            for r in (json.loads(line) for line in path.read_text().splitlines() if line.strip())}
+
+
+def test_run_writes_the_review_flag_onto_the_row_the_sweep_reads(tmp_path, monkeypatch, capsys):
+    """clause 4 — the flag survives the emitter, the JSONL and the sweep's loader.
+
+    Two processes meet only through `semantic-proposals-latest.jsonl`: #67
+    proposes weekly, the sweep reads every 15 minutes. So this drives the real
+    `main()`, reads the dated file back, and then asks the sweep's own surfacer
+    what it would put in `plan["semantic_proposals"]` — the list that line
+    assigns verbatim.
+    """
+    _flag_run(tmp_path, monkeypatch, capsys)
+
+    run_rows = _row_lines(tmp_path / "semantic-proposals-2099-01-01.jsonl")
+    assert (run_rows[("Mythos", "Mythos 5")]["review_flag"] == "version_suffix_mismatch"
+            and run_rows[("Jason", "Jason Ma")]["review_flag"] == "bare_name_expansion"), run_rows
+    control = run_rows[("Tool MCP", "Tool MCP Service")]
+    assert control["review_flag"] is None, control
+    # Labelling only, at the run level too: a flagged row keeps the merge it
+    # earned, and the control's fields are untouched by the new key.
+    assert {k: run_rows[k]["action"] for k in run_rows} == {k: "merge" for k in run_rows}
+    assert control["guard_reason"] is None, control
+
+    swept = {(p["canonical"], p["variant"]): p
+             for p in sweep.load_semantic_proposals(tmp_path)}
+    assert swept[("Mythos", "Mythos 5")]["review_flag"] == "version_suffix_mismatch", swept
+    surfaced, _never = sweep.surface_semantic_proposals(
+        tmp_path, seen_path=tmp_path / "seen.jsonl")
+    by_pair = {(p["canonical"], p["variant"]): p for p in surfaced}
+    assert not set(run_rows[("Jason", "Jason Ma")]) - set(by_pair[("Jason", "Jason Ma")]), \
+        "the plan row dropped an emitter field, so the flag would not reach a reader"
+
+
+def test_run_report_counts_the_rows_the_flag_caught(tmp_path, monkeypatch, capsys):
+    """clause 5 — the run says how many rows it flagged, beside the guard counts.
+
+    A count, not just the flag's name: owed entry 1 is about proving the clause
+    is alive on live data two weeks from now, and a line that prints a word
+    whether or not anything matched cannot answer that. `Tool MCP`/`Tool MCP
+    Service` is in the same run and is not counted, so a nonzero here is not the
+    whole pool being flagged.
+    """
+    out = _flag_run(tmp_path, monkeypatch, capsys)
+
+    # Parsed from the block under its own header, not from every indented
+    # `word number` line in stdout: a number harvested off an unrelated line
+    # would answer something other than "how many rows did this flag catch".
+    counts = _review_flag_counts(out)
+    assert counts == {"version_suffix_mismatch": 1, "bare_name_expansion": 1}, out
+    assert "no merge withheld" in out, out
+
+
+def _review_flag_counts(stdout: str) -> dict:
+    """The `name count` lines under the run's `review flags` header, and only those.
+
+    Parsing the whole transcript would let an unrelated indented `word number`
+    line — an `[info]` line, a verdict tally — satisfy a count assertion, which is
+    the opposite of what a count is for.
+    """
+    if "review flags" not in stdout:
+        return {}
+    counts = {}
+    for line in stdout.split("review flags")[1].splitlines()[1:]:
+        m = re.fullmatch(r" {4}([a-z_]+) +(\d+)", line)
+        if m:
+            counts[m.group(1)] = int(m.group(2))
+        elif line.strip():
+            break
+    return counts
+
+
+def test_the_replay_path_reports_the_flag_without_calling_an_engine(tmp_path, monkeypatch,
+                                                                    capsys):
+    """The item's own no-LLM reproduction path carries the flag too.
+
+    `--replay` reads a judgments file and skips candidate generation and judging,
+    so this is the seam a reviewer uses to re-check a week's proposals offline —
+    and the flag block sits in the shared proposals loop, below the replay
+    short-circuit, not inside the judging loop. One version pair, one #1175 pair
+    as the control: the control is labelled nothing and downgraded by the guard,
+    exactly as it was before this clause existed.
+    """
+    judgments = tmp_path / "semantic-verdicts-pairs-2099-01-01.jsonl"
+    judgments.write_text("".join(json.dumps({
+        "a": a, "b": b, "verdict": "same", "confidence": 0.9, "reason": "replayed",
+    }) + "\n" for a, b in [("Mythos", "Mythos 5"), ("Tool MCP", "Tool MCP Service")]))
+
+    _drive_main(tmp_path, monkeypatch,
+                ["--replay", str(judgments), "--min-score", "4.0"],
+                entities=FLAG_RUN_ENTITIES, neighbors=FLAG_RUN_NEIGHBORS)
+    out = capsys.readouterr().out
+
+    rows = _row_lines(tmp_path / "semantic-proposals-2099-01-01.jsonl")
+    assert rows[("Mythos", "Mythos 5")]["review_flag"] == "version_suffix_mismatch", rows
+    assert rows[("Tool MCP", "Tool MCP Service")]["review_flag"] is None, rows
+    assert _review_flag_counts(out) == {"version_suffix_mismatch": 1}, out
+
+
+# The committed bytes clause 6 names: the run the item's counts are quoted from,
+# copied verbatim out of the runtime tree into the vault so a reader can
+# re-derive 89 and 48 from versioned bytes rather than from a directory that
+# rotates. Its size is quoted in the clause, so it is a number the node measures
+# and prints, never one it asserts as fixed.
+WITNESS_ARTIFACT = Path.home() / "obsidian/backlog/data/semantic-proposals-2026-09-30.jsonl"
+
+
+def test_the_quoted_run_counts_re_derive_from_the_committed_witness():
+    """clause 6 — the report's numbers are a `wc -l` away, on committed bytes.
+
+    `~/lloyd-data/_pipeline/memory-graph/` is a runtime tree with no history: the
+    file these counts came from can be rotated before anyone checks them, which is
+    the exact failure #1869's witness-artifact clause exists to close. So this
+    reads the vault copy — `wc -l` for the 89 `same` verdicts the item quotes, a
+    `grep -c` for its 48 merge-action rows — and then runs the predicate over
+    those same rows, which is the half that lets a reader audit the flag's rate
+    rather than take it on trust.
+    """
+    assert WITNESS_ARTIFACT.exists(), (
+        f"{WITNESS_ARTIFACT} is the clause-6 witness and is not on disk — the "
+        "quoted counts would be uncheckable from any versioned file")
+
+    text = WITNESS_ARTIFACT.read_text()
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    rows = [json.loads(ln) for ln in lines]
+    merge_rows = [r for r in rows if r.get("action") == "merge"]
+    assert len(lines) == 89, f"wc -l says {len(lines)}, not the 89 the item quotes"
+    assert len(merge_rows) == 48, f"48 merge-action rows expected, got {len(merge_rows)}"
+
+    flagged = {(r["canonical"], r["variant"]) for r in merge_rows
+               if ser.name_shape_review_flag(r["canonical"], r["variant"])
+               == ser.REVIEW_FLAG_VERSION_SUFFIX}
+    # Eleven, where the triage scan reported ten: the extra row is
+    # `Megatron-LM`/`Megatron`, whose coda is a release WORD (`lm`) rather than the
+    # digit/`v3`/`+`/`∞` shapes that scan looked for. Flagging it is the whole
+    # design in one row: #1175 clause 4 rules that the GUARD must stay off that
+    # pair, which it does — `test_review_flags_never_change_what_merge_allowed_returns`
+    # pins `(True, "ok")` for pairs of this shape — while a reviewer now sees the
+    # base-vs-release shape named.
+    assert ("Megatron-LM", "Megatron") in flagged, sorted(flagged)
+    assert len(flagged) == 11, sorted(flagged)
+    # Every one of them read `guard_reason: null` in the run — the reason the plan
+    # read as 48 clean merges — so this flag, and not a guard, is the only thing
+    # that can surface them to whoever reviews the section.
+    unguarded = [r for r in merge_rows if (r["canonical"], r["variant"]) in flagged]
+    assert all(r.get("guard_reason") is None for r in unguarded), unguarded
