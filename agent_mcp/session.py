@@ -107,14 +107,19 @@ _DESTINATION_ALIASES = ("file_path", "filepath", "file_name", "filename",
 def _misnamed_destination(params: dict) -> Optional[str]:
     """The key `params` names its destination under, when that key is not `file`.
 
-    None when no alias key is present. `file` itself stays optional — its
-    `MEMORY.md` default has callers, and dropping the default is the owed ruling
-    on #1729, not this change — but a call that supplies a destination-looking
-    key has stated which file it meant to name, and quietly answering with the
-    loaded index instead is the defect: a write appends 2,290 B there (#1729) and
-    a read hands back its bytes as if they were the topic's (#1796). Checked
-    before the path is resolved or opened, so a refused call cannot touch a file
-    at all.
+    None when no alias key is present. `file` stays optional, with its
+    `MEMORY.md` default, on all four memory tools: #1729 ruled that settled on
+    2026-09-29 and #1796 re-affirmed it on 2026-09-30. Refusing mis-named
+    destination keys is the contract; requiring `file` would break the 10 of 15
+    `memory_remove` calls and the one `memory_replace` call that omit it, while
+    preventing nothing this refusal does not already prevent. The question
+    reopens only on an observed mis-route of a call that omits `file` — never
+    for an alias key, which the refusal catches on read and write alike. A call
+    that supplies a destination-looking key has stated which file it meant to
+    name, and quietly answering with the loaded index instead is the defect: a
+    write appends 2,290 B there (#1729) and a read hands back its bytes as if
+    they were the topic's (#1796). Checked before the path is resolved or
+    opened, so a refused call cannot touch a file at all.
     """
     for key in _DESTINATION_ALIASES:
         if key in params:

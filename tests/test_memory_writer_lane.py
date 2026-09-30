@@ -1935,10 +1935,15 @@ def test_the_writers_still_write_when_the_destination_is_under_file_or_defaulted
     """The positive control for both refusals: an alias guard that refused every
     call would pass them.
 
-    `file` keeps its MEMORY.md default — dropping the default entirely is the owed
-    ruling on #1729, not this change — and an unrecognised argument that does not
-    read as a destination must stay tolerated, because `summary` rides on every
-    tool call the harness dispatches.
+    `file` stays optional, with its `MEMORY.md` default, on all four memory tools:
+    #1729 ruled that settled on 2026-09-29 and #1796 re-affirmed it on 2026-09-30.
+    Refusing mis-named destination keys is the contract; requiring `file` would
+    break the 10 of 15 `memory_remove` calls and the one `memory_replace` call that
+    omit it, while preventing nothing this refusal does not already prevent. The
+    question reopens only on an observed mis-route of a call that omits `file` —
+    never for an alias key, which the refusal catches on read and write alike.
+    Likewise an unrecognised argument that does not read as a destination must stay
+    tolerated, because `summary` rides on every tool call the harness dispatches.
     """
     mem = _index_file(INDEX_BEFORE)
     assert SESSION._memory_add({"entry": f"- {ZORKMID} default lane",
@@ -2192,11 +2197,17 @@ def test_memory_remove_reports_the_line_count_when_no_line_is_close(off_tree):
 def test_memory_read_still_reads_when_the_destination_is_under_file_or_defaulted(off_tree):
     """The positive control for clause 1: a guard that refused every read passes nothing.
 
-    `file` keeps its `MEMORY.md` default — dropping it is the owed ruling carried
-    from #1729, not this change — `USER.md` and `topics/<slug>` read as they did,
-    and a call carrying only non-destination extras still reads, because the
-    harness adds `summary` to every tool call and a guard on every unrecognised
-    key would break the transport rather than the bug.
+    `file` stays optional, with its `MEMORY.md` default, on all four memory tools:
+    #1729 ruled that settled on 2026-09-29 and #1796 re-affirmed it on 2026-09-30.
+    Refusing mis-named destination keys is the contract; requiring `file` would
+    break the 10 of 15 `memory_remove` calls and the one `memory_replace` call that
+    omit it, while preventing nothing this refusal does not already prevent. The
+    question reopens only on an observed mis-route of a call that omits `file` —
+    never for an alias key, which the refusal catches on read and write alike.
+    `USER.md` and `topics/<slug>` read as they did, and a call carrying only
+    non-destination extras still reads, because the harness adds `summary` to every
+    tool call and a guard on every unrecognised key would break the transport
+    rather than the bug.
     """
     root = off_tree["memories"]
     mem = _index_file(INDEX_BEFORE)
@@ -2246,3 +2257,182 @@ async def test_the_memory_read_wire_payload_carries_the_path_it_read(off_tree):
     assert body["content"] == INDEX_BEFORE, body
     assert body["file"] == "MEMORY.md", body
     assert body["path"] == str(mem), body
+
+
+# ---------------------------------------------------------------------------
+# The `file`-default question that three comments in this lane carried as still
+# owed was ruled settled: #1729 `owed_settled[0]` `outcome: ruling` on
+# 2026-09-29, re-affirmed by #1796 on 2026-09-30. Nothing here may advertise it
+# as pending again (#1892). The two-word phrase is one other items legitimately
+# use — 11 more copies live in 9 other tracked files, about #1736, #1756 and
+# #1769 — so the scan is scoped to the two files that carried THIS status line,
+# not to the repo. It is assembled from the pieces below at runtime so this
+# module's own source never holds it: a scan that reads this file would
+# otherwise be failed by the very test that forbids the phrase.
+# ---------------------------------------------------------------------------
+
+_LANE_FILES = ("agent_mcp/session.py", "tests/test_memory_writer_lane.py")
+
+# `\s+`, not a space. All three stale sites wrapped over a newline, which is why
+# the item's own check — `git grep` for the phrase plus `on #1729` — returned 0
+# hits on an UNFIXED tree: git grep is line-based, so that green was vacuous.
+_OWED_RULING_RE = re.compile("owed" + r"\s+" + "ruling", re.IGNORECASE)
+
+# One known-present phrase per lane file, matched by the same regex engine as the
+# scan above: they prove each file was really opened and decoded, so a 0-hit scan
+# can never be an unread path wearing a pass.
+_LANE_CONTROLS = {
+    "agent_mcp/session.py": re.compile("stays" + r"\s+" + "optional"),
+    "tests/test_memory_writer_lane.py": re.compile("positive" + r"\s+" + "control"),
+}
+
+# The commitments of the settled ruling, as all three docstrings now state them.
+_SETTLED_RULING_PHRASES = (
+    "stays optional",           # `file` is not, and stays not, a required parameter
+    "all four memory tools",    # the default stands on read and on all three writers
+    "contract",                 # the mis-named-destination refusal is the contract
+    "omits `file`",             # reopen condition: a defaulting call that mis-routes
+    "alias",                    # never an alias key, which the refusal already catches
+    "#1729",                    # sourced to the item that ruled it
+)
+
+# Every assertion the two positive controls made at #1796's land (`dc255ec4`),
+# unparsed. A ruling note may change under them; what they test may not.
+_WRITERS_CONTROL_ASSERTS = [
+    "assert (SESSION.MEMORIES_ROOT / 'memory' / 'user-md-ledger.md').exists()",
+    "assert SESSION._memory_add({'entry': f'- {ZORKMID} default lane', 'summary': 'note it', 'tool_call_id': 'call_1'})['success']",
+    "assert SESSION._memory_add({'file': 'topics/user-md-ledger', 'entry': f'- {ZORKMID} topic row'})['success']",
+    "assert SESSION._memory_remove({'file': 'MEMORY.md', 'entry': f'{ZORKMID} ruled lane'})['success']",
+    "assert SESSION._memory_replace({'file': 'MEMORY.md', 'old_text': f'- {ZORKMID} default lane', 'new_text': f'- {ZORKMID} ruled lane'})['success']",
+    "assert after == INDEX_BEFORE, f'the round trip left {after!r}'",
+    "assert mem.read_text(encoding='utf-8').endswith(f'- {ZORKMID} default lane\\n')",
+]
+
+_READ_CONTROL_ASSERTS = [
+    "assert 'code' not in stray, stray",
+    "assert SESSION._memory_read({'file': 'MEMORY.md'})['content'] == INDEX_BEFORE",
+    "assert SESSION._memory_read({'file': 'USER.md'})['content'] == '# Alan\\n- stands\\n'",
+    "assert SESSION._memory_read({'file': 'topics/user-md-ledger'})['content'] == '# topics/user-md-ledger\\n\\n- a row\\n'",
+    "assert SESSION._memory_read({})['content'] == INDEX_BEFORE",
+    "assert stray['content'] == INDEX_BEFORE, stray",
+    "assert stray['path'] == str(mem), stray",
+]
+
+
+def _flat(text: str) -> str:
+    """Whitespace-collapsed: what a docstring promises, independent of its wrap."""
+    return " ".join(text.split())
+
+
+def _lane_source(rel: str) -> str:
+    """One lane file, and proof the read had an input to scan."""
+    text = (ROOT / rel).read_text(encoding="utf-8")
+    assert len(text) > 2000, f"{rel} came back as {len(text)} B — a scan of it has no input"
+    return text
+
+
+def _docstring_of(rel: str, name: str) -> str:
+    doc = ast.get_docstring(_func_source(rel, name))
+    assert doc, f"{rel}::{name} lost its docstring; the ruling note must move, not vanish"
+    return _flat(doc)
+
+
+def _assert_lines(rel: str, name: str) -> list[str]:
+    """Every `assert` in a test, unparsed so reflowing one cannot fake the pin."""
+    return sorted(ast.unparse(n) for n in ast.walk(_func_source(rel, name))
+                  if isinstance(n, ast.Assert))
+
+
+def test_no_lane_file_still_advertises_the_file_default_ruling_as_owed():
+    """#1892 clause 3: the line-wrap-safe scan, with four proofs it is not vacuous.
+
+    Zero hits across `agent_mcp/session.py` and this file is the whole subject of
+    #1892: three comments there still called the #1729 `file`-default question
+    owed after it had been ruled settled twice. An absence claim needs the
+    mechanism pinned beside it, because it can come out 0 in three ways that all
+    read as a pass — the file was never opened, the pattern cannot cross the
+    newline the sites wrapped over (the exact failure that made the item's own
+    check green before the fix), or the assertion does not run the scan it names.
+    Scope is the fourth: the scanned files and the controlled files must stay the
+    same two, or shrinking the scan shrinks its evidence along with it.
+    """
+    assert set(_LANE_FILES) == set(_LANE_CONTROLS) and len(_LANE_FILES) == 2, (
+        f"the scan's scope and its controls no longer cover the same two lane "
+        f"files: {sorted(_LANE_FILES)} vs {sorted(_LANE_CONTROLS)}")
+    hits = {rel: [_flat(m.group(0)) for m in _OWED_RULING_RE.finditer(_lane_source(rel))]
+            for rel in _LANE_FILES}
+    assert not any(hits.values()), f"stale owed-status comments left in place: {hits}"
+    for rel, control in _LANE_CONTROLS.items():
+        assert control.search(_lane_source(rel)), (
+            f"{rel} holds none of its control phrase: the scan is reading an empty "
+            f"or substituted file, so its 0 hits would prove nothing")
+    mutated = _lane_source("agent_mcp/session.py").replace(
+        "stays optional", "stays owed\n    ruling", 1)
+    assert "stays owed" in mutated, (
+        "the mutation site moved out of agent_mcp/session.py, so the wrap test "
+        "below was run against unmutated text and could not fail")
+    assert _OWED_RULING_RE.search(mutated), (
+        "the scan no longer crosses a line wrap: it would have reported 0 hits on "
+        "the three stale sites it exists to catch")
+
+
+def test_the_guard_docstring_states_the_settled_ruling_rather_than_an_owed_one():
+    """#1892 clause 1: `_misnamed_destination` says what was ruled, not what is owed.
+
+    That docstring is where the next reader of the guard looks to ask "may I make
+    `file` required?", and until #1892 it answered with a status instead of a
+    decision. Parsed through `_func_source` rather than grepped at a line range,
+    which is this file's own house rule: every line number the originating item
+    cited was already stale by the time the item was filed.
+    """
+    doc = _docstring_of("agent_mcp/session.py", "_misnamed_destination")
+    for phrase in _SETTLED_RULING_PHRASES:
+        assert phrase in doc, (
+            f"the guard's docstring does not state the settled ruling: {phrase!r} "
+            f"is absent from {doc!r}")
+    assert not _OWED_RULING_RE.search(doc), f"the guard still calls it owed: {doc!r}"
+    assert "not this change" not in doc, f"the guard still carries its stale status: {doc!r}"
+
+
+def test_both_destination_positive_controls_carry_the_ruling_with_their_assertions_untouched():
+    """#1892 clause 2: the two controls say the same ruling and still test what they tested.
+
+    Each control exists to prove its refusal can still say yes — a guard that
+    refused every call would pass no test except these — so what they assert is
+    the shipped contract the ruling left alone, while the note above them was
+    free to be corrected. Their 7 assertions each are pinned as unparsed source:
+    pure reflow cannot move the pin, and any changed expression fires it.
+    """
+    for name, frozen in (("test_the_writers_still_write_when_the_destination_is_under_"
+                          "file_or_defaulted", _WRITERS_CONTROL_ASSERTS),
+                         ("test_memory_read_still_reads_when_the_destination_is_under_"
+                          "file_or_defaulted", _READ_CONTROL_ASSERTS)):
+        doc = _docstring_of("tests/test_memory_writer_lane.py", name)
+        for phrase in _SETTLED_RULING_PHRASES:
+            assert phrase in doc, f"{name}: settled ruling missing {phrase!r} in {doc!r}"
+        assert not _OWED_RULING_RE.search(doc), f"{name} still calls it owed: {doc!r}"
+        assert _assert_lines("tests/test_memory_writer_lane.py", name) == frozen, (
+            f"{name}'s assertions moved; this item is doc-only")
+
+
+def test_the_served_memory_tool_schemas_still_leave_file_optional():
+    """#1892 clause 4: a docstring-only change, proved against the served registry.
+
+    The ruling's decision is that the schema stays exactly as shipped — `file`
+    optional with its `MEMORY.md` default on all four memory tools — so what has
+    to be true is that this diff did not move it. `list_tools()` is the same call
+    `lloyd-mcp` answers `tools/list` with, so this is the schema as a caller
+    receives it across the MCP boundary, not a reading of the literal in a file.
+    """
+    served = {t.name: t for t in asyncio.run(SESSION.list_tools())}
+    expected = {"memory_read": [], "memory_add": ["entry"],
+                "memory_replace": ["old_text", "new_text"],
+                "memory_remove": ["entry"]}
+    assert set(expected) <= set(served), sorted(set(expected) - set(served))
+    for name, required in expected.items():
+        schema = served[name].input_schema
+        assert schema["required"] == required, (name, schema.get("required"))
+        assert "file" in schema["properties"], name
+        assert "file" not in schema["required"], (
+            f"{name} started requiring `file`, which #1729 ruled against")
+        assert not _OWED_RULING_RE.search(served[name].description), name
