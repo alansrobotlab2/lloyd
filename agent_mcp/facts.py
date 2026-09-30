@@ -794,7 +794,9 @@ def _fact_resolve(params: dict) -> dict:
 #: The key a resolved contradiction leaves on the loser, spelled exactly as the
 #: canonical edge type it stands for (`app.kg_store.EDGE_TYPES`, where
 #: `conflicts_with` has lived since commit 4f4432f3 / #546). One spelling in both
-#: layers, so whoever rules on #1596's endpoint design has a join key already.
+#: layers, and the shared spelling is all the relationship will ever be: #1596
+#: ruled an intra-entity contradiction markdown-only (2026-09-30), so no edge row
+#: is ever minted for such a pair and this key has no edge-side twin to join.
 _CONTRADICTION_TRACE = "conflicts_with"
 
 
@@ -808,18 +810,31 @@ def _contradiction_trace(winner: dict, winner_entity: str, reason: str,
     no counterparty, so the winner's identity was unrecoverable from the loser.
 
     The key is `conflicts_with`, the canonical edge type's spelling
-    (`app.kg_store.EDGE_TYPES`), so the fact layer and the edge layer are counting
-    the same relation. It is NOT an edge row: a contradiction pair is always
-    intra-entity (`_resolve_scan` globs one entity directory, and
-    `_detect_contradictions_sync` pairs inside that one list), and
-    `EdgeStore.add` refuses `source == target` (`app/kg_store.py:704-705`), so
-    there is no representable edge for it. #1596 (split from the now-closed #1593)
-    carries the endpoint representation — relax the self-loop refusal, or
-    fact-granularity node ids — for a person to rule on; when it lands, this record
-    is the same claim in the layer that can be traversed, keyed by the same name.
-    Nothing traverses it until that ruling does, so the nightly knowledge-health
-    report counts the records themselves instead
+    (`app.kg_store.EDGE_TYPES`), so the fact layer and the edge layer are naming the
+    same relation. It is NOT an edge row, and for a pair like this one never will
+    be: a contradiction pair is always intra-entity (`_resolve_scan` globs one
+    entity directory, and `_detect_contradictions_sync` pairs inside that one
+    list), and both `EdgeStore` self-loop guards refuse `source == target` — `add`
+    raises it (`app/kg_store.py:719`) and `rewrite_endpoint` drops it
+    (`app/kg_store.py:867`). #1596 settled that state on 2026-09-30 with the answer
+    **markdown-only**: this record is the representation of record for a resolved
+    contradiction, neither guard relaxes, no fact-granularity node id
+    (`Lloyd#state-007`) is minted to give the pair two endpoints, and so no edge row
+    will ever be minted for such a pair. The shared spelling is therefore a
+    vocabulary fact, not a join waiting to be used — nothing traverses it, so the
+    nightly knowledge-health report counts the records themselves
     (`contradiction_trace_coverage`, `scripts/memory/knowledge-health-report.py`).
+
+    The bounded reopen trigger, stated here so the condition to revisit is
+    recoverable from code and not only from a closed backlog file: revisit the graph
+    representation only if `contradiction_trace_coverage` reports a trace count above
+    0 over the live corpus AND putting the pair in the graph demonstrates a traversal
+    gain. Both halves, because the first one alone buys the ability to express a row
+    that nothing writes — two tracing writers have been shipping since 2026-09-29
+    (`fact_resolve_apply` here, and `agent_mcp/fact_improvement.py`) and the counter
+    reported 0 of 119,167 fact records on 2026-09-29. Until both halves fire,
+    `test_a_resolution_mints_no_edge_row_under_the_markdown_only_ruling` is a
+    permanent fence, not a to-do.
 
     `file` is spelled exactly as `fact_identity` spells it, so the trace points at
     one fact and not at every fact sharing its per-file counter id (#874).

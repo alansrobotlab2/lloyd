@@ -24,10 +24,12 @@ pool it selected from.
 Run: .venvs/lloyd/bin/python -m pytest tests/test_memory_improvement.py
 """
 import asyncio
+import ast
 import importlib.util
 import inspect
 import json
 import re
+import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1859,7 +1861,6 @@ def _run_wrapper(tmp_path, kg_db, args):
     """The wrapper as the nightly runs it: a real subprocess, the store moved
     with `LLOYD_KG_DB`, all runtime data pointed at tmp."""
     import os
-    import subprocess
     env = dict(os.environ)
     env["LLOYD_DATA"] = str(tmp_path / "data")
     env["LLOYD_FACTS_ROOT"] = str(tmp_path / "facts")
@@ -2127,13 +2128,17 @@ def test_the_cli_exits_2_and_writes_nothing_when_apply_meets_an_absent_store(tmp
 # pair has no two entities to be an edge's endpoints: `_resolve_scan` globs ONE
 # entity directory and `_detect_contradictions_sync` pairs inside that one list,
 # while `EdgeStore.add` raises `refusing self-loop edge` when `source == target`
-# (`app/kg_store.py:704-705`). Measured the same day: 12,244 entity dirs, 0 of
-# them holding more than one distinct `entity`; 48,488 edge rows, 0 with
+# (`app/kg_store.py:719`) and `rewrite_endpoint` drops such a pair rather than
+# rewriting it (`:867`). Measured the same day: 12,244 entity dirs, 0 of them
+# holding more than one distinct `entity`; 48,488 edge rows, 0 with
 # `source = target` in any state. Which shape an intra-entity contradiction takes
-# in the graph — a relaxed self-loop refusal, or fact-granularity node ids — is a
-# ruling #1596 now carries (split from #1593, which closed 2026-09-27 with the
-# ruling unmade), so `test_a_resolution_mints_no_edge_row_while_1593_is_unruled`
-# fences the half this round deliberately did not build.
+# in the graph was #1596's to settle, and it settled it markdown-only on
+# 2026-09-30: neither guard relaxes and no fact-granularity node id is minted, so
+# the trace is the representation of record and
+# `test_a_resolution_mints_no_edge_row_under_the_markdown_only_ruling` is the
+# permanent fence on that state — reopen only through the trigger written into
+# `_contradiction_trace`'s own docstring (a `contradiction_trace_coverage` count
+# above 0 AND a demonstrated traversal gain), not through a round's preference.
 
 TRACE_KEY = "conflicts_with"          # the canonical edge type's own spelling
 PAIR_FILE = "Lloyd/Lloyd-state.md"    # spelled as `retrieval.fact_source_file` does
@@ -2261,16 +2266,23 @@ def test_a_run_that_marks_no_fact_traces_nothing(world):
     assert orphan["unapplied"], "the run has to say it marked nothing, and why"
 
 
-def test_a_resolution_mints_no_edge_row_while_1593_is_unruled(world):
-    """The half of #1544's acceptance this round deliberately does NOT do.
+def test_a_resolution_mints_no_edge_row_under_the_markdown_only_ruling(world):
+    """The fence on the half of #1544 that was never built — permanent by ruling.
 
-    A `conflicts_with` edge for an intra-entity pair needs either `EdgeStore.add`
-    to stop refusing self-loops or fact-granularity node ids — the two designs
-    #1596 puts to a person (the closed #1593 is where they were first written
-    down), each of which acts on all 48,488 edge rows and on
-    `edges.nodes()`, from which `fact_neighbors` and `fact_search` derive their
-    nodes. This node is the fence: the trace shipped, the edge did not, and when
-    #1596's ruling lands this is the test that has to change.
+    A `conflicts_with` edge for an intra-entity pair would need either
+    `EdgeStore.add` to stop refusing self-loops or fact-granularity node ids — the
+    two designs #1596 settled on 2026-09-30 with the answer markdown-only, each of
+    which would act on all 48,488 edge rows and on `edges.nodes()`, from which
+    `fact_neighbors` and `fact_search` derive their nodes. Neither was built: the
+    trace shipped, the edge did not, and that is the decision rather than the
+    open question this node was annotated as when the ruling was still owed.
+
+    So the fence is permanent unless the reopen trigger is met —
+    `contradiction_trace_coverage` reporting a trace count above 0 over the live
+    corpus AND a demonstrated traversal gain, both halves, as written into
+    `_contradiction_trace`'s docstring. Until then a red run here means the WRITE
+    regressed by minting an edge row; it does not mean the ruling changed, and it
+    is not licence to relax a guard to get to green.
     """
     facts_root, st, _vault = world
     _write_adjudicable_pair(facts_root)
@@ -2281,6 +2293,8 @@ def test_a_resolution_mints_no_edge_row_while_1593_is_unruled(world):
 
 
 # ── #1596: the trace is on the advertised surface, not only in the write ──────
+# #1596 also settled the ENDPOINT shape markdown-only (#1871); this header is
+# about the advertised surface, and the ruling is named so an id sweep finds it.
 #
 # `fact_resolve_apply` has left a `conflicts_with` trace on every loser since
 # #1544, and neither surface a client reads said so: the registered description
@@ -2344,16 +2358,330 @@ def test_the_tools_md_row_says_the_same_thing():
     assert "invalid_at" in row, "the row still has to say what the mark is"
 
 
-def test_the_endpoint_ruling_is_pointed_at_the_open_item():
-    """Every shipped pointer here named #1593 as the authority for the endpoint
-    representation, and that item closed 2026-09-27 with the ruling unmade — so
-    the code pointed a live question at a closed item. It names #1596, which is
-    open, now.
+#: #1596's ruling, recorded 2026-09-30 from measurement: a resolved intra-entity
+#: contradiction stays **markdown-only** — the per-record `conflicts_with` trace is
+#: the representation of record, neither `EdgeStore` self-loop guard relaxes, and no
+#: fact-granularity node id is minted. The reopen trigger lives in
+#: `_contradiction_trace`'s own docstring, and
+#: `test_the_endpoint_ruling_is_stated_in_the_shipped_prose` is what keeps this
+#: file's prose from drifting back into asking the question again.
+RULING = "markdown-only"
+
+#: Words that mark a prose block as being about the endpoint shape, which #1596
+#: settled markdown-only. Any block carrying one has to state that ruling — that is
+#: how a stale pointer fails this file instead of shipping.
+ENDPOINT_POINTER_MARKS = ("self-loop", "fact-granularity", "edge row")
+
+#: framings that presented the ruling as still owed to somebody. Each needle is
+#: assembled from fragments so this file cannot be the hit for the grep that proves
+#: the phrasing is gone — the reason `#1769`'s test splits its needle the same way.
+OPEN_QUESTION_FRAMINGS = (
+    "for a person to " + "rule on",
+    "is open, " + "now",
+    "puts to a " + "person",
+    "when #" + "1596's ruling lands",
+    "the test that has to " + "change",
+    "ruling " + "#1596 now carries",
+    "_while_" + "1593_is_unruled",
+)
+
+
+def _flat(text: str) -> str:
+    """Prose with its line wrapping folded away, so a phrase is matched whole.
+
+    Every instance of the framings below wrapped mid-phrase, and the line-oriented
+    form of the tree-wide check that #1871's triage recorded as the premise grep
+    reported nothing about the wrapped one while that claim was shipped.
+    """
+    return " ".join(text.split())
+
+
+def _prose_blocks(src: str) -> list[str]:
+    """Every module-level prose block in a file: unindented `#` runs and docstrings.
+
+    Prose here travels in two shapes — a `#:` block above a module constant, or a
+    header comment above a section of tests, and a docstring — and #1596's round put
+    a pointer in both, so a check that reads only `inspect.getdoc` of one function
+    sees one of the four it is grading. An indented `#` line is a step marker inside
+    a test body rather than a pointer: sweeping those would turn the endpoint-shape
+    check into a hunt for the word "markdown-only" under every comment that happens
+    to mention an endpoint, which grades the prose of the test rather than the
+    shipped claim.
+    """
+    blocks: list[str] = []
+    run: list[str] = []
+    for line in src.splitlines():
+        if line.startswith("#"):
+            run.append(line.lstrip("#").strip())
+        elif run:
+            blocks.append(" ".join(run))
+            run = []
+    if run:
+        blocks.append(" ".join(run))
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef)):
+            doc = ast.get_docstring(node)
+            if doc:
+                blocks.append(doc)
+    return blocks
+
+
+def _comment_above(src: str, name: str) -> str:
+    """The comment block immediately above the module-level binding `name`.
+
+    `_CONTRADICTION_TRACE`'s pointer is a `#:` comment, invisible to `getdoc`, and
+    it is the one line of shipped prose an MCP client never sees but every future
+    reader of the key does.
+    """
+    lines = src.splitlines()
+    at = next((i for i, ln in enumerate(lines)
+               if re.match(rf"^{name}\b", ln)), None)
+    assert at is not None, f"{name} is no longer a module-level binding"
+    block: list[str] = []
+    j = at - 1
+    while j >= 0 and lines[j].strip().startswith("#"):
+        block.append(lines[j].strip().lstrip("#").strip())
+        j -= 1
+    return " ".join(reversed(block))
+
+
+def _shipped_prose_blocks() -> list[tuple[str, str]]:
+    """Every module-level prose block of both files this ruling is written into,
+    as `(flattened, raw)`.
+
+    The two files are the two that carry a pointer: `agent_mcp/facts.py` holds the
+    builder, and this file holds the section header and the fence docstring. Raw is
+    kept beside the flattened form because an assertion that only prints folded prose
+    cannot show the line break a reader has to find.
+    """
+    return [(_flat(b), b) for f in (facts.__file__, __file__)
+            for b in _prose_blocks(Path(f).read_text(encoding="utf-8"))]
+
+
+def test_the_endpoint_ruling_is_named_in_both_prose_shapes():
+    """#1871 clause 1: the shipped prose states the ruling, in BOTH shapes.
+
+    `#1596 settled the endpoint shape **markdown-only** on 2026-09-30`, and no edge
+    row will ever be minted for an intra-entity pair. Two shapes because the
+    `_CONTRADICTION_TRACE` pointer is a `#:` comment — invisible to `getdoc`, never
+    sent to an MCP client, and read by every human who opens the key.
+
+    Falsified by reverting either block of `agent_mcp/facts.py` prose to what #1596's
+    round shipped: the docstring then names no ruling and the comment offers the join
+    key to "whoever rules on" the design.
     """
     doc = inspect.getdoc(facts._contradiction_trace) or ""
-    assert "#1596" in doc, doc
-    assert "#1593 carries" not in doc, (
-        "the shipped docstring still points the ruling at the closed item")
-    src = Path(facts.__file__).read_text(encoding="utf-8")
-    assert "#1596's endpoint design" in src, (
-        "the trace-key comment still points at the closed item")
+    flat_doc = _flat(doc)
+    assert RULING in flat_doc, (
+        "the trace docstring does not name the ruling, so a reader cannot tell "
+        f"whether the endpoint shape is still owed: {doc}")
+    assert "no edge row will ever be minted" in flat_doc, (
+        "the docstring names the ruling but not what it forecloses, so a later "
+        f"round can read 'markdown-only' as this week's convenience: {doc}")
+
+    key_comment = _comment_above(
+        Path(facts.__file__).read_text(encoding="utf-8"), "_CONTRADICTION_TRACE")
+    assert RULING in key_comment, (
+        "the trace-key comment no longer states the ruling — it is the pointer a "
+        f"reader of the constant itself sees: {key_comment}")
+    assert "no edge row" in key_comment, (
+        "the trace-key comment offers the shared spelling as a join key again, "
+        f"which is the framing that invited a round to use it: {key_comment}")
+
+
+def test_the_endpoint_ruling_is_not_asked_as_an_open_question():
+    """#1871 clause 2: nothing shipped still asks what #1596 settled markdown-only.
+
+    The predecessor of this node asserted `"#1596's endpoint design" in src` — prose
+    pinning an open item, which is a claim with an expiry date that expired the
+    moment the ruling landed. What is pinned now is the opposite: the open framings
+    are ABSENT. It fails when a round re-asks, which is the same event seen from the
+    side that keeps shipping prose honest.
+
+    Matching is whole-phrase on folded prose, and the same needles are re-run against
+    the whole tree with `git grep -F`: every shipped instance wrapped mid-phrase,
+    which is how a line-oriented grep reported nothing about the wrapped open-item
+    framing while that claim was in the file.
+    """
+    own = Path(__file__).read_text(encoding="utf-8")
+    for needle in OPEN_QUESTION_FRAMINGS:
+        assert needle not in _flat(Path(facts.__file__).read_text(encoding="utf-8")), (
+            f"{needle!r} is back in agent_mcp/facts.py: the endpoint shape was "
+            "settled markdown-only by #1596 on 2026-09-30 and must not be re-opened "
+            "in prose")
+        assert needle not in _flat(own), (
+            f"{needle!r} is back in this file's prose — the module header, this "
+            "section's fence docstring or this node's own text")
+
+    out = subprocess.run(
+        ["git", "grep", "-rln", *sum([["-e", n] for n in OPEN_QUESTION_FRAMINGS], [])],
+        cwd=str(ROOT), capture_output=True, text=True)
+    assert out.returncode in (0, 1), out.stderr
+    assert not out.stdout.strip(), (
+        "these lines still present the endpoint shape as owed to someone:\n"
+        + out.stdout)
+
+    # A positive control on the instrument, not on the needles. #1769's lesson: a
+    # `git grep -e` whose needle list is silently empty exits 1, which is the exact
+    # output a clean sweep produces — so absence alone is not evidence the command
+    # could have found anything. The same command shape, run on a phrase that IS
+    # shipped, has to name the file; if it does not, the sweep above proves nothing.
+    assert OPEN_QUESTION_FRAMINGS, "the framing list is empty, so the sweep proves 0"
+    control = subprocess.run(
+        ["git", "grep", "-rln", "-e", RULING, "--", "agent_mcp/facts.py"],
+        cwd=str(ROOT), capture_output=True, text=True)
+    assert control.returncode == 0 and "facts.py" in control.stdout, (
+        f"the same `git grep -e` shape cannot find a phrase that IS shipped "
+        f"(rc={control.returncode!r}, out={control.stdout.strip()!r}): its silence "
+        "above is not a clean bill")
+
+
+def test_the_endpoint_ruling_trigger_names_the_counter_it_reads():
+    """#1871 clause 3: the reopen trigger is bounded, and measurable from code.
+
+    Stated inside `_contradiction_trace`'s own docstring: revisit the graph
+    representation only if `contradiction_trace_coverage` reports a trace count above
+    0 over the live corpus AND putting the pair in the graph demonstrates a traversal
+    gain. Both halves, because the first alone buys the ability to express a row that
+    nothing writes.
+
+    Both halves AND the instrument are asserted inside ONE paragraph. The counter's
+    name also appears in the paragraph above, describing what counts the records
+    today, so the whole-docstring form of this check stayed green while I deleted the
+    instrument from the trigger sentence alone — measured, not hypothesised.
+    """
+    doc = inspect.getdoc(facts._contradiction_trace) or ""
+    trigger = [_flat(par) for par in doc.split("\n\n")
+               if "above 0" in _flat(par) and "traversal gain" in _flat(par)]
+    assert trigger, (
+        "no paragraph of the docstring states both halves of the bounded trigger — "
+        f"a trace count above 0 AND a demonstrated traversal gain: {doc}")
+    assert "contradiction_trace_coverage" in trigger[0], (
+        "the trigger states a threshold without the instrument that measures it, so "
+        f"nobody can tell whether it has fired: {trigger[0]}")
+
+    counter = ROOT / "scripts" / "memory" / "knowledge-health-report.py"
+    assert "def contradiction_trace_coverage" in counter.read_text(
+        encoding="utf-8"), (
+        "the counter the trigger reads is gone or renamed: the first half of the "
+        "trigger can no longer be measured, which silently un-bounds it")
+
+
+def test_the_endpoint_ruling_sweep_covers_every_endpoint_pointer():
+    """#1871 clause 5, first half: a stale pointer fails this file, it does not ship.
+
+    #1596's round — which settled the endpoint shape markdown-only — put pointers in
+    two shapes and this item's list named four of the
+    five — the section header above these tests was the fifth, unpinned by anything,
+    so a round that reworded it would have gone unnoticed and a round that did not
+    left a fifth open-question block behind. So the rule is not "these four lines say
+    the ruling" but a sweep: any module-level prose block in either file that carries
+    an endpoint-shape mark — one of ENDPOINT_POINTER_MARKS —
+    has to state the ruling in the same block.
+
+    The count floor is the non-vacuity control, and it is on the denominator rather
+    than on a needle: five blocks qualified when this landed, so four blocks found
+    means a pointer stopped being read, which is the failure this sweep exists for.
+    """
+    blocks = [(flat, raw) for flat, raw in _shipped_prose_blocks()
+              if any(m in raw for m in ENDPOINT_POINTER_MARKS)]
+    assert len(blocks) >= 4, (
+        f"the endpoint-shape sweep found only {len(blocks)} block(s) across the two "
+        "files. It existed to police five (#: key comment, trace docstring, section "
+        "header, fence docstring, two constant comments); a smaller count means a "
+        "pointer shape stopped being read, and a sweep that reads none passes "
+        "vacuously")
+    for flat, raw in blocks:
+        assert RULING in flat, (
+            "a pointer about the endpoint shape states no ruling, which is the "
+            f"stale-pointer state this item closed: {raw}")
+
+
+def test_the_endpoint_ruling_cites_the_two_self_loop_guard_lines():
+    """#1871 clause 5, second half: the guard line numbers in that markdown-only
+    ruling's prose are the guards themselves.
+
+    Both shipped pointers cited lines 704-705 of `app/kg_store.py` for guards already
+    at 719 and 867 — the same rot class as a stale ruling, arriving on the same
+    schedule, and invisible to a reader who trusts the citation while checking whether
+    the self-loop refusal is still there. So every line this prose cites for the
+    guards must be a line that really holds `if src == tgt`, and BOTH guards must be
+    cited: one correct number still leaves the other unfindable.
+
+    Read off the prose blocks, not the whole file: the first version scanned the raw
+    source and failed on this file's own history comment, which quotes the rotted
+    `704-705` deliberately to explain the rot. A check that grades its own commentary
+    is not grading the prose.
+    """
+    guard_src = (ROOT / "app" / "kg_store.py").read_text(encoding="utf-8")
+    guards = {i for i, ln in enumerate(guard_src.splitlines(), 1)
+              if "if src == tgt" in ln}
+    assert len(guards) == 2, (
+        f"expected the two self-loop guards #1596's markdown-only ruling refuses to relax, found "
+        f"{sorted(guards)} — this check is out of date with the file it reads")
+
+    cited: set[int] = set()
+    for flat in (f for f, _ in _shipped_prose_blocks() if "kg_store" in f):
+        cited |= {int(n) for n in re.findall(r"kg_store\.py:(\d+)", flat)}
+    assert cited, "neither file cites a guard line any more, so this checks nothing"
+    assert cited <= guards, (
+        f"prose cites {sorted(cited - guards)} which is not a self-loop guard line — "
+        f"the guards are at {sorted(guards)}")
+    assert cited == guards, (
+        f"prose cites {sorted(cited)} but the guards are at {sorted(guards)}: the "
+        "uncited one is unfindable by the next reader")
+
+
+def test_the_endpoint_ruling_sweeps_every_mention_of_the_item_that_settled_it():
+    """#1871 clause 5, third half: naming the item means stating its markdown-only
+    decision.
+
+    Narrower than the endpoint-mark sweep and aimed at the rot that produced this
+    item: #1596's own round shipped four pointers naming #1593 as the authority for
+    the endpoint representation while #1593 sat CLOSED with the ruling unmade. So any
+    module-level prose block in either file that names #1593 or #1596 has to state the
+    ruling in the same block — a closed item's id may appear beside a decision, never
+    beside a question. No exemption list, because an exemption is the hole the next
+    stale pointer is written into.
+
+    The floor is the denominator: ten blocks named an item id when this landed, so a
+    drop means a block stopped being read rather than the rot being fixed.
+    """
+    ITEM_IDS = ("#1593", "#1596")
+    blocks = [(flat, raw) for flat, raw in _shipped_prose_blocks()
+              if any(i in raw for i in ITEM_IDS)]
+    assert len(blocks) >= 8, (
+        f"the item-id sweep read {len(blocks)} block(s); ten qualified when this "
+        "landed, so a smaller number is a prose shape going unread, not a cleanup")
+    for flat, raw in blocks:
+        assert RULING in flat, (
+            "a block names the item that settled the endpoint shape but not what it "
+            f"settled it to — the #1593-pointing-at-a-closed-item state again: {raw}")
+
+
+def test_the_fence_names_itself_permanent_and_points_at_the_trigger():
+    """#1871 clause 4: the fence reads as a decision, not as a to-do.
+
+    Asserted about the shipped node rather than restated as a comment: its name must
+    not claim the ruling is unmade, and its docstring must say the fence is permanent
+    AND name the reopen trigger, so a reader who finds a red run learns to look for a
+    WRITE regression instead of permission to relax a guard. Both halves are needed:
+    a docstring that only says "permanent" hides the way back, and one that only names
+    the trigger reads like an invitation.
+    """
+    fence = "test_a_resolution_mints_no_edge_row_under_the_markdown_only_ruling"
+    node = globals().get(fence)
+    assert node is not None, (
+        f"{fence} is gone: the fence on the markdown-only ruling has to exist")
+    assert "_while_" + "1593_is_unruled" not in fence, (
+        "the fence's own name still claims the ruling is unmade")
+    doc = _flat(inspect.getdoc(node) or "")
+    assert RULING in doc, f"the fence docstring does not name the ruling: {doc}"
+    assert "permanent" in doc, (
+        f"the fence docstring does not say the fence is permanent: {doc}")
+    assert "contradiction_trace_coverage" in doc and "above 0" in doc, (
+        "the fence docstring does not name the bounded reopen trigger, so 'permanent' "
+        f"has no stated end condition: {doc}")
+    assert "and st." not in doc and "has to change" not in doc, (
+        f"the fence docstring still tells the next round to edit it: {doc}")
