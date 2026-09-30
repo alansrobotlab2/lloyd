@@ -53,6 +53,7 @@ import vaultwatch        # noqa: E402
 import datawatch         # noqa: E402
 import memwatch          # noqa: E402
 import tmpwatch          # noqa: E402
+import voiceloss          # noqa: E402
 from supervisor import SupervisorClient, SupervisordUnreachable  # noqa: E402
 
 
@@ -141,6 +142,15 @@ class Guardian:
         # service, no new endpoint, no new config key. Built once per guardian
         # process, which is what makes its grace streak mean "consecutive ticks".
         self.pool = poolwatch.PoolWatch(
+            self.gdir, base_url=self.backend_url.rsplit("/health", 1)[0])
+        # A spoken alert that never reached the speakers leaves `voice-loss.md`
+        # (#1806), and for two days nothing read it — an artefact in the state dir
+        # where an alarm should have been (#1904). Same backend, same state dir,
+        # this process, and deliberately NOT the child that failed: the route this
+        # posts to is `[program:lloyd-backend]`, which shares `agent-supervisord`
+        # with the TTS server that just refused, so a post from inside that child
+        # would die with the sound. This unit outlives that outage.
+        self.voiceloss = voiceloss.VoiceLossEscalator(
             self.gdir, base_url=self.backend_url.rsplit("/health", 1)[0])
 
         self.tick_n = 0
@@ -847,6 +857,32 @@ class Guardian:
                 "the worker pool reports running on the latest check — the "
                 "instructions above are stale, nothing further to enable")
 
+    def check_voice_loss(self) -> None:
+        """Escalate `voice-loss.md` into one coalesced backlog item (`voiceloss.py`).
+
+        Placed with `check_pool`/`check_tmp`, above the `infra_down`, `broken` and
+        `paused` early returns, for the reason their comment already gives and the
+        one this item names: the record most often exists because the speaker died
+        during an outage, so a check seated below those returns would escalate it
+        only when the stack looked healthy — which for this incident is never.
+
+        Fan-out is the board, not `self.alert`: the alert already went out on five
+        reliable channels and the sixth is the thing that failed. The watermark is
+        the cursor on disk in `gdir`, not an attribute, so a guardian restart does
+        not re-file an incident the board already carries. The log line names only
+        the outcomes a human would want to see: `no-record` and `unchanged` are
+        every healthy tick, and a tick is 5 seconds.
+        """
+        try:
+            report = self.voiceloss.tick()
+        except Exception as exc:  # noqa: BLE001 — same rule as the watches above
+            log(f"voiceloss failed (continuing): {exc}")
+            return
+        reason = report.get("reason")
+        if reason in ("created", "refreshed", "closed-suppressed"):
+            log(f"voice-loss escalation {reason}: backlog #{report.get('item_id')} "
+                f"(occurrences {report.get('occurrences')})")
+
     # ── memory-pressure evidence ───────────────────────────────────────
     def check_memory(self) -> None:
         """Record who holds the memory while pressure builds toward an oomd
@@ -1249,6 +1285,11 @@ class Guardian:
         # And /tmp, for the same reason: a full /tmp is a state the stack
         # cannot report from, because nothing in it can create a file.
         self.check_tmp()
+        # And the dead speaker's record, for the item's own reason: the burst this
+        # escalates is most likely to have happened while the stack was
+        # unreachable, so a check below the returns above would file it exactly
+        # when it had nothing to file.
+        self.check_voice_loss()
 
         if snap["supervisord"] == "unreachable":
             self.sup_down_streak += 1

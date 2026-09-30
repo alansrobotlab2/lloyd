@@ -1203,3 +1203,65 @@ def test_the_message_is_written_verbatim_after_the_stamp(tmp_path):
     assert body == msg, f"the body was altered: {body!r}"
     assert (tmp_path / speak.LOG_NAME).read_text(encoding="utf-8").startswith(
         stamp + " "), "the stamp must be the first token on the line"
+
+
+# ── the loss record's stamps, now that something reads them (#1904) ───
+def _loss_fields(tmp_path: Path) -> dict:
+    """The `key: value` header lines of `voice-loss.md`, as written."""
+    text = (tmp_path / speak.LOSS_NAME).read_text(encoding="utf-8")
+    out = {}
+    for line in text.splitlines():
+        key, sep, value = line.partition(":")
+        if sep and key in ("occurrences", "last_seen", "burst_started", "first_seen"):
+            out[key] = value.strip()
+    return out
+
+
+def test_the_loss_record_stamps_its_clock_with_an_offset(tmp_path):
+    """#1904 clause 5: the two stamps a reader now parses must name their zone.
+
+    `_log` got its `%z` from #1808 for exactly this reason and the record did not,
+    so for a day `voice-loss.md` was a file nobody read and its naive stamps cost
+    nothing. That changed the moment the escalator landed: `last_seen` is now put
+    into a body posted to the board, and a naive local stamp handed to a
+    UTC-assuming parser is what made the 2026-09-28 outage look like it began 59
+    minutes early.
+    """
+    speak._record_loss(tmp_path, "Guardian alert. supervisord was unreachable",
+                       "ConnectionRefusedError: [Errno 111] Connection refused")
+
+    fields = _loss_fields(tmp_path)
+    for key in ("last_seen", "first_seen"):
+        parsed = datetime.datetime.strptime(fields[key], "%Y-%m-%dT%H:%M:%S%z")
+        assert parsed.utcoffset() is not None, (
+            f"{key}={fields[key]!r} carries no offset, so a reader has to guess "
+            "whether it is local or UTC")
+
+
+def test_the_loss_record_offset_marks_the_zone_without_moving_the_clock(tmp_path):
+    """#1904 clause 5, the other half: marking the zone is not converting to UTC.
+
+    No clock is frozen here, because the record freezes its own: `burst_started` is
+    the epoch the same call wrote both stamps from. So the digits are compared
+    against the LOCAL wall clock at the instant the file itself names, computed
+    with the real `strftime` — the comparison shares no code with the writer, and
+    a `time.gmtime` here would satisfy the offset and move both stamps by seven
+    hours, which is the shift that makes an incident unreadable against a human's
+    memory of the evening.
+    """
+    speak._record_loss(tmp_path, "Guardian alert. supervisord was unreachable",
+                       "ConnectionRefusedError: [Errno 111] Connection refused")
+
+    fields = _loss_fields(tmp_path)
+    moment = float(fields["burst_started"])
+    expected = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(moment))
+    want_offset = datetime.datetime.fromtimestamp(
+        moment, datetime.timezone.utc).astimezone().utcoffset()
+    for key in ("last_seen", "first_seen"):
+        parsed = datetime.datetime.strptime(fields[key], "%Y-%m-%dT%H:%M:%S%z")
+        assert parsed.strftime("%Y-%m-%dT%H:%M:%S") == expected, (
+            f"{key}={fields[key]!r} but the local wall clock at {moment:.3f} was "
+            f"{expected!r} — the record must keep writing local time and only "
+            "MARK the zone")
+        assert parsed.utcoffset() == want_offset, (
+            f"{key}={fields[key]!r} names the wrong offset for this machine")

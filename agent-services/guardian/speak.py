@@ -217,6 +217,54 @@ def _log(state_dir: Path, message: str) -> None:
 _LOSS_COUNT_RE = re.compile(r"^occurrences:\s*(\d+)\s*$", re.M)
 _LOSS_STARTED_RE = re.compile(r"^burst_started:\s*([0-9.]+)\s*$", re.M)
 _LOSS_SAID_RE = re.compile(r'^- "(.*)"$', re.M)
+_LOSS_LAST_SEEN_RE = re.compile(r"^last_seen:\s*(\S+)\s*$", re.M)
+_LOSS_FIRST_SEEN_RE = re.compile(r"^first_seen:\s*(\S+)\s*$", re.M)
+
+
+def _parse_loss_body(body: str) -> dict | None:
+    """The fields of one loss record, or None when the text is not one.
+
+    ONE definition of the format, shared by the writer and the reader. The writer
+    needs it because it decides, from the bytes it holds the lock on, whether this
+    failure opens a record or refreshes one; the reader is #1904's escalator, and a
+    second parser would be a second opinion about a format whose whole contract is
+    that the two agree.
+
+    `occurrences` is the only field a body must have to count as a record — a file
+    that lost it is not a record, and treating it as one would file an alarm whose
+    count is invented. `burst_started` is what bounds a burst, so a record without
+    it can be read but never refreshed.
+    """
+    m_count = _LOSS_COUNT_RE.search(body)
+    if m_count is None:
+        return None
+    m_started = _LOSS_STARTED_RE.search(body)
+    m_last, m_first = _LOSS_LAST_SEEN_RE.search(body), _LOSS_FIRST_SEEN_RE.search(body)
+    return {
+        "occurrences": int(m_count.group(1)),
+        "burst_started": float(m_started.group(1)) if m_started else None,
+        "last_seen": m_last.group(1) if m_last else None,
+        "first_seen": m_first.group(1) if m_first else None,
+        "said": _LOSS_SAID_RE.findall(body),
+    }
+
+
+def read_loss_record(state_dir: Path) -> dict | None:
+    """The live loss record in `LOSS_NAME`, or None when there is nothing to read.
+
+    #1904's reader. Takes no lock: the writer holds `LOCK_EX` only for the moment it
+    reads-and-rewrites, and a reader that blocked on that lock would be a guardian
+    tick waiting on a failure path in a detached child, which is the wrong way
+    round. The cost is that a read racing a rewrite can catch a truncated file, and
+    the answer to that is the one this function already gives — None, try again on
+    the next tick — because a guardian tick is a repeating reader and an
+    under-counted alarm never was.
+    """
+    try:
+        body = (Path(state_dir) / LOSS_NAME).read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return None
+    return _parse_loss_body(body)
 
 
 def _record_loss(state_dir: Path, text: str, reason: str) -> None:
@@ -238,6 +286,12 @@ def _record_loss(state_dir: Path, text: str, reason: str) -> None:
     server that just refused, so an outage-shaped failure would take the report
     down with the sound. Never raises — a failure path that can raise is how a
     voice channel ends up taking a watchdog with it.
+
+    A record is not an alarm. Nothing read this file for the two days it existed,
+    which is #1904: the escalator lives in the guardian's loop (`voiceloss.py`),
+    reading through `read_loss_record`, so the post happens in the one process that
+    outlives the outage that silenced the speaker — and the stamps below carry an
+    explicit offset, because a file with a reader is a machine-facing payload.
     """
     now = time.time()
     try:
@@ -247,22 +301,31 @@ def _record_loss(state_dir: Path, text: str, reason: str) -> None:
         with open(d / LOSS_NAME, "a+", encoding="utf-8") as fh:
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
             fh.seek(0)
-            body = fh.read()
+            prev = _parse_loss_body(fh.read())
             count, started = 1, now
-            m_count, m_started = _LOSS_COUNT_RE.search(body), _LOSS_STARTED_RE.search(body)
-            if m_count and m_started and now - float(m_started.group(1)) <= LOSS_WINDOW:
-                count = int(m_count.group(1)) + 1
-                started = float(m_started.group(1))
-            said = [line] + [s for s in _LOSS_SAID_RE.findall(body)
-                             if s != line][:LOSS_TEXT_KEEP - 1]
+            if (prev and prev["burst_started"] is not None
+                    and now - prev["burst_started"] <= LOSS_WINDOW):
+                count = prev["occurrences"] + 1
+                started = prev["burst_started"]
+            prior = prev["said"] if prev else []
+            said = [line] + [s for s in prior if s != line][:LOSS_TEXT_KEEP - 1]
             fh.seek(0)
             fh.truncate()
             fh.write(
+                # Both stamps carry an explicit UTC offset, the same %z #1808 put on
+                # `_log` (:212) and for the same reason: the digits stay the LOCAL
+                # wall clock and the marker says which zone they are in. Writing
+                # `time.gmtime` here would satisfy the offset and move both stamps
+                # seven hours, which is the opposite of the fix. It matters now
+                # rather than only for tidiness because #1904 put a reader on this
+                # file, and a naive local stamp handed to a UTC-assuming parser is
+                # the class that made the 2026-09-28 outage look like it began 59
+                # minutes early.
                 f"{LOSS_HEADING}\n"
                 f"\noccurrences: {count}"
-                f"\nlast_seen: {time.strftime('%Y-%m-%dT%H:%M:%S', time.localtime(now))}"
+                f"\nlast_seen: {time.strftime('%Y-%m-%dT%H:%M:%S%z', time.localtime(now))}"
                 f"\nburst_started: {started:.3f}"
-                f"\nfirst_seen: {time.strftime('%Y-%m-%dT%H:%M:%S', time.localtime(started))}"
+                f"\nfirst_seen: {time.strftime('%Y-%m-%dT%H:%M:%S%z', time.localtime(started))}"
                 f"\nwindow_s: {LOSS_WINDOW:.1f}"
                 f"\nlast_error: {reason}"
                 "\n\nThese alerts were dispatched to the voice channel and never "
