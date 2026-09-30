@@ -144,10 +144,17 @@ def _planned_confidence_action(tmp_path, monkeypatch):
     """
     root = _built_tree(tmp_path, monkeypatch, _RECORDS)
     planned = fi.plan_entity("Idcol")
-    action = next((a for a in planned["actions"] if a["kind"] == "confidence"), None)
+    # Selected by the pair it condemns, never by position. The fixture holds two
+    # 0.3-vs-0.9 pairs and the planner plans both (MAX_ACTIONS_PER_ENTITY is 5); the
+    # order it lists them in is the order the facts tree lists its files, which is
+    # the filesystem's, not this file's. `next(...)` over the first confidence action
+    # passed on tmpfs for months and failed the day the gate's TMPDIR moved to btrfs
+    # (2026-09-29), where Idcol-state.md lists first.
+    confidence = [a for a in planned["actions"] if a["kind"] == "confidence"]
+    action = next((a for a in confidence if a.get("loser_fact") == _LOSER_TEXT), None)
     assert action is not None, (
-        "the fixture must produce a confidence action; a plan that yields none "
-        f"proves nothing about any clause: {planned['actions']}")
+        "the fixture must produce a confidence action against the usage pair; a plan "
+        f"that yields none proves nothing about any clause: {planned['actions']}")
     return root, action
 
 
