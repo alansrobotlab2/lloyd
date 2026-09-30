@@ -47,6 +47,8 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -60,6 +62,7 @@ from app.routers import backlog as BR
 # nightly gate imports, so a writer that produces a block *this* regex rejects
 # fails here even though a lenient parser would have forgiven it.
 from scripts.vault.validate_okf import STRICT_FM_RE
+from scripts.vault import segment_scan as SS
 
 
 def okf_type_of(path: Path) -> str:
@@ -310,3 +313,67 @@ def test_task_create_post_over_http_writes_a_non_empty_tags_list(http_board):
     files = sorted(http_board.glob("*.md"))
     assert len(files) == 1, files
     assert _tags_of(files[0]) == list(BT.DEFAULT_NEW_TASK_TAGS)
+
+
+# ── #1901: the THIRD create path, `scripts/automod/backlog.py::new_item` ──────
+#
+# #1804 closed on the claim that the MCP and HTTP writers above were the create
+# paths that mattered. They were not all of them: the Python writer the automod
+# loop files its own red-tree and owed-entry items through still wrote
+# `fm["tags"]` only `if tags:`, so every item filed by `scripts/automod/owed.py`
+# or by `file_red_tree_item` with no tags named is born with no `tags` key at
+# all — the first of the three shapes the scanner #1804 shipped counts as
+# missing. Four such items were on the board when #1901 was filed, and the
+# scanner exits 1 on them every time a skill runs it.
+
+def _new_item(tmp_path: Path, name: str, **extra) -> Path:
+    """File one item through the Python writer into a throwaway board."""
+    from scripts.automod import backlog as AB
+    board = tmp_path / "backlog"
+    item = AB.new_item(name, backlog_dir=board, **extra)
+    assert item.path.is_file(), f"the writer created no file under {board}"
+    return item.path
+
+
+def test_new_item_with_no_tags_named_writes_a_non_empty_tags_list(tmp_path):
+    """Clause 1 (#1901): the third writer takes the same fallback the other two do.
+
+    `new_item(name)` with no `tags=` must land a `tags` list of >= 1 item through
+    `app.backlog_tags.new_task_tags`, the shared rule whose docstring is this exact
+    requirement. Before this change the key was simply absent, which is the shape
+    `segment_scan.py` reports as `missing tags` and which #1804 was closed as fixed.
+    """
+    assert _tags_of(_new_item(tmp_path, "Third writer, no tags named")) \
+        == list(BT.DEFAULT_NEW_TASK_TAGS)
+
+
+def test_new_item_keeps_the_tags_the_caller_named(tmp_path):
+    """A caller that names tags still wins, as it does on the MCP path: the fallback
+    replaces only the empty answer, so `red_tree_scan.py` and `owed.py` keep filing
+    whatever tags they pass."""
+    assert _tags_of(_new_item(tmp_path, "Red tree item", tags=["red-tree"])) == ["red-tree"]
+
+
+def test_a_tree_whose_only_item_new_item_wrote_is_clean_under_the_scanner(tmp_path):
+    """Clause 1's other side, across the process boundary the clause names.
+
+    The scanner is a separate program, and this is the only thing standing between
+    "the writer writes a list" and "the check a nightly run actually executes is
+    green": a one-file tree built by `new_item` goes through
+    `segment_scan.py --root <tree> --list` as a subprocess, and the exit status the
+    nightly skills branch on must be 0 with no file named. The tree holds `backlog/`
+    only, and `scan` skips a configured directory the tree does not have, so nothing
+    here depends on a segment this fixture does not contain.
+    """
+    script = Path(SS.__file__).resolve()
+    assert script.is_file(), "the committed scanner moved out from under this test"
+    _new_item(tmp_path, "Third writer, no tags named")
+    assert SS.scan(tmp_path, ["backlog"], []) == {
+        "backlog": {"segment": [], "tags": []}}, \
+        SS.scan(tmp_path, ["backlog"], [])
+    # `--root` only: the directory list is the config's, and `scan` skips a directory the
+    # tree does not have, so this fixture tree is reported as `backlog/` and nothing else.
+    proc = subprocess.run([sys.executable, str(script), "--root", str(tmp_path), "--list"],
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "missing tags: 0" in proc.stdout, proc.stdout

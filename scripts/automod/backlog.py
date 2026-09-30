@@ -62,7 +62,7 @@ from app.backlog_status import (
     is_off_vocabulary,
 )
 from app.backlog_move import record_status_move
-from app.backlog_tags import NEEDS_HUMAN_TAG, is_spawn_tag, normalize_tags
+from app.backlog_tags import NEEDS_HUMAN_TAG, is_spawn_tag, new_task_tags, normalize_tags
 # Standard-library-only by design (see its docstring): this module is the light
 # one the automod CLI loads, so the shared fence rule must not drag in `mcp`.
 from app import frontmatter as FM
@@ -6138,8 +6138,14 @@ def new_item(name: str, body: str = "", *, priority: str = DEFAULT_PRIORITY,
               "priority": _level(priority, PRIORITY_LEVELS) or DEFAULT_PRIORITY,
               "board": board, "blocked": False, "assigned": False,
               "position": item_id * 1000, "created": now, "updated": now}
-        if tags:
-            fm["tags"] = normalize_tags(list(tags))
+        # The shared rule, not `if tags:` (#1901). #1804 fixed the MCP and HTTP create
+        # paths and closed believing those were all of them; this was the third, and
+        # every item the loop filed here with no tags named — the red-tree reports and
+        # the owed-entry follow-ups — was born with no `tags` key at all, which is the
+        # first of the three shapes `scripts/vault/segment_scan.py` counts as missing.
+        # `new_task_tags` is the same function both other writers call: the caller's
+        # tags win verbatim (normalised), and only an empty answer takes the default.
+        fm["tags"] = new_task_tags(tags)
         text = (f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)}"
                 f"---\n# {name}" + (f"\n\n{body.strip()}\n" if body.strip() else "\n"))
         path = root / f"{item_id}-{slug}.md"
