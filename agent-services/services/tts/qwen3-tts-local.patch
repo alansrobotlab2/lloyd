@@ -1,8 +1,81 @@
 diff --git i/api/backends/optimized_backend.py w/api/backends/optimized_backend.py
-index 8b527c3..71a0138 100644
+index 8b527c3..a067f86 100644
 --- i/api/backends/optimized_backend.py
 +++ w/api/backends/optimized_backend.py
-@@ -127,8 +127,32 @@ class OptimizedQwen3TTSBackend(TTSBackend):
+@@ -23,6 +23,72 @@ from .base import TTSBackend
+ 
+ logger = logging.getLogger(__name__)
+ 
++#: The two vendored streaming methods default `max_frames` to 10 000 —
++#: `qwen_tts/inference/qwen3_tts_model.py:700` for voice clone and `:1024` for
++#: CustomVoice — which at the codec's 12.5 Hz hands every single request a budget of
++#: ~800 s of audio. `agent-tts.err` shows that budget consumed exactly twice, on
++#: 2026-09-23 14:19:34 and 2026-09-28 19:51:04, both `audio=800.00s chunks=1667`
++#: where 1667 = ceil(10000/6) at `emit_every_frames: 6`, costing 419.94 s and
++#: 378.74 s of wall clock while the longest healthy generation on record measured
++#: `audio=19.68s chunks=41`. Every `stream_generate_*` call below therefore states a
++#: budget instead of inheriting that one.
++#:
++#: The multiplier is a deliberate over-estimate, not a measured rate: 3 audio frames
++#: per character of text, against the 41 frames (3.28 s of audio) that sufficed for
++#: the whole of the longest healthy request on record — roughly nine times what that
++#: utterance actually consumed. Its job is only to stay far above what real speech
++#: needs, so that the floor and the ceiling, and not a guess about how a tokenizer
++#: expands a character, decide the answer for any text a caller can plausibly send.
++_DEFAULT_MAX_FRAMES_PER_CHAR = 3.0
++#: Floor: 750 frames = 60 s of audio at 12.5 Hz — 3x the 19.68 s healthy maximum, and
++#: the same length the client already stops reading at (`max_audio_seconds: 60.0` in
++#: `agent-services/guardian/speak.py`), so server and client stop at one length
++#: instead of the server running on after the caller gave up.
++_DEFAULT_MAX_FRAMES_FLOOR = 750
++#: Ceiling: 1500 frames = 120 s, under a fifth of the 800 s the vendored default
++#: allowed and inside the 2000-frame bound #1878 puts on any answer given here.
++_DEFAULT_MAX_FRAMES_CEILING = 1500
++#: The codec's frame rate, used only to say what a frame count means in seconds.
++#: `frames_per_second` overrides it if a deployment ever needs to.
++_DEFAULT_FRAMES_PER_SECOND = 12.5
++#: Warmup text is long on purpose — the pad note in `_warmup_base_model` says the
++#: incremental decoder has to complete a long decode to seed the state that keeps
++#: CUDA from crashing (`c17e07b`, 2026-09-20) — so warmups get a wider multiplier and
++#: no ceiling. See `_warmup_frame_cap`.
++_WARMUP_FRAMES_PER_CHAR = 4.0
++
++
++def _frame_budget(
++    text_len: int,
++    frames_per_char: float,
++    floor_frames: int,
++    ceiling_frames: int,
++) -> int:
++    """Frames to allow a generation of `text_len` characters.
++
++    Pure by construction — the config values arrive as arguments and the codec rate
++    is a module constant — so the numbers #1878 pins are checked against this
++    function rather than against a copy of them inside a test.
++    """
++    return min(ceiling_frames, max(floor_frames, int(text_len * frames_per_char)))
++
++
++def _frame_cap_message(cap_frames: int, emitted_frames: int,
++                       frames_per_second: float) -> str:
++    """The witness line for a generation that stopped at its budget, not at EOS.
++
++    Built in one place so neither streaming path can word its way out of being
++    greppable: it names the cap in frames, what that cap is in seconds, and how many
++    frames were emitted. Those events used to be visible only as an INFO
++    `audio=800.00s chunks=1667` line saying nothing about a budget, rather than the
++    model, having ended the run.
++    """
++    return (
++        f"streaming frame cap reached: max_frames={cap_frames} "
++        f"(= {cap_frames / frames_per_second:.0f}s at {frames_per_second} Hz), "
++        f"emitted_frames={emitted_frames} — stopped at the budget, not at EOS"
++    )
++
+ # Location of the YAML config file (overridable via TTS_CONFIG env var)
+ _DEFAULT_CONFIG_PATH = Path.home() / "qwen3-tts" / "config.yaml"
+ 
+@@ -127,8 +193,32 @@ class OptimizedQwen3TTSBackend(TTSBackend):
  
          logger.info(f"Loading {model_key!r} ({hf_id})…")
  
@@ -37,6 +110,154 @@ index 8b527c3..71a0138 100644
  
          from qwen_tts import Qwen3TTSModel
          torch.set_float32_matmul_precision("high")
+@@ -203,6 +293,58 @@ class OptimizedQwen3TTSBackend(TTSBackend):
+         except Exception as exc:
+             logger.warning(f"Warmup failed (non-critical): {exc}")
+ 
++    # ------------------------------------------------------------------
++    # Streaming frame budget (#1878)
++    # ------------------------------------------------------------------
++
++    def _frame_cap(self, text: str, streaming_opts: dict) -> int:
++        """Explicit `max_frames` for one served generation, from the text length.
++
++        The knobs come from `optimization.streaming` when a deployment carries them —
++        `max_frames_per_char`, `max_frames_floor`, `max_frames_ceiling` — and from
++        the module defaults when it does not, which is the state of every tree that
++        never re-applied the config hunk. Same
++        `streaming_opts.get("emit_every_frames", 6)` pattern this file already uses,
++        so the cap binds whether or not the config was ever touched.
++        """
++        return _frame_budget(
++            len(text or ""),
++            float(streaming_opts.get(
++                "max_frames_per_char", _DEFAULT_MAX_FRAMES_PER_CHAR)),
++            int(streaming_opts.get(
++                "max_frames_floor", _DEFAULT_MAX_FRAMES_FLOOR)),
++            int(streaming_opts.get(
++                "max_frames_ceiling", _DEFAULT_MAX_FRAMES_CEILING)),
++        )
++
++    def _warmup_frame_cap(self, text: str,
++                          streaming_opts: "dict | None" = None) -> int:
++        """`max_frames` for a warmup: derived from its own text, never clipped.
++
++        Truncating a warmup is the one clip this file must not apply, and no text a
++        caller does not control reaches a warmup call, so there is nothing there for
++        a tight budget to protect. `streaming_opts` is therefore optional and the
++        two warmup methods — which never receive the config block — call it with
++        just their own text, on the module defaults. Passing an unbound name here
++        would be a `NameError` inside the `except` of a warmup call, i.e. the model
++        load failing on the path meant to survive a failed warmup.
++        """
++        streaming_opts = streaming_opts or {}
++        frames_per_second = float(streaming_opts.get(
++            "frames_per_second", _DEFAULT_FRAMES_PER_SECOND))
++        return max(int(2 * frames_per_second),
++                   int(len(text or "") * _WARMUP_FRAMES_PER_CHAR))
++
++    def _frame_cap_hit(self, cap_frames: int, emitted_frames: int,
++                       streaming_opts: dict) -> None:
++        """WARNING when a stream reached its budget instead of finishing at EOS."""
++        if emitted_frames < cap_frames:
++            return
++        frames_per_second = float(streaming_opts.get(
++            "frames_per_second", _DEFAULT_FRAMES_PER_SECOND))
++        logger.warning(
++            _frame_cap_message(cap_frames, emitted_frames, frames_per_second))
++
+     async def _warmup_base_model(
+         self,
+         dummy_audio: "np.ndarray",
+@@ -225,6 +367,7 @@ class OptimizedQwen3TTSBackend(TTSBackend):
+             x_vector_only_mode=True,
+             emit_every_frames=emit_every,
+             decode_window_frames=decode_window,
++            max_frames=self._warmup_frame_cap("Streaming warmup for voice clone."),
+         ):
+             pass
+ 
+@@ -237,6 +380,7 @@ class OptimizedQwen3TTSBackend(TTSBackend):
+             x_vector_only_mode=False,
+             emit_every_frames=emit_every,
+             decode_window_frames=decode_window,
++            max_frames=self._warmup_frame_cap("Second warmup to compile ICL reference-code path."),
+         ):
+             pass
+ 
+@@ -248,6 +392,7 @@ class OptimizedQwen3TTSBackend(TTSBackend):
+             x_vector_only_mode=True,
+             emit_every_frames=emit_every,
+             decode_window_frames=decode_window,
++            max_frames=self._warmup_frame_cap("Third pass to stabilise GPU power state."),
+         ):
+             pass
+         logger.info("Warmup complete (base)")
+@@ -269,6 +414,7 @@ class OptimizedQwen3TTSBackend(TTSBackend):
+             language="English",
+             emit_every_frames=emit_every,
+             decode_window_frames=decode_window,
++            max_frames=self._warmup_frame_cap("Streaming warmup sentence for compiling the streaming code path."),
+         ):
+             pass
+ 
+@@ -279,6 +425,7 @@ class OptimizedQwen3TTSBackend(TTSBackend):
+             language="English",
+             emit_every_frames=emit_every,
+             decode_window_frames=decode_window,
++            max_frames=self._warmup_frame_cap("A medium-length sentence to warm up different tensor shapes."),
+         ):
+             pass
+ 
+@@ -289,6 +436,7 @@ class OptimizedQwen3TTSBackend(TTSBackend):
+             language="English",
+             emit_every_frames=emit_every,
+             decode_window_frames=decode_window,
++            max_frames=self._warmup_frame_cap("Short test."),
+         ):
+             pass
+         logger.info("Warmup complete (customvoice)")
+@@ -365,6 +513,8 @@ class OptimizedQwen3TTSBackend(TTSBackend):
+         decode_window_frames = streaming_opts.get("decode_window_frames", 80)
+         emit_every_frames = streaming_opts.get("emit_every_frames", 6)
+ 
++        cap_frames = self._frame_cap(text, streaming_opts)
++        streamed_frames = 0
+         for chunk, sr in self.model.stream_generate_custom_voice(
+             text=text,
+             speaker=voice,
+@@ -372,8 +522,11 @@ class OptimizedQwen3TTSBackend(TTSBackend):
+             instruct=instruct,
+             emit_every_frames=emit_every_frames,
+             decode_window_frames=decode_window_frames,
++            max_frames=cap_frames,
+         ):
++            streamed_frames += emit_every_frames
+             yield chunk, sr
++        self._frame_cap_hit(cap_frames, streamed_frames, streaming_opts)
+ 
+     async def generate_voice_clone(
+         self,
+@@ -479,14 +632,19 @@ class OptimizedQwen3TTSBackend(TTSBackend):
+             else:
+                 logger.info(f"Voice prompt built (no cache): {time.time()-t0:.3f}s")
+ 
++        cap_frames = self._frame_cap(text, streaming_opts)
++        streamed_frames = 0
+         for chunk, sr in self.model.stream_generate_voice_clone(
+             text=text,
+             language=language,
+             voice_clone_prompt=prompt_items,
+             emit_every_frames=emit_every_frames,
+             decode_window_frames=decode_window_frames,
++            max_frames=cap_frames,
+         ):
++            streamed_frames += emit_every_frames
+             yield chunk, sr
++        self._frame_cap_hit(cap_frames, streamed_frames, streaming_opts)
+ 
+     # ------------------------------------------------------------------
+     # TTSBackend interface — metadata / introspection
 diff --git i/api/routers/openai_compatible.py w/api/routers/openai_compatible.py
 index c24a149..5107e92 100644
 --- i/api/routers/openai_compatible.py
@@ -52,7 +273,7 @@ index c24a149..5107e92 100644
  
          # Return audio response
 diff --git i/config.yaml w/config.yaml
-index a913ded..61e5484 100644
+index a913ded..8ca84f6 100644
 --- i/config.yaml
 +++ w/config.yaml
 @@ -3,7 +3,7 @@
@@ -90,3 +311,25 @@ index a913ded..61e5484 100644
  
  # Performance optimizations (only used with TTS_BACKEND=optimized)
  optimization:
+@@ -59,6 +66,21 @@ optimization:
+     # higher RTF cost.  Recommended: 6 (good TTFB/RTF balance for voice agents).
+     emit_every_frames: 6
+ 
++    # Frame budget per request, derived from the text (#1878). The streaming calls
++    # used to inherit the vendored default of 10000 frames = ~800 s of audio, and
++    # agent-tts.err shows two requests that consumed all of it (419.94 s and 378.74 s
++    # of wall clock) while a decoder looped. All three keys are optional: the same
++    # defaults are compiled into api/backends/optimized_backend.py, so a tree that
++    # never re-applied this hunk is still capped.
++    #   max_frames_per_char — frames allowed per character of text (an over-estimate:
++    #                         ~9x what the longest healthy request actually used)
++    #   max_frames_floor    — the budget even the shortest request gets (750 frames =
++    #                         60 s, the length the client already stops reading at)
++    #   max_frames_ceiling  — the most any served request may generate (1500 = 120 s)
++    max_frames_per_char: 3.0
++    max_frames_floor: 750
++    max_frames_ceiling: 1500
++
+ # Server listen address and port
+ server:
+   host: "0.0.0.0"
