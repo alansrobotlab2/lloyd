@@ -145,10 +145,14 @@ path, which is a different question. A name that IS parsed (`pip3 install
 
 The advisory half is not wired into any path yet: `scan_requirements()` reads
 lockfiles, runs an offline OSV scan when the binary is installed, and records the
-MISSING BINARY as a coverage gap in `eval/supply-chain/baseline.yaml` — never as
-zero advisories. `osv-scanner` is not installed on this machine
-(`command -v osv-scanner` → empty), so the advisory count on this box is
-permanently UNKNOWN, and that is the finding, not an all-clear.
+MISSING BINARY — or an unmirrored database — as a coverage gap in
+`eval/supply-chain/baseline.yaml`, never as zero advisories. Since 2026-09-30
+(#1838) `osv-scanner` v2.6.0 is in `~/.local/bin` (the checksummed GitHub asset;
+PyPI has no such name) with its PyPI database in `$DATA_ROOT/supply-chain/osv-db`,
+and the baseline reads **91 advisories across 14 locked packages** — the first real
+count, hidden until then by a parser that read a JSON shape upstream never printed.
+`--offline` over an empty database exits 0 with no findings, so the wrapper refuses
+a database with no `all.zip`.
 
 ## Automod (self-modification)
 

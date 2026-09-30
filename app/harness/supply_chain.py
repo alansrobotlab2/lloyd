@@ -1313,6 +1313,34 @@ class ScannerSpec:
         return {}
 
 
+#: The one verified install route (#1838). PyPI has no `osv-scanner` — the name
+#: returns 404, and this module's own install-provenance check refuses it as the
+#: slop-squat signature — so the reason string must never send a reader there.
+OSV_SCANNER_RELEASES = "https://github.com/google/osv-scanner/releases"
+OSV_SCANNER_ASSET = "osv-scanner_linux_amd64"
+OSV_SCANNER_SUMS = "osv-scanner_SHA256SUMS"
+
+
+def default_osv_db_dir() -> Path:
+    """Where the offline database is mirrored when `OSV_DB_ENV` is unset."""
+    try:
+        from app.paths import DATA_ROOT
+        return Path(DATA_ROOT) / "supply-chain" / "osv-db"
+    except Exception:  # noqa: BLE001
+        return Path(os.path.expanduser("~/.cache/lloyd/osv-db"))
+
+
+def _osv_lockfile_arg(path: Path) -> str:
+    """`--lockfile` value for one dependency file. osv-scanner picks a parser by
+    file name, and `requirements.lock` matches none — measured 2026-09-30 it exits
+    127 ("could not determine extractor suitable to this file") and the whole scan
+    reads as failed. That file is `pip freeze` output, so name the format:
+    `requirements.txt:<path>`."""
+    if path.name.startswith("requirements") and path.suffix == ".lock":
+        return f"requirements.txt:{path}"
+    return str(path)
+
+
 class OsvScannerSpec(ScannerSpec):
     name = "osv-scanner"
     binary = "osv-scanner"
@@ -1322,16 +1350,12 @@ class OsvScannerSpec(ScannerSpec):
         override = os.environ.get(OSV_DB_ENV, "").strip()
         if override:
             return Path(override)
-        try:
-            from app.paths import DATA_ROOT
-            return Path(DATA_ROOT) / "supply-chain" / "osv-db"
-        except Exception:  # noqa: BLE001
-            return Path(os.path.expanduser("~/.cache/lloyd/osv-db"))
+        return default_osv_db_dir()
 
     def argv(self, dependency_files: Sequence[Path]) -> list[str]:
         argv = ["scan", "--offline", "--format", "json"]
         for path in dependency_files:
-            argv += ["--lockfile", str(path)]
+            argv += ["--lockfile", _osv_lockfile_arg(path)]
         extra = os.environ.get("LLOYD_OSV_SCANNER_ARGS", "").strip()
         if extra:
             import shlex as _shlex
@@ -1454,10 +1478,34 @@ def run_offline_scan(root: Path | str | None = None, *, scanner: str | None = No
         return ScanReport(scan_status="scanner_absent", scanner_name=scanner,
                           scanner_version=None, scanner_path=None, offline=True,
                           reason=(f"no offline advisory scanner available: {why}. "
-                                  f"Install osv-scanner (e.g. `uv tool install "
-                                  f"osv-scanner`) and mirror its database into "
-                                  f"{OSV_DB_ENV}; this record is a coverage gap, not "
-                                  f"a clean tree."),
+                                  f"Install osv-scanner from its GitHub release, "
+                                  f"{OSV_SCANNER_RELEASES}: download {OSV_SCANNER_ASSET}, "
+                                  f"check it against {OSV_SCANNER_SUMS}, and install it "
+                                  f"as ~/.local/bin/osv-scanner (no sudo). The PyPI name "
+                                  f"`osv-scanner` is not published there — never install "
+                                  f"it from a package registry. Then mirror its database "
+                                  f"into {default_osv_db_dir()} (or the directory "
+                                  f"{OSV_DB_ENV} names) with `osv-scanner scan --offline "
+                                  f"--download-offline-databases`; this record is a "
+                                  f"coverage gap, not a clean tree."),
+                          dependency_set=dependency_set_summary(root),
+                          generated_at=_utc_stamp(), coverage_gap=True)
+
+    if isinstance(spec, OsvScannerSpec) and spec.freshness() is None:
+        # Measured 2026-09-30 (#1838): `osv-scanner scan --offline` over a directory
+        # holding no mirrored `all.zip` exits 0 with zero findings, so without this
+        # check an unmirrored box writes `completed / no_advisories` over a lock
+        # that held 91 known advisories. No database is no instrument.
+        return ScanReport(scan_status="failed", scanner_name=spec.name,
+                          scanner_version=scanner_version(spec.binary),
+                          scanner_path=shutil.which(spec.binary), offline=True,
+                          db_directory=_db_dir(spec),
+                          reason=(f"osv-scanner has no mirrored database under "
+                                  f"{spec.database_dir()} (no */all.zip); an offline "
+                                  f"scan against it reports zero advisories whatever "
+                                  f"the tree holds. Mirror it with `osv-scanner scan "
+                                  f"--offline --download-offline-databases` first; this "
+                                  f"record is a coverage gap, not a clean tree."),
                           dependency_set=dependency_set_summary(root),
                           generated_at=_utc_stamp(), coverage_gap=True)
 
@@ -1561,23 +1609,32 @@ def _parse_scan_output(scanner: str, text: str) -> tuple[list[Advisory], int] | 
     advisories: list[Advisory] = []
     try:
         if scanner == "osv-scanner":
+            # osv-scanner v2 `--format json`, as captured from v2.6.0 on 2026-09-30:
+            # results[].packages[] = {"package": {name, version, ecosystem},
+            # "vulnerabilities": [{id, summary, aliases, …}], "groups": […]}.
+            # This parser used to read `packages[].package_vulnerabilities` and a
+            # top-level `name` — a shape upstream never printed — so every real
+            # finding was dropped and a 91-advisory lock read as zero (#1838). A
+            # package entry of any other shape is now an unreadable report, never
+            # a quiet zero.
             results = payload.get("results") if isinstance(payload, dict) else None
             if not isinstance(results, list):
                 return None
             for group in results:
                 if not isinstance(group, dict):
-                    continue
+                    return None
                 for pkg in group.get("packages") or []:
-                    if not isinstance(pkg, dict):
-                        continue
-                    for vuln in pkg.get("package_vulnerabilities") or []:
+                    meta = pkg.get("package") if isinstance(pkg, dict) else None
+                    if not isinstance(meta, dict):
+                        return None
+                    for vuln in pkg.get("vulnerabilities") or []:
                         if not isinstance(vuln, dict):
                             continue
                         advisories.append(Advisory(
-                            id=str(vuln.get("osv_id") or vuln.get("id") or ""),
-                            package=str(pkg.get("name") or ""),
-                            version=pkg.get("version"),
-                            ecosystem=str(group.get("ecosystem") or ""),
+                            id=str(vuln.get("id") or ""),
+                            package=str(meta.get("name") or ""),
+                            version=meta.get("version"),
+                            ecosystem=str(meta.get("ecosystem") or ""),
                             summary=str(vuln.get("summary") or "")[:200]))
             return advisories, len(advisories)
         # pip-audit: a list of dependency entries, each with a `vulns` list.

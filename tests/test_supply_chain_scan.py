@@ -20,22 +20,27 @@ import pytest
 
 from app.harness import supply_chain as sc
 
-# What osv-scanner v2 prints for a lockfile scan with two findings. The shape is
-# the upstream `--format json` document: `results[].packages[]
-# .package_vulnerabilities[]`.
+# What osv-scanner v2 prints for a lockfile scan with two findings, in the shape
+# captured from real v2.6.0 `--format json` output on 2026-09-30 (#1838):
+# `results[].packages[] = {"package": {name, version, ecosystem},
+# "vulnerabilities": [...], "groups": [...]}`. The fixture used to model an
+# invented `package_vulnerabilities` shape, which is how a parser that dropped
+# every real finding passed.
 OSV_REPORT = {
     "results": [
-        {"type": "lockfile", "source": {"path": "requirements.lock"},
-         "ecosystem": "PyPI",
+        {"source": {"path": "requirements.lock", "type": "lockfile"},
          "packages": [
-             {"name": "mcp", "version": "2.0.0",
-              "package_vulnerabilities": [
-                  {"osv_id": "GHSA-2q8f-6q6f-aaaa", "summary": "RCE in server"},
-                  {"osv_id": "PYSEC-2026-111", "summary": "path traversal"}]},
-             {"name": "httpx", "version": "0.27.0", "package_vulnerabilities": []},
+             {"package": {"name": "mcp", "version": "2.0.0", "ecosystem": "PyPI"},
+              "groups": [{"ids": ["GHSA-2q8f-6q6f-aaaa"]}, {"ids": ["PYSEC-2026-111"]}],
+              "vulnerabilities": [
+                  {"id": "GHSA-2q8f-6q6f-aaaa", "summary": "RCE in server",
+                   "aliases": ["CVE-2026-0001"]},
+                  {"id": "PYSEC-2026-111", "summary": "path traversal", "aliases": []}]},
+             {"package": {"name": "httpx", "version": "0.27.0", "ecosystem": "PyPI"},
+              "groups": [], "vulnerabilities": []},
          ]},
     ],
-    "message": None,
+    "experimental_config": {},
 }
 
 #: One JSON object per invocation, appended. The wrapper invokes the scanner more
@@ -231,6 +236,71 @@ def test_an_absent_scanner_never_yields_a_zero_advisory_verdict(tmp_path, monkey
     assert blob["verdict"] == "none_recorded"
     assert blob["scan_status"] == "scanner_absent"
     assert "not a clean tree" in blob["reason"]
+
+
+def test_the_absent_reason_names_the_release_route_and_never_the_registry(
+        tmp_path, monkeypatch):
+    """#1838: the old reason said `uv tool install osv-scanner`, a name PyPI does not
+    publish and this module's own provenance check refuses. The reason now names the
+    checksummed GitHub asset and a database path a reader can mkdir."""
+    empty = tmp_path / "empty-bin"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+
+    reason = sc.run_offline_scan(_repo(tmp_path)).reason
+
+    assert "uv tool install" not in reason and "pip install" not in reason
+    assert "github.com/google/osv-scanner" in reason
+    assert "osv-scanner_linux_amd64" in reason and "osv-scanner_SHA256SUMS" in reason
+    assert "not published" in reason
+    assert sc.OSV_DB_ENV in reason
+    assert str(Path("supply-chain") / "osv-db") in reason
+
+
+def test_an_unmirrored_database_is_a_gap_not_a_clean_scan(tmp_path, monkeypatch):
+    """Measured 2026-09-30: real osv-scanner --offline over an empty database dir
+    exits 0 with no findings. The stub does the same; the wrapper must not believe it."""
+    bin_dir = _install_stub(tmp_path, json.dumps({"results": []}))
+    monkeypatch.setenv("PATH", str(bin_dir))
+    empty_db = tmp_path / "osv-db"
+    empty_db.mkdir()
+    monkeypatch.setenv(sc.OSV_DB_ENV, str(empty_db))
+
+    report = sc.run_offline_scan(_repo(tmp_path))
+
+    assert report.scan_status == "failed"
+    assert report.advisory_count is None
+    assert report.coverage_gap is True
+    assert "no mirrored database" in report.reason and "not a clean tree" in report.reason
+    assert report.to_dict()["verdict"] == "none_recorded"
+
+
+def test_a_package_entry_of_an_unknown_shape_is_unreadable_not_zero():
+    """The old parser read an invented `package_vulnerabilities` shape and counted a
+    real report as 0. A package entry without upstream's `package` object is now a
+    report the wrapper cannot read."""
+    old_shape = {"results": [{"packages": [
+        {"name": "mcp", "version": "2.0.0",
+         "package_vulnerabilities": [{"osv_id": "GHSA-x", "summary": "s"}]}]}]}
+
+    assert sc._parse_scan_output("osv-scanner", json.dumps(old_shape)) is None
+    advisories, count = sc._parse_scan_output("osv-scanner", json.dumps(OSV_REPORT))
+    assert count == 2
+    assert {(a.package, a.version, a.ecosystem) for a in advisories} == {
+        ("mcp", "2.0.0", "PyPI")}
+
+
+def test_a_requirements_lock_is_handed_over_with_its_format_named():
+    """osv-scanner picks a parser by file name and knows no `requirements.lock`:
+    measured 2026-09-30 it exited 127 and the scan read as failed. The lock is
+    `pip freeze` output, so it goes over as `requirements.txt:<path>`."""
+    argv = sc.OsvScannerSpec().argv([Path("/r/requirements.txt"),
+                                     Path("/r/requirements.lock"),
+                                     Path("/r/requirements-dev.txt")])
+    lockfiles = [argv[i + 1] for i, tok in enumerate(argv) if tok == "--lockfile"]
+
+    assert lockfiles == ["/r/requirements.txt", "requirements.txt:/r/requirements.lock",
+                         "/r/requirements-dev.txt"]
 
 
 def test_the_cli_exits_non_zero_when_no_scanner_can_run(tmp_path, monkeypatch):
