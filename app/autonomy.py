@@ -3274,10 +3274,16 @@ def _file_daily_note_mismatch(note_path: Path, why: str, entry: str) -> None:
     coalesces: five drops in a week are one item that says five, not five items and
     not five lines nobody greps.
 
-    Board and priority follow the guardian's own alert filing (`notify.py:514-519`,
-    `up_next` / `high`) so an auto-filed operational alert sits where the other
-    auto-filed alerts sit; whether `lloyd` is the right board for alerts at all is the
-    ruling owed on #1798, and is a one-line change here if it comes out otherwise.
+    Board and priority follow the guardian's own alert filing, so an auto-filed
+    operational alert sits where the other auto-filed alerts sit. The STATUS does not,
+    deliberately: it is `draft`, the only status the autotriage pool reads
+    (`TRIAGE_POOL_STATUS`, applied as `i.status == TRIAGE_POOL_STATUS` in
+    `scripts/automod/backlog.py`). At any other status the item reaches neither reader —
+    `ready_confirmed` takes the implement pool only alongside a confirmed triage verdict
+    nothing auto-files, and the reconciler sends an untriaged item back to `draft` as
+    never triaged — so the alarm sits there unread, which is the state #1893 measured.
+    Whether `lloyd` is the right board for alerts at all is the ruling owed on #1798, and
+    is a one-line change here if it comes out otherwise.
 
     Never raises, and it is called *after* the ERROR log for the same reason: this is
     a side effect of a failure that already has its record, so no bug in this function
@@ -3295,7 +3301,11 @@ def _file_daily_note_mismatch(note_path: Path, why: str, entry: str) -> None:
                 "name": _DAILY_NOTE_DROP_ITEM[:120],
                 "description": _daily_note_drop_body(1, seen, note_path, why, entry),
                 "board": _DAILY_NOTE_DROP_BOARD,
-                "status": "up_next",
+                # NOT the guardian's status. `draft` is the only status autotriage's
+                # pool filter reads, and the implement pool wants a confirmed triage
+                # verdict an auto-filed item never has, so at any other value this
+                # alarm is filed where nothing polls it (#1893 measured that state).
+                "status": "draft",
                 "priority": "high",
             })
         else:

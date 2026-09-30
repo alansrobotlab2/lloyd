@@ -11,6 +11,7 @@ were missing: a duration-shaped signal, and a surface that works here.
 """
 import asyncio
 import datetime as dt
+import inspect
 import json
 import logging
 import os
@@ -981,12 +982,14 @@ def test_a_dropped_daily_note_line_files_one_backlog_item_on_the_lloyd_board(
         aut, board_server, monkeypatch, caplog):
     """Clause 1: the False now reaches a file a person opens, not only a log line.
 
-    The payload assertions are the contract the owed ruling is about — board `lloyd`,
-    and `up_next` / `high` so an auto-filed alert sits where the guardian's own alert
-    items sit (`agent-services/guardian/notify.py:514-519`) — and they are asserted on
-    what the code SENT as well as on the file the route wrote, because a board that
-    arrives defaulted and a board that arrives named are the same file and a different
-    decision.
+    The payload assertions are the contract the owed ruling is about — board `lloyd`
+    and priority `high`, which follow the guardian's own alert filing so an auto-filed
+    alert sits where the other auto-filed alerts sit — plus the one field #1893
+    deliberately does NOT follow it on: `status`, filed `draft` because the autotriage
+    pool reads `draft` and nothing else, so at any other status the alarm is filed
+    where no reader looks. They are asserted on what the code SENT as well as on the
+    file the route wrote, because a board that arrives defaulted and a board that
+    arrives named are the same file and a different decision.
     """
     path = _seed_note_with_body()
     _clobber_on_write(monkeypatch, path.read_text(encoding="utf-8"))
@@ -999,12 +1002,12 @@ def test_a_dropped_daily_note_line_files_one_backlog_item_on_the_lloyd_board(
     sent = board_server.payload_of(CREATE_PATH)
     assert sent["name"].startswith(ALERT_ITEM_PREFIX), sent
     assert sent["board"] == "lloyd", sent
-    assert (sent["status"], sent["priority"]) == ("up_next", "high"), sent
+    assert (sent["status"], sent["priority"]) == ("draft", "high"), sent
 
     items = board_server.items()
     assert len(items) == 1, [str(p) for p, _, _ in items]
     _, fm, body = items[0]
-    assert (fm["board"], fm["status"], fm["priority"]) == ("lloyd", "up_next", "high"), fm
+    assert (fm["board"], fm["status"], fm["priority"]) == ("lloyd", "draft", "high"), fm
     assert fm["name"] == sent["name"], (fm, sent)
     assert _field(body, "Mismatches observed") == "1", body
     assert _note_file(autonomy).name in body, body
@@ -1039,13 +1042,77 @@ def test_the_second_mismatch_refreshes_that_one_item_instead_of_filing_a_second(
     second_seen = _field(body, "Last seen")
     assert (dt.datetime.fromisoformat(second_seen)
             > dt.datetime.fromisoformat(first_seen)), (first_seen, second_seen)
-    assert fm["status"] == "up_next", fm
+    # The refresh posts a body and no status, so this is the field the ROUTE must
+    # carry across its own front-matter rewrite — and it is the field that decides
+    # whether the item a person is watching is still sitting in the pool autotriage
+    # reads (#1893). A refresh that dropped it to some other status would leave the
+    # count advancing on an item nobody polls.
+    assert fm["status"] == "draft", fm
 
     assert board_server.paths_of(CREATE_PATH) == [CREATE_PATH], board_server.requests
     assert board_server.paths_of(UPDATE_PATH) == [UPDATE_PATH], board_server.requests
     assert board_server.payload_of(UPDATE_PATH)["force_body_replace"] is True, \
         "the refresh replaces a body this function authored whole, and the route " \
         "ignores a shorter body without that flag"
+
+
+#: The three functions that ARE the drop-alert filing path, named by symbol rather than
+#: as a line range: #1893 retired a status literal from this path, and a range citation
+#: drifts while a symbol boundary does not. The region is exact because the module keeps
+#: `up_next` elsewhere legitimately — `_record_failure` re-arms an autonomy TASK to
+#: `up_next` (`app/autonomy.py`, the `fields` dict) and `RUNNABLE_STATUSES` lists it —
+#: which is the scheduler's task-file state, a different store from a backlog item's
+#: front matter. These three functions are what decides what the filed item reads.
+DROP_FILING_FUNCS = ("_daily_note_drop_body", "_open_daily_note_drop_item",
+                     "_file_daily_note_mismatch")
+
+
+def test_the_drop_alert_is_filed_where_the_triage_loop_reads():
+    """#1893 clause 4: the dead status is gone from the filing path, and so is its reason.
+
+    `up_next` was the value that made this an alarm nobody received: autotriage's pool
+    filter is `i.status == TRIAGE_POOL_STATUS` with that constant set to `draft`, and
+    `ready_confirmed` takes only the implement status plus a confirmed triage verdict an
+    auto-filed item has never had — so an item filed at any other status was in neither
+    pool, and the reconciler pushed it back as never triaged. Pinned here: the absence of
+    that literal over the source of the functions that file the alert, and the presence,
+    in both places that used to argue for it, of the replacement rationale — board and
+    priority DO follow the guardian's alert filing, the status deliberately does not. The
+    test's own docstring is read for the same reason as the code's: a stale rationale in
+    prose is a second copy of the bug.
+    """
+    src = "".join(
+        inspect.getsource(getattr(autonomy, name)) for name in DROP_FILING_FUNCS)
+    # Not a vacuous sweep: each function contributed, and the payload it files is in
+    # what was read. A test over an empty string passes every absent-literal check
+    # forever, which is the failure mode this whole item is about.
+    for name in DROP_FILING_FUNCS:
+        assert f"def {name}(" in src, f"{name} contributed nothing to the region"
+    assert '"status"' in src and '"priority"' in src and '"board"' in src, src
+    # What the status must BE is pinned by the two tests above, which drive the route
+    # and read back the file it wrote. Requiring the word here as source text would only
+    # reject a later refactor that names the value through a constant, so this sweep
+    # checks the one thing that must never return: the retired literal.
+    assert "up_next" not in src, [
+        f"{name}:{n}: {line.strip()}" for name in DROP_FILING_FUNCS
+        for n, line in enumerate(
+            inspect.getsource(getattr(autonomy, name)).splitlines(), 1)
+        if "up_next" in line]
+
+    filed = " ".join((autonomy._file_daily_note_mismatch.__doc__ or "").split())
+    assert "Board and priority follow" in filed, filed
+    assert "does not" in filed, "the divergence needs stating, not implying"
+    assert "draft" in filed and "triage" in filed, filed
+    assert "up_next" not in filed, filed
+    assert "notify.py:514-519" not in filed, (
+        "the stale range citation is back: the guardian's filing payload moved, so a "
+        "rationale must not hang on a line range")
+
+    test_prose = " ".join(
+        (test_a_dropped_daily_note_line_files_one_backlog_item_on_the_lloyd_board
+         .__doc__ or "").split())
+    assert "up_next" not in test_prose, test_prose
+    assert "draft" in test_prose, test_prose
 
 
 def test_a_closed_drop_item_does_not_absorb_the_next_mismatch(aut, board_server,
