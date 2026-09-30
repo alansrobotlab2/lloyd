@@ -373,6 +373,20 @@ LIVE_BENCH_CATEGORIES = {
     # `git -C ~/obsidian ls-files lloyd/bench | wc -l` = 21), so the `git clean -fd`
     # caveat in the comment above is live for this id as it is for `bench_021`.
     "bench_022_skill_invocation_never_ran_chain": "synthetic",
+    # Keyed by stem with the `category:` its own front matter declares
+    # (`lloyd/bench/bench_023_skill_invocation_shadowed_import_chain.md:4` =
+    # `synthetic`), the only authority this table may copy. It is the entry whose
+    # absence reds `test_every_live_bench_file_is_named_in_the_census` on main at
+    # 1627fe91 (#1905), and this line is the whole fix that node's assertion asks
+    # for. It reached the directory at 2026-09-30T13:26Z — six minutes after the
+    # last-known-good commit `1627fe91` was recorded at 13:20:02Z, which is why the
+    # tree is red at that sha and why no code change is involved. Still untracked in
+    # the vault as measured for this line: 23 `.md` on disk against
+    # `git -C ~/obsidian ls-files lloyd/bench | wc -l` = 22, and
+    # `git -C ~/obsidian status --porcelain -- lloyd/bench` names exactly this file
+    # (`??`), so the `git clean -fd` caveat above is live for it as it was for
+    # `bench_021` and `bench_022` before their authors committed theirs.
+    "bench_023_skill_invocation_shadowed_import_chain": "synthetic",
 }
 
 
@@ -431,6 +445,101 @@ def test_every_live_bench_file_is_named_in_the_census():
     assert not drift, (
         "census and front matter disagree, shown (census, loaded) — the split is "
         f"computed from the loaded category: {drift}")
+
+
+#: The marks that take a node off the gate's `tests` rung while
+#: `pytest tests/test_bench_split.py` still exits 0, so a red census can be
+#: "fixed" by decoration instead of by a keyed entry. `skip` and `xfail` report a
+#: node as passed or as an expected failure without running its assertion;
+#: `live_vault` and `fault_injection` are precisely the two the gate's own
+#: selection deselects (`TESTS_MARK_EXPR` in `scripts/automod/gate.py:471`).
+#: `skipif` is deliberately NOT in this set: every live-corpus node in this file
+#: legitimately carries the corpus-absence guard built at `requires_real_bench`,
+#: so that one mark is checked below by its exact reason string and by its
+#: evaluated condition instead — a second, real `skipif` still cannot hide inside
+#: the allowance.
+OFF_RUNG_MARKS = ("live_vault", "fault_injection", "skip", "xfail")
+
+#: The node #1905 reds on, named by id so "not deleted" is checkable: a removed or
+#: renamed node has no marks left to inspect and no body left to read.
+CENSUS_NODE_1905 = "test_every_live_bench_file_is_named_in_the_census"
+
+
+def test_the_census_node_reached_the_rung_and_was_not_marked_away():
+    """#1905 clause 2: the census went green by being keyed, not by being marked away.
+
+    `pytest -m "not live_vault and not fault_injection" tests/test_bench_split.py`
+    exits 0 just as happily for a corpus whose newest id was added to
+    `LIVE_BENCH_CATEGORIES` as for one whose census node was decorated off the run
+    or deleted, and the gate reports both as a fix. So the mark inventory is pinned
+    here, in three layers that catch different things:
+
+    1. Module-wide: no `test_` node in this file carries any of `OFF_RUNG_MARKS`,
+       so green cannot be bought by marking this file's other nodes either.
+    2. In-module, on the named node: it still exists and is callable (the deleted
+       and renamed routes clause 2 names), it carries no off-rung mark, and its one
+       `skipif` is this file's own corpus-absence guard — matched by its exact
+       reason — whose condition evaluates False, which is what makes "it was not
+       skipped" a statement about the run rather than about the source text.
+    3. Across the process boundary: a real `pytest --collect-only` of this file
+       handed `TESTS_MARK_EXPR` imported from `scripts/automod/gate.py`, with the
+       node id read back out of its collection report. The selector lives in
+       another module and is consumed by the gate's own subprocess, so a change
+       that stops naming `live_vault` for this file's rung deselects the census
+       without touching a decorator, and only this half sees it.
+
+    Takes no fixture and no `requires_real_bench`: every assertion below is about
+    marks and collection, not about the corpus, so a box whose vault is missing has
+    to be able to report that independently of the corpus nodes it also breaks. The
+    subprocess is `--collect-only` with the cache provider off, so it writes nothing
+    into the tree the gate is judging.
+    """
+    import subprocess
+    import sys
+
+    from scripts.automod.gate import TESTS_MARK_EXPR
+
+    offenders = {}
+    for name, fn in list(globals().items()):
+        if not (name.startswith("test_") and callable(fn)):
+            continue
+        hit = sorted({m.name for m in getattr(fn, "pytestmark", [])} & set(OFF_RUNG_MARKS))
+        if hit:
+            offenders[name] = hit
+    assert not offenders, (
+        f"node(s) here carry a mark that takes them off the gate's "
+        f"`-m \"{TESTS_MARK_EXPR}\"` rung: {offenders} — #1905 asked for the named "
+        f"test to pass, not to stop being run")
+
+    census = globals().get(CENSUS_NODE_1905)
+    assert callable(census), (
+        f"{CENSUS_NODE_1905} is not a callable in this module — deleting or "
+        f"renaming the node that reds is not the fix clause 2 allows")
+
+    skipifs = [m for m in getattr(census, "pytestmark", []) if m.name == "skipif"]
+    assert len(skipifs) == 1, (
+        f"{CENSUS_NODE_1905} carries {len(skipifs)} skipif mark(s); exactly one is "
+        f"allowed, and it is the corpus-absence guard named next")
+    guard = skipifs[0]
+    reason = guard.kwargs.get("reason", "")
+    assert reason == f"no live bench at {REAL_BENCH}", (
+        f"{CENSUS_NODE_1905}'s skipif is not this file's corpus-absence guard, so "
+        f"it is a second way to skip the census: reason={reason!r}")
+    condition = guard.kwargs.get("condition", guard.args[0])
+    assert condition is False, (
+        f"{CENSUS_NODE_1905} is skipped on this box (condition={condition!r}), so "
+        f"the node #1905 names never ran the assertion that has to pass")
+
+    here = Path(__file__).resolve()
+    r = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q", "--no-header",
+         "-p", "no:cacheprovider", "-m", TESTS_MARK_EXPR, str(here)],
+        cwd=str(here.parent.parent), capture_output=True, text=True, timeout=300)
+    report = r.stdout + r.stderr
+    assert f"::{CENSUS_NODE_1905}" in report, (
+        f"{CENSUS_NODE_1905} is not in the collection of `pytest -m "
+        f"\"{TESTS_MARK_EXPR}\"` over this file — it left the rung rather than "
+        f"reaching it (rc={r.returncode}, report tail: {report.strip()[-300:]!r})")
 
 
 @requires_real_bench
