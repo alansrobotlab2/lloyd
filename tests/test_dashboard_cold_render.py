@@ -6,34 +6,46 @@ time equals API time. Measured at triage, 2026-09-16: a cold cycle cost
 **15.22 s over a 1,142-file board**, and the user saw "Loading dashboard…" for
 exactly that long, recurring every 60 s on the scorecard TTL rather than once.
 
-The contract's number is **under 8.0 s**, not the item's original sub-second
-target. It was 6.0 at triage, calibrated on the 1,142-file board of 2026-09-16;
-the board has since grown to 1,450 files and the node measured 6.02 s and
-6.16 s before a pass (round SM_20260925_205059's review run, 2026-09-25, load
-average 11 on 32 cores) — under 3% margin, so the bound was measuring the
-smaller board rather than the code. 8.0 keeps ~30% headroom over the 2026-09-25
-measurement while still firing long before the 15.22 s triage cost returns.
-The loader swap alone was measured at 5.00 s cold (over that 1,142-file board),
-and anything below it needs recommendation B (one shared board walk, analytics
-off the read path), which is deferred to a follow-on round with #1199.
-Asserting 1.0 s here would be a test that cannot pass, which is a defect in
-the contract rather than in the code.
+The budget is a MEASURED number, not an aspirational one, and since #1858 it
+carries the corpus it was measured on with it. It was 6.0 s on the 1,142-file
+board of 2026-09-16, then 8.0 s on a 1,450-file board on 2026-09-25, and both
+times the board outgrew the bound rather than the code getting faster: the node
+became the commonest parallel-only flake in the gate ledger — 11 rows naming it
+before 2026-09-28 and 6 more after (`promotions.jsonl`, rung `tests`) — because
+a cycle over a bigger corpus costs more and the number did not know it. So now:
+`CALIBRATED_BOARD_FILES` records the board the table beside `COLD_BUDGET_S` was
+walked over, `cold_budget_for_board` charges a cycle the same per-file allowance
+spread over the board it actually walked, and a board that has drifted more than
+`BOARD_DRIFT_FRACTION` away reddens
+`test_the_board_is_still_the_size_the_budget_was_calibrated_on`, which tells the
+reader to RE-BASE the calibration rather than raise the budget. Corpus growth
+then costs a measurement, not a flake. (The loader swap alone measured 5.00 s
+cold over the 1,142-file board; anything below it needs recommendation B — one
+shared board walk, analytics off the read path — which #1199 holds.)
 
-Three things keep this from being a stopwatch that always passes:
+Four things keep this from being a stopwatch that always passes:
 
 * the board file count is printed and asserted > 0 — the walk is the thing
   being timed, so a cycle over zero files is no measurement at all;
 * the payload must actually carry the two heavy sections, because a `_gather`
   that swallowed an exception would return `{"error": ...}` in milliseconds and
   read as a speed-up;
-* the cache is cleared first. A warm cycle costs 0.06 s and would trivially
-  satisfy the bound while proving nothing about the cold path the user pays.
+* both caches are cleared before EVERY timed cycle, including the confirming
+  one. A warm cycle costs 0.06 s and would trivially satisfy the bound while
+  proving nothing about the cold path the user pays;
+* one breach is a sample, not a verdict. A breaching cycle is re-measured once,
+  cold, and the node reddens only if that second cycle breaches too — which is
+  the difference between a load spike under `xdist -n 8` and a slow dashboard.
+  `enforce_cold_cycle_budget` never runs a third cycle, so it cannot grind its
+  way to a green.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import time
+from pathlib import Path
 
 import pytest
 
@@ -42,29 +54,237 @@ import board_presence
 from board_presence import board_files_or_stop, timed_ledger_or_stop
 from scripts.automod import backlog as B
 
-#: Triage baseline (2026-09-16): 15.22 s cold over 1,142 files; the bound was
-#: 6.0 then (loader swap alone measured 5.00 s — see the module docstring and
-#: '## Findings (triage 2026-09-16)' on #1204). Re-set to 8.0 on 2026-09-25:
-#: over the 1,450-file board the node measured 6.02 s and 6.16 s before a
-#: pass at load average 11 (round SM_20260925_205059's review run for #1496)
-#: — the 6.0 bound had under 3% margin left on the board it now walks.
-COLD_BUDGET_S = 8.0
+#: The board this calibration was walked over, in item files (`*.md` with a
+#: numeric name, which is how the dashboard counts them — the same rule
+#: `board_files_or_stop(numeric_names=True)` applies).
+#:
+#: ONE copy of the number lives in this file. `cold_budget_for_board` divides
+#: the budget by it to get the per-file allowance the cycle is charged, and
+#: `assert_board_within_calibration_drift` builds the +/- band from it, so the
+#: two derived quantities can never disagree about which board the budget
+#: describes. `test_the_calibrated_board_count_is_written_once_in_this_file`
+#: reddens if the digits are ever typed again, in code or in a comment: a prose
+#: copy is the thing that goes stale, and this file's last two calibrations each
+#: left one behind (the 1,142-file board and the 1,450-file one, both of which
+#: the bound then walked past).
+CALIBRATED_BOARD_FILES = 1804
+
+#: Bytes of `promotions.jsonl` the calibrated cycle decoded, for the same
+#: reason. NOT part of the denominator — the budget scales with the board, not
+#: with the ledger, because pinning bytes decoded is a second change and #1858
+#: left that ruling open (owed clause 2: the ledger is read by the cycle, grows
+#: faster than the board, and is in none of the retention sweep's bounded
+#: stores). A reader comparing today's cost against this table has to know both
+#: inputs, since ledger growth can exhaust this budget with no code change and
+#: no drift-test warning.
+CALIBRATED_LEDGER_BYTES = 28_960_660
+
+#: The later of the two measured tails, in seconds.
+#:
+#:     measured 2026-09-30 from abe3360a in a round worktree, 32 cores
+#:     board  = CALIBRATED_BOARD_FILES item files (the numeric-name subset)
+#:     ledger = CALIBRATED_LEDGER_BYTES bytes, repointed live as in every gate run
+#:              (the live file grows: the sets below saw 28,954,336 to 28,965,388)
+#:     serial, 8 runs over 1,803 item files, load 5.6-6.4:
+#:              min 6.95  median 7.14  p90 7.52  max 7.52
+#:     serial, 6 runs over the calibrated board, load 4.4-5.4:
+#:              min 6.46  median 6.54  p90 6.97  max 6.97
+#:     `-n 8 --dist loadfile`, 1 full-suite pass, load 3.2:  7.64
+#:
+#: The two serial sets are 0.5 s apart for the same code over the same corpus,
+#: which is the machine's own spread and the reason a 3%-margin bound was never
+#: stable. Their later p90 is 7.52 s (nearest-rank; 7.46 by linear interpolation).
+#: One `xdist -n 8 --dist loadfile` full-suite pass — the shape the gate's tests
+#: rung actually uses — printed 7.64 s from the node's own line, so over a quiet
+#: board the parallel penalty is small and this constant records THAT tail. All
+#: three rows are here because the check has to be readable against any of them:
+#: `COLD_BUDGET_S` below is >= the p90 of each serial set as well as >= the
+#: `-n 8` sample.
+#:
+#: What none of those rows capture is contention, and the two serial sets above
+#: already show the machine's own contribution: the same code over the same corpus
+#: came in at median 7.14 s in one set and 6.54 s in the other — 9% apart, with the
+#: 1-minute load average about a point higher. The gate's tests rung adds eight
+#: workers on top of whatever else the box is doing, which is why a single sample on
+#: a 3%-margin bound was never stable: the ledger carries 17 rows naming this node
+#: as a parallel-only failure up to 2026-09-29 (triage on #1858), with no code
+#: change behind any of them.
+#:
+#: The budget is deliberately NOT padded to absorb an arbitrary load spike. A
+#: number high enough for that would sit near the 15.22 s cost the check exists to
+#: catch and stop measuring the dashboard. What absorbs the transient is the second
+#: sample in `enforce_cold_cycle_budget`, plus the load average and xdist worker id
+#: the node prints beside every duration, so a red that survives the retry says
+#: whether the machine was the problem or the code was.
+COLD_P90_S = 7.64
+
+#: Stated margin over that p90 (#1858 clause 1): 25%, arithmetic rather than the
+#: "~30% headroom" the 2026-09-25 re-base claimed in prose. It has to cover the
+#: worker contention the re-measurement does not absorb, and it has to stay far
+#: enough under the 15.22 s triage cost that a real regression still trips it —
+#: at 1.25 the budget is 9.55 s and the triage cost is 59% higher, so the check
+#: still means something. A re-baser changes the table and, if they must, this
+#: number; the budget itself follows arithmetically.
+COLD_BUDGET_MARGIN = 1.25
+
+#: Budget for one cold cycle over the board named by `CALIBRATED_BOARD_FILES`,
+#: charged per file by `cold_budget_for_board`. 8.0 s was the calibration on a
+#: 1,450-file board with a 6,286,192-byte ledger, where the node measured 6.02 s
+#: and 6.16 s; to restore that value, restore those two inputs (round
+#: SM_20260925_205059's review run, 2026-09-25, load average 11). Triage
+#: baseline: 15.22 s over 1,142 files, 2026-09-16 — the bound still fires well
+#: short of that.
+COLD_BUDGET_S = COLD_P90_S * COLD_BUDGET_MARGIN
+
+#: How far the live board may move from the calibrated one before the budget
+#: stops describing it (#1858 clause 3).
+BOARD_DRIFT_FRACTION = 0.20
+
+
+def cold_budget_for_board(board_files: int) -> float:
+    """The budget owed by a cycle that walked `board_files` item files.
+
+    `COLD_BUDGET_S` is the price of the calibrated board; spread over the files
+    it was measured on it is a per-file allowance, and that allowance times the
+    board actually walked is what this cycle pays. The floor at `COLD_BUDGET_S`
+    means a board *smaller* than the calibrated one does not buy a tighter
+    bound — the absolute number is the one the triage baseline is readable
+    against, and a shrunken corpus is a calibration event anyway (the drift test
+    says so). Growth past `BOARD_DRIFT_FRACTION` is not absorbed forever either:
+    it reddens the drift test, which asks for a re-measurement rather than a
+    bigger margin.
+    """
+    per_file = COLD_BUDGET_S / CALIBRATED_BOARD_FILES
+    return max(COLD_BUDGET_S, per_file * board_files)
+
+
+def assert_board_within_calibration_drift(live_board_files: int) -> None:
+    """Redden when the board is no longer the corpus this budget measured.
+
+    The band is `CALIBRATED_BOARD_FILES +/- BOARD_DRIFT_FRACTION`, derived from
+    the constant rather than restated, so re-basing the calibration moves the
+    band with it and cannot leave a stale +/-20% of a dead number behind.
+    """
+    low = int(CALIBRATED_BOARD_FILES * (1.0 - BOARD_DRIFT_FRACTION))
+    high = int(CALIBRATED_BOARD_FILES * (1.0 + BOARD_DRIFT_FRACTION))
+    assert low <= live_board_files <= high, (
+        f"the cold-cycle budget is calibrated on a board of "
+        f"{CALIBRATED_BOARD_FILES} item files and this board holds "
+        f"{live_board_files} — outside the "
+        f"+/-{BOARD_DRIFT_FRACTION:.0%} band ({low}..{high}). RE-BASE THE "
+        f"CALIBRATION, do not raise the budget: re-run the node the way the "
+        f"table beside `COLD_BUDGET_S` says (serial runs and `-n 8` runs over "
+        f"the real board), then set `COLD_P90_S`, `CALIBRATED_BOARD_FILES` and "
+        f"`CALIBRATED_LEDGER_BYTES` to what those runs measured. Raising "
+        f"`COLD_BUDGET_MARGIN` instead keeps a green node that no longer "
+        f"measures the board anyone has."
+    )
+
+
+def empty_both_caches() -> None:
+    """Forget every cache a cold cycle is supposed to miss.
+
+    Both layers, always: the response cache in `app.routers.dashboard` and the
+    decoded-ledger cache in `scripts.automod.state`. A cycle that hits either one
+    costs milliseconds, so "cold" is a property of two stores and clearing one of
+    them is how a warm cycle gets timed while reading as a cold one.
+    """
+    dash._cache.clear()
+    B._ledger_cache_clear()
 
 
 @pytest.fixture(autouse=True)
 def _cold():
     """Every timing test starts from an empty cache, in both layers."""
-    dash._cache.clear()
-    B._ledger_cache_clear()
+    empty_both_caches()
     yield
-    dash._cache.clear()
-    B._ledger_cache_clear()
+    empty_both_caches()
 
 
 async def _cold_cycle() -> dict:
     """One cold call through the real route handler, decoded."""
     response = await dash.get_dashboard()
     return json.loads(response.body.decode("utf-8"))
+
+
+async def enforce_cold_cycle_budget(*, board_files: int, run_cycle, grade,
+                                    budget: float | None = None) -> float:
+    """Time cold cycles until one is inside the budget — at most two.
+
+    `run_cycle()` performs one timed cold cycle and returns
+    `(seconds, payload)`; `grade(payload)` returns the reason that cycle measured
+    nothing, or `None` for a real one. Both caches are emptied before the second
+    attempt, so the confirming cycle is as cold as the first.
+
+    One breach is not a verdict. Under `xdist -n 8` on a loaded box a single
+    sample carries the scheduler's variance, which is how this node became the
+    gate's commonest parallel-only flake: a cycle just under the budget at rest
+    went over it under eight workers, with no code change behind the red. So the
+    first cycle that breaches is followed by exactly one more, cold, and the node
+    reddens only when both breach. Two is also the ceiling — a third cycle would
+    be a way of grinding to a green, so `run_cycle` is called at most twice and
+    `test_a_breaching_cycle_is_confirmed_by_exactly_one_more_cold_cycle` counts
+    the calls to prove it.
+
+    A cycle that `grade` refuses is not a breach and gets no retry: a fast error
+    is not a slow dashboard, and re-measuring it would let a broken reader pass
+    on the luck of its second attempt.
+    """
+    owed = cold_budget_for_board(board_files) if budget is None else budget
+    first_seconds: float | None = None
+    for attempt in (1, 2):
+        if attempt == 2:
+            empty_both_caches()
+        seconds, payload = await run_cycle()
+        complaint = grade(payload)
+        if complaint:
+            raise AssertionError(
+                f"attempt {attempt} finished in {seconds:.2f}s and so is inside "
+                f"the {owed:.2f}s budget, but it measured nothing: {complaint}. A "
+                f"cycle that did not walk the board cannot retire a breach or "
+                f"prove a speed-up, so this is a failure rather than a retry."
+            )
+        print(f"cold cycle{'' if attempt == 1 else ' (confirming)'}: "
+              f"{seconds:.2f}s over {board_files} files; budget {owed:.2f}s")
+        if seconds < owed:
+            return seconds
+        if attempt == 1:
+            first_seconds = seconds
+    raise AssertionError(
+        f"two consecutive cold /api/dashboard cycles over {board_files} board "
+        f"files both breached the {owed:.2f}s budget: {first_seconds:.2f}s then "
+        f"{seconds:.2f}s. The second cycle ran with both caches emptied, so this "
+        f"is the cold path and not a load spike. The calibration is "
+        f"{COLD_BUDGET_S:.2f}s over {CALIBRATED_BOARD_FILES} item files and "
+        f"{CALIBRATED_LEDGER_BYTES:,} ledger bytes; the triage baseline was "
+        f"15.22 s at 1,142 files. The remaining cost is named on #1204: "
+        f"re-walking the board per section (recommendation B) and re-decoding the "
+        f"ledger (tests/test_backlog_ledger_cache.py)."
+    )
+
+
+def _grade_a_cold_cycle(payload: dict) -> str | None:
+    """Why this payload is not a measurement, or None if it is one.
+
+    The positive control from #1204, kept exactly where it was: the two sections
+    that cost the time must have run. A `_gather` that swallows an exception
+    returns `{"error": ...}` in milliseconds and reads as a speed-up, and a board
+    scan that parses nothing returns `total: 0` after the full walk. Either one
+    is a fast *nothing*, and a fast nothing must never retire a budget.
+    """
+    backlog = payload.get("backlog") or {}
+    automod = payload.get("automod") or {}
+    if not isinstance(backlog, dict) or "error" in backlog:
+        return (f"the backlog section errored out ({backlog}), so the timed cycle "
+                f"never walked the board — a fast error is not a fast dashboard")
+    if not isinstance(automod, dict) or "error" in automod:
+        return (f"the automod section errored out ({automod}), which is the "
+                f"section that cost 13.07 s cold at triage; without it the "
+                f"measurement is of a different request")
+    if not backlog.get("total", 0) > 0:
+        return (f"backlog.total reads {backlog.get('total')} — the scan parsed "
+                f"nothing, so the budget would be met by a broken reader")
+    return None
 
 
 async def test_one_cold_dashboard_cycle_beats_the_budget(monkeypatch):
@@ -75,46 +295,273 @@ async def test_one_cold_dashboard_cycle_beats_the_budget(monkeypatch):
     # vault. See tests/board_presence.py.
     files = board_files_or_stop(what="cold-cycle budget", numeric_names=True)
     ledger = timed_ledger_or_stop(monkeypatch, what="cold-cycle budget")
+    ledger_bytes = ledger.path.stat().st_size
     print(f"board: {len(files)} item files; ledger {ledger.path}: "
-          f"{ledger.path.stat().st_size:,} bytes | {ledger.why}")
-    assert ledger.path.stat().st_size > 0, (
+          f"{ledger_bytes:,} bytes | {ledger.why}")
+    assert ledger_bytes > 0, (
         f"{ledger.path} is empty, so this cycle decoded no ledger at all and the "
         f"budget does not constrain the ledger re-decode path"
     )
+    budget = cold_budget_for_board(len(files))
+    # What the machine was doing while this was timed. The table beside
+    # `COLD_BUDGET_S` cannot carry it, and a red that says only "10.2s > 9.55s"
+    # gets read as a regression by a reader with no way to tell a slow dashboard
+    # from a busy box. The load average and the xdist worker id together say
+    # which one it was.
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "master")
+    print(f"budget for this cycle: {budget:.2f}s = the calibrated "
+          f"{COLD_BUDGET_S:.2f}s spread over {CALIBRATED_BOARD_FILES} files and "
+          f"re-charged on {len(files)}")
+    print(f"machine at measurement: xdist worker {worker}, "
+          f"load 1/5/15 = {os.getloadavg()} ")
 
-    started = time.perf_counter()
-    payload = await _cold_cycle()
-    elapsed = time.perf_counter() - started
-    print(f"cold cycle: {elapsed:.2f}s over {len(files)} files")
+    async def one_cold_cycle():
+        started = time.perf_counter()
+        payload = await _cold_cycle()
+        return time.perf_counter() - started, payload
 
-    # Positive control: the two sections that cost the time must have run.
-    backlog = payload.get("backlog") or {}
-    automod = payload.get("automod") or {}
-    assert isinstance(backlog, dict) and "error" not in backlog, (
-        f"the backlog section errored out ({backlog}), so the timed cycle never "
-        f"walked the board — a fast error is not a fast dashboard"
+    elapsed = await enforce_cold_cycle_budget(
+        board_files=len(files),
+        budget=budget,
+        run_cycle=one_cold_cycle,
+        grade=_grade_a_cold_cycle,
     )
-    assert isinstance(automod, dict) and "error" not in automod, (
-        f"the automod section errored out ({automod}), which is the section that "
-        f"cost 13.07 s cold at triage; without it the measurement is of a "
-        f"different request"
-    )
-    assert backlog.get("total", 0) > 0, (
-        f"backlog.total reads {backlog.get('total')} after walking "
-        f"{len(files)} files — the scan parsed nothing, so the budget would be "
-        f"met by a broken reader"
+    assert elapsed < budget, (
+        f"the helper returned {elapsed:.2f}s, outside the {budget:.2f}s it was "
+        f"given — it retired a breach it did not measure away"
     )
 
-    assert elapsed < COLD_BUDGET_S, (
-        f"one cold /api/dashboard cycle over {len(files)} board files took "
-        f"{elapsed:.2f}s; the budget is {COLD_BUDGET_S}s (6.0 at triage, "
-        f"re-set to 8.0 on 2026-09-25 after 6.02/6.16 s measurements over the "
-        f"1,450-file board). Triage baseline "
-        f"15.22 s at 1,142 files, loader swap alone measured 5.00 s. The "
-        f"remaining cost is named on #1204: re-walking the board per section "
-        f"(recommendation B) and re-decoding the ledger (recommendation, "
-        f"tests/test_backlog_ledger_cache.py)."
-    )
+
+def test_the_board_is_still_the_size_the_budget_was_calibrated_on():
+    """Redden when the corpus the budget measured has drifted out of its band.
+
+    This is the node that turns the old flake into a maintenance signal. The
+    budget was 8.0 s across two calibrations while the board grew past it, and
+    the only thing that noticed was a parallel-only red on whatever round happened
+    to be gated at the time. Now the growth itself reddens, once, with an
+    instruction to re-measure.
+    """
+    files = board_files_or_stop(what="budget calibration drift", numeric_names=True)
+    live = len(files)
+    assert_board_within_calibration_drift(live)
+    print(f"board drift: {live} item files live vs {CALIBRATED_BOARD_FILES} "
+          f"calibrated — inside the +/-{BOARD_DRIFT_FRACTION:.0%} band")
+
+
+@pytest.mark.parametrize("live_board_files", [
+    pytest.param(0, id="an-empty-board"),
+    pytest.param(1, id="a-one-file-board"),
+])
+def test_a_board_far_smaller_than_the_calibration_reddens_the_drift_check(
+        live_board_files):
+    """A shrunken board is as uncalibrated as a grown one.
+
+    Drift is two-sided on purpose: a cycle over almost nothing also costs almost
+    nothing, and a budget calibrated on the real board would be met by a corpus
+    that no longer exists. `board_files_or_stop` stops on a genuinely missing
+    board; this catches a board that is present and no longer the one measured.
+    """
+    with pytest.raises(AssertionError) as caught:
+        assert_board_within_calibration_drift(live_board_files)
+    message = str(caught.value)
+    assert str(CALIBRATED_BOARD_FILES) in message, message
+    assert str(live_board_files) in message, message
+    assert "RE-BASE" in message and "do not raise the budget" in message, message
+
+
+def test_a_board_that_outgrew_the_calibration_reddens_the_drift_check():
+    """The failure this whole clause exists for, exercised without waiting for it.
+
+    Driven one file past the band rather than at some dramatic multiple, because
+    the band's edge is the behaviour under test: 20% of growth is absorbed by the
+    per-file charge, and the file past it is a calibration event.
+    """
+    outside = int(CALIBRATED_BOARD_FILES * (1.0 + BOARD_DRIFT_FRACTION)) + 1
+    inside = int(CALIBRATED_BOARD_FILES * (1.0 + BOARD_DRIFT_FRACTION))
+    assert_board_within_calibration_drift(inside)   # the band itself still passes
+    with pytest.raises(AssertionError) as caught:
+        assert_board_within_calibration_drift(outside)
+    message = str(caught.value)
+    assert f"{CALIBRATED_BOARD_FILES} item files" in message, message
+    assert f"{outside}" in message, (
+        f"the message must print the count it is reddening on: {message}")
+    assert "RE-BASE" in message and "do not raise the budget" in message, message
+    assert "COLD_BUDGET_MARGIN" in message, (
+        f"the message has to name the dial the reader must NOT turn: {message}")
+
+
+def test_the_budget_is_the_measured_p90_times_the_stated_margin():
+    """Clause 1's arithmetic, pinned: no hand-tuned number sits between them."""
+    assert COLD_BUDGET_MARGIN > 1.0, COLD_BUDGET_MARGIN
+    assert COLD_BUDGET_S == pytest.approx(COLD_P90_S * COLD_BUDGET_MARGIN), (
+        f"{COLD_BUDGET_S} is not {COLD_P90_S} x {COLD_BUDGET_MARGIN}: the budget "
+        f"is a typed number again, not a re-based one")
+    assert COLD_BUDGET_S >= COLD_P90_S, (
+        f"the budget {COLD_BUDGET_S} is below the p90 it was derived from "
+        f"{COLD_P90_S}")
+
+
+def test_the_per_file_charge_reproduces_the_calibration_and_scales_from_it():
+    """Clause 2: the budget's margin reads the calibrated count, one copy."""
+    assert cold_budget_for_board(CALIBRATED_BOARD_FILES) == pytest.approx(
+        COLD_BUDGET_S), "the per-file charge must be exact on its own calibration"
+    assert cold_budget_for_board(CALIBRATED_BOARD_FILES * 2) == pytest.approx(
+        COLD_BUDGET_S * 2), "a board twice the size is charged twice the budget"
+    assert cold_budget_for_board(1) == COLD_BUDGET_S, (
+        "a smaller board does not buy a tighter bound: the floor is the "
+        "calibrated number, and a shrunken corpus is the drift test's business")
+
+
+def test_the_calibrated_board_count_is_written_once_in_this_file():
+    """No second copy of the calibrated count, in code or in prose.
+
+    Reading the file's own text is how this can be checked over everything the
+    next editor might write, including the comments that go stale quietly. The
+    historical counts (1,142 and 1,450) are not this count and are allowed to
+    stay where the story needs them; what may not exist is a second copy of the
+    number the budget and the drift band are both derived from.
+    """
+    text = Path(__file__).read_text(encoding="utf-8")
+    hits = [i for i, line in enumerate(text.splitlines(), 1)
+            if str(CALIBRATED_BOARD_FILES) in line]
+    assert len(hits) == 1, (
+        f"{CALIBRATED_BOARD_FILES} is written on {len(hits)} lines "
+        f"({hits}); only the definition of `CALIBRATED_BOARD_FILES` may hold it, "
+        f"because every other copy is a number nothing re-computes")
+
+
+def _valid_payload() -> dict:
+    """A payload the nothing-was-measured guard accepts, for a fake cycle."""
+    return {"backlog": {"total": 7}, "automod": {"rounds": 3}}
+
+
+async def test_a_breaching_cycle_is_confirmed_by_exactly_one_more_cold_cycle():
+    """Slow then fast: the second cold sample retires the breach, and it is the
+    last one. Clause 4 of #1858, driven by an injected cycle so the policy is
+    pinned without a slow machine to demonstrate it on."""
+    calls = []
+
+    async def fake_cycle():
+        calls.append(len(calls) + 1)
+        durations = [COLD_BUDGET_S + 1.0, 0.5]
+        return durations[len(calls) - 1], _valid_payload()
+
+    elapsed = await enforce_cold_cycle_budget(
+        board_files=CALIBRATED_BOARD_FILES, run_cycle=fake_cycle,
+        grade=_grade_a_cold_cycle)
+    assert elapsed == 0.5, elapsed
+    assert len(calls) == 2, (
+        f"a breach must be confirmed by exactly one more cycle; the injected "
+        f"cycle ran {len(calls)} times")
+
+
+async def test_two_breaching_cycles_fail_and_name_both_durations_and_the_board():
+    """Slow then slow: a second breach is the verdict, and it is the last sample.
+
+    The message is part of the clause. A reader of a red gate should not have to
+    re-run anything to know what it cost and over what corpus.
+    """
+    calls = []
+
+    async def fake_cycle():
+        calls.append(len(calls) + 1)
+        return COLD_BUDGET_S + [1.0, 2.5][len(calls) - 1], _valid_payload()
+
+    with pytest.raises(AssertionError) as caught:
+        await enforce_cold_cycle_budget(
+            board_files=CALIBRATED_BOARD_FILES, run_cycle=fake_cycle,
+            grade=_grade_a_cold_cycle)
+    assert len(calls) == 2, (
+        f"never a third cycle: the helper ran the injected cycle {len(calls)} "
+        f"times, and a third sample would be a way of grinding to a green")
+    message = str(caught.value)
+    for expected in (f"{COLD_BUDGET_S + 1.0:.2f}s", f"{COLD_BUDGET_S + 2.5:.2f}s",
+                     f"{CALIBRATED_BOARD_FILES} board files"):
+        assert expected in message, (
+            f"{expected!r} missing from the failure message: {message}")
+
+
+async def test_a_cycle_inside_the_budget_is_measured_once():
+    """No retry cost on the common path: the second cycle exists only for breaches."""
+    calls = []
+
+    async def fake_cycle():
+        calls.append(1)
+        return 0.5, _valid_payload()
+
+    elapsed = await enforce_cold_cycle_budget(
+        board_files=CALIBRATED_BOARD_FILES, run_cycle=fake_cycle,
+        grade=_grade_a_cold_cycle)
+    assert elapsed == 0.5 and len(calls) == 1, (elapsed, len(calls))
+
+
+async def test_a_fast_error_fails_at_once_instead_of_buying_a_second_sample():
+    """The nothing-was-measured guards stand in front of the retry.
+
+    Clause 5's other half: a payload whose heavy section errored is not a breach
+    waiting to be re-measured, it is a cycle that measured nothing. Retrying it
+    would let a broken reader pass on the luck of its second attempt.
+    """
+    calls = []
+
+    async def fake_cycle():
+        calls.append(1)
+        return 0.01, {"backlog": {"error": "boom"}, "automod": {}}
+
+    with pytest.raises(AssertionError) as caught:
+        await enforce_cold_cycle_budget(
+            board_files=CALIBRATED_BOARD_FILES, run_cycle=fake_cycle,
+            grade=_grade_a_cold_cycle)
+    assert len(calls) == 1, (
+        f"a nothing-was-measured cycle must not earn a retry; got {len(calls)}")
+    assert "measured nothing" in str(caught.value), str(caught.value)
+
+
+async def test_the_confirming_cycle_starts_from_emptied_caches(tmp_path):
+    """The second cycle is cold, witnessed on the real cache objects.
+
+    A breach retired by a warm cycle is worse than the flake this replaced: the
+    0.06 s warm path clears any budget instantly. So the fake cycle plays the
+    part of a real one — it populates both caches as `get_dashboard` and the
+    ledger reader do — and what is asserted is what the *next* attempt finds:
+    nothing. The positive control is the seeding itself, done in the first
+    attempt, so the assertion cannot be satisfied by caches nobody filled.
+    """
+    from scripts.automod import state as S
+
+    ledger = tmp_path / "promotions.jsonl"
+    ledger.write_text(json.dumps({"event": "gate", "round_id": "SM_FAKE"}) + "\n",
+                      encoding="utf-8")
+    found_empty = []    # what each attempt observes on entry
+    left_warm = []      # what each attempt leaves behind, having run
+
+    async def fake_cycle():
+        found_empty.append((dict(dash._cache), S.ledger_read_count(ledger)))
+        dash._cache["payload"] = ({"backlog": {"total": 1}}, time.monotonic())
+        S.ledger_rows(ledger)                     # warm the decoded-ledger cache
+        left_warm.append((dict(dash._cache), S.ledger_read_count(ledger)))
+        durations = [COLD_BUDGET_S + 1.0, 0.5]
+        return durations[len(found_empty) - 1], _valid_payload()
+
+    elapsed = await enforce_cold_cycle_budget(
+        board_files=CALIBRATED_BOARD_FILES, run_cycle=fake_cycle,
+        grade=_grade_a_cold_cycle)
+
+    assert len(found_empty) == 2, found_empty
+    assert elapsed == 0.5, elapsed
+    cache_left, reads_left = left_warm[0]
+    assert "payload" in cache_left and reads_left == 1, (
+        f"the first attempt was supposed to leave both caches warm so there was "
+        f"something for the reset to remove; it left {list(cache_left)} and "
+        f"{reads_left} ledger read(s)")
+    cache_found, reads_found = found_empty[1]
+    assert cache_found == {}, (
+        f"the confirming cycle found the response cache still populated: "
+        f"{list(cache_found)} — a warm cycle cannot retire a breach")
+    assert reads_found == 0, (
+        f"the confirming cycle found the decoded ledger still cached "
+        f"(reads={reads_found} since the last reset), so it would have been timed "
+        f"with the ledger already in memory")
 
 
 def test_a_repointed_ledger_says_so(tmp_path, monkeypatch):
