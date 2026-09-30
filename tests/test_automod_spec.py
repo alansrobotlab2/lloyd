@@ -9,6 +9,8 @@ listing a denied path in `writable_paths`.
 from __future__ import annotations
 
 import inspect
+import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -779,3 +781,286 @@ def test_the_verdicts_these_rails_pin_are_the_ones_another_interpreter_prints():
     assert lines[1] == spec.classify("agent-services/models/wakeword/hey_lloyd.onnx"), out.stdout
     assert lines[2] == "protected", out.stdout
     assert int(lines[3]) == len([p for p in universe if spec.classify(p) == "allowed"]), out.stdout
+
+
+# ---------------------------------------------------------------------------
+# the #1883 grant: the tracked Qwen3-TTS patch, #1878's only writable artefact
+# ---------------------------------------------------------------------------
+#
+# `agent-services/services/tts/qwen3-tts/` is an untracked vendored clone —
+# `git ls-files agent-services/services/tts/` returns the patch, an upstream
+# commit pin and three server scripts, and no `.py` from the clone — so the one
+# artefact of the Qwen3-TTS integration that a diff can carry is the tracked
+# `.patch` applied to it. Round SM_20260930_063800 wrote #1878's frame cap into
+# that patch plus `tests/test_qwen3_tts_frame_cap.py`, and its `gate.json`
+# records rung 0 as the only rung that ran:
+# `paths outside the writable set: ['agent-services/services/tts/qwen3-tts-local.patch']`,
+# bucket `unlisted`. #1883 is the widening that makes #1878 implementable. These
+# rails are its shape: one verbatim file, no rollback drill, exactly one tracked
+# path's verdict moved, and the reason written beside the entry.
+
+#: The tracked patch. Named verbatim, never by a glob, because the rail above
+#: (`agent_services_paths_admitted_without_being_named`) refuses a wildcard
+#: spelling of even a single file.
+TTS_PATCH = "agent-services/services/tts/qwen3-tts-local.patch"
+
+#: The diff #1878's re-offered round carries: the regenerated patch plus its
+#: test. `tests/test_qwen3_tts_frame_cap.py` exists on the kept branch
+#: `automod/SM_20260930_063800` (`cb3bc441`), not on main; rung 0 classifies the
+#: paths a diff touches, so what has to hold is the pair's verdicts together.
+TTS_1878_DIFF = [TTS_PATCH, "tests/test_qwen3_tts_frame_cap.py"]
+
+
+def test_the_tracked_tts_patch_is_admitted_verbatim():
+    """#1883 clause 1: the exact path is in `ALLOWED_GLOBS` and classifies `allowed`.
+
+    The file must also be tracked: the whole reason #1878 is unimplementable is
+    that the clone the patch applies to is untracked, so admitting an untracked
+    path would be a grant over bytes no commit can carry.
+    """
+    assert TTS_PATCH in spec.ALLOWED_GLOBS
+    assert spec.classify(TTS_PATCH) == "allowed"
+    assert TTS_PATCH in tracked_agent_services_paths(), (
+        f"{TTS_PATCH} is not tracked, so admitting it grants nothing a round "
+        f"can actually change")
+
+
+def test_the_tts_grant_carries_its_reason_beside_the_entry():
+    """#1883 clause 5, the in-file half: an allowlist entry has to say why.
+
+    Every other `agent-services` grant in the tuple carries a comment naming the
+    hazard it does not admit (`agent-services/**` would take in every launcher
+    and conf), and this one needs the same sentence for a different reason: the
+    path is admitted because the tree it sits in is untracked, which is exactly
+    why the usual objection does not apply. A bare entry reads as an oversight
+    to the next reader and gets swept by the next person who tidies the tuple.
+    """
+    src = (REPO_ROOT / "scripts" / "automod" / "spec.py").read_text().splitlines()
+    entry = f'    "{TTS_PATCH}",'
+    assert src.count(entry) == 1, (
+        f"expected the grant exactly once in spec.py's ALLOWED_GLOBS, found "
+        f"{src.count(entry)}")
+    block: list[str] = []
+    j = src.index(entry) - 1
+    while j >= 0 and (src[j].lstrip().startswith("#") or not src[j].strip()):
+        block.append(src[j])
+        j -= 1
+    comment = " ".join(reversed(block))
+    assert "untracked" in comment, (
+        f"the grant does not name the untracked vendored TTS clone as its "
+        f"reason, which is the only thing that distinguishes it from a "
+        f"`agent-services/**` widening: {comment!r}")
+    assert "patch" in comment, comment
+    assert "#1883" in comment or "#1878" in comment, comment
+
+
+def test_the_1878_diff_clears_rung_0_without_a_drill():
+    """#1883 clause 2: the re-offered #1878 diff is in scope, and buys no drill.
+
+    The two buckets both matter. `unlisted` empty is the defect #1883 exists to
+    close; `protected` empty is the grant being in `ALLOWED_GLOBS` rather than
+    `PROTECTED_GLOBS` — a protected path also clears preflight
+    (`check_scope` permits it) but sets `requires_drill`, which would make every
+    #1878 re-offer pay the ~90 s guardian drill for a documentation-shaped edit.
+    """
+    ok, reason, buckets = spec.check_scope(TTS_1878_DIFF)
+    assert (ok, reason) == (True, "in scope"), (ok, reason)
+    assert buckets["allowed"] == list(TTS_1878_DIFF), buckets
+    assert not buckets["unlisted"] and not buckets["protected"], buckets
+    assert not buckets["denied"] and not buckets["comment_only"], buckets
+    assert spec.requires_drill(TTS_1878_DIFF) is False, (
+        "an empty protected bucket is the clause: this grant must not buy a "
+        "guardian drill")
+
+
+def test_the_tts_grant_keeps_the_exactness_rail_and_its_floor_green():
+    """#1883 clause 3: the grant is a named file, so no unnamed admission exists.
+
+    `agent_services_paths_admitted_without_being_named` reads `verbatim` straight
+    out of `ALLOWED_GLOBS`, so adding this exact path is precisely the case where
+    the admitted file and the named file are the same file and the violation list
+    stays empty. The vacuity floor rides along: one file out of the 81 tracked
+    paths that were `unlisted` at this round's base `337b1f1a` leaves the rail
+    guarding a large corpus, not a husk.
+    """
+    assert TTS_PATCH in {g for g in spec.ALLOWED_GLOBS if "*" not in g}
+    assert agent_services_paths_admitted_without_being_named() == []
+    unlisted = [p for p in tracked_agent_services_paths()
+                if spec.classify(p) == "unlisted"]
+    assert len(unlisted) >= 70, (
+        f"only {len(unlisted)} tracked agent-services paths are still unlisted "
+        f"against 81 at base 337b1f1a: the path-exactness rail is close to "
+        f"vacuous and the widening should be re-read, not trusted")
+
+
+def test_the_wildcard_spelling_of_the_tts_grant_would_be_an_unnamed_admission(monkeypatch):
+    """Proves the verbatim spelling is load-bearing, not stylistic.
+
+    #1883's title asked for `agent-services/services/tts/*.patch`. Applied to the
+    tuple before this round, that glob admits exactly the one file the item wants
+    and moves the same tracked verdicts the verbatim entry does — and the
+    path-exactness rail still goes red on it, because `fnmatch`'s `*` crosses
+    `/` and a wildcard in that tuple is one keystroke from a grant over the tree.
+    The count cannot tell the two spellings apart, which is why the rail is the
+    only thing that can, and why this node exists: it is the difference between
+    the entry the item's title named and the entry it landed, executed.
+    """
+    assert TTS_PATCH in ALLOWED_GLOBS_AS_SHIPPED, (
+        "this node simulates the title's glob against the tuple minus the grant; "
+        "with the grant absent the comparison is not the one being made")
+    shipped_unlisted = [p for p in tracked_agent_services_paths()
+                        if spec.classify(p) == "unlisted"]
+    pre = tuple(g for g in ALLOWED_GLOBS_AS_SHIPPED if g != TTS_PATCH)
+    monkeypatch.setattr(spec, "ALLOWED_GLOBS",
+                        (*pre, "agent-services/services/tts/*.patch"))
+    assert spec.classify(TTS_PATCH) == "allowed", "the glob does not even reach the file"
+    assert agent_services_paths_admitted_without_being_named() == [TTS_PATCH]
+    # The rail itself, not a restatement of its helper — but stated as a
+    # try/except rather than `pytest.raises`, because the honest failure here is
+    # "that rail stopped raising", which happens two different ways: the grant
+    # went wrong, or the rail was refactored to return a violation list instead
+    # of asserting. `pytest.raises` reports both as DID NOT RAISE and sends the
+    # next maintainer to the wrong file.
+    try:
+        test_only_a_verbatised_path_under_agent_services_may_be_admitted()
+    except AssertionError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError(
+            "the path-exactness rail did not fire under the wildcard grant. If "
+            "the grant was narrowed this node needs updating; if the rail was "
+            "refactored to return a violation list instead of asserting, assert "
+            "on that list here — the helper reports "
+            f"{agent_services_paths_admitted_without_being_named()} today"
+        ) from None
+    assert "became writable without being named" in message, message
+    wildcard_unlisted = [p for p in tracked_agent_services_paths()
+                         if spec.classify(p) == "unlisted"]
+    assert len(wildcard_unlisted) == len(shipped_unlisted), (
+        "the vacuity floor was supposed to be blind to the spelling; if it can "
+        "see it, the node above is no longer the only rail that can")
+
+
+def test_the_tts_grant_moves_exactly_one_tracked_agent_services_verdict(monkeypatch):
+    """#1883 clause 4: nothing else under `agent-services` changes classification.
+
+    Diffed against the tuple one line narrower rather than asserted in isolation:
+    "the grant admits one file" is a statement about two trees, and the only way
+    to say it is to compute both verdict maps over `git ls-files agent-services`
+    and compare them. The models tree is asserted again on the `after` side
+    because the acoustic weights are the one content whose bad edit no rung can
+    score, and a grant that reaches them would be invisible to the gate.
+    """
+    corpus = tracked_agent_services_paths()
+    pre = tuple(g for g in ALLOWED_GLOBS_AS_SHIPPED if g != TTS_PATCH)
+    monkeypatch.setattr(spec, "ALLOWED_GLOBS", pre)
+    before = {p: spec.classify(p) for p in corpus}
+    monkeypatch.setattr(spec, "ALLOWED_GLOBS", ALLOWED_GLOBS_AS_SHIPPED)
+    after = {p: spec.classify(p) for p in corpus}
+    assert sorted(p for p in corpus if before[p] != after[p]) == [TTS_PATCH]
+    assert (before[TTS_PATCH], after[TTS_PATCH]) == ("unlisted", "allowed")
+    allowed_after = {p for p in after if after[p] == "allowed"}
+    assert allowed_after == {TTS_PATCH, "agent-services/livekit_worker.py"}, (
+        f"the named grants over tracked agent-services paths are exactly the two "
+        f"this node pins; found {sorted(allowed_after)}. A new verbatim grant is "
+        f"a legitimate edit — add its path to this pin, and check it against "
+        f"`agent_services_paths_admitted_without_being_named()`, which is the "
+        f"rail that actually decides whether a grant is legal")
+    models = [p for p in corpus if p.startswith("agent-services/models/")]
+    assert models, "no tracked file under agent-services/models/ — this rail guards nothing"
+    assert [p for p in models if after[p] == "allowed"] == []
+    assert not spec.requires_drill([TTS_PATCH])
+
+
+def test_a_second_interpreter_admits_the_tts_patch_the_way_rung_0_does():
+    """The seam this grant sits on, crossed the way the gate crosses it.
+
+    `automod_gate` is spawned detached against the live tree — `gate_detached`
+    builds the argv and `S.spawn_detached(argv, log, cwd=LIVE_ROOT)` runs it
+    (`scripts/automod/round.py:527-555`) — so rung 0 grades with the `spec`
+    module *that* interpreter imported: rung 0 calls
+    `spec.check_scope` at `scripts/automod/gate.py:1296` and the drill rung asks
+    `spec.requires_drill` at `gate.py:2846`. A widening that read as admitted only
+    inside the pytest process would certify a grant the gate never sees — and
+    #1878's whole wait is a rung-0 verdict, so this node runs the fresh
+    interpreter over #1878's own diff and takes the child's answer as the truth.
+    """
+    probe = (
+        "import sys; "
+        "from scripts.automod import spec; "
+        "print(spec.classify(sys.argv[1])); "
+        "ok, why, buckets = spec.check_scope(sys.argv[1:3]); "
+        "print(ok, buckets['allowed'] == [sys.argv[1], sys.argv[2]], "
+        "bool(buckets['unlisted']), bool(buckets['protected']), "
+        "spec.requires_drill(sys.argv[1:3]))"
+    )
+    out = subprocess.run([sys.executable, "-c", probe, *TTS_1878_DIFF],
+                         cwd=REPO_ROOT, capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    lines = out.stdout.strip().splitlines()
+    assert lines[0] == "allowed", out.stdout
+    assert lines[1] == "True True False False False", out.stdout
+
+
+#: The vault, resolved the way `tests/board_presence.py:vault_root()` resolves it
+#: (`LLOYD_OBSIDIAN_VAULT` if set, else `~obsidian`), duplicated rather than
+#: imported so this file stays runnable as a single module.
+VAULT = (Path(os.environ["LLOYD_OBSIDIAN_VAULT"]).expanduser()
+         if os.environ.get("LLOYD_OBSIDIAN_VAULT") else Path.home() / "obsidian")
+
+#: #1883 clause 6's witness, and the state-dir artefact it was copied from.
+WITNESS = VAULT / "backlog" / "data" / "gate.json"
+WITNESS_SOURCE = (Path.home() / ".local" / "state" / "lloyd-automod" / "rounds"
+                  / "SM_20260930_063800" / "gate.json")
+
+
+#: The witness lives in the vault, and the gate runs `-m "not live_vault"`
+#: (pytest.ini:14-19): a file a nightly job can rewrite between rounds must not
+#: fail the next author on a hard rung. Run it with
+#: `python3 -m pytest tests/test_automod_spec.py -q -m "" -k witness`.
+@pytest.mark.live_vault
+def test_the_rung_0_refusal_this_item_quotes_has_committed_witness_bytes():
+    """#1883 clause 6: the refusal this whole grant exists for has readable bytes.
+
+    `~/.local/state/lloyd-automod/` is the audit trail and the rollback target,
+    never hand-edited — and it is outside git and outside the vault backup, so
+    SM_20260930_063800's rung-0 refusal existed in exactly one file with no
+    history. #1883's Evidence block quotes that file line by line, and a
+    transcription typed into this repo would be no more verifiable than the
+    prose it replaced. So the witness is the artefact itself, copied byte for
+    byte — `wc -l` on it reads 34, `wc -c` 1143 — and this node re-derives every
+    quoted number from those committed bytes rather than from anything here.
+    """
+    assert WITNESS.is_file(), (
+        f"{WITNESS} is absent, so the refusal #1883 quotes survives only in "
+        f"{WITNESS_SOURCE}, a path with no history a reader can check")
+    raw = WITNESS.read_text()
+    # `wc -l` counts newline bytes, and the artefact's last line (`}`) has no
+    # terminating one, so the figure the clause quotes is 34 while
+    # `splitlines()` returns 35 lines. Counted the way the clause measures it,
+    # with the byte count beside it: the two together are what make "the same
+    # file" checkable rather than a claim.
+    assert (raw.count("\n"), len(raw.encode())) == (34, 1143), (
+        f"wc -l / wc -c on the committed witness read "
+        f"{raw.count(chr(10))} / {len(raw.encode())}, not the 34 / 1143 of "
+        f"SM_20260930_063800's gate.json: the copy is no longer the artefact")
+    report = json.loads(raw)
+    assert report["round_id"] == "SM_20260930_063800"
+    assert report["head"] == "cb3bc441f9c17afbde23b13148ae90b5d5e54f3f"
+    assert report["ok"] is False
+    assert [r["name"] for r in report["rungs"]] == ["preflight"], (
+        "the item states preflight was the only rung that ran; the witness "
+        f"lists {[r['name'] for r in report['rungs']]}")
+    rung0 = report["rungs"][0]
+    assert rung0["ok"] is False and rung0["seconds"] == 0.08, rung0
+    assert rung0["data"]["buckets"] == {
+        "allowed": ["tests/test_qwen3_tts_frame_cap.py"],
+        "protected": [], "denied": [],
+        "unlisted": [TTS_PATCH],
+        "comment_only": [],
+    }, f"the bucket split the item quotes does not match: {rung0['data']['buckets']}"
+    assert "`git add -f`" in rung0["detail"], rung0["detail"]
+    if WITNESS_SOURCE.is_file():
+        assert raw == WITNESS_SOURCE.read_text(), (
+            "the committed witness and the state-dir artefact have come apart, "
+            "so neither one is the witness any more")

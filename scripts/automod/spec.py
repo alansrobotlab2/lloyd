@@ -85,6 +85,19 @@ ALLOWED_GLOBS: tuple[str, ...] = (
     # restart is what those rails exist for); tests/test_automod_spec.py's
     # #1376 section pins that a widening here must name its path verbatim.
     "agent-services/livekit_worker.py",
+    # #1883 / #1878 (2026-09-30): the tracked Qwen3-TTS patch, and again one
+    # verbatim file rather than `agent-services/services/tts/*.patch` — the
+    # #1376 rail refuses a wildcard spelling of a single file, and
+    # tests/test_automod_spec.py pins both halves. Admitted for a reason the
+    # line above does not share: `agent-services/services/tts/qwen3-tts/` is an
+    # untracked vendored clone, so no launcher, conf or weight under it is in
+    # the index, and this `.patch` is the only artefact of that integration a
+    # commit can carry and a gate can see. #1878's round SM_20260930_063800
+    # wrote the frame cap into it and died at rung 0 with the path bucketed
+    # `unlisted` — the sole rung that ran. Applying the patch to the live clone
+    # and restarting `agent-tts` stays a human action (SETUP.md); this entry
+    # only makes the tracked half of that fix landable by a round.
+    "agent-services/services/tts/qwen3-tts-local.patch",
     "web/src/**",
     "web/index.html",
     "web/public/**",

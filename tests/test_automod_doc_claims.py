@@ -173,6 +173,10 @@ def test_supervisor_confs_stop_process_groups(conf):
     # before this round, which is why no round could have landed the route.
     ("requirements-dev.txt", "allowed"),
     ("SETUP.md", "allowed"),
+    # #1883: the tracked Qwen3-TTS patch. The row is the operator-facing claim
+    # — a round may rewrite the frame cap in this file, and only this file under
+    # `agent-services/services/`, because the clone it patches is untracked.
+    ("agent-services/services/tts/qwen3-tts-local.patch", "allowed"),
 ])
 def test_path_policy_matches_the_doc(path, expected):
     from scripts.automod import spec
