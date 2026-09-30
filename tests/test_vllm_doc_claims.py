@@ -542,6 +542,11 @@ def test_the_population_recount_trigger_falsifies_the_ruling_not_the_calendar(re
     carries no digit of its own, because its volume half points back at the derived count
     named earlier in the bullet — so a re-cut fixture moves the bar without anyone editing
     a number into this sentence, and the re-count stays one query.
+
+    Deliberately NOT a parameter here: `derived`. The count this clause forbids the sentence
+    from repeating lives up-bullet, and the node that binds it to the derivation is
+    `test_the_population_ruling_is_closed_and_named_owed_checks`; a fixture used only to
+    decorate a failure message would make this node look data-dependent when it is not.
     """
     b = _criterion_bullet(reading, "a")
     assert _PRE_1918_REOPEN not in b and "beats this one" not in b, \
@@ -552,14 +557,17 @@ def test_the_population_recount_trigger_falsifies_the_ruling_not_the_calendar(re
         f"{[c for c in _CLAUSE_BREAK.split(b) if 're-count' in c or 'volume' in c]}")
     for c in fired:
         assert not re.search(r"\d", c), \
-            f"the falsifier hand-wrote a figure ({c!r}); its volume half is the derived " \
-            f"{derived['chat_turns']} named up-bullet, not a number copied down here"
-    q = _CHAT_QUERY.findall(reading)
+            f"the falsifier hand-wrote a figure ({c!r}); its volume half is the count named " \
+            f"up-bullet, which is the derivation's, not a number copied down here"
+    # §10-wide, not the counted-reading slice: the clause grades the section, and a second
+    # read-only query added anywhere in §10 makes the falsifier ambiguous about which one
+    # the re-count runs. The slice would let that through.
+    q = _CHAT_QUERY.findall(_section(10))
     assert len(q) == 1, \
         f"the falsifier has to stay answerable by the ONE query §10 already cites, got {q}"
 
 
-def test_the_population_falsifier_is_a_conjunction_with_no_eye_on_the_record(reading, monkeypatch):
+def test_the_population_falsifier_is_a_conjunction_with_no_eye_on_the_record(reading):
     """#1918 clause 3: drop either half of the falsifier and this node goes red — and no
     day of traffic can do it instead.
 
@@ -570,19 +578,18 @@ def test_the_population_falsifier_is_a_conjunction_with_no_eye_on_the_record(rea
     restore the defect; the miss-only form is §10's accepted-loss trigger one, which moves
     no population ruling.
 
-    And nothing here may depend on `usage.db`. The module already has a node that runs the
-    cited query over the production record and skips when no database is there; a WORDING
-    pin reading that same database would go red the week a chat turn misses, over a defect
-    no round can fix from a commit. So the entire verdict below is computed with `sqlite3`
-    unreachable — that is how "wording only" becomes something the suite proves instead of
-    something the docstring claims.
+    The "no eye on the record" half of the name is a constraint on this node's INPUTS, not a
+    property it can demonstrate at runtime. Its only input is `reading`, which is doc text,
+    and the three other values it reads are the constants defined above, so there is no
+    record route to take — a trap around `sqlite3.connect` here could never fire, which is
+    exactly what the review rung of SM_20260930_201725 caught when it called that line
+    decoration. Why the constraint is worth stating at all: the module's one record-reading
+    node, `test_the_cited_chat_query_selects_what_the_classifier_selects`, already succeeds,
+    fails or SKIPS on the state of `usage.db`, and a WORDING pin sharing that dependency would
+    go red the week a chat turn misses, over a defect no round can fix from a commit. The
+    witness for the separation is this signature — adding a fixture that touches the record
+    here is the change that breaks it, and the next editor is the audience for that sentence.
     """
-    import sqlite3
-
-    def _no_record(*_a, **_k):
-        raise AssertionError("the wording pin reached a database; it must read §10 alone")
-
-    monkeypatch.setattr(sqlite3, "connect", _no_record)
     b = _criterion_bullet(reading, "a")
     assert len(_population_falsifiers(b)) == 1, \
         "(a)'s falsifier is not one clause carrying both halves; the two one-halved " \
