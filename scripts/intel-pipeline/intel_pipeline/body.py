@@ -70,6 +70,48 @@ _RUN_LABEL_RE = re.compile(r"^\W*?[^:\n]{1,40}:\s*$")
 #: is exactly how #1861's stored row ends.
 _ARROW_PREFIX = ("👉", "➡", "→", "📌")
 
+#: The channel-intro anchors (#1900). TheAIGRID opens EVERY description with the same
+#: paragraph — `Welcome to TheAIGRID — the place to learn AI for free. … Subscribe to
+#: start learning AI for free…` — and because it sits at offset 0 and is the WHOLE
+#: description, the two footer anchors cannot reach it: both scan a TAIL. This is the
+#: same closed-list discipline as `_FOOTER_LABEL_RE`, and the same reason it is a list:
+#: a promo classifier's mis-fire eats the description's opening paragraph, which is
+#: #856's failure mode. Three phrases, each one observed in the stored corpus
+#: (1 row in 1078 youtube rows), and `_greeting_is_whole_body` requires the whole
+#: description to be nothing else.
+_GREETING_ANCHOR_RE = re.compile(
+    r"^\W*?(?:welcome\s+to\b|this\s+channel\b|subscribe\s+to\b)\b", re.IGNORECASE)
+
+#: The same three phrases anywhere inside a LINE (#1900), each a named kind. Two uses,
+#: both of them abstentions-by-narrowing: every non-blank line of the description must
+#: contain one of them (`_greeting_is_whole_body`), and at least two DIFFERENT kinds must
+#: occur in the text. The second is what refuses the shape the first cannot: a line of
+#: real news that merely opens with `Welcome to my deep dive today, which covers …` uses
+#: one kind and is the video's subject, while a channel's standing intro repeats itself
+#: across all three.
+_GREETING_PHRASE_RE = re.compile(
+    r"(?P<welcome>welcome\s+to\b)|(?P<channel>this\s+channel\b)"
+    r"|(?P<subscribe>subscribe\s+to\b)", re.IGNORECASE)
+
+
+def _greeting_kinds(text: str) -> set:
+    """Which of the three intro phrases occur in `text`, as a set of kind names."""
+    return {m.lastgroup for m in _GREETING_PHRASE_RE.finditer(text) if m.lastgroup}
+
+#: The verbs a signup line opens with: `👉 Join the free GPT-6 Astra Crash Course here:
+#: https://…`, `➡️ Sign up for the waitlist: https://…`. `_link_run_bounds` needs TWO
+#: such lines to call them a run (`body.py`, the floor of two), and one arrow line is
+#: how a channel signs off, so the run rule cannot remove it — that is the shape #1900
+#: found published. A verb list, not a sentence model: `👉 My repo: https://…` and
+#: `➡️ Twitter: https://…` are pointers to the video's subject and are NOT signup asks,
+#: so they stay, and they are the two cases the tests below pin as abstentions.
+_SIGNUP_CTA_RE = re.compile(
+    r"^(?:join|sign\s?up|register|enroll|claim|apply)\b", re.IGNORECASE)
+
+#: What to skip between an arrow and the word after it (`👉🏻 Join`, `➡️  Sign up`),
+#: including the skin-tone modifier and the variation selector.
+_LEADING_NON_WORDS_RE = re.compile(r"^[^\w]+")
+
 #: The labels a creator writes above the links they sell: `My Links 🔗`, `Follow me`,
 #: `Business inquiries`, `Check out my Patreon`. Matched as a leading phrase after
 #: any emoji or bullet (`\W*?` skips both), because the label line usually carries no
@@ -269,6 +311,96 @@ def _is_link_run_line(line: str) -> bool:
                 or _RUN_LABEL_RE.match(line))
 
 
+def _greeting_is_whole_body(lines: list) -> bool:
+    """True when the description is NOTHING but a channel's standing self-intro (#1900).
+
+    Three conditions, each one narrowing, all three asked of the text's non-blank LINES
+    (a description is unwrapped in practice, so a line is a paragraph and a paragraph that
+    continues on the next line is a line that is not the intro):
+
+    1. The first non-blank line OPENS with a phrase from `_GREETING_ANCHOR_RE`.
+    2. EVERY non-blank line contains one of the three phrases somewhere. This is what
+       refuses news that continues under the greeting, whether below a blank line or on
+       the very next line with no blank between — a sentence about Manus 2.0 or a model
+       release carries none of `welcome to` / `this channel` / `subscribe to`.
+    3. At least TWO DIFFERENT phrases occur (`_greeting_kinds`). This is what refuses the
+       shape condition 2 alone lets through, because it is a whole single line: `Welcome
+       to my deep dive today, which covers how Manus 2.0 gave Cue agents their own phone`
+       opens with the anchor, is the only line, and is the video's subject — one kind, so
+       not an intro. A channel's standing boilerplate always repeats itself across the
+       three, as TheAIGRID's does (`Welcome to TheAIGRID …`, `this channel gives you`,
+       `Subscribe to start learning AI for free`).
+
+    The residual over-reach is worth naming rather than hiding: a description whose lines
+    ALL happen to mention one of three phrases, and two of them different, is treated as
+    the intro even if some of it is news, and a description hard-wrapped so that a middle
+    line carries no phrase is NOT stripped. Both follow from a closed list of three
+    phrases, the same trade `_FOOTER_LABEL_RE` makes; the alternative #1819's triage ruled
+    out is a classifier that eats opening paragraphs, which is #856's failure mode.
+    Under-reach costs one more day of an advert in the note; over-reach deletes news.
+
+    Why this needs a rule at all when the footer anchors exist: they scan backwards from
+    a rule line or a footer label, so a block at offset 0 is outside their reach by
+    construction, and the writer's footer-only ruling is never reached either — with
+    nothing stripped, `stripped == summary` returns the ad verbatim (`vault_writer.py:426`).
+    TheAIGRID's greeting was 100 % of the published body for exactly that reason.
+    Returning "" is what the caller already understands as "the body WAS the footer":
+    `ends_a_sentence("")` is False, and the entry carries the scorer's `why` instead.
+    """
+    rows = [ln for ln in lines if ln.strip()]
+    if not rows or not _GREETING_ANCHOR_RE.match(rows[0]):
+        return False
+    if any(not _GREETING_PHRASE_RE.search(ln) for ln in rows):
+        return False
+    return len(_greeting_kinds("\n".join(rows))) >= 2
+
+
+def _is_signup_cta_line(line: str) -> bool:
+    """A line that is ONLY an arrow-prefixed signup ask carrying a URL (#1900).
+
+    Three things on the one line: it starts with an `_ARROW_PREFIX` arrow, the first
+    word after that arrow is a verb from the closed `_SIGNUP_CTA_RE` list, and the line
+    carries a URL. Drop any of the three and the line is something else — a pointer to
+    the video's own subject (`👉 My repo: https://…`), or an ask with no destination —
+    and it is left in.
+    """
+    stripped = line.strip()
+    if not stripped.startswith(_ARROW_PREFIX):
+        return False
+    return bool(_SIGNUP_CTA_RE.match(_LEADING_NON_WORDS_RE.sub("", stripped))
+                and _URL_RE.search(stripped))
+
+
+def _drop_signup_cta_lines(lines: list) -> list:
+    """The lines with every set-off signup line taken out, or `lines` itself (#1900).
+
+    Set-off (`_set_off`) is what makes a LINE droppable rather than a sentence: an ask
+    wrapped into the middle of a paragraph has no blank above it, and cutting a line out
+    of a paragraph would edit prose the channel wrote. The blank that set the line off
+    goes with it, so the prose around the removal keeps the spacing it had —
+    `prose\\n\\nCTA\\n\\nmore prose` comes back as `prose\\n\\nmore prose`, not with a
+    doubled gap — and every other line is returned byte-for-byte.
+    """
+    if not any(_set_off(lines, i) and _is_signup_cta_line(ln)
+               for i, ln in enumerate(lines)):
+        return lines
+    out: list = []
+    for i, line in enumerate(lines):
+        if _set_off(lines, i) and _is_signup_cta_line(line):
+            # Take the blank above only when the line ENDED its paragraph, because then
+            # that blank was the paragraph's own separator. A signup line that HEADS a
+            # link run has a link line below it, and its blank is the run's separator —
+            # eating it would weld the run onto the prose above and take the run out of
+            # `_link_run_bounds`' reach (its `_set_off` check needs that blank). Keeping
+            # it leaves the run set off, which is the shape #1861 already handles.
+            ends_paragraph = i == len(lines) - 1 or not lines[i + 1].strip()
+            if ends_paragraph and out and not out[-1].strip():
+                out.pop()
+            continue
+        out.append(line)
+    return out
+
+
 def _link_run_bounds(lines: list) -> Optional[tuple]:
     """The `(start, end)` line indices of a set-off run of link lines, or None (#1861).
 
@@ -370,12 +502,33 @@ def strip_link_footer(text: str) -> str:
     What is kept is returned as it was: the strip removes the block and does not rewrap
     or re-case the prose it was attached to.
 
+    #1900 added the two shapes that are not a tail, so no backwards anchor can see them:
+    `_greeting_is_whole_body`, when a channel's standing self-intro is the ENTIRE
+    description (TheAIGRID's greeting reached the digest as the whole body on
+    2026-09-30), which returns "" so the writer renders `why`; and
+    `_drop_signup_cta_lines`, which removes a single set-off `👉 Join … https://…` line
+    that `_link_run_bounds` cannot call a run because its floor is two link lines. A
+    greeting above real prose is returned byte-for-byte, as is any arrow line missing
+    the signup verb or the URL — neither rule is a licence to prefer `why` over the
+    channel's own copy, which is the caution #1819 clause 4 pins for the footer anchors.
+
     Returns "" for a body that WAS nothing but the footer; the caller decides what an
     empty body means (`ends_a_sentence` below is the writer's test for that).
     """
     if not text:
         return ""
     lines = text.splitlines()
+    # The two shapes that are not a TAIL, so no backwards anchor can reach them (#1900):
+    # a channel-intro greeting that is the whole description, and one set-off signup line.
+    # Both are properties of this text as a whole, so they are asked before the scan; the
+    # CTA drop rebinds `text` as well as `lines`, because the abstention below returns
+    # `text.rstrip()` and it must return the text this function actually looked at.
+    if _greeting_is_whole_body(lines):
+        return ""
+    kept = _drop_signup_cta_lines(lines)
+    if kept is not lines:
+        lines = kept
+        text = "\n".join(lines)
     for idx in range(len(lines) - 1, -1, -1):
         if not _RULE_LINE_RE.match(lines[idx]) or not _set_off(lines, idx):
             continue

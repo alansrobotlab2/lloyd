@@ -944,3 +944,259 @@ def test_replaying_the_stored_muse_row_writes_no_link_block_to_the_digest(intel_
     assert MUSE_OPENING in written
     for mark in MUSE_LINK_MARKS:
         assert mark not in written, mark
+
+
+# ── #1900: the two ad shapes that are not a TAIL, so no backwards anchor reaches them ──
+#
+# #1561, #1819 and #1861 all strip from the END: a rule line with links under it, a
+# footer label with links under it, a run of link lines. Two shapes ran into the digest on
+# 2026-09-30 that are not tails at all. TheAIGRID's standing self-intro sits at offset 0
+# and is the WHOLE description, so `vault_writer.py:426` sees `stripped == summary`, takes
+# the no-footer branch, and publishes the ad as 100 % of the body — the video's subject
+# appears nowhere in the note. The Manus row's `👉 Join the free GPT-6 Astra Crash Course`
+# is ONE arrow line, and `_link_run_bounds`'s floor of two link lines is what makes a run
+# a run, so a lone sign-off line was never a candidate.
+#
+# The fix is two more closed lists, not a classifier, and the tests below are mostly
+# abstentions: `👉 My repo: https://…` is a pointer to the video and stays, `👉 Join the
+# course` with no URL stays, a greeting above real prose stays. Frequency first, as the
+# item asked: 1 greeting and 1 signup line in 1078 stored youtube rows
+# (`~/lloyd-data/_pipeline/vault-derived/memory/feeds/raw/*.jsonl`, 2026-09-22→09-30).
+
+#: TheAIGRID's description for `youtube:UCbY9xX3_jW5c2fjlZVBI4cg:o3YTzebEs18`, verbatim
+#: from the `summary` field of `raw/2026-09-30.jsonl`: 500 characters, one paragraph, the
+#: `…` being `clip_body`'s own cut marker. All three greeting anchors occur in it.
+THEAIGRID_GREETING = (
+    "Welcome to TheAIGRID — the place to learn AI for free. I create simple, practical "
+    "videos that help beginners, creators, entrepreneurs, and business owners understand "
+    "artificial intelligence, AI tools, automation, AI agents, robotics, ChatGPT, Claude, "
+    "Gemini, and the future of technology. Whether you want AI tutorials, tool breakdowns, "
+    "beginner guides, or explanations of the latest breakthroughs, this channel gives you "
+    "the knowledge you need to stay ahead. Subscribe to start learning AI for free…")
+
+#: TheAIGRID's title and its scorer's `why`, both verbatim: the title from `summary`'s
+#: sibling `title` field in `raw/2026-09-30.jsonl`, the `why` from the model-graded row of
+#: the same video in `intel-2026-09-30.jsonl` (whose bytes are committed for this item at
+#: `backlog/data/intel-2026-09-30.jsonl`, 15 lines). The `why` is what the entry must carry
+#: once the greeting is treated as footer-only-equivalent, and it mentions neither
+#: `Welcome to` nor `Subscribe`, so the digest assertion below has something to prove.
+THEAIGRID_TITLE = "OpenAI Just Revealed Dots… This Changes ChatGPT Forever"
+THEAIGRID_WHY = ("The video discusses a major update to ChatGPT, which is directly "
+                 "relevant to the user's interest in AI and LLMs, though it lacks "
+                 "specific focus on robotics, voice, or hardware.")
+
+#: The news paragraph of `youtube:UC5l7RouTQ60oUjLjt1Nh-UQ:L75zF2WKiVE`: 279 characters of
+#: the video's actual subject, from the same stored file. It has to survive uncut.
+MANUS_NEWS = (
+    "Manus 2.0 just turned AI agents into something much closer to digital people, giving "
+    "Cue agents their own phone, email, wallet and computer. Meanwhile Tencent secretly "
+    "tests an AI gaming companion, while Claude Sonnet 5.5 beats Opus 5.5 on agentic "
+    "coding at half the token price.")
+
+#: The signup line the same description ends with: 82 characters, arrow-prefixed, one URL.
+#: The whole of shape 2, and the only arrow-CTA in the 1078-row corpus.
+MANUS_CTA = "👉 Join the free GPT-6 Astra Crash Course here: https://links.outskill.com/AIRVOCT1"
+
+#: The stored `summary` of that row verbatim: news, blank line, CTA. 363 characters.
+MANUS_STORED_SUMMARY = MANUS_NEWS + "\n\n" + MANUS_CTA
+
+#: Title and `why` verbatim from the two stored files, by the same route as above. Both
+#: rows carry `relevance: 6`, which is what the fixtures below pass.
+MANUS_TITLE = ("New Manus 2.0 is Fully Autonomous, New Sonnet 5.5 Beats Opus, "
+               "Tencent AI Companion & More AI News")
+MANUS_WHY = ("The item focuses on autonomous AI agents and LLM benchmarks, which aligns "
+             "with the ai-llms interest, though it lacks specific robotics or hardware "
+             "details.")
+
+#: `DIGEST_PROFILE`'s keyword is `agent`, and `match_keywords` tests a single-word keyword
+#: WHOLE-WORD (`profile.py:180`): both stored rows say `agents`, neither says `agent`, so
+#: with that profile they route to `knowledge/feeds/youtube-uncategorized.md` and never
+#: reach the file this item is about. These two keywords are each a word one of the stored
+#: titles really contains — `determine_vault_path` scores `title + " " + summary`, never
+#: `why` — which is what sends both rows to `DIGEST_FILE`.
+STORED_ROW_PROFILE = {"topics": [{"name": "ai-llms", "weight": 0.9,
+                                  "keywords": ["chatgpt", "manus"]}]}
+
+#: What the CTA rule must never touch: a pointer to the video's own subject, an ask with
+#: no destination, and an ask welded into a paragraph instead of set off by a blank.
+POINTER_NOT_A_SIGNUP = "👉 My repo: https://github.com/example/rollout"
+SIGNUP_WITHOUT_URL = "👉 Join the waitlist for the next cohort"
+CTA_HEADING = "Prose about the model. Two sentences, both about the video."
+
+
+def test_a_description_that_is_only_a_channel_greeting_strips_to_nothing_and_renders_why():
+    """Clause 1 (#1900): the standing self-intro IS the description, so the strip returns
+    "" — the value the writer already understands as "the body WAS the footer".
+
+    `ends_a_sentence("")` is False, so `_entry_body` falls through to the scorer's `why`
+    and the digest carries a reason instead of a subscriber appeal. Without the "" the
+    writer's `stripped == summary` branch at `vault_writer.py:426` returns the greeting
+    verbatim, which is precisely what reached the note on 2026-09-30. The re-flowed form is
+    in the same assertion because the rule asks the question of every non-blank LINE: an
+    intro broken over two paragraphs is still an intro and nothing else, because each of
+    its lines carries one of the three phrases.
+    """
+    assert len(THEAIGRID_GREETING) == 500, "the fixture stopped being the stored row"
+    assert "this channel gives you" in THEAIGRID_GREETING
+    assert body_mod.strip_link_footer(THEAIGRID_GREETING) == ""
+    wrapped = THEAIGRID_GREETING.replace(
+        "Whether you want AI tutorials", "breakthroughs.\n\nWhether you want AI tutorials")
+    assert body_mod.strip_link_footer(wrapped) == ""
+
+    item = _yt(id="youtube:UCbY9xX3_jW5c2fjlZVBI4cg:o3YTzebEs18", relevance=6,
+               summary=THEAIGRID_GREETING, why=THEAIGRID_WHY, title=THEAIGRID_TITLE)
+    assert vw_mod._entry_body(item) == THEAIGRID_WHY
+    for ad in ("Welcome to", "Subscribe"):
+        assert ad not in vw_mod._entry_body(item), ad
+
+
+def test_a_greeting_above_real_prose_is_returned_byte_for_byte():
+    """Clause 2 (#1900): the greeting rule fires on a description that is NOTHING but the
+    intro and on nothing else. Three shapes, all of them prose the strip must hand back
+    untouched:
+
+    - the intro above the video's subject, below a blank line — TheAIGRID's own phrases
+      followed by a real story;
+    - the same intro with the news on the NEXT LINE and no blank between, which is one
+      paragraph to a human and one line more to the rule, and the news line carries none
+      of the three phrases;
+    - a description that opens with `Welcome to` and is a single paragraph of news
+      throughout — `Welcome to my deep dive today, which covers how Manus 2.0 gave Cue
+      agents their own phone` — where the anchor's presence means nothing, because a
+      standing boilerplate says all three things and a first sentence says one.
+
+    A strip that preferred `why` on any of these would be doing the thing #1819 clause 4
+    forbids and #856 made expensive: editing the opening of the channel's copy on a guess.
+    """
+    greeting_then_prose = THEAIGRID_GREETING + "\n\n" + MANUS_NEWS
+    assert body_mod.strip_link_footer(greeting_then_prose) == greeting_then_prose
+
+    no_blank = THEAIGRID_GREETING + "\n" + MANUS_NEWS
+    assert body_mod.strip_link_footer(no_blank) == no_blank, \
+        "news on the line under a greeting was deleted with it"
+
+    one_phrase = ("Welcome to my deep dive today, which covers how Manus 2.0 gave Cue "
+                  "agents their own phone, email, wallet and computer, and why that "
+                  "matters")
+    assert len(body_mod._greeting_kinds(one_phrase)) == 1, \
+        "the counterexample grew a second phrase"
+    assert body_mod.strip_link_footer(one_phrase) == one_phrase, \
+        "a single-phrase `Welcome to` opening was treated as the standing intro"
+
+    item = _yt(summary=greeting_then_prose, relevance=6, why=THEAIGRID_WHY,
+               title=THEAIGRID_TITLE)
+    assert vw_mod._entry_body(item) == greeting_then_prose, \
+        "a greeting above real prose was replaced by the scorer's `why`"
+
+
+def test_a_set_off_signup_line_is_dropped_and_every_other_line_survives_byte_for_byte():
+    """Clause 3 (#1900): one arrow-prefixed line whose first word after the arrow is a
+    signup verb and which carries a URL is dropped, and every other line of the description
+    comes back byte-for-byte. `_link_run_bounds` needs two link lines to call them a run,
+    and that floor of two is exactly what let a single sign-off line through.
+
+    The three abstentions are the rule's whole edge: a pointer to the video's own subject
+    opens with a word that is not a signup verb; an ask with no URL has no destination to
+    advertise; and a line with no blank above it is inside someone's paragraph, where
+    dropping it would edit prose. All three come back unchanged.
+
+    Spacing is part of the clause, not decoration: the blank that set the dropped line off
+    goes with it when the line ended its paragraph, and stays when it heads a link run,
+    because there the blank is the run's separator — eating it would weld the run onto the
+    prose and move it out of the run rule's reach.
+    """
+    mid_body = CTA_HEADING + "\n\n" + MANUS_CTA + "\n\n" + MANUS_NEWS
+    assert body_mod.strip_link_footer(mid_body) == CTA_HEADING + "\n\n" + MANUS_NEWS
+    assert body_mod.strip_link_footer(MANUS_STORED_SUMMARY) == MANUS_NEWS
+    for arrow_line in ("📌 Sign up for the cohort: https://example.com/cohort",
+                       "➡️ Register here: https://example.com/waitlist",
+                       "👉🏻 Join the course: https://example.com/course"):
+        assert body_mod.strip_link_footer("Real prose about the video.\n\n" + arrow_line) \
+            == "Real prose about the video."
+
+    for abstention in (POINTER_NOT_A_SIGNUP, SIGNUP_WITHOUT_URL):
+        text = CTA_HEADING + "\n\n" + abstention
+        assert body_mod.strip_link_footer(text) == text, abstention
+    welded = CTA_HEADING + "\n" + MANUS_CTA
+    assert body_mod.strip_link_footer(welded) == welded, \
+        "a CTA line with no blank above it was dropped out of a paragraph"
+
+    # A signup line that HEADS a link run is the interesting case, and the blank under it
+    # decides what happens: that blank is the RUN's separator, not the line's, so it stays,
+    # the remaining two link lines are still set off, and #1861's run rule removes them too.
+    # A dropped line's own separator is taken only when it ENDED its paragraph.
+    run_head = (CTA_HEADING + "\n\n" + MANUS_CTA
+                + "\n🔴 Subscribe: https://youtube.com/@example"
+                + "\n🌐 Website: https://example.com")
+    assert body_mod.strip_link_footer(run_head) == CTA_HEADING, \
+        "a signup line heading a link run left its separator above the run"
+    run_mid = run_head + "\n\n" + MANUS_NEWS
+    assert body_mod.strip_link_footer(run_mid) == CTA_HEADING + "\n\n" + MANUS_NEWS, \
+        "a run removed below the fold took the prose under it"
+
+
+def test_replaying_the_two_stored_rows_writes_neither_ad_to_the_digest(intel_state):
+    """Clause 4 (#1900): both stored 2026-09-30 descriptions through the real writer. The
+    greeting row publishes the scorer's `why` and neither greeting phrase; the Manus row
+    publishes its news paragraph WHOLE — equal to it, not merely containing it — and
+    neither the course URL nor its arrow. A replay of `2026-09-30.jsonl` therefore cannot
+    reproduce the two sections this item was filed for, which is the only claim here that
+    is about the file on disk and not about a rule.
+    """
+    assert len(MANUS_STORED_SUMMARY) == 363 and len(MANUS_NEWS) == 279 \
+        and len(MANUS_CTA) == 82, "the fixture stopped being the stored row"
+
+    greeting_item = _yt(id="youtube:UCbY9xX3_jW5c2fjlZVBI4cg:o3YTzebEs18", relevance=6,
+                        summary=THEAIGRID_GREETING, why=THEAIGRID_WHY, title=THEAIGRID_TITLE)
+    news_item = _yt(id="youtube:UC5l7RouTQ60oUjLjt1Nh-UQ:L75zF2WKiVE", relevance=6,
+                    summary=MANUS_STORED_SUMMARY, why=MANUS_WHY, title=MANUS_TITLE)
+    # The expected value comes out of the stored INPUT, not out of the constant that built
+    # it: everything before the first blank line is what the news paragraph is, and its
+    # length is the number the item quotes. `MANUS_NEWS` is then checked against that, so
+    # the assertion fails if either the fixture or the strip drifts.
+    news_only = MANUS_STORED_SUMMARY.split("\n\n")[0]
+    assert len(news_only) == 279 == len(MANUS_NEWS) and news_only == MANUS_NEWS
+    assert vw_mod._entry_body(greeting_item) == THEAIGRID_WHY
+    assert vw_mod._entry_body(news_item) == news_only
+
+    # The OTHER caller of the strip is the scanner, and it crosses a real process
+    # boundary: `youtube_scanner.py:407` stores `clip_body(strip_link_footer(desc))` into
+    # the row's `summary`, so a greeting-only description is recorded EMPTY and every later
+    # reader of that JSONL row — stage 2, a replay, this replay — sees the same thing the
+    # writer sees. The Manus row keeps its news paragraph there too. The empty-summary
+    # shape is not new to the pipeline: stage 1 left `summary` empty for every YouTube row
+    # until #1155, and `why` is what the writer renders for it.
+    assert body_mod.clip_body(body_mod.strip_link_footer(THEAIGRID_GREETING)) == ""
+    assert body_mod.clip_body(body_mod.strip_link_footer(MANUS_STORED_SUMMARY)) \
+        == MANUS_NEWS
+
+    written = _publish(intel_state, greeting_item, news_item, profile=STORED_ROW_PROFILE)
+    digest = intel_state / "vault" / DIGEST_FILE
+    assert digest.is_file(), f"neither item reached {DIGEST_FILE}: {written[:200]!r}"
+    for ad in ("Welcome to", "Subscribe", "links.outskill.com", "👉"):
+        assert ad not in written, ad
+    assert MANUS_NEWS in written
+    assert THEAIGRID_WHY in written
+
+
+def test_the_1269_pin_survives_both_new_rules():
+    """Clause 5 (#1900): the two descriptions #1269 clause 2 rules on are still published
+    as the summary, after these rules exist and because they do not apply.
+
+    `NO_FOOTER_DESCRIPTION` and `NO_FOOTER_CUT_MID_SENTENCE` are the strings
+    `test_a_youtube_description_under_the_cap_is_still_passed_through_untouched` already
+    pins, imported here by name rather than restated so this node cannot drift from it.
+    What this node adds is the interaction: a greeting-shaped or CTA-shaped string could
+    have made the writer prefer `why` for those rows too, and it must not — the strip's
+    abstention is what #1269's ruling is made of, and #1819 clause 4 pinned it for the
+    footer anchors.
+    """
+    assert body_mod.strip_link_footer(NO_FOOTER_DESCRIPTION) == NO_FOOTER_DESCRIPTION
+    assert body_mod.strip_link_footer(NO_FOOTER_CUT_MID_SENTENCE) \
+        == NO_FOOTER_CUT_MID_SENTENCE
+    plain = _yt(id="youtube:UCtest:vid5", summary=NO_FOOTER_DESCRIPTION,
+                why="Scores 8/10: robotics")
+    assert vw_mod._entry_body(plain) == NO_FOOTER_DESCRIPTION
+    cut = _yt(id="youtube:UCtest:vid6", summary=NO_FOOTER_CUT_MID_SENTENCE,
+              why="Scores 8/10: robotics")
+    assert vw_mod._entry_body(cut) == NO_FOOTER_CUT_MID_SENTENCE
