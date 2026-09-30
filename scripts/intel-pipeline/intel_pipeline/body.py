@@ -49,6 +49,23 @@ _BLOCK_MARKER_RE = re.compile(r"^\s*(?:>|#|[-*+]\s*\[)")
 # Scaffolding: headings and checkbox lines carry no description of their own.
 _SCAFFOLD_LINE_RE = re.compile(r"^\s*(?:#{1,6}\s|#{1,6}$|[-*+]\s*\[[ xX]?\])")
 
+#: The heading half of that class on its own, and the only scaffold a PUBLISHED body
+#: loses as well (#1925). `clean_body` has always discounted a heading line before
+#: testing a body against `BODY_FLOOR` and then returned the text still holding it, so a
+#: filled PR opening `# Description` cleared the floor and published the heading one or
+#: two levels inside the digest's own `## 2026-MM-DD` section — flattening the dated
+#: structure every corpus-shape count reads, by the upstream author's headings and not
+#: by Lloyd's. `_SCAFFOLD_LINE_RE` cannot be reused for the returned value: its
+#: `[-*+]\s*\[[ xX]?\]` alternative matches a WHOLE checkbox line, text included, and a
+#: filled release body writes real content on those lines
+#: (`- [ ] Added Newton visualizer support`).
+#:
+#: The one cost of a line-based strip, stated here rather than discovered at review: a
+#: `# comment` shell line inside a fenced code block is a heading marker to this pattern
+#: and goes with them. It is the same line the floor measurement has always ignored, so
+#: the measurement and the publication agree — but it is a real, small content loss.
+_HEADING_LINE_RE = re.compile(r"^\s*#{1,6}(?:\s|$)")
+
 #: A rule alone on its line: `______` or `======`. Anchored to the whole line on
 #: purpose — markdown turns a `______` sitting under a heading into a setext H2, and
 #: a run of underscores inside text (`snake__case`, a table row) is not a rule.
@@ -223,6 +240,13 @@ def clean_body(text: Optional[str], title: str = "") -> Tuple[Optional[str], Opt
       (body, None)   paste `body`;
       (None, reason) the body says nothing — render `None — reason`;
       (None, None)   the body only restates the title — omit the body line.
+
+    The `body` of the first form is the upstream text with its heading-marker lines
+    removed (#1925) — a heading was never counted towards `BODY_FLOOR`, so returning it
+    pasted the author's `# Description` back into a section the floor had already judged
+    on its content. Nothing else goes: prose, list items, checkbox lines and URLs are
+    returned byte-for-byte, in the order upstream wrote them. See `_HEADING_LINE_RE` for
+    the fenced-code case that this line-based strip does cost.
     """
     # Looked for in the raw text: templates keep their instructions in a comment,
     # and the comment is exactly what says the body is a template.
@@ -240,6 +264,17 @@ def clean_body(text: Optional[str], title: str = "") -> Tuple[Optional[str], Opt
             continue
         content.append(line)
     content_text = " ".join(" ".join(content).split())
+    # The value that gets pasted, measured on the same lines as the floor above. The
+    # floor discounts every heading line; returning `body` pasted those lines back in, so
+    # a filled PR body that cleared the floor on its prose published its `# Description`
+    # one level under the digest's `## 2026-MM-DD` and flattened that structure (#1925).
+    # Only heading markers go — every other line, checkbox lines included, survives
+    # byte-for-byte and in order, which is why this is not `"\n".join(content)`: that
+    # list has already lost `- [ ] Added Newton visualizer support` along with the
+    # unfilled `- [ ] Bug fix` it was matched alongside.
+    published = _collapse_blank_runs(
+        "\n".join(line for line in body.splitlines()
+                  if not _HEADING_LINE_RE.match(line)))
 
     if title:
         norm_title = _normalise(title)
@@ -260,7 +295,7 @@ def clean_body(text: Optional[str], title: str = "") -> Tuple[Optional[str], Opt
         if not content_text or content_text.lower() == "no description":
             return None, "no description upstream"
         return None, f"the upstream body is under {BODY_FLOOR} characters"
-    return body, None
+    return published, None
 
 
 def _is_link_block_line(line: str) -> bool:

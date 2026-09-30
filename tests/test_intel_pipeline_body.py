@@ -1200,3 +1200,225 @@ def test_the_1269_pin_survives_both_new_rules():
     cut = _yt(id="youtube:UCtest:vid6", summary=NO_FOOTER_CUT_MID_SENTENCE,
               why="Scores 8/10: robotics")
     assert vw_mod._entry_body(cut) == NO_FOOTER_CUT_MID_SENTENCE
+
+
+# ── #1925: the headings the floor discounted came back in the paste ─────────────
+#
+# `clean_body` dropped every line matching `_SCAFFOLD_LINE_RE` into `content`, measured
+# `content` against `BODY_FLOOR`, and returned `body` — the text from BEFORE that loop.
+# A filled PR body therefore cleared the floor on its prose and published the author's
+# `# Description` anyway: on 2026-09-30, 450 of the 4,159 `## 2026-MM-DD` dated sections
+# across `knowledge/tools/*/{prs,updates}.md` carried such a line (10.8 %), and the
+# entry this run wrote for PR #8128 opened its body with an h1 that outranks the dated
+# heading it sits under — the digest's own section structure, flattened by upstream
+# authors rather than by Lloyd.
+#
+# `PR_8128_BODY` and `COMMIT_8183_BODY` below are the two bodies that run published.
+# The four tests after them are the item's four acceptance clauses, in order.
+
+PR_8128_TITLE = "Make uv the only installation workflow"
+#: The opening paragraph of isaac-sim/IsaacLab PR #8128 as it reached the digest. 202
+#: characters: over `BODY_FLOOR`, and under `SUMMARY_LIMIT`, so no assertion below
+#: depends on `clip_body` having cut anything.
+PR_8128_PROSE = (
+    "Make uv the only supported Isaac Lab installation workflow. Remove "
+    "`isaaclab.sh`, `isaaclab.bat`, the Python CLI installer "
+    "(-i / --install), conda provisioning, and legacy environment "
+    "creation commands.")
+PR_8128_BODY = "# Description\n\n" + PR_8128_PROSE + "\n"
+
+COMMIT_8183_TITLE = "Remove obsolete ROS 2 Docker image (#8183)"
+COMMIT_8183_BODY = (
+    "## Summary\n\n"
+    "Remove the obsolete ROS 2 Docker image and its dedicated files: "
+    "`Dockerfile.ros2`, `.env.ros2`, and DDS configuration.\n\n"
+    "## Type of change\n\n"
+    "Breaking change: the `ros2` container profile is gone.\n")
+
+#: The clause 1-3 rail: the heading-marker half of `_SCAFFOLD_LINE_RE`, spelled as the
+#: acceptance clause spells it. A level sign followed by a space, or nothing.
+_HEADING_LINE = re.compile(r"^#{1,6}(\s|$)")
+
+
+# ── clause 1 — the floor's own discount applies to what gets pasted ─────────────
+
+def test_a_body_over_the_floor_returns_without_the_heading_it_was_measured_without():
+    assert len(PR_8128_PROSE) >= body_mod.BODY_FLOOR, "the fixture must clear the floor"
+
+    body, reason = body_mod.clean_body(PR_8128_BODY, PR_8128_TITLE)
+
+    assert reason is None, reason
+    first = next(line for line in body.splitlines() if line.strip())
+    assert first == PR_8128_PROSE, first
+    assert body == PR_8128_PROSE, body
+    assert not [ln for ln in body.splitlines() if _HEADING_LINE.match(ln)], body
+    # The pre-fix return value, asserted absent by name rather than by the shape that
+    # would happen to exclude it: `# Description` was the line that shipped.
+    assert "# Description" not in body, body
+
+
+# ── clause 2 — nothing but a heading marker may be removed ──────────────────────
+
+#: A filled release body carrying every shape that is NOT a heading: checkbox lines with
+#: text on them (the trap in `return "\n".join(content)`, which drops the whole line), a
+#: hashtag line, an ordinary bullet, a bare URL — plus one HTML comment and one bare
+#: template phrase, which are stripped before this clause is ever asked.
+FILLED_CHECKLIST_BODY = "\n".join([
+    "<!--",
+    "Please include a summary of the change and which issue is fixed.",
+    "-->",
+    "",
+    "# Description",
+    "",
+    "Kit visualizer markers now reach the Newton visualizers.",
+    "",
+    "## Type of change",
+    "",
+    "- [ ] Bug fix",
+    "- [ ] New feature",
+    "- [ ] Added Newton visualizer support",
+    "",
+    "Please include a summary of the change with before and after numbers.",
+    "",
+    "- `isaaclab.sh` and `isaaclab.bat` are gone",
+    "#shipit: the hashtag line is content, not a heading",
+    "",
+    "https://github.com/isaac-sim/IsaacLab/pull/8128",
+])
+
+#: Every non-heading line of `FILLED_CHECKLIST_BODY` once comments and template phrases
+#: are gone, in the order upstream wrote them. `- [ ] Added Newton visualizer support` is
+#: the line `content` threw away and `_SCAFFOLD_LINE_RE` matched whole; `#shipit…` is a
+#: level sign with no space after it, so it is a hashtag and not a heading.
+FILLED_CHECKLIST_KEPT = [
+    "Kit visualizer markers now reach the Newton visualizers.",
+    "- [ ] Bug fix",
+    "- [ ] New feature",
+    "- [ ] Added Newton visualizer support",
+    "- `isaaclab.sh` and `isaaclab.bat` are gone",
+    "#shipit: the hashtag line is content, not a heading",
+    "https://github.com/isaac-sim/IsaacLab/pull/8128",
+]
+
+
+def test_no_line_that_is_not_a_heading_marker_is_removed_from_the_returned_body():
+    body, reason = body_mod.clean_body(FILLED_CHECKLIST_BODY, "Extend Kit markers to Newton")
+
+    assert reason is None, reason
+    rows = body.splitlines()
+    for line in FILLED_CHECKLIST_KEPT:
+        assert line in rows, f"{line!r} missing from:\n{body}"
+    # …verbatim AND in order, not merely present.
+    positions = [rows.index(line) for line in FILLED_CHECKLIST_KEPT]
+    assert positions == sorted(positions), positions
+    assert not [ln for ln in rows if _HEADING_LINE.match(ln)], body
+    # The comment and the bare template phrase are gone, as they were before this fix.
+    assert "<!--" not in body and "Please include a summary" not in body, body
+
+
+def test_a_hash_comment_inside_a_fence_goes_with_the_headings_and_says_so():
+    """The one content cost of a line-based strip, pinned here rather than found later.
+
+    `# install the pinned toolchain` is a shell comment inside a fenced block, and to a
+    line-based pattern it is indistinguishable from `# Description`. It goes — the same
+    line the floor measurement has always discounted when it judged this body worth
+    publishing, so the measurement and the publication stay consistent at the cost of one
+    comment line. The command below it, which is the reason the block exists, survives.
+    """
+    fenced = ("Moves the install docs onto uv. Everything below is what a reader copies "
+              "into a shell.\n\n```bash\n# install the pinned toolchain\n"
+              "uv sync --extra isaacsim\n```\n")
+
+    body, reason = body_mod.clean_body(fenced, "Install docs onto uv")
+
+    assert reason is None, reason
+    assert "# install the pinned toolchain" not in body, body
+    assert "uv sync --extra isaacsim" in body, body
+    assert "```bash" in body and "```" in body, body
+
+
+# ── clause 3 — the three refusal rulings are unmoved ────────────────────────────
+
+@pytest.mark.parametrize("text, reason", [
+    (UNFILLED_TEMPLATE, "the upstream body is an unfilled PR template"),
+    ("# Description\n\n## Motivation\n",
+     "the upstream body is template headings with nothing under them"),
+    ("fix typo", "the upstream body is under 40 characters"),
+])
+def test_the_three_refusal_rulings_survive_the_heading_strip(text, reason):
+    """Same headings, same refusal — the strip only changes what a PASSED body looks like.
+
+    Every fixture below still fails the floor on `content_text`, which is computed
+    exactly as it was: `# Description` and `## Motivation` were discounted before the
+    comparison and are discounted now. Removing the heading from the returned value must
+    not move a body across the boundary, so the reason strings are pinned whole and not
+    by keyword.
+    """
+    body, got = body_mod.clean_body(text, "Add a scheduler knob")
+
+    assert body is None, body
+    assert got == reason, got
+
+
+# ── clause 4 — the seam: a real `--write` run into a redirected vault ───────────
+
+def test_a_write_run_publishes_those_bodies_with_no_heading_under_the_dated_section(
+        tmp_path):
+    """Process boundary: scanner jsonl → `python -m intel_pipeline --write` → vault file.
+
+    `clean_body` and `vault_writer` share a process, but the digest they build is the
+    artefact, and only a subprocess with `HOME` redirected proves the entry that reaches
+    disk carries no heading — which is what 450 sections of the live corpus say it did not
+    do on 2026-09-30. Each entry appends its own `## <date>` section, so the section count
+    is the entry count: exactly one per run.
+    """
+    home = tmp_path / "home"
+    feeds = home / "lloyd-data" / "_pipeline" / "vault-derived" / "memory" / "feeds"
+    (feeds / "raw").mkdir(parents=True)
+    vault = home / "obsidian"
+    (vault / "knowledge").mkdir(parents=True)
+    (vault / "interests.md").write_text(
+        "---\ntitle: Interests\n---\n\n## AI & LLMs\ninference, vllm\n", encoding="utf-8")
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    def _write(records):
+        (feeds / f"intel-{day}.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+        return subprocess.run(
+            [sys.executable, "-m", "intel_pipeline", "--write", "--date", day],
+            cwd=str(INTEL_DIR),
+            env=dict(os.environ, HOME=str(home), LLOYD_DATA=str(home / "lloyd-data")),
+            capture_output=True, text=True, timeout=180)
+
+    def _digest_for(title):
+        hits = [p for p in (vault / "knowledge").rglob("*.md")
+                if title in p.read_text(encoding="utf-8")]
+        assert len(hits) == 1, f"{title!r} in {hits}"
+        return hits[0]
+
+    first = _write([_item(PR_8128_TITLE, PR_8128_BODY, item_id="8128").to_dict()])
+    assert first.returncode == 0, first.stderr[-2000:]
+
+    target = _digest_for(PR_8128_TITLE)
+    text = target.read_text(encoding="utf-8")
+    # The entry sits under its own dated section, and the body line under it is the
+    # prose — the heading that used to sit between them is not there.
+    assert re.search(
+        rf"^## {day}\n\n### {re.escape(PR_8128_TITLE)}\n", text, re.M), text
+    assert f"**Source:** github | **Relevance:** 6/10\n\n{PR_8128_PROSE}" in text, text
+    assert not re.findall(r"^#{1,3} (Description|Summary|Type of change)$", text, re.M)
+    assert len(re.findall(r"^## 2026-", text, re.M)) == 1, text
+
+    second = _write([_item(COMMIT_8183_TITLE, COMMIT_8183_BODY,
+                           item_id="8183").to_dict()])
+    assert second.returncode == 0, second.stderr[-2000:]
+
+    # One more run, one more entry, and exactly one more dated section in the same file:
+    # the strip does not swallow the entry, duplicate it, or nest it under the last one.
+    assert _digest_for(COMMIT_8183_TITLE) == target
+    text2 = target.read_text(encoding="utf-8")
+    assert len(re.findall(r"^## 2026-", text2, re.M)) == 2, text2
+    assert re.search(
+        rf"^## {day}\n\n### {re.escape(COMMIT_8183_TITLE)}\n", text2, re.M), text2
+    assert not re.findall(r"^#{1,3} (Description|Summary|Type of change)$", text2, re.M)
+    assert "## Summary" not in text2 and "## Type of change" not in text2, text2
