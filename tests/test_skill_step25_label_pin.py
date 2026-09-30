@@ -49,8 +49,9 @@ ordering ruling #1809 reports as owed.
 These assertions read the live vault, so they can go red from a nightly skills
 pass rather than from the change under review. That is the same trade
 `tests/test_yaml_fix_skill_claims.py` makes, and it is deliberate: the gate runner
-hardcodes `-m "not live_vault"` (`scripts/automod/gate.py:327`), so a marked check
-is deselected from the very run meant to enforce it and pins nothing. Nothing here
+hardcodes `-m TESTS_MARK_EXPR` where that is `"not live_vault and not
+fault_injection"` (`scripts/automod/gate.py:471`), so a marked check is deselected
+from the very run meant to enforce it and pins nothing. Nothing here
 skips either — with no vault the reads fail naming the path they looked in, after
 `NO_VAULT` in that file's `:96`, and the vault is resolved as
 `Path.home() / "obsidian" / "skills"` rather than through `app.paths`, which
@@ -60,6 +61,7 @@ re-anchors to a round's worktree where the skills tree does not exist.
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
 import subprocess
 import sys
@@ -219,6 +221,120 @@ def _load_renamed_linker(tmp_path: Path, old: str, new: str):
     return module
 
 
+# ── the diagnostic: what a run SEES when a denominator is unread ─────
+#
+# Everything above pins that a label and a header agree. It cannot say anything about
+# the line a run reads when they do not, which is the half #1917 is about: the block
+# used to print `UNREAD: ['of_which_embed_a_name']`, the artefact's dict key, and two
+# task #24 runs on 2026-09-30 read that underscored spelling as evidence their own
+# dispatched prompt had been re-transcribed — a claim that was false, because the key
+# is underscored in the CORRECT block too. So the helpers below do not read the skill's
+# prose: they extract the Python the Step 2.5 heredoc actually runs and run it over a
+# log, because the artefact under test is the printed line.
+
+HEREDOC_OPEN = "<<'EOF'\n"
+HEREDOC_CLOSE = "\nEOF"
+KEY_FIELD_RE = re.compile(r'^\s*"(\w+)":\s*field\("([^"]+)"\)', re.M)
+UNREAD_PREFIX = "STRANDED step 2.5 UNREAD"
+# Any report of which header lines matched, printed as part of the unread diagnostic.
+# Deliberately NOT a match on the block's present wording (`… UNREAD HEADERS-MATCHED:`):
+# clause 2 asks that the report EXIST, and a diagnostic headed `UNREAD matched-headers:`
+# reports the same thing, so matching the literal string would have this node reject an
+# improvement to the wording it is supposed to be checking. What stays pinned is the
+# behaviour: the report is inside the unread diagnostic, where whoever reads `UNREAD` is
+# looking, and the matched headers and their count are asserted on whatever line carries it.
+MATCHED_REPORT_RE = re.compile(r"\bUNREAD\b.*MATCH", re.I)
+LABEL_SHOWN_RE = re.compile(r"label='([^']*)'")
+KEY_SHOWN_RE = re.compile(r"key='([^']*)'")
+
+
+def _matched_report_lines(stdout: str) -> list[str]:
+    """The line(s) of the unread diagnostic that report which header lines matched.
+
+    Detected by `MATCHED_REPORT_RE`, not by the block's current wording, for the reason
+    recorded there: clause 2 pins that the report is made, not the word it is headed by.
+    """
+    return [ln for ln in stdout.splitlines() if MATCHED_REPORT_RE.search(ln)]
+
+
+def _skill_rows(text: str) -> list[tuple[str, str]]:
+    """(artefact key, searched label) pairs, in the order the block writes them.
+
+    One regex over one source line, so a key is only ever paired with the label its own
+    `field(` call passed. Pairing them any other way — two lists, zipped — would let the
+    test assert a key/label pair the block never produced, which is the exact confusion
+    the diagnostic exists to remove.
+    """
+    rows = KEY_FIELD_RE.findall(_step_2_5_block(text))
+    assert len(rows) == RECORDED_FIELDS, (
+        f"paired {len(rows)} (key, field(\"…\")) rows on one line each, expected "
+        f"{RECORDED_FIELDS} — the block's keys and labels can only be read as a pair "
+        "while they are written on one line, so this node needs re-measuring if that "
+        "shape changed rather than a looser regex")
+    assert [lab for _k, lab in rows] == _skill_labels(text), (
+        "the paired labels and the label-only extraction disagree, so one of the two "
+        "regexes is reading a different part of the block")
+    return rows
+
+
+def _recording_snippet(text: str) -> str:
+    """The Python the Step 2.5 heredoc runs, extracted verbatim between its markers."""
+    block = _step_2_5_block(text)
+    start = block.index(HEREDOC_OPEN) + len(HEREDOC_OPEN)
+    end = block.index(HEREDOC_CLOSE, start)
+    src = block[start:end]
+    assert "def field(" in src, (
+        "the text between the heredoc markers is not the recording block; the markers "
+        "or the block moved and extracting blind would run arbitrary skill prose")
+    return src
+
+
+def _drive_recording_block(tmp_path: Path, headers: list[tuple[str, str]],
+                           *, snippet: str | None = None,
+                           ts: str = "2026-09-30") -> str:
+    """Run the skill's own recording block over a log; return its stdout.
+
+    `headers` is the (label, value) table the fake log is built from — labels come out
+    of `report_lines`, never a hand-typed spelling — and `HOME` is aimed at `tmp_path`,
+    because the block resolves BOTH its log and the artefact it writes off
+    `Path.home() / "lloyd-data/_pipeline"`. A fixture that let that resolve to the
+    account's home would have the suite writing into the pipeline directory the nightly
+    job owns.
+    """
+    src = _recording_snippet(_read_skill()) if snippet is None else snippet
+    home = tmp_path / "home"
+    base = home / "lloyd-data" / "_pipeline"
+    base.mkdir(parents=True, exist_ok=True)
+    body = ["Stranded-entity linker — #1019 (dry-run)"] + [
+        f"  {label}  {value}" for label, value in headers]
+    (base / f"stranded-entities-{ts}.log").write_text("\n".join(body) + "\n",
+                                                      encoding="utf-8")
+    script = tmp_path / "recording_block.py"
+    script.write_text(src, encoding="utf-8")
+    run = subprocess.run([sys.executable, str(script), ts], cwd=str(tmp_path),
+                         env={**os.environ, "HOME": str(home)},
+                         capture_output=True, text=True, timeout=180)
+    assert run.returncode == 0, (
+        f"the recording block exited {run.returncode} over a well-formed log; its "
+        f"stderr is the block's own traceback:\n{run.stderr}")
+    return run.stdout
+
+
+def _unread_lines(stdout: str) -> list[str]:
+    return [ln for ln in stdout.splitlines()
+            if ln.startswith(UNREAD_PREFIX) and not MATCHED_REPORT_RE.search(ln)]
+
+
+def _fields_shown(line: str) -> tuple[str, str]:
+    """(label shown, key shown) off one UNREAD line, or a failure naming the line."""
+    lab, key = LABEL_SHOWN_RE.search(line), KEY_SHOWN_RE.search(line)
+    assert lab and key, (
+        f"the UNREAD line must carry the searched label and the artefact key as two "
+        f"named fields on the SAME line — split across lines a reader comparing them "
+        f"has to hold one in memory, which is how the two get conflated: {line!r}")
+    return lab.group(1), key.group(1)
+
+
 # ── the seam: skill literal ↔ linker header ──────────────────────────
 
 def test_every_step_2_5_field_label_is_a_header_the_linker_prints():
@@ -313,6 +429,220 @@ def test_the_pin_compares_printed_labels_and_never_the_report_keys():
     _assert_labels_are_printed(labels, reported, source=str(SKILL_PATH))
 
 
+# ── the unread diagnostic itself (#1917) ─────────────────────────────
+
+def test_the_unread_line_names_its_label_key_headers_and_the_msg0_rule_is_indexed(
+        tmp_path):
+    """#1917 clauses 1 and 2, run through the block rather than read off its prose.
+
+    Two failure modes that used to print the identical underscored key — and did, on
+    2026-09-30: `run_24_20260930_052951` (session `20260929_222951_autonomy_7173`, msg48)
+    and `run_24_20260930_094319` (`20260930_024319_autonomy_e918`, msg39) both fired
+    `UNREAD: ['of_which_embed_a_name']` while their `messages[0]` each carried the four
+    correct hyphenated labels, so neither could tell a linker header rename from a
+    hand-mis-transcribed block. Here both are driven for real, and the two lines must
+    now differ in the one field that separates them:
+
+    * **A linker rename** — the log is built from a copy of the linker with
+      `of-which embed a name` renamed to `of-which embeds a name`, block untouched: the
+      line's label is the hyphenated one and its key is underscored, so label ≠ key.
+    * **A mis-transcribed block** — `field("of-which embed a name")` rewritten to the
+      underscored form in a COPY under `tmp_path`, log built from the real linker: the
+      label is underscored too, so label = key.
+
+    And in both cases the same run must report which of the four header lines DID match,
+    which is what makes a rename (three matched, one absent from the log entirely) look
+    different from a transcription error (three matched, and the log's own hyphenated
+    spelling sitting right there).
+
+    Clause 4 — the class rule this item writes to `lloyd/MEMORY.md` — is asserted by the
+    same node, through `_assert_msg0_rule_is_indexed()`, for a reason that is not tidiness:
+    the item's own acceptance check (b) is that this file goes from `8 passed` to
+    `9 passed`, so a second node would fail the very check that proves the change, and the
+    review rung's refusal on the first gate ("no changed test covers MEMORY.md") has to be
+    answered inside the node count the contract fixes. Nor does the vault half inherit a
+    gate-run check from elsewhere: the node that validates the live index is
+    `tests/test_prompt_surface_budget.py::test_the_live_memory_index_validates` (`:202`),
+    decorated `@vault_only` and `@live_vault` (`:200-201`), and the gate runs the suite with
+    `TESTS_MARK_EXPR = "not live_vault and not fault_injection"`
+    (`scripts/automod/gate.py:471`) — measured, that selection reports
+    `40 passed, 8 deselected` for that file and this validator is among the eight. A rule
+    can therefore reach a green gate with nothing the gate ran enforcing its shape, which
+    is the hole `_assert_msg0_rule_is_indexed()` closes.
+    """
+    rows = _skill_rows(_read_skill())
+    wanted = {"of_which_embed_a_name": "of-which embed a name"}
+    subject = [(k, lab) for k, lab in rows if k in wanted]
+    assert subject == [("of_which_embed_a_name", "of-which embed a name")], (
+        f"the row the 2026-09-30 runs tripped over is not the one this node drives: "
+        f"{subject}")
+    key, label = subject[0]
+    renamed = "of-which embeds a name"
+
+    # ── failure mode A: the linker renamed the header, the block did nothing wrong
+    patched = _load_renamed_linker(
+        tmp_path, f'("{label}", "embed_a_name"', f'("{renamed}", "embed_a_name"')
+    log_rows = [(lab, f"{i + 1},{i + 1}0") for i, lab in enumerate(_reported(patched)[0])]
+    out = _drive_recording_block(tmp_path / "rename", log_rows)
+    unread = _unread_lines(out)
+    assert len(unread) == 1, (
+        f"a log with one renamed header must produce exactly one UNREAD line, got "
+        f"{unread!r} in:\n{out}")
+    shown_label, shown_key = _fields_shown(unread[0])
+    assert (shown_label, shown_key) == (label, key), (
+        f"the line must show the label it searched ({label!r}) and the artefact key "
+        f"({key!r}) as those two things; a reader comparing the two spellings is "
+        f"deciding whether to blame the skill or the linker: {unread[0]!r}")
+    assert shown_label != shown_key, (
+        "under a rename the two spellings must be visibly different — that difference "
+        "is the whole diagnostic")
+    header_lines = _matched_report_lines(out)
+    assert len(header_lines) == 1, (
+        f"the unread diagnostic must also say which header lines matched, once: "
+        f"{header_lines!r} in:\n{out}")
+    matched_text = header_lines[0]
+    assert label not in matched_text, (
+        f"{label!r} matched nothing in that log, so it must not appear in the matched "
+        f"list — the list is what DID match: {matched_text!r}")
+    assert f"{len(rows) - 1} of {len(rows)}" in matched_text, (
+        f"one label of {len(rows)} went unread, so the line has to say 3 of 4 matched; "
+        f"a count is what tells a reader the log was opened at all: {matched_text!r}")
+    for _k, lab in rows:
+        if lab == label:
+            continue
+        assert lab in matched_text, (
+            f"{lab!r} matched a line in that log, so the diagnostic must account for "
+            "it: an unread row that hides what its siblings did match leaves the run "
+            "with one number and no idea whether the log was read at all")
+
+    # ── failure mode B: the block was re-transcribed, the log is fine
+    drifted = _recording_snippet(_read_skill()).replace(
+        f'field("{label}")', f'field("{key}")')
+    assert drifted.count(f'field("{key}")') == 1, (
+        "the mis-transcription this mode reproduces is one label rewritten; if the "
+        "replacement did not land exactly once the two modes are not comparable")
+    good_rows = [(lab, f"{i + 1},{i + 1}0")
+                 for i, lab in enumerate(_reported(_load_linker())[0])]
+    out_b = _drive_recording_block(tmp_path / "drift", good_rows, snippet=drifted)
+    unread_b = _unread_lines(out_b)
+    assert len(unread_b) == 1, (
+        f"a block searching one underscored label must produce exactly one UNREAD "
+        f"line, got {unread_b!r} in:\n{out_b}")
+    shown_label_b, shown_key_b = _fields_shown(unread_b[0])
+    assert (shown_label_b, shown_key_b) == (key, key), (
+        f"a hand-mis-transcribed block prints the SAME spelling twice — label and key "
+        f"both underscored — which is how it is told apart from a rename: {unread_b[0]!r}")
+    assert shown_label_b == shown_key_b, (
+        "the discriminator is exactly this equality versus A's inequality")
+    matched_b = _matched_report_lines(out_b)
+    assert len(matched_b) == 1, (
+        f"the unread diagnostic must print its matched-header list exactly once: "
+        f"{matched_b!r} in:\n{out_b}")
+    assert key not in matched_b[0] and all(
+        lab in matched_b[0] for _k, lab in rows if lab != label), (
+        f"the mis-transcribed label found no header and the other three did, so the "
+        f"matched list is the evidence that the log itself was readable — the run "
+        f"should conclude its own spelling moved, not the linker's: {matched_b[0]!r}")
+    assert unread[0] != unread_b[0], (
+        "the two failure modes must not print the same line — that sameness is the bug "
+        "this node exists to keep fixed")
+
+    _assert_msg0_rule_is_indexed()
+
+
+# ── the vault half of #1917: the class rule this item writes ─────────
+
+# ── the vault half: the class rule this item writes (clause 4) ───────
+
+MEMORY_INDEX = Path.home() / "obsidian" / "lloyd" / "MEMORY.md"
+MSG0_RULE = re.compile(r"messages\[0\]")
+RULE_RUNS = ("run_24_20260930_052951", "run_24_20260930_094319")
+VALIDATOR = ROOT / "scripts" / "memory" / "validate_memory_index.py"
+
+
+def _assert_msg0_rule_is_indexed() -> None:
+    """Clause 4, asserted from the one node this diff adds. See that node's docstring
+    for why the vault's own rule shape is checked here and not in a node of its own.
+    """
+    assert MEMORY_INDEX.is_file(), _missing_tree(MEMORY_INDEX)
+    lines = MEMORY_INDEX.read_text(encoding="utf-8", errors="replace").splitlines()
+    rule = [ln for ln in lines
+            if ln.startswith("- ") and MSG0_RULE.search(ln)]
+    assert len(rule) == 1, (
+        f"the index must carry the msg0 rule exactly once; {len(rule)} top-level lines "
+        f"name `messages[0]`, and two copies means one of them is the stale one that a "
+        f"later reader trusts: {rule}")
+    line = rule[0]
+
+    assert line.startswith("- [feedback] "), (
+        f"an untyped index line fails `check()` and is invisible to the reader who scans "
+        f"by type — a ruling is feedback, not project state: {line[:24]!r}")
+    assert "(2026-09-30)" in line, (
+        f"the clause is dated the day the #1809 ruling ordered it; an undated rule "
+        f"cannot be aged out or checked against its incident: {line[:36]!r}")
+    for run in RULE_RUNS:
+        assert run in line, (
+            f"the ruling names {run} as one of the two runs that asserted a prompt "
+            "contained something its own `messages[0]` disproved; a rule citing neither "
+            "is advice, and the incident is what makes it checkable")
+
+    at = lines.index(line)
+    heading = next(l for l in reversed(lines[:at]) if l.strip())
+    assert heading.startswith("## "), (
+        f"the rule is meant to sit under a heading of its own (the 2026-09-22 "
+        f"convention MEMORY.md states at its `## How a class rule gets added` line), not "
+        f"be appended to whatever section was last: {heading!r}")
+    stem = re.sub(r"\s*\((?:added|updated) \d{4}-\d\d-\d\d\)\s*$", "", heading[3:])
+    assert not re.search(r"\d{4}-\d\d-\d\d", stem), (
+        f"{heading!r} is a DATE-named heading once its parenthetical is stripped, and "
+        "clause 4 names the alternative: a heading named for the RULE with the date "
+        "inside it, because a date-named heading cannot be found by what it says")
+
+    spec = importlib.util.spec_from_file_location("validate_memory_index_pinned",
+                                                  VALIDATOR)
+    assert spec and spec.loader, f"the index validator is gone: {VALIDATOR}"
+    validator = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = validator
+    spec.loader.exec_module(validator)
+    from app import memory_ceiling as mc
+    from app import prompt_surface as ps
+
+    report = validator.check(MEMORY_INDEX.parent, ceiling=ps.MEMORY_MD_CEILING_BYTES)
+    assert report["ok"], (
+        f"the live index fails its own validator ({report['errors']}), and this is the "
+        "node that was supposed to see it before the gate did — the `live_vault` sibling "
+        f"reports `1 deselected` on a normal round: {report}")
+
+    assert report["memory_md_bytes"] <= ps.MEMORY_MD_CEILING_BYTES
+    # The 300-character bound the clause names, pinned as a NUMBER. `check()` above
+    # enforces whatever `INDEX_LINE_MAX_CHARS` currently says, so if that constant moved
+    # the rule would be measured against something else and this node — the one standing
+    # in for a `live_vault`-marked validator the gate does not run — would stay green
+    # while the clause it cites said 300. Not a second measurement of the line, which
+    # `check()` already made: a pin on the bound the clause depends on.
+    assert mc.INDEX_LINE_MAX_CHARS == 300, (
+        f"the clause's limit is 300 characters; the enforced cap is now "
+        f"{mc.INDEX_LINE_MAX_CHARS}, so either the bound moved or the clause was "
+        "rewritten without this node")
+    slugs = validator.links(line)
+    assert slugs, (
+        "the line has to point at a topic file — that pointer is what keeps one index "
+        "line possible, and `check()` cannot fail on an index line that never links")
+    detail = MEMORY_INDEX.parent / mc.TOPICS_SUBDIR / f"{slugs[0]}.md"
+    # `check()` also reports a dangling link; this one exists so the failure names the
+    # FILE the detail should be sitting in, rather than quoting a link string.
+    assert detail.is_file(), f"the linked topic file is missing: {detail}"
+    body = detail.read_text(encoding="utf-8")
+    for token in (*RULE_RUNS, "messages[0]", "grepping", "retract"):
+        assert token in body, (
+            f"the index line is the hook and this file is the detail; {token!r} is part "
+            f"of what makes the ruling re-checkable by a reader who never sees the "
+            f"ledger: {detail}")
+
+
+#
+
+
 # ── enforcement: the gate must actually run what is above ────────────
 
 def test_nothing_in_this_file_is_allowed_to_skip():
@@ -380,8 +710,16 @@ def test_the_gate_mark_expression_still_collects_every_node_in_this_file():
         f"the gate's selection ({TESTS_MARK_EXPR!r}) deselected "
         f"{sorted(set(unfiltered) - set(gated))} of this file's nodes, so they "
         "would enforce nothing at the gate")
-    assert len(unfiltered) >= 5, unfiltered
-
+    # The floor is this file's own node count, raised when a node is added — not a round
+    # number sitting below it. A ">= 5" against a file of ten stays green while five
+    # nodes quietly stop being collected, and quiet non-collection is the exact rot this
+    # file exists to catch (it is how #1809's cited pins stopped enforcing). The coupling
+    # is the mechanism: adding a node here means editing this number, so a node cannot be
+    # added without being noticed and cannot be lost without going red.
+    assert len(unfiltered) >= 9, (
+        f"{len(unfiltered)} nodes collected; 9 were here when #1917 landed — the count "
+        "is the item's acceptance check (b), `8 passed` -> `9 passed`, so a node lost "
+        f"here is a check that no longer holds: {sorted(unfiltered)}")
 
 def test_a_missing_skills_tree_fails_naming_the_path_it_looked_in(tmp_path,
                                                                  monkeypatch):
