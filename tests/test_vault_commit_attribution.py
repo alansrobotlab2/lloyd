@@ -31,11 +31,18 @@ Two behaviours replace it, and the pair is what makes `git log` honest:
    the wrapper writes an `unattributed dirty state:` block into the commit body
    naming every path the commit carries, and prints the same list to stderr. The
    commit no longer claims to be the committer's own work.
+3. **A declared write list** (#1867). `LLOYD_JOB_WRITES="a.md:b.md"` alongside
+   `LLOYD_JOB` and a pathspec makes ownership mean *authorship* instead of
+   *vicinity*: the block then names every carried path that is not on the list.
+   Without it, ownership stays "under one of the named paths", which is what a
+   job that names whole segments — `-- memory/ backlog/ …` — silently turns into
+   a claim on whatever else was dirty in those segments. Opt-in: unset, both
+   modes behave exactly as item 1 and item 2 describe.
 
 The wrapper is one script whose commit step now also carries #341's branch guard,
-#668's job identity (`LLOYD_JOB` → author + `Job:` trailer) and #1127's
-autonomy-status rung. Rewriting the staging/commit step can silently drop any of
-them, so each is pinned here too rather than assumed.
+#668's job identity (`LLOYD_JOB` → author + `Job:` trailer), #1127's autonomy-status
+rung and #1867's declared-write ownership. Rewriting the staging/commit step can
+silently drop any of them, so each is pinned here too rather than assumed.
 
 The boundary under test is bash plus the git index: a job reaches this script as a
 shell command and the claim is about what lands in a real commit, so every test
@@ -51,6 +58,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -77,15 +85,22 @@ def _git(repo: Path, *args: str, env: dict | None = None) -> subprocess.Complete
     return proc
 
 
-def _env(repo: Path, job: str | None = None) -> dict:
+def _env(repo: Path, job: str | None = None,
+         writes: str | None = None) -> dict:
     """A minimal env: no HOME, so no `~/.gitconfig` leaks an identity into a
     fixture, and `LLOYD_PYTHON` names this interpreter for the #1127 rung the
     wrapper runs, rather than depending on what `/usr/bin/python3` has installed.
+
+    `writes` is #1867's declared write list. `None` leaves the variable out of the
+    environment, which is the unset case every call site has today; `""` is the
+    distinct case of a job that set it from a variable that was not itself set.
     """
     env = {"VAULT_DIR": str(repo), "PATH": "/usr/bin:/bin:/usr/local/bin",
            "LLOYD_PYTHON": sys.executable}
     if job is not None:
         env["LLOYD_JOB"] = job
+    if writes is not None:
+        env["LLOYD_JOB_WRITES"] = writes
     return env
 
 
@@ -112,15 +127,18 @@ def vault_repo(tmp_path):
 
 
 def _run_wrapper(repo: Path, msg: str, *, paths: list[str] | None = None,
-                 job: str | None = None) -> subprocess.CompletedProcess:
+                 job: str | None = None,
+                 writes: str | None = None) -> subprocess.CompletedProcess:
     """Run the real wrapper as a job would. `paths=None` means the invocation has
-    no `--` at all, which is the eight legacy call sites' shape."""
+    no `--` at all, which is the eight legacy call sites' shape. `writes` is the
+    declared write list (#1867): `None` leaves `LLOYD_JOB_WRITES` out of the
+    environment entirely, which is the unset case the other tests run in."""
     argv = ["bash", str(WRAPPER), msg]
     if paths is not None:
         argv.append("--")
         argv.extend(paths)
     return subprocess.run(argv, capture_output=True, text=True, timeout=120,
-                          cwd=str(repo), env=_env(repo, job))
+                          cwd=str(repo), env=_env(repo, job, writes))
 
 
 def _commit_paths(repo: Path, sha: str = "HEAD") -> list[str]:
@@ -379,6 +397,239 @@ def test_the_job_identity_and_the_status_rung_survive_the_new_commit_step(vault_
 
 
 # ---------------------------------------------------------------------------
+# The declared write list (#1867) — `LLOYD_JOB_WRITES` turns "under a path I
+# named" into "a file I wrote".
+# ---------------------------------------------------------------------------
+
+#: The 2026-09-30 01:17Z autonomy-data-pipeline run in fixture form. It ran the
+#: Post-Flight literal `-- memory/ knowledge/ backlog/ autonomy/` and produced
+#: commit 441c35d9: its own run-log note, another job's in-flight edit to a
+#: backlog item (95 insertions), and the audit logger's append. All three lie
+#: inside a named segment, so #1070's ownership rule called all three this job's
+#: own and printed nothing — while the same run's no-`--` pre-flight commit,
+#: 4e2fd7b9, printed the block for all 15 paths it carried.
+OWN_NOTE = "memory/vault-maintenance/2026-09-30.md"
+FOREIGN_ITEM = "backlog/1866-item.md"
+AUDIT_APPEND = "memory/audit/writes.jsonl"
+
+#: The Post-Flight literal's scope, verbatim.
+PIPELINE_SCOPE = ["memory/", "knowledge/", "backlog/", "autonomy/"]
+
+
+def _the_0117_tree(vault_repo):
+    """One write this job made and two it did not, all inside the named segments."""
+    _write(vault_repo, OWN_NOTE, "## Run 01:17Z\n")
+    _write(vault_repo, FOREIGN_ITEM, "another job's in-flight item edit\n")
+    _write(vault_repo, AUDIT_APPEND, '{"job": "audit-logger"}\n')
+
+
+def test_a_declared_write_list_names_a_foreign_path_inside_a_named_directory(vault_repo):
+    """The hole #1867 names, closed: a path-scoped commit carrying two paths
+    absent from the declared list emits the block naming both.
+
+    The same invocation was silent before this variable existed, because both
+    foreign paths lie under a segment the caller named and #1070 compared
+    ownership against the *pathspec*, never against what the job wrote.
+    """
+    _the_0117_tree(vault_repo)
+    proc = _run_wrapper(vault_repo, "autonomy-data-pipeline: 2026-09-30",
+                        paths=PIPELINE_SCOPE, job="autonomy-data-pipeline",
+                        writes=OWN_NOTE)
+    assert proc.returncode == 0, proc.stderr
+    body = _body(vault_repo)
+    assert UNATTRIBUTED in body, (
+        "the commit carried a backlog item another job was editing and the audit "
+        "logger's append and said nothing — the silent attribution 441c35d9 made")
+    listed = _paths_in(body.split(UNATTRIBUTED, 1)[1])
+    assert sorted(listed) == sorted([FOREIGN_ITEM, AUDIT_APPEND]), listed
+    assert OWN_NOTE not in listed, (
+        f"the one path this job did write was named as unattributed: {listed}")
+    for path in (FOREIGN_ITEM, AUDIT_APPEND):
+        assert path in proc.stderr, (
+            f"{path} is in the commit body but not on stderr, and a job cannot read "
+            f"its own commit body from where it is running")
+    assert "Job: autonomy-data-pipeline" in body, (
+        f"the block arrived by way of dropping #668's trailer: {body}")
+
+
+def test_the_block_lists_exactly_the_committed_paths_that_are_not_declared(vault_repo):
+    """The declared half of the rule: a path on the list is never named, and an
+    entry may be a directory as well as a file.
+
+    `memory/audit/` is declared as a directory here, which is how a job that owns a
+    subtree says so — the entry has to cover the paths *under* it, not merely equal
+    one. Everything declared stays out of the block, so what is left is exactly what
+    the job cannot show it wrote.
+    """
+    _the_0117_tree(vault_repo)
+    proc = _run_wrapper(vault_repo, "autonomy-data-pipeline: 2026-09-30",
+                        paths=PIPELINE_SCOPE, job="autonomy-data-pipeline",
+                        writes=f"{OWN_NOTE}:memory/audit/")
+    assert proc.returncode == 0, proc.stderr
+    body = _body(vault_repo)
+    assert UNATTRIBUTED in body, proc.stderr
+    assert _paths_in(body.split(UNATTRIBUTED, 1)[1]) == [FOREIGN_ITEM], body
+    assert sorted(_commit_paths(vault_repo)) == sorted([FOREIGN_ITEM, OWN_NOTE,
+                                                        AUDIT_APPEND]), (
+        "the commit is still the scoped sweep it always was — the declared list "
+        "changes what is reported, not what is staged")
+
+
+def test_a_job_that_declared_every_path_it_carried_commits_without_a_word(vault_repo):
+    """The other side of the same rule, and the reason this is not a tax: a run
+    that names its own writes and carries nothing else commits with no block in the
+    body and nothing on stderr."""
+    _write(vault_repo, OWN_NOTE, "## Run 01:17Z\n")
+    _write(vault_repo, "knowledge/mine.md")
+    proc = _run_wrapper(vault_repo, "autonomy-data-pipeline: 2026-09-30",
+                        paths=PIPELINE_SCOPE, job="autonomy-data-pipeline",
+                        writes=f"{OWN_NOTE}:knowledge/mine.md")
+    assert proc.returncode == 0, proc.stderr
+    assert sorted(_commit_paths(vault_repo)) == sorted([OWN_NOTE,
+                                                        "knowledge/mine.md"])
+    body = _body(vault_repo)
+    assert UNATTRIBUTED not in body, body
+    assert UNATTRIBUTED not in proc.stderr, proc.stderr
+
+
+def test_the_declared_list_splits_on_newlines_and_ignores_padding(vault_repo):
+    """The one syntactic claim the header makes: `:` and newline are both
+    separators, and whitespace around a separator is not part of a path.
+
+    Worth a node because the failure is quiet — an entry read as
+    `" memory/audit/"` matches nothing, so a job that wrote its list with padding
+    would find its own file reported as unattributed.
+    """
+    _the_0117_tree(vault_repo)
+    proc = _run_wrapper(vault_repo, "autonomy-data-pipeline: 2026-09-30",
+                        paths=PIPELINE_SCOPE, job="autonomy-data-pipeline",
+                        writes=f"{OWN_NOTE}\n memory/audit/ ")
+    assert proc.returncode == 0, proc.stderr
+    body = _body(vault_repo)
+    assert UNATTRIBUTED in body, proc.stderr
+    assert _paths_in(body.split(UNATTRIBUTED, 1)[1]) == [FOREIGN_ITEM], body
+
+
+def test_an_unset_or_empty_declared_list_leaves_a_pathspec_asking_the_old_question(
+        vault_repo):
+    """Opt-in, in both spellings of it. With the variable absent — every human
+    commit, and every call site that has not adopted it — and with it present but
+    empty (`LLOYD_JOB_WRITES="$MAYBE_UNSET_VAR"`, which is how a run forgets),
+    ownership is still "under one of the named paths" and a foreign path inside a
+    named directory stays unreported. That is the behaviour
+    `test_a_pathspec_commit_does_not_claim_unattributed_state` pins, re-pinned here
+    with `LLOYD_JOB` set, which that test does not exercise.
+    """
+    _the_0117_tree(vault_repo)
+    proc = _run_wrapper(vault_repo, "autonomy-data-pipeline: 2026-09-30",
+                        paths=PIPELINE_SCOPE, job="autonomy-data-pipeline")
+    assert proc.returncode == 0, proc.stderr
+    body = _body(vault_repo)
+    assert UNATTRIBUTED not in body, body
+    assert UNATTRIBUTED not in proc.stderr, proc.stderr
+    assert len(_commit_paths(vault_repo)) == 3, "the scoped sweep still swept"
+
+    _write(vault_repo, "knowledge/empty-list.md")
+    proc = _run_wrapper(vault_repo, "autonomy-data-pipeline: 2026-09-30 (empty list)",
+                        paths=PIPELINE_SCOPE, job="autonomy-data-pipeline",
+                        writes="")
+    assert proc.returncode == 0, proc.stderr
+    assert _commit_paths(vault_repo) == ["knowledge/empty-list.md"]
+    assert UNATTRIBUTED not in _body(vault_repo), (
+        "an empty declared list was read as 'this job wrote nothing', which would "
+        "name the committer's own file as unattributed: " + _body(vault_repo))
+
+
+def test_the_sweep_still_names_every_carried_path_when_nothing_is_declared(vault_repo):
+    """Clause 3's other mode, with a job name attached (the pre-existing sweep test
+    runs without one): no pathspec and no declared list is still #1070's honest
+    snapshot, naming all three paths."""
+    _the_0117_tree(vault_repo)
+    proc = _run_wrapper(vault_repo, "autonomy-data-pipeline: pre-flight 2026-09-30",
+                        job="autonomy-data-pipeline")
+    assert proc.returncode == 0, proc.stderr
+    body = _body(vault_repo)
+    assert UNATTRIBUTED in body, proc.stderr
+    listed = _paths_in(body.split(UNATTRIBUTED, 1)[1])
+    assert sorted(listed) == sorted([OWN_NOTE, FOREIGN_ITEM, AUDIT_APPEND]), listed
+
+
+def test_the_unset_block_keeps_the_sentence_1070_wrote_in_both_modes(vault_repo):
+    """The exact-sentence half of clause 3. "Behaves exactly as today" is a claim
+    about bytes, not about counts: eight call sites' run records quote these two
+    sentences, and the sweep prose is what a job is told to copy. So the whole
+    sentences are pinned here, with `LLOYD_JOB` set — the case the pre-existing
+    tests do not run, and the only one in which a new "declared write list" branch
+    could have reached in and reworded them."""
+    _the_0117_tree(vault_repo)
+    proc = _run_wrapper(vault_repo, "autonomy-data-pipeline: pre-flight 2026-09-30",
+                        job="autonomy-data-pipeline")
+    assert proc.returncode == 0, proc.stderr
+    assert ("unattributed dirty state: 3 path(s) in this commit that this invocation "
+            "did not name as its own writes." in _body(vault_repo)
+            ), _body(vault_repo)
+    assert ("unattributed dirty state: 3 path(s) this commit carries that this "
+            "invocation did not name — copy this exact list" in proc.stderr), proc.stderr
+    assert "LLOYD_JOB_WRITES" not in proc.stderr, (
+        "the unset sweep was told about a variable it never set: " + proc.stderr)
+
+
+def test_a_declared_list_without_a_pathspec_does_not_quiet_the_sweep(vault_repo):
+    """The declared list is scoped to the mode that needs it. With no `--`, the
+    block keeps naming every carried path *including* the declared one: a
+    pre-flight snapshot cannot buy back authorship by declaring, and a run that
+    sets the variable and forgets the pathspec has to end up over-disclosing, never
+    under."""
+    _the_0117_tree(vault_repo)
+    proc = _run_wrapper(vault_repo, "autonomy-data-pipeline: pre-flight 2026-09-30",
+                        job="autonomy-data-pipeline", writes=OWN_NOTE)
+    assert proc.returncode == 0, proc.stderr
+    body = _body(vault_repo)
+    assert UNATTRIBUTED in body, proc.stderr
+    listed = _paths_in(body.split(UNATTRIBUTED, 1)[1])
+    assert OWN_NOTE in listed, (
+        "a declaration silenced the sweep for its own path; with no pathspec there "
+        f"is nothing to scope, so the block must name all three: {listed}")
+    assert sorted(listed) == sorted([OWN_NOTE, FOREIGN_ITEM, AUDIT_APPEND]), listed
+
+
+def test_a_declared_list_is_ignored_when_the_invocation_has_no_job_name(vault_repo):
+    """An invocation that does not say which job it is has no own writes to check
+    against, so the list is inert and the commit stays the #1070 unattributed one.
+    Honouring a declaration from an anonymous caller would hand any commit the power
+    to silence the guard that exists to interrogate it."""
+    _the_0117_tree(vault_repo)
+    proc = _run_wrapper(vault_repo, "somebody: 2026-09-30",
+                        paths=PIPELINE_SCOPE, writes=OWN_NOTE)
+    assert proc.returncode == 0, proc.stderr
+    body = _body(vault_repo)
+    assert UNATTRIBUTED not in body, body
+    assert "Job:" not in body, body
+
+
+def test_a_declared_entry_that_is_not_a_scoped_path_is_refused_as_an_invocation_error(
+        vault_repo):
+    """`LLOYD_JOB_WRITES=.` claims every path in the vault as this job's own work —
+    the same claim `-- .` is refused for, by the same shape of rail, and here it is
+    refused by the guard it would disarm. So is a glob, an absolute path and a `..`,
+    because a declared entry that matches no staged path is indistinguishable, in a
+    commit body, from a job that declared nothing. Exit 3, named by variable, nothing
+    committed."""
+    _the_0117_tree(vault_repo)
+    before = _head(vault_repo)
+    for claim in (".", "*", "memory/.."):
+        proc = _run_wrapper(vault_repo, "job: claiming the vault",
+                            paths=PIPELINE_SCOPE, job="autonomy-data-pipeline",
+                            writes=claim)
+        assert proc.returncode == 3, f"'{claim}': {proc.stderr}"
+        assert "LLOYD_JOB_WRITES" in proc.stderr, proc.stderr
+    assert _head(vault_repo) == before
+    assert len(_dirty_paths(vault_repo)) == 3, (
+        f"the refusal left the tree it refused to commit in another state: "
+        f"{_dirty_paths(vault_repo)}")
+
+
+# ---------------------------------------------------------------------------
 # Clause 4: the eight call sites in the seven skills.
 # ---------------------------------------------------------------------------
 
@@ -415,6 +666,30 @@ def test_every_wrapper_call_site_in_a_skill_scopes_its_commit_or_labels_it():
 
 
 @pytest.mark.live_vault
+def test_the_pipeline_post_flight_step_declares_the_writes_it_is_committing():
+    """Clause 4, read off the live skill: the Post-Flight step names its own writes
+    alongside the directory scope, not just the scope.
+
+    The directory form alone is what let the 2026-09-30 01:17Z run commit another
+    job's `backlog/1866-*.md` edit and the audit logger's append under
+    `autonomy-data-pipeline: 2026-09-29` with nothing said: `-- memory/ knowledge/
+    backlog/ autonomy/` asserts authorship of everything inside four segments. The
+    run-log note is the one path every run writes, so it is the entry that has to be
+    in the literal for the literal to be a declaration rather than a placeholder.
+    """
+    skill = VAULT_SKILLS / "autonomy-data-pipeline" / "SKILL.md"
+    line = next((ln.strip() for ln in skill.read_text(encoding="utf-8").splitlines()
+                 if "scripts/util/vault-commit.sh" in ln and " -- " in ln), None)
+    assert line is not None, "post-flight step no longer passes a pathspec"
+    assert "LLOYD_JOB_WRITES=" in line, line
+    assert "memory/vault-maintenance/" in line, (
+        f"the declared list does not name the run-log note, the write every run "
+        f"makes, so the declaration covers nothing: {line}")
+    assert "LLOYD_JOB=autonomy-data-pipeline" in line, (
+        f"a declared list without a job name is inert by design: {line}")
+
+
+@pytest.mark.live_vault
 def test_the_scoped_call_sites_execute_and_leave_the_rest_of_the_tree_alone(tmp_path):
     """Clause 4's mechanism, executed rather than read.
 
@@ -428,6 +703,11 @@ def test_the_scoped_call_sites_execute_and_leave_the_rest_of_the_tree_alone(tmp_
     itself rewrites continuously and no nightly job is a writer of — so it is the
     path whose survival in the tree, uncommitted, is the thing a scoped commit has to
     guarantee.
+
+    Since #1867 the same literal carries a declared list naming only the run-log
+    note, so the fixture's `memory/audit/writes.jsonl` is foreign by that rule even
+    though it sits in a named segment: the commit still ships it, and now has to say
+    so. That is the 01:17Z run reproduced with the skill's own line.
     """
     skill = VAULT_SKILLS / "autonomy-data-pipeline" / "SKILL.md"
     line = next((ln.strip() for ln in skill.read_text(encoding="utf-8").splitlines()
@@ -441,6 +721,9 @@ def test_the_scoped_call_sites_execute_and_leave_the_rest_of_the_tree_alone(tmp_
     _write(repo, "seed.md")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "base")
+    # The path the literal declares, under the same UTC date the literal expands.
+    _write(repo, f"memory/vault-maintenance/{time.strftime('%Y-%m-%d', time.gmtime())}.md",
+           "## Run 01:17Z\n")
     _write(repo, "memory/audit/writes.jsonl")
     _write(repo, ".obsidian/workspace.json")
 
@@ -448,9 +731,17 @@ def test_the_scoped_call_sites_execute_and_leave_the_rest_of_the_tree_alone(tmp_
     proc = subprocess.run(("bash", "-c", command), capture_output=True, text=True,
                           timeout=120, cwd=str(repo), env=_env(repo))
     assert proc.returncode == 0, proc.stderr
-    assert _commit_paths(repo) == ["memory/audit/writes.jsonl"], proc.stderr
+    assert sorted(_commit_paths(repo)) == ["memory/audit/writes.jsonl",
+                                           f"memory/vault-maintenance/"
+                                           f"{time.strftime('%Y-%m-%d', time.gmtime())}.md"], \
+        proc.stderr
     assert ".obsidian/workspace.json" in _dirty_paths(repo), _dirty_paths(repo)
-    assert UNATTRIBUTED not in _body(repo), _body(repo)
+    body = _body(repo)
+    assert UNATTRIBUTED in body, (
+        "the pipeline's own Post-Flight line carried the audit logger's append and "
+        f"reported nothing — the 01:17Z run's silent commit: {body}")
+    listed = _paths_in(body.split(UNATTRIBUTED, 1)[1])
+    assert listed == ["memory/audit/writes.jsonl"], listed
 
 
 # ---------------------------------------------------------------------------

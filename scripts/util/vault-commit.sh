@@ -51,6 +51,10 @@
 #   ~/lloyd/scripts/util/vault-commit.sh "autonomy-data-pipeline: $(date +%Y-%m-%d)" \
 #       -- memory/ backlog/ autonomy/
 #   LLOYD_JOB=nightly-knowledge-write ~/lloyd/scripts/util/vault-commit.sh "nightly: knowledge write 2026-09-20"
+#   # …and the same scope, but reporting anything carried that this job did not write:
+#   LLOYD_JOB=autonomy-data-pipeline LLOYD_JOB_WRITES="memory/vault-maintenance/2026-09-30.md" \
+#       ~/lloyd/scripts/util/vault-commit.sh "autonomy-data-pipeline: 2026-09-30" \
+#       -- memory/ knowledge/ backlog/ autonomy/
 #
 # A named path that holds no change is skipped, not fatal: a job names every
 # segment it ever writes and usually dirties two of them.
@@ -60,12 +64,18 @@
 #   LLOYD_JOB   job name; when set, this commit is authored as lloyd-<job>
 #               <<job>@jobs.lloyd.local> and carries `Job: <job>`. The one place
 #               to change that spelling is the identity block below.
+#   LLOYD_JOB_WRITES  the vault-relative paths THIS job wrote, colon-separated
+#               (newlines work too, and padding around a separator is ignored),
+#               honoured only alongside LLOYD_JOB. A path-scoped commit then
+#               reports as unattributed every path it carries that is not on this
+#               list — see the ownership block below.
 #
 # Exit codes:
 #   0 — committed successfully OR nothing to commit
 #   2 — git operation failed (logged to stderr)
 #   3 — invocation error (no message; an argument where a pathspec separator
-#       belongs; a pathspec naming the whole tree; LLOYD_JOB not a usable name)
+#       belongs; a pathspec or a LLOYD_JOB_WRITES entry naming the whole tree;
+#       LLOYD_JOB not a usable name)
 
 set -euo pipefail
 
@@ -132,6 +142,68 @@ if [ -n "$JOB" ]; then
 else
     GIT_ARGS=()
     TRAILER_ARGS=()
+fi
+
+# The declared write list (#1867): the paths the invoking job actually wrote.
+#
+# #1070 gave a path-scoped commit its `unattributed dirty state:` block, but it
+# computed ownership as "lies under one of the paths named on the command line".
+# Nightly jobs name whole segments — `-- memory/ knowledge/ backlog/ autonomy/` is
+# the literal in autonomy-data-pipeline's Post-Flight step — so every path inside a
+# named segment was owned by construction and the block could never fire for one.
+# The 2026-09-30 01:17Z run of that job ran that literal and committed
+# `backlog/1866-*.md` (95 insertions to another job's in-flight item) plus the audit
+# logger's append to `memory/audit/writes.jsonl` under the subject
+# `autonomy-data-pipeline: 2026-09-29`, with no block in the body and nothing on
+# stderr. That is `05aeb28a` (46 files under one job's subject) returning through the
+# path-scoped door, and the safer-looking mode was the silent one: the same run's
+# no-`--` pre-flight commit DID print the block, for all 15 paths it carried.
+#
+# A job that names its writes makes the comparison ask the question it was always
+# meant to ask. OPT-IN by design: with the variable unset ownership stays what #1070
+# implemented, so every human `git commit`, every call site that has not adopted the
+# list, and every test written before it behave byte-for-byte as before. It needs
+# LLOYD_JOB too — an invocation with no job identity has no own writes to check
+# against, and honouring a declaration from an anonymous caller would let any commit
+# silence the guard that exists to interrogate it.
+#
+# No existing attribution surface knew a job's paths, which is why this is a new
+# variable rather than a reader for one: `memory/audit/writes.jsonl` records only the
+# `vault_write` route (app/autonomy.py says so outright), and it is itself one of the
+# foreign appends this hole swallows, so it cannot be the manifest either.
+DECLARED=()
+if [ -n "$JOB" ] && [ -n "${LLOYD_JOB_WRITES:-}" ]; then
+    # One separator rule: `:` or newline, padding ignored. A vault path containing a
+    # colon cannot be declared this way — measured 2026-09-30, `git -C ~/obsidian
+    # ls-files | grep -c ':'` is 0, so nothing today needs the escape.
+    _DECLARED=$(printf '%s' "${LLOYD_JOB_WRITES}" \
+        | tr '\n' ':' \
+        | sed -e 's/[[:space:]]*:[[:space:]]*/:/g' -e 's/^[[:space:]:]*//' -e 's/[[:space:]:]*$//')
+    if [ -n "$_DECLARED" ]; then
+        IFS=':' read -r -a _DECLARED_LIST <<< "$_DECLARED"
+        for spec in ${_DECLARED_LIST[@]+"${_DECLARED_LIST[@]}"}; do
+            # `a::b` and a trailing `:` survive the sed; an empty entry would match
+            # nothing anyway, and dropping it keeps the list honest about its size.
+            if [ -n "$spec" ]; then
+                DECLARED+=("$spec")
+            fi
+        done
+    fi
+    # The same shapes a pathspec may not take, mirrored from the rail above:
+    # declaring `.` or `*` claims every path in the vault as this job's own work,
+    # which is the claim that disarms the guard, and a glob, an absolute path or a
+    # `..` is not something the prefix comparison below can match a staged path
+    # against. Refusing here rather than ignoring matters because an entry that
+    # matches nothing is indistinguishable, in a commit body, from a job that
+    # declared nothing.
+    for spec in ${DECLARED[@]+"${DECLARED[@]}"}; do
+        case "$spec" in
+            '.'|'./'|*'*'*|'/'*|'./'*|*'..'*)
+                echo "vault-commit.sh: LLOYD_JOB_WRITES entry '$spec' is not a scoped path; name the paths this job wrote, or leave the variable unset" >&2
+                exit 3
+                ;;
+        esac
+    done
 fi
 
 if [ ! -d "$VAULT/.git" ]; then
@@ -202,20 +274,49 @@ if [ ${#STAGED[@]} -eq 0 ]; then
     exit 0
 fi
 
-# Everything staged that the caller did not name is state this commit is taking
-# responsibility for without having written it. With no pathspec that is all of it,
-# which is the honest description of a pre-flight snapshot.
-UNATTRIBUTED=()
-for path in ${STAGED[@]+"${STAGED[@]}"}; do
-    owned=0
-    for spec in ${PATHSPEC[@]+"${PATHSPEC[@]}"}; do
+# Is this staged path one of the caller's own writes? Exact match, or the path
+# sitting UNDER the entry — so `memory/` covers `memory/audit/writes.jsonl` while
+# `mem` does not cover `memory/x.md`. Comparing raw prefixes without the slash would
+# let a declared `mem` claim a sibling directory called `memory/`, which is the same
+# bug #1593 is about one layer up.
+owns_one_of() {
+    local path="$1"
+    shift
+    local spec
+    for spec in "$@"; do
         spec="${spec%/}"
         if [ "$path" = "$spec" ] || [ "${path#"$spec"/}" != "$path" ]; then
-            owned=1
-            break
+            return 0
         fi
     done
-    if [ "$owned" -eq 0 ]; then
+    return 1
+}
+
+# Whose writes this commit's contents are. A declared list, when the caller passed
+# one with a job name and a pathspec attached, IS the answer and the pathspec gets no
+# vote: "under a segment I said I might write" was never authorship, and that
+# conflation is the hole #1867 names. With no declared list, ownership is exactly the
+# #1070 rule — named on the command line — and with no pathspec either nothing is
+# owned, which is the honest description of a pre-flight snapshot.
+#
+# Deliberate: a declared list changes NOTHING in the no-`--` mode. That mode is the
+# sweep, its block already names every path it carries, and over-disclosing there is
+# the safe direction — a job that sets the list and forgets the pathspec gets today's
+# full block, never a quieter commit.
+OWNER_SET=()
+OWNERSHIP=scope
+if [ ${#DECLARED[@]} -gt 0 ] && [ ${#PATHSPEC[@]} -gt 0 ]; then
+    OWNER_SET=(${DECLARED[@]+"${DECLARED[@]}"})
+    OWNERSHIP=declared
+else
+    OWNER_SET=(${PATHSPEC[@]+"${PATHSPEC[@]}"})
+fi
+
+# Everything staged that the caller cannot show it wrote is state this commit is
+# taking responsibility for without having authored it.
+UNATTRIBUTED=()
+for path in ${STAGED[@]+"${STAGED[@]}"}; do
+    if ! owns_one_of "$path" ${OWNER_SET[@]+"${OWNER_SET[@]}"}; then
         UNATTRIBUTED+=("$path")
     fi
 done
@@ -228,8 +329,21 @@ done
 MSG_ARGS=(-m "$MSG")
 if [ ${#UNATTRIBUTED[@]} -gt 0 ]; then
     COUNT=${#UNATTRIBUTED[@]}
-    BLOCK="unattributed dirty state: ${COUNT} path(s) in this commit that this invocation did not name as its own writes. The committing job is not necessarily the writer of these lines; a path-scoped invocation ('-- <path>…') is what makes a commit's message mean its authorship."
-    REPORT="vault-commit.sh: unattributed dirty state: ${COUNT} path(s) this commit carries that this invocation did not name — copy this exact list into the job's run record:"
+    if [ "$OWNERSHIP" = declared ]; then
+        # Say which rule named it: a reader of a commit body cannot see whether the
+        # caller declared anything, and the #1070 wording below would read to one as
+        # "no pathspec was given". With the list unset both sentences stay exactly as
+        # #1070 wrote them, byte for byte — tests/test_vault_commit_attribution.py
+        # pins them, because a job's run record quotes this prose and a rewording
+        # would be a change to eight call sites' output under an innocent item.
+        BODY_SUFFIX="not on this job's declared write list (LLOYD_JOB_WRITES)"
+        ERR_SUFFIX="not on this job's declared write list (LLOYD_JOB_WRITES)"
+    else
+        BODY_SUFFIX="that this invocation did not name as its own writes"
+        ERR_SUFFIX="that this invocation did not name"
+    fi
+    BLOCK="unattributed dirty state: ${COUNT} path(s) in this commit ${BODY_SUFFIX}. The committing job is not necessarily the writer of these lines; a path-scoped invocation ('-- <path>…') is what makes a commit's message mean its authorship."
+    REPORT="vault-commit.sh: unattributed dirty state: ${COUNT} path(s) this commit carries ${ERR_SUFFIX} — copy this exact list into the job's run record:"
     for path in "${UNATTRIBUTED[@]}"; do
         BLOCK+=$'\n    '"$path"
         REPORT+=$'\n    '"$path"
