@@ -56,7 +56,9 @@ Usage:
     python eval/compare_tool_choice.py                     # newest vs the one before
     python eval/compare_tool_choice.py --label soul377-post
     python eval/compare_tool_choice.py --current a.json --baseline b.json
-    python eval/compare_tool_choice.py --measure-floor     # rewrite the floor record
+    python eval/compare_tool_choice.py --measure-floor     # refresh the floor record from
+                                                           # a same-tree <stem>-a/-b pair;
+                                                           # writes nothing without one
 """
 from __future__ import annotations
 
@@ -259,7 +261,26 @@ def same_tree_pairs(directory: Path) -> list[tuple[Path, Path]]:
 
 
 def measure_floor(directory: Path, out_path: Path) -> dict[str, Any]:
-    """Write the floor record from every same-tree pair on disk. Returns it."""
+    """Measure the same-tree floor and write `out_path`, but only if it measured something.
+
+    Returns the record either way; two rules the caller cannot enforce for
+    itself, both from backlog #1888:
+
+    * **Nothing measurable -> no write at all.** The guard is on the measured
+      pair rows, not on `same_tree_pairs()`'s raw output, because a pair whose
+      run errored is found by `same_tree_pairs` and then dropped below — keying
+      on the raw list would still clobber the record with `pairs: []` in that
+      case. An emptied record is worse than the stale one: it silently
+      collapses every floor to the binomial term while the comparison output
+      still prints a floor source, and the pair runs it was measured from are
+      usually swept by the time anyone notices, so the spreads cannot be
+      re-derived. `main()` still exits non-zero off `record["pairs"]`.
+    * **A real rewrite keeps provenance.** The prior record's `measured_at` and
+      `pairs` are carried forward under a top-level `superseded` key, so a
+      measured spread stays attributable to its source runs after those runs
+      are deleted. One level only — the immediately preceding record — because
+      nesting every ancestor would grow the file at every refresh.
+    """
     pairs = same_tree_pairs(directory)
     per_metric: dict[str, float] = {}
     pair_rows = []
@@ -295,6 +316,18 @@ def measure_floor(directory: Path, out_path: Path) -> dict[str, Any]:
         "pairs": pair_rows,
         "metrics": {m: {"observed_spread": per_metric[m]} for m in sorted(per_metric)},
     }
+    if not pair_rows:
+        # Guard on what got measured, not on what was found: an errored pair
+        # reaches `pair_rows` as nothing at all. Writing here would replace a
+        # real record with `pairs: []` and every floor would read as
+        # binomial-only while the output still claimed a measured source.
+        return record
+    prior = load_floor_record(out_path)
+    if prior:
+        record["superseded"] = {
+            "measured_at": prior.get("measured_at"),
+            "pairs": prior.get("pairs") or [],
+        }
     out_path.write_text(yaml.safe_dump(record, sort_keys=False, width=100),
                         encoding="utf-8")
     return record
@@ -427,7 +460,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--baseline", help="explicit path to the prior run")
     ap.add_argument("--baselines", help=f"directory of run artifacts (default {BASELINE_DIR})")
     ap.add_argument("--measure-floor", action="store_true",
-                    help="rewrite the noise floor record from same-tree a/b run pairs and exit")
+                    help="refresh the noise floor record from same-tree `<stem>-a`/"
+                         "`<stem>-b` run pairs and exit; with no such pair it writes "
+                         "nothing and exits 2")
     ap.add_argument("--floor-record", help=f"where the floor record lives (default {FLOOR_RECORD})")
     args = ap.parse_args(argv)
 
@@ -436,14 +471,23 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.measure_floor:
         record = measure_floor(directory, floor_path)
+        if not record["pairs"]:
+            # Exit 2 on a record that was deliberately left alone: the caller
+            # must not read "the file is still there" as "the floor is current".
+            print(f"[warn] no same-tree pair in {directory} produced a measured spread, so "
+                  f"{floor_path} was NOT rewritten and keeps its previous bytes — nothing "
+                  "has been refreshed, which is not a pass. To refill it, run the eval "
+                  "twice on an unmodified tree as `--label noise-a` then `--label noise-b`: "
+                  "that `<stem>-a`/`<stem>-b` pairing is all this reads.")
+            return 2
         print(f"[info] measured floor from {len(record['pairs'])} same-tree pair(s) "
               f"in {directory} -> {floor_path}")
         for metric, block in record["metrics"].items():
             print(f"  {metric:<24} observed spread {block['observed_spread']:.3f}")
-        if not record["pairs"]:
-            print("[warn] no `<stem>-a`/`<stem>-b` pairs with matching config: the record "
-                  "is empty and every floor will read as binomial-only")
-            return 2
+        sup = record.get("superseded") or {}
+        if sup:
+            print(f"  superseded: prior record measured_at={sup.get('measured_at')} with "
+                  f"{len(sup.get('pairs') or [])} pair(s) carried forward for provenance")
         return 0
 
     record = load_floor_record(floor_path)

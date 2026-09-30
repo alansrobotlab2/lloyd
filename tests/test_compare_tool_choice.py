@@ -23,9 +23,11 @@ how big a movement you can actually certify today.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 
 import pytest
+import yaml
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -425,6 +427,154 @@ def test_measure_floor_drops_an_errored_run(tmp_path):
                  encoding="utf-8")
     rec = C.measure_floor(tmp_path, tmp_path / "floor.yaml")
     assert rec["pairs"] == []
+
+
+# ── a refresh never empties the record (backlog #1888) ───────────────────────
+#
+# `--measure-floor` rewrites `eval/noise_floor_tool_choice.yaml` from whatever
+# same-tree pairs are on disk — and the baselines directory holds gate runs
+# (`item435-…`, `item1786-…`, `livebase-…`), whose arms are `item<id>` /
+# `gate-<round_id>`, never `-a`/`-b`. So `same_tree_pairs()` returns `[]` on
+# that directory while the record's own source runs have long since been swept:
+# one invocation replaced the 2026-09-13 spreads with `pairs: []`, and every
+# floor became binomial-only behind a line that still said "measured same-tree
+# spread". The non-zero exit added in `767ff403` fired on a file it had already
+# emptied. These pin the two halves the exit code does not cover: do not write,
+# and when you do write, keep where the numbers came from.
+
+PRIOR_MEASURED_AT = "2026-09-13T14:02:11+00:00"
+PRIOR_PAIRS = [{"a": "875noise-a-20260913-135900.json",
+                "b": "875noise-b-20260913-140015.json",
+                "n_queries": 20,
+                "spread": {"correct_rate": 0.05, "http_tool_first_rate": 0.071}}]
+
+
+def _sha(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _prior_floor_record(tmp_path):
+    """A record with content a clobber would destroy, at a path that survives it."""
+    p = tmp_path / "floor.yaml"
+    p.write_text(yaml.safe_dump({
+        "measured_at": PRIOR_MEASURED_AT,
+        "generated_by": "eval/compare_tool_choice.py --measure-floor",
+        "binomial_sigmas": C.BINOMIAL_SIGMAS,
+        "pairs": PRIOR_PAIRS,
+        "metrics": {"correct_rate": {"observed_spread": 0.05},
+                    "http_tool_first_rate": {"observed_spread": 0.071}},
+    }, sort_keys=False, width=100), encoding="utf-8")
+    return p
+
+
+def _pair_dir(tmp_path, stem="fresh"):
+    """A usable `<stem>-a`/`<stem>-b` pair: same config, one errored-free spread."""
+    d = tmp_path / "runs"
+    d.mkdir(parents=True, exist_ok=True)
+    cfg = {"system_prompt_chars": 43000, "model": "qwen"}
+    (d / f"{stem}-a-20260930-120000.json").write_text(
+        json.dumps({**NOISE_A, "config": cfg}), encoding="utf-8")
+    (d / f"{stem}-b-20260930-120130.json").write_text(
+        json.dumps({**NOISE_B, "config": cfg}), encoding="utf-8")
+    return d
+
+
+def _errored_pair_dir(tmp_path):
+    """An `-a`/`-b` pair `same_tree_pairs` FINDS and `measure_floor` then drops."""
+    d = tmp_path / "runs"
+    d.mkdir(parents=True, exist_ok=True)
+    cfg = {"system_prompt_chars": 1}
+    (d / "e-a-20260930-120000.json").write_text(
+        json.dumps({**_run(correct_rate=0.9), "config": cfg}), encoding="utf-8")
+    (d / "e-b-20260930-120130.json").write_text(
+        json.dumps({**_run(correct_rate=0.1, errors=7), "config": cfg}), encoding="utf-8")
+    return d
+
+
+def test_measure_floor_with_no_pair_leaves_the_record_byte_identical(tmp_path, capsys):
+    """Nothing measurable must not rewrite the record — it is unreconstructable.
+
+    The record's numbers came from runs that no longer exist, so an empty write
+    does not merely lose information, it loses it *and* prints a floor source.
+    The prior bytes surviving is the assertion; exit 2 is the already-shipped
+    half (`767ff403`), here only to prove the exit is reported on a file this
+    call had no business touching.
+    """
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    (runs / "solo-20260930-120000.json").write_text(
+        json.dumps({**_run(), "config": {"model": "qwen"}}), encoding="utf-8")
+    floor = _prior_floor_record(tmp_path)
+    before = _sha(floor)
+    assert C.main(["--measure-floor", "--baselines", str(runs),
+                   "--floor-record", str(floor)]) == 2
+    assert _sha(floor) == before
+    assert yaml.safe_load(floor.read_text(encoding="utf-8"))["pairs"] == PRIOR_PAIRS
+    assert "NOT rewritten" in capsys.readouterr().out
+
+
+def test_measure_floor_with_only_an_errored_pair_still_leaves_it(tmp_path, capsys):
+    """The guard reads measured pair rows, not `same_tree_pairs()`'s raw output.
+
+    This pair IS found — one `-a`/`-b` stem, identical config — and is dropped
+    afterwards because b carries 7 errors. A guard written as
+    `if not same_tree_pairs(directory): return` passes right through here and
+    empties the record anyway, which is the case the clause names.
+    """
+    runs = _errored_pair_dir(tmp_path)
+    assert C.same_tree_pairs(runs) != [], "fixture must present a found-but-dropped pair"
+    floor = _prior_floor_record(tmp_path)
+    before = _sha(floor)
+    assert C.main(["--measure-floor", "--baselines", str(runs),
+                   "--floor-record", str(floor)]) == 2
+    assert _sha(floor) == before
+    assert "NOT rewritten" in capsys.readouterr().out
+
+
+def test_a_refreshed_floor_record_carries_the_prior_provenance(tmp_path, capsys):
+    """A real refresh still writes, and the superseded record stays attributable."""
+    runs = _pair_dir(tmp_path)
+    floor = _prior_floor_record(tmp_path)
+    assert C.main(["--measure-floor", "--baselines", str(runs),
+                   "--floor-record", str(floor)]) == 0
+    rec = yaml.safe_load(floor.read_text(encoding="utf-8"))
+    assert rec["superseded"]["measured_at"] == PRIOR_MEASURED_AT
+    assert rec["superseded"]["pairs"] == PRIOR_PAIRS
+    # The live block is the new measurement, not the copied one.
+    assert [p["a"] for p in rec["pairs"]] == ["fresh-a-20260930-120000.json"]
+    assert rec["measured_at"] != PRIOR_MEASURED_AT
+    assert rec["metrics"]["correct_rate"]["observed_spread"] == pytest.approx(0.05)
+    assert "superseded: prior record measured_at" in capsys.readouterr().out
+
+
+def test_a_first_floor_record_carries_no_superseded_content(tmp_path):
+    """With no prior at the target path the rewrite is clean, not empty-headed."""
+    runs = _pair_dir(tmp_path)
+    floor = tmp_path / "floor.yaml"
+    assert not floor.exists()
+    assert C.main(["--measure-floor", "--baselines", str(runs),
+                   "--floor-record", str(floor)]) == 0
+    rec = yaml.safe_load(floor.read_text(encoding="utf-8"))
+    assert "superseded" not in rec
+    assert len(rec["pairs"]) == 1
+
+
+def test_measurement_doc_names_the_stems_that_refill_the_record():
+    """The `-a`/`-b` convention belongs in the doc that documents the rung.
+
+    Nothing calls `--measure-floor` automatically, and the gate's own labels —
+    `item<id>` (gate.py:1590) or `gate-<round_id>` — produce stems whose arm
+    residue can never end `-a`/`-b`, so a human is the only thing that refills
+    the record. A human reading "`--measure-floor` fixes that" needs the two
+    labels that actually produce a pair, written beside the rung.
+    """
+    doc = (ROOT / "architecture" / "measurement.md").read_text(encoding="utf-8")
+    heading = "## Which measurement stands between a round and landing"
+    assert heading in doc, "the tool-choice rung section is gone from measurement.md"
+    rung = doc.split(heading, 1)[1]
+    assert "<stem>-a-<ts>.json" in rung, "the -a stem is not named beside the rung"
+    assert "<stem>-b-<ts>.json" in rung, "the -b stem is not named beside the rung"
+    assert "--label noise-a" in rung and "--label noise-b" in rung
 
 
 def test_the_committed_floor_record_is_valid_and_nonempty():

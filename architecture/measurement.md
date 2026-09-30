@@ -191,6 +191,25 @@ rung of `scripts/automod/gate.py` and nothing else.
   runtime data left it at `6426668b` (2026-09-22) — is gone from the comment,
   from the test and from here, because the doc layer inherits whatever the
   comment asserts.
+- The measured spread every floor is compared against lives in
+  `eval/noise_floor_tool_choice.yaml`, and exactly one thing refills it: a
+  same-tree run pair named `<stem>-a-<ts>.json` / `<stem>-b-<ts>.json` — two
+  runs of an **unmodified** tree, taken as `eval/run_tool_choice_eval.py` twice
+  with `--label noise-a` and then `--label noise-b`, whose filenames come out
+  `noise-a-<YYYYMMDD-HHMMSS>.json` and `noise-b-<…>.json`
+  (`eval/run_tool_choice_eval.py:498`). `same_tree_pairs()` matches those stems
+  only when the two runs recorded an identical `config` block, and
+  `eval/compare_tool_choice.py --measure-floor` is what measures the spread from
+  them. No automated label can ever produce a pair: the rung above labels the
+  run `item<id>` or `gate-<round_id>` (`scripts/automod/gate.py:1590`), so its
+  arm residue is never `-a`/`-b`, and nothing calls `--measure-floor` on a
+  schedule either. A person does it, or the record ages. Since #1888 that
+  command refuses to write when no pair survived into the record — no pair on
+  disk, or every pair dropped for an errored run — and exits 2 on the bytes it
+  left alone; and a rewrite that does happen carries the previous record's
+  `measured_at` and `pairs` under `superseded`, because the run files a floor
+  was measured from get swept routinely and the spread cannot be re-derived
+  afterwards.
 - Exit codes come from the script, not a copy of its contract: 0 pass, 1
   regression, 2 nothing to compare against — which is not a pass — and 3
   instrument failure, meaning the control set moved so the comparison certified
