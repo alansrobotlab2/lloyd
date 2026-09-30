@@ -245,6 +245,84 @@ def _drop_scratch(path: Path | str, round_id: str) -> None:
     shutil.rmtree(real, ignore_errors=True)
 
 
+#: A gate child's `TMPDIR` lives here, one short directory per round, on disk.
+#: Short because a Unix socket path is capped at 107 bytes and programs put their
+#: sockets under TMPDIR: Chromium's singleton socket is
+#: `$TMPDIR/.org.chromium.Chromium.XXXXXX/SingletonSocket`, 45 bytes past TMPDIR.
+#: On 2026-09-29 the first cut used `<round>/gate-state/tmp` (64 bytes), every
+#: Playwright test's Chromium aborted with "Socket path too long", and 65 core
+#: dumps and a stream of crash toasts followed within fifteen minutes.
+CHILD_TMP_DIRNAME = ".t"
+#: Longest `TMPDIR` handed to a child. 107 - 45 leaves 62 for Chromium alone;
+#: 48 keeps room for a deeper socket name than Chromium's.
+MAX_CHILD_TMPDIR = 48
+_CHILD_TMP_NAME = re.compile(r"^[0-9a-f]{10}$")
+_CHILD_TMP_OWNER = ".owner"
+
+
+def _child_tmp_root() -> Path:
+    return Path(W.WORK_ROOT) / CHILD_TMP_DIRNAME
+
+
+def _child_tmpdir(round_id: str) -> Path | None:
+    """The round's own short `TMPDIR`, created, or None when no short one fits.
+
+    `~/lloyd-work/.t/<10 hex of the round id>`: 36 bytes on this box. On disk,
+    so a gate never spends `/tmp`'s inode budget (see `architecture/testing.md`
+    "2026-09-29"), and short, so no socket under it outgrows `sun_path`. None
+    — the child inherits the system temp dir, loudly — when the work root is so
+    long that no name under it fits `MAX_CHILD_TMPDIR`; a long TMPDIR breaks
+    every browser test, which is worse than the budget it protects.
+    """
+    import hashlib
+    root = _child_tmp_root()
+    path = root / hashlib.sha1(round_id.encode()).hexdigest()[:10]
+    if len(str(path)) > MAX_CHILD_TMPDIR:
+        print(f"[warn] {path} is {len(str(path))} bytes (> {MAX_CHILD_TMPDIR}); "
+              f"children keep the system temp dir")
+        return None
+    path.mkdir(parents=True, exist_ok=True)
+    (path / _CHILD_TMP_OWNER).write_text(str(W.round_dir(round_id)), encoding="utf-8")
+    _prune_child_tmpdirs(keep=path)
+    return path
+
+
+def _drop_child_tmpdir(path: Path | str | None) -> bool:
+    """Remove one directory `_child_tmpdir` made, and refuse anything else:
+    it must be a real directory, a direct child of the child-tmp root, named by
+    `_child_tmpdir`'s own pattern. False when refused or absent."""
+    if not path:
+        return False
+    p = Path(path)
+    root = _child_tmp_root()
+    if (p.is_symlink() or not p.is_dir() or p.parent.resolve() != root.resolve()
+            or not _CHILD_TMP_NAME.match(p.name)):
+        return False
+    shutil.rmtree(p, ignore_errors=True)
+    return True
+
+
+def _prune_child_tmpdirs(keep: Path | None = None) -> list[str]:
+    """Drop child tmpdirs whose round dir is gone: a gate that was killed never
+    reached the `finally` that removes its own."""
+    root = _child_tmp_root()
+    dropped: list[str] = []
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return dropped
+    for e in entries:
+        if keep is not None and e == keep:
+            continue
+        try:
+            owner = (e / _CHILD_TMP_OWNER).read_text(encoding="utf-8").strip()
+        except OSError:
+            continue           # no owner file: not ours to judge
+        if owner and not Path(owner).exists() and _drop_child_tmpdir(e):
+            dropped.append(e.name)
+    return dropped
+
+
 def _canary_lock_held() -> bool:
     """Whether another gate holds the canary ports right now. Probed by
     taking and at once releasing the lock, which is what `flock` offers."""
@@ -746,14 +824,14 @@ class Gate:
         scratch = W.round_dir(self.round_id) / "gate-state"
         (scratch / "automod").mkdir(parents=True, exist_ok=True)
         (scratch / "guardian").mkdir(parents=True, exist_ok=True)
-        # Every child's temp files go under the round too (`TMPDIR`): pytest's
-        # basetemp, conftest's scratch roots, whatever a test hands `tempfile`.
-        # `/tmp` on this box is a 1M-inode tmpfs that the suite's own leftovers
-        # have filled twice (2026-09-22, 2026-09-29), and a full `/tmp` turns
-        # every `tmp_path` fixture into an error — the 24-error `tests` rung of
-        # 09-22 — and worse (see `_scratch_dir`). On disk, and gone with the
-        # round, it is neither a shared resource nor a growing one.
-        (scratch / "tmp").mkdir(parents=True, exist_ok=True)
+        # Every child's temp files go on disk (`TMPDIR`): pytest's basetemp,
+        # conftest's scratch roots, whatever a test hands `tempfile`. `/tmp` on
+        # this box is a 1M-inode tmpfs that the suite's own leftovers have
+        # filled twice (2026-09-22, 2026-09-29), and a full `/tmp` turns every
+        # `tmp_path` fixture into an error — and worse (see `_scratch_dir`).
+        # SHORT, and not under the round dir: see `_child_tmpdir`.
+        tmp = _child_tmpdir(self.round_id)
+        self._child_tmp = tmp
         home = Path.home()
         if isolate_home:
             try:
@@ -770,8 +848,9 @@ class Gate:
             "LLOYD_AUTOMOD_STATE": str(scratch / "automod"),
             "LLOYD_GUARDIAN_STATE": str(scratch / "guardian"),
             "LLOYD_VOICE_ALERTS": "0",
-            "TMPDIR": str(scratch / "tmp"),
         }
+        if tmp is not None:
+            env["TMPDIR"] = str(tmp)
         if live_data:
             from app.data_root import production_data_root
             env["LLOYD_DATA"] = str(production_data_root())
@@ -1057,6 +1136,9 @@ class Gate:
             # A gate that stopped before the review rung judged nothing: the
             # prefetch leaves no event and spends no attempt.
             self._discard_review_prefetch("the gate stopped before the review rung")
+            # The children's TMPDIR, which lives outside the round dir and so
+            # would outlive it; a killed gate's copy is pruned by the next one.
+            _drop_child_tmpdir(getattr(self, "_child_tmp", None))
             if getattr(self, "_canary", None):
                 try:
                     self._canary.stop()

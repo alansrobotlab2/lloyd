@@ -200,7 +200,8 @@ python -m scripts.automod.rehearse --yes-i-mean-it  # prove rollback still works
   On 2026-09-29 `mktemp -d` failed on a full `/tmp` (1M inodes), its empty
   stdout became `Path("")` = the gate's cwd = `~/lloyd`, and the static rung's
   `rmtree` deleted production. Scratch is `gate._scratch_dir` / `_drop_scratch`
-  under the round dir, children get `TMPDIR` there, and no quoted `mktemp`
+  under the round dir, children get a SHORT on-disk `TMPDIR` (a socket path
+  caps at 107 bytes; a 64-byte one crashed every Chromium), and no quoted `mktemp`
   argv may exist in the tree (`tests/test_gate_scratch_dirs.py`).
   `architecture/testing.md` "2026-09-29".
 - **A worker turn may not restart, stop or hand-boot a service or engine, nor

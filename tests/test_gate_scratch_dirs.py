@@ -164,15 +164,100 @@ def test_static_rung_fails_closed_when_no_scratch_dir_can_be_made(
         "the rung wrote into the working directory")
 
 
-def test_child_env_puts_tmpdir_under_the_round(work_root):
-    """Every child of the gate — pytest's basetemp, conftest's scratch roots,
-    a test's own `tempfile` — writes under the round dir, on disk, not into
-    the 1M-inode `/tmp` tmpfs the suite's leftovers have filled twice."""
+#: Chromium's singleton socket, relative to TMPDIR: `/.org.chromium.Chromium.`
+#: plus six random characters, then `/SingletonSocket`.
+CHROMIUM_SOCKET_TAIL = "/.org.chromium.Chromium.abcdef/SingletonSocket"
+SUN_PATH_MAX = 107
+
+
+def test_production_child_tmpdir_leaves_room_for_chromiums_socket():
+    """The 2026-09-29 regression: `<round>/gate-state/tmp` was 64 bytes, 45 more
+    for Chromium's socket is 109, and every Playwright test's browser aborted.
+    Computed against the real work root and a real-length round id."""
+    path = G._child_tmp_root() / ("0" * 10)
+    assert len(str(path)) <= G.MAX_CHILD_TMPDIR
+    assert len(str(path)) + len(CHROMIUM_SOCKET_TAIL) <= SUN_PATH_MAX
+    assert G.MAX_CHILD_TMPDIR + len(CHROMIUM_SOCKET_TAIL) <= SUN_PATH_MAX
+
+
+def test_the_kernel_accepts_a_socket_at_the_longest_allowed_tmpdir():
+    """Not arithmetic about the limit — a bind the kernel judges. A directory
+    exactly `MAX_CHILD_TMPDIR` bytes long takes Chromium's socket; one as long
+    as the 09-29 TMPDIR does not."""
+    import socket
+    import tempfile
+    base = tempfile.mkdtemp(prefix="s", dir="/tmp")
+    try:
+        def at(length):
+            d = Path(base) / ("x" * (length - len(base) - 1))
+            sock_path = str(d) + CHROMIUM_SOCKET_TAIL
+            Path(sock_path).parent.mkdir(parents=True, exist_ok=True)
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                s.bind(sock_path)
+                return True
+            except OSError:
+                return False
+            finally:
+                s.close()
+        assert at(G.MAX_CHILD_TMPDIR) is True
+        assert at(len("/home/alansrobotlab/lloyd-work/SM_20260930_003324/gate-state/tmp")) is False
+    finally:
+        import shutil
+        shutil.rmtree(base, ignore_errors=True)
+
+
+@pytest.fixture
+def short_work_root(monkeypatch):
+    import tempfile, shutil
+    root = Path(tempfile.mkdtemp(prefix="w", dir="/tmp"))
+    monkeypatch.setattr(W, "WORK_ROOT", root)
+    yield root
+    shutil.rmtree(root, ignore_errors=True)
+
+
+def test_child_env_gives_a_short_on_disk_tmpdir_and_the_gate_removes_it(short_work_root):
+    g = G.Gate.__new__(G.Gate)
+    g.round_id = ROUND
+    g.worktree = short_work_root / ROUND / "home" / "lloyd"
+    g.home_isolation = "not requested"
+    env = g._child_env()
+    tmp = Path(env["TMPDIR"])
+    assert tmp.is_dir() and tmp.parent == short_work_root / G.CHILD_TMP_DIRNAME
+    assert len(str(tmp)) <= G.MAX_CHILD_TMPDIR
+    assert not str(tmp).startswith("/tmp/") or str(short_work_root).startswith("/tmp/")
+    assert G._drop_child_tmpdir(tmp) is True and not tmp.exists()
+
+
+def test_a_work_root_too_long_for_a_short_tmpdir_keeps_the_system_one(work_root):
+    """Pytest's own tmp_path makes the work root far over the bound: the child
+    then gets no TMPDIR at all rather than a long one."""
     g = G.Gate.__new__(G.Gate)
     g.round_id = ROUND
     g.worktree = work_root / ROUND / "home" / "lloyd"
     g.home_isolation = "not requested"
-    env = g._child_env()
-    tmp = Path(env["TMPDIR"])
-    assert tmp.is_absolute() and tmp.is_dir()
-    assert tmp.is_relative_to(work_root / ROUND)
+    assert "TMPDIR" not in g._child_env()
+
+
+def test_drop_child_tmpdir_refuses_anything_it_did_not_make(short_work_root, tmp_path):
+    made = G._child_tmpdir(ROUND)
+    other = short_work_root / G.CHILD_TMP_DIRNAME / "not-a-hash"
+    other.mkdir()
+    link = short_work_root / G.CHILD_TMP_DIRNAME / "abcdef0123"
+    link.symlink_to(tmp_path)
+    (tmp_path / "keep").write_text("x")
+    for target in (other, link, short_work_root, short_work_root / G.CHILD_TMP_DIRNAME,
+                   tmp_path, None, ""):
+        assert G._drop_child_tmpdir(target) is False
+    assert other.exists() and (tmp_path / "keep").exists() and made.exists()
+
+
+def test_a_killed_gates_tmpdir_is_pruned_once_its_round_is_gone(short_work_root):
+    (short_work_root / "SM_OLD").mkdir()
+    old = G._child_tmpdir("SM_OLD")
+    (short_work_root / "SM_OLD").rmdir()           # the round was cleaned up
+    live_round = short_work_root / "SM_LIVE"
+    live_round.mkdir()
+    live = G._child_tmpdir("SM_LIVE")              # pruning runs here
+    assert not old.exists()
+    assert live.exists()

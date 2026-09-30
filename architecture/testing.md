@@ -64,10 +64,18 @@ Three rules now, pinned by `tests/test_gate_scratch_dirs.py`:
   round's scratch parent, and anything that is or contains the working
   directory, `$HOME`, the live tree, `~/lloyd-work` or the round dir. It raises
   rather than logs.
-- **The gate's children get `TMPDIR=<round>/gate-state/tmp`.** pytest's basetemp,
-  conftest's scratch roots and every test's `tempfile` land on disk under the
-  round and die with it, so a gate run neither fills `/tmp` nor fails when
-  something else has.
+- **The gate's children get a short on-disk `TMPDIR`**, `~/lloyd-work/.t/<10 hex>`
+  (44 bytes, `gate._child_tmpdir`, removed by the gate's `finally`, a killed
+  gate's copy pruned by the next). pytest's basetemp, conftest's scratch roots
+  and every test's `tempfile` land there, so a gate run neither fills `/tmp` nor
+  fails when something else has. **It must stay short**: a Unix socket path is
+  capped at 107 bytes and programs put sockets under TMPDIR. The first cut used
+  `<round>/gate-state/tmp` (64 bytes); Chromium's singleton socket adds 45, and
+  from 17:30 PDT every Playwright test's browser aborted with "Socket path too
+  long" — 65 core dumps and a stream of crash toasts in fifteen minutes, and
+  browser-test verdicts in those gates that mean nothing. `MAX_CHILD_TMPDIR` is
+  48; a work root too long for that gives the child no TMPDIR rather than a
+  long one. A kernel `bind` at Chromium's path shape pins it.
 
 What filled `/tmp` on 09-29, measured by `du --inodes -x -d1 /tmp` at 100%:
 `/tmp/pytest-of-alansrobotlab` 666,565, `/tmp/claude-1000` (Claude Code's own
