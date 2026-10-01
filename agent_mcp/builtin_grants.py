@@ -78,13 +78,32 @@ async def _grant_create(args: dict[str, Any]) -> str:
         logger.warning("[grants] refused mint from session=%r", get_bound_session())
         return json.dumps({"error": refused})
 
+    # An omitted quota is ONE action, not an unlimited row.
+    # `app.harness.policy.GrantStore.mint` stores NULL for absence and validates
+    # the value only when one was given, and every consumption check in that
+    # module reads `if quota is not None and consumed >= quota` — so a NULL row
+    # is never over quota and the approval stands until its expiry. An approval
+    # that quietly becomes a licence for everything of that tool for a week is
+    # how an agent walks past a human, and the mint line a denial hands over
+    # (#727, `app.harness.policy.grant_shape`) carries no `quota=` bit at all, so
+    # pasting it used to mint exactly that row. The default belongs HERE, on the
+    # entry a human's paste lands on, and not inside `mint`: `mint(quota=None)`
+    # means unbounded to callers that mean it — the autonomy `grants:`
+    # frontmatter surface, whose own default is a separate ruling, and the
+    # multi-call egress tests. And it is an `is None` test, never
+    # `args.get("quota") or 1`: a caller that passed 0 was refused before this
+    # change and must be refused now, not quietly handed a 1.
+    quota = args.get("quota")
+    if quota is None:
+        quota = 1
+
     store = _store()
     try:
         row = store.mint(
             scope=args.get("scope"),
             tool_pattern=args.get("tool"),
             arg_predicate=args.get("predicate") or "",
-            quota=args.get("quota"),
+            quota=quota,
             issued_by=args.get("issued_by"),
             expires_at=args.get("expires_at"),
             note=args.get("note") or "",
@@ -157,9 +176,10 @@ async def _grant_revoke(args: dict[str, Any]) -> str:
                        "effective": "next dispatch, including mid-run"})
 
 
-_CREATE_DESC = """Use when the user wants to let an unattended worker or autonomy task use a tool its gate refuses; to see existing grants use grant_list, to withdraw one use grant_revoke.
+_CREATE_DESC = """Use when the user wants to let an unattended worker or autonomy task use a tool its gate refuses; to see grants use grant_list, to withdraw one use grant_revoke.
 
-Mints an expiring, quota-bound authority grant (#534) for one scope and one tool. Interactive turns only: a worker or autonomy turn cannot call it, and a grant never outlives `expires_at`. A refusal reading "no grant for X from scope Y" shows the exact call to make."""
+Mints an expiring, quota-bound authority grant (#534) for one scope and one tool. Interactive turns only, and a grant never outlives `expires_at`. A refusal naming 'no grant for X from scope Y' shows the exact call to make; an omitted `quota` clears one action (#1946)."""
+
 
 _LIST_DESC = """List live (unexpired, unrevoked) authority grants, optionally for one scope.
 
@@ -209,10 +229,10 @@ async def list_tools():
                     "type": "integer",
                     "minimum": 1,
                     "description": (
-                        "Maximum number of executions. Counted per call, and "
-                        "checked before expiry. Omitted means unbounded — "
-                        "prefer setting it, since volume is the half of 'scope' "
-                        "that an agent is most likely to push."
+                        "How many executions it pays for, counted per call. "
+                        "Omitting it yields 1: an approval clears the one action "
+                        "it names instead of becoming a standing licence. Pass N "
+                        "only if you mean N, and say why in `note`."
                     ),
                 },
                 "expires_at": {
