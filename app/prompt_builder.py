@@ -491,6 +491,7 @@ def build_system_prompt(
         "<task_notification> unless its result changes your plan."
     )
     parts.append(bg_tasks)
+    parts.append(_refusal_hint())
 
     # Web lookups. Bash gets an affordance paragraph directly above, and the
     # model has both it and the http_* tools in the ToolSearch baseline on
@@ -952,6 +953,33 @@ def rpc_hint_enabled() -> bool:
     except Exception:  # noqa: BLE001
         return False
     return enabled()
+
+
+def _refusal_hint() -> str:
+    """What a refused tool call means and what not to do about it.
+
+    Every guard on this box judges the call in front of it by its shape — a
+    Bash command by its program word and arguments, a write by the path it
+    resolves to — so a refusal can be "worked around" by respelling the same
+    effect through another tool, and the detour is judged by the same rule
+    when it arrives. The model is told that up front rather than discovering
+    it one refusal at a time, and told that a refusal naming a remedy (a grant
+    to mint, a path, a session) is the way forward. OpenAPPA ships the same
+    paragraph as a session-context document; the measured baseline for how
+    often a refusal is followed by a same-target retry is
+    `eval/refusal_detour_baseline.py`.
+    """
+    return (
+        "Refused tool calls: a result that begins `Tool call denied` is a policy "
+        "decision, not an error. Do not retry it, and do not reach the same effect "
+        "through another tool or another spelling — a delete refused as `rm -rf` is "
+        "refused as `find -delete`, a Python one-liner or a shell wrapper too, and a "
+        "write refused on one path is refused on every path that resolves to it; a "
+        "detour is judged as the same action. When the refusal names what to do "
+        "instead (a grant to mint, a route that validates the change, a session that "
+        "may do it), that is the way forward. Otherwise say in one sentence what you "
+        "tried and that the harness refused it, and finish the rest of the task."
+    )
 
 
 def _rpc_hint() -> str:

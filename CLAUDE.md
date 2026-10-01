@@ -106,6 +106,28 @@ The sync registration is guarded the same way (`app/harness/sync_registration.py
 running, and never re-link sync to a remote that holds an incident's
 deletions.** Long version: `architecture/vault-protection.md`.
 
+## Every refusal is journaled
+
+`app/harness/denial_journal.py` appends one JSONL row per refusal to
+`$DATA_ROOT/safety/denials.jsonl`: guard, where it fired (`hook` or `dispatch`),
+session class (`chat|background|bench|subagent|none`), tool, reason, pattern label,
+commit. Two call sites cover every guard — `HookRegistry.fire_pre_tool_use` for every
+PreToolUse deny (a fail-closed gate that raised included) and `agent_mcp.main._refused_call`
+for every dispatch-time refusal — plus the two Write-lane handlers. **A new guard needs
+no journal code; a new dispatch refusal passes `guard=` and `session_id=` to
+`_refused_call`.** Fail-open and never a decision input: a lost row costs a warning,
+never a dispatch. Scorecard row 16 ("guard denials") reads it; the writer and the
+reader share one override, `LLOYD_DENIAL_JOURNAL`. Long version: `architecture/harness.md`
+"The denial journal".
+
+The system prompt also tells the model what a refusal means
+(`prompt_builder._refusal_hint`): a `Tool call denied` result is a decision, not an error;
+no retry and no respelling through another tool, since every guard judges a detour by the
+same rule; a refusal naming a remedy is the way forward. Baseline before the paragraph
+(`eval/refusal_detour_baseline.py`, 2026-09-30): 23 of 400 stored refusals were followed
+within three calls by a same-effect retry, 30% of the hard-deny refusals. Re-run it to see
+whether the paragraph moved that.
+
 ## Install provenance and advisory scan
 
 `app/harness/supply_chain.py`. **A background session's `pip install <name>` for a

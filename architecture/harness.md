@@ -1739,6 +1739,93 @@ a negative result is a clean `rejected`):
 - **P10** — a labelling week (200 calls, hand-labelled) before any threshold
   is written and `warn` is considered.
 
+## The denial journal (2026-09-30)
+
+**What it is.** `app/harness/denial_journal.py` writes one JSON line per refusal to
+`$DATA_ROOT/safety/denials.jsonl` (`app.paths.DENIAL_JOURNAL_PATH`, env override
+`LLOYD_DENIAL_JOURNAL` for tests and canary boots). A row carries `at` (UTC, offset-bearing),
+`guard`, `where` (`hook` | `dispatch`), `session`, `session_class`
+(`chat` | `background` | `bench` | `subagent` | `none`, read off the id alone), `tool`,
+`label` (the pattern label inside a `harness safety: blocked '…'` reason), `reason`
+(400 chars), `excerpt` (200 chars) and `commit` (the tree's HEAD at first use, cached for
+the process).
+
+**Why.** Before it, a refusal's only durable witness was whatever the refusing guard chose
+to keep. The grant gate had its `grant_dispatch` table and install provenance its
+`provenance.jsonl`; every other guard — the hard-deny table, the protected-path deny-sets,
+sync-registration, service-control, the bench sandbox, the outbound-content gate, the
+desktop and sessionless refusals — emitted one `logger.warning` into `server.err`, which
+with its rotations spans about 2.6 days. "How often does guard X refuse, and in which
+session class" had no answer older than that, and a threshold or false-positive question
+had no corpus. The OpenAPPA assessment (vault, `knowledge/ai/openappa-adoption-assessment.md`)
+named this gap: that engine keeps every decision as a fact in its trajectory log beside the
+hash of the policy it ran under. This is the same idea at the size one box needs.
+
+**Where it is written.** Two sites, chosen so a new guard is journaled without knowing the
+journal exists:
+
+- `HookRegistry.fire_pre_tool_use` (`app/harness/hooks.py`) journals every PreToolUse deny
+  it returns, including the deny it synthesises for a fail-closed gate that raised. The
+  guard name comes from the callback's qualname through `denial_journal._HOOK_GUARDS`
+  (`_safety_pretool_cb` → `safety`, `_policy_pretool_cb` → `grant`,
+  `_content_pretool_cb` → `outbound_content`, `_bench_corpus_pretool_cb` → `bench_corpus`,
+  `write_scope_denial` → `trial_write_scope`); an unlisted callback is journaled under its
+  own qualname, so it is still counted.
+- `agent_mcp.main._refused_call(name, reason, *, guard, session_id)` journals every refusal
+  the aggregator makes at dispatch — `tool_sandbox`, `safety`, `desktop`, `sessionless`,
+  `lloyd_rpc`. Dispatch is where a call runs whether or not a hook was installed, so this is
+  the site that cannot be bypassed by a caller that forgot `hooks=`.
+- The two Write-lane handlers (`builtin_fs._protected_path_refusal`,
+  `vault._protected_write_refusal`) return their own error strings and call `record`
+  directly under `protected_write`.
+
+A Bash command refused by the hook AND at dispatch is two rows (`where` tells them apart);
+that is the honest count of how often each layer fired, not a duplicate to dedupe.
+Install provenance keeps its own journal as well — that file records every install check,
+cleared ones included, and this one records refusals.
+
+**What it is not.** Not a decision input: nothing on the dispatch path reads it. Fail-open
+like the provenance journal and for the same reason — a journal that can turn its own
+failure into a refusal, or delay a dispatch, is worse than none. `record` never raises; a
+lost row is one warning line.
+
+**Who reads it.** Scorecard row 16 (`scripts/automod/scorecard._denials`) counts the window
+by guard, session class and `where`, with the top safety labels, and renders
+`safety 40 (background 38, chat 2)` so a reader sees at a glance whether a guard is
+refusing unattended work or a person. A missing journal renders as "no journal yet", never
+as zero. The scorecard resolves the path through `app.data_root`, the stdlib-only resolver
+the guardian uses, so it still imports nothing from the application.
+
+**Pins.** `tests/test_denial_journal.py`: a hook deny under its gate's name, a raising
+fail-closed gate, a pass and a fail-open raise writing nothing, the dispatch helper under
+the caller's guard, the session-class table, an unwritable journal that neither raises nor
+changes the refusal, and row 16 against a fixture journal.
+
+## The refusal paragraph (2026-09-30)
+
+`prompt_builder._refusal_hint()` is one paragraph in every platform's system prompt, after
+the background-bash hint. It says four things: a result beginning `Tool call denied` is a
+policy decision, not an error; do not retry it; do not reach the same effect through another
+tool or spelling (`rm -rf` → `find -delete`, a Python one-liner, a redirect to a path that
+resolves to the same file), because every guard judges the detour by the rule that refused
+the original; and when the refusal names a remedy — the grant to mint, the route that
+validates the change, the session that may do it — that is the way forward. OpenAPPA ships
+the same text as a session-context document; here the grant gate already names the exact
+grant to mint, so the paragraph supplies the half that was missing, the detour rule.
+
+**Why a prompt paragraph and not more regex.** Bash is governed per command shape, so a
+refused shape can always be respelled; closing each spelling in the pattern table is a
+chase. Telling the model the rule once is cheap, and whether it works is measurable:
+`eval/refusal_detour_baseline.py` scans every stored session for `Tool call denied` results
+(bare from the hook, JSON-wrapped from the aggregator) and asks, over the next three tool
+calls, whether a target path from the refusal's excerpt reappears (same-target) and whether
+the call carries the refused verb or a known alternative for it (same-effect). The
+2026-09-30 baseline, before the paragraph: 400 refusals in 3,979 sessions, 306 of them the
+bench sandbox (0 retries), 77 the hard-deny table — of which 25 were same-target and **23
+same-effect (30%)**; top labels `sudo` 24, `rm -rf on root/home/system path` 13. Retries
+were Bash 16, Read 4, Edit 3, Write 2. The paragraph is judged by that number moving on a
+re-run, not by its wording. Pins: `tests/test_refusal_hint.py`.
+
 ## Cleared tool results: where they go and how they come back (#1514, #1481, #1499)
 
 A cleared result has left the prompt but not the machine. Every rung that drops
