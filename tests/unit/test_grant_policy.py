@@ -730,6 +730,70 @@ def test_a_first_mint_and_an_expired_rearm_say_nothing_about_a_revocation(
         _policy_warnings(caplog))
 
 
+# ── #2021: the denial for a spent declared grant names the edit that works ──
+
+def _spend(store, *, scope, tool, tool_input):
+    for _ in range(2):
+        assert check_grants(store, scope=scope, tool_name=tool,
+                            tool_input=tool_input, now=NOW).allowed
+    denied = check_grants(store, scope=scope, tool_name=tool,
+                          tool_input=tool_input, now=NOW)
+    assert denied.allowed is False and "over quota (2/2)" in denied.reason, (
+        denied.reason)
+    return denied.reason
+
+
+def _mint_line(reason: str, scope: str, tool: str) -> str:
+    import re
+    expiry = re.search(r"expires_at='([^']+)'\, issued_by", reason).group(1)
+    return (f"grant_create(scope='{scope}', tool='{tool}', "
+            f"expires_at='{expiry}', issued_by='alan')")
+
+
+@pytest.mark.parametrize("tool,tool_input", [
+    ("email_send", {}),
+    (policy.SCHEDULE_STATE_TOOL, {"id": 68, "status": "up_next"}),
+])
+def test_a_spent_frontmatter_grant_is_denied_with_the_file_edit_that_works(
+        store, tool, tool_input):
+    """The file already has the `grants:` block — it minted the refusing row —
+    so the reason must not send the reader to add one. Still a deny, still
+    `over quota (2/2)`: no dispatch decision moves."""
+    scope = "autonomy-task:40"
+    assert policy.sync_task_grants(
+        store, task_id=40, scope=scope, now=NOW,
+        grants=[{"tool": tool, "quota": 2, "expires_at": _iso(24),
+                 "issued_by": "alan"}]) == 1
+    gid = store.live(scope=scope, now=NOW)[0]["id"]
+
+    reason = _spend(store, scope=scope, tool=tool, tool_input=tool_input)
+
+    assert "adds a `grants:` block" not in reason, reason
+    assert f"autonomy task #40's own `grants:` block" in reason, reason
+    assert "`40-*.md`" in reason and "`expires_at:`" in reason and "`quota:`" in reason
+    assert f"grant_revoke(grant_id={gid})" in reason, reason
+    assert _mint_line(reason, scope, tool) in reason, (
+        "the paste-ready line stays as the one-off route")
+
+
+def test_a_spent_hand_minted_grant_keeps_its_denial_text_exactly(store):
+    """The other half of clause 3: an `interactive-tool` row is described as
+    before — paste-ready line, and for the schedule tool the `grants:`-block
+    sentence, which is true advice for a file that declares nothing."""
+    scope = "autonomy-task:39"
+    for tool, tool_input in (("email_send", {}),
+                             (policy.SCHEDULE_STATE_TOOL,
+                              {"id": 68, "status": "up_next"})):
+        store.mint(scope=scope, tool_pattern=tool, quota=2, issued_by="alan",
+                   expires_at=NOW + dt.timedelta(hours=24),
+                   minted_by="interactive-tool", now=NOW)
+        reason = _spend(store, scope=scope, tool=tool, tool_input=tool_input)
+        assert reason.endswith(_mint_line(reason, scope, tool)), reason
+        assert "grant_revoke" not in reason and "minted from autonomy task" not in reason
+        assert ("adds a `grants:` block" in reason) is (
+            tool == policy.SCHEDULE_STATE_TOOL), reason
+
+
 # ── #1949 claim 1: the two ledgers are one store, on committed bytes ───────
 #
 # The item's literal premise was a restart asymmetry: does `_tool_effects.py`'s

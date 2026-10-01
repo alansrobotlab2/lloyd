@@ -826,6 +826,17 @@ def destination_covers(entry: Any, host: Any) -> bool:
 def _explain_missing(scope: str, tool: str, rows: Iterable[dict],
                      now: dt.datetime, *,
                      destination: str | None = None) -> str:
+    return _explain_missing_row(scope, tool, rows, now,
+                                destination=destination)[0]
+
+
+def _explain_missing_row(scope: str, tool: str, rows: Iterable[dict],
+                         now: dt.datetime, *,
+                         destination: str | None = None
+                         ) -> tuple[str, dict | None, str]:
+    """`(sentence, row, kind)` for the row that explains a deny; kind is
+    `revoked`, `expired`, `spent` or `''`. The row is what lets the remedy
+    depend on who minted it (#2021)."""
     at = _utc(now)
     for row in rows:
         if destination is not None and not destination_covers(
@@ -833,17 +844,48 @@ def _explain_missing(scope: str, tool: str, rows: Iterable[dict],
             continue
         if row.get("revoked_at"):
             return (f"grant #{row['id']} for '{tool}' from scope '{scope}' was "
-                    f"revoked at {row['revoked_at']}")
+                    f"revoked at {row['revoked_at']}", row, "revoked")
         if str(row.get("expires_at") or "") <= _iso(at):
             return (f"grant #{row['id']} for '{tool}' from scope '{scope}' "
-                    f"expired at {row['expires_at']}")
+                    f"expired at {row['expires_at']}", row, "expired")
         quota, consumed = row.get("quota"), row.get("consumed") or 0
         if quota is not None and consumed >= quota:
             return (f"grant #{row['id']} for '{tool}' from scope '{scope}' is "
-                    f"over quota ({consumed}/{quota})")
+                    f"over quota ({consumed}/{quota})", row, "spent")
         if not predicate_matches(row.get("arg_predicate") or "", {}):
             continue
-    return ""
+    return "", None, ""
+
+
+#: `minted_by` prefix of a row `sync_task_grants` wrote from a task's own
+#: `grants:` block; the task id follows the colon.
+FRONTMATTER_MINTER = "frontmatter:"
+
+
+def spent_frontmatter_remedy(row: dict) -> str:
+    """What restores a spent grant that a task's own `grants:` block minted.
+
+    One sentence, shared by the sync warning and the denial (#2021), because
+    the obvious edits do not work and both readers need to hear that: a spent,
+    unrevoked, unexpired row still *covers* its (scope, tool, predicate), so
+    `sync_task_grants` mints nothing over it whatever `quota:` or `expires_at:`
+    the file now says. The route that does re-mint is the #1949 one — revoke
+    the row, then declare an `expires_at:` later than the row's.
+    """
+    task = str(row.get("minted_by") or "")[len(FRONTMATTER_MINTER):]
+    return (f"Grant #{row['id']} was minted from autonomy task #{task}'s own "
+            f"`grants:` block (the `{task}-*.md` file under the vault's "
+            f"`autonomy/` folder), and it covers the pair until "
+            f"{row['expires_at']}: editing `quota:` or `expires_at:` in that "
+            f"file alone mints nothing over it. To restore the declared "
+            f"authority a human runs grant_revoke(grant_id={row['id']}) and "
+            f"sets that entry's `expires_at:` later than {row['expires_at']} "
+            f"(with the `quota:` wanted); the next run mints the fresh row.")
+
+
+def _is_spent_frontmatter(row: dict | None, kind: str) -> bool:
+    return bool(row is not None and kind == "spent" and str(
+        row.get("minted_by") or "").startswith(FRONTMATTER_MINTER))
 
 
 #: The closing rule of a shadow, as one string. `_shadow_sentence` puts it
@@ -1143,9 +1185,10 @@ def check_grants(store: GrantStore, *, scope: str, tool_name: Any,
                                   grant_id=match["id"], now=at)
         return Decision(True, match["id"], "")
 
-    why = _explain_missing(scope, tool,
-                           store.candidates(scope=scope, tool=tool, now=at), at,
-                           destination=destination)
+    why, why_row, why_kind = _explain_missing_row(
+        scope, tool, store.candidates(scope=scope, tool=tool, now=at), at,
+        destination=destination)
+    spent_declared = _is_spent_frontmatter(why_row, why_kind)
     if bounded and broad:
         # The pair does hold a live grant, so "no grant" would be untrue, and
         # the mintable row appended below would be an invitation to mint past
@@ -1176,9 +1219,19 @@ def check_grants(store: GrantStore, *, scope: str, tool_name: Any,
         target = args.get("id") or "new (this call creates the task)"
         reason += (f" This call would change dispatch-affecting field(s) "
                    f"[{changed}] on target #{target}, which decides whether and "
-                   f"when that task runs. To authorise it, a human either adds a "
-                   f"`grants:` block to the calling task's frontmatter "
-                   f"(scope `autonomy-task:*` only) or runs the line below.")
+                   f"when that task runs.")
+        if not spent_declared:
+            reason += (" To authorise it, a human either adds a "
+                       "`grants:` block to the calling task's frontmatter "
+                       "(scope `autonomy-task:*` only) or runs the line below.")
+    if spent_declared:
+        # #2021: the file already HAS the block — it minted the row that is
+        # refusing — so "add a `grants:` block" sends the reader to do what is
+        # already done. Name the row's origin and the edit that works; the
+        # mint line below stays, as the one-off that does not wait for a run.
+        reason += (" " + spent_frontmatter_remedy(why_row)
+                   + " For a one-off instead, the line below mints a separate "
+                     "row.")
     reason += (" " + grant_shape(scope=scope, tool=tool, tool_input=args, now=at,
                                  destination=destination))
     if record:
@@ -1280,7 +1333,16 @@ def install_policy_hook(hooks: HookRegistry, *, store: GrantStore | None = None,
 
 def validate_task_grants(grants: Any) -> tuple[list[dict], list[str]]:
     """`(normalized specs, errors)`. Never partially accepts: any error means
-    the caller must not run the task."""
+    the caller must not run the task.
+
+    An omitted `quota:` stays `None`, i.e. unbounded until `expires_at` — the
+    #1946 ruling. `grant_create` defaults an omitted quota to one action because
+    its row is a human's paste approving the call in front of them; a
+    frontmatter grant is declared once for a task that fires every night, and
+    `sync_task_grants` never re-mints over a covering row, so a default of one
+    here would be spent on the first run and deny every later run for the rest
+    of the declared expiry. A bounded frontmatter grant is the file saying so.
+    """
     if grants is None:
         return [], []
     if not isinstance(grants, list):
@@ -1352,6 +1414,14 @@ def sync_task_grants(store: GrantStore, *, task_id: Any, scope: str,
     expiry covers nothing, revoked or not: that is what keeps expiry and
     revocation distinguishable in both directions, and what leaves a nightly
     re-armable without deleting a row.
+
+    Quota (#1946 ruling, #2021): an omitted `quota:` is minted as `None` —
+    unbounded until expiry — and is deliberately not given `grant_create`'s
+    one-action default, because a spent row still covers its pair here. That
+    same fact is the hazard for a *declared* quota: once spent, the row
+    suppresses every re-mint until it expires, whatever the file is edited to
+    say. That case mints 0 and warns, naming the row and the route that works
+    (`spent_frontmatter_remedy`).
     """
     specs, errors = validate_task_grants(grants)
     if errors:
@@ -1377,7 +1447,35 @@ def sync_task_grants(store: GrantStore, *, task_id: Any, scope: str,
             r for r in store.candidates(scope=scope, tool=spec["tool"], now=at)
             if (r["arg_predicate"] or "") == spec["predicate"]
             and str(r["expires_at"]) > at_iso]
-        if any(not r["revoked_at"] for r in unexpired):
+        covering = [r for r in unexpired if not r["revoked_at"]]
+        if covering:
+            # #2021: a covering row that is spent still covers — nothing is
+            # minted, by design (a nightly must not renew itself by running) —
+            # but the task then runs denied for the rest of that row's expiry,
+            # and until now this was the one branch here that said nothing.
+            # Behaviour is unchanged; whether a spent row should stop covering
+            # is a separate ruling.
+            spent = [r for r in covering if r["quota"] is not None
+                     and (r["consumed"] or 0) >= r["quota"]]
+            if len(spent) == len(covering):
+                row = max(spent, key=lambda r: str(r["expires_at"]))
+                logger.warning(
+                    "[grants] task #%s declares a grant for '%s' that is "
+                    "covered only by a spent row: grant #%s for scope '%s' is "
+                    "over quota (%s/%s), so nothing is minted and the task "
+                    "runs without it. %s Do not mint a duplicate to stand in "
+                    "for the declared one.",
+                    task_id, spec["tool"], row["id"], scope,
+                    row["consumed"] or 0, row["quota"],
+                    spent_frontmatter_remedy(row)
+                    if str(row.get("minted_by") or "").startswith(
+                        FRONTMATTER_MINTER)
+                    else f"Grant #{row['id']} was minted by "
+                         f"{row.get('minted_by')!r}, not by this file; it "
+                         f"covers the pair until {row['expires_at']}, and "
+                         f"grant_revoke(grant_id={row['id']}) plus an "
+                         f"`expires_at:` later than that in the task's file "
+                         f"is what lets the declared grant mint.")
             continue
         withdrawn = [r for r in unexpired if r["revoked_at"]]
         blocking = max(withdrawn, key=lambda r: str(r["expires_at"]),

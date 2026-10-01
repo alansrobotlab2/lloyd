@@ -525,3 +525,131 @@ def test_this_change_cites_symbols_and_no_line_number_can_be_stale():
         f"this change cites line numbers {found}; a line number is only true of "
         "one revision, and a grader that opens the file and finds a shorter one "
         "voids the review — name the symbol instead")
+
+
+# ── #2021: a spent frontmatter-minted grant is visible, with a remedy that works ─
+
+FM_SCOPE = "autonomy-task:40"
+FM_TOOL = "email_send"
+
+
+def _declared(quota, hours):
+    return [{"tool": FM_TOOL, "quota": quota, "issued_by": "alan",
+             "expires_at": (NOW + dt.timedelta(hours=hours)).isoformat()}]
+
+
+def _spend_declared_grant(store) -> int:
+    from app.harness.policy import sync_task_grants
+    assert sync_task_grants(store, task_id=40, scope=FM_SCOPE,
+                            grants=_declared(2, 24), now=NOW) == 1
+    for _ in range(2):
+        assert check_grants(store, scope=FM_SCOPE, tool_name=FM_TOOL,
+                            tool_input={}, now=NOW, record=False).allowed
+    rows = store.candidates(scope=FM_SCOPE, tool=FM_TOOL, now=NOW)
+    assert [(r["quota"], r["consumed"], r["minted_by"], r["revoked_at"])
+            for r in rows] == [(2, 2, "frontmatter:40", None)], rows
+    return rows[0]["id"]
+
+
+def _policy_warnings(caplog) -> list[str]:
+    import logging
+    return [r.getMessage() for r in caplog.records
+            if r.name == "lloyd-harness-policy" and r.levelno >= logging.WARNING
+            and "[grants] task #" in r.getMessage()]
+
+
+def test_a_resync_over_a_spent_declared_grant_mints_nothing_and_says_so(
+        tmp_path, caplog):
+    """Clause 1. The re-sync returned 0 and logged nothing: the spent row still
+    covers its pair, so the task ran denied for the rest of the expiry with no
+    line connecting the two."""
+    import logging
+
+    from app.harness.policy import sync_task_grants
+
+    store = _store(tmp_path)
+    gid = _spend_declared_grant(store)
+    caplog.set_level(logging.WARNING, logger="lloyd-harness-policy")
+    caplog.clear()
+
+    assert sync_task_grants(store, task_id=40, scope=FM_SCOPE,
+                            grants=_declared(2, 24), now=NOW) == 0
+    assert len(store.candidates(scope=FM_SCOPE, tool=FM_TOOL, now=NOW)) == 1
+    warns = _policy_warnings(caplog)
+    assert len(warns) == 1, warns
+    assert "task #40" in warns[0] and f"grant #{gid}" in warns[0], warns[0]
+    assert "over quota (2/2)" in warns[0], warns[0]
+
+    # Not spent, not warned: a covering row with quota left, and an unbounded
+    # one, are the ordinary idempotent re-run.
+    for task, quota in ((41, 5), (42, None)):
+        scope = f"autonomy-task:{task}"
+        grants = [{"tool": FM_TOOL, "issued_by": "alan",
+                   "expires_at": (NOW + dt.timedelta(hours=24)).isoformat(),
+                   **({"quota": quota} if quota else {})}]
+        assert sync_task_grants(store, task_id=task, scope=scope,
+                                grants=grants, now=NOW) == 1
+        assert check_grants(store, scope=scope, tool_name=FM_TOOL, tool_input={},
+                            now=NOW, record=False).allowed
+        caplog.clear()
+        assert sync_task_grants(store, task_id=task, scope=scope,
+                                grants=grants, now=NOW) == 0
+        assert _policy_warnings(caplog) == []
+
+
+def test_the_warning_names_a_remedy_that_restores_the_grant_and_it_does(
+        tmp_path, caplog):
+    """Clause 2 — with the item's own remedy corrected by measurement.
+
+    The item asked the warning to say "raise `quota:` or push `expires_at:`".
+    Neither restores anything while behaviour is unchanged: the spent row still
+    covers, so the edited block mints 0. Both are run here as the control. What
+    does re-mint is the #1949 route — revoke the row, declare a later expiry —
+    so that is what the warning names, and it is executed below to show it
+    works and that no duplicate was needed."""
+    import logging
+
+    from app.harness.policy import sync_task_grants
+
+    store = _store(tmp_path)
+    gid = _spend_declared_grant(store)
+    old_expiry = store.candidates(scope=FM_SCOPE, tool=FM_TOOL, now=NOW)[0]["expires_at"]
+    caplog.set_level(logging.WARNING, logger="lloyd-harness-policy")
+
+    for edited in (_declared(5, 24), _declared(5, 48)):
+        caplog.clear()
+        assert sync_task_grants(store, task_id=40, scope=FM_SCOPE,
+                                grants=edited, now=NOW) == 0, (
+            "a file edit alone now re-mints over a spent row: the ruling this "
+            "item left open has been made, and the remedy text is stale")
+        line = _policy_warnings(caplog)[0]
+        assert "alone mints nothing over it" in line, line
+        assert f"grant_revoke(grant_id={gid})" in line, line
+        assert f"`expires_at:` later than {old_expiry}" in line, line
+        assert "`40-*.md`" in line and "`quota:`" in line, line
+        assert "Do not mint a duplicate" in line, line
+
+    assert store.revoke(gid, now=NOW) is True
+    assert sync_task_grants(store, task_id=40, scope=FM_SCOPE,
+                            grants=_declared(5, 48), now=NOW) == 1
+    assert check_grants(store, scope=FM_SCOPE, tool_name=FM_TOOL, tool_input={},
+                        now=NOW, record=False).allowed
+
+
+def test_the_1946_ruling_is_written_where_the_frontmatter_quota_is_read():
+    """Clause 4: an omitted frontmatter `quota:` stays unbounded, and the three
+    places a reader meets that say so instead of deferring it."""
+    from agent_mcp import builtin_grants
+    from app.harness import policy
+
+    for fn in (policy.validate_task_grants, policy.sync_task_grants):
+        doc = " ".join((fn.__doc__ or "").split())
+        assert "#1946" in doc and "unbounded" in doc, fn.__name__
+    source = Path(builtin_grants.__file__).read_text(encoding="utf-8")
+    assert "separate ruling" not in source
+    assert "#1946" in source
+
+    specs, errors = policy.validate_task_grants(
+        [{"tool": FM_TOOL, "expires_at": "2099-01-01T00:00:00+00:00",
+          "issued_by": "alan"}])
+    assert errors == [] and specs[0]["quota"] is None

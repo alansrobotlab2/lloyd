@@ -89,8 +89,10 @@ async def _grant_create(args: dict[str, Any]) -> str:
     # pasting it used to mint exactly that row. The default belongs HERE, on the
     # entry a human's paste lands on, and not inside `mint`: `mint(quota=None)`
     # means unbounded to callers that mean it — the autonomy `grants:`
-    # frontmatter surface, whose own default is a separate ruling, and the
-    # multi-call egress tests. And it is an `is None` test, never
+    # frontmatter surface, where an omitted `quota:` stays unbounded by ruling
+    # (#1946: `sync_task_grants` never re-mints over a covering row, so a
+    # one-action default there would be spent on the first nightly and deny
+    # the rest of the declared expiry), and the multi-call egress tests. And it is an `is None` test, never
     # `args.get("quota") or 1`: a caller that passed 0 was refused before this
     # change and must be refused now, not quietly handed a 1.
     quota = args.get("quota")
