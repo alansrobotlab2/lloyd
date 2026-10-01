@@ -5,13 +5,15 @@ lands unverified" has to be enforced after the edit, not before it.
 """
 from __future__ import annotations
 
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from agent_mcp.skills import _QUARANTINE_STATUSES
-from scripts.automod import state as S, vault_round as V
+from scripts.automod import state as S, vault_guards as VG, vault_round as V
 
 
 def git(repo, *args):
@@ -859,3 +861,548 @@ def test_the_amend_tool_names_the_working_route_for_a_vault_landing(tmp_path, mo
     assert "edit the clause on the backlog item" in out["error"] and "blocker" in out["error"]
     assert out["error"] != "no run spec for vault-land-1886"
     assert not out["error"].startswith("no run spec for")
+
+
+# --------------------------------------------------------------------------- #
+# #2036: a vault land cannot commit prose that the code tree's own guards
+# contradict.
+#
+# Both trees here are throwaways. `guard_tree` is a code checkout holding one
+# vault-reading guard in its default selection; `vault` (the module's own
+# fixture) is a git repo that behaves like ~/obsidian. The guard counts the store
+# lines a script prints against the count the prose states — the same shape as
+# the two `tests/test_retention_sweep.py` nodes #1975 left red — and it names the
+# vault through `LLOYD_VAULT_ROOT`, the knob `app/data_root.py:183` honours and
+# the one `vault_guards._run_selection` sets. Neither ~/lloyd nor ~/obsidian is
+# touched: `agreement` is handed explicit roots and runs the same subprocess
+# production runs.
+# --------------------------------------------------------------------------- #
+
+#: The guard's fixture source. It reads the vault through the environment
+#: (`vault_root()` in the real guards, `LLOYD_VAULT_ROOT` here — the same
+#: resolution, `app/data_root.py:183`), and its assert message carries both
+#: counts, so a refusal that quotes the guard's output names the stated count
+#: without this module re-deriving a number from prose.
+GUARD_SRC = '''"""A vault-reading guard, shaped like the two #1975 left red."""
+import os
+from pathlib import Path
+
+import pytest
+
+
+def _store_lines():
+    return [l for l in Path("store_lines.py").read_text().splitlines() if l.strip()]
+
+
+@pytest.mark.skipif(os.environ.get("GUARD_FORCE_SKIP") == "1",
+                    reason="fixture switch: the denominator can be driven to zero")
+def test_the_prose_states_the_count_the_script_prints():
+    text = (Path(os.environ["LLOYD_VAULT_ROOT"]) / "skills" / "foo" / "SKILL.md").read_text()
+    stated = [int(l.split()[-1]) for l in text.splitlines() if l.startswith("stores: ")]
+    assert len(stated) == 1, f"the skill states {len(stated)} counts"
+    assert stated[0] == len(_store_lines()), f"prose {stated[0]}, script {len(_store_lines())}"
+'''
+
+#: A guard that WRITES into the vault it is shown, then fails on the count. The
+#: probe runs a selection only to make a judgement, but `land()` calls it with
+#: its own edit already sitting in the vault working tree and commits that tree
+#: afterwards — so a selection handed `~/obsidian` itself would let one mutating
+#: guard add unreviewed bytes to the commit the route came only to judge. It
+#: fails against the proposed vault and passes against the pre-land one, so both
+#: runs happen and both are held to this.
+GUARD_SRC_WRITES = '''"""A vault-reading guard that writes into the vault it is shown."""
+import os
+from pathlib import Path
+
+
+def test_a_guard_that_mutates_the_vault_it_judges():
+    v = Path(os.environ["LLOYD_VAULT_ROOT"])
+    (v / "PROBED").write_text("written by the probe")
+    text = (v / "skills" / "foo" / "SKILL.md").read_text()
+    stated = [int(l.split()[-1]) for l in text.splitlines() if l.startswith("stores: ")]
+    assert stated == [4], f"prose {stated}, script 4"
+'''
+
+#: The two nodes clause 5 is about, named exactly as they exist in the repo.
+RETENTION_NODES = (
+    "test_the_skill_says_twelve_stores_and_its_table_has_a_row_per_report_line",
+    "test_the_task_description_names_every_store_the_sweep_prints",
+)
+
+SKILL_AT_FOUR = "---\nname: foo\n---\nstores: 4\n"
+
+
+def repo() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def _head(repo) -> str:
+    return git(repo, "rev-parse", "HEAD").stdout.strip()
+
+
+def _prose(vault, body: str, *, commit: bool = False) -> None:
+    """Write the skill's prose; `commit=True` makes it the vault's HEAD state.
+
+    Default `False` because the land being staged is exactly that: a working-tree
+    edit the route has not committed yet.
+    """
+    (vault / "skills" / "foo" / "SKILL.md").write_text(body)
+    if commit:
+        git(vault, "add", "-A")
+        git(vault, "commit", "-q", "-m", "prose at vault HEAD")
+
+
+def make_guard_tree(root: Path, *, src: str = GUARD_SRC,
+                    store_lines: str = "draft\nup_next\nin_progress\ndone\n") -> Path:
+    """A code checkout at HEAD: the store lines, and `src` as its one guard.
+
+    A `pytest.ini` so the probe child's rootdir is this tree and nothing above
+    it — the child runs with this tree as its cwd, exactly as the gate's base
+    probe runs with the candidate checkout as its own.
+    """
+    (root / "tests").mkdir(parents=True)
+    (root / "pytest.ini").write_text("[pytest]\naddopts =\n")
+    (root / "tests/test_guard.py").write_text(src)
+    (root / "store_lines.py").write_text(store_lines)
+    git(root.parent, "init", "-q", "-b", "main", str(root))
+    git(root, "config", "user.email", "t@e.com")
+    git(root, "config", "user.name", "t")
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "base")
+    return root
+
+
+@pytest.fixture
+def guard_tree(tmp_path):
+    """A code checkout at HEAD: four store lines, one vault-reading guard."""
+    return make_guard_tree(tmp_path / "tree")
+
+
+@pytest.fixture
+def probed(tmp_path, monkeypatch):
+    """Arm `land()` to probe given roots for real.
+
+    `tests/conftest.py` defaults `LLOYD_VAULT_GUARD_PROBE` for the suite — the
+    nesting rule that keeps ~25 `land()` calls from each starting a ~70 s pytest
+    subprocess — so a test of the probe has to clear it as well as point the
+    roots. Production never sets it, so every real landing is probed.
+    """
+    def arm(tree, vault):
+        monkeypatch.delenv(VG.NESTING_ENV, raising=False)
+        real = VG.agreement
+        monkeypatch.setattr(
+            V.VG, "agreement",
+            lambda *, paths, **kw: real(paths=list(paths), live_root=tree,
+                                        live_vault=vault, python=Path(sys.executable),
+                                        scratch_parent=tmp_path / "probe-scratch"))
+    return arm
+
+
+def test_a_land_whose_stated_count_the_tree_disagrees_with_is_refused_before_commit(
+        vault, guard_tree, probed):
+    """Clause 1. The prose says five, the tree prints four store lines.
+
+    Asserted on the guard's own output inside the refusal, not on a count this
+    module re-derived: `prose 5, script 4` is what the guard measured, and the
+    node id plus the tree root and sha are what clause 1 asks the refusal to
+    name.
+    """
+    _prose(vault, SKILL_AT_FOUR, commit=True)         # vault HEAD agrees with the tree
+    probed(guard_tree, vault)
+    _prose(vault, "---\nname: foo\n---\nstores: 5\n")
+    head = _head(vault)
+    with pytest.raises(V.VaultRoundError) as ei:
+        V.land(["skills/foo/SKILL.md"], "#2036 five stores", item_id=None)
+    msg = str(ei.value)
+    assert "code agreement failed" in msg
+    assert "tests/test_guard.py::test_the_prose_states_the_count_the_script_prints" in msg
+    assert "prose 5, script 4" in msg
+    assert str(guard_tree) in msg and _head(guard_tree)[:8] in msg
+    assert _head(vault) == head, "refused before any vault commit"
+
+
+def test_a_refusal_leaves_the_vault_at_its_previous_head_and_is_ledged(
+        vault, guard_tree, probed):
+    """Clause 3. Nothing committed, and the ledger row names the item and why."""
+    _prose(vault, SKILL_AT_FOUR, commit=True)
+    probed(guard_tree, vault)
+    _prose(vault, "---\nname: foo\n---\nstores: 5\n")
+    head = _head(vault)
+    with pytest.raises(V.VaultRoundError):
+        V.land(["skills/foo/SKILL.md"], "#2036 five stores", item_id=42)
+    assert _head(vault) == head
+    rows = _events("vault_land")
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row["ok"] is False and "commit" not in row
+    assert row["item_id"] == 42
+    assert row["reverted"] == ["skills/foo/SKILL.md"]
+    assert row["guards"] == {
+        "state": "checked", "refuse": True,
+        "candidate": {"ran": 1, "failed": 1}, "baseline": {"ran": 1, "failed": 0},
+        "nodes": ["tests/test_guard.py::test_the_prose_states_the_count_the_script_prints"]}
+    assert "prose 5, script 4" in row["errors"][0]
+    assert row["review_reason"] == "code agreement refused the land"
+    # The prose is back at the vault's HEAD state: "nothing lands" has to mean
+    # "nothing stays", the #599 rule this route already enforces for validation.
+    assert (vault / "skills/foo/SKILL.md").read_text() == SKILL_AT_FOUR
+
+
+def test_a_land_whose_stated_count_agrees_with_the_tree_still_commits(
+        vault, guard_tree, probed):
+    """Clause 2, first half: a land that only rewords prose is never refused."""
+    _prose(vault, SKILL_AT_FOUR, commit=True)
+    probed(guard_tree, vault)
+    _prose(vault, "---\nname: foo\n---\nstores: 4\n\nBounded by the weekly sweep.\n")
+    head = _head(vault)
+    out = V.land(["skills/foo/SKILL.md"], "#2036 reworded", item_id=None)
+    assert _head(vault) != head
+    assert out["guards"]["state"] == "checked" and out["guards"]["refuse"] is False
+    assert out["guards"]["candidate"] == {"ran": 1, "failed": 0}
+    assert _events("vault_land")[0]["guards"]["refuse"] is False
+
+
+def test_a_count_land_whose_code_half_already_landed_proceeds(vault, guard_tree, probed):
+    """Clause 2, second half: five store lines on the tree, so prose may say five.
+
+    This is #1975's repair direction — the code half landed, the prose follows it
+    — and it must not be refused, which is what makes the check consistency-scoped
+    rather than a ban on a `mixed` item landing its vault half.
+    """
+    (guard_tree / "store_lines.py").write_text("draft\nup_next\nin_progress\ndone\nquarantined\n")
+    git(guard_tree, "add", "-A")
+    git(guard_tree, "commit", "-q", "-m", "the thirteenth store line lands")
+    _prose(vault, SKILL_AT_FOUR, commit=True)
+    probed(guard_tree, vault)
+    _prose(vault, "---\nname: foo\n---\nstores: 5\n")
+    out = V.land(["skills/foo/SKILL.md"], "#2036 five stores, code first", item_id=None)
+    assert out["guards"] == {"state": "checked", "refuse": False,
+                             "candidate": {"ran": 1, "failed": 0},
+                             "reason": "1 vault-reading node passes against the "
+                                       "vault as proposed"}
+
+
+def test_a_guard_already_red_before_the_land_does_not_refuse_it(vault, guard_tree, probed):
+    """The delta rule: a red tree is not this land's fault, and is not a block.
+
+    `main` is red right now (#1975's unlanded code half). Refusing on any red
+    guard would hold every landing on the route hostage to a failure this land did
+    not cause, which is why the check compares the proposed vault against the same
+    tree with only this land's paths put back. The route is busy enough that this
+    is not a hypothetical: #1975 landed three prose commits in forty-one minutes, all
+    three `review: skipped`, and those rows are the witness this file reads.
+    """
+    _prose(vault, "---\nname: foo\n---\nstores: 6\n", commit=True)   # red at vault HEAD
+    probed(guard_tree, vault)
+    _prose(vault, "---\nname: foo\n---\nstores: 6\n\nReworded only.\n")
+    out = V.land(["skills/foo/SKILL.md"], "#2036 reword while main is red", item_id=None)
+    assert out["guards"]["state"] == "checked" and out["guards"]["refuse"] is False
+    # Both runs red, the same node: that is what "pre-existing" measured.
+    assert out["guards"]["candidate"] == {"ran": 1, "failed": 1}
+    assert out["guards"]["baseline"] == {"ran": 1, "failed": 1}
+
+
+#: `scripts/automod/review.py:1433`'s own abstention for a surface that is not
+#: `vault` — #2036's blindness site, and the sentence three `vault_land` rows for
+#: #1975 carry verbatim. `test_a_mixed_surface_items_vault_land_is_checked_too`
+#: gets it by calling `review.grade_vault` for real rather than reciting it, and the
+#: ledger-witness test below compares the recorded rows against it.
+MIXED_SKIP = "surface is mixed, not vault: the clauses are graded at the code gate"
+#: review.py builds that sentence from an f-string, so only this tail of it is a
+#: literal in the source. The test below asserts the tail is there before it asserts
+#: the real grader produced the whole sentence: if the wording moves, that ordering
+#: says which of the two went stale.
+MIXED_SKIP_TAIL = "not vault: the clauses are graded at the code gate"
+
+
+@pytest.mark.parametrize("surface,skip", [
+    ("mixed", MIXED_SKIP),
+    ("code", "surface is code, not vault: the clauses are graded at the code gate"),
+], ids=["mixed", "code"])
+def test_a_mixed_surface_items_vault_land_is_checked_too(vault, guard_tree, probed,
+                                                         monkeypatch, surface, skip):
+    """Clause 4. The review rung abstained on this surface and that exempted nothing.
+
+    `review.grade_vault` runs FOR REAL here: a confirmed triage row names the
+    surface, the branch at review.py:1433 executes, and the abstention quoted in
+    the ledger is that function's own sentence. Stubbing the grader would stay
+    green through any change to the condition that produces it — which is exactly
+    how a future widening of that skip would hide. The land is refused regardless,
+    by the code-agreement check: the rung that owns the clauses abstained, and the
+    land was still checked against the tree.
+    """
+    import scripts.automod.review as RV
+    assert MIXED_SKIP_TAIL in (repo() / "scripts/automod/review.py").read_text(), \
+        "review.py no longer abstains in these words; this node's expect is stale"
+    S.append_event({"event": "backlog_triage", "item_id": 42, "verdict": "confirmed",
+                    "surface": surface, "acceptance": "a",
+                    "acceptance_clauses": ["a"]}, path=S.LEDGER_PATH)
+    monkeypatch.setattr(V, "GRADER", RV.grade_vault)
+    _prose(vault, SKILL_AT_FOUR, commit=True)
+    probed(guard_tree, vault)
+    _prose(vault, "---\nname: foo\n---\nstores: 5\n")
+    with pytest.raises(V.VaultRoundError) as ei:
+        V.land(["skills/foo/SKILL.md"], "#2036 mixed item prose", item_id=42)
+    assert "test_the_prose_states_the_count_the_script_prints" in str(ei.value)
+    reviews = _events("vault_review")
+    assert reviews and reviews[0]["kind"] == "skipped", reviews
+    assert reviews[0]["findings"] == skip, "the row is not the skip review.py wrote"
+    assert _events("vault_land")[0]["guards"]["refuse"] is True
+
+
+@pytest.mark.parametrize("surface", ["vault", "mixed", "code", None],
+                         ids=["vault", "mixed", "code", "no-surface-field"])
+def test_the_code_agreement_call_carries_no_surface_and_no_item(vault, monkeypatch,
+                                                                surface):
+    """Clause 4, mechanism half: asked once with `paths` and nothing else, whatever
+    the item's surface is — which is what makes an exemption impossible to write.
+
+    A route that decides per surface is a route that eventually exempts one: the
+    #551 history inside review.py:1426-1430 is what a surface-scoped refusal did
+    last time, and #2036's own triage refuses to re-break it. So this walks every
+    surface a triage row can carry — including the absent field, which is most of
+    the ledger's history — and refuses a call that names one. A probe told which
+    item is landing is one branch away from a probe that skips some of them, so
+    `item_id` is refused by the same assert rather than by a name nobody would
+    think to grep for.
+    """
+    calls = []
+
+    def fake(**kw):
+        calls.append(kw)
+        return {"state": "checked", "refuse": False}
+
+    monkeypatch.setattr(V.VG, "agreement", fake)
+    monkeypatch.setattr(V, "GRADER", lambda *a, **k: ("skipped", "not consulted here", []))
+    row = {"event": "backlog_triage", "item_id": 42, "verdict": "confirmed",
+           "acceptance": "a", "acceptance_clauses": ["a"]}
+    if surface is not None:
+        row["surface"] = surface
+    S.append_event(row, path=S.LEDGER_PATH)
+    (vault / "skills/foo/SKILL.md").write_text("---\nname: foo\n---\nstores: 4\n\n#2036.\n")
+    out = V.land(["skills/foo/SKILL.md"], "#2036 shape", item_id=42)
+    assert len(calls) == 1, f"surface {surface!r}: {calls}"
+    assert set(calls[0]) == {"paths"}, f"surface {surface!r} reached the probe call"
+    assert calls[0]["paths"] == ["skills/foo/SKILL.md"]
+    assert out["guards"]["refuse"] is False
+
+
+def test_a_probe_that_cannot_judge_proceeds_and_says_why_on_the_row(vault, tmp_path,
+                                                                   monkeypatch):
+    """A non-answer is never a refusal, and never silent either.
+
+    Holding the vault route hostage to a subprocess it does not own would be a
+    worse failure than the hole being closed — the same shape as the reviewer's
+    abstention one block earlier in `land()`. What is not allowed is a row that
+    cannot tell a clean check from a check that never ran.
+    """
+    monkeypatch.delenv(VG.NESTING_ENV, raising=False)
+    real = VG.agreement   # bound before the attribute is replaced: `V.VG` is `VG`
+    monkeypatch.setattr(V.VG, "agreement", lambda **kw: real(
+        paths=kw["paths"], live_root=tmp_path / "no-such-checkout", live_vault=vault,
+        python=Path(sys.executable), scratch_parent=tmp_path / "scratch"))
+    _prose(vault, "---\nname: foo\n---\n# foo\n\nReworded while unprobeable.\n")
+    out = V.land(["skills/foo/SKILL.md"], "#2036 unjudgeable", item_id=None)
+    assert out["commit"]
+    assert out["guards"]["state"] == "skipped" and out["guards"]["refuse"] is False
+    # The named root is unreadable as a git tree, which is the first thing the
+    # probe can fail on and the reason it has to say rather than assume agreement.
+    assert "cannot read the code tree" in out["guards"]["reason"]
+    assert "no-such-checkout" in out["guards"]["reason"]
+    assert _events("vault_land")[0]["guards"]["state"] == "skipped"
+
+
+def test_a_selection_whose_only_guard_is_skipped_answers_nothing_and_still_lands(
+        vault, guard_tree, probed, monkeypatch):
+    """The denominator counts nodes that RAN, not nodes that were collected.
+
+    A selection whose one vault-reading guard is `skipif`-skipped collects fine
+    and asserts nothing — the zero-denominator failure the tree already names
+    seven instances of. It has to read as "not judged", never as "found nothing",
+    and it must not be the thing that stops a landing.
+    """
+    _prose(vault, "---\nname: foo\n---\nstores: 6\n", commit=True)
+    monkeypatch.setenv("GUARD_FORCE_SKIP", "1")
+    probed(guard_tree, vault)
+    _prose(vault, "---\nname: foo\n---\nstores: 7\n")
+    out = V.land(["skills/foo/SKILL.md"], "#2036 skipped selection", item_id=None)
+    assert out["commit"]
+    assert out["guards"]["state"] == "skipped" and out["guards"]["refuse"] is False
+    assert "answered nothing" in out["guards"]["reason"]
+
+
+def test_the_selection_is_named_by_token_not_by_a_hand_kept_list(tmp_path):
+    """The selection is derived from the tree, so no list here can go stale.
+
+    #1734 and #1835 are both on record with a *guard's own* count going stale, and
+    a registry of prose claims to verify rots the same way. What is enumerable is
+    the set of guards a vault land can break — which is what `guard_selection`
+    returns, from the tree it is handed.
+    """
+    tree = tmp_path / "t"
+    (tree / "tests").mkdir(parents=True)
+    (tree / "tests/test_reads_a_vault.py").write_text("def a(): vault_root()\n")
+    (tree / "tests/test_reads_env.py").write_text("VAULT_ROOT = 1\n")
+    (tree / "tests/test_reads_nothing.py").write_text("def a(): return 1\n")
+    (tree / "tests/helper_not_a_test.py").write_text("vault_root()\n")
+    assert VG.guard_selection(tree) == ["tests/test_reads_a_vault.py",
+                                        "tests/test_reads_env.py"]
+    assert VG.guard_selection(tmp_path / "absent") == []
+
+
+# --------------------------------------------------------------------------- #
+# Clause 5 lives in this file because it pins the OTHER file: the two
+# `tests/test_retention_sweep.py` count guards have to stay in the default
+# selection, or a red main can be silenced by excluding the nodes that read the
+# vault — which is the wrong fix #2036's own triage names and rejects.
+# --------------------------------------------------------------------------- #
+
+def test_the_two_retention_count_guards_stay_in_the_default_selection(tmp_path):
+    """Clause 5, measured — not asserted about a marker.
+
+    Three ways a red main gets silenced are all refused here: a node vanishing
+    from the file, a node growing a decorator (a `live_vault` or `skip` mark), and
+    a node that survives the mark expr but is skipped or not run by the child
+    pytest that the gate would actually spawn. The child runs with `LLOYD_DATA` in
+    this test's own `tmp_path`, so it cannot write into a data root another test
+    is reading — `tests/test_retention_sweep.py`'s sweep nodes create directories
+    under theirs — and the tree it runs in is the round's own checkout, never
+    `~/lloyd`, which the suite refuses to run in at all (`tests/conftest.py:205`).
+    """
+    import ast
+
+    src = (repo() / "tests/test_retention_sweep.py").read_text()
+    fns = {n.name: n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef)}
+    for name in RETENTION_NODES:
+        assert name in fns, f"{name} is gone from the file that has guarded it"
+        assert fns[name].decorator_list == [], f"{name} grew a decorator"
+    assert "live_vault" not in src, "a live_vault mark entered the file that reads the vault"
+
+    mark, _failed_ids, summary = VG._gate_tools()
+    assert mark == "not live_vault and not fault_injection", "the gate's own constant"
+    env = {**os.environ, "LLOYD_DATA": str(tmp_path / "retention-data")}
+    # The child is the gate's own command line: the mark expr is that constant, the
+    # file is named, and `-p no:cacheprovider` keeps a probe run from writing a
+    # cache the suite would inherit. Whatever way the two nodes fail is decided by
+    # the summary counts below, and deselection shows up there too: a node the mark
+    # expr excludes never reaches passed or failed, so the sum is not 2.
+    r = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                        "-m", mark, "-k", " or ".join(RETENTION_NODES),
+                        "tests/test_retention_sweep.py"],
+                       cwd=str(repo()), capture_output=True, text=True, timeout=300,
+                       env=env)
+    line = r.stdout.strip().splitlines()[-1]
+    counts = summary(r.stdout)
+    # Two nodes RUN. Which way they fail is #1975's business (they fail today, on
+    # the thirteen-vs-twelve count, and pass once its code half lands); that they
+    # are neither deselected nor skipped is clause 5, and is what a `live_vault`
+    # mark or a `pytest.skip` on either node would turn red. Counted from the
+    # summary line rather than grepped, because the file's other 66 nodes are
+    # legitimately deselected by `-k` and the word alone says nothing.
+    assert counts["passed"] + counts["failed"] == 2, line
+    assert counts["tests_skipped"] == 0, line
+
+
+def test_the_probe_judges_a_copy_so_a_writing_guard_cannot_reach_the_live_vault(
+        vault, tmp_path, probed):
+    """The check reads a mirror of the vault, never the vault it is about to land.
+
+    `land()` runs the probe with its own edit already written into the vault's
+    working tree, and commits that tree afterwards. A selection handed the live
+    vault would therefore let any guard in it add bytes to the commit the route
+    came only to judge — and a hardlink or symlink farm fails identically, because
+    both write THROUGH. The fixture guard writes a file into whichever vault it is
+    shown, then fails on the count, so a probe pointed at the live tree leaves
+    `PROBED` behind there while still refusing the land. The refusal is asserted
+    too: a mirror that did not carry the proposed edit would wave the bad land
+    through, which is the other way this node can go red.
+    """
+    tree = make_guard_tree(tmp_path / "writing-tree", src=GUARD_SRC_WRITES)
+    _prose(vault, SKILL_AT_FOUR, commit=True)
+    probed(tree, vault)
+    _prose(vault, "---\nname: foo\n---\nstores: 5\n")
+    with pytest.raises(V.VaultRoundError) as ei:
+        V.land(["skills/foo/SKILL.md"], "#2036 a guard that writes", item_id=None)
+    assert "test_a_guard_that_mutates_the_vault_it_judges" in str(ei.value)
+    assert not (vault / "PROBED").exists(), "a probe guard wrote into the vault being landed"
+
+
+# --------------------------------------------------------------------------- #
+# #2036's own evidence, kept where a later reader can open it. The previous round
+# of this item was refused on clause 6 because its report quoted ledger rows the
+# tree could not reproduce: `tail -3` of the live promotions ledger has moved on
+# (sibling items land every hour), and the vault's committed copy of the whole
+# ledger came from #1975's land, not from this item. So the rows the report quotes
+# are committed here verbatim, and this node re-reads them. A claim nobody can
+# re-check is the defect, not a footnote to it.
+# --------------------------------------------------------------------------- #
+
+#: The three `vault_land` rows of #1975 — the `mixed` item whose vault half landed
+#: "thirteen" while its code half sat on an unmerged branch, which is #2036's
+#: premise. Cut verbatim from ~/.local/state/lloyd-automod/promotions.jsonl on
+#: 2026-10-01, and the family the root `.gitignore`'s `*.json` rule does not reach.
+WITNESS = repo() / "tests/fixtures/promotions_vault_land_rows_2026-10-01-item1975.jsonl"
+
+
+def test_the_promotions_ledger_witness_still_shows_one_mixed_item_landed_thrice():
+    """The refusal this item is built on is re-checkable from bytes in the tree.
+
+    #2036's claim about the world is one sentence: a `mixed` item's vault half can
+    land — prose and all, unreviewed — while its code half sits unmerged. These
+    three rows are that sentence. Three lands of item #1975 inside forty-one minutes,
+    every one `review: skipped` with review.py's own mixed-surface abstention, the
+    first carrying the two prose paths that took the count from twelve to thirteen
+    and the two after it validating nothing, and no row carrying a round at all
+    (that gap is #1987's, not this item's). The guard the first row's prose reddened
+    is the one clause 5 keeps in the default selection.
+    """
+    import json
+    rows = [json.loads(l) for l in WITNESS.read_text().splitlines() if l.strip()]
+    assert len(rows) == 3, [r.get("ts") for r in rows]
+    assert all(r["event"] == "vault_land" and r["item_id"] == 1975 for r in rows)
+    assert all(r["ok"] is True for r in rows), "these are landed rows, not refusals"
+    assert [len(r["validated"]) for r in rows] == [2, 0, 0], [r["validated"] for r in rows]
+    assert rows[0]["validated"] == ["skills/retention-sweep/SKILL.md",
+                                    "autonomy/79-retention-sweep.md"]
+    assert [r["commit"][:8] for r in rows] == ["ceea3904", "bf91f9e5", "4bc93177"]
+    assert [r["review"] for r in rows] == ["skipped"] * 3
+    assert all(r["review_reason"] == MIXED_SKIP for r in rows)
+    # The blindness in one key: no row names a round, so no rung had one to read.
+    assert all("round" not in r and "round_id" not in r for r in rows)
+    span = float(rows[-1]["ts"]) - float(rows[0]["ts"])
+    # Cut within one sitting on 2026-10-01: first land 19:37:44Z, last 20:17:56Z.
+    assert 0 < span <= 45 * 60, f"three lands {span:.0f}s apart is not one sitting"
+
+
+def test_a_vault_surface_items_land_is_checked_by_the_same_call(vault, guard_tree,
+                                                               probed, items,
+                                                               monkeypatch):
+    """Clause 4, other half: a plain `vault`-surface land is refused by that same call.
+
+    The `mixed` item is the case that was blind, but the clause's words are that a
+    plain vault-surface land is checked the same way — so here is one, with a triage
+    row that says `surface: vault` and real acceptance clauses, so the reviewer runs
+    the full `grade_vault` path rather than skipping early. `run_grader` is stubbed at
+    the transport (a reviewer that cannot reach a backend abstains, and an abstention
+    is not what is being tested here); the land is refused by the code-agreement check
+    either way, which is the point: the probe sits on the route whatever the reviewer
+    made of the clauses.
+    """
+    import scripts.automod.review as RV
+    S.append_event({"event": "backlog_triage", "item_id": 43, "verdict": "confirmed",
+                    "surface": "vault", "acceptance": "a",
+                    "acceptance_clauses": ["a"]}, path=S.LEDGER_PATH)
+    write_item(items, 43, ["a"])
+    monkeypatch.setattr(RV, "run_grader",
+                        lambda **kw: {"ok": False, "error": "backend 503"})
+    monkeypatch.setattr(V, "GRADER", RV.grade_vault)
+    _prose(vault, SKILL_AT_FOUR, commit=True)
+    probed(guard_tree, vault)
+    _prose(vault, "---\nname: foo\n---\nstores: 5\n")
+    with pytest.raises(V.VaultRoundError):
+        V.land(["skills/foo/SKILL.md"], "#2036 vault-surface prose", item_id=43)
+    reviews = _events("vault_review")
+    assert reviews[0]["kind"] == "skipped" and "backend 503" in reviews[0]["findings"]
+    lands = _events("vault_land")
+    assert lands[0]["guards"]["refuse"] is True and lands[0]["ok"] is False
+    assert lands[0]["item_id"] == 43

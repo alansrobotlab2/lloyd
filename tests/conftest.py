@@ -100,6 +100,18 @@ def _default_state_dirs_to_scratch() -> None:
 _default_state_dirs_to_scratch()
 
 
+# `scripts/automod/vault_guards.py` judges a vault land by running the tree's
+# vault-reading selection as a pytest subprocess (~70 s, one throwaway worktree
+# and one whole vault mirror per call), and `vault_round.land` calls it. `land()`
+# is called ~25 times by `tests/test_automod_vault_round.py` alone; left alone,
+# every one of those nests a second full selection inside the suite. This variable
+# is the nesting rule, not an off switch: production never sets it, so every real
+# landing is probed, and the tests that pin the probe itself hand `agreement`
+# roots of their own and clear it. Same shape as the block just above — the suite
+# must not reach the machine, and here must not reach a second copy of itself.
+os.environ.setdefault("LLOYD_VAULT_GUARD_PROBE", "1")
+
+
 def _data_root_to_scratch() -> None:
     """No pytest run writes into the machine's data root (`~/lloyd-data`).
 

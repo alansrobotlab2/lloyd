@@ -53,7 +53,7 @@ from pathlib import Path
 
 import yaml
 
-from scripts.automod import spec, state as S
+from scripts.automod import spec, state as S, vault_guards as VG
 
 LLOYD_HOME = Path(__file__).resolve().parent.parent.parent
 VAULT = Path(os.environ.get("LLOYD_VAULT") or (Path.home() / "obsidian"))
@@ -604,6 +604,35 @@ def _vault_review_attempts(item_id: int) -> int:
                and e.get("item_id") == item_id and float(e.get("ts") or 0) >= started)
 
 
+def _guards_row(guards: dict) -> dict:
+    """What goes on the ledger about one code-agreement probe.
+
+    Carried on the refusal row, the pass row and the not-judged row alike, because
+    the three are one measurement read three ways, and a row that names only the
+    refusal cannot answer the question the owed-check job asks once this ships
+    ("did the first real mixed-surface land get a validated pass or a refusal?").
+    `state` and `refuse` are on every row: a pass that says nothing about the probe
+    is indistinguishable from a probe that never ran, which is the #1691 failure
+    shape. The detail keys — `nodes`, `reason`, the two run summaries — are written
+    only when there is something to say, so an absent key means "nothing reported"
+    and never "reported as nothing", the convention `review_findings` below uses
+    for #1868.
+    """
+    out: dict = {"state": guards.get("state", "skipped"),
+                 "refuse": bool(guards.get("refuse"))}
+    cand = guards.get("candidate") or {}
+    if cand:
+        out["candidate"] = {"ran": cand.get("ran", 0), "failed": len(cand.get("failed") or [])}
+    base = guards.get("baseline") or {}
+    if base:
+        out["baseline"] = {"ran": base.get("ran", 0), "failed": len(base.get("failed") or [])}
+    if guards.get("nodes"):
+        out["nodes"] = list(guards["nodes"])[:10]
+    if guards.get("reason"):
+        out["reason"] = str(guards["reason"])[:400]
+    return out
+
+
 def land(paths: list[str], message: str, *, item_id: int | None = None,
          session_id: str | None = None) -> dict:
     """Validate these paths, commit exactly them on the vault's main, ledger it.
@@ -724,6 +753,41 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
                         "review_reason": findings[:600] if kind == "skipped" else "",
                         "clauses": clauses})
 
+    # #2036: does the code tree's own vault-reading selection still agree with the
+    # vault as proposed? Validation above proves the prose PARSES, and that is its
+    # ceiling — a sentence that parses perfectly can state a count the code does
+    # not have, and then the live tree's guards start demanding code that has not
+    # landed: #1975's prose land moved the retention skill to "thirteen" stores
+    # while `scripts/groundskeeper/retention-sweep.py` still printed twelve, and
+    # `tests/test_retention_sweep.py` has been red on every later round's base
+    # probe since. Neither rung could see it, because each is blind to the half it
+    # does not own — the code gate's diff never contains the vault, and
+    # `review.grade_vault` abstains on a `mixed` surface at review.py:1433 for the
+    # #551 reason. So this check is consistency-scoped and never surface-scoped: a
+    # `mixed` item's vault land and a plain `vault` land run the identical probe,
+    # and the review-rung skip exempts the land from nothing.
+    #
+    # It sits after validation and after the reviewer — the cheap rails first, the
+    # ~70 s subprocess last — and before the commit, which is the only point that
+    # can still leave the vault where it was. A probe that cannot judge does NOT
+    # refuse: it records why and proceeds, the same shape as the reviewer's
+    # abstention above, because holding the vault route hostage to a subprocess it
+    # does not own is worse than the hole being closed. Silence is what is not
+    # allowed: the report, with its denominator, goes on the row whatever it says.
+    guards = VG.agreement(paths=list(norm))
+    if guards.get("refuse"):
+        undone = revert_paths(list(norm))
+        S.append_event({"event": "vault_land", "ok": False, "item_id": item_id,
+                        "session_id": session_id or "", "paths": norm,
+                        "validated": list(norm),
+                        "errors": [VG.refusal_text(guards)],
+                        "reverted": undone,
+                        "review": "skipped",
+                        "review_reason": "code agreement refused the land",
+                        "guards": _guards_row(guards)})
+        raise VaultRoundError("code agreement failed; the change was reverted: "
+                              + VG.refusal_text(guards)[:1200])
+
     _ensure_main()
     # Never `git add -A --` with an empty pathspec: that stages the whole vault.
     stage = _stageable(norm)
@@ -767,6 +831,7 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
         review_clauses.sort(key=lambda r: int(r.get("clause") or 0))
     S.append_event({"event": "vault_land", "ok": True, "item_id": item_id, "commit": sha,
                     "paths": norm, "validated": buckets["validated"],
+                    "guards": _guards_row(guards),
                     "review": review, "review_reason": review_reason,
                     "review_clauses": review_clauses, "landing_clauses": landing_rows,
                     # Only when the reviewer said something about a round it
@@ -781,6 +846,7 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
                     **({"skill_body": skill_body} if skill_body else {}),
                     "message": message.strip()[:200]})
     return {"ok": True, "commit": sha, "paths": norm, "validated": buckets["validated"],
+            "guards": _guards_row(guards),
             "review": review, "review_reason": review_reason,
             "landing_clauses": landing_rows,
             **({"review_findings": review_findings} if review_findings else {}),
