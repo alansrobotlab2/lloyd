@@ -118,8 +118,13 @@ def measure(root: str, now: float | None = None, *,
 def evaluate(history: list[Snapshot], current: Snapshot | None, *,
              window: float = WINDOW_SECONDS, drop_fraction: float = DROP_FRACTION,
              drop_min: int = DROP_MIN, topdir_min: int = TOPDIR_MIN_FILES,
-             what: str = "vault") -> str | None:
-    """Why the tree (the vault, or `datawatch`'s data root) looks wiped, or None. Pure."""
+             what: str = "vault",
+             skip_top: frozenset[str] = frozenset()) -> str | None:
+    """Why the tree (the vault, or `datawatch`'s data root) looks wiped, or None. Pure.
+
+    A folder named in `skip_top` is never the subject of the top-level-folder
+    rule, whatever an older baseline recorded for it.
+    """
     if current is None:
         return f"the {what} root is missing"
     if not history:
@@ -135,7 +140,7 @@ def evaluate(history: list[Snapshot], current: Snapshot | None, *,
         return (f"{lost} of {peak.total} {what} files disappeared "
                 f"({lost / peak.total:.0%}) within {current.ts - peak.ts:.0f}s")
     for name, count in sorted(last.top.items()):
-        if name == "." or count < topdir_min:
+        if name == "." or count < topdir_min or name in skip_top:
             continue
         now_count = current.top.get(name)
         if not now_count:
@@ -148,8 +153,17 @@ class VaultWatch:
     """The guardian-side state machine: history, latch, persistence."""
 
     what = "vault"
-    #: Top-level folders `measure` does not count (none, for the vault).
-    skip_top: frozenset[str] = frozenset()
+    #: Top-level folders `measure` does not count. For the vault that is one,
+    #: `_pipeline`: scratch, not notes. Its only content was a stray pytest
+    #: basetemp (`_pipeline/tmp/pt1018`, 63 files, no note among them), and
+    #: because 63 is over `TOPDIR_MIN_FILES` removing that scratch read as a
+    #: top-level folder being wiped, which stops sync until a human clears the
+    #: latch (#2001). The exemption is from the top-level-folder rule and from
+    #: the file count, for that folder only: the root going missing, the root
+    #: being replaced, a drop across the rest of the vault and any other
+    #: top-level folder emptying all trip exactly as before. Never name a
+    #: folder here that holds notes.
+    skip_top: frozenset[str] = frozenset({"_pipeline"})
     state_file = STATE_FILE
     marker_file = MARKER_FILE
 
@@ -175,9 +189,24 @@ class VaultWatch:
             data = json.loads((self.state_dir / self.state_file).read_text(encoding="utf-8"))
             last = data.get("last_good")
             if isinstance(last, dict):
-                self.history = [Snapshot.from_dict(last)]
+                self.history = [self._without_skipped(Snapshot.from_dict(last))]
         except (OSError, ValueError):
             pass
+
+    def _without_skipped(self, snap: Snapshot) -> Snapshot:
+        """A stored baseline, as `measure` would count the same tree today.
+
+        A baseline written before a folder joined `skip_top` still carries its
+        bucket and its files in `total`. Compared as stored, the first tick
+        after the change would see that folder "vanish" and latch on nothing,
+        so the baseline is read without it.
+        """
+        dropped = {n: c for n, c in snap.top.items() if n in self.skip_top}
+        if not dropped:
+            return snap
+        return Snapshot(ts=snap.ts, total=max(0, snap.total - sum(dropped.values())),
+                        top={n: c for n, c in snap.top.items() if n not in dropped},
+                        inode=snap.inode)
 
     def _persist(self, snap: Snapshot) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -209,7 +238,7 @@ class VaultWatch:
         return None, snap
 
     def judge(self, snap: Snapshot | None) -> str | None:
-        return evaluate(self.history, snap, what=self.what)
+        return evaluate(self.history, snap, what=self.what, skip_top=self.skip_top)
 
     def trip(self, reason: str, snap: Snapshot | None, actions: dict) -> Path:
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -247,11 +276,11 @@ def sync_gate(root: str = VAULT_ROOT, state_dir: Path = GUARDIAN_STATE) -> tuple
     if marker:
         return False, (f"vault tripwire is set ({marker.get('reason')}); clear it with "
                        f"{marker.get('clear_with') or 'vaultwatch.py clear'} after checking the vault")
-    snap = measure(root)
+    snap = measure(root, skip_top=w.skip_top)
     if snap is None:
         return False, f"{root} does not exist"
     if w.history:
-        why = evaluate(w.history, snap, window=float("inf"))
+        why = evaluate(w.history, snap, window=float("inf"), skip_top=w.skip_top)
         if why:
             return False, f"the vault does not look like the last healthy measurement: {why}"
     return True, f"{snap.total} files"
@@ -261,7 +290,7 @@ def main(argv: list[str]) -> int:
     cmd = argv[1] if len(argv) > 1 else "status"
     w = VaultWatch()
     if cmd == "status":
-        snap = measure(w.root)
+        snap = measure(w.root, skip_top=w.skip_top)
         print(json.dumps({"tripped": w.tripped(),
                           "last_good": w.history[-1].to_dict() if w.history else None,
                           "now": snap.to_dict() if snap else None}, indent=2))

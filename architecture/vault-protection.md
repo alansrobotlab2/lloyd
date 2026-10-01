@@ -219,6 +219,17 @@ which churns thousands of loose objects. It trips on:
 The baseline persists to `vault_watch.json`, so a wipe while the guardian was
 down still reads as a wipe when it comes back.
 
+One top-level folder is not counted: `_pipeline` (`VaultWatch.skip_top`, #2001).
+It is scratch, never notes; its only content was a stray pytest basetemp of 63
+files, enough that clearing it would have read as a folder being wiped. The
+exemption covers that folder only, and every other rule above still trips. A
+baseline stored before a folder joined `skip_top` is read without it
+(`_without_skipped`), so deploying the exemption is not itself an event:
+compared as stored, today's `"_pipeline": 63` would have latched as "vanished"
+on the first tick. Order matters all the same. The guardian runs a staged
+snapshot, so re-stage it first and delete the scratch after. Never add a folder
+that holds notes.
+
 On a trip, in this order:
 
 1. write `vault-tripped.json` first, so a supervisord autorestart of sync is

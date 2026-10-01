@@ -225,3 +225,96 @@ def test_snapshots_record_changes_refuse_a_shrunken_vault_and_restore_aside(tmp_
     into_live = subprocess.run([str(ROOT / "scripts/backup/restore-vault.sh"), "HEAD", str(live)],
                                capture_output=True, text=True, env=env, timeout=60)
     assert into_live.returncode != 0 and "refusing" in into_live.stderr
+
+
+# ── #2001: the vault's scratch top-level folder is not counted ────────────────
+#
+# `~/obsidian/_pipeline/` held one thing, a stray pytest basetemp of 63 files.
+# 63 >= TOPDIR_MIN_FILES, so removing the scratch would have read as a top-level
+# folder being wiped: sync stopped, pool paused, a human-only `clear`.
+
+def _scratch_vault(root: Path) -> Path:
+    v = _vault(root)
+    scratch = v / "_pipeline" / "tmp" / "pt1018"
+    scratch.mkdir(parents=True)
+    for i in range(63):
+        (scratch / f"f{i}.json").write_text("{}")
+    return v
+
+
+def test_the_vault_exempts_exactly_one_top_level_folder_and_says_why():
+    assert VW.VaultWatch.skip_top == frozenset({"_pipeline"})
+    src = Path(VW.__file__).read_text(encoding="utf-8")
+    comment = src[src.index("#: Top-level folders `measure` does not count"):
+                  src.index("skip_top: frozenset[str] = frozenset({")]
+    for said in ("scratch", "top-level-folder rule", "for that folder only"):
+        assert said in comment, (said, comment)
+
+
+def test_measure_counts_none_of_the_scratch_folder_and_every_other_folder_the_same(tmp_path):
+    v = _scratch_vault(tmp_path / "vault")
+    full = VW.measure(str(v))
+    skipped = VW.measure(str(v), skip_top=VW.VaultWatch.skip_top)
+
+    assert full.top["_pipeline"] == 63
+    assert "_pipeline" not in skipped.top
+    assert skipped.total == full.total - 63
+    siblings = {k: n for k, n in full.top.items() if k != "_pipeline"}
+    assert siblings and skipped.top == siblings
+
+
+def test_shipping_the_exemption_against_a_baseline_that_still_holds_the_folder_does_not_trip(
+        tmp_path):
+    """The persisted `vault_watch.json` on the live box records `"_pipeline": 63`.
+    The first tick of the new code measures no such bucket; read as stored, that
+    is `top-level folder '_pipeline' (63 files) vanished` and a latched trip
+    before anything was deleted."""
+    v = _scratch_vault(tmp_path / "vault")
+    state = tmp_path / "state"
+    state.mkdir()
+    old = VW.measure(str(v), now=1000.0)                       # counted, as the old code did
+    assert old.top["_pipeline"] == 63
+    (state / VW.STATE_FILE).write_text(json.dumps({"root": str(v), "last_good": old.to_dict()}))
+    # The hazard is real for the stored snapshot taken as it stands:
+    assert "'_pipeline' (63 files) vanished" in VW.evaluate(
+        [old], VW.measure(str(v), now=1010.0, skip_top=VW.VaultWatch.skip_top),
+        window=float("inf"))
+
+    w = VW.VaultWatch(str(v), state)
+    assert "_pipeline" not in w.history[-1].top
+    assert w.history[-1].total == old.total - 63
+    why, snap = w.tick(now=1010.0)
+    assert why is None and w.tripped() is None
+    ok, said = VW.sync_gate(str(v), state)
+    assert ok, said
+
+    # And removing the scratch afterwards is not an event either.
+    shutil.rmtree(v / "_pipeline")
+    assert w.tick(now=1020.0)[0] is None
+    assert VW.sync_gate(str(v), state)[0]
+
+
+def test_a_real_top_level_folder_emptying_still_trips_and_an_exempt_one_never_does(tmp_path):
+    v = _scratch_vault(tmp_path / "vault")
+    state = tmp_path / "state"
+    w = VW.VaultWatch(str(v), state)
+    assert w.tick(now=1000.0)[0] is None
+    big = max((k for k in w.history[-1].top if k != "."), key=lambda k: w.history[-1].top[k])
+    assert w.history[-1].top[big] >= VW.TOPDIR_MIN_FILES
+
+    for f in (v / "_pipeline").rglob("*"):                      # the exempt folder empties
+        if f.is_file():
+            f.unlink()
+    assert w.tick(now=1010.0)[0] is None
+
+    shutil.rmtree(v / big)                                      # a real one vanishes
+    why, _ = w.tick(now=1020.0)
+    assert why is not None and repr(big) in why, why
+
+    # The pure rule, both directions, on hand-written snapshots.
+    before = VW.Snapshot(ts=0, total=5000, top={"notes": 40, "_pipeline": 63, ".": 3})
+    emptied_exempt = VW.Snapshot(ts=1, total=4937, top={"notes": 40, "_pipeline": 0, ".": 3})
+    emptied_real = VW.Snapshot(ts=1, total=4960, top={"notes": 0, "_pipeline": 63, ".": 3})
+    skip = VW.VaultWatch.skip_top
+    assert VW.evaluate([before], emptied_exempt, skip_top=skip) is None
+    assert "'notes' (40 files) emptied" in VW.evaluate([before], emptied_real, skip_top=skip)
