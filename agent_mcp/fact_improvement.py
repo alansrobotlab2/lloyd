@@ -29,6 +29,16 @@ detector's pairing:
                 carrying neither field beating one that carries either is the
                 extractor's default `1.0` beating a sourced claim (#1348), so
                 that pair is reported too, never acted on.
+                *Attributable is not the same as independent*, and only one of
+                the two was ever checked: a pair whose sides carry the SAME
+                non-empty `source_doc`, or the same non-empty `source_hash`, is
+                one document restated twice, and one document is one reason —
+                not two that happen to disagree (#1941). Such a pair is flagged
+                `shared_lineage` on the pair itself, counted in the record's
+                `lineage_withheld_pairs`, and never acted on. This veto is on
+                the confidence basis ONLY: on the `created_at` basis a later
+                write inside the same document is the whole evidentiary value of
+                write order, and vetoing it there is vetoing the basis.
   created_at    one was written ≥ MIN_STALE_GAP_DAYS after the other, so the
                 older one is the one a later write superseded → expire it
   same day, same confidence → no basis. Reported, never acted on.
@@ -157,6 +167,26 @@ MIN_CONFIDENCE_GAP = 0.1
 # specified finer than three decimals, so this cannot let a 0.0999999 pair
 # through; it only undoes representation error.
 _GAP_TOLERANCE = 1e-9
+# The two fields that name WHERE a row came from, checked for agreement across a
+# pair (#1941). Both are per-record fields on the fact markdown itself, read
+# through the same YAML parse that produced the rows the plan loop is holding —
+# verified on the live tree 2026-10-01: two rows of
+# `_pipeline/vault-derived/facts/LLM Inference/LLM Inference-general.md` carry
+# identical `source_hash` values, so the veto needs no new read. (The hash is
+# quoted as a field name, not a value, because a bare hex run in a comment reads
+# as a commit sha to anything that validates citations against this repo, where
+# no such object exists.)
+#
+# Both are asked because neither is a superset of the other: the same document
+# can be cited by two paths, giving two `source_doc` strings over one
+# `source_hash`, and `source_hash` is missing on rows written before a writer
+# stamped one (120,572 of the 121,112 active rows carry it, against 121,103
+# carrying `source_doc`). That near-universality is what makes this veto
+# reachable — 19,933 (entity, `source_doc`) groups hold ≥2 rows — and it is the
+# same fact that makes the *presence* of these fields useless as a reason: the
+# #1348 guard asks only whether a row has one, and on 2026-10-01 every active
+# row does, because `created_at` is on 121,112 of 121,112.
+_LINEAGE_FIELDS = ("source_doc", "source_hash")
 # Cap per entity: a god-node's contradiction list is noise, and expiring 20
 # facts because a heuristic shrugged is not an improvement.
 MAX_ACTIONS_PER_ENTITY = 5
@@ -740,6 +770,37 @@ def _unattributed_winner(winner: dict, loser: dict) -> bool:
     return not _has_attribution(winner) and _has_attribution(loser)
 
 
+def _shared_lineage(f1: dict, f2: dict) -> str | None:
+    """Which field names ONE origin for both rows of a pair, or None.
+
+    The question `_has_attribution` never asked (#1941). That predicate is about
+    whether a row can say where it came from; this one is about whether the two
+    rows came from *different* places. A pair sourced to the same document on
+    both sides is that document said twice, and one document is one reason — it
+    cannot be the independent second reason this pass's whole thesis requires
+    ("every action here therefore needs an independent reason *on top of* the
+    detector's pairing", module docstring). Confidence is what makes the pair
+    look decidable: the witness on the live tree is entity `LLM Inference`, two
+    rows both sourced to
+    `projects/lloyd/channel-eval/ai-engineer.md`, at 0.95 against 0.85 — a gap
+    of exactly `MIN_CONFIDENCE_GAP`, cleared only because `_GAP_TOLERANCE` makes
+    the floor `>=`.
+
+    Returns the field name that agreed, not just a bool, so a reader of the pair
+    can tell a shared document from a shared content hash. Compares stripped
+    strings and refuses to call two empty values shared: `source_doc: None` on
+    both sides says nothing about where either came from, which is the #1348
+    shape and is already refused on its own grounds — treating "neither knows"
+    as "same source" would silently swallow the unattributed-winner guard and
+    every row written without attribution.
+    """
+    for field in _LINEAGE_FIELDS:
+        v1, v2 = str(f1.get(field) or "").strip(), str(f2.get(field) or "").strip()
+        if v1 and v2 and v1 == v2:
+            return field
+    return None
+
+
 def _loser_by_age(f1: dict, f2: dict) -> tuple[dict, dict, str] | None:
     """Return (loser, winner, reason) when write order is evidence."""
     t1, t2 = _iso(f1.get("created_at")), _iso(f2.get("created_at"))
@@ -890,6 +951,19 @@ def plan_entity(entity: str, max_actions: int = MAX_ACTIONS_PER_ENTITY) -> dict:
         categories_skipped = retry["categories_skipped"]
 
     contradictions = detection.get("contradictions", [])
+    # The lineage flag goes on EVERY pair the detector returned, before the
+    # opposing-terms filter runs (#1941): "these two rows are one document
+    # restated" is a property of the pair, and a pair the filter sets aside has
+    # it as plainly as one it keeps. Emitting it before the veto is what keeps
+    # the two halves of clause 5 apart — `lineage_pairs` is exposure, and
+    # `lineage_withheld` is what the veto cost. A withheld count of 0 means
+    # nothing until the exposure beside it says whether there was anything to
+    # withhold.
+    for pair in contradictions:
+        if _shared_lineage(pair.get("fact1") or {}, pair.get("fact2") or {}):
+            pair["shared_lineage"] = True
+    lineage_pairs = sum(1 for c in contradictions if c.get("shared_lineage"))
+    lineage_withheld = 0
     if REQUIRE_OPPOSING_TERMS:
         actable = [c for c in contradictions
                    if str(c.get("reason", "")).startswith("opposing_terms")]
@@ -925,6 +999,18 @@ def plan_entity(entity: str, max_actions: int = MAX_ACTIONS_PER_ENTITY) -> dict:
                 # 0.9 vs 0.95 is two facts captured two ways, not two claims
                 # of differing strength. No basis, so no action — the pair
                 # stays in `contradictions` and is reported (#701).
+                continue
+            if item.get("shared_lineage"):
+                # One document, two rows → no action, pair still reported
+                # (#1941). Placed after the gap floor because the floor is what
+                # the clause's "differ by >= MIN_CONFIDENCE_GAP" refers to, and
+                # before the #1348 contest because the lineage question is the
+                # earlier one and does not depend on which side holds the higher
+                # number. The two refusals are disjoint on the `source_doc` half:
+                # two rows sharing a non-empty `source_doc` makes the winner
+                # attributed by that fact alone, so `_unattributed_winner` is
+                # False for any pair this vetoes.
+                lineage_withheld += 1
                 continue
             loser, winner = (f2, f1) if c1 > c2 else (f1, f2)
             if _unattributed_winner(winner, loser):
@@ -1024,6 +1110,16 @@ def plan_entity(entity: str, max_actions: int = MAX_ACTIONS_PER_ENTITY) -> dict:
             "near_duplicates": sum(
                 1 for c in contradictions
                 if not str(c.get("reason", "")).startswith("opposing_terms")),
+            # Exposure and cost, stated separately (#1941). `lineage_pairs` is
+            # how many of THIS entity's pairs share an origin — the number that
+            # says whether the veto below had anything to bite on.
+            # `lineage_withheld` is how many of those the confidence basis was
+            # about to act on and did not. The second is the one an action-rate
+            # drop is read from; the first is what stops a zero in the second
+            # from being read as a clean night, which is the #1348 lesson this
+            # item names. Both are per-entity, and a refused entity reports
+            # neither, because it was never scanned.
+            "lineage_pairs": lineage_pairs, "lineage_withheld": lineage_withheld,
             "actions": actions, "before_active": _active_count(entity),
             # Coverage, stated. `pairs_before` on a `by_category` plan counts the
             # pairs inside each scanned category and nothing across one, and
@@ -1429,6 +1525,11 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
         entry = {"entity": entity, "signal": signal["source"],
                  "contradictions": None if plan["refused"] else plan["contradictions"],
                  "near_duplicates": None if plan["refused"] else plan.get("near_duplicates", 0),
+                 # Null for a refused entity for the same #702 reason as
+                 # `near_duplicates`: it was never scanned, so its lineage is
+                 # unknown, not clean.
+                 "lineage_pairs": None if plan["refused"] else plan.get("lineage_pairs", 0),
+                 "lineage_withheld": None if plan["refused"] else plan.get("lineage_withheld", 0),
                  "refused": plan["refused"],
                  "checked": plan.get("checked", 0),
                  "skipped_reason": plan.get("skipped_reason") if plan["refused"] else None,
@@ -1543,6 +1644,19 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
         "entities": [s["entity"] for s in signals],
         "actions_planned": planned,
         "actions_taken": taken,
+        # What the shared-lineage veto cost this run (#1941), over the entities
+        # it scanned. `actions_planned` alone cannot tell a quiet night from a
+        # vetoed one: this pass already has two refusals that leave no mark on
+        # any field (#1348's pass "reported every entity and planned nothing" and
+        # read as healthy), so a third that also removed most of the actions, and
+        # said nothing, would be invisible from the record. `lineage_pairs` is the
+        # exposure beside it — a withheld of 0 over an exposure of 0 is "nothing
+        # to withhold", a withheld of 0 over an exposure of 40 is the veto doing
+        # its work somewhere the confidence basis never reached. `or 0` because a
+        # refused entity carries null here and its unknowns are not counted.
+        "lineage_pairs": sum(e.get("lineage_pairs") or 0 for e in per_entity),
+        "lineage_withheld_pairs": sum(e.get("lineage_withheld") or 0
+                                      for e in per_entity),
         "before_active": before,
         "after_active": after,
         "delta_active": (after - before) if after >= 0 and before >= 0 else None,
