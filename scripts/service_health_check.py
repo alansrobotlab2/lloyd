@@ -602,6 +602,87 @@ def check_ca_trust(runner=subprocess.run) -> list:
                     found.get("stored"), found.get("expected"))]
 
 
+# Every repo-tracked user timer must actually be enabled (#1891). The guard,
+# `scripts/maintenance/check-unit-enabledness.sh`, landed with a test and no caller,
+# so a placed-but-disabled timer was still found only by someone remembering to run
+# it (#1989). This entry is that caller, on the route a human actually runs.
+#
+# The .sh stays the single source of the assertion. Nothing here asks systemd
+# anything or decides which answer counts as a pass: a row is unhealthy only where
+# the script exited non-zero AND printed its own `FAIL <unit>` line for that timer,
+# and the denominator in every row is the script's own `checked N timers: ...` line,
+# copied, never recounted.
+UNITS_CATEGORY = "units"
+UNIT_ENABLEDNESS = _TREE / "scripts" / "maintenance" / "check-unit-enabledness.sh"
+_UNITS_DENOMINATOR_RE = re.compile(r"^checked \d+ timers?: .*$", re.M)
+_UNITS_ROW_RE = re.compile(r"^(\S+\.timer)\t(\S+)$", re.M)
+_UNITS_FAIL_RE = re.compile(r"^FAIL (\S+\.timer) ", re.M)
+
+
+def _unit_enabledness_argv() -> list:
+    """The guard's argv. Under pytest only, `UNIT_ENABLEDNESS_SCRIPT` names a stand-in.
+
+    The same rule as the `UNIT` seam at the top of this file, for the same reason:
+    guarded on PYTEST_CURRENT_TEST so no environment variable can redirect which
+    guard a live run executes. The real script shells out to the host `systemctl`,
+    and a test must never read the host's unit state.
+    """
+    script = str(UNIT_ENABLEDNESS)
+    if os.environ.get("PYTEST_CURRENT_TEST") and os.environ.get("UNIT_ENABLEDNESS_SCRIPT"):
+        script = os.environ["UNIT_ENABLEDNESS_SCRIPT"]
+    return ["bash", script]
+
+
+def _units_row(name: str, healthy: bool, status: str, exit_code: int, output: str) -> dict:
+    # No `advisory` key, on purpose: a timer that never fires is a job that never
+    # runs, which is a live fault and is graded like the `deployed:` rows.
+    return {
+        "name": name,
+        "status": status,
+        "healthy": healthy,
+        "exit_code": exit_code,
+        "output": output,
+        "category": UNITS_CATEGORY,
+    }
+
+
+def check_unit_enabledness(runner=subprocess.run) -> list:
+    """One graded row per repo timer, from the guard's own output and exit code.
+
+    Exit 0 is the only pass. On a non-zero exit the rows the script itself named in
+    a `FAIL <unit>` line are unhealthy; if it failed without naming a timer (no unit
+    directory, no systemctl, zero timers) one `unit-enabledness` row carries its
+    first FAIL line, because a guard that looked at nothing is never a pass. A guard
+    that could not be run at all is likewise an unhealthy row, not a missing one.
+    """
+    argv = _unit_enabledness_argv()
+    try:
+        proc = runner(argv, capture_output=True, text=True, timeout=30)
+    except Exception as exc:
+        return [_units_row("unit-enabledness", False,
+                           f"unknown: the timer enabledness guard could not be run "
+                           f"({str(exc)[:120]}) — nothing was checked", -1, str(exc))]
+    text = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+    denominator = _UNITS_DENOMINATOR_RE.search(text)
+    counted = denominator.group(0) if denominator else "the guard printed no denominator"
+    failed = set(_UNITS_FAIL_RE.findall(text)) if proc.returncode != 0 else set()
+    rows = []
+    for unit, verdict in _UNITS_ROW_RE.findall(text):
+        rows.append(_units_row(f"timer:{unit}", unit not in failed,
+                               f"{verdict} — {counted}", proc.returncode, text))
+    if proc.returncode != 0 and not any(not r["healthy"] for r in rows):
+        head = next((ln for ln in text.splitlines() if ln.startswith("FAIL")),
+                    text.splitlines()[0] if text else "no output")
+        rows.append(_units_row("unit-enabledness", False,
+                               f"failed (exit {proc.returncode}): {head[:200]} — {counted}",
+                               proc.returncode, text))
+    elif not rows:
+        rows.append(_units_row("unit-enabledness", False,
+                               f"unknown: the guard exited 0 and named no timer — {counted}",
+                               proc.returncode, text))
+    return rows
+
+
 CATEGORIES = {
     "llm": ["agent-llm-primary", "agent-llm-secondary", "agent-djev"],
     "lloyd": ["lloyd-backend", "lloyd-frontend", "lloyd-mcp"],
@@ -612,6 +693,8 @@ CATEGORIES = {
     # Same shape: `main` answers it from `check_ca_trust`, which is neither a
     # supervisor program nor a deployed file.
     CA_TRUST_CATEGORY: [],
+    # Same shape again: `main` answers it from `check_unit_enabledness`.
+    UNITS_CATEGORY: [],
     "all": list(SERVICES.keys()),
 }
 
@@ -917,6 +1000,10 @@ def main():
     # operator's own `bash scripts/install-ca.sh --check` would read.
     if not args.services and args.category in (None, CA_TRUST_CATEGORY):
         results.extend(check_ca_trust())
+    # The timer enabledness guard, on the same rule: whole-fleet run or its own
+    # category, never a `--services` ask.
+    if not args.services and args.category in (None, UNITS_CATEGORY):
+        results.extend(check_unit_enabledness())
 
     # Calculate summary
     summary = {}

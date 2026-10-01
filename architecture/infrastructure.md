@@ -349,6 +349,18 @@ One tracked unit used to sit outside the directory —
 `WorkingDirectory` and venv had both been deleted for a year; it was never
 installed by anything and was removed on 2026-09-24 (#1110).
 
+Placing a unit and enabling it are two acts, and the tree only performs the
+first. `scripts/maintenance/check-unit-enabledness.sh` (#1891) asserts every
+tracked `*.timer` answers `enabled`, and since #1989 the health script is its
+caller: `check_unit_enabledness`, category `units`, on a whole-fleet run and
+`--category units`, never for a `--services` ask. One graded row per timer —
+no `advisory` key, so a disabled timer degrades `Units:` and counts in
+`Overall:`. The script stays the only place the assertion lives: a row is
+unhealthy only where the guard exited non-zero and printed its own
+`FAIL <unit>` line, and each status carries the guard's `checked N timers`
+line verbatim (`tests/test_unit_enabledness_route.py`, driven through a
+stand-in script behind the pytest-only `UNIT_ENABLEDNESS_SCRIPT` seam).
+
 Thunderbird runs as a user service because `agent_mcp/thunderbird.py` talks
 to a live instance; a closed Thunderbird is the usual reason the aggregator
 reports `degraded`.

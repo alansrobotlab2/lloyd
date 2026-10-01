@@ -16,11 +16,12 @@
 # diff can produce it — but the DRIFT is checkable, and until this script nothing
 # checked it.
 #
-# WHO RUNS IT. Nobody automatically, as of #1891: run it by hand as
-# `scripts/maintenance/check-unit-enabledness.sh` from the repo root. Wiring it
-# into a route someone actually executes (a health script, a nightly autonomy task)
-# is the ruling #1891 left owed — that is a behaviour change on a route, not this
-# check, and the item names it rather than pretending the file has a caller.
+# WHO RUNS IT. `scripts/service_health_check.py` (#1989): `check_unit_enabledness`
+# runs this file through subprocess on every whole-fleet run and on
+# `--category units`, and turns its lines into graded rows. It reimplements
+# nothing — the verdict, the `FAIL <unit>` lines and the denominator are all read
+# from this script's output, so change the assertion here and nowhere else. By
+# hand it is still `scripts/maintenance/check-unit-enabledness.sh` from the repo root.
 #
 # WHAT IT ASSERTS, AND WHAT IT DELIBERATELY DOES NOT.
 #   - `.timer` units ONLY. A co-located `.service` legitimately reads something

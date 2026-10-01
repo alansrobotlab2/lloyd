@@ -11,7 +11,7 @@ must be a recurring one that wants `timers.target`.
 
 Installing the units is configuration; enabling them is host state this module
 never reads, so the test does not pin enabledness — a box that has not linked
-them must not go red here. Enabling is the SETUP.md:1520 route:
+them must not go red here. Enabling is the SETUP.md route (its tailnet-cert renewal steps):
 `systemctl --user enable --now lloyd-cert-renew.timer`. The drift #1891 found
 sitting behind that handoff — a timer installed but never enabled — is what
 `scripts/maintenance/check-unit-enabledness.sh` checks, over every repo timer.

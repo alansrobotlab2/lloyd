@@ -537,6 +537,12 @@ def _stub(tmp_path, lines, per_name=None):
     stub.write_text(_FLEET_SCRIPT.format(lines="\n".join(lines),
                                          per_name=per_name or {}))
     stub.chmod(0o755)
+    # The default run also executes scripts/maintenance/check-unit-enabledness.sh
+    # (#1989), which asks `systemctl --user is-enabled`. A stand-in first on PATH
+    # answers for it, so this suite never reads the host's unit state.
+    systemctl = bin_dir / "systemctl"
+    systemctl.write_text("#!/bin/sh\necho enabled\n")
+    systemctl.chmod(0o755)
     env = dict(PATH=f"{bin_dir}:/usr/bin:/bin", UNIT=str(stub.resolve()),
                PYTEST_CURRENT_TEST="seam")
     return env, stub

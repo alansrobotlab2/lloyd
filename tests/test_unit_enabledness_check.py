@@ -279,8 +279,26 @@ def test_the_cert_renew_units_docstring_blames_the_route_not_the_operator():
     assert doc, f"{CERT_UNITS_TEST} lost its module docstring"
     assert "operator" not in flat, flat
     assert "does not pin enabledness" in flat, flat
-    assert "SETUP.md:1520" in flat, flat
+    assert "SETUP.md route" in flat, flat
+    # The pointer is pinned by what it points at, not by a line number (#1989):
+    # a cited line moves with every edit above it, and then names something else.
+    assert re.search(r"SETUP\.md:\d+ route", flat) is None, flat
+    setup = (ROOT / "SETUP.md").read_text(encoding="utf-8")
+    assert f"systemctl --user enable --now {CERT_TIMER}" in setup
     assert "scripts/maintenance/check-unit-enabledness.sh" in flat, flat
     assert "is-enabled" not in src, (
         "this module has started asserting a unit is enabled, which is the host "
         "state it exists to refuse")
+
+
+def test_the_guard_names_its_caller():
+    """#1989 clause 5: the header's WHO RUNS IT names the health script, and the
+    health script really does name this guard — a header that claims a caller the
+    tree does not have is the same dangling pointer in the other direction."""
+    text = SCRIPT.read_text(encoding="utf-8")
+    who = text.split("# WHO RUNS IT.", 1)[1].split("# WHAT IT ASSERTS", 1)[0]
+    assert "scripts/service_health_check.py" in who, who
+    assert "Nobody automatically" not in who, who
+
+    caller = (ROOT / "scripts" / "service_health_check.py").read_text(encoding="utf-8")
+    assert '"check-unit-enabledness.sh"' in caller
