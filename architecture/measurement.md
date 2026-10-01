@@ -177,6 +177,17 @@ the task file (both refusal-form checks now also accept an opening
 `{"status": "blocked"`), and `tests/test_bench_invariants.py` permits that shape
 on the closed pair bench_009 + bench_010 only.
 
+## A normalized score needs one population
+
+`eval/run_eval.py` emits `<metric>_normalized = score / ceiling` only when both
+halves say they divided over the same number of queries (`ci95[metric].n` and
+`ceiling.n[metric]`). The gold-side ceiling drops every query whose gold was never
+offered to the second labeler, the score does not, so on a full-corpus nightly
+the two differ (2026-10-01: 66 vs 53 for `entity_hit_rate`, printed 1.2799) and
+the ratio is null with a `population mismatch` note naming both n's, in
+`ceiling_notes` and on the printed line (#2014). Scoring the numerator over the
+ceiling's own query set would keep the field live; that is a separate change.
+
 ## Which measurement stands between a round and landing
 
 One arm is load-bearing at the gate: tool choice, run by the `prompt_surface`

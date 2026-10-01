@@ -1286,6 +1286,12 @@ def gold_label_fingerprint(queries: list[dict], scored_ids: list[str]) -> str | 
     return lac.labels_sha256(sorted(labelled, key=lambda q: str(q["id"])))
 
 
+#: The head of the `ceiling_notes` reason for a ratio withheld because its two halves
+#: were divided over different query sets (#2014). Named so the page and the tests
+#: match the class, not a sentence.
+POPULATION_MISMATCH = "population mismatch"
+
+
 def _normalize_against_ceiling(fields: dict, overall: dict) -> None:
     """Fill `<metric>_normalized = score / ceiling` for each metric that has a
     ceiling, once the raw aggregates exist. Mutates `fields` in place.
@@ -1293,6 +1299,9 @@ def _normalize_against_ceiling(fields: dict, overall: dict) -> None:
     A ceiling of exactly 0.0 leaves the value null with a note beside it: it means no
     answer at all could satisfy these gold labels, so the ratio is 0/0 and a printed
     0.0 would claim a scored position where there is a division by nothing.
+
+    A ceiling divided over a different number of queries than the score leaves the
+    value null too, with both n's in the note (#2014): see the guard below.
     """
     ceil = fields.get("ceiling") or {}
     for metric in CI_METRICS:
@@ -1308,6 +1317,22 @@ def _normalize_against_ceiling(fields: dict, overall: dict) -> None:
         if not cap:
             fields.setdefault("ceiling_notes", {})[metric] = (
                 "ceiling is 0.0; score/ceiling undefined")
+            continue
+        # The population guard (#2014). The score divides over every gold-bearing
+        # query the run scored; the ceiling drops each query whose gold was never
+        # offered to the second labeler (`ceiling.excluded`), which the `ids=` alignment
+        # in `ceiling_context` does not undo. On the 2026-10-01 nightly that was 66 vs
+        # 53 for entity_hit_rate, and the printed 1.2799 was the population gap, not
+        # retrieval above its ceiling. A ratio is emitted only when both halves say
+        # they divided over the same number of queries; a ceiling with no `n` block
+        # (a hand-built one) makes no population claim to compare.
+        score_n = ((overall.get("ci95") or {}).get(metric) or {}).get("n")
+        ceil_n = (ceil.get("n") or {}).get(metric) if "n" in ceil else None
+        if "n" in ceil and (score_n is None or ceil_n is None or score_n != ceil_n):
+            fields[f"{metric}_normalized"] = None
+            fields.setdefault("ceiling_notes", {})[metric] = (
+                f"{POPULATION_MISMATCH}: score over n={score_n} queries, ceiling over "
+                f"n={ceil_n}; score/ceiling is not a position on one scale")
             continue
         fields[f"{metric}_normalized"] = round(score / cap, 4)
 
@@ -1648,6 +1673,12 @@ def print_table(records: list[dict], summary: dict) -> None:
         else:
             suffix = (f"   score/ceiling={'null' if norm is None else norm}"
                       f" (ceiling={cap} kind={kind})")
+            # Why a ceilinged metric has no ratio, on the line itself (#2014): the
+            # reporter copies this page, and a bare null beside a real ceiling reads
+            # as a bug rather than as two populations.
+            note = (o.get("ceiling_notes") or {}).get(metric)
+            if norm is None and note:
+                suffix += f" [{note}]"
         print(f"  {label:<20}{fmt(o.get(metric))}{_fmt_ci(metric, o)}{suffix}")
     # No `gold_bearing` companion line any more (#1663): the rates printed above are
     # the gold-bearing means, and `n=` at the end of each bracket is how many queries

@@ -160,6 +160,87 @@ def test_normalization_divides_and_names_the_kind():
     assert "ceiling_notes" not in fields
 
 
+# ── #2014: a ratio is never emitted from two different query sets ────────────
+
+def _ceilinged(ceil_n: dict | None) -> dict:
+    fields = {"ceiling": {"kind": lac.CEILING_KIND, "entity_hit_rate": 0.5094,
+                          "doc_hit_rate": 0.6122, "entity_recall_avg": 0.0,
+                          "doc_recall_avg": None, "mrr_doc": None, "ndcg10": None,
+                          "fact_entity_recall_avg": None}}
+    if ceil_n is not None:
+        fields["ceiling"]["n"] = ceil_n
+    for metric in METRICS:
+        fields[f"{metric}_normalized"] = None
+        fields[f"{metric}_ceiling_kind"] = None
+    return fields
+
+
+def _scored(entity_n, doc_n) -> dict:
+    return {"entity_hit_rate": 0.652, "doc_hit_rate": 0.716, "entity_recall_avg": 0.3,
+            "doc_recall_avg": 0.5, "mrr_doc": 0.4, "ndcg10": 0.5,
+            "fact_entity_recall_avg": None,
+            "ci95": {"entity_hit_rate": {"n": entity_n}, "doc_hit_rate": {"n": doc_n},
+                     "entity_recall_avg": {"n": entity_n}}}
+
+
+def test_a_ratio_is_withheld_when_the_two_halves_cover_different_query_sets():
+    """The 2026-10-01 nightly, in miniature: entity_hit_rate 0.652 over 66 queries
+    against a ceiling of 0.5094 over 53 printed 1.2799 — a population gap read as
+    retrieval above its ceiling. The ratio is null and the note names both n's."""
+    fields = _ceilinged({"entity_hit_rate": 53, "doc_hit_rate": 49, "entity_recall_avg": 38})
+    ev._normalize_against_ceiling(fields, _scored(66, 74))
+    for metric, (sn, cn) in {"entity_hit_rate": (66, 53), "doc_hit_rate": (74, 49)}.items():
+        assert fields[f"{metric}_normalized"] is None, metric
+        note = fields["ceiling_notes"][metric]
+        assert note.startswith(ev.POPULATION_MISMATCH), note
+        assert f"n={sn}" in note and f"n={cn}" in note, note
+        assert fields[f"{metric}_ceiling_kind"] == lac.CEILING_KIND
+    # A side that cannot say how many queries it covered is a mismatch, not a match.
+    half = _ceilinged({"entity_hit_rate": 53})
+    scores = _scored(53, 74)
+    del scores["ci95"]
+    ev._normalize_against_ceiling(half, scores)
+    assert half["entity_hit_rate_normalized"] is None
+    assert "n=None" in half["ceiling_notes"]["entity_hit_rate"]
+
+
+def test_a_ratio_is_still_emitted_when_both_halves_cover_the_same_query_set():
+    """The guard is a population guard, not a retirement of the field: equal n's
+    divide, exactly as before."""
+    fields = _ceilinged({"entity_hit_rate": 66, "doc_hit_rate": 74, "entity_recall_avg": 66})
+    ev._normalize_against_ceiling(fields, _scored(66, 74))
+    assert fields["entity_hit_rate_normalized"] == round(0.652 / 0.5094, 4)
+    assert fields["doc_hit_rate_normalized"] == round(0.716 / 0.6122, 4)
+    # The zero-ceiling leg answers first and keeps its own note, n's equal or not.
+    assert fields["entity_recall_avg_normalized"] is None
+    assert "undefined" in fields["ceiling_notes"]["entity_recall_avg"]
+    assert set(fields["ceiling_notes"]) == {"entity_recall_avg"}
+    # No ceiling for a metric: still null, still no ratio borrowed, no note invented.
+    assert fields["doc_recall_avg_normalized"] is None
+
+
+def test_the_page_prints_null_for_a_ratio_over_two_populations(capsys):
+    """The printed page is what the nightly reporter copies: a mismatched metric
+    shows `score/ceiling=null` with both n's on its own line, never a number."""
+    fields = ev._ceiling_absent_fields("unused")
+    fields["ceiling"] = {"kind": lac.CEILING_KIND, "entity_hit_rate": 0.8,
+                         "doc_hit_rate": 0.9, "entity_recall_avg": 0.7,
+                         "doc_recall_avg": 0.8, "mrr_doc": 0.6, "ndcg10": 0.7,
+                         "fact_entity_recall_avg": None,
+                         "n": {"entity_hit_rate": 7, "doc_hit_rate": 10,
+                               "entity_recall_avg": 7, "doc_recall_avg": 10,
+                               "mrr_doc": 10, "ndcg10": 10}}
+    records, summary = _printed_summary(fields)
+    assert summary["overall"]["ci95"]["entity_hit_rate"]["n"] == 10
+    ev.print_table(records, summary)
+    lines = _page_lines(capsys.readouterr().out)
+    assert "score/ceiling=null (ceiling=0.8 kind=gold_label_surrogate)" in lines["entity_hit"]
+    assert "n=10" in lines["entity_hit"] and "n=7" in lines["entity_hit"], lines["entity_hit"]
+    assert "score/ceiling=0." not in lines["entity_hit"], lines["entity_hit"]
+    # Control on the same page: doc_hit's halves agree (10 and 10), so it divides.
+    assert "score/ceiling=1.1111 (ceiling=0.9" in lines["doc_hit"], lines["doc_hit"]
+
+
 # ── the printed page: what the nightly reporter actually reads ───────────────
 
 PRINTED = (("entity_hit", "entity_hit_rate"), ("doc_hit", "doc_hit_rate"),
@@ -504,7 +585,10 @@ def test_an_engine_artifact_clears_all_four_refusals_and_divides_the_score(
         "before there are scores there is nothing to divide: the field is present "
         "and null, which is the shape that keeps a null from reading as a zero")
 
-    overall = {"entity_hit_rate": 2 / 3}
+    # The score's own denominator travels with it, as `summarize` writes it (#2014):
+    # all three queries were offered their gold, so both halves are over the same three.
+    assert fields["ceiling"]["n"]["entity_hit_rate"] == 3
+    overall = {"entity_hit_rate": 2 / 3, "ci95": {"entity_hit_rate": {"n": 3}}}
     ev._normalize_against_ceiling(fields, overall)
     assert fields["entity_hit_rate_normalized"] == pytest.approx(1.0, abs=1e-3), (
         "0.6667 / 0.6667: at the ceiling, because the one query it missed is the one "
