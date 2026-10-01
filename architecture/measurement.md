@@ -196,6 +196,18 @@ the ratio is null with a `population mismatch` note naming both n's, in
 `ceiling_notes` and on the printed line (#2014). Scoring the numerator over the
 ceiling's own query set would keep the field live; that is a separate change.
 
+The ceiling itself is a function of the candidate menu the second labeler was
+shown, so the artifact names its menu builder (`menu_builder`, beside `caps`) and
+records an `offered` block per leg: gold offered at the run's cap, at 2x/4x/8x,
+and with the ranking uncapped (#1937). Replayed on 2026-10-01 the shipped
+builder (`query-token-overlap/v1`) offered 0.468 of entity gold at cap 40, 0.649
+at cap 320 and 1.000 only uncapped — a gold sharing no word with its query is
+ordered by spelling — so `outside_cap` does not mean a wider cap recovers a
+label. `eval/gold_blind_menu_probe.py` measures replacement builders (alias
+surfaces, embedding cosine, query-side expansion) over a namespace and corpus
+it is handed, calls no labeler, and deploys nothing; the bar is entity offered
+>= 0.80 at cap <= 60.
+
 ## Which measurement stands between a round and landing
 
 One arm is load-bearing at the gate: tool choice, run by the `prompt_surface`

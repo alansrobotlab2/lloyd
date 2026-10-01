@@ -2035,3 +2035,55 @@ def test_a_re_derived_split_counts_labels_and_reports_names_separately():
     assert "0.4 all-gold (2/5 labels)" in agree_line, agree_line
     # The advisory and the header now agree: one offered label, agreed, on each reading.
     assert "agreement among the labels that WERE offered: 1.0 (2/2)" in text, text
+
+
+# ── #1937: what the menu builder's ORDER hides, beside what its cap hides ─────
+
+def test_the_artifact_records_offered_at_the_cap_and_over_the_whole_namespace():
+    """The `offered` block sits beside `caps` and carries, per leg, the gold-offered
+    fraction at the run's cap and the fraction of the same ranking uncapped.
+
+    One query, two entity golds that are both namespace names. `Robot` shares a token
+    with the query and sorts first; `Raspberry Pi 5` shares none and sorts below a cap
+    of 1 — so the two figures differ, and the uncapped one is 1.0: the namespace holds
+    every gold, and what hid one of them was the order under the cap.
+    """
+    queries = [{"id": "q1", "query": "what does the robot run on",
+                "expect_entities": ["Robot", "Raspberry Pi 5"],
+                "expect_docs": ["memory/entities/robot.md", "memory/entities/gpu.md"]}]
+    art = lac.label_corpus(queries=queries, entity_names=_NS, vault_paths=_VAULT,
+                           labeler=_first_labeler, labeler_identity={"command": "test"},
+                           seed=7, entity_cap=1, doc_cap=1)
+    keys = list(art)
+    assert keys.index("offered") == keys.index("caps") + 2 and \
+        keys.index("menu_builder") == keys.index("caps") + 1, keys
+    ent = art["offered"]["entity"]
+    assert ent["labels"] == 2 and ent["cap"] == 1
+    assert ent["at_cap"] == 0.5 and ent["uncapped"] == 1.0, ent
+    assert ent["at_cap"] != ent["uncapped"] and ent["unoffered_uncapped"] == 0
+    assert ent["offered_by_cap"]["1"] == 1 == art["agreement"]["entity_labels_offered"], (
+        "the cap rung is the very count the agreement block has always carried")
+    assert list(ent["offered_by_cap"]) == ["1", "2", "4", "8"]
+    assert art["offered"]["doc"]["uncapped"] == 1.0
+
+    # A gold no namespace name satisfies is the only thing uncapped cannot offer.
+    absent = lac.offered_block(_cap_queries(), _NS, _VAULT, entity_cap=1, doc_cap=1)
+    assert absent["entity"]["unoffered_uncapped"] == 1, absent["entity"]
+    assert absent["entity"]["uncapped"] < 1.0
+    # ...and the block agrees with the per-row classification the run recorded.
+    capped = _capped_artifact()
+    detail = capped["ceiling"]["labels_unofferable_detail"]["entity"]
+    assert capped["offered"]["entity"]["unoffered_uncapped"] == detail["absent_from_namespace"]
+    assert (capped["offered"]["entity"]["labels"]
+            - capped["offered"]["entity"]["offered_by_cap"]["1"]) == detail["total"]
+
+
+def test_the_ranking_the_cap_cuts_is_the_ranking_the_ladder_measures():
+    """`_narrow` is `_ranked` cut and shuffled — one order, so the ladder cannot
+    describe a different builder from the one that made the menus."""
+    q = "what does the robot run on"
+    ranked = lac._ranked(q, _NS)
+    assert sorted(ranked) == sorted(_NS) and ranked == lac._ranked(q, list(reversed(_NS)))
+    for cap in (1, 2, len(_NS)):
+        assert sorted(lac.entity_candidates(q, _NS, cap=cap, seed=7, query_id="q1")) \
+            == sorted(ranked[:cap])

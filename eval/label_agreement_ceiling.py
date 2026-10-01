@@ -126,8 +126,27 @@ DOC_CAP = 40
 #: entity gold NAMES were cap artefacts and exactly one (`Nightly Reflection`) had no
 #: namespace name — the instrument printed the second story for all of them while
 #: computing neither test.
+#:
+#: #1937 corrected the half of that which over-promised. "Widening a cap converts those
+#: labels back" is true only in the limit cap -> namespace: replayed over the live
+#: pools on 2026-10-01, entity gold offered went 0.468 at cap 40 -> 0.649 at cap 320 ->
+#: 1.000 only uncapped, because 42 of 94 entity golds share no token with their query
+#: and the ranking orders that zero-overlap band by spelling. `outside_cap` keeps its
+#: meaning (the namespace holds a name); what it no longer implies is that a bounded
+#: cap reaches it. The artifact's `offered` block records the ladder, so the share the
+#: BUILDER hides is printed rather than inferred.
 OUTSIDE_CAP = "outside_cap"
 ABSENT_FROM_NAMESPACE = "absent_from_namespace"
+
+#: Identity of the candidate-menu builder (#1937), recorded in every artifact beside
+#: `caps`. A ceiling is a function of its menu: one produced by a different builder
+#: (alias-expanded, embedding-ranked — `eval/gold_blind_menu_probe.py`) is a different
+#: instrument, and must be distinguishable from label-agreement-20260929-005508.json,
+#: which predates the key and was built by this one.
+MENU_BUILDER = "query-token-overlap/v1"
+
+#: The cap multiples the `offered` block reports beside the run's own cap.
+OFFERED_LADDER = (1, 2, 4, 8)
 
 #: The agreement below which a ceiling's own disagreement set becomes the headline
 #: (#654's veto), and the figure `--print` evaluates it on — the all-gold rate.
@@ -251,6 +270,13 @@ def _narrow(query: str, pool: list[str], *, cap: int, seed: int, query_id: str,
     order, so a zero-overlap query is measured on a pool like every other rather
     than on an empty one that would report agreement 0 for a non-reason.
     """
+    chosen = _ranked(query, pool)[:cap]
+    _rng(seed, query_id, leg).shuffle(chosen)
+    return chosen
+
+
+def _ranked(query: str, pool: list[str]) -> list[str]:
+    """The whole of `pool` in the builder's total order, before any cap or shuffle."""
     toks = query_tokens(query)
     scored: list[tuple[int, int, str]] = []
     for name in pool:
@@ -258,9 +284,47 @@ def _narrow(query: str, pool: list[str], *, cap: int, seed: int, query_id: str,
         score = sum(1 for t in toks if t in hay)
         scored.append((-score, len(name), name))
     scored.sort()
-    chosen = [n for _s, _l, n in scored][:cap]
-    _rng(seed, query_id, leg).shuffle(chosen)
-    return chosen
+    return [n for _s, _l, n in scored]
+
+
+def offered_block(queries: list[dict], entity_names: list[str], vault_paths: list[str],
+                  *, entity_cap: int = ENTITY_CAP, doc_cap: int = DOC_CAP) -> dict:
+    """Per leg: gold labels offered at the run's cap, at its multiples, and uncapped.
+
+    The same ranking `_narrow` cuts, measured at every depth (#1937). `at_cap` is
+    what this run offered; `uncapped` is the offered fraction of the same ranking
+    over the whole namespace, i.e. every label some namespace name satisfies; the
+    rungs between say how much of the gap a wider cap buys. When `at_cap` and the
+    8x rung are close and `uncapped` is far, the gold is hidden by the ORDER, and no
+    bounded cap is the fix. No labeler, no gold reaches a menu: this only measures
+    where the gold fell in an order built without it.
+    """
+    out: dict = {}
+    for leg, pool, cap, key, satisfied in (
+            ("entity", entity_names, int(entity_cap), "expect_entities",
+             entity_label_satisfied),
+            ("doc", vault_paths, int(doc_cap), "expect_docs", doc_label_satisfied)):
+        ranks: list[int | None] = []
+        for q in queries:
+            golds = list(q.get(key) or [])
+            if not golds:
+                continue
+            ordered = _ranked(str(q.get("query") or ""), pool) if pool else []
+            for g in golds:
+                ranks.append(next((i for i, c in enumerate(ordered)
+                                   if satisfied(g, [c])), None))
+        total = len(ranks)
+        rungs = {str(cap * m): sum(1 for r in ranks if r is not None and r < cap * m)
+                 for m in OFFERED_LADDER}
+        uncapped = sum(1 for r in ranks if r is not None)
+        out[leg] = {
+            "labels": total, "cap": cap,
+            "offered_by_cap": rungs, "offered_uncapped": uncapped,
+            "unoffered_uncapped": total - uncapped,
+            "at_cap": round(rungs[str(cap)] / total, 4) if total else None,
+            "uncapped": round(uncapped / total, 4) if total else None,
+        }
+    return out
 
 
 def entity_candidates(query: str, entity_names: list[str], *, cap: int = ENTITY_CAP,
@@ -771,6 +835,12 @@ def label_corpus(*, labeler: Callable[[dict], dict], queries: list[dict],
         "labeler": dict(labeler_identity),
         "seed": int(seed),
         "caps": {"entity": int(entity_cap), "doc": int(doc_cap)},
+        # Which builder made the menus, and what its order hides at this cap and
+        # beyond it (#1937) — beside the caps, because the cap alone was read as the
+        # whole cost for a month.
+        "menu_builder": MENU_BUILDER,
+        "offered": offered_block(queries, entity_names, vault_paths,
+                                 entity_cap=entity_cap, doc_cap=doc_cap),
         # How the candidate lists were built, recorded beside the number so a reader
         # never opens the source to learn what the ceiling licenses. Both menus are a
         # function of the QUERY AND THE NAMESPACE ONLY — never the primary's gold,
@@ -1444,8 +1514,9 @@ def sub_veto_advisory(art: dict, *, leg: str = "entity",
            f"they were dropped" if detail["unclassified"] else "") + ".")
     if cap:
         lines.append(
-            f"  fix owner for those {cap}: {cap_name}, this instrument's own constant. "
-            "Raising it is the knob that turns them back into measurements, and it "
+            f"  fix owner for those {cap}: {cap_name}, this instrument's own constant, "
+            "and the menu builder that orders the namespace under it. "
+            f"{uncapped_note(art, leg)}. Either change "
             "re-bases the ceiling every baseline in the window divides by, so the "
             "decision and its re-run belong in one commit.")
     if absent:
@@ -1456,6 +1527,45 @@ def sub_veto_advisory(art: dict, *, leg: str = "entity",
             "different owners; until the split was measured, one sentence gave all of "
             "them the same answer.")
     return "\n".join(lines)
+
+
+def menu_builder_line(art: dict) -> str:
+    """Which builder made this artifact's menus (#1937), for `--print`."""
+    caps = art.get("caps") or {}
+    name = art.get("menu_builder")
+    shown = name if name else (f"unrecorded — this artifact predates the key; the only "
+                               f"builder that existed then is {MENU_BUILDER}")
+    return (f"menu builder: {shown}   caps entity={caps.get('entity')} "
+            f"doc={caps.get('doc')}")
+
+
+def uncapped_note(art: dict, leg: str) -> str:
+    """How many of a leg's labels stay unoffered with the ranking uncapped (#1937).
+
+    The sentence that stops the unofferable line reading as "widen the cap": the
+    count no cap recovers, and — when the run recorded the ladder — how little a
+    cap eight times wider buys. An artifact predating the `offered` block has the
+    uncapped count only if its rows classified each drop; otherwise it is unmeasured
+    and says so.
+    """
+    block = (art.get("offered") or {}).get(leg)
+    if isinstance(block, dict) and block.get("labels") is not None:
+        cap, total = int(block["cap"]), int(block["labels"])
+        by = block.get("offered_by_cap") or {}
+        widest = str(cap * OFFERED_LADDER[-1])
+        return (f"{block['unoffered_uncapped']} remain unoffered even with the ranking "
+                f"uncapped; offered {by.get(str(cap))}/{total} at cap {cap}, "
+                f"{by.get(widest)}/{total} at cap {widest}, "
+                f"{block['offered_uncapped']}/{total} uncapped — what a wider cap does "
+                "not reach is hidden by the builder's order, not by the cap")
+    detail = ((art.get("ceiling") or {}).get("labels_unofferable_detail") or {}).get(leg)
+    if isinstance(detail, dict) and detail.get("absent_from_namespace") is not None \
+            and not detail.get("unclassified"):
+        return (f"{detail['absent_from_namespace']} remain unoffered even with the ranking "
+                "uncapped; how many a WIDER cap would reach is unrecorded by this "
+                "artifact, and outside_cap does not mean a bounded cap recovers them")
+    return ("how many remain unoffered with the ranking uncapped is unrecorded by this "
+            "artifact, and outside_cap does not mean a bounded cap recovers them")
 
 
 def _agreement_for_print(art: dict) -> dict:
@@ -1500,6 +1610,7 @@ def print_summary(art: dict, *, split_half_result: dict | None = None,
     # the same page as the ratio is the second line of that defence.
     print(f"\nlabeler: {lab.get('kind')}/{lab.get('model')} @ {lab.get('endpoint')}"
           f"   seed {art.get('seed')}   ran {art.get('ran_at')}")
+    print(menu_builder_line(art))
     # Both rates, per leg, every time (#1823 clause 4). The all-gold figure is what the
     # #654 veto is evaluated on; the offered-only figure is what the two labelers did on
     # the labels they could actually choose from. On the 2026-09-29 artifact the entity leg
@@ -1538,7 +1649,8 @@ def print_summary(art: dict, *, split_half_result: dict | None = None,
                       f"of {d.get('total', 0)} unofferable in total "
                       f"({d.get('absent_from_namespace', 0)} absent from the namespace"
                       + (f", {d.get('unclassified', 0)} unclassified"
-                         if d.get("unclassified") else "") + ")")
+                         if d.get("unclassified") else "") + ")"
+                      + f"; {uncapped_note(art, leg)}")
     if split_half_result is not None:
         print(f"split-half: {json.dumps(split_half_result)}")
     # Printed unconditionally, and with no flag to suppress it: clause 5 is "a low

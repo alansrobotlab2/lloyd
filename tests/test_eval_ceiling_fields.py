@@ -1266,3 +1266,70 @@ def test_the_witness_block_re_derives_and_the_four_keys_are_pure_addition(tmp_pa
         "the new block is not a superset of last night's — either a key went missing or "
         f"something besides the four offered-only figures arrived: "
         f"{sorted(set(emitted) - set(witness))}")
+
+
+# ── #1937: `--print` says what a wider cap does NOT recover, and who built the menu ──
+
+_M_NS = ["Robot", "Vision System", "Raspberry Pi 5", "GPU", "Backlog"]
+_M_VAULT = ["memory/entities/robot.md", "memory/entities/gpu.md", "notes/other.md"]
+_M_QUERIES = [{"id": "m1", "query": "what does the robot run on",
+               "expect_entities": ["Robot", "Raspberry Pi 5", "Nonexistent Entity"],
+               "expect_docs": ["memory/entities/robot.md", "memory/entities/gpu.md"]},
+              # No token shared with its gold, so the cap of 1 offers nothing and the
+              # query is excluded — which is what makes the unofferable line print.
+              {"id": "m2", "query": "which board", "expect_entities": ["Raspberry Pi 5"],
+               "expect_docs": []}]
+
+
+def _menu_artifact() -> dict:
+    return lac.label_corpus(
+        queries=_M_QUERIES, entity_names=_M_NS, vault_paths=_M_VAULT,
+        labeler=lambda req: {"text": '{"entities": [1], "docs": [1]}'},
+        labeler_identity={"command": "test"}, seed=7, entity_cap=1, doc_cap=1)
+
+
+def _printed(art: dict, capsys) -> str:
+    lac.print_summary(art)
+    return capsys.readouterr().out
+
+
+def test_the_unofferable_line_states_what_stays_unoffered_uncapped(capsys):
+    """Clause 2. The line used to end at the outside_cap / absent split, and the
+    module said a wider cap "converts those labels back into measurements" — true
+    only at cap = namespace. It now states the count no cap recovers and the rungs
+    between, while the two existing counts keep their meaning and their values."""
+    art = _menu_artifact()
+    detail = art["ceiling"]["labels_unofferable_detail"]["entity"]
+    assert (detail["outside_cap"], detail["absent_from_namespace"]) == (2, 1), detail
+    assert art["ceiling"]["excluded"]["entity"] == ["m2"]
+    out = _printed(art, capsys)
+    line = next(l for l in out.splitlines() if l.startswith("  labels_unofferable (entity)"))
+    assert "of 3 unofferable in total (1 absent from the namespace)" in line, line
+    assert "1 remain unoffered even with the ranking uncapped" in line, line
+    assert "offered 1/4 at cap 1, 3/4 at cap 8, 3/4 uncapped" in line, line
+    assert "hidden by the builder's order, not by the cap" in line, line
+    assert "Raising it is the knob that turns them back into measurements" not in out
+
+    # An artifact that predates the block does not invent a ladder.
+    legacy = {k: v for k, v in art.items() if k not in ("offered", "menu_builder")}
+    old = _printed(legacy, capsys)
+    line = next(l for l in old.splitlines() if l.startswith("  labels_unofferable (entity)"))
+    assert "1 remain unoffered even with the ranking uncapped" in line, line
+    assert "unrecorded by this artifact" in line and "at cap 8" not in line, line
+
+
+def test_the_artifact_and_the_page_name_the_menu_builder(capsys):
+    """Clause 5. The builder's identity is recorded beside `caps` and printed, so a
+    ceiling made by another builder cannot be read as comparable with one made by
+    this one — and the one artifact on disk, which predates the key, says so."""
+    art = _menu_artifact()
+    assert art["menu_builder"] == lac.MENU_BUILDER == "query-token-overlap/v1"
+    out = _printed(art, capsys)
+    assert "menu builder: query-token-overlap/v1   caps entity=1 doc=1" in out, out
+
+    other = dict(art, menu_builder="alias-expanded/v1")
+    assert "menu builder: alias-expanded/v1" in _printed(other, capsys)
+
+    legacy = {k: v for k, v in art.items() if k != "menu_builder"}
+    old = _printed(legacy, capsys)
+    assert "menu builder: unrecorded" in old and "query-token-overlap/v1" in old, old
