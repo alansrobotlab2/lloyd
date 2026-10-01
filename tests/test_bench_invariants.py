@@ -484,7 +484,15 @@ BENCH_009_SATISFIABILITY_TESTS = (
 # corpus file, so an unrelated promotion into `lloyd/bench/` could break it for a
 # round that never touched the bench. Named so the selector test below can pin
 # the boundary in both directions.
-CORPUS_WIDE_SHAPE_TEST = "test_the_block_signal_shape_lives_in_bench_009_alone"
+#: The closed pair whose graded objective layer may carry the block-signal JSON
+#: shape (#1936 owed-check 1 ruling, 2026-10-01; #2016). bench_009 is the task
+#: that defends the signal; bench_010's prompt is the one the contract mandates
+#: the signal for — `app/prompt_surface.py` `LOAD_BEARING` maps "block signal ->
+#: 010" — so an anchor that scored the signal 0.0 vetoed every promotion.
+#: Permitted, not required: a third task is what the corpus-wide rule refuses.
+BLOCK_SIGNAL_PAIR = frozenset({BENCH_009, BENCH_010})
+
+CORPUS_WIDE_SHAPE_TEST = "test_no_task_outside_the_permitted_pair_carries_the_block_signal_shape"
 
 
 def test_the_satisfiability_guard_survives_the_gate_selector():
@@ -703,9 +711,10 @@ def _objective_snapshot_failures(tasks, *, corpus_wide: bool = False) -> list[st
     Scoped to bench_009 by default: the gated test may only fail on the task this
     item owns, because any other task's objective layer is edited by its own item
     and an autoresearch promotion of it must not break a gate rung for an
-    unrelated round. `corpus_wide=True` adds the second claim — that the block
-    signal's JSON shape lives in bench_009 alone, a check counting as a carrier
-    under either leg of `_carries_the_block_signal_shape` — which reads every
+    unrelated round. `corpus_wide=True` adds the second claim — that no task
+    outside `BLOCK_SIGNAL_PAIR` grades the block signal's JSON shape, a check
+    counting as a carrier under either leg of `_carries_the_block_signal_shape`,
+    and each offending task named in the message — which reads every
     other file in the corpus and so belongs to the `live_vault`-marked reporter,
     not to the hard rung.
     """
@@ -720,9 +729,14 @@ def _objective_snapshot_failures(tasks, *, corpus_wide: bool = False) -> list[st
         shape_users = {task_id for task_id, checks in got.items()
                        if any(_carries_the_block_signal_shape(ctype, value)
                               for ctype, value in checks)}
-        if shape_users != {BENCH_009}:
+        # A difference against the pair, never an equality with it (#2016): the
+        # pair is who MAY carry the shape, not who must, so the rule holds both
+        # before and after bench_010's reshape (#1927) puts it in `shape_users`.
+        outside = sorted(shape_users - BLOCK_SIGNAL_PAIR)
+        if outside:
             failures.append(
-                f"the block-signal JSON shape is in more than bench_009: {shape_users}")
+                "the block-signal JSON shape is graded outside the permitted pair "
+                f"{sorted(BLOCK_SIGNAL_PAIR)}: {outside}")
     return failures
 
 
@@ -746,7 +760,7 @@ def test_bench_009_objective_layer_matches_the_pinned_snapshot(tasks):
     Scoped to bench_009's own checks (clause 4): this is the rung the automod
     gate runs, so it fails only for the round that changed bench_009. The
     corpus-wide "nothing else scores on the block signal" claim is real but reads
-    every other file, so it is `test_the_block_signal_shape_lives_in_bench_009_alone`
+    every other file, so it is `test_no_task_outside_the_permitted_pair_carries_the_block_signal_shape`
     under `live_vault`, which the gate excludes — the marker `pytest.ini` exists
     for. Both run in a plain `pytest tests/test_bench_invariants.py`.
     """
@@ -754,8 +768,17 @@ def test_bench_009_objective_layer_matches_the_pinned_snapshot(tasks):
 
 
 @pytest.mark.live_vault
-def test_the_block_signal_shape_lives_in_bench_009_alone(tasks):
-    """The reporting copy: no second task scores on the block-signal JSON shape.
+def test_no_task_outside_the_permitted_pair_carries_the_block_signal_shape(tasks):
+    """The reporting copy: outside the permitted pair, no task grades the
+    block-signal JSON shape.
+
+    The pair is `bench_009_adversarial_probe` and `bench_010_safety_destructive`
+    (`BLOCK_SIGNAL_PAIR`). bench_010 is permitted because the block signal is
+    load-bearing for it: `app/prompt_surface.py:146,150-151` maps "block signal ->
+    010" in `LOAD_BEARING` (consumed at `:574`), the prompt mandates the signal for
+    exactly that task's prompt, and an anchor refusing it vetoed every promotion
+    (#1927; ruling on #1936 owed-check 1, 2026-10-01). The rule is a difference
+    against the pair, so it is green whether or not bench_010 carries the shape yet.
 
     Marked `live_vault` because it asserts over the whole corpus, which an
     hourly autoresearch promotion or a nightly job can rewrite between rounds —
@@ -786,7 +809,7 @@ def test_the_block_signal_shape_lives_in_bench_009_alone(tasks):
 def test_the_objective_snapshot_fires_for_bench_009_and_only_for_it(tasks):
     """The gated test can fail, and only on the task in scope.
 
-    Six mutations of the same loaded corpus. Narrowing bench_009 back to the
+    Nine mutations of the same loaded corpus. Narrowing bench_009 back to the
     pre-#415 regex must fail the scoped check (the regression this item exists to
     catch), and so must dropping #1607's second check while keeping the first —
     the exact narrowing that re-introduces the `lazy_pass` #1607 removed, and the
@@ -799,16 +822,15 @@ def test_the_objective_snapshot_fires_for_bench_009_and_only_for_it(tasks):
     `live_vault` reporter keeps, so scoping did not silently drop it, it only
     moved it off the hard rung.
 
-    Three of them are #1936's, and all three keep that claim true under either
-    answer owed-check 2 gives. The mutation target excludes bench_010 as well as
-    bench_009: bench_010 is the task the open ruling is about, so a node that
-    pinned "bench_010 must not carry the shape" would go red for a ruling that
-    grants it — reporting a lost invariant that was in fact granted, and letting
-    this round pre-empt the decision the item exists to route. The exclusion is not
-    a bare filter: the node asserts bench_010 loads immediately after bench_009, the
-    adjacency that would make any scan-forward-from-009 target choice pick 010, so a
-    corpus reorder fails here rather than quietly turning this node into a claim
-    about 010 that a permitting ruling would pass.
+    Three of them are #1936's. Their mutation target excludes bench_010 as well
+    as bench_009, because those two are the permitted pair (`BLOCK_SIGNAL_PAIR`,
+    the #1936 ruling of 2026-10-01): a mutation of bench_010 proves nothing about
+    a task outside it. The exclusion is not a bare filter: the node asserts
+    bench_010 loads immediately after bench_009, the adjacency that would make any
+    scan-forward-from-009 target choice pick 010, so a corpus reorder fails here
+    rather than quietly turning this node into a claim about 010. Two more are
+    #2016's and are the other side of that ruling: bench_010 itself adopting the
+    shape, under each leg, leaves the corpus-wide call empty.
 
     The other two pin what the corpus rule does NOT cover, so the scope is a failing
     test rather than a memory. The boundary is leg 2's word gate: a check naming
@@ -819,7 +841,7 @@ def test_the_objective_snapshot_fires_for_bench_009_and_only_for_it(tasks):
     (`BLOCKED_WITHOUT_STATUS`, which `{"error": "blocked"}` also passes, so counting
     it would fire the reporter on any minted task mentioning `blocked` in an
     unrelated sense). The one-word case takes its own target task, so it stays
-    measurable even under a ruling that widens the rule to admit bench_010.
+    measurable now that the rule admits bench_010.
     """
     def _mutated(task_id, checks):
         out = []
@@ -874,6 +896,20 @@ def test_the_objective_snapshot_fires_for_bench_009_and_only_for_it(tasks):
         "the corpus-wide claim lost its teeth: another task took the block-signal "
         "shape and neither reporter noticed")
 
+    failure = _objective_snapshot_failures(adopted, corpus_wide=True)
+    assert len(failure) == 1 and other in failure[0], (
+        f"the corpus-wide failure must name the task outside the pair: {failure}")
+
+    # #2016: the same adoption by bench_010 is the permitted half of the pair, so
+    # the corpus-wide rule stays silent for it under either leg — and the pair is
+    # not a licence for anyone else, which the two `other` mutations around this
+    # one pin.
+    for shape in ('{"status": "blocked", "reason": "x"}', BLOCK_SHAPE_NO_QUOTES):
+        permitted = _mutated(BENCH_010, [{"type": "regex", "value": shape}])
+        assert _objective_snapshot_failures(permitted, corpus_wide=True) == [], (
+            f"bench_010 carrying {shape!r} tripped the corpus-wide rule, which the "
+            f"#1936 ruling permits: {_objective_snapshot_failures(permitted, corpus_wide=True)}")
+
     # The blind spot #1936 measured on 2026-10-01, and the leg that closes it. The
     # three scores below are the seam: the guard's text rule and the objective
     # layer's own matcher have to agree about this pattern, so the assertion is run
@@ -891,7 +927,7 @@ def test_the_objective_snapshot_fires_for_bench_009_and_only_for_it(tasks):
     assert _objective_snapshot_failures(quote_omitted) == [], (
         f"a rewrite of {other} reached the gated rung: "
         f"{_objective_snapshot_failures(quote_omitted)}")
-    assert _objective_snapshot_failures(quote_omitted, corpus_wide=True), (
+    assert other in "".join(_objective_snapshot_failures(quote_omitted, corpus_wide=True)), (
         f"{other} adopted a check that lets the block signal through at 1.0 while "
         "spelling neither quote, and the corpus-wide rule still reported nothing — "
         "the literal-only rule is back, and a graded safety anchor can be written "
