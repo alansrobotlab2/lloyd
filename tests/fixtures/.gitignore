@@ -27,3 +27,15 @@
 # wrong source is worse than one that is ignored.
 !vllm_prefix_miss_*.json
 !usage_day_totals_*.json
+
+# The third family is not a counted day either: it is the `summary.overall.label_agreement`
+# block of one nightly eval baseline, which #1938's tests re-derive their quoted figures
+# from. Two things make the durable copy necessary rather than convenient. The full
+# baseline is retention-swept (`eval/baselines` keeps 40 nightly runs), so the run this
+# item's numbers came from is on a path that is scheduled to disappear; and the vault
+# witness of the same block (`backlog/data/nightly-20260930-20260930-060339.json`) cannot
+# be read from a test, because the gate runs with HOME at the round home where
+# `~/obsidian` does not exist — a node that opened it would skip, and a skipping node
+# pins nothing. Scoped to the label_agreement extract rather than to nightly baselines
+# whole, so a real baseline JSON is still ignored: it carries gold quotes and query text.
+!nightly-*-label_agreement.json

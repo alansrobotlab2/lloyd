@@ -936,3 +936,249 @@ def test_labels_unofferable_survives_the_disk_round_trip_and_a_legacy_artifact()
         "a run that recorded no reasons must not report that there were none"
     assert lac.ceiling(legacy)["labels_unofferable_detail"] == {"entity": None,
                                                                 "doc": None}
+
+
+# ── #1938: the offered-only reading reaches the baseline block and the page ───
+
+#: The four #1823 figures #1938 carries into `summary.overall.label_agreement`. The
+#: all-gold rate stays the #654 veto figure; these two pairs are the reading that
+#: tells a cap artefact from a labelling disagreement. The block has carried the
+#: offered-only DENOMINATOR (`entity_labels_offered`) since #1823 without its rate or
+#: its numerator, so nothing downstream of this JSON could say which reading any
+#: printed rate was — and the veto verdict is read on this page, not in the labeler's
+#: own `--print`.
+OFFERED_KEYS = ("entity_label_agreement_when_offered",
+                "entity_labels_agreed_when_offered",
+                "doc_label_agreement_when_offered",
+                "doc_labels_agreed_when_offered")
+
+#: `summary.overall.label_agreement` exactly as the 2026-09-30 nightly wrote it: 13
+#: keys, no `when_offered` among them. An extract of the vault witness
+#: `backlog/data/nightly-20260930-20260930-060339.json` (`wc -l` 12790), committed here
+#: because the gate's HOME has no `~/obsidian` and a node that read the vault copy would
+#: skip rather than pin.
+WITNESS = (Path(__file__).resolve().parent / "fixtures"
+           / "nightly-20260930-label_agreement.json")
+
+
+def _cap_narrowed(art: dict) -> dict:
+    """The same artifact with every AGREED entity gold dropped from its offered menu,
+    and the two derived blocks re-stamped from the mutated queries.
+
+    This is the shape #1823 measured on the live store — 52 of the 53 unofferable
+    entity gold names were this instrument's own `ENTITY_CAP`, not a name missing from
+    the namespace — and it is the only fixture that separates the two readings. With
+    the shipped synthetic menu every gold is offered, so `*_when_offered` equals the
+    all-gold figure and a block that merely copied the all-gold rate into the
+    offered-only slot would pass; narrowed this way, the entity leg reads 0.2 all-gold
+    against 0.0 offered-only. Re-stamping `agreement` and `ceiling` is what keeps
+    `load_artifact`'s two recompute guards admitting the file rather than refusing an
+    artifact whose stored figure no longer follows from its own rows.
+    """
+    for q in art["queries"]:
+        agreed = [g for g in (q.get("primary_entities") or [])
+                  if lac.entity_label_satisfied(g, q.get("second_entities") or [])]
+        if agreed:
+            q["entity_candidates"] = [
+                c for c in (q.get("entity_candidates") or [])
+                if not any(lac.entity_label_satisfied(g, [c]) for g in agreed)]
+    art["agreement"] = lac.agreement(art)
+    art["ceiling"] = lac.ceiling(art)
+    return art
+
+
+def _veto_page_fields(entity_all_gold: float, entity_offered: float) -> dict:
+    """A measured ceiling block for the printed page.
+
+    The doc leg is the 2026-09-29 artifact's RECORDED doc leg, copied out of
+    ``WITNESS``: all-gold 0.259 over 139 gold labels (36 agreed) against 0.5714 among
+    the 63 that were offered. The two entity figures are arguments because clause 4
+    needs rates on both sides of 0.80, and the callers pass that artifact's recorded
+    pair (0.3404 all-gold = 32/94, 0.7273 offered-only = 32/44) wherever the page is
+    being read rather than the veto being probed. Every figure here is therefore a
+    recorded one except the two entity rates clause 4 deliberately moves.
+    """
+    fields = ev._ceiling_absent_fields("unused")
+    fields["ceiling"] = {"kind": lac.CEILING_KIND, "entity_hit_rate": 0.8,
+                         "doc_hit_rate": 0.9, "entity_recall_avg": 0.7,
+                         "doc_recall_avg": 0.8, "mrr_doc": 0.6, "ndcg10": 0.7,
+                         "fact_entity_recall_avg": None}
+    fields["label_agreement"] = {
+        "entity_label_agreement": entity_all_gold,
+        "entity_label_agreement_when_offered": entity_offered,
+        "doc_label_agreement": 0.259,
+        "doc_label_agreement_when_offered": 0.5714,
+        "entity_labels": 94, "entity_labels_agreed": 32,
+        "entity_labels_agreed_when_offered": 32, "entity_labels_offered": 44,
+        "doc_labels": 139, "doc_labels_agreed": 36,
+        "doc_labels_agreed_when_offered": 36, "doc_labels_offered": 63,
+        "labeler": {"model": DJEV_IDENTITY["model"],
+                    "endpoint": DJEV_IDENTITY["endpoint"]},
+        "entity_disagreements": [], "doc_disagreements": []}
+    return fields
+
+
+def _verdict_line(text: str) -> str:
+    """The agreement verdict line of a printed page — both readings have to sit on
+    that one line, so a test that searched the whole page could be satisfied by the
+    offered-only figure turning up anywhere else on it."""
+    hits = [ln for ln in text.splitlines()
+            if ln.strip().startswith("entity_label_agreement=")]
+    assert len(hits) == 1, f"expected exactly one agreement verdict line, got {hits}"
+    return hits[0]
+
+
+def test_the_emitted_block_carries_the_offered_only_rate_and_numerator(tmp_path,
+                                                                       monkeypatch):
+    """Clause 1: `summary.overall.label_agreement` carries both readings, per leg.
+
+    Until now the offered-only rate existed only inside `label_agreement_ceiling
+    --print`. The baseline JSON carried `entity_labels_offered` — 44 on the 2026-09-29
+    artifact — with neither `entity_label_agreement_when_offered` (0.7273) nor its
+    numerator (32), while the veto line printed the all-gold 0.3404 with nothing beside
+    it. Each value is asserted against `lac.agreement()` over the very artifact the
+    block was built from, so the block cannot invent a number, and against a menu
+    narrowed by the cap, so it cannot copy the all-gold rate into the offered-only slot
+    either.
+    """
+    art = _cap_narrowed(_synthetic_artifact())
+    _write(art, tmp_path)
+    monkeypatch.setenv(lac.OUT_DIR_ENV, str(tmp_path))
+    fields = ev.ceiling_context(_synth_corpus())
+    la = fields["label_agreement"]
+    fresh = lac.agreement(lac.load_artifact(
+        directory=tmp_path,
+        expect_labels_sha256=lac.labels_sha256(_synth_corpus())))
+    for key in OFFERED_KEYS:
+        assert key in la, f"{key} absent from the block: to the next reader an " \
+                          "absent key and a measured zero are the same reading"
+        assert la[key] == fresh[key], (
+            f"{key}: block says {la[key]!r}, the artifact's own rows compute "
+            f"{fresh[key]!r}")
+    assert (la["entity_label_agreement"],
+            la["entity_label_agreement_when_offered"]) == (0.2, 0.0), (
+        "this fixture only tests clause 1 while the two readings differ: 1 of 5 gold "
+        "labels agreed, and that label's name was outside the narrowed menu")
+    assert (la["entity_labels_agreed"], la["entity_labels_agreed_when_offered"],
+            la["entity_labels_offered"]) == (1, 0, 4), (
+        "the numerator that belongs to the offered-only denominator, not the "
+        "all-gold one beside it")
+    # And in the WRITTEN bytes, which is the artefact the acceptance names: the nightly
+    # serialises this block with `json.dump` and the next reader opens the file, so a
+    # key that exists only in the in-process dict never reached anyone.
+    summary = ev.summarize(_printed_records(3, 1))
+    summary["overall"].update(fields)
+    written = tmp_path / "written-baseline.json"
+    written.write_text(json.dumps({"summary": summary}), encoding="utf-8")
+    on_disk = json.loads(written.read_text(encoding="utf-8"))["summary"]["overall"]
+    for key in OFFERED_KEYS:
+        assert key in on_disk["label_agreement"], (
+            f"{key} did not survive the write into summary.overall.label_agreement")
+    assert on_disk["label_agreement"]["entity_label_agreement_when_offered"] == 0.0
+
+
+def test_an_artifact_stored_without_them_gets_them_back_filled_not_nulled(tmp_path,
+                                                                          monkeypatch):
+    """Clause 2: the shape of every artifact on disk today.
+
+    `label-agreement-20260929-005508.json` — the only one on this box — predates #1823
+    and stores none of the four keys. So a copy written as a raw
+    `art["agreement"][key]` raises KeyError on tonight's nightly, and one written as
+    `.get(key)` emits a null for the very reading the verdict line now prints beside the
+    veto figure. `lac._agreement_for_print` fills ONLY the absent keys, by deterministic
+    recomputation over the stored rows with no engine call, which is the same
+    measurement the labeler would have written rather than a new one.
+    """
+    art = _cap_narrowed(_synthetic_artifact())
+    for key in OFFERED_KEYS:
+        art["agreement"].pop(key)
+    _write(art, tmp_path)
+    monkeypatch.setenv(lac.OUT_DIR_ENV, str(tmp_path))
+    fields = ev.ceiling_context(_synth_corpus())
+    la = fields["label_agreement"]
+    for key in OFFERED_KEYS:
+        assert la.get(key) is not None, (
+            f"{key} came back {la.get(key)!r}; the labeler's own --print has a number "
+            "here, so a null in the baseline is the asymmetry this item closes")
+    assert (la["entity_label_agreement_when_offered"],
+            la["entity_labels_agreed_when_offered"]) == (0.0, 0), (
+        "back-filled by recomputation and not copied across: the all-gold numerator is "
+        "1 on this artifact and the offered-only one is 0")
+
+
+def test_the_agreement_verdict_line_names_both_readings(capsys):
+    """Clause 3: the all-gold rate and the offered-only rate on the verdict's own line.
+
+    The page is the seam: the nightly reporter reads this text, and a reader who
+    copies 0.3404 off it cannot otherwise tell a labelling disagreement from
+    `ENTITY_CAP` narrowing a namespace that does hold the name. Both figures have to be
+    on the agreement line itself, each named by which reading it is.
+    """
+    ev.print_table(*_printed_summary(_veto_page_fields(0.3404, 0.7273)))
+    line = _verdict_line(capsys.readouterr().out)
+    assert "0.3404" in line and "0.7273" in line, line
+    assert "all-gold" in line and "offered" in line, (
+        f"two rates with nothing naming which is which is the original defect:\n{line}")
+
+
+def test_the_veto_still_consumes_the_all_gold_rate_alone(capsys):
+    """Clause 4: the offered-only figure is diagnostic only, never the veto input.
+
+    Pinned in both directions, because one direction alone cannot say which of the two
+    printed figures the sub-0.80 comparison reads: all-gold 0.72 with offered-only 0.95
+    must still call the labels too ambiguous, and all-gold 0.95 with offered-only 0.55
+    must still let the entity hit rate stand. #654's veto asks whether the gold can be
+    trusted at all, and a gold that was never offered cannot be; relaxing it on the
+    offered-only reading is a person's call (#1823 owed entry 3), not a print change.
+    """
+    ev.print_table(*_printed_summary(_veto_page_fields(0.72, 0.95)))
+    out = capsys.readouterr().out
+    assert "labels too ambiguous to call it a retrieval defect" in out, out
+    ev.print_table(*_printed_summary(_veto_page_fields(0.95, 0.55)))
+    out2 = capsys.readouterr().out
+    assert "labels hold; the entity hit rate stands as a retrieval result" in out2, out2
+    assert "too ambiguous" not in out2, out2
+
+
+def test_the_witness_block_re_derives_and_the_four_keys_are_pure_addition(tmp_path,
+                                                                          monkeypatch):
+    """Clause 5: the quoted figures have committed bytes behind them, and #1938 adds
+    keys without moving one.
+
+    The witness is a vault commit — `backlog/data/nightly-20260930-20260930-060339.json`,
+    `wc -l` 12790, sha256 `b037d9751b243c4b…` — and no node in this repo can read it: the
+    gate runs with HOME at the round home, where `~/obsidian` does not exist, so a node
+    that opened the vault copy would skip, and a skipping node pins nothing. What is
+    pinned here is the extract of that single block, committed in this repo and holding
+    the identical values, for both halves of the clause.
+
+      * every figure this item quotes re-derives out of the extract's own counts: entity
+        32/94 = 0.3404 all-gold against 32/44 = 0.7273 offered-only, doc 36/139 = 0.259
+        against 36/63 = 0.5714. That is the whole argument for keeping the all-gold rate
+        as the veto figure and printing the other beside it — the doc leg moves by more
+        than half again on the same 36 agreed labels;
+      * the block #1938 emits is these keys plus exactly the four offered-only ones, so
+        nothing a reader took off last night's baseline is missing from tonight's.
+    """
+    witness = json.loads(WITNESS.read_text(encoding="utf-8"))
+    assert not [k for k in witness if "when_offered" in k], (
+        "the extract has stopped being the pre-fix baseline it is quoted as")
+    assert witness["entity_label_agreement"] == 0.3404
+    assert witness["doc_label_agreement"] == 0.259
+    assert round(witness["entity_labels_agreed"] / witness["entity_labels"], 4) == 0.3404
+    assert round(witness["entity_labels_agreed"]
+                 / witness["entity_labels_offered"], 4) == 0.7273
+    assert round(witness["doc_labels_agreed"] / witness["doc_labels"], 4) == 0.259
+    assert round(witness["doc_labels_agreed"]
+                 / witness["doc_labels_offered"], 4) == 0.5714
+    art = _synthetic_artifact()
+    _write(art, tmp_path)
+    monkeypatch.setenv(lac.OUT_DIR_ENV, str(tmp_path))
+    emitted = ev.ceiling_context(_synth_corpus())["label_agreement"]
+    assert set(witness) <= set(emitted), (
+        f"a key the 2026-09-30 baseline wrote has stopped being emitted: "
+        f"{sorted(set(witness) - set(emitted))}")
+    assert set(emitted) - set(witness) == set(OFFERED_KEYS), (
+        "the new block is not a superset of last night's — either a key went missing or "
+        f"something besides the four offered-only figures arrived: "
+        f"{sorted(set(emitted) - set(witness))}")

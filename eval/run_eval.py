@@ -1176,11 +1176,32 @@ def ceiling_context(queries: list[dict], *, scored_ids: list[str] | None = None)
     # divide by it, and recomputing through `lac.ceiling` costs one pass over rows
     # already in memory.
     ceil = lac.ceiling(art, ids=scored_ids) if scored_ids is not None else art["ceiling"]
-    agree = art["agreement"]
+    # The same helper the labeler's own `--print` reads, so the page and the emitted
+    # block can never disagree about which readings exist (#1938). It returns the
+    # stored block as recorded and fills ONLY the keys an artifact predates — every
+    # artifact written before #1823, which is every artifact on disk as of
+    # 2026-09-30, lacks the four offered-only keys, and a raw `art["agreement"][key]`
+    # raises KeyError there. Filling by recomputation is the same measurement, not a
+    # new one: `agreement()` is deterministic over the stored rows with no engine call.
+    agree = lac._agreement_for_print(art)
     fields: dict = {
         "label_agreement": {
             "entity_label_agreement": agree["entity_label_agreement"],
             "doc_label_agreement": agree["doc_label_agreement"],
+            # The offered-only reading beside the all-gold one (#1938). The block has
+            # always carried the offered-only DENOMINATOR (`*_labels_offered`) without
+            # its rate or numerator, so a reader of `summary.overall.label_agreement`
+            # could not tell which of the two readings any printed rate was — the
+            # reading #1823 clause 4 exists to make impossible. `entity_label_agreement`
+            # above stays the #654 veto figure; these two pairs are diagnostic.
+            "entity_label_agreement_when_offered":
+                agree["entity_label_agreement_when_offered"],
+            "entity_labels_agreed_when_offered":
+                agree["entity_labels_agreed_when_offered"],
+            "doc_label_agreement_when_offered":
+                agree["doc_label_agreement_when_offered"],
+            "doc_labels_agreed_when_offered":
+                agree["doc_labels_agreed_when_offered"],
             "entity_labels": agree["entity_labels"],
             "entity_labels_agreed": agree["entity_labels_agreed"],
             "entity_labels_offered": agree["entity_labels_offered"],
@@ -1582,8 +1603,21 @@ def print_table(records: list[dict], summary: dict) -> None:
                     "labels hold; the entity hit rate stands as a retrieval result"
                     if _ent > 0.90 else
                     "labels partly ambiguous; read the normalized gap, not the raw")
-        print(f"  entity_label_agreement={_ent}  "
-              f"doc_label_agreement={_agree.get('doc_label_agreement')}  -> {_verdict}")
+        # Both readings on the line the verdict is printed on (#1938). The all-gold
+        # rate is the figure `_verdict` above was computed on and the one #654's veto
+        # is evaluated on; the offered-only rate beside it is diagnostic only. On the
+        # 2026-09-29 artifact the entity leg reads 0.3404 all-gold (32 of 94 gold
+        # labels agreed) against 0.7273 among the 44 labels that were offered, and that
+        # gap is this instrument's own ENTITY_CAP, not two labelers disagreeing. This
+        # page, not the labeler's own `--print`, is where the veto is read — printing
+        # one rate there for a month is what made an instrument reading look like an
+        # opinion reading (#1823 clause 4).
+        _offered_txt = _offered if (_offered := _agree.get(
+            "entity_label_agreement_when_offered")) is not None else "null"
+        print(f"  entity_label_agreement={_ent} all-gold  "
+              f"entity_label_agreement_when_offered={_offered_txt}  "
+              f"doc_label_agreement={_agree.get('doc_label_agreement')}"
+              f"  -> {_verdict} (on the all-gold rate)")
     for label, metric, fmt in (("MRR", "mrr_doc", _fmt_rate3),
                                ("NDCG10", "ndcg10", _fmt_rate3),
                                ("doc_hit", "doc_hit_rate", _fmt_rate),
