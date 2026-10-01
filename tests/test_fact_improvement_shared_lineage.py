@@ -16,19 +16,25 @@ That gap is exactly `MIN_CONFIDENCE_GAP`, and it clears the floor only because
 `_GAP_TOLERANCE` makes the floor `>=`. One document, two rows, and the plan reads
 as a contest between two claims.
 
-Every node below is a differential. The same-document fixtures (`LinFlagged`,
-`LinDry`, `LinApply`), the shared-hash one (`LinHash`) and the differing-lineage
-one (`LinDiffering`) all come from one `_pair` constructor, at the SAME
-confidences and the SAME ages, and differ in nothing but their lineage fields.
-The differential was measured, not asserted: with the veto's early-continue
-replaced by a no-op and the flag and the counters left standing — the mutant
-that isolates this one branch — five nodes go red (the three pinning a
-same-document pair, the shared-hash node, and the record node) and four stay
-green (differing lineage, the sub-floor refusal, write order, the refused
-entity). Against base itself, where none of the fields exist yet, all nine are
-red. That split is the only arrangement that shows a withheld action was
-withheld *by lineage* and not by the gap floor, the god-node bound, or a fixture
-that never paired.
+Nine of the ten nodes here are differentials; the tenth is the clause-6 witness
+pin, and it is not one — see its own node for why that is the right shape. The
+same-document fixtures (`LinFlagged`, `LinDry`, `LinApply`), the shared-hash one
+(`LinHash`) and the differing-lineage one (`LinDiffering`) all come from one
+`_pair` constructor, at the SAME confidences and the SAME ages, and differ in
+nothing but their lineage fields.
+The differential was measured, not asserted, and re-measured node by node on
+this tree: with the veto's early-continue replaced by a no-op and the flag and
+the counters left standing — the mutant that isolates this one branch — five
+nodes go red (the three pinning a same-document pair, the shared-hash node, and
+the record node) and five stay green (differing lineage, the sub-floor refusal,
+write order, the refused entity, and the witness node). Against the module as it
+stood before this veto landed, where none of the fields exist yet, nine go red
+and only the witness node stays green, because that node reads the committed
+vault bytes and never touches a field this change added — it is the one node
+here a revert of the veto cannot break, which is the price of pinning a clause
+about bytes held in another repo. That 5-red / 5-green split is the only
+arrangement that shows a withheld action was withheld *by lineage* and not by
+the gap floor, the god-node bound, or a fixture that never paired.
 
 Two numbers are pinned beside the behaviour, because the record has to be able to
 say what the veto cost: `lineage_pairs` (exposure) and `lineage_withheld` /
