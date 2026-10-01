@@ -569,3 +569,38 @@ def test_sync_task_grants_logs_the_shadow_with_the_task_id_and_still_mints(
         f"and the row it just minted, so the two are not guessed apart: "
         f"{logged!r}")
     assert PREDICATE in logged, f"the bound itself has to be in the line: {logged!r}"
+
+
+def test_a_revival_under_a_standing_shadow_logs_both_lines(tmp_path, caplog):
+    """#2023 clause 4: the revocation-naming warning is added beside the #1834
+    shadow warning, not in place of it, and the shadow sentence is untouched."""
+    import logging
+
+    from app.harness.policy import _SHADOW_RULE, sync_task_grants
+
+    store = _store(tmp_path)
+    bounded = store.mint(scope=SCOPE, tool_pattern=TOOL,
+                         arg_predicate=PREDICATE, issued_by="Alan",
+                         expires_at=NOW + dt.timedelta(hours=6))
+
+    def declare(hours):
+        return sync_task_grants(
+            store, task_id=9, scope=SCOPE,
+            grants=[{"tool": TOOL, "issued_by": "Alan",
+                     "expires_at": (NOW + dt.timedelta(hours=hours)).isoformat()}])
+
+    assert declare(3) == 1
+    broad = [r for r in store.live(scope=SCOPE, now=NOW) if not r["arg_predicate"]]
+    assert store.revoke(broad[0]["id"]) is True
+    caplog.set_level(logging.WARNING, logger="lloyd-harness-policy")
+    caplog.clear()
+
+    assert declare(5) == 1
+    lines = [rec.getMessage() for rec in caplog.records
+             if rec.name == "lloyd-harness-policy"
+             and rec.levelno >= logging.WARNING]
+    revival = [ln for ln in lines if "over a revocation" in ln]
+    shadow = [ln for ln in lines if "under a standing shadow" in ln]
+    assert len(revival) == 1 and len(shadow) == 1 and len(lines) == 2, lines
+    assert f"grant #{broad[0]['id']} was revoked at" in revival[0], revival[0]
+    assert _SHADOW_RULE in shadow[0] and f"#{bounded['id']}" in shadow[0], shadow[0]

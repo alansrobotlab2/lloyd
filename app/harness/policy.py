@@ -1347,7 +1347,8 @@ def sync_task_grants(store: GrantStore, *, task_id: Any, scope: str,
     (#1949). So the dedupe reads every row for the pair that is still inside its
     expiry — revocation included — and a revoked one of those suppresses the
     re-mint unless the file now declares a strictly later `expires_at`, which is
-    a fresh, visible act of approval and the only way back. A row past its
+    a fresh, visible act of approval and the only way back — and that revival
+    is logged as loudly as the decline, naming both grant ids (#2023). A row past its
     expiry covers nothing, revoked or not: that is what keeps expiry and
     revocation distinguishable in both directions, and what leaves a nightly
     re-armable without deleting a row.
@@ -1398,6 +1399,22 @@ def sync_task_grants(store: GrantStore, *, task_id: Any, scope: str,
                          issued_by=spec["issued_by"], expires_at=expiry,
                          note=spec["note"] or f"autonomy task #{task_id}",
                          minted_by=f"frontmatter:{task_id}", now=at)
+        # #2023: reaching here with a `blocking` row means this mint supersedes
+        # a human's revocation, on the strength of a later `expires_at` in the
+        # task file. The decline above is loud; the revival was silent, and a
+        # task file is a vault path a turn can write, so a silent revival reads
+        # in the log exactly like a self-approval. Said once, after the mint,
+        # so both grant ids are in the line. An expired-unrevoked re-arm has no
+        # `blocking` row and stays quiet: expiry is not revocation.
+        if blocking is not None:
+            logger.warning(
+                "[grants] task #%s minted grant #%s for '%s' in scope '%s' over "
+                "a revocation: grant #%s was revoked at %s and ran to %s; the "
+                "file now declares the later %s, which supersedes it. If that "
+                "edit was not a human's, revoke grant #%s.",
+                task_id, row["id"], spec["tool"], scope, blocking["id"],
+                blocking["revoked_at"], blocking["expires_at"], _iso(expiry),
+                row["id"])
         # #1834: the frontmatter path is where nobody is standing there. A task
         # that declares a broad `grants:` entry while a bounded row for the same
         # pair is live has just written a row that changes nothing — the

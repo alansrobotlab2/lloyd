@@ -662,6 +662,74 @@ def test_a_declined_rematerialization_warns_naming_the_task_and_grant(store,
     assert "revoked" in warns[0], warns[0]
 
 
+# ── #2023: a revival over a revocation is as loud as the decline beside it ──
+
+def _policy_warnings(caplog) -> list[str]:
+    import logging
+    return [r.getMessage() for r in caplog.records
+            if r.name == "lloyd-harness-policy" and r.levelno >= logging.WARNING]
+
+
+def test_a_revival_over_a_revocation_warns_naming_both_grants(store, caplog):
+    """The strictly-later-expiry mint supersedes a human's `grant_revoke`, and
+    until #2023 said nothing: one WARNING naming the task, the revoked grant, its
+    `revoked_at`, and the grant just minted. The decline one call earlier keeps
+    its own text."""
+    import logging
+
+    declared = [{"tool": "email_send", "expires_at": _iso(24), "issued_by": "alan"}]
+    policy.sync_task_grants(store, task_id=45, scope="autonomy-task:45",
+                            grants=declared, now=NOW)
+    old = store.live(scope="autonomy-task:45", now=NOW)[0]["id"]
+    assert store.revoke(old, now=NOW) is True
+    caplog.set_level(logging.WARNING, logger="lloyd-harness-policy")
+    caplog.clear()
+
+    assert policy.sync_task_grants(store, task_id=45, scope="autonomy-task:45",
+                                   grants=declared, now=NOW) == 0
+    decline = _policy_warnings(caplog)
+    assert len(decline) == 1 and "is not materialized" in decline[0], decline
+    assert "a revocation is not renewed by re-running the task" in decline[0]
+    caplog.clear()
+
+    edited = [{"tool": "email_send", "expires_at": _iso(48), "issued_by": "alan"}]
+    assert policy.sync_task_grants(store, task_id=45, scope="autonomy-task:45",
+                                   grants=edited, now=NOW) == 1
+    new = store.live(scope="autonomy-task:45", now=NOW)[0]["id"]
+    assert new != old
+    warns = _policy_warnings(caplog)
+    assert len(warns) == 1, f"exactly one revival warning expected: {warns}"
+    line = warns[0]
+    assert "task #45" in line and "over a revocation" in line, line
+    assert f"grant #{old} was revoked at {NOW.isoformat()}" in line, line
+    assert f"minted grant #{new}" in line, line
+
+
+def test_a_first_mint_and_an_expired_rearm_say_nothing_about_a_revocation(
+        store, caplog):
+    """The two negatives. A fresh pair has no prior row; a pair whose row merely
+    ran out was never anyone's decision. Both mint 1 and neither warns — a
+    nightly that warned on every re-arm would bury the one line that matters."""
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="lloyd-harness-policy")
+    fresh = [{"tool": "email_send", "expires_at": _iso(24), "issued_by": "alan"}]
+    assert policy.sync_task_grants(store, task_id=46, scope="autonomy-task:46",
+                                   grants=fresh, now=NOW) == 1
+    assert _policy_warnings(caplog) == []
+
+    ran_out = [{"tool": "email_send", "issued_by": "alan",
+                "expires_at": (NOW - dt.timedelta(hours=2)).isoformat()}]
+    assert policy.sync_task_grants(store, task_id=47, scope="autonomy-task:47",
+                                   grants=ran_out,
+                                   now=NOW - dt.timedelta(hours=3)) == 1
+    caplog.clear()
+    assert policy.sync_task_grants(store, task_id=47, scope="autonomy-task:47",
+                                   grants=fresh, now=NOW) == 1
+    assert [w for w in _policy_warnings(caplog) if "revok" in w] == [], (
+        _policy_warnings(caplog))
+
+
 # ── #1949 claim 1: the two ledgers are one store, on committed bytes ───────
 #
 # The item's literal premise was a restart asymmetry: does `_tool_effects.py`'s
