@@ -92,6 +92,76 @@ def test_hygiene_regrowth_is_a_baseline_diff_not_a_created_at_window(tmp_path):
 
 # ── fact-level exact duplicates (#499 clause 5) ──────────────────────────────
 
+# #1942: the two-row fixtures below carry no `source_doc`, so the same-source
+# half of the cell reads zero of their two active rows — printed, never omitted.
+SAME_SOURCE_NONE = ("; same-source: 0 of 2 active rows (0.0%) share an entity and a "
+                    "source document with an earlier row, in 0 groups: a population at "
+                    "risk, not counted as duplicates")
+
+
+def _sourced(root, name, cat, items):
+    """Like `_facts`, with a `source_doc` (and optional `expired_at`) per fact."""
+    d = root / name
+    d.mkdir(parents=True, exist_ok=True)
+    facts = []
+    for text, doc, *rest in items:
+        f = {"entity": name, "fact": text, "confidence": 0.9, "category": cat,
+             "source_doc": doc}
+        if rest:
+            f["expired_at"] = rest[0]
+        facts.append(f)
+    fm = {"type": "facts", "entity": name, "category": cat, "facts": facts}
+    p = d / f"{name}-{cat}.md"
+    p.write_text(f"---\n{yaml.dump(fm, sort_keys=False)}---\n\n# {name} - {cat}\n")
+    return p
+
+
+def test_the_duplicate_cell_prints_same_source_rows_over_the_active_denominator(tmp_path):
+    """#1942: the exact-twin number reads 0 on a store whose rows mostly
+    re-assert their own source document in different words. The cell carries
+    that second number with the row set it was measured on — active rows, which
+    is NOT the `rows` the exact-twin number divides by (one row here is
+    expired) — and names it a population at risk, never a duplicate or an error."""
+    from app import kg_store
+
+    root = tmp_path / "facts"
+    _sourced(root, "vLLM", "state", [("serves the api", "knowledge/a.md"),
+                                     ("answers on 8096", "knowledge/a.md"),
+                                     ("holds the kv pool", "knowledge/a.md"),
+                                     ("was on llama.cpp", "knowledge/old.md", "2026-02-01")])
+    _sourced(root, "QMD", "state", [("indexes the vault", "knowledge/c.md")])
+    kg_store.configure(tmp_path / "kg.sqlite")
+    st = kg_store.store()
+    st.facts_idx.reindex(sorted(root.rglob("*.md")), root=root)
+    d = khr.fact_duplicate_stats()
+    kg_store.reset()
+
+    assert (d["rows"], d["active_rows"]) == (5, 4), d
+    assert (d["same_source_paraphrase_groups"], d["same_source_redundant_rows"]) == (1, 2), d
+    assert d["same_entity_redundant_rows"] == 0, d          # every text is distinct
+    cell = khr._fact_duplicate_cell(d)
+    assert "0 redundant of 5 rows" in cell, cell
+    assert "2 of 4 active rows (50.0%)" in cell, cell       # the count never stands alone
+    assert "population at risk" in cell and "not counted as duplicates" in cell, cell
+    same_source = cell.split("same-source:", 1)[1]
+    assert "error" not in same_source.lower(), cell
+
+    now = datetime.now(timezone.utc)
+    report = khr.generate_report({}, khr.compute_relationship_stats([], {}), [], [], now,
+                                 fact_dups=d)
+    line = [ln for ln in report.splitlines() if "Exact-duplicate fact rows" in ln]
+    assert len(line) == 1 and "2 of 4 active rows" in line[0] \
+        and "population at risk" in line[0], line
+
+
+def test_the_duplicate_cell_reads_an_older_stats_dict_without_the_new_keys():
+    """A dict without the #1942 keys (an older store build) renders the cell it
+    always did rather than raising: the report degrades, it does not die."""
+    cell = khr._fact_duplicate_cell({"rows": 2, "distinct_texts": 1,
+                                     "same_entity_redundant_rows": 1,
+                                     "entities_with_exact_dupes": 1})
+    assert cell == "1 redundant of 2 rows (entities with an exact twin: 1; distinct texts: 1)"
+
 def test_fact_level_duplicate_total_comes_from_facts_idx(tmp_path):
     """`Near-duplicate name clusters` counts entity-name DIRECTORIES
     (`kg_hygiene.near_duplicates` → `_clusters(root)`, on `d.name`), so a report
@@ -146,7 +216,7 @@ def test_fact_level_duplicate_line_renders_distinct_from_name_clusters(tmp_path)
     lines = report.splitlines()
     dup_line = [ln for ln in lines if "Exact-duplicate fact rows" in ln]
     assert dup_line == ["| Exact-duplicate fact rows (facts_idx.text_hash) | 1 redundant of 2 rows "
-                        "(entities with an exact twin: 1; distinct texts: 1) |"], dup_line
+                        "(entities with an exact twin: 1; distinct texts: 1)" + SAME_SOURCE_NONE + " |"], dup_line
     # The name-cluster line is still there and still says something different.
     cluster_line = [ln for ln in lines if "Near-duplicate name clusters" in ln]
     assert cluster_line and cluster_line != dup_line, (cluster_line, dup_line)
@@ -195,12 +265,12 @@ def test_the_script_prints_the_fact_level_total(tmp_path):
     assert proc.returncode == 0, proc.stderr[-2000:]
     report = next(out.glob("knowledge-health-*.md")).read_text()
     expected = ("| Exact-duplicate fact rows (facts_idx.text_hash) | 1 redundant of 2 rows "
-                "(entities with an exact twin: 1; distinct texts: 1) |")
+                "(entities with an exact twin: 1; distinct texts: 1)" + SAME_SOURCE_NONE + " |")
     assert expected in report, report[-1200:]
     # And on stdout, in that line's own form — the job log keeps stdout, which
     # is what a nightly run is actually read from.
     assert ("  Exact-duplicate fact rows (facts_idx.text_hash): 1 redundant of 2 rows "
-            "(entities with an exact twin: 1; distinct texts: 1)") in proc.stdout, proc.stdout[-1500:]
+            "(entities with an exact twin: 1; distinct texts: 1)" + SAME_SOURCE_NONE) in proc.stdout, proc.stdout[-1500:]
 
 
 # ── #1289: the printed metrics are in the written report ────────────────────

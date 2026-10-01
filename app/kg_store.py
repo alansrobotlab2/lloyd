@@ -1411,6 +1411,17 @@ class _FactsIdx:
         is the number the #499 trend is read on, and a retired row is still a
         row ingestion wrote. `same_entity_*` is the #499 denominator: one text
         held twice by one entity, in any pair of categories.
+
+        `same_source_*` (#1942) is the other denominator, and it is read on a
+        DIFFERENT row set, which is why `active_rows` is returned beside it:
+        over active rows only (`expired_at` and `invalid_at` both NULL), the
+        `(entity, source_doc)` groups holding more than one row, and the rows
+        in them beyond the first. Rows with no `source_doc` name no source and
+        are in no group. These rows all carry distinct text, so `text_hash`
+        has no traction on them (0 exact twins against 79,780 same-source
+        rows of 121,127 active, 2026-10-01). It is a population at risk, not a
+        duplicate count: one document legitimately supports many claims about
+        one entity. Divide it by `active_rows`, never by `rows`.
         """
         r = self._s._query("SELECT COUNT(*), COUNT(DISTINCT text_hash) FROM facts_idx")[0]
         rows, distinct_texts = int(r[0]), int(r[1])
@@ -1421,7 +1432,18 @@ class _FactsIdx:
             "SELECT COUNT(*), COALESCE(SUM(n - 1), 0), COUNT(DISTINCT entity) FROM "
             "(SELECT entity, text_hash, COUNT(*) AS n FROM facts_idx "
             "GROUP BY entity, text_hash HAVING COUNT(*) > 1)")[0]
+        active = "expired_at IS NULL AND invalid_at IS NULL"
+        active_rows = int(self._s._query(
+            f"SELECT COUNT(*) FROM facts_idx WHERE {active}")[0][0])
+        ss = self._s._query(
+            "SELECT COUNT(*), COALESCE(SUM(n - 1), 0) FROM "
+            "(SELECT COUNT(*) AS n FROM facts_idx "
+            f"WHERE {active} AND source_doc IS NOT NULL AND source_doc != '' "
+            "GROUP BY entity, source_doc HAVING COUNT(*) > 1)")[0]
         return {"rows": rows, "distinct_texts": distinct_texts,
+                "active_rows": active_rows,
+                "same_source_paraphrase_groups": int(ss[0]),
+                "same_source_redundant_rows": int(ss[1]),
                 "duplicate_rows": rows - distinct_texts, "groups": groups,
                 "same_entity_groups": int(se[0]),
                 "same_entity_redundant_rows": int(se[1]),

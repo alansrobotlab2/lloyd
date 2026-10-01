@@ -402,6 +402,64 @@ def test_facts_idx_reindex_and_temporal_filters(db, tmp_path):
     assert db.facts_idx.count(entity="Lloyd") == 3
 
 
+def test_exact_duplicate_stats_counts_same_source_rows_over_active_rows(db, tmp_path):
+    """#1942: `text_hash` has no traction on a document re-asserted in other
+    words, so the same call also returns the `(entity, source_doc)` groups with
+    more than one ACTIVE row and the rows in them beyond the first."""
+    root = tmp_path / "facts"
+    _fact_file(root, "E", "state", [
+        {"id": "s-1", "fact": "e one", "source_doc": "A.md"},
+        {"id": "s-2", "fact": "e two", "source_doc": "A.md"},
+        {"id": "s-3", "fact": "e three", "source_doc": "B.md"}])
+    _fact_file(root, "E", "goal", [                       # groups span categories
+        {"id": "g-1", "fact": "e four", "source_doc": "A.md"},
+        {"id": "g-2", "fact": "e five", "source_doc": "B.md"}])
+    _fact_file(root, "F", "state", [{"id": "s-1", "fact": "f one", "source_doc": "C.md"}])
+    db.facts_idx.reindex(root=root)
+    d = db.facts_idx.exact_duplicate_stats()
+    assert (d["same_source_paraphrase_groups"], d["same_source_redundant_rows"]) == (2, 2 + 1), d
+    assert d["rows"] == d["active_rows"] == 6, d
+    # every text is distinct, so the exact-twin numbers see nothing at all
+    assert (d["duplicate_rows"], d["same_entity_redundant_rows"]) == (0, 0), d
+
+
+def test_exact_duplicate_stats_item_fixture_reads_two_groups_two_rows(db, tmp_path):
+    """The contract's own fixture, read as written: E/doc A holds 3 active rows,
+    E/doc B holds 2, F/doc C holds 1. Two groups hold more than one row. The
+    item states the redundant figure as 2; the definition it gives beside it
+    (rows in those groups minus the number of groups) is 5 - 2 = 3, and the
+    definition is what the live figure 99,715 - 19,935 = 79,780 was computed
+    by, so the definition is what is pinned here."""
+    root = tmp_path / "facts"
+    _fact_file(root, "E", "state", [
+        {"id": f"s-{i}", "fact": f"e {i}", "source_doc": "A.md" if i < 3 else "B.md"}
+        for i in range(5)])
+    _fact_file(root, "F", "state", [{"id": "s-1", "fact": "f one", "source_doc": "C.md"}])
+    db.facts_idx.reindex(root=root)
+    d = db.facts_idx.exact_duplicate_stats()
+    assert d["same_source_paraphrase_groups"] == 2, d
+    assert d["same_source_redundant_rows"] == 3, d
+
+
+def test_exact_duplicate_stats_returns_both_row_sets_and_renames_nothing(db, tmp_path):
+    """`rows` counts every indexed row, `active_rows` only those with neither
+    `expired_at` nor `invalid_at`; an expired row does not make a same-source
+    group, and a row with no `source_doc` is in no group. Every key the two
+    existing consumers index by name is still there."""
+    root = tmp_path / "facts"
+    _fact_file(root, "E", "state", [
+        {"id": "s-1", "fact": "e now", "source_doc": "A.md"},
+        {"id": "s-2", "fact": "e before", "source_doc": "A.md", "expired_at": "2026-02-01"},
+        {"id": "s-3", "fact": "e unsourced"},
+        {"id": "s-4", "fact": "e unsourced too"}])
+    db.facts_idx.reindex(root=root)
+    d = db.facts_idx.exact_duplicate_stats()
+    assert (d["rows"], d["active_rows"]) == (4, 3), d
+    assert (d["same_source_paraphrase_groups"], d["same_source_redundant_rows"]) == (0, 0), d
+    assert {"rows", "distinct_texts", "duplicate_rows", "groups", "same_entity_groups",
+            "same_entity_redundant_rows", "entities_with_exact_dupes"} <= set(d), d
+
+
 # ── caching / versioning ─────────────────────────────────────────────────────
 
 def test_data_version_cache_invalidates_on_cross_process_commit(tmp_path):

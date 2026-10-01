@@ -625,7 +625,29 @@ def _fact_duplicate_cell(d: dict) -> str:
         return f"not measured: {d.get('reason', 'store unavailable')}"
     return (f"{d['same_entity_redundant_rows']} redundant of {d['rows']} rows "
             f"(entities with an exact twin: {d['entities_with_exact_dupes']}; "
-            f"distinct texts: {d['distinct_texts']})")
+            f"distinct texts: {d['distinct_texts']}){_same_source_clause(d)}")
+
+
+def _same_source_clause(d: dict) -> str:
+    """The second denominator of the fact-duplicate cell (#1942).
+
+    The exact-twin number beside it reads 0 on a store where two thirds of the
+    active rows re-assert something their own source document already said
+    about that entity, because every one of those rows is worded differently.
+    So the count is printed with the ACTIVE-row denominator it was measured on
+    (never `rows`, which includes retired ones) and named for what it is: a
+    population at risk. One document supports many distinct claims about one
+    entity; the share that is one claim twice was measured on recent writes
+    only (#1487, about a third), not on this row set.
+    """
+    if "same_source_redundant_rows" not in d or "active_rows" not in d:
+        return ""
+    n, active = d["same_source_redundant_rows"], d["active_rows"]
+    pct = f"{100.0 * n / active:.1f}%" if active else "no active rows"
+    return (f"; same-source: {n} of {active} active rows ({pct}) share an entity and "
+            f"a source document with an earlier row, in "
+            f"{d['same_source_paraphrase_groups']} groups: a population at risk, "
+            f"not counted as duplicates")
 
 
 def _provenance_cell(pv: dict | None) -> str:

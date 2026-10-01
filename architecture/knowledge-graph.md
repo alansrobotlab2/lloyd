@@ -341,6 +341,22 @@ page went on serving the fact as current, and the two disagreed until the next
 full reindex. A `StoreUnavailable` here is not fatal — the markdown is written
 and `facts_idx.reindex()` rebuilds the index — but a silent skip is.
 
+### The duplicate trend carries two denominators (#1942)
+
+`facts_idx.exact_duplicate_stats()` is the #499 trend instrument and the
+nightly knowledge-health report prints it. Its exact-twin numbers are keyed on
+`text_hash` and read 0 on a store where most active rows re-assert, in other
+words, something their own source document already said about that entity.
+The same call therefore also returns `active_rows`,
+`same_source_paraphrase_groups` and `same_source_redundant_rows`: over active
+rows only, the `(entity, source_doc)` groups with more than one row and the
+rows in them beyond the first (20,078 groups, 80,990 of 122,556 active rows =
+66.1%, read-only on 2026-10-01). The report prints that count over
+`active_rows`, never over `rows` (which includes retired ones), and calls it a
+population at risk: one document supports many distinct claims, and the share
+that is one claim twice was measured on recent writes only (#1487, about a
+third), not on this row set.
+
 ### The paraphrase gate (#1487, ships off)
 
 #499 refuses a byte-identical re-statement; a paraphrase walks through it, and
