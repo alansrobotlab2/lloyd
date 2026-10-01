@@ -183,9 +183,12 @@ def test_the_probe_cannot_satisfy_a_tightened_task_even_repeated(live_tasks):
         lr = lazy_result(by[tid])
         assert lr["checks_failed"], f"{tid} failed nothing, so its score is not a refusal"
 #: Measured 2026-09-21, AFTER `bench_011_haiku_quantum.md` named `haiku_5_7_5` as
-#: a rubric criterion. It was in this set before that edit; `bench_003` remains
-#: because "Summarize in two sentences" is still graded by nothing.
-MEASURED_UNCOVERED = {"bench_003_vault_recall"}
+#: a rubric criterion, and again 2026-10-01 after `bench_003_vault_recall.md` named
+#: `two_sentence_summary` (#2010, the #1929 owed-1 ruling: a prompt-level structural
+#: ask is a reply-level requirement). Both were in this set before their edits; the
+#: pinned corpus now states no ask that nothing grades. "Covered" means the rubric
+#: judge is asked about the sentence count, not that a count is enforced.
+MEASURED_UNCOVERED: set[str] = set()
 
 
 @pytest.fixture(autouse=True)
@@ -488,10 +491,12 @@ def test_bench_011_names_a_criterion_for_the_5_7_5_ask_it_states(
 def test_the_coverage_error_that_remains_is_the_measured_one(
     tmp_path: Path, live_report: dict
 ) -> None:
-    """Measured 2026-09-21 after bench_011 was fixed: one task still states a
-    count nothing grades. `bench_003`'s prompt says "Summarize in two sentences";
-    its checks are `tool_called` + `max_tool_calls` and its criteria are
-    `tool_usage_correctness` + `conciseness` — none of which is a sentence count.
+    """No pinned task states a count nothing grades. Measured 2026-09-21 after
+    bench_011 was fixed, one remained: `bench_003`'s prompt says "Summarize in two
+    sentences" while its checks are `tool_called` + `max_tool_calls` and its criteria
+    were `tool_usage_correctness` + `conciseness`. #2010 named `two_sentence_summary`
+    as a third criterion — a criterion and not a string check, so the lazy row could
+    not move — and the set is empty.
 
     Exact over `PINNED_CORPUS`, whose verdicts `_pinned_bench_dir` proves are the
     live files', and containment over the live directory — the same split as clause
@@ -499,6 +504,13 @@ def test_the_coverage_error_that_remains_is_the_measured_one(
     uncovered ask and the lint's job is to report it, not to be expected by it."""
     report = lint_bench_dir(_pinned_bench_dir(tmp_path / "bench", live_report))
     assert set(report["uncovered"]) == MEASURED_UNCOVERED
+    # Not vacuous: bench_003 still states the ask, and it is the criterion that covers it.
+    b3 = next(t for t in load_bench_tasks(BENCH_DIR) if t["id"] == "bench_003_vault_recall")
+    assert "two sentences" in b3["prompt"], "the ask moved; re-read this clause"
+    assert [c for c in b3["rubric_criteria"] if "sentence" in c] == ["two_sentence_summary"]
+    assert [c["type"] for c in b3["objective_checks"]] == ["tool_called", "max_tool_calls"]
+    row = next(r for r in report["tasks"] if r["id"] == "bench_003_vault_recall")
+    assert row["valid"] is True and row["lazy_objective_score"] is None, row
     live_uncovered = set(live_report["uncovered"])
     assert MEASURED_UNCOVERED <= live_uncovered, (
         f"a measured uncovered ask got covered: {MEASURED_UNCOVERED - live_uncovered}"
@@ -917,32 +929,34 @@ def _pinned_bench_dir(dest: Path, live_report: dict) -> Path:
 
 
 LIVE_VALID_TASKS = [
-    "bench_002_recall_user_fact", "bench_004_replay_schedule_task",
+    "bench_002_recall_user_fact", "bench_003_vault_recall",
+    "bench_004_replay_schedule_task",
     "bench_005_replay_memory_update", "bench_006_contradiction_check",
     "bench_007_skill_invocation", "bench_008_adversarial_gap",
     "bench_009_adversarial_probe", "bench_010_safety_destructive",
     "bench_011_haiku_quantum", "bench_012_replay_schedule_verify_chain",
     "bench_013_replay_memory_update_novelty",
 ]
-#: Re-measured 2026-09-28 for #1607: the pinned corpus's lint-valid pool is 11 of 13,
-#: not 4. The seven tasks #1607 tightened are lint-valid now because each kept every
-#: check it had and gained one, so `objective_only_max_tool_calls` and
-#: `uncovered_requirement` no longer fire on them — the two tasks left out are
-#: bench_001 (one `max_tool_calls`, a layer that cannot refuse anything) and
-#: bench_003 ("Summarize in two sentences" graded by nothing).
+#: Re-measured 2026-10-01 for #2010: the pinned corpus's lint-valid pool is 12 of 13.
+#: #1607 took it from 4 to 11 (each tightened task kept every check it had and gained
+#: one, so `objective_only_max_tool_calls` and `uncovered_requirement` stopped firing
+#: on them); #2010 added bench_003 once its "Summarize in two sentences" was named as
+#: a rubric criterion. The one task left out is bench_001 (one `max_tool_calls`, a
+#: layer that cannot refuse anything).
 #:
 #: This constant used to be four tasks, and the premise it carried — "the lint-valid
 #: pool is empty of scored tasks" — is what `scripts/autoresearch/promote.py` still
 #: asserts in prose and what the two tests below used to pin. Those tests now report
 #: the pool at this size. Nothing in `promote.py` keys off pool emptiness;
-#: `MIN_VALID_POOL_TASKS` is 2, and a pool of 11 clears it, so the refusal the tests
+#: `MIN_VALID_POOL_TASKS` is 2, and a pool of 12 clears it, so the refusal the tests
 #: assert below is a real comparison verdict rather than a shortage.
 #:
 #: The round id whose split is pinned below. `bench_split._rotated` is a pure
 #: sha256 of (round_id, task_id), so this is reproducible, not a snapshot.
 SPLIT_RID = "R_20260921_000000"
 LIVE_TARGETED_VALID = [
-    "bench_002_recall_user_fact", "bench_005_replay_memory_update",
+    "bench_002_recall_user_fact", "bench_003_vault_recall",
+    "bench_005_replay_memory_update",
     "bench_006_contradiction_check", "bench_007_skill_invocation",
     "bench_011_haiku_quantum", "bench_012_replay_schedule_verify_chain",
 ]
@@ -1038,16 +1052,17 @@ def _with_bench_010_unanchored(src: Path, dest: Path) -> Path:
 def test_validity_report_over_the_pinned_corpus_and_a_real_split(
     tmp_path: Path, live_report: dict
 ) -> None:
-    """Clause 4: the pool legs now compute over 11 real tasks, and the report says so.
+    """Clause 4: the pool legs now compute over 12 real tasks, and the report says so.
 
     All 13 pinned tasks, the lint's own verdicts, a split built by the real splitter.
-    The two lint-invalid tasks and the five held-out valid ones improve while the six
+    The one lint-invalid task and the five held-out valid ones improve while the seven
     targeted valid ones hold: the all-task leg promotes, the advisory leg refuses with
     a comparison verdict, and the means disagree — the #646 shape, still reproduced,
     now over a pool that exists.
 
     Three things changed with #1607 and each is a premise, not a number. The pool is
-    11 tasks where the version of this test written on 2026-09-21 had four.
+    12 tasks (11 after #1607, bench_003 joining with #2010) where the version of this
+    test written on 2026-09-21 had four.
     `safety_outside_valid_pool` is EMPTY: `bench_010_safety_destructive` was
     lint-invalid then, which is why the advisory leg could not have exercised the veto
     and the report had to say so — it is lint-valid now, so the pool the advisory leg
@@ -1056,7 +1071,7 @@ def test_validity_report_over_the_pinned_corpus_and_a_real_split(
     tasks, need 2)` for four days until #647 added bench_014-017.
 
     The fixture stays honest the way it did: `valid_task_mean` is a dict computed over
-    those 11 task scores, and the last two lines show it moving when a member's
+    those 12 task scores, and the last two lines show it moving when a member's
     objective layer is cleared, which no pool of any size would do if the leg were
     being short-circuited by a constant.
     """
@@ -1070,7 +1085,7 @@ def test_validity_report_over_the_pinned_corpus_and_a_real_split(
     assert [t for t in valid if t in split["heldout"]] == LIVE_HELDOUT_VALID
 
     invalid = [t["id"] for t in tasks if t["id"] not in valid]
-    assert sorted(invalid) == ["bench_001_reply_greeting", "bench_003_vault_recall"], invalid
+    assert sorted(invalid) == ["bench_001_reply_greeting"], invalid
     base = _summary(tasks, {t["id"]: 0.60 for t in tasks})
     var = _summary(tasks, {t["id"]: (0.60 if t["id"] in LIVE_TARGETED_VALID else 0.90)
                            for t in tasks})
@@ -1082,7 +1097,7 @@ def test_validity_report_over_the_pinned_corpus_and_a_real_split(
     assert rep["promote_all"] is True, rep["reason_all"]
     assert rep["valid_tasks"] == LIVE_VALID_TASKS
     assert rep["valid_task_mean"] == {
-        "baseline": 0.6, "variant": 0.7364, "tasks": 11, "delta": 0.1364}, rep["valid_task_mean"]
+        "baseline": 0.6, "variant": 0.725, "tasks": 12, "delta": 0.125}, rep["valid_task_mean"]
     assert rep["promote_valid"] is False and rep["reason_valid"].startswith("targeted_no_gain")
     assert rep["means_agree"] is False
     assert rep["safety_outside_valid_pool"] == [], (
@@ -1151,7 +1166,8 @@ def test_the_pinned_valid_pool_has_seven_scored_tasks_once_the_real_judge_scores
         "bench_004_replay_schedule_task", "bench_005_replay_memory_update",
         "bench_012_replay_schedule_verify_chain",
         "bench_013_replay_memory_update_novelty",
-    ], "the tool-behaviour six plus the two lint-invalid tasks are still unrankable"
+    ], ("unrankable is about the objective layer, not the lint: these six declare "
+        "only tool-behaviour checks, lint-valid (bench_003 since #2010) or not")
 
     row10 = next(p for p in summary["per_task"]
                  if p["task_id"] == "bench_010_safety_destructive")
