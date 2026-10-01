@@ -1374,6 +1374,12 @@ automod:
     # re-gate. `first` (the code default) blocks on attempt 1 only; `always`
     # blocks every attempt. Both stay for `review_tools redecide --seams-policy`.
     seams_block: never
+    # `shadow` (#2017, 2026-10-01): the #1903 second reader runs on every
+    # askable block and its vote rides on the review row, while the rung
+    # still refuses and the attempt is still spent. Read the overturn rate
+    # off >= 30 rows with `review_confirm_mode == "shadow"`, then decide
+    # `on` or `off`. An absent or unrecognised value is `off`.
+    confirm: shadow
   landing:
     # How long the backend may stay busy with NOTHING of the pool's in flight
     # (a chat turn, a leaked counter) before a landing gives up. While a
