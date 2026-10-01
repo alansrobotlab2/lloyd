@@ -2358,11 +2358,20 @@ class Gate:
             "review_confirm_reason": confirm["reason"],
             "review_confirm_votes": [{**v, "entry": str(v.get("entry") or "")[:200]}
                                       for v in confirm["votes"]]})
+        # #2017 shadow: the vote and what it cost are recorded, and nothing
+        # below acts on it. `overturned` is the one name every branch reads, so
+        # a shadow overturn cannot reach the pass path by a second spelling.
+        shadow = confirm.get("mode") == RV.CONFIRM_SHADOW
+        if shadow:
+            confirm_fields["review_confirm_mode"] = RV.CONFIRM_SHADOW
+            confirm_fields["review_confirm_seconds"] = round(
+                float(confirm.get("seconds") or 0.0), 1)
+        overturned = confirm["outcome"] == RV.OVERTURNED and not shadow
         # An overturned block is recorded as the pass it became, because
         # `blocking` is the field `_review_prepare`'s walk counts to charge an
         # attempt: this row says `blocking: false`, so the round's spent count
         # is exactly what it was before this grading turn.
-        recorded = "pass" if confirm["outcome"] == RV.OVERTURNED else kind
+        recorded = "pass" if overturned else kind
         S.append_event({**base_event, "ok": True, "premise": parsed["premise"],
                         "clauses": parsed["clauses"], "test_honesty": parsed["test_honesty"],
                         "seams_unverified": [s["seam"] if isinstance(s, dict) else s
@@ -2378,7 +2387,15 @@ class Gate:
                         "amendments_ok": parsed.get("amendments_ok", True),
                         "amendments_note": parsed.get("amendments_note", ""),
                         "blocking": recorded != "pass", "kind": recorded,
-                        "findings": findings[:2000], **confirm_fields})
+                        "findings": findings[:2000],
+                        # #2017: the entry list itself. `findings` is capped at
+                        # 2000 characters and 118 of 365 recorded blocks ran past
+                        # it, so a reader re-splitting the text lost entries; the
+                        # list is the decision's own and the cap does not touch it.
+                        "blocking_entries": [
+                            {"text": str(e.get("text") or "").strip(), "kind": e.get("kind")}
+                            for e in (decision.get("blocking") or [])],
+                        **confirm_fields})
         # Decided on the PRE-confirmation kind: ratifying an amendment is the
         # first reader's call about the contract, and a demote-only vote on a
         # clause entry is not a second vote on it. (`amendment_refused` is one
@@ -2389,7 +2406,7 @@ class Gate:
             return False, f"review: premise unsound{tree_note} — {findings}", {
                 "review_premise_unsound": True, "review_summary": findings[:800],
                 "review_session": res.get("session_id"), **confirm_fields, **validated}
-        if kind == "retry" and confirm["outcome"] != RV.OVERTURNED:
+        if kind == "retry" and not overturned:
             contract_refusal = any(c.get("verdict") == "unsatisfiable" for c in parsed["clauses"])
             if contract_refusal:
                 nxt = ("this refusal spends no attempt — amend the unsatisfiable clause(s) "
@@ -2448,7 +2465,7 @@ class Gate:
         # nobody refused, the same way an honesty-demoted pass does: two
         # identical "met 5 of 5" sentences would hide which one cost a vote.
         overturn_note = ""
-        if confirm["outcome"] == RV.OVERTURNED:
+        if overturned:
             overturn_note = (f" — every blocking entry was retired by the second reader"
                              f" ({confirm['reason'][:200]}); no review attempt spent")
         return True, (f"review: {RV.summarize_clauses(parsed)} of {len(contract['clauses'])} "
@@ -2484,16 +2501,23 @@ class Gate:
         change a verdict, and an exception from the reader upholds the entry.
         """
         from scripts.automod import review as RV
-        on = RV.confirm_policy()
+        # Normalised here as well as in `confirm_policy`: whatever that returns
+        # — a state, a legacy bool, something unexpected — resolves to one of
+        # the three states, and anything unrecognised is off.
+        mode = RV.confirm_policy_state(RV.confirm_policy())
+        on = mode != RV.CONFIRM_OFF
         plan = RV.confirm_plan(decision["kind"], decision["blocking"], confirm_on=on)
         if not plan["ask"]:
-            return {"policy_on": on, "outcome": RV.NOT_ASKED,
-                    "reason": plan["reason"], "votes": [], "asked": 0}
+            return {"policy_on": on, "mode": mode, "outcome": RV.NOT_ASKED,
+                    "reason": plan["reason"], "votes": [], "asked": 0, "seconds": 0.0}
+        started = time.monotonic()
         diff, truncated = RV.diff_text(self.worktree, self.base)
         reader = RV.confirm_reader(round_id=self.round_id, item_id=self.item_id,
                                    clauses=list(contract["clauses"]), diff=diff,
                                    diff_truncated=truncated, run_grader_fn=run_grader_fn)
-        return {"policy_on": on, **RV.confirm_refusal(decision, plan, reader=reader)}
+        verdict = RV.confirm_refusal(decision, plan, reader=reader)
+        return {"policy_on": on, "mode": mode, **verdict,
+                "seconds": time.monotonic() - started}
 
     def _review_prepare(self):
         """Everything the review rung decides before it asks a grader.

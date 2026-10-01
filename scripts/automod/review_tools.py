@@ -424,27 +424,40 @@ def redecide(*, since_ts: float, ledger: Path | None = None,
 STORED_FINDINGS_CAP = 2000
 
 
-def _row_diff(repo: Path, head: str, _cache: dict) -> tuple[str, bool]:
-    """The diff a recorded review graded, recovered from the repo by `head`.
+#: Why an askable block's diff could not be put to a reader (#2017). Each is a
+#: census key in `replay_confirm`'s `not_ask_reasons`, never a silent skip.
+DIFF_NO_HEAD = "diff_no_head"              # the row recorded no head sha
+DIFF_NO_BASE = "diff_no_base"              # no `round_start` row carries its base
+DIFF_UNRECOVERABLE = "diff_unrecoverable"  # the head (or base) object is gone
+DIFF_EMPTY = "diff_empty"                  # recovered, and it shows nothing
+DIFF_REASONS = (DIFF_NO_HEAD, DIFF_NO_BASE, DIFF_UNRECOVERABLE, DIFF_EMPTY)
 
-    `git merge-base main <head>` is the round's base as long as the round was
-    cut off `main`, which every gate round is; the branch outlives the round
-    because `automod_abort` keeps it. `(text, found)` — `(“”, False)` means the
-    object is gone, and a row whose diff cannot be shown to a reader is
-    reported as `diff_unrecoverable` rather than graded against nothing.
+
+def _row_diff(repo: Path, head: str, base: str, _cache: dict) -> tuple[str, str]:
+    """The round's own diff — its recorded `round_start.base` to the graded head.
+
+    `(text, why_not)`: `why_not` is "" for a diff a reader can be shown and one
+    of `DIFF_REASONS` otherwise. The base is the recorded one, not `git
+    merge-base main <head>`: once a head has landed it is an ancestor of main,
+    so the merge-base IS the head and the "diff" is empty with returncode 0 —
+    which the first version reported as found, and the reader was then asked to
+    assume a finding mistaken on the evidence of `(no diff)`. An empty diff is
+    not evidence, so it is its own unreplayable reason.
     """
-    if not head or head in _cache:
-        return _cache.get(head, ("", False))
-    mb = _git(repo, "merge-base", "main", head)
-    ok = mb.returncode == 0
-    base = mb.stdout.strip() if ok else ""
-    out: tuple[str, bool] = ("", False)
-    if base:
+    if not head:
+        return "", DIFF_NO_HEAD
+    if not base:
+        return "", DIFF_NO_BASE
+    key = (base, head)
+    if key not in _cache:
         d = _git(repo, "diff", f"{base}..{head}")
-        if d.returncode == 0:
-            out = (d.stdout[:RV.DIFF_CAP_CHARS], True)
-    _cache[head] = out
-    return out
+        if d.returncode != 0:
+            _cache[key] = ("", DIFF_UNRECOVERABLE)
+        elif not d.stdout.strip():
+            _cache[key] = ("", DIFF_EMPTY)
+        else:
+            _cache[key] = (d.stdout[:RV.DIFF_CAP_CHARS], "")
+    return _cache[key]
 
 
 def replay_confirm(*, since_ts: float = 0.0, ledger: Path | None = None,
@@ -476,10 +489,17 @@ def replay_confirm(*, since_ts: float = 0.0, ledger: Path | None = None,
     diffs: dict = {}
     asking = reader is not None or reader_factory is not None
     if path.exists():
+        events = []
         for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
             try:
-                ev = json.loads(line)
+                events.append(json.loads(line))
             except ValueError:
+                continue
+        # Each round's own base, off its `round_start` row (#2017).
+        bases = {e.get("round_id"): str(e.get("base") or "") for e in events
+                 if isinstance(e, dict) and e.get("event") == "round_start"}
+        for ev in events:
+            if not isinstance(ev, dict):
                 continue
             if ev.get("event") != "review" or not ev.get("ok"):
                 continue
@@ -491,23 +511,36 @@ def replay_confirm(*, since_ts: float = 0.0, ledger: Path | None = None,
             text = str(ev.get("findings") or "")
             if not text.strip():
                 continue
-            entries = RV.blocking_entries_from_text(text)
+            # A row written since #2017 carries the entry list itself, which the
+            # 2000-character cap on `findings` never touched; only a row from
+            # before it has to be re-split from the capped text.
+            stored = ev.get("blocking_entries")
+            has_list = isinstance(stored, list) and all(isinstance(e, dict) for e in stored)
+            entries = ([{"text": str(e.get("text") or ""), "kind": e.get("kind")}
+                        for e in stored] if has_list
+                       else RV.blocking_entries_from_text(text))
             row = {"round_id": ev.get("round_id"), "item_id": ev.get("item_id"),
                    "attempt": ev.get("attempt"), "ts": ev.get("ts"),
                    "head": str(ev.get("head") or ""), "entries": entries}
-            if len(text) >= findings_cap:
+            if not has_list and len(text) >= findings_cap:
                 row["skipped"] = "stored_findings_truncated"
             else:
                 plan = RV.confirm_plan("retry", entries, confirm_on=True)
                 row["ask"] = bool(plan["ask"])
                 row["reason"] = plan["reason"]
                 row["offered"] = [e["text"] for e in plan["entries"]]
-                if plan["ask"] and asking:
-                    diff, found = _row_diff(repo, row["head"], diffs)
-                    if not found:
-                        row["skipped"] = "diff_unrecoverable"
+                if plan["ask"]:
+                    # Probed whether or not a reader was handed in: "would be put
+                    # to the second reader" is only true of a block whose diff can
+                    # be shown, and the no-reader arm used to count 61 where 16
+                    # were replayable.
+                    diff, why_not = _row_diff(repo, row["head"],
+                                              bases.get(row["round_id"], ""), diffs)
+                    if why_not:
+                        row["skipped"] = why_not
                     else:
                         row["diff_chars"] = len(diff)
+                    if not why_not and asking:
                         verdict = RV.confirm_refusal(
                             {"blocking": entries, "findings": text}, plan,
                             reader=(reader_factory(row, diff) if reader_factory
@@ -519,20 +552,29 @@ def replay_confirm(*, since_ts: float = 0.0, ledger: Path | None = None,
             if limit and len(rows) >= limit:
                 break
     askable = [r for r in rows if r.get("ask")]
+    replayable = [r for r in askable if not r.get("skipped")]
     judged = [r for r in askable if "outcome" in r]
+    # One reason per block that no reader can be asked about, so that
+    # `replayable + sum(not_ask_reasons.values()) == blocking`, and with a reader
+    # `judged == replayable`. An askable row whose diff is missing or empty is in
+    # here under its `DIFF_REASONS` key; before #2017 it was in neither count.
     reasons: dict[str, int] = {}
     for r in rows:
-        if not r.get("ask"):
-            key = str(r.get("reason") if r.get("ask") is False
-                      else r.get("skipped") or "skipped")
-            reasons[key] = reasons.get(key, 0) + 1
+        if r.get("skipped"):
+            key = str(r["skipped"])
+        elif not r.get("ask"):
+            key = str(r.get("reason") or "skipped")
+        else:
+            continue
+        reasons[key] = reasons.get(key, 0) + 1
     return {"rows": rows, "blocking": len(rows), "askable": len(askable),
+            "replayable": len(replayable),
             "not_ask_reasons": reasons, "judged": len(judged),
             "overturned": (sum(1 for r in judged if r["outcome"] == RV.OVERTURNED)
                            if judged else None),
             "upheld": (sum(1 for r in judged if r["outcome"] == RV.UPHELD)
                        if judged else None),
-            "diffs_recovered": len([d for d in diffs.values() if d[1]]),
+            "diffs_recovered": len([d for d in diffs.values() if not d[1]]),
             "limit": limit}
 
 
@@ -637,14 +679,17 @@ def main(argv=None) -> int:
             print(json.dumps(out, indent=2, default=str))
             return 0
         for row in out["rows"]:
-            flag = "asked" if row.get("ask") else f"not asked: {row.get('reason') or row.get('skipped')}"
+            flag = ("asked" if row.get("ask") and not row.get("skipped")
+                    else f"not asked: {row.get('skipped') or row.get('reason')}")
             vote = ""
             if row.get("outcome"):
                 vote = f" → {row['outcome']} ({row.get('confirm_reason', '')[:90]})"
             print(f"{row.get('round_id')} #{row.get('item_id')} attempt {row.get('attempt')}: "
                   f"{len(row.get('entries') or [])} blocking entr(ies), {flag}{vote}")
         reasons = ", ".join(f"{k}: {v}" for k, v in sorted(out["not_ask_reasons"].items()))
-        print(f"\n{out['blocking']} recorded block(s); {out['askable']} would be put to the "
+        # Replayable, not merely askable (#2017): a block whose diff is gone or
+        # empty cannot be put to anyone, and is named in the census below.
+        print(f"\n{out['blocking']} recorded block(s); {out['replayable']} would be put to the "
               f"second reader")
         if reasons:
             print(f"not put to it: {reasons}")

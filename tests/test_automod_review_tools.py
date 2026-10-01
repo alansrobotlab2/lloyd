@@ -224,6 +224,14 @@ def _append(world, *rows):
         S.append_event(r, path=world["ledger"])
 
 
+def _round_start(world, round_id, base=None):
+    """The row `round.start` writes: the round's own base, which is what a replay
+    diffs from (#2017). `world["commit"]` has landed, so `merge-base main <head>` is
+    the head itself — the base has to come from here or the diff is empty."""
+    return {"event": "round_start", "round_id": round_id,
+            "base": world["parent"] if base is None else base}
+
+
 _TWO_CLAUSE_BLOCKS = ("clause 1 unmet: CONFIRM_ONE_SENTINEL no second reader is wired; "
                       "clause 2 partial (downgraded: not graded): the pin is not in this diff")
 
@@ -238,6 +246,7 @@ def test_replay_confirm_counts_the_blocks_a_second_reader_would_overturn(world):
     pass — and nothing on disk changed to say so.
     """
     _append(world,
+            _round_start(world, "SM_A"),
             _review_row("SM_A", findings=_TWO_CLAUSE_BLOCKS, head=world["commit"]),
             _review_row("SM_B", findings="test honesty tests/test_m.py:2: `or True`",
                         head=world["commit"]),
@@ -275,9 +284,11 @@ def test_replay_confirm_without_a_reader_measures_the_population_not_a_verdict(w
     nothing", which is the exact sentence the owed check on #1903 exists to
     produce, and would settle it with an arm that judged nothing.
     """
-    _append(world, _review_row("SM_A", findings=_TWO_CLAUSE_BLOCKS, head=world["commit"]))
+    _append(world, _round_start(world, "SM_A"),
+            _review_row("SM_A", findings=_TWO_CLAUSE_BLOCKS, head=world["commit"]))
     res = RT.replay_confirm(ledger=world["ledger"], repo=world["repo"])
     assert res["blocking"] == 1 and res["askable"] == 1 and res["judged"] == 0
+    assert res["replayable"] == 1 and res["not_ask_reasons"] == {}
     assert res["overturned"] is None and res["upheld"] is None
     row = res["rows"][0]
     assert row["ask"] is True and row["reason"] == "ask"
@@ -292,6 +303,7 @@ def test_replay_confirm_says_which_recorded_block_it_cannot_recover(world):
     _append(world,
             _review_row("SM_LONG", findings=("clause 1 unmet: n" + "; clause 2 unmet: n" * 700),
                         head=world["commit"]),
+            _round_start(world, "SM_GONE"),
             _review_row("SM_GONE", findings="clause 1 unmet: gone", head="0f" * 20))
     res = RT.replay_confirm(ledger=world["ledger"], repo=world["repo"],
                             reader=lambda t: {"retire": True, "reason": "r"})
@@ -301,14 +313,22 @@ def test_replay_confirm_says_which_recorded_block_it_cannot_recover(world):
     by = {r["round_id"]: r for r in res["rows"]}
     assert by["SM_LONG"]["skipped"] == "stored_findings_truncated"
     assert by["SM_GONE"]["skipped"] == "diff_unrecoverable"
-    assert res["not_ask_reasons"] == {"stored_findings_truncated": 1}
+    # Both are in the census (#2017): the unrecoverable diff used to be in no count.
+    assert res["not_ask_reasons"] == {"stored_findings_truncated": 1,
+                                      "diff_unrecoverable": 1}
+    assert res["replayable"] == 0
 
 
-def test_the_replay_confirm_cli_reports_it_and_writes_nothing(world, tmp_path, capsys):
+def test_the_replay_confirm_cli_reports_it_and_writes_nothing(world, tmp_path, capsys,
+                                                             monkeypatch):
+    # The CLI reads diffs from the live root; since #2017 the no-reader arm probes
+    # them too, so the fixture repo has to be the one it looks in.
+    monkeypatch.setattr(RT, "LIVE_ROOT", world["repo"])
     # ts is epoch seconds on a ledger row, and `--since` is a date: a row dated
     # 1970 would be filtered out by a 2020 floor, so this one is dated 2026.
-    _append(world, _review_row("SM_A", findings=_TWO_CLAUSE_BLOCKS, head=world["commit"],
-                              ts=1777000000.0))
+    _append(world, _round_start(world, "SM_A"),
+            _review_row("SM_A", findings=_TWO_CLAUSE_BLOCKS, head=world["commit"],
+                        ts=1777000000.0))
     before = world["ledger"].read_text()
     rc = RT.main(["replay-confirm", "--since", "2020-01-01"])
     out = capsys.readouterr().out
@@ -339,3 +359,77 @@ def test_the_known_true_calibrate_block_is_never_offered_to_the_reader(world, tm
     assert entries, rows[0]["findings"]
     assert all(e["kind"] in RV.PYTHON_COMPUTED_ENTRY_KINDS for e in entries), entries
     assert RV.confirm_plan("retry", entries, confirm_on=True)["reason"] == "all_python_computed"
+
+
+# ── #2017: the replay shows the round's own diff, and counts what it cannot ──
+
+def test_a_replay_diffs_from_the_recorded_base_and_names_every_unreplayable_row(world):
+    """The diff is `round_start.base..head`, never `merge-base main <head>`.
+
+    `world["commit"]` has landed, so its merge-base with main is itself and the
+    old recovery returned an empty diff as FOUND — the reader was then told to
+    assume the finding mistaken on the evidence of `(no diff)`. Five askable
+    blocks: one replayable, and one for each way a diff can be missing or empty.
+    Every one that cannot be shown is a census key, so judged plus the census is
+    the blocking count.
+    """
+    shown: list[str] = []
+
+    def factory(row, diff):
+        shown.append(diff)
+        return lambda entry: {"retire": False, "reason": "stands"}
+
+    _append(world,
+            _round_start(world, "SM_OK"),
+            _review_row("SM_OK", findings=_TWO_CLAUSE_BLOCKS, head=world["commit"]),
+            # Landed head, and a base equal to it: the merge-base shape, empty.
+            _round_start(world, "SM_EMPTY", base=world["commit"]),
+            _review_row("SM_EMPTY", findings=_TWO_CLAUSE_BLOCKS, head=world["commit"]),
+            _review_row("SM_NOBASE", findings=_TWO_CLAUSE_BLOCKS, head=world["commit"]),
+            _round_start(world, "SM_NOHEAD"),
+            _review_row("SM_NOHEAD", findings=_TWO_CLAUSE_BLOCKS, head=""),
+            _round_start(world, "SM_GONE"),
+            _review_row("SM_GONE", findings=_TWO_CLAUSE_BLOCKS, head="0f" * 20),
+            _review_row("SM_PY", findings="test honesty tests/test_m.py:2: `or True`",
+                        head=world["commit"]))
+    res = RT.replay_confirm(ledger=world["ledger"], repo=world["repo"], reader_factory=factory)
+    by = {r["round_id"]: r for r in res["rows"]}
+    assert by["SM_OK"]["outcome"] == RV.UPHELD and "skipped" not in by["SM_OK"]
+    assert len(shown) == 1 and "app/m.py" in shown[0], "the reader saw the round's own diff"
+    assert {rid: by[rid]["skipped"] for rid in ("SM_EMPTY", "SM_NOBASE", "SM_NOHEAD", "SM_GONE")} == {
+        "SM_EMPTY": RT.DIFF_EMPTY, "SM_NOBASE": RT.DIFF_NO_BASE,
+        "SM_NOHEAD": RT.DIFF_NO_HEAD, "SM_GONE": RT.DIFF_UNRECOVERABLE}
+    assert all("outcome" not in by[rid] for rid in by if rid != "SM_OK")
+    assert res["not_ask_reasons"] == {
+        RT.DIFF_EMPTY: 1, RT.DIFF_NO_BASE: 1, RT.DIFF_NO_HEAD: 1, RT.DIFF_UNRECOVERABLE: 1,
+        "all_python_computed": 1}
+    assert res["blocking"] == 6 and res["askable"] == 5 and res["replayable"] == 1
+    assert res["judged"] + sum(res["not_ask_reasons"].values()) == res["blocking"]
+
+    # The no-reader arm probes the diffs too, so its headline is the same population.
+    dry = RT.replay_confirm(ledger=world["ledger"], repo=world["repo"])
+    assert dry["replayable"] == 1 and dry["judged"] == 0
+    assert dry["not_ask_reasons"] == res["not_ask_reasons"]
+
+
+def test_a_row_carrying_its_entry_list_is_replayed_past_the_findings_cap(world):
+    """Rows written since #2017 carry `blocking_entries`, so a block whose joined
+    text ran past the 2000-character cap is no longer `stored_findings_truncated`:
+    the list is replayed as stored, entry for entry, and it round-trips through
+    the same splitter the old rows need."""
+    texts = [f"clause {i} unmet: " + "x" * 400 for i in range(1, 8)]
+    joined = "; ".join(texts)
+    assert len(joined) > RT.STORED_FINDINGS_CAP
+    entries = [{"text": t, "kind": RV.blocking_entry_kind(t)} for t in texts]
+    assert RV.blocking_entries_from_text(joined) == entries
+    capped = _review_row("SM_OLD", findings=joined[:RT.STORED_FINDINGS_CAP], head=world["commit"])
+    listed = {**_review_row("SM_NEW", findings=joined[:RT.STORED_FINDINGS_CAP],
+                            head=world["commit"]), "blocking_entries": entries}
+    _append(world, _round_start(world, "SM_OLD"), capped, _round_start(world, "SM_NEW"), listed)
+    res = RT.replay_confirm(ledger=world["ledger"], repo=world["repo"],
+                            reader=lambda t: {"retire": False, "reason": "stands"})
+    by = {r["round_id"]: r for r in res["rows"]}
+    assert by["SM_OLD"]["skipped"] == "stored_findings_truncated"
+    assert "skipped" not in by["SM_NEW"] and by["SM_NEW"]["entries"] == entries
+    assert by["SM_NEW"]["outcome"] == RV.UPHELD
+    assert len(by["SM_NEW"]["votes"]) == RV.CONFIRM_MAX_ENTRIES

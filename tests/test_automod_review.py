@@ -2769,21 +2769,57 @@ def test_the_confirm_policy_defaults_off_and_only_says_on_when_config_says_on(mo
     import app.config as C
 
     monkeypatch.setattr(C, "CONFIG", {"automod": {"review": {"seams_block": "never"}}})
-    assert RV.confirm_policy() is False
+    assert RV.confirm_policy() == RV.CONFIRM_OFF
     monkeypatch.setattr(C, "CONFIG", {"automod": {"review": {"confirm": "on"}}})
-    assert RV.confirm_policy() is True
+    assert RV.confirm_policy() == RV.CONFIRM_ON
     monkeypatch.setattr(C, "CONFIG", {"automod": {"review": {"confirm": True}}})
-    assert RV.confirm_policy() is True
+    assert RV.confirm_policy() == RV.CONFIRM_ON
     for off in (False, "off", "", None, "sometimes"):
         monkeypatch.setattr(C, "CONFIG", {"automod": {"review": {"confirm": off}}})
-        assert RV.confirm_policy() is False, off
+        assert RV.confirm_policy() == RV.CONFIRM_OFF, off
+        assert RV.confirm_policy_value(off) is False, off
 
     class _Boom(dict):
         def get(self, *a, **k):
             raise RuntimeError("config unreadable")
 
     monkeypatch.setattr(C, "CONFIG", _Boom())
-    assert RV.confirm_policy() is False, "a broken config never turns the reader on"
+    assert RV.confirm_policy() == RV.CONFIRM_OFF, "a broken config never turns the reader on"
+
+
+def test_shadow_is_its_own_confirm_state_and_nothing_else_resolves_to_it(monkeypatch):
+    """#2017: three states, and `shadow` is neither neighbour's spelling.
+
+    Before this, `confirm: shadow` in config.yaml silently meant OFF — the value
+    was unrecognised and the policy was a bool — so a person who set it to start
+    the measurement would have waited ten days for rows that were never written.
+    The other direction matters as much: an unrecognised, absent or unreadable
+    value must resolve to `off`, never to a state that calls a model on a block.
+    """
+    import app.config as C
+
+    assert len({RV.CONFIRM_OFF, RV.CONFIRM_SHADOW, RV.CONFIRM_ON}) == 3
+    for raw in ("shadow", "Shadow", " SHADOW "):
+        monkeypatch.setattr(C, "CONFIG", {"automod": {"review": {"confirm": raw}}})
+        assert RV.confirm_policy() == RV.CONFIRM_SHADOW, raw
+        assert RV.confirm_policy_value(raw) is False, "shadow is not a switch-on"
+    for raw in ("on", "true", "yes", "1", True):
+        assert RV.confirm_policy_state(raw) == RV.CONFIRM_ON, raw
+    for raw in ("shadows", "shadow-on", "dry", "observe", "warn", 2, 0, [], {}, None, "",
+                False, "off", {"mode": "shadow"}, ["shadow"]):
+        monkeypatch.setattr(C, "CONFIG", {"automod": {"review": {"confirm": raw}}})
+        assert RV.confirm_policy() == RV.CONFIRM_OFF, raw
+    for cfg in ({}, {"automod": None}, {"automod": {"review": None}},
+                {"automod": {"review": {}}}):
+        monkeypatch.setattr(C, "CONFIG", cfg)
+        assert RV.confirm_policy() == RV.CONFIRM_OFF, cfg
+
+    class _Boom(dict):
+        def get(self, *a, **k):
+            raise RuntimeError("config unreadable")
+
+    monkeypatch.setattr(C, "CONFIG", _Boom())
+    assert RV.confirm_policy() == RV.CONFIRM_OFF
 
 
 def test_the_second_reader_is_offered_the_entries_the_decision_itself_produced():

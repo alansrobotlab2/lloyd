@@ -2440,6 +2440,38 @@ length; the event's `seconds` is still the grade's, plus `rung_wait_s`.
 `automod.gate.concurrent_review: false` is the serial ladder.
 `tests/test_gate_concurrent_review.py` pins all of it.
 
+### 4.5f The confirmation pass: off, shadow, on (#1903, #2017)
+
+A block is the expensive verdict of this rung, so it may be put to a second,
+demote-only reader (`RV.confirm_plan` / `confirm_reader` / `confirm_refusal`):
+one grader turn per offered blocking entry, able to retire only the entry it
+is shown. `automod.review.confirm` has three states, resolved by
+`RV.confirm_policy()`; the key is absent from `config.yaml`, which is `off`,
+and an unrecognised or unreadable value is `off` too — never a state that
+calls a model.
+
+| state | reader runs | review row | refusal and attempt |
+|---|---|---|---|
+| `off` | no | no `review_confirm*` key | as shipped |
+| `shadow` | yes | `review_confirm`, `_reason`, `_votes`, plus `review_confirm_mode: shadow` and `review_confirm_seconds` | as shipped: the row stays `blocking: true`, `kind: retry` |
+| `on` | yes | `review_confirm`, `_reason`, `_votes` | an overturned block becomes `blocking: false` and spends no attempt |
+
+`shadow` exists because the switch could not be measured by replay:
+`review_tools replay-confirm` over recorded blocks found 36 of 58 askable heads
+already collected by git, and a head that had landed diffed empty against
+`merge-base main <head>` (which is the head itself) while being reported as
+found. Three instrument fixes ride with it. Every review row now carries
+`blocking_entries`, the decision's own entry list, because `findings` is capped
+at 2000 characters and 118 of 365 recorded blocks ran past it. A replay diffs
+from the round's recorded `round_start.base`. And an askable row whose diff is
+missing or empty is a census key (`diff_no_head`, `diff_no_base`,
+`diff_unrecoverable`, `diff_empty`), so `replayable + sum(not_ask_reasons)` is
+the blocking count and the headline counts only blocks a reader can be shown.
+
+The overturn rate is read off live rows: `review_confirm_mode == "shadow"` and
+`review_confirm in ("overturned", "upheld")`. Zero overturns after thirty or
+more askable blocks closes #1903 as tried.
+
 ### 4.1 pyflakes is a diff, not a bar
 
 The tree carries hundreds of pre-existing findings — 215 unique ones measured

@@ -2593,28 +2593,55 @@ def blocking_entries_from_text(findings: str) -> list[dict]:
     return out
 
 
+#: The three states of `automod.review.confirm` (#1903, #2017).
+CONFIRM_OFF = "off"
+CONFIRM_SHADOW = "shadow"
+CONFIRM_ON = "on"
+
+
 def confirm_policy_value(raw) -> bool:
     """Is this config value a switch-on? Tolerant of both spellings."""
+    return confirm_policy_state(raw) == CONFIRM_ON
+
+
+def confirm_policy_state(raw) -> str:
+    """One of `off` / `shadow` / `on` for a raw config value.
+
+    `shadow` is its own state, never a spelling of either neighbour: it runs the
+    second reader and records the vote while the refusal and the charged attempt
+    stay exactly as shipped. Anything unrecognised — a typo, a number, a mapping,
+    None — is `off`, because the two other states both call a model on a block
+    and a misspelt key must not start doing that.
+    """
     if isinstance(raw, bool):
-        return raw
-    return str(raw or "").strip().lower() in ("on", "true", "yes", "1")
+        return CONFIRM_ON if raw else CONFIRM_OFF
+    text = str(raw if raw is not None else "").strip().lower()
+    if text in ("on", "true", "yes", "1"):
+        return CONFIRM_ON
+    if text == CONFIRM_SHADOW:
+        return CONFIRM_SHADOW
+    return CONFIRM_OFF
 
 
-def confirm_policy() -> bool:
-    """`automod.review.confirm`, OFF unless config says otherwise. Never raises.
+def confirm_policy() -> str:
+    """`automod.review.confirm` as `off` / `shadow` / `on`. Never raises.
 
-    Off is the shipped setting and reproduces today's single-vote behaviour
-    exactly: no reader is asked, and no `review_confirm*` field is written on
-    any review row. Turning it on is an edit to `config.yaml`, which the
-    self-modification loop may not land — the switch is a human's, and
-    `review_tools replay-confirm` is the number a human decides it on.
+    Off is the shipped setting and reproduces the single-vote behaviour exactly:
+    no reader is asked, and no `review_confirm*` field is written on any review
+    row. `shadow` (#2017) is how the switch gets measured: the reader runs on
+    every askable block and its vote and elapsed seconds ride on the review row,
+    while the rung still refuses and the attempt is still spent — the overturn
+    rate is then read off live rows instead of replayed over heads git has
+    collected. Changing it is an edit to `config.yaml`, which the
+    self-modification loop may not land. An absent key, an unreadable config and
+    an unrecognised value are all `off`.
     """
     try:
         from app.config import CONFIG
-        return confirm_policy_value(((CONFIG.get("automod") or {}).get("review") or {})
+        return confirm_policy_state(((CONFIG.get("automod") or {}).get("review") or {})
                                     .get("confirm", False))
     except Exception:
-        return False
+        return CONFIRM_OFF
 
 
 def confirm_plan(kind: str, blocking: list[dict], *, confirm_on: bool) -> dict:

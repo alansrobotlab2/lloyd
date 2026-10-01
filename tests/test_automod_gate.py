@@ -2112,6 +2112,95 @@ def test_a_refusal_is_never_put_to_a_second_reader_while_the_policy_is_off(
     assert not [k for k in data if k.startswith("review_confirm")], data
 
 
+def test_a_shadow_vote_is_recorded_and_changes_nothing_the_rung_decides(tmp_path, monkeypatch):
+    """#2017: in shadow the reader runs and its vote is on the row — and the
+    refusal, the row's `blocking`, and the charged attempt are the shipped ones.
+
+    The reader here retires the only blocking entry, which with the policy `on`
+    is a pass that spends no attempt (the node above). In shadow the same vote is
+    recorded as `overturned` beside the seconds the reader took, the rung still
+    sends the round back, the row still says `blocking: true` / `kind: retry`,
+    and the charging walk counts it: the next grade is attempt 2.
+    """
+    from scripts.automod import review as RV
+    events, _ = _stub_grader(monkeypatch, tmp_path, _UNMET_ONE)
+    turns = _confirm_reader(monkeypatch)                      # retires what it is shown
+    monkeypatch.setattr(RV, "confirm_policy", lambda: RV.CONFIRM_SHADOW)
+    ok, detail, data = _ReviewGate(tmp_path).rung_review()
+
+    assert ok is False and "review sent it back" in detail, detail
+    assert "no review attempt spent" not in detail
+    assert len(turns) == 1, "shadow runs the reader"
+    ev = events[-1]
+    assert ev["blocking"] is True and ev["kind"] == "retry", ev
+    assert ev["review_confirm"] == "overturned"
+    assert ev["review_confirm_mode"] == "shadow"
+    assert ev["review_confirm_reason"] and ev["review_confirm_votes"][0]["verdict"] == "retired"
+    secs = ev["review_confirm_seconds"]
+    assert isinstance(secs, (int, float)) and not isinstance(secs, bool) and secs >= 0
+    assert data["review_retry"] is True and data["review_attempt"] == 1
+    assert data["review_confirm"] == "overturned" and "review_confirm_seconds" in data
+
+    monkeypatch.setattr(G.S, "read_events", lambda limit=100: list(events))
+    ctx = _ReviewGate(tmp_path)._review_prepare()
+    assert isinstance(ctx, dict), ctx
+    assert ctx["attempt"] == 2, "a shadow overturn refunded the attempt"
+
+
+def test_the_on_and_off_states_do_not_gain_the_shadow_fields(tmp_path, monkeypatch):
+    """#2017: `on` still overturns and refunds, `off` still writes no
+    `review_confirm*` key — and neither carries the shadow-only fields."""
+    from scripts.automod import review as RV
+    events, _ = _stub_grader(monkeypatch, tmp_path, _UNMET_ONE)
+    turns = _confirm_reader(monkeypatch)
+    monkeypatch.setattr(RV, "confirm_policy", lambda: RV.CONFIRM_ON)
+    ok, _detail, _data = _ReviewGate(tmp_path).rung_review()
+    ev = events[-1]
+    assert ok is True and ev["blocking"] is False and ev["kind"] == "pass", ev
+    assert sorted(k for k in ev if k.startswith("review_confirm")) == [
+        "review_confirm", "review_confirm_reason", "review_confirm_votes"]
+
+    for off in (RV.CONFIRM_OFF, False, "shadows", None):
+        turns.clear()
+        monkeypatch.setattr(RV, "confirm_policy", lambda off=off: off)
+        ok, _detail, data = _ReviewGate(tmp_path).rung_review()
+        ev = events[-1]
+        assert ok is False and turns == [], off
+        assert not [k for k in ev if k.startswith("review_confirm")], (off, ev)
+        assert not [k for k in data if k.startswith("review_confirm")], (off, data)
+
+
+def test_a_review_row_carries_its_blocking_entries_whole(tmp_path, monkeypatch):
+    """#2017: the row's own `blocking_entries` is the decision's list, untouched by
+    the 2000-character cap on `findings` — 118 of 365 recorded blocks ran past
+    that cap and could not be replayed."""
+    from scripts.automod import review as RV
+    # Six clauses, each unmet with a long note: a per-clause note is itself capped,
+    # so it takes a full contract to run the joined text past 2000 characters.
+    note = "GATE_ENTRY_SENTINEL " + "the pin is not on the line it names " * 40
+    unmet = {**_UNMET_ONE, "clauses": [
+        {**_UNMET_ONE["clauses"][0], "clause": n, "note": f"{note} TAIL{n}"}
+        for n in range(1, 7)]}
+    events, _ = _stub_grader(monkeypatch, tmp_path, unmet)
+    monkeypatch.setattr(RV, "item_contract", lambda iid, ledger=None: {
+        "id": iid, "title": "t", "body": "b", "path": "",
+        "clauses": [f"clause text {n}" for n in range(1, 7)]})
+    monkeypatch.setattr(RV, "confirm_policy", lambda: RV.CONFIRM_OFF)
+    ok, _detail, _data = _ReviewGate(tmp_path).rung_review()
+    ev = events[-1]
+    assert ok is False and len(ev["findings"]) == 2000, len(ev["findings"])
+    entries = ev["blocking_entries"]
+    assert len(entries) == 6 and all(set(e) == {"text", "kind"} for e in entries), entries
+    assert sum(len(e["text"]) for e in entries) > 2000, "the list was capped with the text"
+    assert [e["kind"] for e in entries] == ["clause"] * 6
+    # The capped text re-splits to fewer whole entries than the decision made;
+    # the list does not, and each stored entry re-splits to itself.
+    assert len(RV.blocking_entries_from_text(ev["findings"])) < 6 or \
+        RV.blocking_entries_from_text(ev["findings"])[-1]["text"] != entries[-1]["text"]
+    for e in entries:
+        assert RV.blocking_entries_from_text(e["text"]) == [e]
+
+
 def test_a_refusal_the_code_computed_is_not_put_to_the_reader(tmp_path, monkeypatch):
     """Clause 1's exemption at the rung: a fact about the tree gets no vote.
 
