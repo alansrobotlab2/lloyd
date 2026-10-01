@@ -26,7 +26,8 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from app.paths import PIPELINE_DIR, VAULT_FACTS_ROOT as FACTS_DIR, VAULT_KG_DB
-from app.kg_store import EDGE_TYPES, StoreUnavailable, store as _kg_store
+from app.kg_store import (EDGE_TYPES, StoreUnavailable, canonical_edge_type,
+                          store as _kg_store)
 from scripts.reflection_archive import copy_gaps as _copy_gaps, reports_in as _reports_in
 
 DEFAULT_OUTPUT_DIR = PIPELINE_DIR / "reflection"
@@ -60,16 +61,22 @@ AGE_BAND_BOUNDS_DAYS = (90, 180, 365, 730, 3650)
 # Edge-type cardinality (#546): a type used fewer than this many times is a
 # one-off, and one type holding this share of active edges is a catch-all
 # absorbing relations that should have been typed.
-#: What makes an under-floor type a defect (#1820) is its name not being in
+#: What makes a type a defect (#1820, #1931) is its name not being in
 #: `app.kg_store.EDGE_TYPES`, imported here so the report and the writer cannot
-#: disagree about what a real relation is. Two writers can persist a name that
-#: `_Edges.add` only spell-checks — `conversation_relations.py:1119` (the Stage-2
-#: classifier's proposed type) and `kg_rebuild.py:597` (a migration payload) — because
-#: the vocabulary refusal lives in `_fact_relate` alone (`agent_mcp/facts.py:1025`), and
-#: nothing else catches it. A name that IS in the set is a legitimate rare use, and is
-#: named on the line without failing it: the 2026-09-29 store measured 38,069 active
-#: edges across 12 types with nothing outside `EDGE_TYPES`, so a count-based floor was
-#: firing on approved types alone.
+#: disagree about what a real relation is — judged on `canonical_edge_type(t)`,
+#: because this report's histogram counts the RAW row type and a pre-#1161
+#: `related-to` is an approved type's old spelling, not a defect. Two writers can
+#: persist a name that `_Edges.add` only spell-checks — `conversation_relations.py:1119`
+#: (the Stage-2 classifier's proposed type) and `kg_rebuild.py:597` (a migration
+#: payload) — because the vocabulary refusal lives in `_fact_relate` alone
+#: (`agent_mcp/facts.py:1025`), and nothing else catches it. Since #1931 the count
+#: gates nothing about that verdict (an off-vocabulary name FAILs at any count;
+#: measured 2026-09-30, `ships` at exactly 5 uses printed PASS until then) — this
+#: floor only chooses WHICH failing condition names it. A name that IS in the set
+#: is a legitimate rare use, and is named on the line without failing it: the
+#: 2026-09-30 store measured 38,551 active edges across 13 types with nothing
+#: outside `EDGE_TYPES` (witness: vault `backlog/data/kg-health-2026-09-30T222931Z.json`),
+#: so a count-based floor was firing on approved types alone.
 EDGE_TYPE_MIN_USES = 5
 #: The ceiling on one type's share of active edges. It was 0.5 until #1658, and 0.5
 #: is not a bound that anything can act on: `mentions` sat at 69-92% for every night
@@ -1059,42 +1066,61 @@ def edge_type_cardinality(type_dist: dict[str, int], *,
     graph's shape rather than about the store being broken. The two conditions are
     attributed separately on the FAIL line so a reader sees which one drifted.
 
-    Two conditions, each stated as a fact about the graph that can be checked:
+    Conditions, each stated as a fact about the graph that can be checked:
 
-    * The 5-use floor fails on VOCABULARY (#1820). Under it, a type outside
-      `EDGE_TYPES` FAILs the line at any count and any age, named with its count; a
-      type inside `EDGE_TYPES` is named on the line and never contributes to the
-      verdict. Age decided this split until today and could not: `fact_relate` refuses
-      a type outside the vocabulary, so a canonical singleton is by construction a
-      legitimate first use, while the off-vocabulary name a Stage-2 classifier or a
-      rebuild payload can persist is the defect the floor exists to catch. Measured on
-      2026-09-29: all 38,069 active edges carry canonical types, so the only two types
-      the floor was failing — `conflicts_with (1)`, `describes (1)` — were approved
-      types, and the grace that exempted them expired on 2026-10-10, at which point the
-      line fails again on those same two singletons.
+    * VOCABULARY decides the verdict on types (#1820, #1931): a name outside
+      `EDGE_TYPES` FAILs the line AT ANY COUNT, named with its count. The floor
+      chooses only WHICH failing condition names it — under it, #1820's
+      `types below the {EDGE_TYPE_MIN_USES}-use floor (…)` (wording byte-identical
+      from #1544 on); at or above it, #1931's `types outside the edge-type
+      vocabulary (…)`. Before #1931 the count was tested first, so a junk name an
+      above-floor count of uses — the shape of a classifier that mints one
+      repeatedly — printed PASS (measured 2026-09-30: `ships` at exactly 5 uses);
+      the store's own refusal (`agent_mcp/facts.py:1025`) covers `fact_relate`
+      only, and the writers that can persist such a name
+      (`conversation_relations.py:1119`, `kg_rebuild.py:597`) do not consult it.
+    * Membership is judged on `canonical_edge_type(t)`, the store's spelling fold
+      matching the one `kg_health.py` applies to its snapshot: this report's
+      histogram counts the RAW row type, so without the fold a pre-#1161
+      `related-to` — an approved relation's old spelling — would FAIL as
+      off-vocabulary, and the check would fire on spelling instead of on names.
+    * A name inside `EDGE_TYPES` never contributes to the verdict — `fact_relate`
+      refuses anything else, so a canonical singleton is by construction a
+      legitimate first use — and every type under the floor, canonical or not, is
+      named in the `types under {EDGE_TYPE_MIN_USES} uses:` column as ever.
     * The share condition is a TREND, not a level: FAIL when the leader exceeds
       `EDGE_TYPE_MAX_SHARE` or when it is higher than the previous night's
       day-aligned share. A constant FAIL teaches nothing; a level that is falling
       while the line says FAIL nightly trains the reader to skip the section.
-      #1820 changed none of this half.
+      Neither #1820 nor #1931 changed this half.
 
-    The floor is a floor and not a vocabulary check: an off-vocabulary type AT or above
-    5 uses is not named by this line, and neither is a canonical one. `tests/
+    Measured 2026-09-30 over the witness committed as vault
+    `backlog/data/kg-health-2026-09-30T222931Z.json`: all 38,551 active edges
+    carry names inside `EDGE_TYPES` across 13 types, and the only under-floor
+    types are the approved `conflicts_with (1)`, `derived_from (3)` and
+    `describes (1)` — the pure vocabulary test moves no live line. `tests/
     test_edge_type_vocabulary.py` asserts the DECLARED vocabularies agree with
-    `EDGE_TYPES`; nothing asserts the stored rows do, and that gap is owed a ruling
-    (#1820). `EDGE_TYPE_MAX_SHARE` still catches a runaway catch-all at 0.8 on its own,
-    a rise still FAILs, and the measured dominant type, share and active-edge total are
-    printed on every PASS, so the bound quoted in the text is the one that can fail the
-    line.
+    `EDGE_TYPES`, and this line is where the STORED rows are checked against it.
+    `EDGE_TYPE_MAX_SHARE` still catches a runaway catch-all at 0.8 on its own, a
+    rise still FAILs, and the measured dominant type, share and active-edge total
+    are printed on every PASS, so the bound quoted in the text is the one that can
+    fail the line.
     """
     total = sum(type_dist.values())
     if not total:
         return "Edge-type cardinality: PASS — no active edges"
 
     # Canonical types are sorted with the rest and named on the line; only a name
-    # outside the vocabulary may contribute to the verdict.
+    # outside the vocabulary may contribute to the verdict (#1820), and since #1931
+    # at ANY count — the floor no longer gates the vocabulary condition, it only
+    # chooses which failing condition names an off-vocabulary type. The fold is the
+    # store's own (`canonical_edge_type`, as `kg_health.py` does before counting),
+    # because this histogram holds raw row spellings: membership is a question about
+    # the relation, not about the hyphens.
     under = sorted(t for t, n in type_dist.items() if n < EDGE_TYPE_MIN_USES)
-    below = [t for t in under if t not in EDGE_TYPES]
+    off_vocab = [t for t in type_dist if canonical_edge_type(t) not in EDGE_TYPES]
+    below = sorted(t for t in off_vocab if type_dist[t] < EDGE_TYPE_MIN_USES)
+    at_or_above = sorted(t for t in off_vocab if type_dist[t] >= EDGE_TYPE_MIN_USES)
 
     rare = ", ".join(f"{t} ({type_dist[t]})" for t in under) or "none"
     dominant, top = max(type_dist.items(), key=lambda kv: kv[1])
@@ -1104,6 +1130,9 @@ def edge_type_cardinality(type_dist: dict[str, int], *,
     if below:
         failing.append(f"types below the {EDGE_TYPE_MIN_USES}-use floor "
                        f"({', '.join(f'{t} ({type_dist[t]})' for t in below)})")
+    if at_or_above:
+        failing.append("types outside the edge-type vocabulary "
+                       f"({', '.join(f'{t} ({type_dist[t]})' for t in at_or_above)})")
 
     # The trend bound needs `previous`; without it only the level can fail, and the
     # line says the comparison was not available rather than implying it passed.

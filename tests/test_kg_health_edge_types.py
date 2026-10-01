@@ -302,9 +302,11 @@ def test_both_conditions_are_attributed_together_and_a_clean_vocabulary_names_no
 # #1658 answered the first half with a 14-night grace, which only deferred it: those
 # two singletons do not grow, so the line would re-catch them as the window closed on
 # 2026-10-10. #1820 replaced the age split with the distinction the grace could not
-# draw — an under-floor type OUTSIDE `app.kg_store.EDGE_TYPES` fails at any count and
-# any age, a canonical one is named and never fails — and the ceiling-and-trend half
-# of #1658 is untouched, still pinned below: the ceiling catches a runaway leader on
+# draw — an under-floor type OUTSIDE `app.kg_store.EDGE_TYPES` fails at any age, a
+# canonical one is named and never fails — and #1931 then dropped the count gate from
+# that check entirely, so an outside-vocabulary name fails at any COUNT too and the
+# floor only chooses which failing condition names it (pinned at the end of this file).
+# The ceiling-and-trend half of #1658 is untouched, still pinned below: the ceiling catches a runaway leader on
 # its own with no history to compare against, a rising share still fails, and a PASS
 # still prints the measured share so "it passed" is never mistaken for "it stopped
 # measuring".
@@ -532,3 +534,163 @@ def test_the_quoted_bound_is_the_one_that_can_fail_the_line_and_the_floor_lists_
     assert "conflicts_with (1)" in under_floor_part, line
     assert "related_to" not in under_floor_part and "mentions" not in under_floor_part, \
         under_floor_part
+
+
+# ── #1931: the floor is a pure vocabulary test — off-vocabulary fails at ANY count ──
+#
+# #1820 moved the under-floor decision from age to vocabulary but left the count
+# gating it: `under = … if n < EDGE_TYPE_MIN_USES`, vocabulary only tested inside
+# that. Measured on HEAD f952852f (2026-09-30): `{mentions 40, uses 35,
+# related_to 25, ships 5}` printed PASS naming nothing, and `ships: 500` failed
+# only on the share ceiling — so a classifier that minted a junk name repeatedly
+# read as clean, while one use of the same name failed. #1931 drops the count gate
+# from the vocabulary condition; the floor now only chooses WHICH failing
+# condition names an outside-vocabulary type. Membership is judged on
+# `canonical_edge_type(t)` because the report's histogram counts the raw row type
+# while `kg_health.py` folds before counting — without the same fold here the
+# vocabulary test would fire on a pre-#1161 spelling instead of on a name.
+# The share half of the line is untouched by this section.
+
+def test_an_off_vocabulary_type_at_or_above_the_floor_fails_and_names_its_count():
+    """#1931 clause 1: the hole #1820 left open, closed at both boundaries.
+
+    `ships` at EXACTLY 5 uses (5 is the floor: `n < 5` is under it, 5 itself is
+    not) and at 500 uses must both FAIL and name the count. The leader stays
+    under the 80% ceiling in both fixtures — 40/105 = 38.1% and 500/1,500 of
+    1,500 total is 33.3%, and no previous night is given — so the new
+    `types outside the edge-type vocabulary` condition is the only thing that can
+    fail these lines. `types under 5 uses:` reads `none` at exactly 5 uses: this
+    is precisely the name the old code never put under the floor.
+    """
+    assert "ships" not in kg_store.EDGE_TYPES, "the fixture stopped being off-vocabulary"
+
+    at_floor = khr.edge_type_cardinality(
+        {"mentions": 40, "uses": 35, "related_to": 25, "ships": 5})
+    assert at_floor.startswith("Edge-type cardinality: FAIL — "), at_floor
+    assert "ships (5)" in at_floor, at_floor
+    assert "conditions failing: types outside the edge-type vocabulary " \
+           "(ships (5))" in at_floor, at_floor
+    assert "types under 5 uses: none" in at_floor, at_floor
+
+    above = khr.edge_type_cardinality(
+        {"mentions": 400, "uses": 350, "related_to": 250, "ships": 500})
+    assert above.startswith("Edge-type cardinality: FAIL — "), above
+    assert "ships (500)" in above, above
+    assert "conditions failing: types outside the edge-type vocabulary " \
+           "(ships (500))" in above, above
+    assert "dominant type share" not in _failing_segment(above), \
+        f"33.3% is under the ceiling: {_failing_segment(above)}"
+
+
+def test_a_pre_canonical_spelling_of_an_approved_type_is_never_read_as_off_vocabulary():
+    """#1931 clause 2: the fold must ship with the vocabulary test, not after it.
+
+    The report's histogram counts the RAW row type (`compute_relationship_stats`
+    counts `edge.get("type", "unknown")`), while `kg_health.py` folds every
+    snapshot through `canonical_edge_type` before counting. Change 1 alone would
+    therefore have turned every pre-#1161 spelling of an approved relation into a
+    nightly FAIL: `related-to` is not a member of `EDGE_TYPES` under its raw
+    spelling — what makes it approved is that `canonical_edge_type("related-to")`
+    is. Membership is now judged through the same fold the snapshot uses.
+
+    Three legs, because the fold must hold on each verdict path: `related-to` at
+    40 uses PASSes (it fails neither half); `conflicts-with` at 1 is the
+    canonicalising fold of an approved type, so it is NAMED in `types under 5
+    uses:` and fails nothing — the same report-not-fail #1820 ruled for canonical
+    singletons; and the fold must not launder real junk: `ships-with` folds to
+    `ships_with`, still outside `EDGE_TYPES`, and FAILs at one use inside the
+    floor condition, exactly like its canonical twin.
+    """
+    assert kg_store.canonical_edge_type("related-to") == "related_to"
+    assert "related-to" not in kg_store.EDGE_TYPES, "raw fixture name joined the vocabulary"
+    assert "ships_with" not in kg_store.EDGE_TYPES, "folded junk name joined the vocabulary"
+
+    passed = khr.edge_type_cardinality({"mentions": 40, "uses": 35, "related-to": 40})
+    assert passed.startswith("Edge-type cardinality: PASS — "), passed
+    assert "conditions failing: none" in passed, passed
+
+    named = khr.edge_type_cardinality(
+        {"mentions": 40, "uses": 35, "related_to": 25, "conflicts-with": 1})
+    assert named.startswith("Edge-type cardinality: PASS — "), named
+    assert "conflicts-with (1)" in named.split("conditions failing", 1)[0], named
+    assert "conditions failing: none" in named, named
+
+    junk = khr.edge_type_cardinality(
+        {"mentions": 40, "uses": 35, "related_to": 25, "ships-with": 1})
+    assert junk.startswith("Edge-type cardinality: FAIL — "), junk
+    assert "ships-with (1)" in _failing_segment(junk), junk
+
+    # The seam the fold actually serves: the nightly line is not handed a curated
+    # dict but the histogram `compute_relationship_stats` builds from raw store
+    # rows (`edge.get("type", "unknown")`, no fold). These rows carry the hyphen
+    # the pre-#1161 store wrote, so the dist reaching the gate holds the RAW key —
+    # this is the call that would FAIL nightly on spelling alone without the fold.
+    young = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)
+    rows = ([{"source": f"S{i}", "target": f"T{i}", "type": "mentions",
+              "created_at": young.isoformat()} for i in range(40)]
+            + [{"source": f"U{i}", "target": f"V{i}", "type": "uses",
+                "created_at": young.isoformat()} for i in range(35)]
+            + [{"source": f"R{i}", "target": f"W{i}", "type": "related-to",
+                "created_at": young.isoformat()} for i in range(40)])
+    raw_dist = khr.compute_relationship_stats(rows, {})["type_distribution"]
+    assert raw_dist == {"mentions": 40, "uses": 35, "related-to": 40}, raw_dist
+    from_store = khr.edge_type_cardinality(raw_dist)
+    assert from_store.startswith("Edge-type cardinality: PASS — "), from_store
+    assert "conditions failing: none" in from_store, from_store
+
+
+def test_a_canonical_distribution_still_passes_and_still_names_its_singleton():
+    """#1931 clause 3: the live shape must not move.
+
+    The 2026-09-30 witness (`backlog/data/kg-health-2026-09-30T222931Z.json`:
+    38,551 active edges, 13 types, zero names outside the vocabulary, all three
+    under-floor types approved) reduced to a testable size. Dropping the count
+    gate from the vocabulary condition must keep this distribution PASSing, keep
+    naming `conflicts_with (1)` in the `types under 5 uses:` column, and keep
+    `conditions failing: none`: reporting approved singletons without failing
+    them is #1820's ruling, and the line still holds it because the FAIL side
+    keys on vocabulary, not on count.
+    """
+    line = khr.edge_type_cardinality({"mentions": 40, "uses": 35, "related_to": 25,
+                                      "conflicts_with": 1})
+    assert line.startswith("Edge-type cardinality: PASS — "), line
+    under_floor_part = line.split("types under 5 uses", 1)[1].split(";")[0]
+    assert "conflicts_with (1)" in under_floor_part, line
+    assert "conditions failing: none" in line, line
+
+
+def test_the_under_floor_off_vocabulary_failing_text_is_unchanged_by_the_new_condition():
+    """#1931 clause 4: the two historical failing-condition strings, byte-for-byte.
+
+    #1544 pinned the attribution wording and #1820 pinned its off-vocabulary
+    subject; #1931 may add a condition but may not retitle an existing one.
+    `ships (1)` inside `types below the 5-use floor (…)` is the string
+    `test_an_under_floor_type_is_named_as_its_own_condition` and the nightly
+    reader quote, and `informs (1), ships (1)` is the string
+    `tests/test_knowledge_health_stale_facts.py`'s drifted-store fixture quotes;
+    both are re-asserted here against the real function, alongside those untouched
+    nodes. An off-vocabulary type UNDER the floor stays on the floor condition
+    alone — the new condition names only the at-or-above-floor types the old code
+    silently passed. The mixed fixture pins the coexistence: `informs (1)` under
+    the floor and `ships (10)` above it fail together, floor condition first, and
+    the leader at 60/106 = 56.6% with no previous night fails neither share half.
+    """
+    one = khr.edge_type_cardinality({"mentions": 40, "uses": 35, "related_to": 25,
+                                     "ships": 1})
+    assert "conditions failing: types below the 5-use floor (ships (1))" in one, one
+
+    both_off = khr.edge_type_cardinality(
+        {"mentions": 60, "uses": 35, "depends_on": 3, "informs": 1, "ships": 1})
+    assert ("conditions failing: types below the 5-use floor "
+            "(informs (1), ships (1))") in both_off, both_off
+    assert "depends_on" not in _failing_segment(both_off), both_off
+    assert "edge-type vocabulary" not in _failing_segment(both_off), \
+        f"an under-floor off-vocab type belongs to the floor condition alone: {_failing_segment(both_off)}"
+
+    mixed = khr.edge_type_cardinality(
+        {"mentions": 60, "uses": 35, "informs": 1, "ships": 10})
+    assert mixed.startswith("Edge-type cardinality: FAIL — "), mixed
+    failing_mixed = _failing_segment(mixed)
+    assert failing_mixed.startswith("types below the 5-use floor (informs (1))"), mixed
+    assert "types outside the edge-type vocabulary (ships (10))" in failing_mixed, mixed
+    assert "dominant type share" not in failing_mixed, mixed
