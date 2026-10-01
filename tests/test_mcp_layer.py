@@ -895,6 +895,54 @@ def test_run_task_materialises_the_declared_grant_before_arming_the_hook(
         "denied, but not by the scope whose frontmatter is the authority")
 
 
+def test_a_second_run_task_does_not_resurrect_a_revoked_grant(tmp_path,
+                                                             monkeypatch):
+    """#1949, at the seam that actually revives it: the next dispatch of the
+    task whose own file declares the grant.
+
+    The unit-level cases in `tests/unit/test_grant_policy.py` call
+    `sync_task_grants` directly. The revival this one pins needs the dispatcher,
+    because that is what calls the sync on every run (`app/autonomy.py:4107`
+    inside `run_task`) with the file's unchanged `grants:` block and
+    `default_store()`. So the node runs the real `run_task`, revokes the row it
+    left, and runs it again — the scheduler's re-fire, a manual
+    `autonomy_run_task`, or simply the first run after a service restart, all of
+    which are this same call.
+
+    Before the fix the second dispatch wrote a second row on the file's own
+    2099 expiry and the armed hook let the call through again, so a human's
+    `grant_revoke` held until the next run and no longer.
+    """
+    import asyncio
+
+    from app import autonomy as AUT
+
+    captured, store = _grant_dispatch_env(monkeypatch, tmp_path, _GRANT_BLOCK)
+    assert asyncio.run(AUT.run_task(40)).get("success") is True
+    rows = store.live(scope="autonomy-task:40")
+    assert [r["tool_pattern"] for r in rows] == ["autonomy_write_task"], rows
+    assert store.revoke(rows[0]["id"]) is True
+    assert store.live(scope="autonomy-task:40") == []
+
+    assert asyncio.run(AUT.run_task(40)).get("success") is True
+
+    still = store.candidates(scope="autonomy-task:40",
+                             tool="autonomy_write_task")
+    assert len(still) == 1, (
+        "the second dispatch re-materialised the withdrawn authority from the "
+        f"task's own file; rows now: {[(r['id'], r['expires_at'], r['revoked_at']) for r in still]}")
+    assert still[0]["id"] == rows[0]["id"] and still[0]["revoked_at"], still
+
+    hooks = captured["hooks"]
+    denied = asyncio.run(hooks.fire_pre_tool_use(
+        session_id="s", tool_name="mcp__lloyd-mcp__autonomy_write_task",
+        tool_input={"id": 68, "status": "up_next"}, tool_use_id="t2"))
+    out = denied.get("hookSpecificOutput", {})
+    assert out.get("permissionDecision") == "deny", (
+        f"the task ran with the authority it lost: {denied}")
+    assert "revoked" in out.get("permissionDecisionReason", ""), out
+
+
 def test_run_task_refuses_to_dispatch_a_task_whose_grants_block_is_malformed(
         tmp_path, monkeypatch):
     """The fail-closed half, and it needs its own node because `run_task` has two

@@ -23,6 +23,7 @@ Run:
 from __future__ import annotations
 
 import datetime as dt
+import json
 import sqlite3
 import sys
 import tempfile
@@ -525,6 +526,272 @@ def test_materialize_is_idempotent_and_never_renews(aut, store):
     assert second[0]["expires_at"] == first[0]["expires_at"]
 
 
+# ── #1949: a revocation must outlive the next dispatch of the task that declared it
+#
+# `run_task` calls `sync_task_grants` on every run (app/autonomy.py:4107), and the
+# task file is an ordinary agent-writable markdown file. So the question these four
+# cases settle is whether `grant_revoke` is a decision or a delay: if the dedupe
+# that asks "is this pair already covered?" reads only `store.live()` — whose
+# `revoked_at IS NULL` filter hides the withdrawn row — the next scheduler re-fire
+# re-derives the authority from the file that declared it, on the file's own
+# unchanged expiry, and the revocation lasted until then and no longer.
+
+
+def test_a_revoked_unexpired_grant_is_not_re_materialized_by_the_next_run(store):
+    """Clause 1: re-running the declaring task must not resurrect its revoked row.
+
+    Same `(scope, tool, predicate)`, same unchanged `grants:` block, expiry still
+    ahead of `now` — the only thing that changed between the two calls is that a
+    human revoked the row. So the second materialisation returns 0 new grants and
+    `check_grants` still denies, citing that revocation and that grant id.
+    """
+    grants = [{"tool": "email_send", "expires_at": _iso(24), "issued_by": "alan"}]
+    assert policy.sync_task_grants(store, task_id=41, scope="autonomy-task:41",
+                                   grants=grants, now=NOW) == 1
+    gid = store.live(scope="autonomy-task:41", now=NOW)[0]["id"]
+    assert store.revoke(gid, now=NOW) is True
+    assert store.live(scope="autonomy-task:41", now=NOW) == []
+    denied = _check(store, scope="autonomy-task:41")
+    assert denied.allowed is False, denied.reason
+
+    n = policy.sync_task_grants(store, task_id=41, scope="autonomy-task:41",
+                                grants=grants, now=NOW)
+    assert n == 0, (
+        f"the next run re-materialised {n} row(s) over a revocation that had not "
+        "expired; a withdrawn row still covers its (scope, tool, predicate)")
+    after = _check(store, scope="autonomy-task:41")
+    assert after.allowed is False, after.reason
+    assert "revoked" in after.reason and f"#{gid}" in after.reason, after.reason
+
+
+def test_a_later_declared_expiry_still_materializes_after_a_revocation(store):
+    """Clause 2: renewal stays the human editing the file, revocation included.
+
+    The conservative half of the rule: what a revocation forbids is the *same*
+    authority coming back on the *same* terms, so a block whose declared
+    `expires_at` is later than the revoked row's is a fresh act of approval and
+    must go through and allow. The first assertion below is the boundary that
+    makes that meaningful — the unedited block, declaring exactly the expiry the
+    revocation killed, still materialises nothing.
+    """
+    declared = [{"tool": "email_send", "expires_at": _iso(24),
+                 "issued_by": "alan"}]
+    assert policy.sync_task_grants(store, task_id=42, scope="autonomy-task:42",
+                                   grants=declared, now=NOW) == 1
+    gid = store.live(scope="autonomy-task:42", now=NOW)[0]["id"]
+    assert store.revoke(gid, now=NOW) is True
+    assert policy.sync_task_grants(store, task_id=42, scope="autonomy-task:42",
+                                   grants=declared, now=NOW) == 0
+
+    edited = [{"tool": "email_send", "expires_at": _iso(48), "issued_by": "alan"}]
+    n = policy.sync_task_grants(store, task_id=42, scope="autonomy-task:42",
+                                grants=edited, now=NOW)
+    assert n == 1, (
+        "a human extending `expires_at` past the revoked row's is re-approving "
+        "the grant, so the materialisation must go through")
+    fresh = store.live(scope="autonomy-task:42", now=NOW)
+    assert len(fresh) == 1 and fresh[0]["id"] != gid, fresh
+    assert fresh[0]["expires_at"] == _iso(48), fresh
+    allowed = _check(store, scope="autonomy-task:42")
+    assert allowed.allowed is True, allowed.reason
+
+
+def test_an_expired_unrevoked_grant_does_not_block_materialization(store):
+    """Clause 3: expiry and revocation stay distinguishable in both directions.
+
+    A row that simply ran out is no one's decision, so unlike a revoked row it
+    must NOT suppress the re-mint — otherwise this fix would trade a resurrection
+    bug for a nightly that can never be re-armed without deleting a row. The
+    first materialisation runs at `NOW - 3h` on an expiry that lands at
+    `NOW - 2h`, so by `NOW` the row is expired with `revoked_at` never set; the
+    fresh block declaring `NOW + 24h` then has to mint and allow.
+    """
+    ran_out_at = (NOW - dt.timedelta(hours=2)).isoformat()
+    stale = [{"tool": "email_send", "expires_at": ran_out_at,
+              "issued_by": "alan"}]
+    assert policy.sync_task_grants(store, task_id=43, scope="autonomy-task:43",
+                                   grants=stale,
+                                   now=NOW - dt.timedelta(hours=3)) == 1
+    dead = store.live(scope="autonomy-task:43",
+                      now=NOW - dt.timedelta(hours=3))[0]
+    assert dead["revoked_at"] is None and dead["expires_at"] == ran_out_at, dead
+    assert store.live(scope="autonomy-task:43", now=NOW) == []
+
+    fresh = [{"tool": "email_send", "expires_at": _iso(24), "issued_by": "alan"}]
+    n = policy.sync_task_grants(store, task_id=43, scope="autonomy-task:43",
+                                grants=fresh, now=NOW)
+    assert n == 1, (
+        "an expired row is not a revocation: it must not block the re-arm")
+    allowed = _check(store, scope="autonomy-task:43")
+    assert allowed.allowed is True, allowed.reason
+
+
+def test_a_declined_rematerialization_warns_naming_the_task_and_grant(store,
+                                                                      caplog):
+    """Clause 4: a task running without its withdrawn authority is said out loud.
+
+    Declining is silent by default, and the silence is the failure mode: the run
+    proceeds, its tool call is denied later (or in a week, or never), and nothing
+    in the log connects a task that is quietly not doing its job to the decision
+    that undid it. One WARNING, naming the task id and the revoked grant id it is
+    honouring, from the `lloyd-harness-policy` logger this module defines at
+    `policy.py:61` — the one its sibling `[grants] task #…` warning already uses
+    on the mint-under-a-standing-shadow path (`policy.py:1410`), so a declined
+    re-mint lands in the same stream an operator already reads for grants rather
+    than a new one nobody subscribed to.
+    """
+    import logging
+
+    grants = [{"tool": "email_send", "expires_at": _iso(24), "issued_by": "alan"}]
+    policy.sync_task_grants(store, task_id=44, scope="autonomy-task:44",
+                            grants=grants, now=NOW)
+    gid = store.live(scope="autonomy-task:44", now=NOW)[0]["id"]
+    assert store.revoke(gid, now=NOW) is True
+    caplog.set_level(logging.WARNING, logger="lloyd-harness-policy")
+    caplog.clear()
+
+    assert policy.sync_task_grants(store, task_id=44, scope="autonomy-task:44",
+                                   grants=grants, now=NOW) == 0
+
+    warns = [r.getMessage() for r in caplog.records
+             if r.name == "lloyd-harness-policy"
+             and r.levelno >= logging.WARNING]
+    assert len(warns) == 1, f"exactly one warning expected, got: {warns}"
+    assert "task #44" in warns[0], warns[0]
+    assert f"#{gid}" in warns[0], warns[0]
+    assert "revoked" in warns[0], warns[0]
+
+
+# ── #1949 claim 1: the two ledgers are one store, on committed bytes ───────
+#
+# The item's literal premise was a restart asymmetry: does `_tool_effects.py`'s
+# dedup key survive a `lloyd-mcp`/`lloyd-backend` restart while
+# `authority_grants`/`grant_dispatch` do not, or vice versa. The answer is that
+# the question has no referent, and the evidence is a table list, not a probe:
+# all six names are tables in ONE sqlite file — `~/lloyd-data/workers.db`,
+# resolved by `workers.queue.configured_db_path()` on both sides
+# (`agent_mcp/_tool_effects.py:158-170`, `policy.default_store()`,
+# config.yaml:1536 `db_path: ${LLOYD_DATA}/workers.db`, no `LLOYD_GRANT_DB` or
+# `LLOYD_EFFECT_LEDGER_DB` in `agent-services/supervisord.conf`). One file means
+# one WAL, so no restart of either service, in either order, can diverge them:
+# a spent `tool_effects` row cannot replay as fresh, and a revoked or consumed
+# grant row cannot come back with `revoked_at NULL` / `consumed 0`.
+#
+# The vault artifact below is what makes that claim re-checkable by a reader who
+# has no live database. `backlog/data/workers.db` is the committed extract
+# #1946 filed for its ROWS; #1949 needs its SCHEMA, so
+# `backlog/data/workers-authority-extract.py` now also copies `queue`, `runs`,
+# `tool_effects` and `watermarks` as the live file's own DDL with zero rows —
+# those four columns hold turn payloads, model output and call results, which
+# have no place in a notes repository, and the claim about them is which tables
+# share one file, not what is inside them.
+
+
+QUOTED_INVENTORY = ["authority_grants", "egress_events", "grant_dispatch",
+                    "queue", "runs", "tool_effects", "watermarks"]
+
+
+def _witness_db():
+    """The committed extract's bytes, or a skip if this machine has no vault.
+
+    Deliberately not a fixture that copies the file elsewhere: the clause says
+    the command must run against the committed extract, and reading it in place,
+    read-only, is exactly that. `mode=ro` so a test run can never write the
+    artifact it is certifying.
+    """
+    path = Path.home() / "obsidian" / "backlog" / "data" / "workers.db"
+    if not path.exists():
+        pytest.skip(f"no vault witness at {path} on this machine")
+    return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+
+
+def _tables(conn) -> list:
+    return sorted(r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' "
+        "AND name <> 'sqlite_sequence' ORDER BY name"))
+
+
+def test_the_committed_witness_bytes_hold_both_ledgers_in_one_file():
+    """One file, seven tables, zero payload rows — read out of committed bytes.
+
+    `sqlite_sequence` is excluded from the inventory throughout: sqlite creates
+    it for its AUTOINCREMENT tables, and bookkeeping is not a store. The
+    `count(*) from sqlite_master` figure #1946's clause names is larger than
+    seven for the same reason plus the autoindexes the copied DDL's UNIQUE and
+    PRIMARY KEY constraints bring with them; both figures are in the marker, and
+    neither is the claim.
+    """
+    conn = _witness_db()
+    try:
+        assert _tables(conn) == QUOTED_INVENTORY, (
+            "the committed extract is not the inventory the item quotes, so a "
+            "reader with only the vault cannot re-derive the one-store claim")
+        for name in QUOTED_INVENTORY:
+            ddl = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                (name,)).fetchone()
+            assert ddl and ddl[0] and ddl[0].strip(), (
+                f"{name} is not a real table in the extract")
+        # The two safety columns the item's probe was written to chase.
+        effects = {d[1] for d in conn.execute("PRAGMA table_info(tool_effects)")}
+        grants = {d[1] for d in conn.execute("PRAGMA table_info(authority_grants)")}
+        assert "effect_key" in effects and "status" in effects, effects
+        assert {"revoked_at", "consumed", "expires_at"} <= grants, grants
+        # Zero payload rows, with a positive control so the count cannot be
+        # vacuous: a check whose denominator can be zero is not a check.
+        for name in ("queue", "runs", "tool_effects", "watermarks"):
+            assert conn.execute(f"SELECT count(*) FROM {name}").fetchone()[0] == 0, (
+                f"{name} was committed with rows, which are prompt text in a "
+                "notes repository")
+        for name in ("authority_grants", "grant_dispatch", "egress_events"):
+            assert conn.execute(f"SELECT count(*) FROM {name}").fetchone()[0] > 0, (
+                f"{name} is empty, so the zero counts above prove nothing")
+    finally:
+        conn.close()
+
+
+def test_the_witness_marker_reports_the_inventory_its_bytes_hold():
+    """The marker cannot drift from the bytes it describes."""
+    marker_path = (Path.home() / "obsidian" / "backlog" / "data"
+                   / "workers-authority.witness.md")
+    if not marker_path.exists():
+        pytest.skip(f"no marker at {marker_path} on this machine")
+    conn = _witness_db()
+    try:
+        tables, objects = _tables(conn), conn.execute(
+            "SELECT count(*) FROM sqlite_master").fetchone()[0]
+    finally:
+        conn.close()
+    text = marker_path.read_text(encoding="utf-8")
+    block = text.split("```json")[1].split("```")[0]
+    marker = json.loads(block)
+    assert marker["table_inventory"] == tables, (
+        "the marker names a different inventory than the bytes hold")
+    assert marker["sqlite_master_entries"] == objects, (
+        "the marker's object count is not what `select count(*) from "
+        f"sqlite_master` answers over these bytes ({objects})")
+    assert sum(marker["sqlite_master_by_type"].values()) == objects, (
+        "the per-type breakdown does not account for every object")
+    assert marker["rows_not_copied"] == {k: 0 for k in
+                                         ("queue", "runs", "tool_effects",
+                                          "watermarks")}, marker["rows_not_copied"]
+
+
+# A third node belonged here — the same inventory read from the running queue's
+# own `~/lloyd-data/workers.db`, which is where "one file, so no restart can
+# diverge them" is actually about. It was written, and the promotion gate settled
+# it: the gate runs the suite under a round home (SM_20261001_060931, `home/`
+# beside the worktree) so `Path.home() / "lloyd-data" / "workers.db"` resolves to
+# the sandbox's own store, which holds six of the seven names but no
+# `egress_events`, and the node failed with `no longer holds
+# ['egress_events']`. A unit test that reaches the real user home is the wrong
+# shape here: that home swap exists precisely so a fixture cannot read, or
+# delete, the running system — and it is why the two nodes above read the VAULT,
+# which the round home symlinks (`home/obsidian` → the real vault, so the gate
+# ran them against the landed bytes rather than skipping them). The live
+# inventory was measured once, by hand, and is recorded on the item; what stays
+# pinned is the committed extract's copy of it — the same seven objects, the live
+# file's own DDL, and no dependency on a machine.
 # ── Prompt-independence (the acceptance's framing) ─────────────────────────
 
 

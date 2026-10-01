@@ -1339,6 +1339,18 @@ def sync_task_grants(store: GrantStore, *, task_id: Any, scope: str,
     (scope, tool, predicate) is left exactly as it is, so a task that runs
     every night cannot extend its own expiry by running. Renewal is the human
     editing the file, which is the visible act the design asks for.
+
+    "Already covering" cannot mean `store.live()`, whose `revoked_at IS NULL`
+    filter hides a withdrawn row: the next dispatch would then re-derive the
+    authority from the task file that declared it, on that file's own unchanged
+    expiry, and a human's `grant_revoke` would hold only until the next re-fire
+    (#1949). So the dedupe reads every row for the pair that is still inside its
+    expiry — revocation included — and a revoked one of those suppresses the
+    re-mint unless the file now declares a strictly later `expires_at`, which is
+    a fresh, visible act of approval and the only way back. A row past its
+    expiry covers nothing, revoked or not: that is what keeps expiry and
+    revocation distinguishable in both directions, and what leaves a nightly
+    re-armable without deleting a row.
     """
     specs, errors = validate_task_grants(grants)
     if errors:
@@ -1353,10 +1365,33 @@ def sync_task_grants(store: GrantStore, *, task_id: Any, scope: str,
                 "at %s; not materialized — the task runs without it",
                 task_id, spec["tool"], _iso(at))
             continue
-        existing = [r for r in store.live(scope=scope, now=at)
-                    if r["tool_pattern"] == spec["tool"]
-                    and (r["arg_predicate"] or "") == spec["predicate"]]
-        if existing:
+        # Rows for this pair that are still inside their expiry, revocation
+        # included — `candidates()` rather than `live()`, because the whole
+        # point of #1949 is that the withdrawn row is the one `live()` cannot
+        # see. Lexicographic expiry compares are the store's own convention:
+        # every expiry is written through `_iso`, so UTC isoformat sorts as
+        # written, which is exactly what `live()`'s `expires_at > ?` relies on.
+        at_iso = _iso(at)
+        unexpired = [
+            r for r in store.candidates(scope=scope, tool=spec["tool"], now=at)
+            if (r["arg_predicate"] or "") == spec["predicate"]
+            and str(r["expires_at"]) > at_iso]
+        if any(not r["revoked_at"] for r in unexpired):
+            continue
+        withdrawn = [r for r in unexpired if r["revoked_at"]]
+        blocking = max(withdrawn, key=lambda r: str(r["expires_at"]),
+                       default=None)
+        if blocking is not None and str(blocking["expires_at"]) >= _iso(expiry):
+            logger.warning(
+                "[grants] task #%s declares a grant for '%s' that is not "
+                "materialized: grant #%s for scope '%s' was revoked at %s and "
+                "runs to %s, at or after the declared %s — a revocation is not "
+                "renewed by re-running the task, so the task runs without it. "
+                "Restore it by editing the file's expires_at past %s or by an "
+                "explicit grant_create.",
+                task_id, spec["tool"], blocking["id"], scope,
+                blocking["revoked_at"], blocking["expires_at"], _iso(expiry),
+                blocking["expires_at"])
             continue
         row = store.mint(scope=scope, tool_pattern=spec["tool"],
                          arg_predicate=spec["predicate"], quota=spec["quota"],
