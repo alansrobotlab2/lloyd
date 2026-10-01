@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Coverage of the loaded-memory rationale ledger (#1488). Read-only.
+"""Coverage of the loaded-memory rationale ledger (#1488), and its retire step (#1996).
+
+`status` is read-only. `retire` is the one writer here, and it writes only the
+ledgers and their archive — never a loaded file.
 
 `lloyd/USER.md` and the `lloyd/MEMORY.md` index are loaded into every prompt
 and sit at a fixed byte ceiling (`prompt_surface`). The proposal in
@@ -10,9 +13,9 @@ condition that would make it false — in a topic file the prompt never loads
 nightly curator can make headroom by retiring the lines whose reason no longer
 holds instead of refusing the next addition.
 
-This script is the deterministic half the curator runs first. It reads, never
-writes — the loaded files are written only through the memory tools and `Edit`,
-which enforce the ceiling — and answers three questions:
+This script is the deterministic half the curator runs first. `status` reads,
+never writes — the loaded files are written only through the memory tools and
+`Edit`, which enforce the ceiling — and answers three questions:
 
 * which loaded lines have no ledger row (backfill owed);
 * which loaded lines have an anchor that NO row can carry (reported apart,
@@ -41,6 +44,31 @@ indistinguishable from the legacy backtick-wrapped row form that
 
     python3 scripts/memory/memory_ledger.py status            # both files
     python3 scripts/memory/memory_ledger.py status --json
+
+**The retire step (#1996): the ledger is bounded by lifecycle, the ceiling is not
+moved.** A ledger is a topic file, so it sits under the 32,768 B topic-file ceiling
+(`TOPIC_FILE_CEILING_BYTES`, `app/memory_ceiling.py`) and its only bound used to
+be `memory_add`'s `topic_size_error` refusal. `retire` moves a row out of the live
+ledger into an archive under `lloyd/reviews/` — outside the topic directory, so
+the archive is not ceiling-checked and `LEDGERS` cannot read it — when, and only
+when, that row's anchor no longer joins any line in the loaded file: the line was
+retired, relocated or rewritten, and the row is an orphan that covers nothing.
+That is the one retirement that needs no judgement. Deciding that a row's
+`retire_when` has happened means running its `check` and is the curator's call
+(step-2a-ter-curation §2-§3), which deletes the row by hand when it retires the
+line; what it leaves behind is what this step sweeps.
+
+    python3 scripts/memory/memory_ledger.py retire            # both ledgers
+    python3 scripts/memory/memory_ledger.py retire --dry-run  # print, move nothing
+
+What `retire` is NOT, and must never become: a way to make room. #1881's rule is
+"never make room" — do not shorten anchors, drop fields, rewrite the ledger
+shorter or open a second live ledger to fit another row — and it stands. `retire`
+takes no size, no target and no "until it fits" flag; it is never called from a
+write path; a row whose line is still loaded is never moved however full the
+ledger is; and a ledger write that would cross the ceiling is still refused while
+archivable rows sit in the file. Do not add such a flag later. `LEDGERS` keeps
+exactly one live file per loaded file.
 """
 from __future__ import annotations
 
@@ -188,13 +216,102 @@ def status(memories_dir: Path) -> dict:
     return report
 
 
+#: Where retired rows go: beside the curator's other archives (§3 of the curation
+#: step), outside `lloyd/memory/` so the topic ceiling does not apply to it and
+#: nothing in `LEDGERS` reads it back.
+ARCHIVE_SUBDIR = "reviews"
+
+
+def archive_path(memories_dir: Path, ledger_name: str) -> Path:
+    return memories_dir / ARCHIVE_SUBDIR / f"{Path(ledger_name).stem}-archive.md"
+
+
+def retire(memories_dir: Path, *, dry_run: bool = False, today: str | None = None) -> dict:
+    """Move orphan rows out of each live ledger into its archive.
+
+    A row is eligible only when its anchor joins no line in the loaded file. A row
+    whose line is still loaded is kept, byte for byte, whatever the ledger's size.
+    Lines of the ledger that are not rows (the heading, blank lines, notes) are
+    never touched. The archive is appended to BEFORE the ledger is rewritten, so a
+    crash between the two leaves a row in both places rather than in neither.
+
+    Returns `{loaded file: {"moved": [anchor…], "kept": n, "archive": path}}`.
+    """
+    from datetime import date
+    stamp = today or date.today().isoformat()
+    report = {}
+    for name, ledger_name in LEDGERS.items():
+        loaded, lpath = memories_dir / name, memories_dir / "memory" / ledger_name
+        if not loaded.exists() or not lpath.exists():
+            # No loaded file means no line can be shown to be gone: retire nothing.
+            report[name] = {"moved": [], "kept": 0, "archive": None,
+                            "skipped": "no loaded file" if not loaded.exists() else "no ledger"}
+            continue
+        live = {anchor_of(e) for e in loaded_entries(loaded.read_text(encoding="utf-8"))}
+        text = lpath.read_text(encoding="utf-8")
+        keep_lines, moved_lines, moved, kept = [], [], [], 0
+        for line in text.splitlines(keepends=True):
+            m = _ROW.match(line.rstrip("\n"))
+            if m is None:
+                keep_lines.append(line)
+                continue
+            anchor = _norm(_anchor_field(m.group("field")))
+            if anchor in live:
+                keep_lines.append(line)
+                kept += 1
+            else:
+                moved_lines.append(line if line.endswith("\n") else line + "\n")
+                moved.append(anchor)
+        apath = archive_path(memories_dir, ledger_name)
+        if moved and not dry_run:
+            apath.parent.mkdir(parents=True, exist_ok=True)
+            head = "" if apath.exists() else (
+                f"# {Path(ledger_name).stem} — retired rows\n\n"
+                f"Rows `scripts/memory/memory_ledger.py retire` moved out of "
+                f"`lloyd/memory/{ledger_name}` because the line they anchored is no "
+                f"longer in `lloyd/{name}`. Verbatim; nothing reads this file back.\n")
+            with apath.open("a", encoding="utf-8") as fh:
+                fh.write(f"{head}\n## Retired {stamp}\n\n" + "".join(moved_lines))
+            tmp = lpath.with_name(lpath.name + ".retire-tmp")
+            tmp.write_text("".join(keep_lines), encoding="utf-8")
+            tmp.replace(lpath)
+        report[name] = {"moved": moved, "kept": kept, "archive": str(apath),
+                        "ledger": str(lpath), "dry_run": dry_run}
+    return report
+
+
+def _print_retire(rep: dict) -> None:
+    for name, r in rep.items():
+        if r.get("skipped"):
+            print(f"{name}: nothing retired ({r['skipped']})")
+            continue
+        verb = "would archive" if r["dry_run"] else "archived"
+        for anchor in r["moved"]:
+            print(f"{name}: {verb} -> {r['archive']}: {anchor}")
+        print(f"{name}: {len(r['moved'])} row(s) {verb}, {r['kept']} kept "
+              f"(line still loaded)")
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
+    default_dir = str(Path.home() / "obsidian" / "lloyd")
     s = sub.add_parser("status")
-    s.add_argument("--memories-dir", default=str(Path.home() / "obsidian" / "lloyd"))
+    s.add_argument("--memories-dir", default=default_dir)
     s.add_argument("--json", action="store_true")
+    r = sub.add_parser("retire", help="archive ledger rows whose line is no longer "
+                                      "loaded; never makes room for a new row")
+    r.add_argument("--memories-dir", default=default_dir)
+    r.add_argument("--dry-run", action="store_true")
+    r.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
+    if args.cmd == "retire":
+        rep = retire(Path(args.memories_dir).expanduser(), dry_run=args.dry_run)
+        if args.json:
+            print(json.dumps(rep, indent=1, ensure_ascii=False))
+        else:
+            _print_retire(rep)
+        return 0
     rep = status(Path(args.memories_dir).expanduser())
     if args.json:
         print(json.dumps(rep, indent=1, ensure_ascii=False))

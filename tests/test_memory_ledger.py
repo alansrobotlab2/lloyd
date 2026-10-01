@@ -347,3 +347,142 @@ def test_curate_stays_off_while_the_index_has_room_to_append(tmp_path):
     assert rep["curate"] is False
     rep2 = ml.status(_memories_with(tmp_path / "w", 20_480 - ml.HEADROOM_BYTES + 1))["MEMORY.md"]
     assert rep2["curate"] is True
+
+
+# ── #1996 — the retire step: bounded by lifecycle, the ceiling unmoved ─────
+#
+# A ledger is a topic file under a 32,768 B ceiling and its only bound was the
+# write refusal. `retire` archives a row whose line is no longer loaded — the one
+# retirement that needs no judgement — into `lloyd/reviews/`, and is never a way
+# to make room (#1881).
+
+GONE = "**A line that was retired** — it is no longer in USER.md at all"
+
+
+def _retire_dir(tmp_path):
+    anchors = [ml.anchor_of(e) for e in ml.loaded_entries(USER)]
+    ledger = ("# topics/user-md-ledger\n\n"
+              + _row(anchors[0]) + _row(GONE[:ml.ANCHOR_CHARS].rstrip())
+              + _row(anchors[1]) + "a note that is not a row\n")
+    return _dir(tmp_path, ledger=ledger), anchors
+
+
+def test_retire_moves_an_orphan_row_into_reviews_and_prints_each_move(tmp_path, capsys):
+    """Clause 1, through the CLI against a temporary memory dir."""
+    d, _ = _retire_dir(tmp_path)
+    ledger = d / "memory" / "user-md-ledger.md"
+    orphan = _row(GONE[:ml.ANCHOR_CHARS].rstrip())
+    assert orphan in ledger.read_text(encoding="utf-8")
+
+    assert ml.main(["retire", "--memories-dir", str(d)]) == 0
+    out = capsys.readouterr().out
+
+    archive = d / "reviews" / "user-md-ledger-archive.md"
+    assert archive.is_file() and archive.parent.name == "reviews"
+    assert orphan in archive.read_text(encoding="utf-8"), "the row is archived verbatim"
+    assert orphan not in ledger.read_text(encoding="utf-8")
+    moves = [ln for ln in out.splitlines() if ": archived -> " in ln]
+    assert len(moves) == 1 and ml._norm(GONE[:ml.ANCHOR_CHARS]) in moves[0], out
+    assert str(archive) in moves[0]
+    assert "USER.md: 1 row(s) archived, 2 kept" in out, out
+    # The archive is outside the topic directory, so nothing reads it as a ledger
+    # and the topic ceiling does not apply to it.
+    assert not list((d / "memory").glob("*archive*"))
+
+
+def test_retire_keeps_a_row_whose_anchor_still_joins_a_loaded_line(tmp_path, capsys):
+    """Clause 2: the live rows' bytes are unchanged, and they are reported kept."""
+    d, anchors = _retire_dir(tmp_path)
+    ledger = d / "memory" / "user-md-ledger.md"
+    before = ledger.read_text(encoding="utf-8")
+
+    rep = ml.retire(d)
+
+    after = ledger.read_text(encoding="utf-8")
+    assert rep["USER.md"]["kept"] == 2 and len(rep["USER.md"]["moved"]) == 1
+    for a in anchors[:2]:
+        assert _row(a) in after
+    assert after == before.replace(_row(GONE[:ml.ANCHOR_CHARS].rstrip()), ""), (
+        "everything but the orphan row is byte-identical, heading and notes included")
+    # A second run finds nothing, moves nothing and does not grow the archive.
+    archive = (d / "reviews" / "user-md-ledger-archive.md").read_bytes()
+    again = ml.retire(d)
+    assert again["USER.md"]["moved"] == [] and again["USER.md"]["kept"] == 2
+    assert ledger.read_text(encoding="utf-8") == after
+    assert (d / "reviews" / "user-md-ledger-archive.md").read_bytes() == archive
+
+
+def test_a_ledger_with_no_orphan_is_left_alone_and_no_archive_appears(tmp_path):
+    anchors = [ml.anchor_of(e) for e in ml.loaded_entries(USER)]
+    d = _dir(tmp_path, ledger="".join(_row(a) for a in anchors))
+    before = {p: p.read_bytes() for p in d.rglob("*") if p.is_file()}
+    rep = ml.retire(d)
+    assert rep["USER.md"]["moved"] == [] and rep["USER.md"]["kept"] == 3
+    assert {p: p.read_bytes() for p in d.rglob("*") if p.is_file()} == before
+    assert not (d / "reviews").exists()
+
+
+def test_a_dry_run_prints_the_move_and_writes_nothing(tmp_path, capsys):
+    d, _ = _retire_dir(tmp_path)
+    before = {p: p.read_bytes() for p in d.rglob("*") if p.is_file()}
+    assert ml.main(["retire", "--memories-dir", str(d), "--dry-run"]) == 0
+    assert "would archive" in capsys.readouterr().out
+    assert {p: p.read_bytes() for p in d.rglob("*") if p.is_file()} == before
+
+
+def test_status_reads_one_live_ledger_and_agrees_before_and_after_a_retire(tmp_path):
+    """Clause 3: `LEDGERS` is unchanged, every non-retired row counts as it did, and
+    the archived row is neither covered nor orphaned afterwards."""
+    assert ml.LEDGERS == {"USER.md": "user-md-ledger.md", "MEMORY.md": "memory-md-ledger.md"}
+    d, anchors = _retire_dir(tmp_path)
+    gone = ml._norm(GONE[:ml.ANCHOR_CHARS])
+
+    before = ml.status(d)["USER.md"]
+    assert before["orphan_rows"] == [gone] and before["rows"] == 3
+    ml.retire(d)
+    after = ml.status(d)["USER.md"]
+
+    assert after["orphan_rows"] == [], "an archived row is not an orphan"
+    assert after["rows"] == 2, "and it is not a row status reads at all"
+    for key in ("without_row", "unrepresentable", "stalest_checked",
+                "duplicate_anchors", "entries", "bytes", "curate", "ledger"):
+        assert after[key] == before[key], key
+    assert gone not in after["stalest_checked"] and gone not in after["without_row"]
+
+
+def test_retire_is_never_a_way_to_make_room(tmp_path, monkeypatch):
+    """Clause 4: a ledger write that would cross the topic ceiling is still refused
+    while archivable rows sit in the file, the ceiling is the number it was, and the
+    step has no flag that could be used to fit a row."""
+    import inspect
+
+    from agent_mcp import session
+    from app import memory_ceiling as ceiling
+
+    assert ceiling.TOPIC_FILE_CEILING_BYTES == 32_768
+
+    d, _ = _retire_dir(tmp_path)
+    monkeypatch.setattr(session, "MEMORIES_ROOT", d)
+    monkeypatch.setattr(ceiling, "MEMORIES_DIR", d)
+    ledger = d / "memory" / "user-md-ledger.md"
+    before = ledger.read_bytes()
+    assert ml.status(d)["USER.md"]["orphan_rows"], "the fixture holds an archivable row"
+
+    res = session._memory_add({"file": "topics/user-md-ledger",
+                               "entry": "- anchor: " + "y" * ceiling.TOPIC_FILE_CEILING_BYTES})
+
+    assert res.get("code") == "INVALID_PARAM" and "topic file ceiling" in res["error"], res
+    assert ledger.read_bytes() == before, "the refused write retired nothing to fit"
+    assert not (d / "reviews").exists(), "and archived nothing"
+
+    # No size, target or until-it-fits parameter exists to be misused later...
+    assert set(inspect.signature(ml.retire).parameters) == {"memories_dir", "dry_run", "today"}
+    # ...no write path calls the step...
+    # (`app/memory_ceiling.py` names `memory_ledger.py status` in a docstring; what
+    # it must not do is import the module or call its retire step.)
+    for rel in ("agent_mcp/session.py", "app/memory_ceiling.py"):
+        src = (ROOT / rel).read_text(encoding="utf-8")
+        assert "import memory_ledger" not in src and "retire(" not in src, rel
+    # ...and the module says why, by name.
+    doc = " ".join((ml.__doc__ or "").split())
+    assert "#1881" in doc and "never make room" in doc
