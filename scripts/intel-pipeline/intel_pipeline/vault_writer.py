@@ -10,7 +10,8 @@ from typing import List, Dict, Any, Optional
 from . import state as scanner_state
 from .models import ScoredItem, GRADE_CALL_CAP, GRADE_KEYWORD
 from .profile import load_profile, get_all_keywords, keyword_match
-from .body import clean_body, ends_a_sentence, strip_link_footer
+from .body import (NO_ITEM_DESCRIPTION, clean_body, ends_a_sentence,
+                   is_interest_profile_prose, strip_link_footer)
 
 
 from ._paths import VAULT_ROOT, KNOWLEDGE_DIR, FEEDS_DIR as SCORED_FEEDS_DIR, VAULT_WRITTEN_STATE
@@ -411,6 +412,10 @@ def _entry_body(item: ScoredItem) -> str:
     no body at all so the entry carries `why` instead. A short feed summary is still a
     summary; a link block is not a summary, and publishing one as knowledge prose is
     what this is here to stop.
+
+    The `why` fallback is for a `why` that describes the item. One that rates it
+    against the reader's interest profile (`body.is_interest_profile_prose`, #2011) is
+    not published: the entry carries `None — <reason>` instead.
     """
     summary = (item.summary or "").strip()
     if summary and (item.source or "").lower() != "github":
@@ -435,6 +440,13 @@ def _entry_body(item: ScoredItem) -> str:
             return body
         return f"None — {reason}" if reason else ""
     why = (getattr(item, "why", "") or "").strip()
+    if why and is_interest_profile_prose(why):
+        # The scorer answered "why does this match my interests" in those words
+        # (#2011). That is a sentence about the rubric, and as a body it is worse than
+        # the footer the strip above just removed. Both routes arrive here: a
+        # description that stripped to nothing, and the empty `summary` stage 1 leaves
+        # on a YouTube row. A `why` that describes the item is published as before.
+        return f"None — {NO_ITEM_DESCRIPTION}"
     if why:
         return why
     return "(No description)"
@@ -487,7 +499,9 @@ def _note_pointer(item: ScoredItem, note: Path, digest_path: Path) -> str:
     except (ValueError, OSError):
         link = display
     why = (getattr(item, "why", "") or "").strip()
-    reason = f" — {why}" if why else ""
+    # The suffix says what the video is about, or it is left off (#2011): a `why` that
+    # rates the item against the interest profile is not a description of it.
+    reason = f" — {why}" if why and not is_interest_profile_prose(why) else ""
     return (f"**Already noted:** [{display}]({link}){reason}\n\n"
             f"The YouTube channel monitor holds the full note for this video; this "
             f"digest indexes it instead of restating it.")

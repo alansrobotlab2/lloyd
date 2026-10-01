@@ -985,6 +985,12 @@ THEAIGRID_WHY = ("The video discusses a major update to ChatGPT, which is direct
                  "relevant to the user's interest in AI and LLMs, though it lacks "
                  "specific focus on robotics, voice, or hardware.")
 
+#: A `why` that says what the video is about and names neither the reader nor a profile:
+#: the kind #1155 ruled is a body. And the named no-body form #2011 gives a `why` that
+#: only rates the item, which is what `THEAIGRID_WHY` above does.
+DESCRIPTIVE_WHY = "OpenAI showed Dots, a ChatGPT interface that keeps several threads live."
+NO_BODY = "None — the feed carried no description of this item"
+
 #: The news paragraph of `youtube:UC5l7RouTQ60oUjLjt1Nh-UQ:L75zF2WKiVE`: 279 characters of
 #: the video's actual subject, from the same stored file. It has to survive uncut.
 MANUS_NEWS = (
@@ -1043,11 +1049,20 @@ def test_a_description_that_is_only_a_channel_greeting_strips_to_nothing_and_ren
         "Whether you want AI tutorials", "breakthroughs.\n\nWhether you want AI tutorials")
     assert body_mod.strip_link_footer(wrapped) == ""
 
+    # A `why` that describes the video is what the entry carries, byte for byte.
     item = _yt(id="youtube:UCbY9xX3_jW5c2fjlZVBI4cg:o3YTzebEs18", relevance=6,
-               summary=THEAIGRID_GREETING, why=THEAIGRID_WHY, title=THEAIGRID_TITLE)
-    assert vw_mod._entry_body(item) == THEAIGRID_WHY
+               summary=THEAIGRID_GREETING, why=DESCRIPTIVE_WHY, title=THEAIGRID_TITLE)
+    assert vw_mod._entry_body(item) == DESCRIPTIVE_WHY
     for ad in ("Welcome to", "Subscribe"):
         assert ad not in vw_mod._entry_body(item), ad
+    # The stored `why` of this row rates it against the interest profile instead
+    # (#2011), so with it the entry names that it has no body. The ad is refused
+    # either way.
+    rated = _yt(id="youtube:UCbY9xX3_jW5c2fjlZVBI4cg:o3YTzebEs18", relevance=6,
+                summary=THEAIGRID_GREETING, why=THEAIGRID_WHY, title=THEAIGRID_TITLE)
+    assert vw_mod._entry_body(rated) == NO_BODY
+    for ad in ("Welcome to", "Subscribe"):
+        assert ad not in vw_mod._entry_body(rated), ad
 
 
 def test_a_greeting_above_real_prose_is_returned_byte_for_byte():
@@ -1137,7 +1152,8 @@ def test_a_set_off_signup_line_is_dropped_and_every_other_line_survives_byte_for
 
 def test_replaying_the_two_stored_rows_writes_neither_ad_to_the_digest(intel_state):
     """Clause 4 (#1900): both stored 2026-09-30 descriptions through the real writer. The
-    greeting row publishes the scorer's `why` and neither greeting phrase; the Manus row
+    greeting row publishes neither greeting phrase (nor, since #2011, its `why`, which
+    rates the video against the interest profile: it carries the named no-body form); the Manus row
     publishes its news paragraph WHOLE — equal to it, not merely containing it — and
     neither the course URL nor its arrow. A replay of `2026-09-30.jsonl` therefore cannot
     reproduce the two sections this item was filed for, which is the only claim here that
@@ -1156,7 +1172,7 @@ def test_replaying_the_two_stored_rows_writes_neither_ad_to_the_digest(intel_sta
     # the assertion fails if either the fixture or the strip drifts.
     news_only = MANUS_STORED_SUMMARY.split("\n\n")[0]
     assert len(news_only) == 279 == len(MANUS_NEWS) and news_only == MANUS_NEWS
-    assert vw_mod._entry_body(greeting_item) == THEAIGRID_WHY
+    assert vw_mod._entry_body(greeting_item) == NO_BODY      # #2011: its `why` is a rating
     assert vw_mod._entry_body(news_item) == news_only
 
     # The OTHER caller of the strip is the scanner, and it crosses a real process
@@ -1176,7 +1192,7 @@ def test_replaying_the_two_stored_rows_writes_neither_ad_to_the_digest(intel_sta
     for ad in ("Welcome to", "Subscribe", "links.outskill.com", "👉"):
         assert ad not in written, ad
     assert MANUS_NEWS in written
-    assert THEAIGRID_WHY in written
+    assert THEAIGRID_WHY not in written and NO_BODY in written
 
 
 def test_the_1269_pin_survives_both_new_rules():
@@ -1543,3 +1559,110 @@ def test_the_docs_no_longer_promise_checkbox_lines_come_back():
     comment = src[src.index("#: The heading half of that class"):src.index("_HEADING_LINE_RE = re.compile")]
     assert "byte-for-byte" not in comment, comment
     assert "no longer published" in comment, comment
+
+
+# ── #2011 — a `why` that rates the item against the interest profile is no body ──
+#
+# Stage 2's `why` answers "why does this match my interests". On 2026-10-01 TheAIGRID's
+# description stripped to nothing and the entry's whole body became `Directly addresses
+# the user's interest in AI/LLMs by covering a major new model release, despite the
+# generic channel description.` — a sentence about the rubric. The same text reaches the
+# digest two more ways: the empty `summary` stage 1 leaves on a YouTube row, and the
+# `— <why>` suffix of an `Already noted:` line.
+
+#: Every interest-profile sentence `knowledge/ai-llms/youtube-digest.md` held on
+#: 2026-10-01, verbatim: bodies and `Already noted:` suffixes both.
+PUBLISHED_PROFILE_SENTENCES = [
+    "Directly addresses advanced AI reasoning techniques, which is core to the user's "
+    "AI/LLM interest.",
+    "The event features key players in LLMs (DeepMind, Hugging Face) and voice AI "
+    "(ElevenLabs), directly matching the user's core interests.",
+    "The video focuses on AI capabilities and NVIDIA hardware, which aligns with the "
+    "user's interests in AI and hardware, though it lacks specific robotics or voice/TTS "
+    "depth.",
+    "Directly addresses AI/LLM advancements, specifically recursive self-improvement, "
+    "which is core to the user's interest in AI-LLMs.",
+    "Directly addresses robotics and AI advancements, aligning perfectly with the user's "
+    "top-weighted interests.",
+    "Directly addresses AI/LLM agent architecture and agentic coding workflows, which are "
+    "core to the user's stated interests.",
+    "Directly addresses AI-LLM agent workflows and software engineering automation, which "
+    "aligns with the ai-llms interest, though it lacks specific relevance to robotics, "
+    "voice, or hardware.",
+    "The item discusses a major update to ChatGPT, which is directly relevant to the "
+    "user's interest in AI and LLMs, though it lacks specific technical depth or "
+    "hardware/robotics connections.",
+    "The item focuses on AI metrics in software engineering workflows, which is "
+    "tangentially related to AI interests but lacks specific relevance to robotics, "
+    "voice, or hardware.",
+    "Directly addresses the user's interest in AI/LLMs by covering a major new model "
+    "release, despite the generic channel description.",
+]
+
+#: The last of those is the 2026-10-01 row's stored `why`.
+ARGON_WHY = PUBLISHED_PROFILE_SENTENCES[-1]
+
+
+@pytest.mark.parametrize("sentence", PUBLISHED_PROFILE_SENTENCES + [THEAIGRID_WHY, MANUS_WHY])
+def test_every_published_interest_profile_sentence_is_classified_as_one(sentence):
+    assert body_mod.is_interest_profile_prose(sentence) is True, sentence
+
+
+@pytest.mark.parametrize("why", [
+    "Scores 8/10: covers the agent-safety keyword set",
+    "Scores 8/10: robotics",
+    DESCRIPTIVE_WHY,
+    "Isaac Lab adds a camera preset per task; the note walks through the config.",
+    "An interesting comparison of two KV cache layouts under load.",
+    "",
+])
+def test_a_why_that_describes_or_merely_scores_is_not_interest_profile_prose(why):
+    assert body_mod.is_interest_profile_prose(why) is False, why
+
+
+def test_an_interest_profile_why_is_never_the_body_by_either_route():
+    """Route one: the recorded 2026-10-01 description, all channel boilerplate, strips
+    to "". Route two: the empty `summary` stage 1 leaves on every YouTube row, which
+    never reaches the strip at all. Both used to publish the `why`."""
+    assert body_mod.strip_link_footer(THEAIGRID_GREETING) == ""
+    stripped_to_nothing = _yt(summary=THEAIGRID_GREETING, why=ARGON_WHY)
+    never_had_one = _yt(summary="", why=ARGON_WHY)
+
+    for item in (stripped_to_nothing, never_had_one):
+        body = vw_mod._entry_body(item)
+        assert body == NO_BODY, body
+        assert body.startswith("None — ")
+        assert "Welcome to" not in body and "Subscribe" not in body
+        assert not body_mod.is_interest_profile_prose(body)
+    # The entry is still written: a named no-body line is a body to `lacks_body`.
+    assert vw_mod.is_trailer_only(NO_BODY) is False
+
+
+def test_a_descriptive_why_is_still_the_body_byte_for_byte():
+    for why in ("Scores 8/10: robotics", DESCRIPTIVE_WHY):
+        assert vw_mod._entry_body(_yt(summary="", why=why)) == why
+        assert vw_mod._entry_body(_yt(summary=THEAIGRID_GREETING, why=why)) == why
+    # And nothing here prefers the ad back: no `why` at all is the old placeholder.
+    assert vw_mod._entry_body(_yt(summary=THEAIGRID_GREETING, why="")) == "(No description)"
+
+
+def test_the_already_noted_line_drops_an_interest_profile_suffix_and_keeps_a_descriptive_one(
+        tmp_path):
+    note = tmp_path / "knowledge" / "youtube" / "Chan" / "20260921-a-video.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("# a video\n", encoding="utf-8")
+    digest = tmp_path / "knowledge" / "ai-llms" / "youtube-digest.md"
+    standing = ("The YouTube channel monitor holds the full note for this video; this "
+                "digest indexes it instead of restating it.")
+
+    rated = vw_mod._note_pointer(_yt(why=PUBLISHED_PROFILE_SENTENCES[0]), note, digest)
+    first, _, rest = rated.partition("\n\n")
+    assert first.startswith("**Already noted:** [") and first.endswith(
+        "](../youtube/Chan/20260921-a-video.md)"), first
+    assert " — " not in first and "the user" not in rated, rated
+    assert rest == standing
+
+    described = vw_mod._note_pointer(_yt(why=DESCRIPTIVE_WHY), note, digest)
+    assert described.partition("\n\n")[0].endswith(
+        f"](../youtube/Chan/20260921-a-video.md) — {DESCRIPTIVE_WHY}"), described
+    assert described.partition("\n\n")[2] == standing

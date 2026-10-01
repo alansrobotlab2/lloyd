@@ -621,6 +621,34 @@ def strip_link_footer(text: str) -> str:
     return "\n".join(lines).rstrip() if run is not None else text.rstrip()
 
 
+#: What marks a scorer's `why` as a rating against the reader's interest profile and
+#: not a description of the item (#2011). Stage 2 is asked "why does this match my
+#: interests" and about one answer in ten says so in those words: `core to the user's
+#: interest in AI-LLMs`, `aligns with the ai-llms interest, though it lacks specific
+#: relevance to robotics`. Published as an entry's body, that tells a reader about the
+#: rubric and nothing about the video. The patterns key on the sentence NAMING the
+#: reader or the profile; a `why` that merely rates (`Scores 8/10: robotics`) or
+#: describes is not matched and is still published as #1155 ruled.
+_INTEREST_PROFILE_RES = (
+    re.compile(r"\bthe user\b", re.IGNORECASE),
+    re.compile(r"\binterest profile\b", re.IGNORECASE),
+    re.compile(r"\b(?:align(?:s|ed|ing)?|match(?:es|ed|ing)?|relevan(?:t|ce)|related|"
+               r"core|central|addresses)\b[^.!?]{0,80}\binterests?\b", re.IGNORECASE),
+    re.compile(r"\binterests\b", re.IGNORECASE),      # `robotics and AI interests`
+    re.compile(r"\btangential(?:ly)?\b", re.IGNORECASE),
+    re.compile(r"\blacks?\b[^.!?]{0,40}\b(?:relevance|focus)\b", re.IGNORECASE),
+)
+
+#: The named no-body reason an entry carries in place of such a `why`.
+NO_ITEM_DESCRIPTION = "the feed carried no description of this item"
+
+
+def is_interest_profile_prose(text: Optional[str]) -> bool:
+    """True when `text` rates an item against the reader's interests instead of
+    describing it. See `_INTEREST_PROFILE_RES`."""
+    return any(p.search(text or "") for p in _INTEREST_PROFILE_RES)
+
+
 def ends_a_sentence(text: str) -> bool:
     """True when at least one line of `text` ends in sentence-final punctuation.
 
