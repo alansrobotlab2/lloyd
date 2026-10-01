@@ -909,11 +909,77 @@ VOICE_LIBRARY_DIR=$PWD/voice_library ~/lloyd/.venvs/qwen3-tts/bin/python \
   -c "from api.routers.openai_compatible import _load_voice_profile as f; print(f('dave_cullen'))"
 ```
 
-Re-sync the patch if you change the vendored code:
+Re-sync the patch if you change the vendored code — from a clone that already
+has the tracked patch applied, and only from one:
 
 ```bash
-git -C qwen3-tts diff > qwen3-tts-local.patch
+git -C qwen3-tts diff -- api config.yaml > qwen3-tts-local.patch
 ```
+
+The hazard is the direction, not the scope. The redirect replaces the whole
+file, so regenerating from a clone that has not yet had the current patch
+applied overwrites the only gate-visible copy of whatever the patch carries that
+the clone lacks. That was the live state after #1878: the frame cap landed in
+the patch (`7f25bfdf`, nine `max_frames=`) while the clone still held the older
+patch, and a re-sync run then would have written the cap out of the repo.
+`tests/test_qwen3_tts_frame_cap.py` reads the patch text and turns red on that,
+so it is caught at the gate rather than landed — but upgrade the clone first
+(below) and it never happens. The path scope keeps anything outside the three
+patched files out of the patch.
+
+### Upgrade the vendored clone in place
+
+When the tracked patch changes (a landing touched `qwen3-tts-local.patch`), the
+live clone does not: it is untracked, so no merge, landing or rollback reaches
+it, and `agent-tts` keeps serving the old code until someone does this. The
+`git apply ../qwen3-tts-local.patch` in the restore block above works only on a
+freshly cloned pristine tree; on a dirty live clone — one already carrying an
+older version of the patch — it fails with `patch does not apply`, because the
+patch is a diff against upstream, not against the previous patch. A dirty live
+clone needs its patched files put back to upstream first:
+
+```bash
+cd ~/lloyd/agent-services/services/tts
+# 1. Save what the clone carries now.
+git -C qwen3-tts diff -- api config.yaml > /tmp/qwen3-tts-local-before.diff
+# 2. Confirm every changed line of it is in the tracked patch (ignoring the
+#    `index` / `diff --git` lines, which differ by blob id and by the
+#    `diff.mnemonicprefix` setting). This must print nothing; a line it prints is
+#    a local change that exists nowhere else and step 3 would destroy.
+changed() { grep -E '^[+-]' "$1" | grep -vE '^(\+\+\+|---) ' | sort -u; }
+comm -23 <(changed /tmp/qwen3-tts-local-before.diff) <(changed qwen3-tts-local.patch)
+# 3. Put the three patched files back to upstream, then apply the tracked patch.
+git -C qwen3-tts checkout -- api/backends/optimized_backend.py api/routers/openai_compatible.py config.yaml
+git -C qwen3-tts apply -p1 --check ../qwen3-tts-local.patch
+git -C qwen3-tts apply -p1 ../qwen3-tts-local.patch
+# 4. The clone's diff is now the tracked patch; this prints nothing.
+diff <(git -C qwen3-tts diff -- api config.yaml | grep -vE '^(index |diff --git )') \
+     <(grep -vE '^(index |diff --git )' qwen3-tts-local.patch)
+# 5. Load it (about three minutes of warmup before the first synthesis).
+supervisorctl -c ~/lloyd/agent-services/supervisor/supervisord.conf restart agent-tts
+```
+
+If step 2 prints lines, stop: carry them into the tracked patch through a
+commit first, or lose them. If step 3's `--check` fails after the checkout, the
+clone's `HEAD` is not the commit in `qwen3-tts-upstream-commit.txt`. To back out,
+`git -C qwen3-tts checkout --` the same three files and
+`git -C qwen3-tts apply -p1 /tmp/qwen3-tts-local-before.diff`, then restart.
+`voice_library/` and `models/` are untracked inside the clone and none of these
+commands touch them.
+
+Afterwards, for the frame cap: `grep -c 'max_frames=' qwen3-tts/api/backends/optimized_backend.py`
+prints 9, and `ps -o lstart= -p "$(pgrep -f 'uvicorn api.main:app')"` postdates
+the restart.
+
+**Do not apply `~/obsidian/backlog/data/qwen3-tts-local-1878-framecap.patch`.**
+It is an earlier draft of the frame cap kept as an item's evidence, and it boots
+a broken service: its budget helper takes `streaming_opts` as a required
+argument, and the six warmup calls pass a `streaming_opts` name that the warmup
+methods never bind. Each warmup therefore raises `NameError`, the warmup's own
+`except` swallows it, and the service comes up uncompiled — healthy to look at,
+slow on every request. The tracked
+`qwen3-tts-local.patch` is the only patch to apply (`7b33b166` fixed exactly
+that).
 
 `config.yaml` sets `livekit.tts.voice: clone:dave_cullen`, which resolves against
 `voice_library/profiles/dave_cullen/`. Without it, TTS starts but every synthesis
@@ -1578,4 +1644,7 @@ request is served off the wrong model silently. That file also needs
 It is tracked by the *upstream* repo, so `git status` in that tree reads clean
 while carrying upstream's defaults — which is why `qwen3-tts-local.patch` must
 include `config.yaml`. Regenerate the patch with
-`git -C qwen3-tts diff > qwen3-tts-local.patch` after any change there.
+`git -C qwen3-tts diff -- api config.yaml > qwen3-tts-local.patch` after any
+change there — and only from a clone the current patch has already been applied
+to (Part 8, "Upgrade the vendored clone in place"), or the regeneration drops
+whatever the patch held that the clone did not.

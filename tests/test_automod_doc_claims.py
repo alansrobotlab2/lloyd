@@ -1344,3 +1344,88 @@ def test_only_the_restart_commands_keep_the_relative_venv_path():
         "the surviving relative paths are not the restart commands — those run "
         "from the live checkout, where the relative form works; anywhere else "
         "it must be absolute")
+
+
+# ── #1982: SETUP.md's procedure for the untracked Qwen3-TTS clone ──
+#
+# `scripts/automod/spec.py` says applying `qwen3-tts-local.patch` to the live
+# clone "stays a human action (SETUP.md)". These pin that SETUP.md really
+# carries that action, for the clone as it is found (dirty), and that the
+# re-sync rule is spelled one way with a reason that measures true.
+
+_TTS_RESYNC = "git -C qwen3-tts diff -- api config.yaml > qwen3-tts-local.patch"
+_TTS_PATCHED_FILES = ("api/backends/optimized_backend.py",
+                      "api/routers/openai_compatible.py", "config.yaml")
+
+
+def _setup_text() -> str:
+    return (ROOT / "SETUP.md").read_text(encoding="utf-8")
+
+
+def _tts_upgrade_section() -> str:
+    text = _setup_text()
+    m = re.search(r"^### Upgrade the vendored clone in place\n(.*?)(?=^#{2,3} |\Z)",
+                  text, re.M | re.S)
+    assert m, "SETUP.md lost its 'Upgrade the vendored clone in place' section"
+    return m.group(1)
+
+
+def test_setup_gives_the_in_place_upgrade_sequence_for_a_dirty_clone():
+    section = _tts_upgrade_section()
+    steps = [
+        "git -C qwen3-tts diff -- api config.yaml > /tmp/qwen3-tts-local-before.diff",
+        "comm -23 <(changed /tmp/qwen3-tts-local-before.diff) <(changed qwen3-tts-local.patch)",
+        "git -C qwen3-tts checkout -- " + " ".join(_TTS_PATCHED_FILES),
+        "git -C qwen3-tts apply -p1 ../qwen3-tts-local.patch",
+        "supervisorctl -c ~/lloyd/agent-services/supervisor/supervisord.conf restart agent-tts",
+    ]
+    at = [section.find(step) for step in steps]
+    assert all(i >= 0 for i in at), [s for s, i in zip(steps, at) if i < 0]
+    assert at == sorted(at), "the steps are out of order: save, compare, checkout, apply, restart"
+    flat = " ".join(section.split())
+    assert "works only on a freshly cloned pristine tree" in flat
+    assert "dirty live clone" in flat
+    assert "`index` / `diff --git` lines" in flat
+
+
+def test_the_files_the_upgrade_checks_out_are_the_files_the_patch_touches():
+    """The checkout list is a copy of a fact in the patch; a fourth patched file left off
+    it would make step 3's `git apply` fail on a clone that still carries the old hunk."""
+    patch = (ROOT / "agent-services" / "services" / "tts"
+             / "qwen3-tts-local.patch").read_text(encoding="utf-8")
+    touched = sorted(set(re.findall(r"^\+\+\+ \w/(\S+)", patch, re.M)))
+    assert touched == sorted(_TTS_PATCHED_FILES)
+    assert all(f.startswith("api/") or f == "config.yaml" for f in touched), (
+        "the re-sync pathspec `-- api config.yaml` no longer covers the patch")
+
+
+def test_every_patch_regeneration_in_setup_is_path_scoped():
+    text = _setup_text()
+    assert "git -C qwen3-tts diff >" not in text
+    flat = " ".join(text.split())
+    assert flat.count(_TTS_RESYNC) == 2, (
+        "the re-sync command appears in Part 8 and again in Troubleshooting; both must "
+        "be the path-scoped spelling")
+    every = re.findall(r"git -C qwen3-tts diff[^\n|]*> *qwen3-tts-local\.patch", text)
+    assert every and all(cmd == _TTS_RESYNC for cmd in every), every
+
+
+def test_the_resync_prose_names_the_real_hazard_and_not_the_one_that_measures_false():
+    text = _setup_text()
+    flat = " ".join(text.split())
+    assert ("regenerating from a clone that has not yet had the current patch applied "
+            "overwrites the only gate-visible copy") in flat
+    assert "tests/test_qwen3_tts_frame_cap.py" in flat
+    # Measured 2026-10-01: `__pycache__/` is gitignored inside the clone and no `.pyc` is
+    # tracked, so an unscoped diff is byte-identical to the scoped one. A sentence saying
+    # it emits binary diffs or fails `--check` would be a reason that is not true.
+    assert "Binary files" not in text
+    assert ".pyc" not in text[text.index("## Part 8"):text.index("## Part 9")]
+
+
+def test_the_upgrade_section_names_the_patch_that_must_not_be_applied():
+    flat = " ".join(_tts_upgrade_section().split())
+    assert "Do not apply `~/obsidian/backlog/data/qwen3-tts-local-1878-framecap.patch`" in flat
+    for part in ("`streaming_opts` as a required argument", "`NameError`",
+                 "`except` swallows it", "comes up uncompiled"):
+        assert part in flat, part
