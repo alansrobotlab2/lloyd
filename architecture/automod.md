@@ -1844,6 +1844,16 @@ clause (c), the reopen bound. `parse_answer` keeps only a 6000-character
 ceiling, so the writer's cut is the only one. The fields cut before this are
 not backfilled: most originals are unrecoverable.
 
+**A filed follow-up quotes the owed line without its line range (#2013).** The
+child's trailer ("Filed by owed-check from #N's owed entry: …") goes through
+`owed.cite_for_child`: every `path:start-end` loses the range and keeps the
+path, labelled `repo-relative` or `vault-relative` by which tree in
+`owed.CITE_ROOTS` holds that file, or `root unresolved` when neither does (a
+root is never guessed: 60 of the cited tokens on the board resolved in neither
+tree). The trailer ends with the revision it was read at, or `cited at an
+unpinned revision`. The parent's own entry is left byte-identical, and the
+children filed before this are not rewritten.
+
 **An empty `owed` list on an open item is a closed item.** When the answers that
 settle the last entry are applied, the same write closes the item
 (`closed_by: owed-check`) — the sweep that empties the list is the sweep that

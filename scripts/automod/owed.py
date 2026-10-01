@@ -296,8 +296,83 @@ def is_real_follow_up(follow: dict) -> bool:
     return True
 
 
+# ── The child copy of an owed line (#2013) ──────────────────────────────────
+#
+# A filed follow-up quotes the parent's owed line in its trailer. Copied
+# verbatim it carried the parent's `file:line` range with no root and no pin,
+# and the child is what a later round opens: measured 2026-10-01, 62 of 192
+# children held such a citation and #1932's child pointed `SKILL.md:240-245`
+# at a paragraph that had moved to `:300-317`. The copy drops the range, keeps
+# the path, says which tree the path resolves in, and names the revision it
+# was read at. The parent's own entry is never rewritten.
+
+#: label -> tree. None means "the live vault and this checkout", resolved on
+#: first use; a test repoints it at temp dirs.
+CITE_ROOTS: dict[str, Path] | None = None
+UNPINNED = "cited at an unpinned revision"
+_CITED_PATH = re.compile(
+    r"(?<![\w/.~-])(?P<path>~?[\w./-]*\w\.[A-Za-z][A-Za-z0-9]{0,5}):\d+(?:-\d+)?(?![\w])")
+
+
+def _cite_roots() -> dict[str, Path]:
+    if CITE_ROOTS is not None:
+        return CITE_ROOTS
+    from app import paths
+    return {"vault": paths.VAULT_ROOT, "repo": paths.LLOYD_HOME}
+
+
+def _cite_label(token: str) -> str:
+    """Which tree resolves `token`: `<name>-relative`, or `root unresolved`
+    when none does — never a guessed root."""
+    roots = _cite_roots()
+    expanded = Path(token).expanduser()
+    for name, root in roots.items():
+        try:
+            if expanded.is_absolute():
+                if expanded.is_file() and expanded.resolve().is_relative_to(root.resolve()):
+                    return f"{name}-relative"
+            elif (root / token).is_file():
+                return f"{name}-relative"
+        except OSError:
+            continue
+    return "root unresolved"
+
+
+def _cite_revision() -> str:
+    """The short HEAD of each cite root that is a git checkout, e.g.
+    `repo a03a7300, vault 29302c7f`; empty when none can be read."""
+    import subprocess
+    parts = []
+    for name, root in _cite_roots().items():
+        try:
+            r = subprocess.run(["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
+                               capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if r.returncode == 0 and r.stdout.strip():
+            parts.append(f"{name} {r.stdout.strip()}")
+    return ", ".join(parts)
+
+
+def cite_for_child(what: str, revision: str | None = None) -> str:
+    """The owed line as a filed child may quote it: every `path:start-end`
+    loses its range and gains a root label, and the whole carries a revision
+    marker (`UNPINNED` when no revision is known)."""
+    def _sub(m: re.Match) -> str:
+        token = m.group("path")
+        return f"{token} ({_cite_label(token)})"
+    reduced = _CITED_PATH.sub(_sub, what)
+    if revision is None:
+        try:
+            revision = _cite_revision()
+        except Exception:  # noqa: BLE001 — a pin is a courtesy, never a failed filing
+            revision = ""
+    return f"{reduced} [{'cited at ' + revision if revision else UNPINNED}]"
+
+
 def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_id: int,
-                  session_id: str = "", spawn_cap: int = 3, now: datetime | None = None) -> dict:
+                  session_id: str = "", spawn_cap: int = 3, now: datetime | None = None,
+                  revision: str | None = None) -> dict:
     """Write one owed-check answer onto the item. Returns what was done.
 
     `answers` is the parsed list: {"n", "outcome", "evidence", "ruling",
@@ -355,7 +430,8 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
         if out in ("work", "ruling") and is_real_follow_up(follow) and len(filed) < spawn_cap:
             new = B.new_item(_text(follow.get("name"), 140),
                              f"{str(follow.get('body') or '').strip()}\n\n"
-                             f"Filed by owed-check from #{item_id}'s owed entry: {e['what']}",
+                             f"Filed by owed-check from #{item_id}'s owed entry: "
+                             f"{cite_for_child(e['what'], revision)}",
                              status="draft")
             filed.append(new.id)
             record["follow_up"] = new.id

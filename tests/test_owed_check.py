@@ -48,6 +48,10 @@ def isolated(tmp_path, monkeypatch):
     d.mkdir()
     monkeypatch.setattr(B, "BACKLOG_DIR", d)
     monkeypatch.setattr(S, "LEDGER_PATH", tmp_path / "ledger.jsonl")
+    # #2013: a filing resolves citations against these and pins a revision;
+    # neither may reach the live vault, the live repo or real git.
+    monkeypatch.setattr(O, "CITE_ROOTS", {"vault": tmp_path / "no-vault", "repo": tmp_path / "no-repo"})
+    monkeypatch.setattr(O, "_cite_revision", lambda: "")
     return d
 
 
@@ -710,3 +714,67 @@ def test_the_bound_holds_end_to_end_through_parse_answer(isolated):
     assert first["ruling"].endswith(last) and len(first["ruling"]) == 951
     assert second["ruling"].endswith(O.TRUNCATION_MARKER)
     assert second["artifact"] == "~/lloyd-data/sessions/y.json"
+
+
+# ── #2013: the child's copy of the owed line carries no rotting range ────────
+
+@pytest.fixture
+def cite_roots(tmp_path, monkeypatch):
+    vault, repo = tmp_path / "vault", tmp_path / "repo"
+    (vault / "skills" / "eval").mkdir(parents=True)
+    (vault / "skills" / "eval" / "SKILL.md").write_text("x")
+    (repo / "pkg").mkdir(parents=True)
+    (repo / "pkg" / "path.py").write_text("x")
+    monkeypatch.setattr(O, "CITE_ROOTS", {"vault": vault, "repo": repo})
+    monkeypatch.setattr(O, "_cite_revision", lambda: pytest.fail("no real git in a test"))
+    return vault, repo
+
+
+_FOLLOW = {"name": "Fix the cited paragraph",
+           "body": "Change the helper so the paragraph is right. Check it with the unit test."}
+
+
+def _child_body(isolated, new_id: int) -> str:
+    return next(isolated.glob(f"{new_id}-*.md")).read_text(encoding="utf-8")
+
+
+def test_a_filed_child_drops_the_range_keeps_the_path_and_labels_the_root(isolated, cite_roots):
+    what = ("the copy at pkg/path.py:120-140 rots, as does skills/eval/SKILL.md:240-245 "
+            "and probe1539.py:7")
+    p, entries = _owing(isolated, 70, [what])
+    assert O.is_real_follow_up(_FOLLOW)
+    out = O.apply_verdict(p, entries, [{"n": 1, "outcome": "work", "evidence": "seen",
+                                        "follow_up": _FOLLOW}], item_id=70, revision="abc1234")
+    body = _child_body(isolated, out["filed"][0])
+    trailer = body[body.index("Filed by owed-check"):]
+    assert ":120-140" not in body and ":240-245" not in body and "probe1539.py:7" not in body
+    assert "pkg/path.py (repo-relative)" in trailer
+    assert "skills/eval/SKILL.md (vault-relative)" in trailer
+    assert "probe1539.py (root unresolved)" in trailer, "a root is never guessed"
+    assert "[cited at abc1234]" in trailer
+    # The parent keeps what it owed, byte for byte.
+    assert fm_of(p)["owed_settled"][0]["what"] == what
+
+
+def test_a_child_filed_with_no_revision_says_unpinned(isolated, cite_roots, monkeypatch):
+    monkeypatch.setattr(O, "_cite_revision", lambda: "")
+    p, entries = _owing(isolated, 71, ["the range at pkg/path.py:120-140 is stale"])
+    out = O.apply_verdict(p, entries, [{"n": 1, "outcome": "work", "evidence": "seen",
+                                        "follow_up": _FOLLOW}], item_id=71)
+    body = _child_body(isolated, out["filed"][0])
+    assert "cited at an unpinned revision" in body and ":120-140" not in body
+    assert "pkg/path.py (repo-relative)" in body
+
+
+def test_an_unfiled_entry_keeps_its_text_byte_identical(isolated, cite_roots):
+    what = "the range at pkg/path.py:120-140 is stale"
+    p, entries = _owing(isolated, 72, [what])
+    O.apply_verdict(p, entries, [{"n": 1, "outcome": "work", "evidence": "seen",
+                                  "follow_up": {"name": "None", "body": "None"}}],
+                    item_id=72, revision="abc1234")
+    assert [e["what"] for e in O.entries_of(fm_of(p))] == [what]
+
+
+def test_cite_for_child_leaves_plain_prose_and_times_alone(cite_roots):
+    text = "at 13:00 the run v2.6.0 finished: 3-4 rows, see config.yaml"
+    assert O.cite_for_child(text, "r1") == text + " [cited at r1]"
