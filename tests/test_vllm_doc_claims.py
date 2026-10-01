@@ -1593,6 +1593,34 @@ def test_the_budget_keeps_its_home_in_6_1_and_a_repoint_must_name_its_input():
         f"{tokens_per_day}M), composed here from the derivation rather than hand-typed")
 
 
+def test_the_repoint_question_is_recorded_as_ruled_not_as_owed():
+    """#2008: the rule used to end on an ownership clause — re-pointing the budget "is
+    owed-check's to rule" — and owed-check then ruled, on #1919, a closed item nobody reads
+    while editing this page. An ownership citation rots when its item closes: left open-tense,
+    the next round reads a live question and re-opens a settled one. So the span must carry the
+    verdict and its substance, and must not pose the question again.
+
+    Scoped to `_rule_prose()` on purpose. The same four words survive once more further down
+    the page, about a different and still unanswered question (whether the upstream report
+    needs a second independent day), and that one stays open-tense.
+    """
+    r = _rule_prose()
+    assert "owed-check's to rule" not in r, \
+        "the rule still hands the re-point question to owed-check, which has answered it"
+    ruled = [s for s in re.split(r"[.!?;]+\s+", r)
+             if "owed-check ruled" in s and "#1919" in s]
+    assert ruled, "no sentence records that owed-check ruled the budget question, naming #1919"
+    assert re.search(r"no re-?point", r, re.I), "the verdict itself (no re-point) is not stated"
+    assert re.search(r"[Rr]outine firing of trigger \(ii\) at the current load mix is not "
+                     r"grounds", r), \
+        "the span does not say that (ii) firing routinely is not grounds for a re-point"
+    assert re.search(r"tripwire and not as a quota", r), \
+        "the span does not say what the budget is: a tripwire, not a quota"
+    doc = " ".join(DOC.read_text(encoding="utf-8").split())
+    assert doc.count("owed-check's to rule") == 1, \
+        "the replication question further down is a different one and must stay open-tense"
+
+
 def test_the_rule_keeps_2026_09_28_as_the_worked_exemplar_and_the_ruling_verbatim(reopen):
     """#1919 clause 4: the new prose sits AFTER the exemplar and displaces nothing.
 

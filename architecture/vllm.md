@@ -926,8 +926,11 @@ has still not been run as of 2026-09-11.
   churn attribution this bullet already prescribes and produces no new §10 paragraph.**
   2026-09-28 stays the worked exemplar for the (ii) side because it is the day where
   both triggers fired and the attribution was done in full, not because over-budget is
-  rare. The budget's home stays §6.1's baseline sentence: nothing here edits it, and
-  re-pointing it at this machine's mix is owed-check's to rule — a re-point requires a
+  rare. The budget's home stays §6.1's baseline sentence: nothing here edits it. Whether
+  (ii) firing routinely is itself grounds to re-point that budget at this machine's mix
+  is no longer an open question: owed-check ruled it on 2026-10-01 (#1919), and the
+  verdict is no re-point. Routine firing of trigger (ii) at the current load mix is not
+  grounds, because the budget stands as a tripwire and not as a quota. A re-point requires a
   measured current-mix baseline naming the input that restores **97 misses / 10.3M
   tokens a day**, which is that baseline divided by the two days it spans, before any
   figure in §6.1 moves.
