@@ -1286,22 +1286,31 @@ FILLED_CHECKLIST_BODY = "\n".join([
     "https://github.com/isaac-sim/IsaacLab/pull/8128",
 ])
 
-#: Every non-heading line of `FILLED_CHECKLIST_BODY` once comments and template phrases
-#: are gone, in the order upstream wrote them. `- [ ] Added Newton visualizer support` is
-#: the line `content` threw away and `_SCAFFOLD_LINE_RE` matched whole; `#shipit…` is a
-#: level sign with no space after it, so it is a hashtag and not a heading.
+#: Every line of `FILLED_CHECKLIST_BODY` the floor counts, in the order upstream wrote
+#: them. `#shipit…` is a level sign with no space after it, so it is a hashtag and not a
+#: heading.
 FILLED_CHECKLIST_KEPT = [
     "Kit visualizer markers now reach the Newton visualizers.",
-    "- [ ] Bug fix",
-    "- [ ] New feature",
-    "- [ ] Added Newton visualizer support",
     "- `isaaclab.sh` and `isaaclab.bat` are gone",
     "#shipit: the hashtag line is content, not a heading",
     "https://github.com/isaac-sim/IsaacLab/pull/8128",
 ]
 
+#: The three checkbox lines of that body. #1925 kept them in the published text for the
+#: sake of the third, which carries real content; #2012 takes all three out, because the
+#: floor has never counted a checkbox line and an unfilled checklist was clearing it as
+#: prose. The loss of `- [ ] Added Newton visualizer support` is the price, pinned here
+#: so it is a decision on the record and not something a later reader finds.
+FILLED_CHECKLIST_DROPPED = [
+    "- [ ] Bug fix",
+    "- [ ] New feature",
+    "- [ ] Added Newton visualizer support",
+]
 
-def test_no_line_that_is_not_a_heading_marker_is_removed_from_the_returned_body():
+_CHECKBOX_LINE = re.compile(r"^\s*[-*+]\s*\[[ xX]?\]")
+
+
+def test_no_line_the_floor_counts_is_removed_and_no_checkbox_line_is_returned():
     body, reason = body_mod.clean_body(FILLED_CHECKLIST_BODY, "Extend Kit markers to Newton")
 
     assert reason is None, reason
@@ -1311,6 +1320,9 @@ def test_no_line_that_is_not_a_heading_marker_is_removed_from_the_returned_body(
     # …verbatim AND in order, not merely present.
     positions = [rows.index(line) for line in FILLED_CHECKLIST_KEPT]
     assert positions == sorted(positions), positions
+    for line in FILLED_CHECKLIST_DROPPED:
+        assert line not in rows, f"{line!r} still published:\n{body}"
+    assert not [ln for ln in rows if _CHECKBOX_LINE.match(ln)], body
     assert not [ln for ln in rows if _HEADING_LINE.match(ln)], body
     # The comment and the bare template phrase are gone, as they were before this fix.
     assert "<!--" not in body and "Please include a summary" not in body, body
@@ -1422,3 +1434,112 @@ def test_a_write_run_publishes_those_bodies_with_no_heading_under_the_dated_sect
         rf"^## {day}\n\n### {re.escape(COMMIT_8183_TITLE)}\n", text2, re.M), text2
     assert not re.findall(r"^#{1,3} (Description|Summary|Type of change)$", text2, re.M)
     assert "## Summary" not in text2 and "## Type of change" not in text2, text2
+
+
+# ── #2012 — what the floor does not count is not published ────────────────────
+#
+# IsaacLab commit ae5d4e39 was written to `knowledge/tools/isaaclab/updates.md` on
+# 2026-10-01 carrying `Fixes # (issue)` and `- [x]  Backport this pull request to the`
+# under a paragraph about a calibration photo: the author's PR checklist, published as
+# knowledge. The floor discounted the checkbox line and the return pasted it back.
+
+#: The `summary` of that row in `intel-2026-10-01.jsonl`, byte for byte (its trailing
+#: `…` is the scanner's own clip).
+SO101_TITLE = "[Docs] Add SO-101 leader calibration pose image (#8219)"
+SO101_BODY = (
+    "[Docs] Add SO-101 leader calibration pose image (#8219)\n\n# Description\n\n"
+    "Adds a photo of the SO-101 leader arm in the mid-range calibration pose\n"
+    "to the SO-101\njoint teleop example in the Isaac Teleop docs, plus a tip to set the\n"
+    "gripper to its\n  midpoint during that step.\n\nFixes # (issue)\n\n"
+    "## Type of change\n\n- Documentation update\n\n## Release backport\n\n"
+    "- [x]  Backport this pull request to the\n"
+    "active release branch after it merges into `develop`\n\n## Checklist\n\n"
+    "Docker and GPU tests run on demand.…")
+
+
+def test_the_real_so101_body_keeps_its_prose_and_loses_the_checklist():
+    body, reason = body_mod.clean_body(SO101_BODY, SO101_TITLE)
+
+    assert reason is None, reason
+    rows = [ln for ln in body.splitlines() if ln.strip()]
+    assert rows[0] == ("Adds a photo of the SO-101 leader arm in the mid-range "
+                       "calibration pose"), rows[0]
+    assert not [ln for ln in rows if body_mod._SCAFFOLD_LINE_RE.match(ln)], body
+    assert "Fixes # (issue)" not in rows, body
+    # The wrapped tail of the checkbox line goes with the line it belongs to.
+    assert "Backport this pull request" not in body, body
+    assert "active release branch" not in body, body
+
+
+def test_a_checkbox_line_and_its_wrapped_tail_do_not_clear_the_floor():
+    """The tail of a hard-wrapped checkbox was counted as prose: 51 characters, over
+    the floor on its own. With nothing else in the body there is nothing to publish."""
+    text = ("## Release backport\n\n- [x]  Backport this pull request to the\n"
+            "active release branch after it merges into `develop`\n")
+
+    body, reason = body_mod.clean_body(text, "Some PR")
+
+    assert body is None, body
+    assert reason == "the upstream body is template headings with nothing under them", reason
+
+
+def test_a_list_item_after_a_checkbox_line_is_not_its_tail():
+    text = ("The scheduler knob moves into the per-task config, with a migration.\n\n"
+            "- [x] tested\n- `sched.max_inflight` replaces the global\n")
+
+    body, reason = body_mod.clean_body(text, "Scheduler knob")
+
+    assert reason is None, reason
+    assert body.splitlines()[-1] == "- `sched.max_inflight` replaces the global", body
+    assert "tested" not in body, body
+
+
+@pytest.mark.parametrize("trailer", [
+    "Fixes # (issue)", "fixes #(issue)", "Closes # (issue number)", "Resolves # ()",
+    "Fixed # (issue)", "Fixes: # (issue)",
+])
+def test_an_unfilled_issue_trailer_is_in_neither_the_floor_nor_the_body(trailer):
+    prose = "Moves the camera presets into the task config so each task can pick its own."
+    body, reason = body_mod.clean_body(f"{prose}\n\n{trailer}\n", "Camera presets")
+    assert reason is None, reason
+    assert body == prose, body
+
+    # Not in the floor's line set either: beside prose under the floor it adds nothing.
+    short, why = body_mod.clean_body(f"tidy the launch file\n\n{trailer}\n", "Launch cleanup")
+    assert short is None and why == "the upstream body is under 40 characters", (short, why)
+
+
+@pytest.mark.parametrize("trailer", ["Fixes #8219", "Closes #12 (the camera one)",
+                                     "Fixes # (issue 8219)"])
+def test_a_filled_issue_trailer_is_kept_in_both(trailer):
+    prose = "Moves the camera presets into the task config so each task can pick its own."
+    body, reason = body_mod.clean_body(f"{prose}\n\n{trailer}\n", "Camera presets")
+    assert reason is None, reason
+    assert body.splitlines()[-1] == trailer, body
+
+    # Counted towards the floor: 20 + a filled trailer of 27 is a body.
+    counted, why = body_mod.clean_body(f"tidy the launch file\n\nCloses #12 (the camera one)\n",
+                                       "Launch cleanup")
+    assert why is None and "Closes #12" in counted, (counted, why)
+
+
+def test_the_trailer_is_recognised_by_shape_and_the_phrase_list_is_unchanged():
+    assert body_mod.TEMPLATE_PHRASES == (
+        "thank you for your interest in sending a pull request",
+        "please include a summary",
+        "please make sure to check the contribution guidelines",
+        "please try to keep prs small and focused",
+    )
+
+
+def test_the_docs_no_longer_promise_checkbox_lines_come_back():
+    """`clean_body`'s docstring and the `_HEADING_LINE_RE` comment both said a checkbox
+    line is returned byte-for-byte. Neither may say it now."""
+    import inspect
+    doc = inspect.getdoc(body_mod.clean_body)
+    assert "byte-for-byte" not in doc, doc
+    assert "checkbox" in doc                       # it says what happens to them instead
+    src = Path(body_mod.__file__).read_text(encoding="utf-8")
+    comment = src[src.index("#: The heading half of that class"):src.index("_HEADING_LINE_RE = re.compile")]
+    assert "byte-for-byte" not in comment, comment
+    assert "no longer published" in comment, comment

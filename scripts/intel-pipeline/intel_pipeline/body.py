@@ -49,22 +49,43 @@ _BLOCK_MARKER_RE = re.compile(r"^\s*(?:>|#|[-*+]\s*\[)")
 # Scaffolding: headings and checkbox lines carry no description of their own.
 _SCAFFOLD_LINE_RE = re.compile(r"^\s*(?:#{1,6}\s|#{1,6}$|[-*+]\s*\[[ xX]?\])")
 
-#: The heading half of that class on its own, and the only scaffold a PUBLISHED body
-#: loses as well (#1925). `clean_body` has always discounted a heading line before
-#: testing a body against `BODY_FLOOR` and then returned the text still holding it, so a
-#: filled PR opening `# Description` cleared the floor and published the heading one or
-#: two levels inside the digest's own `## 2026-MM-DD` section — flattening the dated
-#: structure every corpus-shape count reads, by the upstream author's headings and not
-#: by Lloyd's. `_SCAFFOLD_LINE_RE` cannot be reused for the returned value: its
-#: `[-*+]\s*\[[ xX]?\]` alternative matches a WHOLE checkbox line, text included, and a
-#: filled release body writes real content on those lines
-#: (`- [ ] Added Newton visualizer support`).
+#: The heading half of that class on its own (#1925). `clean_body` discounted a heading
+#: line before testing a body against `BODY_FLOOR` and then returned the text still
+#: holding it, so a filled PR opening `# Description` cleared the floor and published the
+#: heading one or two levels inside the digest's own `## 2026-MM-DD` section — flattening
+#: the dated structure every corpus-shape count reads, by the upstream author's headings
+#: and not by Lloyd's.
+#:
+#: #1925 stripped only this half from the returned value and kept checkbox lines, for
+#: the sake of a filled release body that writes real content on them
+#: (`- [ ] Added Newton visualizer support`). #2012 reversed that: a line the floor
+#: does not count is not published either, so the returned body is now built from the
+#: same lines the floor measured, and this pattern is kept for callers and tests that
+#: ask about headings alone. The price, owned here: content written on a checkbox line
+#: is no longer published.
 #:
 #: The one cost of a line-based strip, stated here rather than discovered at review: a
 #: `# comment` shell line inside a fenced code block is a heading marker to this pattern
 #: and goes with them. It is the same line the floor measurement has always ignored, so
 #: the measurement and the publication agree — but it is a real, small content loss.
 _HEADING_LINE_RE = re.compile(r"^\s*#{1,6}(?:\s|$)")
+
+#: The checkbox half of `_SCAFFOLD_LINE_RE` on its own: the line a wrapped task-list
+#: item starts on.
+_CHECKBOX_LINE_RE = re.compile(r"^\s*[-*+]\s*\[[ xX]?\]")
+
+#: A line that opens a block of its own, so it cannot be the wrapped tail of the
+#: checkbox line above it: another list item, a heading, a quote, a fence, a table row.
+_BLOCK_OPENER_RE = re.compile(r"^\s*(?:[-*+]\s|\d+[.)]\s|#|>|```|~~~|\|)")
+
+#: An issue-number trailer the author never filled in: a closing keyword, a `#`, and a
+#: parenthesised placeholder holding no digit — `Fixes # (issue)`. Recognised by shape,
+#: not by phrase (#2012): `TEMPLATE_PHRASES` is four sentences from one upstream and
+#: cannot enumerate every template, while "a reference to an issue with no number in
+#: it" is the same in all of them. `Fixes #8219` has its number and is content.
+_UNFILLED_ISSUE_TRAILER_RE = re.compile(
+    r"^\s*(?:fix(?:e[sd])?|close[sd]?|resolve[sd]?)\s*:?\s*#\s*\([^)\d]*\)\s*\.?\s*$",
+    re.IGNORECASE)
 
 #: A rule alone on its line: `______` or `======`. Anchored to the whole line on
 #: purpose — markdown turns a `______` sitting under a heading into a setext H2, and
@@ -241,12 +262,15 @@ def clean_body(text: Optional[str], title: str = "") -> Tuple[Optional[str], Opt
       (None, reason) the body says nothing — render `None — reason`;
       (None, None)   the body only restates the title — omit the body line.
 
-    The `body` of the first form is the upstream text with its heading-marker lines
-    removed (#1925) — a heading was never counted towards `BODY_FLOOR`, so returning it
-    pasted the author's `# Description` back into a section the floor had already judged
-    on its content. Nothing else goes: prose, list items, checkbox lines and URLs are
-    returned byte-for-byte, in the order upstream wrote them. See `_HEADING_LINE_RE` for
-    the fenced-code case that this line-based strip does cost.
+    The `body` of the first form is built from exactly the lines `BODY_FLOOR` was
+    measured on. Three kinds of line are counted by neither and returned by neither:
+    a heading marker (#1925: returning it pasted the author's `# Description` into a
+    section the floor had judged on its content), a task-list checkbox line together
+    with its wrapped tail, and an issue trailer nobody filled in (`Fixes # (issue)`).
+    The last two are #2012: an upstream PR checklist cleared the floor as prose and was
+    published as knowledge. Everything else — prose, plain list items, URLs — is
+    returned unchanged and in the order upstream wrote it. See `_HEADING_LINE_RE` for
+    the fenced-code case this line-based strip costs.
     """
     # Looked for in the raw text: templates keep their instructions in a comment,
     # and the comment is exactly what says the body is a template.
@@ -258,23 +282,27 @@ def clean_body(text: Optional[str], title: str = "") -> Tuple[Optional[str], Opt
     body = _collapse_blank_runs("\n".join(kept_lines))
 
     content = []
+    in_checkbox = False
     for line in body.splitlines():
         if _SCAFFOLD_LINE_RE.match(line):
             saw_scaffold = True
+            in_checkbox = bool(_CHECKBOX_LINE_RE.match(line))
+            continue
+        if in_checkbox and line.strip() and not _BLOCK_OPENER_RE.match(line):
+            # The wrapped tail of the checkbox line above: one list item, hard-wrapped
+            # upstream. Counted, it cleared the floor on its own (51 characters of
+            # `active release branch after it merges into …`).
+            continue
+        in_checkbox = False
+        if _UNFILLED_ISSUE_TRAILER_RE.match(line):
             continue
         content.append(line)
     content_text = " ".join(" ".join(content).split())
-    # The value that gets pasted, measured on the same lines as the floor above. The
-    # floor discounts every heading line; returning `body` pasted those lines back in, so
-    # a filled PR body that cleared the floor on its prose published its `# Description`
-    # one level under the digest's `## 2026-MM-DD` and flattened that structure (#1925).
-    # Only heading markers go — every other line, checkbox lines included, survives
-    # byte-for-byte and in order, which is why this is not `"\n".join(content)`: that
-    # list has already lost `- [ ] Added Newton visualizer support` along with the
-    # unfilled `- [ ] Bug fix` it was matched alongside.
-    published = _collapse_blank_runs(
-        "\n".join(line for line in body.splitlines()
-                  if not _HEADING_LINE_RE.match(line)))
+    # The value that gets pasted is the lines the floor above was measured on, and no
+    # others (#1925 for headings, #2012 for checkbox lines and the unfilled trailer):
+    # a line that does not count towards a body being worth publishing is not part of
+    # what is published.
+    published = _collapse_blank_runs("\n".join(content))
 
     if title:
         norm_title = _normalise(title)
