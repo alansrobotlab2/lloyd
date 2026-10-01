@@ -287,6 +287,16 @@ export interface WorkerSourceHealth {
     fail_rate: number | null
     gpu_hours: number
     last_completed: string | null
+    // #1857's split of the runs that ended with part of a matrix unrun (#1970).
+    // Optional on purpose: a backend older than the split sends none of them,
+    // and `undefined` must stay hidden rather than render as a healthy 0.
+    // `deadline_cut` is the failure (#1687: the clock cut the run);
+    // `matrix_shrunk` is the projection working as designed; `unfinished_matrix`
+    // is their non-trigger union and is declared here only so the wire shape is
+    // whole — it is never rendered.
+    unfinished_matrix?: number
+    deadline_cut?: number
+    matrix_shrunk?: number
   } | null
   recent: Array<{
     run_id: string

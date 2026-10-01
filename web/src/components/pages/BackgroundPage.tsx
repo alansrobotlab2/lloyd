@@ -208,6 +208,15 @@ function SourceCard({
         ) : (
           <>
             <span>{h.total} run{h.total === 1 ? '' : 's'}</span>
+            {/* #1857's split, beside the run count it is a share of — 2 of 40
+                and 2 of 2 are opposite readings. Only the deadline cut is the
+                alarm; a shrunk matrix is the projection doing its job. */}
+            {(h.deadline_cut ?? 0) > 0 && (
+              <span className="text-rose-400">{h.deadline_cut} deadline-cut</span>
+            )}
+            {(h.matrix_shrunk ?? 0) > 0 && (
+              <span>{h.matrix_shrunk} matrix-shrunk</span>
+            )}
             <span className="text-emerald-400">{h.ok} ok</span>
             {h.failed > 0 && <span className="text-rose-400">{h.failed} failed</span>}
             {h.skipped > 0 && <span>{h.skipped} skipped</span>}

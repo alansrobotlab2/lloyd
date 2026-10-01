@@ -1259,3 +1259,98 @@ def test_an_uncalibrated_note_still_promotes_its_task(monkeypatch, tmp_path):
             f"the staging label ({phrase!r}) rode along into the graded bench, "
             "where the bench loader would hand it to a runner as task metadata")
     assert not src.exists(), "the staged note is consumed by the move, as ever"
+
+
+# ── #1970: the Background per-source row renders #1857's split ──────────────
+#
+# Pinned as source text for the reason spelled out above
+# `test_the_background_tab_reads_the_join_through_a_pure_module`: vitest runs
+# `environment: "node"` with no renderer, so a component's markup has no render
+# test, and `web/package.json` is human-only.
+
+API_TS = ROOT / "web/src/api.ts"
+
+
+def _health_type() -> str:
+    """The body of `WorkerSourceHealth.health`'s object type in api.ts."""
+    api = API_TS.read_text(encoding="utf-8")
+    iface = api.split("export interface WorkerSourceHealth {", 1)[1]
+    body = iface.split("  health: {", 1)[1].split("  } | null", 1)[0]
+    assert "total: number" in body and "last_completed" in body, (
+        "the span extracted from api.ts is not the health object")
+    return body
+
+
+def _source_row() -> tuple[str, str]:
+    """(the `h === null` branch, the has-runs branch) of the per-source flex row."""
+    page = PAGE_TSX.read_text(encoding="utf-8")
+    row = page.split("{h === null ? (", 1)[1].split("{source.recent.length > 0", 1)[0]
+    null_branch, runs_branch = row.split(") : (", 1)
+    assert "{h.total} run" in runs_branch, "the has-runs branch lost its run count"
+    return null_branch, runs_branch
+
+
+def _code(src: str) -> str:
+    """`src` with `//` line comments and JSX `{/* */}` comments removed."""
+    import re
+    src = re.sub(r"\{/\*.*?\*/\}", "", src, flags=re.S)
+    return "\n".join(ln for ln in src.splitlines() if not ln.strip().startswith("//"))
+
+
+def test_the_health_type_declares_the_split_as_optional():
+    body = _code(_health_type())
+    for key in ("unfinished_matrix", "deadline_cut", "matrix_shrunk"):
+        assert f"{key}?: number" in body, (
+            f"{key} is not an optional number on WorkerSourceHealth.health — a "
+            "required field would read a pre-#1857 backend as a type error, and a "
+            "defaulted one as a healthy 0")
+
+
+def test_the_row_renders_a_rose_deadline_cut_only_above_zero():
+    import re
+    _, runs = _source_row()
+    m = re.search(r"\{\(h\.deadline_cut \?\? 0\) > 0 && \(\s*"
+                  r"<span className=\"([^\"]*)\">\{h\.deadline_cut\} [^<]*</span>", runs)
+    assert m, "no span guarded by `deadline_cut > 0` in the per-source row"
+    assert "text-rose-400" in m.group(1)
+    assert runs.index("{h.total} run") < m.start(), (
+        "the deadline-cut span must sit beside (after) the run count, never alone")
+
+
+def test_the_row_renders_a_muted_matrix_shrunk_only_above_zero():
+    import re
+    _, runs = _source_row()
+    m = re.search(r"\{\(h\.matrix_shrunk \?\? 0\) > 0 && \(\s*"
+                  r"<span([^>]*)>\{h\.matrix_shrunk\} [^<]*</span>", runs)
+    assert m, "no span guarded by `matrix_shrunk > 0` in the per-source row"
+    assert "rose" not in m.group(1) and "className" not in m.group(1), (
+        "matrix_shrunk is context, not the alarm: it inherits the row's "
+        "text-muted-foreground and takes no colour of its own")
+    page = PAGE_TSX.read_text(encoding="utf-8")
+    container = page.split("{h === null ? (", 1)[0].rsplit("<div className=\"", 1)[1]
+    assert "text-muted-foreground" in container.split("\"", 1)[0]
+
+
+def test_unfinished_matrix_is_rendered_nowhere():
+    """The union is declared on the wire type and read by nothing.
+
+    The type declaration in api.ts is the one allowed occurrence; any other use
+    in web/src — a component, a helper, a second type — is a render path.
+    """
+    hits = {}
+    for path in sorted((ROOT / "web/src").rglob("*")):
+        if path.suffix not in (".ts", ".tsx") or not path.is_file():
+            continue
+        n = _code(path.read_text(encoding="utf-8")).count("unfinished_matrix")
+        if n:
+            hits[str(path.relative_to(ROOT))] = n
+    assert hits == {"web/src/api.ts": 1}, hits
+    assert "unfinished_matrix?: number" in _code(_health_type())
+
+
+def test_a_source_with_no_runs_still_reads_no_runs_and_neither_span():
+    null_branch, _ = _source_row()
+    spans = [ln.strip() for ln in _code(null_branch).splitlines() if "<span" in ln]
+    assert spans == ["<span>no runs in the window</span>"], spans
+    assert "deadline_cut" not in null_branch and "matrix_shrunk" not in null_branch
+
