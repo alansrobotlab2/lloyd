@@ -709,6 +709,11 @@ async def run_trial(
         model=model, overlay_dir=overlay_dir, session_id=session_id,
         max_agent_turns=max_agent_turns, hooks=hooks,
         extra_disallowed=extra_disallowed, system_append=system_append,
+        # #1971: the hop that was missing. `run_trial` took `writes_into`, its
+        # docstring promised to forward it, and this call dropped it — so the
+        # scope hook `build_options` installs was armed on no live trial, and a
+        # capture's `capture.yaml` named a bound nothing enforced.
+        writes_into=writes_into,
     )
     # Read back off what was built rather than restating the pin (#427). A pin
     # that is later changed, or overridden by a caller, then shows up in the

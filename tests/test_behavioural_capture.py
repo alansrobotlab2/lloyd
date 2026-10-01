@@ -1019,6 +1019,126 @@ def test_the_trial_write_scope_denies_a_target_outside_the_named_directory(tmp_p
     assert "vault_write" in SDK.STATEFUL_TOOLS and "memory_add" in SDK.STATEFUL_TOOLS
 
 
+# ── #1971: the scope is armed on the trial `run_trial` actually builds ────────
+#
+# The two nodes above call the installer directly, and every other node that
+# reaches `sdk_runner` replaces `run_trial` whole, so the one hop between them —
+# `run_trial` forwarding `writes_into` to `build_options` — was covered by nothing
+# and was missing: the hook was armed on no live trial. These drive the REAL
+# `run_trial` and the REAL `build_options`; only the harness loop (`_consume`) and
+# the aggregator's sandbox probe are stubbed, and the verdict is asked of the
+# registry on the `RunOptions` the loop was handed.
+
+async def _no_sandbox_probe() -> None:
+    return None
+
+
+def _drive_real_run_trial(monkeypatch, tmp_path, **run_kwargs):
+    """(trace, the RunOptions the loop received) from one real `run_trial`."""
+    import asyncio
+
+    from scripts.autoresearch import bench_runner_sdk as SDK
+
+    built: list = []
+
+    async def _keep_the_options(messages, options, trace):
+        built.append(options)
+        trace["final_text"] = "done"
+
+    monkeypatch.setattr(SDK, "require_tool_sandbox", _no_sandbox_probe)
+    monkeypatch.setattr(SDK, "_consume", _keep_the_options)
+    overlay = tmp_path / "overlay"
+    overlay.mkdir(exist_ok=True)
+    task = {"id": "behavioural:scope-probe", "category": "behavioural",
+            "prompt": "write the note"}
+    trace = asyncio.run(SDK.run_trial(task, "baseline", overlay, "test-model",
+                                      max_agent_turns=4, **run_kwargs))
+    assert trace["status"] == "success", trace
+    assert len(built) == 1, "the loop stub was not reached exactly once"
+    return trace, built[0]
+
+
+def _verdict(options, tool_name: str, tool_input: dict) -> dict:
+    import asyncio
+
+    out = asyncio.run(options.hooks.fire_pre_tool_use(
+        session_id="bench_scope_probe", tool_name=tool_name, tool_input=tool_input))
+    return out.get("hookSpecificOutput") or {}
+
+
+def test_run_trial_arms_the_write_scope_it_was_given(monkeypatch, tmp_path):
+    """Clauses 1, 2, 3 and 5. Goes red if `writes_into` is dropped from the
+    `build_options` call inside `run_trial` again: nothing here stubs
+    `build_options`, so a missing kwarg is a missing hook and the outside write
+    below is allowed."""
+    from scripts.autoresearch import bench_runner_sdk as SDK
+
+    root = tmp_path / "writes"
+    root.mkdir()
+    _trace, options = _drive_real_run_trial(monkeypatch, tmp_path, writes_into=root)
+
+    outside = _verdict(options, "Write", {"file_path": str(tmp_path / "outside.md"),
+                                          "content": "x"})
+    assert outside.get("permissionDecision") == "deny", (
+        f"a Write outside the named root was not refused by the built registry: {outside}")
+    assert str(root.resolve()) in outside.get("permissionDecisionReason", ""), outside
+    assert _verdict(options, "Write", {"file_path": str(root / "inside.md"),
+                                       "content": "x"}) == {}, (
+        "the bound is deny-outside, not a blanket write ban")
+
+    # An extra deny, never a permission: every state-changing name is still off
+    # the trial's surface with the scope armed.
+    missing = sorted(set(SDK.STATEFUL_TOOLS) - set(options.disallowed_tools))
+    assert not missing, f"arming the scope dropped name denials: {missing}"
+
+
+def test_run_trial_without_a_root_arms_no_write_scope(monkeypatch, tmp_path):
+    """The control for the node above: the same outside write is NOT refused by
+    a trial that named no root, so the deny seen there is the scope hook's and
+    not some other hook's opinion of the path."""
+    _trace, options = _drive_real_run_trial(monkeypatch, tmp_path)
+    assert _verdict(options, "Write", {"file_path": str(tmp_path / "outside.md"),
+                                       "content": "x"}) == {}
+
+
+def test_the_capture_record_names_the_root_its_trials_denied_against(monkeypatch, tmp_path):
+    """Clause 4: `capture.yaml`'s `writes_into` is read back and tried against
+    the registry of a trial that capture ran. A record naming a bound is only a
+    claim until a hook armed on that trial refuses a write outside it."""
+    from scripts.autoresearch import bench_runner_sdk as SDK
+
+    cfg = _cfg(tmp_path)
+    root = tmp_path / "capture-writes"
+    root.mkdir()
+    built: list = []
+
+    async def _keep_the_options(messages, options, trace):
+        built.append(options)
+        trace["final_text"] = "done"
+
+    monkeypatch.setattr(SDK, "require_tool_sandbox", _no_sandbox_probe)
+    monkeypatch.setattr(SDK, "_consume", _keep_the_options)
+    (tmp_path / "overlay").mkdir()
+    monkeypatch.setattr("scripts.autoresearch.variant_sandbox.materialize_baseline",
+                        lambda cfg: ("BASELINE_TEST", tmp_path / "overlay"))
+
+    CAP.capture_round(cfg=cfg, run_id=RUN_ID,
+                      runner=CAP.sdk_runner(cfg, writes_into=root), writes_into=root)
+    record = yaml.safe_load(
+        (CAP.capture_dir(cfg, RUN_ID) / B.CAPTURE_META_FILENAME).read_text())
+    recorded = record["writes_into"]
+    assert recorded == str(root)
+    assert built, "no trial reached the loop, so no registry was built to ask"
+    for options in built:
+        denied = _verdict(options, "Write",
+                          {"file_path": str(Path(recorded).parent / "outside.md"),
+                           "content": "x"})
+        assert denied.get("permissionDecision") == "deny", denied
+        assert str(Path(recorded).resolve()) in denied.get("permissionDecisionReason", "")
+        assert _verdict(options, "Write", {"file_path": str(Path(recorded) / "in.md"),
+                                           "content": "x"}) == {}
+
+
 # ── #1843 clause 4: the manifest declares scope, and the set identity holds ──
 
 def test_every_shipped_scenario_declares_whether_a_capture_can_reach_it():
