@@ -95,10 +95,31 @@ git grep -n "GATE_ARM_POINTS\|def stale_gate_arm_points\|def find_unarmed_dispat
   -- app/harness/outbound_content.py
 ```
 
-That last block names the one **machine-checked** half of this table: the arm
+That last block names the first **machine-checked** half of this table: the arm
 points of the outbound gate are derived from the tree and re-measured on every
-suite run. It covers one guard and runs only from tests (#1963) — which is why
-this page is prose and why the prose has to be re-run by hand.
+suite run. It covers one guard and runs only from tests.
+
+For the matrix itself, run the derivation rather than the grep above (#1963):
+
+```
+python scripts/maintenance/guard_arm_matrix.py
+```
+
+It prints one row per production dispatch path — the same denominator the gate's
+roster is measured against — and the hook-installed guards each one can arm:
+`safety`, `policy`, `outbound_content`, `action_review`
+(`app/harness/guard_arm_matrix.py`). An arm is read from the installer's **body**,
+so `app/routers/turn_options.py` shows the outbound gate although it never names
+it, and a path that calls only the floor is credited with the floor and what the
+floor's body arms, nothing more. On 2026-10-01 it printed twelve rows: the
+interactive builder arming all four; `builtin_task.py` three (no reviewer);
+`app/autonomy.py` and `workers/sources/_common.py` the policy hook and the gate
+and **no** safety hook, which is what §6's dispatch floor is for; the eval and
+bench drivers the floor and the gate. A cell means the path *can* arm the guard —
+`install_policy_hook` still needs a grant scope and the reviewer a worker stream
+turn. The three guards that refuse from inside a tool handler are not
+hook-installed and are not in it. The prose above is still hand-written; this is
+what to check it against.
 
 ---
 

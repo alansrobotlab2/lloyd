@@ -1960,3 +1960,31 @@ def test_guard_coverage_tabulates_every_file_gated_flag_with_both_edges():
         assert f"`{created}`" in cells[2], f"{flag}: create edge names no {created}"
         assert f"`{removed}`" in cells[3], f"{flag}: remove edge names no {removed}"
     assert "rollback_requested" in Path(S.__file__).read_text(encoding="utf-8")
+
+
+# ── #1963: the guard-by-path section points at the derivation, and agrees ────
+
+def test_guard_coverage_names_the_matrix_script_and_states_what_it_prints():
+    """The page links the derived set from the section a person reads, beside
+    the one-gate citation — and the facts it quotes from the script's output are
+    re-derived here, so the paragraph cannot outlive the tree."""
+    from app.harness import guard_arm_matrix as G
+
+    text = (ARCH / "guard-coverage.md").read_text(encoding="utf-8")
+    start = text.index("## The guards, and where each one is wired")
+    section = text[start:text.index("\n## ", start + 1)]
+    assert "python scripts/maintenance/guard_arm_matrix.py" in section
+    assert (ROOT / "scripts" / "maintenance" / "guard_arm_matrix.py").is_file()
+    assert "def stale_gate_arm_points" in section, "the one-gate citation stays"
+    assert section.index("def stale_gate_arm_points") < section.index(
+        "scripts/maintenance/guard_arm_matrix.py")
+    for guard in G.GUARDS:
+        assert f"`{guard}`" in section, f"the section does not name {guard}"
+
+    matrix = G.guard_arm_matrix(ROOT)
+    assert all(matrix["app/routers/turn_options.py"].values())
+    for rel in ("app/autonomy.py", "workers/sources/_common.py"):
+        assert matrix[rel] == {"safety": False, "policy": True,
+                               "outbound_content": True, "action_review": False}, (
+            f"{rel} no longer arms what the page says it arms: {matrix[rel]}")
+    assert matrix["agent_mcp/builtin_task.py"]["action_review"] is False
