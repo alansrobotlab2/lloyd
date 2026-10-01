@@ -545,3 +545,45 @@ def test_a_norm1000_click_lands_where_the_pixel_click_does(desk, lease):
     asyncio.run(d.act({"action": "click", "coordinate": [100, 100]}, "s"))
     assert state["moves"][-1] == pixel_target
 
+
+
+_MISS: dict[str, str] = {}          # the registry miss: every lookup is None
+_CHAT_PARENT = {"task:of-chat-1": "20260930_101010_ivabcd"}
+
+
+@pytest.mark.parametrize("name,parents", [
+    ("desktop_capture", _MISS), ("desktop_act", _MISS),
+])
+def test_an_unresolvable_task_session_is_refused_desktop(name, parents,
+                                                         monkeypatch):
+    """#1961: a subagent whose parent row is missing gets the desktop nothing.
+
+    The table above only feeds it ids whose shape is decidable without a parent
+    (a worker id, an autonomy id, `""`), so the one row that used to walk through
+    is the one this item is about: a `task:*` id whose `parent_scope()` lookup
+    finds nothing. `_safety_parent_of` returns None for it, the old boolean read
+    that as chat, and the gate opened.
+
+    `desktop_capture` is the sharper of the pair: it is annotated read-only and
+    takes no lease, so this gate is the single thing between an unattended turn
+    and a screenshot of Alan's screen. `desktop_act` at least has a lease behind
+    it, and both are asserted here.
+    """
+    import agent_mcp.main as M
+
+    monkeypatch.setattr(M, "_safety_parent_of", parents.get)
+    res = _call(name, {"instruction": "look"}, "task:zzz")
+    assert _is_err(res), f"an unresolvable task:* session was handed {name}: {_text(res)!r}"
+    assert "only available in a person's chat" in _text(res), _text(res)
+
+
+def test_a_task_session_of_a_chat_keeps_desktop_access(monkeypatch):
+    """The half that must not break: a subagent Alan started from his own
+    conversation is attended through its parent, and refusing it would be the
+    false positive the resolver's fail-open was written to avoid."""
+    import agent_mcp.main as M
+
+    monkeypatch.setattr(M, "_safety_parent_of", _CHAT_PARENT.get)
+    res = _call("desktop_capture", {}, "task:of-chat-1")
+    assert "only available in a person's chat" not in _text(res), (
+        f"a chat session's own subagent was refused the desktop: {_text(res)!r}")

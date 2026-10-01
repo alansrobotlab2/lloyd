@@ -31,8 +31,23 @@ Read-only forms stay allowed — `supervisorctl status`, `systemctl status`,
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Callable
+
+logger = logging.getLogger("lloyd-harness-service-control")
+
+#: The three answers `classify_session` gives. A `task:*` id is NOT a chat id, so
+#: a resolver that cannot say who its parent is has not established that it is
+#: attended; collapsing that to "attended" is what let one registry miss grant a
+#: worker subagent the chat surface (#1961).
+ATTENDED = "attended"
+BACKGROUND = "background"
+UNKNOWN = "unknown"
+
+#: One shared spelling for the miss, because four guards ask the same question and
+#: a per-guard wording would let a systematic miss look like four clean windows.
+MISS_EVENT = "guard_parent_unresolved"
 
 # The verbs that change a service's state. `status`, `tail`, `pid`, `maintail`
 # and the like are not here on purpose.
@@ -245,6 +260,66 @@ def is_background_session(session_id: str, *,
     return is_background_session_id(sid)
 
 
+def classify_session(session_id: str, *,
+                     parent_of: Callable[[str], str | None] | None = None,
+                     guard: str = "") -> str:
+    """`ATTENDED`, `BACKGROUND` or `UNKNOWN` for this session id (#1961).
+
+    The three-way form exists because one boolean was handed to four guards that
+    want opposite things on a miss. `is_background_session` answers "is this an
+    unattended turn", and its False covers both "a person is reading this" and "I
+    could not tell" — so a `task:*` id whose parent does not resolve read as a
+    chat session and was handed the desktop surface, the engine-restart pass, and
+    an unattended install-provenance bypass, all from one registry row.
+
+    `UNKNOWN` is the third answer and it is only ever a `task:*` id: a `task:`
+    session is minted by the Task tool and is never the attended surface, so when
+    no resolver was supplied, the resolver returns None, it returns the id itself
+    (a self-parent is not an ancestry), or it raises, the guard picks its own side
+    instead of inheriting the fail-open. A non-`task:` id resolves from its own
+    shape and can therefore never be unknown.
+
+    `guard` names the caller in the miss record, so a systematic miss is
+    attributable rather than reading as four clean windows.
+    """
+    sid = str(session_id or "")
+    if not sid:
+        # No id at all is not a session anyone can attribute privileges to, and
+        # every call site already treats an empty id as "no guard applies".
+        return ATTENDED
+    if not sid.startswith("task:"):
+        return BACKGROUND if is_background_session_id(sid) else ATTENDED
+    if parent_of is None:
+        _record_miss(sid, guard, "no resolver supplied")
+        return UNKNOWN
+    try:
+        parent = parent_of(sid)
+    except Exception as exc:  # noqa: BLE001 - a raising resolver is a miss
+        _record_miss(sid, guard, f"resolver raised {type(exc).__name__}")
+        return UNKNOWN
+    if not parent or parent == sid:
+        _record_miss(sid, guard, "resolver returned no parent" if not parent
+                     else "resolver returned the id itself")
+        return UNKNOWN
+    return classify_session(parent, parent_of=parent_of, guard=guard)
+
+
+def _record_miss(session_id: str, guard: str, why: str) -> None:
+    """Say out loud that a guard could not classify a subagent.
+
+    Silent today, which is the epistemic half of the bug: a resolver that misses
+    on every dispatch looks exactly like a window with no misses. One WARNING per
+    lookup, naming the id, the guard that asked and why the resolution failed —
+    countable from `server.err` with
+    `grep -c guard_parent_unresolved`, and the reason is in the same line so a
+    `no resolver supplied` (a call site that forgot to pass one) is not confused
+    with a registry eviction.
+    """
+    logger.warning("[guards] %s session=%s guard=%s: %s — the guard has to pick "
+                   "its own side; a desktop or service-control guard refuses",
+                   MISS_EVENT, session_id, guard or "unspecified", why)
+
+
 def find_service_control(command: str, *, _depth: int = 0) -> str | None:
     """The first service-control form in `command`, as a short label, or None.
 
@@ -274,11 +349,18 @@ def check_service_control(command: str, session_id: str | None, *,
                           parent_of: Callable[[str], str | None] | None = None) -> str | None:
     """Reason to refuse `command` for `session_id`, or None.
 
-    Only a background session is refused, and only for a state-changing
-    service verb. A chat session is never refused here: a person restarting
-    the stack from Mission Control is the intended operator.
+    A background session is refused, and only for a state-changing service verb.
+    A chat session is never refused here: a person restarting the stack from
+    Mission Control is the intended operator.
+
+    An `UNKNOWN` `task:*` id is refused too (#1961). The rule exists to stop an
+    unattended turn killing the engine, and a subagent whose parent row cannot be
+    read is not the attended surface — it is a `Task:` child, which is only ever
+    reached from a worker, a schedule or a pool. Attended is a claim this function
+    now requires evidence for, not a default it grants on a miss.
     """
-    if not session_id or not is_background_session(session_id, parent_of=parent_of):
+    if not session_id or classify_session(session_id, parent_of=parent_of,
+                                          guard="service_control") is ATTENDED:
         return None
     label = find_service_control(command)
     if not label:

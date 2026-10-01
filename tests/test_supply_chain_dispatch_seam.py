@@ -214,3 +214,83 @@ def test_the_same_name_older_than_the_threshold_is_allowed_at_the_boundary(monke
     monkeypatch.setattr(supply_chain.PypiRegistry, "lookup", fake_lookup)
     monkeypatch.delenv(supply_chain.OSV_API_URL_ENV, raising=False)
     assert _verdict("pip install brandnewpkg", BACKGROUND) is None
+
+
+# ── #1961: an unresolvable `task:*` id is not attended ───────────────────────
+#
+# `check_install_provenance` returns at its attended branch BEFORE the registry is
+# consulted and before a journal row is written, so what `_attended_by_session_id`
+# decides is not a label — it is whether the lookup happens at all. The helper
+# used to name this exact miss in its own comment ("would read as 'attended' and
+# hand every subagent a pass") and then close only the `parent_of is None` case,
+# leaving the reachable one open: a resolver that was supplied and returned
+# nothing. Both halves below are measured on the thing the branch controls —
+# whether a lookup was paid — rather than on a string.
+
+NO_PARENTS: dict[str, str] = {}
+CHAT_PARENTS = {"task:of-chat-1": "20260924_060000_ivabcd"}
+
+
+def _counting_lookup(monkeypatch, first: dt.datetime):
+    """Replace the registry with one that counts its own calls, so "pays no
+    lookup" is a measured thing and not an inference from a missing verdict."""
+    calls: list[str] = []
+
+    def fake_lookup(self, name):  # noqa: ANN001
+        calls.append(name)
+        return supply_chain.RegistryFacts(
+            name=name, exists=True, first_release=first, release_count=144,
+            source="pypi.org", observed_at=NOW)
+
+    monkeypatch.setattr(supply_chain.PypiRegistry, "lookup", fake_lookup)
+    monkeypatch.delenv(supply_chain.OSV_API_URL_ENV, raising=False)
+    return calls
+
+
+def test_an_unresolvable_task_session_reaches_the_registry_and_is_denied(
+        fresh_squat):
+    """A `task:*` id whose parent cannot be resolved is unattended, so the
+    squat-shaped install is refused exactly as it is for a worker."""
+    out = _verdict("pip install graphy", "task:deadbeef",
+                   parent_of=NO_PARENTS.get)
+    assert out is not None, (
+        "a subagent with no resolvable parent got the attended override, so the "
+        "registry was never consulted and nothing was journalled: this is the "
+        "bypass _attended_by_session_id's own comment named")
+    label, excerpt = out
+    assert label.startswith("install provenance:") and "graphy" in label, label
+
+
+def test_an_unresolvable_task_session_gets_a_journal_row_where_a_chat_child_gets_none(
+        monkeypatch):
+    """The journal half, and the cost half.
+
+    Unknown: the lookup is paid and the projection is non-empty — a decision
+    exists, so a row exists. A `task:*` child of a chat id: attended, returns
+    early, pays NO lookup at all, which is the cheap override an interactive turn
+    keeps (an attended Bash call must not take a network round trip for a decision
+    a person is present to make). Asserting the zero beside the non-zero is what
+    makes the first assertion mean "unattended" rather than "everything looks up".
+    """
+    calls = _counting_lookup(monkeypatch, dt.datetime(2018, 9, 5,
+                                                      tzinfo=dt.timezone.utc))
+
+    unknown = supply_chain.check_install_provenance(
+        "pip install brandnewpkg", "task:deadbeef", parent_of=NO_PARENTS.get,
+        dependency_set={}, now=NOW)
+    assert calls == ["brandnewpkg"], (
+        f"an unresolvable subagent paid {calls} — the registry check is what the "
+        "attended branch skips, so a miss must not skip it")
+    assert supply_chain.journal_entries(unknown), (
+        "the unattended decision wrote no journal entry, so the bypass would "
+        "still leave no trace once it was fixed")
+
+    calls.clear()
+    attended = supply_chain.check_install_provenance(
+        "pip install brandnewpkg", "task:of-chat-1",
+        parent_of=CHAT_PARENTS.get, dependency_set={}, now=NOW)
+    assert calls == [], (
+        f"a chat session's own subagent took {calls} to install: the cheap "
+        "attended override must survive the fix, or every chat turn pays a "
+        "registry round trip")
+    assert attended.refusal is None and not supply_chain.journal_entries(attended)

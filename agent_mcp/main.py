@@ -474,12 +474,12 @@ def _effect_refused(name: str, effect: "_tool_effects.Claim",
 
 def _safety_parent_of(session_id: str) -> str | None:
     """A `task:*` subagent's parent session, for the service-control rule:
-    a subagent of a worker turn is a worker turn."""
+    a subagent of a worker turn is a worker turn. None is a MISS, not a pass."""
     try:
         from agent_mcp import _subagent_registry
         parent = _subagent_registry.parent_scope(session_id)
         return parent[0] if parent else None
-    except Exception:  # noqa: BLE001 — unresolvable means not refused
+    except Exception:  # noqa: BLE001 — a raising resolver is a miss, not a pass
         return None
 
 
@@ -539,14 +539,14 @@ async def call_tool(name: str, arguments: dict, meta: Any = None):
             return _refused_call(name, f"harness safety: blocked {label!r} on {excerpt!r}",
                                  guard="safety", session_id=sid)
 
-    # 2b. Desktop computer use is for a person's chat only. The screen is
-    #     Alan's private desktop and the input lands under Alan's hands, so a
-    #     worker, an autonomy task, a bench or eval trial, or a subagent of
-    #     one may neither look at it nor touch it — refused here, where every
-    #     caller passes, not in a hook a caller may not have installed.
+    # 2b. Desktop computer use is for a person's chat only. The screen is Alan's
+    #     private desktop and the input lands under Alan's hands, so a worker, an
+    #     autonomy task, a bench or eval trial, or a subagent of one may neither
+    #     look at it nor touch it — refused here, where every caller passes. And
+    #     `not ATTENDED`, not `is BACKGROUND`: a miss is not a person (#1961).
     if name.startswith("desktop_"):
-        from app.harness.service_control import is_background_session
-        if sandboxed or not sid or is_background_session(sid, parent_of=_safety_parent_of):
+        from app.harness.service_control import ATTENDED, classify_session
+        if sandboxed or not sid or classify_session(sid, parent_of=_safety_parent_of, guard="desktop") is not ATTENDED:
             logger.warning("desktop: refused %s for non-chat session %r", name, sid)
             return _refused_call(
                 name, "desktop computer use is only available in a person's chat "

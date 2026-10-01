@@ -257,15 +257,27 @@ git grep -c '^    ("' -- agent_mcp/_injection_probe.py      # the family count
    what will not be caught.
 5. **Background sessions only.** A `task:` child of one *is* probed: the single
    production call site always hands a resolver in
-   (`agent_mcp/main.py:706`, `is_background_session(sid, parent_of=_safety_parent_of)`),
+   (`agent_mcp/main.py`, `background = is_background_session(sid,
+   parent_of=_safety_parent_of)` in the injection-probe block),
    so the helper classifies the subagent by its parent. The exclusion is the
-   **miss**, not the missing argument — `_safety_parent_of` returns `None` when
-   `agent_mcp/_subagent_registry` cannot resolve a parent, under the comment
-   "unresolvable means not refused", and the child is then neither background nor
-   worker. That one boolean also gates the dispatch `Bash` service-control refusal
-   (`agent_mcp/main.py:534`) and the desktop refusal (`:549`), so a registry miss
-   hands a worker's subagent chat-session privileges and stops recording its
-   fetched text at the same time (#1961).
+   **miss**, not the missing argument: a `task:` id whose parent
+   `agent_mcp/_subagent_registry` cannot resolve stays `False` there, so its
+   fetched text is still not recorded — the miss costs a shadow row and nothing
+   more, which is the one fail-open this guard can afford.
+   The other four no longer share that answer (#1961). The desktop refusal
+   (`agent_mcp/main.py`, the `name.startswith("desktop_")` branch) and the dispatch
+   `Bash` service-control refusal (the `if name == "Bash"` branch,
+   `check_bash_command`) now key on `service_control.classify_session(...)`, which
+   answers three ways —
+   `attended`, `background`, `unknown` — and an unresolvable `task:` id is
+   `unknown`, which refuses: `unknown` is not evidence of a person, and
+   `desktop_capture` has no lease behind it. Install provenance
+   (`app/harness/supply_chain.py`, `_attended_by_session_id`) treats the same miss
+   as unattended, because its attended branch returns before the registry is read
+   and before any journal row exists. Every miss logs one
+   `guard_parent_unresolved` warning naming the session id, the guard that asked
+   and why, so a systematic miss is countable instead of reading as a clean
+   window.
 
 ```
 git grep -n "def _safety_parent_of" -- agent_mcp/main.py

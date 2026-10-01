@@ -1191,19 +1191,23 @@ def _attended_by_session_id(session_id: str | None, *,
     the unattended path the item is about. No session id is *not* attended: #1053
     established that treating an absent id as "not sandboxed" is itself the
     bypass.
+
+    Nor is an unresolvable one attended (#1961). This function's own comment used
+    to name the miss as the bypass and then close only the `parent_of is None`
+    case, so a resolver that was supplied and still returned nothing read as
+    attended — and `check_install_provenance` returns at its attended branch
+    before the registry is consulted and before any journal row is written, so
+    that bypass left no trace at all. Attended is now a claim that needs evidence:
+    `classify_session` says so, and an unresolvable `task:*` id pays the lookup
+    like any other unattended turn.
     """
-    from app.harness.service_control import is_background_session
+    from app.harness.service_control import ATTENDED, classify_session
 
     sid = str(session_id or "")
     if not sid:
         return False
-    if sid.startswith("task:"):
-        # `is_background_session` needs a resolver to classify a subagent; with
-        # none it says False, which would read as "attended" and hand every
-        # subagent a pass. Absent a resolver, judge it unattended.
-        if parent_of is None:
-            return False
-    return not is_background_session(sid, parent_of=parent_of)
+    return classify_session(sid, parent_of=parent_of,
+                            guard="install_provenance") is ATTENDED
 
 
 # ---------------------------------------------------------------------------
