@@ -22,6 +22,7 @@ writers beside it), so the unparsed-YAML guard and the activity log hold.
 
 from __future__ import annotations
 
+import string
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -182,20 +183,77 @@ def close_item(path: Path, why: str) -> bool:
     return True
 
 
+# The cheap first test, NOT the guard: the words one incident produced (#1772 on
+# 2026-09-28, `9b22b6c2` "a placeholder follow-up is never filed"), kept because
+# it is free and already right about those words. A denylist cannot close this
+# property — #1932 arrived 2026-09-30 named `ignore` with the body `ignore`, and
+# no list of stand-in words ever finishes, because the corpus is whatever the
+# model next types into an optional field. What closes it is shape, below.
 _PLACEHOLDER_NAMES = frozenset({"placeholder", "todo", "tbd", "follow-up", "follow up",
                                 "untitled", "none", "n/a", "name"})
 
+# A body shorter than this with no sentence terminator in it is a token standing
+# in for an instruction, not one. The margin is measured, not guessed. The job's
+# own prompt (`workers/sources/owed_check.py:117-119`) asks for a body that "says
+# what to change, why, and how to check it (at most six checkable clauses)", and
+# the whole live population was replayed through this predicate on 2026-10-01: of
+# the 142 backlog files carrying a `Filed by owed-check from #N's owed entry:`
+# trailer, each replayed with its own title and the body as the model wrote it
+# (trailer and `# title` heading stripped), 140 are kept and exactly 2 are
+# refused — `#1772 Placeholder` (16 characters) and `#1932 ignore` (6) — while the
+# shortest KEPT body is 53 characters (`#1915`, which also carries a full stop, so
+# both halves of the conjunction pass it). The rule stays a conjunction because
+# that is what buys the margin in both directions: a length-only floor set high
+# enough to catch a lazy one-liner would have eaten #1915's 53-character real
+# follow-up, and a terminator-only rule would refuse any real instruction the
+# model happens to write as a bare clause.
+MIN_INSTRUCTION_CHARS = 40
+_SENTENCE_TERMINATORS = ".!?"
+# Surrounding punctuation is decoration on an answer, so the same-token test
+# strips it before comparing: `" IGNORE "` and `"Ignore."` are the same word.
+_EDGE_PUNCT = string.punctuation + "\u2014\u2013\u2026\u2018\u2019\u201c\u201d"
+
+
+def _bare(value: Any) -> str:
+    """A name or body reduced to its answer: lower-cased, whitespace collapsed,
+    stripped of the punctuation wrapped around it."""
+    return " ".join(str(value or "").split()).lower().strip(_EDGE_PUNCT)
+
 
 def is_real_follow_up(follow: dict) -> bool:
-    """A follow-up worth filing: a name that is not a stand-in, and a body.
+    """A follow-up worth filing: an instruction, not a stand-in token.
+
     The schema's `follow_up` object invites the model to fill it even for a
-    ruling that needs none; on 2026-09-28 that filed #1772, named
-    "Placeholder" with the body "Placeholder body"."""
+    ruling that needs none; on 2026-09-28 that filed #1772, named "Placeholder"
+    with the body "Placeholder body", and on 2026-09-30 it filed #1932 named
+    "ignore". Three tests, cheapest first, and the last two are structural:
+
+    1. the denylist above — right about the words it names, open-ended as a
+       mechanism, which is why #1933 stopped relying on it;
+    2. the same-token test — name and body that reduce (`_bare`) to the SAME
+       SINGLE WORD mean the model answered one blank twice. "ignore" / "Ignore."
+       is that case, and it is refused here rather than by test 3: the body
+       carries a full stop, so its shape looks like a sentence and only its
+       equality with the name gives it away;
+    3. the fragment test — a body under MIN_INSTRUCTION_CHARS with no sentence
+       terminator anywhere in it ("nothing to do", "placeholder body") is a
+       fragment. Its subject is the shape of a non-sentence and nothing else: a
+       short body that does carry a terminator ("Do it.") passes this test on its
+       own, and neither test consults a vocabulary, so "Ignore the 3 stale rows."
+       files without anyone adding "ignore" to a list.
+    """
     name = _text(follow.get("name")).strip().strip(".").lower()
     body = str(follow.get("body") or "").strip().lower()
     if not name or name in _PLACEHOLDER_NAMES or "placeholder" in name:
         return False
-    return bool(body) and not body.startswith("placeholder") and body not in _PLACEHOLDER_NAMES
+    if not body or body.startswith("placeholder") or body in _PLACEHOLDER_NAMES:
+        return False
+    bare_name = _bare(name)
+    if bare_name and " " not in bare_name and bare_name == _bare(body):
+        return False
+    if len(body) < MIN_INSTRUCTION_CHARS and not any(c in body for c in _SENTENCE_TERMINATORS):
+        return False
+    return True
 
 
 def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_id: int,

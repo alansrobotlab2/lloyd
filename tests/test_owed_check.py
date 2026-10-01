@@ -130,26 +130,105 @@ def test_work_files_a_draft_item_on_lloyd_and_links_it(isolated):
 
 
 def test_a_placeholder_follow_up_is_never_filed(isolated):
-    """#1772 was filed as "Placeholder" / "Placeholder body" beside a ruling
-    that needed no follow-up. A ruling still records; `work` stays owed."""
-    before = sorted(isolated.glob("*.md"))
-    p, entries = _owing(isolated, 22, ["raise max_tokens?", "fix the doc"])
-    fake = {"name": "Placeholder", "body": "Placeholder body"}
+    """The stand-ins owed-check has actually produced are never filed; an
+    instruction-shaped follow-up still is.
+
+    #1772 was filed as "Placeholder" / "Placeholder body" on 2026-09-28 beside a
+    ruling that needed no follow-up, and #1932 as "ignore" / "ignore" on
+    2026-09-30 — a word no denylist held, which is why the guard is structural now
+    (`owed.is_real_follow_up`). All five forms are refused here: the two
+    "Placeholder"/"TODO" ones by the word list, "ignore"/"IGNORE" by the
+    name-equals-body test, "nothing to do" by the fragment test. A ruling still
+    records, `work` stays owed, and no file appears — then the same pass on a
+    second item, with a body that is an instruction, files exactly one draft.
+    """
+    before = sorted(p.name for p in isolated.glob("*.md"))
+    stand_ins = [{"name": "Placeholder", "body": "Placeholder body"},
+                 {"name": "TODO", "body": ""},
+                 {"name": "ignore", "body": "ignore"},
+                 {"name": " IGNORE ", "body": "Ignore."},
+                 {"name": "skip", "body": "nothing to do"}]
+    p, entries = _owing(isolated, 22, ["raise max_tokens?"] + [f"owed {i}" for i in range(1, 6)])
     out = O.apply_verdict(p, entries, [
-        {"n": 1, "outcome": "ruling", "evidence": "x", "ruling": "no", "follow_up": fake},
-        {"n": 2, "outcome": "work", "evidence": "y", "follow_up": {"name": "TODO", "body": ""}},
-    ], item_id=22)
-    assert out["filed"] == [] and len(sorted(isolated.glob("*.md"))) == len(before) + 1
+        {"n": 1, "outcome": "ruling", "evidence": "x", "ruling": "no", "follow_up": stand_ins[0]},
+    ] + [{"n": n, "outcome": "work", "evidence": "y", "follow_up": stand_ins[n - 2]}
+         for n in range(2, 7)], item_id=22)
+    assert out["filed"] == [], f"a stand-in form was filed: {out['filed']}"
+    assert sorted(p.name for p in isolated.glob("*.md")) == before + [p.name], \
+        "a refused stand-in still created a backlog file"
     fm = fm_of(p)
-    assert fm["owed_settled"][0]["outcome"] == "ruling"
-    assert [e["what"] for e in O.entries_of(fm)] == ["fix the doc"]
+    assert fm["owed_settled"][0]["outcome"] == "ruling", "the ruling is still recorded"
+    assert [e["what"] for e in O.entries_of(fm)] == [f"owed {i}" for i in range(1, 6)], \
+        "unfiled work stays owed"
+    for follow in stand_ins:
+        assert not O.is_real_follow_up(follow), f"the guard let through {follow}"
+
+    # The same pass, one body that is an instruction: it files, and files once.
+    p2, entries2 = _owing(isolated, 23, ["the skill doc still says the old thing"])
+    out2 = O.apply_verdict(p2, entries2, [
+        {"n": 1, "outcome": "work", "evidence": "SKILL.md:31",
+         "follow_up": {"name": "Fix SKILL.md:31", "body": "Say what the job does now."}}],
+        item_id=23)
+    assert out2["filed"] and len(out2["filed"]) == 1, out2["filed"]
     assert O.is_real_follow_up({"name": "Fix SKILL.md:31", "body": "Say what the job does now."})
+
+
+def test_a_name_and_a_body_that_are_the_same_word_are_refused():
+    """Answering one blank twice is a stand-in, whatever the word is.
+
+    #1932 arrived as `ignore` / `ignore`: not on any denylist, and no list of
+    stand-in words ends, because the corpus is whatever the model next types into
+    an optional field (`owed._bare` compares the two answers with surrounding
+    punctuation stripped, so `" IGNORE "` and `"Ignore."` are the same word too).
+    `"Ignore."` is the case that proves this test does work the fragment test does
+    not: that body carries a full stop, so its shape looks like a sentence, and
+    only its equality with the name gives it away. The controls show no vocabulary
+    is needed either side: a body that begins with the word "Ignore" and says
+    something is filed, and a one-word name with a real body is filed.
+    """
+    assert not O.is_real_follow_up({"name": "ignore", "body": "ignore"})
+    assert not O.is_real_follow_up({"name": " IGNORE ", "body": "Ignore."})
+    assert not O.is_real_follow_up({"name": "unchanged", "body": "Unchanged"})
+
+    assert O.is_real_follow_up({"name": "Triage the sweep",
+                                "body": "Ignore the 3 stale rows."})
+    assert O.is_real_follow_up({"name": "Rebase",
+                                "body": "Rebase the fixture onto the current row count."})
+
+
+def test_a_body_that_is_a_fragment_rather_than_a_sentence_is_refused():
+    """#1933's second shape test, and the half of it that must NOT fire.
+
+    `skip` / `nothing to do` was filed-adjacent junk: 13 characters with no
+    sentence terminator anywhere in it. The conjunction matters as much as the
+    rule, so both halves are pinned: a short body that does carry a terminator
+    passes this test on its own ("Do it." is an instruction, however terse), and a
+    body at or over `MIN_INSTRUCTION_CHARS` passes on length alone — the live
+    replay in `owed.py` found a real 53-character follow-up (`#1915`) that only a
+    conjunction leaves intact.
+    """
+    assert O.MIN_INSTRUCTION_CHARS == 40
+    assert not O.is_real_follow_up({"name": "skip", "body": "nothing to do"})
+    assert not O.is_real_follow_up({"name": "Fix the doc", "body": "see the note"})
+
+    assert O.is_real_follow_up({"name": "Skip the check", "body": "Do it."}), \
+        "a terminator-bearing body is not refused by this test on its own"
+    over_floor = "Rename the sweep timer to match the job id"
+    assert len(over_floor) >= O.MIN_INSTRUCTION_CHARS and "." not in over_floor
+    assert O.is_real_follow_up({"name": "Rename the timer", "body": over_floor}), \
+        "the rule is length AND no-terminator, not length alone"
+    under_floor = "Rename the sweep timer to match its"
+    assert len(under_floor) < O.MIN_INSTRUCTION_CHARS
+    assert not O.is_real_follow_up({"name": "Rename the timer", "body": under_floor})
 
 
 def test_follow_ups_past_the_cap_stay_owed(isolated):
     p, entries = _owing(isolated, 21, ["one", "two"])
+    # The body is instruction-shaped on purpose: a stand-in here would be refused
+    # by the guard and the node would test the wrong refusal.
     answers = [{"n": n, "outcome": "work", "evidence": "x",
-                "follow_up": {"name": f"work {n}", "body": "b"}} for n in (1, 2)]
+                "follow_up": {"name": f"work {n}", "body": "Do the thing it names."}}
+               for n in (1, 2)]
     out = O.apply_verdict(p, entries, answers, item_id=21, spawn_cap=1)
     assert len(out["filed"]) == 1
     assert [e["what"] for e in O.entries_of(fm_of(p))] == ["two"]
