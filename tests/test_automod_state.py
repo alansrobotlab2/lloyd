@@ -395,3 +395,59 @@ def test_a_lock_whose_holder_died_is_available_again(isolated_state):
     subprocess.run([sys.executable, "-c", code], check=True, capture_output=True)
     with S.Lock(owner="survivor"):
         pass
+
+
+# ── #2024: BROKEN's clear has one ledgered route, and `round recover` uses it ──
+
+def test_clearing_broken_appends_a_row_naming_the_clearer(isolated_state):
+    S.BROKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+    S.BROKEN_PATH.write_text("escalated: probe dead", encoding="utf-8")
+    assert S.clear_broken(by="alan, after reading the journal") is True
+    assert not S.is_broken()
+    rows = [r for r in _ledger_rows(S.LEDGER_PATH) if r.get("event") == "broken_cleared"]
+    assert len(rows) == 1
+    assert rows[0]["by"] == "alan, after reading the journal"
+    assert rows[0]["path"] == str(S.BROKEN_PATH)
+    with pytest.raises(TypeError):
+        S.clear_broken()          # an anonymous clear is a TypeError
+
+
+def test_clearing_an_unset_broken_flag_records_no_transition(isolated_state):
+    assert S.clear_broken(by="anyone") is False
+    assert _ledger_rows(S.LEDGER_PATH) == []
+
+
+def test_recover_clears_broken_through_the_ledgered_route(isolated_state, monkeypatch):
+    """`recover` unlinked the flag itself; the only trace was the `cleared` list
+    inside an actor-less `recovered` row. It now goes through `clear_broken`,
+    with the same `--by` the halt clear carries, and no file in the tree
+    unlinks `BROKEN_PATH` anywhere else."""
+    import app.supervisor_client as SC
+    from scripts.automod import round as R
+
+    monkeypatch.setattr(SC, "start_process", lambda name: (True, "started"))
+    S.BROKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+    S.BROKEN_PATH.write_text("escalated: probe dead", encoding="utf-8")
+    monkeypatch.setattr(S, "ROLLBACK_REQUEST_PATH",
+                        S.BROKEN_PATH.parent / "rollback_request.json")
+    S.ROLLBACK_REQUEST_PATH.write_text("{}", encoding="utf-8")
+
+    out = R.recover(by="alan")
+
+    assert out["cleared"] == ["BROKEN"]
+    rows = _ledger_rows(S.LEDGER_PATH)
+    by_event = {r["event"]: r for r in rows}
+    assert by_event["broken_cleared"]["by"] == "alan"
+    assert by_event["rollback_request_cleared"]["by"] == "alan"
+    assert by_event["recovered"]["cleared"] == ["BROKEN"], "unchanged"
+
+    # And with nothing set, recover invents no transition.
+    S.LEDGER_PATH.unlink()
+    assert R.recover(by="alan")["cleared"] == []
+    assert [r["event"] for r in _ledger_rows(S.LEDGER_PATH)] == ["recovered"]
+
+    root = Path(R.__file__).resolve().parents[2]
+    unlinkers = [str(p.relative_to(root)) for d in ("scripts", "app", "workers", "agent_mcp")
+                 for p in (root / d).rglob("*.py")
+                 if "BROKEN_PATH.unlink" in p.read_text(encoding="utf-8")]
+    assert unlinkers == ["scripts/automod/state.py"], unlinkers

@@ -32,6 +32,7 @@ import fcntl
 import hashlib
 import json
 import os
+import sys
 import subprocess
 import threading
 import time
@@ -553,11 +554,51 @@ def read_rollback_request() -> dict | None:
     return read_json(ROLLBACK_REQUEST_PATH)
 
 
-def clear_rollback_request() -> None:
+# Spelled as `agent-services/guardian/gstate.py` spells it; pinned to that copy
+# by `tests/test_guardian_rollback.py`, for the reason given at HALT_SET_EVENT.
+ROLLBACK_CLEAR_EVENT = "rollback_request_cleared"
+
+
+def _caller(depth: int = 2) -> str:
+    """`<function> pid <n>` for the frame that called a ledgered edge — the
+    actor when the caller named none. Nine promoter sites take the lease; a row
+    that says which one is worth more than nine edited call sites."""
+    try:
+        name = sys._getframe(depth).f_code.co_name
+    except ValueError:
+        name = "unknown"
+    return f"{name} pid {os.getpid()}"
+
+
+def _record_edge(entry: dict) -> None:
+    """Append a safety-state edge, never raising. The lease is taken and
+    released around a restart — `clear_pause` from `finally` blocks — and the
+    file has already been written or removed by the time this runs, so a ledger
+    that cannot be written costs the row and a line on stderr, never the
+    landing. (`set_halted`/`clear_halted` raise; they are not on that path.)"""
+    try:
+        append_event(entry)
+    except OSError as exc:
+        print(f"automod state: could not ledger {entry.get('event')}: {exc}",
+              file=sys.stderr)
+
+
+def clear_rollback_request(*, by: str | None = None) -> bool:
+    """Drop the request, on the record (#2024). True if there was one.
+
+    `request_rollback` appends `rollback_requested`; this was a bare unlink, so
+    the ledger showed requests and never what became of them. The guardian's
+    own clear (`gstate.AutomodState.clear_rollback_request`) writes the same
+    event. A clear that removed nothing appends nothing.
+    """
     try:
         ROLLBACK_REQUEST_PATH.unlink()
     except FileNotFoundError:
-        pass
+        return False
+    _record_edge({"event": ROLLBACK_CLEAR_EVENT,
+                  "by": str(by or _caller())[:100],
+                  "path": str(ROLLBACK_REQUEST_PATH)})
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -622,6 +663,29 @@ def is_broken() -> bool:
     return BROKEN_PATH.exists()
 
 
+# Shared with the guardian, which is the only production writer of the flag
+# (`gstate.AutomodState.set_broken`, event `broken_set`); pinned to its copy.
+BROKEN_SET_EVENT = "broken_set"
+BROKEN_CLEAR_EVENT = "broken_cleared"
+
+
+def clear_broken(*, by: str) -> bool:
+    """Lift BROKEN and record who did — True only if the flag was set (#2024).
+
+    The one ledgered route, and the one `round recover` uses. `rm BROKEN` still
+    works and still leaves nothing, which is why the guardian's escalation
+    alert names `round recover` instead of the file. `by` is required for the
+    reason `clear_halted` gives.
+    """
+    try:
+        BROKEN_PATH.unlink()
+    except FileNotFoundError:
+        return False
+    _record_edge({"event": BROKEN_CLEAR_EVENT, "by": str(by)[:100],
+                  "path": str(BROKEN_PATH)})
+    return True
+
+
 def pause_remaining() -> float:
     """Seconds left on the maintenance lease, 0 if none/expired."""
     try:
@@ -631,25 +695,49 @@ def pause_remaining() -> float:
     return max(0.0, expiry - time.time())
 
 
-def set_pause(seconds: float, cap: float = 1800.0) -> float:
+PAUSE_SET_EVENT = "pause_set"
+PAUSE_CLEAR_EVENT = "pause_clear"
+
+
+def set_pause(seconds: float, cap: float = 1800.0, *,
+              by: str | None = None) -> float:
     """Take a maintenance lease so the guardian observes but does not act.
 
     Capped so a forgotten lease cannot disable the watchdog indefinitely. The
     cap the *guardian* enforces lives in its pinned snapshot, not here — this
     one is only a courtesy to callers.
+
+    Ledgered (#2024): the guardian only ever *reads* the lease
+    (`pause_remaining`), so a watchdog-suppressed interval had no record of
+    when it began, for how long, or who took it. One `pause_set` row per call:
+    `started_at`, `seconds` as granted after the cap, `expires_at`, the caller,
+    and `refreshed: true` when a live lease was already held, so the first row
+    of a run of refreshes stays the start. A lease that simply runs out leaves
+    no row — nothing unlinks an expired file, so there is no write to record;
+    `expires_at` on the set row is what dates it.
     """
     seconds = max(0.0, min(float(seconds), cap))
+    refreshed = pause_remaining() > 0.0
     PAUSE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    expiry = time.time() + seconds
+    started = time.time()
+    expiry = started + seconds
     PAUSE_PATH.write_text(str(expiry), encoding="utf-8")
+    _record_edge({"event": PAUSE_SET_EVENT, "by": str(by or _caller())[:100],
+                  "started_at": now_iso(), "seconds": seconds,
+                  "expires_at": expiry, "refreshed": refreshed,
+                  "path": str(PAUSE_PATH)})
     return expiry
 
 
-def clear_pause() -> None:
+def clear_pause(*, by: str | None = None) -> bool:
+    """Release the lease and record it — True only if a lease file was removed."""
     try:
         PAUSE_PATH.unlink()
     except FileNotFoundError:
-        pass
+        return False
+    _record_edge({"event": PAUSE_CLEAR_EVENT, "by": str(by or _caller())[:100],
+                  "path": str(PAUSE_PATH)})
+    return True
 
 
 def read_denied() -> dict:

@@ -434,6 +434,37 @@ by `tests/test_config_guard_modes.py`, `tests/test_action_review.py` and
   `grant_create` is banned on every non-interactive scope (`install_policy_hook`
   in the §matrix command above names the builders that install it).
 
+## File-gated safety state (#2024)
+
+The guards above judge a call. Four *files* in `~/.local/state/lloyd-automod/`
+gate the loop itself, and each is read with a bare `exists()` or a float parse —
+so the file says a state holds and only the ledger (`promotions.jsonl`) can say
+when it began, why, and who ended it. Every edge that is a write appends one
+row from the call that makes it. The guardian cannot import
+`scripts/automod/state.py`, so the event names are spelled on both sides and
+pinned to each other in `tests/test_guardian_rollback.py`.
+
+| Flag | Read by (what it gates) | Create edge → event | Remove edge → event |
+|---|---|---|---|
+| `BROKEN` | the guardian's tick (stands down), the promoter, the gate, `round start`, autocode's reaper, the dashboard | `gstate.AutomodState.set_broken`, from `guardian.py::escalate` → `broken_set` (`by`, `reason`, `already_broken`) | `state.clear_broken(by=…)`, the route `round recover` takes → `broken_cleared` (`by`) |
+| `pause` | the guardian's tick only — it observes and does not act while `pause_remaining` is positive, capped from its own snapshot | `state.set_pause`, the promoter's and `round restart`'s restart legs → `pause_set` (`by`, `started_at`, `seconds` after the cap, `expires_at`, `refreshed`) | `state.clear_pause` → `pause_clear` (`by`). Expiry is not an edge: nothing unlinks a lapsed lease, so `expires_at` on the set row is what dates it |
+| `promotions-halted` | the promoter, the gate, `round start`, autocode, the guardian's liveness predicate, the dashboard | `set_halted` on either surface (flap quarantine, vault tripwire) → `promotion_halt_set` | `clear_halted(by=…)` → `promotion_halt_clear` (#1365) |
+| `rollback_request.json` | the guardian's tick (performs it), the promoter and autocode (hold while one is pending) | `state.request_rollback` → `rollback_requested` | `clear_rollback_request` on either surface → `rollback_request_cleared` (`by`) |
+
+```
+git grep -n "_EVENT = " -- scripts/automod/state.py agent-services/guardian/gstate.py
+git grep -n "def set_broken\|def clear_broken\|def set_pause\|def clear_pause\|def clear_rollback_request" -- scripts/automod/state.py agent-services/guardian/gstate.py
+git grep -n "BROKEN_PATH.unlink\|PAUSE_PATH.unlink\|HALTED_PATH.unlink" -- scripts app workers agent_mcp
+```
+
+What this does not cover: a flag removed by hand (`rm BROKEN`) leaves no row —
+the escalation alert therefore names `round recover`, not the file — and the
+guardian does not attest a flag it finds missing. A row is fail-open on the
+edges that sit inside a restart or an escalation: the flag is written first and
+a ledger that cannot be appended costs the row, never the lease or the BROKEN
+state. Before 2026-10-01 only the halt pair and `rollback_requested` existed;
+the ledger of that date held 28,351 rows and none of the other five kinds.
+
 ## Keeping this page honest
 
 A new guard, a new eligible-session rule, or a new value in `GUARD_MODE_KEYS`

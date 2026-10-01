@@ -79,6 +79,22 @@ def read_events(ledger: Path, limit: int = 200) -> list[dict]:
 HALT_SET_EVENT = "promotion_halt_set"
 HALT_CLEAR_EVENT = "promotion_halt_clear"
 
+# The other file-gated safety-state edges (#2024), same arrangement: spelled as
+# `scripts.automod.state` spells them and pinned to it by
+# `tests/test_guardian_rollback.py`. `BROKEN` is set here and cleared there;
+# the rollback request is created there and cleared on both sides.
+BROKEN_SET_EVENT = "broken_set"
+BROKEN_CLEAR_EVENT = "broken_cleared"
+ROLLBACK_CLEAR_EVENT = "rollback_request_cleared"
+
+# How far back the flap count reads. `read_events` defaults to the last 200
+# rows, and at the ledger's real rate (about 1,400 rows a day, 2026-10-01) 200
+# rows span roughly five hours — less than `FLAP_WINDOW_SECONDS` (6 h) — so a
+# rollback could fall out of the count while still inside the window. The
+# edges #2024 puts on the ledger add rows, so the count reads by a bound sized
+# for the window rather than inheriting that default.
+FLAP_SCAN_ROWS = 20000
+
 # What this snapshot can judge. 2: a `current.json` carrying `commits`
 # (oldest..newest, the land train's one record for several merged rounds) is
 # rolled back as a batch — reset only when `rollback_target..HEAD` is exactly
@@ -225,10 +241,29 @@ class AutomodState:
     def read_rollback_request(self) -> dict | None:
         return read_json(self.rollback_request)
 
-    def clear_rollback_request(self) -> None:
+    def clear_rollback_request(self, *, by: str = "guardian") -> bool:
+        """Consume the request, on the record. True if there was one.
+
+        The create edge has always been a `rollback_requested` row; the remove
+        edge was a bare unlink, so the ledger could say a rollback was asked
+        for and never that the request was taken (#2024). No row for a clear
+        that removed nothing: no transition happened.
+        """
         try:
             self.rollback_request.unlink()
         except FileNotFoundError:
+            return False
+        self._record({"event": ROLLBACK_CLEAR_EVENT, "by": str(by)[:100],
+                      "path": str(self.rollback_request)})
+        return True
+
+    def _record(self, entry: dict) -> None:
+        """Append a safety-state edge. The flag is the guard's input and is
+        already written or removed by the time this runs; a ledger that cannot
+        be written must never stop the escalation or the rollback behind it."""
+        try:
+            append_event(self.ledger, entry)
+        except OSError:
             pass
 
     # ── flags ──────────────────────────────────────────────────────────
@@ -253,9 +288,21 @@ class AutomodState:
         """
         return self.halted.exists()
 
-    def set_broken(self, reason: str) -> None:
+    def set_broken(self, reason: str, *, by: str = "guardian") -> None:
+        """Write the terminal flag and put the transition on the ledger.
+
+        The flag was the whole record: `escalate` appends an `escalated` row
+        after this returns, but that row is about the incident, and a second
+        caller of `set_broken` would have left nothing (#2024). Same shape as
+        `set_halted`; a re-assertion carries `already_broken: true` so the
+        first row stays the start time.
+        """
+        already = self.broken.exists()
         self.broken.parent.mkdir(parents=True, exist_ok=True)
         self.broken.write_text(f"{now_iso()} {reason}\n", encoding="utf-8")
+        self._record({"event": BROKEN_SET_EVENT, "by": str(by)[:100] or "guardian",
+                      "reason": str(reason)[:2000], "already_broken": already,
+                      "path": str(self.broken)})
 
     def set_halted(self, reason: str, *, by: str = "guardian") -> None:
         """Freeze promotions and record the freeze in the automod ledger.
@@ -315,7 +362,7 @@ class AutomodState:
     def recent_rollbacks(self, window_seconds: float) -> int:
         cutoff = time.time() - window_seconds
         return sum(
-            1 for ev in read_events(self.ledger)
+            1 for ev in read_events(self.ledger, limit=FLAP_SCAN_ROWS)
             if ev.get("event") == "rollback_succeeded" and float(ev.get("ts", 0)) >= cutoff
         )
 

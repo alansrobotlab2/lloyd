@@ -3962,10 +3962,10 @@ ruled out when it was gitignored but still inside the tree; it has lived in
 | `eval_last.json` | quality worker | the measurement the guardian folds into LKG at settle. Guardian reads it, never writes it |
 | `promotions.jsonl` | both | append-only audit trail, fsynced, **raises** |
 | `lock` | all | one round / promotion / rollback at a time |
-| `pause` | promoter | maintenance lease, capped in the pinned policy |
+| `pause` | promoter | maintenance lease, capped in the pinned policy. Taking and releasing it append `pause_set` / `pause_clear` (#2024; every flag's edges: `guard-coverage.md` "File-gated safety state") |
 | `denied.json` | guardian | anti-ping-pong |
 | `broken/<ts>/` | guardian | preserved evidence |
-| `BROKEN` | guardian | terminal state; services left stopped |
+| `BROKEN` | guardian | terminal state; services left stopped. Set appends `broken_set`; clear it with `round recover`, which appends `broken_cleared` — a hand `rm` leaves no row |
 | `rounds/<id>/` | round, gate | `run_spec.yaml`, `gate.json`, the `gate.running` marker (§4.5b), and the detached `gate.log` / `land.log` |
 | `clusters.json` | `backlog-cluster` | last night's clustering (§3.2c); `autotriage`'s group mode reads it, and its mtime is what "nightly" means |
 | `cluster_judgments.jsonl` | cluster pass | the pair-judge's verdicts, cached by body hash so a re-run costs no LLM calls |

@@ -797,8 +797,11 @@ class Guardian:
         gstate.append_event(self.state.ledger, {"event": "escalated", "title": title,
                                                 "body": body[:2000]})
         self.alert("critical", title,
-                   body + "\n\nServices left stopped. Clear "
-                          f"{self.state.broken} once resolved.")
+                   body + "\n\nServices left stopped. Once resolved, clear "
+                          f"{self.state.broken} with `python -m "
+                          "scripts.automod.round recover` — it records who "
+                          "cleared it; deleting the file by hand leaves no "
+                          "ledger row.")
 
     def alert(self, level: str, title: str, body: str, **kw) -> None:
         # Repeat-suppression. A persistent condition ticks every 5s, and an

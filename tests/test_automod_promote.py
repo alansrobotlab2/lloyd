@@ -1344,3 +1344,72 @@ def test_a_candidate_venv_named_by_the_gate_reaches_the_landing_through_gate_jso
         "the candidate the gate named was not installed"
     assert (live / ".venvs" / "lloyd.prev" / "bin" / "python").read_text() == LIVE_MARKER
     assert json.loads(S.CURRENT_PATH.read_text())["venv_swapped"] is True
+
+
+# ── #2024: the maintenance lease is on the ledger, both edges ────────────────
+
+def _edge_rows(event: str) -> list[dict]:
+    if not S.LEDGER_PATH.exists():
+        return []
+    return [r for r in (json.loads(line) for line in
+                        S.LEDGER_PATH.read_text(encoding="utf-8").splitlines()
+                        if line.strip()) if r.get("event") == event]
+
+
+def test_taking_and_releasing_the_lease_leaves_one_row_each():
+    """The guardian only reads the lease, so a watchdog-suppressed interval had
+    no record of when it began, how long it was granted, or who took it."""
+    before = time.time()
+    expiry = S.set_pause(600)
+    sets = _edge_rows("pause_set")
+    assert len(sets) == 1
+    row = sets[0]
+    assert row["seconds"] == 600.0 and row["expires_at"] == expiry
+    assert before <= row["ts"] <= time.time()
+    assert row["started_at"].endswith("Z") and row["started_at"] == row["created_at"]
+    assert row["refreshed"] is False
+    assert "test_taking_and_releasing_the_lease_leaves_one_row_each" in row["by"], (
+        "with no `by`, the caller's own function is the actor")
+
+    assert S.clear_pause() is True
+    clears = _edge_rows("pause_clear")
+    assert len(clears) == 1 and clears[0]["by"].strip()
+    assert S.pause_remaining() == 0.0
+
+    assert S.clear_pause() is False, "nothing held"
+    assert len(_edge_rows("pause_clear")) == 1, "and so nothing recorded"
+
+
+def test_the_row_carries_the_seconds_granted_after_the_cap_and_the_named_caller():
+    S.set_pause(99999, cap=1800.0, by="round restart: picked up gate.py")
+    row = _edge_rows(S.PAUSE_SET_EVENT)[0]
+    assert row["seconds"] == 1800.0, "what was granted, not what was asked"
+    assert row["by"] == "round restart: picked up gate.py"
+
+    S.set_pause(60)            # the promoter refreshes the lease per restart leg
+    assert [r["refreshed"] for r in _edge_rows("pause_set")] == [False, True], (
+        "a refresh is marked, so the first row of a run stays the start")
+
+
+def test_a_ledger_that_cannot_be_written_does_not_cost_the_lease(monkeypatch, tmp_path):
+    """`clear_pause` runs from `finally` blocks around a restart. The file is
+    the guard's input; a failed append is a lost row, never a failed landing."""
+    blocked = tmp_path / "ledger-is-a-directory"
+    blocked.mkdir()
+    monkeypatch.setattr(S, "LEDGER_PATH", blocked)
+    assert S.set_pause(60) > time.time()
+    assert S.pause_remaining() > 0
+    assert S.clear_pause() is True
+    assert S.pause_remaining() == 0.0
+
+
+def test_the_promoters_own_lease_sites_are_attributed_by_function(monkeypatch):
+    """No promoter call site was edited: the default actor is the calling
+    function, read off the frame, so `S.set_pause(RESTART_LEASE)` inside a
+    promoter function is attributable as written."""
+    def restart_leg():
+        S.set_pause(P.RESTART_LEASE)
+        S.clear_pause()
+    restart_leg()
+    assert _edge_rows("pause_set")[0]["by"].startswith("restart_leg pid ")
+    assert _edge_rows("pause_clear")[0]["by"].startswith("restart_leg pid ")

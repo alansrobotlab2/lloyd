@@ -1034,20 +1034,18 @@ def recover(clear_broken: bool = True, clear_halt: bool = True,
     """
     from app.supervisor_client import start_process
     out: dict = {"cleared": [], "started": []}
-    if clear_broken and S.is_broken():
-        S.BROKEN_PATH.unlink()
+    # `by` names whoever cleared it, because this is the one production route
+    # that lifts a halt or BROKEN and the clear rows are where that is on the
+    # record: the `recovered` row beside them carries no actor and no round_id,
+    # and still does. A caller who was told to clear the flag passes their own
+    # name (`--by`); with none, the row at least names the call.
+    who = (by or "").strip() or f"round recover pid {os.getpid()}"
+    if clear_broken and S.clear_broken(by=who):
         out["cleared"].append("BROKEN")
     if clear_halt and S.is_halted():
-        # `by` names whoever cleared it, because this is the one production
-        # route that lifts a halt and the halt-clear ledger row is where that
-        # is on the record: the `recovered` row beside it carries no actor and
-        # no round_id, and still does. A caller who was told to clear the flag
-        # passes their own name (`--by`); with none, the row at least names the
-        # call.
-        who = (by or "").strip() or f"round recover pid {os.getpid()}"
         S.clear_halted(by=who)
         out["cleared"].append("promotions-halted")
-    S.clear_rollback_request()
+    S.clear_rollback_request(by=who)
     for program in ("lloyd-mcp", "lloyd-backend"):
         ok, msg = start_process(program)
         out["started"].append(f"{program}: {msg}")

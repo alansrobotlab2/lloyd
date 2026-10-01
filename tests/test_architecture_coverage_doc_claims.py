@@ -1921,3 +1921,42 @@ def test_guard_coverage_cites_the_live_owner_of_the_egress_posture():
     from agent_mcp import egress
     import inspect
     assert '"enforce": enforce_on()' in inspect.getsource(egress.network_report)
+
+
+# ── #2024: the file-gated safety-state table names real edges and real events ─
+
+def test_guard_coverage_tabulates_every_file_gated_flag_with_both_edges():
+    """One row per flag, and each event the row names is the constant the code
+    appends — so a renamed event or a dropped row fails here, not in a reader."""
+    import sys
+
+    from scripts.automod import state as S
+    sys.path.insert(0, str(ROOT / "agent-services" / "guardian"))
+    import gstate
+
+    text = (ARCH / "guard-coverage.md").read_text(encoding="utf-8")
+    start = text.index("## File-gated safety state")
+    section = text[start:text.index("\n## ", start + 1)]
+    rows = {ln.split("|")[1].strip().strip("`"): ln
+            for ln in section.splitlines()
+            if ln.startswith("| `")}
+    assert set(rows) == {"BROKEN", "pause", "promotions-halted",
+                         "rollback_request.json"}, sorted(rows)
+    for flag, path in (("BROKEN", S.BROKEN_PATH), ("pause", S.PAUSE_PATH),
+                       ("promotions-halted", S.HALTED_PATH),
+                       ("rollback_request.json", S.ROLLBACK_REQUEST_PATH)):
+        assert path.name == flag, f"{flag} is not the file the code gates on"
+        assert len([c for c in rows[flag].split("|") if c.strip()]) == 4, (
+            f"the {flag} row lost a column (readers, create edge, remove edge)")
+
+    expected = {
+        "BROKEN": (gstate.BROKEN_SET_EVENT, S.BROKEN_CLEAR_EVENT),
+        "pause": (S.PAUSE_SET_EVENT, S.PAUSE_CLEAR_EVENT),
+        "promotions-halted": (S.HALT_SET_EVENT, S.HALT_CLEAR_EVENT),
+        "rollback_request.json": ("rollback_requested", S.ROLLBACK_CLEAR_EVENT),
+    }
+    for flag, (created, removed) in expected.items():
+        cells = [c for c in rows[flag].split("|") if c.strip()]
+        assert f"`{created}`" in cells[2], f"{flag}: create edge names no {created}"
+        assert f"`{removed}`" in cells[3], f"{flag}: remove edge names no {removed}"
+    assert "rollback_requested" in Path(S.__file__).read_text(encoding="utf-8")

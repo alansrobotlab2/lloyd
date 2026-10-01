@@ -1230,3 +1230,116 @@ def test_a_batch_commit_already_gone_is_not_reverted_twice(tmp_path, monkeypatch
     assert row["commits"] == [new_two], "ONE is not in this history and is not touched"
     assert row["route"] == "reset", "base..HEAD is exactly what is left"
     assert rb.head_commit(r) == repo["base"]
+
+
+# ---------------------------------------------------------------------------
+# #2024: the other file-gated safety-state edges the guardian owns — BROKEN's
+# create edge and the rollback request's remove edge — are on the ledger too.
+# ---------------------------------------------------------------------------
+
+def test_setting_broken_appends_a_broken_set_row_from_the_same_call(tmp_path):
+    """`set_broken` was a bare `write_text`. The `escalated` row its one caller
+    appends afterwards is about the incident; the flag's own transition — what
+    `is_broken()` and the promoter's refusal read — had no row."""
+    st = gstate.AutomodState(tmp_path)
+    st.set_broken("rollback failed twice: probe dead")
+    assert st.is_broken()
+    rows = _halt_rows(st.ledger, "broken_set")
+    assert len(rows) == 1
+    assert rows[0]["reason"] == "rollback failed twice: probe dead"
+    assert rows[0]["by"] == "guardian" and rows[0]["by"].strip()
+    assert rows[0]["path"] == str(st.broken)
+    assert rows[0]["already_broken"] is False
+
+    st.set_broken("still dead", by="guardian nag")
+    rows = _halt_rows(st.ledger, gstate.BROKEN_SET_EVENT)
+    assert [r["already_broken"] for r in rows] == [False, True]
+    assert rows[1]["by"] == "guardian nag"
+
+
+def test_escalate_leaves_the_broken_row_before_the_escalated_row(tmp_path):
+    """Through the production caller, in order: the flag's row is written by
+    the call that writes the flag, so it precedes everything that reads it."""
+    import types
+
+    import guardian as G
+
+    alerts: list[tuple] = []
+    g = types.SimpleNamespace(state=gstate.AutomodState(tmp_path),
+                              alert=lambda *a, **k: alerts.append(a))
+    G.Guardian.escalate(g, "Rollback failed", "could not reset")
+    assert alerts and "round recover" in alerts[0][2], (
+        "the alert must name the ledgered clear, not the bare file")
+    events = [json.loads(line)["event"] for line in
+              g.state.ledger.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert "broken_set" in events and "escalated" in events, events
+    assert events.index("broken_set") < events.index("escalated"), events
+
+
+def test_a_ledger_that_cannot_be_written_never_stops_the_escalation(tmp_path):
+    """The flag is the guard's input; the row is the record. A directory where
+    the ledger file should be makes every append raise — BROKEN is still set."""
+    st = gstate.AutomodState(tmp_path)
+    st.ledger.mkdir(parents=True)
+    st.set_broken("disk trouble")
+    assert st.is_broken()
+
+
+def test_the_guardian_clearing_a_rollback_request_is_on_the_record(tmp_path):
+    st = gstate.AutomodState(tmp_path)
+    assert st.clear_rollback_request() is False
+    assert not st.ledger.exists(), "nothing was cleared, so nothing is recorded"
+    gstate.write_json_atomic(st.rollback_request, {"reason": "regression"})
+    assert st.clear_rollback_request() is True
+    assert st.read_rollback_request() is None
+    rows = _halt_rows(st.ledger, "rollback_request_cleared")
+    assert len(rows) == 1 and rows[0]["by"] == "guardian", rows
+    assert rows[0]["path"] == str(st.rollback_request)
+    assert rows[0]["created_at"].endswith("Z"), "when, as well as who"
+
+
+def test_the_two_surfaces_share_the_broken_and_rollback_clear_vocabulary(
+        tmp_path, monkeypatch):
+    """Same arrangement as the halt pair, same reason: `gstate` cannot import
+    `scripts.automod.state`, so the names are duplicated and pinned. Both
+    writers on ONE ledger, bucketed on `event` as a reader would."""
+    from scripts.automod import state as S
+
+    assert (gstate.BROKEN_SET_EVENT, gstate.BROKEN_CLEAR_EVENT,
+            gstate.ROLLBACK_CLEAR_EVENT) == \
+        ("broken_set", "broken_cleared", "rollback_request_cleared")
+    assert (S.BROKEN_SET_EVENT, S.BROKEN_CLEAR_EVENT, S.ROLLBACK_CLEAR_EVENT) == \
+        ("broken_set", "broken_cleared", "rollback_request_cleared")
+
+    st = gstate.AutomodState(tmp_path)
+    monkeypatch.setattr(S, "LEDGER_PATH", st.ledger)
+    monkeypatch.setattr(S, "BROKEN_PATH", st.broken)
+    monkeypatch.setattr(S, "ROLLBACK_REQUEST_PATH", st.rollback_request)
+
+    st.set_broken("escalated")                       # guardian sets
+    assert S.is_broken()
+    assert S.clear_broken(by="alan") is True          # automod side clears
+    gstate.write_json_atomic(st.rollback_request, {"reason": "a"})
+    assert st.clear_rollback_request() is True        # guardian clears
+    gstate.write_json_atomic(st.rollback_request, {"reason": "b"})
+    assert S.clear_rollback_request(by="round recover") is True   # automod clears
+
+    rows = [json.loads(line) for line in
+            st.ledger.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert [r["event"] for r in rows] == [
+        "broken_set", "broken_cleared",
+        "rollback_request_cleared", "rollback_request_cleared"]
+    assert [r["by"] for r in rows] == ["guardian", "alan", "guardian", "round recover"]
+
+
+def test_the_flap_count_reads_the_whole_window_not_the_last_200_rows(tmp_path):
+    """The rows #2024 adds must not push a rollback out of the flap count. The
+    default `read_events` window is 200 rows — about five hours of this ledger,
+    under the six-hour flap window — so the count names its own bound."""
+    st = gstate.AutomodState(tmp_path)
+    gstate.append_event(st.ledger, {"event": "rollback_succeeded"})
+    for _ in range(300):
+        gstate.append_event(st.ledger, {"event": "pause_set"})
+    assert len(gstate.read_events(st.ledger)) == 200, "the default still bounds"
+    assert st.recent_rollbacks(6 * 3600.0) == 1
+    assert gstate.FLAP_SCAN_ROWS >= 10000
