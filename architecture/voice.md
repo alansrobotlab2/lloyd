@@ -794,6 +794,20 @@ ONNX export of its torchaudio front end, so CAM++ ships.
   Resemblyzer profile. Deleting a name removes every backend's copy. A backend
   switch therefore means re-enrolling, and moving both thresholds —
   Resemblyzer's were 0.75 / 0.4, config.yaml has the measurement.
+- **Resemblyzer loads through `speaker_id.import_webrtcvad()`** (#1926).
+  `webrtcvad` 2.0.10 — the last release, and the distribution name Resemblyzer
+  0.1.4 requires — opens with `import pkg_resources`, which setuptools 83
+  removed, and `resemblyzer/audio.py` imports it at module level; without the
+  helper the backend (and `tts_bakeoff.py`'s similarity score) dies with
+  `No module named 'pkg_resources'`. The helper lends that one import a
+  stand-in with the single function it calls (`get_distribution(...).version`,
+  answered from `importlib.metadata`) and removes it again. The
+  `webrtcvad-wheels` fork imports cleanly on its own but does not provide the
+  `webrtcvad` name, so pinning it instead leaves `uv pip check` failing with
+  `resemblyzer requires webrtcvad>=2.0.10, but it's not installed` — measured
+  2026-10-01, and why the pin did not move. Measured in a clone of the venv on
+  torch 2.13.0 / setuptools 83.0.0: the encoder loads and the four fixture
+  clips embed at cosine 1.000000 to their torch 2.11 vectors.
 - `enroll_reference(name, clips)` stores the renormalised mean of several
   clips — how Phase 2 enrols the clone as `lloyd-voice` — and `embed_many`
   embeds a list; `enroll` is the one-clip case.

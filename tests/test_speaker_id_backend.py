@@ -216,3 +216,121 @@ def test_campplus_identify_end_to_end(tmp_path):
     s2 = sid.SpeakerIdentifier(tmp_path, backend="campplus", threshold=0.40)
     assert sorted(p["name"] for p in s2.list_profiles()) == ["eighttwo", "sixnine"]
     assert not sid.SpeakerIdentifier(tmp_path, backend="resemblyzer").has_profiles
+
+
+# ── #1926: the resemblyzer backend on a setuptools with no pkg_resources ──
+#
+# setuptools 83 dropped `pkg_resources`; `webrtcvad` 2.0.10 opens with
+# `import pkg_resources`, and `resemblyzer/audio.py` imports webrtcvad at module
+# level. The nodes below take `pkg_resources` away with an import hook, so they
+# say the same thing whichever setuptools the venv under test carries.
+
+_VAD_CHAIN = ("pkg_resources", "webrtcvad", "resemblyzer")
+
+
+class _NoPkgResources:
+    """A meta-path finder that answers `import pkg_resources` the way
+    setuptools >= 83 does: there is no such module."""
+
+    def find_spec(self, name, path=None, target=None):
+        if name == "pkg_resources" or name.startswith("pkg_resources."):
+            raise ModuleNotFoundError("No module named 'pkg_resources'", name="pkg_resources")
+        return None
+
+
+@pytest.fixture
+def no_pkg_resources():
+    def ours(name):
+        return name in _VAD_CHAIN or name.startswith(tuple(p + "." for p in _VAD_CHAIN))
+
+    saved = {k: v for k, v in sys.modules.items() if ours(k)}
+    for k in saved:
+        del sys.modules[k]
+    hook = _NoPkgResources()
+    sys.meta_path.insert(0, hook)
+    try:
+        yield
+    finally:
+        sys.meta_path.remove(hook)
+        for k in [k for k in sys.modules if ours(k)]:
+            del sys.modules[k]
+        sys.modules.update(saved)
+
+
+def _webrtcvad_is_the_fork() -> bool:
+    import importlib.metadata as md
+    try:
+        md.version("webrtcvad-wheels")
+        return True
+    except md.PackageNotFoundError:
+        return False
+
+
+def test_the_hook_reproduces_the_setuptools_83_failure(no_pkg_resources):
+    """The premise: without `pkg_resources`, a bare `import webrtcvad` of the
+    pinned 2.0.10 fails with exactly that name. (Under the `webrtcvad-wheels`
+    fork the bare import works, and the node says so instead of skipping.)"""
+    with pytest.raises(ModuleNotFoundError):
+        import pkg_resources  # noqa: F401
+    if _webrtcvad_is_the_fork():
+        import webrtcvad
+        assert webrtcvad.Vad(2) is not None
+        return
+    with pytest.raises(ModuleNotFoundError) as exc:
+        import webrtcvad  # noqa: F401
+    assert exc.value.name == "pkg_resources"
+    assert "webrtcvad" not in sys.modules
+
+
+def test_webrtcvad_imports_and_builds_a_vad_without_pkg_resources(no_pkg_resources):
+    vad_mod = sid.import_webrtcvad()
+    assert vad_mod.Vad(2) is not None
+    import importlib.metadata as md
+    name = "webrtcvad-wheels" if _webrtcvad_is_the_fork() else "webrtcvad"
+    assert vad_mod.__version__ == md.version(name)
+    # The stand-in is lent to that one import and taken back: a stub left behind
+    # would answer other libraries' `try: import pkg_resources` with a module
+    # that has none of the attributes they go on to use.
+    assert "pkg_resources" not in sys.modules
+    with pytest.raises(ModuleNotFoundError):
+        import pkg_resources  # noqa: F401
+
+
+def test_a_real_pkg_resources_is_left_alone():
+    """Where `pkg_resources` exists (setuptools < 83) or is not needed (the
+    fork), the helper is a plain import: whatever `pkg_resources` is loaded
+    afterwards is the real one, never the stand-in."""
+    assert sid.import_webrtcvad().Vad(2) is not None
+    loaded = sys.modules.get("pkg_resources")
+    assert loaded is None or hasattr(loaded, "working_set")
+
+
+def test_an_import_failure_that_is_not_pkg_resources_is_not_swallowed(monkeypatch):
+    class _NoVad:
+        def find_spec(self, name, path=None, target=None):
+            if name == "webrtcvad":
+                raise ModuleNotFoundError("No module named 'webrtcvad'", name="webrtcvad")
+            return None
+
+    monkeypatch.delitem(sys.modules, "webrtcvad", raising=False)
+    hook = _NoVad()
+    monkeypatch.setattr(sys, "meta_path", [hook, *sys.meta_path])
+    with pytest.raises(ModuleNotFoundError) as exc:
+        sid.import_webrtcvad()
+    assert exc.value.name == "webrtcvad"
+    assert "pkg_resources" not in sys.modules or hasattr(sys.modules["pkg_resources"], "working_set")
+
+
+def test_if_resemblyzer_is_a_backend_it_loads_without_pkg_resources(no_pkg_resources):
+    """#1914 clause 5: "if `resemblyzer` is in `BACKENDS`, the import succeeds" —
+    through the path the backend really takes, on the venv setuptools 83 leaves."""
+    assert "resemblyzer" in sid.BACKENDS, (
+        "the backend was retired: drop this node with the Resemblyzer and webrtcvad pins")
+    enc = sid._ResemblyzerEncoder("cpu")
+    import resemblyzer.audio
+    assert resemblyzer.audio.webrtcvad.Vad(2) is not None
+    v = enc.embed(_clip("ls_6930_0.flac").astype(np.float32) / 32768.0)
+    assert v.shape == (256,) and abs(float(np.linalg.norm(v)) - 1.0) < 1e-5
+    same = enc.embed(_clip("ls_6930_1.flac").astype(np.float32) / 32768.0)
+    other = enc.embed(_clip("ls_8230_0.flac").astype(np.float32) / 32768.0)
+    assert float(v @ same) > float(v @ other)

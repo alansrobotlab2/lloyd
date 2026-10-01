@@ -355,6 +355,8 @@ def score(args) -> int:
     rec.load()
     enc = None
     try:
+        import speaker_id
+        speaker_id.import_webrtcvad()   # setuptools >= 83 ships no pkg_resources (#1926)
         from resemblyzer import VoiceEncoder, preprocess_wav
         enc = VoiceEncoder(device="cpu")
     except Exception as e:  # noqa: BLE001 — similarity is optional

@@ -196,11 +196,53 @@ class _CampplusEncoder:
         return _unit(out[0])
 
 
+def import_webrtcvad():
+    """Import ``webrtcvad`` on a setuptools that no longer ships ``pkg_resources``.
+
+    ``webrtcvad`` 2.0.10 (the last release, and the name Resemblyzer 0.1.4
+    requires) opens with ``import pkg_resources`` and uses it for one thing:
+    ``pkg_resources.get_distribution('webrtcvad').version``, read once at import
+    to fill ``__version__``. setuptools 83 removed ``pkg_resources``, so
+    ``resemblyzer/audio.py``'s module-level ``import webrtcvad`` raised
+    ModuleNotFoundError and this backend could not load (#1926).
+
+    When — and only when — that is the failure, lend the import a stand-in with
+    that single function, answered from ``importlib.metadata``, and take it away
+    again: a ``pkg_resources`` left in ``sys.modules`` would turn other
+    libraries' ``try: import pkg_resources`` fallbacks into AttributeErrors. The
+    module stays imported, so resemblyzer's own ``import webrtcvad`` then finds
+    it. The ``webrtcvad-wheels`` fork needs none of this, but it does not provide
+    the ``webrtcvad`` distribution name, so swapping to it leaves ``pip check``
+    failing on Resemblyzer's requirement.
+    """
+    try:
+        import webrtcvad
+        return webrtcvad
+    except ModuleNotFoundError as e:
+        if e.name != "pkg_resources":
+            raise
+    import importlib.metadata
+    import sys
+    import types
+
+    stub = types.ModuleType("pkg_resources")
+    stub.get_distribution = lambda dist: types.SimpleNamespace(
+        version=importlib.metadata.version(dist))
+    sys.modules["pkg_resources"] = stub
+    try:
+        import webrtcvad
+    finally:
+        if sys.modules.get("pkg_resources") is stub:
+            del sys.modules["pkg_resources"]
+    return webrtcvad
+
+
 class _ResemblyzerEncoder:
     name = "resemblyzer"
     dim = 256
 
     def __init__(self, device: str = "cpu") -> None:
+        import_webrtcvad()
         from resemblyzer import VoiceEncoder
         self._enc = VoiceEncoder(device=device)
 
