@@ -1892,3 +1892,32 @@ def test_prose_and_fragment_flags_are_never_read_as_commands():
     # And the four graded docs, unchanged.
     for slug in NEW_DOCS:
         assert undispatched_claims(_text(slug), slug) == [], slug
+
+
+# ── #1965: the egress posture's owner on guard-coverage.md is a live item ─────
+
+def _guard_coverage_lines() -> list[str]:
+    return (ARCH / "guard-coverage.md").read_text(encoding="utf-8").splitlines()
+
+
+def test_guard_coverage_cites_the_live_owner_of_the_egress_posture():
+    """#1960 closed; a closed item is not an owner. The two ownership citations
+    name #1965, the §3 row says where the posture is published, and the page's
+    changelog sentence that records #1960 being *filed* is history and stays."""
+    lines = _guard_coverage_lines()
+    row = [ln for ln in lines if ln.startswith("| `agent_mcp/egress.py` |")]
+    assert len(row) == 1, row
+    assert "#1965" in row[0] and "#1960" not in row[0], row[0]
+    for needle in ("egress.network_report()", "policy.enforce", "GET /api/dashboard",
+                   "network.policy", "enforcing", "recording only"):
+        assert needle in row[0], f"the egress row no longer names {needle!r}"
+
+    unarmed = [ln for ln in lines if "destination table (unarmed" in ln]
+    assert len(unarmed) == 1 and "#1965" in unarmed[0] and "#1960" not in unarmed[0]
+
+    still_1960 = [ln for ln in lines if "#1960" in ln]
+    assert len(still_1960) == 1 and "Filed #1959, #1960" in still_1960[0], still_1960
+
+    from agent_mcp import egress
+    import inspect
+    assert '"enforce": enforce_on()' in inspect.getsource(egress.network_report)

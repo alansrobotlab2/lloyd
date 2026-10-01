@@ -656,3 +656,77 @@ def test_grant_shape_renders_the_destination_field_and_keeps_expiry_last():
     expiry = (NOW + dt.timedelta(days=policy.SUGGESTED_TTL_DAYS)).isoformat()
     assert f"expires_at='{expiry}'" in text, text
     assert text.endswith("issued_by='alan')"), text
+
+
+# ── #1965: the config flags are parsed, never `bool()`-coerced ───────────────
+
+def _config_value(monkeypatch, **values):
+    """Put raw values where `harness.egress_policy` puts them, with both env
+    overrides unset — the config path is the one under test."""
+    monkeypatch.delenv("LLOYD_EGRESS_ENFORCE", raising=False)
+    monkeypatch.delenv("LLOYD_EGRESS_TELEMETRY", raising=False)
+    state = dict(egress._DEFAULTS)
+    state.update(values)
+    monkeypatch.setattr(egress, "config", lambda: dict(state))
+
+
+@pytest.mark.parametrize("word", ["off", "false", "no", "0", " OFF ", "False"])
+def test_a_quoted_negative_word_in_config_does_not_arm_enforcement(monkeypatch, word):
+    """The reproduction on the item: `enforce: "off"` printed True, because
+    `bool()` of any non-empty string is True and no parse step ran before it."""
+    assert bool(word) is True, "the control: bool() is what armed it"
+    _config_value(monkeypatch, enforce=word)
+    assert egress.enforce_on() is False
+
+
+@pytest.mark.parametrize("junk", ["maybe", "enfroce", ["on"], {"a": 1}, 2, 1.5])
+def test_an_unparseable_enforce_value_stays_off_and_is_named_in_the_log(
+        monkeypatch, caplog, junk):
+    _config_value(monkeypatch, enforce=junk)
+    with caplog.at_level("WARNING", logger="lloyd-egress"):
+        assert egress.enforce_on() is False
+    lines = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(lines) == 1, lines
+    assert "harness.egress_policy.enforce" in lines[0] and repr(junk) in lines[0], lines
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("on", True), ("true", True), ("yes", True), ("1", True),
+    (True, True), (False, False)])
+def test_affirmative_words_and_real_bools_behave_as_written(monkeypatch, caplog,
+                                                           value, expected):
+    _config_value(monkeypatch, enforce=value)
+    with caplog.at_level("WARNING", logger="lloyd-egress"):
+        assert egress.enforce_on() is expected
+    assert not caplog.records, "a parseable value is not a warning"
+
+
+def test_the_env_var_still_overrides_the_config_value_both_ways(monkeypatch):
+    _config_value(monkeypatch, enforce="off")
+    monkeypatch.setenv("LLOYD_EGRESS_ENFORCE", "1")
+    assert egress.enforce_on() is True
+    _config_value(monkeypatch, enforce=True)
+    monkeypatch.setenv("LLOYD_EGRESS_ENFORCE", "off")
+    assert egress.enforce_on() is False
+
+
+def test_telemetry_is_parsed_the_same_way_and_defaults_on(monkeypatch, caplog):
+    _config_value(monkeypatch, telemetry="off")
+    assert egress.telemetry_on() is False
+    _config_value(monkeypatch, telemetry="on")
+    assert egress.telemetry_on() is True
+    _config_value(monkeypatch, telemetry="sometimes")
+    with caplog.at_level("WARNING", logger="lloyd-egress"):
+        assert egress.telemetry_on() is True
+    lines = [r.getMessage() for r in caplog.records]
+    assert len(lines) == 1, lines
+    assert "harness.egress_policy.telemetry" in lines[0] and "'sometimes'" in lines[0]
+
+
+def test_the_real_config_accessor_feeds_the_parse(monkeypatch):
+    """End to end through `egress.config()`, the way the item reproduces it."""
+    import app.config as C
+    monkeypatch.delenv("LLOYD_EGRESS_ENFORCE", raising=False)
+    monkeypatch.setattr(C, "CONFIG", {"harness": {"egress_policy": {"enforce": "off"}}})
+    assert egress.config()["enforce"] == "off"
+    assert egress.enforce_on() is False

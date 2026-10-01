@@ -170,23 +170,58 @@ def _env_flag(name: str, default: bool) -> bool:
     if raw is None or not str(raw).strip():
         return default
     val = str(raw).strip().lower()
-    if val in ("1", "true", "yes", "on"):
+    if val in _TRUE_WORDS:
         return True
-    if val in ("0", "false", "no", "off"):
+    if val in _FALSE_WORDS:
         return False
     logger.warning("egress: unparseable %s=%r — keeping %s", name, raw, default)
     return default
 
 
+_TRUE_WORDS = ("1", "true", "yes", "on")
+_FALSE_WORDS = ("0", "false", "no", "off")
+
+
+def _config_flag(key: str) -> bool:
+    """`harness.egress_policy.<key>` as a flag, parsed rather than coerced.
+
+    `bool()` on the YAML value armed default-deny for any non-empty string: a
+    quoted `enforce: "off"` — or a typo — came up as enforcement with an empty
+    allow-list, and the dashboard then read `enforcing` as though somebody had
+    decided it (#1965). A real YAML bool is taken as written; a string goes
+    through the word list the env var gets; anything else is the shipped default,
+    with the key and the offending value named in the log. Failing toward
+    `_DEFAULTS` is the safe direction for both flags: enforcement off, telemetry
+    on. Not a boot refusal — the aggregator imports `app.config` too, and a
+    typo here should cost a warning, not both processes.
+    """
+    default = bool(_DEFAULTS[key])
+    raw = config().get(key, default)
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        word = raw.strip().lower()
+        if word in _TRUE_WORDS:
+            return True
+        if word in _FALSE_WORDS:
+            return False
+    elif isinstance(raw, int) and raw in (0, 1):
+        return bool(raw)
+    logger.warning("egress: unparseable harness.egress_policy.%s=%r in config "
+                   "— keeping the shipped default %s", key, raw, default)
+    return default
+
+
 def telemetry_on() -> bool:
-    return _env_flag("LLOYD_EGRESS_TELEMETRY", bool(config().get("telemetry", True)))
+    return _env_flag("LLOYD_EGRESS_TELEMETRY", _config_flag("telemetry"))
 
 
 def enforce_on() -> bool:
     """The enforcement flag. **Default off**: a human flips it once the
     destination table has been read and the policy shape chosen (#628's own
-    post-landing decisions). Telemetry runs with it off."""
-    return _env_flag("LLOYD_EGRESS_ENFORCE", bool(config().get("enforce", False)))
+    post-landing decisions). Telemetry runs with it off. The config value is
+    parsed by `_config_flag`, never `bool()`-coerced."""
+    return _env_flag("LLOYD_EGRESS_ENFORCE", _config_flag("enforce"))
 
 
 # ── destinations ────────────────────────────────────────────────────────────
