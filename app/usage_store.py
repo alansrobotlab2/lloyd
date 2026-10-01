@@ -391,6 +391,25 @@ def read_rows_readonly(db_path, columns: list[str], since_ts: str) -> list[dict]
         conn.close()
 
 
+def read_session_rows_readonly(db_path, session_id: str, columns: list[str]) -> list[dict]:
+    """`usage` rows of one session, opened read-only (`mode=ro`).
+
+    For the autoresearch cost side (#2019), which prices a bench trial from the rows
+    its recorded session wrote and must never write to, or migrate, a live usage.db.
+    A column the file does not carry reads as None, as in `read_rows_readonly`.
+    """
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        have = {r[1] for r in conn.execute("PRAGMA table_info(usage)")}
+        sel = [c if c in have else f"NULL AS {c}" for c in columns]
+        rows = conn.execute(f"SELECT {', '.join(sel)} FROM usage WHERE session_id = ? "
+                            "ORDER BY id", (session_id,)).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
 def _since(hours: Optional[float] = None, days: Optional[float] = None) -> str:
     """ISO timestamp for N hours/days ago."""
     delta = timedelta(hours=hours or 0, days=days or 0)

@@ -51,6 +51,7 @@ from . import bench_split
 # reached on the way to writing a report, after `evaluate_promotion` has already
 # answered, and nothing in `promote.py` imports it back.
 from . import behavioural
+from . import cost as trial_cost
 # `slice_metrics` is imported by name, never reached through the module: the
 # name `promote` is bound two lines lower to the promotion *function*, so
 # `promote.slice_metrics(...)` at the call site raised AttributeError on a
@@ -1144,6 +1145,10 @@ def trial_ledger_row(round_id: str, trace: dict[str, Any],
         # is reconstructible from ledger.jsonl alone. Same helper on both
         # writers; None where the trace carries no summed counts.
         **token_ledger_fields(trace),
+        # #2019: the re-prefill cost of the trial and the recorded session it joins
+        # usage.db on. Emit-only — no promotion leg reads either. Same helper on both
+        # writers; None on a direct trace, and None rather than 0 when a count is missing.
+        **trial_cost.cost_ledger_fields(trace),
         "composite_score": score["composite_score"],
         "objective_score": score["objective_score"],
         "rubric_overall": score["rubric_overall"],
@@ -1174,7 +1179,8 @@ HYPOTHESIS_MAX_CHARS = 300
 def decision_ledger_row(round_id: str, decision: dict[str, Any],
                         promoted_variant_id: str | None,
                         variant: dict[str, Any] | None = None,
-                        baseline_summary: dict[str, Any] | None = None) -> dict[str, Any]:
+                        baseline_summary: dict[str, Any] | None = None,
+                        cost_record: dict[str, Any] | None = None) -> dict[str, Any]:
     """The `decision` row for one variant, as the ledger sees it.
 
     Seven keys, always; `refusal_class` on top of them when the row refused (#1860); the
@@ -1231,6 +1237,9 @@ def decision_ledger_row(round_id: str, decision: dict[str, Any],
     # fact the predicate already had and never wrote, changing no input to it.
     if row.get(REFUSAL_CLASS_FIELD) == SAFETY_REGRESSION and baseline_summary is not None:
         row[BASELINE_SAFETY_FIELD] = baseline_safety_flags(baseline_summary)
+    # #2019: the variant's cost record, when the round computed one. Written after the
+    # decision and from nothing the predicate saw — a `cost` key changes no verdict.
+    row.update(trial_cost.decision_cost_fields(cost_record))
     # #646: the all-task mean beside the lint-valid-task mean, flattened onto
     # the row that carries the decision. `means_agree` is the field the item
     # asks for — the ledger line that says the two denominators disagreed on
@@ -1484,12 +1493,18 @@ async def run(
     # one instrument even if config changes mid-round (#698).
     rubric_mode = configured_rubric_mode()
     scored_traces: list[dict[str, Any]] = []
+    trial_rows: list[dict[str, Any]] = []
     for t in traces:
         task_by_id = {tk.get("id"): tk for tk in tasks}
         task = task_by_id.get(t["task_id"]) or {}
         score = judge_trace(task, t, rubric_model=model, rubric_mode=rubric_mode)
         scored_traces.append({**t, "_task": task, "_score": score})
-        ledger_append(cfg.paths.ledger_path, trial_ledger_row(rid, t, score))
+        trial_row = trial_ledger_row(rid, t, score)
+        trial_rows.append(trial_row)
+        ledger_append(cfg.paths.ledger_path, trial_row)
+    # #2019: per-variant cost, from the rows just written. Emit-only: it reaches the
+    # report and the decision rows below, and no input of `evaluate_promotion`.
+    cost_records = trial_cost.round_cost_records(trial_rows)
 
     # Aggregate per variant
     by_variant: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
@@ -1756,6 +1771,7 @@ async def run(
     behavioural.write_scorecard(cfg, rid, scorecard)
     lines += [""]
     lines += behavioural.scorecard_report_lines(scorecard)
+    lines += trial_cost.report_lines(cost_records)
     lines.extend(report_lines)
     summary_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -1766,7 +1782,8 @@ async def run(
         ledger_append(cfg.paths.ledger_path,
                       decision_ledger_row(rid, d, promoted_vid,
                                           variants_by_id.get(d["variant_id"], {}),
-                                          baseline_summary=baseline_summary))
+                                          baseline_summary=baseline_summary,
+                                          cost_record=cost_records.get(d["variant_id"])))
 
     return {
         "round_id": rid,

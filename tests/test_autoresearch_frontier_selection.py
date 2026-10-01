@@ -405,6 +405,10 @@ PUBLISHED_TRIAL_KEYS = {
     # #698: which rubric judge (`scalar` | `binary`) produced `rubric_overall`,
     # from `judge.rankability_fields`, so a mean across a mode switch is readable.
     "rubric_mode",
+    # #2019: the trial's re-prefill cost and the recorded session it joins usage.db
+    # on, from `cost.cost_ledger_fields`. Emit-only provenance; #428's denominator
+    # reads `decision` rows and is unmoved by them.
+    "recorded_session_id", "reprefill_cost_tokens",
 }
 
 #: A `decision` row's unconditional keys: the floor, never a ceiling. A row written by

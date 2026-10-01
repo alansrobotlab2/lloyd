@@ -849,6 +849,11 @@ async def run_bench_sdk(
 # --------------------------------------------------------------------------
 
 
+def _cost_fields(trace: dict[str, Any]) -> dict[str, Any]:
+    from .cost import cost_ledger_fields
+    return cost_ledger_fields(trace)
+
+
 def ledger_row_for(trace: dict[str, Any], score: dict[str, Any] | None,
                    round_id: str) -> dict[str, Any]:
     """Build the per-trace ledger row.
@@ -900,6 +905,10 @@ def ledger_row_for(trace: dict[str, Any], score: dict[str, Any] | None,
         # is reconstructible from ledger.jsonl alone. Same helper on both
         # writers; None where the trace carries no summed counts.
         **token_ledger_fields(trace),
+        # #2019: re-prefill cost and its usage.db join key, from the helper the
+        # round's writer uses. Imported here, like the two above, to keep the
+        # module's import graph as it was.
+        **_cost_fields(trace),
         "composite_score": score["composite_score"] if score else None,
         "objective_score": score["objective_score"] if score else None,
         "rubric_overall": score["rubric_overall"] if score else None,

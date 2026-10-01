@@ -2407,3 +2407,47 @@ def test_the_ledger_witness_in_the_vault_reproduces_the_quoted_figures():
     assert (len(decisions), len(post_d)) == (142, 51)
     assert not any(r.get("should_promote") or r.get("promoted") for r in decisions)
     assert sum(r.get("reason_head") == promote.SAFETY_REGRESSION for r in post_d) == 39
+
+
+# ── #2019: cost is emit-only ─────────────────────────────────────────────────
+
+def test_cost_fields_change_no_verdict_and_no_refusal_class(cfg):
+    """The cost currency rides on the per-trial rows and the decision row, and no
+    leg of `evaluate_promotion` reads it: for identical score rows the verdict and
+    the refusal class are the same with the cost fields present or absent — on a
+    pair that promotes and on one that refuses. The cost here is stacked the way a
+    cost-reading gate would bite: the promoted variant is the dearer one."""
+    from scripts.autoresearch import cost, run_round
+
+    cases = {"promotes": scored([0.4] * 11, [0.9] * 11),
+             "refuses": scored([0.6] * 11, [0.3] * 11)}
+    for label, (base, var) in cases.items():
+        bare = promote.evaluate_promotion(cfg, base, var)
+        priced_base, priced_var = json.loads(json.dumps(base)), json.loads(json.dumps(var))
+        for summ, c in ((priced_base, 100), (priced_var, 90000)):
+            for p in summ["per_task"]:
+                p[cost.REPREFILL_FIELD] = c
+                p[cost.SESSION_FIELD] = "20261001_053224_bench_7a06"
+            summ["cost"] = {"advantage_total": -89900.0, "cost_mean_valid": c}
+        priced = promote.evaluate_promotion(cfg, priced_base, priced_var)
+        assert priced == bare, (label, bare, priced)
+
+        decision = {"variant_id": "v1", "should_promote": bare[0], "reason": bare[1],
+                    "predicate_refusal": "" if bare[0] else promote.refusal_head(bare[1])}
+        without = run_round.decision_ledger_row("R_2019", decision, None)
+        record = cost.round_cost_records([
+            {"variant_id": "v1", "task_id": "t", "trace_status": "success",
+             "objective_score": 1.0, cost.REPREFILL_FIELD: 90000}])["v1"]
+        with_cost = run_round.decision_ledger_row("R_2019", decision, None, cost_record=record)
+        assert with_cost["cost"]["cost_mean_valid"] == 90000.0
+        assert "per_trial" not in with_cost["cost"]
+        assert {k: v for k, v in with_cost.items() if k not in ("cost", "created_at")} == \
+            {k: v for k, v in without.items() if k != "created_at"}, label
+        assert with_cost.get(promote.REFUSAL_CLASS_FIELD) == without.get(promote.REFUSAL_CLASS_FIELD)
+    assert promote.evaluate_promotion(cfg, *cases["promotes"])[0] is True
+    assert promote.evaluate_promotion(cfg, *cases["refuses"])[0] is False
+
+    src = (ROOT / "scripts" / "autoresearch" / "promote.py").read_text(encoding="utf-8")
+    assert "evaluate_promotion" in src, "positive control"
+    for name in ("reprefill", "cost_record", "from .cost", "import cost"):
+        assert name not in src, f"promote.py names `{name}`, so the gate can read cost"
