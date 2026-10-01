@@ -1403,8 +1403,8 @@ async def test_the_shape_test_rejects_a_token_nobody_has_seen(registry, queue,
 
     `facts”:14,` is topic 15's shipped corruption and appears NOWHERE in this diff —
     not in the predicate, not in a test list of bad values. So does `null` (topic 14's)
-    and a bare registry id, which the prompt's wording does invite and which is
-    accepted as a POINTER only if someone rules on it (#1875 owed entry 3). If the
+    and a bare registry id, which the prompt's wording does invite and which stays
+    rejected by ruling (recorded on `_pointer_shaped`'s docstring, #1980). If the
     gate were an enumeration, this node would pass for the tokens it names and stay
     blind to the next key the decoder renames — which is how `duplicate_of` became the
     live corruption surface after #1773 closed the counts.
@@ -1437,4 +1437,29 @@ async def test_the_shape_test_rejects_a_token_nobody_has_seen(registry, queue,
         [v for v in rejected if D._pointer_shaped(v)])
     assert all(D._pointer_shaped(v) for v in accepted), (
         [v for v in accepted if not D._pointer_shaped(v)])
+
+
+def test_the_pointer_grammar_ruling_is_recorded_as_settled_not_deferred():
+    """#1980: the docstring went on deferring the grammar question to #1875's owed
+    list after the ruling was made, so the next reader reopened it."""
+    doc = " ".join(D._pointer_shaped.__doc__.split())
+    assert "widening the grammar is a ruling" not in doc
+    assert "owed " + "entry 3" not in doc
+    assert "ever been observed" not in doc, "topic #27 did carry a bare id"
+    # The ruling: the whole grammar, and what is rejected by decision.
+    assert '`"/" in value or value.endswith(".md")` is the whole predicate' in doc
+    assert "rejected by decision" in doc and "bare registry id" in doc
+    assert "bare directory" in doc and "no `.md`" in doc
+    # The measured case and why it refuses.
+    assert 'duplicate_of_raw="15"' in doc and "duplicate of 15" in doc
+    assert "false pointer" in doc
+    # The standing reopen trigger.
+    assert "reopens widening" in doc and "result=duplicate" in doc
+    # No surface still defers the question.
+    for src in (inspect.getsource(D), Path(__file__).read_text(encoding="utf-8")):
+        assert "owed " + "entry 3" not in src
+        assert "only if someone " + "rules on it" not in src
+    # Prose only: the predicate is what it was.
+    assert inspect.getsource(D._pointer_shaped).rstrip().endswith(
+        'return "/" in value or value.endswith(".md")')
 

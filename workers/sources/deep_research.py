@@ -297,12 +297,17 @@ def _pointer_shaped(value: str) -> bool:
     `facts”,14,`, `facts`). A rejected token is not dropped: the caller keeps it
     verbatim as `duplicate_of_raw` for whoever reads the row next.
 
-    The predicate deliberately does NOT accept a bare registry id (`14`, `topic 14`).
-    The prompt this source sends asks for "DUPLICATE_OF: <the note or topic that
-    already covers it>", so one day a genuine duplicate may arrive that way and be
-    downgraded to `nothing_found`. No such value has ever been observed in the
-    registry, and widening the grammar is a ruling, not a default — see #1875's owed
-    entry 3.
+    The grammar is settled as path-only (ruled 2026-10-01 by owed-check on #1875,
+    recorded by #1980): `"/" in value or value.endswith(".md")` is the whole
+    predicate, and a bare registry id (`14`, `topic 14`), a bare directory and a
+    path with no `.md` are rejected by decision, although the prompt this source
+    sends does ask for "DUPLICATE_OF: <the note or topic that already covers it>".
+    The refusal rests on the measured case, not on principle: topic #27 finished
+    `written` with `duplicate_of_raw="15"`, a leaked token and not a pointer, and
+    accepting integer shape would have written `duplicate of 15` onto an unrelated
+    topic's note — a manufactured false pointer. What reopens widening to integer
+    shape: a bare-id token preserved as `duplicate_of_raw` on a run whose
+    `result=duplicate`.
     """
     return "/" in value or value.endswith(".md")
 
