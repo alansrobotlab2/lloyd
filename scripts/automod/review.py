@@ -2181,6 +2181,17 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
     # across 15 rounds citing a line past EOF. Hence the block-list below rather than a
     # check of the citation alone.
     #
+    # Deterministic prechecks stay out of this block-list, by ruling (owed-check on
+    # #1845, recorded by #1958): the list names grader-authored citation defects only,
+    # `parse_review` takes no prechecks, and `honesty_prechecks_with_standing` stays the
+    # one place a live-module finding is demoted. The tolerated hazard is a `blocking`
+    # precheck beside a non-empty `unreliable` buying a free re-gate; measured
+    # 2026-10-01 over the ledger's review rows it has happened 0 times in 1,118 (32
+    # rows carry a blocking precheck, 24 a non-empty `unreliable`, none both). Reopen
+    # only when that count is above zero, and then by routing the precheck into the
+    # `external_blocker` detail so the attempt stays unspent — never by a suppression
+    # term here.
+    #
     # No new bound is needed. `rung_review` counts every grading turn against
     # REVIEW_HARD_CAP, so a grader that repeats its own phantom number ends there, and
     # `premise_problems` keeps a broken-premise refusal charging its attempt.
