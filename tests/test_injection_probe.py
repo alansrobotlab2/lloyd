@@ -161,6 +161,25 @@ async def test_apply_returns_its_input_on_an_unexpected_result_shape():
                          mode="warn") is odd
 
 
+async def test_an_unparseable_mode_still_probes_in_shadow_rather_than_off(monkeypatch,
+                                                                           logged):
+    """A typo must not read as a clean window (#1948).
+
+    `mode: shawdow` used to fall through `mode not in MODES` to a branch that
+    scanned nothing, on the one guard that can append a `<warning>` to a tool
+    result. Boot refuses the value now (`tests/test_config_guard_modes.py`); this
+    is the second line — a value arriving by any other route still probes, at the
+    default, and the row says which mode ran.
+    """
+    _serve(monkeypatch, INJECTED)
+    monkeypatch.setattr(P, "mode_from_config", lambda: "shawdow")
+    result = await M.call_tool("Read", {"file_path": "/x"}, {"lloyd/session_id": BG})
+    await _drain()
+    assert _texts(result) == [INJECTED]
+    assert [d["pattern_id"] for _, _, d in logged] == ["ignore_instructions"]
+    assert logged[0][2]["mode"] == "shadow"
+
+
 def test_config_default_is_shadow():
     from app.config import CONFIG
     block = (CONFIG.get("harness") or {}).get("injection_probe") or {}

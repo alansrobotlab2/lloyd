@@ -289,6 +289,90 @@ def _apply_config_overlay(raw: dict) -> dict:
     return _deep_merge(raw, overlay)
 
 
+# ------------------------------------------------------------- guard modes --
+#
+#: Every `mode` key a guard on this box reads out of the config, with the values
+#: that key accepts. Both readers used to resolve their key with
+#: `mode if mode in MODES else DEFAULT_MODE`, which made a typo indistinguishable
+#: from the setting it replaced: `harness.action_review.mode: shodow` booted, and
+#: the only surface that could show the miss was a corpus with no rows in it —
+#: which reads exactly like a window in which nothing was flagged (#1948).
+#:
+#: The set is the union of the values the two readers have ever documented, and
+#: `warn` is in it for BOTH keys even though `app/harness/action_review.py`
+#: dropped `warn` from its `MODES` on the #1944 measurement. Accepting a value at
+#: boot is not the same as honouring it: `action_review` maps `warn` onto the mode
+#: `warn` always ran as (`shadow`), so a deployment written before that ruling
+#: boots instead of dying over a value that changed nothing — and the recorder is
+#: still not a gate, which `tests/test_action_review.py` pins two ways.
+#:
+#: A reader module's own `MODES` has to stay a subset of the set named here, or
+#: boot would refuse a value the guard implements. `tests/test_config_guard_modes.py`
+#: pins the subset relation against both modules, so the two cannot drift apart.
+GUARD_MODE_KEYS: dict[str, tuple[str, ...]] = {
+    "harness.action_review.mode": ("off", "shadow", "warn"),
+    "harness.injection_probe.mode": ("off", "shadow", "warn"),
+}
+
+
+def _dig_config(cfg: dict, dotted: str):
+    """(found, value) for a dotted config path. `found` is False when any part is
+    absent or a non-mapping stood where a mapping was needed."""
+    node = cfg
+    for part in dotted.split(".")[:-1]:
+        if not isinstance(node, dict) or part not in node:
+            return False, None
+        node = node[part]
+    leaf = dotted.rsplit(".", 1)[1]
+    if not isinstance(node, dict) or leaf not in node:
+        return False, None
+    return True, node[leaf]
+
+
+def read_guard_mode(cfg: dict, key: str, default: str = "") -> str:
+    """The value at a `GUARD_MODE_KEYS` key as the reader sees it, or `default`.
+
+    One resolution of the dotted path for every guard, so a reader and the boot
+    check below can never disagree about what the config says — the two-sided
+    failure this whole check is about (#1948).
+    """
+    found, value = _dig_config(cfg or {}, key)
+    if not found or value is None:
+        return default
+    return str(value).strip().lower()
+
+
+def validate_guard_modes(cfg: dict) -> None:
+    """Refuse to boot on a guard-mode value this build cannot honour (#1948).
+
+    The property is OpenAPPA's: a policy the deployment cannot honour is a
+    startup failure, not a runtime hole. An absent key is the documented state
+    and is not invalid — the reader defaults to `shadow`, and an empty value is
+    the same absent case for `read_guard_mode`, so the two sides agree. A value
+    that no branch of the reader implements has no honest behaviour left, and it
+    raises here, at the import of `app.config`, beside the two `RuntimeError`s in
+    `_apply_config_overlay` that already refuse a missing or non-mapping
+    `$LLOYD_CONFIG_OVERLAY`.
+
+    Deliberately *not* applied per turn. By the time a turn is running, refusing
+    is not available: the guard's install path catches the exception and returns
+    `None`, so raising there would un-install the very recorder whose silence
+    this check exists to make impossible. The per-turn read path coerces to the
+    default and says so in the log; only boot stops.
+    """
+    for key, valid in GUARD_MODE_KEYS.items():
+        found, raw = _dig_config(cfg, key)
+        if not found or raw is None:
+            continue
+        if str(raw).strip().lower() not in valid:
+            raise RuntimeError(
+                f"config key {key} = {raw!r} is not a value this build can honour. "
+                f"Valid values for {key}: {', '.join(valid)} — omit the key to take "
+                f"the default. Refusing to start rather than run a guard on a mode "
+                f"nobody implements (#1948)."
+            )
+
+
 def _load_config() -> dict:
     _load_env_file(LLOYD_HOME / ".env")
     config_path = LLOYD_HOME / "config.yaml"
@@ -300,6 +384,9 @@ def _load_config() -> dict:
 
 
 CONFIG = _load_config()
+#: Before anything that reads a guard's mode can import this module: a
+#: misconfiguration is a startup failure, not a runtime hole (#1948).
+validate_guard_modes(CONFIG)
 MODEL_CONFIGS = CONFIG.get("models", {})
 
 def _get_model_cfg(model_name: str) -> dict:

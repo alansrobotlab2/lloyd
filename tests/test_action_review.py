@@ -8,6 +8,7 @@ worker turns only; and the seam has a frozen schema.
 
 from __future__ import annotations
 
+import logging
 import time
 
 import pytest
@@ -245,3 +246,42 @@ def test_a_config_still_naming_warn_gets_shadow_not_a_gate():
     r = AR.install_action_review_hook(hooks, user_prompt=PROMPT, mode="warn")
     assert r is not None and r.mode == "shadow"
     assert AR.mode_from_config() in AR.MODES
+
+
+def test_an_unparseable_config_value_still_installs_a_shadow_reviewer(monkeypatch, caplog):
+    """The refusal belongs at boot and never at the turn (#1948 clause 3).
+
+    `install_action_review_hook` wraps its mode read in `except Exception: return
+    None`. Making the config read raise would therefore have turned a typo into
+    the exact harm the item names: a recorder that silently never installs, on a
+    turn that reads as though it had one. So the price of `mode: shodow` is one
+    refused boot — pinned in `tests/test_config_guard_modes.py` — and never a
+    missing reviewer. The coercion is the second line, and it is spoken, not
+    silent: the warning names the value and the modes that do exist.
+    """
+    import app.config as C
+    monkeypatch.setattr(C, "CONFIG",
+                        {"harness": {"action_review": {"mode": "shodow"}}})
+    hooks = HookRegistry()
+    with caplog.at_level(logging.WARNING, logger="lloyd-harness-action-review"):
+        r = AR.install_action_review_hook(hooks, user_prompt=PROMPT,
+                                          source="autotriage", session_id="s1")
+    assert r is not None, ("a typo un-installed the reviewer: the boot refusal "
+                           "leaked into the turn")
+    assert r.mode == "shadow"
+    assert AR.mode_from_config() == "shadow"
+    assert "shodow" in caplog.text
+    assert "off, shadow" in caplog.text, "coerced without naming the valid set"
+
+
+def test_the_deprecated_warn_is_a_documented_mapping_not_a_warning(monkeypatch, caplog):
+    """`warn` is boot-valid and behaviourally `shadow` (#1944), so mapping it is
+    the documented reading of that config, not a misconfiguration — and a
+    deployment that still names it must not pay a warning per turn for it."""
+    import app.config as C
+    monkeypatch.setattr(C, "CONFIG", {"harness": {"action_review": {"mode": "warn"}}})
+    hooks = HookRegistry()
+    with caplog.at_level(logging.WARNING, logger="lloyd-harness-action-review"):
+        r = AR.install_action_review_hook(hooks, user_prompt=PROMPT)
+    assert r is not None and r.mode == "shadow"
+    assert "not one of" not in caplog.text

@@ -89,7 +89,7 @@ NEW_DOCS = ("measurement.md", "context-window.md", "authority-surfaces.md",
 #: a sweep over "every doc" pass by sweeping nothing. A doc landing here moves
 #: the number, and that is the sweep admitting its new subject, which is the
 #: #1890 ruling: every doc is graded, so every doc has to be in the surface.
-ARCH_DOC_SURFACE = 34
+ARCH_DOC_SURFACE = 35   # + guard-coverage.md (#1948, 2026-10-01)
 
 #: The heading every one of the four carries, in the words clause 3 asks for.
 NOT_COVERED = "What this doc does not cover"

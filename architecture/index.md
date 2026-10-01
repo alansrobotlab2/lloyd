@@ -38,6 +38,7 @@ already uses; arch-review refreshes that one).
 | [[harness]] | `run_query`: events, the position-0 rule, preserved thinking, tool pool, summaries, thinking trace, finalizer, subagents |
 | [[context-window]] | the four layers that fit a session to the model's window: microcompaction, the persisted summary, LLM summarisation, truncate — one token meter with three readers, the manual `/compact`, and the prefix-cache misses each fold costs |
 | [[authority-surfaces]] | every guard in one list, in the order an action meets it: the Bash denies, protected trees and the write deny-set, the tool sandbox, unattended tool bans, grants, egress, the browser guard, RPC policy, the desktop lease, and where one rule is spelled twice |
+| [[guard-coverage]] | the union of what no guard on this box sees, each with the mechanism and the command that proves it: interactive turns, the tool-result and model/provider channels, the injection probe's own limits, hook-only labels, nested RPC, and the mode typo that let a silently-off guard read as a clean window |
 | [[tools]] | the lloyd-mcp aggregator: routes and credential, the dispatch path in order, tool properties and what each decides, every tool with its properties |
 | [[desktop]] | desktop computer use: `desktop_capture`/`desktop_act` over Alan's real Hyprland desktop, the lease only a human grants, chat sessions only, screenshots as refs never base64 |
 | [[editing-safeguards]] | read-before-edit gates, edit diagnostics and blast radius, the change and effect ledgers, the code graph |

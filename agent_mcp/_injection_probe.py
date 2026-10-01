@@ -35,6 +35,10 @@ from typing import Any
 
 logger = logging.getLogger("lloyd-mcp.injection-probe")
 
+#: The config key `app/config.py::validate_guard_modes` refuses an unparseable
+#: value for at boot, named here so the boot check and this reader quote one
+#: spelling rather than two copies of a string (#1948).
+CONFIG_KEY = "harness.injection_probe.mode"
 MODES = ("off", "shadow", "warn")
 DEFAULT_MODE = "shadow"
 EVENT = "harness.injection_probe_hit"
@@ -73,13 +77,40 @@ _background: set[asyncio.Task] = set()
 
 
 def mode_from_config() -> str:
+    """`harness.injection_probe.mode`, read through `resolve_mode`.
+
+    No longer the fail-open it was (#1948). This is the guard that can append a
+    `<warning>` to a tool result, so a typo here was the more consequential of
+    the two on this box: `mode: shawdow` booted, probed in `shadow`, and looked
+    exactly like a `warn` that had found nothing. An unparseable value now stops
+    the process at boot — `app/config.py::validate_guard_modes` — and what stays
+    here is the second line, for a value that never came through a booted config
+    and for a config that could not be imported at all.
+    """
     try:
-        from app.config import CONFIG
-        block = ((CONFIG or {}).get("harness") or {}).get("injection_probe") or {}
-        mode = str(block.get("mode", DEFAULT_MODE)).strip().lower()
-    except Exception:  # noqa: BLE001 — fail open to the default
+        from app.config import CONFIG, read_guard_mode
+        raw = read_guard_mode(CONFIG, CONFIG_KEY)
+    except Exception:  # noqa: BLE001 — a probe is never worth a turn
         return DEFAULT_MODE
-    return mode if mode in MODES else DEFAULT_MODE
+    return resolve_mode(raw)
+
+
+def resolve_mode(raw: Any) -> str:
+    """A mode this module implements, or `DEFAULT_MODE` with the coercion said
+    out loud.
+
+    `apply` runs every mode through this, including one its caller handed it, so
+    no path can act on a mode nobody implemented. Coercing instead of raising is
+    what keeps the probe from switching itself off mid-session — the failure mode
+    that reads as a clean window (#1948).
+    """
+    mode = str(raw or DEFAULT_MODE).strip().lower()
+    if mode not in MODES:
+        logger.warning("%s: mode %r is not one of %s — probing as %s. Boot refuses "
+                       "this value, so a call reaching it never came through config "
+                       "validation.", EVENT, raw, ", ".join(MODES), DEFAULT_MODE)
+        return DEFAULT_MODE
+    return mode
 
 
 def scan(text: str) -> list[dict[str, str]]:
@@ -149,8 +180,8 @@ async def apply(name: str, result: Any, *, session_id: str, is_background: bool,
     try:
         if name not in PROBED_TOOLS or not is_background or not session_id:
             return result
-        mode = mode or mode_from_config()
-        if mode not in MODES or mode == "off":
+        mode = resolve_mode(mode or mode_from_config())
+        if mode == "off":
             return result
         text, is_error = _result_text(result)
         if not text or is_error:

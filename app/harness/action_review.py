@@ -89,14 +89,25 @@ from typing import Any
 logger = logging.getLogger("lloyd-harness-action-review")
 
 SEAM = "action_review"
+#: The config key `app/config.py::validate_guard_modes` refuses an unparseable
+#: value for at boot, named here so the boot check and this reader quote one
+#: spelling rather than two copies of a string (#1948).
+CONFIG_KEY = "harness.action_review.mode"
 #: `warn` was removed 2026-10-01 on the measurement in the module docstring
 #: (item #1944): 174.1 would-be interruptions per day, 1 of 963 positives above
 #: tier 1, `injected` the argmax in 0 of 57,325 rows. A config still carrying
-#: `mode: warn` falls back to `DEFAULT_MODE` below, which is what `warn` did
-#: anyway — nothing ever branched on it — so the fallback is the honest one, not
-#: a silent gate. `tests/test_action_review.py` pins that `warn` is gone.
+#: `mode: warn` maps onto `DEFAULT_MODE` through `DEPRECATED_MODES` below, which
+#: is what `warn` did anyway — nothing ever branched on it — so the mapping is the
+#: honest one, not a silent gate. `tests/test_action_review.py` pins that `warn`
+#: is gone.
 MODES = ("off", "shadow")
 DEFAULT_MODE = "shadow"
+#: Values the boot check accepts because a config may already name them, and this
+#: module never implemented: each maps onto the mode it always ran as, so a
+#: deployment written before the ruling boots and behaves as it did. Not a gate
+#: waiting to be opened — `MODES` above is the behaviour, and
+#: `tests/test_action_review.py` pins `warn` out of it.
+DEPRECATED_MODES = {"warn": DEFAULT_MODE}
 
 #: The trusted task, clipped. A worker prompt is 2-12 KB; the head carries the
 #: instruction, the tail is mostly rules and output format.
@@ -110,16 +121,43 @@ MAX_PRIOR_CALLS = 20
 
 
 def mode_from_config() -> str:
-    """`harness.action_review.mode`, defaulting to shadow. Fail-open to the
-    default: an unreadable config must not switch a recorder into a gate or
-    silently off."""
+    """`harness.action_review.mode`, read through `resolve_mode`.
+
+    No longer the fail-open it was. A value this build cannot honour stops the
+    process at boot (`app/config.py::validate_guard_modes`), so the operator
+    sees the typo where it was typed instead of reading a corpus with no rows in
+    it and calling the window clean (#1948). What is left here is the second
+    line, for a value that never went through a booted config — a test, a
+    hand-built dict, a caller passing `mode=` — and for a config that could not
+    be imported at all: `DEFAULT_MODE`, and a warning in the log.
+    """
     try:
-        from app.config import CONFIG
-        block = ((CONFIG or {}).get("harness") or {}).get("action_review") or {}
-        mode = str(block.get("mode", DEFAULT_MODE)).strip().lower()
-    except Exception:  # noqa: BLE001
+        from app.config import CONFIG, read_guard_mode
+        raw = read_guard_mode(CONFIG, CONFIG_KEY)
+    except Exception:  # noqa: BLE001 — a recorder is never worth a turn
         return DEFAULT_MODE
-    return mode if mode in MODES else DEFAULT_MODE
+    return resolve_mode(raw)
+
+
+def resolve_mode(raw: Any) -> str:
+    """A mode this module implements, or `DEFAULT_MODE` with the coercion said
+    out loud.
+
+    `install_action_review_hook` runs every mode through this, including one its
+    caller handed it directly, so no path returns a mode the recorder cannot run.
+    Coercing here rather than raising is what keeps a typo from un-installing the
+    reviewer mid-turn — which, not the recording itself, is the hole the boot
+    refusal exists to close (#1948 clause 3).
+    """
+    mode = str(raw or DEFAULT_MODE).strip().lower()
+    mode = DEPRECATED_MODES.get(mode, mode)
+    if mode not in MODES:
+        logger.warning("%s: mode %r is not one of %s — recording as %s. Boot "
+                       "refuses this value, so a turn reaching it never came "
+                       "through config validation.",
+                       SEAM, raw, ", ".join(MODES), DEFAULT_MODE)
+        return DEFAULT_MODE
+    return mode
 
 
 def args_rendering(args: Any) -> str:
@@ -260,9 +298,7 @@ def install_action_review_hook(hooks: Any, *, user_prompt: str, source: str = ""
     ruling in this module's docstring.
     """
     try:
-        mode = (mode or mode_from_config()).strip().lower()
-        if mode not in MODES:
-            mode = DEFAULT_MODE
+        mode = resolve_mode(mode or mode_from_config())
         if mode == "off" or hooks is None:
             return None
         reviewer = ActionReviewer(user_prompt=user_prompt, source=source,
