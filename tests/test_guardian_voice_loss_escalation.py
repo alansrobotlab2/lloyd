@@ -328,15 +328,16 @@ def test_a_later_burst_refreshes_the_one_open_item_and_files_no_second_one(
 @pytest.mark.parametrize("status", ["done", "closed", "cancelled", "wontfix"])
 def test_a_closed_voice_loss_item_is_neither_refreshed_nor_re_opened(
         tmp_path, monkeypatch, board, status):
-    """Clause 3: a row outside the open set is left alone, and a later burst does
-    not answer it with a fresh item either.
+    """A row outside the open set is never posted to — and a burst the cursor never
+    escalated is filed as a FRESH row that cites it (#2003, amending #1904 clause 3).
 
     The retired spellings are in the parametrised set on purpose: a row reading
     `status: closed` is exactly what a person who has finished with an incident
     leaves behind, and a reader that only knew the four current words would
-    refresh it back to life. The second burst is the half that catches an
-    implementation which files a NEW item when the old one is closed — that
-    overrules whoever closed it, and the record on disk is still the evidence.
+    refresh it back to life. What changed with #2003 is the other half: this node
+    used to pin that a later burst files nothing, and with the only row closed that
+    was permanent silence on the one route a lost alert has to a person. The closed
+    row still receives no update and no status change, on any tick.
     """
     clk = _clock(monkeypatch, time.time())
     _burst(tmp_path, _LOST)
@@ -346,20 +347,105 @@ def test_a_closed_voice_loss_item_is_neither_refreshed_nor_re_opened(
     esc = _escalator(board, tmp_path)
     first = esc.tick(now=clk.now)
 
-    assert first["reason"] == "closed-suppressed", first
-    assert board.calls(CREATE) == [], "a closed incident must not be re-filed"
+    assert first["reason"] == "created", first
+    creates = board.calls(CREATE)
+    assert len(creates) == 1, "exactly one fresh row for the new incident"
+    assert "follows closed #777" in _body(creates[0]), _body(creates[0])
     assert board.calls(UPDATE) == [], "a closed incident must not be refreshed"
+    new_id = board.next_id - 1
+    cursor = gstate.read_json(esc.cursor_path)
+    assert cursor["item_id"] == new_id and first["item_id"] == new_id, cursor
+    assert cursor["last_escalated_burst_ts"] == \
+        speak.read_loss_record(tmp_path)["burst_started"], cursor
 
-    clk.now += 600.0
-    _burst(tmp_path, _LOST_2)
+    # Two more ticks over the same, unmodified record: nothing, not even a read.
+    requests = len(board.requests)
+    for step in (5.0, 10.0):
+        assert esc.tick(now=clk.now + step)["reason"] == "unchanged"
+    assert len(board.requests) == requests
+    assert len(board.calls(CREATE)) == 1 and board.calls(UPDATE) == []
+
+    # The row just filed is open. A second, DISTINCT burst refreshes that one row
+    # and files no second open row; the closed row is still never posted to.
+    board.rows.append({"id": new_id, "name": voiceloss.ITEM_NAME, "status": "draft",
+                       "board": "lloyd"})
+    _lose_a_later_burst(tmp_path, clk, _LOST_2, _LOST_3)
     second = esc.tick(now=clk.now)
 
-    assert second["reason"] == "closed-suppressed", second
-    assert board.calls(CREATE) == [], "a later burst must not overrule the close"
-    assert board.calls(UPDATE) == [], "a later burst must not re-open the row"
-    assert gstate.read_json(esc.cursor_path)["occurrences"] == 2, (
-        "the cursor still advances, so an incident a human closed is not read "
-        "again on every tick")
+    assert second["reason"] == "refreshed", second
+    assert len(board.calls(CREATE)) == 1, "a later burst must not file a second open row"
+    updates = board.calls(UPDATE)
+    assert len(updates) == 1
+    assert updates[0]["payload"]["id"] == new_id, "the closed row must not be re-opened"
+    assert updates[0]["payload"]["force_body_replace"] is True
+    assert set(updates[0]["payload"]) == {"id", "description", "force_body_replace"}, (
+        "no status change rides the refresh")
+    assert _count(_body(updates[0])) == 2
+    assert _last_seen(_body(updates[0])) > _last_seen(_body(creates[0]))
+    assert "follows closed #777" in _body(updates[0]), (
+        "the whole-body replace must keep the citation the row was filed with")
+    assert all(r["payload"].get("id") != 777 for r in board.calls(UPDATE))
+
+
+def test_the_fresh_row_cites_the_newest_closed_row(tmp_path, monkeypatch, board):
+    """Closes accumulate after #2003; the citation names the highest closed id,
+    whatever order the list route returns them in."""
+    clk = _clock(monkeypatch, time.time())
+    _burst(tmp_path, _LOST)
+    board.rows = [
+        {"id": 950, "name": voiceloss.ITEM_NAME, "status": "done", "board": "lloyd"},
+        {"id": 1911, "name": voiceloss.ITEM_NAME, "status": "closed", "board": "lloyd"},
+        {"id": 400, "name": voiceloss.ITEM_NAME, "status": "done", "board": "lloyd"},
+    ]
+    report = _escalator(board, tmp_path).tick(now=clk.now)
+    assert report["reason"] == "created" and report["follows_closed"] == 1911, report
+    assert "follows closed #1911" in _body(board.calls(CREATE)[0])
+
+
+def test_a_first_incident_with_no_closed_row_cites_nothing(tmp_path, monkeypatch, board):
+    clk = _clock(monkeypatch, time.time())
+    _burst(tmp_path, _LOST)
+    report = _escalator(board, tmp_path).tick(now=clk.now)
+    assert report["reason"] == "created" and "follows_closed" not in report
+    assert "follows closed" not in _body(board.calls(CREATE)[0])
+
+
+def test_a_refused_create_after_a_close_is_delivered_by_a_later_tick(
+        tmp_path, monkeypatch, board):
+    """#2003 clause 5: backend connection-refused, nothing raises, the retry cursor
+    keeps the burst it owes, and one later tick past the retry interval delivers
+    exactly one create carrying that burst."""
+    clk = _clock(monkeypatch, time.time())
+    _burst(tmp_path, _LOST, _LOST_2)
+    board.rows = [{"id": 777, "name": voiceloss.ITEM_NAME, "status": "done",
+                   "board": "lloyd"}]
+    esc = _escalator(board, tmp_path)
+    cursor_a = _seed_escalated_burst(esc, occurrences=2, item_id=board.next_id,
+                                     reason="created")
+    assert len(board.calls(CREATE)) == 1
+    board.rows.append({"id": cursor_a["item_id"], "name": voiceloss.ITEM_NAME,
+                       "status": "done", "board": "lloyd"})   # and it is closed too
+
+    _lose_a_later_burst(tmp_path, clk, _LOST_3)
+    owed = speak.read_loss_record(tmp_path)["burst_started"]
+    down = voiceloss.VoiceLossEscalator(
+        tmp_path, base_url=f"http://127.0.0.1:{_refused_port()}")
+    refused = down.tick(now=clk.now)
+
+    assert refused["reason"] == "unreachable", refused
+    retry = gstate.read_json(down.cursor_path)
+    assert retry["last_escalated_burst_ts"] == cursor_a["last_escalated_burst_ts"], retry
+    assert down.tick(now=clk.now + 5.0)["reason"] == "retry-waiting"
+    assert len(board.calls(CREATE)) == 1, "nothing reached the board while it was down"
+
+    delivered = esc.tick(now=retry["next_attempt_ts"] + 1.0)
+
+    assert delivered["reason"] == "created", delivered
+    creates = board.calls(CREATE)
+    assert len(creates) == 2 and board.calls(UPDATE) == []
+    assert f"follows closed #{cursor_a['item_id']}" in _body(creates[1])
+    assert _count(_body(creates[1])) == 1
+    assert gstate.read_json(esc.cursor_path)["last_escalated_burst_ts"] == owed
 
 
 # ── clause 4 ─────────────────────────────────────────────────────────
@@ -710,36 +796,40 @@ def test_the_shipped_cursor_adopts_its_burst_quietly_and_then_hears_the_next_one
 
 def test_a_later_burst_after_the_row_was_closed_reports_rather_than_silence(
         tmp_path, monkeypatch, board):
-    """A new burst against a CLOSED row is reported `closed-suppressed`, not
-    `unchanged` — and files nothing.
+    """A new burst against a CLOSED row reaches the board and is filed as a fresh
+    row citing the closed one — never swallowed.
 
-    The second half is not this item's to change: #1904's clause and
-    `test_a_closed_voice_loss_item_is_neither_refreshed_nor_re_opened` rule that a
-    person who closed `[alerts] voice loss` ended that incident, and whether a
-    genuinely new burst should be allowed to file a fresh row is a ruling still
-    owed on #1904. What #1913 fixes is the half below that ruling: the burst must
-    at least REACH the board and be named in the guardian's log, instead of being
-    swallowed by a count comparison before anyone looks.
+    #1913 fixed the half below the ruling: the burst must at least REACH the board
+    instead of being lost to a count comparison. The ruling it left owed (#1904
+    owed 3) is now made, #2003: a burst the cursor never escalated is a new
+    incident, with no age cutoff and no look at who closed the row, so this node's
+    old `CREATE == []` leg is amended to exactly one create.
     """
     clk = _clock(monkeypatch, time.time())
     _burst(tmp_path, _LOST, _LOST_2)
-    board.rows = [{"id": 1911, "name": voiceloss.ITEM_NAME, "status": "done",
+    board.rows = [{"id": 777, "name": voiceloss.ITEM_NAME, "status": "done",
                    "board": "lloyd"}]
     esc = _escalator(board, tmp_path)
-    cursor_a = _seed_escalated_burst(esc, occurrences=2, item_id=1911,
-                                     reason="closed-suppressed")
+    first_id = board.next_id
+    cursor_a = _seed_escalated_burst(esc, occurrences=2, item_id=first_id,
+                                     reason="created")
+    # That row is closed in turn, so the board again holds no open row.
+    board.rows.append({"id": first_id, "name": voiceloss.ITEM_NAME, "status": "done",
+                       "board": "lloyd"})
 
     _lose_a_later_burst(tmp_path, clk, _LOST_3)
     report = esc.tick(now=clk.now)
 
-    assert report["reason"] == "closed-suppressed", (
-        f"a new incident was never put in front of the ruling: {report}")
-    assert board.calls(CREATE) == [], "closing an incident stays closed (#1904 clause 3)"
-    assert board.calls(UPDATE) == []
+    assert report["reason"] == "created", (
+        f"a new incident after a close must be filed, not suppressed: {report}")
+    creates = board.calls(CREATE)
+    assert len(creates) == 2, "one create per incident: the first burst, then this one"
+    assert f"follows closed #{first_id}" in _body(creates[1]), _body(creates[1])
+    assert board.calls(UPDATE) == [], "no closed row is refreshed or re-opened"
     cursor_b = gstate.read_json(esc.cursor_path)
     assert cursor_b["last_escalated_burst_ts"] != cursor_a["last_escalated_burst_ts"], (
-        f"the suppressed burst must still move the watermark, or every tick after "
-        f"it re-reads one incident: {cursor_a} -> {cursor_b}")
+        f"the cursor must name the burst it just filed: {cursor_a} -> {cursor_b}")
+    assert cursor_b["item_id"] == report["item_id"] == first_id + 1
 
 
 def test_an_escalation_the_board_refused_keeps_the_burst_it_owes(

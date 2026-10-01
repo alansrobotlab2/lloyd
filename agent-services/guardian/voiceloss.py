@@ -40,10 +40,21 @@ path in `speak.py` gains no HTTP call and stays inside its 2.0 s watchdog contra
 * *Raise.* Every branch returns a report; the caller logs it. A tick that dies
   here costs the watchdog its other watches.
 * *Re-open a closed incident.* `canonical_status` says whether a row is live
-  before anything is posted to it, and a row outside `OPEN_STATUSES` is neither
-  refreshed nor replaced. A person who closed `[alerts] voice loss` closed that
-  incident; the next burst advances the cursor and files nothing, and the record
-  on disk stays the evidence.
+  before anything is posted to it, and a row outside `OPEN_STATUSES` is never
+  refreshed and never has its status changed. A person who closed
+  `[alerts] voice loss` closed that incident.
+
+**A new burst after a close is a new incident (#2003).** #1904 first ruled the
+other way — a closed row suppressed every later burst — and once the single row
+(#1911) was `done` that became the permanent end state: every future lost alert
+advanced the cursor and filed nothing, on the only route `voice-loss.md` has to a
+person (`speak._record_loss` notifies nobody, and the fallback chirp plays through
+the speakers that just failed). So when the record is new work and no open row
+exists, `tick()` files a FRESH row whose body cites the closed one
+(`follows closed #<id>`) and leaves the closed row untouched. There is no age
+cutoff and no branch on who closed the row: both were ruled out on #1904 owed 3.
+What keeps a close meaningful is the cursor, not suppression — the burst a row was
+filed for is never filed twice, so closing a row is final for that burst.
 """
 
 from __future__ import annotations
@@ -124,7 +135,7 @@ def canonical_status(value) -> str:
     return "draft"
 
 
-def item_body(record: dict, *, state_dir: Path) -> str:
+def item_body(record: dict, *, state_dir: Path, follows_closed=None) -> str:
     """The whole body for one coalesced item, written from the record.
 
     The count and the two stamps are on their own lines, `Occurrences: <n>`
@@ -133,7 +144,14 @@ def item_body(record: dict, *, state_dir: Path) -> str:
     whole with `force_body_replace`, which is what makes "written from the record"
     load-bearing: nothing here is merged with what is on the board, so the board
     can never keep a stale tally that this function did not write.
+
+    `follows_closed` is the id of the closed row this incident was filed after
+    (#2003), or None. It is a fact about the ROW, so `_refresh` passes it again
+    only for the row the cursor recorded it against.
     """
+    follows = (f"This incident follows closed #{follows_closed}: that row was "
+               "closed and is left as it is; this is a later burst.\n"
+               if follows_closed is not None else "")
     said = "".join(f'- "{s}"\n'
                    for s in list(record.get("said") or [])[:speak.LOSS_TEXT_KEEP])
     return (
@@ -147,11 +165,13 @@ def item_body(record: dict, *, state_dir: Path) -> str:
         f"Burst window: {speak.LOSS_WINDOW:.1f}s\n"
         f"Record: {Path(state_dir) / speak.LOSS_NAME}\n"
         f"Escalated: {gstate.now_iso()}\n"
+        f"{follows}"
         "\n"
         "Filed by the guardian's own tick, so a burst during an "
         "`agent-supervisord` outage is escalated once the backend answers. One "
         "item per incident: a later burst refreshes this one rather than adding a "
-        "second, and closing it ends the incident.\n"
+        "second, and closing it ends the incident — a burst after the close is "
+        "filed as a new item that cites this one.\n"
         "\n"
         "## What did not get said\n"
         f"{said}"
@@ -225,27 +245,28 @@ class VoiceLossEscalator:
             if open_row is not None:
                 return self._refresh(record, cursor, open_row, now)
             closed_row = self._pick(rows, open_only=False)
-            if closed_row is not None:
-                # A closed incident stays closed: not refreshed, not re-opened,
-                # and not answered with a fresh row that overrules the person who
-                # closed it. The cursor advances anyway, because the alternative
-                # is a board read every tick for an incident someone finished
-                # with, and the record on disk is still the evidence.
-                self._write_cursor(record, now, action="closed-suppressed",
-                                   item_id=_row_id(closed_row))
-                return self._report("closed-suppressed",
-                                    occurrences=record["occurrences"],
-                                    item_id=_row_id(closed_row))
-            return self._create(record, cursor, now)
+            # No open row. A closed one does not suppress this: the record is new
+            # work (a burst the cursor never escalated), so it is a new incident
+            # and gets a fresh row citing the closed one (#2003, module
+            # docstring). The closed row itself is never posted to. No age test
+            # and no look at who closed it — both ruled out on #1904 owed 3.
+            follows = _row_id(closed_row) if closed_row is not None else None
+            return self._create(record, cursor, now, follows_closed=follows)
         except Exception as exc:  # noqa: BLE001 — a watch never owns the tick
             return self._report("failed", error=f"{type(exc).__name__}: {exc}")
 
     # ── the three outcomes ─────────────────────────────────────────────
-    def _create(self, record: dict, cursor: dict, now: float) -> dict:
-        """File the one coalesced item for this incident."""
+    def _create(self, record: dict, cursor: dict, now: float, *,
+                follows_closed=None) -> dict:
+        """File the one coalesced item for this incident.
+
+        `follows_closed` is the closed row this burst arrived after, if any; the
+        body cites it and the cursor remembers it for this row's refreshes.
+        """
         reply = self._post(_CREATE_PATH, {
             "name": ITEM_NAME[:120],
-            "description": item_body(record, state_dir=self.dir),
+            "description": item_body(record, state_dir=self.dir,
+                                     follows_closed=follows_closed),
             "board": ITEM_BOARD,
             # `draft`, as `notify.py::_backlog_task` posts for a rollback since
             # #1990: it is the only status autotriage's pool filter reads (#1893
@@ -258,16 +279,24 @@ class VoiceLossEscalator:
             return self._retry(cursor, now, "create-failed",
                                occurrences=record["occurrences"], reply=reply)
         self._write_cursor(record, now, action="created",
-                           item_id=_row_id(reply))
+                           item_id=_row_id(reply), follows_closed=follows_closed)
+        extra = {} if follows_closed is None else {"follows_closed": follows_closed}
         return self._report("created", occurrences=record["occurrences"],
-                            item_id=_row_id(reply))
+                            item_id=_row_id(reply), **extra)
 
     def _refresh(self, record: dict, cursor: dict, target: dict, now: float) -> dict:
         """Advance the one open row: count and last-seen move, no second item."""
         task_id = target.get("id")
+        # The citation belongs to the row it was filed with. The body is replaced
+        # whole, so it is written again for THAT row and for no other — a refresh
+        # of any other row must not grow a "follows closed" line it never had.
+        follows = (cursor.get("follows_closed")
+                   if cursor.get("item_id") is not None
+                   and str(cursor.get("item_id")) == str(task_id) else None)
         reply = self._post(_UPDATE_PATH, {
             "id": task_id,
-            "description": item_body(record, state_dir=self.dir),
+            "description": item_body(record, state_dir=self.dir,
+                                     follows_closed=follows),
             # The daily-note pilot's fix, for the identical reason
             # (`app/autonomy.py:3325-3335`): the route DROPS a body shorter than
             # the one on disk unless this is set (`app/routers/backlog.py:614`),
@@ -280,7 +309,8 @@ class VoiceLossEscalator:
             return self._retry(cursor, now, "update-failed",
                                occurrences=record["occurrences"],
                                item_id=task_id, reply=reply)
-        self._write_cursor(record, now, action="refreshed", item_id=task_id)
+        self._write_cursor(record, now, action="refreshed", item_id=task_id,
+                           follows_closed=follows)
         return self._report("refreshed", occurrences=record["occurrences"],
                             item_id=task_id)
 
@@ -305,7 +335,8 @@ class VoiceLossEscalator:
 
     @staticmethod
     def _pick(rows: list, *, open_only: bool) -> dict | None:
-        """The first row of OURS whose open-ness is `open_only`.
+        """The row of OURS whose open-ness is `open_only`: the first open one, or
+        the highest-numbered closed one.
 
         Matched on the name prefix, not on the body — `?q=` searches both, so the
         needle alone would also return an item that merely quotes this one — and
@@ -313,6 +344,7 @@ class VoiceLossEscalator:
         spelling (`closed`, `cancelled`) is read as the closed incident it means
         instead of being refreshed back to life.
         """
+        ours = []
         for row in rows:
             if not isinstance(row, dict):
                 continue
@@ -320,8 +352,16 @@ class VoiceLossEscalator:
                 continue
             is_open = canonical_status(row.get("status")) in OPEN_STATUSES
             if is_open == open_only:
-                return row
-        return None
+                if open_only:
+                    return row
+                ours.append(row)
+        if not ours:
+            return None
+        # Closed rows accumulate once a burst after a close files a fresh one
+        # (#2003), and the id the new row cites has to be one this code chose, not
+        # whichever the list route happened to return first: the highest id, which
+        # is the most recently filed incident.
+        return max(ours, key=_row_order)
 
     def _post(self, path: str, payload: dict):
         return self._request("POST", path, payload=payload)
@@ -376,7 +416,7 @@ class VoiceLossEscalator:
         return self._report(reason, next_attempt_ts=now + self.retry_seconds, **extra)
 
     def _write_cursor(self, record: dict, now: float, *, action: str,
-                      item_id=None) -> None:
+                      item_id=None, follows_closed=None) -> None:
         gstate.write_json_atomic(self.cursor_path, {
             "schema": 1,
             "occurrences": int(record["occurrences"]),
@@ -388,6 +428,8 @@ class VoiceLossEscalator:
             "last_escalated_burst_ts": record.get("burst_started"),
             "action": action,
             "item_id": item_id,
+            # The closed row `item_id` was filed after (#2003), or None.
+            "follows_closed": follows_closed,
             "last_seen": record.get("last_seen"),
             "escalated_at": gstate.now_iso(),
             "next_attempt_ts": 0.0,
@@ -512,6 +554,12 @@ def _occurrences(value) -> int:
     except (TypeError, ValueError):
         return 0
     return n if n > 0 else 0
+
+
+def _row_order(row) -> int:
+    """Sort key for closed rows: the numeric id, or -1 for a row without one."""
+    rid = _row_id(row)
+    return rid if rid is not None else -1
 
 
 def _row_id(source) -> int | None:

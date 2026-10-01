@@ -454,6 +454,20 @@ that directory or it will not exist in the pinned snapshot.
   said, and they are on the toast, the journal, ALERT.md and the daily note
   already. Pinned by the failure-path nodes in `tests/test_guardian_speak.py`,
   which refuse through a real closed port rather than a stubbed exception.
+- **The record reaches the board through the guardian's tick, one row per
+  incident.** `voiceloss.py` (`VoiceLossEscalator`, #1904) reads `voice-loss.md`
+  each tick and keeps a cursor naming the burst it last escalated (#1913). An
+  open `[alerts] voice loss` row is refreshed whole; a closed row is never
+  refreshed and never has its status changed. **A burst the cursor never
+  escalated, with no open row, files a fresh row** whose body says
+  `follows closed #<id>` — the highest-numbered closed row — and the cursor
+  remembers that citation for the new row's refreshes (#2003). Before that a
+  closed row suppressed every later burst, and once the only row (#1911) was
+  `done` every future lost alert filed nothing. No age cutoff and no look at who
+  closed the row (ruled on #1904 owed 3); a close stays final for its own burst
+  because the cursor never files one burst twice. A refused board keeps the
+  burst owed and retries after `RETRY_SECONDS`
+  (`tests/test_guardian_voice_loss_escalation.py`).
 - **The child runs the venv python, and that is deliberate.** The
   stdlib-only rule exists so the watchdog cannot be taken down by what it
   watches; this child runs after the ledger, ALERT.md, the journal and the

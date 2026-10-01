@@ -880,8 +880,10 @@ class Guardian:
             return
         reason = report.get("reason")
         if reason in ("created", "refreshed", "closed-suppressed"):
+            after = (f", follows closed #{report['follows_closed']}"
+                     if report.get("follows_closed") is not None else "")
             log(f"voice-loss escalation {reason}: backlog #{report.get('item_id')} "
-                f"(occurrences {report.get('occurrences')})")
+                f"(occurrences {report.get('occurrences')}{after})")
 
     # ── memory-pressure evidence ───────────────────────────────────────
     def check_memory(self) -> None:
