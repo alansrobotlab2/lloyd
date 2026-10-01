@@ -58,6 +58,9 @@ DEFAULT_MODEL = "primary"
 DEFAULT_MAX_TURNS = 40
 DEFAULT_SPAWN_CAP = 3
 BODY_CHARS = 14_000
+#: parse_answer's ceiling on evidence/ruling, far above
+#: `owed.SETTLED_TEXT_LIMIT` so the writer's marked cut is the only cut.
+_FIELD_CEILING = 6000
 
 OWED_SCHEMA = {
     "type": "object",
@@ -74,6 +77,7 @@ OWED_SCHEMA = {
                 "follow_up": {"type": "object", "properties": {
                     "name": {"type": "string"}, "body": {"type": "string"}}},
                 "outside": {"type": "string"},
+                "artifact": {"type": "string"},
             },
             "required": ["n", "outcome", "evidence"]}},
         "summary": {"type": "string"},
@@ -126,6 +130,11 @@ the host, a secret or account only Alan holds, hardware, spending money. Say \
 exactly what he would do in `outside`. Deleting or moving data is NOT outside: \
 rule on it, and file the change as `work` so a gated round does it.
 
+Evidence and rulings are stored up to 1200 characters. When one would run \
+longer it is cut with a visible marker, so put the decision and its bounds \
+first and name in `artifact` a path that already holds the detail (a run \
+record, a session file, a log).
+
 Do not edit files, write to the backlog, or change the system yourself — \
 measure and decide; the job applies your answer. Finish by restating every \
 entry's answer as the structured object you are asked for.
@@ -174,8 +183,12 @@ def parse_answer(structured: Any, due_numbers: set[int]) -> dict | None:
             continue
         follow = raw.get("follow_up") if isinstance(raw.get("follow_up"), dict) else {}
         answers.append({"n": n, "outcome": outcome,
-                        "evidence": " ".join(str(raw.get("evidence") or "").split())[:800],
-                        "ruling": " ".join(str(raw.get("ruling") or "").split())[:800],
+                        # Never cut below the writer's bound: `O._bounded`
+                        # makes the one visible cut (#1955). This is only a
+                        # ceiling on a runaway answer.
+                        "evidence": " ".join(str(raw.get("evidence") or "").split())[:_FIELD_CEILING],
+                        "ruling": " ".join(str(raw.get("ruling") or "").split())[:_FIELD_CEILING],
+                        "artifact": " ".join(str(raw.get("artifact") or "").split())[:300],
                         "recheck_after": str(raw.get("recheck_after") or "")[:40],
                         "outside": " ".join(str(raw.get("outside") or "").split())[:500],
                         "follow_up": {"name": " ".join(str(follow.get("name") or "").split())[:140],

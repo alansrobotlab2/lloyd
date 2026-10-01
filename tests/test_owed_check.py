@@ -630,3 +630,83 @@ def test_a_name_that_merely_starts_with_a_listed_word_still_files():
     for name in ("Follow-up: fix the owed cursor", "None of the three callers pass session_id",
                  "Nothing-examined rows: count them in the scorecard", "Non-empty guard for owed"):
         assert O.is_real_follow_up({"name": name, "body": body}), name
+
+
+# ── #1955: a settled field is bounded visibly, never cut silently ────────────
+
+def _sentences(n: int, last: str = "") -> str:
+    """Exactly `n` chars of short sentences, ending with `last` when given."""
+    unit = "A sentence that explains the bound. "
+    text = (unit * (n // len(unit) + 2))[:n - len(last)].rstrip()
+    text = text + " " * (n - len(last) - len(text)) + last
+    return " ".join(text.split()).ljust(n, "x")[:n]
+
+
+def test_a_900_char_ruling_and_a_700_char_evidence_field_are_stored_whole(isolated):
+    assert O.SETTLED_TEXT_LIMIT == 1200
+    ruling, evidence = _sentences(900), _sentences(700)
+    assert (len(ruling), len(evidence)) == (900, 700)
+    p, entries = _owing(isolated, 60, ["decide the retention rule"])
+    O.apply_verdict(p, entries, [{"n": 1, "outcome": "ruling", "evidence": evidence,
+                                  "ruling": ruling}], item_id=60)
+    rec = fm_of(p)["owed_settled"][0]
+    assert rec["ruling"] == ruling and len(rec["ruling"]) == 900
+    assert rec["evidence"] == evidence and len(rec["evidence"]) > 500
+    assert "artifact" not in rec, "nothing was cut, so nothing needs a witness"
+
+
+def test_an_over_bound_ruling_is_cut_at_a_sentence_end_and_marked(isolated):
+    ruling = _sentences(1300)
+    p, entries = _owing(isolated, 61, ["decide the retention rule"])
+    O.apply_verdict(p, entries, [{"n": 1, "outcome": "ruling", "evidence": "measured it",
+                                  "ruling": ruling,
+                                  "artifact": "~/lloyd-data/sessions/x_owedcheck.json"}],
+                    item_id=61)
+    rec = fm_of(p)["owed_settled"][0]
+    stored = rec["ruling"]
+    assert stored.endswith(O.TRUNCATION_MARKER) and O.TRUNCATION_MARKER == " … [truncated]"
+    kept = stored[:-len(O.TRUNCATION_MARKER)]
+    assert 500 < len(kept) <= O.SETTLED_TEXT_LIMIT
+    assert kept.endswith("."), "cut at the last sentence end"
+    assert ruling.startswith(kept)
+    assert rec["artifact"] == "~/lloyd-data/sessions/x_owedcheck.json"
+
+
+def test_a_cut_with_no_sentence_end_falls_back_to_whitespace_never_mid_token():
+    words = " ".join(["token%04d" % i for i in range(200)])       # no sentence end
+    text, cut = O._bounded(words)
+    assert cut and text.endswith(O.TRUNCATION_MARKER)
+    kept = text[:-len(O.TRUNCATION_MARKER)]
+    assert len(kept) <= O.SETTLED_TEXT_LIMIT
+    assert kept.split()[-1] in words.split(), "the last kept token is whole"
+    assert O._bounded("short") == ("short", False)
+
+
+def test_a_cut_field_with_no_artifact_named_points_at_its_session(isolated):
+    p, entries = _owing(isolated, 62, ["decide"])
+    O.apply_verdict(p, entries, [{"n": 1, "outcome": "settled", "evidence": _sentences(1300)}],
+                    item_id=62, session_id="20261001_owedcheck_ab12")
+    rec = fm_of(p)["owed_settled"][0]
+    assert rec["evidence"].endswith(O.TRUNCATION_MARKER)
+    assert rec["artifact"] == "20261001_owedcheck_ab12"
+
+
+def test_the_bound_holds_end_to_end_through_parse_answer(isolated):
+    """#1644's case: a 951-char ruling whose last sentence is clause (c)."""
+    last = "Clause (c) reopen if a keep-ref ever appears."
+    ruling = _sentences(951, last)
+    assert len(ruling) == 951 and ruling.endswith(last)
+    long = _sentences(1300)
+    got = OC.parse_answer({"entries": [
+        {"n": 1, "outcome": "ruling", "evidence": "e", "ruling": ruling},
+        {"n": 2, "outcome": "ruling", "evidence": "e", "ruling": long,
+         "artifact": "~/lloyd-data/sessions/y.json"}], "summary": "s"}, {1, 2})
+    assert got["entries"][0]["ruling"] == ruling, "the dispatcher does not cut below the bound"
+    assert len(got["entries"][1]["ruling"]) == 1300
+    assert "artifact" in OC.OWED_SCHEMA["properties"]["entries"]["items"]["properties"]
+    p, entries = _owing(isolated, 63, ["rule on retention", "rule on the other"])
+    O.apply_verdict(p, entries, got["entries"], item_id=63)
+    first, second = fm_of(p)["owed_settled"]
+    assert first["ruling"].endswith(last) and len(first["ruling"]) == 951
+    assert second["ruling"].endswith(O.TRUNCATION_MARKER)
+    assert second["artifact"] == "~/lloyd-data/sessions/y.json"

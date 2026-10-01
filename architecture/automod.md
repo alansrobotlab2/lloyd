@@ -1832,6 +1832,18 @@ against the live system, then answers with one of these:
 The apply step is the only writer; the session cannot edit files or write the
 board.
 
+**A settled record's text is bounded visibly (#1955).** `evidence` and `ruling`
+are stored up to `owed.SETTLED_TEXT_LIMIT` (1200) characters. Past it the field
+is cut at the last sentence end, else the last whitespace, and ends with the
+literal ` … [truncated]`; the record then carries `artifact` — the path the
+session named, else the session id — so the full text has a witness. The cap
+had been a bare `[:500]` (and an unmarked `[:800]` upstream in `parse_answer`):
+on 2026-10-01, 494 of 576 settled fields on the board were exactly 500
+characters and none was marked, and #1644's 951-character ruling had lost its
+clause (c), the reopen bound. `parse_answer` keeps only a 6000-character
+ceiling, so the writer's cut is the only one. The fields cut before this are
+not backfilled: most originals are unrecoverable.
+
 **An empty `owed` list on an open item is a closed item.** When the answers that
 settle the last entry are applied, the same write closes the item
 (`closed_by: owed-check`) — the sweep that empties the list is the sweep that

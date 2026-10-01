@@ -62,6 +62,34 @@ def _text(value: Any, limit: int = 600) -> str:
     return " ".join(str(value or "").split())[:limit]
 
 
+# The bound on a settled record's `evidence` and `ruling` (#1955). It was a
+# literal 500 at both call sites, cut with a bare slice: measured 2026-10-01,
+# 494 of 576 `owed_settled` fields on the board were exactly 500 chars, none
+# marked, and #1644's 951-char ruling lost its clause (c), the reopen bound.
+# 1200 holds the longest ruling observed with room; the cap stays as a guard
+# against a runaway answer. `workers.sources.owed_check.parse_answer` must not
+# cut below it, or the effective bound is silently the lower one.
+SETTLED_TEXT_LIMIT = 1200
+TRUNCATION_MARKER = " … [truncated]"
+_SENTENCE_END = re.compile(r"[.!?](?=\s)")
+
+
+def _bounded(value: Any, limit: int = SETTLED_TEXT_LIMIT) -> tuple[str, bool]:
+    """`value` flattened to one line and, when it exceeds `limit`, cut at the
+    last sentence end (else the last whitespace) with `TRUNCATION_MARKER`
+    appended. Returns (text, was_cut): a cut is always visible on the board."""
+    flat = " ".join(str(value or "").split())
+    if len(flat) <= limit:
+        return flat, False
+    head = flat[:limit]
+    ends = [m.end() for m in _SENTENCE_END.finditer(flat[:limit + 1])]
+    if ends:
+        head = head[:ends[-1]]
+    elif not flat[limit].isspace() and " " in head:
+        head = head[:head.rindex(" ")]
+    return head.rstrip() + TRUNCATION_MARKER, True
+
+
 def entries_of(fm: dict) -> list[dict]:
     """The item's owed entries, each normalised to a dict. Tolerates the
     plain-string shape a hand edit would write."""
@@ -295,7 +323,7 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
             keep.append(_compact(e))
             continue
         out = a["outcome"]
-        evidence = _text(a.get("evidence"), 500)
+        evidence, cut = _bounded(a.get("evidence"))
         if out == "recheck" and e.get("rechecks", 0) >= MAX_RECHECKS:
             out = "ruling"
             a = {**a, "ruling": a.get("ruling") or
@@ -315,7 +343,14 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
         if evidence:
             record["evidence"] = evidence
         if out in ("ruling", "work", "reopen", "close") and _text(a.get("ruling")):
-            record["ruling"] = _text(a.get("ruling"), 500)
+            record["ruling"], ruling_cut = _bounded(a.get("ruling"))
+            cut = cut or ruling_cut
+        if cut:
+            # A cut field names where the whole text lives: the artifact the
+            # session gave, else the session that wrote it.
+            artifact = _text(a.get("artifact"), 300) or session_id
+            if artifact:
+                record["artifact"] = artifact
         follow = a.get("follow_up") or {}
         if out in ("work", "ruling") and is_real_follow_up(follow) and len(filed) < spawn_cap:
             new = B.new_item(_text(follow.get("name"), 140),
