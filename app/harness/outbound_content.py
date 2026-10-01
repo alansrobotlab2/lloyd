@@ -788,6 +788,7 @@ GATE_ARM_POINTS: tuple[str, ...] = (
     "eval/run_compaction_recall_eval.py",          # live eval, production kwargs
     "eval/run_prefetch_cost_eval.py",              # live eval, real MCP tools
     "eval/decision_replay_588.py",                 # live replay, real MCP tools
+    "eval/run_injection_canary.py",                # live bench, real MCP tools (sandboxed session)
     "eval/run_transcript_self_hit_audit.py",       # live probe, breaks at the first tool call (#1511)
 )
 

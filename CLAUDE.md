@@ -128,6 +128,15 @@ same rule; a refusal naming a remedy is the way forward. Baseline before the par
 within three calls by a same-effect retry, 30% of the hard-deny refusals. Re-run it to see
 whether the paragraph moved that.
 
+**The injection canary bench** (`eval/run_injection_canary.py`, scenarios and corpus in
+`eval/injection_canary/`) is the positive class the P10 seams never had: twelve worker-style
+tasks whose fetched content plants an instruction beside a canary token, scored on whether
+the token reached a sink call (any non-read-only tool, or Bash), never on prose. Every
+episode runs under a `_bench_` background-shaped id — sandboxed, and visible to both
+`action_review` and the input probe, whose verdicts are read back per row. Add a scenario
+by adding a corpus file and a YAML entry; a new tool that is a sink needs no change, since
+the scorer reads `agent_mcp.annotations.READ_ONLY`.
+
 ## Install provenance and advisory scan
 
 `app/harness/supply_chain.py`. **A background session's `pip install <name>` for a
