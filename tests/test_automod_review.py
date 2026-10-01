@@ -722,9 +722,10 @@ def test_a_seed_constant_written_by_a_fixture_elsewhere_is_no_mirror(tmp_path):
     act. Then the three controls, each of which keeps the detector alive: a
     `PAYLOAD` that never enters any argument list is `FALLBACK_LAYOUT` and fires
     once, at the assertion's own line, naming the constant's; `assert
-    parse(PAYLOAD) == PAYLOAD` fires, because the round-trip-that-cannot-fail is
-    the worst case in the corpus and counting its input side as a seed would
-    silence it; and a seed call that can only take `PAYLOAD + "!"` fires too,
+    parse(PAYLOAD) == PAYLOAD` fires, because counting the input side of the
+    round-trip-that-cannot-fail as a seed would silence it — which a def
+    parameter default (`def helper(n=PAYLOAD)`) did do until #1976, the one shape
+    that silenced the round-trip in the corpus; and a seed call that can only take `PAYLOAD + "!"` fires too,
     because a constant fed into arithmetic is being used as an expectation, not
     handed over as one.
     """
@@ -764,6 +765,43 @@ def test_a_seed_constant_written_by_a_fixture_elsewhere_is_no_mirror(tmp_path):
                                           n_clauses=1))
     assert len(found) == 1, found
     assert found[0]["line"] == 7, found
+
+
+@pytest.mark.parametrize("header", [
+    "def helper(n=PAYLOAD):",
+    "def helper(tmp_path, *, entity=PAYLOAD):",
+    "def helper(\n    *, entity=PAYLOAD,\n):",
+    "async def helper(\n    tmp_path,\n    entity=PAYLOAD,\n):",
+])
+def test_a_def_parameter_default_buys_the_constant_no_exclusion(header):
+    """#1976: `_CALL_OPEN_RX` read a def's parameter list as a call's argument
+    list, so a default made the constant a "fixture input" with no call in the
+    file handing it anywhere — and silenced the identity round-trip in
+    `tests/test_counterfactual_eval.py`."""
+    src = f'PAYLOAD = "seed"\n{header}\n    ...\nassert read_back() == PAYLOAD\n'
+    code = RV._code_only(src)[0]
+    assert RV._constants_handed_in(code) == set()
+    found = RV._mirrored_assertions(code)
+    assert len(found) == 1 and found[0][2] == "PAYLOAD", found
+    # The identity round-trip, the corpus shape itself.
+    rt = (f'PAYLOAD = "seed"\n{header}\n    ...\n'
+          'def test_x():\n    assert parse(PAYLOAD) == PAYLOAD\n')
+    assert len(RV._mirrored_assertions(RV._code_only(rt)[0])) == 1
+
+
+def test_the_def_skip_leaves_real_calls_and_lambdas_as_they_were():
+    """The exclusion still excludes: a call is a call, in a def body or as a
+    def's own default value."""
+    for seed in ("target.write_text(PAYLOAD)", "target.write(content=PAYLOAD)"):
+        src = (f'PAYLOAD = "seed"\ndef _seed(target):\n    {seed}\n'
+               'def test_x():\n    assert read_back() == PAYLOAD\n')
+        assert RV._constants_handed_in(RV._code_only(src)[0]) == {"PAYLOAD"}, seed
+        assert RV._mirrored_assertions(RV._code_only(src)[0]) == [], seed
+    nested = 'PAYLOAD = "seed"\ndef helper(n=wrap(PAYLOAD)):\n    ...\n'
+    assert RV._constants_handed_in(RV._code_only(nested)[0]) == {"PAYLOAD"}
+    lam = 'PAYLOAD = "seed"\nH = {"k": lambda n=PAYLOAD: n}\nassert read_back() == PAYLOAD\n'
+    assert RV._constants_handed_in(RV._code_only(lam)[0]) == set()
+    assert len(RV._mirrored_assertions(RV._code_only(lam)[0])) == 1
 
 
 def test_prose_that_spells_a_write_buys_the_constant_no_exclusion(tmp_path):

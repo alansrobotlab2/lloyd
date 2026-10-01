@@ -514,6 +514,9 @@ _CALL_OPEN_RX = re.compile(r"[^\W\d_]\s*(?:\.\s*[^\W\d_]+\s*)*\(")
 # A WHOLE argument that is a bare constant name, or a keyword whose value is one
 # (`content=PAYLOAD`). No verb list and no parameter-name list in it, on purpose:
 # see `_constants_handed_in`.
+# A `_CALL_OPEN_RX` match whose open paren is a `def`'s parameter list: the text
+# from the start of its line up to and including that paren (#1976).
+_DEF_HEAD_RX = re.compile(r"\s*(?:async\s+)?def\s+\w+\s*\(\Z")
 _ARG_CONST_RX = re.compile(r"^(?:\w+\s*=\s*)?(?P<name>[A-Z][A-Z0-9_]*)$")
 
 
@@ -650,8 +653,16 @@ def _constants_handed_in(code: str) -> set[str]:
     is what a genuine expectation constant is for, and earns nothing. And an
     argument inside an assertion never counts, because `assert parse(PAYLOAD) ==
     PAYLOAD` is the round-trip-that-cannot-fail this detector exists to catch —
-    reading its input side as a fixture would silence the worst case in the
-    corpus. The safe direction is over-count, so a constant used BOTH as a seed
+    reading its input side as a fixture would silence it. That round-trip was in
+    fact silenced by one shape until #1976: a `def` parameter default
+    (`def _verify_store(tmp_path, *, entity=SEEDED_ENTITY)`), whose parameter
+    list `_CALL_OPEN_RX` read as a call's argument list, so
+    `tests/test_counterfactual_eval.py`'s `assert resolve(SEEDED_ENTITY) ==
+    SEEDED_ENTITY` went quiet with no call argument anywhere in the file. A def
+    parameter list is never a call's argument list and is skipped, on whichever
+    line of a multi-line header the default sits; a lambda's parameters were
+    never a match head and need no rule. The safe direction is over-count, so a
+    constant used BOTH as a seed
     and as the compared expectation is silenced anyway (`ORIGINAL`, the miss that
     cost 2026-09-29 its promotion); the shape that must keep firing is the one
     that never appears in any argument list, `FALLBACK_LAYOUT`.
@@ -666,6 +677,8 @@ def _constants_handed_in(code: str) -> set[str]:
     n = len(code)
     for m in _CALL_OPEN_RX.finditer(code):
         if code.count("\n", 0, m.start()) + 1 in assert_lines:
+            continue
+        if _DEF_HEAD_RX.match(code, code.rfind("\n", 0, m.start()) + 1, m.end()):
             continue
         chunks, start, depth, j = [], m.end(), 1, m.end()
         while j < n:
