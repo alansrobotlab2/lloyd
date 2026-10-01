@@ -164,18 +164,17 @@ def test_dead_wikilink_gold_still_matches_the_vault(tasks):
 
 
 def test_skill_dead_path_gold_still_matches_the_skills(tasks):
-    skip_wrong_examples = {"lloyd/inner-voice/system-prompt.md"}
-    ref = re.compile(r"(?:~|/home/alansrobotlab)/lloyd/([A-Za-z0-9_./-]*[A-Za-z0-9_-])")
+    # The rule itself lives in `scripts/util/skill_path_findings.py` since #1969:
+    # `vault-commit.sh` asks it of a skill edit BEFORE the commit, and this node
+    # asks it of the committed corpus after. One definition, so the writer-side
+    # warning and this assertion cannot disagree about what a dead path is.
+    from scripts.util.skill_path_findings import bench_dead_refs
+
     dead = set()
     for p in (VAULT / "skills").rglob("SKILL.md"):
         if ".archived" in p.parts:
             continue
-        for m in ref.finditer(p.read_text(errors="ignore")):
-            rel = m.group(1)
-            if "." not in Path(rel).name or rel in skip_wrong_examples:
-                continue  # directories and the presented-as-wrong example
-            if not (HOME / "lloyd" / rel).exists():
-                dead.add(rel.lower())
+        dead |= bench_dead_refs(p.read_text(errors="ignore"), HOME / "lloyd")
     assert dead == set(_check(tasks["bench_016_audit_skill_dead_paths"])["gold_items"])
 
 

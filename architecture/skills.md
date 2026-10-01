@@ -358,6 +358,26 @@ Two gates now, deliberately at different cadences:
   category so drift shows up in the weekly report rather than only when someone
   runs pytest.
 
+The same file carries the path half (#1240): a skill or task naming a checkout
+path that is not there fails
+`test_no_active_skill_or_task_names_a_path_absent_from_the_checkout`, unmarked,
+so it is in every round's `tests` rung and a vault commit can turn `main` red.
+That happened three times in three days, each from a different nightly writer
+and each time in a sentence that was true ("`~/lloyd/.t` is absent"): a
+dead-path check cannot tell a path quoted as gone from a path to use. A rule in
+the writing skill would be rewritten by the same jobs, so the writer-side check
+is tracked code at the door they commit through (#1969):
+`scripts/util/vault-commit.sh` runs `scripts/util/skill_path_findings.py` after
+staging, which prints one `skill-path FINDING:` line per dead path the staged
+edit **adds** to a `skills/*/SKILL.md` or `autonomy/*.md`, with the reword to
+use. It loads `_absent_refs` from the test module rather than restating it, and
+owns the bench_016 rule (`bench_dead_refs`) that
+`tests/test_bench_audit_tasks.py` calls back. Report-only by design: the
+wrapper's no-pathspec mode commits other writers' state, so a refusal would let
+one job's sentence block every later job's snapshot. The fix for a finding is
+always the prose (name the removed thing without a repo-rooted path), never
+`PATH_KNOWN_UNFIXED` or the bench gold set.
+
 `terminal` — the OpenClaw name for Bash, found as a call in 69 places — is
 matched only as `` `terminal` `` or `terminal(`, because it is also an ordinary
 English word. `read_text`/`write_text` were deliberately **not** rewritten:

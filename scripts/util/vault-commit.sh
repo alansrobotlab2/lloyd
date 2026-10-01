@@ -40,6 +40,9 @@
 #      staged tree (see the autonomy-status block below). That step reports and
 #      never blocks: it exists so a dispatch-killing `status` flip cannot be
 #      certified by a commit message that talks about something else. #1127.
+#   5b. Print every repo path a staged skill or task edit newly names that the
+#      checkout does not have (the skill-path block below). Reports, never
+#      blocks. #1969.
 #   6. With LLOYD_JOB set, commit as the job rather than as whoever `user.name`
 #      says, and add a `Job:` trailer (see the job-identity block below). Unset
 #      means no change of any kind to what this wrapper used to do. #668.
@@ -371,6 +374,22 @@ elif [ -z "$PY" ]; then
     echo "vault-commit.sh: autonomy-status CHECK SKIPPED (no python interpreter)" >&2
 else
     "$PY" "$RUNG" --repo "$VAULT" || echo "vault-commit.sh: autonomy-status rung exited nonzero; committing anyway" >&2
+fi
+
+# Second pre-flight rung (#1969): name every repo path a staged skill or task
+# edit ADDS that the checkout does not have. Two suite nodes read the live vault
+# and go red on main for exactly that, and the writers are nightly jobs whose
+# prose a vault-side rule cannot bind — `~/lloyd/.t` was removed by hand on
+# 2026-09-30 and re-added by the next knowledge write. REPORT ONLY, like the rung
+# above: this wrapper also commits other writers' state, so a refusal here would
+# let one job's sentence block every later job's snapshot.
+PATH_RUNG="$SCRIPT_DIR/skill_path_findings.py"
+if [ ! -f "$PATH_RUNG" ]; then
+    echo "vault-commit.sh: skill-path CHECK SKIPPED (missing $PATH_RUNG)" >&2
+elif [ -z "$PY" ]; then
+    echo "vault-commit.sh: skill-path CHECK SKIPPED (no python interpreter)" >&2
+else
+    "$PY" "$PATH_RUNG" --repo "$VAULT" || echo "vault-commit.sh: skill-path rung exited nonzero; committing anyway" >&2
 fi
 
 # The `-c` overrides go BEFORE the subcommand: after it, git parses `-c` as

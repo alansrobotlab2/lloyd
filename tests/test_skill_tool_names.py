@@ -735,6 +735,35 @@ def _row_parts(row: str) -> tuple[str, str]:
     return tree, rel
 
 
+def _absent_refs(label: str, body: str, skill_dir: Path | None) -> set[str]:
+    """`<label>::<tree>:<path>` for each path `body` names that is not on disk.
+
+    One document's worth of `_unresolved_rows`, before the two tree-level
+    exemptions (ignore rules, landed-after-base) are applied. Split out so the
+    writer side can ask the same question of a body that is not on disk yet:
+    `scripts/util/skill_path_findings.py` runs this over the STAGED text of a
+    skill inside `vault-commit.sh`, which is where a nightly job that re-adds a
+    removed path is told so before its commit turns this file red on main
+    (#1969). One rule, two callers — a second copy of it there would drift.
+    """
+    out: set[str] = set()
+    for tree, rel in _named_paths(body, skill_dir):
+        if _is_template(rel) or "/" not in rel or rel.endswith(RUNTIME_SUFFIXES):
+            continue
+        if tree == "vault":
+            roots = [VAULT / rel]
+        else:
+            roots = [ROOT / rel]
+            if skill_dir is not None:
+                roots.append(skill_dir / rel)
+        if any(r.exists() for r in roots):
+            continue
+        if tree == "repo" and _dotted_module_ref(rel, roots):
+            continue
+        out.add(f"{label}::{tree}:{rel}")
+    return out
+
+
 def _unresolved_rows() -> dict[str, Path]:
     """`<label>::<tree>:<path>` -> the doc file that names it, for every named
     path that is not on disk.
@@ -780,20 +809,8 @@ def _unresolved_rows() -> dict[str, Path]:
     for label, path in _doc_files():
         body = path.read_text(encoding="utf-8", errors="replace")
         skill_dir = path.parent if label.startswith("skills/") else None
-        for tree, rel in sorted(_named_paths(body, skill_dir)):
-            if _is_template(rel) or "/" not in rel or rel.endswith(RUNTIME_SUFFIXES):
-                continue
-            if tree == "vault":
-                roots = [VAULT / rel]
-            else:
-                roots = [ROOT / rel]
-                if skill_dir is not None:
-                    roots.append(skill_dir / rel)
-            if any(r.exists() for r in roots):
-                continue
-            if tree == "repo" and _dotted_module_ref(rel, roots):
-                continue
-            bad[f"{label}::{tree}:{rel}"] = path
+        for row in sorted(_absent_refs(label, body, skill_dir)):
+            bad[row] = path
     ignored = _tree_ignores(ROOT, [_row_parts(r)[1] for r in bad
                                    if _row_parts(r)[0] == "repo"])
     if ignored:
