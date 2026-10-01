@@ -921,3 +921,79 @@ def test_row_9_reports_full_gates_and_the_red_tree(tmp_path, repo):
     text = SC.render(row)
     assert "gate time per round 701.0 s (median full gate 701.0 s)" in text
     assert "red-tree items filed 1, closed 1" in text
+
+
+# ── row 17 (#1956): install provenance, read from the journal by decision ────
+
+def _prov_row(offset_s, session, command, *entries):
+    at = datetime.fromtimestamp(NOW - offset_s, tz=timezone.utc).isoformat()
+    return {"at": at, "session": session, "session_class": "unattended",
+            "command": command,
+            "names": [{"name": n, "outcome": o, **extra} for n, o, extra in entries]}
+
+
+def _prov_scorecard(tmp_path, journal):
+    return SC.compute(since_days=7, ledger=_ledger(tmp_path, []),
+                      backlog_dir=tmp_path / "nope", repo=tmp_path, now=NOW,
+                      denials=tmp_path / "no-denials.jsonl", provenance=journal)
+
+
+def test_install_provenance_counts_decisions_by_outcome_not_rows(tmp_path):
+    journal = tmp_path / "provenance.jsonl"
+    rows = [
+        # one decision written twice, 11 ms apart: the pre-latch hook/dispatch pair
+        _prov_row(3600.000, "s1", "pip install -r requirements.lock",
+                  ("-r requirements.lock", "declared", {"count": 180})),
+        _prov_row(3599.989, "s1", "pip install -r requirements.lock",
+                  ("-r requirements.lock", "declared", {"count": 180})),
+        # the same command again two minutes later: a second decision
+        _prov_row(3480, "s1", "pip install -r requirements.lock",
+                  ("-r requirements.lock", "declared", {"count": 180})),
+        _prov_row(3000, "s2", "pip install graphy rich",
+                  ("graphy", "denied", {"fact": "unpublished"}), ("rich", "cleared", {})),
+        _prov_row(2000, "s3", "LLOYD_DEP_OVERRIDE=eval pip install graphy",
+                  ("graphy", "overridden", {"override": "eval"})),
+        _prov_row(1000, "s4", "npm install left-pad", ("left-pad", "unvetted", {})),
+        # outside the 7-day window
+        _prov_row(8 * DAY, "s5", "pip install old", ("old", "denied", {})),
+    ]
+    journal.write_text("\n".join(json.dumps(r) for r in rows) + "\nnot json\n")
+
+    row = _prov_scorecard(tmp_path, journal)
+    p = row["install_provenance"]
+    assert p["recorded"] is True
+    assert p["rows"] == 6 and p["decisions"] == 5, p
+    assert p["by_outcome"] == {"denied": 1, "overridden": 1, "unvetted": 1,
+                               "cleared": 1, "declared": 2}, p
+    assert p["names"] == 180 + 180 + 2 + 1 + 1
+
+    line = [ln for ln in SC.render(row).splitlines() if ln.startswith("| 17 |")]
+    assert len(line) == 1
+    assert "| install provenance | 5 |" in line[0]
+    assert "denied 1, overridden 1, unvetted 1, cleared 1, declared 2" in line[0]
+
+
+def test_install_provenance_says_zero_and_says_no_journal_as_different_things(tmp_path):
+    empty = tmp_path / "provenance.jsonl"
+    empty.write_text(json.dumps(_prov_row(8 * DAY, "s", "pip install old",
+                                          ("old", "denied", {}))) + "\n")
+    row = _prov_scorecard(tmp_path, empty)
+    assert row["install_provenance"]["recorded"] is True
+    assert row["install_provenance"]["decisions"] == 0
+    assert "| 17 | install provenance | 0 | no install decision journaled in the window |" \
+        in SC.render(row)
+
+    row = _prov_scorecard(tmp_path, tmp_path / "absent.jsonl")
+    assert row["install_provenance"]["recorded"] is False
+    assert "| 17 | install provenance | — | no journal yet (app/harness/supply_chain.py) |" \
+        in SC.render(row)
+
+
+def test_the_provenance_reader_and_writer_share_a_vocabulary_and_a_path(monkeypatch, tmp_path):
+    """The scorecard restates the outcome set and the latch rather than import
+    the application; pinned here so neither can drift from the writer."""
+    from app.harness import supply_chain as sc
+    assert set(SC.PROVENANCE_OUTCOMES) == set(sc.JOURNAL_OUTCOMES)
+    assert SC.PROVENANCE_LATCH_SECONDS == sc.JOURNAL_LATCH_SECONDS
+    monkeypatch.setenv("LLOYD_SUPPLY_CHAIN_CACHE_DIR", str(tmp_path))
+    assert SC._provenance_journal_default() == sc.provenance_journal_path()

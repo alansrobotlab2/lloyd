@@ -370,3 +370,98 @@ def test_the_path_the_doc_names_is_the_path_the_code_writes(monkeypatch):
         Path(DATA_ROOT) / "supply-chain" / sc.PROVENANCE_JOURNAL_NAME), (
         f"the guard writes {sc.provenance_journal_path()}, which is not the "
         "$DATA_ROOT/supply-chain/ file CLAUDE.md points a reader at")
+
+
+# ── #1956: one row per decision, and a lockfile is one entry ─────────────────
+
+def test_the_hook_and_the_dispatch_of_one_call_write_one_row(journal):
+    """A Bash call reaches the guard twice — PreToolUse hook, then dispatch,
+    in two processes about 11 ms apart — and each wrote a row: 15 of the 19
+    decisions in the live journal on 2026-10-01 were there twice. Driven through
+    the boundary both callers use, once as each."""
+    command = "pip install httpx"
+    for at_dispatch in (False, True):
+        assert safety.check_bash_command(command, session_id=BACKGROUND,
+                                         at_dispatch=at_dispatch) is None
+    rows = _rows(journal)
+    assert len(rows) == 1, [r["command"] for r in rows]
+    assert rows[0]["session"] == BACKGROUND and rows[0]["command"] == command
+
+
+def test_a_denied_command_still_has_exactly_one_row(journal):
+    """Why the latch and not "write from dispatch only": a hook denial never
+    reaches dispatch, so that route would stop journalling denials at all."""
+    registry = _registry(graphy=("missing",))
+    result = _check("pip install graphy", registry)
+    assert result.refusals, "the premise: this command is denied"
+    rows = _rows(journal)
+    assert len(rows) == 1 and rows[0]["names"][0]["outcome"] == "denied"
+    _check("pip install graphy", registry)       # the model retrying at once
+    assert len(_rows(journal)) == 1
+
+
+def test_the_same_command_run_again_later_is_a_new_decision(journal, monkeypatch):
+    """The latch is a window, not a set: past it, an identical command is a
+    second decision and gets its own row. And inside it, a different session or
+    a different command is never folded."""
+    registry = _registry()
+    t0 = dt.datetime(2026, 10, 1, 12, tzinfo=dt.timezone.utc)
+
+    def write(command, session, seconds):
+        result = sc.ProvenanceResult()
+        result.declared.extend(sc.find_install_commands(command))
+        sc._journal_decision(command, session, "unattended", result,
+                             now=t0 + dt.timedelta(seconds=seconds))
+
+    write("pip install httpx", BACKGROUND, 0)
+    write("pip install httpx", BACKGROUND, 0.011)
+    assert len(_rows(journal)) == 1
+    write("pip install httpx", BACKGROUND, sc.JOURNAL_LATCH_SECONDS + 1.5)
+    assert len(_rows(journal)) == 2, "more than 60 s apart is a second decision"
+    write("pip install httpx", "20260924_054120_autonomy_999", sc.JOURNAL_LATCH_SECONDS + 2)
+    write("pip install rich", BACKGROUND, sc.JOURNAL_LATCH_SECONDS + 2)
+    assert len(_rows(journal)) == 4
+    assert sc.JOURNAL_LATCH_SECONDS == 60.0
+
+
+def test_a_requirements_file_is_one_entry_with_a_count(journal, tmp_path, monkeypatch):
+    """`pip install -r <lockfile>` wrote one entry per name: 2,168 of the live
+    journal's 2,191 entries, 180 to a row. The parser still expands the file —
+    every name is decided on its own — and the journal names the file once."""
+    names = [f"pkg{i}" for i in range(40)]
+    req = tmp_path / "requirements.lock"
+    req.write_text("\n".join(f"{n}==1.0" for n in names) + "\n")
+    command = f"pip install -r {req}"
+
+    parsed = sc.find_install_commands(command)
+    assert [r.name for r in parsed] == names, "the parser still yields every name"
+    assert {r.source for r in parsed} == {str(req)}
+
+    result = check_install_provenance(
+        command, BACKGROUND, registry=_registry(), now=NOW,
+        dependency_set={n: "requirements.lock" for n in names})
+    assert [r.name for r in result.declared] == names, (
+        "the decision is per name and unchanged")
+
+    row = _rows(journal)[0]
+    assert len(row["names"]) == 1, row["names"]
+    entry = row["names"][0]
+    assert entry["file"] == str(req) and entry["count"] == 40
+    assert entry["outcome"] == "declared" and entry["name"] == f"-r {req}"
+    assert len(json.dumps(row)) < 600, "40 names used to be ~1.3 KB of entries"
+
+
+def test_a_denied_name_from_a_requirements_file_keeps_its_own_entry(journal, tmp_path):
+    """The collapse never hides the one thing worth a row: a name the registry
+    refused is written by name, with its fact, beside the file's count."""
+    req = tmp_path / "requirements.txt"
+    req.write_text("httpx==0.27\ngraphy==0.1\n")
+    result = _check(f"pip install -r {req} rich", _registry(
+        graphy=("missing",), rich=(True, "2018-01-01T00:00:00+00:00", 40)))
+    assert [r.name for r, _v in result.refusals] == ["graphy"]
+
+    by_name = {e["name"]: e for e in _rows(journal)[0]["names"]}
+    assert by_name[f"-r {req}"]["count"] == 1 and by_name[f"-r {req}"]["outcome"] == "declared"
+    assert by_name["graphy"]["outcome"] == "denied" and by_name["graphy"]["fact"]
+    assert by_name["graphy"]["file"] == str(req)
+    assert by_name["rich"]["outcome"] == "cleared" and "count" not in by_name["rich"]

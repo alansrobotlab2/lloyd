@@ -156,6 +156,10 @@ the override reason verbatim on an override. That file is where *blocks per week
 its ten rotations span 2.6 days, and the deny path emitted no log line of its own at
 all. The write is fail-open like the guard itself — a broken journal costs a row and a
 warning, never a dispatch.
+One row is one decision (#1956): the hook and the dispatch of one call latch on
+`(session, command, names)` for 60 s, a `-r <file>` install is one entry naming the file
+and a count, and scorecard row 17 reads the file by outcome. `python -m pip` needs an
+install verb to parse as an install — `python -m pip list` is not one.
 
 `check_bash_command` refuses in a fixed order — protected-delete deny-set,
 sync-registration, service-restart (#1455), protected-write deny-set (#1530) —

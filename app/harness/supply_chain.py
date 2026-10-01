@@ -263,6 +263,10 @@ class InstallRequest:
     #: a decision about one install — `OVERRIDE=why pip install a && pip install b`
     #: licences `a` and not `b`, the same scoping `env KEY=val cmd` already has.
     override: str | None = None
+    #: The `-r <file>` this name was read out of, "" for a name on the command
+    #: line. The decision is per name either way; the journal uses this to write
+    #: a 180-name lockfile as one entry instead of 180 (#1956).
+    source: str = ""
 
 
 #: An npm scoped package: `@scope/name`, optionally with a version suffix.
@@ -406,9 +410,18 @@ def _requests_in_segment(argv: Sequence[str], depth: int) -> list[InstallRequest
                 # `python -m pip install …` — the verb is argv of the module, not
                 # an operand; dropping it here is what stops `install` itself
                 # being reported as a distribution named `install`.
-                if after and after[0] in ("install", "uninstall", "download", "wheel"):
-                    after = after[1:]
-                return _requests_for("pip", "pip install", after)
+                #
+                # And the verb is REQUIRED (#1956). Stripping it when present and
+                # parsing whatever followed otherwise made `python -m pip list`
+                # an install of a distribution named `list` — refused, four
+                # times on 2026-09-30, as "not published on pypi.org" — while
+                # the bare `pip list` beside it parsed to nothing, because that
+                # path asks for a verb first. The first non-flag token decides.
+                verb_at = next((j for j, tok in enumerate(after)
+                                if not tok.startswith("-")), None)
+                if verb_at is None or after[verb_at] not in _PIP_MODULE_VERBS:
+                    return []
+                return _requests_for("pip", "pip install", after[verb_at + 1:])
         # A quoted operand that is itself a shell one-liner (`python x.py -c
         # "pip install foo"` is rarer than `python -c`, but wrappers exist).
         for tok in rest:
@@ -458,6 +471,10 @@ def _requests_in_segment(argv: Sequence[str], depth: int) -> list[InstallRequest
 
 
 _SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh", "fish"})
+#: The `python -m pip <verb>` forms that name distributions. Everything else
+#: (`list`, `show`, `check`, `freeze`, `config`, `cache`, …) reads and installs
+#: nothing. Unchanged from the set the branch always stripped.
+_PIP_MODULE_VERBS = frozenset({"install", "uninstall", "download", "wheel"})
 _INSTALL_HINT_RE = re.compile(r"\b(pip|pip3|uv|uvx|npm|pnpm|yarn|poetry|cargo|pipx)\b")
 
 
@@ -543,7 +560,8 @@ def _requests_for(prog: str, verb: str, args: Sequence[str]) -> list[InstallRequ
             continue
         for nm in _requirements_names(text):
             out.append(InstallRequest(name=nm, ecosystem=ecosystem, verb=verb,
-                                      vetted=ecosystem == _Ecosystem_PYPI))
+                                      vetted=ecosystem == _Ecosystem_PYPI,
+                                      source=req))
     return out
 
 
@@ -936,6 +954,49 @@ PROVENANCE_JOURNAL_NAME = "provenance.jsonl"
 JOURNAL_OUTCOMES = ("declared", "cleared", "denied", "overridden", "unvetted")
 
 
+#: Outcomes a `-r <file>` name may be folded into its file's one entry under.
+_COLLAPSED_OUTCOMES = frozenset({"declared", "cleared", "unvetted"})
+
+#: One decision, one row: a Bash call reaches this guard twice — the PreToolUse
+#: hook in the backend, then dispatch in the aggregator, about 11 ms apart and in
+#: two processes — and each wrote a row, so 15 of 19 decisions on 2026-10-01 were
+#: journalled twice. A row repeating the `(session, command, names)` of one
+#: written inside this many seconds is the same decision and is not written
+#: again. Read off the file's tail, because no in-process memory spans the two
+#: writers. The same command run again later is a new decision and a new row.
+JOURNAL_LATCH_SECONDS = 60.0
+_LATCH_TAIL_BYTES = 262_144
+
+
+def _decision_key(row: dict[str, Any]) -> tuple:
+    names = row.get("names") or []
+    return (row.get("session"), row.get("command"),
+            tuple(sorted(str(e.get("name")) for e in names if isinstance(e, dict))))
+
+
+def _already_journalled(target: Path, row: dict[str, Any], now: dt.datetime) -> bool:
+    """Whether the file's tail already holds this decision inside the latch."""
+    try:
+        size = target.stat().st_size
+    except OSError:
+        return False
+    with target.open("rb") as handle:
+        handle.seek(max(0, size - _LATCH_TAIL_BYTES))
+        tail = handle.read().decode("utf-8", errors="replace")
+    key = _decision_key(row)
+    for line in reversed(tail.splitlines()):
+        try:
+            prior = json.loads(line)
+            at = dt.datetime.fromisoformat(str(prior.get("at")))
+        except Exception:  # noqa: BLE001 — a cut first line, or a foreign row
+            continue
+        if (now - at).total_seconds() > JOURNAL_LATCH_SECONDS:
+            return False        # rows are appended in time order: nothing older matters
+        if _decision_key(prior) == key:
+            return True
+    return False
+
+
 def provenance_journal_path() -> Path:
     """Where the decision journal lives: the registry cache's own directory.
 
@@ -974,10 +1035,32 @@ def journal_entries(result: ProvenanceResult) -> list[dict[str, Any]]:
     """
     entries: list[dict[str, Any]] = []
     by_name: dict[str, dict[str, Any]] = {}
+    by_file: dict[tuple[str, str], dict[str, Any]] = {}
 
     def _add(request: InstallRequest, outcome: str) -> None:
+        # #1956: names read out of `-r <file>` that needed nothing said about
+        # them individually are one entry naming the file and how many. 98.9% of
+        # the journal's entries on 2026-10-01 were `declared` names from one
+        # lockfile, 180 to a row. A projection only — every name was still
+        # parsed and decided on its own — and never applied to a denial or an
+        # override, whose whole value is the name and the reason.
+        source = getattr(request, "source", "")
+        if source and outcome in _COLLAPSED_OUTCOMES \
+                and getattr(request, "override", None) is None:
+            key = (source, outcome)
+            entry = by_file.get(key)
+            if entry is None:
+                entry = {"name": f"-r {source}", "file": source, "count": 0,
+                         "ecosystem": request.ecosystem, "verb": request.verb,
+                         "outcome": outcome}
+                by_file[key] = entry
+                entries.append(entry)
+            entry["count"] += 1
+            return
         entry = {"name": request.name, "ecosystem": request.ecosystem,
                  "verb": request.verb, "outcome": outcome}
+        if source:
+            entry["file"] = source
         entries.append(entry)
         by_name[entry["name"]] = entry
 
@@ -1003,7 +1086,8 @@ def journal_entries(result: ProvenanceResult) -> list[dict[str, Any]]:
 
 
 def _journal_decision(command: str, session_id: str | None, session_class: str,
-                      result: ProvenanceResult, *, path: Path | None = None) -> None:
+                      result: ProvenanceResult, *, path: Path | None = None,
+                      now: dt.datetime | None = None) -> None:
     """Append one JSON line for one decision. Never raises, never delays (#1839).
 
     Fail-open like the rest of the guard, and for the same reason: a journal that
@@ -1017,8 +1101,9 @@ def _journal_decision(command: str, session_id: str | None, session_class: str,
     import logging
     try:
         target = path if path is not None else provenance_journal_path()
+        at = now or dt.datetime.now(dt.timezone.utc)
         row = {
-            "at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "at": at.isoformat(),
             "session": str(session_id) if session_id else None,
             "session_class": session_class,
             "command": str(command or "")[:200],
@@ -1030,6 +1115,8 @@ def _journal_decision(command: str, session_id: str | None, session_class: str,
                 "supply-chain: provenance journal carries outcome(s) outside %s: %s",
                 list(JOURNAL_OUTCOMES), unknown)
         target.parent.mkdir(parents=True, exist_ok=True)
+        if _already_journalled(target, row, at):
+            return      # the hook already wrote this decision; dispatch is its echo
         with target.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(row, sort_keys=True) + "\n")
     except Exception as exc:  # noqa: BLE001 — the guard outlives its own journal

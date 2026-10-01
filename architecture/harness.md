@@ -1894,6 +1894,24 @@ refusing unattended work or a person. A missing journal renders as "no journal y
 as zero. The scorecard resolves the path through `app.data_root`, the stdlib-only resolver
 the guardian uses, so it still imports nothing from the application.
 
+**The install-provenance journal is its sibling, and is read beside it (#1956).**
+`$DATA_ROOT/supply-chain/provenance.jsonl` (`app/harness/supply_chain.py`) records what
+this journal cannot: an *override*, an install allowed *unvetted*, and what was cleared or
+already declared. Three things were wrong with it on its first day of data (2026-10-01:
+36 rows, 19 decisions, 212 KB). One decision was written twice, because the guard runs in
+the PreToolUse hook (backend) and again at dispatch (aggregator) — two processes, so the
+latch is read off the file's tail: a row repeating a `(session, command, names)` written
+in the last 60 s is not written again. A hook denial never reaches dispatch, which is why
+the fix is a latch and not "write at dispatch only". `pip install -r <lockfile>` wrote one
+entry per name, 98.9% of all entries; it is now one entry naming the file with a `count`,
+while a denied or overridden name from that file keeps its own entry — the parser still
+expands the file and every name is still decided. And `python -m pip list` parsed as an
+install of a distribution named `list` (four hard denials), because that branch stripped
+an install verb when present instead of requiring one. Scorecard row 17
+(`scorecard._provenance`) counts decisions per outcome, folding pre-latch pairs the same
+way, and prints `no journal yet` rather than 0 when the file is absent. Not done: the file
+has no rotation, and `command` is still cut at 200 characters.
+
 **Pins.** `tests/test_denial_journal.py`: a hook deny under its gate's name, a raising
 fail-closed gate, a pass and a fail-open raise writing nothing, the dispatch helper under
 the caller's guard, the session-class table, an unwritable journal that neither raises nor

@@ -37,6 +37,8 @@ The metrics, each defined where it is computed:
  15  human overrides         decision events that name the person who made them
  16  guard denials           refusals journaled by every guard, by guard and
                              session class (app/harness/denial_journal.py)
+ 17  install provenance      unattended install decisions by outcome, from
+                             the provenance journal (app/harness/supply_chain.py)
 """
 
 from __future__ import annotations
@@ -687,9 +689,88 @@ def _denials(path: Path, since: float) -> dict[str, Any]:
     return out
 
 
+#: The journal's own outcome vocabulary (`supply_chain.JOURNAL_OUTCOMES`), in
+#: the order worth reading: what was stopped, what needed a reason, what went
+#: through unexamined, then the two that needed nothing. Restated rather than
+#: imported — this module reads state without importing the application — and
+#: pinned to the writer's tuple by `tests/test_automod_scorecard.py`.
+PROVENANCE_OUTCOMES = ("denied", "overridden", "unvetted", "cleared", "declared")
+#: The writer's latch (`supply_chain.JOURNAL_LATCH_SECONDS`): two rows for one
+#: `(session, command, names)` inside it are one decision. Rows written before
+#: the latch existed carry the hook/dispatch pair; this is what folds them.
+PROVENANCE_LATCH_SECONDS = 60.0
+
+
+def _provenance_journal_default() -> Path:
+    """Where `app/harness/supply_chain.py` journals install decisions: the same
+    override the writer honours, else the data root, resolved as row 16 does."""
+    import os
+    override = os.environ.get("LLOYD_SUPPLY_CHAIN_CACHE_DIR", "").strip()
+    if override:
+        return Path(override) / "provenance.jsonl"
+    try:
+        from app.data_root import resolve_data_root_for_tree
+        return resolve_data_root_for_tree(LIVE_ROOT) / "supply-chain" / "provenance.jsonl"
+    except Exception:  # noqa: BLE001
+        return Path.home() / "lloyd-data" / "supply-chain" / "provenance.jsonl"
+
+
+def _provenance(path: Path, since: float) -> dict[str, Any]:
+    """Row 17: unattended install decisions inside the window, by outcome.
+
+    Not a second count of row 16's denials: the denial journal says a guard
+    refused; this file is the only place an *override*, an install allowed
+    *unvetted*, and what was cleared or already declared are recorded at all.
+    Counted in decisions — rows folded on `(session, command, names)` within
+    the writer's latch — and a decision is counted once under each outcome any
+    of its names carries, so the five numbers can sum past `decisions`.
+    `names` is the distributions behind them, a `-r <file>` entry counting its
+    `count`. `recorded` False means no journal file, which is not zero.
+    """
+    out: dict[str, Any] = {"recorded": path.exists(), "decisions": 0, "rows": 0,
+                           "names": 0,
+                           "by_outcome": {o: 0 for o in PROVENANCE_OUTCOMES}}
+    if not out["recorded"]:
+        return out
+    last_seen: dict[tuple, float] = {}
+    try:
+        with path.open(encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                    at = datetime.fromisoformat(str(r.get("at"))).timestamp()
+                    entries = [e for e in (r.get("names") or []) if isinstance(e, dict)]
+                except Exception:  # noqa: BLE001
+                    continue
+                if at < since:
+                    continue
+                out["rows"] += 1
+                key = (r.get("session"), r.get("command"),
+                       tuple(sorted(str(e.get("name")) for e in entries)))
+                prior = last_seen.get(key)
+                last_seen[key] = at
+                if prior is not None and at - prior <= PROVENANCE_LATCH_SECONDS:
+                    continue
+                out["decisions"] += 1
+                for outcome in {str(e.get("outcome")) for e in entries}:
+                    out["by_outcome"][outcome] = out["by_outcome"].get(outcome, 0) + 1
+                for e in entries:
+                    try:
+                        out["names"] += int(e.get("count") or 1)
+                    except (TypeError, ValueError):
+                        out["names"] += 1
+    except Exception:  # noqa: BLE001 — a half-written line is skipped, never fatal
+        pass
+    return out
+
+
 def compute(*, since_days: float = 7.0, ledger: Path | None = None,
             backlog_dir: Path | None = None, repo: Path | None = None,
-            now: float | None = None, denials: Path | None = None) -> dict[str, Any]:
+            now: float | None = None, denials: Path | None = None,
+            provenance: Path | None = None) -> dict[str, Any]:
     from scripts.automod import state as S
     ledger = ledger or S.LEDGER_PATH
     backlog_dir = backlog_dir or (Path.home() / "obsidian" / "backlog")
@@ -1005,13 +1086,17 @@ def compute(*, since_days: float = 7.0, ledger: Path | None = None,
     # ── 16 guard denials ────────────────────────────────────────────────
     guard_denials = _denials(denials or _denial_journal_default(), since)
 
+    # ── 17 install provenance ───────────────────────────────────────────
+    install_provenance = _provenance(provenance or _provenance_journal_default(), since)
+
     return {"computed_at": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(timespec="seconds"),
             "since_days": since_days, "events": len(ev), "grouping": grouping,
             "acceptance": acceptance, "audit": audit, "review": review, "spawn": spawn,
             "human_touch": human, "test_honesty": honesty, "bookkeeping": bookkeeping,
             "verdict_plumbing": plumbing, "throughput": throughput, "rollbacks": rollbacks,
             "arch_review": arch_review, "flow": flow, "duty_cycle": duty,
-            "overrides": overrides, "guard_denials": guard_denials}
+            "overrides": overrides, "guard_denials": guard_denials,
+            "install_provenance": install_provenance}
 
 
 # ── output ───────────────────────────────────────────────────────────────
@@ -1075,6 +1160,7 @@ def render(row: dict) -> str:
         f"largest {d.get('largest_gap_minutes', 0):g} min |")
     lines.append(_render_overrides(row))
     lines.append(_render_denials(row))
+    lines.append(_render_provenance(row))
     return "\n".join(lines)
 
 
@@ -1090,6 +1176,25 @@ def _override_ref(event_row: dict) -> str:
         return str(rid)
     iid = event_row.get("item_id")
     return f"#{iid}" if iid is not None else "no round or item"
+
+
+def _render_provenance(row: dict) -> str:
+    """Table row 17. Every outcome is printed, zeros included: `overridden 0`
+    is the reading the row exists for, and an omitted zero reads as unmeasured."""
+    d = row.get("install_provenance")
+    if d is None:
+        return "| 17 | install provenance | — | section not recorded for this row |"
+    if not d.get("recorded"):
+        return "| 17 | install provenance | — | no journal yet (app/harness/supply_chain.py) |"
+    if not d.get("decisions"):
+        return "| 17 | install provenance | 0 | no install decision journaled in the window |"
+    by = d.get("by_outcome") or {}
+    parts = ", ".join(f"{o} {by.get(o, 0)}" for o in PROVENANCE_OUTCOMES)
+    extra = sorted(set(by) - set(PROVENANCE_OUTCOMES))
+    if extra:
+        parts += ", " + ", ".join(f"{o} {by[o]}" for o in extra)
+    return (f"| 17 | install provenance | {d['decisions']} | decisions carrying each "
+            f"outcome: {parts}; {d.get('names', 0)} names, {d.get('rows', 0)} rows |")
 
 
 def _render_denials(row: dict) -> str:

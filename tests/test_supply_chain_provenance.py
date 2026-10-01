@@ -416,3 +416,31 @@ def test_evaluate_provenance_is_pure_about_the_thresholds():
         "one place turns a fact into a refusal, so a threshold change moves the "
         "eval and the dispatch path together")
 
+
+
+# ── #1956: `python -m pip <read-only verb>` is not an install ────────────────
+
+@pytest.mark.parametrize("command", [
+    "python -m pip list", "python -m pip check", "python -m pip show httpx",
+    "python -m pip freeze", "python3 -m pip list --outdated",
+    "python -m pip --version", "python -m pip", "python -m pip config list",
+    ".venvs/lloyd/bin/python -m pip list",
+])
+def test_a_read_only_module_pip_subcommand_parses_to_no_install(command):
+    """The `-m pip` branch stripped an install verb when it saw one and parsed
+    whatever followed otherwise, so `python -m pip list` was an install of a
+    distribution named `list` — hard-denied four times on 2026-09-30 as "not
+    published on pypi.org". The bare forms beside it always parsed to nothing."""
+    assert sc.find_install_commands(command) == [], command
+    assert sc.find_install_commands(command.split("-m ", 1)[-1]) == [], (
+        "the bare spelling of the same command is the control")
+
+
+@pytest.mark.parametrize("command", [
+    "python -m pip install graphy", "python3.11 -m pip install graphy",
+    "python -m pip download graphy", "python -m pip wheel graphy",
+    "python -m pip uninstall graphy", "python -m pip --quiet install graphy",
+])
+def test_an_installing_module_pip_verb_still_yields_its_one_request(command):
+    found = sc.find_install_commands(command)
+    assert [r.name for r in found] == ["graphy"], (command, found)
