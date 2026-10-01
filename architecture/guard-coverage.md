@@ -16,9 +16,12 @@ the hook and not at dispatch, `agent_mcp/_injection_probe.py` says it probes fiv
 tools on background sessions. All true, all local to one file. What nobody had
 was the **union**: the list of dispatch paths and content channels that no guard
 on this machine sees at all. A reader who asks "what would an injected
-instruction have to arrive inside to reach a worker untouched?" gets five partial
-answers and has to do the intersection themselves, which is the work this page
-does once.
+instruction have to arrive inside to reach a worker untouched?" gets one partial
+answer per guard and has to do the intersection themselves, which is the work
+this page does once — and the first pass at it under-counted the guards, because
+it read the guard directory instead of the refusal sites. The inventory below is
+the re-derived one; §3, §8 and the two rows added on 2026-10-01 are what that
+re-derivation found.
 
 ## How to read this page
 
@@ -32,7 +35,9 @@ would exploit.
 
 All commands were run on 2026-10-01 in the tree of `main` at `17f48780` plus the
 diff that introduced this page (round `SM_20261001_060920`, item #1948), from the
-repository root. Three conventions keep the greps honest:
+repository root, and **re-run in full the same day at `b03c6c0b`** — every block
+still hits, the two guards added on that re-run hit too, and nothing under this
+page moved in between. Three conventions keep the greps honest:
 
 - absence claims use `git grep`, and every absence command is paired with a
   **positive control** — the same pattern against a file where it must hit — so a
@@ -41,7 +46,7 @@ repository root. Three conventions keep the greps honest:
   failed command;
 - a line number is a convenience, not the claim. Quote the symbol.
 
-## The five guards, and where each one is wired
+## The guards, and where each one is wired
 
 | Guard | Question it answers | Sees | Wired at |
 |---|---|---|---|
@@ -50,16 +55,50 @@ repository root. Three conventions keep the greps honest:
 | `app/harness/outbound_content.py` | what is inside the arguments | string argument values, direction `out` | beside the safety hook, and per scoped turn builder |
 | `app/harness/action_review.py` | is this call what the task asked for | the worker's prompt and the calls it has made | `build_turn_options`, `kind == "stream"`, worker platforms only |
 | `agent_mcp/_injection_probe.py` | is this result instruction-shaped | the text of five tools' results, background sessions | `agent_mcp/main.call_tool` |
+| `agent_mcp/session.py::_check_injection` | is this memory entry instruction-shaped | the `entry` of `memory_add`, the `new_text` of `memory_replace` | inside the two writers (`agent_mcp/session.py:293`, `:345`) — it **refuses**, `ErrorCode.INJECTION` |
+| `agent_mcp/egress.py` | is this destination allowed for this scope | the host of four network tools | `agent_mcp/http_tools.py:119`, `:412`, `:523`, `agent_mcp/browser.py:694` — its `DECISION_DENY` branch is armed only by `harness.egress_policy.enforce`, a key **no `config.yaml` sets** (#1960) |
+
+```
+git grep -n "_check_injection" -- agent_mcp/session.py
+git grep -n "egress.guard\|egress.aguard" -- agent_mcp/http_tools.py agent_mcp/browser.py
+```
+
+The last two rows are the 2026-10-01 re-derivation. They were missing from the
+first version because it inventoried `app/harness/` — the guard directory — and
+both refusals live elsewhere and refuse from inside a tool handler rather than
+from a hook. A union page has to enumerate the **refusal sites**, not the
+directory that smells like guards; that is the difference between §3 and §8
+being true and being almost true.
 
 ```
 git grep -n "install_default_safety_hook\|install_policy_hook\|install_outbound_content_gate\|_install_action_review" \
-  -- app/routers/turn_options.py app/autonomy.py workers/sources/_common.py agent_mcp/builtin_task.py
+  -- app/routers/turn_options.py app/harness/safety.py app/autonomy.py \
+  -- workers/sources/_common.py agent_mcp/builtin_task.py
 ```
 
 That output is the guard-by-path matrix, and it is the reason the exclusions
-below are shaped the way they are: three of the five guards live in one builder,
-and three other turn builders construct their own `HookRegistry` and install a
-different subset.
+below are shaped the way they are: **four** of the guards reach a worker's stream
+turn through one builder — `install_default_safety_hook`, `install_policy_hook`
+where a grant scope exists, `_install_action_review` on `kind == "stream"`, and
+the outbound gate, which is armed from *inside* the safety installer at
+`app/harness/safety.py:526` and so appears in that command only because
+`app/harness/safety.py` is in its path list. The first version of this page said
+"three", and its own table cell reading "beside the safety hook" contradicted it:
+the command could not see the transitive arm, so the sentence was copied from the
+command and inherited its blind spot. Three other turn builders construct their
+own `HookRegistry` and install a different subset — `builtin_task.py`,
+`autonomy.run_task`, `workers/sources/_common.py` — and the last of those three
+installs no Bash hook at all, which is what §6's dispatch floor is for.
+
+```
+git grep -n "GATE_ARM_POINTS\|def stale_gate_arm_points\|def find_unarmed_dispatch_paths" \
+  -- app/harness/outbound_content.py
+```
+
+That last block names the one **machine-checked** half of this table: the arm
+points of the outbound gate are derived from the tree and re-measured on every
+suite run. It covers one guard and runs only from tests (#1963) — which is why
+this page is prose and why the prose has to be re-run by hand.
 
 ---
 
@@ -132,8 +171,15 @@ git grep -n "The reviewer's whole view" -- app/harness/action_review.py
 ```
 
 So the text of a fetched page — the single largest channel by which somebody
-else's words enter a worker's context — is read by exactly one thing on this box,
-`_injection_probe`, and that thing's own exclusions are §4. This is deliberate in
+else's words enter a worker's context — is read **for what it says** by exactly
+one thing on this box, `_injection_probe`, and that thing's own exclusions are
+§4. The second command above is the exception that makes the qualifier
+necessary: `outcome_of` does read a result, and stops at a prefix test for
+`Tool call denied:` and a fragment test for `disabled by configuration`
+(`app/harness/action_review.py:189-197`) to work out what the *other* gates did.
+It never asks what the page said. Say "reads a result" without that qualifier
+and this section contradicts itself four lines after proving the reader exists.
+This is deliberate in
 `action_review` (a reviewer that reads the fetched content can be told what to
 think by the page; pinned by
 `tests/test_action_review.py::test_the_reviewer_sees_only_the_prompt_and_the_calls`)
@@ -144,8 +190,18 @@ the gap they leave together.
 
 ## 3. Model and provider traffic
 
-Nothing on this box scans what the model sent, or what came back from the
-provider.
+Nothing on this box scans what a tool was **sent**, or what came back from the
+provider. One thing does scan text the model authored, and it is not on this
+path: `agent_mcp/session.py::_check_injection` reads the `entry` of `memory_add`
+and the `new_text` of `memory_replace` against six patterns of its own and
+answers `ErrorCode.INJECTION` (`agent_mcp/session.py:293`, `:345`). It sits
+between a model and loaded memory, never between a model and a call, so it
+narrows this section's claim without weakening it — and it is a **second**,
+divergent copy of the probe's families, which is #1959's subject.
+
+```
+git grep -n "_check_injection" -- agent_mcp/session.py
+```
 
 The probe is wired at one call site, and it is a tool-dispatch site:
 
@@ -199,10 +255,22 @@ git grep -c '^    ("' -- agent_mcp/_injection_probe.py      # the family count
    *misses-ordinary-prose* fixture list precisely because precision is what
    decides whether `warn` can ever be enabled; the same list is the inventory of
    what will not be caught.
-5. **Background sessions only, and a `task:` child counts as one only if a parent
-   resolver is handed in** (`is_background_session(..., parent_of=...)` returns
-   False for a subagent with no resolver, by design, so the subagent's own tools
-   are not probed even though its parent's are).
+5. **Background sessions only.** A `task:` child of one *is* probed: the single
+   production call site always hands a resolver in
+   (`agent_mcp/main.py:706`, `is_background_session(sid, parent_of=_safety_parent_of)`),
+   so the helper classifies the subagent by its parent. The exclusion is the
+   **miss**, not the missing argument — `_safety_parent_of` returns `None` when
+   `agent_mcp/_subagent_registry` cannot resolve a parent, under the comment
+   "unresolvable means not refused", and the child is then neither background nor
+   worker. That one boolean also gates the dispatch `Bash` service-control refusal
+   (`agent_mcp/main.py:534`) and the desktop refusal (`:549`), so a registry miss
+   hands a worker's subagent chat-session privileges and stops recording its
+   fetched text at the same time (#1961).
+
+```
+git grep -n "def _safety_parent_of" -- agent_mcp/main.py
+git grep -n "parent_of=_safety_parent_of" -- agent_mcp/main.py
+```
 
 ## 5. Content that reaches a worker from anywhere else
 
@@ -263,13 +331,32 @@ git grep -n "nested call skips every PreToolUse hook" -- app/harness/rpc_policy.
 The module says it plainly and keeps v1 read-only as the mitigation. What it
 means for the union: `safety.py`, `policy.py` and `outbound_content.py` are all
 PreToolUse hooks, so a nested call is seen by none of them — only by the
-allowlist the socket stamped when the Bash call started, plus whatever
-`agent_mcp/main.call_tool` still does (the Bash hard-deny pass, and the probe,
-both of which run at dispatch and so do apply).
+allowlist the socket stamped when the Bash call started, plus the part of
+`agent_mcp/main.call_tool` it genuinely re-enters: the **probe**. The dispatch
+`Bash` hard-deny pass does not apply here and cannot: `_rpc_call` re-enters
+`call_tool`, but a nested `Bash` is refused a rung earlier by `FIXED_DENY`
+(`app/harness/rpc_policy.py:76`, admitted at `agent_mcp/_rpc.py:219`), so the
+`if name == "Bash"` branch at `agent_mcp/main.py:529` never sees the call. That
+is a stronger statement than the one it replaces, not a weaker one — and read-only
+is precisely the probe's class, so what a script pulls back *is* scanned.
 
-## 8. Nothing on the content axis blocks
+The whole section is latent today: `harness.rpc.enabled: false` in `config.yaml`
+(the `rpc:` block, `config.yaml:765`), and the module says the feature ships off.
+Named anyway, because the exclusion belongs to the mechanism, and the mechanism
+is one config key from live.
 
-The floor below the floor. Both content guards record; neither refuses:
+```
+git grep -n "^FIXED_DENY" -- app/harness/rpc_policy.py
+git grep -n "await call_tool(name, arguments" -- agent_mcp/main.py
+```
+
+## 8. Nothing on the content axis blocks the call an injection asked for
+
+The floor below the floor. Both **injection** guards record; neither refuses.
+(Without "injection" this heading was false on the day it was written: the
+credential gate, the egress table and `session.py`'s memory check all refuse
+content — every one of them keyed on a payload *shape*, which is the distinction
+this section is actually making.)
 
 ```
 git grep -n "^MODES = \|^DEPRECATED_MODES" -- app/harness/action_review.py agent_mcp/_injection_probe.py
@@ -278,13 +365,17 @@ git grep -n "^MODES = \|^DEPRECATED_MODES" -- app/harness/action_review.py agent
 `action_review`'s set is `("off", "shadow")` — `warn` was removed on the
 measurement in that module's docstring (#1944: 174.1 would-be interruptions per
 day, 1 of 963 positives above tier 1, `injected` the argmax in 0 of 57,325 rows).
-`injection_probe` still *ships* `warn`, and `warn` is the only emitting behaviour
-on the box; it is off in `config.yaml` and the module says the decision belongs to
-a measured hit sample, not to itself. So every exclusion above is an exclusion
-from a *recorder*. A prompt injection that reaches a worker today is written down
-after it acted, and the only thing between an injected instruction and the call
-is `safety.py`'s command shapes, `policy.py`'s tiers and `outbound_content.py`'s
-credential rules — none of which asks whether the call is what the task asked
+`injection_probe` still *ships* `warn`, and `warn` is the only behaviour on the
+box that puts a word back into the conversation. `config.yaml` does not have it
+"off" — it sets `harness.injection_probe.mode: shadow` (`config.yaml:758`), which
+records hits and stays out of the result — and the module says the decision to
+turn `warn` on belongs to a measured hit sample, not to itself. So every
+exclusion above is an exclusion from a *recorder*. A prompt injection that
+reaches a worker today is written down after it acted, and everything standing
+between an injected instruction and the call refuses on shape: `safety.py`'s
+command shapes, `policy.py`'s tiers, `outbound_content.py`'s credential rules,
+`egress.py`'s destination table (unarmed — #1960) and `session.py`'s
+memory-entry check. Not one of them asks whether the call is what the task asked
 for. That is the sentence this page exists to make unavoidable.
 
 ## What closed the "we cannot even tell" case (#1948)
@@ -326,3 +417,23 @@ changes the union. When one lands: re-run every block here in the same commit,
 update the stamp in "How to read this page", and add the exclusion the new guard
 *creates* — a guard that sees channel X usually makes "everything except X"
 worth naming.
+
+And when the page itself is reviewed, re-derive the guard list from the
+**refusal sites**, not from `app/harness/`: enumerate what can answer
+`denied`/`refused`/`ErrorCode.INJECTION` and work backwards to who wrote it. The
+one review this page had before this one found its two omissions that way, and
+neither omission was in a file a reader would think to look in.
+
+## Review log
+
+- 2026-10-01 — **stale** (not drift: every command here still hits at
+  `b03c6c0b`). The guard inventory was short of the two refusals living outside
+  `app/harness/` — `agent_mcp/session.py::_check_injection`, which blocks a
+  memory write, and `agent_mcp/egress.py`, which blocks a destination and is
+  unarmed — so §3 and §8 were overstating; §4.5 published an exclusion the tree
+  refutes (a `task:` child of a worker *is* probed — the real gap is the resolver
+  *miss*, #1961); §7 claimed the dispatch `Bash` hard-deny covers a nested call,
+  which `FIXED_DENY` makes unreachable; and "three of the five guards live in one
+  builder" contradicted the table's own "beside the safety hook" row, because the
+  matrix command could not see `app/harness/safety.py:526`. Filed #1959, #1960,
+  #1961, #1962, #1963.
