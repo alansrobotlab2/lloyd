@@ -692,3 +692,74 @@ def test_the_config_annotation_prices_the_options_and_leaves_the_value_to_config
         f"config.yaml's own value line ({value_line[0]!r}) is not what CONFIG "
         f"resolves ({shipped!r}) — an override or a second writer is in play, "
         "and no annotation in this repo can be trusted to describe it")
+
+
+# ── #1962: config.yaml must not promise an action_review gate that was ruled out ─
+
+#: The sentence `config.yaml:751` carried until #1962, verbatim. #1944 took
+#: `warn` out of `action_review.MODES` and #1948 mapped a surviving `warn` onto
+#: `shadow`; neither touched this comment, so the one sentence a person editing
+#: the value reads kept promising a gate that was waiting for a number.
+PREFIX_ACTION_REVIEW_SENTENCE = (
+    "action_review.py). `warn` records like `shadow` until a threshold exists.")
+STALE_ACTION_REVIEW_PHRASES = ("records like", "until a threshold exists")
+
+
+def _stale_action_review_lines(text: str) -> list[str]:
+    return [ln for ln in text.splitlines()
+            if any(p in ln for p in STALE_ACTION_REVIEW_PHRASES)]
+
+
+def _guard_half(block: str, name: str, until: str | None) -> str:
+    """One guard's half of the P10 comment block: from `<name>:` to `<until>:`."""
+    start = block.index(f"{name}:")
+    end = block.index(f"{until}:", start) if until else len(block)
+    return block[start:end]
+
+
+def test_config_yaml_no_longer_promises_an_action_review_gate_awaiting_a_threshold():
+    """#1962 clause 1. The pre-fix sentence is kept as the firing control."""
+    assert len(_stale_action_review_lines(PREFIX_ACTION_REVIEW_SENTENCE)) == 1, (
+        "the pre-fix sentence no longer trips the scan, so a clean config.yaml "
+        "proves nothing")
+    stale = _stale_action_review_lines(
+        (ROOT / "config.yaml").read_text(encoding="utf-8"))
+    assert stale == [], f"config.yaml still carries the pre-#1944 promise: {stale}"
+
+
+def test_the_action_review_comment_says_warn_is_deprecated_and_shadow_is_permanent():
+    """#1962 clauses 2 and 3, read off the block above `action_review:` and
+    checked against the module, so the comment cannot outlive a second ruling."""
+    import app.harness.action_review as AR
+
+    block = _comment_block_above("config.yaml", "action_review:")
+    half = _guard_half(block, "action_review", "injection_probe")
+
+    assert "warn" not in AR.MODES and AR.DEPRECATED_MODES.get("warn") == "shadow", (
+        "action_review honours `warn` again or maps it elsewhere — the comment "
+        "this test pins is now the stale side")
+    assert "`warn` is deprecated for action_review" in half, half
+    assert "maps to `shadow`" in half, half
+    assert "off | shadow." in half and "off | shadow | warn" not in half, (
+        f"the action_review half lists a mode the module does not honour: {half!r}")
+
+    assert "records only" in half, half
+    assert "permanent" in half and "reopening needs new evidence" in half, half
+    assert ("module docstring" in half
+            and "knowledge/ai/action-review-threshold-measurement.md" in half), (
+        f"the block states a ruling without naming where it is written: {half!r}")
+    assert "reopening needs new evidence" in " ".join((AR.__doc__ or "").split()), (
+        "the module docstring the comment cites no longer carries the ruling")
+
+
+def test_warn_stays_documented_as_a_live_mode_of_the_injection_probe():
+    """#1962 clause 4: the mode-list change is scoped to `action_review`."""
+    from agent_mcp import _injection_probe as P
+
+    block = _comment_block_above("config.yaml", "action_review:")
+    half = _guard_half(block, "injection_probe", None)
+    assert "warn" in P.MODES
+    assert "off | shadow | warn" in half, half
+    assert "warn also appends one <warning>" in half, half
+    assert "deprecated" not in half, (
+        f"the probe half calls a mode it still honours deprecated: {half!r}")

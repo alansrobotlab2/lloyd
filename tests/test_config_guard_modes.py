@@ -183,3 +183,15 @@ def test_the_read_path_and_the_boot_check_agree_on_one_value():
     validate_guard_modes(cfg)
     assert read_guard_mode(cfg, "harness.action_review.mode") == "warn"
     assert read_guard_mode({}, "harness.action_review.mode") == ""
+
+
+def test_the_shipped_config_resolves_both_guard_modes_to_shadow():
+    """#1962 clause 5: the comment rewrite above `harness.action_review` moved no
+    value. Read from the tracked file itself, not from `CONFIG`, so an overlay
+    in the environment cannot make this green."""
+    from app.config import validate_guard_modes
+
+    cfg = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
+    validate_guard_modes(cfg)
+    assert cfg["harness"]["action_review"]["mode"] == "shadow"
+    assert cfg["harness"]["injection_probe"]["mode"] == "shadow"

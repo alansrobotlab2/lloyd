@@ -743,15 +743,19 @@ harness:
   max_turns_wrapup:
     enabled: true
     models: [primary]
-  # P10, injection resistance for worker turns. Both halves only observe until
-  # a week of rows is labelled (architecture/harness.md, Review 2026-09-24).
-  # off | shadow | warn.
-  # action_review: djev asks, per worker tool call, whether it is on task,
-  #   unrelated, or what injected text would ask for (app/harness/
-  #   action_review.py). `warn` records like `shadow` until a threshold exists.
-  # injection_probe: regex families over fetched text in background sessions
-  #   (agent_mcp/_injection_probe.py). shadow logs harness.injection_probe_hit;
-  #   warn also appends one <warning> to the tool result.
+  # P10, injection resistance for worker turns (architecture/harness.md,
+  # Review 2026-09-24). The two halves take different modes.
+  # action_review: off | shadow. djev asks, per worker tool call, whether it
+  #   is on task, unrelated, or what injected text would ask for (app/harness/
+  #   action_review.py). It records only, and shadow is its permanent state:
+  #   the #1944 measurement ruled a gate out, and reopening needs new evidence
+  #   (the module docstring; knowledge/ai/action-review-threshold-measurement.md
+  #   in the vault). `warn` is deprecated for action_review and maps to
+  #   `shadow`: it still boots, and does nothing more.
+  # injection_probe: off | shadow | warn. Regex families over fetched text in
+  #   background sessions (agent_mcp/_injection_probe.py). shadow logs
+  #   harness.injection_probe_hit; warn also appends one <warning> to the tool
+  #   result. Whether warn is ever enabled is a ruling on the measured hits.
   action_review:
     mode: shadow
   injection_probe:
