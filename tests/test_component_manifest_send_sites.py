@@ -1211,15 +1211,21 @@ def _load_tally():
     return module
 
 
-def test_the_residual_check_splits_a_restart_boundary_from_an_unthreaded_site(
+def test_the_residual_check_splits_an_absent_session_file_from_an_unthreaded_site(
         tmp_path, capsys):
     """The check has to answer the question the residual ruling turns on.
 
-    Claim 3 says the leftover after this fix should be restart-boundary only, and a
-    manifest line carries its own `session_id` — so asking the manifest whether that
-    id "appears in the day" answers yes by construction and the bucket can never
-    fill. This drives the script over a scratch store whose sessions dir knows three
-    of four residual sessions, and requires all three buckets to come out distinct.
+    A manifest line carries its own `session_id` — so asking the manifest whether
+    that id "appears in the day" answers yes by construction and the file-absent
+    bucket can never fill. This drives the script over a scratch store whose
+    sessions dir knows three of four residual sessions, and requires the buckets to
+    come out distinct.
+
+    #1984: the fourth session has no file and nothing else, and that is ALL the
+    check may say about it. It used to be named a `restart_boundary` on absence
+    alone, which is a cause nobody had checked against any restart; it is
+    `session_file_absent`, and `restart_boundary` stays empty without a
+    process-death discriminant.
     """
     tally_mod = _load_tally()
     store = tmp_path / "manifests"
@@ -1253,10 +1259,16 @@ def test_the_residual_check_splits_a_restart_boundary_from_an_unthreaded_site(
     assert rep["stream_chat"] == {"lines": 6, "unrecorded": 5,
                                   "pct": 100.0 * 5 / 6}, rep["stream_chat"]
     assert rep["attribution"] == {
-        "unthreaded_send_site": sorted(known[:2]),
-        "restart_boundary": ["20260929_010003_ghost_ffff"],
         "registry_eviction": [known[2]],
+        "trial_traffic": [],
+        "unthreaded_send_site": sorted(known[:2]),
+        "restart_boundary": [],
+        "session_file_absent": ["20260929_010003_ghost_ffff"],
     }, rep["attribution"]
+    # Every bucket line carries the day's unrecorded-session denominator (4 here).
+    for kind in tally_mod.KINDS:
+        want = f"   {kind}: {len(rep['attribution'][kind])}/4 unrecorded sessions"
+        assert any(ln.startswith(want) for ln in printed.splitlines()), (kind, printed)
 
     # The zero-denominator rail: a window with lines and no stream_chat line must
     # not come back looking like a clean day.
@@ -1271,3 +1283,128 @@ def test_the_residual_check_splits_a_restart_boundary_from_an_unthreaded_site(
         "a day with no stream_chat line and a day with no file both returned 0 — "
         "the check can report a clean result over nothing")
     assert "NO stream_chat LINE" in empty, empty
+
+
+def _tally_fixture(tmp_path, rows, known=()):
+    store = tmp_path / "manifests"
+    store.mkdir()
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    for sid in known:
+        (sessions / f"{sid}.json").write_text("{}", encoding="utf-8")
+    (store / "2026-10-01.ndjson").write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    return store, sessions
+
+
+def _unrec(sid, ts, **extra):
+    return {"ts": ts, "session_id": sid, "send_site": STREAM_SITE,
+            "components_captured": "unrecorded", **extra}
+
+
+def test_a_residual_bench_session_with_no_session_file_does_not_land_in_restart_boundary(
+        tmp_path, capsys):
+    """#1984 clauses 1, 2 and 4, over a scratch store and a scratch sessions dir.
+
+    The live shape on 2026-10-01: fifteen `bench` trials, no session file for any of
+    them, printed as `restart_boundary: 15`. Trial traffic is tested BEFORE the
+    session store, on the row's `source` field first and the id slug only where the
+    row carries no `source`, and the bucket reports its burst window.
+    """
+    tally_mod = _load_tally()
+    by_field = "20260930_200049_worker_aaaa"       # slug says nothing; the row does
+    by_slug = "20260930_200050_benchmine_bbbb"     # no `source` on the row at all
+    with_file = "20260930_200051_bench_cccc"       # a trial that DOES have a file
+    not_trial = "20260930_200052_autonomy_dddd"    # source present and not a trial
+    rows = [
+        _unrec(by_field, "1790823649.5", source="bench"),
+        _unrec(by_field, 1790823700.0, source="bench"),
+        _unrec(by_slug, 1790823973.5),
+        _unrec(with_file, 1790823800.0, source="bench"),
+        _unrec(not_trial, 1790823900.0, source="autonomy"),
+    ]
+    store, sessions = _tally_fixture(tmp_path, rows, known=[with_file])
+
+    rc = tally_mod.report(str(store), ["2026-10-01"], json_out=False,
+                          sessions_dir=str(sessions))
+    printed = capsys.readouterr().out
+    assert rc == 0, printed
+    rep = tally_mod.tally(tally_mod.day_rows(str(store), "2026-10-01"),
+                          session_ids=tally_mod.known_sessions(str(sessions)))
+
+    assert rep["attribution"]["trial_traffic"] == sorted([by_field, by_slug, with_file])
+    assert rep["attribution"]["restart_boundary"] == []
+    assert rep["attribution"]["session_file_absent"] == [not_trial]
+    assert rep["attribution"]["unthreaded_send_site"] == []
+
+    # Clause 2: the session count and the burst window, first and last `ts`.
+    assert rep["trial_burst"] == {"sessions": 3, "lines": 4,
+                                  "first_ts": 1790823649.5, "last_ts": 1790823973.5}
+    trial_line = next(ln for ln in printed.splitlines()
+                      if ln.strip().startswith("trial_traffic:"))
+    assert "3/4 unrecorded sessions" in trial_line, trial_line
+    assert "4 lines" in trial_line and "burst " in trial_line, trial_line
+    assert tally_mod._stamp(1790823649.5) in trial_line
+    assert tally_mod._stamp(1790823973.5) in trial_line
+
+    # Clause 4: no bucket line without the denominator.
+    bucket_lines = [ln for ln in printed.splitlines()
+                    if ln.strip().split(":")[0] in tally_mod.KINDS]
+    assert len(bucket_lines) == len(tally_mod.KINDS), printed
+    for ln in bucket_lines:
+        assert "/4 unrecorded sessions" in ln, ln
+
+
+def test_restart_boundary_needs_a_process_death_discriminant(tmp_path, capsys):
+    """#1984 clause 3: absence alone is `session_file_absent`; a restart time that
+    falls between the session being minted and its first unrecorded line is what
+    makes it a restart boundary — and a restart outside that span does not."""
+    from datetime import datetime
+
+    tally_mod = _load_tally()
+    sid = "20260930_200052_autonomy_dddd"
+    minted = datetime.strptime("20260930200052", "%Y%m%d%H%M%S").timestamp()
+    assert tally_mod._minted_at(sid) == minted
+    rows = [_unrec(sid, minted + 600, source="autonomy")]
+    store, sessions = _tally_fixture(tmp_path, rows)
+    day = tally_mod.day_rows(str(store), "2026-10-01")
+
+    alone = tally_mod.tally(day, session_ids=set())
+    assert alone["attribution"]["session_file_absent"] == [sid]
+    assert alone["attribution"]["restart_boundary"] == []
+
+    spanned = tally_mod.tally(day, session_ids=set(), restarts=(minted + 300,))
+    assert spanned["attribution"]["restart_boundary"] == [sid]
+    assert spanned["attribution"]["session_file_absent"] == []
+
+    for outside in (minted - 300, minted + 900):
+        rep = tally_mod.tally(day, session_ids=set(), restarts=(outside,))
+        assert rep["attribution"]["restart_boundary"] == [], outside
+        assert rep["attribution"]["session_file_absent"] == [sid]
+
+    # A session that HAS a file is never a restart boundary, restart or no restart.
+    has_file = tally_mod.tally(day, session_ids={sid}, restarts=(minted + 300,))
+    assert has_file["attribution"]["unthreaded_send_site"] == [sid]
+    assert has_file["attribution"]["restart_boundary"] == []
+
+    # And the report says why the bucket is empty when no restart was supplied,
+    # then fills it through the CLI flag.
+    assert tally_mod.main(["2026-10-01", "--store", str(store),
+                           "--sessions", str(sessions)]) == 0
+    assert "no --restart-at given" in capsys.readouterr().out
+    assert tally_mod.main(["2026-10-01", "--store", str(store), "--sessions",
+                           str(sessions), "--restart-at", str(minted + 300)]) == 0
+    out = capsys.readouterr().out
+    assert "restart_boundary: 1/1 unrecorded sessions" in out, out
+    assert "no --restart-at given" not in out
+
+
+def test_the_tally_docstring_calls_the_missing_file_cause_unconfirmed():
+    """The script must not commit the sin it fixes: it may name
+    `bench_runner_sdk.py`'s swallowed `create_session` as a candidate for a trial's
+    missing session file, never as the cause — no runtime witness exists."""
+    doc = " ".join((_load_tally().__doc__ or "").split())
+    assert "bench_runner_sdk.py" in doc
+    assert "CANDIDATE, unconfirmed" in doc
+    assert "the known cause" not in doc
+
