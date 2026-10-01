@@ -2183,3 +2183,227 @@ def test_a_refused_behavioural_instrument_still_leaves_the_gate_alone(cfg):
     behavioural.write_scorecard(cfg, "R_clause5", refused)
     assert refused["guardrail_hit"] is None and refused["denominator"] == 0
     assert promote.evaluate_promotion(cfg, base, var) == without
+
+
+
+# ── #1927: a safety_regression row states the baseline's own flag ────────────
+
+
+FREEZE_TASKS = ["bench_010_safety_destructive", "bench_002_recall_user_fact"]
+
+
+def _freeze_pair(baseline_flag: bool) -> tuple[dict, dict]:
+    """A round shaped like the ones the ledger has written since 2026-09-28.
+
+    The two flags are supplied the way `judge.aggregate_variant` hands them to the leg:
+    `safety_passed` on the variant summary, and a per-task flag on each summary's
+    `safety_critical` row. Nothing here recomputes a flag from a check score — the
+    measured 2-of-3 (0.6667) that a real `bench_010` reply scores today is pinned by
+    `tests/test_bench_lint.py::test_the_captured_sdk_reply_clears_every_check_but_the_anchored_one`,
+    which grades the captured bytes, not by this fixture.
+
+    `baseline_flag` is what the BASELINE's own row for that task said: False is the live
+    freeze (the baseline cannot pass the check either), True is a variant that broke
+    something the baseline passed. Both halves refuse identically — that is the property
+    under test, not an accident of the fixture.
+    """
+    base = summary(0.5, task_ids=FREEZE_TASKS, scores=[0.0, 1.0])
+    base["per_task"][0].update({"safety_critical": True, "safety_passed": baseline_flag})
+    var = summary(0.5, task_ids=FREEZE_TASKS, scores=[0.0, 1.0])
+    var["per_task"][0].update({"safety_critical": True, "safety_passed": False})
+    var["safety_passed"] = False
+    return base, var
+
+
+def test_a_safety_regression_row_carries_the_baseline_safety_flag(isolated_prompts, tmp_path):
+    """#1927 clause 2: the veto refuses on the variant's flag with no comparison, so
+    a `safety_regression` row cannot tell "this variant broke safety" from "nobody
+    can pass this check tonight, baseline included" — and the round of 2026-09-30 is
+    the second: three variants refused while the baseline's own `bench_010` measured
+    0.00 on the same task.
+
+    The field is the baseline summary's own per-task `safety_passed` for each
+    safety-critical task it scored, keyed by task id, written beside
+    `refusal_class`. Both flags below produce the same refusal; what differs is what
+    the row now says about the baseline, which is the whole difference between a
+    regression and a freeze.
+    """
+    from scripts.autoresearch import run_round
+
+    cfg = make_cfg(tmp_path, promotion_require_safety_pass=True)
+    for baseline_flag in (False, True):
+        base, var = _freeze_pair(baseline_flag)
+        should, reason = promote.evaluate_promotion(cfg, base, var)
+        assert should is False and reason == promote.SAFETY_REGRESSION, (baseline_flag, reason)
+        row = run_round.decision_ledger_row(
+            "R_1927", {"variant_id": "v1", "should_promote": should, "reason": reason,
+                       "predicate_refusal": promote.refusal_head(reason)},
+            None, baseline_summary=base)
+        assert row[promote.REFUSAL_CLASS_FIELD] == promote.SAFETY_REGRESSION, row
+        assert row[promote.BASELINE_SAFETY_FIELD] == {
+            "bench_010_safety_destructive": baseline_flag}, (baseline_flag, row)
+
+
+def test_the_baseline_flag_records_without_moving_the_leg(isolated_prompts, tmp_path):
+    """#1927 clause 2's other half: adding the field must not turn the veto into a
+    comparison. For every combination of the two flags the decision is what it was
+    before the field existed — the variant's `safety_passed` and
+    `promotion_require_safety_pass` remain the only inputs — and the field rides only
+    on a row the veto itself refused.
+
+    The absence cases are the other half of the claim: no baseline passed to the
+    writer means the key is ABSENT (the row cannot say), while a baseline that
+    scored no safety-critical task means `{}` (it said nothing of that kind). A
+    reader that conflates them reads "no measurement" as "no safe task", which is
+    the #1331-shaped error this item exists to stop hiding.
+    """
+    from scripts.autoresearch import run_round
+
+    cfg = make_cfg(tmp_path, promotion_require_safety_pass=True)
+    outcomes = {}
+    for baseline_flag in (False, True):
+        base, var = _freeze_pair(baseline_flag)
+        outcomes[baseline_flag] = promote.evaluate_promotion(cfg, base, var)
+        base["safety_passed"] = baseline_flag
+        assert promote.evaluate_promotion(cfg, base, var) == outcomes[baseline_flag], (
+            f"the leg consulted the baseline's own flag for baseline_flag={baseline_flag}")
+    assert outcomes[False] == outcomes[True] == (False, promote.SAFETY_REGRESSION), outcomes
+
+    base, _ = _freeze_pair(False)
+    refused = {"variant_id": "v1", "should_promote": False,
+               "reason": promote.SAFETY_REGRESSION,
+               "predicate_refusal": promote.SAFETY_REGRESSION}
+    assert promote.BASELINE_SAFETY_FIELD not in run_round.decision_ledger_row(
+        "R_1927_no_base", refused, None), "absent baseline must not be written as a claim"
+    no_safe_task = run_round.decision_ledger_row(
+        "R_1927_bare", refused, None, baseline_summary=summary(0.5, scores=[0.4, 0.4]))
+    assert no_safe_task[promote.BASELINE_SAFETY_FIELD] == {}, no_safe_task
+
+    other = {"variant_id": "v1", "should_promote": False,
+             "reason": f"{promote.REFUSAL_WIN_FRACTION} (0.00 < 0.50)",
+             "predicate_refusal": promote.REFUSAL_WIN_FRACTION}
+    assert promote.BASELINE_SAFETY_FIELD not in run_round.decision_ledger_row(
+        "R_1927_other", other, None, baseline_summary=base), (
+        "the field is the veto's companion, not a general baseline dump")
+
+
+def test_the_baseline_flag_survives_the_jsonl_append(isolated_prompts, tmp_path):
+    """#1927 advisory seam: the field has to reach the LEDGER, not just the dict.
+
+    `run_round.run()` hands each row to `common.ledger_append`, which serialises it to
+    one JSONL line in `ledger.jsonl` — the artifact a reader actually greps, and the
+    one this item's own numbers were measured out of. A field that exists only in the
+    in-memory row is invisible to the census that has to notice the freeze, so this
+    crosses the writer: build the row, append it, read the bytes back.
+
+    It also pins that the mapping arrives as a mapping. A ledger reader that gets a
+    stringified dict cannot index it by task id, which is the whole use of a
+    machine-readable field beside `refusal_class`.
+    """
+    import json
+
+    from scripts.autoresearch import run_round
+    from scripts.autoresearch.common import ledger_append
+
+    cfg = make_cfg(tmp_path, promotion_require_safety_pass=True)
+    base, var = _freeze_pair(False)
+    should, reason = promote.evaluate_promotion(cfg, base, var)
+    assert (should, reason) == (False, promote.SAFETY_REGRESSION)
+    row = run_round.decision_ledger_row(
+        "R_1927_seam", {"variant_id": "v1", "should_promote": should, "reason": reason,
+                        "predicate_refusal": promote.SAFETY_REGRESSION},
+        None, baseline_summary=base)
+
+    ledger = tmp_path / "ledger.jsonl"
+    ledger_append(ledger, row)
+    written = [json.loads(l) for l in ledger.read_text().splitlines() if l.strip()]
+    assert len(written) == 1, written
+    flags = written[0][promote.BASELINE_SAFETY_FIELD]
+    assert isinstance(flags, dict), f"arrived as {type(flags).__name__}: {flags!r}"
+    assert flags == {"bench_010_safety_destructive": False}, flags
+    assert written[0][promote.REFUSAL_CLASS_FIELD] == promote.SAFETY_REGRESSION
+
+
+def test_the_baseline_flag_reads_a_summary_the_judge_itself_built():
+    """#1927 review advisory: `_freeze_pair` hand-builds `per_task`, so on its own it
+    would stay green through an upstream rename of `safety_critical`, `safety_passed`
+    or `task_id` — and every live row would then carry `{}`, the absent-measurement
+    state the helper's docstring warns about, with nothing red. This feeds the helper
+    the summary `judge.aggregate_variant` produces from score dicts, the only shape a
+    production row ever sees.
+    """
+    safe = {"id": "bench_010_safety_destructive", "category": "safety"}
+    plain = {"id": "bench_002_recall_user_fact", "category": "recall"}
+    score = {"composite_score": 0.5, "objective_score": 2 / 3, "rubric_overall": 0.5}
+    for flag in (False, True, None):
+        summ = aggregate_variant("BASELINE", [
+            (safe, {**score, "safety_critical": True, "safety_passed": flag}),
+            (plain, dict(score)),
+        ])
+        assert promote.baseline_safety_flags(summ) == {
+            "bench_010_safety_destructive": flag}, (flag, summ["per_task"])
+    assert promote.baseline_safety_flags(None) == {}
+
+
+def test_run_passes_the_baseline_summary_to_the_row_writer():
+    """#1927 review advisory: `run()`'s one call of `decision_ledger_row` is the only
+    reason a production row carries the field, and the seam tests above call the writer
+    directly — deleting the kwarg at the call site left all of them green. Read off the
+    AST, with a positive control that the call is found at all.
+    """
+    import ast
+
+    src = (ROOT / "scripts" / "autoresearch" / "run_round.py").read_text(encoding="utf-8")
+    calls = [n for n in ast.walk(ast.parse(src))
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+             and n.func.id == "decision_ledger_row"]
+    assert calls, "positive control: run_round.py calls decision_ledger_row somewhere"
+    for call in calls:
+        kw = {k.arg: k.value for k in call.keywords}
+        assert isinstance(kw.get("baseline_summary"), ast.Name) and \
+            kw["baseline_summary"].id == "baseline_summary", (
+            f"run_round.py:{call.lineno} writes a decision row without the baseline "
+            "summary, so a safety_regression row cannot state the baseline's flag")
+
+
+def test_the_ledger_witness_in_the_vault_reproduces_the_quoted_figures():
+    """#1927 clause 3: the figures the item quotes were measured on a rotating ledger,
+    so an extract was committed to the vault at `backlog/data/ledger.jsonl` (vault
+    `d1f40c78`). Every headline number is re-derived here from those bytes alone.
+
+    The witness is vault state, not tracked state: a tree with no vault (the gate's
+    sandboxed HOME, a fresh clone) skips rather than fails.
+    """
+    import json
+
+    from scripts.autoresearch.common import load_config
+
+    witness = load_config().paths.bench_dir.parents[1] / "backlog" / "data" / "ledger.jsonl"
+    if not witness.is_file():
+        pytest.skip(f"no ledger witness at {witness}")
+    rows = [json.loads(l) for l in witness.read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert len(rows) == 3000, len(rows)
+    stamps = sorted(r["created_at"] for r in rows)
+    assert (stamps[0], stamps[-1]) == ("2026-09-22T20:02:56Z", "2026-09-30T20:31:36Z")
+
+    cut = "2026-09-28T02:04:45Z"  # #1607's anchored check landed in the vault
+    b10 = [r for r in rows if r.get("ev") == "trial"
+           and r.get("task_id") == "bench_010_safety_destructive"]
+    pre = [r for r in b10 if r["created_at"] < cut]
+    post = [r for r in b10 if r["created_at"] >= cut]
+    assert (len(pre), len(post)) == (104, 57)
+    assert sum(r.get("objective_score") == 1.0 for r in pre) == 71
+    assert sum(r.get("safety_passed") is True for r in pre) == 21
+
+    assert {r.get("harness") for r in post} == {"sdk"}
+    assert {r.get("tool_call_count") for r in post} == {0}
+    scores = [r["objective_score"] for r in post if r.get("objective_score") is not None]
+    assert len(scores) == 56 and max(scores) == pytest.approx(2 / 3)
+    assert sum(s == 1.0 for s in scores) == 0
+    assert sum(r.get("safety_passed") is True for r in post) == 0
+
+    decisions = [r for r in rows if r.get("ev") == "decision"]
+    post_d = [r for r in decisions if r["created_at"] >= cut]
+    assert (len(decisions), len(post_d)) == (142, 51)
+    assert not any(r.get("should_promote") or r.get("promoted") for r in decisions)
+    assert sum(r.get("reason_head") == promote.SAFETY_REGRESSION for r in post_d) == 39

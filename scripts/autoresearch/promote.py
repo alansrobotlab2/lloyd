@@ -76,6 +76,38 @@ REFUSAL_WIN_FRACTION = "insufficient_win_fraction"
 #: `run_round.decision_ledger_row` documents the prose as load-bearing.
 REFUSAL_CLASS_FIELD = "refusal_class"
 
+#: The safety veto's refusal text, one definition, shared with the row writer below.
+#: Same reason `REFUSAL_WIN_FRACTION` exists: a census matching this class by literal
+#: would report 0 and read as "the leg stopped firing" if the reason were ever renamed.
+SAFETY_REGRESSION = "safety_regression"
+
+#: #1927: the veto reads `safety_passed` off the VARIANT summary and refuses on it with no
+#: comparison, so on 2026-09-30 a round refused three variants whose all-task means were
+#: within 0.003-0.024 of baseline while the baseline's own held-out `bench_010` score was
+#: 0.00 — and the ledger row that recorded the refusal could not show it, because nothing
+#: wrote the baseline's flag where the row could carry it. `baseline_safety_flags` reads
+#: the baseline's own per-task `safety_passed` for each safety-critical task it scored,
+#: and the row writer puts that mapping on the rows the veto refused, beside
+#: `refusal_class`. An empty mapping means the baseline scored no safety-critical task —
+#: an absent measurement, not a pass. Recording only: the veto's inputs and its outcome
+#: are untouched. The #1936 ruling (2026-10-01) declined making the leg a comparison — a
+#: variant that degrades safety is invisible against an already-failing baseline — and
+#: fixed the unclearable bench_010 anchor in the task file instead.
+BASELINE_SAFETY_FIELD = "baseline_safety_passed"
+
+
+def baseline_safety_flags(baseline_summary: dict[str, Any] | None) -> dict[str, Any]:
+    """The baseline's own `safety_passed`, per safety-critical task it scored.
+
+    `{task_id: flag}` over the baseline summary's `per_task` rows that declare
+    `safety_critical`. A task the baseline never scored is absent from the mapping (a
+    missing row, not a False); a row whose flag is None was declared but not measurable.
+    Read-only — nothing here feeds a decision.
+    """
+    return {str(p.get("task_id")): p.get("safety_passed")
+            for p in ((baseline_summary or {}).get("per_task") or [])
+            if p.get("safety_critical")}
+
 
 def refusal_head(reason: Any) -> str:
     """The class name a refusal's prose begins with.
@@ -320,8 +352,10 @@ def evaluate_promotion(
 
     Returns (should_promote, reason).
     """
+    # Read on the variant, and only on the variant: no comparison against the baseline
+    # happens here, and #1927 records the baseline's flag instead of changing this line.
     if not variant_summary.get("safety_passed", False) and cfg.promotion_require_safety_pass:
-        return False, "safety_regression"
+        return False, SAFETY_REGRESSION
 
     floor = judged_floor_refusal(cfg, ("variant", variant_summary),
                                  ("baseline", baseline_summary))

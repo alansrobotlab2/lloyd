@@ -56,7 +56,8 @@ from . import behavioural
 # `promote.slice_metrics(...)` at the call site raised AttributeError on a
 # function object — every real round died before it wrote a report, and only a
 # test that stubbed the decision loop could get that far.
-from .promote import (REFUSAL_CLASS_FIELD, evaluate_promotion, promote, refusal_head,
+from .promote import (BASELINE_SAFETY_FIELD, REFUSAL_CLASS_FIELD, SAFETY_REGRESSION,
+                      baseline_safety_flags, evaluate_promotion, promote, refusal_head,
                       slice_metrics, validity_report, validity_report_lines)
 from .variant_sandbox import AnchorApplyError, materialize, materialize_baseline
 
@@ -1172,13 +1173,16 @@ HYPOTHESIS_MAX_CHARS = 300
 
 def decision_ledger_row(round_id: str, decision: dict[str, Any],
                         promoted_variant_id: str | None,
-                        variant: dict[str, Any] | None = None) -> dict[str, Any]:
+                        variant: dict[str, Any] | None = None,
+                        baseline_summary: dict[str, Any] | None = None) -> dict[str, Any]:
     """The `decision` row for one variant, as the ledger sees it.
 
     Seven keys, always; `refusal_class` on top of them when the row refused (#1860); the
     eight conditional #646 validity keys when the bench lint ran; and
     `LOSER_EVIDENCE_KEYS` when `variant` is given, which `run()` always does. A row that
     promoted carries no refusal class, so the seven stay the unconditional floor.
+    `BASELINE_SAFETY_FIELD` rides beside the class on a `safety_regression` row when the
+    caller had a baseline summary to read (#1927) — absent, not empty, when it did not.
 
     `reason` is the predicate's own prose, byte-identical: on a round the deadline stopped
     the caller has already rewritten it into the `deadline_stopped: … (predicate said: …)`
@@ -1216,6 +1220,17 @@ def decision_ledger_row(round_id: str, decision: dict[str, Any],
         row[REFUSAL_CLASS_FIELD] = (
             str(decision.get("predicate_refusal") or "").strip()
             or refusal_head(decision["reason"]))
+    # #1927: on a row the safety veto refused, what the baseline's own flag was, per
+    # safety-critical task. The veto compares nothing (it refuses on the variant's flag
+    # alone), so a `safety_regression` row on its own cannot distinguish "this variant
+    # broke safety" from "nobody can pass this check tonight, baseline included" — which
+    # is the difference between a regression and a freeze, and the difference the round
+    # of 2026-09-30 could not see: three variants refused at `bench_010=0.00` against a
+    # baseline scoring 0.00 on the same task. Written only beside a `safety_regression`
+    # class, and written from the summary that was in scope at the decision: recording a
+    # fact the predicate already had and never wrote, changing no input to it.
+    if row.get(REFUSAL_CLASS_FIELD) == SAFETY_REGRESSION and baseline_summary is not None:
+        row[BASELINE_SAFETY_FIELD] = baseline_safety_flags(baseline_summary)
     # #646: the all-task mean beside the lint-valid-task mean, flattened onto
     # the row that carries the decision. `means_agree` is the field the item
     # asks for — the ledger line that says the two denominators disagreed on
@@ -1750,7 +1765,8 @@ async def run(
     for d in decisions:
         ledger_append(cfg.paths.ledger_path,
                       decision_ledger_row(rid, d, promoted_vid,
-                                          variants_by_id.get(d["variant_id"], {})))
+                                          variants_by_id.get(d["variant_id"], {}),
+                                          baseline_summary=baseline_summary))
 
     return {
         "round_id": rid,

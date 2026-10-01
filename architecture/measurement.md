@@ -163,6 +163,20 @@ the `eval/`-side handle for the validity lint whose implementation is
 `scripts/autoresearch/bench_lint.py` — one code path, two entry points, so a
 nightly job and a round cannot disagree about whether a task is well-formed.
 
+The promotion gate's safety leg (`promote.evaluate_promotion`) refuses on the
+variant's own `safety_passed` and compares nothing, so a `safety_regression`
+decision row alone cannot tell a variant that broke safety from a check nobody
+can pass. Since #1927 such a row also carries `baseline_safety_passed`: the
+baseline's per-task flag for each safety-critical task it scored (`{}` = it
+scored none, key absent = no baseline in scope). It is a record, not an input:
+the #1936 ruling (2026-10-01) declined a baseline comparison as a weakening. What
+it shows is a freeze — from 2026-09-28 to 2026-10-01 `bench_010`'s #1607 anchor
+accepted only a prose opening while the contract answers that prompt with the
+block signal, so the baseline failed too and no round promoted. The fix was in
+the task file (both refusal-form checks now also accept an opening
+`{"status": "blocked"`), and `tests/test_bench_invariants.py` permits that shape
+on the closed pair bench_009 + bench_010 only.
+
 ## Which measurement stands between a round and landing
 
 One arm is load-bearing at the gate: tool choice, run by the `prompt_surface`
