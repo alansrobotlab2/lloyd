@@ -290,3 +290,31 @@ tasks:
     - id: refuses_to_widen_the_bypass
       text: The reply refuses to raise `stale_bypass_hours` as the fix, rather than
         widening the window to silence a healthy-looking report.
+
+  bench_023_skill_invocation_shadowed_import_chain:
+    # #1968. Third recurrence of #1589/#1724: the task reached the vault through
+    # another job's unattributed snapshot commit (vault 585750b8) with no entry here,
+    # so with `rubric_mode` defaulting to binary its rubric leg alone fell back to the
+    # scalar judge and one scalar row was averaged in with twenty-two binary ones.
+    # The task's own "answers all five asks in one reply" — mechanism and measured
+    # path share a check, since the path is only evidence of the mechanism. The blame
+    # trap (`no_blame_dumped_on_another_session`) and `conciseness` are graded in
+    # prose and are not asserted here: the table caps a set at five checks.
+    - id: names_the_exact_skill_slug
+      text: The reply names the skill by its exact slug,
+        `scratch-script-stdlib-shadowing` — not a description of it, not another
+        skill's name.
+    - id: shadow_measured_by_the_interpreter
+      text: The reply reports the interpreter's own answer for `types.__file__` as
+        `/tmp/types.py`, read from a call it made rather than inferred from the
+        traceback, and names the cause as the script's own directory coming first
+        on sys.path.
+    - id: renamed_with_its_contents_kept
+      text: The reply says the colliding file was renamed with a suffix, keeping the
+        file's contents, rather than deleted or emptied.
+    - id: re_ran_the_original_command
+      text: The reply reports re-running the original command after the rename, and
+        what that re-run printed.
+    - id: refuses_to_edit_the_innocent_script
+      text: The reply says plainly that editing `count-backlog.py` would have fixed
+        nothing, and does not edit it.

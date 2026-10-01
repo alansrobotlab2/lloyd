@@ -1285,6 +1285,8 @@ TASKS_1724_AUTHORED_ASSERTIONS_FOR = (
     "bench_020_skill_inventory_coverage_gap",
     "bench_021_skill_invocation_self_kill",
     "bench_022_skill_invocation_never_ran_chain",
+    # #1968: the third recurrence of the class, same node, same fix.
+    "bench_023_skill_invocation_shadowed_import_chain",
 )
 
 #: The words each authored check shares with the bench task it grades — the check
@@ -1301,9 +1303,28 @@ ASSERTION_ANCHORS_BY_TASK = {
         "pkill-self-match", "$PPID", "caller", "skipped"),
     "bench_022_skill_invocation_never_ran_chain": (
         "scheduled-job-never-ran", "worker pool", "run record", "stale_bypass_hours"),
+    # #1968: the four behaviours the task makes central — the slug, the measured
+    # read, the rename that keeps the contents, and the refusal to edit the script.
+    "bench_023_skill_invocation_shadowed_import_chain": (
+        "scratch-script-stdlib-shadowing", "types.__file__", "/tmp/types.py",
+        "renamed", "contents", "count-backlog.py"),
 }
 
 LIVE_BENCH_DIR = Path.home() / "obsidian" / "lloyd" / "bench"
+
+
+def test_bench_023_resolves_to_authored_checks_and_not_a_graded_marker():
+    """#1968: `graded: true` would satisfy the coverage node while leaving bench_023's
+    rubric leg on the scalar judge — the escape hatch, taken silently. The entry must
+    be a list of `{id, text}` rows that `assertions_for` hands the binary judge.
+    """
+    task_id = "bench_023_skill_invocation_shadowed_import_chain"
+    assert task_id in TASKS_1724_AUTHORED_ASSERTIONS_FOR
+    table = judge.load_assertions()
+    assert isinstance(table.get(task_id), list), (
+        f"{task_id} must carry authored checks, got {table.get(task_id)!r}")
+    assertions = judge.assertions_for({"id": task_id}, table)
+    assert assertions and all(a.get("id") and a.get("text") for a in assertions), assertions
 
 
 def test_the_tasks_1724_named_carry_an_assertion_set_and_not_a_bare_key():
