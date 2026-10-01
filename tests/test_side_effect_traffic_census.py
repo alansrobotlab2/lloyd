@@ -768,3 +768,174 @@ def test_the_knowledge_note_names_a_corpus_source_per_class():
     assert "email_reply" in text and "rssc" in lowered
     # And it must not become the fourth tier table #1056 step 3 forbids.
     assert "single tier source" in lowered
+
+
+# ── #1950: a census of this surface must not repeat the escaped-argument false
+# zero, and the recorder plus the new reader are what prove the caveat ────────
+
+
+def test_a_recorder_written_document_is_read_through_the_escape(tmp_path):
+    """The escape is a fact about the bytes `app.transcript_entries` writes, so the
+    proof is a document that module produced and the new reader consumed — not a
+    document this test assembled with json.dumps, which could only agree with itself.
+
+    Three claims, each asserted in the direction that is dangerous.
+
+    (a) The naive pattern the caveat is about — the literal `"command": ` — matches
+        NONE of those bytes, while the escaped form matches once. Asserting the
+        zero on the producer's own output is what turns it into a tripwire: if the
+        writer ever stops nesting arguments as a JSON string, this flips and the
+        note gets corrected then, instead of a census quietly reporting zero for a
+        surface that has traffic.
+    (b) The reader (`app/harness/session_test_runs`) parses the nested string back
+        out and sees the run: one run, `not-passing`, because its text says
+        `2 failed` while the recorded flag says clean.
+    (c) The transcript, not the ledger, is the only store that can hold this at all
+        — the census above counts ledger-side effects and never reads a command
+        field, and `tool_effects` holds no Bash row to point at.
+
+    The two patterns are built with chr(92) rather than literals so this file holds
+    no second layer of Python escaping on top of the JSON layer it is about.
+    """
+    from app import transcript_entries as TE
+    from app.harness import session_test_runs as STR
+
+    naive = '"command": '
+    # One backslash-escaped quote either side of the key and one on the opening
+    # quote of the value — `\"command\": \"` — which is what the outer document
+    # actually holds.
+    q = chr(92) + '"'
+    escaped = q + "command" + q + ": " + q
+    ts = "2026-10-01T06:00:00"
+    command = "python -m pytest tests/test_x.py -q 2>&1 | tail -20"
+    text = "FAILED tests/test_x.py::one" + chr(10) + "2 failed in 0.32s"
+    call = TE.build_tool_call("chatcmpl-tool-esc1", "Bash",
+                              json.dumps({"command": command}), "Run the suite")
+    messages = [
+        TE.build_tool_call_entry(call, timestamp=ts, turn_id="t0"),
+        TE.build_tool_result_entry("chatcmpl-tool-esc1", text, timestamp=ts,
+                                   is_error=False, raw_chars=len(text),
+                                   turn_id="t0"),
+    ]
+    doc = tmp_path / "20261001_120000_autocode_c1en.json"
+    doc.write_text(json.dumps({"id": doc.stem, "messages": messages}),
+                   encoding="utf-8")
+    raw = doc.read_text(encoding="utf-8")
+
+    assert naive not in raw, (
+        "the producer has stopped nesting arguments as an escaped JSON string, so "
+        "the caveat this node guards describes bytes that no longer exist")
+    assert raw.count(escaped) == 1, (
+        "no escaped command field in the recorder's own output — what wrote this?")
+
+    runs = STR.session_test_runs(doc.stem, sessions_dir=tmp_path)
+    assert len(runs) == 1, (
+        "the reader did not see the run, so it is not reading through the escape, "
+        "and every count it prints is the false zero the note exists to stop")
+    # `session_test_runs()` returns test runs only — a row exists here at all
+    # because the command matched the test shape — so the verdict is the claim.
+    assert runs[0].verdict == "not-passing" and runs[0].passed is False
+    assert runs[0].is_error is False, (
+        "the flag is clean on a red suite: that is the pipe mask, on real bytes")
+    assert runs[0].command == command, (
+        "the run was counted but its command did not survive the nested JSON")
+
+
+def test_the_traffic_note_records_the_escaped_argument_false_zero():
+    """`knowledge/software/session-tool-traffic-counting.md` documents three false
+    zeros about transcript traffic, and the third is the one a fresh census is most
+    likely to hit: a tool call's arguments are stored as an escaped JSON string, so
+    the intuitive grep is the empty one.
+
+    Pinned for the reason the two zeros it sits beside are pinned: the note's own
+    closing section is "What this pattern has already caught", and a false zero
+    that lives only in a commit message has not been caught, it has been
+    re-derived. Skipped where no vault is reachable, exactly as the note-pinning
+    node above this one does.
+    """
+    here = Path.cwd()
+    real = pwd.getpwuid(os.getuid()).pw_dir
+    candidates = [here / "obsidian", Path(real) / "obsidian",
+                  Path.home() / "obsidian"]
+    note = next((c / "knowledge" / "software"
+                 / "session-tool-traffic-counting.md"
+                 for c in candidates if (c / "knowledge").is_dir()), None)
+    if note is None or not note.is_file():
+        pytest.skip("no obsidian vault reachable from this checkout")
+    text = note.read_text(encoding="utf-8")
+    assert '"command"' in text, "the unescaped pattern is not named as a zero"
+    assert "escaped" in text.lower() and chr(92) in text, (
+        "the note does not say arguments are stored as an escaped JSON string")
+
+
+#: The committed rows behind the premise, and the marker that describes them.
+#: `~/lloyd-data/workers.db` is one mutable file the running queue appends to, so
+#: a count read from it is unreproducible the week it is written — and the two
+#: figures that carry this item's argument (`0` Bash rows, and the seven-name tool
+#: set) are statements about what the ledger has EVER recorded, which no
+#: re-query of a live table can establish. `Path.home()` is the repo's idiom for
+#: reaching the vault from a test (see the same pair in
+#: `tests/test_grant_mint_quota_default.py`), and it resolves through the round
+#: home's `obsidian` symlink under the gate, so the rung exercises these bytes
+#: rather than skipping them.
+LEDGER_WITNESS = (Path.home() / "obsidian" / "backlog" / "data"
+                  / "tool_effects.db")
+LEDGER_MARKER = (Path.home() / "obsidian" / "backlog" / "data"
+                 / "tool_effects.witness.md")
+
+
+def test_the_committed_effect_ledger_bytes_hold_no_bash_row():
+    """The premise's own numbers, re-derived from committed rows.
+
+    `select count(*), sum(tool='Bash') from tool_effects` over the extract is the
+    form the argument needs, and it is what this reads: a non-zero row count so
+    the denominator exists, zero on the Bash axis, and the seven ledgered tool
+    names in place of the eight the rule of this shape would need. The positive
+    control is the per-tool breakdown underneath the total — a Bash zero from an
+    empty table would prove nothing, so the sum of the parts has to equal the
+    whole and at least one other tool has to have rows.
+
+    Byte and prose are checked against each other rather than one being trusted:
+    the marker's `rows`, `rows_where_tool_is_Bash`, `distinct_tools`,
+    `rows_with_empty_session_id` and `distinct_session_ids` are the same figures
+    the item quotes, and the session axis is what makes the reader this item ships
+    feasible at all — 0 rows with an empty `session_id` across 985 distinct
+    sessions.
+    """
+    for path in (LEDGER_WITNESS, LEDGER_MARKER):
+        assert path.is_file(), f"missing witness artifact {path}"
+    meta = json.loads(LEDGER_MARKER.read_text(encoding="utf-8")
+                      .split("```json")[1].split("```")[0])
+
+    with sqlite3.connect(f"file:{LEDGER_WITNESS}?mode=ro", uri=True) as ex:
+        total, bash_sum = ex.execute(
+            "SELECT count(*), coalesce(sum(tool='Bash'), 0) "
+            "FROM tool_effects").fetchone()
+        tools = sorted({r[0] for r in ex.execute("SELECT tool FROM tool_effects")})
+        per_tool = dict(ex.execute(
+            "SELECT tool, count(*) FROM tool_effects GROUP BY tool"))
+        empty_session = ex.execute(
+            "SELECT count(*) FROM tool_effects "
+            "WHERE session_id IS NULL OR session_id=''").fetchone()[0]
+        sessions = ex.execute(
+            "SELECT count(DISTINCT session_id) FROM tool_effects").fetchone()[0]
+
+    assert total == meta["rows"] and total > 0, (
+        f"the committed extract holds {total} rows and the marker says "
+        f"{meta['rows']}: the figures the item quotes need a non-zero denominator "
+        "or 'no Bash row' is just an empty table")
+    assert bash_sum == 0 and meta["rows_where_tool_is_Bash"] == 0, (
+        f"a Bash row exists in the effect ledger ({bash_sum}); the premise and the "
+        "reader's reason for existing both change if that changed")
+    assert tools == meta["distinct_tools"], (
+        "the ledger's whole recorded surface is what the claim rests on, and the "
+        "marker and the bytes have to say the same seven names")
+    assert "Bash" not in tools, (
+        f"Bash is among the recorded tools: {tools}")
+    assert sum(per_tool.values()) == total and max(per_tool.values()) > 0, (
+        f"the per-tool breakdown does not account for the total ({per_tool} vs "
+        f"{total}), so the Bash zero is not being measured against real rows")
+    assert empty_session == 0 and sessions == meta["distinct_session_ids"] > 0, (
+        f"session_id is unusable as a key in these bytes "
+        f"(empty={empty_session}, distinct={sessions}) — the session-scoped "
+        "reader this item ships would have no axis to read on")
