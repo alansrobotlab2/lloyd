@@ -17,6 +17,19 @@ forever. Measured at triage on 2026-09-13 while the drop was happening.
      history, and `git -C ~/obsidian remote -v` returns 0 lines, so nothing else carries
      it. Provisioning that copy needs credentials and a person; it is NOT delivered here,
      and neither the note nor `~/vault-external/README.md` claims otherwise.
+  3. **everything the first two do not name, by file type** — also configuration, and
+     the boundary this guard must not overclaim. `ob`'s own banner, reprinted at every
+     sync start, reads `File types: image, audio, pdf, video`: markdown plus four media
+     categories, an allow-list. A `.jsonl`, `.db`, `.log`, `.ndjson` or `.patch` is in
+     none of them, so it is refused by configuration exactly as `.git` is and no size
+     ceiling can apply to it — it was never eligible to upload. That is #1935: the
+     ceiling probes were red on `backlog/data/promotions.jsonl` (10,917,874 bytes, the
+     ledger extract #1903 pinned), a file whose bytes the transport has never carried,
+     against a witness route that mints extracts with no size bound. Both probes now
+     prune non-markdown files under `backlog/data/` and nothing else — every `.md` and
+     every media file, wherever they sit, is still graded. The banner line the prune
+     stands on is pinned by `test_the_transport_carries_only_the_types_its_prune_assumes`,
+     so widening the transport's categories turns this file red rather than quiet.
 
 What the fix did, and what these tests hold:
 
@@ -38,7 +51,17 @@ read by a shell `find` run as a subprocess, the command the acceptance itself na
 written by a *different process* and rotated at 10 MB, is the input to
 `test_no_refused_path_still_lives_in_the_vault`; and the vault's git index, which the file
 tools never touch, is read through `git ls-files` in a subprocess by
-`test_the_move_reached_the_vault_git_index`.
+`test_the_move_reached_the_vault_git_index`. The transport's *configuration*, which no
+file on this box states, is read from the banner the client prints into the supervisor
+program's stdout and parsed out of the retained windows by
+`test_the_transport_carries_only_the_types_its_prune_assumes`.
+
+One consequence to keep in plain sight, since it is the honest cost of prune 3: files
+outside those four categories have no off-box copy at any size, so this guard was never
+giving the witness extracts durability — `backlog/data/` is single-copy on this box
+today, 10 MB ceiling or not, alongside the 60 MB of `.git`. Recording that as a fact is
+what #1935 does; provisioning a real off-box copy for either is a person's action and
+stays owed.
 """
 
 from __future__ import annotations
@@ -64,6 +87,58 @@ SYNC_ERR = SYNC_LOG_DIR / "agent-obsidian-sync.err"
 #: 5691071-byte file as "5.43 MB" (5691071 / 1048576 = 5.4274); a decimal megabyte would
 #: have printed 5.69. Pinned by test_ceiling_in_the_note_is_the_clients_number_not_the_authors.
 SYNC_MAX_BYTES = 5 * 1024 * 1024
+
+#: The subtree an item's owed-witness clause commits frozen extracts into —
+#: `voice.log`, `usage.db`, `*.ndjson`, `promotions.jsonl`, and the `.md` sidecar
+#: that names each one's commit and md5.
+WITNESS_DIR_REL = ("backlog", "data")
+
+#: The non-markdown categories `ob` prints on its own banner line
+#: `File types: image, audio, pdf, video` — an allow-list, not a deny-list. The
+#: categories this guard's prune assumes are NOT carried; pinned by
+#: `test_the_transport_carries_only_the_types_its_prune_assumes`.
+CARRIED_NONMD_TYPES = {"image", "audio", "pdf", "video"}
+
+
+def witness_extract(rel: Path) -> bool:
+    """True for a machine-written frozen extract: non-markdown under `backlog/data/`.
+
+    Exempt from the ceiling probe on the same ground `.git` is exempt — the
+    transport is *configured* not to carry it. The client's own banner, printed by
+    every sync start into `agent-obsidian-sync.log`, reads
+    `File types: image, audio, pdf, video`: markdown plus four media categories.
+    `.jsonl`, `.db`, `.log`, `.ndjson` and `.patch` are in none of them, so
+    `backlog/data/promotions.jsonl` — 10,917,874 bytes, vault `0d96fdb0`, the
+    26,903-row ledger extract #1903 pinned — was never a candidate for a 5 MiB
+    upload, exactly as the 60 MB of `.git` never was. What this guard is about is
+    what the transport *would* carry and might refuse; counting what it cannot carry
+    makes the check unsatisfiable against a witness route that mints extracts with
+    no size bound. That is how #1935 went red: the file landed at 16:42 on
+    2026-09-30 and both ceiling nodes have been red since, with nothing any round
+    could do about it except delete the witness #1903 exists to pin.
+
+    Scoped to the subtree, deliberately NOT to a list of exempt extensions:
+    exempting by type would mean enumerating every image/audio/video suffix the
+    client recognises, and one forgotten suffix — `m4a`? `webp`? — would quietly
+    take a real, carryable, over-cap asset out of the guard, which is the standing
+    class rule about hand-maintained allow-lists over an open-set corpus. Under this
+    rule the only way to escape the probe is to put a file under `backlog/data/`,
+    and markdown *there* is still graded — a keyless sidecar is exempt from the
+    concept-document gates (#1934) but a 6 MiB `.md` is still something Sync would
+    refuse. Both halves pinned by
+    `test_python_walk_agrees_with_the_find_and_detects_a_planted_offender`, and the
+    config line the whole thing rests on pinned by
+    `test_the_transport_carries_only_the_types_its_prune_assumes`.
+    """
+    return rel.parts[:2] == WITNESS_DIR_REL and rel.suffix.lower() != ".md"
+
+
+#: The same predicate in the acceptance's own `find` syntax, so the shell probe and
+#: the Python walker prune one set rather than two that can drift. `-prune` on a
+#: plain file is a no-op; the `-o` is what drops it, and the pattern needs
+#: `backlog/data/` in the path, so a directory named `data` anywhere else — the
+#: hole #1934 had to avoid in the OKF gate — is unaffected.
+WITNESS_PRUNE = r"\( -path '*/backlog/data/*' ! -name '*.md' -prune \) -o "
 
 REF_DIR = "projects/lloyd/voice/references/dave_cullen"
 BLOB_REL = f"{REF_DIR}/source_nS8PvZv3v0U.webm"
@@ -109,17 +184,78 @@ def _bash(pipeline: str) -> subprocess.CompletedProcess:
                           timeout=180)
 
 
-def over_cap_files(root: Path, limit: int = SYNC_MAX_BYTES) -> list[tuple[int, Path]]:
-    """Files under `root` bigger than `limit`, skipping `root/.git` wholesale.
+def _find_over_cap(root_expr: str, prune: str = WITNESS_PRUNE) -> str:
+    """The acceptance's own `find` over `root_expr`, with the `.git` prune and `prune`.
 
-    The `.git` skip mirrors the acceptance's `-path ./.git -prune`. `.git` is refused by
-    *configuration* (refusal 2), whose remedy is a git remote — a different fix from the
-    per-file ceiling (refusal 1). Reporting it here would make this check unsatisfiable,
-    which is why the acceptance prunes it and not why it is safe.
+    `root_expr` is passed unquoted so `~/obsidian` expands the way the acceptance is
+    typed; `-H` is what follows the symlink a gate's round home puts there. The
+    default carries `WITNESS_PRUNE`, and the node that needs the unpruned denominator
+    passes `prune=""`.
+    """
+    return (f'find -H {root_expr} -path {root_expr}/.git -prune -o {prune}'
+            f'-type f -size +{SYNC_MAX_BYTES}c -printf \'%s\\t%p\\n\'')
+
+
+def _find_offenders(pipeline: str) -> list[Path]:
+    run = _bash(pipeline)
+    assert run.returncode == 0, f"find failed: {run.stderr[:400]}"
+    return [Path(line.split("\t", 1)[1])
+            for line in run.stdout.splitlines() if line.strip()]
+
+
+#: The shapes a ceiling guard has to tell apart, as relative paths and sizes. One
+#: definition, read by both the shell node and the walker node, so the two
+#: denominators cannot be pinned against two different fixtures.
+CEILING_TREE: dict[str, int] = {
+    "big.webm": SYNC_MAX_BYTES + 1,                      # media: carried, refused
+    "edge.wav": SYNC_MAX_BYTES,                          # exactly at the cap: syncs
+    ".git/objects/pack/pack-x.pack": SYNC_MAX_BYTES * 40,  # excluded folder
+    "backlog/data/pinned.jsonl": SYNC_MAX_BYTES * 3,     # extract: type not carried
+    "backlog/data/big-sidecar.md": SYNC_MAX_BYTES + 1,   # markdown IS carried
+    "backlog/1935-big-item.md": SYNC_MAX_BYTES + 1,      # a note one directory up
+}
+
+#: What each of those three must be reported as, written out rather than derived: an
+#: expectation computed from `witness_extract` would move with the predicate it is
+#: meant to catch, which is the shape of test this file exists to prevent.
+CEILING_REPORTED = {"big.webm", "backlog/data/big-sidecar.md", "backlog/1935-big-item.md"}
+
+
+def _plant_ceiling_tree(root: Path) -> None:
+    """Plant `CEILING_TREE` under `root`.
+
+    Files are `truncate`d, not written: only `st_size` matters to either side, and a
+    sparse 209 MB pack file costs the tmp directory nothing.
+    """
+    for name, size in CEILING_TREE.items():
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("wb") as handle:
+            handle.truncate(size)
+
+
+def over_cap_files(root: Path, limit: int = SYNC_MAX_BYTES) -> list[tuple[int, Path]]:
+    """Files under `root` bigger than `limit`, skipping what the transport cannot carry.
+
+    Two skips, one per reason. The `.git` skip mirrors the acceptance's
+    `-path ./.git -prune`: `.git` is refused by *configuration* (refusal 2), whose
+    remedy is a git remote — a different fix from the per-file ceiling (refusal 1).
+    Reporting it here would make this check unsatisfiable, which is why the
+    acceptance prunes it and not why it is safe. The `witness_extract` skip is the
+    same shape one level further in: `File types: image, audio, pdf, video` is an
+    allow-list, so the frozen extracts under `backlog/data/` are refused by that same
+    configuration and no ceiling applies to a file that was never eligible to upload.
+
+    Everything else is graded at full width: every markdown file anywhere in the
+    tree, and every non-markdown file outside `backlog/data/` — including media,
+    which the transport does carry and does refuse over 5 MiB.
     """
     offenders: list[tuple[int, Path]] = []
     for path in root.rglob("*"):
-        if path.relative_to(root).parts[:1] == (".git",):
+        rel = path.relative_to(root)
+        if rel.parts[:1] == (".git",):
+            continue
+        if witness_extract(rel):
             continue
         if path.is_symlink() or not path.is_file():
             continue
@@ -133,14 +269,27 @@ def over_cap_files(root: Path, limit: int = SYNC_MAX_BYTES) -> list[tuple[int, P
 
 
 def test_acceptance_find_pipeline_reports_no_over_cap_file():
-    """The literal acceptance probe: no file under `~/obsidian` outside `.git` is over 5 MiB."""
-    # `-H`: follow `~/obsidian` itself when it is a symlink (a gate's round home),
-    # which plain `find` lists as one entry and never enters.
-    probe = (f'find -H ~/obsidian -path ~/obsidian/.git -prune -o -type f '
-             f'-size +{SYNC_MAX_BYTES}c -printf \'%s\\t%p\\n\'')
-    run = _bash(probe)
-    assert run.returncode == 0, f"find failed: {run.stderr[:400]}"
-    assert run.stdout.strip() == "", f"files over Sync's ceiling are still in the vault:\n{run.stdout}"
+    """No file under `~/obsidian` that the transport could carry is over its 5 MiB ceiling.
+
+    The probe is the acceptance's own `find` with one added clause — `WITNESS_PRUNE`,
+    the non-markdown extracts under `backlog/data/` that
+    `File types: image, audio, pdf, video` excludes — and the same command without that
+    clause runs beside it, so the addition cannot widen in silence: every file it hides
+    has to be something `witness_extract` exempts on its own terms. The vault today
+    hides exactly one file that way, `backlog/data/promotions.jsonl` at 10,917,874
+    bytes; an offender of any other shape — a clip in a note tree, a big `.md` in the
+    witness subtree — leaves this node red.
+    """
+    graded = _find_offenders(_find_over_cap("~/obsidian"))
+    assert graded == [], f"files over Sync's ceiling are still in the vault:\n{graded}"
+
+    # The prune's own control: the same walk without it. Anything it reports that the
+    # walker's predicate does not exempt is a file this check has no business hiding.
+    for path in _find_offenders(_find_over_cap("~/obsidian", prune="")):
+        assert witness_extract(path.relative_to(VAULT)), (
+            f"the ceiling probe hides {path}, which `witness_extract` does not exempt: "
+            "the denominator has widened past what the transport excludes")
+
     # A green verdict on an empty walk proves nothing — #1028 is exactly this shape — so the
     # same command without the size filter has to show a real tree behind it.
     walk = _bash('find -H ~/obsidian -path ~/obsidian/.git -prune -o -type f -printf "%p\\n" | wc -l')
@@ -148,19 +297,111 @@ def test_acceptance_find_pipeline_reports_no_over_cap_file():
     assert n_files > 1000, f"the vault walk saw only {n_files} files — this check saw nothing"
 
 
+def test_shell_probe_and_python_walker_prune_the_same_tree(tmp_path):
+    """The pair's claim is agreement, so test agreement: both denominators, one fixture.
+
+    `find` with `WITNESS_PRUNE`, rooted at the fixture exactly as the acceptance roots
+    it at the vault, and `over_cap_files` must report the same three relative paths out
+    of `CEILING_TREE`. Before #1935 the shell clause and the Python skip were written
+    twice, in two languages, and only the two live-vault runs kept them in step — on a
+    tree with one over-cap file, where any prune that hides that one file passes. Here
+    an exempt extract, a graded `.md` in the same directory, a graded media file, a
+    graded note one directory up, the at-cap edge case and a 40x `.git` pack exist at
+    once, so widening either side on its own — dropping `-name '*.md'` from the shell
+    clause, or broadening `witness_extract` to any directory named `data` — breaks the
+    equality rather than passing both halves.
+    """
+    _plant_ceiling_tree(tmp_path)
+    shell = {p.relative_to(tmp_path).as_posix()
+             for p in _find_offenders(_find_over_cap(str(tmp_path)))}
+    walker = {p.relative_to(tmp_path).as_posix() for _, p in over_cap_files(tmp_path)}
+    assert shell == CEILING_REPORTED, (
+        f"the shell probe reported {sorted(shell)}, not {sorted(CEILING_REPORTED)}")
+    assert walker == CEILING_REPORTED, (
+        f"the walker reported {sorted(walker)}, not {sorted(CEILING_REPORTED)}")
+
+
 def test_python_walk_agrees_with_the_find_and_detects_a_planted_offender(tmp_path):
-    """The walker is falsifiable: it catches a planted 6 MiB file and ignores `.git`."""
-    (tmp_path / ".git" / "objects" / "pack").mkdir(parents=True)
-    (tmp_path / "sub").mkdir()
-    for name, size in (("big.webm", SYNC_MAX_BYTES + 1),
-                       ("edge.wav", SYNC_MAX_BYTES),               # at the cap: syncs
-                       (".git/objects/pack/pack-x.pack", SYNC_MAX_BYTES * 40)):
-        (tmp_path / name).write_bytes(b"\0" * size)
-    found = {p.name: size for size, p in over_cap_files(tmp_path)}
-    assert found == {"big.webm": SYNC_MAX_BYTES + 1}, (
-        "expected exactly big.webm; a walker that reports the 40x .git pack file, or the "
-        f"file sitting exactly at the cap, is measuring the wrong denominator: {found}")
+    """The walker is falsifiable on sizes: it reports each of `CEILING_REPORTED`, and
+    skips the 40x pack under `.git`, the file sitting *exactly* at the cap, and the 3x
+    extract under `backlog/data/`.
+
+    Sizes are the axis this node owns — a walker reporting the at-cap file or the pack
+    is measuring the wrong denominator — while `witness_extract`'s own boundary (a
+    graded `.md` inside the exempt subtree, a graded media file outside it) is pinned
+    against the shell clause by `test_shell_probe_and_python_walker_prune_the_same_tree`.
+    """
+    _plant_ceiling_tree(tmp_path)
+    found = {p.relative_to(tmp_path).as_posix(): size
+             for size, p in over_cap_files(tmp_path)}
+    assert found == {name: CEILING_TREE[name] for name in sorted(CEILING_REPORTED)}, (
+        f"expected exactly {sorted(CEILING_REPORTED)} at their planted sizes; a walker "
+        "that reports the 40x .git pack file, the file sitting exactly at the cap, or "
+        f"the extract under backlog/data is measuring the wrong denominator: {found}")
     assert over_cap_files(VAULT) == [], f"over-cap files in the live vault: {over_cap_files(VAULT)}"
+
+
+# ── #1935 clause: the config the two prunes rest on, read off the transport ───────────
+
+
+def _sync_banner_field(field: str) -> str:
+    """The most recent `field: value` the sync client printed into its own log.
+
+    The client prints its configuration banner (`File types:`, `Excluded folders:`)
+    on every start, into the supervisor program's stdout, which rotates — so the
+    newest window that holds the banner is the live answer, the same rotation rule
+    `test_every_diagnostic_one_liner_names_its_evidence_and_rotation_bound` enforces
+    on the note. Windows are the conf's own bound, read from `SYNC_PROGRAM_CONF`.
+    """
+    windows = sorted(SYNC_LOG_DIR.glob("agent-obsidian-sync.log*"),
+                     key=lambda p: p.stat().st_mtime)
+    assert windows, f"no sync log window under {SYNC_LOG_DIR} — the check lost its input"
+    latest, seen = None, 0
+    for window in windows:
+        with window.open(encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if line.strip().startswith(f"{field}:"):
+                    seen += 1
+                    latest = line.split(":", 1)[1].strip()
+    assert latest is not None, (
+        f"no `{field}:` banner in any of the {len(windows)} retained sync log windows — "
+        "the transport no longer prints the configuration this guard's prunes assume, "
+        "so they are unverified, not true")
+    assert seen >= 1, f"`{field}:` was read but counted {seen}"
+    return latest
+
+
+def test_the_transport_carries_only_the_types_its_prune_assumes():
+    """The one config line both prunes stand on, read from the client's own banner.
+
+    `File types:` is an allow-list of what Obsidian Sync carries beyond markdown.
+    Measured 2026-09-30: `image, audio, pdf, video`, printed 11 times across the
+    retained log windows, beside `Excluded folders: .git`. That is why
+    `backlog/data/promotions.jsonl` is not a silently-un-syncable file: a `.jsonl`
+    is in none of those categories, so it was never eligible to upload — the same
+    configuration-class refusal the `.git` prune already concedes.
+
+    Falsifiable in the direction that matters: if a person turns on the category
+    that holds machine files (Obsidian calls it `other`, and a catch-all like `all`
+    is the same hole), or the banner stops being printed, this node goes red and the
+    `witness_extract` exemption has to be withdrawn and the extracts moved out of the
+    vault instead. It does not fail on a *narrowing* — dropping `video` would only
+    make this guard stricter than the transport.
+    """
+    carried = {c.strip().lower() for c in _sync_banner_field("File types").split(",")
+               if c.strip()}
+    assert carried, "the banner printed an empty File types list"
+    assert not carried & {"all", "other", "others", "files", "all files"}, (
+        f"the transport now carries {sorted(carried)}, which includes the category "
+        "machine-written extracts fall in — `witness_extract` must stop exempting them")
+    assert carried <= CARRIED_NONMD_TYPES, (
+        f"an unrecognised category in `File types: {sorted(carried)}`; this guard's "
+        "prune was written against image/audio/pdf/video and has to be re-read")
+
+    excluded = _sync_banner_field("Excluded folders")
+    assert ".git" in [f.strip() for f in excluded.split(",")], (
+        f"`Excluded folders: {excluded}` no longer names .git, so the walker's other "
+        "skip is no longer a configuration refusal")
 
 
 # ── clause 2: a path the transport refused must not still exist ────────────────────────
