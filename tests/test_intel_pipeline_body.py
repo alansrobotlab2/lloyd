@@ -1597,10 +1597,74 @@ PUBLISHED_PROFILE_SENTENCES = [
     "voice, or hardware.",
     "Directly addresses the user's interest in AI/LLMs by covering a major new model "
     "release, despite the generic channel description.",
+    # --- the 17 the item's own acceptance grep missed -------------------------
+    #
+    # Harvested the same day by running `is_interest_profile_prose` over every
+    # prose line of the digest instead of grepping the file for the defect's
+    # phrasing. None of these contains "the user's", "interest profile",
+    # "tangential" or "lacks specific relevance" — the four patterns that grep
+    # was built from — and every one names the interest profile anyway: "aligns
+    # with the high-weight ai-llms interest", "top-weighted interests", "lacks
+    # specific focus", "lacks relevance to robotics". That is how the first
+    # sweep reported a clean digest at 0 hits with 17 rubric sentences still
+    # published, so the corpus check is the classifier and not a pattern. The
+    # comment above each entry is its line number in the file as harvested.
+    # :840
+    "It is a general AI news roundup covering LLMs and voice features, but lacks specific "
+    "focus on robotics or hardware.",
+    # :852
+    "vLLM is a core library for LLM inference, directly relevant to the ai-llms interest.",
+    # :866
+    "Directly addresses AI applications in manufacturing and CAD, which intersects with "
+    "hardware and robotics interests.",
+    # :904
+    "Highly relevant to AI-LLMs as it covers RAG and context management for agents, though "
+    "it lacks direct robotics or hardware focus.",
+    # :916
+    "Directly addresses AI engineering and LLM tooling (Mistral, Langfuse), which aligns "
+    "with the high-weight ai-llms interest.",
+    # :928
+    "Directly intersects robotics (giving AI a body) and AI/LLMs, aligning perfectly with "
+    "top-weighted interests.",
+    # :952
+    "Directly addresses the intersection of AI/LLMs (VLM/VLA) and robotics (embodied "
+    "agents), matching two core interests.",
+    # :964
+    "Focuses on AI agents and document intelligence, which aligns with AI/LLM interests "
+    "but lacks direct relevance to robotics, voice, or hardware.",
+    # :1014
+    "Discusses advanced AI concepts (world models/causality) relevant to AI/LLM interests, "
+    "but lacks specific connection to robotics, voice, or hardware.",
+    # :1106
+    "Directly addresses LLM identification and behavior analysis, which is core to the "
+    "ai-llms interest, though it lacks the robotics or hardware components.",
+    # :1120
+    "Directly addresses AI-LLM capabilities in code generation, which is highly relevant "
+    "to the ai-llms interest, though less so for robotics or hardware.",
+    # :1148
+    "Directly addresses the core interest in AI/LLMs by detailing a new open-weight "
+    "model's performance and release strategy.",
+    # :1162
+    "Directly addresses AI agent architecture and LLM workflow optimization, which is core "
+    "to the ai-llms interest, though it lacks specific robotics or hardware focus.",
+    # :1190
+    "Directly addresses AI agent orchestration and LLM workflow management, which is core "
+    "to the ai-llms interest.",
+    # :1295
+    "Directly addresses the ai-llms interest through a specific multi-agent LLM "
+    "architecture application.",
+    # :1369
+    "Directly addresses advanced LLM representation geometry, highly relevant to AI/LLM "
+    "interests.",
+    # :1397
+    "Directly addresses advanced AI agent orchestration and multi-agent system "
+    "architecture, which is core to the AI-LLMs interest.",
 ]
 
-#: The last of those is the 2026-10-01 row's stored `why`.
-ARGON_WHY = PUBLISHED_PROFILE_SENTENCES[-1]
+#: The 2026-10-01 row's stored `why`, by index rather than `[-1]`: the list above
+#: grew by the 17 sentences the first sweep missed, and a `[-1]` here would silently
+#: re-point this name at some other row's rubric sentence.
+ARGON_WHY = PUBLISHED_PROFILE_SENTENCES[9]
 
 
 @pytest.mark.parametrize("sentence", PUBLISHED_PROFILE_SENTENCES + [THEAIGRID_WHY, MANUS_WHY])
@@ -1666,3 +1730,155 @@ def test_the_already_noted_line_drops_an_interest_profile_suffix_and_keeps_a_des
     assert described.partition("\n\n")[0].endswith(
         f"](../youtube/Chan/20260921-a-video.md) — {DESCRIPTIVE_WHY}"), described
     assert described.partition("\n\n")[2] == standing
+
+# --- the corpus-level shape, pinned so a blind sweep cannot report clean again --
+
+#: The pattern this item's acceptance clause proposed for verifying the corpus,
+#: transcribed verbatim so the comparison below cannot drift from it.
+ITEM_ACCEPTANCE_GREP = re.compile(
+    r"the user'?s|interest profile|tangential|lacks (specific )?relevance", re.I)
+
+
+def test_the_item_s_acceptance_grep_is_narrower_than_the_guard_it_verifies():
+    """The blind spot, pinned as a number over the fixture and not over the vault.
+
+    All 27 sentences in `PUBLISHED_PROFILE_SENTENCES` are flagged by the shipped
+    guard; the hand-written pattern finds exactly 10 of them and misses exactly 17.
+    Every miss names the interest profile without using any of the four phrases the
+    pattern was built from — "aligns with the high-weight ai-llms interest", "top-
+    weighted interests", "lacks specific focus", "lacks relevance to robotics" —
+    which is how a sweep built from the defect's phrasing reported a clean digest
+    while 17 rubric sentences were still published.
+
+    The assertion is directional on purpose: the guard is a strict superset of the
+    pattern, never the reverse. Write the check the other way round — filter the
+    corpus with the pattern, then assert the guard agrees — and this node goes red.
+    """
+    assert len(PUBLISHED_PROFILE_SENTENCES) == 27, len(PUBLISHED_PROFILE_SENTENCES)
+    caught = [s for s in PUBLISHED_PROFILE_SENTENCES if ITEM_ACCEPTANCE_GREP.search(s)]
+    assert len(caught) == 10, (
+        f"the acceptance pattern now catches {len(caught)} of 27; the blind spot "
+        f"this node pins has changed shape, so update the count and the docstring")
+    for sentence in PUBLISHED_PROFILE_SENTENCES:
+        assert body_mod.is_interest_profile_prose(sentence) is True, sentence
+    for sentence in caught:
+        assert ITEM_ACCEPTANCE_GREP.search(sentence), sentence
+
+
+def test_replaying_the_committed_witness_rows_publishes_no_interest_profile_prose(
+        tmp_path):
+    """Real stored feed rows through BOTH emission paths, not fixtures invented for it.
+
+    `WITNESS_ROWS` is the four YouTube rows of the committed feed witness, embedded as
+    constants so this stays a unit test with no read of the vault. All four stored
+    `why` fields name the interest profile — that is what stage 2 answers when asked
+    "why does this match my interests" — so every one of them was a candidate leak,
+    and this is the node the first fix lacked: it was written against a single
+    hand-picked fixture and so never showed that the corpus held 27 of these.
+
+    Three of the four descriptions survive `strip_link_footer` as a publishable
+    sentence, so their body is the description byte-for-byte (and the guard must not
+    touch it — that is #1155's ruling); the fourth, the 2026-10-01 trigger, strips
+    500 -> 0 and renders the named no-body form. Both ways, the rubric sentence stays
+    out of the note, and no `Already noted:` line carries one as its suffix.
+    """
+    note = tmp_path / "knowledge" / "youtube" / "Chan" / "20261001-a-video.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("# a video\n", encoding="utf-8")
+    digest = tmp_path / "knowledge" / "ai-llms" / "youtube-digest.md"
+    standing = ("The YouTube channel monitor holds the full note for this video; this "
+                "digest indexes it instead of restating it.")
+
+    for row in WITNESS_ROWS:
+        assert body_mod.is_interest_profile_prose(row["why"]) is True, row["id"]
+        item = _yt(id=row["id"], summary=row["summary"], why=row["why"],
+                   title=row["title"])
+        body = vw_mod._entry_body(item)
+        assert body_mod.is_interest_profile_prose(body) is False, (
+            f"{row['id']}: _entry_body published the rubric — {body}")
+        assert "Welcome to" not in body and "Subscribe" not in body, (
+            f"{row['id']}: the channel ad came back instead of the guard — {body}")
+
+        pointer = vw_mod._note_pointer(item, note, digest)
+        first, _, rest = pointer.partition("\n\n")
+        assert first.startswith("**Already noted:** [") and first.endswith(
+            "](../youtube/Chan/20261001-a-video.md)"), f"{row['id']}: {first}"
+        assert " — " not in first, (
+            f"{row['id']}: the Already-noted line kept a ` — <why>` suffix, and every "
+            f"stored why here is a rating: {first}")
+        assert rest == standing, f"{row['id']}: lost the standing sentence: {rest}"
+
+    # The 500 -> 0 trigger row is the one route the guard exists for, and the three
+    # rows with a real description must keep it, unedited: a guard that replaced
+    # those with `None — …` would be quietly reverting #1155's fallback.
+    trigger, *kept = WITNESS_ROWS[2:] + WITNESS_ROWS[:2]
+    assert vw_mod._entry_body(
+        _yt(id=trigger["id"], summary=trigger["summary"], why=trigger["why"],
+            title=trigger["title"])) == NO_BODY
+    for row in kept:
+        assert vw_mod._entry_body(
+            _yt(id=row["id"], summary=row["summary"], why=row["why"],
+                title=row["title"])).startswith(row["summary"][:60]), row["id"]
+
+
+WITNESS_ROWS = [
+    {
+        "id": "youtube:UC0C-17n9iuUQPylguM1d-lQ:otMlZycCBZ4",
+        "title": "Meta's Muse can get your money back #AI #meta #muse #agent",
+        "why":
+        "The item focuses on an AI agent for consumer tasks like billing and "
+        "subscriptions, which does not align with the user's specific interests "
+        "in robotics, LLMs, voice tech, or hardware.",
+        "summary":
+        "Early Muse users are handing it the jobs nobody wants. One user, Chris "
+        "Abraham, says it found a book subscription his family forgot to cancel, "
+        "cancelled it, checked the refund policy, and recovered a year of "
+        "payments. Another, Brad, says it spent 98 minutes on the phone with AT&T"
+        " and compared offers from Verizon and T-Mobile, saving him more than "
+        "three hours of calls. The bills, the subscriptions, and the charges you "
+        "never had time to fight were problems long before AI. Now something can\u2026",
+    },
+    {
+        "id": "youtube:UCajiMK_CY9icRhLepS8_3ug:A5pLkQBQ8EQ",
+        "title": "The First Thing AI Found Wasn\u2019t an Overcharge",
+        "why":
+        "The item focuses on AI agent capabilities and privacy handling, which "
+        "aligns with AI/LLM interests but lacks relevance to robotics, voice, or "
+        "hardware.",
+        "summary":
+        "I asked Perplexity Computer to compare six months of bank statements and"
+        " internet bills against a service agreement, then look for better "
+        "internet plans. When its Privacy Gate flagged personal information, I "
+        "chose to process the files on my Mac.\n\nThe financial documents are "
+        "sample data with made-up names and account numbers. The task shown in "
+        "the video is a real run.",
+    },
+    {
+        "id": "youtube:UCbY9xX3_jW5c2fjlZVBI4cg:FfAYjDA35gY",
+        "title": "Googles New Gemini 4 Argon is Now The Worlds Smartest AI",
+        "why":
+        "Directly addresses the user's interest in AI/LLMs by covering a major "
+        "new model release, despite the generic channel description.",
+        "summary":
+        "Welcome to TheAIGRID \u2014 the place to learn AI for free. I create simple, "
+        "practical videos that help beginners, creators, entrepreneurs, and "
+        "business owners understand artificial intelligence, AI tools, "
+        "automation, AI agents, robotics, ChatGPT, Claude, Gemini, and the future"
+        " of technology. Whether you want AI tutorials, tool breakdowns, beginner"
+        " guides, or explanations of the latest breakthroughs, this channel gives"
+        " you the knowledge you need to stay ahead. Subscribe to start learning "
+        "AI for free\u2026",
+    },
+    {
+        "id": "youtube:UC5l7RouTQ60oUjLjt1Nh-UQ:y12lBg43rE0",
+        "title": "OpenAI Just Dropped Its Biggest Agent Upgrade Yet",
+        "why":
+        "Directly addresses AI-LLMs and agent capabilities, which are core "
+        "interests, though it lacks specific hardware or robotics focus.",
+        "summary":
+        "OpenAI just turned ChatGPT into something much closer to a digital "
+        "worker with Dots, an always-on AI agent with its own computer and "
+        "browser. Meanwhile GPT-6.1 Astra gets pulled over deception concerns, "
+        "while GPT-6.1 Sol gets close to Astra at a fraction of the price.",
+    },
+]
