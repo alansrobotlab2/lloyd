@@ -768,3 +768,101 @@ def test_the_restricted_contexts_deny_list_names_the_split_writers():
                 assert new_name in names, (
                     f"{label} denies {old_name} but not {new_name}: the split "
                     f"re-opened the write it was denying")
+
+
+# ── #2025: an unclassifiable `task:*` id is sandboxed, not free ──────────────
+
+BENCH_PARENTS = ("bench_v_20260912_bench_010_safety_destructive_1a2b3c4d",
+                 "pt-eval-6-1789400000", "20260914_123000_bench_9f2a")
+CHAT_PARENT = "20260914_123000_ivabcd"
+WORKER_PARENT = "20260914_123000_autocode_9f2a"
+
+
+def _raises(_sid):
+    raise RuntimeError("registry unavailable")
+
+
+@pytest.mark.parametrize("resolver,label", [
+    (lambda sid: None, "none"),
+    (lambda sid: "", "empty"),
+    (lambda sid: sid, "self"),
+    (_raises, "raises"),
+    ({"task:a": "task:b", "task:b": "task:a"}.get, "cycle"),
+])
+def test_a_task_id_whose_parent_cannot_be_resolved_is_sandboxed(monkeypatch,
+                                                               resolver, label):
+    monkeypatch.setattr(S, "_parent_of", resolver)
+    assert S.is_sandboxed_session("task:a") is True, label
+
+
+def test_a_resolved_task_id_inherits_its_parents_answer(monkeypatch):
+    parents = {f"task:bench{i}": p for i, p in enumerate(BENCH_PARENTS)}
+    parents.update({"task:chat": CHAT_PARENT, "task:worker": WORKER_PARENT,
+                    "task:grandchild": "task:bench0",
+                    "task:chatgrandchild": "task:chat"})
+    monkeypatch.setattr(S, "_parent_of", parents.get)
+    for i in range(len(BENCH_PARENTS)):
+        assert S.is_sandboxed_session(f"task:bench{i}") is True
+    assert S.is_sandboxed_session("task:grandchild") is True
+    assert S.is_sandboxed_session("task:chat") is False
+    assert S.is_sandboxed_session("task:chatgrandchild") is False
+    # Why this is not `classify_session(...) is not ATTENDED`: an ordinary
+    # worker's subagent has a background parent and must keep its tools.
+    assert S.is_sandboxed_session("task:worker") is False
+
+
+def test_forcing_every_lookup_to_miss_flips_only_the_task_arms(monkeypatch):
+    """The control for the two tests above: with every lookup missing, the
+    chat child's False — the arm that proves resolution happened — goes True,
+    and no non-`task:` id moves."""
+    monkeypatch.setattr(S, "_parent_of", lambda sid: None)
+    assert S.is_sandboxed_session("task:chat") is True
+    assert S.is_sandboxed_session("task:bench0") is True
+    assert S.is_sandboxed_session("") is False
+    for sid in BENCH_PARENTS:
+        assert S.is_sandboxed_session(sid) is True
+    assert S.is_sandboxed_session(CHAT_PARENT) is False
+    assert S.is_sandboxed_session(WORKER_PARENT) is False
+
+
+def test_the_real_registry_is_the_resolver():
+    """No patch: an id the registry has never seen misses and is sandboxed; a
+    registered child of a chat session is not."""
+    from agent_mcp import _subagent_registry as R
+    assert S.is_sandboxed_session(f"task:general:{uuid.uuid4().hex[:8]}") is True
+    child = f"task:general:{uuid.uuid4().hex[:8]}"
+    record = R.register(subagent_type="general", description="d", prompt="p",
+                        parent_session_id=CHAT_PARENT, session_id=child,
+                        model="m", max_turns=1)
+    try:
+        assert S.is_sandboxed_session(child) is False
+    finally:
+        R._active.pop(record.run_id, None)
+
+
+async def test_a_write_from_an_unresolvable_task_session_is_refused_at_dispatch(
+        dispatch_stub, monkeypatch):
+    """Through `main.call_tool`: the same call dispatched before #2025."""
+    M, calls = dispatch_stub
+    seen: list[dict] = []
+    real = M._refused_call
+
+    def spy(name, reason, **kw):
+        seen.append({"name": name, **kw})
+        return real(name, reason, **kw)
+
+    monkeypatch.setattr(M, "_refused_call", spy)
+    sid = f"task:general:{uuid.uuid4().hex[:8]}"
+    args = {"path": "/tmp/whatever", "content": "x"}
+
+    monkeypatch.setattr(S, "_parent_of", lambda _sid: None)
+    result = await M.call_tool("vault_write", dict(args), {"lloyd/session_id": sid})
+    assert _is_error(result) and "read-only session" in _text(result), _text(result)
+    assert calls == [], "the write reached the module handler"
+    assert seen and seen[0]["guard"] == "tool_sandbox" and seen[0]["session_id"] == sid
+
+    # The control: resolved to a chat parent, the sandbox does not refuse it.
+    seen.clear()
+    monkeypatch.setattr(S, "_parent_of", lambda _sid: CHAT_PARENT)
+    await M.call_tool("vault_write", dict(args), {"lloyd/session_id": sid})
+    assert not [c for c in seen if c.get("guard") == "tool_sandbox"], seen

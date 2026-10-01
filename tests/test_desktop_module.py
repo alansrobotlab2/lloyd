@@ -570,8 +570,20 @@ def test_an_unresolvable_task_session_is_refused_desktop(name, parents,
     it, and both are asserted here.
     """
     import agent_mcp.main as M
+    from agent_mcp import _tool_sandbox as S
 
+    # As it happens in production, where both guards read one registry: since
+    # #2025 the read-only sandbox sits above this gate and refuses the same miss
+    # first. Refused either way; which guard answers is what moved.
     monkeypatch.setattr(M, "_safety_parent_of", parents.get)
+    monkeypatch.setattr(S, "_parent_of", parents.get)
+    res = _call(name, {"instruction": "look"}, "task:zzz")
+    assert _is_err(res), f"an unresolvable task:* session was handed {name}: {_text(res)!r}"
+    assert "read-only session" in _text(res), _text(res)
+
+    # The desktop gate's own arm, isolated: the sandbox resolves the id to a
+    # chat parent and stands aside, and this gate's resolver still misses.
+    monkeypatch.setattr(S, "_parent_of", {"task:zzz": "20260930_101010_ivabcd"}.get)
     res = _call(name, {"instruction": "look"}, "task:zzz")
     assert _is_err(res), f"an unresolvable task:* session was handed {name}: {_text(res)!r}"
     assert "only available in a person's chat" in _text(res), _text(res)
@@ -583,7 +595,12 @@ def test_a_task_session_of_a_chat_keeps_desktop_access(monkeypatch):
     false positive the resolver's fail-open was written to avoid."""
     import agent_mcp.main as M
 
+    from agent_mcp import _tool_sandbox as S
+
     monkeypatch.setattr(M, "_safety_parent_of", _CHAT_PARENT.get)
+    monkeypatch.setattr(S, "_parent_of", _CHAT_PARENT.get)
     res = _call("desktop_capture", {}, "task:of-chat-1")
+    assert "read-only session" not in _text(res), (
+        f"the sandbox refused a chat session's own subagent: {_text(res)!r}")
     assert "only available in a person's chat" not in _text(res), (
         f"a chat session's own subagent was refused the desktop: {_text(res)!r}")

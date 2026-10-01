@@ -278,6 +278,13 @@ git grep -c '^    ("' -- agent_mcp/_injection_probe.py      # the family count
    `guard_parent_unresolved` warning naming the session id, the guard that asked
    and why, so a systematic miss is countable instead of reading as a clean
    window.
+   The read-only sandbox is the fifth consumer and was the last inline copy
+   (#2025): `_tool_sandbox.is_sandboxed_session` resolved a `task:` id itself and
+   returned `False` on a miss, so a bench trial's subagent whose registry row had
+   been evicted got the write toolbox. It now answers `True` on a miss and logs
+   the same event with `guard=tool_sandbox`. It does not use `classify_session`:
+   the question is "is the parent a bench or eval trial", not "is the parent
+   unattended", and an ordinary worker's subagent must stay unsandboxed.
 
 ```
 git grep -n "def _safety_parent_of" -- agent_mcp/main.py

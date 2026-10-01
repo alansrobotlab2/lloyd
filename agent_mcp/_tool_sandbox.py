@@ -37,12 +37,16 @@ For a sandboxed session:
 The sandboxed ids are the ones a trial mints (`bench_…`, and the recorded
 `<date>_<time>_bench_<hex>` form) and the preserved-thinking eval, which
 replays real session prompts with the full toolbox (`pt-eval-…`). A `task:*`
-subagent inherits its parent's answer.
+subagent inherits its parent's answer — and a `task:*` id whose parent cannot
+be resolved is sandboxed (#2025): the registry is a 20-deep in-process ring, so
+an evicted row or an aggregator restart is a miss, and a miss that read as "not
+sandboxed" handed a bench trial's subagent the full write toolbox.
 """
 
 from __future__ import annotations
 
 import contextvars
+import logging
 import os
 import shutil
 import subprocess
@@ -50,6 +54,8 @@ import threading
 import time
 
 from agent_mcp import annotations as _annotations
+
+logger = logging.getLogger("lloyd-tool-sandbox")
 
 SANDBOXED_ID_PREFIXES: tuple[str, ...] = ("bench_", "pt-eval-")
 #: Producer slugs of `sessions_io.new_background_session_id` whose sessions
@@ -71,7 +77,34 @@ _probe: dict[str, object] = {"ok": None, "at": 0.0, "error": ""}
 _PROBE_RETRY_S = 60.0
 
 
-def is_sandboxed_session(session_id: str) -> bool:
+#: The name this guard carries in a `guard_parent_unresolved` record.
+GUARD_NAME = "tool_sandbox"
+
+
+def _parent_of(sid: str) -> str | None:
+    """The parent session of a `task:*` id, or None. The seam tests patch."""
+    from agent_mcp import _subagent_registry
+    scope = _subagent_registry.parent_scope(sid)
+    return scope[0] if scope else None
+
+
+def is_sandboxed_session(session_id: str, *, _seen: frozenset[str] = frozenset()) -> bool:
+    """Whether this session may only observe the machine.
+
+    A `task:*` id is answered by its parent. When the parent cannot be found —
+    the lookup returns nothing, returns the id itself, raises, or loops — the
+    answer is **True**: a `task:` session is minted by the Task tool and is
+    never the attended surface, so an unclassifiable one is refused the write
+    toolbox rather than handed it (#2025; the old `False` was the fail-open
+    #1961 closed for four other guards). The miss is recorded through the same
+    `guard_parent_unresolved` WARNING those guards use, with
+    `guard=tool_sandbox`; a resolved lookup leaves a debug line only, so the
+    WARNING count is a miss count.
+
+    Not `classify_session(...) is not ATTENDED`: that would sandbox the
+    subagent of every ordinary worker (autocode, autotriage), whose parent is
+    background but not a bench or eval trial.
+    """
     sid = session_id or ""
     if not sid:
         return False
@@ -82,10 +115,32 @@ def is_sandboxed_session(session_id: str) -> bool:
             and parts[2] in SANDBOXED_BACKGROUND_SLUGS):
         return True
     if sid.startswith("task:"):
-        from agent_mcp import _subagent_registry
-        parent = _subagent_registry.parent_scope(sid)
-        return bool(parent and parent[0] != sid and is_sandboxed_session(parent[0]))
+        try:
+            parent = _parent_of(sid)
+        except Exception as exc:  # noqa: BLE001 — a raising lookup is a miss
+            return _unresolved(sid, f"resolver raised {type(exc).__name__}")
+        if not parent:
+            return _unresolved(sid, "resolver returned no parent")
+        if parent == sid:
+            return _unresolved(sid, "resolver returned the id itself")
+        if parent in _seen:
+            return _unresolved(sid, "resolver returned a parent cycle")
+        answer = is_sandboxed_session(parent, _seen=_seen | {sid})
+        logger.debug("tool_sandbox: %s resolved to parent %s (sandboxed=%s)",
+                     sid, parent, answer)
+        return answer
     return False
+
+
+def _unresolved(sid: str, why: str) -> bool:
+    """Record the miss and fail closed. The record must never be what decides."""
+    try:
+        from app.harness import service_control
+        service_control._record_miss(sid, GUARD_NAME, why)
+    except Exception:  # noqa: BLE001
+        logger.warning("tool_sandbox: guard_parent_unresolved session=%s "
+                       "guard=%s: %s", sid, GUARD_NAME, why)
+    return True
 
 
 def bwrap_path() -> str | None:

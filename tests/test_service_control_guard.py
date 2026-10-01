@@ -328,3 +328,36 @@ def test_an_unresolvable_lookup_is_recorded_with_the_id_and_the_guard(caplog):
                                          guard="desktop")
     assert service_control.MISS_EVENT not in caplog.text, (
         "a resolved lookup was counted as a miss")
+
+
+def test_the_tool_sandbox_records_its_misses_under_its_own_guard_name(caplog, monkeypatch):
+    """#2025 — the fifth consumer is countable like the other four.
+
+    One `guard_parent_unresolved` WARNING per miss, naming `guard=tool_sandbox`
+    and the reason; a resolved lookup logs no WARNING and one debug witness, so
+    a zero miss count is never mistaken for no traffic.
+    """
+    import logging
+    from agent_mcp import _tool_sandbox as S
+
+    for resolver, why in ((lambda sid: None, "resolver returned no parent"),
+                          (lambda sid: sid, "resolver returned the id itself")):
+        caplog.clear()
+        monkeypatch.setattr(S, "_parent_of", resolver)
+        with caplog.at_level(logging.DEBUG):
+            assert S.is_sandboxed_session(UNKNOWN_TASK) is True
+        misses = [r.getMessage() for r in caplog.records
+                  if r.levelno == logging.WARNING
+                  and service_control.MISS_EVENT in r.getMessage()]
+        assert len(misses) == 1, misses
+        assert UNKNOWN_TASK in misses[0] and "guard=tool_sandbox" in misses[0]
+        assert why in misses[0], misses[0]
+
+    caplog.clear()
+    monkeypatch.setattr(S, "_parent_of", lambda sid: CHAT)
+    with caplog.at_level(logging.DEBUG):
+        assert S.is_sandboxed_session(UNKNOWN_TASK) is False
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING], caplog.text
+    witness = [r for r in caplog.records if r.levelno == logging.DEBUG
+               and r.name == "lloyd-tool-sandbox" and UNKNOWN_TASK in r.getMessage()]
+    assert len(witness) == 1, caplog.text
