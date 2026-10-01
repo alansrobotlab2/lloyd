@@ -504,7 +504,7 @@ The six schemas today:
 | `entity` | `entity` | `choice`: `different` / `same` thing | 0.263 | 0.40 | 150 rows of `semantic-verdicts.jsonl`, 1 pair per canvas: AUC 0.942 | no: 0.562 on the 151 verified-bad merges |
 | `clusters` | — | `choice`: `distinct` / `related` work | 0.217 | 0.80 | 200 rows of `cluster_judgments.jsonl`, 8 per canvas: AUC 0.699 | no: replay corpus only |
 | `edges` | — | 10-way `choice` of relationship type | — (argmax) | 0.60 | 200 rows of `classified-v4-batch.jsonl`: agreement 0.580 | no: agreement is not correctness |
-| `action_review` | `action_review` | `choice`: `consistent` / `unrelated` / `injected` (P10) | — | **unset** | — (shadow rows, then Alan's labels) | no: nothing measured |
+| `action_review` | `action_review` | `choice`: `consistent` / `unrelated` / `injected` (P10) | — (permanently: §6.4) | **unset** (permanently) | — ; 57,325 shadow rows measured 2026-10-01, none labelled | no: **ruled permanently shadow** (#1944), not uncalibrated |
 
 The negative option is listed **first** in every pair schema, because that arm
 measured AUC 0.833 against 0.795 and an optimal threshold of 0.39 against 0.03.
@@ -693,13 +693,20 @@ queue on shutdown (2 s bound), so a landing restart's losses are counted into
 The measurement and decision rule live in `architecture/harness.md`
 ("Review 2026-09-24", P10).
 
-**It has recorded nothing yet, and that is the pool, not the seam.** Measured
-2026-09-25 18:00Z: 0 `action_review` rows. The worker pool has been paused by an
-operator since before the seam landed (03:21Z that day), and the only worker
-traffic since was `bench_*` and `rpceval` sessions, which do not go through
-`/api/message/stream`. The same install and record path, driven in a scratch
-process against the live engine, wrote its row. Rows start when the pool
-resumes; a week of them is what P10's measurement needs.
+**Rows arrived, and the threshold question they were collected for is closed.**
+The 2026-09-25 claim here — 0 rows, because the worker pool was paused by an
+operator and only `bench_*` and `rpceval` traffic had run through
+`/api/message/stream` — held for four days and then stopped holding when the pool
+resumed. As of the 2026-10-01 snapshot the seam is by far the busiest: **57,325
+rows**, its own first at **2026-09-25T18:45:16Z**. `injected` is the argmax in
+**none of them**, and 963 (1.68%, **180.5/day**) came back `unrelated`, of which
+exactly one was a tier ≥ 2 durable-external call — already denied by the
+deterministic hook. That is the ruling recorded in `harness.md` P10 and in the
+module docstring: **`action_review` stays in shadow permanently**, `warn` is out
+of `MODES`, `threshold` and `label_mass_floor` stay unset, and the reason is not a
+missing calibration but an absent positive class — no shadow row is labelled, so
+FP and FN cannot be computed at all. Re-run it with
+`python -m eval.djev.action_review_calibration`.
 
 ### 6.5 Voice addressee — `agent-services/voice/addressee.py` (a gate)
 

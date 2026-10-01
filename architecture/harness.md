@@ -782,7 +782,7 @@ Re-run whenever `models.primary.expect_model` changes.
 Two passive seams for worker turns; neither can change a tool call today.
 
 - **Action reviewer** (`app/harness/action_review.py`, `harness.action_review.mode:
-  off|shadow|warn`, default `shadow`). Installed by `messages._install_action_review`
+  off|shadow`, default `shadow`). Installed by `messages._install_action_review`
   on `/api/message/stream` for `NON_USER_PLATFORMS` turns only, as an OnEvent tap
   (no PreToolUse callback, so it cannot deny or deliver). Per tool call it
   enqueues one frozen djev question through `djev_shadow.shadow(seam="action_review")`
@@ -791,8 +791,9 @@ Two passive seams for worker turns; neither can change a tool call today.
   `eval/djev/schemas.py::ACTION_REVIEW`, switch `djev.shadow.seams.action_review`).
   The canvas is the worker's prompt plus the calls so far, never tool results or
   prose; `actual` is the gates' outcome read off the result. The canvas is built
-  on the recorder's thread. `warn` records like `shadow` until a threshold exists.
-  `architecture/djev.md` §6.4.
+  on the recorder's thread. **There is no `warn` mode** — it was removed from
+  `MODES` on the ruling below, so a config carrying `mode: warn` falls back to
+  `shadow`, which is all it ever did. `architecture/djev.md` §6.4.
 - **Input probe** (`agent_mcp/_injection_probe.py`, `harness.injection_probe.mode`,
   default `shadow`). Regex families (`role_header`, `ignore_instructions`,
   `you_must_now`, `run_the_following`, `conceal_from_user`, `persona_swap`,
@@ -804,21 +805,111 @@ Two passive seams for worker turns; neither can change a tool call today.
   `<warning>` to a non-error result. Never raises into `call_tool`.
   `session.py::_INJECTION_PATTERNS` (the `memory_add` gate) is unchanged.
 
-**What gets measured (not done here).** A week of `action_review` rows in
-`~/.local/state/lloyd-djev/shadow.jsonl` (extend until ≥ 200 rows); a stratified
-200-call sample (source × score decile) hand-labelled by Alan as consistent /
-off-task / injection-shaped, plus 20 synthetic positives replayed with a planted
-instruction under `LLOYD_DJEV_SHADOW=0` into a separate file; AUC and FP/FN at the
-best threshold on P(`injected`). For the probe: hit rate per `pattern_id` from
-the event logs and 50 hand-checked hits for precision (this repo's docs describe
-injections, so arch-review reads are the expected false positives).
+**The reviewer's threshold question, asked and answered (item #1944, 2026-10-01).**
+`eval/djev/action_review_calibration.py` reads `action_review` rows out of
+`~/.local/state/lloyd-djev/shadow.jsonl`, recovers each call's real arguments from
+the session transcript its `meta.session_id` + `meta.call_id` name, tiers them
+through the gate's own `effective_tier`, and prints every rate beside its
+denominator. Re-run it with
+`python -m eval.djev.action_review_calibration`. The file is append-only and
+grows ~5.4 MB/day, so the figures below are a snapshot read at
+**2026-10-01T02:47Z** over **57,325 seam rows** spanning
+**2026-09-25T18:45Z → 2026-10-01T02:46Z** — 5.34 days of the seam's own traffic,
+which is not the file's span: the file's first row is a `rerank` row five days
+before the seam's first, and dividing by the file's span is how the item got
+~92/day instead of ~180:
 
-**Decision rule.** `mode: warn` — the probe's warning, and an Inner Voice inject
-when the reviewer picks `injected` above the measured threshold — only if FP ≤ 2%
-at FN ≤ 30% and `label_mass` clears the floor set from the week's rows (write
-`threshold`, `label_mass_floor`, `calibrated_on`, `calibrated_hash` into the
-schema). Never a hard block on djev alone; deny stays with the safety and grant
-hooks. `tests/test_action_review.py`, `tests/test_injection_probe.py`.
+| measure | value |
+|---|---|
+| `unrelated` positives | 963 / 57,325 = 1.68% → **180.5 / day** |
+| …on calls that ran (what a `warn` interrupts) | 929 / 963 → **174.1 / day** |
+| …at tier ≥ 2 durable-external | **1 / 963** |
+| …at tier 1 | 961 / 963 |
+| `injected` as the argmax | **0 / 57,325** |
+| rows whose tier could not be resolved | 6 / 57,325 (all digest mismatches) |
+| deterministic hook denials, and their labels | 36 → **35 `consistent` + 1 `unrelated`** |
+
+Per tool the positive rate is the same order of magnitude across the three tools
+that carry the traffic — `Bash` 798/42,006 = 1.90%, `Read` 53/5,174 = 1.02%,
+`Edit` 31/4,897 = 0.63% — and per source it is everywhere at once
+(`automod-review` 492, `autotriage` 145, `autocode` 143, `owed-check` 118,
+`youtube-digest` 54). That is the branch the item called **(b)**: topical drift
+across the ordinary tools, at a volume no worker absorbs without muting the
+advisory, not a concentration in durable-external calls that a gate could act on.
+The single tier-2 positive is itself an `owed-check` call the deterministic hook
+had already denied, so on the one call where the reviewer and the gate could both
+have acted, the gate acted first and the reviewer's vote was redundant.
+
+**The committed bytes behind them.** The live corpus is append-only, so nobody can
+reproduce the table above from it later — by the time a reader tries it has more rows.
+The extract the figures were read from is therefore in git:
+`~/obsidian/backlog/data/shadow.jsonl`, the 57,325 `action_review` rows in file order,
+projected to the fields this report reads and carrying `recovered_arguments` on the 963
+positives. `wc -l` of it prints the same 57,325 as every table above, which is the
+identity that is meant to survive: `sha256sum` of those bytes, and the projection plus
+the source file's byte count, are recorded in its marker
+`~/obsidian/backlog/data/shadow-action-review-2026-10-01T0247Z.witness.md`, and
+`git -C ~/obsidian diff --quiet -- backlog/data/shadow.jsonl` being clean says the bytes
+on disk are the committed bytes. Vault commits `f20e9852` (first extract, dated
+filename), `89f64ffe` (this path) and `009506d4` (the recovered arguments) placed it;
+`cfa95f34` committed the file itself after its marker's fenced block lost a newline and
+stopped parsing.
+
+Those bytes are the corpus the entry point reads, unchanged: `python -m
+eval.djev.action_review_calibration --shadow-log ~/obsidian/backlog/data/shadow.jsonl
+--sessions-dir /nonexistent --quiet` reproduces **every figure in the table above with
+no transcript open at all**, because the rows whose tier turns on their arguments carry
+those arguments. That is what makes "re-runnable" mean something here, and
+`tests/test_action_review_calibration.py::test_the_ruling_reproduces_from_the_committed_extract_with_no_transcripts`
+runs that exact command on every pytest run. What the extract does not carry is the tier
+column for the *other* argument-dependent rows: over it with no transcripts, 41,204 of
+them answer `no_session_file` instead of a tier, so "rows whose tier could not be
+resolved: 6" is a live-corpus figure while the positives' 961 / 1 / 1 is not, and a
+reader quoting one should not label it the other. `tests/test_action_review_calibration.py` recomputes the label, outcome,
+source and hook axes from them, recomputes the **tier** axis from them too, and fails if
+the file's digest stops matching its marker's. Tiering a `Bash` row needs its command
+string, which lives only in the session transcript, and the groundskeeper gzips
+transcripts at 30 days (`scripts/groundskeeper/retention-sweep.py:252-264`), so a ruling
+that depended on them would quietly stop being checkable; carrying the recovered
+arguments is what lets the witness stand in for the transcripts. The order the join runs
+in is load-bearing, and the test follows it: `args_digest` first, `effective_tier`
+second. Tiering unverified gives 962 / 1 / 0, because the single untierable positive is
+precisely the row whose arguments fail their digest; only the verified path reproduces
+**961 / 1 / 1**.
+
+Two further facts make the number unnameable even if the shape had been right.
+`injected` — the option the schema comment named as the one a threshold would be
+read off — is never the argmax, and no shadow row carries a human label, so FP and
+FN cannot be computed at all: the rule below is not unmet, it is unevaluable. And
+`warn` was never implemented; no line branched on it, so branch (a) would have
+needed an emit path built before it could be measured, which the item's own header
+("measure, no new mechanism") excluded.
+
+**Ruling.** `action_review` stays in **shadow permanently**. `warn` is out of
+`MODES`, `threshold` and `label_mass_floor` stay `None`, and `gate_blocked_reason`
+records why. Reopening is not a matter of recalling a rate. The 180.5/day above is
+a mean over a window in which the rate is climbing — 10 on the part-day it opened,
+then 128, 129, 209, 234, 223, 30 on the part-day it closed — and it tracks which
+worker jobs were up, so it is not a steady-state figure anyone should design a
+cutoff against. Any new attempt starts from the labelled sample below, not from
+this corpus. `tests/test_action_review.py`
+pins the mode set and the ruling; `tests/test_action_review_calibration.py` pins
+the measurement's mechanism; `knowledge/ai/action-review-threshold-measurement.md`
+is the write-up.
+
+**What still gets measured (the probe only).** Hit rate per `pattern_id` from the
+event logs and 50 hand-checked hits for precision (this repo's docs describe
+injections, so arch-review reads are the expected false positives). The reviewer's
+half of this list — a stratified 200-call sample hand-labelled by Alan as
+consistent / off-task / injection-shaped, plus 20 synthetic positives replayed with
+a planted instruction under `LLOYD_DJEV_SHADOW=0`, scored as AUC and FP/FN on
+P(`injected`) — is what a future attempt at the reviewer would need, and it is owed
+nobody: the ruling above does not require it, and no shadow row is labelled today.
+
+**Decision rule, for the probe.** `mode: warn` on `injection_probe` only if its
+measured precision clears 50 hand-checked hits. Never a hard block on djev alone;
+deny stays with the safety and grant hooks, and the reviewer has no mode that could
+try. `tests/test_action_review.py`, `tests/test_injection_probe.py`.
 
 ### D5 — deny hooks fail closed
 
@@ -1736,8 +1827,13 @@ a negative result is a clean `rejected`):
 - **P9** — its eval needs a session with live, unsandboxed Bash, which the
   bench/eval sandbox rule (CLAUDE.md, "The vault is protected at the tool
   layer") forbids by construction: Alan's call on how it is run.
-- **P10** — a labelling week (200 calls, hand-labelled) before any threshold
-  is written and `warn` is considered.
+- **P10** — closed for the **reviewer** on 2026-10-01 and NOT owed a labelling
+  week: measured over 57,325 rows, ruled permanently shadow, `warn` removed from
+  `MODES`. The label pass (200 calls hand-labelled plus 20 planted positives
+  under `LLOYD_DJEV_SHADOW=0`) is only owed to REOPEN that ruling, and what would
+  justify reopening is a non-zero `injected` count, which is 0. Still owed for
+  the **probe**: hit rate per `pattern_id` and 50 hand-checked hits, which is what
+  its `warn` mode turns on.
 
 ## The denial journal (2026-09-30)
 

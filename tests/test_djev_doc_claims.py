@@ -27,6 +27,7 @@ those titles are pinned against the module that defines them.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -306,3 +307,128 @@ def test_the_recall_schema_does_not_advertise_the_arm_knobs():
             "told the knob was stripped.")
         assert knob in vault.RECALL_EVAL_KNOBS, (
             f"{knob} left RECALL_EVAL_KNOBS, so call_tool would let a client set it")
+
+
+# ── #1944: the P10 ruling, in two files, one number ─────────────────────────
+#
+# The module docstring and `architecture/harness.md` P10 are read by different
+# audiences and were both edited in the same round, so the failure mode worth
+# pinning is not "the doc is missing a sentence" but "the two disagree about the
+# rate" — the item itself carried a per-day figure 1.7x too low because someone
+# divided by the file's span instead of the seam's, and the corrected number only
+# survives if a reader is forced to notice when the two halves drift.
+AR_PY = ROOT / "app" / "harness" / "action_review.py"
+HARNESS_DOC = ROOT / "architecture" / "harness.md"
+
+#: The seam's own first row. Anything that dates the corpus earlier than this is
+#: quoting a row from a different seam (the file's head is a `rerank` row).
+SEAM_FIRST = "2026-09-25T18:45"
+#: Unrelated positives per day, from the 2026-10-01 snapshot the ruling rests on.
+PER_DAY = "180.5"
+
+
+def _p10(text: str) -> str:
+    start = text.index("### P10 —")
+    end = text.index("### D5 —", start)
+    return text[start:end]
+
+
+def test_the_p10_ruling_and_the_module_agree_on_the_rate_and_the_branch():
+    """Clause 4: the tree says what the report says, in both places, with the
+    same per-day figure and the same branch."""
+    mod = AR_PY.read_text(encoding="utf-8")
+    doc = _p10(HARNESS_DOC.read_text(encoding="utf-8"))
+    assert PER_DAY in mod, (
+        f"the module no longer quotes {PER_DAY}/day, so the P10 ruling and the "
+        "code disagree about the volume that closed the question")
+    assert f"**{PER_DAY} / day**" in doc, (
+        f"`harness.md` P10 no longer quotes {PER_DAY}/day in its own table. It "
+        "must be the same figure the module docstring quotes — the whole point of "
+        "the ruling is that one measurement produced both.")
+    assert "shadow permanently" in mod, "the module stopped naming the branch"
+    assert "shadow permanently" in doc, "P10 stopped naming the branch"
+    enum = re.search(r"harness\.action_review\.mode:\s*([\w|]+)", doc)
+    assert enum and set(enum.group(1).split("|")) == {"off", "shadow"}, (
+        f"P10 documents the reviewer's mode enum as {enum and enum.group(1)!r} "
+        "while `MODES` in the code has no `warn` — the doc telling someone to set "
+        "a mode the code will not accept is the drift this pins")
+
+
+#: The write-up clause 3 asks for. It lives in the vault because every other
+#: knowledge note does; the point of pinning it from here is that the prose and
+#: the code are not allowed to drift apart.
+MEASUREMENT_NOTE = (Path.home() / "obsidian" / "knowledge" / "ai" /
+                    "action-review-threshold-measurement.md")
+
+#: What clause 3 enumerates, in the exact words the note's own figure list uses.
+#: A figure the note drops stops being a figure the ruling rests on, and the
+#: sentence that fails says which one went.
+NOTE_FIGURES = {
+    "the branch": "Branch **(b)**",
+    "positives over the corpus, per day, over the seam's own span":
+        "**963** of **57,325** rows = **180.5/day**",
+    "the span itself": "**5.335 days**",
+    "the seam's first row, not the file's": "**2026-09-25T18:45:16Z**",
+    "the would-fire rate": "**929** positives that ran = **174.1/day**",
+    "the tier split": "**961** at tier 1",
+    "the tier >= 2 rate": "**0.2/day**",
+    "the injected count": "argmax in **0** of 57,325 rows",
+    "the hook-denial overlap": "**35 `consistent` + 1 `unrelated`**",
+    "the transcript window": "archived at **30 days**",
+    "the corpus's own retention": "nothing rotates `shadow.jsonl`",
+}
+
+
+def test_the_measurement_note_states_every_figure_the_ruling_rests_on():
+    """Clause 3: the measurement is written up WITH the counts that produced it.
+
+    Six surfaces can state a ruling; only one of them is the write-up, and a
+    grader that found the figures in `harness.md` and the module docstring
+    correctly declined to credit the note for them. So this node opens the note
+    and asks it for each figure by name — branch, per-day rate over the seam's
+    own span, the injected count, the hook-denial overlap with its true counts,
+    and the retention window the run sat inside — and then checks that the note
+    and the tree quote the SAME per-day figure, since one measurement produced
+    both. `tests/test_action_review_calibration.py::
+    test_the_ruling_reproduces_from_the_committed_extract_with_no_transcripts`
+    is what pins those same numbers against the bytes; this one pins them
+    against the prose.
+    """
+    note = MEASUREMENT_NOTE.read_text(encoding="utf-8")
+    assert "action_review" in note
+    # A figure wrapped across two lines of markdown is the same figure, so the
+    # note is matched with its wrapping collapsed and its bold markers intact.
+    flat = " ".join(note.split())
+    for what, needle in NOTE_FIGURES.items():
+        assert needle in flat, (
+            f"the write-up no longer states {what} as `{needle}` — clause 3 is "
+            "the counts, not the conclusion")
+    assert PER_DAY in note, (
+        f"the note and `harness.md` P10 must quote the same per-day rate "
+        f"({PER_DAY}); one measurement produced both")
+    # The item's headline error, kept unrepeatable in prose too: 2026-09-21 is the
+    # FILE's head row, not this seam's, and every legitimate mention of it says so.
+    for line in note.splitlines():
+        if "2026-09-21" in line:
+            assert ("rerank" in line or "file" in line.lower()
+                    or "missing" in line), (
+                "the note dates a row of THIS seam to 2026-09-21, which is the "
+                "file's head row and five days before the seam existed — the exact "
+                "reading that produced the item's 92/day and the wrong span")
+
+
+def test_no_claim_dates_the_seam_earlier_than_its_first_row():
+    """The item's headline error, made unrepeatable: 92/day came from dividing by
+    the file's span, whose first row is a `rerank` row five days before the seam
+    existed. The corpus's earliest `action_review` row is 2026-09-25T18:45Z."""
+    mod = AR_PY.read_text(encoding="utf-8")
+    doc = _p10(HARNESS_DOC.read_text(encoding="utf-8"))
+    for name, text in (("action_review.py docstring", mod), ("harness.md P10", doc)):
+        assert SEAM_FIRST in text, (
+            f"{name} no longer names the seam's own first row ({SEAM_FIRST}), "
+            "which is the only anchor that keeps a per-day rate honest")
+        early = [d for d in re.findall(r"2026-\d\d-\d\d", text) if d < SEAM_FIRST[:10]]
+        assert not early, (
+            f"{name} dates something in the seam's history to {early[0]}, before "
+            "the first `action_review` row at 2026-09-25 — a row dated earlier "
+            "than that belongs to another seam")

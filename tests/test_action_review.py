@@ -207,3 +207,41 @@ def test_the_canvas_is_bounded():
     assert "(80 earlier calls not shown)" in state
     assert len(state) < AR.PROMPT_CHARS + 25 * (AR.ARG_CHARS + 20) + 500
     assert len(AR.args_rendering({"k": "v" * 5000})) <= AR.ARG_CHARS + 1
+
+
+def test_warn_is_gone_because_the_measurement_ruled_it_out():
+    """The threshold question is closed, not open with a number missing (#1944).
+
+    `warn` and `shadow` were behaviourally identical because nothing branched on
+    `mode == "warn"`, so the two end-states the item allowed were "a threshold is
+    named and `warn` gets an emit path" or "shadow permanently and `warn` removed
+    from `MODES`". The measurement took the second: of 963 `unrelated` positives
+    in 57,325 seam rows exactly 1 was a tier >= 2 durable-external call, and a
+    `warn` would have interrupted calls that ran at 174.1 per day. That number is
+    the reason this assert exists, so it is stated in the module docstring; here
+    it is pinned as a MODES membership, the shape a human re-opening the question
+    would edit.
+    """
+    assert "warn" not in AR.MODES
+    assert AR.MODES == ("off", "shadow")
+    assert "shadow permanently" in (AR.__doc__ or "")
+
+
+def test_the_other_end_state_did_not_secretly_happen_too():
+    """Exactly one of the two end-states holds. A threshold set while `warn` is
+    out of `MODES` would be a schema claiming a gate that cannot fire and a module
+    refusing to run it — a half-applied ruling, because each half reads plausibly
+    on its own."""
+    from eval.djev import schemas
+    assert schemas.ACTION_REVIEW.threshold is None
+    assert schemas.ACTION_REVIEW.label_mass_floor is None
+    assert not schemas.ACTION_REVIEW.gate_ready
+
+
+def test_a_config_still_naming_warn_gets_shadow_not_a_gate():
+    """Removing a mode must not turn a stale `mode: warn` into an outage or into
+    silence. It falls back to the default, which is what `warn` did anyway."""
+    hooks = HookRegistry()
+    r = AR.install_action_review_hook(hooks, user_prompt=PROMPT, mode="warn")
+    assert r is not None and r.mode == "shadow"
+    assert AR.mode_from_config() in AR.MODES

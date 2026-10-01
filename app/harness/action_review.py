@@ -8,11 +8,47 @@ or what the text the agent just read asked for?
 
 This module asks djev that question once per tool call of a
 `NON_USER_PLATFORMS` turn and records the answer beside what production did.
-It decides nothing. `mode: warn` exists as a config value so the switch has
-its final shape, but until a threshold is measured (`eval/djev/schemas.py`
-`ACTION_REVIEW.threshold is None`) it records exactly as `shadow` does; the
-measurement and the decision rule are in `architecture/harness.md`
-("Review 2026-09-24", P10).
+It decides nothing, and after the measurement below it is not going to.
+
+THE THRESHOLD QUESTION, AND HOW IT WAS SETTLED (item #1944, 2026-10-01)
+----------------------------------------------------------------------
+The seam ran with `ACTION_REVIEW.threshold is None`, which made `shadow` and
+`warn` behaviourally identical, so the question its rows had been accumulating
+against was never asked until it was measured. Re-run the answer with
+`python -m eval.djev.action_review_calibration`. The corpus is append-only and
+live, so these are a dated snapshot — read at **2026-10-01T02:47Z**, over
+**57,325 `action_review` rows** spanning **2026-09-25T18:45Z →
+2026-10-01T02:46Z**, 5.34 days of the seam's own traffic and NOT the file's,
+whose head is a `rerank` row five days earlier. A re-run reports more rows and a
+rate a little off this one; the ratios are the finding, not the absolutes.
+
+**963 rows (1.68%) came back `unrelated` — 180.5 per day** — and **929 of them
+were calls that actually ran**, so a `warn` would have interrupted **174.1 per
+day**. Where those positives sit is the ruling: **1 of the 963** is a tier ≥ 2
+durable-external call, **961 are tier 1**, and 1 could not be tiered. The
+remainder is spread across the ordinary tools at the same order of rate
+(`Bash` 798/42,006 = 1.90%, `Read` 53/5,174 = 1.02%, `Edit` 31/4,897 = 0.63%)
+and across every worker source (`automod-review` 492, `autotriage` 145,
+`autocode` 143, `owed-check` 118, `youtube-digest` 54). That is branch (b) of the
+item: topical drift, not a concentration a gate could act on. Even the one
+tier-2 positive argues against gating — it is an `owed-check` call the
+deterministic hook had already denied, so the reviewer added nothing to the gate
+that the gate did not already have.
+
+Two more facts make a threshold unnameable even if the shape had been right.
+**`injected` is the argmax in 0 of 57,325 rows** — the option the schema comment
+called "the one a threshold will be read off" has never once been the answer —
+and no shadow row carries a human label, so FP and FN are uncomputable: the P10
+rule (FP ≤ 2% at FN ≤ 30%) is unevaluable here, not merely unmet. And `warn` was
+never implemented, so branch (a) needed an emit path built before it could be
+measured at all, which the item's own header excluded.
+
+**Ruling: `action_review` stays in shadow permanently.** `warn` is out of
+`MODES` so the switch cannot be opened on vibes, `threshold` and
+`label_mass_floor` stay `None`, and reopening needs new evidence rather than a
+recollected rate — the counts come from `eval/djev/action_review_calibration.py`,
+the reasoning is in `knowledge/ai/action-review-threshold-measurement.md`, and
+the rule it was judged against is `architecture/harness.md` (P10).
 
 WHAT THE REVIEWER IS SHOWN, AND WHAT IT IS NOT
 ----------------------------------------------
@@ -53,7 +89,13 @@ from typing import Any
 logger = logging.getLogger("lloyd-harness-action-review")
 
 SEAM = "action_review"
-MODES = ("off", "shadow", "warn")
+#: `warn` was removed 2026-10-01 on the measurement in the module docstring
+#: (item #1944): 174.1 would-be interruptions per day, 1 of 963 positives above
+#: tier 1, `injected` the argmax in 0 of 57,325 rows. A config still carrying
+#: `mode: warn` falls back to `DEFAULT_MODE` below, which is what `warn` did
+#: anyway — nothing ever branched on it — so the fallback is the honest one, not
+#: a silent gate. `tests/test_action_review.py` pins that `warn` is gone.
+MODES = ("off", "shadow")
 DEFAULT_MODE = "shadow"
 
 #: The trusted task, clipped. A worker prompt is 2-12 KB; the head carries the
@@ -212,9 +254,10 @@ def install_action_review_hook(hooks: Any, *, user_prompt: str, source: str = ""
     """Tap this turn's event stream for the action reviewer, or do nothing.
 
     The caller decides eligibility (a `NON_USER_PLATFORMS` turn); this decides
-    the mode. Returns the reviewer (for tests and for a later `warn`), or
-    `None` when off. Registers no PreToolUse callback: it cannot change a
-    tool call's outcome by construction.
+    the mode. Returns the reviewer (for tests), or `None` when off. Registers
+    no PreToolUse callback: it cannot change a tool call's outcome by
+    construction, and there is no `warn` mode left to change it under — see the
+    ruling in this module's docstring.
     """
     try:
         mode = (mode or mode_from_config()).strip().lower()
