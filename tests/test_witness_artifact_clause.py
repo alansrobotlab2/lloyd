@@ -502,3 +502,12 @@ def test_item_1886_contract_keeps_only_its_three_authored_clauses():
         "any root-form token left in the body must at least be real bytes")
     assert B.add_witness_artifact_clause(list(graded), body) == list(graded), (
         "the emitter must not re-add a witness clause to #1886")
+
+
+def test_the_docstring_carries_no_dated_ledger_count_about_the_vault_route():
+    """#1987: the vault refusal row now writes per-clause verdicts, so the sentence
+    saying it writes none — and its "(0 of 291 on 2026-09-30)" — had rotted."""
+    doc = " ".join(B.add_witness_artifact_clause.__doc__.split())
+    assert "0 of " + "291" not in doc
+    assert "no per-clause verdicts" not in doc
+    assert "VAULT_NO_AMENDMENT_ROUTE" in doc

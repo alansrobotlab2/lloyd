@@ -611,7 +611,11 @@ def _amend_clause(round_id: str, clause, text: str, reason: str) -> dict:
     import yaml
     spec_path = S.ROUNDS_DIR / round_id / "run_spec.yaml"
     if not spec_path.exists():
-        return {"error": f"no run spec for {round_id}"}
+        # #1987: a vault landing never creates a round dir, so this is where
+        # a vault-surface amendment actually dies. Name the route that works.
+        return {"error": f"{round_id!r} has no run spec, so it is not a code round with a "
+                         f"graded review to amend against. If this is a vault landing: "
+                         f"{B.VAULT_NO_AMENDMENT_ROUTE}"}
     run_spec = yaml.safe_load(spec_path.read_text(encoding="utf-8")) or {}
     item_id = (run_spec.get("item") or {}).get("id")
     if not item_id:

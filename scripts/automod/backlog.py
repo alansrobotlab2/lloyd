@@ -1090,14 +1090,13 @@ def add_witness_artifact_clause(clauses, text, *, probe=in_git_tree,
     whatever the item itself quoted.
 
     What this function cannot do is undo a clause it already emitted. A
-    `vault`-surface item has no amendment route at all: `amend_clause` resolves
-    the graded review through `last_graded_review(ledger, round_id)`, and no
-    `vault_review` row in the ledger carries a `round_id` (0 of 291 on
-    2026-09-30), while the vault grader writes no per-clause verdicts in
-    structured form at all — `met` is the only value ever recorded there, so the
-    `verdict == "unsatisfiable"` guard can never fire for a vault clause. That
-    leaves a bad generated clause sitting in the item's own front matter with
-    nothing to clear it but editing the item, which is what #1889 does for #1886.
+    `vault`-surface item has no amendment route: `amend_clause` resolves the
+    graded review through `last_graded_review(ledger, round_id)`, which reads
+    code-round `review` rows, and a vault landing has no round and so no
+    `round_id` to resolve. `amend_clause` says so by name
+    (`VAULT_NO_AMENDMENT_ROUTE`) rather than claiming the review did not judge
+    the clause. A bad generated clause on a vault item is cleared by editing
+    the item, which is what #1889 does for #1886, or by filing a blocker.
     """
     every = list(clauses or ())
     if any(_ARCHIVE_MENTION_RX.search(str(c)) for c in every):
@@ -1292,6 +1291,17 @@ def _write_item(path: Path, fm: dict, body: str) -> None:
         f"---\n{body}", encoding="utf-8")
 
 
+#: What a vault-surface clause is told when it asks for an amendment (#1987).
+#: `automod_amend_clause` ratifies against a code round's graded review; a vault
+#: landing has no round, so the route does not exist and the answer has to name
+#: the one that does.
+VAULT_NO_AMENDMENT_ROUTE = (
+    "a vault-surface clause has no amendment route: automod_amend_clause ratifies against "
+    "a code round's graded review, and a vault landing has no round. What works: edit the "
+    "clause on the backlog item itself, or file a blocker item that says why the clause "
+    "cannot be met.")
+
+
 def amend_clause(item_id: int, clause: int, text: str, reason: str, *,
                  round_id: str, ledger: Path | None = None) -> dict:
     """Replace one acceptance clause the review rung judged unsatisfiable.
@@ -1343,6 +1353,13 @@ def amend_clause(item_id: int, clause: int, text: str, reason: str, *,
     if not text or not reason:
         raise ValueError("both the amended clause text and a reason are required")
     review = last_graded_review(ledger, round_id)
+    if review is None and str((confirmed_verdicts(ledger).get(int(item_id)) or {})
+                              .get("surface") or "") == "vault":
+        # Only when no graded code review resolves: a code round's path is
+        # untouched. Saying "the review has not judged clause N unsatisfiable"
+        # here would be a claim about a review this lookup cannot see.
+        raise ValueError(f"item #{item_id} is confirmed on the vault surface and {round_id!r} "
+                         f"has no graded code review: {VAULT_NO_AMENDMENT_ROUTE}")
     verdicts = {int(c.get("clause") or 0): str(c.get("verdict") or "")
                 for c in ((review or {}).get("clauses") or []) if isinstance(c, dict)}
     if verdicts.get(idx) != "unsatisfiable":

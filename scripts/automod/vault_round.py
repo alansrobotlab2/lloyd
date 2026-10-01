@@ -702,6 +702,13 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
             S.append_event({"event": "vault_review", "item_id": item_id, "paths": norm,
                             "kind": kind, "blocking": True, "attempt": attempts,
                             "findings": findings[:2000], "reverted": undone,
+                            # #1987: the refused clause in structured form, the
+                            # same rows the non-blocking append below writes.
+                            # Without it `met` was the only verdict any vault
+                            # row could carry, and a refusal named its clause
+                            # in prose alone. No `round_id`: a vault landing
+                            # has no round.
+                            "clauses": clauses,
                             "review_premise_unsound": kind == "unsound",
                             "review_retry": kind == "retry"})
             raise VaultRoundError(

@@ -2293,6 +2293,19 @@ The day also showed three dead ends the loop could only escalate:
   met. An `unsatisfiable` clause on two distinct heads without an amendment
   still escalates through `review_disagreement`.
 
+  **A vault-surface clause has no amendment route, and the tools say so
+  (#1987).** A vault landing has no round, so there is no `round_id` and no
+  graded code review for `amend_clause` to ratify against. Asked anyway,
+  `backlog.amend_clause` (item confirmed on the `vault` surface, no graded
+  review for the id given) and the `automod_amend_clause` tool (no run spec)
+  answer with `backlog.VAULT_NO_AMENDMENT_ROUTE`: edit the clause on the item,
+  or file a blocker. A refused vault clause is still recorded in structured
+  form — the blocking `vault_review` row carries the grader's per-clause
+  `clauses`, as the non-blocking row always did (before, 0 of 35 refusal rows
+  had them and `met` was the only verdict any vault row held). The shared
+  `decide()` wording that names `automod_amend_clause` in a vault refusal's
+  findings is left as it is; changing it is a separate ruling.
+
   **A check that can only run after the change lands is `unsatisfiable`
   before it, never `partial`** — a day of traffic, a nightly run, a number
   only production produces, a script over live data. No diff can carry that

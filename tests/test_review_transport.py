@@ -462,6 +462,45 @@ def test_amend_refuses_a_clause_the_reviewer_did_not_call_unsatisfiable(isolated
     assert _fm(path)["acceptance_clauses"] == ["a", "b"]
 
 
+def _confirm(item_id, surface):
+    S.append_event({"event": "backlog_triage", "item_id": item_id, "verdict": "confirmed",
+                    "surface": surface, "acceptance": "x"}, path=S.LEDGER_PATH)
+
+
+def test_amend_on_a_vault_surface_item_names_the_surface_and_the_route_that_works(isolated):
+    """#1987: no vault row carries a round_id, so the old answer — "the review rung
+    has not judged clause N unsatisfiable" — was a claim about a review this lookup
+    cannot see."""
+    path = write_item(isolated, 1987, clauses=["a", "b"])
+    _confirm(1987, "vault")
+    assert B.last_graded_review(S.LEDGER_PATH, "SM_other") is None, "#860: nothing item-wide"
+    with pytest.raises(ValueError) as exc:
+        B.amend_clause(1987, 2, "b, narrowed", "cannot be met", round_id="SM_other")
+    msg = str(exc.value)
+    assert "vault surface" in msg and B.VAULT_NO_AMENDMENT_ROUTE in msg
+    assert "edit the clause on the backlog item" in msg and "file a blocker" in msg
+    assert "not judged" not in msg and "unsatisfiable" not in msg
+    assert _fm(path)["acceptance_clauses"] == ["a", "b"]
+
+
+def test_amend_on_a_code_surface_item_is_unchanged_by_the_vault_refusal(isolated):
+    path = write_item(isolated, 1988, clauses=["a", "b"])
+    _confirm(1988, "code")
+    with pytest.raises(ValueError, match="not judged clause 2 unsatisfiable"):
+        B.amend_clause(1988, 2, "b, narrowed", "why", round_id="SM_c")
+    _unsat_review("SM_c", 1988, 2)
+    rec = B.amend_clause(1988, 2, "b, narrowed", "why", round_id="SM_c")
+    assert rec["state"] == "pending" and rec["round_id"] == "SM_c"
+    assert _fm(path)["acceptance_clauses"] == ["a", "b, narrowed"]
+    assert [a["state"] for a in B.pending_amendments(_fm(path))] == ["pending"]
+    # A vault-surface item that DOES have a graded code review for the round is
+    # judged on that review, like any other.
+    write_item(isolated, 1989, clauses=["a"])
+    _confirm(1989, "vault")
+    _unsat_review("SM_d", 1989, 1)
+    assert B.amend_clause(1989, 1, "a2", "why", round_id="SM_d")["state"] == "pending"
+
+
 def test_amend_writes_pending_and_the_next_review_ratifies_or_restores(isolated):
     path = write_item(isolated, 601, clauses=["a", "b"])
     _unsat_review("SM_a", 601, 2)

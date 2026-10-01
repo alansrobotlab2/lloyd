@@ -821,3 +821,41 @@ def test_a_pass_with_nothing_to_report_records_no_findings_field(vault, items, m
     assert "review_findings" not in ev, ev
     outcome = B.vault_review_outcome(S.LEDGER_PATH, [out["commit"]])
     assert outcome and "review_findings" not in outcome, outcome
+
+
+# ── #1987: a refused vault clause is on the row, and the amend tool is honest ──
+
+def test_a_blocking_vault_review_row_carries_the_per_clause_verdicts(vault, items, monkeypatch):
+    """0 of 35 refusal rows carried `clauses`, so `met` was the only verdict any
+    vault row ever held and the refused clause existed in prose alone."""
+    write_item(items, 1987, ["the skill names the retry rule", "the skill names the cap"])
+    rows = [{"clause": 1, "verdict": "met"}, {"clause": 2, "verdict": "unmet"}]
+    monkeypatch.setattr(V, "GRADER", lambda **kw: ("retry", "clause 2 unmet", rows))
+    (vault / "skills" / "foo" / "SKILL.md").write_text("---\nname: foo\n---\n# foo retry rule\n")
+    with pytest.raises(V.VaultRoundError, match="review sent it back"):
+        V.land(["skills/foo/SKILL.md"], "skill: foo (#1987)", item_id=1987)
+    refusal = _events("vault_review")[-1]
+    assert refusal["blocking"] is True and refusal["kind"] == "retry"
+    assert [(c["clause"], c["verdict"]) for c in refusal["clauses"]] == [(1, "met"), (2, "unmet")]
+    assert "round_id" not in refusal, "a vault landing has no round; none is invented"
+    # The same key, in the same shape, as the non-blocking row writes.
+    monkeypatch.setattr(V, "GRADER", lambda **kw: (
+        "pass", "", [{"clause": 1, "verdict": "met"}, {"clause": 2, "verdict": "met"}]))
+    V.land(["skills/foo/SKILL.md"], "skill: foo (#1987)", item_id=1987)
+    passed = _events("vault_review")[-1]
+    assert passed["blocking"] is False
+    assert {type(c) for c in passed["clauses"]} == {type(c) for c in refusal["clauses"]} == {dict}
+    assert set(passed["clauses"][0]) >= {"clause", "verdict"} <= set(refusal["clauses"][0])
+    # The attempt counter reads blocking rows only and is unmoved by the new key.
+    assert V._vault_review_attempts(1987) >= 1
+
+
+def test_the_amend_tool_names_the_working_route_for_a_vault_landing(tmp_path, monkeypatch):
+    import agent_mcp.automod as T
+    import scripts.automod.backlog as B
+    monkeypatch.setattr(S, "ROUNDS_DIR", tmp_path / "rounds")
+    out = T._amend_clause("vault-land-1886", 4, "narrowed", "the clause cannot be met")
+    assert B.VAULT_NO_AMENDMENT_ROUTE in out["error"]
+    assert "edit the clause on the backlog item" in out["error"] and "blocker" in out["error"]
+    assert out["error"] != "no run spec for vault-land-1886"
+    assert not out["error"].startswith("no run spec for")
