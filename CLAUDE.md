@@ -182,8 +182,9 @@ MISSING BINARY — or an unmirrored database — as a coverage gap in
 PyPI has no such name) with its PyPI database in `$DATA_ROOT/supply-chain/osv-db`,
 and the first real count was **91 advisories across 14 locked packages**, hidden until
 then by a parser that read a JSON shape upstream never printed. #1908 upgraded 12 of
-them to their first fixed versions (3 left: torch 2.11 pins `setuptools<82`, so the
-two move together).
+them to their first fixed versions and #1914 moved the last 3 in the lock (torch 2.13 +
+setuptools 83, together: torch 2.11 pinned `setuptools<82`). The scan reads the lock, not
+the venv — installing it is a hand step (SETUP.md "Upgrading the main venv to a moved lock").
 `--offline` over an empty database exits 0 with no findings, so the wrapper refuses
 a database with no `all.zip`.
 

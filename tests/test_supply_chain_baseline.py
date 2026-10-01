@@ -103,3 +103,59 @@ def test_the_baseline_is_tracked_by_git(baseline):
     ignored = subprocess.run(["git", "check-ignore", "-v", str(rel)],
                              cwd=str(sc._repo_root()), capture_output=True, text=True)
     assert ignored.returncode != 0, f"{rel} is gitignored: {ignored.stdout}"
+
+
+# ── #1914: the three advisories this file used to carry, and the lock that clears them ──
+
+#: id → (package, the version the advisory was reported against, first fixed version),
+#: as the committed baseline recorded them before #1914 and as the mirrored OSV records
+#: give the fix. Named so a cleared baseline cannot be satisfied by an empty file.
+ADVISED_BEFORE_1914 = {
+    "PYSEC-2026-3447": ("setuptools", "81.0.0", "83.0.0"),
+    "GHSA-h35f-9h28-mq5c": ("setuptools", "81.0.0", "83.0.0"),
+    "GHSA-rrmf-rvhw-rf47": ("torch", "2.11.0", "2.13.0"),
+}
+
+
+def _lock_pin(name: str) -> str:
+    lock = sc._repo_root() / "requirements.lock"
+    for raw in lock.read_text(encoding="utf-8").splitlines():
+        pinned, sep, version = raw.strip().partition("==")
+        if sep and pinned.strip().lower().replace("_", "-") == name:
+            return version.strip()
+    raise AssertionError(f"{name} is not pinned in requirements.lock")
+
+
+def test_requirements_lock_pins_torch_and_setuptools_at_or_past_their_fixes():
+    """The lock is the file the scan reads (`requirements.txt` names neither version), so
+    this is the whole of "no advised version remains in the set the scan covers". It says
+    nothing about what is INSTALLED — `tests/test_supply_chain_lock_pins.py` does."""
+    from packaging.version import Version
+    for advisory_id, (pkg, advised, fixed) in sorted(ADVISED_BEFORE_1914.items()):
+        pin = Version(_lock_pin(pkg))
+        assert pin != Version(advised), f"{advisory_id}: the lock still pins {pkg}=={advised}"
+        assert pin >= Version(fixed), f"{advisory_id}: lock pins {pkg}=={pin}, below {fixed}"
+
+
+def test_the_committed_baseline_is_a_scan_of_the_lock_now_in_the_tree(baseline):
+    """`advisories: []` proves nothing alone. `dependency_set` carries a truncated sha256 of
+    each file the scanner was handed; matching it against the bytes on disk is what says
+    this verdict came out of the lock a reader can open."""
+    import hashlib
+    assert baseline["scan_status"] == "completed", baseline["scan_status"]
+    covered = {row["path"]: row for row in baseline["dependency_set"]}
+    assert "requirements.lock" in covered, sorted(covered)
+    for rel, row in covered.items():
+        digest = hashlib.sha256((sc._repo_root() / rel).read_bytes()).hexdigest()[:16]
+        assert row["sha256"] == digest, (
+            f"{rel}: baseline records {row['sha256']}, the file hashes to {digest} — "
+            "regenerate with `python -m app.harness.supply_chain scan --write-baseline`")
+
+
+def test_the_baseline_reports_no_advisory_naming_torch_or_setuptools(baseline):
+    assert baseline["scan_status"] == "completed", baseline["scan_status"]
+    named = {rec["package"].lower() for rec in baseline["advisories"]}
+    assert not (named & {"torch", "setuptools"}), f"still flagged: {sorted(named)}"
+    ids = {rec["id"] for rec in baseline["advisories"]}
+    assert not (ids & set(ADVISED_BEFORE_1914)), sorted(ids & set(ADVISED_BEFORE_1914))
+    assert baseline["advisory_count"] == len(baseline["advisories"])

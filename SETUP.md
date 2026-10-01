@@ -290,7 +290,7 @@ Install from **`requirements.lock`**, not `requirements.txt`. The lock is the
 frozen 179-package snapshot; `requirements.txt` holds loose human-edited intent
 and resolving it fresh will pull an incompatible `mcp` major. It carries the
 voice stack too — `sherpa-onnx` (Parakeet ASR), `faster-whisper`, `ctranslate2`,
-`openwakeword`, `onnxruntime`, `Resemblyzer`, `livekit`, and `torch` 2.11 (the
+`openwakeword`, `onnxruntime`, `Resemblyzer`, `livekit`, and `torch` 2.13 (the
 CUDA 13 build, with its `nvidia-*` cu13 wheels).
 
 **Do not `pip install silero-vad` into this venv.** It requires `torchaudio`,
@@ -300,6 +300,39 @@ set of CUDA 12 wheels, and uninstalling those afterwards deleted shared
 import) until they were force-reinstalled from the lock. The VAD uses Silero's
 ONNX model through `onnxruntime` directly (`agent-services/voice/vad.py`). Diff
 `pip freeze` against the lock after any install here.
+
+**Upgrading the main venv to a moved lock.** A commit that changes
+`requirements.lock` changes nothing that runs: the venv is untracked, the gate
+builds its own clone, and the advisory scan reads the lock file, so
+`advisory_count: 0` in `eval/supply-chain/baseline.yaml` is a statement about
+the file, never about what is installed. Installing is a hand action, done
+once the lock is on `main`:
+
+```bash
+cd ~/lloyd
+.venvs/lloyd/bin/python -m pip freeze > ~/lloyd-data/supply-chain/prod-freeze-before-$(date +%Y%m%d).txt
+uv pip install --python .venvs/lloyd/bin/python -r requirements.lock
+uv pip check   --python .venvs/lloyd/bin/python
+.venvs/lloyd/bin/python -c "import torch, importlib.metadata as m; print(torch.__version__, torch.version.cuda, m.version('setuptools'))"
+.venvs/lloyd/bin/python -m pytest tests/test_supply_chain_lock_pins.py tests/test_speaker_id_backend.py -q
+.venvs/lloyd/bin/python -m scripts.automod.round restart --reason "venv moved to requirements.lock"
+supervisorctl -c agent-services/supervisor/supervisord.conf restart lloyd-agent-worker
+```
+
+The install replaces files under three running services (`lloyd-backend`,
+`lloyd-mcp`, `lloyd-agent-worker` — the only supervisord programs on this venv),
+so restart them straight after it rather than leaving a process to lazily import
+half of a new torch. `uv pip install -r` adds and replaces, it never removes, so
+the dev-only packages survive. To go back, install the saved freeze the same way
+(`uv pip install --python .venvs/lloyd/bin/python -r <the freeze>`) and restart
+the same three. `tests/test_supply_chain_lock_pins.py` accepts the pre-upgrade
+pair and the lock's pair and fails on a mix. The torch 2.13 / setuptools 83
+move (#1914) was rehearsed this way in a reflink clone of the venv on
+2026-10-01: eight packages change (`torch`, `setuptools`, `triton`,
+`cuda-toolkit`, `nvidia-cublas`, and the `cudnn` / `cusparselt` / `nccl` cu13
+wheels), `uv pip check` stays clean, and setuptools 83 has no `pkg_resources` —
+the Resemblyzer backend loads `webrtcvad` through `speaker_id.import_webrtcvad()`
+for that reason (#1926).
 
 `trafilatura` (with `lxml`, `courlan`, `htmldate`, `justext`) is what `http_fetch`
 extracts pages with — pure Python over the system `libxml2` that `lxml` already

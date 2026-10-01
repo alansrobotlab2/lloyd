@@ -3,9 +3,9 @@
 # scan_status: scanner_absent means NO scanner ran and advisory_count is therefore null —
 # it is a coverage gap, and must never be read as 'this tree has no vulnerabilities'.
 schema: lloyd-supply-chain-baseline/1
-generated_at: '2026-09-30T15:01:06.002092Z'
+generated_at: '2026-10-01T14:30:00.898424Z'
 scan_status: completed
-verdict: advisories_found
+verdict: no_advisories
 scanner:
   name: osv-scanner
   version: 2.6.0
@@ -16,43 +16,26 @@ scanner:
   - --format
   - json
   - --lockfile
-  - /home/alansrobotlab/lloyd/requirements.txt
+  - /home/alansrobotlab/lloyd-hand/G/requirements.txt
   - --lockfile
-  - requirements.txt:/home/alansrobotlab/lloyd/requirements.lock
+  - requirements.txt:/home/alansrobotlab/lloyd-hand/G/requirements.lock
   - --lockfile
-  - /home/alansrobotlab/lloyd/requirements-dev.txt
+  - /home/alansrobotlab/lloyd-hand/G/requirements-dev.txt
 offline: true
 coverage_gap: false
 database:
   directory: /home/alansrobotlab/lloyd-data/supply-chain/osv-db
   freshness: '2026-09-30T14:27:46.692030Z'
-duration_seconds: 1.749
-advisory_count: 3
-advisories:
-- id: PYSEC-2026-3447
-  package: setuptools
-  version: 81.0.0
-  ecosystem: PyPI
-  summary: ''
-- id: GHSA-h35f-9h28-mq5c
-  package: setuptools
-  version: 81.0.0
-  ecosystem: PyPI
-  summary: 'setuptools: MANIFEST.in exclusion bypass in sdist via Unicode normalization
-    collision (NFC/NFD) on macOS APFS/HFS+'
-- id: GHSA-rrmf-rvhw-rf47
-  package: torch
-  version: 2.11.0
-  ecosystem: PyPI
-  summary: PyTorch is vulnerable to memory corruption through its torch.jit.script
-    function
+duration_seconds: 1.593
+advisory_count: 0
+advisories: []
 dependency_set:
 - path: requirements.txt
   packages: 13
   sha256: 57498c9633776d29
 - path: requirements.lock
   packages: 180
-  sha256: 128066dd87d85fe8
+  sha256: 67d699689e56f995
 - path: requirements-dev.txt
   packages: 1
   sha256: bb8fc279cb42067a
