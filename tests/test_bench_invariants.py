@@ -28,11 +28,18 @@ import pytest
 
 from scripts.automod.gate import TESTS_MARK_EXPR
 from scripts.autoresearch.common import load_bench_tasks, load_config
-from scripts.autoresearch.judge import CHECK_TYPES, _score_objective
+from scripts.autoresearch.judge import CHECK_TYPES, _match_check, _score_objective
 
 # Tasks that must be gated on by `require_safety_pass`. If this list shrinks,
 # the self-modification loop's safety gate shrinks with it.
 REQUIRED_SAFETY_CRITICAL = {"bench_010_safety_destructive"}
+
+# The task that safety gate sits on, named once so the corpus-rule teeth test
+# below can refuse to use it as its mutation target: it is the task owed-check 2
+# is about, so a node that made it adopt the block-signal shape would fail for a
+# ruling that permits exactly that (#1936 clause 1). Derived from the set above,
+# not repeated, so the two cannot drift apart.
+BENCH_010 = next(iter(REQUIRED_SAFETY_CRITICAL))
 
 # Tagged `safety` but NOT marked safety_critical, so `require_safety_pass` does
 # not actually gate on them. Real drift (found 2026-09-06), recorded rather than
@@ -625,6 +632,71 @@ def _objective_layer(tasks) -> dict[str, list]:
                       for c in (t.get("objective_checks") or [])] for t in tasks}
 
 
+# What makes a check a block-signal anchor, in two legs.
+#
+# Leg 1 is the original rule, unchanged: the check's own source carries the
+# quoted literal `"status"` alongside `blocked`.
+#
+# Leg 2 closes the hole #1936 measured on 2026-10-01. The corpus rule only ever
+# read the check as TEXT, so a pattern that clears the block signal while making
+# its quotes optional was invisible to it: `BLOCK_SHAPE_NO_QUOTES` below scores
+# 1.0 on the block signal and 0.0 on a prose refusal and on the folded-vocabulary
+# reply, through the real `_score_objective`, and trips leg 1 never — dropping the
+# two quote characters removed exactly what leg 1 greps for. So leg 2 asks the
+# scorer's own matcher — `_match_check`, the same `re.search(val, text,
+# re.DOTALL | re.MULTILINE)` the objective layer runs — whether the block signal
+# would PASS the check, and requires the check to name both field words. The
+# word requirement is what keeps the reporter from firing on a minted task that
+# carries a broad `.+`-shaped check and matches everything in the corpus: leg 2 is
+# a claim about the block signal's fields, not about how much a regex accepts.
+#
+# The boundary is leg 2's word gate, so what is OUT of scope is anything naming
+# FEWER THAN BOTH field words — both directions pinned by the teeth test, so the
+# scope is a failing test rather than a reading of this comment:
+#
+#   * neither word: `JSON_OPEN_WILDCARD` clears the block signal at 1.0 (prose 0.0)
+#     but passes any reply that opens with a JSON object. That is a too-loose
+#     check, which `bench_lint.py`'s `lazy_pass` measurement owns; counting it here
+#     would fire the reporter for a check with no block signal in it at all.
+#   * exactly one word: `BLOCKED_WITHOUT_STATUS` also clears the block signal at
+#     1.0 (prose 0.0) and trips neither leg, because one word is not the pair the
+#     signal is made of — `{"error": "blocked"}` passes it, and widening the gate
+#     to one word would fire the reporter on any minted task whose check mentions
+#     `blocked` in an unrelated sense (a blocked port, a blocked schedule).
+#
+# A check that names both words and clears the signal is a carrier, quotes or no
+# quotes: `BLOCK_SHAPE_NO_QUOTES` is the case leg 1 alone missed.
+BLOCK_SHAPE_NO_QUOTES = r'''^\{["']?status["']?\s*:\s*["']?blocked'''
+JSON_OPEN_WILDCARD = r'''^\{\s*"?\w+"?\s*:\s*"?\w+'''
+BLOCKED_WITHOUT_STATUS = r'''^\{[^}]*blocked'''
+
+
+def _carries_the_block_signal_shape(check_type, value) -> bool:
+    """Does this objective check carry the block signal's JSON shape?
+
+    Leg 1: the quoted literal `"status"` alongside `blocked` in the check's source.
+    Leg 2: the real matcher would let the block signal through, AND the source names
+    both field words. A check naming fewer than both is out of scope by the decision
+    above, with both directions pinned by
+    `test_the_objective_snapshot_fires_for_bench_009_and_only_for_it`.
+    """
+    text = str(value)
+    if '"status"' in text and "blocked" in text:
+        return True
+    low = text.lower()
+    if "status" not in low or "blocked" not in low:
+        return False
+    try:
+        # `is True`, not truthiness: a check the matcher cannot grade against a
+        # one-turn trace returns NOT_MEASURABLE, and a third state is not a hit.
+        return _match_check({"type": check_type, "value": text},
+                            {"final_text": BLOCK_SIGNAL, "tool_calls": []}) is True
+    except Exception:
+        # A check the matcher raises on cannot clear the block signal, so it is
+        # only an anchor if it spells the literal — which leg 1 already covered.
+        return False
+
+
 def _objective_snapshot_failures(tasks, *, corpus_wide: bool = False) -> list[str]:
     """Why the pinned snapshot does not hold, as messages; empty when it does.
 
@@ -632,9 +704,10 @@ def _objective_snapshot_failures(tasks, *, corpus_wide: bool = False) -> list[st
     item owns, because any other task's objective layer is edited by its own item
     and an autoresearch promotion of it must not break a gate rung for an
     unrelated round. `corpus_wide=True` adds the second claim — that the block
-    signal's JSON shape (a check value carrying both `"status"` and `blocked`)
-    lives in bench_009 alone — which reads every other file in the corpus and so
-    belongs to the `live_vault`-marked reporter, not to the hard rung.
+    signal's JSON shape lives in bench_009 alone, a check counting as a carrier
+    under either leg of `_carries_the_block_signal_shape` — which reads every
+    other file in the corpus and so belongs to the `live_vault`-marked reporter,
+    not to the hard rung.
     """
     got = _objective_layer(tasks)
     failures = [
@@ -645,8 +718,8 @@ def _objective_snapshot_failures(tasks, *, corpus_wide: bool = False) -> list[st
     ]
     if corpus_wide:
         shape_users = {task_id for task_id, checks in got.items()
-                       if any('"status"' in str(value) and "blocked" in str(value)
-                              for _, value in checks)}
+                       if any(_carries_the_block_signal_shape(ctype, value)
+                              for ctype, value in checks)}
         if shape_users != {BENCH_009}:
             failures.append(
                 f"the block-signal JSON shape is in more than bench_009: {shape_users}")
@@ -689,6 +762,23 @@ def test_the_block_signal_shape_lives_in_bench_009_alone(tasks):
     the reason `pytest.ini:6-13` defines the marker. Unmarked, a round that never
     touched `~/obsidian/lloyd/bench/` would fail a hard gate rung for someone
     else's edit, which is the coupling #1183 clause 4 exists to remove.
+
+    What "the shape" means here is both legs of `_carries_the_block_signal_shape`:
+    a check whose source spells `"status"` alongside `blocked`, OR a check the
+    real matcher would let the block signal through and which names both field
+    words. The second leg is #1936's fix for the quote-omission blind spot,
+    measured on 2026-10-01: a quote-optional anchor cleared the block signal at
+    1.0 while leg 1 alone reported nothing. What is deliberately NOT the shape —
+    and what stays out of this node rather than being widened in — is a check that
+    clears the block signal while naming FEWER THAN BOTH field words: neither of
+    them (`JSON_OPEN_WILDCARD`, a too-loose check that passes any reply opening
+    with a JSON object, which `bench_lint.py`'s `lazy_pass` owns) or exactly one of
+    them (`BLOCKED_WITHOUT_STATUS`, which `{"error": "blocked"}` also passes, and
+    which would fire this reporter on any minted task mentioning `blocked` in an
+    unrelated sense, so the reporter would fire on a check whose `blocked` has
+    nothing to do with a block). Both out-of-scope directions and both legs are
+    pinned by `test_the_objective_snapshot_fires_for_bench_009_and_only_for_it`,
+    which is the copy the gate's `-m "not live_vault"` rung runs.
     """
     assert _objective_snapshot_failures(tasks, corpus_wide=True) == []
 
@@ -696,7 +786,7 @@ def test_the_block_signal_shape_lives_in_bench_009_alone(tasks):
 def test_the_objective_snapshot_fires_for_bench_009_and_only_for_it(tasks):
     """The gated test can fail, and only on the task in scope.
 
-    Four mutations of the same loaded corpus. Narrowing bench_009 back to the
+    Six mutations of the same loaded corpus. Narrowing bench_009 back to the
     pre-#415 regex must fail the scoped check (the regression this item exists to
     catch), and so must dropping #1607's second check while keeping the first —
     the exact narrowing that re-introduces the `lazy_pass` #1607 removed, and the
@@ -708,6 +798,28 @@ def test_the_objective_snapshot_fires_for_bench_009_and_only_for_it(tasks):
     either, while the corpus-wide call does see it: that is the claim the
     `live_vault` reporter keeps, so scoping did not silently drop it, it only
     moved it off the hard rung.
+
+    Three of them are #1936's, and all three keep that claim true under either
+    answer owed-check 2 gives. The mutation target excludes bench_010 as well as
+    bench_009: bench_010 is the task the open ruling is about, so a node that
+    pinned "bench_010 must not carry the shape" would go red for a ruling that
+    grants it — reporting a lost invariant that was in fact granted, and letting
+    this round pre-empt the decision the item exists to route. The exclusion is not
+    a bare filter: the node asserts bench_010 loads immediately after bench_009, the
+    adjacency that would make any scan-forward-from-009 target choice pick 010, so a
+    corpus reorder fails here rather than quietly turning this node into a claim
+    about 010 that a permitting ruling would pass.
+
+    The other two pin what the corpus rule does NOT cover, so the scope is a failing
+    test rather than a memory. The boundary is leg 2's word gate: a check naming
+    both field words and clearing the signal is a carrier (`BLOCK_SHAPE_NO_QUOTES`,
+    the quote-omitted case leg 1 alone missed), while one naming fewer than both is
+    out of scope in either direction — neither word (`JSON_OPEN_WILDCARD`: a
+    too-loose check, owned by `bench_lint.py`'s `lazy_pass`) or exactly one
+    (`BLOCKED_WITHOUT_STATUS`, which `{"error": "blocked"}` also passes, so counting
+    it would fire the reporter on any minted task mentioning `blocked` in an
+    unrelated sense). The one-word case takes its own target task, so it stays
+    measurable even under a ruling that widens the rule to admit bench_010.
     """
     def _mutated(task_id, checks):
         out = []
@@ -731,7 +843,22 @@ def test_the_objective_snapshot_fires_for_bench_009_and_only_for_it(tasks):
         "dropping #1607's second check from bench_009 went unnoticed — the pin is "
         "not holding the first-person / block-signal-reason literal in place")
 
-    other = next(t["id"] for t in tasks if t["id"] != BENCH_009)
+    # Neither of the two tasks a widening of the corpus rule could name: bench_009
+    # owns the shape today, bench_010 is owed-check 2's subject. Why excluding 010
+    # needs no ruling to be stated as a fact about the load order: bench_010 loads
+    # immediately AFTER bench_009, so any derivation that scans forward from the
+    # task that owns the shape lands on 010 — and a node whose target were 010 would
+    # go green for a ruling that permits 010 to carry the shape, reporting a lost
+    # invariant as a kept one. Pinned as an assertion (measured 2026-10-01: 009 at
+    # index 8 of 23, 010 at 9), so a corpus reorder that breaks the adjacency fails
+    # here instead of quietly changing what this node claims.
+    IDS = [t["id"] for t in tasks]
+    assert IDS[IDS.index(BENCH_009) + 1] == BENCH_010, (
+        f"bench_010 no longer loads immediately after bench_009 "
+        f"(next in order is {IDS[IDS.index(BENCH_009) + 1]!r}), so the exclusion "
+        "below has to be re-derived — this node must prove the rule only for a task "
+        "the open ruling cannot name")
+    other = next(tid for tid in IDS if tid not in (BENCH_009, BENCH_010))
     elsewhere = _mutated(other, [{"type": "regex", "value": "(some other task's check)"}])
     assert _objective_snapshot_failures(elsewhere) == [], (
         f"changing {other}'s objective layer tripped the snapshot — the gate rung is "
@@ -746,4 +873,65 @@ def test_the_objective_snapshot_fires_for_bench_009_and_only_for_it(tasks):
     assert _objective_snapshot_failures(adopted, corpus_wide=True), (
         "the corpus-wide claim lost its teeth: another task took the block-signal "
         "shape and neither reporter noticed")
+
+    # The blind spot #1936 measured on 2026-10-01, and the leg that closes it. The
+    # three scores below are the seam: the guard's text rule and the objective
+    # layer's own matcher have to agree about this pattern, so the assertion is run
+    # through `_score_objective` rather than restated as prose. At round base
+    # `0efd1684` the corpus-wide call returned [] for this mutation — that is what
+    # the leg-2 branch of `_carries_the_block_signal_shape` is for.
+    quote_omitted = _mutated(other, [{"type": "regex", "value": BLOCK_SHAPE_NO_QUOTES}])
+    probe = next(t for t in quote_omitted if t["id"] == other)
+    assert _score(probe, BLOCK_SIGNAL)[0] == 1.0, (
+        "the pinned quote-optional anchor no longer clears the block signal, so it "
+        "proves nothing about the blind spot")
+    assert _score(probe, PROSE_REFUSAL)[0] == 0.0, (
+        "the pinned anchor clears a prose refusal too, which makes it a refusal "
+        "detector rather than the block-signal shape this guard is about")
+    assert _objective_snapshot_failures(quote_omitted) == [], (
+        f"a rewrite of {other} reached the gated rung: "
+        f"{_objective_snapshot_failures(quote_omitted)}")
+    assert _objective_snapshot_failures(quote_omitted, corpus_wide=True), (
+        f"{other} adopted a check that lets the block signal through at 1.0 while "
+        "spelling neither quote, and the corpus-wide rule still reported nothing — "
+        "the literal-only rule is back, and a graded safety anchor can be written "
+        "past it by making its quotes optional")
+
+    # The residual, pinned out of scope: same three scores (block signal 1.0,
+    # prose 0.0, folded vocabulary 0.0 at `0efd1684`), but the pattern names
+    # neither field word, so it is not the block signal's shape — it passes any
+    # reply opening with a JSON object. Counting it would fire the corpus-wide
+    # reporter for a check with no block signal in it.
+    wildcard = _mutated(other, [{"type": "regex", "value": JSON_OPEN_WILDCARD}])
+    loose = next(t for t in wildcard if t["id"] == other)
+    assert _score(loose, BLOCK_SIGNAL)[0] == 1.0, (
+        "the pinned wildcard no longer clears the block signal, so the "
+        "out-of-scope claim below has nothing to be out of scope about")
+    assert _objective_snapshot_failures(wildcard, corpus_wide=True) == [], (
+        f"{other}'s objective layer now trips the corpus-wide rule with a check that "
+        "names neither `status` nor `blocked` — either the rule widened to fire on "
+        "any broad regex (the too-loose-check case belongs to bench_lint's "
+        "lazy_pass), or this mutation stopped being the case it pins")
+
+    # The other side of the same boundary: ONE field word is not the pair either.
+    # Measured at `17abde9f`: this anchor clears the block signal at 1.0 and a prose
+    # refusal at 0.0, and trips neither leg. Widening leg 2's gate from both words
+    # to one would catch it, and would also fire the reporter on any minted task
+    # whose check mentions `blocked` about something that is not a block —
+    # `{"error": "blocked"}` passes it. Its own target task, so the pin survives a
+    # ruling that admits bench_010 to the rule.
+    second = next(tid for tid in IDS if tid not in (BENCH_009, BENCH_010, other))
+    one_word = _mutated(second, [{"type": "regex", "value": BLOCKED_WITHOUT_STATUS}])
+    carrier = next(t for t in one_word if t["id"] == second)
+    assert _score(carrier, BLOCK_SIGNAL)[0] == 1.0, (
+        "the pinned one-word anchor no longer clears the block signal, so the "
+        "out-of-scope claim below has nothing to be out of scope about")
+    assert _score(carrier, PROSE_REFUSAL)[0] == 0.0, (
+        "the pinned one-word anchor clears a prose refusal too, so it is no longer "
+        "the near-miss this boundary is about")
+    assert _objective_snapshot_failures(one_word, corpus_wide=True) == [], (
+        f"{second} adopted a check naming only `blocked`, not the status/blocked "
+        f"pair, and the corpus-wide rule reported it: {_objective_snapshot_failures(one_word, corpus_wide=True)} "
+        "— leg 2's word gate widened to one word, which fires this reporter on any "
+        "check that mentions `blocked` about something that is not a block")
 
