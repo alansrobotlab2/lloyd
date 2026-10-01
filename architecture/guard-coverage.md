@@ -37,7 +37,10 @@ All commands were run on 2026-10-01 in the tree of `main` at `17f48780` plus the
 diff that introduced this page (round `SM_20261001_060920`, item #1948), from the
 repository root, and **re-run in full the same day at `b03c6c0b`** — every block
 still hits, the two guards added on that re-run hit too, and nothing under this
-page moved in between. Three conventions keep the greps honest:
+page moved in between. Re-run in full at `219e1314` (2026-10-01), after #1961
+changed three guards' answer on a resolver miss: all 18 blocks still hit, and
+again at `a03a7300` with §4.5's block widened (#2022). Three conventions keep
+the greps honest:
 
 - absence claims use `git grep`, and every absence command is paired with a
   **positive control** — the same pattern against a file where it must hit — so a
@@ -290,20 +293,40 @@ git grep -c '^    ("' -- agent_mcp/_injection_probe.py      # the family count
    `agent_mcp/_subagent_registry` cannot resolve stays `False` there, so its
    fetched text is still not recorded — the miss costs a shadow row and nothing
    more, which is the one fail-open this guard can afford.
-   The other four no longer share that answer (#1961). The desktop refusal
-   (`agent_mcp/main.py`, the `name.startswith("desktop_")` branch) and the dispatch
-   `Bash` service-control refusal (the `if name == "Bash"` branch,
-   `check_bash_command`) now key on `service_control.classify_session(...)`, which
-   answers three ways —
-   `attended`, `background`, `unknown` — and an unresolvable `task:` id is
-   `unknown`, which refuses: `unknown` is not evidence of a person, and
-   `desktop_capture` has no lease behind it. Install provenance
-   (`app/harness/supply_chain.py`, `_attended_by_session_id`) treats the same miss
-   as unattended, because its attended branch returns before the registry is read
-   and before any journal row exists. Every miss logs one
+   Three other guards are fed the same resolver, and since #1961 they no longer
+   share that answer. The count is an enumeration, not the line count of the
+   `main.py` grep below — that grep prints four lines, one of which is this probe
+   and one of which is bookkeeping, and it never shows install provenance at all:
+
+   - **desktop** (`agent_mcp/main.py`, the `name.startswith("desktop_")`
+     branch): `classify_session(...) is not ATTENDED` refuses;
+   - **service control** (`app/harness/service_control.py`, `check_service_control`, reached from the
+     dispatch `Bash` branch through `check_bash_command`): the same test refuses;
+   - **install provenance** (`app/harness/supply_chain.py`,
+     `_attended_by_session_id`): a miss is unattended, because the attended
+     branch returns before the registry is read and before any journal row exists.
+
+   `classify_session` answers three ways — `attended`, `background`, `unknown` —
+   and an unresolvable `task:` id is `unknown`: not evidence of a person, and
+   `desktop_capture` has no lease behind it. The single hand-off from `main.py` to
+   `check_bash_command` reaches the last two through `app/harness/safety.py`
+   (`check_service_control`, `check_install_provenance`), which is why the
+   derivation has to name that file: the third command below prints both.
+
+   What each resolver consumer does on a miss, so nobody re-counts: the three
+   above refuse or go unattended; the injection probe keeps `False` — one shadow
+   row lost; and `denial_journal.record` (called from `_refused_call`) is
+   bookkeeping after a decision, never a guard — and it never asks the resolver
+   about a `task:` id at all, since `denial_journal.session_class` returns
+   `subagent` on the `task:` prefix ahead of its `is_background_session` call
+   (the fifth command prints the two lines in that order).
+
+   A miss at one of the three `classify_session`-fed guards logs one
    `guard_parent_unresolved` warning naming the session id, the guard that asked
-   and why, so a systematic miss is countable instead of reading as a clean
-   window.
+   and why, so a systematic miss there is countable instead of reading as a clean
+   window. The probe's own miss is **silent**: `_record_miss` is called only from
+   `classify_session` and, since #2025, the read-only sandbox below; the probe goes
+   through `is_background_session`.
    The read-only sandbox is the fifth consumer and was the last inline copy
    (#2025): `_tool_sandbox.is_sandboxed_session` resolved a `task:` id itself and
    returned `False` on a miss, so a bench trial's subagent whose registry row had
@@ -315,6 +338,10 @@ git grep -c '^    ("' -- agent_mcp/_injection_probe.py      # the family count
 ```
 git grep -n "def _safety_parent_of" -- agent_mcp/main.py
 git grep -n "parent_of=_safety_parent_of" -- agent_mcp/main.py
+git grep -n "parent_of=parent_of" -- app/harness/safety.py
+git grep -n "classify_session(" -- agent_mcp/main.py app/harness/service_control.py app/harness/supply_chain.py
+git grep -n 'startswith("task:")\|is_background_session(' -- app/harness/denial_journal.py
+git grep -n "_record_miss(" -- app/harness/service_control.py
 ```
 
 ## 5. Content that reaches a worker from anywhere else

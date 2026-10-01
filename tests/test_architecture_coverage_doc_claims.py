@@ -1988,3 +1988,97 @@ def test_guard_coverage_names_the_matrix_script_and_states_what_it_prints():
                                "outbound_content": True, "action_review": False}, (
             f"{rel} no longer arms what the page says it arms: {matrix[rel]}")
     assert matrix["agent_mcp/builtin_task.py"]["action_review"] is False
+
+
+# --------------------------------------------------------------------------- #
+# guard-coverage.md §4.5: the resolver-miss count is derived, not grep lines (#2022)
+# --------------------------------------------------------------------------- #
+
+def _guard_coverage_resolver_passage() -> tuple[str, list[str]]:
+    """§4's fifth exclusion — prose, and the commands of the block that closes it."""
+    section = _section(_text("guard-coverage.md"), "4. `_injection_probe`'s own exclusions")
+    start = section.index("5. **Background sessions only.**")
+    fence = section.index("```\n", start)
+    end = section.index("```", fence + 4)
+    cmds = [l for l in section[fence + 4:end].splitlines() if l.strip()]
+    return " ".join(section[start:fence].split()), cmds
+
+
+def _run(cmd: str) -> list[str]:
+    out = subprocess.run(cmd, shell=True, cwd=ROOT, capture_output=True, text=True)
+    return out.stdout.strip().splitlines()
+
+
+def test_the_resolver_miss_count_is_three_and_names_each_guard():
+    """#2022 clause 1. "The other four" was the line count of one grep over
+    `agent_mcp/main.py`: one of those lines is the probe the sentence contrasts
+    with, one is the denial journal, and install provenance is not among them."""
+    prose, _ = _guard_coverage_resolver_passage()
+    assert "other four" not in _text("guard-coverage.md")
+    assert "Three other guards" in prose
+    for name in ("**desktop**", "**service control**", "**install provenance**",
+                 "agent_mcp/main.py", "app/harness/service_control.py",
+                 "app/harness/supply_chain.py"):
+        assert name in prose, f"§4.5 does not name {name}"
+
+
+def test_the_resolver_miss_block_derives_the_three_from_the_tree():
+    """#2022 clause 2: the block names `app/harness/safety.py` and running it prints
+    the fan-out to the two helpers; `classify_session(` is called from exactly the
+    three guards' files. Every command in the block must hit."""
+    _, cmds = _guard_coverage_resolver_passage()
+    for cmd in cmds:
+        assert cmd.startswith("git grep -n "), cmd
+        assert _run(cmd), f"a proving command prints nothing: {cmd}"
+    fan_out = next(c for c in cmds if "app/harness/safety.py" in c)
+    lines = _run(fan_out)
+    assert len(lines) == 2, lines
+    assert "check_service_control(" in lines[0] and "check_install_provenance(" in lines[1]
+
+    callers = next(c for c in cmds if "classify_session(" in c)
+    calls = [l for l in _run(callers)
+             if "def classify_session" not in l and "return classify_session(parent" not in l]
+    assert sorted(l.split(":")[0] for l in calls) == [
+        "agent_mcp/main.py", "app/harness/service_control.py",
+        "app/harness/supply_chain.py"], calls
+
+
+def test_the_passage_says_what_each_resolver_consumer_does_on_a_miss():
+    """#2022 clauses 3 and 4: the probe keeps False, the journal is bookkeeping and
+    never asks the resolver about a `task:` id, and the logging claim is bounded to
+    the guards `classify_session` feeds — `_record_miss` has no other caller, so
+    the probe's own miss is silent."""
+    prose, cmds = _guard_coverage_resolver_passage()
+    assert "keeps `False`" in prose and "one shadow row lost" in prose
+    assert "bookkeeping" in prose and "never a guard" in prose
+    assert "Every miss logs" not in prose
+    assert "`classify_session`-fed guards" in prose and "**silent**" in prose
+
+    order = _run(next(c for c in cmds if "denial_journal.py" in c))
+    early = next(i for i, l in enumerate(order) if 'startswith("task:")' in l)
+    asks = next(i for i, l in enumerate(order) if "is_background_session(" in l)
+    assert early < asks, order
+
+    misses = _run(next(c for c in cmds if "_record_miss(" in c))
+    assert misses and all(l.startswith("app/harness/service_control.py:") for l in misses)
+    src = (ROOT / "app/harness/service_control.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    owners = {fn.name for fn in ast.walk(tree) if isinstance(fn, ast.FunctionDef)
+              for n in ast.walk(fn)
+              if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "_record_miss"}
+    assert owners == {"classify_session"}, owners
+    # The one caller outside `classify_session` is the read-only sandbox (#2025),
+    # which logs its own miss; the probe still has none.
+    elsewhere = subprocess.run(["git", "grep", "-l", "_record_miss(", "--", "agent_mcp"],
+                               cwd=ROOT, capture_output=True, text=True).stdout.split()
+    assert elsewhere == ["agent_mcp/_tool_sandbox.py"], elsewhere
+
+
+def test_the_guard_coverage_stamp_names_a_real_commit_and_the_block_count():
+    """#2022 clause 5: the re-run line names 219e1314, that sha is in this repo's
+    history, and the page carries at least the 18 blocks the line counted then."""
+    text = _text("guard-coverage.md")
+    how = _section(text, "How to read this page")
+    assert "`219e1314` (2026-10-01)" in how and "all 18 blocks still hit" in how
+    assert subprocess.run(["git", "cat-file", "-e", "219e1314^{commit}"], cwd=ROOT).returncode == 0
+    assert len(re.findall(r"^```\n.*?^```$", text, re.S | re.M)) >= 18
