@@ -58,7 +58,60 @@ def _build(root: Path) -> tuple[Path, Path]:
             {"session_key": "s2", "tools": []}]
     (traj / "2026-09-19.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
     (traj / "2026-08-01.jsonl").write_text(json.dumps({"session_key": "old"}) + "\n")
+    _add_digests(vault)
     return vault, pipeline
+
+
+#: A rubric sentence #2011's hand-written acceptance grep MISSES entirely — no
+#: `the user's`, no `interest profile`, no bare `tangential`, no `lacks relevance` —
+#: while the shipped guard flags it. Every injection below uses it, because a
+#: sentence the old grep would have caught cannot pin the blind spot closed.
+RUBRIC_SENTENCE = ("Directly intersects robotics and AI/LLMs, aligning perfectly "
+                   "with top-weighted interests.")
+
+
+def _add_digests(vault: Path) -> None:
+    """Three category digests: two with a descriptive body, one whose only
+    rubric-looking lines are structure.
+
+    The third (`local-llm`) is the skip list made arithmetic. Its heading, its
+    `**Source:**` line and its `[Link]` line each hold a sentence the guard flags,
+    and none of them is an entry body, so a correct sweep reads `prose_lines=1
+    flagged=0` there. Drop `DIGEST_STRUCTURAL_PREFIXES` and that same digest reads
+    `flagged=3`, which is the difference between a count of bodies and a count of
+    whatever a heading happened to say.
+    """
+    for cat, title, body in (
+            ("ai-llms", "A video about caching",
+             "Muse adds a KV cache preset per model; the note walks through the config."),
+            ("robotics", "ROS2 image_to_3d package demo",
+             "A ROS2 package turns one image into a point cloud and publishes it as a topic."),
+    ):
+        d = vault / "knowledge" / cat
+        d.mkdir(parents=True)
+        (d / "youtube-digest.md").write_text(
+            "---\ntype: note\n---\n# YouTube digest\n\n"
+            "## 2026-09-19\n\n"
+            f"### {title}\n\n"
+            "**Source:** youtube | **Relevance:** 8/10\n\n"
+            f"{body}\n\n"
+            "[Link](https://example.invalid/a)\n\n"
+            "---\n", encoding="utf-8")
+    structural = vault / "knowledge" / "local-llm"
+    structural.mkdir(parents=True)
+    (structural / "youtube-digest.md").write_text(
+        "# YouTube digest\n\n"
+        "## Aligning perfectly with top-weighted interests\n\n"
+        "### One short\n\n"
+        "**Source:** youtube | aligns with the ai-llms interest, though it lacks "
+        "specific relevance to robotics\n\n"
+        "The channel published one short video this week.\n\n"
+        "[Link](https://example.invalid/b) — matching the reader's core interests\n\n"
+        "---\n", encoding="utf-8")
+
+
+def _digest(vault: Path, cat: str) -> Path:
+    return vault / "knowledge" / cat / "youtube-digest.md"
 
 
 def _run(vault, pipeline, out, *extra, now=NOW):
@@ -279,3 +332,185 @@ def test_the_scheduled_task_runs_quiet_off_hours_and_names_its_skill():
     assert "exit code 2" in front["description"]
     skill = files[f"skills/{front['skill_name']}/SKILL.md"]
     assert "corpus_shape.py --quiet" in skill and "exit code 2" in skill
+
+
+# --- the digest sweep (#2039): a count kept with the shipped guard, not a grep ---
+
+def _digest_rows(report: dict) -> dict:
+    """{digest path relative to the vault: the file's own sweep row}."""
+    return {f["file"]: f for f in report["interest_profile"]["files"]}
+
+
+def test_the_digest_count_prints_one_line_per_digest_and_reads_zero_when_clean(
+        tmp_path, capsys):
+    """Clause 3 of #2039: one per-digest count per digest file found, each reading 0.
+
+    Three digests exist in the fixture and exactly three lines are printed — a digest
+    silently missing from the print is a digest nobody is watching, which is how the
+    robotics entry stayed published: nothing was counting it at all. The clean bodies
+    read `flagged=0`, and `local-llm` reads it while three flagged-looking sentences
+    sit on its heading, its `**Source:**` line and its `[Link]` line, so the 0 is the
+    skip list holding and not the sweep looking away from the file.
+    """
+    vault, pipeline = _build(tmp_path)
+    assert _run(vault, pipeline, tmp_path / "out") == 0
+    out = capsys.readouterr().out
+
+    printed = [l for l in out.splitlines() if l.startswith("interest_profile [")]
+    assert len(printed) == 3, printed
+    assert all("flagged=0" in l for l in printed), printed
+    assert "interest_profile [knowledge/robotics/youtube-digest.md]: lines_checked=2 " \
+           "flagged=0" in out, out
+    assert "interest_profile [knowledge/local-llm/youtube-digest.md]: lines_checked=1 " \
+           "flagged=0" in out, out
+
+    report = json.loads(next((tmp_path / "out").glob("corpus-shape-*.json")).read_text())
+    assert report["interest_profile"]["files_count"] == 3
+    assert report["interest_profile"]["total_flagged"] == 0
+    assert _digest_rows(report)["knowledge/local-llm/youtube-digest.md"] == {
+        "file": "knowledge/local-llm/youtube-digest.md", "lines_checked": 1,
+        "flagged": 0, "hits": []}
+
+
+def test_an_injected_rubric_sentence_survives_quiet_and_names_its_file_and_line(
+        tmp_path, capsys):
+    """Clause 4 of #2039: the leak reports ITSELF, by path and line number.
+
+    The injected sentence is the shape #2011's blind spot was made of — the shipped
+    guard flags it, `#2011`'s hand-written acceptance grep matches none of its four
+    phrases (that half is pinned in `tests/test_intel_pipeline_body.py`, where the
+    grep is transcribed). It goes into a copy of the vault, so the clean fixture is
+    still the control: the untouched copy runs `--quiet`, exits 0 and says nothing,
+    while the dirty copy exits 2 and prints the digest's vault-relative path with the
+    line number the sentence actually sits on — the derived `lineno` is read back out
+    of the file, not pasted in, so an off-by-one in the sweep's enumeration fails here.
+    """
+    clean_vault, pipeline = _build(tmp_path / "clean")
+    dirty_root = tmp_path / "dirty"
+    shutil.copytree(tmp_path / "clean", dirty_root)
+    target = _digest(dirty_root / "vault", "robotics")
+    target.write_text(target.read_text() + f"\n{RUBRIC_SENTENCE}\n", encoding="utf-8")
+    lineno = next(i for i, line in enumerate(target.read_text().splitlines(), 1)
+                  if RUBRIC_SENTENCE in line)
+
+    assert _run(clean_vault, pipeline, tmp_path / "out-clean", "--quiet") == 0
+    assert capsys.readouterr().out == ""
+
+    dirty_out_dir = tmp_path / "out-dirty"
+    shutil.copytree(tmp_path / "out-clean", dirty_out_dir)
+    # The dirty run is the NEXT UTC date's, not a second run on 2026-09-20: #1576's
+    # one-row-per-day rule means a same-date re-run writes no row at all, and reading
+    # the directory back would then hand this node the clean row above. Its base is
+    # that clean row, and no shape metric differs between the two copies, so the only
+    # thing that can make it exit non-zero is the digest.
+    code = _run(dirty_root / "vault", dirty_root / "pipeline", dirty_out_dir, "--quiet",
+                now=NEXT_DAY)
+    out = capsys.readouterr().out
+    assert code == 2, out
+    line = next(l for l in out.splitlines() if "FLAGGED" in l)
+    assert "knowledge/robotics/youtube-digest.md" in line, line
+    assert f":{lineno} " in line, (lineno, line)
+    assert RUBRIC_SENTENCE in line, line
+    # Quiet mode prints the finding and nothing else: the ten per-digest lines are the
+    # series a person trends, not something to copy into a report every night.
+    assert not [l for l in out.splitlines() if l.startswith("interest_profile [")], out
+
+    row = next(p for p in dirty_out_dir.glob("corpus-shape-*.json")
+               if cs._row_date(p) == date(2026, 9, 21))
+    report = json.loads(row.read_text())
+    assert report["interest_profile"]["total_flagged"] == 1
+    assert _digest_rows(report)["knowledge/robotics/youtube-digest.md"]["flagged"] == 1
+    # The other two digests still read 0, so the finding names one file rather than
+    # turning the whole corpus red and sending the reader hunting.
+    assert _digest_rows(report)["knowledge/ai-llms/youtube-digest.md"]["flagged"] == 0
+
+
+def test_the_digest_count_is_the_guard_s_verdict_and_not_a_phrase_pattern(
+        tmp_path, monkeypatch, capsys):
+    """Clause 5's other half: no phrase list of this script's own is in the loop.
+
+    Both halves are needed, because either one alone survives a hand-written pattern
+    quietly added alongside the guard. Flipping the guard to a stub that flags on
+    `"point cloud"` — a description of a video, which the shipped guard would never
+    flag — moves the count to exactly the digest carrying those words, so the number
+    printed is whatever the callable says. Flipping it to a stub that flags nothing
+    takes the injected rubric sentence back to 0 while the sentence is still on the
+    page, so nothing else is counting phrases.
+    """
+    vault, pipeline = _build(tmp_path)
+    shipped = cs._classify_interest_profile        # the real guard, before any patch
+    monkeypatch.setattr(cs, "_classify_interest_profile",
+                        lambda text: "point cloud" in text)
+    assert _run(vault, pipeline, tmp_path / "out-a") == 2
+    out = capsys.readouterr().out
+    report = json.loads(next((tmp_path / "out-a").glob("*.json")).read_text())
+    rows = _digest_rows(report)
+    assert rows["knowledge/robotics/youtube-digest.md"]["flagged"] == 1, out
+    assert rows["knowledge/ai-llms/youtube-digest.md"]["flagged"] == 0
+    assert rows["knowledge/local-llm/youtube-digest.md"]["flagged"] == 0
+
+    dirty = _digest(vault, "ai-llms")
+    dirty.write_text(dirty.read_text() + f"\n{RUBRIC_SENTENCE}\n", encoding="utf-8")
+    monkeypatch.setattr(cs, "_classify_interest_profile", lambda text: False)
+    assert _run(vault, pipeline, tmp_path / "out-b", "--quiet") == 0
+    assert capsys.readouterr().out == ""
+    assert RUBRIC_SENTENCE in dirty.read_text()      # the sentence is still published
+    # …and the guard the script really ships does flag it, so the 0 above is the stub
+    # and not a corpus that happened to be clean. `shipped` is the function object
+    # from before the patch, which is the one that reaches intel_pipeline.body.
+    assert shipped(RUBRIC_SENTENCE) is True
+
+
+# --- the entry point's own fallbacks, which is where a real leak hid (#2039) -----
+
+def _inject_into_a_digest(vault: Path) -> int:
+    """Append the rubric sentence to a copy of the live robotics digest; give back its line."""
+    src = Path.home() / "obsidian" / "knowledge" / "robotics" / "youtube-digest.md"
+    dst = vault / "knowledge" / "robotics" / "youtube-digest.md"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    text = src.read_text(encoding="utf-8").rstrip("\n")
+    dst.write_text(text + "\n\n" + RUBRIC_SENTENCE + "\n", encoding="utf-8")
+    return len(dst.read_text().splitlines())
+
+
+def test_the_run_finds_the_vault_and_the_data_root_from_the_environment(
+        tmp_path, monkeypatch, capsys):
+    """A redirected vault must redirect the real command, not just one with `--vault`.
+
+    Measured, not imagined: the first time the shipped CLI was run against a digest
+    with a rubric sentence appended, it printed nothing and exited 0. `--vault` and
+    `--pipeline` fall back to `app.paths`, whose `VAULT_ROOT` is a plain
+    `Path.home() / "obsidian"` — so `LLOYD_OBSIDIAN_VAULT`, the variable
+    `tests/board_presence.py` and the rest of the repo honour, was ignored at this
+    entry point, and the check reported "clean" about a corpus it had not opened. The
+    option in the other tests here hid that; this node runs the command a person
+    actually types — no roots named — and so is the only node that exercises
+    `_vault_default`/`_pipeline_default`.
+
+    `LLOYD_DATA` points at an empty pipeline root rather than the machine's, so the
+    four shape corpora are empty and the only thing that can move the exit code is the
+    digest. Same argument in reverse for the clean half: exit 0 with the sentence
+    absent proves the 0 is the corpus and not a broken reader.
+    """
+    empty_pipeline = tmp_path / "empty-pipeline"
+    empty_pipeline.mkdir()
+    monkeypatch.setenv("LLOYD_DATA", str(empty_pipeline))
+
+    clean = tmp_path / "vault-clean"
+    src = Path.home() / "obsidian" / "knowledge" / "robotics" / "youtube-digest.md"
+    (clean / "knowledge" / "robotics").mkdir(parents=True)
+    (clean / "knowledge" / "robotics" / "youtube-digest.md").write_text(
+        src.read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setenv("LLOYD_OBSIDIAN_VAULT", str(clean))
+    assert cs.main(["--quiet", "--out-dir", str(tmp_path / "out-clean")]) == 0
+    assert capsys.readouterr().out == ""
+
+    dirty = tmp_path / "vault-dirty"
+    lineno = _inject_into_a_digest(dirty)
+    monkeypatch.setenv("LLOYD_OBSIDIAN_VAULT", str(dirty))
+    assert cs.main(["--quiet", "--out-dir", str(tmp_path / "out-dirty")]) == 2, (
+        "the command a person types reads a vault it was not told about: "
+        "`_vault_default` is ignoring LLOYD_OBSIDIAN_VAULT again")
+    out = capsys.readouterr().out
+    assert "knowledge/robotics/youtube-digest.md" in out, out
+    assert f":{lineno} " in out, (lineno, out)

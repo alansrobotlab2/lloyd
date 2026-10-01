@@ -746,7 +746,11 @@ cannot become the following night's diff base, and the base is always read befor
 the day's own row exists, so no run gates on a file it wrote itself (#1576). One
 row per day bounds duplicates, not gaps — a day #90 did not run leaves the next
 run's base older than one day. It exits 2 only when a metric crosses its
-provisional threshold or a sentence newly recurs across items. Exit 0 prints
+provisional threshold, a sentence newly recurs across items, or a line of one of the
+ten `knowledge/*/youtube-digest.md` digests is flagged by the intel pipeline's own
+interest-profile guard — counted per digest on every run, by that guard rather than
+by a phrase list, because the hand-written grep #2011 verified the corpus with caught
+10 of the 27 sentences published (#2039). Exit 0 prints
 `corpus shape: no finding`; either way it changes nothing outside its own series,
 which is why it sits in
 this group and in the Reports-only tier rather than in Measure, where the other

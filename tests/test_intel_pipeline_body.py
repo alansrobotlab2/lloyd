@@ -1882,3 +1882,119 @@ WITNESS_ROWS = [
         "while GPT-6.1 Sol gets close to Astra at a fraction of the price.",
     },
 ]
+
+
+# --- the published corpus, counted by the guard rather than by a grep (#2039) ----
+#
+# #2011 closed with two writer guards and one hand-written acceptance grep, and the
+# grep was the weak link: it caught 10 of the 27 sentences the guard flags, which is
+# how a digest reported clean while rubric prose was published. #2039 replaces that
+# manual count with a recurring one inside `scripts/maintenance/corpus_shape.py`, so
+# the corpus-level claim stops living in a person's shell history. These two nodes are
+# the corpus side; the mechanism side — per-digest print, file:line on a flag, the
+# count following the callable it is handed — is in `tests/test_corpus_shape.py`.
+
+#: The recurring check's own path, loaded the way `tests/test_corpus_shape.py` loads
+#: it: the script is stdlib-only and is not an importable package member.
+def _load_corpus_shape():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "corpus_shape_for_body_claims",
+        REPO_ROOT / "scripts" / "maintenance" / "corpus_shape.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_the_shipped_guard_reports_no_interest_profile_prose_in_any_published_digest():
+    """Clause 2 of #2039, over the REAL vault: zero flagged lines, ten files.
+
+    This is the claim #2011 could not keep true — the writer guards stop NEW leaks, and
+    nothing until now re-counted what is already published. It runs the same collector
+    the weekly job runs (`corpus_shape.interest_profile_sweep`, no `classify` passed),
+    so the number a person reads on Tuesday night and the number pinned here are one
+    computation, not two that happen to agree. `files_count` is pinned to the number of
+    category digests on this box with an explicit number rather than `>=`, because a
+    sweep that quietly found one file fewer would also quietly find fewer defects —
+    add a category digest and this goes red until the count moves with it.
+    """
+    import board_presence
+    cs = _load_corpus_shape()
+    vault = board_presence.vault_root()
+    sweep = cs.interest_profile_sweep(vault)
+
+    assert sweep["files_count"] == 10, (
+        f"{sweep['files_count']} digests matched {sweep['glob']}; the ten category "
+        f"digests this clause counts are {sorted(f['file'] for f in sweep['files'])} — "
+        f"a corpus that shrank is not a clean corpus, so update the number only "
+        f"together with the clause")
+    assert sweep["total_flagged"] == 0, [
+        (f["file"], h["line"], h["text"]) for f in sweep["files"] for h in f["hits"]]
+
+
+def test_the_recurring_count_asks_the_guard_the_writer_asks_and_changes_nothing():
+    """Clause 5 of #2039: the count is the classifier's, and the guards still hold.
+
+    Three halves, each killing a different way for the recurring check to look green
+    while measuring something else.
+
+    1. Identity. `corpus_shape` reaches the guard across a `sys.path` seam, and a
+       second definition of "is this rubric prose" is exactly what went wrong before —
+       so the callable the sweep cached must BE `body.is_interest_profile_prose`,
+       checked after a real sweep rather than by reading the module's source.
+    2. The guards. `_entry_body` still renders a rubric `why` as the named no-body
+       line, byte for byte, and still publishes a merely-rating `why` byte for byte —
+       the two rulings #1155 and #2011 made, re-asserted here because this round is the
+       one touching the counting path and must not have moved either.
+    3. The scorer prompt. Stage 2 is still asked for `"why": "<one short sentence>"`
+       and nothing more: whether it should also stop GENERATING this prose is #2011's
+       owed ruling, and this item's step 6 forbids a round settling it with a diff.
+    """
+    import board_presence
+    cs = _load_corpus_shape()
+    rubric = PUBLISHED_PROFILE_SENTENCES[0]
+
+    # A production call — `classify=None` — over a corpus with lines in it. Sweeping an
+    # empty directory would leave the module's cached guard unset and the identity below
+    # would compare None with None's absence, so the assertion is over the ten digests.
+    assert cs.interest_profile_sweep(board_presence.vault_root())["total_flagged"] == 0
+    assert cs._interest_profile_guard is body_mod.is_interest_profile_prose, (
+        "the recurring count is consulting something other than the shipped guard, so "
+        "the digest sweep and the write-path guard can disagree")
+
+    assert vw_mod._entry_body(_yt(summary="", why=rubric)) == NO_BODY, \
+        "the named no-body render moved"
+    assert NO_BODY == "None — the feed carried no description of this item", \
+        "the line #2039 puts in the digest is this string, so the two must not drift"
+    assert vw_mod._entry_body(_yt(summary="", why="Scores 8/10: robotics")) == \
+        "Scores 8/10: robotics", "a rating-only `why` must still publish unchanged"
+
+    prompt = (INTEL_DIR / "intel_pipeline" / "scoring.py").read_text(encoding="utf-8")
+    assert '"why": "<one short sentence>"' in prompt, (
+        "the scorer prompt moved: whether stage 2 stops generating interest-profile "
+        "`why` text is #2011's owed ruling for the owed-check job, not something a "
+        "counting round may decide")
+
+
+def test_the_rubric_sentence_the_sweep_is_built_to_catch_is_one_the_old_grep_missed():
+    """The blind spot, pinned for the very sentence the recurring check injects.
+
+    `tests/test_corpus_shape.py` injects a sentence of this shape to prove the check
+    fires and names its file and line; that only means anything if the sentence is one
+    #2011's hand-written acceptance grep would have passed over — otherwise the new
+    check is being tested against a case the old one already caught. The guard flags
+    it (`aligning … interests` is its third pattern, and bare `interests` its fourth);
+    `ITEM_ACCEPTANCE_GREP` matches none of its four phrases. The last assertion is a
+    drift guard: the sentence is spelled in both files, so it checks the tail the two
+    copies share rather than trusting a comment to keep them equal.
+    """
+    sentence = ("Directly intersects robotics and AI/LLMs, aligning perfectly "
+                "with top-weighted interests.")
+    assert body_mod.is_interest_profile_prose(sentence) is True, sentence
+    assert ITEM_ACCEPTANCE_GREP.search(sentence) is None, (
+        "the injected sentence is now one the hand-written grep catches, so the "
+        "corpus_shape injection no longer proves the blind spot is closed")
+    assert "with top-weighted interests." in (
+        REPO_ROOT / "tests" / "test_corpus_shape.py").read_text(encoding="utf-8"), (
+        "the sentence injected in tests/test_corpus_shape.py drifted from the one "
+        "pinned here; the mechanism and the blind spot must be tested on one text")

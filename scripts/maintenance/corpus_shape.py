@@ -37,9 +37,25 @@ next run's base older than one day.
 The thresholds below are provisional. Real ones need a week of series (a human
 clause on #761); until then a move past them is a prompt to look, not a verdict.
 
-Exit 0: nothing to report. Exit 2: a metric moved past its threshold, or a
-sentence recurs that did not recur in the earlier day's row. `--quiet` prints
-nothing on exit 0, so a scheduled run speaks only when it has something to say.
+A FIFTH COUNT, KEPT WITH SOMEBODY ELSE'S CLASSIFIER (#2039). The four corpora
+above are measured with this file's own metrics, and for the ten YouTube digests
+under `knowledge/*/youtube-digest.md` that is the wrong tool: the defect worth
+catching there is an entry body that rates an item against the reader's interest
+profile instead of describing it, and the thing that knows what such a sentence
+looks like is `intel_pipeline.body.is_interest_profile_prose` — the shipped guard
+`vault_writer` applies on the write path. #2011 found 27 published instances of it
+after a hand-written acceptance grep had reported the corpus clean, catching 10 of
+the 27, so the count below calls the guard and never re-spells its phrasing: a
+phrase pattern here would be the instrument that already lied. It is reported per
+digest file, and it is a finding in its own right rather than a threshold — one
+flagged line exits 2, because "0 flagged" is the whole claim and a number that
+cannot fail is not a check.
+
+Exit 0: nothing to report. Exit 2: a metric moved past its threshold, a sentence
+recurs that did not recur in the earlier day's row, or a digest line is flagged by
+that guard. `--quiet` prints nothing on exit 0, so a scheduled run speaks only when
+it has something to say; in quiet mode a flagged line is still printed, named with
+its file and its line number, and the per-digest counts are not.
 Read-only apart from the day's one new JSON — and apart from nothing at all on a
 same-day retry, which writes no row.
 """
@@ -170,6 +186,136 @@ def collect_trajectories(pipeline: Path, since, until):
     return items
 
 
+#: The digest corpus (#2039): one entry body per published item, ten category
+#: digests, written by the intel pipeline's `vault_writer` on every run.
+DIGEST_GLOB = "knowledge/*/youtube-digest.md"
+
+#: The lines an entry is built from AROUND its body, so not prose: a heading, the
+#: `---` rule between entries, the source/relevance line, the item's link. Skipping
+#: these is what keeps the count about bodies — a `**Source:**` line or a heading
+#: carrying a rubric sentence is structure the writer does not choose, and counting
+#: it would train the reader to ignore the alert.
+DIGEST_STRUCTURAL_PREFIXES = ("#", "---", "**Source:**", "[Link]")
+
+#: `scripts/intel-pipeline`, the package that owns the guard. This script is
+#: stdlib-only and lives one directory over, so reaching it is a `sys.path` insert
+#: rather than an import — the same seam `main` already uses for `app.paths`.
+_INTEL_PIPELINE_DIR = Path(__file__).resolve().parents[1] / "intel-pipeline"
+_interest_profile_guard = None
+
+
+def _classify_interest_profile(text: str) -> bool:
+    """Ask the SHIPPED guard, do not re-implement it (#2039).
+
+    `intel_pipeline.body.is_interest_profile_prose` is the same callable
+    `vault_writer` consults on the write path, so a line that reaches a digest and a
+    line counted here answer to one definition. Re-spelling that definition as a
+    phrase list here is the mistake #2011 records: its acceptance grep caught 10 of
+    the 27 published sentences and reported the corpus clean.
+    """
+    global _interest_profile_guard
+    if _interest_profile_guard is None:
+        if str(_INTEL_PIPELINE_DIR) not in sys.path:
+            sys.path.insert(0, str(_INTEL_PIPELINE_DIR))
+        from intel_pipeline.body import is_interest_profile_prose
+        _interest_profile_guard = is_interest_profile_prose
+    return bool(_interest_profile_guard(text))
+
+
+def interest_profile_sweep(vault: Path, classify=None) -> dict:
+    """Per digest: how many lines the guard was asked about, and how many it flagged.
+
+    `lines_checked` is the denominator the guard actually saw — every non-blank line
+    that does not start with one of `DIGEST_STRUCTURAL_PREFIXES`, the file's own front
+    matter included, since a `tags:` key is neither structure nor prose and can never
+    flag. Front matter is not skipped because the sweep is the count #2039 asked for,
+    stated line by line, and an undocumented extra skip is how a sweep starts reading
+    clean for the wrong reason. Every flag carries the line number it sits on,
+    because the reader of a finding has to open that line. `classify` is a seam for
+    tests to show the count follows the guard they hand it and not some pattern of
+    their own; production calls it with none.
+    """
+    classify = classify or _classify_interest_profile
+    files, total = [], 0
+    for p in sorted(vault.glob(DIGEST_GLOB)):
+        hits, checked = [], 0
+        for lineno, line in enumerate(p.read_text(errors="replace").splitlines(), 1):
+            text = line.strip()
+            if not text or text.startswith(DIGEST_STRUCTURAL_PREFIXES):
+                continue
+            checked += 1
+            if classify(text):
+                hits.append({"line": lineno, "text": text})
+        total += len(hits)
+        files.append({"file": str(p.relative_to(vault)), "lines_checked": checked,
+                      "flagged": len(hits), "hits": hits})
+    return {"glob": DIGEST_GLOB, "skips": list(DIGEST_STRUCTURAL_PREFIXES),
+            "files": files, "files_count": len(files), "total_flagged": total}
+
+
+def interest_profile_lines(report: dict) -> tuple[list, list, bool]:
+    """`(per_digest, flagged, any_flagged)` for one measured report.
+
+    Split in two because the two halves have different audiences: the per-digest
+    counts are the series a person trends and belong to the non-quiet print, while a
+    flag is the thing the task exists to catch and survives `--quiet`. The flagged
+    line names the file AND its line number — "1 flagged somewhere in ten digests"
+    is not actionable.
+    """
+    sweep = report.get("interest_profile") or {}
+    per_digest, flagged = [], []
+    for f in sweep.get("files", []):
+        per_digest.append(f"interest_profile [{f['file']}]: "
+                          f"lines_checked={f['lines_checked']} flagged={f['flagged']}")
+        for h in f["hits"]:
+            flagged.append(f"interest_profile: FLAGGED {f['file']}:{h['line']} "
+                           f"{h['text']!r}")
+    return per_digest, flagged, bool(sweep.get("total_flagged"))
+
+
+def _vault_default() -> Path:
+    """The vault to measure: `LLOYD_OBSIDIAN_VAULT` if set, else `~/obsidian`.
+
+    The same precedence as `tests/board_presence.py::vault_root`, which is how the rest
+    of this repo reaches a vault — including a test's redirected one. Before #2039 the
+    fallback here was `app.paths.VAULT_ROOT` and nothing else, a plain
+    `Path.home() / "obsidian"`, so the variable other modules honour was silently
+    ignored at this entry point. The first real injection of a rubric sentence ran with
+    that variable pointing at a dirty vault, read an undeclared clean one, printed
+    nothing and exited 0 — a check reporting "clean" about a corpus it never opened,
+    which is the exact failure #2011 was about.
+
+    The name is `LLOYD_…VAULT`, not a new `LLOYD_…` spelling, because it already existed
+    here as an option default and in `board_presence`; a check gets its corpus from one
+    place, and a test that redirects it is redirecting the corpus, not the machine.
+    """
+    raw = os.environ.get("LLOYD_OBSIDIAN_VAULT")
+    return Path(raw).expanduser() if raw else Path.home() / "obsidian"
+
+
+def _pipeline_default() -> Path:
+    """`LLOYD_DATA`, else the checkout's `.lloyd-data/_pipeline`, else `~/lloyd-data`.
+
+    Same precedence as `app.paths.resolve_data_root` (which resolves the data root and
+    not the `_pipeline` under it, hence the re-spelling): environment first, then the
+    git tree this script sits in, then the machine's data root. Consulted only when
+    `--pipeline` is absent, which is never in a test.
+
+    It is not `app.paths.PIPELINE_DIR` any more because a round's worktree is a git
+    tree too, and `app.paths` deliberately anchors to it — so importing that constant
+    made a read-only probe of this script from a worktree point at the worktree's
+    empty `.lloyd-data/` and report `n=0` for all four corpora, which reads exactly
+    like a corpus that emptied. Falling back to the machine's data root when the
+    anchored one holds nothing measures the same box a scheduled run measures; the
+    scheduled run's own tree has the directory, so its path does not move.
+    """
+    data = os.environ.get("LLOYD_DATA")
+    if data:
+        return Path(data).expanduser() / "_pipeline"
+    anchored = Path(__file__).resolve().parents[2] / ".lloyd-data" / "_pipeline"
+    return anchored if anchored.exists() else Path.home() / "lloyd-data" / "_pipeline"
+
+
 def _p95(values):
     if not values:
         return 0
@@ -233,6 +379,10 @@ def measure(vault: Path, pipeline: Path, now: datetime, days: int):
         if name in PROSE:
             entry["recurring"] = recurring_sentences(by_corpus[name])
         report["corpora"][name] = entry
+    # Outside `corpora` on purpose: its unit is a prose line and its verdict is the
+    # shipped guard's, so it shares none of the four shape metrics, and folding it in
+    # would put a fifth row through the threshold loop it has no thresholds for.
+    report["interest_profile"] = interest_profile_sweep(vault)
     return report
 
 
@@ -392,11 +542,12 @@ def main(argv=None) -> int:
     ap.add_argument("--quiet", action="store_true", help="print nothing when there is no finding")
     args = ap.parse_args(argv)
 
-    if args.vault is None or args.pipeline is None:
-        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-        from app import paths
-        args.vault = args.vault or paths.VAULT_ROOT
-        args.pipeline = args.pipeline or paths.PIPELINE_DIR
+    # An explicit option always wins; the fallbacks are the two the rest of the repo
+    # uses, so a redirected vault actually redirects this check. Resolution moved out
+    # of `app.paths` entirely (#2039), which also drops the import that anchored a
+    # worktree run to the worktree's own empty data dir.
+    args.vault = args.vault or _vault_default()
+    args.pipeline = args.pipeline or _pipeline_default()
     out_dir = args.out_dir or args.pipeline / "metrics"
     now = datetime.fromisoformat(args.now) if args.now else datetime.now(timezone.utc)
     if now.tzinfo is None:
@@ -408,9 +559,10 @@ def main(argv=None) -> int:
     prior = previous_run(out_dir, before=day)   # read BEFORE this run writes anything
     lines, moved = diff_lines(prior[1] if prior else None, report)
     recurring, new_recurring = recurring_lines(prior[1] if prior else None, report)
+    per_digest, flags, flagged = interest_profile_lines(report)
     row, wrote = write_new(out_dir, report)
 
-    finding = moved or new_recurring
+    finding = moved or new_recurring or flagged
     if finding or not args.quiet:
         kept = "" if wrote else f" [row for {day} already existed; nothing written]"
         print(f"corpus shape over {args.days} d -> {row}"
@@ -421,7 +573,10 @@ def main(argv=None) -> int:
                   f"len_p95={c['len_p95']} distinct_key_ratio={c['distinct_key_ratio']} "
                   f"duplicate_rate={c['duplicate_rate']} "
                   f"self_reference_rate={c['self_reference_rate']}")
-        for line in lines + recurring:
+        if not args.quiet:
+            for line in per_digest:
+                print(line)
+        for line in lines + recurring + flags:
             print(line)
     return 2 if finding else 0
 
