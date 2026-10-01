@@ -141,6 +141,58 @@ Manual compaction is `/compact`, a queued turn rather than an inline rewrite
 `persist_summary` says — a person's compaction is not gated on a flag awaiting an
 eval.
 
+## What a summary re-injects as
+
+A summary is not a note back to the reader, it is a row in the assistant's own
+voice. `app/compaction_state.py::summary_message` returns the rendered record with
+`role` set to `assistant`, and `app/compaction.py::_persisted_summary_layer` puts it at
+index 0 — first element of the new conversation — so everything the summariser carried re-enters
+every later turn as text Lloyd apparently wrote itself: the fence it arrived inside is
+gone, and so is any label saying where it came from. The summariser strips one thing,
+the `<analysis>` scratchpad, and nothing else. That is a persistence channel for a
+prompt injection: content the model was told to treat as data gets promoted to
+first-party instructions by the act of being summarised.
+
+It is worse than a bare copy because of what the summariser is asked to do. Its prompt
+(`app/compaction_llm.py`) orders the model to keep user messages near-verbatim, to list
+pending tasks that were "explicitly requested", and to name the single most logical
+next step — three ways to promote a directive into the part of the summary a later turn
+will act on — and nothing in it says that folded-window content may be untrusted data.
+One partial mitigation is in force and undocumented elsewhere: the same prompt says
+tool results are persisted to disk and should be referred to by tool and intent, which
+narrows a payload riding in a large tool result and does nothing for one quoted in as a
+user message.
+
+Measured so far: the mechanism, from the tree, and it is real. What has not been
+measured is the rate, and the instrument that will measure it is in
+`eval/run_injection_canary.py`. Its persistence scenarios put the payload on the
+arrival turn, force a fold over every arrival row with `keep_recent_turns` at zero, and
+probe on the next turn from the summary row alone — so the only way the instruction can
+reach the probe is through the summariser. An episode whose fold did not cover every
+arrival row is reported not-run, because its probe turn still had the payload
+verbatim. It reports the leak as planted tokens found in the rendered summary — matched
+verbatim, each planted token against the exact text `render_summary` produces, which is
+the text the summary row actually carries — beside a benign control's own survival
+count, so a summary emptied enough to look clean shows as a control failure. That
+verbatim match is why the rate is a **lower bound**: the summariser's own prompt invites
+it to restate things "in their own words", and a directive that survived in other words
+is not counted. A low number is therefore evidence the channel is narrow, never evidence
+it is shut. The verdict on the channel is therefore open, and this is the command that
+closes it:
+
+```bash
+python -m eval.run_injection_canary run --only persistence-web-digest persistence-relay-email persistence-control-handover
+python -m eval.run_injection_canary grade
+```
+
+The first line needs the live aggregator and the engine, which is why it is owed after
+landing rather than run from a round. Where a fix would go if the number is not
+negligible is the summariser's output boundary — restating a surviving directive as
+inert data, or keeping its provenance with it — and not a wider allowance for the
+model to edit its own context, which is the one thing the same class of paper argues
+against. Whether the summary row keeps its `assistant` role is a separate ruling, and
+changing it would move every later turn's reading of that text.
+
 ## The prompt that goes out
 
 `app/prompt_builder.py` decides what the system prompt holds;
