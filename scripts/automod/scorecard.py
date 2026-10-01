@@ -35,6 +35,8 @@ The metrics, each defined where it is computed:
  13  board net flow          items created minus items closed, 24 h and 7 d
  14  autocode duty cycle     share of the window with an implement turn in flight
  15  human overrides         decision events that name the person who made them
+ 16  guard denials           refusals journaled by every guard, by guard and
+                             session class (app/harness/denial_journal.py)
 """
 
 from __future__ import annotations
@@ -623,9 +625,71 @@ def _overrides(events: list[dict]) -> dict[str, Any]:
             "by_event": dict(sorted(by_event.items())), "fields": fields, "rows": rows}
 
 
+def _denial_journal_default() -> Path:
+    """Where `app/harness/denial_journal.py` writes, resolved without importing
+    the application: the same env override the writer honours, else the data
+    root through `app.data_root`, which is the stdlib-only resolver the guardian
+    uses for the same reason. A missing file reads as "not recorded", not zero."""
+    import os
+    override = os.environ.get("LLOYD_DENIAL_JOURNAL", "").strip()
+    if override:
+        return Path(override)
+    try:
+        from app.data_root import resolve_data_root_for_tree
+        return resolve_data_root_for_tree(LIVE_ROOT) / "safety" / "denials.jsonl"
+    except Exception:  # noqa: BLE001
+        return Path.home() / "lloyd-data" / "safety" / "denials.jsonl"
+
+
+def _denials(path: Path, since: float) -> dict[str, Any]:
+    """Row 16: the refusals every guard journaled inside the window.
+
+    One row per refusal (`app/harness/denial_journal.py`), from both the hook
+    walk and the aggregator's dispatch, so this is the one place "how often does
+    guard X refuse, in which session class" is answered without a log grep.
+    `recorded` is False when the journal does not exist — a loop that has never
+    refused anything and a loop whose journal is missing must not read alike.
+    """
+    out: dict[str, Any] = {"recorded": path.exists(), "count": 0, "by_guard": {},
+                           "by_class": {}, "by_where": {}, "guard_by_class": {},
+                           "top_labels": {}}
+    if not out["recorded"]:
+        return out
+    labels: dict[str, int] = {}
+    try:
+        with path.open(encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                    at = datetime.fromisoformat(str(r.get("at"))).timestamp()
+                except Exception:  # noqa: BLE001
+                    continue
+                if at < since:
+                    continue
+                g = str(r.get("guard") or "unknown")
+                c = str(r.get("session_class") or "none")
+                w = str(r.get("where") or "dispatch")
+                out["count"] += 1
+                out["by_guard"][g] = out["by_guard"].get(g, 0) + 1
+                out["by_class"][c] = out["by_class"].get(c, 0) + 1
+                out["by_where"][w] = out["by_where"].get(w, 0) + 1
+                out["guard_by_class"].setdefault(g, {})
+                out["guard_by_class"][g][c] = out["guard_by_class"][g].get(c, 0) + 1
+                if r.get("label"):
+                    key = f"{g}:{r['label']}"
+                    labels[key] = labels.get(key, 0) + 1
+    except Exception:  # noqa: BLE001 — a half-written line is skipped, never fatal
+        pass
+    out["top_labels"] = dict(sorted(labels.items(), key=lambda kv: -kv[1])[:8])
+    return out
+
+
 def compute(*, since_days: float = 7.0, ledger: Path | None = None,
             backlog_dir: Path | None = None, repo: Path | None = None,
-            now: float | None = None) -> dict[str, Any]:
+            now: float | None = None, denials: Path | None = None) -> dict[str, Any]:
     from scripts.automod import state as S
     ledger = ledger or S.LEDGER_PATH
     backlog_dir = backlog_dir or (Path.home() / "obsidian" / "backlog")
@@ -938,13 +1002,16 @@ def compute(*, since_days: float = 7.0, ledger: Path | None = None,
     # ── 15 human overrides ──────────────────────────────────────────────
     overrides = _overrides(ev)
 
+    # ── 16 guard denials ────────────────────────────────────────────────
+    guard_denials = _denials(denials or _denial_journal_default(), since)
+
     return {"computed_at": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(timespec="seconds"),
             "since_days": since_days, "events": len(ev), "grouping": grouping,
             "acceptance": acceptance, "audit": audit, "review": review, "spawn": spawn,
             "human_touch": human, "test_honesty": honesty, "bookkeeping": bookkeeping,
             "verdict_plumbing": plumbing, "throughput": throughput, "rollbacks": rollbacks,
             "arch_review": arch_review, "flow": flow, "duty_cycle": duty,
-            "overrides": overrides}
+            "overrides": overrides, "guard_denials": guard_denials}
 
 
 # ── output ───────────────────────────────────────────────────────────────
@@ -1007,6 +1074,7 @@ def render(row: dict) -> str:
         f"{d.get('gaps', 0)} gaps: {by_class}; "
         f"largest {d.get('largest_gap_minutes', 0):g} min |")
     lines.append(_render_overrides(row))
+    lines.append(_render_denials(row))
     return "\n".join(lines)
 
 
@@ -1022,6 +1090,28 @@ def _override_ref(event_row: dict) -> str:
         return str(rid)
     iid = event_row.get("item_id")
     return f"#{iid}" if iid is not None else "no round or item"
+
+
+def _render_denials(row: dict) -> str:
+    """Table row 16. Per-guard counts with the session-class split in brackets,
+    so "safety 40 (background 38, chat 2)" reads at a glance whether a guard is
+    refusing unattended work or a person."""
+    d = row.get("guard_denials")
+    if d is None:
+        return "| 16 | guard denials | — | section not recorded for this row |"
+    if not d.get("recorded"):
+        return "| 16 | guard denials | — | no journal yet (app/harness/denial_journal.py) |"
+    if not d.get("count"):
+        return "| 16 | guard denials | 0 | no refusal journaled in the window |"
+    parts = []
+    for g, n in sorted((d.get("by_guard") or {}).items(), key=lambda kv: -kv[1]):
+        split = ", ".join(f"{c} {k}" for c, k in sorted(
+            (d.get("guard_by_class") or {}).get(g, {}).items(), key=lambda kv: -kv[1]))
+        parts.append(f"{g} {n} ({split})" if split else f"{g} {n}")
+    where = ", ".join(f"{k} {v}" for k, v in sorted((d.get("by_where") or {}).items()))
+    labels = ", ".join(f"{k} {v}" for k, v in (d.get("top_labels") or {}).items())
+    return (f"| 16 | guard denials | {d['count']} | {'; '.join(parts)}; where: {where}"
+            + (f"; top labels: {labels}" if labels else "") + " |")
 
 
 def _render_overrides(row: dict) -> str:

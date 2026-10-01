@@ -105,6 +105,9 @@ SERVICE_LOGS_DIR = DATA_ROOT / "logs" / "services"
 # Rebuildable, so it is a nested btrfs subvolume the hourly snapshots do not
 # descend into, and datawatch does not count it (`datawatch.CACHE_DIRS`).
 CODE_GRAPH_DIR = DATA_ROOT / "code-graph"
+# Every guard's refusals, one JSONL row each (`app/harness/denial_journal.py`).
+SAFETY_DIR = DATA_ROOT / "safety"
+DENIAL_JOURNAL_PATH = SAFETY_DIR / "denials.jsonl"
 
 VAULT_ROOT = Path.home() / "obsidian"
 

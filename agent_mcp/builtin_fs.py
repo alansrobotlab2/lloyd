@@ -248,6 +248,15 @@ def _protected_path_refusal(mut: _Mutation) -> str | None:
         })
     if label is None:
         return None
+    try:  # one durable row per refusal (app/harness/denial_journal.py); never decides
+        from app.harness import denial_journal
+        denial_journal.record(guard="protected_write", where="dispatch",
+                              session_id=get_bound_session(),
+                              tool="Write" if mut.kind == "write" else "Edit",
+                              reason=f"protected path ({label})", excerpt=str(mut.path),
+                              label=str(label))
+    except Exception:  # noqa: BLE001
+        pass
     return json.dumps({
         "error": (
             f"{'Write' if mut.kind == 'write' else 'Edit'} refused: {mut.path} "

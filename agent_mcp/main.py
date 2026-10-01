@@ -521,7 +521,7 @@ async def call_tool(name: str, arguments: dict, meta: Any = None):
         if why:
             logger.warning("tool_sandbox: refused %s for read-only session %s: %s",
                            name, sid, why)
-            return _refused_call(name, f"read-only session: {why}")
+            return _refused_call(name, f"read-only session: {why}", guard="tool_sandbox", session_id=sid)
     # 2. The destructive-command check, for every session. The harness hook
     #    runs the same function, but only where a caller installed it; this is
     #    where the command actually executes, so nothing reaches a shell
@@ -536,7 +536,8 @@ async def call_tool(name: str, arguments: dict, meta: Any = None):
             label, excerpt = match
             logger.warning("safety: refused Bash for session %s: %s — %r",
                            sid, label, (arguments.get("command") or "")[:500])
-            return _refused_call(name, f"harness safety: blocked {label!r} on {excerpt!r}")
+            return _refused_call(name, f"harness safety: blocked {label!r} on {excerpt!r}",
+                                 guard="safety", session_id=sid)
 
     # 2b. Desktop computer use is for a person's chat only. The screen is
     #     Alan's private desktop and the input lands under Alan's hands, so a
@@ -550,7 +551,8 @@ async def call_tool(name: str, arguments: dict, meta: Any = None):
             return _refused_call(
                 name, "desktop computer use is only available in a person's chat "
                       "session — never to background, worker, bench or sessionless "
-                      "calls (the screen and input are Alan's)")
+                      "calls (the screen and input are Alan's)",
+                guard="desktop", session_id=sid)
 
     # 2c. Nothing but Alan grants the desktop lease, and no tool call reads or
     #     feeds the retained frame mirror either (#1418). Bash is covered by
@@ -567,7 +569,7 @@ async def call_tool(name: str, arguments: dict, meta: Any = None):
         if why:
             logger.warning("desktop: refused %s reaching a desktop route for %r",
                            name, sid)
-            return _refused_call(name, why)
+            return _refused_call(name, why, guard="desktop", session_id=sid)
 
     # 3. A state-changing call that arrives with no session id is refused
     #    (#1053). `_tool_sandbox.is_sandboxed_session("")` is False by design —
@@ -592,7 +594,8 @@ async def call_tool(name: str, arguments: dict, meta: Any = None):
             name,
             "a call that can change state arrived with no session id — refusing "
             "rather than treating a missing session id as 'not sandboxed' "
-            "(#1053); pass the session id in `lloyd/session_id` `_meta`")
+            "(#1053); pass the session id in `lloyd/session_id` `_meta`",
+            guard="sessionless", session_id=sid)
 
     parent_model = meta.get(META_MODEL, "") if isinstance(meta, dict) else ""
     parent_base_url = meta.get(META_BASE_URL, "") if isinstance(meta, dict) else ""
@@ -743,7 +746,8 @@ async def _rpc_call(name: str, arguments: dict, meta: dict):
                        meta.get(rpc_policy.META_RPC_PARENT_CALL_ID), why)
         _rpc.record(parent, name=name, arguments=arguments, ms=0.0,
                     is_error=True, refused=why)
-        return _refused_call(name, f"lloyd_rpc: {why}")
+        return _refused_call(name, f"lloyd_rpc: {why}", guard="lloyd_rpc",
+                             session_id=getattr(parent, "session_id", None))
     started = _time.perf_counter()
     is_error = True
     try:
@@ -758,10 +762,22 @@ async def _rpc_call(name: str, arguments: dict, meta: dict):
                     is_error=is_error)
 
 
-def _refused_call(name: str, reason: str) -> CallToolResult:
+def _refused_call(name: str, reason: str, *, guard: str = "dispatch",
+                  session_id: str | None = None) -> CallToolResult:
     """A call refused before dispatch. Worded like the harness's own hook
     deny ("Tool call denied: …") so a bench trace files it under
-    `denied_calls` — the model tried, and the attempt is the measurement."""
+    `denied_calls` — the model tried, and the attempt is the measurement.
+
+    Every refusal made here is also one row in the denial journal
+    (`app/harness/denial_journal.py`), under `guard`, so a guard added to
+    this function's callers is counted without knowing the journal exists.
+    The journal never raises and is not consulted by any decision."""
+    try:
+        from app.harness import denial_journal
+        denial_journal.record(guard=guard, where="dispatch", session_id=session_id,
+                              tool=name, reason=reason, parent_of=_safety_parent_of)
+    except Exception:  # noqa: BLE001 — bookkeeping about a decision already made
+        pass
     return CallToolResult(
         content=[TextContent(type="text", text=json.dumps({
             "error": f"Tool call denied: {reason}",

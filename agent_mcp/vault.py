@@ -1627,6 +1627,14 @@ def _protected_write_refusal(path: str) -> dict | None:
                     f"working around it.", ErrorCode.PROTECTED_PATH)
     if label is None:
         return None
+    try:  # one durable row per refusal (app/harness/denial_journal.py); never decides
+        from app.harness import denial_journal
+        denial_journal.record(guard="protected_write", where="dispatch",
+                              session_id=get_bound_session(), tool="vault_write",
+                              reason=f"protected path ({label})", excerpt=str(path),
+                              label=str(label))
+    except Exception:  # noqa: BLE001
+        pass
     return _err(f"vault_write refused: {path} is protected ({label}). This lane "
                 f"refuses it for every session, like `Write` and `Edit`. Land the "
                 f"change through the route that validates it — `automod_vault_land` "

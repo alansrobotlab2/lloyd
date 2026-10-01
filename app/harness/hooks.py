@@ -56,6 +56,16 @@ from typing import Any, Awaitable, Callable
 
 from app.harness import telemetry
 
+
+def _journal_deny(cb: Any, session_id: str, tool_name: str, deny: dict[str, Any]) -> None:
+    """One durable row per PreToolUse deny (`denial_journal`). Never raises:
+    the deny is already decided and this is bookkeeping about it."""
+    try:
+        from app.harness import denial_journal
+        denial_journal.record_hook_deny(cb, session_id=session_id, tool=tool_name, deny=deny)
+    except Exception:  # noqa: BLE001
+        pass
+
 logger = logging.getLogger("lloyd-harness-hooks")
 
 HookCallback = Callable[[dict[str, Any], str | None, Any], Awaitable[dict[str, Any]]]
@@ -229,7 +239,7 @@ class HookRegistry:
                     "PreToolUse gate %s raised on %s — denying: %s",
                     name, tool_name, exc, exc_info=True,
                 )
-                return {
+                denied = {
                     "hookSpecificOutput": {
                         "hookEventName": "PreToolUse",
                         "permissionDecision": "deny",
@@ -240,10 +250,13 @@ class HookRegistry:
                         ),
                     }
                 }
+                _journal_deny(cb, session_id, tool_name, denied)
+                return denied
             if not out:
                 continue
             hso = out.get("hookSpecificOutput") or {}
             if hso.get("permissionDecision") == "deny":
+                _journal_deny(cb, session_id, tool_name, out)
                 return out
             if deliver is None and hso.get("skillDeliver"):
                 deliver = out
