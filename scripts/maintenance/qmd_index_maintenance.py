@@ -101,12 +101,19 @@ Usage:
   python scripts/maintenance/qmd_index_maintenance.py            # act if needed
   python scripts/maintenance/qmd_index_maintenance.py --dry-run  # report only
   python scripts/maintenance/qmd_index_maintenance.py --force    # prune anyway
+
+By hand only, never scheduled (#1992, see "the side-copy rebuild" below):
+  ... --rebuild-side-copy NAME --dry-run   # print the commands, run none
+  ... --rebuild-side-copy NAME             # build, embed and verify a side index
+  ... --rebuild-side-copy NAME --swap      # the same, then swap it in if it verified
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -290,8 +297,8 @@ def _sh(cmd: list[str], timeout: int, env: dict | None = None) -> tuple[int, str
         return 1, repr(e)
 
 
-def supervisor(action: str, timeout: int = 120) -> tuple[int, str]:
-    return _sh([str(SUPERVISORCTL), "-c", str(SUPERVISOR_CONF), action, SERVICE], timeout)
+def supervisor(action: str, timeout: int = 120, service: str = SERVICE) -> tuple[int, str]:
+    return _sh([str(SUPERVISORCTL), "-c", str(SUPERVISOR_CONF), action, service], timeout)
 
 
 def index_footprint(index: Path) -> dict:
@@ -571,7 +578,9 @@ CAPACITY_WHAT_TO_DO = (
     "rebuild a side copy re-embedded in full and swap it in while the daemon "
     "serves the old one, BY HAND (the 2026-09-21 procedure: 1.25 GB -> 481 MB at "
     "56% occupancy). Never in place: an in-place vec0 drop leaves the serving "
-    "daemon with no vector leg for the whole re-embed.")
+    "daemon with no vector leg for the whole re-embed. The route a person runs is "
+    "this script's `--rebuild-side-copy <name>`, then the same command with "
+    "`--swap`; no scheduled run passes either flag.")
 
 
 def capacity_owed(vec0: dict | None, footprint: dict | None) -> dict:
@@ -614,15 +623,20 @@ def _exit_code(report: dict) -> int:
     return 0 if report["daemon_healthy"] else 1
 
 
-def inspect_index() -> dict:
-    """Read orphan counts straight from SQLite (read-only, daemon can be up)."""
-    fp = index_footprint(INDEX)
+def inspect_index(index: Path | None = None) -> dict:
+    """Read orphan counts straight from SQLite (read-only, daemon can be up).
+
+    `index` defaults to the live `INDEX`; the side-copy route (#1992) passes its
+    own database. Either way the open is `mode=ro`.
+    """
+    index = INDEX if index is None else index
+    fp = index_footprint(index)
     out: dict = {"index_bytes": fp["total"], "footprint": fp}
-    if not INDEX.exists():
+    if not index.exists():
         out["error"] = "index missing"
         return out
     try:
-        con = sqlite3.connect(f"file:{INDEX}?mode=ro", uri=True, timeout=30)
+        con = sqlite3.connect(f"file:{index}?mode=ro", uri=True, timeout=30)
         q = lambda s: con.execute(s).fetchone()[0]  # noqa: E731
         out["vectors_total"] = q("select count(*) from content_vectors")
         out["vectors_orphaned"] = q(
@@ -857,6 +871,357 @@ def config_drift(template: Path = TEMPLATE_CONFIG, live: Path = LIVE_CONFIG) -> 
     return out
 
 
+# ---- #1992: the side-copy rebuild, as a route a person invokes ----------------
+#
+# VEC0_REBUILD_RULED_OUT rules the rebuild out as an action of the nightly job and
+# says what it is instead: a side copy of the index, re-embedded in full, swapped
+# in. Until #1992 that existed only as that sentence. Occupancy fell 0.44 -> 0.34
+# over 09-27..09-30 with dead MiB already past the floor, so the verdict was days
+# from firing with nothing to run when it did.
+#
+# The route is reachable only through `--rebuild-side-copy <name>` (and `--swap`
+# beside it). `main()` hands off to it before any of the nightly logic and the
+# nightly path never calls into this section, so `capacity_verdict()` and
+# `_exit_code()` stay report-and-exit.
+#
+# How the side copy stays off the live index: every qmd command carries
+# `--index <name>`, which the CLI resolves to `~/.cache/qmd/<name>.sqlite` and to
+# the config `~/.config/qmd/<name>.yml` (so the live config is copied there
+# first). The only opens of the live database are `inspect_index()`'s `mode=ro`.
+#
+# Two things a person running it should know, both measured from the CLI's code
+# and not yet from a run:
+#   * the embed lock is per DIRECTORY (`.qmd-embed.lock` beside the database), so
+#     the side copy's embed and the watcher's embed of the live index exclude each
+#     other. A skipped side embed is retried; while the side embed holds the lock
+#     the watcher's embeds wait, and the live index's vectors lag until it ends.
+#   * a swap leaves `index.sqlite.bak-<stamp>` in the series the stray retention
+#     above bounds to its newest member, so the next acting nightly run plans the
+#     older backups for deletion. Which backup is worth keeping is a person's call.
+
+#: A side index name: a plain token, never a path, never the live name.
+SIDE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,40}$")
+WATCHER_SERVICE = "agent-qmd-watcher"
+#: One query that any index of this vault answers. Hits, not their ranking, are
+#: what the check reads: an index with no vector leg returns none.
+SIDE_PROBE_QUERY = "how the vault retrieval index is maintained"
+#: The side embed is retried while the watcher holds the directory's embed lock.
+SIDE_EMBED_ATTEMPTS = 40
+SIDE_EMBED_RETRY_SLEEP_S = 30
+SIDE_STEP_TIMEOUT_S = 4 * 3600
+
+
+class SideCopyRefused(RuntimeError):
+    """The route declined before doing anything; the message is the reason."""
+
+
+def side_index_path(name: str) -> Path:
+    return INDEX.with_name(f"{name}.sqlite")
+
+
+def side_config_path(name: str) -> Path:
+    return LIVE_CONFIG.with_name(f"{name}.yml")
+
+
+def side_marker_path(name: str) -> Path:
+    """Written by this route when it creates a side copy. A database of that name
+    without it was made by something else (the eval side-indexes share this
+    directory) and is never built on or swapped in."""
+    return INDEX.with_name(f"{name}.sqlite.rebuild.json")
+
+
+def _check_side_name(name: str) -> None:
+    if not SIDE_NAME_RE.match(name or ""):
+        raise SideCopyRefused(
+            f"side index name {name!r} must match {SIDE_NAME_RE.pattern} — a plain "
+            "token, so it cannot be a path")
+    if side_index_path(name) == INDEX or name == INDEX.stem:
+        raise SideCopyRefused(f"{name!r} is the live index's own name")
+
+
+def _qmd_side(name: str, *args: str) -> list[str]:
+    return ["/usr/bin/node", str(QMD_CLI), "--index", name, *args]
+
+
+def side_copy_plan(name: str, swap: bool) -> list[str]:
+    """The commands the route runs, in order, as a person would type them."""
+    cli = f"node {QMD_CLI} --index {name}"
+    plan = [
+        f"cp {LIVE_CONFIG} {side_config_path(name)}",
+        f"{cli} update",
+        f"{cli} embed    # retried while the watcher holds the embed lock",
+        f"{cli} status   # pending must read 0",
+        f"{cli} vsearch --format json -n 5 {SIDE_PROBE_QUERY!r}",
+        f"verify: side live_rows >= live index's non-orphan vectors, pending 0, "
+        f"vsearch hits > 0",
+    ]
+    if swap:
+        ctl = f"supervisorctl -c {SUPERVISOR_CONF}"
+        plan += [
+            "refuse unless the verification above passed in this invocation",
+            "hold regression.lock",
+            f"{ctl} stop {WATCHER_SERVICE}",
+            f"{ctl} stop {SERVICE}",
+            f"mv {INDEX} {INDEX}.bak-<stamp>   # with its -wal and -shm",
+            f"mv {side_index_path(name)} {INDEX}",
+            f"{ctl} start {SERVICE}",
+            f"{ctl} start {WATCHER_SERVICE}",
+            f"node {QMD_CLI} vsearch --format json -n 5 {SIDE_PROBE_QUERY!r}",
+        ]
+    return plan
+
+
+def _status_pending(out: str) -> int:
+    for line in out.splitlines():
+        t = line.strip()
+        if t.startswith("Pending:"):
+            digits = "".join(ch for ch in t if ch.isdigit())
+            return int(digits) if digits else 0
+    return 0
+
+
+def _vsearch_hits(cmd: list[str]) -> int:
+    """How many results one vector search returned; 0 when it failed or said nothing
+    parseable. The query runs for real: that the vector leg answers is the claim."""
+    rc, out = _sh(cmd, 600, env=QMD_ENV)
+    if rc != 0:
+        return 0
+    start = out.find("[")
+    if start < 0:
+        return 0
+    try:
+        rows = json.loads(out[start:out.rindex("]") + 1])
+    except ValueError:
+        return 0
+    return len(rows) if isinstance(rows, list) else 0
+
+
+def rebuild_side_copy(name: str) -> dict:
+    """Build and fully embed the named side index, then verify it. Never swaps.
+
+    Returns the route's report; `report["verification"]["passed"]` is the only
+    thing `swap_side_copy` accepts. Raises `SideCopyRefused` before touching
+    anything when the name is bad, the live index cannot be read, a database of
+    that name exists that this route did not create, or the disk has no room.
+    """
+    _check_side_name(name)
+    side, cfg, marker = side_index_path(name), side_config_path(name), side_marker_path(name)
+    report: dict = {"route": "rebuild-side-copy", "name": name, "side_index": str(side),
+                    "actions": []}
+    live = inspect_index()
+    if live.get("error") or "vectors_live" not in live:
+        raise SideCopyRefused(f"the live index could not be read: {live.get('error')}")
+    report["live_before"] = live
+    floor = int(live["vectors_live"])
+    if side.exists() and not marker.exists():
+        raise SideCopyRefused(
+            f"{side} exists and this route did not create it (no {marker.name}); "
+            "pick another name")
+    free = shutil.disk_usage(INDEX.parent).free
+    need = int(live.get("index_bytes") or 0)
+    if free < need:
+        raise SideCopyRefused(
+            f"{free / 1e9:.2f} GB free beside the index, under the live footprint "
+            f"of {need / 1e9:.2f} GB a side copy can reach")
+    live_cfg = LIVE_CONFIG.read_bytes()
+    if cfg.exists() and cfg.read_bytes() != live_cfg and not marker.exists():
+        raise SideCopyRefused(f"{cfg} exists and differs from {LIVE_CONFIG}")
+
+    marker.write_text(json.dumps({"name": name, "started": datetime.now().isoformat(),
+                                  "floor_vectors_live": floor}))
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_bytes(live_cfg)
+    report["actions"].append(f"config: {LIVE_CONFIG} -> {cfg}")
+
+    t = time.time()
+    rc, out = _sh(_qmd_side(name, "update"), SIDE_STEP_TIMEOUT_S, env=QMD_ENV)
+    report["actions"].append(f"update rc={rc} in {time.time() - t:.0f}s :: {_last_line(out)}")
+    update_ok = rc == 0
+
+    pending, embed_ok = -1, False
+    if update_ok:
+        for attempt in range(1, SIDE_EMBED_ATTEMPTS + 1):
+            t = time.time()
+            rc, out = _sh(_qmd_side(name, "embed"), SIDE_STEP_TIMEOUT_S, env=QMD_ENV)
+            report["actions"].append(
+                f"embed #{attempt} rc={rc} in {time.time() - t:.0f}s :: {_last_line(out)}")
+            src, sout = _sh(_qmd_side(name, "status"), 180, env=QMD_ENV)
+            pending = _status_pending(sout) if src == 0 else -1
+            if rc != 0:
+                break
+            if pending == 0:
+                embed_ok = True
+                break
+            # rc 0 with work left: the lock was busy, or a pass ended early. Wait
+            # for the watcher's cycle to release the lock and go again.
+            time.sleep(SIDE_EMBED_RETRY_SLEEP_S)
+
+    after = inspect_index(side)
+    report["side_after"] = after
+    side_rows = ((after.get("vec0") or {}).get("live_rows")) if not after.get("error") else None
+    hits = _vsearch_hits(_qmd_side(name, "vsearch", "--format", "json", "-n", "5",
+                                   SIDE_PROBE_QUERY)) if embed_ok else 0
+    failed = []
+    if not update_ok:
+        failed.append("`update` did not exit 0")
+    if not embed_ok:
+        failed.append(f"the embed did not finish (pending {pending})")
+    if side_rows is None or side_rows < floor:
+        failed.append(f"side live_rows {side_rows} is under the live index's "
+                      f"{floor} non-orphan vectors")
+    if hits <= 0:
+        failed.append("the vsearch against the side index returned no hits")
+    report["verification"] = {
+        "passed": not failed,
+        "name": name,
+        "side_live_rows": side_rows,
+        # The floor is the live index's NON-ORPHAN vectors, not its vec0 live_rows:
+        # the live table still holds its orphans, a fresh copy never has them, so
+        # the raw count is a bar a correct rebuild cannot reach.
+        "floor_vectors_live": floor,
+        "live_vec0_live_rows": (live.get("vec0") or {}).get("live_rows"),
+        "pending_embeddings": pending,
+        "vsearch_hits": hits,
+        "failed": failed,
+    }
+    report["side_bytes"] = after.get("index_bytes")
+    report["side_occupancy"] = (after.get("vec0") or {}).get("occupancy")
+    report["live_occupancy"] = (live.get("vec0") or {}).get("occupancy")
+    return report
+
+
+def _regression_lock():
+    """`regression.lock`, held across the daemon restart: a promotion's regression
+    check times the same daemon, and a restart under it reads as a regression."""
+    from scripts.automod import state as S
+    return S.Lock(S.STATE_DIR / "regression.lock", owner=f"qmd side-copy swap {os.getpid()}")
+
+
+def swap_side_copy(name: str, verification: dict | None) -> dict:
+    """Move the verified side copy into the live index's place.
+
+    Refuses outright unless `verification` is the passed result `rebuild_side_copy`
+    returned for this name in this process: there is no flag, file or earlier run
+    that stands in for it. The live database is renamed, never opened.
+    """
+    _check_side_name(name)
+    if not verification or verification.get("passed") is not True \
+            or verification.get("name") != name:
+        raise SideCopyRefused(
+            "swap refused: the side copy's verification did not pass in this "
+            "invocation (" + "; ".join((verification or {}).get("failed") or
+                                       ["no verification was run"]) + ")")
+    side, marker = side_index_path(name), side_marker_path(name)
+    if not marker.exists() or not side.exists():
+        raise SideCopyRefused(f"swap refused: {side} is not a side copy this route built")
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    bak = INDEX.with_name(f"{INDEX.name}{BACKUP_INFIX}-{stamp}")
+    out: dict = {"backup": str(bak), "actions": [], "swapped": False}
+    try:
+        lock = _regression_lock().acquire()
+    except Exception as e:  # noqa: BLE001 — LockHeld, or the state dir unreadable
+        raise SideCopyRefused(f"swap refused: regression.lock is not free ({e})") from e
+    try:
+        # The side copy's own WAL is folded into its main file first, so one rename
+        # carries the whole database. This is the side copy, not the live index.
+        con = sqlite3.connect(side, timeout=60)
+        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        con.close()
+        for svc in (WATCHER_SERVICE, SERVICE):
+            rc, _ = supervisor("stop", service=svc)
+            out["actions"].append(f"stop {svc} rc={rc}")
+        try:
+            moved = []
+            for suffix in ("",) + LIVE_SIDECARS:
+                src = INDEX.with_name(INDEX.name + suffix)
+                if src.exists():
+                    dst = bak.with_name(bak.name + suffix)
+                    os.rename(src, dst)
+                    moved.append((src, dst))
+            try:
+                os.rename(side, INDEX)
+            except OSError:
+                for src, dst in reversed(moved):          # put the live index back
+                    os.rename(dst, src)
+                raise
+            out["swapped"] = True
+            out["actions"].append(f"{INDEX.name} -> {bak.name}; {side.name} -> {INDEX.name}")
+        finally:
+            for svc in (SERVICE, WATCHER_SERVICE):
+                rc, _ = supervisor("start", service=svc)
+                out["actions"].append(f"start {svc} rc={rc}")
+        out["daemon_healthy"] = daemon_healthy()
+        out["retrieval_hits"] = _vsearch_hits(
+            ["/usr/bin/node", str(QMD_CLI), "vsearch", "--format", "json", "-n", "5",
+             SIDE_PROBE_QUERY])
+        out["retrieval_ok"] = out["daemon_healthy"] and out["retrieval_hits"] > 0
+        if out["swapped"]:
+            marker.unlink(missing_ok=True)                # ours: written by the rebuild
+        if not out["retrieval_ok"]:
+            out["to_undo"] = (f"stop both services, then mv {INDEX} aside and "
+                              f"mv {bak} {INDEX} (with its -wal and -shm), then start them")
+    finally:
+        lock.release()
+    return out
+
+
+def run_side_copy_route(name: str, *, swap: bool, dry_run: bool, as_json: bool) -> int:
+    """`--rebuild-side-copy <name>` [`--swap`] [`--dry-run`]. Exit 0 only when the
+    side copy verified and, if a swap was asked for, retrieval answers afterwards."""
+    try:
+        _check_side_name(name)
+    except SideCopyRefused as e:
+        print(f"refused: {e}", file=sys.stderr)
+        return 2
+    if dry_run:
+        # Printed and returned before anything opens a database: a read-only open of
+        # a WAL database can still create its -shm, and the promise here is that
+        # `ls -l` on the index directory reads the same afterwards.
+        for line in side_copy_plan(name, swap):
+            print(line)
+        print("dry-run: nothing was run")
+        return 0
+    started = datetime.now()
+    try:
+        report = rebuild_side_copy(name)
+    except SideCopyRefused as e:
+        print(f"refused: {e}", file=sys.stderr)
+        return 2
+    rc = 0 if report["verification"]["passed"] else 1
+    if swap:
+        try:
+            report["swap"] = swap_side_copy(name, report["verification"])
+            if not report["swap"]["retrieval_ok"]:
+                rc = 1
+        except SideCopyRefused as e:
+            report["swap"] = {"refused": str(e), "swapped": False}
+            rc = 1
+    report["elapsed_s"] = round((datetime.now() - started).total_seconds(), 1)
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    out = REPORT_DIR / f"qmd-side-copy-{name}-{started:%Y-%m-%dT%H%M%S}.json"
+    out.write_text(json.dumps(report, indent=2))
+    if as_json:
+        print(json.dumps(report, indent=2))
+    else:
+        v = report["verification"]
+        print(f"side copy {name}: verification {'passed' if v['passed'] else 'NOT passed'} "
+              f"(live_rows {v['side_live_rows']} vs floor {v['floor_vectors_live']}, "
+              f"pending {v['pending_embeddings']}, vsearch hits {v['vsearch_hits']}); "
+              f"{(report.get('side_bytes') or 0) / 1e6:.0f} MB at occupancy "
+              f"{report.get('side_occupancy')} against live {report.get('live_occupancy')}")
+        for why in v["failed"]:
+            print(f"  - {why}")
+        if swap:
+            sw = report["swap"]
+            print("swap: " + (sw.get("refused") or
+                              f"swapped={sw['swapped']} retrieval_ok={sw.get('retrieval_ok')} "
+                              f"backup {sw.get('backup')}"))
+            if sw.get("to_undo"):
+                print(f"  to undo: {sw['to_undo']}")
+        print(f"report: {out}")
+    return rc
+
+
 def _write_report(report: dict, started: datetime) -> Path:
     """Land the dated JSON report, on every run that did something or nothing.
 
@@ -876,7 +1241,21 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="report only, change nothing")
     ap.add_argument("--force", action="store_true", help="prune regardless of triggers")
     ap.add_argument("--json", action="store_true", help="emit JSON only")
+    ap.add_argument("--rebuild-side-copy", metavar="NAME",
+                    help="by hand only: build and fully embed a side index NAME, verify "
+                         "it, and stop (see the #1992 section); never touches the live index")
+    ap.add_argument("--swap", action="store_true",
+                    help="with --rebuild-side-copy: swap the side copy in once its "
+                         "verification passed in this same invocation")
     args = ap.parse_args()
+    if args.swap and args.rebuild_side_copy is None:
+        ap.error("--swap needs --rebuild-side-copy NAME: a swap is only allowed after "
+                 "that side copy verified in the same invocation")
+    if args.rebuild_side_copy is not None:      # an empty name is refused, not ignored
+        # A separate route, handed off before any nightly logic runs and before the
+        # dry-run early exit below, which would print the nightly dry-run line.
+        return run_side_copy_route(args.rebuild_side_copy, swap=args.swap,
+                                   dry_run=args.dry_run, as_json=args.json)
 
     started = datetime.now()
     report: dict = {"ran_at": started.isoformat(), "actions": []}

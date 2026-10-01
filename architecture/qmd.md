@@ -220,7 +220,20 @@ pins both through the door, `tests/test_qmd_query_shape.py` the sanitizing.
   orphan ratio cannot give, and the footprint as main + `-wal` + `-shm` (#844).
   Neither cleanup nor VACUUM reclaims a dead vec0 slot; the verdict is report-only,
   and the rebuild it points at is a hand side-copy-and-swap like the 09-21
-  model switch.
+  model switch. That rebuild is a route of the same script that only a person
+  invokes (#1992): `--rebuild-side-copy <name>` copies the live config to
+  `~/.config/qmd/<name>.yml`, runs `update` and `embed` with `--index <name>`
+  (so the database is `~/.cache/qmd/<name>.sqlite`), and verifies: the side copy
+  holds at least the live index's non-orphan vectors, nothing is pending, and one
+  real vsearch against it returns hits. It opens the live index read-only and
+  nothing else. `--swap`, on the same command line, is refused unless that
+  verification passed in the same invocation; it holds `regression.lock`, stops
+  the watcher and the daemon, renames the live database with its `-wal`/`-shm` to
+  `index.sqlite.bak-<stamp>`, moves the side copy in, starts both and runs one
+  retrieval. `--dry-run` prints the commands and runs none. No scheduled run
+  passes either flag. Not yet run for real: the embed lock is per directory, so
+  the side embed and the watcher exclude each other (the route retries), and a
+  swap's backup joins the `.bak` series the nightly retention bounds to its newest.
 - **A rerank that could not run says so.** No VRAM for a ranking context used to
   be an HTTP 200 with fusion-order results; `meta.reranked` is false, the daemon
   counts it and never caches a fallback score, and `app/qmd_health.py` logs and

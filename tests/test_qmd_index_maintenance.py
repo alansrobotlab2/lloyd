@@ -1570,3 +1570,279 @@ def test_the_committed_witness_agrees_with_the_fixture_this_change_is_pinned_to(
     # reaches the 0.25 trigger in under three days, which is why the escalation is
     # worth landing before it does rather than after.
     assert (0.3379 - 0.25) / 0.0343 < 3.0
+
+
+# ── #1992: the side-copy rebuild is a route a person invokes ──────────────────
+#
+# VEC0_REBUILD_RULED_OUT said "rebuild a side copy and swap it, by hand" and nothing
+# in the tree could do it. The route below is driven end to end over a fake qmd: the
+# subprocess seam `_sh` is the only thing replaced, so what these nodes pin is which
+# commands run, in what order, against which database, and what the route refuses.
+
+SIDE = "rebuild-a"
+
+
+class _FakeQmd:
+    """`_sh`, standing in for the qmd CLI and supervisorctl.
+
+    `update` creates the side database (a vec0-shaped one with `side_rows` vectors),
+    `embed` is busy for `busy` calls and then succeeds, `status` reports pending 0 once
+    it has, `vsearch` returns `hits` rows. Every command is recorded.
+    """
+
+    def __init__(self, side: Path, *, side_rows: int = 40, hits: int = 3, busy: int = 0):
+        self.side, self.side_rows, self.hits, self.busy = side, side_rows, hits, busy
+        self.calls: list[list[str]] = []
+        self.embedded = False
+
+    def __call__(self, cmd, timeout, env=None):
+        cmd = [str(c) for c in cmd]
+        self.calls.append(cmd)
+        if cmd[0] != "/usr/bin/node":
+            return 0, ""                                   # supervisorctl, curl
+        if "update" in cmd:
+            _vec0_index(self.side, chunks=1, chunk_slots=64, live=self.side_rows)
+            return 0, "Indexed 40 documents"
+        if "embed" in cmd:
+            if self.busy > 0:
+                self.busy -= 1
+                return 0, "Another embed process is already running. Skipping."
+            self.embedded = True
+            return 0, "Embedded 40 chunks"
+        if "status" in cmd:
+            return 0, f"  Pending: {0 if self.embedded else 40}\n"
+        if "vsearch" in cmd:
+            return 0, json.dumps([{"docid": f"d{i}", "score": 0.5} for i in range(self.hits)])
+        return 0, ""
+
+    def qmd(self) -> list[list[str]]:
+        return [c for c in self.calls if c[0] == "/usr/bin/node"]
+
+    def services(self) -> list[tuple[str, str]]:
+        return [(c[-2], c[-1]) for c in self.calls if c[0] == str(m.SUPERVISORCTL)]
+
+
+class _FakeLock:
+    held = released = 0
+
+    def acquire(self):
+        type(self).held += 1
+        return self
+
+    def release(self):
+        type(self).released += 1
+
+
+def _side_env(monkeypatch, tmp_path, *, live_rows: int = 32, orphaned: int = 6, **fake):
+    """A live index with `live_rows` real vectors and some orphans, its config, and
+    the route's module state pointed at `tmp_path`. Returns (fake, index dir)."""
+    d = tmp_path / "qmd"
+    d.mkdir()
+    _vec0_index(d / "index.sqlite", chunks=4, chunk_slots=64, live=live_rows, orphaned=orphaned)
+    (d / "index.sqlite-wal").write_bytes(b"wal")
+    cfg = tmp_path / "config" / "index.yml"
+    cfg.parent.mkdir()
+    cfg.write_text(LIVE)
+    monkeypatch.setattr(m, "INDEX", d / "index.sqlite")
+    monkeypatch.setattr(m, "LIVE_CONFIG", cfg)
+    monkeypatch.setattr(m, "REPORT_DIR", tmp_path / "reflection")
+    monkeypatch.setattr(m, "SIDE_EMBED_RETRY_SLEEP_S", 0)
+    monkeypatch.setattr(m, "daemon_healthy", lambda retries=10: True)
+    _FakeLock.held = _FakeLock.released = 0
+    monkeypatch.setattr(m, "_regression_lock", _FakeLock)
+    fq = _FakeQmd(d / f"{SIDE}.sqlite", **fake)
+    monkeypatch.setattr(m, "_sh", fq)
+    return fq, d
+
+
+def _stat_listing(d: Path) -> dict[str, tuple[int, int]]:
+    return {p.name: (p.stat().st_size, p.stat().st_mtime_ns) for p in sorted(d.iterdir())}
+
+
+def _route(monkeypatch, *argv: str) -> int:
+    monkeypatch.setattr(sys, "argv", ["qmd_index_maintenance.py", *argv])
+    return m.main()
+
+
+def test_the_route_builds_a_named_side_index_and_never_writes_the_live_one(monkeypatch,
+                                                                         tmp_path, capsys):
+    """Clause 1: registered, builds and embeds `<name>.sqlite` at the CLI's per-name
+    path, and the live `INDEX` is only ever opened `mode=ro`."""
+    fq, d = _side_env(monkeypatch, tmp_path, busy=2)
+    live_before = (d / "index.sqlite").read_bytes()
+    stat_before = _stat_listing(d)["index.sqlite"]
+
+    import sqlite3
+    real_connect, opened = sqlite3.connect, []
+
+    def recording_connect(database, *a, **k):
+        opened.append((str(database), dict(k)))
+        return real_connect(database, *a, **k)
+
+    monkeypatch.setattr(m.sqlite3, "connect", recording_connect)
+    rc = _route(monkeypatch, "--rebuild-side-copy", SIDE)
+    monkeypatch.setattr(m.sqlite3, "connect", real_connect)
+
+    assert rc == 0, capsys.readouterr()
+    assert (d / f"{SIDE}.sqlite").exists()
+    assert m.side_index_path(SIDE) == d / f"{SIDE}.sqlite"
+    # Every qmd command names the side index; none is a bare command on the default.
+    assert fq.qmd() and all(c[2:4] == ["--index", SIDE] for c in fq.qmd()), fq.qmd()
+    verbs = [c[4] for c in fq.qmd()]
+    assert verbs[0] == "update" and verbs.count("embed") == 3 and verbs[-1] == "vsearch", verbs
+    # The side config is the live one, where `--index <name>` looks for it.
+    assert m.side_config_path(SIDE).read_text() == LIVE
+    # The live database: same bytes, same mtime, and every open of it read-only.
+    assert (d / "index.sqlite").read_bytes() == live_before
+    assert _stat_listing(d)["index.sqlite"] == stat_before
+    live_opens = [(db, k) for db, k in opened if "index.sqlite" in db
+                  and f"{SIDE}.sqlite" not in db]
+    assert live_opens, "the route never read the live index, so the floor is not its count"
+    for db, k in live_opens:
+        assert db.startswith("file:") and db.endswith("?mode=ro") and k.get("uri") is True, db
+    assert fq.services() == [], "a rebuild without --swap stopped or started a service"
+    # No swap happened, and the report says what was measured.
+    report = json.loads(next((tmp_path / "reflection").glob("qmd-side-copy-*.json")).read_text())
+    assert report["verification"]["passed"] is True and "swap" not in report
+    assert report["verification"]["floor_vectors_live"] == 32      # orphans are not the bar
+    assert report["verification"]["live_vec0_live_rows"] == 32
+
+
+@pytest.mark.parametrize("fake, why", [
+    ({"side_rows": 31}, "is under the live index's 32 non-orphan vectors"),
+    ({"hits": 0}, "returned no hits"),
+])
+def test_verification_fails_on_a_short_or_unsearchable_side_copy_and_refuses_the_swap(
+        monkeypatch, tmp_path, capsys, fake, why):
+    """Clause 2: both conditions are required, and either failure refuses `--swap`
+    in the same invocation with the live index left exactly where it was."""
+    fq, d = _side_env(monkeypatch, tmp_path, **fake)
+    before = _stat_listing(d)
+
+    rc = _route(monkeypatch, "--rebuild-side-copy", SIDE, "--swap")
+
+    assert rc == 1
+    report = json.loads(next((tmp_path / "reflection").glob("qmd-side-copy-*.json")).read_text())
+    v = report["verification"]
+    assert v["passed"] is False and any(why in f for f in v["failed"]), v
+    assert report["swap"]["swapped"] is False and "swap refused" in report["swap"]["refused"]
+    assert fq.services() == [], "a refused swap touched a service"
+    assert _FakeLock.held == 0
+    after = _stat_listing(d)
+    assert after["index.sqlite"] == before["index.sqlite"]
+    assert not [n for n in after if ".bak-" in n], after
+    out = capsys.readouterr().out
+    assert "verification NOT passed" in out and "swap refused" in out
+
+
+def test_a_passed_verification_at_exactly_the_floor_counts(monkeypatch, tmp_path):
+    fq, _ = _side_env(monkeypatch, tmp_path, side_rows=32)
+    assert m.rebuild_side_copy(SIDE)["verification"]["passed"] is True
+
+
+def test_swap_renames_the_live_index_moves_the_side_copy_in_and_checks_retrieval(
+        monkeypatch, tmp_path, capsys):
+    """Clause 3: `--swap` is its own flag; after a verification that passed in this
+    invocation it stops the writers, renames the live database (with its WAL) to
+    `index.sqlite.bak-<stamp>`, moves the side copy in, starts the services again and
+    runs one retrieval against the live index, all under `regression.lock`."""
+    fq, d = _side_env(monkeypatch, tmp_path)
+    old_live = (d / "index.sqlite").read_bytes()
+
+    rc = _route(monkeypatch, "--rebuild-side-copy", SIDE, "--swap")
+
+    assert rc == 0, capsys.readouterr()
+    names = sorted(p.name for p in d.iterdir())
+    baks = [n for n in names if re.fullmatch(r"index\.sqlite\.bak-\d{8}-\d{6}", n)]
+    assert len(baks) == 1, names
+    assert (d / baks[0]).read_bytes() == old_live
+    assert f"{baks[0]}-wal" in names and "index.sqlite-wal" not in names
+    assert f"{SIDE}.sqlite" not in names and f"{SIDE}.sqlite.rebuild.json" not in names
+    live = m.inspect_index()
+    assert live["vec0"]["live_rows"] == 40 and live["vec0"]["chunks"] == 1
+    assert fq.services() == [("stop", m.WATCHER_SERVICE), ("stop", m.SERVICE),
+                             ("start", m.SERVICE), ("start", m.WATCHER_SERVICE)]
+    # The retrieval check after the swap is against the default index: no --index.
+    last = fq.qmd()[-1]
+    assert "vsearch" in last and "--index" not in last, last
+    stops = [i for i, c in enumerate(fq.calls) if c[0] == str(m.SUPERVISORCTL)]
+    assert fq.calls.index(last) > max(stops)
+    assert (_FakeLock.held, _FakeLock.released) == (1, 1)
+    report = json.loads(next((tmp_path / "reflection").glob("qmd-side-copy-*.json")).read_text())
+    assert report["swap"]["swapped"] is True and report["swap"]["retrieval_ok"] is True
+
+
+def test_swap_takes_no_verification_but_this_invocations_own(monkeypatch, tmp_path, capsys):
+    """Clause 3's refusal, at each door: the flag alone, a verification for another
+    name, a hand-made dict, and a database of that name the route did not build."""
+    fq, d = _side_env(monkeypatch, tmp_path)
+    with pytest.raises(SystemExit) as e:
+        _route(monkeypatch, "--swap")
+    assert e.value.code == 2 and "--swap needs --rebuild-side-copy" in capsys.readouterr().err
+
+    for bad in (None, {}, {"passed": False, "name": SIDE, "failed": ["x"]},
+                {"passed": True, "name": "another"}, {"passed": 1, "name": SIDE}):
+        with pytest.raises(m.SideCopyRefused):
+            m.swap_side_copy(SIDE, bad)
+    # A passed dict for a database this route never built is refused too.
+    _vec0_index(d / f"{SIDE}.sqlite", chunks=1, chunk_slots=64, live=40)
+    with pytest.raises(m.SideCopyRefused, match="not a side copy this route built"):
+        m.swap_side_copy(SIDE, {"passed": True, "name": SIDE})
+    with pytest.raises(m.SideCopyRefused, match="did not create it"):
+        m.rebuild_side_copy(SIDE)
+    assert fq.services() == [] and _FakeLock.held == 0
+    assert not [p for p in d.iterdir() if ".bak-" in p.name]
+
+
+@pytest.mark.parametrize("name", ["index", "../index", "a/b", "", "Index", "x"])
+def test_the_side_name_is_a_plain_token_and_never_the_live_index(monkeypatch, tmp_path,
+                                                               capsys, name):
+    fq, d = _side_env(monkeypatch, tmp_path)
+    before = _stat_listing(d)
+    assert _route(monkeypatch, "--rebuild-side-copy", name) == 2
+    assert "refused" in capsys.readouterr().err
+    assert fq.calls == [] and _stat_listing(d) == before
+
+
+def test_the_nightly_path_cannot_reach_the_route(monkeypatch, tmp_path, capsys):
+    """Clause 4: a fired verdict still reports and exits, with no command of the
+    route's among its actions, and neither route function is called without the flag."""
+    def boom(*a, **k):
+        raise AssertionError("the nightly path called into the side-copy route")
+
+    monkeypatch.setattr(m, "rebuild_side_copy", boom)
+    monkeypatch.setattr(m, "swap_side_copy", boom)
+    monkeypatch.setattr(m, "run_side_copy_route", boom)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(m, "_sh", lambda cmd, timeout, env=None: calls.append(cmd) or (0, ""))
+    rc, report, _ = _run_over_shape(monkeypatch, tmp_path, FIRED_SHAPE, capsys,
+                                    tag="route", probe_via_sh=True)
+    assert rc != 0 and report["need_capacity"] is True
+    assert report["actions"] == [], report["actions"]
+    assert not [c for c in calls if "--index" in c or "update" in c or "embed" in c], calls
+    assert m.capacity_verdict(FIRED_SHAPE["vec0"]) is True
+    assert m._exit_code({"need_capacity": True, "daemon_healthy": True}) == 1
+    assert m._exit_code({"need_capacity": False, "daemon_healthy": True}) == 0
+
+
+@pytest.mark.parametrize("extra", [(), ("--swap",)])
+def test_dry_run_of_the_route_prints_its_commands_and_touches_nothing(monkeypatch, tmp_path,
+                                                                     capsys, extra):
+    """Clause 5: the plan is printed by the route, ahead of the nightly dry-run exit,
+    and the index directory reads byte- and mtime-identical afterwards."""
+    fq, d = _side_env(monkeypatch, tmp_path)
+    before = _stat_listing(d)
+
+    rc = _route(monkeypatch, "--rebuild-side-copy", SIDE, "--dry-run", *extra)
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    for said in (f"--index {SIDE} update", f"--index {SIDE} embed", f"--index {SIDE} vsearch"):
+        assert said in out, out
+    assert ("index.sqlite.bak-<stamp>" in out) == bool(extra)
+    assert "dry-run: nothing was run" in out
+    assert "need_prune" not in out, "the nightly dry-run branch answered instead"
+    assert fq.calls == [], fq.calls
+    assert _stat_listing(d) == before
+    assert not m.side_config_path(SIDE).exists()
+    assert not (tmp_path / "reflection").exists()
