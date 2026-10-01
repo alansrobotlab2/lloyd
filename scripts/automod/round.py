@@ -28,9 +28,10 @@ def live_venv_python(live_root: Path | None = None) -> Path:
     worktree under `~/lloyd-work/<round>/home/lloyd` has no `.venvs/` at all
     until the gate's `venv` rung clones one, and that rung is skipped whole on
     a requirements-unchanged diff — after the implement turn in which the
-    verify command actually runs. So the relative form the vault has always
-    prescribed (`.venvs/lloyd/bin/python`, `CLAUDE.md:12`, 247 files under
-    `~/obsidian`) dies inside the round with `No such file or directory`,
+    verify command actually runs. So the relative form vault notes still
+    write (`.venvs/lloyd/bin/python`; the `**Venv**:` entry of CLAUDE.md's
+    Project Overview names the absolute interpreter and what a round uses
+    instead) dies inside the round with `No such file or directory`,
     which reads exactly like a failed acceptance check and is not one (#692,
     measured again on the round that found it: exit 127 on the relative form,
     the same pytest invocation through the live interpreter 3 passed).

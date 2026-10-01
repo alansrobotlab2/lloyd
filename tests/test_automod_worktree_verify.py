@@ -3,9 +3,10 @@
 `.venvs/` is gitignored: it exists only in the live checkout, so a round
 worktree has no interpreter at all until the gate's `venv` rung clones one —
 and that rung is skipped whole on a requirements-unchanged diff, after the
-implement turn in which the verify command actually runs. The vault's default
-form (`.venvs/lloyd/bin/python`, `CLAUDE.md:12`, 247 files under `~/obsidian`)
-therefore fails inside a round with `No such file or directory`, which is
+implement turn in which the verify command actually runs. The relative form
+vault notes still write (`.venvs/lloyd/bin/python`; the `**Venv**:` entry of
+CLAUDE.md's Project Overview names the absolute interpreter and what a round
+uses instead) therefore fails inside a round with `No such file or directory`, which is
 indistinguishable from a failed acceptance check at the moment it decides
 whether the implementer trusts the check.
 

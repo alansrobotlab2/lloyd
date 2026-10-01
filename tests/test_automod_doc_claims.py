@@ -1429,3 +1429,56 @@ def test_the_upgrade_section_names_the_patch_that_must_not_be_applied():
     for part in ("`streaming_opts` as a required argument", "`NameError`",
                  "`except` swallows it", "comes up uncompiled"):
         assert part in flat, part
+
+
+# ── #2009: the two places that cite the Venv rule cite it by anchor ──────────
+
+#: The docstrings that justify `live_venv_python` by pointing at the Venv rule.
+VENV_RULE_CITERS = ("scripts/automod/round.py", "tests/test_automod_worktree_verify.py")
+CLAUDE_LINE_CITATION_RE = re.compile(r"CLAUDE\.md:(\d+)")
+VAULT_FILE_COUNT_RE = re.compile(r"\d+\s+files\s+under\s+`?~/obsidian")
+
+
+def _venv_citer_docstring(rel: str) -> str:
+    import ast
+    tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
+    if rel.startswith("tests/"):
+        return ast.get_docstring(tree) or ""
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "live_venv_python")
+    return ast.get_docstring(fn) or ""
+
+
+@pytest.mark.parametrize("rel", VENV_RULE_CITERS)
+def test_the_venv_rule_is_cited_by_anchor_with_no_line_and_no_corpus_count(rel):
+    """Both docstrings read "`CLAUDE.md:12`, 247 files under `~/obsidian`": line 12
+    held an unrelated sentence, and the count measured 732 on 2026-10-01. The
+    mechanism rests on `.venvs/` being gitignored, on neither figure."""
+    text = (ROOT / rel).read_text(encoding="utf-8")
+    assert "CLAUDE.md:" + "12" not in text and "247 " + "files" not in text
+    assert not CLAUDE_LINE_CITATION_RE.search(text), "a line number in CLAUDE.md rots"
+    assert not VAULT_FILE_COUNT_RE.search(text), "a vault corpus count moves daily"
+    doc = " ".join(_venv_citer_docstring(rel).split())
+    assert "**Venv**:" in doc and "Project Overview" in doc
+    # The anchor the docstring names resolves, through the same helper the Venv
+    # section above uses: one `**Venv**:` bullet inside `## Project Overview`.
+    assert "**Venv**:" in _venv_rule_region()
+
+
+def _stale_claude_line_citations(text: str, claude_lines: list[str]) -> list[int]:
+    """Every `CLAUDE.md:<n>` in `text` whose line <n> does not hold the Venv rule."""
+    return [int(n) for n in CLAUDE_LINE_CITATION_RE.findall(text)
+            if not (0 < int(n) <= len(claude_lines) and "**Venv**:" in claude_lines[int(n) - 1])]
+
+
+def test_a_line_citation_of_claude_md_must_land_on_the_venv_rule():
+    """The forward guard: should either file cite a CLAUDE.md line again, that
+    line has to be the Venv rule. Shown to bite on the text this replaced."""
+    claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8").splitlines()
+    for rel in VENV_RULE_CITERS:
+        assert _stale_claude_line_citations((ROOT / rel).read_text(encoding="utf-8"), claude) == [], rel
+    was = "(`.venvs/lloyd/bin/python`, `CLAUDE.md:" + "12`, 247 files under `~/obsidian`)"
+    assert _stale_claude_line_citations(was, claude) == [12], "line 12 is not the Venv rule"
+    venv_line = next(i for i, ln in enumerate(claude, 1) if "**Venv**:" in ln)
+    assert _stale_claude_line_citations(f"CLAUDE.md:{venv_line}", claude) == []
+    assert VAULT_FILE_COUNT_RE.search(was)
