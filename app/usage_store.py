@@ -8,6 +8,7 @@ for the Usage dashboard (4-hour window, 7-day window, time-series).
 import json
 import os
 import sqlite3
+from pathlib import Path
 import threading
 from datetime import datetime, timedelta
 from typing import Any, Mapping, Optional, Sequence
@@ -471,6 +472,588 @@ def prefix_miss_summary(hours: float = 24) -> dict:
         (_since(hours=hours),),
     ).fetchone()
     return dict(row) if row else {}
+
+
+# ---------------------------------------------------------------------------
+# Per-mechanism re-prefill attribution (#2027)
+#
+# `prefix_miss_summary` above says what a window's prefix misses cost. It cannot
+# say which mechanism caused them, and the two of Lloyd's destructive layers
+# that do cause them break the shared prefix at the FRONT, which is the expensive
+# end: `app/compaction.py:505` makes the new conversation
+# `[CS.summary_message(record)] + ...`, so position 0 changed and the longest
+# common prefix of the old and new prompt is ~0, and
+# `app/harness/microcompact.py:11` clears "oldest first, and stops" — restated at
+# `:28`, "Clearing is oldest-first by design" — so the first cleared message is
+# the break and the surviving suffix is nearly the whole conversation.
+# arXiv:2609.37725v1 §4.3 prices a context edit as the re-prefill of everything
+# AFTER its break point, so front-breaking edits are the costly kind, and
+# `compaction` on each usage row (#1078) joined to `reprefill_tokens` (#1078's
+# column, measured per turn by `app/prefix_miss.py`) is what lets that price be
+# read per mechanism instead of per week.
+# ---------------------------------------------------------------------------
+
+#: The intra-turn relief ladder's rungs, in the order the ladder runs them.
+#: `app/harness/loop.py:1708` states the order ("Four rungs, in cost order, each
+#: running only while the meter still says...") and the appends that build
+#: `report["rungs"]` follow it — images at :1795, tool_results at :1816,
+#: reasoning at :1834, arguments at :1860, truncate at :1884. A stored rung name
+#: carries its own count (`"reasoning:6"`); `_rung_base` strips it. Kept as a
+#: constant rather than harvested from the window so a rung the window holds none
+#: of still gets a printed row with `n=0`: a rung that stopped firing is a
+#: result, and an absent row reads identically to a healthy machine.
+RELIEF_RUNGS_IN_LADDER_ORDER: tuple[str, ...] = (
+    "images", "tool_results", "reasoning", "arguments", "truncate",
+)
+
+#: A row whose relief passes freed tokens but whose first freeing pass named a
+#: rung outside the ladder above. Expected `n=0`; a non-zero row here means the
+#: ladder grew a rung this constant does not know, and
+#: `reprefill_attribution()["unknown_relief_rungs"]` names it. Aggregating rather
+#: than dropping is what keeps the printed Σ exhaustive.
+RELIEF_OTHER = "relief:other"
+
+#: A record that exists but names no mechanism and freed nothing on either path.
+#: The live shape is `{"mechanisms": []}` with no `turn_start` block — 21 such rows
+#: in the 2026-09-24..10-01 window. An entirely empty record never reaches here:
+#: the writer's own sanitizer turns one into NULL (#1078), so it is
+#: `NO_COMPACTION_RECORD`. This bucket is NOT the control:
+#: `ran_noop` is a record that says the pass ran (`turn_start.ran`) and freed
+#: nothing, which is why its 3.9% is a credible floor; a record that records no
+#: mechanism at all is an absence of evidence and gets its own row so it can never
+#: dilute the arm the 52x ratio is measured against.
+NO_FREEING_EVIDENCE = "no_freeing_evidence"
+
+#: A row with no `compaction` value at all: written before #1078's column, or by
+#: a writer that recorded nothing. The item's arm A.
+NO_COMPACTION_RECORD = "no_compaction_record"
+
+#: A row carrying a record whose two freeing paths both freed nothing. This is
+#: the CONTROL arm (the item's arm D): the pass was offered and did not edit, so
+#: whatever re-prefill it paid is the floor every rung row is compared against.
+RAN_NOOP = "ran_noop"
+
+#: Printed order, and the tie-break for a row naming more than one mechanism:
+#: front-most break first. Two mechanisms in one row is common (the top-reprefill
+#: rows all carry `"mechanisms": ["microcompact", "relief:intra_turn"]`), and the
+#: record holds ONE `reprefill_tokens` per row with no per-rung split —
+#: `compaction.relief[].rungs` is name:count and `freed_tokens` is per whole pass
+#: — so a row is assigned wholly to one bucket under this rule, which is what
+#: makes the printed Σ exhaustive rather than a selection of interesting rungs.
+#: Front-most is the defensible choice because §4.3's price is set by the
+#: earliest break: everything after it re-prefills, so crediting a later edit
+#: would price the cheap edit with the expensive one's bill. Within the
+#: `turn_start:*` family the three front-position edits (a replaced position 0, a
+#: fold of the summary that sits at the front, a truncation that drops the oldest
+#: turns) all break at position ~0, so their relative order is a deterministic
+#: tie-break, not a claim about which of them is dearer.
+ATTRIBUTION_BUCKETS: tuple[str, ...] = (
+    "turn_start:summarized",
+    "turn_start:summary_folds",
+    "turn_start:truncated",
+    "turn_start:microcompact",
+    "turn_start:other",
+    *(f"relief:{rung}" for rung in RELIEF_RUNGS_IN_LADDER_ORDER),
+    RELIEF_OTHER,
+    RAN_NOOP,
+    NO_FREEING_EVIDENCE,
+    NO_COMPACTION_RECORD,
+)
+
+
+def _rung_base(rung: Any) -> str:
+    """`"reasoning:6"` -> `"reasoning"`. The count suffix is the ladder's own
+    tally of how many items that rung edited, not part of its name."""
+    return str(rung).split(":", 1)[0].strip()
+
+
+def _freeing_evidence(compaction: Any) -> dict:
+    """What one row's `compaction` record says about freeing.
+
+    Reads BOTH freeing paths, which is the whole instrument (#2027's own first
+    draft read only `turn_start.*` and thereby dumped every relief-only turn into
+    the control arm — the wrong predicate does not fail loudly, it prints a
+    plausible weaker number): `turn_start.tokens_freed` for the turn-start pass
+    and top-level `relief_tokens_freed` for the intra-turn ladder.
+
+    A record that will not parse is read as a record that names no mechanism and
+    freed nothing — the same reading `json_extract` gives it in SQL, which is what
+    keeps the arms table reproducible from the shell. It is bucketed
+    `NO_FREEING_EVIDENCE`, not `RAN_NOOP`, because nothing in it claims a pass ran.
+
+    Returns `{"no_record": bool, "ran": bool, "turn_start_freed": int,
+    "relief_freed": int, "turn_start_flags": [bucket, ...],
+    "relief_rungs": [bucket, ...], "relief_rung_names": [rung, ...]}` where the
+    two bucket lists are in front-most-first order and hold the buckets the row is
+    *eligible* for, and `relief_rung_names` keeps the raw names so a rung the
+    ladder constant does not know is still visible to the caller after its row is
+    folded into `RELIEF_OTHER`. A NULL record is `no_record`: "the writer recorded
+    nothing at all" is a different statement from "the record names nothing".
+    """
+    blank = {"no_record": False, "ran": False, "turn_start_freed": 0,
+             "relief_freed": 0, "turn_start_flags": [], "relief_rungs": [],
+             "relief_rung_names": []}
+    if compaction is None:
+        return dict(blank, no_record=True)
+    if isinstance(compaction, str):
+        try:
+            compaction = json.loads(compaction)
+        except (ValueError, TypeError):
+            return blank
+    if not isinstance(compaction, Mapping):
+        return blank
+    ts = compaction.get("turn_start")
+    ts = ts if isinstance(ts, Mapping) else {}
+    flags: list[str] = []
+    if ts.get("summarized"):
+        flags.append("turn_start:summarized")
+    if _as_int(ts.get("summary_folds")) > 0:
+        flags.append("turn_start:summary_folds")
+    if ts.get("truncated"):
+        flags.append("turn_start:truncated")
+    if _as_int(ts.get("microcompacted")) > 0:
+        flags.append("turn_start:microcompact")
+
+    relief_freed = _as_int(compaction.get("relief_tokens_freed"))
+    rungs: list[str] = []
+    names: list[str] = []
+    passes = compaction.get("relief")
+    if isinstance(passes, list):
+        for one in passes:
+            if not isinstance(one, Mapping) or _as_int(one.get("freed_tokens")) <= 0:
+                continue
+            named = [_rung_base(r) for r in (one.get("rungs") or [])]
+            names.extend(named)
+            # The first rung of the pass that freed tokens, since the ladder
+            # appends in run order (loop.py:1795-:1884) and so the earliest one
+            # listed is the earliest one that edited. A name this file's ladder
+            # constant does not know does not become an invisible row: the row is
+            # folded into RELIEF_OTHER and the name is reported.
+            known = [r for r in named if r in RELIEF_RUNGS_IN_LADDER_ORDER]
+            rungs.append(f"relief:{known[0]}" if known else RELIEF_OTHER)
+
+    if _as_int(ts.get("tokens_freed")) > 0 and not flags:
+        flags.append("turn_start:other")
+    return {
+        "no_record": False,
+        "ran": bool(ts.get("ran")),
+        "turn_start_freed": _as_int(ts.get("tokens_freed")),
+        "relief_freed": relief_freed,
+        "turn_start_flags": flags,
+        "relief_rungs": rungs,
+        "relief_rung_names": names,
+    }
+
+
+def _as_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def attribution_bucket(compaction: Any) -> str:
+    """The one bucket a turn's `compaction` record is attributed to.
+
+    Precedence is `ATTRIBUTION_BUCKETS`: a row that freed via the turn-start pass
+    is credited to the front-most turn-start flag that fired, a row whose only
+    freeing signal is `relief_tokens_freed` is credited to the first rung of the
+    first pass that freed tokens, and a row that freed by both paths is counted
+    once — under the turn-start edit, which is nearer the front. A row with a
+    record and no freeing on either path is `RAN_NOOP`, the control; a row with no
+    record is `NO_COMPACTION_RECORD`.
+    """
+    ev = _freeing_evidence(compaction)
+    if ev.get("no_record"):
+        return NO_COMPACTION_RECORD
+    if ev["turn_start_freed"] > 0:
+        # Front-most turn-start flag that fired; `turn_start:other` only when the
+        # pass freed tokens and none of the four named flags says how.
+        for bucket in ev["turn_start_flags"]:
+            return bucket
+        return "turn_start:other"
+    if ev["relief_freed"] > 0:
+        return ev["relief_rungs"][0] if ev["relief_rungs"] else RELIEF_OTHER
+    # Neither documented freeing path freed a token. A record whose turn-start
+    # pass reports it ran is the control — arm D, the 3.9% every rung mean is
+    # compared against, defined by "freed nothing" rather than by "ran", exactly
+    # as the item's predicate defines it. A record that does not even claim a run
+    # is the absence of evidence, and gets its own row.
+    return RAN_NOOP if ev.get("ran") else NO_FREEING_EVIDENCE
+
+
+def reprefill_attribution(hours: float = 168.0, *, since: Optional[str] = None,
+                          until: Optional[str] = None) -> dict:
+    """Price the window's re-prefill per mechanism, and show the split is exhaustive.
+
+    The window is the last `hours` hours, or — when `since` is given — the absolute
+    interval `since <= ts < until` (`until` optional). The absolute form exists for
+    a figure that has already been published and must stay checkable after the
+    clock moves: `replay_usage_extract` plus `REPREFILL_WITNESS_SINCE` re-answers
+    the 2026-10-01 verdict over the same rows in a month's time. One row per bucket in
+    `ATTRIBUTION_BUCKETS` — every rung, plus the control (`ran_noop`) and the
+    unmeasured arm (`no_compaction_record`) — each carrying `n=` beside its mean,
+    and a rung the window holds none of is printed with `n=0` rather than
+    omitted. `report` is the text to print.
+
+    **The total the table is exhaustive against is named in the header**: the
+    row-level `COALESCE(SUM(reprefill_tokens), 0)` over EVERY usage row with
+    `ts >= since`, with no validity filter. That choice is deliberate and stated
+    because two figures are in play and mixing them silently is what this item's
+    triage did — it took `prefix_miss_summary`'s `reprefill_tokens` for a
+    validity-filtered turn-level total, when that SELECT carries no case logic on
+    the column and is the SAME sum over the SAME window, equal to the named total
+    byte for byte. The pair it measured was one expression over two WINDOWS: the
+    `ts` column holds a literal 'T' and sqlite renders `datetime('now','-7 day')`
+    with a space, and 'T' (0x54) sorts above the space (0x20), so the
+    space-spelled predicate is wider. Both figures are printed, each labelled, and
+    `share=` is against the named one.
+
+    Every row in the window goes to exactly one bucket, so `bucket_sum` equals
+    `window_total` exactly and `gap_pct` is 0.0 — a row that freed nothing is in
+    the table too, which is the only way the sum can be exhaustive rather than a
+    selection of interesting rungs. Means are over measured rows only
+    (`measured=`), since a NULL `reprefill_tokens` is unmeasured, not zero.
+
+    The `arms` block reproduces the three-arm table this item was filed with
+    (`A_no_record` / `B_freed_something` / `D_ran_noop`) over measured rows, with
+    both paths in the predicate, and `ratio_b_over_d_mean` beside
+    `size_controlled`. It is False by construction here: arm B's mean
+    `input_tokens` is roughly twice arm D's, so a mean-to-mean ratio is not
+    size-controlled, and the within-session paired comparison that would control
+    for it needs paired sessions this function does not attempt (#2027's owed
+    clause). `MISS_RATIO_ABOVE_100_IS_NOT_A_BUG`: `reprefill_tokens` is summed
+    over a turn's iterations while `input_tokens` is one request, so a share of
+    prompt above 100% is arithmetic, not a mistake to "fix".
+    """
+    absolute = since is not None
+    since = since or _since(hours=hours)
+    conn = _conn()
+    span = "ts >= ?" + (" AND ts < ?" if until is not None else "")
+    span_args: list[Any] = [since] + ([until] if until is not None else [])
+    # The same sum, asked with the separator sqlite's own datetime() emits. Printed
+    # so a shell re-run reconciles instead of looking like a contradiction. Only
+    # meaningful for an offset window, where a shell would spell `since` that way.
+    sqlite_spelling_total = (None if absolute else _as_int(conn.execute(
+        f"SELECT COALESCE(SUM(reprefill_tokens), 0) FROM usage WHERE {span}",
+        [a.replace("T", " ") if isinstance(a, str) else a for a in span_args],
+    ).fetchone()[0]))
+    # The same `span` the total above is asked with: a row at or after `until` is
+    # outside the window the header prints, so it belongs to neither the named
+    # total nor any bucket. Dropping the bound here would leave the header and the
+    # arms table claiming a closed interval while the rows behind them stayed open
+    # — and an extract re-cut a day later than its `until` would quietly widen.
+    rows = conn.execute(
+        f"""SELECT compaction, reprefill_tokens, input_tokens
+              FROM usage WHERE {span}""",
+        span_args,
+    ).fetchall()
+    window_total = sum(_as_int(r["reprefill_tokens"]) for r in rows)
+
+    counts: dict[str, dict[str, int]] = {}
+    # Rows in which a relief rung edited something at all, whether or not this row
+    # was ATTRIBUTED to it. A rung can hold `n=0` (no row is credited to it,
+    # because an earlier rung in the same pass is nearer the front and takes the
+    # row) while still firing on hundreds of rows, and printing the bare `n=0`
+    # without this would read as "the truncate rung did not run this week".
+    fired: dict[str, int] = {}
+
+    def bump(bucket: str, reprefill: Optional[int], input_tokens: Any) -> None:
+        cell = counts.setdefault(bucket, {"n": 0, "measured": 0, "sum": 0, "input": 0})
+        cell["n"] += 1
+        cell["input"] += _as_int(input_tokens)
+        if reprefill is not None:
+            cell["measured"] += 1
+            cell["sum"] += _as_int(reprefill)
+
+    arms: dict[str, dict[str, int]] = {}
+    unknown_rungs: set[str] = set()
+    for row in rows:
+        raw = row["compaction"]
+        ev = _freeing_evidence(raw)
+        bucket = attribution_bucket(raw)
+        bump(bucket, row["reprefill_tokens"], row["input_tokens"])
+        for name in (ev.get("relief_rung_names") or []):
+            bucket_name = f"relief:{name}"
+            if bucket_name in ATTRIBUTION_BUCKETS:
+                fired[bucket_name] = fired.get(bucket_name, 0) + 1
+            else:
+                unknown_rungs.add(bucket_name)
+        if row["reprefill_tokens"] is None:
+            continue        # unmeasured is not arm D; the arms table is measured-only
+        # A literal transcription of the item's predicate, so a shell re-run of it
+        # lands every row in the same arm: NULL record = A; either freeing path
+        # >0 = B; a record that freed nothing = D.
+        if ev.get("no_record"):
+            arm = "A_no_record"
+        elif ev["turn_start_freed"] > 0 or ev["relief_freed"] > 0:
+            arm = "B_freed_something"
+        else:
+            arm = "D_ran_noop"
+        cell = arms.setdefault(arm, {"n": 0, "input": 0, "reprefill": 0})
+        cell["n"] += 1
+        cell["input"] += _as_int(row["input_tokens"])
+        cell["reprefill"] += _as_int(row["reprefill_tokens"])
+
+    buckets = []
+    for name in ATTRIBUTION_BUCKETS:
+        cell = counts.get(name, {"n": 0, "measured": 0, "sum": 0, "input": 0})
+        buckets.append({
+            "bucket": name,
+            "n": cell["n"],
+            "measured": cell["measured"],
+            "reprefill_tokens": cell["sum"],
+            "mean_reprefill_tokens": (round(cell["sum"] / cell["measured"])
+                                      if cell["measured"] else None),
+            "mean_input_tokens": round(cell["input"] / cell["n"]) if cell["n"] else None,
+            "share_pct": (round(100.0 * cell["sum"] / window_total, 1)
+                          if window_total else 0.0),
+            # Relief rungs only: rows whose record names this rung in a pass that
+            # freed tokens, whether or not the row was CREDITED to it. Not
+            # additive — one row can name three rungs — so it is never part of the
+            # Σ, and it is what stops `n=0` reading as "this rung never ran".
+            "fired_rows": (fired.get(name) if name.startswith("relief:") else None),
+        })
+    # No rows are appended for names outside `RELIEF_RUNGS_IN_LADDER_ORDER`:
+    # their tokens are already inside `relief:other`, and a second row naming the
+    # same tokens would double-count the Σ the header claims is exhaustive. The
+    # name is reported instead, in `unknown_relief_rungs` and on the report's last
+    # line, which is what tells a reader the ladder grew a rung.
+    bucket_sum = sum(b["reprefill_tokens"] for b in buckets)
+    arm_out = {}
+    for arm in ("A_no_record", "B_freed_something", "D_ran_noop"):
+        cell = arms.get(arm, {"n": 0, "input": 0, "reprefill": 0})
+        arm_out[arm] = {
+            "n": cell["n"],
+            "mean_input_tokens": round(cell["input"] / cell["n"]) if cell["n"] else None,
+            "mean_reprefill_tokens": (round(cell["reprefill"] / cell["n"])
+                                      if cell["n"] else None),
+            "reprefill_tokens": cell["reprefill"],
+        }
+    b_mean = arm_out["B_freed_something"]["mean_reprefill_tokens"]
+    d_mean = arm_out["D_ran_noop"]["mean_reprefill_tokens"]
+    ratio = (round(b_mean / d_mean, 1) if b_mean and d_mean else None)
+    pms = ({} if absolute else prefix_miss_summary(hours=hours))
+
+    out = {
+        "window_hours": hours,
+        "since": since,
+        "rows": len(rows),
+        "window_since": since,
+        "window_until": until,
+        "window_absolute": absolute,
+        "window_total_reprefill_tokens": window_total,
+        "window_total_named": (
+            "row-level COALESCE(SUM(reprefill_tokens), 0) over every usage row "
+            f"with {('ts >= ' + since + (' AND ts < ' + until) if absolute else 'ts >= ' + since)}"
+            ", no validity filter"),
+        # The one number the Σ is exhaustive against is `window_total_...` above.
+        # These two are printed because a reader who checks this table with a shell
+        # will meet both of them, and neither is that total.
+        "sqlite_spelling_total_reprefill_tokens": sqlite_spelling_total,
+        "window_spelling_note": (_WINDOW_SPELLING_NOTE if not absolute else
+                                 "absolute window: quote this exact `since` (and "
+                                 "`until`) — the spelling hazard below is why the "
+                                 "interval is given literally"),
+        "sqlite_spelling_total_named": (
+            "COALESCE(SUM(reprefill_tokens),0) over ts >= "
+            f"'{since.replace('T', ' ')}' — the same expression, the space-separated "
+            "spelling sqlite's datetime() produces, which matches MORE rows than "
+            "this window does. Not a different kind of total: a wider window"),
+        "prefix_miss_summary_reprefill_tokens": pms.get("reprefill_tokens"),
+        "prefix_miss_summary_note": (
+            "prefix_miss_summary's reprefill_tokens field is the SAME "
+            "COALESCE(SUM(reprefill_tokens),0) over the SAME window as the named "
+            "total, so it is equal to it and is not a validity-filtered figure — "
+            "only its turns/prefix_misses columns carry case logic. #2027's triage "
+            "took the pair as row-level versus turn-level totals; the difference it "
+            "measured was the window spelling above, and both of its numbers are "
+            "correct sums over the windows they each named"),
+        "bucket_sum_reprefill_tokens": bucket_sum,
+        "gap_pct": (round(100.0 * abs(bucket_sum - window_total) / window_total, 2)
+                    if window_total else 0.0),
+        "buckets": buckets,
+        "arms": arm_out,
+        "ratio_b_over_d_mean": ratio,
+        "size_controlled": False,
+        "size_control_note": (
+            "no — arm B's mean input_tokens is "
+            f"{arm_out['B_freed_something']['mean_input_tokens']} against arm D's "
+            f"{arm_out['D_ran_noop']['mean_input_tokens']}, so a mean-to-mean ratio "
+            "carries the size difference; the within-session paired comparison is "
+            "owed on #2027 and no ratio is quoted from it"),
+        "unknown_relief_rungs": sorted(unknown_rungs),
+    }
+    out["report"] = _format_attribution(out)
+    return out
+
+
+_WINDOW_SPELLING_NOTE = (
+    "quote this exact since string in any shell predicate: the ts column carries a "
+    "literal 'T' between date and time, so a comparison written "
+    "datetime('now','-7 day') — which sqlite renders with a SPACE — is "
+    "lexicographically WIDER than this window ('T' 0x54 sorts above ' ' 0x20, so "
+    "every row on the boundary day passes), and reaches back to 00:00 of that day. "
+    "That is why #2027 saw '135,848,789 over 4101 rows' beside '112,908,568 over "
+    "3868 rows' and read the pair as two kinds of total: both are "
+    "COALESCE(SUM(reprefill_tokens),0), over two different windows.")
+
+#: The vault extract the #2027 verdict is priced on: every `usage` row of the
+#: 168 h window ending 2026-10-01T16:28:38, with `compaction` reduced to the
+#: fields this module reads. A VAULT path, not a repo path — `~/obsidian/` plus
+#: this — because a unit test reading the vault would be measuring whichever
+#: machine ran it. What the repo carries is the reader below, so the extract is
+#: re-derivable by anyone who has the vault commit.
+REPREFILL_WITNESS = "backlog/data/2026-10-01.2027-reprefill-witness.jsonl"
+REPREFILL_WITNESS_COMMIT = "93005612eeda3fdebd274432f8b47f0740cb42f4"
+REPREFILL_WITNESS_ROWS = 3868
+REPREFILL_WITNESS_TOTAL = 112_908_568
+#: The `since` this extract's rows were cut on, verbatim: the extract is a
+#: window, and #2027's own triage showed how one character of that window's
+#: spelling moves its total by 22,940,221 tokens.
+REPREFILL_WITNESS_SINCE = "2026-09-24T16:28:38"
+REPREFILL_WITNESS_UNTIL = "2026-10-01T16:28:38"
+_WITNESS_COLUMNS = ("ts", "session_id", "model", "input_tokens", "output_tokens",
+                    "reprefill_tokens", "prefix_misses", "compaction")
+
+
+def _encode_extract_value(column: str, value: Any) -> Any:
+    """One extract value as it goes into the `usage` column.
+
+    JSON `null` in the extract is SQL NULL, and that distinction is load-bearing,
+    not cosmetic: a NULL `compaction` is `NO_COMPACTION_RECORD` (arm A), while the
+    four-character string `'null'` parses to a non-mapping and lands in
+    `NO_FREEING_EVIDENCE` instead. Dumping nulls through `json.dumps` moved 1,458
+    rows out of arm A in a trial replay, took 7,195,735 tokens off that arm's mean
+    and shifted the headline ratio from 51.8 to 52.3 — a wrong headline with every
+    Σ still intact, which is the shape of error a total check does not catch.
+    """
+    if value is None:
+        return None
+    if column == "compaction" and not isinstance(value, str):
+        return json.dumps(value, sort_keys=True)
+    return value
+
+
+def replay_usage_extract(extract: Path, *, db_path: Optional[Path] = None) -> Path:
+    """Load a usage-row extract into a `usage` table; return the file holding it.
+
+    The mechanism behind "the numbers are re-derivable from committed bytes":
+    point `DB_PATH` at the result and `reprefill_attribution` answers over the
+    extract exactly as it does over the live database.
+
+        from app import usage_store
+        db = usage_store.replay_usage_extract(
+            Path.home() / "obsidian" / usage_store.REPREFILL_WITNESS, db_path=Path("/tmp/w.db"))
+        usage_store.DB_PATH = db
+        attr = usage_store.reprefill_attribution(
+            since=usage_store.REPREFILL_WITNESS_SINCE, until=usage_store.REPREFILL_WITNESS_UNTIL)
+
+    `record_usage` is deliberately NOT used: it takes no `ts`, so a historical row
+    cannot be written through the public writer, and a replay that stamped rows
+    "now" would answer a different window than the one priced. So this inserts
+    directly, onto the schema `_init_schema` builds — the module's own, migrations
+    included, never a hand-copied column list, which is the difference between a
+    replay and a replay that dies on `no such column: exit_plan_mode`.
+
+    A row carrying a key that is not a `usage` column raises rather than dropping
+    silently: an extract that grew a field this reader does not load would
+    otherwise reproduce the tables while quietly not containing the reason.
+    """
+    extract = Path(extract)
+    db_path = Path(db_path) if db_path else extract.with_suffix(".replay.sqlite")
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row      # _init_schema reads PRAGMA rows by name
+    try:
+        _init_schema(conn)
+        rows, inserted = [], 0
+        for lineno, line in enumerate(extract.read_text(encoding="utf-8").splitlines(), 1):
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            unknown = sorted(k for k in row if k not in _WITNESS_COLUMNS)
+            if unknown:
+                raise ValueError(
+                    f"{extract.name}:{lineno}: extract row carries column(s) "
+                    f"{unknown} that `usage` does not have; refusing to drop them")
+            rows.append(row)
+            cols = [c for c in _WITNESS_COLUMNS if c in row]
+            conn.execute(
+                f"INSERT INTO usage ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                [_encode_extract_value(c, row[c]) for c in cols])
+            inserted += 1
+        conn.commit()
+    finally:
+        conn.close()
+    if not inserted:
+        raise ValueError(f"{extract}: no rows — an empty extract proves nothing")
+    return db_path
+
+
+def _format_attribution(attr: Mapping[str, Any]) -> str:
+    """The printable table `reprefill_attribution` collects. One line per bucket,
+    `n=` on every line, `n=0` for an empty rung, `mean=-` where there is no
+    measured row to average."""
+    lines = [
+        (f"reprefill attribution — ABSOLUTE window: {attr['window_since']} <= ts "
+         f"< {attr['window_until']} — a published figure, it does not move with "
+         f"the clock — rows={attr['rows']}"
+         if attr["window_absolute"] else
+         f"reprefill attribution — window: last {attr['window_hours']} h "
+         f"(since {attr['since']}), rows={attr['rows']}"),
+        f"named total: {attr['window_total_named']}"
+        f" = {attr['window_total_reprefill_tokens']:,}",
+        *(["NOT the named total, and here for reconciliation only: "
+           f"{attr['sqlite_spelling_total_named']}"
+           f" = {attr['sqlite_spelling_total_reprefill_tokens']:,}"]
+          if attr["sqlite_spelling_total_reprefill_tokens"] is not None else []),
+        *([f"{attr['prefix_miss_summary_note']}"
+           f" = {attr['prefix_miss_summary_reprefill_tokens']:,}"]
+          if attr["prefix_miss_summary_reprefill_tokens"] is not None else []),
+        (f"Σ over every bucket below = {attr['bucket_sum_reprefill_tokens']:,} "
+         f"(gap to the named total: {attr['gap_pct']}%) — every row in the window "
+         "is attributed to exactly one bucket"),
+        "",
+        "one row per bucket, printed whether or not the window holds a row for it;",
+        "columns after the name: n= rows CREDITED to this bucket, measured= rows",
+        "carrying a reprefill_tokens (a NULL is unmeasured, never 0, so every mean",
+        "is taken over measured= and not over n=), Σ reprefill=, mean= over",
+        "measured=, mean input= over n=, share= of the named total. Relief rows",
+        "also carry fired_= rows whose record names that rung in a freeing pass:",
+        "not additive (a row can name several rungs) and never part of the Σ, so",
+        "n=0 with a fired_>0 says the rung ran but an earlier rung in the same",
+        "pass is nearer the front and owns the row.",
+        "",
+    ]
+    for row in attr["buckets"]:
+        mean = ("-" if row["mean_reprefill_tokens"] is None
+                else f"{row['mean_reprefill_tokens']:,}")
+        min_ = ("-" if row["mean_input_tokens"] is None
+                else f"{row['mean_input_tokens']:,}")
+        line = (f"{row['bucket']:<26} n={row['n']:>6,} "
+                f"measured={row['measured']:>6,} "
+                f"Σ reprefill={row['reprefill_tokens']:>13,} mean={mean:>10} "
+                f"mean input={min_:>9} share={row['share_pct']:>5}%")
+        if row.get("fired_rows") is not None:
+            line += f" fired_={row['fired_rows']:,}"
+        lines.append(line)
+    lines += ["", "arms (measured rows only, both freeing paths in the predicate):"]
+    for arm in ("A_no_record", "B_freed_something", "D_ran_noop"):
+        cell = attr["arms"][arm]
+        lines.append(
+            f"  {arm:<18} n={cell['n']:,} mean input="
+            f"{'-' if cell['mean_input_tokens'] is None else format(cell['mean_input_tokens'], ',')} "
+            f"mean reprefill="
+            f"{'-' if cell['mean_reprefill_tokens'] is None else format(cell['mean_reprefill_tokens'], ',')} "
+            f"Σ reprefill={cell['reprefill_tokens']:,}")
+    lines.append(f"  B/D mean ratio = {attr['ratio_b_over_d_mean']}  "
+                 f"size-controlled: {attr['size_controlled']} "
+                 f"({attr['size_control_note']})")
+    lines += ["", f"  {attr['window_spelling_note']}"]
+    if attr["unknown_relief_rungs"]:
+        lines.append(f"  unknown relief rungs folded into {RELIEF_OTHER}: "
+                     f"{', '.join(attr['unknown_relief_rungs'])}")
+    return "\n".join(lines)
 
 
 def stop_reason_breakdown(hours: float = 24) -> list[dict]:

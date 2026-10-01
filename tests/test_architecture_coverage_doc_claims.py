@@ -1043,6 +1043,115 @@ def test_context_window_delegates_to_the_section_and_says_nothing_unmeasured():
         "control")
 
 
+#: The heading #2027 landed its prefix-break verdict under — inside this existing
+#: doc, not in a new file. A new top-level doc would have had to move
+#: `ARCH_DOC_SURFACE` above, which is the sweep's vacuity guard, and a measurement
+#: write-up is not the place to change what the sweep grades.
+REWRITE_COST_HEADING = "What a rewrite costs, priced per mechanism"
+
+
+def test_the_rewrite_cost_verdict_names_its_break_sites_and_its_command():
+    """Clause 4: the verdict is prose in the doc, and every number in it resolves.
+
+    Four halves, all graded on the one slice `_section` cuts, so nothing here can
+    pass on text the reader never meets:
+
+    * both front-break sites, each with the code it quotes — `app/compaction.py:505`
+      building the compacted conversation with the summary at position 0, and the
+      oldest-first clearing rule that puts microcompaction's break near the front;
+    * the command that reproduces the arm table, as a `sql` fence answering BOTH
+      freeing paths — a predicate reading only `turn_start.*` is what made this
+      item's first draft report 235 turns instead of 360, and it fails silently;
+    * the headline stated as NOT size-controlled, asserted by walking every
+      occurrence of the word rather than by matching one sentence;
+    * the figures quoted from `app/usage_store.py`'s own constants — the window, the
+      row count and the total — so the prose and the module cannot drift apart
+      without one of them going red.
+    """
+    from app import usage_store
+
+    sec = _section(_text("context-window.md"), REWRITE_COST_HEADING)
+    flat = _flat(sec)
+    # The slice is the priced section, not an empty match: the arm table's own
+    # headline ratio is inside it.
+    assert "51.8" in flat, f"the section slice holds no measured ratio:\n{sec[:200]}"
+
+    # (a) the front-break sites, named as sites rather than described.
+    assert "`app/compaction.py:505` is `new_convo: list[dict] = " \
+        "[CS.summary_message(record)]`" in flat, flat[:400]
+    assert "app/harness/microcompact.py:11" in sec, flat[:400]
+    assert "Clearing is oldest-first by design" in flat, (
+        "the microcompact site is cited without the rule that makes it a "
+        "front break, so the citation prices nothing")
+
+    # (b) the reproducing command, with both freeing paths in its arm predicate.
+    fence = re.search(r"```sql\n(.*?)```", sec, re.DOTALL)
+    assert fence, "no sql fence in the section, so the arm table cannot be re-run"
+    sql = fence.group(1)
+    assert "$.turn_start.tokens_freed" in sql and "$.relief_tokens_freed" in sql, (
+        "the printed arm predicate reads only one of the two freeing paths, which "
+        "is the mistake that filed this item with weaker numbers")
+    assert "reprefill_tokens is not null" in sql, sql
+    # Positive control for the assertion above: the single-path spelling this item's
+    # retracted draft used is contained in the block, so the two-path check above is
+    # grading a real extension of that shape and not a pattern nothing matches.
+    assert "when coalesce(json_extract(compaction,'$.turn_start.tokens_freed'),0)>0" \
+        in sql, sql
+    # The window is quoted literally, BOTH bounds, inside the fence itself. Matching
+    # the closing minute against the whole section would not do: the prose names that
+    # minute anyway ("at 2026-10-01T16:28Z"), so a fence carrying only `ts>=` passes
+    # while the command printed above the arm table answers every row from 2026-09-24
+    # on — a strict superset of the 3,868-row / 112,908,568-token window the table
+    # beside it is pinned to, and the discrepancy grows by a day's rows per day. The
+    # bound is the same one `reprefill_attribution` closes its own row scan with.
+    assert f"ts>='{usage_store.REPREFILL_WITNESS_SINCE}'" in sql, sql
+    assert f"ts<'{usage_store.REPREFILL_WITNESS_UNTIL}'" in sql, (
+        "the fence carries no upper bound, so the command above the arm table cannot "
+        "return the table it is printed above on any re-run after the window closes:\n"
+        + sql)
+    # Control: the half-closed spelling is one character from the fenced one, so the
+    # assertion above bites rather than matching a shape nothing else could write.
+    assert f"ts>='{usage_store.REPREFILL_WITNESS_SINCE}'" in sql
+    assert f"ts>='{usage_store.REPREFILL_WITNESS_UNTIL}'" not in sql
+    assert "USAGE_DB" in sec and "app/paths.py" in sec, (
+        "the command names no database to run against")
+
+    # (c) the headline is not presented as size-controlled. The invariant is on the
+    # CLAIM, not on the word: the section also speaks of "the paired size-controlled
+    # ratio" as something owed, which is an honest sentence and must stay.
+    NEGATED = "That 51.8× is not size-controlled, and is stated as such."
+    assert NEGATED in flat, (
+        f"the section never states the headline as {NEGATED!r}:\n{flat[:400]}")
+    assert "size-controlled" in flat, (
+        "the section stopped using the words at all, and an absent claim is not a "
+        "caveat — clause 4 asks for the headline stated with its caveat")
+    affirmative = re.compile(r"\bis\s+size-controlled")
+    assert not affirmative.search(sec), (
+        "the section states the headline ratio as size-controlled: "
+        f"…{sec[affirmative.search(sec).start() - 80:affirmative.search(sec).end() + 40]}…")
+    # Positive control: the same regex fires on the negated sentence with its `not`
+    # removed, so the assertion above is not searching a shape that cannot occur.
+    assert affirmative.search(NEGATED.replace("not ", "")), (
+        "the affirmative pattern matches even the doc's own caveat stripped of its "
+        "'not', so it was never going to catch a re-write")
+
+    # (d) the constants the replay route is driven by are the ones the prose quotes.
+    assert usage_store.REPREFILL_WITNESS in sec, sec[:400]
+    assert f"{usage_store.REPREFILL_WITNESS_ROWS:,} rows" in flat
+    assert f"{usage_store.REPREFILL_WITNESS_TOTAL:,}" in flat
+    assert "REPREFILL_WITNESS_SINCE" in sec and "REPREFILL_WITNESS_UNTIL" in sec, (
+        "the section no longer names the two constants the replay window is cut "
+        "from, so its figures cannot be re-derived")
+    assert usage_store.REPREFILL_WITNESS_UNTIL[:16] in sec, (
+        "the minute the prose says it measured at is no longer the minute the "
+        "replay window closes at, so the command and the published split are two "
+        "different windows")
+    # The bucket the trade is priced at, row and all — the same (n, Σ) pair
+    # `test_the_extract_replays_to_its_own_published_split` re-derives from the
+    # committed witness bytes, kept here as the sentence a reader quotes.
+    assert "| `turn_start:microcompact` | 236 | 68,444,409 |" in sec, flat[:400]
+
+
 # ────────────────────────────────────────────────────────── command spellings
 #
 # The half above proves a doc's *path* resolves. It cannot see whether a doc's
