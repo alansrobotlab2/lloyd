@@ -726,8 +726,18 @@ def test_every_probe_mention_in_the_doc_names_the_probe_file():
         "architecture/workers-jobs.md mentions no probe anywhere, so the loop "
         "below proves nothing — and a doc that lost the co-watcher sentence "
         "altogether is precisely the #1744 regression")
+    # #1981 registered a source whose own name contains the word: the
+    # `frontend-probe-canary` source runs `scripts/automod/frontend_probe_canary.py`,
+    # which measures the gate's FRONTEND probe and has nothing to do with the
+    # service probe. The rule is unchanged in kind — a line that says "probe" names
+    # which probe file it means — with a second file a line may name. A bare
+    # "probe" still fails.
+    named = ("service_probe", "frontend_probe", "frontend-probe-canary")
+    assert any("service_probe" in ln for _, ln in hits), (
+        "no line names workers/service_probe.py any more — the frontend canary's "
+        "lines must not be what keeps this node from being vacuous")
     for n, ln in hits:
-        assert "service_probe" in ln, (
+        assert any(name in ln for name in named), (
             f"architecture/workers-jobs.md:{n} uses the word probe without "
             f"naming the probe file: {ln.strip()!r}")
     flat = " ".join(text.split())

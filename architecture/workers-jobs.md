@@ -26,7 +26,7 @@ the families share more than the members do:
 | § | family | sources | what it is for |
 |---|---|---|---|
 | §3 | **dispatch** | `scheduled-task` | one door onto the autonomy fleet |
-| §4 | **self-mod** | `arch-review`, `backlog-cluster`, `board-steward`, `owed-check`, `autotriage`, `autocode`, `automod-regression`, `autoresearch` | change Lloyd's own code, behind a gate |
+| §4 | **self-mod** | `arch-review`, `backlog-cluster`, `board-steward`, `owed-check`, `autotriage`, `autocode`, `automod-regression`, `autoresearch`, `frontend-probe-canary` | change Lloyd's own code, behind a gate |
 | §5 | **intake** | `youtube-digest`, `deep-research` | turn outside text into vault knowledge |
 | §6 | **mining** | `session-distill`, `bench-mine` | turn Lloyd's own exhaust into staged notes |
 
@@ -37,7 +37,7 @@ the order the pool considers them.
 
 ## 1. The roster
 
-Thirteen sources are registered. Priority is `DEFAULT_PRIORITY` unless config
+Fourteen sources are registered. Priority is `DEFAULT_PRIORITY` unless config
 overrides it — `youtube-digest` is the only real override (45, not the default
 60); `arch-review` and `board-steward` state 62 and 68 in config, though those
 equal their defaults — and **lower runs sooner**.
@@ -57,6 +57,7 @@ equal their defaults — and **lower runs sooner**.
 | `session-distill` | mining | 70 | 1800 s | 1 | direct (primary) | no | — | yes |
 | `automod-regression` | self-mod | 70 | 900 s | 1 | none (subprocess) | no | — | yes |
 | `bench-mine` | mining | 80 | 7200 s | 1 | direct (primary) | no | — | yes |
+| `frontend-probe-canary` | self-mod | 80 | 3600 s poll, one run a day | 1 | none (subprocess) | no | — | yes |
 
 **KV-gated** is `LONG_LIVED = True`: tens of iterations each re-submitting a
 100–200k context, so the pool will not *claim* one while the primary's
@@ -598,6 +599,31 @@ what a safety net that has not had to fire looks like.
   promotion settles the LKG *is* the promoted commit.
 - It is the source that taught the event-loop rule, with two 900-second eval
   arms and a `git worktree add` between them.
+
+### `frontend-probe-canary` — is the gate's frontend check still catching broken builds?
+
+**Wakes** on the 3600 s poll and runs at most once per `min_interval_seconds`
+(86400), held by its own `last_enqueued` watermark so a restart or a finished
+run cannot let a second one in. `execute` spawns
+`python -m scripts.automod.frontend_probe_canary --seeds 12` as a subprocess off
+the event loop, with no `env=`: the child inherits the pool's environment, which
+sets no `LLOYD_AUTOMOD_STATE`, so the artifact lands at
+`~/.local/state/lloyd-automod/frontend_probe_canary/latest.json` — the file
+#1601's owed entries read, which until #1981 nothing but a hand run could write
+(every test redirects the state dir).
+
+- **The source is only the schedule.** Seeds, the 90% bar and the artifact are
+  the script's; it is not a gate, and the check it measures stays observe-only.
+- **`--seeds 12` is the whole must-detect table.** The script's default floor of
+  10 would let a seed drop out of `n` on top of the one miss the bar allows.
+- **The exit code is the verdict.** 0 is a success carrying `detected`,
+  `seeds_measured`, `rate`, `rate_counting_blind_as_misses` and `run_at` (in the
+  result and in the run's `meta`). 1 is a returned failure carrying the same
+  measured numbers. 2, a crash, a timeout, or an exit 0 with no artifact from
+  this run is a returned failure that says "not measured" and carries no rate —
+  `latest.json` may still hold an older run.
+- No measured state yet: the first run happens after the backend restart that
+  loads the source.
 
 ### `autoresearch` — the gate-less week, and why it runs again now
 

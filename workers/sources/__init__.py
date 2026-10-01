@@ -66,6 +66,7 @@ from workers.sources import backlog_cluster as _backlog_cluster  # noqa: E402,F4
 from workers.sources import arch_review as _arch_review  # noqa: E402,F401
 from workers.sources import board_steward as _board_steward  # noqa: E402,F401
 from workers.sources import owed_check as _owed_check  # noqa: E402,F401
+from workers.sources import frontend_probe_canary as _frontend_probe_canary  # noqa: E402,F401
 
 register(_scheduled_task)
 register(_autoresearch)
@@ -80,3 +81,4 @@ register(_backlog_cluster)
 register(_arch_review)
 register(_board_steward)
 register(_owed_check)
+register(_frontend_probe_canary)

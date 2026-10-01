@@ -2040,6 +2040,20 @@ workers:
       max_pairs_judged: 200
       # Write `parent:` frontmatter from the prose first line, once.
       persist_parents: true
+    # The frontend-probe canary's schedule (#1981): once a day it runs
+    # `python -m scripts.automod.frontend_probe_canary --seeds 12` against the
+    # default automod state dir, so frontend_probe_canary/latest.json exists
+    # for the owed-check job to quote. No session and no `inner_voice` key:
+    # seeded builds and a headless probe. A run that did not measure, or
+    # measured below the bar, is recorded failed. The pool polls hourly; the
+    # source's own watermark holds it to one run per `min_interval_seconds`.
+    frontend-probe-canary:
+      enabled: true
+      interval_seconds: 3600
+      min_interval_seconds: 86400
+      max_inflight: 1
+      max_duration_seconds: 900
+      timeout_seconds: 600
     # One architecture review unit per real session: either a whole
     # architecture/*.md doc, or one functional group of autonomy-jobs.md /
     # workers-jobs.md (the `groups` list below, kept by hand). Oldest

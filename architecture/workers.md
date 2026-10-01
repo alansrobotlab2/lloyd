@@ -518,6 +518,7 @@ what it reads, what it writes, and the measured state of it.
 | `board-steward` | 68 | one board pass: proposed moves and the next item for `autocode`, recorded beside the state machine's | session (primary), IV off |
 | `owed-check` | 72 | one item's `owed` list settled: evidence, a recheck date, a ruling, a follow-up item, a reopen or a close (`architecture/automod.md` §3.2k) | session (primary), IV off |
 | `automod-regression` | 70 | paired A/B eval after a promotion | none (subprocess on a thread) |
+| `frontend-probe-canary` | 80 | once a day, `python -m scripts.automod.frontend_probe_canary --seeds 12` against the default state dir; a run that did not measure or measured below the bar is recorded failed, and the measured fields ride the run's `meta` (#1981) | none (subprocess) |
 | `autoresearch` | 60 | one prompt-optimisation round | its own |
 | `deep-research` | 70 | one registry topic, through the deep-dive-research skill | session, IV off |
 | `youtube-digest` | 45 | one tracked-channel video: transcript → vault note → Lloyd eval → backlog draft | session, IV off |
