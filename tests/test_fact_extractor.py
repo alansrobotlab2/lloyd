@@ -1939,3 +1939,107 @@ def test_the_nightly_summary_prints_the_typed_pairs_the_extractor_skipped(
     assert all(k in line for k in ("files_processed=", "facts=", "failed=", "truncated=")), line
     assert "mentions" not in line
     kg_store.reset()
+
+
+# ── #1999: a refused document primary names no filing entity ─────────────────
+#
+# `extract_from_document` returned `primary_entity or "general"` and the nightly
+# fan-out did `result.get("entity") or "general"`, so every fact of a document
+# whose primary the identity gate refused, and that named no entity of its own,
+# was filed under an entity called `general`: 365 facts on 2026-10-01, about
+# `chat_list_sessions`, about a note's file path, about anything but a thing
+# named general, and reachable by no query.
+
+REFUSED_PRIMARY = "Quillfeather Throughput Notes"      # undeclared and untyped
+
+
+def _refused_primary_answer():
+    return _answer({
+        "entity": REFUSED_PRIMARY, "category": "state",
+        "facts": [_fact("the tool is deferred until ToolSearch is called"),
+                  _fact("the canonical path of this note is under knowledge/")]})
+
+
+def test_a_refused_document_primary_names_no_filing_entity(extractor, sidecar, monkeypatch):
+    e = extractor
+    monkeypatch.setattr(e, "_call_llm", _refused_primary_answer())
+
+    out = e.extract_from_document(Path("knowledge/software/q.md"), "two facts\n")
+
+    assert out["entity"] == "", out["entity"]
+    assert out["entity"] != "general"
+    # The facts are still returned (their fate is the caller's), and none of
+    # them was given a subject it did not name.
+    assert len(out["facts"]) == 2
+    assert [f.get("entity") for f in out["facts"]] == [None, None]
+
+
+def test_a_refused_document_primary_is_recorded_in_the_candidates_sidecar(extractor, sidecar,
+                                                                          monkeypatch):
+    e = extractor
+    monkeypatch.setattr(e, "_call_llm", _refused_primary_answer())
+
+    e.extract_from_document(Path("knowledge/software/q.md"), "two facts\n")
+
+    cands = _candidates(sidecar)
+    assert [c["name"] for c in cands] == [REFUSED_PRIMARY], cands
+    assert kg_store.store().entities.lookup(REFUSED_PRIMARY) is None
+
+
+def test_a_junk_document_primary_is_recorded_too(extractor, sidecar, monkeypatch):
+    """`junk` writes no sidecar line of its own inside the gate, so before this
+    a refused junk primary left no trace at all. The fan-out has no name to
+    file under either way."""
+    e = extractor
+    assert en.looks_like_junk_entity("1051") is True
+    monkeypatch.setattr(e, "_call_llm", _answer({
+        "entity": "1051", "entity_type": "task", "category": "state",
+        "facts": [_fact("a fact with no subject of its own")]}))
+
+    out = e.extract_from_document(Path("knowledge/software/q.md"), "one fact\n")
+
+    assert out["entity"] == ""
+    assert [c["name"] for c in _candidates(sidecar)] == ["1051"]
+
+
+def test_a_refused_primary_writes_no_fact_file_under_general(tmp_path, monkeypatch, sidecar):
+    """End to end through the nightly fan-out: the extraction above, handed to
+    `_process_single_file`, writes nothing under `facts/general/` and nothing
+    else either, and says how many facts it held back."""
+    ne = _load("nightly_extraction", "scripts/memory/next-gen-memory/nightly_extraction.py")
+    kg_store.configure(tmp_path / "kg.sqlite")
+    try:
+        x = ne.NightlyExtraction()
+        x.extractor.facts_dir = tmp_path / "facts"
+        x.extractor.facts_dir.mkdir()
+        monkeypatch.setattr(x.extractor, "_call_llm", _refused_primary_answer())
+        monkeypatch.setattr(ne, "VAULT", tmp_path)
+        doc = tmp_path / "doc.md"
+        doc.write_text("two facts\n")
+
+        processed, facts, ok, *_ = x._process_single_file(doc, True, 1, 1)
+
+        assert (processed, facts, ok) == (1, 0, True)
+        assert not (x.extractor.facts_dir / "general").exists()
+        assert list(x.extractor.facts_dir.rglob("*.md")) == []
+        assert x.held_back_facts == 2
+    finally:
+        kg_store.reset()
+
+
+def test_a_fact_whose_own_entity_is_junk_is_held_back_not_handed_to_the_primary(
+        extractor, sidecar, monkeypatch):
+    """The second route into the wrong subject: a per-fact `junk` verdict left
+    the fact with an empty entity, which the fan-out read as "use the primary"."""
+    e = extractor
+    monkeypatch.setattr(e, "_call_llm", _answer({
+        "entity": "Lloyd", "entity_type": "system", "category": "state",
+        "facts": [_fact("refers to the item by number only", entity="1051",
+                        entity_type="task"),
+                  _fact("runs on the primary slot")]}))
+
+    out = e.extract_from_document(Path("knowledge/software/q.md"), "two facts\n")
+
+    assert out["entity"] == "Lloyd"
+    assert [f["fact"] for f in out["facts"]] == ["runs on the primary slot"]
+    assert out["held_back"] == 1

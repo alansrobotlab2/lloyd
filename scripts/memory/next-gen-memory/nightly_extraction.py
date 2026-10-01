@@ -99,6 +99,11 @@ def _TODAY_STR() -> str:
     return datetime.now().strftime("%Y-%m-%d")
 
 
+# The name the doc-level fallback used to file under (#1999). It is a category
+# vocabulary term, never an entity; a fact arriving under it is held back.
+UNFILEABLE_ENTITY = "general"
+
+
 class NightlyExtraction:
     """Nightly deep extraction with primary model."""
 
@@ -117,6 +122,7 @@ class NightlyExtraction:
         # is not finished.
         self.last_files_processed = 0
         self.last_failed_files = 0
+        self.held_back_facts = 0
         self.last_truncated_files: list = []
     
     def _get_entity_lock(self, entity: str) -> threading.Lock:
@@ -222,6 +228,7 @@ class NightlyExtraction:
             log_lines.append("\n[Step 1] Full Vault Fact Extraction")
             self.last_files_processed = 0
             self.last_failed_files = 0
+            self.held_back_facts = 0
             self.last_truncated_files = []
             facts_extracted = self._extract_all_facts(full_mode=full_mode, workers=workers, limit=limit)
             files_processed = getattr(self, "last_files_processed", 0)
@@ -407,8 +414,15 @@ class NightlyExtraction:
         chars_covered = int(result.get("chars_covered", chars_total) or 0)
 
         try:
+            # Facts the extractor itself refused (a `candidate` or `junk`
+            # subject), plus the ones held back below.
+            held_back = int(result.get("held_back") or 0)
             if result.get("facts"):
-                default_entity = result.get("entity") or "general"
+                # No `or "general"` (#1999): `general` is a category, not an
+                # entity, and as the fallback name it collected 365 facts about
+                # other things where no query reaches them. A document whose
+                # primary the identity gate refused has no fallback entity.
+                default_entity = result.get("entity") or ""
                 default_category = result.get("category") or "general"
 
                 # Fan out: file each fact under its OWN entity/category (the
@@ -416,8 +430,13 @@ class NightlyExtraction:
                 # multiple entity files instead of collapsing onto one primary.
                 groups = {}
                 for f in result["facts"]:
-                    key = (f.get("entity") or default_entity,
-                           f.get("category") or default_category)
+                    entity = f.get("entity") or default_entity
+                    if not entity or entity == UNFILEABLE_ENTITY:
+                        # No subject of its own and no primary to stand in:
+                        # held back and counted, never filed under a made-up one.
+                        held_back += 1
+                        continue
+                    key = (entity, f.get("category") or default_category)
                     groups.setdefault(key, []).append(f)
 
                 for (entity, category), gfacts in groups.items():
@@ -431,11 +450,23 @@ class NightlyExtraction:
 
                 processed = 1
                 print(f"[{index}/{total}] Processing: {doc_path} "
-                      f"→ {len(groups)} entities, {facts_count} facts")
+                      f"→ {len(groups)} entities, {facts_count} facts"
+                      + (f", {held_back} held back (no usable entity)" if held_back else ""))
             else:
                 # A genuinely factless document IS extracted; hashing it is
                 # correct and stops it being re-read every night.
                 processed = 1
+                if held_back:
+                    print(f"[{index}/{total}] Processing: {doc_path} "
+                          f"→ 0 entities, 0 facts, {held_back} held back (no usable entity)")
+            if held_back:
+                # Files are processed on worker threads; `locks_lock` is the
+                # instance's one lock for shared bookkeeping.
+                lock = getattr(self, "locks_lock", None)
+                if lock is None:
+                    lock = self.locks_lock = threading.Lock()
+                with lock:
+                    self.held_back_facts = getattr(self, "held_back_facts", 0) + held_back
         except Exception as e:
             print(f"Error writing facts for {md_file}: {e}")
             return 0, 0, False, "", 0, 0
@@ -712,7 +743,8 @@ class NightlyExtraction:
         ]
         print(f"Processed {processed} documents, extracted {total_facts} facts, "
               f"{failed} failed, {len(truncated)} truncated (tail not read: "
-              f"{self.last_truncated_files})")
+              f"{self.last_truncated_files}), "
+              f"{getattr(self, 'held_back_facts', 0)} facts held back (no usable entity)")
         self.last_failed_files = failed
 
         # Final checkpoint for any remaining processed files

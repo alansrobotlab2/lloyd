@@ -90,3 +90,72 @@ def test_the_pre_clean_backup_copies_the_edge_graph_and_not_the_alias_export(tmp
     assert (dest / "_relationships.json").read_text(encoding="utf-8") == '{"edges": []}'
     assert not (dest / "entity-aliases.json").exists()
     assert sorted(p.name for p in pipeline.rglob("entity-aliases.json")) == []
+
+
+# ── #1999: the fan-out has no made-up entity to fall back to ─────────────────
+
+class _FakeExtractor:
+    def __init__(self, result):
+        self.result, self.written = result, []
+
+    def extract_from_document(self, *a, **k):
+        return self.result
+
+    def write_fact_file(self, entity, category, data, **kw):
+        self.written.append((entity, category, [f["fact"] for f in data["facts"]]))
+
+
+def _fan_out(tmp_path, monkeypatch, result):
+    mod = _load_nightly()
+    monkeypatch.setattr(mod, "VAULT", tmp_path)
+    x = _extractor(mod)
+    x.extractor = _FakeExtractor(result)
+    doc = tmp_path / "doc.md"
+    doc.write_text("some content", encoding="utf-8")
+    return x, x._process_single_file(doc, True, 1, 1)
+
+
+def test_a_fact_with_no_usable_entity_is_held_back_and_counted_not_filed(tmp_path, monkeypatch,
+                                                                         capsys):
+    """The document's primary was refused (the result names no entity), one
+    fact names its own subject and two name none. The one is filed; the two
+    are held back and the run's stdout line says so. Nothing is filed under
+    `general`, which is where both used to go."""
+    x, out = _fan_out(tmp_path, monkeypatch, {
+        "entity": "", "category": "state",
+        "facts": [{"fact": "a", "entity": "Lloyd", "category": "state"},
+                  {"fact": "b", "entity": "", "category": "state"},
+                  {"fact": "c", "category": "state"}]})
+
+    assert x.extractor.written == [("Lloyd", "state", ["a"])]
+    assert out[:3] == (1, 1, True)                    # the document is still done
+    assert x.held_back_facts == 2
+    line = [ln for ln in capsys.readouterr().out.splitlines() if "Processing:" in ln]
+    assert len(line) == 1 and "1 entities, 1 facts, 2 held back (no usable entity)" in line[0], line
+
+
+def test_the_literal_general_is_never_a_filing_entity(tmp_path, monkeypatch, capsys):
+    """Neither as the result's primary (an older extractor build, or a model
+    that answers the word) nor on a fact: `general` is a category term."""
+    x, out = _fan_out(tmp_path, monkeypatch, {
+        "entity": "general", "category": "general",
+        "facts": [{"fact": "a"}, {"fact": "b", "entity": "general"}]})
+
+    assert x.extractor.written == []
+    assert out[:3] == (1, 0, True)
+    assert x.held_back_facts == 2
+    assert "2 held back" in capsys.readouterr().out
+
+
+def test_a_fact_without_its_own_entity_still_files_under_a_valid_primary(tmp_path, monkeypatch,
+                                                                         capsys):
+    """What the fallback was for is kept: a real primary stands in for a fact
+    that names no entity, and nothing is counted as held back but what the
+    extractor itself refused."""
+    x, out = _fan_out(tmp_path, monkeypatch, {
+        "entity": "Lloyd", "category": "state", "held_back": 1,
+        "facts": [{"fact": "a"}, {"fact": "b", "entity": "vLLM", "category": "usage"}]})
+
+    assert sorted(x.extractor.written) == [("Lloyd", "state", ["a"]), ("vLLM", "usage", ["b"])]
+    assert x.held_back_facts == 1
+    assert "1 held back" in capsys.readouterr().out

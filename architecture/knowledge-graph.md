@@ -321,6 +321,20 @@ is idempotent, so the nightly run installs them without churning `created_at`.
 weekly human review. Refusing to mint is easy and quietly stops remembering
 things; the sidecar is the pressure valve that keeps the gate honest.
 
+**A refused subject has no fallback entity (#1999).** The extractor used to
+return `primary_entity or "general"` and the nightly fan-out repeated the
+`or "general"`, so a document whose primary the gate refused filed every fact
+without an entity of its own under an entity named `general`: 365 facts by
+2026-10-01, none about anything called general, reachable by no query.
+`general` is a category term. Now a refused primary goes to the sidecar (a
+`junk` one too, which the gate itself does not record), the result's `entity`
+is `""`, a fact whose own entity is `junk` is dropped in the extractor as a
+`candidate` one already was, and the fan-out holds back any fact left with no
+entity or with the literal `general`, counting it on the document's stdout
+line and in the run summary (`N facts held back`). A fact that names no entity
+still files under a primary the gate accepted. The 365 already filed are
+untouched; their disposition is a data decision.
+
 **Reads opt out, writes cannot.** `enforce=False` is passed only where a name
 is being resolved to pull an entity's existing facts into the prompt
 (`get_existing_facts`); refusing there would withhold context and degrade

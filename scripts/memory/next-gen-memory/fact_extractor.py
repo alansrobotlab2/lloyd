@@ -297,6 +297,8 @@ class FactExtractor:
         all_facts = []
         seen_fact_text = set()
         gated_out = 0
+        junk_out = 0
+        primary_refused = ""
         # Starts at the top of what this pass was given, not at the end: the
         # figure has to be earned by a chunk that reached the model, or a
         # document that raised before the first call would report itself read.
@@ -318,6 +320,18 @@ class FactExtractor:
             if primary_entity is None and parsed.get("entity"):
                 primary_entity, _v = self._gate_entity(parsed["entity"],
                                                        declared_type=doc_type)
+                if not primary_entity:
+                    # The document's own subject was refused (#1999). The name
+                    # goes to the sidecar, by the route a refused per-fact
+                    # subject takes, and the result names no filing entity:
+                    # it used to name the literal `general`, and every fact
+                    # of the document without an entity of its own was filed
+                    # there, against a subject it is not about.
+                    primary_refused = str(parsed["entity"]).strip()
+                    _record_candidate(primary_refused,
+                                      reason=f"document primary refused ({_v})",
+                                      source_doc=str(doc_path),
+                                      declared_type=doc_type)
                 # A category is a vocabulary term, not an entity. Running it
                 # through _sanitize_entity registered every distinct spelling
                 # as a canonical entity in the alias table.
@@ -345,6 +359,14 @@ class FactExtractor:
                         gated_out += 1
                         f.pop("entity_type", None)
                         continue
+                    if not entity:
+                        # `junk`: the subject the model named is not a name at
+                        # all (a leaked filename, a run id). The fact used to
+                        # go on with an empty entity, and the fan-out filed it
+                        # under the document's primary: the wrong thing (#1999).
+                        junk_out += 1
+                        f.pop("entity_type", None)
+                        continue
                     f["entity"] = entity
                 f.pop("entity_type", None)
                 f["category"] = normalize_category(f.get("category"))
@@ -354,8 +376,17 @@ class FactExtractor:
             print(f"  ⤫ {gated_out} fact(s) held back: entity not declared and "
                   f"carried no valid type → {ENTITY_CANDIDATES_PATH}")
 
+        if junk_out:
+            print(f"  ⤫ {junk_out} fact(s) held back: the entity named was refused as junk")
+        if primary_refused:
+            print(f"  ⤫ document primary {primary_refused!r} refused → {ENTITY_CANDIDATES_PATH}; "
+                  f"facts naming no entity of their own are held back, not filed")
+
         return {
-            "entity": primary_entity or "general",
+            # "" when the document's primary was refused or never named: there
+            # is no fallback entity, and the caller holds back what has none.
+            "entity": primary_entity or "",
+            "held_back": gated_out + junk_out,
             "category": primary_category or "general",
             "facts": all_facts,
             "chars_covered": chars_covered,
@@ -448,9 +479,10 @@ class FactExtractor:
             # A tracker citation (#743), checked before the junk predicate and
             # before the gate, and answered `candidate` rather than `junk` for
             # two reasons. `extract_from_document` drops a fact whose verdict is
-            # `candidate`; on `junk` it keeps the fact with an empty entity, and
-            # `nightly_extraction.py:340` turns an empty entity into the
-            # document's primary, which files the fact against the wrong thing.
+            # `candidate`, and since #1999 one whose verdict is `junk` as well
+            # (it used to keep the fact with an empty entity, which the nightly
+            # fan-out turned into the document's primary, filing the fact
+            # against the wrong thing). Only `candidate` writes a sidecar line.
             # And the sidecar line is the record that this name was seen — a
             # guard that drops a whole class of names in silence stops
             # remembering things and nobody notices.
