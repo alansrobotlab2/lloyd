@@ -304,8 +304,8 @@ def measure_floor(directory: Path, out_path: Path) -> dict[str, Any]:
         "generated_by": "eval/compare_tool_choice.py --measure-floor",
         "note": (
             "Largest per-metric movement two runs of the SAME unmodified tree "
-            "produced, from labelled a/b run pairs under eval/baselines/"
-            "tool-choice with identical recorded config. Backlog #691 measured "
+            f"produced, from labelled a/b run pairs in {directory} "
+            "with identical recorded config. Backlog #691 measured "
             "the same pair on 2026-09-09 82 s apart (correct_rate +0.050, "
             "http_tool_first_rate +0.071); the 875noise pair on 2026-09-13 "
             "reproduced both magnitudes at the opposite sign. These are floors, "

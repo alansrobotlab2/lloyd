@@ -547,6 +547,23 @@ def test_a_refreshed_floor_record_carries_the_prior_provenance(tmp_path, capsys)
     assert "superseded: prior record measured_at" in capsys.readouterr().out
 
 
+def test_the_written_note_names_the_directory_the_pairs_were_read_from(tmp_path):
+    """#1986: the note said the pairs sit "under eval/baselines/tool-choice", a path
+    that has not existed since the data-home move — `BASELINE_DIR` is
+    `~/lloyd-data/eval/baselines/tool-choice` — and every refresh copied the
+    sentence forward. The note now states the directory it actually read."""
+    runs = _pair_dir(tmp_path)
+    floor = tmp_path / "floor.yaml"
+    assert C.main(["--measure-floor", "--baselines", str(runs),
+                   "--floor-record", str(floor)]) == 0
+    note = yaml.safe_load(floor.read_text(encoding="utf-8"))["note"]
+    assert str(runs) in note, note
+    assert "under eval/baselines" not in note, note
+    # And the production default is the data root's directory, not a repo path.
+    from app.paths import EVAL_BASELINES_DIR
+    assert C.BASELINE_DIR == EVAL_BASELINES_DIR / "tool-choice"
+
+
 def test_a_first_floor_record_carries_no_superseded_content(tmp_path):
     """With no prior at the target path the rewrite is clean, not empty-headed."""
     runs = _pair_dir(tmp_path)
@@ -577,22 +594,59 @@ def test_measurement_doc_names_the_stems_that_refill_the_record():
     assert "--label noise-a" in rung and "--label noise-b" in rung
 
 
+#: The record #767ff403 committed, the only one the repo has ever held.
+RECORD_2026_09_13 = "2026-09-13T22:07:28+00:00"
+
+
 def test_the_committed_floor_record_is_valid_and_nonempty():
     """The record in the repo is what the gate's runs decide against.
 
     If it were missing, every floor would silently collapse to binomial-only
     and the reader would only learn that from a line in the output — so the
-    file's presence and its two #691 numbers are pinned here.
+    file's presence is pinned here, in whichever of its two states it is in.
+
+    Until someone refills it (#1986: two back-to-back runs under `--label
+    noise-a` / `--label noise-b`, then `--measure-floor`) it is the 2026-09-13
+    record and carries #691's two numbers. A refilled record is recognised by
+    its `superseded` block and is held to what a real refresh writes: a pair
+    sharing one stem, a non-empty spread, each metric's observed spread the
+    largest any pair measured, the 2026-09-13 record kept as provenance, and a
+    note that names the directory it read. The numbers themselves are whatever
+    was measured — pinning 0.05 / 0.071 there would make a refresh a red test.
     """
     import pathlib
+    import re
 
     p = pathlib.Path(__file__).resolve().parent.parent / "eval" / "noise_floor_tool_choice.yaml"
-    assert p.exists(), f"{p} missing — force-add it; *.json/yaml is gitignored"
+    assert p.exists(), f"{p} missing"
     rec = C.load_floor_record(p)
     obs = C.observed_spreads(rec)
-    assert obs["correct_rate"] == pytest.approx(0.05)
-    assert obs["http_tool_first_rate"] == pytest.approx(0.071)
     assert rec["binomial_sigmas"] == C.BINOMIAL_SIGMAS
+    assert rec["pairs"] and obs, "an emptied record collapses every floor to binomial-only"
+    if "superseded" not in rec:
+        assert rec["measured_at"] == RECORD_2026_09_13
+        assert obs["correct_rate"] == pytest.approx(0.05)
+        assert obs["http_tool_first_rate"] == pytest.approx(0.071)
+        return
+
+    assert rec["superseded"]["measured_at"] == RECORD_2026_09_13
+    assert [q["a"] for q in rec["superseded"]["pairs"]] == [
+        "875noise-a-20260913-135949.json", "noise-a-20260911-205315.json"]
+    assert rec["measured_at"] > RECORD_2026_09_13
+    stamp = r"-(\d{8}-\d{6})\.json$"
+    for pair in rec["pairs"]:
+        a, b = re.sub(stamp, "", pair["a"]), re.sub(stamp, "", pair["b"])
+        assert a.endswith("-a") and b.endswith("-b") and a[:-2] == b[:-2], pair
+        assert pair["spread"], pair
+    for metric, spread in obs.items():
+        measured = max(q["spread"].get(metric, 0.0) for q in rec["pairs"])
+        assert spread == pytest.approx(measured), metric
+        # What the comparison decides against is never below either term.
+        n = rec["pairs"][0]["n_queries"]
+        floor = C.noise_floor(metric, 0.5, 0.5, n, obs)[0]
+        assert floor >= spread and floor >= C.noise_floor(metric, 0.5, 0.5, n, {})[0], metric
+    assert "under eval/baselines" not in rec["note"]
+    assert "lloyd-data/eval/baselines/tool-choice" in rec["note"], rec["note"]
 
 
 # ── the CLI contract that already existed ────────────────────────────────────
