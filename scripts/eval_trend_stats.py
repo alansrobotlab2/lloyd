@@ -143,6 +143,13 @@ CORPUS_KEYS = ("facts", "edges_active", "entities")
 #: different name would read as a legacy artifact forever, silently.
 GOLD_LABELS_KEY = "labels_sha256"
 
+#: Key of the query-text witness (#1852), written by `eval/run_eval.py` as
+#: `QUESTIONS_KEY`; same no-shared-import contract as the key above. The stamp is the
+#: summary; the evidence this tool actually compares is each record's own `query`,
+#: which every artifact on disk already carries, so the affected ids are derived from
+#: the artifacts and no list of exempt ids exists anywhere.
+QUESTIONS_KEY = "questions_sha256"
+
 #: The five scored rates whose denominator #1663 re-defined on 2026-09-28, each keyed to
 #: the leg whose gold-bearing subset that rate now divides over. `eval/run_eval.py:911`
 #: (`GOLD_BEARING_LEGS`) is the same map at write time; it is restated here rather than
@@ -228,6 +235,11 @@ class Night:
     #: the first is "this artifact says nothing about gold", the second is "no query
     #: carries gold", and only the second is a measurement.
     gold_ids: dict[str, set[str]] | None = None
+    #: query id -> the question text that record was asked (#1852). Only ids whose
+    #: record carried a string `query`; an id absent here says nothing about its text.
+    questions: dict[str, str] = field(default_factory=dict)
+    #: The run's own `questions_sha256` stamp, or None for an artifact predating it.
+    questions_sha256: str | None = None
 
     @property
     def ids(self) -> list[str]:
@@ -268,6 +280,7 @@ def load_night(path: Path) -> Night:
     #: gold that decided each rate's denominator under #1663 is no longer reachable,
     #: and a trend tool that cannot see it cannot see the re-base at all (#1822).
     gold_ids: dict[str, set[str]] | None = None
+    questions: dict[str, str] = {}
     for rec in records:
         rid = rec.get("id")
         if rid is None:
@@ -278,6 +291,8 @@ def load_night(path: Path) -> Night:
         if not isinstance(scoring, dict):
             raise ValueError(f"{path.name}: record {rid!r} has no scoring block")
         scores[rid] = scoring
+        if isinstance(rec.get("query"), str):
+            questions[rid] = rec["query"]
         expected = rec.get("expected")
         if isinstance(expected, dict):
             if gold_ids is None:
@@ -294,7 +309,9 @@ def load_night(path: Path) -> Night:
     return Night(label=label, path=Path(path), ran_at=ran_at, corpus=corpus,
                  scores=scores,
                  labels_sha256=gold if isinstance(gold, str) and gold else None,
-                 gold_ids=gold_ids)
+                 gold_ids=gold_ids, questions=questions,
+                 questions_sha256=(stamp if isinstance(stamp := doc.get(QUESTIONS_KEY), str)
+                                   and stamp else None))
 
 
 def load_window(baselines_dir: Path, since: str | None = None,
@@ -463,6 +480,13 @@ class Transition:
     #: the pre-re-base nights stay in the published window annotated rather than
     #: dropped, which is the opposite of what `incomparable` above does.
     definition_break: str | None = None
+    #: The query ids whose QUESTION TEXT differs between the two nights while the id
+    #: set is unchanged (#1852), as a printed sentence, or None. Like
+    #: `definition_break` it is an annotation and never a refusal — the pair joins,
+    #: the statistics print — but unlike it, it bars `admissible`: a paired test
+    #: across a re-worded question scores the edit, so no rejection on such a pair
+    #: can be credited to the system.
+    question_break: str | None = None
 
     @property
     def auditable(self) -> bool:
@@ -542,7 +566,8 @@ class Transition:
         verdict a reader was about to over-read.
         """
         return (bool(self.rejected) and self.drift_moved is False
-                and self.doc_drift_moved is False)
+                and self.doc_drift_moved is False
+                and self.question_break is None)
 
 
 def _gold_moved(prev: Night, cur: Night, ids: list[str]) -> str | None:
@@ -607,6 +632,45 @@ def definition_break(prev: Night, cur: Night) -> str | None:
             "different subset (#1663 denominator re-base, annotated not dropped)")
 
 
+def question_break(prev: Night, cur: Night) -> str | None:
+    """Query text that moved under an unchanged query-id set (#1852), or None.
+
+    The gold corpus is reserved by prose (`eval/counterfactual.py`), which nothing
+    enforces, and every other witness misses a re-worded question: the id is
+    unchanged so the join is silent, `labels_sha256` hashes the gold and not the
+    question, and the corpus block counts facts. The evidence is each record's own
+    `query`, compared id by id.
+
+    Silent in every other shape, so a pair prints as it did before this existed:
+    differing id sets (the join already refuses those, louder); an id whose record
+    carries no text on either side — a missing witness is not evidence that anything
+    moved (the #1637 rule), so a legacy artifact annotates nothing; and equal texts.
+    When the per-record text cannot name the ids but both runs stamped
+    `questions_sha256` and the stamps differ, the line says so without ids rather
+    than staying quiet.
+    """
+    if sorted(prev.scores) != sorted(cur.scores):
+        return None
+    moved = sorted(i for i in prev.questions
+                   if i in cur.questions and prev.questions[i] != cur.questions[i])
+    if moved:
+        return (f"query text moved under an unchanged query-id set: {', '.join(moved)} "
+                f"({len(moved)} of {len(prev.scores)})")
+    if (prev.questions_sha256 and cur.questions_sha256
+            and prev.questions_sha256 != cur.questions_sha256
+            and set(prev.questions) == set(cur.questions)):
+        return ("query text moved under an unchanged query-id set: ids not derivable, "
+                f"{QUESTIONS_KEY}={prev.questions_sha256} in {prev.label}, "
+                f"{cur.questions_sha256} in {cur.label}")
+    return None
+
+
+def question_witness(prev: Night, cur: Night) -> int:
+    """How many joined ids carry question text on BOTH sides — what the check above
+    could actually compare. 0 means it was blind on this pair, not that it was clean."""
+    return sum(1 for i in prev.questions if i in cur.questions)
+
+
 def audit_transition(prev: Night, cur: Night, reps: int = BOOT_REPS,
                      seed: int = SEED) -> Transition:
     try:
@@ -637,7 +701,8 @@ def audit_transition(prev: Night, cur: Night, reps: int = BOOT_REPS,
             reps=reps, seed=seed)
     return Transition(prev=prev, cur=cur, n=len(ids), legs=legs,
                       drift=corpus_diff(prev, cur),
-                      definition_break=definition_break(prev, cur))
+                      definition_break=definition_break(prev, cur),
+                      question_break=question_break(prev, cur))
 
 
 def _bit(scoring: dict, key: str) -> int:
@@ -832,6 +897,10 @@ def print_transition(t: Transition, alpha: float = ALPHA) -> None:
         # owed-check ruled that pre-re-base nights stay in the window annotated, not
         # dropped and not refused the way an incomparable pair is.
         print(f"  DEFINITION BREAK: {t.definition_break}")
+    if t.question_break:
+        # Same shape (#1852): printed before the numbers, never instead of them. A
+        # re-worded question keeps its id, so nothing else on this page can show it.
+        print(f"  QUESTION BREAK: {t.question_break}")
     for label, _ in BINARY_LEGS:
         leg = t.legs[label]
         lo, hi = leg["wilson"]
@@ -856,7 +925,11 @@ def print_transition(t: Transition, alpha: float = ALPHA) -> None:
               f"paired bootstrap 95% interval [{leg['lo']:+.4f}, {leg['hi']:+.4f}] "
               f"(resampling approximation, not an exact test; {leg['reps']} replicates, "
               f"seed {leg['seed']}, unit = query) p={leg['p']:.3f} ({call})")
-    if t.admissible:
+    if t.question_break:
+        verdict = ("WITHHELD: query text moved under an unchanged id set, so a paired "
+                   "test across this pair scores the edit, not the system — a re-base "
+                   "point, recorded as an observation")
+    elif t.admissible:
         verdict = ("ADMISSIBLE: a paired test rejected and neither corpus half — "
                    "facts/edges/entities, nor the recorded vector count — moved")
     elif t.drift_moved is None:
@@ -932,8 +1005,17 @@ def print_totals(transitions: list[Transition], alpha: float = ALPHA) -> dict:
     print(f"  {DOC_DRIFT_KEY}: moved {doc_moved}; identical {doc_identical}; "
           f"unknown {doc_unknown}"
           "   <- document half (qmd vectors the doc leg searched)")
+    # The witness count rides beside the moved count (#1852) so a 0 cannot read as a
+    # clean bill from a tool that had no text to compare.
+    question_moved = sum(1 for t in transitions if t.question_break)
+    question_seen = sum(1 for t in transitions
+                        if t.joinable and question_witness(t.prev, t.cur))
+    print(f"  query text moved under an unchanged id set: {question_moved}"
+          f"   <- compared on {question_seen} of {total} transitions "
+          "(records[].query present on both nights)")
     print(f"  verdicts admissible under the drift-controlled contract: {admissible} of {total}")
     return {"total": total, "audited": len(audited), "withheld": withheld,
+            "question_moved": question_moved, "question_seen": question_seen,
             "incomparable": gold_moved,
             "rejected": len(rejected), "marginal_only": len(marginal_only),
             "binary_sig": binary_sig, "cont_sig": cont_sig,
@@ -1169,7 +1251,14 @@ def main(argv: list[str] | None = None) -> int:
           "as the ERROR line this tool prints for ids present in one night and not "
           "the other, naming the ids only in the earlier night, plus the "
           "unjoinable transition in the counts above — an announced re-base, not a "
-          "silent one.")
+          "silent one. And one CLASS of re-base point with no dated instance yet "
+          "(#1852): a gold query whose TEXT is edited keeps its id and its gold, so "
+          "neither the join, the labels fingerprint nor the corpus block can see it. "
+          "This tool compares each record's own question text across a pair and "
+          "prints a QUESTION BREAK line naming the ids — an annotation like the "
+          "fifth point's, never a refusal, but a pair carrying it is never an "
+          "admissible verdict; the SUMMARY line counts how many transitions it could "
+          "compare, so a zero there is a measurement and not blindness.")
 
     by_label = {n.label: n for n in nights}
     claims = [] if args.no_claims else list(CLAIMS) + [_parse_claim(c) for c in args.claim]

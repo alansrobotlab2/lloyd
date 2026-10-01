@@ -1482,3 +1482,133 @@ def test_a_pair_whose_records_carry_no_expected_block_prints_no_annotation(tmp_p
     prev, cur = load_window(d)
     assert prev.gold_ids is None and cur.gold_ids is None
     assert definition_break(prev, cur) is None
+
+
+# ===========================================================================
+# #1852 — a re-worded gold query keeps its id and its gold: the query-text witness
+# ===========================================================================
+
+from scripts import eval_trend_stats as _ts  # noqa: E402
+
+
+def _reworded(doc: dict, ids: tuple[str, ...]) -> dict:
+    out = json.loads(json.dumps(doc))
+    for rec in out["records"]:
+        if rec["id"] in ids:
+            rec["query"] = rec["query"] + " (re-worded)"
+    return out
+
+
+def _question_pair(tmp_path, cur_mutator=None, strip_query=()):
+    """Two nights with a rejecting entity leg, both corpus halves recorded still —
+    the one shape `admissible` can be True for, so withholding it is a measurement."""
+    a = _night("nightly-20260101", 1, [0] * 8, [1] * 8, [0.5] * 8, [0.5] * 8,
+               _doc_corpus(VECTORS_THEN))
+    b = _night("nightly-20260102", 2, [1] * 8, [1] * 8, [0.5] * 8, [0.5] * 8,
+               _doc_corpus(VECTORS_THEN))
+    if cur_mutator:
+        b = cur_mutator(b)
+    for which in strip_query:
+        for rec in (a if which == "prev" else b)["records"]:
+            rec.pop("query", None)
+    d = _write(tmp_path, "nightly-a.json", a)
+    _write(tmp_path, "nightly-b.json", b)
+    return d, load_window(d)
+
+
+def test_a_reworded_query_under_unchanged_ids_is_annotated_and_never_admissible(tmp_path, capsys):
+    """The class nothing else can see: same ids, same gold, same corpus counts.
+
+    The pair joins and its statistics print — an annotation, the definition-break
+    shape, never a refusal — but the verdict is withheld, because a paired test
+    across a re-worded question scores the edit. The line names the ids, derived
+    from the two artifacts and from nothing else.
+    """
+    d, (n0, n1) = _question_pair(tmp_path, lambda doc: _reworded(doc, ("q3", "q7")))
+    t = audit_transition(n0, n1)
+    assert t.joinable and t.auditable and t.rejected, "the pair is still measured"
+    assert t.drift_moved is False and t.doc_drift_moved is False
+    assert t.question_break is not None and t.admissible is False
+    print_transition(t)
+    out = capsys.readouterr().out
+    assert "QUESTION BREAK: query text moved under an unchanged query-id set: q3, q7 (2 of 8)" in out, out
+    assert "exact McNemar" in out, "the numbers print; this is not a refusal"
+    assert "ADMISSIBLE" not in out and "WITHHELD: query text moved" in out, out
+
+    assert main(["--baselines", str(d), "--reps", "200", "--no-claims"]) == 0
+    full = capsys.readouterr().out
+    assert "query text moved under an unchanged id set: 1   <- compared on 1 of 1" in full, full
+    assert "verdicts admissible under the drift-controlled contract: 0 of 1" in full
+    assert "#1852" in full and "QUESTION BREAK" in full.split("POWER / QUERY-COUNT SIZING")[1], (
+        "the re-base paragraph names the class beside the dated points")
+    for earlier in ("fifth re-base point", "sixth re-base point"):
+        assert earlier in full, f"the {earlier} was displaced"
+
+
+def test_identical_query_text_prints_nothing_and_leaves_the_verdict_alone(tmp_path, capsys):
+    """The control: same fixture, no edit. No annotation, and the pair is admissible
+    exactly as it was before the witness existed — the check must not become a
+    constant refusal."""
+    d, (n0, n1) = _question_pair(tmp_path)
+    t = audit_transition(n0, n1)
+    assert t.question_break is None and t.admissible is True
+    print_transition(t)
+    out = capsys.readouterr().out
+    assert "QUESTION BREAK" not in out and "ADMISSIBLE" in out, out
+    assert main(["--baselines", str(d), "--reps", "200", "--no-claims"]) == 0
+    full = capsys.readouterr().out
+    assert "query text moved under an unchanged id set: 0   <- compared on 1 of 1" in full, full
+
+
+@pytest.mark.parametrize("strip", [("prev",), ("cur",), ("prev", "cur")])
+def test_a_missing_question_witness_annotates_nothing(tmp_path, capsys, strip):
+    """A night whose records carry no question text is silence, not a move — the
+    #1637 rule. The summary says the check compared nothing, so the 0 beside it
+    cannot read as a clean bill."""
+    d, (n0, n1) = _question_pair(tmp_path, lambda doc: _reworded(doc, ("q3",)),
+                                 strip_query=strip)
+    t = audit_transition(n0, n1)
+    assert t.question_break is None and t.admissible is True
+    assert main(["--baselines", str(d), "--reps", "200", "--no-claims"]) == 0
+    full = capsys.readouterr().out
+    assert "QUESTION BREAK:" not in full.split("SUMMARY")[0]
+    assert "query text moved under an unchanged id set: 0   <- compared on 0 of 1" in full, full
+
+
+def test_the_question_stamp_is_written_beside_the_labels_stamp_and_ignores_gold():
+    """`questions_sha256` is a second witness, not a widened `labels_sha256`: it
+    moves on a re-worded question and stands still on a gold edit, and the labels
+    hash does the opposite — so the ceiling's identity is untouched (#1852)."""
+    import eval.label_agreement_ceiling as lac
+    import eval.run_eval as ev
+
+    assert ev.QUESTIONS_KEY == "questions_sha256" == _ts.QUESTIONS_KEY
+    src = (ROOT / "eval" / "run_eval.py").read_text(encoding="utf-8")
+    assert src.index("GOLD_LABELS_KEY: gold_label_fingerprint(") \
+        < src.index("QUESTIONS_KEY: question_text_fingerprint(records)") \
+        < src.index('"corpus": corpus,'), "the stamp is written beside labels_sha256"
+
+    gold = [{"id": "a", "query": "what is x", "expect_entities": ["X"]},
+            {"id": "b", "query": "what is y", "expect_docs": ["y.md"]}]
+    recs = [{"id": q["id"], "query": q["query"]} for q in gold]
+    base_q, base_l = ev.question_text_fingerprint(recs), lac.labels_sha256(gold)
+    assert base_q and ev.question_text_fingerprint(list(reversed(recs))) == base_q
+
+    reworded = [dict(recs[0], query="what exactly is x"), recs[1]]
+    assert ev.question_text_fingerprint(reworded) != base_q
+    assert lac.labels_sha256([dict(gold[0], query="what exactly is x"), gold[1]]) == base_l
+
+    regolded = [dict(gold[0], expect_entities=["X2"]), gold[1]]
+    assert lac.labels_sha256(regolded) != base_l
+    assert ev.question_text_fingerprint(recs) == base_q
+    assert ev.question_text_fingerprint([{"id": "a"}]) is None
+
+    night = {"label": "n", "ran_at": "2026-01-01T00:00:00+00:00", ev.QUESTIONS_KEY: base_q,
+             "records": [dict(r, scoring={}) for r in recs]}
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "nightly-x.json"
+        p.write_text(json.dumps(night), encoding="utf-8")
+        loaded = _ts.load_night(p)
+    assert loaded.questions_sha256 == base_q
+    assert loaded.questions == {"a": "what is x", "b": "what is y"}

@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -1286,6 +1287,31 @@ def gold_label_fingerprint(queries: list[dict], scored_ids: list[str]) -> str | 
     return lac.labels_sha256(sorted(labelled, key=lambda q: str(q["id"])))
 
 
+#: Key of the query-text witness (#1852). `scripts/eval_trend_stats.py` restates it
+#: for the same reason it restates `GOLD_LABELS_KEY`: no shared import.
+QUESTIONS_KEY = "questions_sha256"
+
+
+def question_text_fingerprint(records: list[dict]) -> str | None:
+    """The #1852 query-text witness: a hash over `[id, query]` of the scored records.
+
+    `labels_sha256` is deliberately a hash of the LABELS — it is the ceiling
+    artifact's identity, so widening it to the question text would null every
+    ceiling on a typo fix. But that leaves a re-worded question invisible: the id
+    is unchanged so the join that announces a corpus re-base stays silent, and the
+    gold is unchanged so the #1637 guard stays silent. This is the second witness,
+    stamped beside the first and never folded into it. Order-independent (sorted by
+    id), over the records this run scored, and None when no record carries text —
+    a constant hash of nothing cannot disagree with anything.
+    """
+    pairs = sorted([str(r.get("id")), r.get("query")] for r in records
+                   if isinstance(r, dict) and r.get("id") is not None
+                   and isinstance(r.get("query"), str))
+    if not pairs:
+        return None
+    return hashlib.sha256(json.dumps(pairs, sort_keys=True).encode()).hexdigest()[:16]
+
+
 #: The head of the `ceiling_notes` reason for a ratio withheld because its two halves
 #: were divided over different query sets (#2014). Named so the page and the tests
 #: match the class, not a sentence.
@@ -2093,6 +2119,9 @@ def main() -> int:
         # `scripts/eval_trend_stats.py`, which key-matches this spelling by contract.
         GOLD_LABELS_KEY: gold_label_fingerprint(
             queries, [r["id"] for r in records if r.get("id")]),
+        # Which QUESTIONS it was asked (#1852): the labels hash above cannot see a
+        # re-worded query under an unchanged id.
+        QUESTIONS_KEY: question_text_fingerprint(records),
         "corpus": corpus,
         "corpus_ok": corpus_ok,
         # What the fact leg read (#1250), recorded on EVERY run — including the

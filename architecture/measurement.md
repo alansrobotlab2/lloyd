@@ -82,6 +82,14 @@ bare `python3` in a gate worktree with no store and no daemon.
 `scripts/eval_trend_stats.py` folds the nightly runs into a trend and reads them
 from `$LLOYD_DATA/eval/baselines/`, not from the repo copy.
 
+A baseline carries two fingerprints of what it was asked, and they are kept
+apart on purpose: `labels_sha256` hashes the gold (and is the ceiling artifact's
+identity, so it must not move on a typo fix), `questions_sha256` hashes
+`[id, query]` of the scored records (#1852). A re-worded question keeps its id
+and its gold, so only the second can see it; the trend tool compares each
+record's own `query` across a pair and prints `QUESTION BREAK` naming the ids —
+an annotation, but such a pair is never an admissible verdict.
+
 ## Arms that are flag values: the compaction-recall runner
 
 §The arms inventories **directories**. The same word carries a second, unrelated
