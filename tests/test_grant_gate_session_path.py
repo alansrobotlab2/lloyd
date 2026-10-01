@@ -283,11 +283,27 @@ def test_the_same_registry_set_also_arms_the_outbound_content_gate():
     assert text.count("install_policy_hook(hooks, scope=grant_scope)") == 1
 
     from app.harness.outbound_content import (
-        GATE_ARM_POINTS, find_unarmed_dispatch_paths, stale_gate_arm_points,
+        FLOOR_MODULE, GATE_ARM_POINTS, dispatch_registry_sites_files,
+        find_unarmed_dispatch_paths, stale_gate_arm_points,
     )
     assert find_unarmed_dispatch_paths() == [], find_unarmed_dispatch_paths()
     assert stale_gate_arm_points() == [], stale_gate_arm_points()
-    assert len(GATE_ARM_POINTS) == 12, GATE_ARM_POINTS  # 12 until P13.4, 11 after, 12 with #1511
+    # 11 after P13.4 folded the chat router's builds and the voice build into one
+    # builder, 12 with #1511's transcript self-hit audit, 13 with
+    # `eval/run_injection_canary.py` (06818b05, 2026-09-30). That last entry is
+    # why this line was red on main: the commit that armed the canary bench
+    # bumped the same count in `tests/test_outbound_content_gate.py` and left
+    # this copy at 12 — two files, one number, hand-synced. The dated history of
+    # the number lives there; here it is asserted beside the property it is
+    # supposed to stand for, so an entry added only to raise the count, rather
+    # than one that arms the gate on a sender-reachable dispatch build, fails on
+    # the following line even though it satisfies the count.
+    assert len(GATE_ARM_POINTS) == 13, GATE_ARM_POINTS
+    # Re-measured off this tree in this call, never copied from a comment: the
+    # roster is exactly the files whose turn builds can address a sender tool,
+    # plus the floor module that arms them all.
+    assert set(GATE_ARM_POINTS) == (
+        dispatch_registry_sites_files() | {FLOOR_MODULE}), GATE_ARM_POINTS
 
 
 # ── The automod ban, by platform (#709) ────────────────────────────────
