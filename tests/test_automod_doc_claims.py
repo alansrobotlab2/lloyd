@@ -1203,3 +1203,144 @@ def test_the_measurement_doc_still_names_the_live_data_root_as_named():
     assert ".lloyd-data" in section, (
         "the doc no longer names where an inherited root would put the record — "
         "inside the worktree, which is the whole reason it must not be inherited")
+
+
+# ─── the Venv rule: the interpreter a round's worktree can actually execute ──
+#
+# CLAUDE.md's Project Overview is the first thing a session reads, and until
+# #1928 its Venv entry prescribed `.venvs/lloyd/bin/python` as the interpreter
+# for "every lloyd script". That path is cwd-relative and `.venvs/` is
+# gitignored (`.gitignore:3`), so it exists only in the live checkout: inside a
+# round worktree a command written that way dies with `No such file or
+# directory` (exit 127), which #692 measured against 3 passes for the same
+# pytest invocation run through the absolute interpreter `automod_start`
+# returns. The mechanism shipped with #1611 — `scripts/automod/round.py`
+# `live_venv_python()`, carried in the start response and written into the
+# round's `run_spec.yaml` — and the skill has told a round to use it since vault
+# `54663efc`. What stayed wrong was the doc a session reads *before* the skill,
+# which stated the opposite as a blanket rule. These nodes pin the doc to the
+# mechanism, in the one region a session reads first.
+
+#: The absolute form has to be this tree's, not merely a path beginning with
+#: `/`: the file states machine paths in this form elsewhere, and a round's
+#: worktree sits under `/home/alansrobotlab/lloyd-work/`, which a looser prefix
+#: would also accept.
+LIVE_ROOT_PREFIX = "/home/alansrobotlab/lloyd/"
+
+#: The relative interpreter only — the leading `/` of the absolute path is held
+#: back by the lookbehind. A plain substring count is 4 both before and after
+#: the fix, because the absolute path ends in exactly this text, which is why
+#: #1928's original check (2) could never go to 3 and is not the pin here.
+RELATIVE_VENV_RE = re.compile(r"(?<!/)\.venvs/lloyd/bin/python")
+
+PROJECT_OVERVIEW_RE = re.compile(r"(?sm)^## Project Overview\n\n.*?(?=^## )")
+
+#: A region is cut into statements at sentence ends and at markdown bullet
+#: markers, because the Venv rule is a bullet list. Splitting on a bullet is
+#: what makes "named in the same breath" checkable: the statement that names
+#: `venv_python` has to carry the rest of the rule itself, not lean on an
+#: adjacent bullet. And the region's lines are joined before splitting, so a
+#: future rewrap of the prose at 80 columns cannot move a fact out of reach.
+STATEMENT_BREAK_RE = re.compile(r"(?<=[.!?])\s+|\s+-\s+")
+
+
+def _venv_rule_region() -> str:
+    """CLAUDE.md's `**Venv**:` bullet and any line indented under it, whitespace
+    normalised.
+
+    The section is fixed to Project Overview because that is what the clause
+    pins: a `venv_python` stated three headings away, in the Automod section,
+    would satisfy a whole-file grep and still leave the first rule a session
+    reads prescribing an interpreter its worktree cannot execute.
+    """
+    text = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+    m = PROJECT_OVERVIEW_RE.search(text)
+    assert m, ("CLAUDE.md has no `## Project Overview` section — that is where "
+               "the Venv rule a session reads first lives")
+    lines = m.group(0).splitlines()
+    starts = [i for i, ln in enumerate(lines) if "**Venv**:" in ln]
+    assert len(starts) == 1, (
+        f"Project Overview has {len(starts)} '**Venv**:' entries, so which one "
+        "a session reads first is not decidable")
+    region = [lines[starts[0]]]
+    for ln in lines[starts[0] + 1:]:
+        if not ln.strip() or not ln[:1].isspace():
+            break
+        region.append(ln)
+    return " ".join(" ".join(region).split())
+
+
+def test_claude_md_venv_rule_names_an_absolute_interpreter():
+    """Clause 1: the interpreter named in the first rule a session reads has to
+    resolve from a round worktree too, where there is no `.venvs/` to resolve a
+    relative path against."""
+    region = _venv_rule_region()
+    m = re.search(r"\*\*Venv\*\*:\s*`([^`]+)`", region)
+    assert m, f"the '**Venv**:' entry names no backticked path: {region!r}"
+    path = m.group(1)
+    assert path.startswith(LIVE_ROOT_PREFIX), (
+        f"'**Venv**:' names {path!r}, which only resolves with the live "
+        f"checkout as cwd — a round worktree needs {LIVE_ROOT_PREFIX}…")
+    assert path.endswith("/.venvs/lloyd/bin/python"), (
+        f"{path!r} is absolute but is not the lloyd venv's interpreter")
+    assert "every lloyd script" in region.lower(), (
+        "the entry dropped the standing instruction that makes the absolute "
+        "form matter, reducing the rule to a path with no use stated")
+
+
+def test_claude_md_routes_a_round_worktree_command_through_the_run_spec_venv():
+    """Clause 2: `venv_python` and `run_spec.yaml` named in one statement about
+    the commands a round runs from its worktree, with the reason attached, so
+    this file and `skills/automod-change-own-code/SKILL.md` ("Run every verify
+    or acceptance command with the absolute `venv_python` the round returned")
+    stop disagreeing.
+    """
+    region = _venv_rule_region()
+    assert "venv_python" in region.lower(), (
+        "the Venv rule still gives one interpreter for every cwd; a round "
+        "worktree has no `.venvs/`, so the relative form dies there with exit "
+        f"127: {region!r}")
+    statement = next((s for s in STATEMENT_BREAK_RE.split(region)
+                      if "venv_python" in s.lower()), "")
+    assert statement, "`venv_python` is named in a fragment with no sentence end"
+    low = statement.lower()
+    assert "run_spec.yaml" in low, (
+        "the statement names `venv_python` but not the round's `run_spec.yaml`, "
+        "which is where a session that never saw the `automod_start` response "
+        "reads the path from")
+    assert "verify" in low or "acceptance" in low, (
+        "the statement does not say which commands it routes — the "
+        "verify/acceptance run is the one whose 127 reads as a failed check "
+        "rather than a missing interpreter")
+    assert "worktree" in low, (
+        "the statement does not say the hazard is a round worktree, so it "
+        "reads as a general style preference")
+    assert "no `.venvs/`" in low or "gitignore" in low, (
+        "the statement gives no reason, which is the half that survives a "
+        "rewording: a worktree has no `.venvs/` because .gitignore ignores it, "
+        "while the live checkout does")
+
+
+def test_only_the_restart_commands_keep_the_relative_venv_path():
+    """Clause 3: the three live-checkout restart commands at the Restart section
+    are the only surviving relative uses, measured with the lookbehind form —
+    `grep -c '\\.venvs/lloyd/bin/python'` is 4 before and after this change,
+    because the absolute path ends in that substring, so the plain count is not
+    a measurement of the relative rule at all.
+    """
+    lines = (ROOT / "CLAUDE.md").read_text(encoding="utf-8").splitlines()
+    relative = [(i + 1, ln) for i, ln in enumerate(lines)
+                if RELATIVE_VENV_RE.search(ln)]
+    assert len(relative) == 3, (
+        f"expected 3 lines carrying the relative interpreter, found "
+        f"{[n for n, _ in relative]}: a fourth means a rule still points every "
+        "script at a path that cannot resolve from a round worktree")
+    restarts = [(i + 1, ln) for i, ln in enumerate(lines)
+                if "scripts.automod.round restart" in ln]
+    assert len(restarts) == 3, (
+        f"CLAUDE.md states {len(restarts)} `scripts.automod.round restart` "
+        "commands, not the three the clause counts")
+    assert [n for n, _ in relative] == [n for n, _ in restarts], (
+        "the surviving relative paths are not the restart commands — those run "
+        "from the live checkout, where the relative form works; anywhere else "
+        "it must be absolute")

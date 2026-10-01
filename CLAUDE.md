@@ -15,7 +15,7 @@ MCP aggregator (`agent_mcp/`). Backend FastAPI + SSE, frontend React (Vite).
 - **Backend**: `server.py` (FastAPI, :8080) · **Frontend**: `web/` (Vite, proxied through the backend)
 - **MCP aggregator**: `agent_mcp/main.py` — `Server("lloyd")` on `:8500/mcp`, Streamable HTTP
 - **Agent harness**: `app/harness/` — `run_query(messages, options)`, an async generator
-- **Config**: `config.yaml` · **Venv**: `.venvs/lloyd/bin/python` (use it for every lloyd script)
+- **Config**: `config.yaml` · **Venv**: `/home/alansrobotlab/lloyd/.venvs/lloyd/bin/python` (use it for every lloyd script). From a round worktree, run verify/acceptance commands through the `venv_python` in that round's `run_spec.yaml` — a worktree has no `.venvs/` (gitignored).
 - Each turn rebuilds the conversation from `sessions/<id>.json` (`load_and_compact_session`); there is no `resume=`.
 
 ```
