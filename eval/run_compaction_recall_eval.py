@@ -240,7 +240,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -440,6 +440,22 @@ _PROSE = [
 
 NOTES_PATH = "notes/deploy-halcyon-{key}.md"
 OPEN_ITEMS_PATH = "ops/open-items-{key}.md"
+HANDOFF_PATH = "ops/handoff-{key}.md"
+
+#: The tool-call id of the planted turn, and of the pointer turn. A turn id in
+#: this eval IS a tool-call id: it is the only handle on a turn that survives
+#: both compaction and `_prepare_messages_for_harness` (kept on the tool
+#: result, and on the assistant row that issued the call in `tool_calls[].id`),
+#: which is what makes retention measurable over a rewritten history.
+PLANTED_CALL_ID = "call_planted"
+POINTER_CALL_ID = "call_pointer"
+#: The two oracle roles, reported separately and never blended into one rate:
+#: a `target` is a turn whose CONTENT the answer needs; a `pointer` is a turn
+#: emitted after it that says where the value lives without repeating it.
+#: Keeping the pointer while shedding its target is the failure ContextBench's
+#: Dynamic Routing family exists to catch (arXiv:2609.37725v1 §3), and one
+#: combined number cannot tell that apart from retaining both.
+ORACLE_ROLES = ("target", "pointer")
 
 
 @dataclass
@@ -456,6 +472,21 @@ class Planted:
         return {self.port, self.old_port, *self.distractor_ports.values()}
 
 
+@dataclass(frozen=True)
+class OracleTurn:
+    """One of the turns the answer requires (ContextBench's oracle trace,
+    arXiv:2609.37725v1 §3, reduced to what one planted session can carry).
+
+    `turn_id` is the tool-call id of the row that carries the turn's content
+    — the only handle that outlives a history rewrite — and `needle` is text
+    ONLY that row was given, so "the row is still there" and "the span is
+    still there" are different questions with different answers.
+    """
+    turn_id: str
+    role: str          # one of ORACLE_ROLES
+    needle: str
+
+
 @dataclass
 class Session:
     key: str
@@ -470,6 +501,12 @@ class Session:
     est_tokens: int = 0
     sha256: str = ""
     meta: dict[str, Any] = field(default_factory=dict)
+    # #2028: the oracle spans of this task — the turns the answer needs. Every
+    # field here is derived from the turn the generator already planted at
+    # `depth`; none of it draws from `rng`, so adding the oracle moves nothing.
+    oracle_turns: list[OracleTurn] = field(default_factory=list)
+    oracle_turn_ids: list[str] = field(default_factory=list)
+    oracle_needles: dict[str, str] = field(default_factory=dict)
 
 
 def _corpus_files(root: Path = ROOT) -> list[Path]:
@@ -696,7 +733,7 @@ def _planted_turn(key: str, planted: Planted, rng: random.Random,
                   shape: str = "tool") -> tuple[list[dict], str]:
     path = NOTES_PATH.format(key=key)
     body = _notes_body(planted, rng)
-    cid = "call_planted"
+    cid = PLANTED_CALL_ID
     if shape == "conversation":
         # The Read result is cleared at turn start like every other one, so the
         # facts have to be in the conversation for a summary to carry them.
@@ -724,9 +761,59 @@ def _planted_turn(key: str, planted: Planted, rng: random.Random,
 SHAPES = ("tool", "conversation")
 
 
+def _pointer_needle(key: str) -> str:
+    return f"ptr-{key}"
+
+
+def _pointer_turn(ptr_key: str, notes_key: str) -> tuple[list[dict], str]:
+    """The pointer emitted AFTER the content it points at (#2028, the shape
+    ContextBench's Dynamic Routing family is built on).
+
+    It is appended as the session's LAST turn and names neither value: by the
+    time the pointer exists, the span it points at has had every opportunity
+    to be cleared, so the answer survives only if the span survived, the
+    pointer survived AND the route back to the span is still walkable. A row
+    that restated the value would answer the probe by itself and measure
+    nothing, which is why the needle here is the handoff's own id.
+    """
+    path = NOTES_PATH.format(key=notes_key)
+    handoff = HANDOFF_PATH.format(key=ptr_key)
+    body = (f"# Halcyon handoff\n\n"
+            f"- {_pointer_needle(ptr_key)}: the value you will need at the end of "
+            f"this review is the one in the deploy-notes result you read earlier "
+            f"in this session (`{path}`).\n"
+            f"- It is not repeated here on purpose. If that result is no longer "
+            f"in front of us, re-read the file rather than guessing at it.\n")
+    return [
+        _msg("user", "Before we wrap the review, log a handoff note so the next "
+                     "person knows where the Halcyon values came from."),
+        {"role": "assistant", "content": [{"type": "text", "text": ""}],
+         "tool_calls": [_tc(POINTER_CALL_ID, "Read",
+                            {"summary": "Reading the handoff note",
+                             "file_path": handoff})]},
+        _msg("tool", _read_render(body), tool_call_id=POINTER_CALL_ID),
+        _msg("assistant", "Logged. I'll take the Halcyon values from the notes "
+                          "result itself when we get to them."),
+    ], body
+
+
+def _oracle_turns(planted: Planted, key: str, pointer: bool) -> list[OracleTurn]:
+    """The task's oracle spans, derived from turns the generator already
+    placed. No `rng` is touched: the target is the planted Read result at
+    `depth`, and the pointer is the appended turn, so making the oracle
+    explicit cannot shift a planted value or a distractor port."""
+    turns = [OracleTurn(turn_id=PLANTED_CALL_ID, role="target",
+                        needle=planted.passphrase)]
+    if pointer:
+        turns.append(OracleTurn(turn_id=POINTER_CALL_ID, role="pointer",
+                                needle=_pointer_needle(key)))
+    return turns
+
+
 def build_session(seed: int, target_tokens: int, depth: float,
                   *, root: Path = ROOT, corpus: list[Path] | None = None,
-                  probe: str = "early", shape: str = "tool") -> Session:
+                  probe: str = "early", shape: str = "tool",
+                  pointer: bool = False) -> Session:
     """One synthetic session: filler to `target_tokens` (estimator units, the
     ones every compaction trigger is written in) with the planted turn at
     `depth` of the way through it. Deterministic in (seed, tree, shape).
@@ -735,7 +822,12 @@ def build_session(seed: int, target_tokens: int, depth: float,
     `target_tokens` is the whole history. `"conversation"` is the summary
     arms' (see SUMMARY ARMS in the module docstring), and `target_tokens`
     counts every row BUT the tool results — the part microcompaction leaves —
-    so the raw session (`est_tokens`) is ~1.6x larger."""
+    so the raw session (`est_tokens`) is ~1.6x larger.
+
+    `pointer=True` appends the #2028 pointer-after-content turn as the last
+    thing in the session, and the oracle then carries a `pointer` span as well
+    as its `target`. It draws nothing from `rng`, so a pointer session's whole
+    prefix is the plain session's, byte for byte."""
     from app.compaction import estimate_conversation_tokens
 
     if shape not in SHAPES:
@@ -747,9 +839,15 @@ def build_session(seed: int, target_tokens: int, depth: float,
     prose = [p for p in corpus if p.suffix == ".md"] or corpus
     # The tool shape keeps its #600 key, so an existing results file resumes.
     key = f"s{seed}-{target_tokens // 1000}k-d{int(depth * 100)}" \
-        + ("-conv" if shape == "conversation" else "")
+        + ("-conv" if shape == "conversation" else "") \
+        + ("-ptr" if pointer else "")
     planted = make_planted(rng)
-    planted_msgs, notes = _planted_turn(key, planted, rng, shape)
+    # The planted file paths keep the non-pointer key, so appending the pointer
+    # probe leaves the rest of the session byte-identical — which is what makes
+    # "the oracle costs no rng draw" checkable on the messages themselves
+    # instead of asserted.
+    file_key = key[:-4] if pointer else key
+    planted_msgs, notes = _planted_turn(file_key, planted, rng, shape)
 
     def counted(msgs: list[dict]) -> int:
         # The conversation shape budgets what microcompaction cannot clear —
@@ -775,22 +873,74 @@ def build_session(seed: int, target_tokens: int, depth: float,
         i += 1
     at = min(len(turns), max(0, round(depth * len(turns))))
     turns.insert(at, planted_msgs)
+    late = probe == "late"
+    files = {NOTES_PATH.format(key=file_key): notes,
+             OPEN_ITEMS_PATH.format(key=file_key): _open_items_body(late)}
+    oracle: list[OracleTurn] = []
+    if pointer:
+        # Appended AFTER all the filler: the span it points at is back among the
+        # rows the turn-start pass clears from the largest first, so this is the
+        # pointer-emitted-after-the-content case, not a restatement of it.
+        ptr_msgs, handoff = _pointer_turn(key, file_key)
+        turns.append(ptr_msgs)
+        files[HANDOFF_PATH.format(key=key)] = handoff
+        oracle = _oracle_turns(planted, key, pointer=True)
+    else:
+        oracle = _oracle_turns(planted, key, pointer=False)
     messages = [m for t in turns for m in t]
     planted_index = next(n for n, m in enumerate(messages)
-                         if m.get("tool_call_id") == "call_planted")
-    late = probe == "late"
+                         if m.get("tool_call_id") == PLANTED_CALL_ID)
     probe_text = (PROBE_LATE if late else PROBE).format(
-        open_items=OPEN_ITEMS_PATH.format(key=key))
-    files = {NOTES_PATH.format(key=key): notes,
-             OPEN_ITEMS_PATH.format(key=key): _open_items_body(late)}
+        open_items=OPEN_ITEMS_PATH.format(key=file_key))
     s = Session(key=key, seed=seed, target_tokens=target_tokens, depth=depth,
                 messages=messages, files=files, planted=planted,
                 planted_index=planted_index, probe=probe_text,
                 est_tokens=estimate_conversation_tokens(messages),
-                meta={"shape": shape})
+                meta={"shape": shape},
+                oracle_turns=oracle,
+                oracle_turn_ids=[t.turn_id for t in oracle],
+                oracle_needles={t.turn_id: t.needle for t in oracle})
     s.sha256 = hashlib.sha256(json.dumps(messages, sort_keys=True)
                               .encode()).hexdigest()
     return s
+
+
+# ---------------------------------------------------------------------------
+# Oracle retention — did the spans the answer needed survive the rewrite
+# ---------------------------------------------------------------------------
+
+def _oracle_rows(prompt: list[dict], turn_id: str) -> list[dict]:
+    """The rows of `prompt` that belong to one oracle turn.
+
+    The tool-call id is the handle, because it is what survives: microcompaction
+    rewrites a tool result's BODY and leaves the row's `tool_call_id` in place
+    (rung 4 truncates it rather than removing it), and the assistant row that
+    issued the call keeps the id in `tool_calls[].id` — which is how the
+    `conversation` shape's restated reply is still recognisably the same turn.
+    A summary row carries neither, so a summary that NAMES the value is a
+    different artifact and is not counted as the span (`summary_has` is the
+    column that reads what the summary restated)."""
+    return [m for m in prompt
+            if m.get("tool_call_id") == turn_id
+            or (m.get("role") == "assistant"
+                and any((tc.get("id") or tc.get("call_id")) == turn_id
+                        for tc in (m.get("tool_calls") or [])))]
+
+
+def oracle_survived(prompt: list[dict], turns: Sequence[OracleTurn],
+                    ) -> dict[str, bool]:
+    """Which of the task's oracle spans are still IN the prompt it was handed.
+
+    Content, not row count: `planted_in_prompt_at_start` already reads it this
+    way for the one planted row, and a policy whose whole job is to clear tool
+    results would score 1.0 on row presence for doing exactly what it is being
+    measured on. A re-read of the same text in a fresh row does not count
+    either — that is a recovery, and `recovered_via_tool` is where the runner
+    already says so."""
+    from app.compaction import _message_text
+    return {t.turn_id: any(t.needle in _message_text(m)
+                           for m in _oracle_rows(prompt, t.turn_id))
+            for t in turns}
 
 
 # ---------------------------------------------------------------------------
@@ -1236,8 +1386,17 @@ def summary_fired(f: dict[str, Any]) -> bool:
     return outcome == "summarized" if outcome else True
 
 
+def freed_total(f: dict[str, Any]) -> int:
+    """#2027's two-path cost predicate: what the turn-start stack freed PLUS
+    what every in-turn relief pass freed. One mechanism fired 802 times in-turn
+    against 0 at turn start in the retained logs (#1078), so either path alone
+    is the wrong number — this is the sum `valid_for_arm` gates on, and the one
+    the report's cost column prints."""
+    return int(f.get("turn_start_freed") or 0) + int(f.get("relief_freed") or 0)
+
+
 def valid_for_arm(arm: str, f: dict[str, Any]) -> bool:
-    freed = f["turn_start_freed"] + f["relief_freed"]
+    freed = freed_total(f)
     if ARMS[arm].get("expects_summary") and not summary_fired(f):
         # A summary-format arm whose summarize layer did not replace a block
         # (under threshold, a summariser that failed and fell back to
@@ -1558,10 +1717,18 @@ async def run_one(session: Session, arm: str, *, discovered: list, system_prompt
         warm_hist = await _prepare_messages_for_harness(
             [m for m in session.messages], "primary")
         history.append({"role": "user", "content": session.probe})
+        # #2028: score the spans against the prompt the answer is about to come
+        # from — after the turn-start pass AND after
+        # `_prepare_messages_for_harness`, the two rewrites between the session
+        # on disk and the loop's wire messages. The probe row is appended first
+        # because it is part of what the engine is handed; it carries neither
+        # needle, so it cannot inflate its own score.
+        row["oracle_survived"] = oracle_survived(history, session.oracle_turns)
+        row["oracle_roles"] = {t.turn_id: t.role for t in session.oracle_turns}
         hk = _get_harness_kwargs()
         hk.update(spec["options"])
         row["planted_in_prompt_at_start"] = any(
-            m.get("tool_call_id") == "call_planted" and session.planted.passphrase in
+            m.get("tool_call_id") == PLANTED_CALL_ID and session.planted.passphrase in
             (m.get("content") or "") for m in history)
         row["history_est_after_turn_start"] = estimate_conversation_tokens(history)
         pre = fired(turn.to_record())
@@ -1722,6 +1889,25 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         vals = [r[key] for r in rs if isinstance(r.get(key), (int, float))]
         return median(vals) if vals else None
 
+    def oracle(rs: list[dict], role: str | None = None) -> dict[str, Any]:
+        """#2028: oracle retention — of the oracle spans this arm was meant to
+        still be carrying, how many were still in the prompt. `n` counts
+        SPANS (a row with two spans contributes two), not rows, so a pointer
+        session shedding its target while keeping its pointer moves this number
+        and not the correctness column. At `n == 0` the rate is None like
+        `rate()`'s: an empty family has not passed anything."""
+        k = n = 0
+        for r in rs:
+            survived = r.get("oracle_survived") or {}
+            roles = r.get("oracle_roles") or {}
+            for turn_id, alive in survived.items():
+                if role is not None and roles.get(turn_id) != role:
+                    continue
+                n += 1
+                k += 1 if alive else 0
+        lo, hi = wilson_ci(k, n) if n else (None, None)
+        return {"k": k, "n": n, "rate": (k / n) if n else None, "ci95": [lo, hi]}
+
     out: dict[str, Any] = {}
     for arm in ARMS:
         all_rows = [r for r in rows if r["arm"] == arm]
@@ -1730,13 +1916,21 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         for d in sorted({r["depth"] for r in kept}):
             rs = [r for r in kept if r["depth"] == d]
             by_depth[str(d)] = {"distinctive": rate(rs, "distinctive"),
-                                "ambiguous": rate(rs, "ambiguous")}
+                                "ambiguous": rate(rs, "ambiguous"),
+                                "oracle_retention": oracle(rs)}
         out[arm] = {
             "rows": len(all_rows), "kept": len(kept),
             "dropped": sum(1 for r in all_rows if r.get("status") == "dropped"),
             "errors": sum(1 for r in all_rows if r.get("status") == "error"),
             "distinctive": rate(kept, "distinctive"),
             "ambiguous": rate(kept, "ambiguous"),
+            # #2028: correctness and retention, always both, never one number.
+            # High correctness beside low retention is the plausible-but-wrong
+            # signature — the run that shed the span and answered anyway — and
+            # it is only visible while the two are separate columns.
+            "oracle_retention": oracle(kept),
+            "oracle_retention_by_role": {role: oracle(kept, role)
+                                         for role in ORACLE_ROLES},
             "by_depth": by_depth,
             "median_ttft_first_s": med(kept, "ttft_first_s"),
             "median_wall_s": med(kept, "wall_s"),
@@ -1775,6 +1969,14 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
             # What the turn-start stack cost, and what the summary itself kept
             # (read off its text, before the model answers anything).
             "median_turn_start_wall_s": med(kept, "turn_start_wall_s"),
+            # #2027's cost, surfaced: tokens freed per turn by BOTH paths —
+            # `freed_total`, the same sum the validity gate reads. Until now the
+            # report priced these arms in time and volume only, so an arm that
+            # threw away 40k tokens and an arm that threw away 4k looked the
+            # same next to a retention number that exists only to notice.
+            "median_tokens_freed": med(
+                [{"v": freed_total(r["fired"])} for r in kept
+                 if isinstance(r.get("fired"), dict)], "v"),
             "median_summarizer_calls": med(
                 [{"v": (r.get("summarizer") or {}).get("calls")} for r in kept], "v"),
             "median_summarizer_wall_s": med(
@@ -1909,6 +2111,13 @@ def main(argv: list[str] | None = None) -> int:
                          "summary arm, else tool (see SUMMARY ARMS)")
     ap.add_argument("--data-root", required=True,
                     help="scratch LLOYD_DATA root (sessions, spills, event logs)")
+    ap.add_argument("--pointer", action="store_true",
+                    help="#2028: append the pointer-after-content turn to every "
+                         "session, so the answer depends on a span that may "
+                         "already be gone by the time the pointer exists. Read "
+                         "summary[*].oracle_retention_by_role — pointer and "
+                         "target are scored apart, because keeping one and "
+                         "losing the other is the thing being measured.")
     ap.add_argument("--tools-snapshot", required=True)
     ap.add_argument("--base-url", default="http://127.0.0.1:8096")
     ap.add_argument("--out", required=True)
@@ -1935,7 +2144,8 @@ def main(argv: list[str] | None = None) -> int:
     corpus = _corpus_files()
 
     sessions = [build_session(a.seed + 1000 * si + i, size, depths[i % len(depths)],
-                              corpus=corpus, probe=a.probe, shape=shape)
+                              corpus=corpus, probe=a.probe, shape=shape,
+                              pointer=a.pointer)
                 for si, size in enumerate(sizes) for i in range(a.sessions)]
     out_path = Path(a.out)
     rows: list[dict] = []
@@ -1955,9 +2165,15 @@ def main(argv: list[str] | None = None) -> int:
                 rows.append(r)
                 print(json.dumps({k: r.get(k) for k in (
                     "session", "arm", "status", "reason", "verdict", "tool_calls",
-                    "ttft_first_s", "wall_s", "run_cache_hit", "summary_has")}
+                    "ttft_first_s", "wall_s", "run_cache_hit", "summary_has",
+                    # Correctness and retention on the same line, per row: the
+                    # pair that reads "hit / {call_planted: False}" is the one
+                    # that used to be invisible until the summary was re-run.
+                    "oracle_survived")}
                     | {"summarize_outcome": (r.get("fired") or {}).get("summarize_outcome"),
                        "summarizer_calls": (r.get("summarizer") or {}).get("calls"),
+                       "tokens_freed": freed_total(r["fired"])
+                       if isinstance(r.get("fired"), dict) else None,
                        "warmup": (r.get("warmup") or {}).get("status")},
                     default=str), flush=True)
                 _write(out_path, a, sessions, system_prompt, rows)
@@ -1979,7 +2195,12 @@ def _write(out_path: Path, a, sessions, system_prompt, rows):
                       "depth": s.depth, "est_tokens": s.est_tokens, "sha256": s.sha256,
                       "planted": {"passphrase": s.planted.passphrase,
                                   "port": s.planted.port,
-                                  "old_port": s.planted.old_port}} for s in sessions],
+                                  "old_port": s.planted.old_port},
+                      # The oracle travels with the task it belongs to, so a
+                      # results file can be re-graded without re-generating it.
+                      "oracle_turn_ids": s.oracle_turn_ids,
+                      "oracle_roles": {t.turn_id: t.role
+                                       for t in s.oracle_turns}} for s in sessions],
         "summary": summarize(rows),
         # The in-turn trigger is a prompt size, so the arms separate by size:
         # below it some arms are identical by construction.

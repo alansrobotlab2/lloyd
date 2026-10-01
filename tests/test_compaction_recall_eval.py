@@ -657,3 +657,298 @@ def test_the_relief_event_carries_what_rungs_3_and_4_cut(monkeypatch):
                                  "freed_tokens": 10, "truncated_chars_freed": 4000,
                                  "argument_chars_freed": 12})
     assert seen["truncated_chars_freed"] == 4000 and seen["argument_chars_freed"] == 12
+
+
+# --- #2028: oracle spans — which turns the answer depended on -----------------
+#
+# ContextBench (arXiv:2609.37725v1) grades a stateful task against an ORACLE
+# TRACE: the exact set of turns that must stay in context for the task to be
+# solvable. Without it a policy that sheds the span and keeps the filler reads
+# as a pass whenever the model answers plausibly anyway. These tests pin the
+# three things the item asks for: the oracle on the spec, retention beside
+# correctness (with an honest zero denominator), and the pointer-after-content
+# probe scored per turn rather than as one blended number.
+
+def _oracle_turn_ids(s) -> set[str]:
+    return {t.turn_id for t in s.oracle_turns}
+
+
+def test_the_planted_turn_is_the_oracle_span_the_answer_needs(corpus):
+    """Clause 1: the spec carries `oracle_turn_ids`, and it is the planted turn
+    the generator already positioned at `depth` — the id is the row's own
+    `tool_call_id`, which survives both compaction and
+    `_prepare_messages_for_harness`, and the needle is the literal only that
+    turn's content carries."""
+    root, files = corpus
+    s = R.build_session(7, 20_000, 0.5, root=root, corpus=files)
+    assert s.oracle_turn_ids == [t.turn_id for t in s.oracle_turns]
+    assert _oracle_turn_ids(s) == {R.PLANTED_CALL_ID}
+    turn = s.oracle_turns[0]
+    assert turn.role == "target"
+    assert turn.needle == s.planted.passphrase
+    # The oracle is the planted row and nothing else: the depth that placed it
+    # is the depth the oracle names.
+    assert s.messages[s.planted_index]["tool_call_id"] == turn.turn_id
+    assert turn.needle in s.messages[s.planted_index]["content"][0]["text"]
+    # A conversation-shape session keeps the same one oracle turn: the facts
+    # are restated in the reply, but the reply is not a second source.
+    c = R.build_session(7, 20_000, 0.5, root=root, corpus=files, shape="conversation")
+    assert c.oracle_turn_ids == [R.PLANTED_CALL_ID]
+
+
+def test_naming_the_oracle_draws_nothing_and_moves_no_turn(corpus):
+    """Clause 1's other half: the oracle is free at generation time. A pointer
+    session's prefix — planted facts, filler, every tool call id — is the
+    non-pointer session's, byte for byte, so adding the probe did not consume a
+    draw that would have shifted the planted values or the distractor ports."""
+    root, files = corpus
+    plain = R.build_session(21, 20_000, 0.5, root=root, corpus=files)
+    again = R.build_session(21, 20_000, 0.5, root=root, corpus=files)
+    assert plain.oracle_turn_ids == again.oracle_turn_ids == [R.PLANTED_CALL_ID]
+    assert plain.sha256 == again.sha256
+    ptr = R.build_session(21, 20_000, 0.5, root=root, corpus=files, pointer=True)
+    assert ptr.messages[:len(plain.messages)] == plain.messages
+    assert ptr.planted == plain.planted
+    assert ptr.planted_index == plain.planted_index
+
+
+def test_a_pointer_turn_points_at_the_span_it_does_not_restate(corpus):
+    """The probe the item asks for: plant, clear, and only THEN emit "the value
+    you'll need is the one in the result you dropped". The pointer is the last
+    turn of the session and carries neither value, so the only way the answer
+    survives is the pointer's TARGET — or a re-read."""
+    root, files = corpus
+    s = R.build_session(7, 20_000, 0.5, root=root, corpus=files, pointer=True)
+    assert _oracle_turn_ids(s) == {R.PLANTED_CALL_ID, R.POINTER_CALL_ID}
+    roles = {t.turn_id: t.role for t in s.oracle_turns}
+    assert roles == {R.PLANTED_CALL_ID: "target", R.POINTER_CALL_ID: "pointer"}
+    at = {m.get("tool_call_id"): n for n, m in enumerate(s.messages)
+          if m.get("tool_call_id")}
+    assert at[R.POINTER_CALL_ID] > at[R.PLANTED_CALL_ID]
+    row = s.messages[at[R.POINTER_CALL_ID]]
+    text = row["content"][0]["text"]
+    p = s.planted
+    assert p.passphrase not in text
+    assert p.port not in text and p.old_port not in text
+    assert s.oracle_needles[R.POINTER_CALL_ID] in text
+    assert s.oracle_needles[R.POINTER_CALL_ID] != p.passphrase
+    # It is the last turn: the content it points at has every chance to be
+    # gone before the pointer exists.
+    assert at[R.POINTER_CALL_ID] == max(at.values())
+
+
+def test_retention_is_the_span_surviving_not_the_row_beating_the_axe(corpus):
+    """Clause 4: retention is measured over the content that reaches the
+    prompt. A cleared row keeps its `tool_call_id`, so row presence alone would
+    score 1.0 for the very policies being tested; and a summary that NAMES the
+    codename is not the planted span either."""
+    root, files = corpus
+    s = R.build_session(7, 20_000, 0.5, root=root, corpus=files, pointer=False)
+    turns = s.oracle_turns
+    intact = list(s.messages)
+    assert R.oracle_survived(intact, turns) == {R.PLANTED_CALL_ID: True}
+
+    cleared, filler_kept = [], 0
+    for m in intact:
+        if m.get("tool_call_id") == R.PLANTED_CALL_ID:
+            m = {**m, "content": [{"type": "text",
+                                   "text": "[tool output cleared to save context]"}]}
+        else:
+            filler_kept += 1
+        cleared.append(m)
+    assert filler_kept > 10                       # the filler all survived
+    assert R.oracle_survived(cleared, turns) == {R.PLANTED_CALL_ID: False}
+    assert R.oracle_survived([m for m in intact
+                              if m.get("tool_call_id") != R.PLANTED_CALL_ID],
+                             turns) == {R.PLANTED_CALL_ID: False}
+
+    # A summary that carries the value verbatim is still not the oracle span.
+    summarised = [m for m in intact if m.get("tool_call_id") != R.PLANTED_CALL_ID]
+    summarised.insert(0, R._msg(
+        "assistant", "[compaction summary — earlier conversation]\n\n"
+        f"codename {s.planted.passphrase}; the relay port is in the notes."))
+    assert R.summary_text(summarised)             # there IS a summary naming it
+    assert R.oracle_survived(summarised, turns) == {R.PLANTED_CALL_ID: False}
+
+    # A re-read of the same content in a NEW row does not count either: the
+    # answer came from a fresh read, not from the span staying in context —
+    # which the runner already separates with `recovered_via_tool`.
+    reread = [m for m in intact if m.get("tool_call_id") != R.PLANTED_CALL_ID]
+    reread.append(R._msg("tool", f"codename {s.planted.passphrase}",
+                         tool_call_id="call_reread"))
+    assert R.oracle_survived(reread, turns) == {R.PLANTED_CALL_ID: False}
+
+
+def _span_row(arm="tool_clear", retained=(), total=(R.PLANTED_CALL_ID,),
+              roles=None, verdict="hit"):
+    surv = {tid: (tid in retained) for tid in total}
+    return {"arm": arm, "depth": 0.5, "status": "ok", "tool_calls": 1,
+            "verdict": {"distinctive": verdict, "ambiguous": verdict},
+            "oracle_survived": surv,
+            "oracle_roles": roles or {tid: "target" for tid in total},
+            "fired": {"turn_start_freed": 0, "relief_freed": 0}}
+
+
+def test_summary_reports_oracle_retention_beside_correctness_for_every_arm():
+    """Clause 2: `oracle_retention` is a k/n/rate column next to
+    `distinctive`/`ambiguous` for the SAME arm — correctness alone is the
+    number that hides a plausible-but-wrong run."""
+    rows = [_span_row(retained=(R.PLANTED_CALL_ID,)),
+            _span_row(retained=(R.PLANTED_CALL_ID,))]
+    arm = R.summarize(rows)["tool_clear"]
+    assert arm["distinctive"]["k"] == 2 and arm["distinctive"]["n"] == 2
+    o = arm["oracle_retention"]
+    assert o["k"] == 2 and o["n"] == 2 and o["rate"] == 1.0
+    assert set(o) >= {"k", "n", "rate", "ci95"}
+    assert arm["by_depth"]["0.5"]["oracle_retention"]["n"] == 2
+    assert "recall" not in arm                    # still never blended
+
+
+def test_high_correctness_with_low_retention_is_visible_not_a_win():
+    """Clause 4 at the reporting end: two rows that BOTH answer correctly, one
+    having kept the oracle span and one having shed it with the filler. Correct
+    alone says the arm is fine; the two columns disagreeing is the finding."""
+    rows = [_span_row(retained=(R.PLANTED_CALL_ID,)),
+            _span_row(retained=())]
+    arm = R.summarize(rows)["tool_clear"]
+    assert arm["distinctive"]["rate"] == 1.0      # correctness sees nothing
+    assert arm["oracle_retention"]["k"] == 1 and arm["oracle_retention"]["n"] == 2
+    assert arm["oracle_retention"]["rate"] == 0.5
+
+
+def test_an_arm_with_no_oracle_bearing_rows_reports_n_zero_and_no_rate():
+    """Clause 3: a zero denominator is not a pass. An arm whose rows never
+    carried an oracle turn — or a family the run did not exercise — reports
+    `n: 0` with `rate: null`, the same shape `rate()` already uses."""
+    rows = [{"arm": "none", "depth": 0.1, "status": "ok", "tool_calls": 1,
+             "verdict": {"distinctive": "hit", "ambiguous": "hit"}}]
+    arm = R.summarize(rows)["none"]
+    for col in (arm["oracle_retention"],
+                arm["oracle_retention_by_role"]["target"],
+                arm["oracle_retention_by_role"]["pointer"]):
+        assert col["n"] == 0 and col["k"] == 0 and col["rate"] is None
+        assert col["ci95"] == [None, None]
+    # And the null survives the JSON the runner prints.
+    assert json.loads(json.dumps(arm))["oracle_retention"]["rate"] is None
+
+
+def test_the_pointer_and_its_target_are_two_separate_numbers():
+    """Clause 5: keeping the pointer while losing the content it points at is
+    THE failure this probe exists for, and one blended number hides it — 0.75
+    reads like a mild regression either way."""
+    rows = [
+        _span_row(retained=(R.PLANTED_CALL_ID, R.POINTER_CALL_ID),
+                  total=(R.PLANTED_CALL_ID, R.POINTER_CALL_ID),
+                  roles={R.PLANTED_CALL_ID: "target", R.POINTER_CALL_ID: "pointer"}),
+        _span_row(retained=(R.POINTER_CALL_ID,),
+                  total=(R.PLANTED_CALL_ID, R.POINTER_CALL_ID),
+                  roles={R.PLANTED_CALL_ID: "target", R.POINTER_CALL_ID: "pointer"}),
+    ]
+    arm = R.summarize(rows)["tool_clear"]
+    by = arm["oracle_retention_by_role"]
+    assert by["pointer"]["n"] == 2 and by["pointer"]["rate"] == 1.0
+    assert by["target"]["n"] == 2 and by["target"]["rate"] == 0.5
+    # The blended number is still printed, but it cannot be the only reading.
+    assert arm["oracle_retention"]["rate"] == 0.75
+
+
+def test_the_cost_column_is_the_two_path_sum_not_one_path():
+    """The item's clause 4: cost is #2027's predicate — the turn-start
+    projection PLUS every relief pass, the sum `valid_for_arm` already gates on
+    — never one path. A row whose freeing came only from the in-turn ladder
+    must still show its cost."""
+    assert R.freed_total({"turn_start_freed": 7_000, "relief_freed": 3_000}) == 10_000
+    rows = [_span_row(retained=(R.PLANTED_CALL_ID,),
+                      total=(R.PLANTED_CALL_ID,)),
+            {"arm": "tool_clear", "depth": 0.5, "status": "ok", "tool_calls": 1,
+             "verdict": {"distinctive": "hit", "ambiguous": "hit"},
+             "oracle_survived": {R.PLANTED_CALL_ID: False},
+             "oracle_roles": {R.PLANTED_CALL_ID: "target"},
+             # Freed nothing at turn start and 5,000 in turn: the dominant
+             # production path (#1078), which a turn-start-only column misses.
+             "fired": {"turn_start_freed": 0, "relief_freed": 5_000}}]
+    arm = R.summarize(rows)["tool_clear"]
+    assert arm["median_tokens_freed"] == 2_500    # median of 0 and 5,000
+    rec = {"mechanisms": ["relief:intra_turn"], "turn_start": {"tokens_freed": 0},
+           "relief": [{"reason": "intra_turn", "rungs": ["tool_results"],
+                       "freed_tokens": 5_000}]}
+    f = R.fired(rec)
+    assert f["turn_start_freed"] == 0 and R.freed_total(f) == 5_000
+    assert R.valid_for_arm("production", f)       # the gate uses the same sum
+
+
+def test_run_one_scores_the_spans_of_the_prompt_the_answer_came_from(corpus, tmp_path,
+                                                                    monkeypatch):
+    """The seam: generator -> session JSON -> turn-start compaction ->
+    `_prepare_messages_for_harness` -> the loop's wire prompt -> the row. Both
+    oracle turns are scored, and the score is recomputed here from the prompt
+    the scripted engine actually saw."""
+    root, files = corpus
+    s = R.build_session(3, 50_000, 0.5, root=root, corpus=files, pointer=True)
+    monkeypatch.setattr(R, "_metrics", lambda base_url: {})
+    seen: list[list[dict]] = []
+
+    async def fake_stream(**kw):
+        eb = kw.get("extra_body") or {}
+        if eb.get("max_tokens") == 1:              # the warm-up
+            yield {"choices": [], "usage": {"prompt_tokens": 100}}
+            return
+        seen.append(kw["messages"])
+        yield {"choices": [{"delta": {"content":
+            f"CODENAME: {s.planted.passphrase}\nPORT: {s.planted.port}"}}]}
+        yield {"choices": [{"delta": {}, "finish_reason": "stop"}]}
+        yield {"choices": [], "usage": {"prompt_tokens": 1_000,
+                                        "completion_tokens": 5,
+                                        "prompt_tokens_details": {"cached_tokens": 900}}}
+
+    monkeypatch.setattr("app.harness.loop.stream_chat", fake_stream)
+    disc = [("lloyd-mcp", [{"name": n, "description": n,
+                            "inputSchema": {"type": "object", "properties": {}}}
+                           for n in ("Read", "Grep", "Bash")])]
+    row = asyncio.run(R.run_one(s, "none", discovered=disc, system_prompt="sys",
+                               data_root=tmp_path / "d", base_url="http://stub",
+                               max_turns=2))
+    assert row["status"] == "ok", row.get("reason")
+    assert set(row["oracle_survived"]) == set(s.oracle_turn_ids)
+    assert row["oracle_survived"] == {R.PLANTED_CALL_ID: True,
+                                     R.POINTER_CALL_ID: True}
+    assert row["oracle_survived"] == R.oracle_survived(seen[-1], s.oracle_turns)
+    arm = R.summarize([row])["none"]
+    assert arm["oracle_retention_by_role"]["pointer"]["rate"] == 1.0
+    assert arm["oracle_retention_by_role"]["target"]["rate"] == 1.0
+    assert arm["median_tokens_freed"] == 0              # `none` frees nothing
+
+
+def test_the_cli_pointer_run_prints_retention_beside_correctness(tmp_path, monkeypatch,
+                                                                 capsys):
+    """The runner itself, end to end: argv -> sessions on disk -> the printed
+    report. `--pointer` makes each task's oracle a target AND a pointer, and
+    the document that gets printed carries `oracle_retention` next to
+    `distinctive` for every arm with `n` beside it — including `rate: null` at
+    `n: 0`, which is what a dry run (no graded rows) has to show rather than a
+    rate of 0 or 1."""
+    snap = tmp_path / "tools.json"
+    snap.write_text(json.dumps([["lloyd-mcp", [{"name": n, "description": n,
+                                                "inputSchema": {"type": "object",
+                                                                "properties": {}}}
+                                               for n in ("Read", "Grep", "Bash")]]]))
+    root = tmp_path / "data"
+    monkeypatch.setenv("LLOYD_DATA", str(root))
+    rc = R.main(["--sessions", "1", "--sizes", "12000", "--depths", "0.5",
+                 "--arms", "none", "--seed", "600", "--pointer", "--dry",
+                 "--data-root", str(root), "--tools-snapshot", str(snap),
+                 "--out", str(tmp_path / "out.json")])
+    assert rc == 0
+    printed = json.loads(capsys.readouterr().out.strip().split("\n{", 1)[1].rsplit("}", 1)[0].join(("{", "}")))
+    arm = printed["none"]
+    assert arm["distinctive"]["n"] == 0                # dry: nothing graded
+    assert arm["oracle_retention"] == {"k": 0, "n": 0, "rate": None,
+                                       "ci95": [None, None]}
+    assert set(arm["oracle_retention_by_role"]) == {"target", "pointer"}
+    assert "median_tokens_freed" in arm
+    # The task on disk carries its own oracle, and the row scored both spans.
+    doc = json.loads((tmp_path / "out.json").read_text())
+    assert doc["sessions"][0]["oracle_roles"] == {"call_planted": "target",
+                                                  "call_pointer": "pointer"}
+    assert doc["rows"][0]["oracle_survived"] == {"call_planted": True,
+                                                 "call_pointer": True}
