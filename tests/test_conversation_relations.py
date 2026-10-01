@@ -1810,7 +1810,9 @@ def _band_pool(cr, confidences: list[float]) -> list[dict]:
 def test_the_band_flag_off_leaves_a_080_row_pending_and_the_line_unchanged(cr):
     """Clause 1 (flag off, the default): a 0.80 scored row is untouched — same
     `status: pending`, same `awaiting_review` mark #1364 gave it — and
-    `format_acceptance_band` prints the #1364 sentence with nothing appended."""
+    `format_acceptance_band` prints the #1364 sentence with nothing appended,
+    because this file holds no band row. A file that does hold one grows the
+    suffix whatever the flag says; the next node pins that (#1957)."""
     row = _classified_proposal(cr, confidence=0.80)
     proposals = [row]
 
@@ -1824,6 +1826,31 @@ def test_the_band_flag_off_leaves_a_080_row_pending_and_the_line_unchanged(cr):
     assert line == ("Auto-approve floor 0.85: auto-approved 0 "
                     "| 1 LLM-classified below the floor, awaiting a review that "
                     "does not exist"), line
+
+
+def test_a_band_row_already_in_the_file_prints_its_suffix_with_the_flag_off(cr):
+    """#1957, production's file state: the proposals file still holds the rows the
+    one band-enabled night admitted, so a floor-only run prints the band suffix
+    too. The tally is cumulative over the file — `format_acceptance_band` never
+    sees the flag — which is why the suffix cannot be read as "the band ran
+    tonight" (`run_51_20260930_060028` printed it under a flag-off heading). The
+    node above keeps the unchanged-line case, for a file holding no band row."""
+    admitted = _classified_proposal(cr, source="knowledge/band-old.md",
+                                    target="knowledge/partner-old.md",
+                                    confidence=0.80)
+    admitted["status"] = "approved"
+    admitted["accepted_by"] = cr.BAND_ACCEPTED_BY
+    pending = _classified_proposal(cr, confidence=0.80)
+    proposals = [admitted, pending]
+
+    assert cr.auto_approve_strong(proposals) == 0, "flag off: tonight admits nothing"
+    assert pending["status"] == "pending"
+
+    line = cr.format_acceptance_band(proposals)
+    assert line == ("Auto-approve floor 0.85: auto-approved 0 "
+                    "| 1 LLM-classified below the floor, awaiting a review that "
+                    "does not exist "
+                    "| 1 admitted by the 0.7-0.85 band (rank-capped, expiring)"), line
 
 
 def test_the_band_admits_by_rank_under_the_cap_and_leaves_the_floor_alone(cr):
@@ -2220,11 +2247,21 @@ def test_the_step4_report_block_promises_only_what_a_floor_only_night_prints(
     block = subsets[0]
     assert len(block) == 4, f"step 4's report subset is not four lines: {block}"
 
+    # #1957 corrected what #1841 pinned here. The page used to promise that a
+    # floor-only night prints "no band figure"; production printed one the next
+    # morning, because the floor line's band tally counts the rows already in the
+    # file. What step 4 owes the reporter is that rule and the one real marker of a
+    # band-enabled night (the header, which only the flag prints).
     step4_flat = _flat(step4).lower()
-    for marker in _BAND_OUTPUT_MARKERS:
-        assert marker.lower() not in step4_flat, (
-            f"step 4 still tells the reporter to expect {marker!r}, which a "
-            f"floor-only night never prints")
+    assert "no band figure" not in step4_flat, (
+        "step 4 still promises a floor-only night prints no band figure")
+    assert "cumulative" in step4_flat and 'accepted_by: "band"' in step4_flat, (
+        "step 4 does not say the floor line's band figure is a cumulative count "
+        "of the band rows in the proposals file")
+    assert "retired unreviewed after 30d" in step4_flat, (
+        "step 4 does not name the #1842 retired suffix")
+    assert re.search(r"header, which prints only with `--approve-band`", step4_flat), (
+        "step 4 does not name the flag-only header as the band-enabled marker")
 
     def _approve(**kw) -> str:
         proposals = tmp_path / "p.json"
