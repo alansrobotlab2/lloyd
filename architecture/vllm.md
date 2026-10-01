@@ -870,8 +870,9 @@ has still not been run as of 2026-09-11.
   as many tokens as the free pool held at the gap's tightest, which is the
   most that could have reclaimed a paused prefix. The other 43 misses have no
   churn to explain them and are the candidates for the branch below, and that
-  branch is decided rather than parked (owed-check `20260927_232609_owedcheck_46d6`,
-  #1720): **the non-churn misses are accepted as a bounded, documented loss, and
+  branch was ruled on (owed-check `20260927_232609_owedcheck_46d6`, #1720), with a
+  re-open condition that has since fired, as the end of this paragraph says:
+  **the non-churn misses are accepted as a bounded, documented loss, and
   the upstream unannotated draft-group annotation is not chased**. The causal
   attribution is unmeasured rather than merely unfinished — this build's warning
   does not claim reuse is disabled, and the day's 4 partial misses show reuse
@@ -880,6 +881,15 @@ has still not been run as of 2026-09-11.
   a future counted window: (i) any counted window in which a chat turn carries a
   prefix miss, or (ii) any counted day exceeding §6.1's per-day budget of 97
   misses / 10.3M re-prefilled tokens.
+  The condition this ruling set for an upstream filing, a chat-turn miss with
+  neither free-pool churn nor a gate-level KV explanation, has since been met on
+  two independent counted days, each with its own bullet below and its own
+  committed extract: 2026-09-29 (`tests/fixtures/vllm_prefix_miss_2026-09-29.json`)
+  and 2026-09-27 (`tests/fixtures/vllm_prefix_miss_2026-09-27.json`). So the
+  re-open has fired and the upstream report is owed, written from those two
+  extracts and claiming what they show, that churn and gate pressure are excluded
+  for those events, and nothing about cause. It has not been filed. The accepted
+  loss still stands for every non-churn miss that is not such a chat-turn event.
   What the ruling above does with a LATER day is now on the record, because
   **2026-09-28 00:00 → 2026-09-29 00:00 UTC** fired **both** of its triggers,
   and it is recorded here as a re-open that attribution then closed rather than
@@ -918,8 +928,8 @@ has still not been run as of 2026-09-11.
   two days that reading spans, and no per-kind mix for that fleet survives anywhere: the
   `usage.db` every per-day query on this page reads starts where (b) says it starts, which
   is after §6.1 was measured. So at the current load mix a counted day exceeds that budget
-  routinely, and the two paragraphs above are the exception rather than the pattern — they
-  are the two days this page has attributed, while the same per-day query prints chat turns
+  routinely, and the days with a paragraph of their own are the exception rather than the
+  pattern — they are the days this page has attributed, while the same per-day query prints chat turns
   carrying a miss on other days too, and trigger (i) is not called until the churn join says
   whether any of those is unexplained. The ruled consequence, so that the next over-budget day is
   not litigated again: **a day that fires (ii) and not (i) earns the load-mix and
@@ -985,13 +995,60 @@ has still not been run as of 2026-09-11.
   09-28 paragraph above produced none and closes on that; this day produced one, and the
   two statements do not contradict each other because they are two measurements: all three
   of 09-28's chat misses churned, this one did not and did not sit at the gate either. What
-  follows is a ruling, not a diff. The condition has now been met on one counted day, and
-  whether one day is enough to file the unannotated draft-group report upstream or whether
-  it needs replication on a second independent day is owed-check's to rule — as is the
-  earlier day whose chat turns also carry misses and which has never been counted, which is
-  why this page says **first counted day on which the condition is met** rather than the
-  only day. The engine lines that would settle it expire the way every other day's do, so
-  an uncounted day stops being countable whether or not anything rules on it.
+  followed was replication rather than a filing on one event. This was the **first counted
+  day on which the condition is met**, and the earlier day whose chat turns also carry
+  misses had not been counted when this paragraph was written. It has been since: the next
+  bullet counts 2026-09-27 over `tests/fixtures/vllm_prefix_miss_2026-09-27.json`, and the
+  condition holds there too, so it now stands on two independent days and two committed
+  extracts, that one and this day's. The engine lines behind both expire the way every
+  other day's do, which is why each day was committed as an extract when it was counted.
+- **The 2026-09-27 count: the filing condition is met on a second, earlier day.**
+  **2026-09-27 00:00 → 2026-09-28 00:00 UTC** is the earlier day the paragraph above left
+  uncounted, counted the same way over the extract committed as
+  `tests/fixtures/vllm_prefix_miss_2026-09-27.json`; every figure in this paragraph is
+  recomputed from it at the `workers.kv_gate.max_kv_usage` gate by
+  `tests/test_vllm_doc_claims.py::test_the_replication_day_figures_are_the_derivation`. It
+  is a FIFTH extract and moves none of the other four: this day does not displace
+  2026-09-25 as the counted reading. Trigger (i): **2 of the day's 4 chat turns**
+  (`2026-09-27T22:17:08` and `2026-09-27T23:34:02`) carry prefix misses, **17 misses /
+  2,268,892 tokens** between them, so criterion (a) does not hold. Trigger (ii): **201
+  misses / 25,082,453 tokens** against §6.1's per-day budget of **97 misses / 10.3M
+  tokens**, over on both sides, so criterion (b) does not hold either, with the caveat the
+  other two days carry: **161 of those 201 misses and 20,201,674 of the 25,082,453 tokens
+  are autocode** (**80%**), read against a **2026-09-08/09** fleet baseline measured over
+  a different load mix. (c) and (d) both hold: **6,521 such lines**, **KV p50 0.19 / p90
+  0.51 / max 0.99**, `Running:` **1** at the median; and of **3,244** lines with two
+  requests resident (median **2408.4 tok/s**, slowest **8.0**) the **6** under the bar's 15
+  tok/s are all excluded as admissions in flight — **6 of them with a cold re-admission**
+  overlapping the interval and **0 with a chunked prefill** climbing across it. The gap
+  join: **gap p50 0.5 s**; KV peak in the gap **p50 0.520 / p90 0.789**, max **0.964**,
+  with **78 of 202** at or over the **0.60** gate and **5** of them over 0.90; and of the
+  day's **202 miss events, 52 had free-pool churn in their gap and 150 did not**.
+  The chat misses, event by event, on the rule the 09-29 attribution uses: of the **17
+  chat miss events**, **6** had free-pool churn in their gap, **7** more had a gap KV peak
+  at or over the gate, and **4** had neither. Those 4 are all in the turn
+  `2026-09-27T23:34:02`, every one a prompt with cache_read 0 on the **844,969**-token
+  pool, and they are:
+  iteration 4, a prompt of 116,805 tokens after a gap of 0.1 s, gap KV peak 0.547, with
+  3,973 tokens computed in the gap against 382,771 free blocks;
+  iteration 12, a prompt of 125,371 tokens after a gap of 0.7 s, gap KV peak 0.595, with
+  86,516 tokens computed in the gap against 342,212 free blocks;
+  iteration 13, a prompt of 126,471 tokens after a gap of 0.1 s, gap KV peak 0.468, with
+  187,300 tokens computed in the gap against 449,524 free blocks;
+  iteration 38, a prompt of 123,864 tokens after a gap of 0.1 s, gap KV peak 0.148, with
+  546 tokens computed in the gap against 719,914 free blocks.
+  The iteration 12 event is marginal and is named as such: its peak of 0.595 is 0.005
+  under the 0.60 gate, one status line's rounding from a gate-level explanation, and the
+  verdict does not rest on it. Set it aside and three events remain whose peaks are well
+  under the gate, the last of them on a pool that was 85% free with 546 tokens computed
+  while the prefix was out. So this is a second independent day carrying a chat-turn miss
+  with **neither free-pool churn nor a gate-level KV explanation**: **the condition is met
+  on two independent counted days**, 2026-09-29 on one event and this day on three, or
+  four with the marginal one. What the two extracts support is an exclusion and not a
+  cause: free-pool churn and gate pressure are ruled out for these events, and nothing on
+  this page measures that the unannotated draft group below is the reason. The upstream
+  report follows from that and is owed; it is not filed, and this page records the issue's
+  URL when it is.
 - **The unannotated draft group.** `_warn_if_unannotated_eagle_mamba` in
   vLLM's `v1/core/kv_cache_utils.py` — name the function, not the line: in
   the **production** venv at `dff1bde` the def is 2190 and its
@@ -1034,3 +1091,4 @@ has still not been run as of 2026-09-11.
 - 2026-09-21 — **stale.** §3's cache table, §2.3's clamp values (275/450/275), §2.4's index table, §2.5's persistence-mode claim, §5's knob defaults, §3.1's three asserts and the `workers.slots`-adjacent KV gate all verified against the live engine (`vllm:cache_config_info`: fp8, 844,969 tokens, block 3200) and the tree. Corrected: §1's verbatim command line was missing `--kv-cache-dtype fp8` and `--engram-config`; §6.3's "`workers.slots` stays 2" (now 6, `config.yaml:1163`); §6.4's observer priority (one step lower on unattended platforms since `97a86cc0`); §7's "priority-0 requests" (the bench runs at 1); §8's OOM account (four kills, not two — and `Slice=lloyd.slice`, not the RAM wait, is what keeps oomd off the unit, plus the FlashInfer JIT rebuild since `0150e88b`) and its restart route; §10's venv line numbers, which had drifted onto the `-0910` revert target. Filed #1337 #1338 #1339 #1340 #1341.
 - 2026-09-27 — **§10's counted reading re-pointed (#1627).** Replaced by one full UTC day of real chat (2026-09-25), now naming chat turns as part of the shape and marking (a)-(d) pass/fail; criterion (d) became a derivation (`two_request_throughput`: a per-status-line combined tok/s reading, and a cold-admission exclusion that separates a re-admission in flight from a chunked prefill climbing across the line), so the page can be wrong about throughput without anyone deciding it was a stall. Corrected: the eviction bullet's shape (this day is gate-level KV in 26 of 46 gaps and free-pool churn in 3, not the reverse), (b)'s verdict against §6.1's per-day budget, the draft-group partial count, §6.3's cross-reference, and rotation's true horizon (about five days of engine status lines, not "two"). `tests/test_vllm_doc_claims.py` now derives every counted figure, both history paragraphs labelled, plus a round-trip against `usage.db`.
 - 2026-09-30 — **§10 counts 2026-09-29 (#1921).** The day the accepted-loss ruling's own filing condition was first met is now a derived reading of its own: `tests/fixtures/vllm_prefix_miss_2026-09-29.json` is committed as a THIRD extract (09-25 stays the counted reading, 09-28 the first re-open), and `tests/test_vllm_doc_claims.py` recomputes every figure in the new §10 paragraph from it at the `workers.kv_gate.max_kv_usage` gate — trigger figures, the (b) ratio against §6.1's budget, the load-mix caveat, (c)/(d), the churn split, and the one chat miss's attribution down to its gap's KV peak against the gate and its tokens against the free pool. The paragraph carries no pass/fail mark and no second population query, so `_verdict`'s one-mark rule and the one-query rule are pinned against it rather than merely left unbroken. Change 5 (whether 2026-09-27 replicates the condition, which decides if the upstream report follows) and Change 6 (a scheduled job, so a day stops needing a human `git add`) stay owed.
+- 2026-10-01 — **§10 counts 2026-09-27 (#2005).** The earlier day the 09-29 paragraph left uncounted is committed as `tests/fixtures/vllm_prefix_miss_2026-09-27.json`, a fifth extract, while its engine status lines were still in the rotation (7,039 of them in `.log.4`/`.log.5`). `tests/test_vllm_doc_claims.py` recomputes every figure in the new paragraph and walks the day's 17 chat miss events one by one: 6 churned, 7 sat at or over the gate, 4 had neither, 3 of them clear of the gate by a wide margin. The filing condition is therefore met on two independent counted days, and the accepted-loss paragraph and the 09-29 paragraph now say so and name both extracts. Owed: the upstream report itself, which is a write to a third-party repository and is Alan's to file.

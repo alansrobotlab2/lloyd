@@ -1153,6 +1153,8 @@ def _gap_events(ex: dict, gate: float) -> list[dict]:
         out.append({"kind": m[5], "gap_s": start - m[6], "peak": peak,
                     "computed": computed, "free_at_peak": round((1 - peak) * pool),
                     "n_lines": len(g),
+                    # The miss row's own columns, so an event can be named (#2005).
+                    "end": m[0], "iteration": m[2], "tokens": m[3], "cache_read": m[4],
                     "churn": computed >= (1 - peak) * pool})
     d = W.derive(ex, gate=gate)
     assert len(out) == d["miss_events"] and \
@@ -1616,9 +1618,6 @@ def test_the_repoint_question_is_recorded_as_ruled_not_as_owed():
         "the span does not say that (ii) firing routinely is not grounds for a re-point"
     assert re.search(r"tripwire and not as a quota", r), \
         "the span does not say what the budget is: a tripwire, not a quota"
-    doc = " ".join(DOC.read_text(encoding="utf-8").split())
-    assert doc.count("owed-check's to rule") == 1, \
-        "the replication question further down is a different one and must stay open-tense"
 
 
 def test_the_rule_keeps_2026_09_28_as_the_worked_exemplar_and_the_ruling_verbatim(reopen):
@@ -1704,6 +1703,8 @@ def test_the_rule_breaks_neither_the_one_mark_nor_the_one_query_rule(reading):
 # that one — keeps reading only 2026-09-28's text, and #1812's five nodes are untouched.
 
 FILING_EXTRACT = ROOT / "tests" / "fixtures" / "vllm_prefix_miss_2026-09-29.json"
+#: The bullet that follows the 09-29 one in §10 (#2005), and so where that one ends.
+_REPLICATION_HEADING = "- **The 2026-09-27 count:"
 
 
 @pytest.fixture(scope="module")
@@ -1719,13 +1720,15 @@ def filing(filing_raw, cfg) -> dict:
 def _filing_bullet() -> str:
     """§10's 2026-09-29 paragraph, whole and collapsed.
 
-    Raw text rather than `_section`, and bounded at the draft-group bullet: the span
-    has to stop there so a phrase demanded of THIS day cannot be satisfied by the
-    09-25 or 09-28 prose several paragraphs earlier.
+    Raw text rather than `_section`, and bounded at the next bullet: the span has to
+    stop there so a phrase demanded of THIS day cannot be satisfied by another day's
+    prose. Until #2005 the next bullet was the draft-group one; it is now 2026-09-27's,
+    which walks its own chat misses iteration by iteration and would otherwise answer
+    for this day's single event.
     """
     raw = DOC.read_text(encoding="utf-8")
     start = raw.index("- **The 2026-09-29 re-open")
-    end = raw.index("- **The unannotated draft group.**", start)
+    end = raw.index(_REPLICATION_HEADING, start)
     return " ".join(raw[start:end].split()).replace("**", "")
 
 
@@ -2058,3 +2061,276 @@ def test_the_routine_exceedance_witness_is_committed_and_states_the_premise(deri
            sorted(d["top_session_kind"] for d in days).count("review") == 2, \
         "bench leading three of the seven days and review two is the load-mix fact the rule " \
         "replaces 'autocode-heavy' with; if the leaders moved, the sentence needs re-measuring"
+
+
+# ── #2005: 2026-09-27 is counted, and the filing condition replicates on it ───────
+#
+# #1921's paragraph ended on a deferral: the condition had been met on one counted day,
+# and an earlier day whose chat turns also carry misses had never been counted. That day
+# is 2026-09-27, and its 7,039 engine status lines were five rotations from deletion when
+# this extract was taken. It is a FIFTH constant for the reason the third and fourth were
+# added: every other one is pinned to a day §10 already grades.
+#
+# What the day turns out to hold is not one event but seventeen, so the walk is asserted
+# event by event and the paragraph's own tally (churned / at the gate / neither) is
+# recomputed, not quoted. One of the "neither" events sits 0.005 under the gate; the
+# paragraph has to say so and the verdict has to survive without it, which is a
+# biconditional below and not a wording pin alone.
+
+REPLICATION_EXTRACT = ROOT / "tests" / "fixtures" / "vllm_prefix_miss_2026-09-27.json"
+
+
+@pytest.fixture(scope="module")
+def replication_raw() -> dict:
+    return json.loads(REPLICATION_EXTRACT.read_text(encoding="utf-8"))
+
+
+@pytest.fixture(scope="module")
+def replication(replication_raw, cfg) -> dict:
+    return W.derive(replication_raw, gate=float(cfg["workers"]["kv_gate"]["max_kv_usage"]))
+
+
+def _replication_bullet() -> str:
+    """§10's 2026-09-27 paragraph, whole and collapsed, bounded at the draft-group bullet."""
+    raw = DOC.read_text(encoding="utf-8")
+    start = raw.index(_REPLICATION_HEADING)
+    end = raw.index("- **The unannotated draft group.**", start)
+    return " ".join(raw[start:end].split()).replace("**", "")
+
+
+def _chat_events(raw: dict, gate: float) -> list[dict]:
+    return [e for e in _gap_events(raw, gate=gate) if e["kind"] == "chat"]
+
+
+def test_the_replication_extract_is_committed_and_is_a_fifth_extract(replication_raw,
+                                                                    replication):
+    """#2005 clause 1: the day is in the tree, byte-for-byte what the script writes, and
+    it moved none of the four readings already graded."""
+    assert replication_raw["window"] == ["2026-09-27", "2026-09-28"]
+    assert replication["misses"] == 201
+    assert replication["reprefill_tokens"] == 25082453
+    assert replication["chat_turns"] == 4
+    assert replication["chat_turns_with_misses"] == 2
+    tracked = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "--error-unmatch",
+         str(REPLICATION_EXTRACT.relative_to(ROOT))],
+        capture_output=True, text=True)
+    assert tracked.returncode == 0, (
+        f"{REPLICATION_EXTRACT.name} is on disk but not in git; its status lines leave the "
+        "rotation about 2026-10-06, after which an uncommitted fixture is the day lost")
+    raw = REPLICATION_EXTRACT.read_text(encoding="utf-8")
+    assert raw == json.dumps(replication_raw, separators=(",", ":")) + "\n", (
+        f"{REPLICATION_EXTRACT.name} is not byte-for-byte what `--write-extract` writes")
+    assert len(raw.splitlines()) == 1
+    # The 4-way assert in the filing node stays true over four constants whatever this
+    # one is, so the 5-way set is asserted here.
+    five = {EXTRACT, OLD_EXTRACT, REOPEN_EXTRACT, FILING_EXTRACT, REPLICATION_EXTRACT}
+    assert len(five) == 5, "a re-pointed constant moves a day this file already grades"
+    windows = {c.name: json.loads(c.read_text(encoding="utf-8"))["window"][0] for c in five}
+    assert windows == {
+        EXTRACT.name: "2026-09-25", OLD_EXTRACT.name: "2026-09-23",
+        REOPEN_EXTRACT.name: "2026-09-28", FILING_EXTRACT.name: "2026-09-29",
+        REPLICATION_EXTRACT.name: "2026-09-27"}, windows
+    assert EXTRACT.name in _counted_reading(_section(10)), (
+        "the counted reading no longer names 2026-09-25's extract")
+    p = _replication_bullet()
+    assert REPLICATION_EXTRACT.name in p
+    assert "does not displace 2026-09-25 as the counted reading" in p
+    assert f"{REPLICATION_EXTRACT.name}:1" not in _section(10)
+
+
+def test_the_replication_day_round_trips_and_the_fixture_outlives_the_lines(replication_raw):
+    """The committed turns and misses are the database's; the status lines the logs still
+    hold are a subset of the fixture's. After the rotation passes this day the second
+    half is the only assertion left, and the fixture the only copy."""
+    from app.paths import PRODUCTION_DATA_ROOT
+
+    db = PRODUCTION_DATA_ROOT / "usage.db"
+    if not db.exists():
+        pytest.skip(f"no usage.db at {db}")
+    got = W.extract(replication_raw["window"][0], replication_raw["window"][1],
+                    data_root=PRODUCTION_DATA_ROOT)
+    if not got["turns"]:
+        pytest.skip(f"{db} holds no turns for {replication_raw['window']}")
+    assert got["turns"] == replication_raw["turns"]
+    assert got["misses"] == replication_raw["misses"]
+    assert set(map(tuple, got["kv_samples"])) <= set(map(tuple, replication_raw["kv_samples"]))
+
+
+def test_the_replication_day_figures_are_the_derivation(replication, replication_raw, cfg):
+    """#2005 clause 2: every figure the 09-27 paragraph prints is `derive`'s at the gate
+    `config.yaml` runs, each asserted as a phrase in the doc's own rendering."""
+    p = _replication_bullet()
+    d = replication
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    assert (f"{replication_raw['window'][0]} 00:00 → {replication_raw['window'][1]} "
+            "00:00 UTC") in p
+    assert f"{d['chat_turns_with_misses']} of the day's {d['chat_turns']} chat turns" in p
+    chat_misses, chat_tokens = d["by_kind"]["chat"]
+    assert f"{chat_misses} misses / {chat_tokens:,} tokens" in p
+    assert f"{d['misses']} misses / {d['reprefill_tokens']:,} tokens" in p
+    misses_per_day, tokens_per_day = _per_day_budget(_section(6))
+    assert f"{misses_per_day} misses / {tokens_per_day}M tokens" in p
+    assert d["misses"] > misses_per_day and d["reprefill_tokens"] > tokens_per_day * 1e6
+    auto_misses, auto_tokens = d["by_kind"]["autocode"]
+    assert (f"{auto_misses} of those {d['misses']} misses and {auto_tokens:,} of the "
+            f"{d['reprefill_tokens']:,} tokens are autocode") in p
+    assert f"({auto_misses / d['misses']:.0%})" in p
+    m = _BASELINE_RE.search(_section(6))
+    assert m and f"2026-09-{m.group(1)}/{m.group(2)}" in p
+    assert f"{_n(d['kv_samples'])} such lines" in p
+    assert f"KV p50 {d['kv_p50']:.2f} / p90 {d['kv_p90']:.2f} / max {d['kv_max']:.2f}" in p
+    assert f"`Running:` {_n(d['running_p50'])} at the median" in p
+    assert f"of {_n(d['two_request_windows'])} lines with two requests resident" in p
+    assert f"median {d['two_request_tok_s_p50']} tok/s" in p
+    assert f"slowest {d['two_request_tok_s_min']}" in p
+    assert f"the {d['two_request_under_stall']} under the bar's {W.STALL_TOK_S:.0f} tok/s" in p
+    assert f"{d['two_request_under_stall_cold_in_flight']} of them with a cold re-admission" in p
+    assert f"{d['two_request_under_stall_cold_prefill']} with a chunked prefill" in p
+    assert f"gap p50 {d['gap_s_p50']:.1f} s" in p
+    assert f"p50 {d['miss_kv_gap_p50']:.3f} / p90 {d['miss_kv_gap_p90']:.3f}" in p
+    assert f"max {d['miss_kv_gap_max']:.3f}" in p
+    assert (f"{d['misses_gap_over_gate']} of {d['miss_events']} at or over the "
+            f"{gate:.2f} gate") in p
+    assert f"{d['misses_gap_over_90']} of them over 0.90" in p
+    assert (f"of the day's {d['miss_events']} miss events, "
+            f"{d['misses_gap_churned_free_pool']} had free-pool churn in their gap and "
+            f"{d['miss_events'] - d['misses_gap_churned_free_pool']} did not") in p
+    assert f"{_n(d['pool_tokens'])}-token pool" in p
+    # The prose verdicts, as biconditionals against the numbers.
+    assert ("criterion (a) does not hold" in p) == (d["chat_turns_with_misses"] > 0)
+    assert ("criterion (b) does not hold" in p) == (
+        d["misses"] > misses_per_day and d["reprefill_tokens"] > tokens_per_day * 1e6)
+    assert ("(c) and (d) both hold" in p) == (
+        d["kv_p50"] < gate and d["two_request_under_stall_not_cold"] == 0)
+    for turn in (t for t in replication_raw["turns"] if t[1] == "chat" and (t[2] or 0) > 0):
+        assert f"`{turn[0]}`" in p, f"the paragraph must name the chat turn {turn[0]}"
+
+
+def test_the_replication_paragraph_breaks_neither_the_one_mark_nor_the_one_query_rule(reading):
+    """#2005 clause 3: no pass/fail mark and no second population query in the new
+    paragraph, with the positive control that the span still carries the four and the one."""
+    p = _replication_bullet()
+    assert p in " ".join(reading.replace("**", "").split()), (
+        "the 09-27 paragraph is not inside the counted reading's span, so the two rails "
+        "below would be checked against text they do not govern")
+    for letter in CRITERIA:
+        assert not re.search(rf"\({letter}\) (passes|fails)", p), letter
+    marks = sum(len(re.findall(rf"\({letter}\) (passes|fails)", reading)) for letter in CRITERIA)
+    assert marks == 4, f"positive control: {marks} marks in the span"
+    assert not _CHAT_QUERY.search(p)
+    assert len(_CHAT_QUERY.findall(reading)) == 1
+
+
+def test_each_replication_chat_miss_is_attributed_and_the_marginal_one_carries_no_weight(
+        replication, replication_raw, cfg):
+    """#2005 clause 4: the day's chat miss events, walked one by one with `derive`'s own
+    churn rule, and the tally the paragraph prints recomputed from that walk.
+
+    An event meets the filing condition when it has neither free-pool churn in its gap
+    nor a gap KV peak at or over the gate. Each such event is asserted with its
+    iteration, prompt size, gap length, gap peak, tokens computed in the gap and the
+    free blocks that peak implies — all six in ONE clause of the paragraph, so a figure
+    cannot be re-pointed at a different event. The event 0.005 under the gate is named,
+    and the verdict is asserted to hold with it removed.
+    """
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    p = _replication_bullet()
+    chat = _chat_events(replication_raw, gate)
+    assert len(chat) == replication["by_kind"]["chat"][0]
+    churned = [e for e in chat if e["churn"]]
+    at_gate = [e for e in chat if not e["churn"] and e["peak"] >= gate]
+    neither = [e for e in chat if not e["churn"] and e["peak"] < gate]
+    assert f"of the {len(chat)} chat miss events" in p
+    assert (f"{len(churned)} had free-pool churn in their gap, {len(at_gate)} more had a gap "
+            f"KV peak at or over the gate, and {len(neither)} had neither") in p
+    assert f"Those {len(neither)} are all in the turn" in p
+
+    # Which turn: the chat turn whose stamp is the first at or after each event's end.
+    from datetime import datetime, timezone
+    stamps = sorted(t[0] for t in replication_raw["turns"] if t[1] == "chat" and (t[2] or 0) > 0)
+
+    def turn_of(e):
+        end = datetime.fromtimestamp(e["end"], timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+        return next(s for s in stamps if s >= end)
+
+    owners = {turn_of(e) for e in neither}
+    assert len(owners) == 1 and f"all in the turn `{owners.pop()}`" in p, owners
+
+    clauses = re.split(r"; | they are: ", p)
+    for e in neither:
+        mine = [c for c in clauses if re.search(rf"\biteration {e['iteration']},", c)]
+        assert len(mine) == 1, f"iteration {e['iteration']} is named in {len(mine)} clauses"
+        c = mine[0]
+        for said in (f"a prompt of {e['tokens']:,} tokens", f"a gap of {e['gap_s']:.1f} s",
+                     f"gap KV peak {e['peak']:.3f}",
+                     f"{e['computed']:,} tokens computed in the gap",
+                     f"against {e['free_at_peak']:,} free blocks"):
+            assert said in c, f"iteration {e['iteration']}: {said!r} not in {c!r}"
+        assert e["cache_read"] == 0
+    assert "every one a prompt with cache_read 0" in p
+    # No event that churned or sat at the gate is listed among them.
+    for e in churned + at_gate:
+        assert not any(f"gap KV peak {e['peak']:.3f}, with {e['computed']:,} tokens" in c
+                       for c in clauses), e
+
+    # The marginal event: named with its margin, and carrying no weight.
+    marginal = [e for e in neither if gate - e["peak"] < 0.01]
+    assert len(marginal) == 1, marginal
+    m0, = marginal
+    assert f"The iteration {m0['iteration']} event is marginal" in p
+    assert (f"its peak of {m0['peak']:.3f} is {gate - m0['peak']:.3f} under the "
+            f"{gate:.2f} gate") in p
+    assert "the verdict does not rest on it" in p
+    clear = [e for e in neither if e is not m0]
+    assert clear and all(gate - e["peak"] > 0.05 for e in clear), (
+        "with the marginal event set aside no event is left clear of the gate, so the "
+        "verdict WOULD rest on it and the paragraph's sentence is false")
+    assert f"{_word(len(clear))} events remain" in p
+    emptiest = min(clear, key=lambda e: e["peak"])
+    assert f"{1 - emptiest['peak']:.0%} free with {emptiest['computed']:,} tokens computed" in p
+
+
+def test_the_replication_outcome_is_stated_where_the_deferral_and_the_ruling_stood(
+        replication_raw, filing_raw, cfg):
+    """#2005 clause 5: §10 states the outcome the derivation yields, and the two places
+    that deferred to it now carry it and name both committed extracts.
+
+    The outcome is computed here from the two extracts — each has at least one chat miss
+    with neither churn nor a gate-level peak — and the three statements are required to
+    agree with it. The deferral's old wording and the 'decided rather than parked'
+    wording are both required gone, since each asserts a state the record has left.
+    """
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+
+    def unexplained(raw):
+        return [e for e in _chat_events(raw, gate) if not e["churn"] and e["peak"] < gate]
+
+    met_on_both = bool(unexplained(replication_raw)) and bool(unexplained(filing_raw))
+    assert met_on_both, "one of the two extracts no longer carries an unexplained chat miss"
+    p = _replication_bullet()
+    assert ("the condition is met on two independent counted days" in p) == met_on_both
+    assert "neither free-pool churn nor a gate-level KV explanation" in p
+    assert (f"2026-09-29 on {_word(len(unexplained(filing_raw)))} event and this day on "
+            f"{_word(len(unexplained(replication_raw)) - 1)}, or "
+            f"{_word(len(unexplained(replication_raw)))} with the marginal one") in p
+    # An exclusion, not a cause; and not filed.
+    assert "an exclusion and not a cause" in p
+    assert "it is not filed" in p
+    assert not re.search(r"github\.com/vllm-project/vllm/issues/\d+", _section(10)), (
+        "§10 names an upstream issue; the 'not filed' sentences must go when it does")
+
+    both = (FILING_EXTRACT.name, REPLICATION_EXTRACT.name)
+    ruling = _reopen_bullet()
+    ruling = ruling[:ruling.index(_RULE_ANCHOR)]
+    assert "decided rather than parked" not in ruling
+    assert "has since been met on two independent counted days" in ruling
+    assert "the re-open has fired and the upstream report is owed" in ruling
+    assert "It has not been filed" in ruling
+    for name in both:
+        assert name in ruling, f"the accepted-loss paragraph does not name {name}"
+
+    f = _filing_bullet()
+    assert "is owed-check's to rule" not in f and "has never been counted" not in f
+    assert "it now stands on two independent days and two committed extracts" in f
+    assert REPLICATION_EXTRACT.name in f and FILING_EXTRACT.name in f
