@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from pathlib import Path
 
@@ -981,8 +982,10 @@ def test_a_shrunk_round_reports_the_lint_valid_and_runtime_coverage_it_gave_up(
     assert "0.0 s on the direct arm, 720.0 s on the serial agent-loop arm" in report
     assert "freed by the serial agent-loop arm alone: yes" in report
     # Clause 4 of the item: the ruling's re-open condition travels with the number.
+    # #1953 fixed which side of the number that number has to fall on: the trigger
+    # fires on a delta OUTSIDE the spread, so that is what the line must state.
     assert "3 consecutive rounds" in report
-    assert "inside that task's own p90 spread" in report
+    assert "outside that task's own p90 minus p10 spread" in report
 
 
 def test_an_unreadable_lint_reports_lint_valid_coverage_as_unknown_not_zero(
@@ -1108,16 +1111,25 @@ def test_the_coverage_numbers_reach_no_promotion_decision(round_env, monkeypatch
 
 
 # ── #1828: the re-open line has to name where its two figures are read from ──────
+#     #1953: ...and the direction it names has to be the verdict-moving one
 #
 # #1716 put the standing budget-versus-coverage ruling's re-open condition into every
-# shrunk round report, but stated only the threshold: "3 consecutive rounds ... the
-# round's decision delta on one of them lands inside that task's own p90 spread".
-# Neither figure had a source. The only p90 in the tree was `derive_trial_priors`'s,
-# which is a per-ARM duration prior — a cost, not a score — so the condition could be
-# argued from memory and measured from nothing. These nodes pin the source being named
-# (clause 1), the payload entry that answers the "sacrifice the SAME task across
-# rounds" half without a hand-search of `ledger.jsonl` (clause 2), and the unknown
-# wording owed to a task that has never scored (clause 3).
+# shrunk round report, but stated only the threshold: 3 consecutive rounds sacrificing
+# the same runtime task, with the round's decision delta on one of them landing on that
+# task's own measured spread. Neither figure had a source. The only p90 in the tree was
+# `derive_trial_priors`'s, which is a per-ARM duration prior — a cost, not a score — so
+# the condition could be argued from memory and measured from nothing. These nodes pin
+# the source being named (clause 1), the payload entry that answers the "sacrifice the
+# SAME task across rounds" half without a hand-search of `ledger.jsonl` (clause 2), and
+# the unknown wording owed to a task that has never scored (clause 3).
+#
+# #1953 then found the direction inverted. Landing ON the spread is the no-gain case,
+# and a shrink that moves no verdict is the evidence AGAINST a budget raise, not for
+# one; the trigger now fires on a delta landing outside the task's p90 minus p10 spread,
+# with a task whose measured spread is 0.0000 excluded beside the scored-row floor. The
+# exact phrase #1953 deleted is quoted nowhere in this file — clause 1 is a grep that
+# has to come back empty — so the negative assertion in the node below is written
+# against the two-word shape that phrase ended in, and is scoped to the rendered line.
 
 
 def _history_ledger(path: Path, rows: list[tuple[str, str, object]]) -> Path:
@@ -1178,7 +1190,9 @@ def test_the_reopen_line_names_the_ledger_rows_both_figures_are_read_from(
     line = [ln for ln in report.splitlines()
             if ln.startswith("- re-open condition")][0]
     # The threshold #1716 put there is still there — this is an amendment.
-    assert "3 consecutive rounds" in line and "inside that task's own p90 spread" in line
+    assert "3 consecutive rounds" in line, line
+    # ...and #1953 corrected which side of the spread the delta has to land on.
+    assert "outside that task's own p90 minus p10 spread" in line, line
     # ...and it now names the one place each figure exists.
     assert "trial ledger" in line, line
     assert "cfg.paths.ledger_path" in line, line
@@ -1214,6 +1228,83 @@ def test_the_reopen_line_names_the_ledger_rows_both_figures_are_read_from(
     assert str(round_env.paths.ledger_path) in figures, figures
     assert "bench_016: R_20260929_082451" in figures, figures
     assert "bench_017: R_20260928_041936" in figures, figures
+
+
+def test_the_rendered_reopen_line_names_the_outside_direction_and_the_zero_spread_guard(
+        round_env, monkeypatch):
+    """#1953 clauses 1 and 2, pinned on the text a shrunk round hands its readers.
+
+    Nothing in this tree computes a p90 minus p10 spread: the re-open condition is a
+    rule the owed-check job applies to ledger rows, and what the round owns is the
+    sentence telling that job what to look for. So this node pins TEXT — the re-open
+    line as it lands in the report file, plus the identical sentence inside the JSON
+    payload the owed-check job reads instead of the markdown — and could pin nothing
+    else. It is still a node that can fail: reverting the direction, and deleting the
+    zero-spread clause, each take it down on their own.
+
+    The direction it replaces asked for the delta to land inside the task's own measured
+    spread — the no-gain case the line's own closing sentence disqualifies — so the
+    trigger went off on the evidence AGAINST a raise. On the frozen witness bytes the
+    note cites, `bench_014_audit_dead_wikilinks` has 28 scored rows across 7 rounds, a
+    p90 minus p10 spread of 0.1667, and per-round best-variant deltas peaking at 0.1667:
+    never once outside its own spread, yet it satisfied the condition as written. The
+    scored-row floor does not cover a zero spread either, so that exclusion has to be on
+    the page as well: on those same bytes `bench_009_adversarial_probe` has 180 scored
+    rows over 35 rounds — nine times the 20-row floor — every one of them 1.0, so its
+    spread is 0.0000 and any movement at all would read as outside it. Both exclusions
+    travel with the floor, because a reader applies this line in one pass.
+
+    The phrase this node exists to keep out is never quoted here, so the negative
+    assertion runs against the two-word form `p90 spread`: the shape the old line ended
+    in, and one the corrected line never writes because it defines the spread as p90
+    minus p10. It is scoped to the re-open line, where that shape would come back, and
+    says nothing about prose elsewhere in this file.
+    """
+    _bench(round_env, _SCHEDULED_19)
+    _quiet_proposer(monkeypatch, 3)
+    loaded = {tid for tid, _r, _c in _SCHEDULED_19}
+    _drive_round(monkeypatch, valid_ids=loaded - {"bench_s1"})
+    result = asyncio.run(run_round.run(targets=["prompts"], budget_minutes=30))
+    assert "error" not in result, result
+    assert result["matrix_dropped_tasks"] == ["bench_017", "bench_016"], \
+        "the precondition: this round shrank, so its report carries the re-open line"
+
+    report = Path(result["summary_file"]).read_text(encoding="utf-8")
+    line = [ln for ln in report.splitlines()
+            if ln.startswith("- re-open condition")][0]
+
+    # The seam the owed-check job actually reads: `matrix_coverage` is written into the
+    # JSON round artifact, so the corrected sentence has to be in that payload and not
+    # only on the markdown page. One sentence, one source — the payload and the report
+    # line are the same string, which is what makes pinning the line worth anything.
+    payload = result["matrix_coverage"]["reopen_condition"]
+    assert payload == line.removeprefix("- "), \
+        ("the JSON payload a later job reads carries the same sentence the report "
+         "does, not merely a key of the same name")
+    assert "outside that task's own p90 minus p10 spread" in payload, payload
+
+    # Clause 1: the direction, and what "outside" is measured against.
+    assert "outside that task's own p90 minus p10 spread" in line, line
+    assert "the delta's absolute value exceeds the spread" in line, line
+    assert "p90 spread" not in line, \
+        "the trigger may not name the two-word spread #1953 removed"
+    # Clause 2: a task whose measured spread is zero supports the trigger on neither
+    # side, and it is stated beside the row floor rather than as a second rule. "Beside"
+    # means in the same sentence: a character-distance window would fail a rewording
+    # that only moved the wording around, so the line is cut into sentences first. The
+    # scored-row count itself is spelled as a digit inside a number, and a sentence
+    # boundary needs a period plus a space, so the spread's own `0.0000` never splits
+    # the line — verified on the rendered text, not assumed.
+    assert "measured spread is 0.0000" in line, line
+    assert "supports the trigger on neither side" in line, line
+    floor_sentence = next(s for s in re.split(r"\.\s+", line)
+                          if f"{run_round.REOPEN_MIN_SCORED_ROWS} scored rows" in s)
+    assert "measured spread is 0.0000" in floor_sentence, \
+        f"the floor and the zero-spread guard are one sentence, not two rules: " \
+        f"{floor_sentence!r}"
+    # Clause 4: nothing the ruling already travelled with was traded away for the fix.
+    assert "3 consecutive rounds" in line, line
+    assert line.rstrip().endswith("budget opinion, not a measurement."), line
 
 
 def test_a_sacrificed_runtime_task_that_never_scored_reads_as_no_scored_history(

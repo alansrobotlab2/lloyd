@@ -859,25 +859,45 @@ def _projection_text(proj: dict[str, Any]) -> str:
 #: `trial_ledger_row` nulls rather than zeroing), and 8 of the 22 benched tasks have
 #: no scored row at all — those tasks cannot support the condition on either side,
 #: which is the honest answer, not a reason to pick a softer column.
+#: #1953: the direction was the wrong way round, and so the trigger fired on the
+#: evidence AGAINST a raise. The note asked for the delta to land INSIDE the spread,
+#: which is the very no-gain case its own closing sentence disqualifies — inside the
+#: spread IS "moved no verdict". On the frozen witness bytes in the vault
+#: (`backlog/data/2026-10-01.1953-ledger-witness.jsonl`, 3,082 rows),
+#: `bench_014_audit_dead_wikilinks` has 28 scored rows over 7 rounds, a p90 minus p10
+#: spread of 0.1667, and per-round best-variant deltas of 0.0, 0.0, 0.1667, 0.0,
+#: 0.0333, 0.1667, 0.0 — never once larger than the spread, so it satisfies the trigger
+#: as written while showing nothing the shrink cost. The trigger now reads OUTSIDE the
+#: spread. The row floor does not cover a zero spread, so that guard is stated beside
+#: it: on those same bytes `bench_009_adversarial_probe` has 180 scored rows over 35
+#: rounds — nine times the floor — every one of them 1.0, so its spread is 0.0000 and
+#: any movement at all would read as outside it. The witness the item proposed,
+#: `bench_015_audit_cross_entity_fact_copies`, has 8 scored rows and the floor already
+#: excludes it, so pinning the guard there would test a case the row count rejects
+#: before the spread is ever consulted.
 REOPEN_SCORE_FIELD = "composite_score"
 REOPEN_MIN_SCORED_ROWS = 20
 
 REOPEN_CONDITION_NOTE = (
     "re-open condition for the standing budget-vs-coverage ruling (#1605, put in the "
-    "report by #1716, measurement source named by #1828): propose raising "
-    "autoresearch.max_duration_seconds / autoresearch.max_variants as a SEPARATE item "
-    "only after 3 consecutive rounds sacrifice the SAME requires_runtime task(s) and "
-    "the round's decision delta on one of them lands inside that task's own p90 "
-    "spread. Both figures are read from one place: this box's trial ledger — the same "
-    "file the round derives its cost priors from, `cfg.paths.ledger_path` — over that "
-    f"task's per-trial rows keyed `round_id` + `task_id`, on the field "
-    f"{REOPEN_SCORE_FIELD} (null on an unrankable trial, so null is not a score). The "
-    "delta is that field's per-round mean for the round's best variant minus its mean "
-    "for the `BASELINE_*` variant, for that task alone; the spread is the same field's "
-    "p90 minus p10 over every scored row that task has on this box. A task with fewer "
-    f"than {REOPEN_MIN_SCORED_ROWS} scored rows has no spread to land inside, so it "
-    "supports the condition on neither side. A shrink that moves no verdict is a "
-    "budget opinion, not a measurement."
+    "report by #1716, measurement source named by #1828, trigger direction corrected by "
+    "#1953): propose raising autoresearch.max_duration_seconds / "
+    "autoresearch.max_variants as a SEPARATE item only after 3 consecutive rounds "
+    "sacrifice the SAME requires_runtime task(s) and the round's decision delta on one "
+    "of them lands outside that task's own p90 minus p10 spread — outside means the "
+    "delta's absolute value exceeds the spread, the only reading on which the line "
+    "reports a verdict the shrink moved instead of one it left alone. Both figures are "
+    "read from one place: this box's trial ledger — the same file the round derives its "
+    "cost priors from, `cfg.paths.ledger_path` — over that task's per-trial rows keyed "
+    f"`round_id` + `task_id`, on the field {REOPEN_SCORE_FIELD} (null on an unrankable "
+    "trial, so null is not a score). The delta is that field's per-round mean for the "
+    "round's best variant minus its mean for the `BASELINE_*` variant, for that task "
+    "alone; the spread is the same field's p90 minus p10 over every scored row that task "
+    f"has on this box. A task with fewer than {REOPEN_MIN_SCORED_ROWS} scored rows has "
+    "no spread worth comparing against, and one whose measured spread is 0.0000 has a "
+    "spread that measures nothing: no delta lands outside either, so such a task "
+    "supports the trigger on neither side. A shrink that moves no verdict is a budget "
+    "opinion, not a measurement."
 )
 
 #: What the last-scored-round entry says when there is no such round, and when the
