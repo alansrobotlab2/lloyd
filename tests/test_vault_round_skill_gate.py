@@ -119,3 +119,75 @@ def test_a_gate_that_breaks_does_not_block(vault, monkeypatch):
     out = V.land([f"skills/{TEA}/SKILL.md"], "degrade tea")
     [row] = out["skill_gate"]
     assert row["would_refuse"] is False and row["reason"].startswith("gate unavailable")
+
+
+# ── #1985: the body-line ceiling on a spill-sampled skill, at the writer ─────
+
+from scripts import skill_lint as SL
+
+SPILLED = SL.SPILL_SAMPLE[0]
+
+
+def _sized(slug: str, body_lines: int) -> str:
+    body = "\n".join([f"# {slug}"] + [f"step {i}" for i in range(1, body_lines)])
+    return f"---\nname: {slug}\ndescription: knit wool scarves\n---\n{body}\n"
+
+
+def _write_skill(vault, slug: str, body_lines: int) -> str:
+    d = vault / "skills" / slug
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "SKILL.md").write_text(_sized(slug, body_lines))
+    return f"skills/{slug}/SKILL.md"
+
+
+def _ledger_rows():
+    import json
+    return [json.loads(l) for l in S.LEDGER_PATH.read_text().splitlines() if l.strip()]
+
+
+def test_a_spilled_skill_at_the_cap_has_no_size_finding(vault):
+    rel = _write_skill(vault, SPILLED, SL.MAX_BODY_LINES)
+    assert V.skill_body_findings([rel]) == []
+    out = V.land([rel], "rewrite at the cap")
+    assert out["ok"] and "skill_body" not in out
+
+
+def test_one_line_past_the_cap_is_a_finding_naming_the_skill_and_its_count(vault):
+    rel = _write_skill(vault, SPILLED, SL.MAX_BODY_LINES + 1)
+    [row] = V.skill_body_findings([rel])
+    assert row["skill"] == SPILLED and row["body_lines"] == SL.MAX_BODY_LINES + 1
+    assert str(SL.MAX_BODY_LINES + 1) in row["reason"]
+
+
+def test_off_by_default_an_over_cap_rewrite_lands_and_the_row_carries_the_finding(vault):
+    assert V.SKILL_BODY_ENFORCE is False
+    rel = _write_skill(vault, SPILLED, SL.MAX_BODY_LINES + 1)
+    errors, _ = V.validate([rel])
+    assert errors == []
+    out = V.land([rel], "push it over")
+    assert out["ok"] and git(vault, "status", "--porcelain").stdout == "", "committed"
+    row = [r for r in _ledger_rows() if r.get("event") == "vault_land"][-1]
+    assert row["ok"] is True and "errors" not in row
+    assert row["skill_body"][0]["skill"] == SPILLED
+    assert row["skill_body"][0]["body_lines"] == SL.MAX_BODY_LINES + 1
+
+
+def test_enforcing_refuses_the_over_cap_rewrite_and_names_the_ceiling(vault, monkeypatch):
+    monkeypatch.setattr(V, "SKILL_BODY_ENFORCE", True)
+    rel = _write_skill(vault, SPILLED, SL.MAX_BODY_LINES + 1)
+    errors, _ = V.validate([rel])
+    assert len(errors) == 1
+    assert "body-line ceiling" in errors[0] and rel in errors[0]
+    assert f"{SL.MAX_BODY_LINES}-line" in errors[0]
+    with pytest.raises(V.VaultRoundError, match="body-line ceiling"):
+        V.land([rel], "push it over")
+
+
+def test_a_skill_outside_the_spill_sample_is_never_measured(vault, monkeypatch):
+    monkeypatch.setattr(V, "SKILL_BODY_ENFORCE", True)
+    assert "uncovered" not in SL.SPILL_SAMPLE
+    rel = _write_skill(vault, "uncovered", SL.MAX_BODY_LINES * 3)
+    assert V.skill_body_findings([rel]) == []
+    assert V.validate([rel])[0] == []
+    out = V.land([rel], "a long unsampled skill")
+    assert out["ok"] and "skill_body" not in out

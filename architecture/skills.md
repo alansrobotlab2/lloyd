@@ -409,6 +409,12 @@ route books what it embedded as a `skill.embedded` event on its session's event
 log (`app/skill_embed.py`; routes `prefetch`, `prefetch_excerpt`,
 `autonomy_task`, `worker_prompt`), so a report can say which route paid for what.
 The 100-line cap is advisory; whether it becomes a failure is a person's call.
+A vault landing that leaves one of the five `SPILL_SAMPLE` skills past the cap
+is recorded, not refused: `vault_round.skill_body_findings` puts a `skill_body`
+row (skill, measured body lines) on that landing's `vault_land` ledger row
+(#1985). `vault_round.SKILL_BODY_ENFORCE`, off, is the switch that would turn
+the row into a refusal. The check is scoped to the sample because 106 of 197
+skills were over the cap on 2026-10-01.
 
 A spilled skill is a folder: the body keeps the procedure, every upper-case hard
 rule and a `## Files in this skill` index whose lines name each sibling `.md` by

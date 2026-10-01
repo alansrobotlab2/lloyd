@@ -372,6 +372,53 @@ def skill_activation_findings(paths: list[str]) -> list[dict]:
     return rows
 
 
+# #1985. Log-only: `architecture/skills.md` says the 100-line cap is advisory and
+# that making it a failure is a person's call, so flipping this is a human's
+# change (and rewords that sentence in the same commit).
+SKILL_BODY_ENFORCE = False
+
+
+def skill_body_findings(paths: list[str]) -> list[dict]:
+    """#1985: one row per touched spill-sampled `skills/<slug>/SKILL.md` whose
+    body is past `skill_lint.MAX_BODY_LINES`.
+
+    The ceiling's only failing check was a `live_vault` node the gate
+    deselects, so a landing could push a spilled skill back over it and nothing
+    on the landing path could say so. Scoped to `skill_lint.SPILL_SAMPLE` on
+    purpose: 106 of 197 live skills were over the cap on 2026-10-01, so a
+    library-wide rule would refuse most landings; a touched skill outside the
+    sample yields no row. Body = the text after front matter, the same rule as
+    `skill_lint.skill_size`. `land()` records every row; `validate()` refuses
+    on one only while `SKILL_BODY_ENFORCE` is on. Never raises.
+    """
+    slugs = sorted({p.split("/")[1] for p in paths
+                    if p.startswith("skills/") and p.endswith("/SKILL.md")
+                    and p.count("/") == 2})
+    if not slugs:
+        return []
+    try:
+        from scripts import skill_lint
+    except Exception:  # noqa: BLE001 — an advisory check never blocks a landing
+        return []
+    rows = []
+    for slug in slugs:
+        if slug not in skill_lint.SPILL_SAMPLE:
+            continue
+        f = VAULT / "skills" / slug / "SKILL.md"
+        try:
+            content = f.read_text(encoding="utf-8", errors="replace")
+            size = skill_lint.skill_size(slug, f, content, skill_lint.parse_frontmatter(content)[1])
+        except Exception:  # noqa: BLE001 — missing (a deletion) or unreadable: nothing to measure
+            continue
+        if size["over_cap"]:
+            rows.append({"skill": slug, "body_lines": size["body_lines"],
+                         "max_body_lines": skill_lint.MAX_BODY_LINES, "would_refuse": True,
+                         "reason": f"body is {size['body_lines']} lines, past the "
+                                   f"{skill_lint.MAX_BODY_LINES}-line ceiling for a "
+                                   f"spill-sampled skill"})
+    return rows
+
+
 def validate(paths: list[str]) -> tuple[list[str], dict[str, list[str]]]:
     """(errors, buckets). Empty errors means the change may land."""
     ok, why, buckets = check_scope(paths)
@@ -397,6 +444,9 @@ def validate(paths: list[str]) -> tuple[list[str], dict[str, list[str]]]:
     if not errors and SKILL_ACTIVATION_ENFORCE:
         errors.extend(f"skills/{r['skill']}/SKILL.md: skill activation: {r['reason']}"
                       for r in skill_activation_findings(paths) if r.get("would_refuse"))
+    if not errors and SKILL_BODY_ENFORCE:
+        errors.extend(f"skills/{r['skill']}/SKILL.md: skill body-line ceiling: {r['reason']}"
+                      for r in skill_body_findings(paths))
     return errors, buckets
 
 
@@ -589,6 +639,7 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
     # Recorded on every landing whatever the enforcement: the log-only phase
     # exists to show what an enforcing gate would have refused.
     skill_gate = skill_activation_findings(norm)
+    skill_body = skill_body_findings(norm)
 
     review = "skipped"
     # Always says WHICH abstention it was, and is None when nothing was abstained:
@@ -720,12 +771,14 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
                     # turn and so no session; it writes no key, which is honest.
                     **({"session_id": session_id} if session_id else {}),
                     **({"skill_gate": skill_gate} if skill_gate else {}),
+                    **({"skill_body": skill_body} if skill_body else {}),
                     "message": message.strip()[:200]})
     return {"ok": True, "commit": sha, "paths": norm, "validated": buckets["validated"],
             "review": review, "review_reason": review_reason,
             "landing_clauses": landing_rows,
             **({"review_findings": review_findings} if review_findings else {}),
-            **({"skill_gate": skill_gate} if skill_gate else {})}
+            **({"skill_gate": skill_gate} if skill_gate else {}),
+            **({"skill_body": skill_body} if skill_body else {})}
 
 
 def revert_many(shas: list[str], reason: str = "rollback") -> dict:
