@@ -42,6 +42,7 @@ from agent_mcp._shared import (
 # tests. `prompt_builder` is too heavy to import into this process, and a second
 # copy of the number is how two writers end up disagreeing about what is bounded —
 # which is exactly the state #1010 was filed on.
+from agent_mcp import _injection_patterns
 from app.memory_ceiling import (
     TOPIC_SLUG_RE,
     TOPICS_SUBDIR,
@@ -56,14 +57,19 @@ from app.prompt_surface import ENTRY_TYPES
 MEMORIES_ROOT = Path.home() / "obsidian" / "lloyd"
 MEMORY_FILES = {"MEMORY.md", "USER.md"}
 
-_INJECTION_PATTERNS = [
-    re.compile(r"ignore\s+(all\s+)?previous\s+instructions", re.I),
-    re.compile(r"you\s+are\s+now\s+a", re.I),
-    re.compile(r"disregard\s+(your\s+)?(previous\s+)?instructions", re.I),
-    re.compile(r"new\s+system\s+prompt", re.I),
-    re.compile(r"pretend\s+you\s+are", re.I),
-    re.compile(r"\x00|​|‌|‍|⁠|﻿", re.I),
-]
+# The families the memory gate REFUSES on, by id in the shared table
+# (`agent_mcp/_injection_patterns.py`, #1959). These six are the gate's shapes
+# verbatim; the fetched-text probe reads a different, mostly broader subset of
+# the same table and only records. Adding a family here widens what
+# `memory_add`/`memory_replace` refuse — `tests/test_injection_pattern_relation.py`
+# pins the difference between the two subsets so that is never an accident.
+INJECTION_GATE_FAMILIES: tuple[str, ...] = (
+    "ignore_previous_strict", "you_are_now_a_unanchored", "disregard_strict",
+    "new_system_prompt_unanchored", "pretend_you_are_unanchored",
+    "invisible_chars",
+)
+_INJECTION_PATTERNS = [rx for _id, rx in
+                       _injection_patterns.select(INJECTION_GATE_FAMILIES)]
 
 from app.atomic_io import commit_lock, write_text_durable
 from app.paths import SESSIONS_DIR  # anchored to LLOYD_HOME, not $HOME/lloyd

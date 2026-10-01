@@ -803,7 +803,9 @@ Two passive seams for worker turns; neither can change a tool call today.
   sessions only. `shadow` logs `harness.injection_probe_hit {tool, pattern_id,
   excerpt}` from a thread the call does not wait on; `warn` appends one
   `<warning>` to a non-error result. Never raises into `call_tool`.
-  `session.py::_INJECTION_PATTERNS` (the `memory_add` gate) is unchanged.
+  The regexes are in `agent_mcp/_injection_patterns.py`, shared with the
+  `memory_add` gate (`session.py::INJECTION_GATE_FAMILIES`), which reads a
+  different, narrower subset and refuses; the two are not copies (#1959).
 
 **The reviewer's threshold question, asked and answered (item #1944, 2026-10-01).**
 `eval/djev/action_review_calibration.py` reads `action_review` rows out of
