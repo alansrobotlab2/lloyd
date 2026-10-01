@@ -688,10 +688,23 @@ class Notifier:
         # keys does not error — the endpoint defaults `name` to "New Task" and
         # returns 2xx, so the alert reads as delivered while filing a task that
         # says nothing. `status` must be one of _VALID_STATUSES.
+        #
+        # `status` is `draft` because that is the only status anything picks an
+        # auto-filed item up from (#1990): autotriage's pool filter reads
+        # `TRIAGE_POOL_STATUS` (`draft`) alone, and the implement pool's
+        # `ready_confirmed` needs a confirmed triage verdict, which an item
+        # filed here has never had. This posted the implement pool's status
+        # until then, a dead state for an untriaged item that only the
+        # reconciler's push-back rescued. `board` is named rather than inherited
+        # from the route's default, as `voiceloss.py` (`ITEM_BOARD`) already
+        # does: a default is right only until someone adds a board. Whether the
+        # lloyd board is where operational alerts belong at all is a separate
+        # ruling (#1798) that this does not settle.
         payload = json.dumps({
             "name": f"[guardian] {title}"[:120],
             "description": body[:6000],
-            "status": "up_next",
+            "board": "lloyd",
+            "status": "draft",
             "priority": "high",
         }).encode()
         req = urllib.request.Request(
@@ -729,9 +742,11 @@ class Notifier:
                 # suite, which already runs on every edit to either side of this
                 # seam: `test_the_guardians_captured_body_files_itself_through_the_real_route`
                 # replays these bytes through the real route and asserts the task
-                # file it wrote — H1, `status`, `priority`, the alert text — which
-                # is the only surface that tells a real filing apart from the
-                # `# New Task` at `status: draft` a drifted payload produces.
+                # file it wrote — H1, `board`, `status`, `priority`, the alert
+                # text — which is the only surface that tells a real filing apart
+                # from the `# New Task` with no alert text a drifted payload
+                # produces. The H1 and the body are what tell them apart: both
+                # land at `draft` since #1990, so status does not.
                 # Weaken that written-file assertion, and live detection is owed
                 # again.
                 row_id = created.get("id")

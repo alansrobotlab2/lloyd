@@ -85,7 +85,7 @@ _CREATE_PATH = "/api/backlog/task-create"
 _UPDATE_PATH = "/api/backlog/task-update"
 _LIST_PATH = "/api/backlog/tasks"
 
-#: Loopback bound. `notify.py:562` posts the same route at 5.0 s and this is the
+#: Loopback bound. `notify.py::_backlog_task` posts the same route at 5.0 s and this is the
 #: same process — the guardian ticks nothing of its own between probes, so it can
 #: afford what a worker's event loop cannot (`app/autonomy.py:3120-3129` explains
 #: why that caller chose 3.0).
@@ -247,10 +247,10 @@ class VoiceLossEscalator:
             "name": ITEM_NAME[:120],
             "description": item_body(record, state_dir=self.dir),
             "board": ITEM_BOARD,
-            # NOT `up_next`, which is what `notify.py::_backlog_task` posts for a
-            # rollback. `draft` is the only status autotriage's pool filter reads
-            # (#1893 measured an alarm filed where nothing polls it), and the
-            # ruling on #1798 says the same for alerts.
+            # `draft`, as `notify.py::_backlog_task` posts for a rollback since
+            # #1990: it is the only status autotriage's pool filter reads (#1893
+            # measured an alarm filed where nothing polls it), and the ruling on
+            # #1798 says the same for alerts.
             "status": ITEM_STATUS,
             "priority": ITEM_PRIORITY,
         })

@@ -1270,10 +1270,27 @@ def test_the_needs_human_route_posts_the_payload_the_board_reads(tmp_path):
     assert seen.get("path") == "/api/backlog/task-create", seen
     assert seen["body"]["name"] == ("[guardian] Service down, but no promotion "
                                     "to revert"), "the `name` key drifted"
-    assert seen["body"]["status"] == "up_next", (
-        "`backlog_task_create` 400s a status outside _VALID_STATUSES, so any "
-        "other value means the task is never created")
+    assert seen["body"]["status"] == "draft", (
+        "autotriage reads `draft` alone, and an untriaged item at the implement "
+        "pool's status is a dead state (#1990); `backlog_task_create` also 400s a "
+        "status outside _VALID_STATUSES")
+    assert seen["body"]["board"] == "lloyd", (
+        "the board is named, not inherited from the route's default (#1990)")
     assert seen["body"]["priority"] == "high"
+    assert tuple(seen["body"][k] for k in ("board", "status", "priority")) == (
+        "lloyd", "draft", "high")
+    # #1990's own grep, pinned: no create payload under the guardian posts the
+    # implement pool's status, and the comment beside the payload says why.
+    dead = '"status": ' + '"up_next"'
+    guardian_dir = Path(__file__).resolve().parent.parent / "agent-services" / "guardian"
+    offenders = [p.name for p in sorted(guardian_dir.glob("*.py"))
+                 if dead in p.read_text(encoding="utf-8")]
+    assert offenders == [], offenders
+    source = (guardian_dir / "notify.py").read_text(encoding="utf-8")
+    block = source[source.index("# Field names match app/routers/backlog.py"):
+                   source.index("payload = json.dumps(")]
+    assert "TRIAGE_POOL_STATUS" in block and "ready_confirmed" in block
+    assert "confirmed triage verdict" in " ".join(block.replace("#", " ").split())
     assert "needs a human" in seen["body"]["description"], (
         "the filed task lost the sentence that asked for the human")
     assert res["backlog"] is True, f"a 2xx filing read as a failure: {res}"
@@ -1404,8 +1421,9 @@ def test_the_guardians_captured_body_files_itself_through_the_real_route(
     `"New Task"` (`app/routers/backlog.py:707`) and answers 200 with an id either
     way. The second half of this test demonstrates that on the same route — a payload
     sending `title`/`body` instead of `name`/`description` still gets `success: true`
-    and a positive id, and writes `# New Task` at `status: draft`. Only the file
-    assertion tells those two filings apart, which is why it is in the test, and it
+    and a positive id, and writes `# New Task` with none of the alert's text. Only
+    the file assertion tells those two filings apart (by H1 and body: both land at
+    `status: draft` since #1990), which is why it is in the test, and it
     is the only guard either side of the seam will ever have: payload-drift
     detection declined 2026-09-29 (#1703): the echo variant shipped at 7da1e0e4 and
     was inert because task-create replies only {success, id}, and a read-back buys
@@ -1431,7 +1449,8 @@ def test_the_guardians_captured_body_files_itself_through_the_real_route(
     fm, h1 = _filed_task(written[0])
     assert h1 == "# [guardian] Service down, but no promotion to revert", (
         f"the filed item's H1 is not the alert's title: {h1!r}")
-    assert fm["status"] == "up_next", fm
+    assert fm["status"] == "draft", fm
+    assert fm["board"] == "lloyd", fm
     assert fm["priority"] == "high", fm
     assert "needs a human" in written[0].read_text(encoding="utf-8"), (
         "the `description` key did not reach the file's body, so the alert text the "
@@ -1453,6 +1472,13 @@ def test_the_guardians_captured_body_files_itself_through_the_real_route(
         "the drifted payload was supposed to show the reply's blindness to a "
         f"defaulted name, got {drifted_h1!r}")
     assert drifted_fm["status"] == "draft", drifted_fm
+    # Since #1990 the intended filing lands at `draft` too, so status no longer
+    # tells the two apart. What does: the H1, and the alert text in the body.
+    assert drifted_fm["status"] == fm["status"]
+    assert drifted_h1 != h1
+    assert "needs a human" not in drifted[0].read_text(encoding="utf-8"), (
+        "the drifted payload's `body` key reached the file, so the body no longer "
+        "discriminates a drifted filing")
 
 
 def test_a_reply_of_success_false_with_a_positive_id_fails_the_verdict(tmp_path):
