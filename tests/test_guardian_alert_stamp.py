@@ -318,3 +318,80 @@ def test_that_reader_comment_scan_fires_on_the_bytes_it_replaces():
             f"the scan never fires on {rel}'s pre-#1912 comment, so "
             "test_no_reader_comment_still_calls_the_alert_stamp_offset_less "
             "could never fail")
+
+
+# ── #1967 clause 5: the retraction's stamp obeys the same rule ───────────────
+#
+# #1967 gives `resolve()` a second write into ALERT.md — a `cleared:` line —
+# and a second timestamp is a second chance to write the ambiguous field
+# #1912 exists to forbid. The retraction stamp matters MORE than the alarm
+# stamp for the item's actual harm: an agent inheriting the file ages the
+# retraction to decide whether the alarm is live, and a naive stamp there is
+# two readings seven hours apart exactly where the decision is made. The
+# `cleared: ` prefix is matched as a literal rather than imported from
+# `notify` so these nodes grade the file's format, not a constant the fix
+# was free to define however it liked.
+
+
+def _cleared_value(state_dir: Path) -> str:
+    """The `cleared:` value of the ALERT.md on disk, read the way a reader reads it.
+
+    The stamp is the line's FIRST space-delimited token; what follows it is
+    the retraction note in prose, which a reader ages separately from the
+    instant — so a node that parsed the whole line with `fromisoformat` would
+    be asserting a format the writer never promised.
+    """
+    lines = (state_dir / "ALERT.md").read_text(encoding="utf-8").splitlines()
+    cleared = [ln for ln in lines if ln.startswith("cleared: ")]
+    assert len(cleared) == 1, f"expected exactly one `cleared:` line, got {cleared!r}"
+    return cleared[0].split("cleared: ", 1)[1].split(" ")[0]
+
+
+def test_the_cleared_stamp_names_its_own_zone(tmp_path):
+    """Clause 5: the retraction's timestamp carries a numeric UTC offset.
+
+    Alert through the shipped `_alert_file`, retract through the shipped
+    `resolve`, then age the retraction with `datetime.fromisoformat` — the
+    same call `app/skill_telemetry.py` makes for a naive stamp and the source
+    of the two-readings disagreement #1912 documents. Fails before #1967
+    because `resolve()` never wrote this line at all.
+    """
+    n = _notifier(tmp_path)
+    assert n._alert_file(LEVEL, TITLE, BODY) is True
+    assert n.resolve(TITLE, "cause removed") is True
+
+    raw = _cleared_value(tmp_path)
+    parsed = datetime.datetime.fromisoformat(raw)
+    assert parsed.utcoffset() is not None, (
+        f"{raw!r} carries no offset, so a reader ageing the retraction — the "
+        "act #1967 exists to make safe — inherits the same seven-hour "
+        "ambiguity #1912 closed for `written:`")
+
+
+def test_the_cleared_stamp_keeps_the_local_wall_clock_reading(tmp_path, monkeypatch):
+    """Clause 5's other half: marking the zone again moves no digits.
+
+    Same frozen-instant shape as
+    `test_marking_the_zone_never_moves_the_wall_clock_reading`: the alarm and
+    its retraction are written inside one frozen instant, so the `cleared:`
+    stamp must answer to that instant in LOCAL digits with the zone merely
+    named — and must equal the `written:` stamp of the same call chain,
+    because a retraction that converted to UTC would read as clearing the
+    incident seven hours before it was raised on a -0700 box.
+    """
+    moment = time.time()
+    frozen = _clock_frozen_at(moment)
+    monkeypatch.setattr(notify, "datetime", frozen)
+    n = _notifier(tmp_path)
+    assert n._alert_file(LEVEL, TITLE, BODY) is True
+    assert n.resolve(TITLE, "cause removed") is True
+
+    raw = _cleared_value(tmp_path)
+    want_digits = _REAL_DATETIME.fromtimestamp(moment).isoformat()
+    assert raw.startswith(want_digits) and _DIGITS.match(raw[:len(want_digits)]), (
+        f"the retraction stamp reads {raw!r} but the local wall clock at that "
+        f"moment was {want_digits!r} — write local time and only MARK the zone")
+    assert _OFFSET_SUFFIX.search(raw), f"{raw!r} has no trailing ±HH:MM offset"
+    assert raw == _written_value(tmp_path), (
+        "the two stamps of one frozen instant disagree; both must answer to "
+        "the same local reading with the same zone")

@@ -70,6 +70,33 @@ DAILY_SCAN_DAYS = 3
 #: open section, so only dated notes are consulted outside the window.
 DATED_NOTE_STEM = re.compile(r"\d{4}-\d{2}-\d{2}")
 
+# ── ALERT.md's incident format (#1967) ────────────────────────────────────
+#
+# The state-dir alarm file is the surface an agent reads FIRST during an
+# incident, and until #1967 `resolve()` never touched it: the 2026-09-30
+# runtime-data alarm stood un-retracted for over a day — eight `cleared:`
+# lines reached the daily note that evening while `ALERT.md` went on ordering
+# a reader to remove `~/lloyd/.t`, a directory absent since the writer fix.
+# Same coalescing rule as the daily note, one shared spelling each.
+#: The single-slot alarm file `alert()` overwrites on EVERY run mode — it is
+#: written at `alert()` above the `external` gate, so the retraction lives
+#: above that gate too or a drill can raise an alarm it can never close.
+ALERT_FILE_NAME = "ALERT.md"
+#: Header key that closes an incident inside ALERT.md, named for
+#: `DAILY_CLEARED_PREFIX` so the two surfaces answer the same question with
+#: the same marker. A reader ages the stamp that follows it — zone-marked per
+#: #1912 — to decide whether an inherited alarm is live.
+ALERT_CLEARED_PREFIX = "cleared:"
+#: What stands between a sealed file's header and the quoted original text:
+#: the alarm's imperative instructions survive as a RECORD, not as a live
+#: directive, so closing the incident never destroys the evidence of it.
+ALERT_CLEARED_BANNER = ("CLEARED — the incident described below is closed. Its "
+                        "text is kept quoted for the record: do not act on it.")
+#: A header key line of ALERT.md (`level: …`, `written: …`, `cleared: …`). The
+#: retraction finds the file's title and its own marker through this and
+#: nothing else, so an alert body can never impersonate a header key.
+_ALERT_HEADER_KEY = re.compile(r"^[a-z_]+: ")
+
 
 def _run(cmd: list[str], timeout: float = 5.0) -> bool:
     try:
@@ -302,7 +329,7 @@ class Notifier:
             # and this repo's own comments held both of them seven hours apart:
             # `scripts/side_effect_traffic_census.py::parse_stamp` reads a naive
             # stamp as local, `app/skill_telemetry.py` reads one as UTC.
-            (self.state_dir / "ALERT.md").write_text(
+            (self.state_dir / ALERT_FILE_NAME).write_text(
                 f"# {title}\n\nlevel: {level}\n"
                 f"written: {datetime.now().astimezone().isoformat()}\n\n{text}\n",
                 encoding="utf-8",
@@ -310,6 +337,93 @@ class Notifier:
             return True
         except Exception:
             return False
+
+    def _alert_file_retract(self, title: str, note_text: str) -> bool:
+        """Seal the incident ALERT.md is holding, when this title's cause clears (#1967).
+
+        The companion of `_alert_file`, deliberately placed on its caller's side
+        of the `external` gate: `alert()` writes that file BEFORE the gate
+        returns, so an all-clear that retracted only behind the gate would leave
+        every drill and `--no-external-alerts` run holding an alarm it can never
+        close — a guard on one of two write surfaces is not a guard (09-22).
+        The live witness at filing: the 2026-09-30 runtime-data alarm still
+        read as a live directive over a day after `~/lloyd/.t` was gone and the
+        writer fix (#1906) had settled, because all eight `cleared:` lines that
+        evening went to the daily note and none here.
+
+        Title-scoped because ALERT.md is ONE last-writer-wins slot: the file is
+        rewritten only when its H1 names this exact title, so resolving the
+        tmpwatch alert can never retract a live runtime-data alarm sharing the
+        path. The alarm's text survives QUOTED below a `CLEARED` banner — the
+        retraction changes what the instructions ARE (a live order → the record
+        of one) without destroying the evidence — and the original header keys,
+        `written:` included, are copied byte-for-byte so a reader can still age
+        the alarm itself. No file is never created: the hourly all-clear runs
+        whether or not anything ever alerted, and conjuring an ALERT.md to
+        retract would manufacture an incident in the surface agents read first.
+        A file already carrying a `cleared:` header key is left byte-identical,
+        which is what keeps the hourly all-clear silent (#1536's contract,
+        extended to this surface).
+
+        The return answers only THIS surface: True when the file is in a
+        retracted-or-nothing-to-do state after the call, False when it exists
+        for this title but could not be read or written — a claim the caller
+        folds into `resolve`'s verdict rather than swallowing.
+        """
+        path = self.state_dir / ALERT_FILE_NAME
+        try:
+            if not path.is_file():
+                return True
+            body = path.read_text(encoding="utf-8")
+        except OSError:
+            return False
+        split = self._alert_file_split(body)
+        if split is None or split[0] != f"# {title}":
+            return True          # another incident's live alarm, or not ours
+        h1, keys, alert_text = split
+        if any(k.startswith(f"{ALERT_CLEARED_PREFIX} ") or k == ALERT_CLEARED_PREFIX
+               for k in keys):
+            return True          # already sealed: idempotent silence
+        stamp = datetime.now().astimezone().isoformat()
+        quoted = "\n".join((f"> {ln}" if ln.strip() else ">")
+                           for ln in alert_text.rstrip("\n").split("\n"))
+        sealed = (f"{h1}\n\n"
+                  + "\n".join(keys)
+                  + f"\n{ALERT_CLEARED_PREFIX} {stamp} — {note_text}\n\n"
+                  + ALERT_CLEARED_BANNER + "\n\n" + quoted + "\n")
+        try:
+            path.write_text(sealed, encoding="utf-8")
+        except OSError:
+            return False
+        return True
+
+    @staticmethod
+    def _alert_file_split(body: str):
+        """(H1 line, header key lines, alert text) of an ALERT.md, or None.
+
+        The layout `_alert_file` writes — `# {title}`, a blank, the `level:`/
+        `written:` run plus the `cleared:` line once a retraction has sealed
+        it, a blank, the text — is parsed by those header keys and nothing
+        else: the text always sits behind a blank line, so alert prose that
+        begins with a `key: value`-looking sentence can never extend the
+        header. None answers for bytes that are not this layout, and a file
+        whose title cannot be read is a file the retraction must not touch.
+        """
+        lines = body.split("\n")
+        if not lines or not lines[0].startswith("# "):
+            return None
+        i = 1
+        while i < len(lines) and not lines[i].strip():
+            i += 1
+        keys: list[str] = []
+        while i < len(lines) and _ALERT_HEADER_KEY.match(lines[i]):
+            keys.append(lines[i])
+            i += 1
+        if not keys:
+            return None
+        while i < len(lines) and not lines[i].strip():
+            i += 1
+        return lines[0], keys, "\n".join(lines[i:])
 
     def _vault_note(self, title: str, text: str, *, coalesce: bool = False) -> bool:
         """Write this alert's section into today's daily note.
@@ -380,12 +494,24 @@ class Notifier:
         an alert, so no toast, no speech, no backlog task — and the ledger still holds
         every individual firing either way.
 
-        The return is a claim about the notes it could reach, not about the incident.
-        True means: every daily note inside the last `DAILY_SCAN_DAYS` that it opened for
-        `title` is now sealed — including the note of a day that has since passed, which is
+        ALERT.md is sealed first and by the same rules (#1967), ABOVE the
+        `external` gate and before any of this: `alert()` writes that file on
+        every run mode, so the retraction must run on every run mode too, and
+        it is title-scoped because the file is one last-writer-wins slot —
+        sealing one incident must never retract a different live one. The
+        daily-note surfaces behind the `external` gate stay closed to a drill
+        exactly as before; only the state-dir file, which the drill already
+        wrote, gains its `cleared:` line.
+
+        The return is a claim about the surfaces it could reach, not about the incident.
+        True means: ALERT.md either held this title's alarm and is now sealed, held
+        another title's, held nothing, or was already sealed; AND every daily note
+        inside the last `DAILY_SCAN_DAYS` that it opened for `title` is now sealed —
+        including the note of a day that has since passed, which is
         where an alarm raised before midnight still stands — or that none of them held an
         open section, which is the ordinary hourly all-clear and stays True so the
-        idempotent-silence contract holds. False means it could not read or write, or that
+        idempotent-silence contract holds. False means it could not read or write either
+        surface, or that
         an open section for `title` sits in a dated note OLDER than that window: a
         retraction reaches back a fixed number of days and no further, so an alarm beyond
         its reach is not a closed question and must not be reported as one. A note it never
@@ -394,8 +520,9 @@ class Notifier:
         (#1590): an alert written 23:05 and all-cleared 00:05 returned success and left the
         alarm's own section claiming it was still open.
         """
+        retracted = self._alert_file_retract(title, note_text)
         if not self.external:
-            return True
+            return retracted
         # Checked before sealing, from the filenames: the out-of-window question is "is
         # there an alarm for this title my reach does not cover", and a section sealed a
         # moment ago must not be able to mask one it cannot touch.
@@ -432,7 +559,7 @@ class Notifier:
                 note.write_text(sealed, encoding="utf-8")
             except OSError:
                 wrote = False
-        return False if out_of_reach else wrote
+        return False if (out_of_reach or not retracted) else wrote
 
     # ── daily-note incident plumbing (#1536) ──────────────────────────────
     #
