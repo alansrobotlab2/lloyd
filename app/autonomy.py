@@ -3860,6 +3860,77 @@ _ACTIVE_RUN: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar(
     "autonomy_active_run", default=None)
 
 
+async def charge_death_without_verdict(task_id, exc: BaseException, *,
+                                       run_id: str, started_at: str) -> dict:
+    """Charge the task file for a death that never reached a verdict (#2037).
+
+    `run_task` records its own failures, and the pool's `except Exception` arm
+    records the run row for everything else. Before #2037 those two surfaces
+    covered every death EXCEPT one shape: an exception escaping before `run_task`
+    ever wrote one. Three routes in, all measured — `scheduled_task.execute()`'s
+    three opening imports outside any try (`run_task`, `run_trigger`,
+    `_discord_notify_task_complete`; the third is task #74's `ModuleNotFoundError`
+    of 2026-09-29), the ~270 lines of `run_task` before its first
+    failure-recording `try`, and the source's own `RuntimeError: model server …
+    unhealthy — deferring task` after the 90 s health wait. Such a run wrote a
+    `runs` row and nothing else: no `failure_count`, no cooldown, no alert. Task
+    #74 measured 41 failed rows behind 14 queue rows in 27 minutes with
+    `failure_count: 0` and `max_retries: 3` in its file, and stopped only when the
+    pool's poison sweep took the queue row — and the sweep cannot bound a TASK,
+    because `mark_failed` NULLs the dedup key when it poisons and the next poll
+    hands that key to a fresh row.
+
+    The charge is `_record_failure`, chosen over a hand-rolled `failure_count += 1`
+    on purpose: that function is where the retry budget, the backoff, the
+    `status: failed` retirement, the run record, the Activity Log line and every
+    alert live. Routing an unrecorded death through it is what makes the loop stop
+    AND makes it say so — an import death is sub-second, so three of them inherit
+    the `_fast_failure_streak` alert rather than needing a new transport (#1085).
+
+    It is also why the kind here is `_failure_kind_of` and not a flat `task`: an
+    infra-shaped exception CAN escape this far (the health-wait raise is one), and
+    charging it as the task's own would spend a retry budget on an outage — the
+    exact reclassification `_record_failure`'s own docstring forbids. This function
+    therefore changes no classification policy, `_INFRA_CEILING` and
+    `_INFRA_EXC_NAMES` included; it only stops the unclassifiable death from being
+    free.
+
+    Returns `{"failure_kind": …, "task_budget_charged": bool}` for the pool to
+    stamp onto the run row, and never raises: a charge that cannot be written must
+    not replace the exception the pool is already handling with one nobody asked
+    about.
+    """
+    kind = _failure_kind_of(exc)
+    out: dict = {"failure_kind": kind, "task_budget_charged": False}
+    try:
+        path = _find_task_file(task_id)
+        task = _parse_task_file(path) if path else None
+        if not isinstance(task, dict):
+            logger.error("Task #%s: a death escaped with no readable task file, so "
+                         "%s spent no retry budget — the queue row is the only "
+                         "record this run ever made", task_id, type(exc).__name__)
+            return out
+        started_dt = _parse_iso(started_at) or datetime.datetime.now(
+            datetime.timezone.utc)
+        error_msg = f"{type(exc).__name__}: {exc}"
+        await _record_failure(
+            task, task_id, run_id, started_at, started_dt,
+            summary=error_msg,
+            body=("## Error before the task ran\n\n"
+                  f"```\n{error_msg}\n```\n\n"
+                  "Raised outside `run_task`, so this run never reached the engine "
+                  "and wrote no verdict of its own; the pool charged it here, on "
+                  f"the `kind={kind}` path `_failure_kind_of` chose."),
+            kind=kind,
+            extra={"exception": type(exc).__name__, "unrecorded_death": True})
+        out["task_budget_charged"] = True
+    except Exception as charge_exc:  # noqa: BLE001 — the death must survive this
+        logger.error("Task #%s: charging the retry budget for an unrecorded death "
+                     "itself failed (%s: %s); the queue row still stands",
+                     task_id, type(charge_exc).__name__, charge_exc)
+    return out
+
+
 @contextlib.contextmanager
 def run_trigger(name: str):
     """`with run_trigger("scheduler"): await run_task(...)` — names the caller."""

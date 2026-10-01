@@ -1354,3 +1354,262 @@ async def test_one_tick_probes_the_endpoint_config_says_the_primary_lives_on(
         "the URL that gates every dispatch is still the module's literal")
     assert q.list_items(source=st.NAME) == [], (
         "dispatch enqueued while its own health probe was refusing")
+
+
+# ---------------------------------------------------------------------------
+# A death that never reached the task file (#2037)
+#
+# `scheduled_task.execute()` opens with three imports outside any try, and
+# `run_task` runs ~270 lines before its first failure-recording try. A death in
+# either stretch passes `WorkerPool._run_item`'s `except Exception` arm and
+# nothing else: no `_record_failure`, so `failure_count` never moved, so the
+# scheduler kept offering the task, so the row re-claimed every ~minute until the
+# poison sweep took it. Task #74 measured 41 failed runs behind 14 queue rows in
+# 27 minutes on 2026-09-29, every one of them with `meta.failure_kind` NULL —
+# that NULL is the signature of a death the task file never saw, and it is what
+# the nodes below replace.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def task_board(tmp_path, monkeypatch):
+    """One real task file and runs tree, both redirected off the live vault.
+
+    The charge this section exercises lives in `app.autonomy` and resolves every
+    path it writes through two module globals, so redirecting them is what keeps
+    a death charged against task #74 here from landing in `~/obsidian/autonomy`
+    or the live data root. `discord_notify.discord_alert` is patched at its
+    source because the disable arm imports it inside its own try block.
+    """
+    import yaml
+    from app import autonomy
+    import app.discord_notify as discord_notify
+
+    tasks = tmp_path / "autonomy"
+    tasks.mkdir()
+    monkeypatch.setattr(autonomy, "AUTONOMY_DIR", tasks)
+    monkeypatch.setattr(autonomy, "AUTONOMY_RUNS_DIR", tmp_path / "autonomy-runs")
+
+    async def _no_alert(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(discord_notify, "discord_alert", _no_alert)
+
+    def write(task_id: int, **over) -> None:
+        fm = {"id": task_id, "name": f"task{task_id}", "type": "autonomy",
+              "status": "up_next", "frequency": "hourly", "priority": "low",
+              "skill_name": "some-skill", "max_retries": 3, "failure_count": 0}
+        fm.update(over)
+        (tasks / f"{task_id}-task{task_id}.md").write_text(
+            f"---\n{yaml.dump(fm, sort_keys=False)}---\n\n# task\n\n"
+            "## Activity Log\n", encoding="utf-8")
+
+    def read(task_id: int) -> dict:
+        return autonomy._parse_task_file(autonomy._find_task_file(task_id))
+
+    return SimpleNamespace(write=write, read=read, tasks=tasks, autonomy=autonomy)
+
+
+def _death_source(exc, *, name: str = "scheduled-task", charge: bool = True,
+                  verdict_recorded: bool = False):
+    """A source that dies the way `scheduled_task.execute` dies on import.
+
+    `charge` is the source's opt-in (`CHARGE_TASK_ON_DEATH`).
+    `verdict_recorded` models the one death that must NOT be charged: `run_task`
+    returned, wrote this attempt's verdict through the real `_record_failure`, and
+    the adapter then died in its own post-processing. The verdict is recorded
+    through production code rather than simulated, so the budget really has moved
+    once by the time the death is handled — and a second unit from the pool is a
+    number the caller can see.
+    """
+    async def execute(item):
+        if verdict_recorded:
+            from datetime import datetime, timezone
+            from app import autonomy
+            from workers.pool import mark_task_verdict
+
+            path = autonomy._find_task_file(item.payload["task_id"])
+            task = autonomy._parse_task_file(path)
+            now = datetime.now(timezone.utc)
+            await autonomy._record_failure(
+                task, task["id"], "run_74_verdict_20261001", now.isoformat(), now,
+                summary="RuntimeError: engine refused the prompt",
+                body="## Prompt\n\n(test)\n", kind="task")
+            mark_task_verdict()
+        raise exc
+
+    src = SimpleNamespace(NAME=name, execute=execute)
+    if charge:
+        src.CHARGE_TASK_ON_DEATH = True
+    return src
+
+
+def _meta_of(runs_row: dict) -> dict:
+    return json.loads(runs_row["meta_json"] or "{}")
+
+
+async def _drain_deaths(q, monkeypatch, src, *, count: int = 1, task_id: int = 74,
+                        source_name: str = "scheduled-task", max_attempts: int = 1,
+                        dedup_key: str | None = None) -> list[dict]:
+    """`count` deaths, each its own queue row, through one real pool.
+
+    One row, one attempt, by `max_attempts=1`: the queue re-claims a failed row up
+    to its own cap, and every claim is a death that owes exactly one budget unit.
+    Leaving that cap at its default of 3 would fold a row's retries into a count
+    the assertions could not attribute to anything. Rows are enqueued and awaited
+    one at a time, so `count` is exact — and a row poisoned at the cap NULLs its
+    dedup key and hands it to the next row, which is the churn under test, not a
+    race to avoid.
+    """
+    import workers.sources as sources
+    monkeypatch.setattr(sources, "SOURCE_REGISTRY", {source_name: src}, raising=False)
+    monkeypatch.setattr(sources, "get_sources_config",
+                        lambda: {source_name: {"max_duration_seconds": 30}},
+                        raising=False)
+    pool = WorkerPool(q, slots=1, max_attempts=max_attempts,
+                      poll_idle_seconds=0.01)
+    await pool.start()
+    try:
+        for i in range(count):
+            q.enqueue(source_name, "run", payload={"task_id": task_id},
+                      dedup_key=dedup_key)
+            for _ in range(400):
+                if len(q.list_runs(limit=50)) >= i + 1:
+                    break
+                await asyncio.sleep(0.02)
+    finally:
+        await pool.stop()
+    return q.list_runs(limit=50)
+
+
+async def test_a_death_with_no_verdict_charges_the_task_retry_budget(
+        q, monkeypatch, task_board):
+    """Clause 1: one death the task file never saw costs that file exactly 1.
+
+    Driven through a real `WorkerPool` and a real queue rather than by calling
+    the charge directly, because the seam IS the pool's `except Exception` arm —
+    the one place that ever saw task #74's `ModuleNotFoundError`.
+    """
+    task_board.write(74)
+    runs = await _drain_deaths(
+        q, monkeypatch,
+        _death_source(ModuleNotFoundError("No module named 'app.discord_notify'")),
+        dedup_key="scheduled-task:74")
+
+    assert runs[0]["status"] == "failed" and runs[0]["task_id"] == "74"
+    fm = task_board.read(74)
+    assert fm["failure_count"] == 1, (
+        f"failure_count is {fm['failure_count']!r}: the death spent no budget, so "
+        "the scheduler offers the task again and the loop outlives the sweep")
+    assert fm["status"] == "up_next", "one death of three already stopped the task"
+    assert fm["next_run"], (
+        "the charge wrote no cooldown, so `hourly` is due again on the next tick")
+
+
+async def test_charged_deaths_reach_max_retries_and_the_task_reads_failed(
+        q, monkeypatch, task_board):
+    """Clause 2, first half: three charged deaths retire a `max_retries: 3` task.
+
+    Three separate queue rows, because the queue bound is per ROW: `mark_failed`
+    NULLs the dedup key when it poisons, and the source re-enqueues under
+    `scheduled-task:74` every poll, which is how 14 rows carried 41 runs.
+    """
+    task_board.write(74, max_retries=3)
+    await _drain_deaths(q, monkeypatch, _death_source(RuntimeError("boom")), count=3)
+
+    fm = task_board.read(74)
+    assert fm["failure_count"] == 3, (
+        f"three deaths moved failure_count to {fm['failure_count']!r}")
+    assert fm["status"] == "failed", (
+        "the retry budget was never reached, so `get_due_tasks` still offers it")
+
+
+async def test_the_failed_row_of_a_charged_death_names_its_failure_kind(
+        q, monkeypatch, task_board):
+    """Clause 4: the exception path writes no NULL-kind row for a charged death.
+
+    `meta.failure_kind` is the key `app/autonomy.py` already writes on the
+    verdict path; 42 failed `scheduled-task` rows carried none of it, which is
+    how a week of a task dying every minute stayed invisible to every reader
+    that groups runs by kind.
+    """
+    task_board.write(74)
+    runs = await _drain_deaths(q, monkeypatch, _death_source(RuntimeError("boom")))
+
+    meta = _meta_of(runs[0])
+    assert meta.get("failure_kind") == "task", (
+        f"the row carries {meta.get('failure_kind')!r}; a NULL is what made the "
+        "09-29 loop uncountable")
+    assert meta.get("task_budget_charged") is True, (
+        "the row says a death happened but not that anything was charged for it")
+
+
+async def test_three_pool_deaths_put_one_fast_failure_line_in_the_daily_note(
+        q, monkeypatch, task_board, tmp_path):
+    """The alert seam reached FROM THE POOL, so the chain is not wired by prose.
+
+    `tests/test_autonomy_failure_alert.py::test_four_charged_pool_deaths_append_exactly_one_fast_failure_line`
+    pins the seam itself — one line per streak, that writer's format — by calling
+    the charge directly. This node pins the link the clause is actually about:
+    three real deaths through this pool append exactly one line naming #74 to
+    today's note. Delete the pool's charge and this goes red while the direct-call
+    node stays green; that pairing is what makes "the silence is the defect"
+    (#1085) checkable end to end rather than by two halves that never meet.
+
+    `LLOYD_DAILY_NOTE_DIR` is pointed at this test's own directory: the conftest
+    default is a dir the whole session shares, and a count of alert lines needs a
+    note only this test wrote in.
+    """
+    from app import autonomy
+
+    monkeypatch.setenv("LLOYD_DAILY_NOTE_DIR", str(tmp_path / "notes"))
+    task_board.write(74, max_retries=9)
+    await _drain_deaths(q, monkeypatch,
+                        _death_source(ModuleNotFoundError("No module named 'x'")),
+                        count=3)
+
+    notes = sorted((tmp_path / "notes").glob("*.md"))
+    assert len(notes) == 1, f"notes written: {[str(p.name) for p in notes]}"
+    lines = [ln for ln in notes[0].read_text().splitlines() if "Autonomy #" in ln]
+    assert len(lines) == 1, (
+        f"the note carries {len(lines)} alert lines for a 3-death streak: {lines}")
+    assert "#74" in lines[0], lines[0]
+    assert autonomy._FAST_FAILURE_ALERT_STREAK == 3, (
+        "the threshold this node counts one line at has moved; the assertion above "
+        "is pinned to it, not to a number copied here")
+
+
+@pytest.mark.parametrize("charge,verdict,expected",
+                         [(False, False, 0), (True, True, 1)],
+                         ids=["source-did-not-opt-in", "verdict-already-written"])
+async def test_a_death_the_pool_must_not_charge_is_still_classified(
+        q, monkeypatch, task_board, charge, verdict, expected):
+    """The two deaths that must not spend a budget, and must still be countable.
+
+    `source-did-not-opt-in` is the case `bench-mine` is in: its payload carries a
+    `task_id` naming an autonomy task it is MINING, not a task this run is, so
+    charging from the payload alone would retire someone else's schedule — the
+    file has to read 0. `verdict-already-written` is a source that died AFTER
+    `run_task` had already recorded this attempt's verdict through the real
+    `_record_failure`, so the file has to read exactly the 1 the verdict booked:
+    a second unit from the pool would retire a task at half its `max_retries`.
+
+    Both cases still classify, which is the half that stops the change trading one
+    silence for another: `meta.failure_kind` is written for every exception from
+    every source, charged or not.
+    """
+    task_board.write(74, max_retries=9)
+    runs = await _drain_deaths(
+        q, monkeypatch,
+        _death_source(ModuleNotFoundError("No module named 'x'"),
+                      charge=charge, verdict_recorded=verdict))
+
+    got = task_board.read(74)["failure_count"]
+    assert got == expected, (
+        f"failure_count is {got}, expected {expected} — a death that is not this "
+        "pool's to charge still moved the task's budget")
+    assert _meta_of(runs[0]).get("failure_kind") == "task", (
+        "not charging is not the same as not classifying: the row still has to be "
+        "countable, or the same silence is back under a different name")
+    assert "task_budget_charged" not in _meta_of(runs[0]), (
+        "the row claims a charge the task file never saw")

@@ -414,3 +414,138 @@ async def test_a_discovery_death_holds_a_downstream_chain_just_as_a_task_failure
     assert held_after_infra is held_after_task is False, (
         "the dependent is held by the missing output, whichever kind the death "
         "was filed under; a difference here means the two paths diverged")
+
+
+# ── #2037: the same two paths, for a death the pool saw and `run_task` never did ──
+#
+# `scheduled_task.execute()` can raise before `run_task` is ever called — on one
+# of its own imports, or on its `RuntimeError: model server … unhealthy —
+# deferring task` after the 90 s health wait. Such a death reaches neither
+# `run_task`'s `except` nor `_record_failure`, so the split these tests exist for
+# had nothing to split: nothing was counted at all. `charge_death_without_verdict`
+# is the pool's route into the SAME two paths, and what follows pins that it
+# changed no policy — `_INFRA_CEILING` and `_INFRA_EXC_NAMES` are read as they
+# are, not restated next to a second copy of themselves.
+
+
+def _death_run_id(kind: str, n: int) -> str:
+    """A run id for one charged death; the record's filename IS the run id."""
+    _RUN_SEQUENCE[0] += 1
+    return (f"run_scheduled-task_20261001_{_RUN_SEQUENCE[0]:06d}_{kind}{n}")
+
+
+async def _charge_death(env, exc, *, task_id: int = 53, kind: str = "d",
+                        n: int = 0) -> dict:
+    """One death charged the way the pool charges it, and what it returned."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return await env.autonomy.charge_death_without_verdict(
+        task_id, exc, run_id=_death_run_id(kind, n), started_at=now.isoformat())
+
+
+@pytest.mark.asyncio
+async def test_a_pool_death_classified_infra_leaves_the_retry_budget_alone(env):
+    """Clause 3, infra half: `ConnectionResetError` is still not the task's fault.
+
+    The name is in `_INFRA_EXC_NAMES`, so the escaping-exception route must land
+    on the infra path exactly as `run_task`'s own handler does: the infra counter
+    moves, `failure_count` does not. Task #53 starts at `failure_count: 1` for
+    exactly this reason — a held count and a zeroed one are the same number 0.
+    """
+    before = task_fields(env, 53)
+    result = await _charge_death(env, ConnectionResetError(
+        "[Errno 111] Connect called on a closed transport"))
+
+    assert result["failure_kind"] == "infra"
+    held = before["failure_count"]
+    assert held >= 1, (
+        f"the fixture holds failure_count {held}: against a zero, `unchanged` and "
+        "`never charged anything` are the same number, and this node would pass "
+        "on a route that silently charges nothing at all")
+    after = task_fields(env, 53)
+    assert after["failure_count"] == held, (
+        "an infrastructure death spent the task's retry budget, which is the "
+        "fleet-wide disable #1085's split exists to prevent")
+    assert after["infra_failure_count"] == 1, (
+        "the death was not booked as infra either, so it is invisible again")
+
+
+@pytest.mark.asyncio
+async def test_a_pool_death_the_classifier_cannot_name_spends_the_budget(env):
+    """Clause 3, task half: an unclassifiable death now costs the task exactly 1.
+
+    `ModuleNotFoundError` — task #74's actual 2026-09-29 death, 40 rows of it —
+    is on no list, and 41 runs of it moved nothing anywhere. This is the whole
+    point of the change: the genuinely unclassifiable death was the free one.
+    """
+    before = task_fields(env, 53)
+    result = await _charge_death(env, ModuleNotFoundError(
+        "No module named 'app.discord_notify'"))
+
+    assert result["failure_kind"] == "task"
+    after = task_fields(env, 53)
+    assert after["failure_count"] == before["failure_count"] + 1 == 2, (
+        f"failure_count went {before['failure_count']} → {after['failure_count']}")
+    assert "infra_failure_count" not in after, (
+        "a task death was booked against the infra counter as well")
+
+
+@pytest.mark.asyncio
+async def test_the_pool_death_route_reads_the_live_infra_name_set(env, monkeypatch):
+    """Clause 3's "changes no classification" half, stated falsifiably.
+
+    The name set is widened IN THE TEST to hold a name that is not on it at HEAD,
+    and the pool's route has to follow. It can only follow if the route asks
+    `_failure_kind_of`, which reads the module global; a route carrying its own
+    copy of the list answers the old way and this fires. Restoring the set is
+    monkeypatch's job, not this test's.
+    """
+    monkeypatch.setattr(env.autonomy, "_INFRA_EXC_NAMES",
+                        frozenset({"ModuleNotFoundError"}))
+    before = task_fields(env, 53)
+
+    result = await _charge_death(env, ModuleNotFoundError("No module named 'x'"))
+
+    assert result["failure_kind"] == "infra", (
+        "the route classified from a list of its own, not from `_INFRA_EXC_NAMES`")
+    assert task_fields(env, 53)["failure_count"] == before["failure_count"], (
+        "widening the infra set did not move the route, so it is not the set "
+        "`run_task` and this path share")
+
+
+@pytest.mark.asyncio
+async def test_pool_deaths_rest_a_task_only_at_the_unmodified_infra_ceiling(env):
+    """The ceiling governs the new route because the new route has none of its own.
+
+    The loop counts to `autonomy._INFRA_CEILING` and reads the constant rather
+    than a number: what is asserted is that the resting state arrives on the
+    LAST of those deaths and on none before it. A route that spent the retry
+    budget instead, or invented its own bound, fails here — and a change to the
+    constant moves this test instead of silently moving the route.
+    """
+    autonomy = env.autonomy
+    ceiling = autonomy._INFRA_CEILING
+    held = task_fields(env, 53)["failure_count"]
+    assert held >= 1, (
+        f"the fixture holds failure_count {held}, so the closing `the budget did "
+        "not move` below would be true of a task that had none to move")
+
+    for i in range(ceiling - 1):
+        await _charge_death(env, ConnectionResetError(f"hiccup {i}"), kind="c", n=i)
+        fm = task_fields(env, 53)
+        assert "infra_rest_until" not in fm, (
+            f"the task rested after {i + 1} of {ceiling} infra deaths")
+        assert fm.get("infra_failure_count") == i + 1, (
+            "the consecutive count did not accumulate, so the ceiling cannot bind")
+
+    await _charge_death(env, ConnectionResetError("one past the ceiling"),
+                        kind="c", n=99)
+
+    fm = task_fields(env, 53)
+    assert fm.get("infra_rest_until"), (
+        f"{ceiling} consecutive infra deaths charged from the pool never crossed "
+        "the ceiling, so this route re-dispatches an outage forever")
+    assert fm.get("infra_failure_count") == 0, (
+        "the crossing left a spent counter armed for a second rest")
+    assert fm["failure_count"] == held, (
+        f"the budget moved {held} → {fm['failure_count']} across {ceiling} infra "
+        "deaths: this route reached the retry budget after all")

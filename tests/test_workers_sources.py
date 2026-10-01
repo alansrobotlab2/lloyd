@@ -2515,3 +2515,159 @@ def test_a_task_pinned_to_an_unhealthy_named_model_is_skipped_not_enqueued(
         f"the pinned model's own endpoint was never probed: {probed}")
     assert q.list_items(source=ST.NAME) == [], (
         "a task pinned to an unhealthy model server was enqueued anyway")
+
+
+# ── #2037 clause 2, second half: a task charged to its cap is never re-offered ──
+
+
+def test_a_charged_to_max_retries_task_gets_no_row_until_the_rearm_is_due(
+        monkeypatch, tmp_path, q):
+    """One real tick over the two files that differ by the charge's own field.
+
+    #74 is written exactly as `_record_failure` leaves a `max_retries: 3` task at
+    its third death: `status: failed`, `failure_count: 3`, `failure_kind: task`,
+    `next_run` absent (the disable branch nulls it) and `last_attempt` NOW. #75 is
+    identical but `status: up_next` with `failure_count: 2` — one death short. Only
+    #75 may be enqueued, and the tick's own recovery scan is left in place: it is
+    production code, it runs first on every real tick, and it is what makes the
+    silence finite rather than permanent.
+
+    That scan is why #74's `last_attempt` is now and not three days ago. A retired
+    task is re-armed by `_rearm_after_one_period` once a full declared period has
+    passed since its last attempt (#1086: "a task retired at max_retries has no
+    other way back"), so a #74 aged three days on an `hourly` frequency would be
+    armed again by the tick's own first step and would legitimately enqueue. The
+    bound #2037 buys is therefore ONE declared period of guaranteed silence per
+    charge, not a permanent mute — and the second half of this node pins the release
+    valve, because a node that asserted only the silence would silently be a node
+    that asserts a task can never come back.
+    """
+    import datetime as dt
+    from app import autonomy
+    from workers.sources import scheduled_task as ST
+
+    tasks = tmp_path / "autonomy"
+    tasks.mkdir()
+    now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
+    three_days_ago = (dt.datetime.now(dt.timezone.utc)
+                      - dt.timedelta(days=3)).isoformat()
+    for task_id, status, failures, last_attempt in (
+            (74, "failed", 3, now_iso), (75, "up_next", 2, three_days_ago)):
+        fm = {"id": task_id, "name": f"task{task_id}", "status": status,
+              "frequency": "hourly", "priority": "low", "skill_name": "some-skill",
+              "max_retries": 3, "failure_count": failures,
+              "failure_kind": "task", "next_run": None,
+              "last_attempt": last_attempt, "last_run": last_attempt}
+        (tasks / f"{task_id}-task{task_id}.md").write_text(
+            f"---\n{yaml.dump(fm, sort_keys=False)}---\n\n# task\n\n"
+            "## Activity Log\n", encoding="utf-8")
+
+    monkeypatch.setattr(autonomy, "AUTONOMY_DIR", tasks)
+    monkeypatch.setattr(autonomy, "AUTONOMY_RUNS_DIR", tmp_path / "autonomy-runs")
+    monkeypatch.setattr(ST, "_vllm_healthy", lambda *a, **k: True)
+
+    asyncio.run(ST.enqueue_if_due(q, {"max_duration_seconds": 1800}))
+
+    enqueued = [str(item.payload.get("task_id"))
+                for item in q.list_items(source=ST.NAME)]
+    assert enqueued == ["75"], (
+        f"enqueued {enqueued}: #75 is the live control that this tick CAN dispatch "
+        "— if it is missing, the silence below proves nothing — and #74 is the "
+        "retired file the charge exists to stop re-offering")
+
+    # The release valve, through the same production scan the tick just ran. Aged
+    # one full `hourly` period past its `last_attempt`, the re-arm is what puts a
+    # retired task back; asserting it here keeps the claim above honest — one
+    # period of silence per charge, and a way back after that.
+    autonomy._update_task_field(74, last_attempt=three_days_ago)
+
+    assert autonomy.recover_stuck_tasks() == [74], (
+        "the re-arm that is supposed to be the only way back did not fire, which "
+        "means a charged-to-the-cap task is muted forever rather than for one "
+        "declared period")
+
+
+def test_the_pool_charges_a_death_of_this_real_source(monkeypatch, tmp_path):
+    """The opt-in seam, with the production source object on both sides of it.
+
+    `test_workers_pool.py` proves the pool honours `CHARGE_TASK_ON_DEATH` on a
+    stand-in source. What it cannot prove is that THIS module — the one the running
+    aggregator registers — actually carries the attribute the pool looks for under
+    that name, which is the half a rename here would drop silently and leave every
+    scheduled-task death uncharged again. So the production module object is handed
+    to the production reader, with nothing of either stubbed.
+    """
+    import datetime as dt
+    from app import autonomy
+    from workers import pool as POOL
+    from workers.sources import scheduled_task as ST
+
+    assert ST.CHARGE_TASK_ON_DEATH is True, (
+        "the source no longer declares the opt-in the pool reads")
+
+    tasks = tmp_path / "autonomy"
+    tasks.mkdir()
+    (tasks / "74-kg-mention-classifier.md").write_text(
+        "---\n"
+        + yaml.dump({"id": 74, "name": "kg-mention-classifier", "status": "up_next",
+                     "frequency": "hourly", "priority": "low",
+                     "skill_name": "kg-mention-classifier",
+                     "max_retries": 3, "failure_count": 0}, sort_keys=False)
+        + "---\n\n# kg\n\n## Activity Log\n", encoding="utf-8")
+    monkeypatch.setattr(autonomy, "AUTONOMY_DIR", tasks)
+    monkeypatch.setattr(autonomy, "AUTONOMY_RUNS_DIR", tmp_path / "runs")
+
+    now = dt.datetime.now(dt.timezone.utc)
+    meta = asyncio.run(POOL._death_meta(
+        _item({"task_id": 74}), ST,
+        ModuleNotFoundError("No module named 'app.discord_notify'"),
+        run_id="run_scheduled-task_20261001_seam_0001", started_at=now.isoformat()))
+
+    assert meta["failure_kind"] == "task", meta
+    assert meta["task_budget_charged"] is True, (
+        "production source, production reader, and no budget moved")
+    fm = autonomy._parse_task_file(autonomy._find_task_file(74))
+    assert fm["failure_count"] == 1, (
+        f"the task file reads failure_count {fm['failure_count']} after a death of "
+        "the real source that never reached a verdict")
+
+
+def test_execute_marks_the_verdict_only_after_run_task_returns(monkeypatch, sched):
+    """The one line that makes a post-verdict death unchargeable, pinned both ways.
+
+    `execute()` calls `mark_task_verdict()` between `run_task` returning and the
+    adapter's own post-processing. The marker is the whole of the contract between
+    this source and `WorkerPool._death_meta`: a death after it is not the task's
+    second attempt, and a death before it is. Both directions are asserted because
+    either half can rot on its own — the marker moved above the `run_task` call and
+    every unrecorded death becomes free again; never called and a task loses half its
+    `max_retries` to one row.
+
+    The spy stands in for the pool's reader; what is production here is WHEN the
+    source calls it.
+    """
+    from app import autonomy
+
+    ST, _ = sched
+    marked: list = []
+    monkeypatch.setattr("workers.pool.mark_task_verdict",
+                        lambda: marked.append(1))
+
+    _execute(ST)
+    assert marked == [1], (
+        "the source never told the pool its verdict had moved, so a death in "
+        "post-processing would charge this attempt a second time")
+
+    marked.clear()
+
+    def _refuse(*_a, **_k):
+        raise RuntimeError("model server unhealthy")
+
+    monkeypatch.setattr(autonomy, "run_task", _refuse)
+    try:
+        asyncio.run(ST.execute(_item({"task_id": 77})))
+    except RuntimeError:
+        pass
+    assert marked == [], (
+        "the marker fired for an attempt that wrote no verdict, which is exactly "
+        "the death #2037 exists to charge")

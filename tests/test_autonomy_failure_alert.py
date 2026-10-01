@@ -1307,3 +1307,61 @@ async def test_a_drop_files_its_item_from_inside_the_worker_s_running_loop(
     items = board_server.items()
     assert len(items) == 1, [str(p) for p, _, _ in items]
     assert _field(items[0][2], "Mismatches observed") == "1", items[0][2]
+
+
+# ── #2037 clause 5: a death charged from the pool reaches THIS seam, not a new one ──
+
+
+@pytest.mark.asyncio
+async def test_four_charged_pool_deaths_append_exactly_one_fast_failure_line(
+        aut, monkeypatch):
+    """A task that dies on import every minute now says so once, in the daily note.
+
+    Task #74 died 41 times in 27 minutes on 2026-09-29 and nothing on the box
+    said so: every alert that could name a failure lives inside `_record_failure`
+    (the disable line, this streak line, the infra-ceiling line), and a death in
+    `scheduled_task.execute`'s imports never reached it. Both stall alarms skip a
+    task with a live queue row, and the churn keeps one live, so the silence was
+    structural rather than incidental.
+
+    The change under test is the CHARGE, not a new alert: the deaths are driven
+    through `charge_death_without_verdict`, and the seam they have to reach is
+    `_append_fast_failure_alert` — spied on here to prove the line is that
+    writer's, since a second transport would fill the note and still leave two
+    places for the alert to be wrong. Four deaths because the clause is about the
+    fourth: `len(streak) == 3` is one line per streak, not one per failure.
+
+    An import death is sub-second, so it is a fast failure by this file's own
+    definition, and `max_retries: 5` keeps the task un-retired at the third
+    death: the line is the streak's doing, not a side effect of a disable.
+    """
+    import app.discord_notify as discord_notify
+
+    async def _no_alert(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(discord_notify, "discord_alert", _no_alert)
+    calls: list = []
+    real_writer = aut._append_fast_failure_alert
+
+    def spy(task, task_id, durations):
+        calls.append((task_id, len(durations)))
+        return real_writer(task, task_id, durations)
+
+    monkeypatch.setattr(aut, "_append_fast_failure_alert", spy)
+    write_task(aut, 91, skill_name="some-skill")
+
+    for i in range(4):
+        started = dt.datetime.now(dt.timezone.utc)
+        await aut.charge_death_without_verdict(
+            91, ModuleNotFoundError("No module named 'app.discord_notify'"),
+            run_id=f"run_91_20261001_00000{i}_a{i}", started_at=started.isoformat())
+
+    assert calls == [(91, 3)], (
+        f"the seam was called {calls}: a fourth line for one streak, or none at all")
+    lines = _alert_lines()
+    assert len(lines) == 1, f"the note carries {len(lines)} lines: {lines}"
+    assert "#91" in lines[0], lines[0]
+    assert read_task(aut, 91)["failure_count"] == 4, (
+        "the alert fired over deaths that never reached the retry budget, which "
+        "means the loop is still running underneath the sentence about it")

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import contextvars
 import logging
 import math
 import time
@@ -367,6 +368,77 @@ def _task_id_of(item: QueueItem, result: Any = None) -> Optional[str]:
     if tid is None:
         tid = item.payload.get("task_id")
     return None if tid is None else str(tid)
+
+
+#: Has this attempt written its task-file verdict yet? (#2037)
+#:
+#: Set by a source whose `run_task` call returned — the budget moved with that
+#: verdict — so that a death later in the SAME item (the silent-run check, the
+#: artifact probe, anything the adapter does after the run) is classified but not
+#: charged a second time. Two charges for one attempt retire a task at half its
+#: declared `max_retries`. It is a ContextVar scoped to one claimed item, the same
+#: way `current_run_sessions` is, because a worker thread's answer must never be
+#: read as another worker's.
+current_task_verdict: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "lloyd_current_task_verdict", default=False)
+
+
+def mark_task_verdict() -> None:
+    """Called by a source that has just recorded this attempt's task-file verdict."""
+    current_task_verdict.set(True)
+
+
+async def _death_meta(item: QueueItem, source: Any, exc: BaseException, *,
+                      run_id: str, started_at: str) -> dict:
+    """What a death adds to its run row's meta — and whether a budget moved (#2037).
+
+    Two decisions, deliberately separated, because the corpus conflated them:
+
+    * **Classification is total.** `_failure_kind_of` answers for every exception
+      from every source, and the failed row carries the answer. The 42 failed
+      `scheduled-task` rows this item is about had `meta.failure_kind` NULL, which
+      is how one task dying every minute for 27 minutes stayed invisible to every
+      reader that groups runs by kind — including the owed check that was going to
+      notice it. The pool's own `asyncio.TimeoutError` arm is NOT stamped here: a
+      run killed at the pool's cap is a different class (#1546's corpus) and is
+      outside this item's declared scope.
+    * **The charge is opt-in and conditional.** Only a source whose work IS one of
+      our task files may charge, and it says so with `CHARGE_TASK_ON_DEATH`.
+      `bench-mine` payloads carry a `task_id` naming an autonomy task it is
+      *mining*, not a task this run is, so charging from the payload alone would
+      retire someone else's schedule. And a source that already wrote this
+      attempt's verdict does not charge again — see `current_task_verdict`.
+
+    Nothing here may raise into the caller: the exception under hand is the run's
+    verdict, and an accounting failure must not replace it.
+    """
+    try:
+        from app import autonomy
+    except Exception as e:  # noqa: BLE001 — the death outranks the accounting
+        logger.error("Cannot classify a %s/%s death (%s: %s): app.autonomy is "
+                     "unimportable (%s)", item.source, item.kind,
+                     type(exc).__name__, exc, e)
+        return {}
+
+    meta: dict = {"failure_kind": autonomy._failure_kind_of(exc)}
+    task_id = _task_id_of(item)
+    if task_id is None or not getattr(source, "CHARGE_TASK_ON_DEATH", False):
+        return meta
+    if current_task_verdict.get():
+        logger.debug("[%s] %s in task %s died after its verdict was recorded; the "
+                     "budget moved with the verdict, so nothing is charged here",
+                     item.source, type(exc).__name__, task_id)
+        return meta
+    try:
+        charge = await autonomy.charge_death_without_verdict(
+            task_id, exc, run_id=run_id, started_at=started_at)
+    except Exception as e:  # noqa: BLE001 — the death outranks the accounting
+        logger.error("Charging task #%s for an unrecorded death failed: %s",
+                     task_id, e, exc_info=True)
+        return meta
+    if charge.get("task_budget_charged"):
+        meta["task_budget_charged"] = True
+    return meta
 
 
 def _positive_int(value: Any) -> Optional[int]:
@@ -1222,6 +1294,12 @@ class WorkerPool:
             # "the handler remembered to pass it back" is not a property worth
             # depending on eleven times.
             sessions_token = current_run_sessions.set([])
+            # #2037: has THIS attempt written its task-file verdict yet? The
+            # flag is what stops a death after `run_task` returned from charging
+            # the budget a second time, and the token is what stops one item's
+            # verdict being read as the next item's — the pool reuses this task
+            # for every claim it makes.
+            verdict_token = current_task_verdict.set(False)
             try:
                 result = await asyncio.wait_for(source.execute(item), timeout=max_duration)
                 duration = time.monotonic() - started_perf
@@ -1341,6 +1419,13 @@ class WorkerPool:
                 duration = time.monotonic() - started_perf
                 completed_at = datetime.now(timezone.utc).isoformat()
                 error_msg = f"{type(e).__name__}: {e}"
+                # Everything this death is allowed to leave behind, on the row.
+                # Before #2037 this arm recorded the exception and nothing else,
+                # so a run that died before its task file saw anything spent no
+                # retry budget, moved no due-gate, and alerted no one — 41 runs of
+                # task #74 in 27 minutes, `failure_count: 0` throughout.
+                death = await _death_meta(item, source, e, run_id=run_id,
+                                          started_at=started_at_iso)
                 await asyncio.to_thread(
                     partial(
                         self.queue.record_run,
@@ -1363,7 +1448,13 @@ class WorkerPool:
                         meta_json=json.dumps({
                             "exception": type(e).__name__,
                             "session_ids": list(current_run_sessions.get() or []),
-                            "scratchpad": _scratchpad_meta()}),
+                            "scratchpad": _scratchpad_meta(),
+                            # `failure_kind` and, when a budget moved,
+                            # `task_budget_charged`. The NULL this replaces is the
+                            # artifact the item is about: a week of a task dying
+                            # every minute was a NULL in `meta_json` that no
+                            # reader grouped on.
+                            **death}),
                     )
                 )
                 new_state = await asyncio.to_thread(
@@ -1374,6 +1465,7 @@ class WorkerPool:
                 current_scope.reset(scope_token)
                 current_effect_scope.reset(effect_token)
                 current_run_sessions.reset(sessions_token)
+                current_task_verdict.reset(verdict_token)
                 self._in_flight.pop(item.id, None)
                 await self._repoll_on_complete(source)
 

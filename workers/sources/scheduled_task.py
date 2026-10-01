@@ -27,6 +27,14 @@ logger = logging.getLogger("lloyd-workers.scheduled_task")
 NAME = "scheduled-task"
 DEFAULT_PRIORITY = 30
 
+#: This source's work IS one of our task files, so a death that never reached a
+#: verdict may charge that file's retry budget (#2037). `WorkerPool._death_meta`
+#: reads the flag, and a source without it is classified but never charged —
+#: `bench-mine` payloads carry a `task_id` naming an autonomy task the run is
+#: MINING, not a task the run is, and charging from the payload alone would
+#: retire someone else's schedule.
+CHARGE_TASK_ON_DEATH = True
+
 _PRIORITY_MAP = {
     "critical": 10,
     "high": 20,
@@ -405,6 +413,12 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         max_dur = 1800
     with run_trigger("scheduler"):
         result = await run_task(int(task_id), max_duration=max_dur)
+    # From here the task file has this attempt's verdict and the retry budget
+    # moved with it. Anything still raising below — the silent-run check, the
+    # artifact probe, the notify post — is a death of this adapter, not of the
+    # task, and must be classified without charging a second unit (#2037).
+    from workers.pool import mark_task_verdict
+    mark_task_verdict()
 
     preview = (result.get("response_preview") or "")
     # #1507: the run record's verdict (its terminal block, exact match), not a
