@@ -1236,8 +1236,8 @@ def test_bare_name_expansion_flags_a_one_token_name_and_not_two_full_names():
         assert ser.name_shape_review_flag(*pair) is None, pair
     # The classes the predicate declines on purpose, each for its own stated
     # reason: #1175 owns a role-noun remainder, the version word is more
-    # specific than the name-shape one, and role→product is owed entry 2's
-    # ruling — which has not been given, so it must stay unflagged here.
+    # specific than the name-shape one, and role→product is declined by the
+    # ruling on #1894 (13 of 15 such rows are one referent), so it stays unflagged.
     # `Tool MCP` / `Tool MCP Service` is #1175's own row from the run report, and it
     # is the witness that the role-noun exclusion is read at all: `tool` happens to
     # sit in `NAME_STOPWORDS` as well, so `Browser`/`Browser Tool` alone would stay
@@ -1252,6 +1252,28 @@ def test_bare_name_expansion_flags_a_one_token_name_and_not_two_full_names():
     # widening of the class cannot hide it: a bare common noun vs its compound
     # is flagged too. A flag can pay for that; a guard could not.
     assert ser.name_shape_review_flag("Knowledge", "Knowledge Library") == ser.REVIEW_FLAG_BARE_NAME
+
+
+def test_the_no_widen_ruling_is_recorded_and_nothing_still_calls_it_open():
+    """#1991: three sites went on deferring the role→product question after the
+    owed-check ruling on #1894 declined to widen the flag class."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    head, _, _ = source.partition("NAME_EXPANSION_PRODUCT_SUFFIXES = {")
+    block = head[head.rindex("# The role→product class"):]
+    assert "#1894" in block and "Declined" in block
+    assert "must not make for " + "a human" not in block
+    doc = " ".join(ser.is_bare_name_expansion.__doc__.split())
+    assert "declined under #1894's ruling" in doc
+    assert "has not been " + "answered" not in doc
+    still_open = re.compile("has not been " + "answered|has not been " + "given|"
+                            "must not make for " + "a human|owed " + "entry 2")
+    for path in (SCRIPT, Path(__file__)):
+        hits = [ln for ln in path.read_text(encoding="utf-8").splitlines() if still_open.search(ln)]
+        assert hits == [], (path.name, hits)
+    # No behaviour moved with the prose.
+    for pair in (("orchestrator", "Orchestrator AI"), ("On-device", "On-Device AI")):
+        assert ser.name_shape_review_flag(*pair) is None, pair
+        assert ser.merge_allowed(*pair, {}) == (True, "ok"), pair
 
 
 def test_review_flags_never_change_what_merge_allowed_returns(monkeypatch):

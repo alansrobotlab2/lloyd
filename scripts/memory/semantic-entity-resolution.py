@@ -185,10 +185,14 @@ VERSION_TOKEN_PATTERN = re.compile(r"(?:\d+|v\d+)", re.IGNORECASE)
 # `Alfie VR System`, #1175), and reading one as a version would flag half the
 # hyphenated vocabulary.
 RELEASE_SYMBOL_CHARS = set("+∞")
-# The role→product class (#1894 owed entry 2): `orchestrator` vs `Orchestrator
-# AI`. Conventionally the same referent, and widening the flag to it is a
-# ruling this file must not make for a human, so an expansion whose extra token
-# is one of these words is declined rather than flagged.
+# The role→product class: `orchestrator` vs `Orchestrator AI`. Declined, by
+# the owed-check ruling on #1894 (2026-10-01, recorded by #1991): the flag
+# class is not widened to it. Measured on the committed witness
+# (`backlog/data/semantic-proposals-2026-09-30.jsonl` in the vault), the
+# containment-remainder class adds 15 merge-action rows of which 13 are the
+# same referent (`Voyage` / `Voyage AI`), and a label wrong 13 times out of 15
+# trains a reviewer to ignore the column. So an expansion whose extra token is
+# one of these words is declined rather than flagged.
 NAME_EXPANSION_PRODUCT_SUFFIXES = {
     "ai", "inc", "io", "co", "labs", "tech", "cloud", "hub",
 }
@@ -981,10 +985,10 @@ def is_bare_name_expansion(a: str, b: str) -> bool:
     Declined, in this order of preference: a role noun or stopword extra token
     (`Browser` / `Browser Tool` — #1175 owns that row and already labels it), a
     release token (`Parakeet v3` — the version flag is the more specific word),
-    and a product suffix (`orchestrator` / `Orchestrator AI` — owed entry 2 says
-    whether that class is in scope, and it has not been answered). Two names of
-    two tokens each, distinct (`Jason Ma` / `Kim Ma`), share no containment and
-    cannot fire.
+    and a product suffix (`orchestrator` / `Orchestrator AI` — declined under
+    #1894's ruling: 13 of the 15 rows that class would add are the same
+    referent). Two names of two tokens each, distinct (`Jason Ma` / `Kim Ma`),
+    share no containment and cannot fire.
     """
     ta, tb = name_tokens(a), name_tokens(b)
     for small, big in ((ta, tb), (tb, ta)):
