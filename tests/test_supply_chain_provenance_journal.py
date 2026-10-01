@@ -427,7 +427,24 @@ def test_the_same_command_run_again_later_is_a_new_decision(journal, monkeypatch
 def test_a_requirements_file_is_one_entry_with_a_count(journal, tmp_path, monkeypatch):
     """`pip install -r <lockfile>` wrote one entry per name: 2,168 of the live
     journal's 2,191 entries, 180 to a row. The parser still expands the file —
-    every name is decided on its own — and the journal names the file once."""
+    every name is decided on its own — and the journal names the file once.
+
+    The size budget is over the row with the lockfile's path cut out of it, because
+    that path is the only part of the row the environment controls, and the row
+    carries it three times: in `command`, as the collapsed entry's `name`
+    (`-r <path>`), and as its `file`. Measuring the whole row made the ceiling
+    `600 + 3 × how deep tmp_path is`, and the same commit cleared it in one tree and
+    missed it in another — 500 bytes under `/tmp`, 647 under the gate's per-round
+    `TMPDIR` (`~/lloyd-work/.t/<10 hex>`, capped at 48 bytes by `MAX_CHILD_TMPDIR` in
+    `scripts/automod/gate.py`). That is #2031: red at the gate and green on the same
+    commit anywhere else, from the day #1956 landed this node. With the path stripped
+    the row is 266 bytes in both trees, so the budget is a property of the shape and
+    not of the temp dir — and it still bites on the thing it was always about: with
+    the fold taken back out these 40 names are a row of 4,067 path-free bytes, and
+    `assert 4067 < 600` is what the node prints (verified 2026-10-01 by disabling the
+    fold, in both temp roots — the un-collapsed entries each carry the path too, and
+    stripping it discounts all 43 copies, so both figures are the same number in both
+    trees)."""
     names = [f"pkg{i}" for i in range(40)]
     req = tmp_path / "requirements.lock"
     req.write_text("\n".join(f"{n}==1.0" for n in names) + "\n")
@@ -444,11 +461,18 @@ def test_a_requirements_file_is_one_entry_with_a_count(journal, tmp_path, monkey
         "the decision is per name and unchanged")
 
     row = _rows(journal)[0]
+    # First, so a regression that stops folding prints this rather than the shape
+    # asserts below it. `command` is truncated to 200 chars, so on an absurdly deep
+    # `tmp_path` one copy can survive the strip short and add at most the ~200 bytes
+    # of the cut; the row's path-free 266 plus that remainder is still half the
+    # ceiling, so the budget holds wherever the temp dir is.
+    assert len(json.dumps(row).replace(str(req), "")) < 600, (
+        "the row outgrew its budget once the lockfile's path is discounted, so what "
+        "grew is the entries, not the temp dir: 40 names used to be 40 entries")
     assert len(row["names"]) == 1, row["names"]
     entry = row["names"][0]
     assert entry["file"] == str(req) and entry["count"] == 40
     assert entry["outcome"] == "declared" and entry["name"] == f"-r {req}"
-    assert len(json.dumps(row)) < 600, "40 names used to be ~1.3 KB of entries"
 
 
 def test_a_denied_name_from_a_requirements_file_keeps_its_own_entry(journal, tmp_path):
