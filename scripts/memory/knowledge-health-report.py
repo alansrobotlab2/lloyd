@@ -153,13 +153,40 @@ def is_extraction_artifact_name(name: str) -> bool:
 
     The shapes are the four mints #954 named plus the two #1542 adds — an
     underscore-bearing dotted path and a bare number — which is why the section's
-    verdict line can call everything it rejects "artifact-shaped".
+    verdict line can call everything it rejects "artifact-shaped". #2000 adds
+    one that is not a pattern: an all-lowercase name of several words
+    (`is_lowercase_prose_fragment`).
 
     Only the questions are filtered by this. The `## Thin Entities` table is not:
     it is the surface on which a regrowth in `#NNN` minting becomes visible, so
     hiding those rows would destroy the very signal #743 needs.
     """
-    return any(pattern.search(name) for pattern in EXTRACTION_ARTIFACT_NAME_RES)
+    return (any(pattern.search(name) for pattern in EXTRACTION_ARTIFACT_NAME_RES)
+            or is_lowercase_prose_fragment(name))
+
+
+def is_lowercase_prose_fragment(name: str) -> bool:
+    """True for a name of two or more words with no capital letter in it (#2000).
+
+    The six shapes above are all punctuation- or digit-shaped, so a noun phrase
+    the extractor clipped out of a sentence passed them as a researchable
+    concept: `cartpole camera presets task` (from an Isaac Lab PR note) headed
+    the 2026-10-01 section twice, because `thin_entity_rank` puts the newest
+    fact first and the newest thin entities are whatever last night's
+    extraction mis-minted. The rule is structural, a shape and not a list of
+    names: a named thing of several words is written with a capital somewhere
+    (`Isaac Lab`, `NVIDIA Jetson`, `DiffusionGemma Technical Report`), a
+    clipped phrase is not.
+
+    Two things it deliberately does not do. A single lowercase token is left
+    alone, since `certifi` and `gh-pages` are real and nothing in a name alone
+    tells them from `unrelated`. And "the name is a substring of its own fact"
+    is not used: measured on the same section it matched 11 of 20 entities,
+    real ones included, and missed this rule's own witness. Known cost: a real
+    subsystem written all in lowercase (`djev shadow-mode score logs`) loses
+    its two questions and keeps its `## Thin Entities` row.
+    """
+    return len(name.split()) >= 2 and name == name.lower() and any(c.isalpha() for c in name)
 
 
 def thin_entity_rank(item) -> tuple:

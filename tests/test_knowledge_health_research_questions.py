@@ -364,3 +364,67 @@ def test_code_shaped_rejections_alone_can_drive_the_unevaluable_verdict(tmp_path
             "artifact-shaped name") in section
     assert "- What does" not in section
     assert "- Is **" not in section
+
+
+# ── #2000: an all-lowercase multi-word name is a clipped phrase, not a concept ─
+
+# `cartpole camera presets task` headed the live 2026-10-01 section twice. The
+# second fragment appears in no report and no other file of this repo: it is
+# here so the rule cannot be a list of the names somebody already saw.
+LOWERCASE_FRAGMENTS = ["cartpole camera presets task", "topical-drift signal"]
+CAPITALIZED_REALS = ["DiffusionGemma Technical Report", "NVIDIA Jetson"]
+
+
+def _fragment_fixture(tmp_path):
+    root = tmp_path / "facts"
+    usable = {f"Gap-Shape-{i:02d}": [10 + i] for i in range(11)}
+    # The fragments carry the NEWEST facts, as the mis-minted names of the
+    # previous night do, so without the rule they would lead the section.
+    entities = _load(root, {**usable, DOTTED_NOT_CODE: [4],
+                            **{n: [0] for n in LOWERCASE_FRAGMENTS},
+                            **{n: [2 + i] for i, n in enumerate(CAPITALIZED_REALS)}})
+    return _report(entities)
+
+
+def test_a_lowercase_multi_word_fragment_gets_no_question_and_capitalized_names_keep_both(tmp_path):
+    report = _fragment_fixture(tmp_path)
+    section = _section(report, "## Suggested Research Questions")
+
+    assert "**cartpole camera presets task**" not in section
+    for name in CAPITALIZED_REALS:
+        assert [ln for ln in section.splitlines() if f"**{name}**" in ln] == [
+            f"- What does **{name}** relate to?",
+            f"- Is **{name}** still relevant?",
+        ], name
+    assert "RESEARCH_QUESTIONS_UNEVALUABLE" not in section
+
+
+def test_the_fragment_rule_is_a_shape_not_a_list_of_names(tmp_path):
+    """A fragment nobody has seen in a report is rejected by the same rule, and
+    the single-token keep-case `jail.nix` still gets both of its questions."""
+    report = _fragment_fixture(tmp_path)
+    section = _section(report, "## Suggested Research Questions")
+
+    assert "**topical-drift signal**" not in section
+    assert [ln for ln in section.splitlines() if f"**{DOTTED_NOT_CODE}**" in ln] == [
+        "- What does **jail.nix** relate to?",
+        "- Is **jail.nix** still relevant?",
+    ]
+    assert khr.is_lowercase_prose_fragment("some phrase never written anywhere")
+    # One lowercase token is not this rule's to judge, and a capital anywhere
+    # in a multi-word name keeps it.
+    for kept in ("certifi", "gh-pages", "unrelated", "jail.nix", "Isaac Lab",
+                 "vLLM serving", "the Jetson"):
+        assert not khr.is_lowercase_prose_fragment(kept), kept
+
+
+def test_the_thin_table_still_lists_the_fragments_and_counts_them(tmp_path):
+    """Only the questions lose them: the table is where #743 reads a regrowth
+    in minting, so its rows and its total include every rejected name."""
+    report = _fragment_fixture(tmp_path)
+    table = _section(report, "## Thin Entities")
+
+    for name in LOWERCASE_FRAGMENTS:
+        assert f"| {name} |" in table, name
+    # 11 Gap-Shape + jail.nix + 2 fragments + 2 capitalized = 16 thin entities
+    assert "**16** in total" in table, table[:400]
