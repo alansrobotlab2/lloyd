@@ -22,6 +22,7 @@ writers beside it), so the unparsed-YAML guard and the activity log hold.
 
 from __future__ import annotations
 
+import re
 import string
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -192,6 +193,12 @@ def close_item(path: Path, why: str) -> bool:
 _PLACEHOLDER_NAMES = frozenset({"placeholder", "todo", "tbd", "follow-up", "follow up",
                                 "untitled", "none", "n/a", "name"})
 
+# What ends the leading token of a name: a colon, or a dash set off by spaces.
+# The leads that mean "no follow-up". Narrower than `_PLACEHOLDER_NAMES` on
+# purpose: "Follow-up: fix the cursor" leads with a word from that set and is work.
+_NO_FOLLOW_UP_LEADS = frozenset({"none", "n/a", "nothing"})
+_LEAD_SEPARATOR = re.compile(r"\s*:\s+|\s+[-–—]\s+")
+
 # A body shorter than this with no sentence terminator in it is a token standing
 # in for an instruction, not one. The margin is measured, not guessed. The job's
 # own prompt (`workers/sources/owed_check.py:117-119`) asks for a body that "says
@@ -245,6 +252,11 @@ def is_real_follow_up(follow: dict) -> bool:
     name = _text(follow.get("name")).strip().strip(".").lower()
     body = str(follow.get("body") or "").strip().lower()
     if not name or name in _PLACEHOLDER_NAMES or "placeholder" in name:
+        return False
+    # A name that LEADS with a stand-in token and then explains itself — "None —
+    # ruling closes the entry" (#1998, #2002, #2020, all 2026-10-01) — is the
+    # model saying there is no follow-up, in the blank where one goes.
+    if _bare(_LEAD_SEPARATOR.split(name, maxsplit=1)[0]) in _NO_FOLLOW_UP_LEADS:
         return False
     if not body or body.startswith("placeholder") or body in _PLACEHOLDER_NAMES:
         return False

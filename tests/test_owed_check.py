@@ -613,3 +613,20 @@ def test_a_row_queued_before_the_item_id_existed_still_finds_the_oldest_item(iso
     monkeypatch.setattr(C, "run_prompt_in_session", fake)
     out = asyncio.run(OC.execute(_Job({"apply": True})))
     assert out["status"] == "success" and out["summary"].startswith("#15:")
+
+
+def test_a_name_that_leads_with_none_is_not_a_follow_up():
+    """2026-10-01: #1998, #2002 and #2020 were filed under these three names —
+    the model saying "no follow-up" in the blank where one goes."""
+    body = "The ruling is recorded on the parent item and nothing in the tree changes."
+    for name in ("None — ruling closes the entry", "None — ruling needs no code",
+                 "none - ruling leaves no engineering work", "N/A: nothing owed",
+                 "Nothing: the ruling stands"):
+        assert not O.is_real_follow_up({"name": name, "body": body}), name
+
+
+def test_a_name_that_merely_starts_with_a_listed_word_still_files():
+    body = "Change the cursor read in owed.py to the last settled row and pin it with a test."
+    for name in ("Follow-up: fix the owed cursor", "None of the three callers pass session_id",
+                 "Nothing-examined rows: count them in the scorecard", "Non-empty guard for owed"):
+        assert O.is_real_follow_up({"name": name, "body": body}), name

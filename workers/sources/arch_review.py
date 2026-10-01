@@ -217,8 +217,8 @@ BIG_DOC_LINES = 600
 
 STATE_FILENAME = "arch_review.json"
 #: Where the review turn's scratch checkouts live, under the automod state dir.
-#: NOT `~/lloyd-work`: autocode counts every worktree there as an open round
-#: (`autocode._loop_worktrees`), so a review checkout there would hold a slot.
+#: NOT `~/lloyd-work`: that is the loop's root, where autocode counts `SM_*`
+#: and `review_*` worktrees as open rounds (`autocode._loop_worktrees`).
 WORKTREE_DIRNAME = "arch-review-worktrees"
 #: Reviewed doc content waiting for a commit a drain or the lock held off.
 PENDING_DIRNAME = "arch-review-pending"

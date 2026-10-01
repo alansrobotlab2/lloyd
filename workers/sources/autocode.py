@@ -1157,7 +1157,7 @@ def _loop_is_free(depth: int | None = None) -> tuple[bool, str]:
         return False, f"cannot list round worktrees: {exc}"
     owned, stray = _loop_worktrees(paths)
     if stray:
-        logger.info("autocode: ignoring %d worktree(s) outside %s: %s",
+        logger.info("autocode: ignoring %d worktree(s) that are not a round under %s: %s",
                     len(stray), _LOOP_WORKTREE_ROOT, ", ".join(stray[:3]))
     if len(owned) >= depth:
         return False, (f"a round is already open ({len(owned)} worktree(s))" if depth == 1 else
@@ -1264,8 +1264,22 @@ def _landing_restarts(rid: str, head: str, changed, report: dict | None = None) 
 _LOOP_WORKTREE_ROOT = Path.home() / "lloyd-work"
 
 
+#: The directory names under the loop's root that ARE a loop checkout: a round
+#: (`SM_<stamp>`, and the rehearsal's `SM_<stamp>-drill`) and a review or
+#: calibration checkout (`review_<label>`). Everything else under the root is
+#: somebody's scratch.
+_LOOP_WORKTREE_PREFIXES = ("SM_", "review_")
+
+
 def _loop_worktrees(paths: list[str]) -> tuple[list[str], list[str]]:
-    """`(owned, stray)`: registered worktrees under the loop's root, and not.
+    """`(owned, stray)`: registered worktrees that are a loop checkout, and not.
+
+    Owned is decided by NAME, not by being under `~/lloyd-work`. On 2026-10-01
+    worker sessions left four scratch checkouts there (`1858-base`, `base1961`,
+    `check-1919-owed`, `check-1929-owed`); each counted as an open round, the
+    first took one of the two slots for two days, and from 08:20Z to 14:04Z
+    the loop read "4 round(s) open, depth 2" with 58 items ready and nothing
+    in flight. It is 2026-09-13's `/tmp/wt484` stall again, one directory in.
 
     The main checkout is neither — it is the repo. Resolved, so a symlinked
     home cannot make an owned worktree look stray."""
@@ -1279,7 +1293,8 @@ def _loop_worktrees(paths: list[str]) -> tuple[list[str], list[str]]:
             resolved = raw
         if resolved == live:
             continue
-        (owned if resolved.startswith(root + "/") or resolved == root else stray).append(raw)
+        top = resolved[len(root) + 1:].split("/", 1)[0] if resolved.startswith(root + "/") else ""
+        (owned if top.startswith(_LOOP_WORKTREE_PREFIXES) else stray).append(raw)
     return owned, stray
 
 
@@ -1291,7 +1306,21 @@ def _age_phrase(ts: float | None) -> str:
 
 
 HOUSEKEEPING_KEY = "last_housekeeping"
-_last_decline: dict[str, str] = {"why": ""}
+_last_decline: dict[str, Any] = {"why": "", "at": 0.0}
+#: A standing decline is said again at INFO this often. Once-per-reason kept the
+#: log readable and made a six-hour stall (2026-10-01) one line long.
+DECLINE_RELOG_SECONDS = 1800.0
+
+
+def _log_decline(why: str) -> None:
+    """One decline: INFO when the reason is new or has stood for
+    `DECLINE_RELOG_SECONDS` since it was last said, DEBUG otherwise."""
+    now = time.monotonic()
+    fresh = why != _last_decline["why"] or now - float(_last_decline["at"]) >= DECLINE_RELOG_SECONDS
+    if fresh:
+        _last_decline["at"] = now
+    _last_decline["why"] = why
+    (logger.info if fresh else logger.debug)("autocode: not queueing — %s", why)
 
 
 def _housekeeping_due(queue: WorkQueue, src_cfg: dict) -> bool:
@@ -1345,9 +1374,7 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> str | None:
     if not free:
         # Once per reason at INFO: at a 60 s retry the same sentence would
         # otherwise fill the log for the forty minutes a round runs.
-        (logger.info if why != _last_decline["why"] else logger.debug)(
-            "autocode: not queueing — %s", why)
-        _last_decline["why"] = why
+        _log_decline(why)
         # The reaper, at the retry cadence while the loop is held. It ran at
         # turn end and then only with housekeeping, so a round whose gate
         # finished AFTER its turn did — three of 2026-09-18's four lost rounds
@@ -1369,9 +1396,7 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> str | None:
         pending = await asyncio.to_thread(B.sweep_pending, S.LEDGER_PATH)
         if pending:
             why = f"yielding to the backlog sweep ({pending} item(s) unread)"
-            (logger.info if why != _last_decline["why"] else logger.debug)(
-                "autocode: not queueing — %s", why)
-            _last_decline["why"] = why
+            _log_decline(why)
             return DECLINED
     # A round row still queued or running coalesces any enqueue below. Asked
     # first, because `select_confirmed` walks the whole board (~2 s) and a

@@ -302,6 +302,43 @@ def test_the_loop_is_free_until_depth_rounds_are_open(monkeypatch):
     assert free is False and "depth 2" in why
 
 
+def test_a_scratch_checkout_under_the_loop_root_is_not_an_open_round(monkeypatch):
+    """2026-10-01: four worker scratch checkouts under `~/lloyd-work` read as
+    "4 round(s) open, depth 2" and no round started for 5 h 44 min."""
+    root = I._LOOP_WORKTREE_ROOT
+    scratch = [str(root / n) for n in ("1858-base", "base1961", "check-1919-owed",
+                                       "check-1929-owed")]
+    _free_loop(monkeypatch, scratch)
+    assert I._loop_is_free(2) == (True, "free")
+    assert I._loop_is_free(1) == (True, "free")
+    owned, stray = I._loop_worktrees(scratch + [str(root / "SM_A" / "home" / "lloyd"),
+                                                str(root / "SM_A-drill"),
+                                                str(root / "review_cal" / "home" / "lloyd"),
+                                                "/tmp/wt484"])
+    assert [Path(p).relative_to(root).parts[0] for p in owned] == ["SM_A", "SM_A-drill", "review_cal"]
+    assert stray == scratch + ["/tmp/wt484"]
+
+
+def test_a_standing_decline_is_said_again_after_the_relog_interval(monkeypatch, caplog):
+    import logging
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(I.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(I, "_last_decline", {"why": "", "at": 0.0})
+    caplog.set_level(logging.DEBUG, logger=I.logger.name)
+
+    def said(level):
+        return [r for r in caplog.records if r.levelno == level and "not queueing" in r.getMessage()]
+    I._log_decline("2 round(s) open, depth 2")
+    clock["t"] += 60
+    I._log_decline("2 round(s) open, depth 2")
+    assert len(said(logging.INFO)) == 1 and len(said(logging.DEBUG)) == 1
+    clock["t"] += I.DECLINE_RELOG_SECONDS
+    I._log_decline("2 round(s) open, depth 2")
+    assert len(said(logging.INFO)) == 2
+    I._log_decline("promotions are halted")
+    assert len(said(logging.INFO)) == 3, "a new reason is said at once"
+
+
 def test_a_landing_promotion_holds_every_new_round_whatever_the_depth(monkeypatch):
     """What lets a landing wait out the other round's turn: nothing new starts."""
     _free_loop(monkeypatch, [])

@@ -1257,6 +1257,25 @@ that now overlap another round's turn. Going back to 1 and 1 is two numbers
 in config.yaml (and `slots` back to 3) and a backend restart; nothing else
 changes shape. `tests/test_loop_depth.py` pins all of it.
 
+#### What counts as an open round (2026-10-01)
+
+The depth guard counts registered worktrees, and only the loop's own: a
+directory under `~/lloyd-work` whose name starts `SM_` (a round, or the
+rehearsal's `SM_<id>-drill`) or `review_` (a review or calibration checkout).
+Anything else is logged as stray and never counted (`autocode._loop_worktrees`).
+
+Until 2026-10-01 the test was "under `~/lloyd-work`". Worker sessions left four
+scratch checkouts there (`1858-base` on 09-29, then `base1961`,
+`check-1919-owed`, `check-1929-owed`). The first held one of the two slots for
+two days; the second closed the other, and from 01:20 to 07:04 Pacific the loop
+read "4 round(s) open, depth 2" with 58 items ready and nothing in flight. The
+board went +52 in 24 h because inflow (owed-check follow-ups, triage
+confirmations) kept running. It is the 2026-09-13 `/tmp/wt484` stall one
+directory in, and the fix is the same shape: own by name, not by location.
+
+The decline was also nearly invisible: logged once at INFO, then DEBUG. A
+standing decline is now repeated at INFO every `DECLINE_RELOG_SECONDS` (1800).
+
 ### 3.2f.1 A landing killed from outside is not a verdict (2026-09-17)
 
 #1179's turn ran `timeout 120 … -m scripts.automod.round land SM_…` in the
