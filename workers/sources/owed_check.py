@@ -147,6 +147,13 @@ def _entries_block(entries: list[dict], due: list[int]) -> str:
         if i not in due:
             continue
         extra = f", rechecked {e['rechecks']}x" if e.get("rechecks") else ""
+        # #2055: a clause can reach this list by derivation rather than by a
+        # landing-time write, and a ruling has to be able to tell the two apart —
+        # a stranded one has never been seen by any pass, so "already handled" is
+        # not an available answer for it.
+        from scripts.automod import owed as O
+        if e.get("origin") == O.STRANDED_ORIGIN:
+            extra += ", derived from human_clauses: never recorded as owed"
         rows.append(f"{i + 1}. [{e['kind']}, owed since {e.get('since') or '?'}{extra}] {e['what']}")
     return "\n".join(rows)
 

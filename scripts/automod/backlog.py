@@ -5958,7 +5958,12 @@ def board_health(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, 
     # the one list Alan reads: what only his hands can do.
     try:
         from scripts.automod import owed as O
-        owing = O.owing_items(boards, due_only=False)
+        # `stranded_cap=None`: this is a COUNT for the board, not a claim, and the
+        # per-run bound on derived-only items (#2055) is a claim rule. With the
+        # default here the number would silently mean "what one owed-check run
+        # could take" while the row above it still says `owed`, and 454 stranded
+        # items would read as 5.
+        owing = O.owing_items(boards, due_only=False, stranded_cap=None)
         owed = {"items": len(owing), "entries": sum(len(o.entries) for o in owing),
                 "due": sum(len(o.due) for o in owing), "outside": O.outside_list(boards)}
     except Exception as exc:  # noqa: BLE001 — a count is never the board's shape

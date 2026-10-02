@@ -48,6 +48,19 @@ MAX_RECHECK_DAYS = 30
 # rescheduled again: the session is told so, and `recheck` is refused.
 MAX_RECHECKS = 4
 
+# The origin an entry carries when it was never written into `owed`: derived at
+# read time from the item's `human_clauses`. It is what lets a ruling tell a
+# stranded clause from one the landing route recorded (#2055).
+STRANDED_ORIGIN = "human_clauses"
+
+# How many items whose ONLY entries are derived one owed-check run may claim.
+# The scan on 2026-10-02 found 454 `status: done` items in #1999's state — 72 of
+# them closed on or after 2026-09-27, when the "nothing parks on Alan" route
+# landed in aa68ea74 — and `owing_items` sorts oldest-first and returns all of
+# them. An unbounded derivation therefore hands the next tick 454 items and every
+# genuinely recorded entry behind them waits behind historical debt (#2055).
+MAX_STRANDED_PER_RUN = 5
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -90,9 +103,13 @@ def _bounded(value: Any, limit: int = SETTLED_TEXT_LIMIT) -> tuple[str, bool]:
     return head.rstrip() + TRUNCATION_MARKER, True
 
 
-def entries_of(fm: dict) -> list[dict]:
-    """The item's owed entries, each normalised to a dict. Tolerates the
-    plain-string shape a hand edit would write."""
+def _recorded(fm: dict) -> list[dict]:
+    """The entries the item itself carries in `owed`, each normalised to a dict.
+    Tolerates the plain-string shape a hand edit would write.
+
+    This is the writer's view: `add_owed` and `apply_verdict` must materialise
+    only what is on the record, never a read-time derivation, or a derivation
+    would become front matter by side effect of some unrelated write."""
     out: list[dict] = []
     for raw in (fm.get(OWED_KEY) or []):
         if isinstance(raw, dict) and _text(raw.get("what")):
@@ -107,11 +124,84 @@ def entries_of(fm: dict) -> list[dict]:
     return out
 
 
+def _since(fm: dict) -> str:
+    """When a derived clause started being owed: the day the item stopped having
+    an owner, which for a closed item is `completed:`, falling back through the
+    last touch and the filing date so the entry never claims a date it cannot
+    name."""
+    for key in ("completed", "updated", "created"):
+        value = str(fm.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def derived_entries(fm: dict) -> list[dict]:
+    """`human_clauses` strings that appear in neither `owed` nor `owed_settled`.
+
+    Only a CLOSED item is derived from (the boundary `tests/test_backlog_unattended.py`
+    already encodes at :4595, where an open item's `entries_of` must be empty until
+    the landing mints its row). An open item's `human_clauses` are its round's
+    contract: `split_post_landing_clauses` shows the landing route owes only the
+    POST-LANDING half of them and grades the landing-time half through the review
+    rung, so deriving an open item's clauses would hand the owed job clauses its own
+    round is still working, and it could `reopen` or duplicate a round in flight. The
+    hole is a close that skipped the route, so the derivation stops there.
+
+    The hole (#2055): the conversion of `human_clauses` into owed entries
+    (`add_owed(human_clauses_of(...))`) is called only from the landing writers in
+    `scripts/automod/backlog.py`. An item closed any other way keeps its clauses
+    in front matter and gets no `owed:` key, and `owing_items` read `owed` alone —
+    so #1999, closed on 2026-10-01 by a hand sweep with three clauses and no
+    landing section, was invisible to the job whose whole job is ruling on clauses
+    a diff cannot settle. Deriving at read time needs no migration and no write:
+    the clause is on the record already, the reader just was not looking there.
+
+    Dedupe is by the flattened text `_text` of each side — the same normalisation
+    `owed` entries already pass through on the way in and out, so a clause the
+    landing route did record matches its own recorded copy exactly and yields
+    nothing here. `owed_settled` counts as recorded: a clause that has already
+    been ruled on is not stranded, whatever its text went on to become.
+    """
+    from app.backlog_status import CLOSED_STATUSES
+    from scripts.automod import backlog as B
+    if str(fm.get("status") or "").strip().lower() not in CLOSED_STATUSES:
+        return []
+    clauses = B.human_clauses_of(None, fm)
+    if not clauses:
+        return []
+    seen = {_text(e.get("what")) for e in _recorded(fm)}
+    seen |= {_text(r.get("what")) for r in (fm.get(SETTLED_KEY) or []) if isinstance(r, dict)}
+    seen.discard("")
+    since = _since(fm)
+    out: list[dict] = []
+    for clause in clauses:
+        what = _text(clause)
+        if not what or what in seen:
+            continue
+        seen.add(what)
+        out.append({"what": what, "kind": "check", "since": since,
+                    "recheck_after": "", "rechecks": 0, "origin": STRANDED_ORIGIN})
+    return out
+
+
+def entries_of(fm: dict, *, derived: bool = True) -> list[dict]:
+    """The item's owed entries: what `owed` records, plus — since #2055 — one due
+    `check` entry per `human_clauses` string recorded in neither `owed` nor
+    `owed_settled`. `derived=False` is the writer's view (`_recorded` only)."""
+    out = _recorded(fm)
+    if derived:
+        out.extend(derived_entries(fm))
+    return out
+
+
 def add_owed(path: Path, whats: list[str], *, kind: str = "check", activity: str = "") -> bool:
     """Append entries (deduped by text) to the item's `owed` list."""
     from scripts.automod import backlog as B
     fm, _ = B._split_frontmatter(path.read_text(encoding="utf-8"))
-    have = entries_of(fm)
+    # The writer's view: a read-time derivation must never be materialised into
+    # `owed` as a side effect of an unrelated append (#2055).
+    have = _recorded(fm)
     seen = {e["what"] for e in have}
     stamp = _stamp()
     new: list[dict] = []
@@ -152,8 +242,20 @@ class Owing:
 
 
 def owing_items(boards: tuple[str, ...] | None = None, *, now: datetime | None = None,
-                due_only: bool = True) -> list[Owing]:
-    """Items (open or closed) with owed entries, oldest owed first."""
+                due_only: bool = True,
+                stranded_cap: int | None = MAX_STRANDED_PER_RUN) -> list[Owing]:
+    """Items (open or closed) with owed entries, oldest owed first.
+
+    An item with nothing but derived entries is a STRANDED one, and at most
+    `stranded_cap` of them are returned (#2055 clause 4): the 454 on the board on
+    2026-10-02 cannot be claimed in one run, and the bound is applied AFTER the
+    oldest-first sort so which ones get ruled on first is the wait they have
+    actually done, not the board's directory order. An item with at least one
+    recorded entry is never held back by it — the bound is on the historical
+    back-fill, not on anything a route filed on purpose. `stranded_cap=None` asks
+    for the whole population, which is what a caller that is COUNTING rather than
+    claiming wants.
+    """
     from scripts.automod import backlog as B
     now = now or _now()
     out: list[Owing] = []
@@ -171,6 +273,16 @@ def owing_items(boards: tuple[str, ...] | None = None, *, now: datetime | None =
         out.append(Owing(item=item, fm=fm, entries=entries, due=due))
     out.sort(key=lambda o: (min((o.entries[i]["since"] for i in o.due), default="~") or "~",
                             o.item.id))
+    if stranded_cap is not None:
+        kept: list[Owing] = []
+        stranded = 0
+        for o in out:
+            if all(e.get("origin") == STRANDED_ORIGIN for e in o.entries):
+                if stranded >= stranded_cap:
+                    continue
+                stranded += 1
+            kept.append(o)
+        out = kept
     return out
 
 

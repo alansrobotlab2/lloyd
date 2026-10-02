@@ -778,3 +778,188 @@ def test_an_unfiled_entry_keeps_its_text_byte_identical(isolated, cite_roots):
 def test_cite_for_child_leaves_plain_prose_and_times_alone(cite_roots):
     text = "at 13:00 the run v2.6.0 finished: 3-4 rows, see config.yaml"
     assert O.cite_for_child(text, "r1") == text + " [cited at r1]"
+
+
+# ── #2055: a clause a close never handed on is derived back into the queue ────
+#
+# `add_owed(human_clauses_of(...))` runs only in the landing writers, so an item
+# closed any other way keeps its human clauses in front matter and never gets an
+# `owed:` key, and `owing_items` read `owed` alone. #1999 is the case that proved
+# it: `status: done`, three `human_clauses`, no `owed:`, closed 2026-10-01 15:47Z
+# by "hand sweep 2026-10-01: landed 70c2d002" with no `## Automod landed` section
+# in its body — so the ruling on what to do with the 365 facts filed under entity
+# `general` had no item any pass visits. Four nodes below, one per clause.
+
+#: Verbatim in shape from #1999's first `human_clauses:` entry: a data decision
+#: over ~/lloyd-data that no diff can settle.
+_DISPOSITION = ("Disposition of the 365 facts already filed under entity "
+                "`general`: re-file, quarantine, or leave and de-score.")
+_READSIDE = "De-score `general` on the read side as defence-in-depth?"
+
+
+def _stranded(isolated, item_id, clauses, *, completed="2026-10-01T15:47:52"):
+    """A `status: done` item that recorded `human_clauses` and has no `owed:` key:
+    the shape #1999 was left in, with nothing but the close date to say when the
+    clause stopped having an owner."""
+    return write_item(isolated, item_id, status="done",
+                      extra={"completed": completed, "human_clauses": list(clauses)})
+
+
+def test_a_done_item_that_recorded_human_clauses_is_owing_again(isolated):
+    """Clause 1: `entries_of` yields one due `check` entry for each `human_clauses`
+    string that appears in neither `owed` nor `owed_settled`, and `owing_items`
+    therefore returns a `status: done` item that has no `owed:` key at all.
+
+    The derivation is at read time and writes nothing: the clause is already on the
+    record, the reader simply was not looking where a hand-swept item puts it. The
+    entry's `since` is the close that stranded it rather than today, because
+    `owing_items` sorts oldest-first and a date invented now would push every one
+    of these behind the entries that have genuinely been waiting.
+    """
+    p = _stranded(isolated, 1999, [_DISPOSITION, _READSIDE])
+    fm = fm_of(p)
+    assert "owed" not in fm and "owed_settled" not in fm, fm
+
+    entries = O.entries_of(fm)
+    assert [e["what"] for e in entries] == [_DISPOSITION, _READSIDE]
+    assert [e["kind"] for e in entries] == ["check", "check"], \
+        "a clause nobody recorded is a thing to check, not a path or a decision"
+    assert [e["origin"] for e in entries] == [O.STRANDED_ORIGIN] * 2
+    assert {e["since"] for e in entries} == {"2026-10-01T15:47:52"}
+
+    owing = O.owing_items()
+    assert [o.item.id for o in owing] == [1999], "the item is back in the queue"
+    assert owing[0].due == [0, 1], "both clauses are due: nothing scheduled them away"
+
+    # And the boundary the derivation does NOT cross: an OPEN item's `human_clauses`
+    # are its own round's contract, which the landing route converts (only its
+    # post-landing half) and the review rung grades. Deriving those would let the
+    # owed job rule on — or `reopen` — a round that is still running.
+    open_p = write_item(isolated, 1997, status="up_next",
+                        extra={"completed": "", "human_clauses": [_DISPOSITION]})
+    assert O.entries_of(fm_of(open_p)) == [], \
+        "an open item's clauses are its round's contract, not an owed ruling"
+
+
+def test_derivation_dedupes_both_lists_and_a_second_pass_writes_no_duplicate(isolated):
+    """Clause 2, both halves.
+
+    Half one, the dedupe: an item whose clauses the landing route DID record yields
+    no additional entry, counted against `owed` AND against `owed_settled` — an
+    item with `owed: [A]` and `human_clauses: [A, B]` owes A once, not twice, and an
+    item with A already ruled in `owed_settled` does not owe A either, because a
+    clause that has been ruled on is not stranded whatever its text went on to
+    become.
+
+    Half two, the idempotence: the owed pass run twice on a derived item writes no
+    duplicate. The first pass materialises the clause it answered into
+    `owed_settled`, which is also what takes it out of the derived set — a `recheck`
+    needs a `recheck_after` somewhere real, and `owed` is the only place that holds
+    one — so the second pass sees a settled text and derives nothing from it.
+    """
+    p_owed = write_item(isolated, 2001, status="done", extra={
+        "completed": "2026-10-01T15:47:52", "human_clauses": [_DISPOSITION, _READSIDE],
+        "owed": [{"what": _DISPOSITION, "kind": "check", "since": "2026-09-20T00:00:00"}]})
+    entries = O.entries_of(fm_of(p_owed))
+    assert [e["what"] for e in entries] == [_DISPOSITION, _READSIDE], \
+        f"a recorded clause was derived a second time: {[e['what'] for e in entries]}"
+    assert [e.get("origin", "") for e in entries] == ["", O.STRANDED_ORIGIN]
+
+    p_settled = write_item(isolated, 2002, status="done", extra={
+        "completed": "2026-10-01T15:47:52", "human_clauses": [_DISPOSITION, _READSIDE],
+        "owed_settled": [{"what": _DISPOSITION, "outcome": "ruling",
+                          "at": "2026-10-01T00:00:00", "evidence": "ruled in triage"}]})
+    assert [e["what"] for e in O.entries_of(fm_of(p_settled))] == [_READSIDE]
+
+    p3 = _stranded(isolated, 2003, [_DISPOSITION, _READSIDE])
+    O.apply_verdict(p3, O.entries_of(fm_of(p3)),
+                    [{"n": 1, "outcome": "settled", "evidence": "rows re-filed 2026-10-02"}],
+                    item_id=2003)
+    fm = fm_of(p3)
+    assert [r["what"] for r in fm["owed_settled"]] == [_DISPOSITION]
+    assert [e["what"] for e in O.entries_of(fm)] == [_READSIDE], \
+        "answered once: the settled clause is gone and the other is still derived"
+
+    # Numbered 1, not 2: after the first pass the settled clause is out of the
+    # list, which is the dedupe doing its work on the numbering the session sees.
+    O.apply_verdict(p3, O.entries_of(fm_of(p3)),
+                    [{"n": 1, "outcome": "ruling", "evidence": "guard already in place",
+                      "ruling": "the read-side guard at retrieval is sufficient"}],
+                    item_id=2003)
+    fm = fm_of(p3)
+    assert [r["what"] for r in fm["owed_settled"]] == [_DISPOSITION, _READSIDE], fm["owed_settled"]
+    assert len({r["what"] for r in fm["owed_settled"]}) == 2, "a duplicate settled record"
+    assert O.entries_of(fm) == [], "two passes, nothing left owed, nothing written twice"
+
+    # The writer keeps the same line: `add_owed` appends to what the item RECORDS,
+    # so an unrelated write (a protected path, a parked decision) cannot silently
+    # materialise a derived clause into front matter — it would freeze a read-time
+    # derivation into a record whose `origin` says it was filed on purpose.
+    p4 = _stranded(isolated, 2005, [_DISPOSITION])
+    assert O.add_owed(p4, ["apply `config.yaml`: the key is still owed"], kind="path")
+    recorded_after = fm_of(p4)["owed"]
+    assert [e["what"] for e in O._recorded(fm_of(p4))] == [
+        "apply `config.yaml`: the key is still owed"], recorded_after
+    assert [e["what"] for e in O.entries_of(fm_of(p4))] == [
+        "apply `config.yaml`: the key is still owed", _DISPOSITION]
+
+
+def test_the_payload_labels_a_derived_clause_and_leaves_a_recorded_one_unlabelled(isolated):
+    """Clause 3: the entry block the owed-check session is actually shown — built by
+    `workers.sources.owed_check.build_prompt`, not by a field a caller could ignore —
+    says which entries came from `human_clauses` and which a route recorded.
+
+    One item, both kinds in the same list, because the distinction a ruling needs is
+    the one it makes while reading: "a previous pass already handled this" is a
+    legitimate answer for a recorded entry and a false one for a stranded clause
+    that no pass has ever seen. The label is asserted per line so an entry cannot
+    borrow the other's marker.
+    """
+    write_item(isolated, 2004, status="done", extra={
+        "completed": "2026-10-01T15:47:52", "human_clauses": [_DISPOSITION],
+        "owed": [{"what": "confirm the nightly ran", "kind": "check",
+                  "since": "2026-09-20T00:00:00"}]})
+    owing = O.owing_items()[0]
+    assert len(owing.entries) == 2, owing.entries
+
+    lines = [ln for ln in OC.build_prompt(owing).splitlines()
+             if ln.startswith("1. [") or ln.startswith("2. [")]
+    assert len(lines) == 2, lines
+    labelled = [ln for ln in lines if "derived from human_clauses" in ln]
+    assert len(labelled) == 1 and _DISPOSITION in labelled[0], lines
+    assert "confirm the nightly ran" not in labelled[0], "the marker reached both entries"
+    unlabelled = [ln for ln in lines if "derived from human_clauses" not in ln]
+    assert len(unlabelled) == 1 and "confirm the nightly ran" in unlabelled[0], lines
+
+
+def test_one_run_claims_at_most_the_named_constant_of_stranded_items(isolated, tmp_path):
+    """Clause 4: the 454 stranded items on the board on 2026-10-02 cannot be taken
+    in one run, and the bound is a named constant, `owed.MAX_STRANDED_PER_RUN`.
+
+    `owing_items` sorts oldest-first and returns everything it is given, so without
+    a bound the first tick after this lands reads 454 items, offers them, and puts
+    every genuinely recorded entry behind a wall of historical debt. The bound is
+    applied AFTER the sort, so which items get ruled on first is the wait they have
+    actually done, and it never holds back an item with a recorded entry — the cap
+    is on the back-fill, not on anything a route filed on purpose. Both sides of
+    the boundary are pinned: the helper, and a real tick whose `batch` is widened
+    to 500, which is the config edit the flood would otherwise need.
+    """
+    from workers.queue import WorkQueue
+    assert O.MAX_STRANDED_PER_RUN == 5
+
+    for i in range(O.MAX_STRANDED_PER_RUN + 3):
+        _stranded(isolated, 3000 + i, [f"Rule on stranded thing {i}."],
+                  completed=f"2026-09-{10 + i:02d}T00:00:00")
+    _owing(isolated, 3100, ["a recorded entry, filed newest of all"],
+           since="2026-10-01T12:00:00")
+
+    ids = [o.item.id for o in O.owing_items()]
+    assert ids == [3000, 3001, 3002, 3003, 3004, 3100], \
+        "at most the constant in stranded items, oldest first, and a recorded item is never held back"
+
+    q = WorkQueue(tmp_path / "owed-stranded.db")
+    asyncio.run(OC.enqueue_if_due(q, {"apply": True, "batch": 500}))
+    rows = [r for r in q.list_items(source=OC.NAME) if r.state == "queued"]
+    assert len(rows) == O.MAX_STRANDED_PER_RUN + 1, \
+        [r.payload["item_id"] for r in rows]
