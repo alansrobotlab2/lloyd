@@ -889,10 +889,20 @@ is the known self-grading failure mode, and this is where it is stopped.
   all 77 `error` baseline rows sit below the 0.6 line by construction. Both are
   pinned in `tests/test_workers_sources.py`, one of those tests crossing the
   writer→ledger→selector seam by asking `materialize_baseline` for its own id.
-  **This is a mechanism fix, not an observed one.** Production has to answer
-  whether the input now fires, on rows #876 had not yet frozen and then
-  un-froze; until `SELECT count(*) FROM queue WHERE source='bench-mine' AND
-  kind='mine'` is non-zero, nothing here has been demonstrated end to end. Note
+  **The mechanism has since been observed, so what follows is a measurement and
+  not a prediction.** The committed extract
+  `tests/fixtures/workers_bench_mine_2077.jsonl` — the `queue` rows read out of
+  `~/lloyd-data/workers.db` at 2026-10-02T22:18:17Z, duplicated byte-for-byte in the
+  vault at `backlog/data/2026-10-02.2077-bench-mine-queue-witness.jsonl` — holds 212
+  queue rows with `source='bench-mine' AND kind='mine'`: 211 `completed`, 1
+  `quarantined`, the earliest enqueued `2026-09-22T22:03:16.477369+00:00` and the
+  newest `2026-10-02T21:07:21.183481+00:00`. The ledger input has therefore been
+  enqueueing `kind='mine'` rows since 2026-09-22, so the zero reading above is the
+  pre-fix state and not the steady state, and every figure here carries the moment
+  it was read because the live count moves on every enqueue. That settles the INPUT
+  half, which is the half #876's rows frozen and then un-frozen could not settle;
+  what the turns those rows started produced is the next paragraph, and that answer
+  is worse than this one. Note
   too that mtime cannot be read as "the ledger is fresh": a watermark matched
   the file's `stat` across an eight-day gap in which no row was appended, which
   only proves the inode was touched.

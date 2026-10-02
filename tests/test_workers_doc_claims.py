@@ -10,7 +10,9 @@ does not read.
 """
 from __future__ import annotations
 
+import json
 import re
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -1485,3 +1487,237 @@ def test_the_cluster_docs_agree_on_the_triggers_and_the_exhausted_floor():
         f"{_hours(SRC.DEFAULT_EXHAUSTED_MIN_AGE_SECONDS)} — which of the three is "
         "wrong should not be a reader's guess, and #1783 was filed precisely "
         "because it was")
+
+
+# ── #2077: §8's bench-mine block records a measurement, not a prediction ──────
+#
+# `architecture/workers.md` §8 closed the bench-mine bullet with "until `SELECT
+# count(*) FROM queue WHERE source='bench-mine' AND kind='mine'` is non-zero,
+# nothing here has been demonstrated end to end". Production answered that on
+# 2026-09-22 and the page never recorded it, while its sibling
+# `architecture/workers-jobs.md` did — so the stale caution was the only
+# surviving record of a resolved question, which is the failure this file's dated
+# counts exist to prevent.
+#
+# These nodes read `ARCH / "workers.md"` directly and slice the bullet themselves:
+# the file's `_section()` helper is hard-wired to `workers-jobs.md`, so reusing it
+# here would grade a different document than the one the claim lives in.
+
+#: The bullet's first line, as the doc writes it. Anchored on the leading `- ` so
+#: the slice starts at the bullet and not at a mention of the source elsewhere.
+_BENCH_MINE_BULLET = "- **`bench-mine` advertised an input"
+
+#: What §8 used to predict, and the prediction's own framing sentence. Both must
+#: be gone: the first is the falsified claim, the second is what made it a
+#: prediction ("Production has to answer whether the input now fires").
+_BENCH_MINE_PREDICTIONS = (
+    "nothing here has been demonstrated end to end",
+    "Production has to answer whether the input now fires",
+)
+
+#: The witness: the 212 `queue` rows for source='bench-mine' AND kind='mine', read
+#: out of the live `~/lloyd-data/workers.db` at 2026-10-02T22:18:17Z, one JSON
+#: object per row. Committed because a live store has no history: the figures the
+#: doc quotes are re-derivable from these bytes after the store has moved on.
+BENCH_MINE_WITNESS = ROOT / "tests" / "fixtures" / "workers_bench_mine_2077.jsonl"
+VAULT_BENCH_MINE_WITNESS = (Path.home() / "obsidian" / "backlog" / "data"
+                            / "2026-10-02.2077-bench-mine-queue-witness.jsonl")
+
+
+def _bench_mine_block() -> str:
+    """§8's bench-mine bullet of `workers.md`, from its first line to the next bullet.
+
+    Sliced on `\n- ` because the bullet's continuation paragraphs are indented, so
+    a line-beginning `- ` is only ever the next bullet. The block is long on
+    purpose: the run-failure paragraphs clause 4 protects are separate indented
+    paragraphs INSIDE this bullet, so a slice that stopped at the first blank line
+    could not see what the change was not allowed to touch.
+    """
+    text = (ARCH / "workers.md").read_text(encoding="utf-8")
+    assert "## 8. Known limits" in text, "§8 is gone, so this section's claims moved"
+    start = text.index(_BENCH_MINE_BULLET)
+    rest = text[start:]
+    end = rest.index("\n- ", 10)
+    block = rest[:end]
+    assert "bench-mine" in block and len(block) > 1_500, (
+        f"the slice is {len(block)} chars, which is not the bench-mine bullet — "
+        "a slice that catches no prose makes every assert below vacuous")
+    return block
+
+
+def _witness_rows() -> list[dict]:
+    raw = BENCH_MINE_WITNESS.read_text(encoding="utf-8")
+    rows = [json.loads(ln) for ln in raw.splitlines() if ln.strip()]
+    assert rows, "the witness fixture is empty, so it can witness nothing"
+    return rows
+
+
+def test_workers_md_no_longer_predicts_the_bench_mine_input_is_unproven():
+    """Clause 1: the falsified prediction is out of the file, not just out of §8.
+
+    Whole-file, because the clause counts occurrences in `architecture/workers.md`
+    and a prediction that survives a §8 rewrite by moving to §5 is still a
+    prediction. Non-vacuity first: the banned strings are asserted non-empty and
+    the block is asserted to still be about bench-mine (inside `_bench_mine_block`),
+    so the node cannot be satisfied by deleting the bullet.
+    """
+    assert len(_BENCH_MINE_PREDICTIONS) == 2, "the ban list itself was edited"
+    doc = (ARCH / "workers.md").read_text(encoding="utf-8")
+    flat = " ".join(doc.split())
+    for banned in _BENCH_MINE_PREDICTIONS:
+        assert " ".join(banned.split()) not in flat, (
+            f"workers.md still predicts {banned!r}, which production refuted on "
+            "2026-09-22; the sibling doc carries the dated observation already")
+
+    block = " ".join(_bench_mine_block().split())
+    assert "kind='mine'" in block, (
+        "the block no longer names the queue rows its claim was about, so the "
+        "absence asserted above is a deletion and not a correction")
+
+
+def test_workers_md_records_the_bench_mine_input_as_a_dated_measurement():
+    """Clause 2: the replacement is past tense and carries the date it was measured.
+
+    Three things have to be true at once for a reader to have a measurement rather
+    than a prediction: the enqueueing is stated as something that HAS happened, the
+    since-date is named, and the figures are stated with their read stamp. A "will"
+    or "has to" replacement sentence would satisfy clause 1 and fail this one.
+    """
+    block = " ".join(_bench_mine_block().split())
+    assert re.search(r"has (therefore )?been enqueueing `kind='mine'` rows "
+                     r"since 2026-09-22", block), (
+        "the block does not state in the past tense that the input has been "
+        f"enqueueing since 2026-09-22: …{block[:200]}…")
+    for stated in ("212 queue rows", "211 `completed`", "1 `quarantined`",
+                   "`2026-09-22T22:03:16.477369+00:00`",
+                   "`2026-10-02T21:07:21.183481+00:00`"):
+        assert stated in block, f"the measurement lost {stated!r}"
+
+
+def test_the_dated_bench_mine_counts_sit_beside_a_date():
+    """Clause 3: no queue-row or run count in the block is undated.
+
+    Per sentence, not per block: the block is ~50 lines and one dated sentence must
+    not license every count in it. `DATED` requires a WINDOW or a READ STAMP attached
+    to the count's own sentence (`as of`, `since`, `to`, `read`, `at` before an ISO
+    date), which is the same distinction #1713's `test_section2_carries_no_undated_count`
+    draws — a date string anywhere is not a measurement date.
+
+    Scope, stated honestly: this guards counts of QUEUE ROWS and RUNS, which is what
+    clause 3 names. It does not scan every integer in the bullet, because clause 4
+    forbids altering the trace_status-guard sentence, whose "all 77 `error` baseline
+    rows" is undated and stays exactly as written — dating it would be the edit the
+    same clause prohibits. The new measurement sentence is what clause 3's "adds no
+    undated live count" is about, and it is checked here and pinned to its bytes
+    below.
+    """
+    block = _bench_mine_block()
+    COUNTED = re.compile(r"\b\d[\d,]*\s+(queue rows|queue row|runs|run)\b")
+    DATED = re.compile(r"(?:as of|since|to|read|at|through)\s*`?\d{4}-\d{2}-\d{2}")
+    sentences = re.split(r"(?<=[.!])\s+", " ".join(block.split()))
+    checked = 0
+    for s in sentences:
+        if not COUNTED.search(s):
+            continue
+        checked += 1
+        assert DATED.search(s), f"undated count in §8's bench-mine block: {s[:160]!r}"
+    assert checked >= 2, (
+        f"only {checked} count-bearing sentence(s) were checked: the doc's queue "
+        "and run counts moved somewhere this node no longer reads")
+    assert "as of 2026-09-19" in " ".join(block.split()), (
+        "the pre-fix zero is no longer stated with the date it was read, which is "
+        "the only reason it can coexist with the 2026-10-02 measurement")
+
+
+def test_the_quoted_bench_mine_figures_are_re_derivable_from_the_committed_bytes():
+    """Clauses 2 and 3, tied to bytes: the doc's figures ARE the fixture's figures.
+
+    The doc quotes a live store, and a live store has no history — so the numbers
+    are read out of the doc and recomputed from the committed extract. Edit either
+    side and this fails, which is the only defence against the page drifting back
+    into an unfalsifiable claim about a count that grows on every enqueue.
+    """
+    rows = _witness_rows()
+    assert {r["source"] for r in rows} == {"bench-mine"}, "witness rows of another source"
+    assert {r["kind"] for r in rows} == {"mine"}, "witness rows of another kind"
+    states: dict[str, int] = {}
+    for r in rows:
+        states[r["state"]] = states.get(r["state"], 0) + 1
+    earliest = min(r["enqueued_at"] for r in rows)
+    newest = max(r["enqueued_at"] for r in rows)
+
+    block = " ".join(_bench_mine_block().split())
+    total = re.search(r"holds (\d[\d,]*) queue rows", block)
+    completed = re.search(r"`source='bench-mine' AND kind='mine'`: (\d+) `completed`", block)
+    quarantined = re.search(r"(\d+) `quarantined`", block)
+    assert total and completed and quarantined, (
+        f"the measurement sentence no longer states its total, completed and "
+        f"quarantined figures in the checked shape (total={bool(total)}, "
+        f"completed={bool(completed)}, quarantined={bool(quarantined)})")
+    assert int(total.group(1).replace(",", "")) == len(rows), (
+        f"the doc says {total.group(1)} queue rows; the committed bytes hold {len(rows)}")
+    assert int(completed.group(1)) == states.get("completed", 0), (
+        f"the doc says {completed.group(1)} completed; the bytes hold "
+        f"{states.get('completed', 0)}")
+    assert int(quarantined.group(1)) == states.get("quarantined", 0), (
+        f"the doc says {quarantined.group(1)} quarantined; the bytes hold "
+        f"{states.get('quarantined', 0)}")
+    assert f"`{earliest}`" in block and f"`{newest}`" in block, (
+        f"the doc's earliest/newest stamps are not the bytes' {earliest!r} / {newest!r}")
+
+
+def test_the_bench_mine_block_keeps_the_caveats_it_was_not_licensed_to_touch():
+    """Clause 4: the four protected passages are here, verbatim, unaltered.
+
+    Quoted in full rather than by keyword, because the failure this guards is a
+    rewrite that keeps the keywords and drops the evidence — "eight-day gap in
+    which no row was appended" is the mtime caveat's whole content, and the
+    `trace_status` guard's reason is the `judge_trace` clause, not the word
+    `trace_status`. Whitespace-normalised, since the doc wraps at ~80 columns.
+    """
+    block = " ".join(_bench_mine_block().split())
+    protected = (
+        'Note too that mtime cannot be read as "the ledger is fresh": a watermark '
+        "matched the file's `stat` across an eight-day gap in which no row was "
+        "appended, which only proves the inode was touched.",
+        "#625 made the comparison case-insensitive (`BM.BASELINE_ID_PREFIX`)",
+        "a loser may only be a trial whose `trace_status` is `success`, because "
+        "`judge_trace` (`scripts/autoresearch/judge.py`) zeroes the composite of "
+        "any trace that did not complete",
+        "empty response (stop_reason=max_turns) — nothing written",
+        "60 runs since 2026-09-09: 6 success, 5 `skipped`",
+        "`bench-mine` 123 failures of 146 runs, **120 of them `stop_reason=max_turns`**",
+    )
+    for kept in protected:
+        assert " ".join(kept.split()) in block, (
+            f"§8's bench-mine block lost or reworded a passage this round was not "
+            f"licensed to change: {kept[:70]!r}…")
+    assert (ROOT / "workers" / "sources" / "bench_mine.py").is_file(), (
+        "the source the block describes is gone, so every figure above is about a "
+        "module that no longer exists")
+
+
+def test_the_vault_copy_of_the_bench_mine_witness_is_the_same_bytes_as_the_fixture():
+    """Clause 5, the durability half: the vault duplicate is the fixture's bytes.
+
+    The vault holds the copy because the repo's copy is the thing the doc cites and
+    the vault is where a report is read from; the two are only one witness if they
+    are the same bytes, so the digest is compared and the vault file's presence in
+    the vault's own git is asserted. A reader with neither the live store nor the
+    repo can still re-derive 212 / 211 / 1 from `backlog/data`.
+    """
+    assert VAULT_BENCH_MINE_WITNESS.is_file(), (
+        f"{VAULT_BENCH_MINE_WITNESS} is not on disk, so §8 cites a witness that "
+        "exists only in the repo")
+    fixture = BENCH_MINE_WITNESS.read_bytes()
+    vault = VAULT_BENCH_MINE_WITNESS.read_bytes()
+    assert fixture == vault, (
+        f"the vault copy diverged from the fixture: {len(vault)} bytes against "
+        f"{len(fixture)}")
+    tracked = subprocess.run(
+        ["git", "-C", str(Path.home() / "obsidian"), "ls-files", "--error-unmatch",
+         "backlog/data/2026-10-02.2077-bench-mine-queue-witness.jsonl"],
+        capture_output=True, text=True)
+    assert tracked.returncode == 0, (
+        "the vault copy is not tracked on the vault's main, so `git log -- ` over "
+        "it finds nothing and it has no history either: " + tracked.stderr.strip()[:160])
