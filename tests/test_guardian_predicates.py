@@ -1832,14 +1832,54 @@ def test_the_three_sites_that_cannot_act_all_ask_for_a_human():
 # 900 s guard is exercised under the arithmetic that made it inert in production.
 # ---------------------------------------------------------------------------
 
-def _stray_incident(tmp_path, monkeypatch, strays):
-    """A guardian whose stray check reads `strays`, writing to a throwaway vault.
+class _StrayDetector:
+    """A `stray_in_tree` stand-in that counts its calls and can be made to fail.
 
-    Everything between the finding and the note is the real thing: the check
-    branch, `Guardian.alert`'s repeat guard, `Notifier.alert`'s fan-out, and
-    `_vault_note`'s write. Only the detector is synthetic — `stray_in_tree`
-    returns whatever the test says, because the live tree returns `[]` since
-    `9e98d0df` and the incident has to be manufactured to be observed.
+    The count is why this is a class and not the lambda it replaces. Clause 4 of
+    #2056 is "one stray check invokes `stray_in_tree` exactly once", and a fixture
+    whose detector returns a constant cannot observe a second call: the re-read
+    hands back the same list, both edges pick the same branch, and every assertion
+    about the alert and the clear still holds while the check now measures the tree
+    twice. `calls` is read AFTER the tick, so what is pinned is the number of
+    measurements a check makes, not the answer it got.
+
+    `fails` is the other half: #2056's live incident is a check whose detector
+    raised, so the failure has to be drivable from the test and not merely possible.
+    """
+
+    def __init__(self, strays=()):
+        self.calls = 0
+        self.fails = False
+        self.strays = list(strays)
+        self.repo = None
+
+    def __call__(self, repo):
+        self.calls += 1
+        self.repo = repo                       # the tree the check actually measured
+        if self.fails:
+            raise RuntimeError("simulated stray check failure")
+        return list(self.strays)
+
+    def set(self, strays):
+        self.strays = list(strays)
+
+
+def _stray_incident_with(tmp_path, monkeypatch, detector):
+    """The #1536 incident harness driven by `detector` instead of a fixed list.
+
+    Returns the guardian, its daily note, `tick`, the `resolve` recorder AND the
+    detector, so a test can count its calls or make it raise between ticks.
+
+    `resolve` is WRAPPED, not replaced, and deliberately so. Clause 4 says the
+    retraction goes through the notifier "as a resolve, not a new alert" — a test
+    that stubbed `resolve` out could only see that it was called, and would still
+    pass if the resolve stopped sealing the section. Here the real method seals it,
+    and the tests read the note to prove the seal happened.
+
+    The note path is today's file, built the way `_vault_note` builds it. Not a
+    fixed date: a fixed date would put the test's sections in a file
+    `_daily_open_at` never looked at, and the nodes that count sections would pass
+    for the wrong reason on any day but one.
     """
     import guardian as gmod
     import notify
@@ -1849,9 +1889,7 @@ def _stray_incident(tmp_path, monkeypatch, strays):
     (vault / "memory").mkdir(parents=True)
     clock = {"t": 1_700_000_000.0}
     monkeypatch.setattr(gmod.time, "time", lambda: clock["t"])
-    found = {"strays": list(strays)}
-    monkeypatch.setattr(gmod.datawatch, "stray_in_tree",
-                        lambda repo: list(found["strays"]))
+    monkeypatch.setattr(gmod.datawatch, "stray_in_tree", detector)
 
     g = gmod.Guardian.__new__(gmod.Guardian)   # no supervisor, no probes, no ledger
     g.notifier = notify.Notifier(ledger=tmp_path / "l.jsonl", state_dir=tmp_path,
@@ -1874,10 +1912,28 @@ def _stray_incident(tmp_path, monkeypatch, strays):
     def tick(new_strays=None):
         """One stray-check interval later, with the detector now seeing `new_strays`."""
         if new_strays is not None:
-            found["strays"] = list(new_strays)
+            detector.set(new_strays)
         clock["t"] += gmod.policy.STRAY_CHECK_SECONDS
         g._runtime_data_incident(clock["t"])
 
+    return g, note, tick, clears, detector
+
+
+def _stray_incident(tmp_path, monkeypatch, strays):
+    """A guardian whose stray check reads `strays`, writing to a throwaway vault.
+
+    Everything between the finding and the note is the real thing: the check
+    branch, `Guardian.alert`'s repeat guard, `Notifier.alert`'s fan-out, and
+    `_vault_note`'s write. Only the detector is synthetic — `stray_in_tree`
+    returns whatever the test says, because the live tree returns `[]` since
+    `9e98d0df` and the incident has to be manufactured to be observed.
+
+    The #2056 nodes that need to count the detector's calls or make it raise go
+    through `_stray_incident_with` with a `_StrayDetector` instead; this wrapper is
+    the four-value form the #1536 nodes were written against.
+    """
+    g, note, tick, clears, _ = _stray_incident_with(
+        tmp_path, monkeypatch, _StrayDetector(strays))
     return g, note, tick, clears
 
 
@@ -2045,6 +2101,186 @@ def test_coalescing_is_scoped_to_the_runtime_data_title(tmp_path, monkeypatch):
     assert g.notifier._vault_note("Plain notice", "body") is True
     assert notify.DAILY_STILL_OPEN not in note.read_text(encoding="utf-8")[len(text):], (
         "`_vault_note`'s default coalesces, so every alert in the file silently did too")
+
+
+# ── #2056: a check that could not measure must not write an all-clear ─────────
+#
+#  Live on 2026-10-02: `journalctl --user -u lloyd-guardian --since 2026-10-01`
+#  ALERTs "Runtime data is being written into the code tree" at 01:48:27, 02:48:29
+#  and 03:48:32, each naming `/home/alansrobotlab/lloyd/workers.db`, whose inode
+#  109003752 has birth = ctime = mtime 2026-10-02 01:01:36.605 and which
+#  `stray_in_tree(policy.REPO)` still returns. `memory/2026-10-02.md` carries three
+#  sections under that one title, two of them ending in a `cleared:` retraction and
+#  the third still `_(still open on the next check)_`. So two all-clears were sealed
+#  over an incident the alert branch was re-raising an hour later, and each spurious
+#  seal is also why #1536's one-section contract broke that day: `_daily_open_at`
+#  returns an open section only while it ends in `DAILY_STILL_OPEN`, so once a clear
+#  had replaced the marker the next alert found nothing open and appended.
+#
+#  The hole is NOT a second `stray_in_tree()` call — line 983 makes exactly one and
+#  both edges read that variable. It is the `except` two lines above: the check
+#  catches the detector's exception, logs `stray check failed (continuing)`, and
+#  substitutes `strays = []`. `elif not strays:` then consumes that SUBSTITUTION as
+#  if it were a measurement, and `notifier.resolve` seals a live incident. Which of
+#  the two paths (a raising detector, or a check that genuinely saw an empty tree
+#  between two checks that did not) wrote tonight's two lines is not decidable from
+#  disk — `grep -h "stray check failed" ~/lloyd-data/logs` finds no guardian log file
+#  at all — so the nodes below pin both edges of the predicate rather than one.
+
+def test_a_failed_stray_check_clears_nothing_and_keeps_the_note_open(tmp_path, monkeypatch):
+    """#2056 clause 1: a failed measurement is not an all-clear.
+
+    The detector raises on the second and third checks, so the check never learns
+    whether the tree is clean. Two things must survive that: no `resolve` for the
+    runtime-data title, and the section's `_(still open on the next check)_` marker.
+    The marker is asserted and not assumed — clause 1's symptom is that the marker is
+    GONE, replaced by a retraction, which is the same loss-of-openness #1967 was
+    about and the reason `_daily_open_at` stopped finding a section to update.
+
+    This node is red before the fix: the substituted empty list satisfies
+    `elif not strays:` and the resolve fires twice.
+    """
+    import guardian as gmod
+    import notify
+
+    det = _StrayDetector(["workers.db"])
+    g, note, tick, clears, detector = _stray_incident_with(tmp_path, monkeypatch, det)
+    tick()
+    assert _sections(note, gmod.RUNTIME_DATA_ALERT_TITLE), "the alert did not open a section"
+
+    detector.fails = True
+    tick()
+    tick()
+
+    assert clears == [], f"a check that raised retracted the incident: {clears}"
+    text = note.read_text(encoding="utf-8")
+    assert notify.DAILY_STILL_OPEN in text, "the still-open marker did not survive"
+    assert f"{notify.DAILY_CLEARED_PREFIX} " not in text, text
+    assert len(_sections(note, gmod.RUNTIME_DATA_ALERT_TITLE)) == 1, (
+        f"a failed check wrote {len(_sections(note, gmod.RUNTIME_DATA_ALERT_TITLE))} "
+        f"sections for one incident:\n{text}")
+
+
+def test_a_finding_while_disarmed_neither_alerts_nor_retracts(tmp_path, monkeypatch):
+    """#2056 clause 2: the clear is the negation of the alert, not its `else`.
+
+    The alert fires on `strays and self.data.armed` (`guardian.py:987`); the clear
+    fired on `not strays` (`:1015`), which is not that predicate's negation — an
+    `else`-shaped clear treats any state the alert did not fire in as evidence the
+    incident is over, including the states the alert declined to speak about. Two
+    cells pin the partition here, both with the tree reporting a stray:
+
+      * armed, strays present  → the alert fires, the clear does not;
+      * disarmed, strays present → NEITHER fires, because a paused guardian has
+        earned no statement in either direction about an incident it has not closed.
+
+    The second cell is the one the `else` shape gets wrong: with `armed` False the
+    alert branch is skipped by its own conjunct, and a clear sitting in the `else`
+    would then retract a finding the guardian is still holding. It is also the cell
+    the item's clause names, and it is checked on the SAME tick the finding was made,
+    so a clear cannot be reached by waiting out a repeat guard.
+
+    This one is a PIN, green before the fix and green after: the current `elif not
+    strays:` happens to get these two cells right. It is here because the fix rewrites
+    the branch into `else:`, and an `else` is exactly where a correct partition can
+    quietly become an incorrect one. The nodes that are red before the fix are the
+    failed-measurement and retraction-text ones below.
+    """
+    import guardian as gmod
+
+    det = _StrayDetector(["workers.db"])
+    g, note, tick, clears, detector = _stray_incident_with(tmp_path, monkeypatch, det)
+
+    g.data.armed = True
+    tick()
+    assert _sections(note, gmod.RUNTIME_DATA_ALERT_TITLE), "armed + strays did not alert"
+    assert clears == [], f"armed + strays retracted: {clears}"
+
+    g.data.armed = False
+    g._alert_seen.clear()          # drop the repeat guard: this cell's subject is the
+    before = g.last_alert          # predicate, not the 900 s throttle
+    tick()
+
+    assert clears == [], (
+        f"the clear fired while the detector was reporting a stray (armed False): {clears}")
+    # `alert` assigns `last_alert` on EVERY path — the fanned-out one and the
+    # suppressed-repeat one — so an unchanged value proves the alert branch was never
+    # entered, which is what the cell needs. Asserting the title is absent from
+    # `last_alert` instead would be red on the cell above's own alert.
+    assert g.last_alert == before, (
+        "a disarmed guardian entered its alert branch after all, so the cell above no "
+        f"longer tests the clear branch's partner: {g.last_alert}")
+
+
+def test_the_cleared_line_names_the_tree_the_check_measured(tmp_path, monkeypatch):
+    """#2056 clause 3: `on the latest check` is not auditable by a later reader.
+
+    The live line — verbatim in both retractions in `memory/2026-10-02.md` — is
+    "no runtime stores inside the code tree on the latest check". It says a check
+    ran and found nothing; it does not say of WHICH root, and a reader trying to
+    reconstruct tonight's three sections has to take the guardian's word for which
+    tree it measured. So the tree is named from the same value the detector received
+    (`policy.REPO`, captured by `_StrayDetector.repo`), which makes the retraction a
+    statement about a measurable thing rather than a timestamp.
+    """
+    import guardian as gmod
+    import notify
+
+    det = _StrayDetector(["workers.db"])
+    g, note, tick, clears, detector = _stray_incident_with(tmp_path, monkeypatch, det)
+    tick()
+    detector.set([])
+    tick()
+
+    assert clears == [(gmod.RUNTIME_DATA_ALERT_TITLE, True)], (
+        f"the clean measurement did not seal the incident: {clears}")
+    line = next(ln for ln in note.read_text(encoding="utf-8").splitlines()
+                if ln.startswith(notify.DAILY_CLEARED_PREFIX))
+    assert detector.repo, "the detector never received a tree, so there is nothing to name"
+    assert detector.repo in line, (
+        f"the retraction does not name the tree it measured ({detector.repo}): {line}")
+    assert detector.repo == gmod.policy.REPO, (
+        "the check measured something other than policy.REPO, so this node's premise "
+        f"that the line names that root is wrong: {detector.repo}")
+    assert "on the latest check" not in line, (
+        f"the un-auditable phrasing is still what a reader finds: {line}")
+
+
+def test_one_stray_check_makes_exactly_one_detector_call_both_edges_share(tmp_path, monkeypatch):
+    """#2056 clause 4: one measurement per check, consumed by whichever edge fires.
+
+    Counted, not inferred from behaviour: `_StrayDetector.calls` is read after each
+    tick. A re-read would return the same list on the happy path and every assertion
+    above would still hold, so the ONLY thing that keeps "a clear can never be
+    computed over a set the alert did not use" true is that there is one set to
+    compute over. Three ticks, three outcomes — alert, clear, and a check that raised
+    — and the count is one in all three, because the third is the case where a
+    second attempt ("retry the detector, it probably was a transient") would be the
+    most tempting way to manufacture a measurement out of nothing.
+    """
+    import guardian as gmod
+
+    det = _StrayDetector(["workers.db"])
+    g, note, tick, clears, detector = _stray_incident_with(tmp_path, monkeypatch, det)
+
+    tick()
+    assert detector.calls == 1, f"the alerting check measured the tree {detector.calls} times"
+    assert _sections(note, gmod.RUNTIME_DATA_ALERT_TITLE), "the alert edge did not fire"
+
+    detector.set([])
+    tick()
+    assert detector.calls == 2, (
+        f"the clearing check measured the tree {detector.calls - 1} times, so the two "
+        "edges of one check can be reading different measurements")
+    assert clears == [(gmod.RUNTIME_DATA_ALERT_TITLE, True)], clears
+
+    detector.fails = True
+    tick()
+    assert detector.calls == 3, (
+        f"a check whose detector raised measured the tree {detector.calls - 2} times; one "
+        "failed measurement is the answer, and calling again is how a check starts "
+        "reporting a verdict it cannot justify")
+    assert len(clears) == 1, f"the failed check retracted a second time: {clears}"
 
 
 # ── #1590: retracting an alarm across the day boundary ───────────────────────

@@ -1106,14 +1106,43 @@ class Guardian:
         (#2057 clauses 1 and 4). Read with `getattr` because the tests build a
         `Guardian` with `__new__`; a first check has no previous one and says so
         rather than inventing a bound.
+
+        Three outcomes, not two (#2056). A check either measures the tree or it does
+        not, and the failure case used to be folded into the empty-set case: the
+        `except` substituted `strays = []`, `elif not strays:` accepted that
+        substitution as a measurement, and `resolve` sealed an incident the alert
+        branch was re-raising an hour later. `memory/2026-10-02.md` is the record —
+        three sections under this one title, two of them ending `cleared:`, against
+        `journalctl --user -u lloyd-guardian` ALERT lines for the same title at
+        01:48:27, 02:48:29 and 03:48:32 naming `workers.db`, whose inode has birth =
+        ctime = mtime 2026-10-02 01:01:36.605 and never moved. The spurious seal is
+        also why `coalesce` left three sections for one incident: `_daily_open_at`
+        returns an open section only while it still ends in the still-open marker, and
+        a clear had already replaced it.
         """
+        # `measured` is a flag rather than a sentinel value in `strays` because the
+        # absence of a measurement must not be expressible as either a finding or an
+        # all-clear. Set after the call, so an exception anywhere inside the detector
+        # leaves it False.
+        measured = False
         try:
             strays = datawatch.stray_in_tree(policy.REPO)
+            measured = True
         except Exception as exc:  # noqa: BLE001
             log(f"stray check failed (continuing): {exc}")
-            strays = []
         prev_check = getattr(self, "_strays_prev_check_at", None)
+        # Recorded on a failed check too: the window is "since the last time this
+        # check ran", and the next check may only claim what has happened since then.
         self._strays_prev_check_at = now
+        if not measured:
+            # Neither edge speaks. Not an alarm, because an alarm asserts "these paths
+            # exist" about a tree this check did not read, and not a clearance, which
+            # asserts the same thing negatively — #1541 closed the name-list leg of
+            # that reasoning on 2026-09-29 and this is the other leg. The section keeps
+            # its `_(still open on the next check)_` marker, which is the true state of
+            # the record: an open incident whose last measurement failed. The reason is
+            # in the log line above.
+            return
         if strays and self.data.armed:
             # `coalesce` is what keeps one incident to one section on the daily
             # note. This check runs every STRAY_CHECK_SECONDS (3600 s) and the
@@ -1138,9 +1167,22 @@ class Guardian:
             # should still close the section it opened, and `resolve` writes
             # nothing unless one of our sections is actually open. It is
             # idempotent, so the hourly all-clear after the first stays silent.
+            #
+            # `elif not strays` and not a bare `else`, which is what #2056 clause 2 is
+            # about: the alert fires on `strays and self.data.armed`, and a finding
+            # held by a disarmed guardian takes neither branch — a paused loop has not
+            # closed the incident, it has stopped checking it, so it has earned no
+            # statement in either direction. The failed-measurement case above is the
+            # third outcome and it returned before reaching here.
+            #
+            # The line names the root it measured because "on the latest check" is not
+            # auditable by the reader who finds it a day later: the two retractions in
+            # `memory/2026-10-02.md` each asserted an empty tree and neither said which
+            # one, while the path the alert branch was naming an hour later was in the
+            # tree both of them claimed to have walked.
             self.notifier.resolve(
                 RUNTIME_DATA_ALERT_TITLE,
-                "no runtime stores inside the code tree on the latest check — the "
+                f"no runtime stores inside the code tree of {policy.REPO} — the "
                 "instructions above are stale, nothing further to move")
 
     def check_data(self) -> None:
