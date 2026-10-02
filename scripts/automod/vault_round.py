@@ -644,6 +644,25 @@ def _guards_row(guards: dict) -> dict:
     apart from a hang: three lands (#2040, #2027, #2038) recorded `ran=0` with an
     empty reason and no witness of the run at all. `excerpt` is the pytest tail the
     pipe held when the child was killed.
+
+    The three parallelism keys are #2046. Since #2044 the probe decides its own
+    worker count and re-asks a parallel failure serially before it may refuse
+    anything, and `agreement` reports all of it (`vault_guards.py:717`, `:831`,
+    `:844`) — but the projection dropped every one of those keys, so ledger row
+    29142 (`ts` 2026-10-02T06:33:44Z, commit 88bab697) carries
+    `candidate.failed=1, refuse=false` and states that the one failure was dismissed
+    as load ONLY in its `reason` prose: a reader could not tell that row's parallel
+    probe from a serial one, nor a flaker that survived the re-ask from a real
+    refusal. `workers` is the count the proposed-vault run got (1 when the probe
+    settled on serial, since `agreement` names the count before it decides),
+    `parallel_retry` is the serial re-ask's own cost — `failed` is a node COUNT like
+    the two run blocks beside it, and `workers` is 1 because the re-ask is serial by
+    construction at `vault_guards.py:829`, which is the whole point of it — and
+    `parallel_only_failures` names the nodes the re-ask cleared, capped at the same
+    10 as `nodes` above with the true total beside it when the cap bites. A
+    `parallel_retry` with `ran: 0` is the re-ask that answered nothing
+    (`vault_guards.py:836-839`), which is why `parallel_only_failures` can be absent
+    beside a present re-ask.
     """
     out: dict = {"state": guards.get("state", "skipped"),
                  "refuse": bool(guards.get("refuse"))}
@@ -651,6 +670,12 @@ def _guards_row(guards: dict) -> dict:
         out["seconds"] = guards["seconds"]
     if guards.get("lock_wait_s"):
         out["lock_wait_s"] = guards["lock_wait_s"]
+    if guards.get("workers") is not None:
+        # A serial probe states `workers: 1` rather than dropping the key: absence
+        # here means the probe never reached its worker decision (`vault_guards.py`
+        # returns before :717 on a bad HEAD or an empty selection), which is a
+        # different non-answer from "decided, and decided serial".
+        out["workers"] = guards["workers"]
     cand = guards.get("candidate") or {}
     if cand:
         out["candidate"] = {"ran": cand.get("ran", 0), "failed": len(cand.get("failed") or [])}
@@ -663,6 +688,21 @@ def _guards_row(guards: dict) -> dict:
         for k in ("seconds", "files"):
             if base.get(k) is not None:
                 out["baseline"][k] = base[k]
+    retry = guards.get("parallel_retry")
+    if retry:
+        # Written only when a re-ask ran, so an absent key means the probe never
+        # re-asked and never "re-asked and reported nothing" — the same convention
+        # as the two run blocks above. `note`, `seconds` and `files` stay off the
+        # row on purpose: the note's content is already in `reason`, and the row is
+        # the shape a clause put there, not a dump of the report.
+        out["parallel_retry"] = {"ran": retry.get("ran", 0),
+                                 "failed": len(retry.get("failed") or []),
+                                 "workers": retry.get("workers") or 1}
+    dismissed = guards.get("parallel_only_failures")
+    if dismissed:
+        out["parallel_only_failures"] = list(dismissed)[:10]
+        if len(dismissed) > 10:
+            out["parallel_only_failures_count"] = len(dismissed)
     if guards.get("nodes"):
         out["nodes"] = list(guards["nodes"])[:10]
     if guards.get("reason"):

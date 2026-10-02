@@ -1037,8 +1037,9 @@ def test_a_land_whose_stated_count_the_tree_disagrees_with_is_refused_before_com
 
 
 def test_a_refusal_leaves_the_vault_at_its_previous_head_and_is_ledged(
-        vault, guard_tree, probed):
+        vault, guard_tree, probed, monkeypatch):
     """Clause 3. Nothing committed, and the ledger row names the item and why."""
+    _two_workers(monkeypatch)      # so the `workers` pinned below is 2, not config
     _prose(vault, SKILL_AT_FOUR, commit=True)
     probed(guard_tree, vault)
     _prose(vault, "---\nname: foo\n---\nstores: 5\n")
@@ -1061,9 +1062,18 @@ def test_a_refusal_leaves_the_vault_at_its_previous_head_and_is_ledged(
     assert g["baseline"]["ran"] == 1 and g["baseline"]["failed"] == 0
     # The row's shape is still closed: a key appears only because a clause put it
     # there. `lock_wait_s` is absent because nothing was queued behind here, and
-    # `_guards_row` writes detail keys only when there is something to say.
+    # `_guards_row` writes detail keys only when there is something to say. #2046
+    # put the last two keys here, and the count is `_two_workers`' 2 rather than the
+    # box's `automod.gate.test_workers`, so the pin says which value the projection
+    # owed the row. A `checked` row cannot exist at `workers` 1 with a failing node,
+    # because `vault_guards.py:718` returns `skipped` before launching a child, and
+    # the failing node was re-asked serially before it could refuse — which the row
+    # now says as data. `parallel_only_failures` being ABSENT is the other half of
+    # the pin: the serial re-ask reproduced the failure, so nothing was dismissed.
     assert set(g) == {"state", "refuse", "seconds", "candidate", "baseline",
-                      "nodes", "excerpt"}, g
+                      "nodes", "excerpt", "workers", "parallel_retry"}, g
+    assert g["workers"] == 2, g
+    assert g["parallel_retry"] == {"ran": 1, "failed": 1, "workers": 1}, g
     # #2042: a refusal row now carries its own cost beside its verdict — the seconds
     # each run took and how many vault-reading files it ran over — and the guard
     # output that states the counts. Before this, only the verdict was ledgered.
@@ -1931,6 +1941,20 @@ def test_a_probe_that_hangs_states_its_seconds_and_still_lands(vault, tmp_path, 
     assert row["state"] == "skipped" and row["refuse"] is False
     assert row["candidate"] == {"ran": 0, "failed": 0,
                                 "seconds": row["candidate"]["seconds"], "files": 1}
+    # #2046: the new keys are ROW-level, so the per-run block #2042 shaped keeps
+    # exactly its four keys — this is the pin that says so rather than leaving it to
+    # the dict equality above, which a stray fifth key inside `candidate` would not
+    # catch only if it happened to equal the placeholder. And the row above now
+    # states the worker count the hung run was launched with, which is what made
+    # this row unreadable before: `ran: 0` with no witness of the parallelism.
+    assert set(row["candidate"]) == {"ran", "failed", "seconds", "files"}, row["candidate"]
+    # `> 1` and not an equality: this box's count is `automod.gate.test_workers`, a
+    # key this node does not own, and reading it through the gate's accessor here
+    # perturbs the module state its neighbours in the same xdist worker monkeypatch.
+    # What the row must prove is that a hung run's row states a PARALLEL count; the
+    # exact value is pinned by the node that patches the worker decision.
+    assert row["workers"] > 1, row
+    assert "parallel_retry" not in row, "no re-ask ran, so the row may not imply one"
     assert "answered nothing" in row["reason"] and "timed out after" in row["reason"]
     assert "over 1 vault-reading file" in row["reason"], row["reason"]
     # The child spent real seconds and was then killed for spending them: that is
@@ -2666,3 +2690,291 @@ def test_a_probe_that_cannot_get_pytest_xdist_says_so_rather_than_running_serial
     assert row["state"] == "skipped" and row["refuse"] is False, row
     assert "pytest-xdist" in row["reason"] and "735" in row["reason"], row
     assert "candidate" not in row, row
+    # #2046 clause 1: a serial probe STATES its count instead of dropping the key.
+    # Omitting it would make this row read as a probe that never reached its worker
+    # decision — `vault_guards.py:708-714`'s unreadable HEAD or empty selection —
+    # which is a different non-answer from the one this reason sentence gives.
+    assert row["workers"] == 1, row
+    assert "parallel_retry" not in row, row
+
+
+# --------------------------------------------------------------------------- #
+#  #2046: the xdist fields the parallel probe reports reach the LEDGER ROW.
+#
+#  Why: #2044 put `workers`, `parallel_retry` and `parallel_only_failures` on the
+#  guard REPORT (`vault_guards.py:717`, `:831`, `:844`), and every node above reads
+#  that report — while `_guards_row`, the one projection between it and
+#  `promotions.jsonl`, dropped all three. Promotion-ledger row 29142 (`ts`
+#  2026-10-02T06:33:44Z, commit 88bab697) is the witness: `candidate.failed=1`,
+#  `refuse=false`, and the sentence "once the 1 that failed only under parallelism
+#  were re-asked serially and pass" ONLY in `reason`. A reader holding the
+#  structured keys could not tell that row's parallel probe from a serial one, nor
+#  a dismissed flaker from a real refusal. These nodes read the row `land()` writes
+#  (`vault_round.py:866`, `:913`), which is the half no #2044 node covered.
+# --------------------------------------------------------------------------- #
+
+def _flaky_report(**over) -> dict:
+    """A guard report shaped exactly as `agreement` builds one, for projection only.
+
+    Four of these numbers are ledger row 29142's own as committed — 7,070 nodes over
+    196 files, 155.2 s of proposed-vault run, 1 failed node — and the row carries NO
+    worker count at all, which is the defect itself: its committed `guards` keys are
+    candidate/excerpt/reason/refuse/seconds/state. So the `workers: 8` this fixture
+    supplies is not read off that row; it is what the probe takes from
+    `automod.gate.test_workers` (`config.yaml:1346`) on the box that wrote it — the
+    value the row should have carried and did not. Only the keys `_guards_row` reads
+    are here; where a field is produced is pinned where it is produced, in the nodes
+    above.
+    """
+    base = {"state": "checked", "refuse": False, "seconds": 157.8, "workers": 8,
+            "candidate": {"ran": 7070, "failed": [], "seconds": 155.2, "files": 196,
+                          "workers": 8},
+            "reason": "7070 vault-reading nodes pass against the vault as proposed",
+            "excerpt": ""}
+    base.update(over)
+    return base
+
+
+def _no_reason(row: dict) -> dict:
+    """The row minus its prose — the comparison clause 4 asks for, enforced."""
+    return {k: v for k, v in row.items() if k != "reason"}
+
+
+def test_a_parallel_probe_states_its_workers_and_its_re_ask_on_the_row_it_lands_with(
+        vault, monkeypatch):
+    """Clauses 1, 2 and 3 across the one seam this change owns.
+
+    The boundary is report → projection → JSONL: `land()` takes whatever
+    `VG.agreement` returns and projects it once (`vault_round.py:866` on the refusal
+    path) into the file a later reader has. So the guard is replaced with a report
+    that has the shape `agreement` builds when it launches on workers and re-asks
+    serially — the same fields #2044's nodes pin AT THE PRODUCER, with ledger row
+    29142's own numbers — and what is asserted below is on
+    `_events("vault_land")[0]["guards"]`, never on the report.
+
+    No probe child is launched here on purpose. The probe lock
+    (`vault_guards.py:722`) is a box-wide file, so a node that ran real children in
+    parallel with `test_the_probe_waits_for_the_gate_tests_slot_before_it_starts_a_child`
+    made that node measure a 2 s queue and lose its `lock_wait_s`-absent assertion;
+    the producer's real children are covered by the nodes above, and this one covers
+    the projection without borrowing the box's lock.
+    """
+    report = _flaky_report(
+        refuse=True, nodes=[COUNT_NODE],
+        candidate={"ran": 7070, "failed": [FLAKER_NODE, COUNT_NODE],
+                   "seconds": 155.2, "files": 196, "workers": 8},
+        parallel_retry={"ran": 2, "failed": [COUNT_NODE], "seconds": 4.4, "files": 2,
+                        "workers": 1, "note": "1 failed in 4.4s"},
+        parallel_only_failures=[FLAKER_NODE],
+        reason=("7070 vault-reading nodes, 2 failed under parallelism; 1 of them "
+                "passed serially, 1 is real"),
+        excerpt="FAILED tests/test_guard.py::test_the_prose_states_the_count")
+    monkeypatch.setattr(VG, "agreement", lambda *a, **k: dict(report))
+    # The path has to exist in the vault's working tree, as every other node here
+    # leaves it: validation runs before the guard, so a missing path would refuse
+    # for the wrong reason and no guards row would be written at all.
+    _prose(vault, SKILL_AT_FOUR, commit=True)
+    _prose(vault, "---\nname: foo\n---\nstores: 5\n")
+    head = _head(vault)
+    with pytest.raises(V.VaultRoundError):
+        V.land(["skills/foo/SKILL.md"], "#2046 the flaker is on the row", item_id=None)
+    assert _head(vault) == head, "refused before any vault commit"
+    g = _events("vault_land")[0]["guards"]
+
+    # Clause 1: the count the proposed-vault run was launched with, as data.
+    assert g["workers"] == 8, g
+    # Clause 2: the serial re-ask as its own block, `failed` a node COUNT like the
+    # two run blocks beside it, `workers` 1 because the re-ask is serial by
+    # construction (`vault_guards.py:829`) — which is the whole reason it exists.
+    assert g["parallel_retry"] == {"ran": 2, "failed": 1, "workers": 1}, g
+    # Clause 3: the node parallelism alone caused, named rather than implied.
+    assert g["parallel_only_failures"] == [FLAKER_NODE], g
+    assert "parallel_only_failures_count" not in g, "one node is under the 10 cap"
+    # The decision the row already recorded is untouched by the projection: the
+    # flaker bought no refusal and the real disagreement still did.
+    assert {k: g[k] for k in ("state", "refuse", "nodes")} == {
+        "state": "checked", "refuse": True, "nodes": [COUNT_NODE]}, g
+    assert FLAKER_NODE not in str(g.get("excerpt", "")), g
+    assert g["candidate"] == {"ran": 7070, "failed": 2, "seconds": 155.2,
+                             "files": 196}, g
+
+
+def test_a_row_from_a_probe_that_re_asked_is_not_the_row_from_one_that_never_re_asked():
+    """Clause 4: structurally, with `reason` out of the comparison on both sides.
+
+    The defect is that row 29142's dismissal lives in its prose and nowhere else, so
+    the two rows below are given the SAME `reason` sentence: if the only place a
+    re-ask could ever be recorded were that string, stripping it would make the rows
+    equal and this node goes red. It is the strictest form of the claim, and the
+    `set(...) - set(...)` line names which keys carry the difference rather than
+    leaving it to a bare `!=`.
+    """
+    cand = {"ran": 7070, "failed": [FLAKER_NODE], "seconds": 155.2, "files": 196,
+            "workers": 8}
+    shared_reason = ("7070 vault-reading nodes pass against the vault as proposed, "
+                     "once the 1 that failed only under parallelism were re-asked "
+                     "serially and pass")
+    reasked = V._guards_row(_flaky_report(
+        candidate=cand, parallel_only_failures=[FLAKER_NODE],
+        parallel_retry={"ran": 2, "failed": [], "seconds": 3.1, "files": 1,
+                        "workers": 1, "note": "2 passed in 3.1s"},
+        reason=shared_reason))
+    never = V._guards_row(_flaky_report(candidate=cand, reason=shared_reason))
+
+    assert _no_reason(reasked) != _no_reason(never), (
+        "the two rows are structurally identical once the prose is removed, which is "
+        "exactly ledger row 29142's shape")
+    assert set(reasked) - set(never) == {"parallel_retry",
+                                        "parallel_only_failures"}, (
+        sorted(reasked), sorted(never))
+    assert "parallel_retry" not in never, (
+        "a probe that never re-asked must omit the key, never carry it present-empty")
+    assert _no_reason(never)["workers"] == 8, "the count both rows share stays put"
+
+
+def test_a_dismissed_flaker_list_is_capped_where_the_nodes_list_is_already_capped():
+    """Clause 3's cap, both sides of it: 10 named plus a total, or 3 and no total.
+
+    The producer puts an unbounded list on the report — `flinched` is a subset of the
+    parallel run's `failed` (`vault_guards.py:840-844`) and nothing bounds it — and
+    the ledger's own precedent for a node list is the `[:10]` on `nodes`. The count
+    appears only past the cap, because a count equal to the list's own length says
+    nothing.
+    """
+    many = [f"tests/test_f{ i }.py::test_node" for i in range(13)]
+    wide = V._guards_row(_flaky_report(
+        candidate={"ran": 7070, "failed": many, "seconds": 155.2, "files": 196,
+                   "workers": 8},
+        parallel_retry={"ran": 13, "failed": [], "seconds": 9.9, "files": 13,
+                        "workers": 1, "note": "13 passed"},
+        parallel_only_failures=many))
+    assert wide["parallel_only_failures"] == many[:10], wide["parallel_only_failures"]
+    assert wide["parallel_only_failures_count"] == 13, wide
+
+    few = V._guards_row(_flaky_report(parallel_only_failures=many[:3]))
+    assert few["parallel_only_failures"] == many[:3], few
+    assert "parallel_only_failures_count" not in few, few
+
+
+def test_a_report_that_reported_nothing_adds_no_key_to_the_row():
+    """Clauses 1-3's absence halves, on the rows the probe never fills in.
+
+    `agreement` returns before it decides a worker count when it cannot read the
+    tree's HEAD or the selection is empty (`vault_guards.py:708-714`), and it reaches
+    a re-ask only when a parallel run failed something — so all three keys can be
+    legitimately absent at once, and a projection that wrote `workers: 0`,
+    `parallel_retry: {}` or `parallel_only_failures: []` would turn "nothing
+    reported" into "reported as nothing", the #1691 shape this function's own
+    docstring names.
+    """
+    row = V._guards_row({"state": "skipped", "refuse": False, "seconds": 0.4,
+                         "reason": "no test file under tests/ names a vault root"})
+    assert set(row) == {"state", "refuse", "seconds", "reason"}, row
+    for key in ("workers", "parallel_retry", "parallel_only_failures",
+                "parallel_only_failures_count"):
+        assert key not in row, f"{key} was written for a probe that never reported it"
+    assert V._guards_row(_flaky_report(workers=1))["workers"] == 1, (
+        "a serial probe states 1; it does not drop the key")
+    empty_retry = V._guards_row(_flaky_report(parallel_retry={}))
+    assert "parallel_retry" not in empty_retry, empty_retry
+    no_flakers = V._guards_row(_flaky_report(
+        parallel_retry={"ran": 0, "failed": [], "seconds": 1.0, "files": 1,
+                        "workers": 1, "note": "timed out after 1.0s"}))
+    assert no_flakers["parallel_retry"] == {"ran": 0, "failed": 0, "workers": 1}, (
+        "the re-ask that answered nothing is still a re-ask, and it explains itself "
+        "in `reason` — `parallel_only_failures` is absent beside it by design")
+    assert "parallel_only_failures" not in no_flakers, no_flakers
+
+
+#: #2046's witness, verbatim: ledger row 29142 of
+#: `~/.local/state/lloyd-automod/promotions.jsonl`, re-read 2026-10-02. Inline rather
+#: than in a fixture file because clause 5 allows exactly two paths in `git diff --stat`
+#: and a third file there would break it, whatever its purpose — so the bytes are
+#: committed in this file, and a byte-identical copy sits on the vault's main at
+#: WITNESS_2046_VAULT_PATH below, which is not this diff.
+WITNESS_2046_ROW = (
+    '{"ts": 1790922824.546555, "created_at": "2026-10-02T06:33:44Z", "event": "vault_land", "ok": tru'
+    'e, "item_id": null, "commit": "88bab69793af05d8670f8914c26b44170698573f", "paths": ["skills/kg-m'
+    'ention-classifier/SKILL.md"], "validated": ["skills/kg-mention-classifier/SKILL.md"], "guards": '
+    '{"state": "checked", "refuse": false, "seconds": 157.8, "candidate": {"ran": 7070, "failed": 1, '
+    '"seconds": 155.2, "files": 196}, "reason": "7070 vault-reading nodes pass against the vault as p'
+    'roposed, once the 1 that failed only under parallelism were re-asked serially and pass", "excerp'
+    't": "..............                                                           [100%]\\n14 passed '
+    'in 0.82s\\n"}, "review": "skipped", "review_reason": "no item bound: the second reader has no con'
+    'tract to grade, so it was not consulted (module CLI, autoresearch promote)", "review_clauses": ['
+    '], "landing_clauses": [], "session_id": "20261001_230425_autonomy_e695", "skill_gate": [{"skill"'
+    ': "kg-mention-classifier", "has_eval": false, "would_refuse": false, "reason": "no activation ev'
+    'al for this skill"}], "message": "kg-mention-classifier: record where mid-run backlog numbers mi'
+    'slead (task #74 run 2026-10-02)\\n\\nThree traps a run hits and can only be warned about from this'
+    ' file:\\n- the runner\'s queue line agrees with"}'
+)
+
+#: The durable copy, landed through `automod_vault_land`. Named as a repo-relative
+#: vault path so the citation resolver finds it, the way #2042's witness does.
+WITNESS_2046_VAULT_PATH = "backlog/data/2026-10-02.2046-parallel-flaker-witness.jsonl"
+LIVE_PROMOTIONS_LEDGER = Path("~/.local/state/lloyd-automod/promotions.jsonl").expanduser()
+WITNESS_2046_ROW_NUMBER = 29142
+
+
+def test_the_witness_row_the_item_quotes_carries_no_worker_count_at_all():
+    """Clause 6: the bytes the defect is quoted from, re-derived and pinned.
+
+    Every figure in the item's own premise is recomputed here from these bytes: the
+    row is a `vault_land` at 2026-10-02T06:33:44Z against commit 88bab697, its
+    `guards` say `checked`/`refuse: false` over 7,070 nodes on 196 files in 155.2 s
+    with ONE failure, and the dismissal of that failure is ONLY the prose sentence
+    naming a serial re-ask. The three keys this change projects are absent, which is
+    the absence the round exists to end — so this node goes red the moment anyone
+    rewrites the witness to look like the fixed shape, the way #2042's node refuses
+    a witness that grew the fields it is filing the absence of.
+
+    Against the live ledger the row is looked up by its own `ts`, not by its line
+    number (29142): that file gains a row with every promotion and the groundskeeper
+    folds it, which is the #1193 failure this file's own witness nodes warn about. A
+    row the live file still holds must equal these bytes byte for byte; one it has
+    archived away is not a disagreement. With no evidence root present the durable leg
+    is skipped, as #2042's node does — the inline bytes and the live leg always run.
+    """
+    import hashlib
+    import json
+
+    import scripts.automod.review as RV
+
+    row = json.loads(WITNESS_2046_ROW)
+    assert row["event"] == "vault_land" and row["ok"] is True
+    assert row["created_at"] == "2026-10-02T06:33:44Z", row["created_at"]
+    assert str(row["commit"]).startswith("88bab697"), str(row["commit"])[:8]
+    g = row["guards"]
+    assert g["state"] == "checked" and g["refuse"] is False, sorted(g)
+    assert g["seconds"] == 157.8, g["seconds"]
+    assert g["candidate"] == {"ran": 7070, "failed": 1, "seconds": 155.2,
+                               "files": 196}, g["candidate"]
+    for key in ("workers", "parallel_retry", "parallel_only_failures"):
+        assert key not in g, (
+            f"{key} is on the witness now, so this row is no longer the non-answer "
+            f"#2046 cites: re-cut it from a pre-landing row before rerunning the item")
+    assert "re-asked serially and pass" in g["reason"], g["reason"]
+    assert "baseline" not in g, "a pruned baseline is a different land"
+
+    if LIVE_PROMOTIONS_LEDGER.is_file():
+        # Looked up by the row's own `ts`, never by line number: #1193 is on the
+        # board precisely because a whole-file live-ledger figure pinned in a test
+        # reddens every later promotion, and this file grows by a row per land and
+        # is folded by the groundskeeper. A row the ledger still holds must match
+        # these bytes exactly; one it has archived away says so without lying.
+        lines = LIVE_PROMOTIONS_LEDGER.read_text(errors="replace").splitlines()
+        live = [l for l in lines if f'"ts": {row["ts"]}' in l]
+        assert len(live) <= 1, f"the live ledger holds {len(live)} copies of one ts"
+        if live:
+            assert live[0] == WITNESS_2046_ROW, (
+                "row 29142 of the live ledger is not the bytes pinned here — the "
+                "witness was rewritten, not merely aged")
+
+    for root in RV.REVIEW_EVIDENCE_ROOTS:
+        durable = root / WITNESS_2046_VAULT_PATH
+        if not root.is_dir():
+            continue
+        assert durable.is_file(), f"the durable copy is not on the vault's main: {durable}"
+        assert hashlib.sha256(durable.read_bytes()).hexdigest() == \
+            hashlib.sha256((WITNESS_2046_ROW + "\n").encode()).hexdigest(), \
+            "the vault's durable copy and these committed bytes diverged"
