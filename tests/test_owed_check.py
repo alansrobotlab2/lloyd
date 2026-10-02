@@ -963,3 +963,30 @@ def test_one_run_claims_at_most_the_named_constant_of_stranded_items(isolated, t
     rows = [r for r in q.list_items(source=OC.NAME) if r.state == "queued"]
     assert len(rows) == O.MAX_STRANDED_PER_RUN + 1, \
         [r.payload["item_id"] for r in rows]
+
+
+def test_a_derived_clause_ruled_outside_is_not_derived_or_listed_again(isolated):
+    """#538, 2026-10-02: `derived_entries` deduped against `owed` and `owed_settled`
+    but not `owed_outside`, so a stranded clause ruled `outside` was back in the
+    queue on the next tick and each pass appended another entry to Alan's list —
+    six in 28 minutes. An `outside` ruling takes the clause out of the derived set,
+    and a clause ruled `outside` twice is one entry, restated, with its first date.
+    """
+    p = _stranded(isolated, 4000, [_DISPOSITION])
+    entries = O.entries_of(fm_of(p))
+    assert [e["what"] for e in entries] == [_DISPOSITION]
+    O.apply_verdict(p, entries, [{"n": 1, "outcome": "outside", "evidence": "e",
+                                  "outside": "attach a drive"}], item_id=4000)
+    assert O.entries_of(fm_of(p)) == [], "ruled outside: no longer stranded"
+    assert 4000 not in [o.item.id for o in O.owing_items()]
+    first = O.outside_list()
+    assert [(o["item_id"], o["needs"]) for o in first] == [(4000, "attach a drive")]
+
+    # The same clause answered `outside` again (a recorded entry can be): one row.
+    O.apply_verdict(p, entries, [{"n": 1, "outcome": "outside", "evidence": "e",
+                                  "outside": "attach a drive, then run the collector"}],
+                    item_id=4000)
+    again = O.outside_list()
+    assert [(o["item_id"], o["needs"]) for o in again] == [
+        (4000, "attach a drive, then run the collector")]
+    assert again[0]["since"] == first[0]["since"], "it has waited since the first ruling"

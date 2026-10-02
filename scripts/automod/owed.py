@@ -137,7 +137,8 @@ def _since(fm: dict) -> str:
 
 
 def derived_entries(fm: dict) -> list[dict]:
-    """`human_clauses` strings that appear in neither `owed` nor `owed_settled`.
+    """`human_clauses` strings that appear in none of `owed`, `owed_settled` and
+    `owed_outside`.
 
     Only a CLOSED item is derived from (the boundary `tests/test_backlog_unattended.py`
     already encodes at :4595, where an open item's `entries_of` must be empty until
@@ -172,6 +173,11 @@ def derived_entries(fm: dict) -> list[dict]:
         return []
     seen = {_text(e.get("what")) for e in _recorded(fm)}
     seen |= {_text(r.get("what")) for r in (fm.get(SETTLED_KEY) or []) if isinstance(r, dict)}
+    # `owed_outside` is a ruling too. Left out, a derived clause ruled `outside`
+    # was derived again on the next tick, ruled again and announced again: #538
+    # was filed on Alan's list six times in 28 minutes on 2026-10-02, a toast and
+    # a spoken alert each, until a seventh session happened to answer `settled`.
+    seen |= {_text(r.get("what")) for r in (fm.get(OUTSIDE_KEY) or []) if isinstance(r, dict)}
     seen.discard("")
     since = _since(fm)
     out: list[dict] = []
@@ -522,8 +528,18 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
             notes.append(f"#{n} recheck after {when[:10]}: {evidence}")
             continue
         if out == "outside":
-            outside.append({"what": e["what"], "needs": _text(a.get("outside") or evidence, 400),
-                            "since": stamp})
+            # One entry per clause: a second `outside` ruling on the same clause
+            # restates the ask in place and keeps the date it has waited since.
+            ask = {"what": e["what"], "needs": _text(a.get("outside") or evidence, 400),
+                   "since": stamp}
+            same = [i for i, o in enumerate(outside) if isinstance(o, dict)
+                    and not o.get("done") and _text(o.get("what")) == _text(e["what"])]
+            if same:
+                ask["since"] = str(outside[same[0]].get("since") or stamp)
+                outside = [o for i, o in enumerate(outside) if i not in same[1:]]
+                outside[same[0]] = ask
+            else:
+                outside.append(ask)
             notes.append(f"#{n} needs Alan's hands: {_text(a.get('outside') or evidence, 200)}")
             continue
         record = {"what": e["what"], "outcome": out, "at": stamp}

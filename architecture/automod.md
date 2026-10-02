@@ -1868,6 +1868,12 @@ and Mission Control's backlog panel list, and the job announces it once. It is
 never a tag and never blocks the board. Deleting or moving data is not
 `outside`; it is ruled on and filed as work for a gated round.
 
+One clause is one entry on that list. A clause derived from `human_clauses`
+(#2055) is deduped against `owed_outside` as well as `owed` and `owed_settled`,
+and a second `outside` ruling on a clause restates its entry in place, keeping
+the first date. Before that (2026-10-02) #538's one clause was re-derived every
+tick and filed six times in 28 minutes, each with a toast and a spoken alert.
+
 **The loop taking an item back makes its owed decisions moot.** Every move that
 used to strip `needs-human` (a reopen, a re-triage, an unfold, the reconciler
 putting an item back in a pool) drops the item's `decide` entries in the same
