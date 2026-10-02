@@ -15,7 +15,7 @@ import re
 import sys
 from bisect import insort
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -565,11 +565,116 @@ AGENT_SELECTORS: dict[str, frozenset[str]] = {
 }
 DEFAULT_AGENT = "all"
 
+# How much of a bucket's own local day may sit between its newest row and the end
+# of the period that bucket could have covered before the bucket is called
+# partial. The number separates the shape the extractor leaves when it has
+# finalised a day — it writes the previous day's tail on its first run after local
+# midnight, so a finalised bucket's last row is minutes from the boundary — from
+# the shape it leaves when it has not run yet: the `2026-10-01.jsonl` bucket #57
+# mined on 2026-10-02 held 27 rows and stopped at 01:09 local, 21.9 h of its own
+# day absent (#2045). A gap in between is a genuinely quiet day, and a day is
+# allowed to be quiet.
+NEWEST_BUCKET_PARTIAL_HOURS = 2.0
+
+#: The two words the miner prints for the newest bucket's completeness. Named
+#: rather than spelled inline because they are the strings the nightly report
+#: quotes: `skills/trajectory-skill-mining/SKILL.md` step 2 tells a run to say the
+#: window is short of a day when it sees `LAST DAY PARTIAL`.
+PARTIAL_FLAG = "LAST DAY PARTIAL"
+COMPLETE_FLAG = "complete"
+
+
+def local_day_start(day: str) -> datetime:
+    """Local midnight beginning the local day `day`."""
+    return datetime.combine(datetime.strptime(day, "%Y-%m-%d").date(),
+                            time.min).astimezone()
+
+
+def local_day_close(day: str) -> datetime:
+    """The instant the LOCAL day `day` ends: the next local midnight.
+
+    Buckets are named by host-local date (`extract-trajectories.py`, #1154), so a
+    bucket's day ends at a local midnight, not a UTC one. Building it as naive
+    local wall time and converting with `astimezone()` is what carries the right
+    offset across a DST change — the idiom `app/autonomy.py` uses at its own
+    `naive.astimezone()` — where pinning a fixed offset would not.
+    """
+    date = datetime.strptime(day, "%Y-%m-%d").date()
+    return datetime.combine(date + timedelta(days=1), time.min).astimezone()
+
+
+def row_instant(traj: dict) -> datetime | None:
+    """A row's `timestamp` as an aware instant, or None if it has no usable one.
+
+    A naive stamp is host-local wall time — the #1154 reading, and the one that
+    decided which bucket that row landed in — so `astimezone()` interprets it
+    rather than assuming UTC, which would move it up to a day.
+    """
+    ts = traj.get("timestamp")
+    if not isinstance(ts, str) or not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.astimezone()
+
+
+def bucket_completeness(day: str, rows: int, newest_row: datetime | None,
+                        run_instant: datetime) -> dict:
+    """How much of the local day `day` one dated bucket actually covers (#2045).
+
+    `partial` is True when the gap from the bucket's newest row to
+    `min(local_day_close(day), run_instant)` exceeds `NEWEST_BUCKET_PARTIAL_HOURS`.
+    The second operand is what a run dispatched INSIDE a still-open day has to
+    measure against — that day has not closed, so its close is not evidence of
+    anything — and it is the case that bit #2045: #57 is dispatched at 23:00
+    local, after #56 has written the stub but before the day ends.
+
+    A bucket with no usable newest row (empty, or every row unparseable) is
+    partial: it cannot show it covers its day, and when the evidence is missing
+    the honest output is the flag, not the absence of one.
+
+    `uncovered_hours` is that gap in hours, clamped at 0.0 so a row stamped after
+    the measured instant reads as 0 rather than as negative hours.
+    """
+    measured = min(local_day_close(day), run_instant)
+    if newest_row is None:
+        gap_hours = max(0.0, (measured - local_day_start(day)).total_seconds() / 3600)
+        return {"date": day, "rows": rows, "partial": True,
+                "uncovered_hours": round(gap_hours, 1)}
+    gap_hours = max(0.0, (measured - newest_row).total_seconds() / 3600)
+    return {"date": day, "rows": rows,
+            "partial": gap_hours > NEWEST_BUCKET_PARTIAL_HOURS,
+            "uncovered_hours": round(gap_hours, 1)}
+
+
+def window_denominator_line(window: dict) -> str:
+    """The miner's window denominator in one line, newest-bucket completeness and
+    all.
+
+    It exists because a file count alone was being read as a claim about days. On
+    2026-10-02 the nightly report said `2768 rows in 7 daily files (no missing
+    day)` while the newest of those seven buckets held 27 rows spanning
+    00:03-01:09 local (`~/lloyd-data/autonomy-runs/57/run_57_20261002_060006.md`,
+    #2045). Seven dated files was a true count and a false denominator, so the
+    count now travels with the one flag that makes it readable.
+    """
+    line = (f"Window: {window.get('rows', 0)} row(s) in "
+            f"{window.get('files', 0)} dated bucket(s)")
+    newest = window.get("newest")
+    if newest is None:
+        return line + "; no dated bucket in the window"
+    flag = PARTIAL_FLAG if newest["partial"] else COMPLETE_FLAG
+    return (f"{line}; newest bucket {newest['date']}: {newest['rows']} row(s), "
+            f"{flag} ({newest['uncovered_hours']} h uncovered after its newest row)")
+
 
 def load_trajectories(days: int = 7, agent_filter: str = DEFAULT_AGENT,
                       exclude_machine: bool = True,
                       class_counts: dict | None = None,
-                      window: dict | None = None) -> list[dict]:
+                      window: dict | None = None,
+                      now: datetime | None = None) -> list[dict]:
     """Load trajectory JSONL files with optional filters.
 
     `exclude_machine` (default True) keeps only the classes in `HUMAN_CLASSES` —
@@ -584,8 +689,22 @@ def load_trajectories(days: int = 7, agent_filter: str = DEFAULT_AGENT,
     the exclusion removed; the exclusion is never silent. It also carries
     `{"agent-dropped": {agent_id: n}}` — the rows the session class admitted and
     `agent_filter` then rejected, the half of the selection that used to be silent.
-    `window`, when given a dict, is filled with `{"files": n, "rows": n}`: how many
-    dated JSONL buckets fell in the window and how many rows they held. That is what
+    `window`, when given a dict, is filled with `{"files": n, "rows": n, "newest":
+    {...} | None}`: how many dated JSONL buckets fell in the window and how many rows
+    they held, plus `bucket_completeness` for the newest dated bucket in it (`None`
+    when the window holds none). The third key is the reason a bucket count is not a
+    day count (#2045): `files` counts a 27-row bucket holding 1.1 hours of traffic
+    exactly as loudly as it counts a 382-row one, so the run of 2026-10-02 could
+    print `7 daily files (no missing day)` over a window that carried ~6.05 local
+    days. `files` and `rows` are unchanged, so every existing reader of them is
+    unaffected.
+
+    `now`, when given, is the run instant used for both the day cutoff and the
+    newest bucket's completeness measure; it exists so a test can state the instant
+    the clause's `earlier of (that bucket's local-day close, the run instant)` needs
+    instead of inheriting whatever the suite's clock said. Production leaves it None.
+
+    The dict as a whole is what
     lets a caller tell an empty window from a filter that selected nothing (#998) —
     without it the two empties print identically and a mis-set filter exits 0. The
     reason that mattered was `write_index`: a zero run reached it with an empty batch
@@ -596,13 +715,18 @@ def load_trajectories(days: int = 7, agent_filter: str = DEFAULT_AGENT,
     still the only thing that distinguishes the two empties, which is what this is for.
     """
     trajectories = []
-    cutoff = datetime.now(tz=timezone.utc) - timedelta(days=days)
+    run_instant = now if now is not None else datetime.now(tz=timezone.utc)
+    cutoff = run_instant - timedelta(days=days)
     class_cache: dict[str, str] = {}
+    # Per dated bucket: rows counted, and the newest row instant seen. Only filled
+    # when a caller asked for `window`, so the row-timestamp parse costs nothing to
+    # the callers that never read the denominator.
+    bucket_stats: dict[str, dict] = {}
 
     if not TRAJECTORY_DIR.exists():
         print(f"Warning: Trajectory directory not found: {TRAJECTORY_DIR}")
         if window is not None:
-            window.update(files=0, rows=0)
+            window.update(files=0, rows=0, newest=None)
         return trajectories
 
     def tally(bucket: str, cls: str) -> None:
@@ -611,7 +735,7 @@ def load_trajectories(days: int = 7, agent_filter: str = DEFAULT_AGENT,
             class_counts[bucket][cls] = class_counts[bucket].get(cls, 0) + 1
 
     if window is not None:
-        window.update(files=0, rows=0)
+        window.update(files=0, rows=0, newest=None)
 
     for jsonl_file in sorted(TRAJECTORY_DIR.glob("*.jsonl")):
         # Skip non-date files
@@ -629,6 +753,7 @@ def load_trajectories(days: int = 7, agent_filter: str = DEFAULT_AGENT,
 
         if window is not None:
             window["files"] += 1
+            bucket_stats[jsonl_file.stem] = {"rows": 0, "newest": None}
 
         try:
             with open(jsonl_file, 'r', encoding='utf-8', errors='replace') as f:
@@ -645,6 +770,13 @@ def load_trajectories(days: int = 7, agent_filter: str = DEFAULT_AGENT,
                         # agent filter ever sees them (#998).
                         if window is not None:
                             window["rows"] += 1
+                            stats = bucket_stats[jsonl_file.stem]
+                            stats["rows"] += 1
+                            instant = row_instant(traj)
+                            if instant is not None and (
+                                    stats["newest"] is None
+                                    or instant > stats["newest"]):
+                                stats["newest"] = instant
                         # Session-class exclusion (#493). `agent_id` cannot do
                         # this work: the extractor derives it from the filename
                         # and 0 of the live session files carry its one prefix, so
@@ -689,7 +821,19 @@ def load_trajectories(days: int = 7, agent_filter: str = DEFAULT_AGENT,
         except Exception as e:
             print(f"Warning: Could not read {jsonl_file}: {e}")
             continue
-    
+
+    if window is not None:
+        # Only the NEWEST dated bucket gets the flag. An older bucket that holds
+        # only its first hour is a fact about history — the extractor finalised it
+        # later — and flagging it would read every future window as short even
+        # after the upstream job caught up (#2045). ISO date names sort
+        # chronologically, so `max` is the newest bucket in the window.
+        newest_day = max(bucket_stats) if bucket_stats else None
+        window["newest"] = (
+            None if newest_day is None else
+            bucket_completeness(newest_day, bucket_stats[newest_day]["rows"],
+                                bucket_stats[newest_day]["newest"], run_instant))
+
     return trajectories
 
 
@@ -2098,6 +2242,11 @@ def main() -> int:
                                      class_counts=class_counts,
                                      window=window)
     print(f"  Loaded {len(trajectories)} trajectory(ies)", file=sys.stderr)
+    # The denominator with its newest bucket's completeness attached, printed at the
+    # moment it is known — before any run can quote the bucket count as a day count
+    # (#2045). It goes to stderr with the other load lines, not into `--stats`
+    # stdout, because the nightly report reads the load block either way.
+    print(f"  {window_denominator_line(window)}", file=sys.stderr)
     dropped = sum(class_counts.get("dropped", {}).values())
     # The label is what `skills/trajectory-skill-mining/SKILL.md` quotes, so it
     # stays parseable. It reads loosely on purpose — the dropped tally carries
