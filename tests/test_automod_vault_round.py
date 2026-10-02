@@ -1070,8 +1070,13 @@ def test_a_refusal_leaves_the_vault_at_its_previous_head_and_is_ledged(
     # the failing node was re-asked serially before it could refuse — which the row
     # now says as data. `parallel_only_failures` being ABSENT is the other half of
     # the pin: the serial re-ask reproduced the failure, so nothing was dismissed.
+    # `reason` joins the set at #2049: clause 2 requires a refusal to name the node id in
+    # the prose a `promotions.jsonl` reader actually reads, not only in `nodes`, and
+    # `_guards_row` writes `reason` only when it is non-empty — which on a plain refusal it
+    # was not before. The pin moves because the row legitimately grew, not loosely.
     assert set(g) == {"state", "refuse", "seconds", "candidate", "baseline",
-                      "nodes", "excerpt", "workers", "parallel_retry"}, g
+                      "nodes", "excerpt", "workers", "parallel_retry", "reason"}, g
+    assert "tests/test_guard.py::" in g["reason"], g["reason"]
     assert g["workers"] == 2, g
     assert g["parallel_retry"] == {"ran": 1, "failed": 1, "workers": 1}, g
     # #2042: a refusal row now carries its own cost beside its verdict — the seconds
@@ -2978,3 +2983,303 @@ def test_the_witness_row_the_item_quotes_carries_no_worker_count_at_all():
         assert hashlib.sha256(durable.read_bytes()).hexdigest() == \
             hashlib.sha256((WITNESS_2046_ROW + "\n").encode()).hexdigest(), \
             "the vault's durable copy and these committed bytes diverged"
+
+
+
+
+# ── #2049: the probe's ONE acknowledged excuse, and its ledger row ────────────
+#
+# The shape is #2047's: `backlog/data/promotions.jsonl` is a prefix-extract of the live
+# promotions ledger and `tests/test_retention_sweep.py` pins figures measured FROM that copy,
+# so no ordering lets both move together. The probe always judges HEAD's code (it takes no
+# caller-supplied tree), so bytes-first shows HEAD's pins disagreeing with the new bytes; and
+# the gate's `tests` rung runs a candidate against the real vault, so pins-first shows the
+# candidate disagreeing with the bytes still on disk. The escape is one ack naming the landed
+# path, scoped to nodes whose own file names that path, with every excused id on the row.
+#
+# Every node here drives the real `agreement`; only `_run_selection` is stood in for pytest —
+# the same stand-in #2042 and #2044 use — and it decides pass/fail from the VAULT BYTES it is
+# handed, which is the only way to reproduce "passed with these paths put back, failed with
+# them in place" without a 32 MB fixture and a 7,000-node run. Not stood in: the worktree off
+# HEAD, the vault copy, `baseline_vault` putting the path back, the ack split, the node-id
+# scoping and the report.
+
+MIRROR_PATH = "backlog/data/promotions.jsonl"
+PINNED_NODE = "tests/test_guard.py::test_the_mirror_row_count_the_item_quotes"
+UNRELATED_NODE = "tests/test_unrelated_guard.py::test_a_guard_this_land_broke"
+
+# `make_guard_tree` writes `src` as the tree's one guard at `tests/test_guard.py`, which is
+# the file `PINNED_NODE` names. Both stand-in files carry `vault_root(` because that token is
+# what puts a file in `guard_selection`; only `tests/test_guard.py` mentions
+# `promotions.jsonl`, and that difference IS the scoping question — an ack on a ledger speaks
+# for the guard that reads the ledger, not for one the land genuinely broke.
+PINNED_TEST_SRC = '''"""Stand-in for tests/test_retention_sweep.py: a node that pins a figure in the mirror."""
+
+
+def vault_root():
+    return None
+
+
+def test_the_mirror_row_count_the_item_quotes():
+    """Pins the mirror at one row, the way `_WITNESS_ROWS` pins 28,678."""
+    rows = len((vault_root() / "backlog" / "data" / "promotions.jsonl").read_text().splitlines())
+    assert rows == 1, f"{rows} rows, not the 1 the pinned figure was measured on"
+'''
+
+UNRELATED_TEST_SRC = '''"""A guard this land breaks for an unrelated reason; it never reads the mirror."""
+
+
+def vault_root():
+    return None
+
+
+def test_a_guard_this_land_broke():
+    assert False, "broken by this land, and nothing to do with the mirror"
+'''
+
+
+def _witness_tree(tmp_path):
+    """A committed checkout: `tests/test_guard.py` pins the mirror, `tests/test_unrelated_guard.py` does not."""
+    tree = make_guard_tree(tmp_path / "witness-tree", src=PINNED_TEST_SRC)
+    (tree / "tests" / "test_unrelated_guard.py").write_text(UNRELATED_TEST_SRC,
+                                                            encoding="utf-8")
+    git(tree, "add", "-A")
+    git(tree, "commit", "-q", "-m", "a second vault-reading guard")
+    return tree
+
+
+def _pin_runs(monkeypatch, *, breaks_sibling: bool = False):
+    """`_run_selection` that answers from the VAULT BYTES, the way pytest would.
+
+    `PINNED_NODE` passes over a one-row mirror — the vault as it stands, which is what the
+    pinned figure was measured on — and fails over any other row count, which is exactly a
+    stale pin meeting refreshed bytes. `breaks_sibling` adds the other shape: a guard that
+    passes on the mirror as it stands and fails on the proposed bytes, i.e. one this land
+    genuinely broke rather than one whose figure is stale. Both are NEW failures under the
+    probe's own attribution rule, which is why the scoping has to be by file and not by
+    freshness. The pre-land run is the same call over the mirror put back, so it reproduces
+    the passes: the rule the ack rides past is the thing being tested, not a formality.
+    """
+    calls: list = []
+
+    def fake(python, tree, files, vault_root, data_root, mark, timeout, workers):
+        mirror = Path(vault_root) / MIRROR_PATH
+        rows = len(mirror.read_text(errors="replace").splitlines()) if mirror.is_file() else 0
+        calls.append(rows)
+        failed = [PINNED_NODE] if rows != 1 else []
+        if rows != 1 and breaks_sibling:
+            failed.append(UNRELATED_NODE)
+        return {"ran": 2, "failed": failed, "note": "", "seconds": 0.01,
+                "files": list(files), "workers": workers, "excerpt": "",
+                "argv_tail": "", "parallel_only_failures": []}
+
+    # `tests/conftest.py` sets the probe's nesting flag for the whole suite, which is the
+    # rule that keeps a suite-run `land()` from launching a second ~70 s probe. These nodes
+    # ARE the probe, so the flag has to come off here — #2042's node does the same at
+    # `tests/test_automod_vault_round.py:2343` for the same reason.
+    monkeypatch.delenv(VG.NESTING_ENV, raising=False)
+    monkeypatch.setattr(VG, "_run_selection", fake)
+    return calls
+
+
+def _stage_mirror_refresh(vault, *, stands: int = 1, proposed: int = 2) -> None:
+    """Commit the mirror as it stands, then put the refresh on disk UNCOMMITTED.
+
+    That split is the real shape of a vault round: `land()` probes before it commits, so the
+    proposal is working-tree bytes and HEAD still holds the copy the pins were measured on.
+    `baseline_vault` builds the pre-land mirror with `git show HEAD:<path>`, so an
+    already-committed refresh would make the "before" side identical to the "after" side, both
+    runs would fail, and every disagreement would read as pre-existing rather than the land's.
+    """
+    ledger = vault / MIRROR_PATH
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+
+    def write(rows: int) -> None:
+        ledger.write_text("".join('{"event": "landed", "n": %d}\n' % i
+                                  for i in range(rows)), encoding="utf-8")
+
+    write(stands)
+    git(vault, "add", "-A")
+    git(vault, "commit", "-q", "-m", f"mirror as it stands ({stands} rows)")
+    write(proposed)
+
+
+def test_an_acknowledged_pinned_witness_leaves_the_probe_checked_and_not_refused(
+        monkeypatch, tmp_path, vault):
+    """Clause 1: with the ack, a node that passes on the old bytes and fails on the new ones
+    leaves `state="checked"` with `refuse` false — and says which node it excused.
+
+    The node is not hypothetical: it passes with the landed path put back (one row, what the
+    pin was measured on) and fails against the proposed bytes (two rows), so `refuse` would be
+    true on the probe's own attribution rule. The ack is the statement that the pin moves in
+    the same change.
+    """
+    tree = _witness_tree(tmp_path)
+    _stage_mirror_refresh(vault)
+    _pin_runs(monkeypatch)
+
+    report = _probe(tree, vault, tmp_path, paths=[MIRROR_PATH], ack=[MIRROR_PATH])
+
+    assert report["ack"] == {"requested": [MIRROR_PATH], "accepted": [MIRROR_PATH],
+                             "unmatched": []}, report["ack"]
+    assert report["state"] == "checked", report["reason"]
+    assert report["refuse"] is False, (
+        f"the ack did not speak for the node and refuse stayed set: {report['reason']}")
+    assert report["nodes"] == [], (
+        f"an excused node must not also be an unanswered one: {report['nodes']}")
+    assert report["excused"] == [PINNED_NODE], report.get("excused")
+    assert "excused" in report["reason"] and MIRROR_PATH in report["reason"], report["reason"]
+    assert report["candidate"]["ran"] > 0 and report["baseline"]["ran"] > 0, (
+        "an excuse must not arrive with a zero denominator beside it")
+
+
+def test_the_probe_still_refuses_without_the_ack_and_with_one_for_another_path(
+        monkeypatch, tmp_path, vault):
+    """Clause 2: the same disagreement refuses when nothing was acknowledged, and when the ack
+    names a path this land does not declare.
+
+    Both halves are load-bearing. Without the first, the excuse is the default and the probe
+    stops catching a vault change that breaks a code-side guard reading the vault. Without the
+    second, a caller can pre-authorise a future disagreement by naming a file it is not
+    landing — the same hole by another route. `unmatched` records the attempt either way.
+    """
+    tree = _witness_tree(tmp_path)
+    _stage_mirror_refresh(vault)
+    _pin_runs(monkeypatch)
+
+    plain = _probe(tree, vault, tmp_path, paths=[MIRROR_PATH])
+    assert plain["refuse"] is True, plain["reason"]
+    assert plain["nodes"] == [PINNED_NODE], plain["nodes"]
+    assert PINNED_NODE in plain["reason"], plain["reason"]
+    assert plain["ack"] == {"requested": [], "accepted": [], "unmatched": []}, plain["ack"]
+    assert "excused" not in plain, plain
+
+    wrong = _probe(tree, vault, tmp_path, paths=[MIRROR_PATH],
+                   ack=["skills/foo/SKILL.md"])
+    assert wrong["refuse"] is True, wrong["reason"]
+    assert PINNED_NODE in wrong["nodes"], wrong["nodes"]
+    assert PINNED_NODE in wrong["reason"], wrong["reason"]
+    assert wrong["ack"] == {"requested": ["skills/foo/SKILL.md"], "accepted": [],
+                            "unmatched": ["skills/foo/SKILL.md"]}, wrong["ack"]
+    assert "excused" not in wrong, (
+        "an ack for a path outside the land excused nothing, yet something was excused")
+
+
+def test_an_ack_never_excuses_a_node_whose_file_does_not_read_the_landed_path(
+        monkeypatch, tmp_path, vault):
+    """Clause 2's scope: a land that refreshes a pinned witness AND breaks an unrelated guard
+    is excused for the first and still refused for the second.
+
+    Scoping is by what the failing node's own file NAMES, because that is the only difference
+    between "this figure is stale until the same commit re-derives it" and "this land broke
+    something". `tests/test_unrelated_guard.py` reads a vault root and never names
+    `promotions.jsonl`, so it stays
+    in `nodes` while its sibling is excused — and the refusal counts what was excused, so a
+    partial excuse cannot read as a clean pass.
+    """
+    tree = _witness_tree(tmp_path)
+    _stage_mirror_refresh(vault)
+    _pin_runs(monkeypatch, breaks_sibling=True)
+
+    report = _probe(tree, vault, tmp_path, paths=[MIRROR_PATH], ack=[MIRROR_PATH])
+    assert report["refuse"] is True, report["reason"]
+    assert report["excused"] == [PINNED_NODE], report.get("excused")
+    assert report["nodes"] == [UNRELATED_NODE], report["nodes"]
+    assert str(len(report["excused"])) in report["reason"], report["reason"]
+
+
+def test_a_land_that_proceeds_on_an_ack_carries_it_and_the_excused_ids_on_its_row(
+        monkeypatch, vault):
+    """Clause 3: an excused failure is never silent — the row carries the ack, the node ids it
+    excused, and the probe's denominator beside them.
+
+    `land()` runs for real over a `VG.agreement` stub shaped like a successful excuse, so what
+    is graded is the projection into the ledger row: `guards.ack.accepted`, `guards.excused`,
+    `guards.candidate` `ran`/`failed` and `guards.baseline.ran` on ONE row. The second half
+    drives the mixed report — one id excused, one still unanswered — and asserts the land is
+    refused with both still on the row, because an excuse that swallowed a real failure is
+    exactly the silence this clause is written against.
+    """
+    (vault / "backlog" / "data").mkdir(parents=True, exist_ok=True)
+    (vault / MIRROR_PATH).write_text('{"event": "landed", "n": 0}\n', encoding="utf-8")
+    checked = {"state": "checked", "refuse": False, "reason": "1 excused", "nodes": [],
+               "excused": [PINNED_NODE],
+               "ack": {"requested": [MIRROR_PATH], "accepted": [MIRROR_PATH],
+                       "unmatched": []},
+               "candidate": {"ran": 3774, "failed": [PINNED_NODE, UNRELATED_NODE],
+                             "seconds": 156.0, "files": ["tests/test_guard.py"]},
+               "baseline": {"ran": 3774, "failed": [UNRELATED_NODE], "seconds": 12.0},
+               "seconds": 211.8}
+    mixed = {**checked, "refuse": True, "nodes": [UNRELATED_NODE],
+             "reason": "1 new failure after 1 were excused"}
+    seen: dict = {}
+
+    def agree(*, paths, **kw):
+        seen.clear()
+        seen.update(kw, paths=list(paths))
+        return dict(mixed if agree.refuse else checked)
+
+    agree.refuse = False
+    monkeypatch.setattr(VG, "agreement", agree)
+    out = V.land([MIRROR_PATH], "refresh the pinned witness", item_id=9,
+                 ack=[MIRROR_PATH])
+    assert out["ok"] is True, out
+    row = _events("vault_land")[-1]
+    assert row["ok"] is True and row["item_id"] == 9, row
+    guards = row["guards"]
+    assert guards["ack"] == {"requested": [MIRROR_PATH], "accepted": [MIRROR_PATH],
+                             "unmatched": []}, guards
+    assert guards["excused"] == [PINNED_NODE], guards
+    assert (guards["candidate"]["ran"], guards["candidate"]["failed"]) == (3774, 2), guards
+    assert guards["candidate"]["seconds"] == 156.0, guards
+    assert guards["baseline"]["ran"] == 3774, guards
+    assert guards["refuse"] is False and guards["state"] == "checked", guards
+
+    agree.refuse = True
+    with pytest.raises(V.VaultRoundError):
+        V.land([MIRROR_PATH], "refresh the pinned witness, refused", item_id=9)
+    refused = _events("vault_land")[-1]
+    assert refused["ok"] is False, refused
+    assert refused["guards"]["excused"] == [PINNED_NODE], refused["guards"]
+    assert refused["guards"]["nodes"] == [UNRELATED_NODE], refused["guards"]
+
+
+def test_land_asks_the_probe_about_its_paths_and_the_ack_and_nothing_that_moves_it(
+        monkeypatch, vault):
+    """Clause 4: `land()` hands the probe its paths and the ack and NOTHING that re-points the
+    probe at a tree, so the probe keeps judging HEAD's code.
+
+    Two halves, both about the hole #2036 closed. The call `land()` really makes carries no
+    `live_root`, so no caller can aim the probe at a candidate checkout and have it agree with
+    itself; and `land` takes no such parameter, so there is no keyword that gets there. The ack
+    is the only new door and it buys a narrower thing.
+    """
+    import inspect
+
+    (vault / "backlog" / "data").mkdir(parents=True, exist_ok=True)
+    (vault / MIRROR_PATH).write_text('{"event": "landed", "n": 0}\n', encoding="utf-8")
+    seen: dict = {}
+
+    def agree(*, paths, **kw):
+        seen.clear()
+        seen.update(kw, paths=list(paths))
+        return {"state": "checked", "refuse": False, "reason": "", "nodes": []}
+
+    monkeypatch.setattr(VG, "agreement", agree)
+    V.land([MIRROR_PATH], "a land with an ack", item_id=9, ack=[MIRROR_PATH])
+
+    assert "live_root" not in seen, (
+        f"land() handed the probe a tree to judge: {sorted(seen)} — it must judge HEAD, "
+        "which is the hole #2036 closed")
+    assert seen["paths"] == [MIRROR_PATH], seen
+    assert seen["ack"] == [MIRROR_PATH], seen
+    assert "live_root" not in inspect.signature(V.land).parameters, (
+        "land() must not accept a tree for the probe to judge")
+
+    # And a land WITHOUT an ack makes byte-identically the call it made before this
+    # parameter existed, so the door is narrower than "always pass something".
+    seen.clear()
+    (vault / "backlog" / "9-item.md").write_text("---\nstatus: done\n---\n# 9\n")
+    V.land(["backlog/9-item.md"], "a land with no ack", item_id=10)
+    assert set(seen) == {"paths"}, (
+        f"an unacknowledged land changed the probe call: {sorted(seen)}")

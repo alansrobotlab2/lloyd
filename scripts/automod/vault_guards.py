@@ -627,7 +627,52 @@ def _prune_leaked_scratch(parent: Path) -> int:
     return n
 
 
-def agreement(*, paths: list[str], live_root: Path | None = None,
+def accepted_ack(ack: list[str] | None, paths: list[str]) -> tuple[list[str], list[str]]:
+    """Split an acknowledgement into entries that name a path THIS land declares, and ones that do not.
+
+    The whole safety of the excuse rests on this split: an ack only ever speaks for paths the
+    landing itself is about to commit. An entry naming anything else — a path nobody is
+    landing, or one the caller hopes will be landed later — is recorded and void, so a caller
+    cannot pre-authorise a future disagreement, and cannot excuse a vault change that breaks a
+    guard about some file this land never touched.
+    """
+    declared = list(paths)
+    accepted = [p for p in (ack or []) if p in declared]
+    unmatched = [p for p in (ack or []) if p not in declared]
+    return accepted, unmatched
+
+
+def excused_ids(new: list[str], ack_accepted: list[str], tree: Path) -> list[str]:
+    """Which newly-failing nodes an accepted ack speaks for — and which it therefore cannot.
+
+    A node is excused only when the test file it lives in NAMES the acknowledged file
+    (`promotions.jsonl`, say, not the whole vault-relative path: the pinned witnesses read it
+    as `vault_root() / "backlog" / "data" / _WITNESS`, so the basename is the token that
+    actually appears in the source). That is the difference between the two shapes the probe
+    sees: a guard that reads the file being refreshed and disagrees because its pinned figure
+    is stale, and a guard broken by the land itself. Only the first is excusable, and the
+    second is what the probe exists to catch — an ack on a ledger cannot speak for a node that
+    never reads a ledger.
+
+    A file that cannot be read excuses nothing. Silence is the failure, not the skip.
+    """
+    if not ack_accepted or not new:
+        return []
+    tokens = {Path(p).name for p in ack_accepted if Path(p).name}
+    out: list[str] = []
+    for node_id in new:
+        rel = str(node_id).split("::", 1)[0]
+        try:
+            text = (tree / rel).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if any(tok in text for tok in tokens):
+            out.append(node_id)
+    return out
+
+
+def agreement(*, paths: list[str], ack: list[str] | None = None,
+              live_root: Path | None = None,
               live_vault: Path | None = None, python: Path | None = None,
               scratch_parent: Path | None = None, timeout: float = PROBE_TIMEOUT_SECONDS,
               mark_expr: str | None = None) -> dict:
@@ -637,6 +682,19 @@ def agreement(*, paths: list[str], live_root: Path | None = None,
     written into the live vault, which is what makes this the only moment the
     question can be asked: after the commit the vault has no "before" to compare
     against, and before the edit there is nothing to judge.
+
+    `ack` is this module's ONE excuse, and it is narrow by construction: a list of
+    vault-relative paths whose pinned witness the SAME change is re-deriving. #2047 is the
+    shape it exists for — `backlog/data/promotions.jsonl` is a copy of the live promotions
+    ledger, `tests/test_retention_sweep.py` pins figures measured FROM that copy, and no
+    ordering lets both move together: bytes first, and HEAD's code disagrees with the new
+    bytes; pins first, and the candidate disagrees with the bytes still on disk. An
+    acknowledged path must be one this land declares (`accepted_ack`), it speaks only for
+    nodes whose own test file names that file (`excused_ids`), and every node it excuses goes
+    on the report — and therefore on the ledger row — with its id, so an excused failure is
+    recorded rather than quiet. Everything else about the probe is unchanged: it still judges
+    HEAD's code, it still builds the proposal by putting these paths back, and an
+    unacknowledged disagreement still refuses.
 
     `timeout` is the WHOLE probe: the queue for the gate's tests lock and every
     pytest run together — the proposed-vault run, the serial re-ask of its
@@ -675,6 +733,15 @@ def agreement(*, paths: list[str], live_root: Path | None = None,
     report: dict = {"state": "skipped", "refuse": False, "reason": "", "nodes": [],
                     "tree": {}, "files": [],
                     "excerpt": "", "seconds": 0.0, "lock_wait_s": 0.0}
+
+    # The ack is split BEFORE anything runs, and both halves ride on the report: an entry
+    # naming a path this land does not declare is a caller reaching for an excuse it has no
+    # standing to give, and that attempt is worth reading on the row later. It is seeded here
+    # rather than only when an ack is supplied because a `checked` row with no `ack` key must
+    # mean "no ack was asked for", the same no-placeholder rule as `candidate`/`baseline`.
+    _accepted, _unmatched = accepted_ack(ack, list(paths))
+    report["ack"] = {"requested": list(ack or []), "accepted": _accepted,
+                     "unmatched": _unmatched}
 
     def done(**kw) -> dict:
         report.update(kw)
@@ -881,11 +948,35 @@ def agreement(*, paths: list[str], live_root: Path | None = None,
             return done(reason=(f"the pre-land run answered nothing, so a failure "
                                 f"cannot be attributed to this land: {base['note']}"))
         new = [n for n in still_failed if n not in set(base["failed"])]
+        excused = excused_ids(new, report["ack"]["accepted"], tree)
+        if excused:
+            report["excused"] = excused
+            new = [n for n in new if n not in set(excused)]
         if not new:
+            if excused:
+                return done(state="checked", refuse=False,
+                            reason=(f"{len(excused)} new failure(s) excused by an "
+                                    f"acknowledged pinned-witness refresh over "
+                                    f"{', '.join(report['ack']['accepted'])} — the nodes "
+                                    "read that file and their expected figures move with "
+                                    "it, and each id is on this row"))
             return done(state="checked", refuse=False,
                         reason=(f"{len(still_failed)} failing node(s) fail against the "
                                 f"pre-land vault too — pre-existing, not this land"))
-        return done(state="checked", refuse=True, nodes=new)
+        if excused:
+            return done(state="checked", refuse=True, nodes=new,
+                        reason=(f"{len(new)} new failure(s) this land has to answer, "
+                                f"after {len(excused)} were excused by the ack over "
+                                f"{', '.join(report['ack']['accepted'])}: "
+                                + "; ".join(new)))
+        # The ids belong in `reason` too, not only in `nodes`: the ledger row's `reason`
+        # is the field a reader of `promotions.jsonl` actually reads, and a refusal whose
+        # prose says only "3 new failure(s)" sends them back to the run log for the thing
+        # the report already knows.
+        return done(state="checked", refuse=True, nodes=new,
+                    reason=(f"{len(new)} new failure(s) against the proposed vault; a "
+                            "code assertion disagrees with the change being landed: "
+                            + "; ".join(new)))
     finally:
         if slot is not None:
             slot.release()

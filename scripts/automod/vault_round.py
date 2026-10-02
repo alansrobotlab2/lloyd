@@ -688,6 +688,21 @@ def _guards_row(guards: dict) -> dict:
         for k in ("seconds", "files"):
             if base.get(k) is not None:
                 out["baseline"][k] = base[k]
+    ack_row = guards.get("ack")
+    if ack_row and (ack_row.get("requested") or ack_row.get("accepted")
+                    or ack_row.get("unmatched")):
+        # The attempt, what it bought, and what it could not buy — all three, because an
+        # excuse that is only visible when it succeeds is indistinguishable from a probe
+        # that quietly agreed. `unmatched` entries are the ones naming a path this land does
+        # not declare: recorded, void, and readable on the row that was refused or landed.
+        out["ack"] = {"requested": list(ack_row.get("requested") or []),
+                      "accepted": list(ack_row.get("accepted") or []),
+                      "unmatched": list(ack_row.get("unmatched") or [])}
+    if guards.get("excused"):
+        # Every node the ack spoke for, by id. This is the clause: an excused failure is
+        # never silent, so a later reader of the ledger can see exactly which code-side
+        # guard was told to move with the bytes, and go re-measure it.
+        out["excused"] = list(guards["excused"])
     retry = guards.get("parallel_retry")
     if retry:
         # Written only when a re-ask ran, so an absent key means the probe never
@@ -713,7 +728,7 @@ def _guards_row(guards: dict) -> dict:
 
 
 def land(paths: list[str], message: str, *, item_id: int | None = None,
-         session_id: str | None = None) -> dict:
+         session_id: str | None = None, ack: list[str] | None = None) -> dict:
     """Validate these paths, commit exactly them on the vault's main, ledger it.
 
     `session_id` is the calling turn's session and it goes on the `vault_land`
@@ -853,7 +868,17 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
     # abstention above, because holding the vault route hostage to a subprocess it
     # does not own is worse than the hole being closed. Silence is what is not
     # allowed: the report, with its denominator, goes on the row whatever it says.
-    guards = VG.agreement(paths=list(norm))
+    # `ack` is the one excuse this route has, and it is passed THROUGH rather than
+    # interpreted here: `accepted_ack` decides which entries speak for this land, and
+    # `excused_ids` decides which nodes they speak for. What is deliberately NOT passed is
+    # `live_root` — the probe keeps judging HEAD's code, which is the hole #2036 closed, and a
+    # caller that could point it at a candidate tree could make any land agree with itself.
+    # An unacknowledged land makes byte-identically the call it made before this parameter
+    # existed — `tests/test_automod_vault_round.py::
+    # test_the_code_agreement_call_carries_no_surface_and_no_item` pins that keyword set as
+    # exactly {"paths"}, and it should keep failing for anything that leaks into the probe.
+    guards = VG.agreement(paths=list(norm),
+                          **({"ack": [str(a) for a in ack]} if ack else {}))
     if guards.get("refuse"):
         undone = revert_paths(list(norm))
         S.append_event({"event": "vault_land", "ok": False, "item_id": item_id,
