@@ -314,6 +314,51 @@ def _promoter_cannot_reach_the_live_backend(monkeypatch):
         pass
 
 
+@pytest.fixture(autouse=True)
+def _review_grader_cannot_reach_the_live_backend(monkeypatch):
+    """No test posts a grading turn to the RUNNING backend.
+
+    On 2026-10-01 `automod.review.confirm` went to `shadow` in config.yaml
+    (#2017). The review-rung tests stub the first reader (`RV.grade`) and were
+    written while the policy was off, so none of them stubbed the second one:
+    from that commit on, every refusal a fixture staged went through
+    `Gate._review_confirm` to the real `review.run_grader`, which resolves the
+    LIVE backend and writes its session into the live data root. 705 turns and
+    32.3M input tokens in one day, 35-50 per gate `tests` run, each a worker
+    session titled `review #7 (SM_REV)` grading "the thing happens once"
+    against `(no diff)` — and nothing read the votes, because the same tests
+    stub the ledger.
+
+    The tripwire: `review.backend_url` is how `run_grader` and `cancel_grader`
+    find the live backend when a caller named none, and it is the first thing
+    `run_grader` does — before the session file. `pytest.fail` rather than a
+    raise, because `review.confirm_refusal` reads a reader that raised as
+    "upheld" and the test would pass having learned nothing. Not the discard
+    port the promoter fixture uses: `run_grader` retries a refused connection.
+    A test about the transport passes `backend=` or replaces `run_grader`.
+
+    And the policy those tests assumed is pinned rather than inherited: the
+    suite reads `automod.review.confirm` as `off`, the code default, whatever
+    config.yaml carries this week. A test about `shadow` or `on` replaces
+    `app.config.CONFIG` itself, after this fixture, and wins.
+    """
+    try:
+        from app import config as C
+        from scripts.automod import review as RV
+    except Exception:
+        return
+    automod = dict(C.CONFIG.get("automod") or {})
+    automod["review"] = {**(automod.get("review") or {}), "confirm": RV.CONFIRM_OFF}
+    monkeypatch.setitem(C.CONFIG, "automod", automod)
+
+    def _refuse(root=None):
+        pytest.fail("a test reached scripts.automod.review.backend_url with no stub: it was "
+                    "about to POST to the live backend. Replace `RV.run_grader` (or pass "
+                    "`backend=`) — see _review_grader_cannot_reach_the_live_backend.")
+
+    monkeypatch.setattr(RV, "backend_url", _refuse)
+
+
 #: The commands a test must never be allowed to execute (#1853). Chosen by COMMAND
 #: name, never by a later token: `app/harness/service_control.py:186` (systemctl) and
 #: `:202` (pkill/killall) reduce an argv to a verdict the same way on the production
