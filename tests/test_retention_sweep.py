@@ -10,6 +10,7 @@ of the wrong tree (`#1415`); see the section at the bottom of this file.
 """
 import gzip
 import importlib.util
+import inspect
 import json
 import os
 import re
@@ -1661,10 +1662,10 @@ def test_the_bare_invocation_deletes_the_pair_it_resolves(tmp_path):
     assert "0 deleted" in _groundskeeper_line(again.stdout)
 
 
-def test_the_skill_says_twelve_stores_and_its_table_has_a_row_per_report_line(
+def test_the_skill_says_thirteen_stores_and_its_table_has_a_row_per_report_line(
         rs, _store_report):
-    """Clause 4: `skills/retention-sweep/SKILL.md` says twelve, and its table's rows are
-    the report's lines.
+    """Clause 4: `skills/retention-sweep/SKILL.md` says thirteen, and its table's rows
+    are the report's lines.
 
     The table is the operator's list of what the weekly sweep bounds, and it said nine
     with the groundskeeper queue bounded by nothing — so a reader who saw `0 deleted`
@@ -1675,8 +1676,8 @@ def test_the_skill_says_twelve_stores_and_its_table_has_a_row_per_report_line(
     It went stale anyway, in the direction this node was blind to: #1644 added two
     stores and the prose stayed at ten for nine commits, because the count of report
     lines came from the suffix selector that could not see them (`#1835`). The report
-    side of the comparison is now the `_store_report` fixture — the twelve lines
-    `main()` prints with both automod rungs in play — so this node reads one
+    side of the comparison is now the `_store_report` fixture — the thirteen lines
+    `main()` prints with all three automod rungs in play — so this node reads one
     measurement, not two.
     """
     skill = rs.vault_root() / "skills" / "retention-sweep" / "SKILL.md"
@@ -1691,13 +1692,13 @@ def test_the_skill_says_twelve_stores_and_its_table_has_a_row_per_report_line(
             and not ln.split("|")[1].strip().lower().startswith("store")}
 
     report = _store_report
-    assert len(report) == 12, f"the sweep prints {len(report)} store lines: {report}"
+    assert len(report) == 13, f"the sweep prints {len(report)} store lines: {report}"
     assert len(rows) == len(report), (
         f"the skill lists {len(rows)} stores against {len(report)} report lines: "
         f"{sorted(rows)}")
-    assert "twelve unbounded-growth stores" in text, (
-        "the skill's description states a store count other than twelve")
-    assert "twelve in all" in text, "the skill's body states a store count other than twelve"
+    assert "thirteen unbounded-growth stores" in text, (
+        "the skill's description states a store count other than thirteen")
+    assert "thirteen in all" in text, "the skill's body states a store count other than thirteen"
 
     pair_row = next((ln for store, ln in rows.items()
                      if "groundskeeper-queue.json" in store), None)
@@ -1729,6 +1730,18 @@ def test_the_skill_says_twelve_stores_and_its_table_has_a_row_per_report_line(
     assert "due_ruling" in branch_row, branch_row
     assert f"{rs.BRANCH_UNREACHABLE_HOLD_DAYS}d" in branch_row, branch_row
     assert str(rs.BRANCH_UNREACHABLE_REOPEN_TIPS) in branch_row, branch_row
+
+    # The store #1975 added, and the one the two rows above read on every pass. Its row
+    # has to name both the window and the archive it moves rows into, because "archived"
+    # and "deleted" are different promises and the table is where an operator reads which
+    # one the weekly run makes.
+    ledger_row = next((ln for store, ln in rows.items()
+                       if "promotions.jsonl" in store), None)
+    assert ledger_row is not None, (
+        f"no row names the promotion ledger the sweep now bounds: {sorted(rows)}")
+    assert "LEDGER_ARCHIVE_AGE_DAYS" in ledger_row, ledger_row
+    assert f">{rs.LEDGER_ARCHIVE_AGE_DAYS}d" in ledger_row, ledger_row
+    assert "promotions-archive-" in ledger_row, ledger_row
     assert str(rs.BRANCH_UNREACHABLE_REOPEN_GIT_MB) in branch_row, branch_row
 
     # And what a run from anywhere else prints, since that reader holds a report
@@ -1769,13 +1782,14 @@ _STORE_ORDER_ANCHOR = "in this order:"
 _STORE_ORDER_TAIL = "Report all"
 _STORE_COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
                       "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
-                      "twelve": 12, "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6,
-                      "7": 7, "8": 8, "9": 9, "10": 10, "11": 11, "12": 12}
+                      "twelve": 12, "thirteen": 13, "1": 1, "2": 2, "3": 3, "4": 4,
+                      "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10, "11": 11,
+                      "12": 12, "13": 13}
 
 
 #: The only two indented report lines that are not a store: the header naming the root
-#: the numbers describe, and the one line a refused automod rung prints in place of its
-#: two stores. Everything else `main()` indents is a store line, whatever it ends in.
+#: the numbers describe, and the one line a refused automod run prints in place of its
+#: three stores. Everything else `main()` indents is a store line, whatever it ends in.
 _NON_STORE_REPORT_PREFIXES = ("data root:", "automod stores:")
 
 
@@ -1790,7 +1804,8 @@ def _store_report_lines(out: str) -> list[str]:
     * **false green.** The two stores #1644 added print `~/lloyd-work round dirs >7d: …
       (kept: …)` and `automod/* branches >30d & ancestor of main: …`, and matched no
       suffix, so the selector reported ten stores against the twelve lines the sweep
-      printed and every count comparison below agreed with stale prose instead of the
+      printed then (thirteen today, with #1975's ledger) and every count comparison below
+      agreed with stale prose instead of the
       report (`#1835`).
     * **false red.** The lock-skip forms print `workers.db runs >30d: SKIPPED (database
       locked …) — nothing pruned` and the automod equivalents end `— nothing reclaimed` /
@@ -1811,8 +1826,8 @@ def _store_report_lines(out: str) -> list[str]:
 
 def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
         rs, _store_report):
-    """#1835 clause 1: the twelve lines `main()` prints are twelve stores, and the two
-    the loop leaves outside the data root are among them.
+    """#1835 clause 1: the thirteen lines `main()` prints are thirteen stores, and the
+    three the loop leaves outside the data root are among them.
 
     This is the acceptance check itself, run against the real `main()`: the count a
     full sweep reports, taken through the selector every count comparison in this file
@@ -1821,9 +1836,9 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
     twelve lines and the guard said ten for nine commits, agreeing with stale prose
     rather than with the script.
     """
-    assert len(_store_report) == 12, (
-        f"the sweep prints {len(_store_report)} store lines, not the twelve its report "
-        f"has since #1644: {_store_report}")
+    assert len(_store_report) == 13, (
+        f"the sweep prints {len(_store_report)} store lines, not the thirteen its report "
+        f"has had since #1975 added the promotion ledger: {_store_report}")
 
     printed = [ln.split(":")[0] for ln in _store_report]
     dirs_line = f"~/lloyd-work round dirs >{rs.WORKTREE_DIR_MAX_AGE_DAYS}d"
@@ -1832,15 +1847,20 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
     assert dirs_line in printed, f"the round-directory store is not in the report: {printed}"
     assert branch_line in printed, f"the round-branch store is not in the report: {printed}"
 
-    # The mechanism of the drift, pinned rather than narrated: the only lines the OLD
-    # suffix rule could not see are exactly these two. `len(report) == 12` alone would
-    # still pass if somebody reintroduced a suffix test alongside a wording change, and
-    # it is the coincidence of a store line's wording with a store line's identity that
-    # made the count unreadable in the first place.
+    # The mechanism of the drift, pinned rather than narrated: the lines the OLD suffix
+    # rule could not see are exactly these three. `len(report) == 13` alone would still
+    # pass if somebody reintroduced a suffix test alongside a wording change, and it is
+    # the coincidence of a store line's wording with a store line's identity that made the
+    # count unreadable in the first place. The third is #1975's ledger line, which ends in
+    # a byte count and so is invisible to that selector too — the set grows when a store
+    # is added, which is the point of naming it rather than counting it.
+    ledger_line = "promotions ledger"
+    assert ledger_line in printed, f"the promotion ledger is not in the report: {printed}"
     invisible = [ln for ln in _store_report
                  if not ln.endswith(("freed", "candidate", "removed (keep last 200)"))]
     assert sorted(ln.split(":")[0] for ln in invisible) == sorted([dirs_line,
-                                                                  branch_line]), (
+                                                                  branch_line,
+                                                                  ledger_line]), (
         "these store lines are invisible to an endswith(('freed','candidate',"
         "'removed (keep last 200)')) rule, which is how #1835's drift happened: "
         f"{[ln.split(':')[0] for ln in invisible]}")
@@ -1888,14 +1908,21 @@ def test_a_run_outside_the_production_checkout_reports_ten_stores_and_one_refusa
     """The other direction of the same rule: a refused rung prints one refusal line, and
     that line is not a store.
 
-    Outside the production checkout both automod rungs collapse into
+    Outside the production checkout all three automod rungs collapse into
     `  automod stores: REFUSED: …`, so a reader holding that output sees ten store lines
-    while the skill says twelve — and SKILL.md now says so in those words. This pins the
+    while the skill says thirteen — and SKILL.md now says so in those words. This pins the
     fact that sentence describes, so the note cannot rot into the reassuring half (just
-    "twelve", which makes every sandbox run look like it lost two stores) or the alarming
-    half ("the sweep is broken"). `test_an_automod_rung_refuses_outside_the_production_checkout`
+    "thirteen", which makes every sandbox run look like it lost three stores) or the
+    alarming half ("the sweep is broken"). `test_an_automod_rung_refuses_outside_the_production_checkout`
     owns the predicate itself and the `NOT_PRODUCTION_EXIT` half; what is new here is the
     COUNT, which is the number a report is written from.
+
+    The ledger rung is inside this guard too, and deliberately so: it rewrites no ref, so
+    the predicate's original reason (a worktree shares the live repo's refs) does not
+    literally cover it, but a tree that is not the live checkout has no business deciding
+    to compress the loop's own audit trail, and one guard that covers all three stores is
+    the rule. A refused run therefore still prints ten lines plus one refusal line, not
+    eleven.
     """
     out = _dry_run_report(rs, monkeypatch, capsys, refused=True)
     report = _store_report_lines(out)
@@ -2026,14 +2053,15 @@ def _dry_run_report(rs, monkeypatch, capsys, *, refused: bool = False) -> str:
 
     `refused=True` stands in for the one tree this suite cannot itself be: a run
     somewhere that is not the production checkout, where `automod_rung_refusal` declines
-    both automod rungs because a round's worktree shares the live repository's refs. The
-    plain `rs` fixture already answers that question *yes* — deliberately, over
+    all three automod rungs because a round's worktree shares the live repository's refs.
+    The plain `rs` fixture already answers that question *yes* — deliberately, over
     redirected constants, so a node about `sessions/*.json` does not end on exit 2 for a
-    branch delete it never asked about — which is what lets the twelve lines below be
+    branch delete it never asked about — which is what lets the thirteen lines below be
     produced from `tmp_path` alone: `AUTOMOD_WORK_ROOT` is an empty directory,
-    `AUTOMOD_REPO` an empty repository, and the ledger trio absent files, so the two
-    rungs are reading a machine that has never run the loop. This is a dry run, which
-    deletes nothing from any tree by design (#1415).
+    `AUTOMOD_REPO` an empty repository, and the ledger trio absent files, so all three
+    rungs are reading a machine that has never run the loop, and the ledger rung has no
+    file to archive. This is a dry run, which deletes nothing from any tree by design
+    (#1415).
     """
     if refused:
         monkeypatch.setattr(rs, "automod_rung_refusal", lambda tree=None: _REFUSAL_SENTENCE)
@@ -2097,7 +2125,7 @@ def test_the_task_description_names_every_store_the_sweep_prints(
 
     items = _assert_description_names_the_reported_stores(description, _store_report,
                                                           "autonomy/79-retention-sweep.md")
-    assert len(items) == len(_store_report) == 12, (
+    assert len(items) == len(_store_report) == 13, (
         f"the guard compared {len(items)} items against {len(_store_report)} lines")
 
     # Clause 5 of #1835: the two stores the self-modification loop leaves behind it are
@@ -2138,24 +2166,32 @@ def test_the_store_count_guard_refuses_a_description_that_disagrees_with_the_rep
     mismatch and not about the guard's shape.
     """
     labels = [_store_label(line) for line in _store_report]
-    good = ("The script is the only actor. twelve stores are bounded, and the report "
-            "names them in this order: "
+    # The count word is read off the lines the sweep printed, never written here: this
+    # fixture is the control that says the guard's shape is sound, and a control whose own
+    # number is hand-copied goes stale in exactly the way it exists to detect (#1835's
+    # twelve-line drift reached the fixture too, when the report went from twelve stores to
+    # thirteen with #1975's ledger).
+    count_word = next(word for word, n in _STORE_COUNT_WORDS.items()
+                      if n == len(labels) and not word.isdigit())
+    good = (f"The script is the only actor. {count_word} stores are bounded, and the "
+            "report names them in this order: "
             + "; ".join(f"{i + 1} {lab}, bounded at the window in the line"
                         for i, lab in enumerate(labels))
-            + ". Report all twelve lines.")
+            + f". Report all {count_word} lines.")
     _assert_description_names_the_reported_stores(good, _store_report, "control fixture")
 
-    # (a) the #1734 drift itself, one store-count down: the prose says nine where twelve
-    # lines are printed. It is stated as a `replace` off the control, so this fixture
-    # cannot keep passing on a stale count of its own if the report grows again.
-    nine = good.replace("twelve stores are bounded", "nine stores are bounded")
+    # (a) the #1734 drift itself, one store-count down: the prose says nine where the
+    # sweep prints what it prints. Both the control and the lie are stated as a `replace`
+    # off the same string, so this fixture cannot keep passing on a stale count of its own
+    # if the report grows again.
+    nine = good.replace(f"{count_word} stores are bounded", "nine stores are bounded")
     with pytest.raises(AssertionError, match="says nine") as raised:
         _assert_description_names_the_reported_stores(nine, _store_report, "fixture nine")
-    assert "12 store lines" in str(raised.value), raised.value
+    assert f"{len(_store_report)} store lines" in str(raised.value), raised.value
 
     # (b) the same lie on the instruction half only: counts in prose fixed, the
     # sentence the worker obeys left at nine.
-    tell_nine = good.replace("Report all twelve lines", "Report all nine lines")
+    tell_nine = good.replace(f"Report all {count_word} lines", "Report all nine lines")
     with pytest.raises(AssertionError, match="says nine"):
         _assert_description_names_the_reported_stores(tell_nine, _store_report,
                                                       "fixture report-all")
@@ -3172,3 +3208,905 @@ def test_the_reworded_line_still_reports_only_what_the_rung_counted(rs, automod,
     assert "0 past 90d" in line, line
     assert "automod/SM_LANDED_ONLY" in _branches(automod), (
         "the dry run whose line this node rewords went and deleted the branch it counted")
+
+
+# ===========================================================================
+# The promotion ledger's archive-out rung (#1975, clauses 1-4 and clause 6)
+#
+# The rung exists because the loop's own audit trail outgrew every bound: 32 MB,
+# ~28,600 rows, +2 MB a day, decoded whole by `board_health()` on every dashboard
+# cycle and pruned by nothing. Every node below drives the SHIPPED
+# `sweep_promotions_ledger` over a fixture ledger and reads the result dict and the
+# resulting bytes. The review of the previous round found the mechanism sound in code
+# and pinned nowhere, and a mechanism nothing drives is a mechanism that can be edited
+# into something else without a test noticing.
+# ===========================================================================
+
+#: Ages used by these nodes. 45 is past the 30-day window with room to spare; 80 puts a
+#: row in a DIFFERENT month, which is the only way to tell a bucket named from a row's
+#: age from one named from the wall clock; 5 is nowhere near it.
+_OLD = 45.0
+_OTHER_MONTH = 80.0
+_YOUNG = 5.0
+
+#: The witness #1975 committed, at the path clause 6 names it by.
+_WITNESS = "promotions.jsonl"
+
+#: What those bytes are, measured with `wc -l` and `stat -c %s` on the committed copy at
+#: vault commit `4bc93177` (`#1975 clause 6: put the ledger witness at the path the clause
+#: names`): 28,678 lines, 33,113,707 bytes, 61 distinct `event` values, oldest `created_at`
+#: 2026-09-06T17:27:02Z. Equality, not a range or a floor: the review of the last round
+#: refused both (`28,500 < rows <= 32,000`, and `rows >= 28_476`), because a re-copy of a
+#: DIFFERENT ledger satisfies either, and then the figure the item quotes and the figure the
+#: node printed are two numbers about two files and nothing says so.
+#:
+#: Written WITHOUT digit separators on purpose: the last round's proving command was
+#: `git grep -n 28678 tests/test_retention_sweep.py`, which `28_678` does not satisfy.
+_WITNESS_ROWS = 28678
+_WITNESS_BYTES = 33113707
+
+#: The distinct `event` values in the witness, which is what
+#: `test_a_fold_of_every_event_name_in_the_witness_stays_neutral` iterates. Quoted here
+#: because clause 6 asks for the report to be DERIVED from the bytes: the count comes out of
+#: the file below and this is the figure it has to keep matching.
+_WITNESS_EVENT_NAMES = 61
+
+#: The day of the witness's oldest `created_at` (`2026-09-06T17:27:02Z`), the figure every
+#: "rows past 30 days = 0" claim on the item rests on.
+_WITNESS_OLDEST_DAY = "2026-09-06"
+
+
+def _fold_row(ts: float, *, event: str = "gate", **extra) -> bytes:
+    """One raw ledger line as written bytes: `ts` plus `created_at` plus `event`.
+
+    Returned as BYTES because the rung's promise is byte-exactness. A fixture that built
+    a dict, let the rung re-serialise it, and compared dicts would pass on a rewrite that
+    reordered keys or dropped a field — and after a move the archive is the only place
+    that row will ever live. Both age fields are present because `_settle_times` answers
+    from `ts` while the month bucket is named after `created_at`; a row carrying one and
+    not the other exercises a fallback rather than the store.
+    """
+    row = {"ts": ts,
+           "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts)),
+           "event": event}
+    row.update(extra)
+    return (json.dumps(row) + "\n").encode()
+
+
+def _write_ledger(rs, rows: list[bytes]) -> list[bytes]:
+    """Seed the fixture ledger with raw lines and hand the same list back."""
+    rs.AUTOMOD_LEDGER.parent.mkdir(parents=True, exist_ok=True)
+    rs.AUTOMOD_LEDGER.write_bytes(b"".join(rows))
+    return rows
+
+
+def _archives(rs) -> list[Path]:
+    return sorted(rs.AUTOMOD_LEDGER.parent.glob(
+        f"{rs.LEDGER_ARCHIVE_PREFIX}*.jsonl.gz"))
+
+
+def _gzip_lines(path: Path) -> list[bytes]:
+    with gzip.open(path, "rb") as fh:
+        return list(fh.read().splitlines(keepends=True))
+
+
+def _archived(rs) -> list[bytes]:
+    return [ln for a in _archives(rs) for ln in _gzip_lines(a)]
+
+
+def _live_lines(rs) -> list[bytes]:
+    return list(rs.AUTOMOD_LEDGER.read_bytes().splitlines(keepends=True))
+
+
+def _archive_bytes(rs) -> int:
+    return sum(a.stat().st_size for a in _archives(rs))
+
+
+
+def _neutral_health(ledger, backlog_dir=None):
+    """A `board_health()` stand-in that answers the same thing over any input.
+
+    Clause 4's own words: `health=` is injected so a node does not pay a real board walk —
+    the shipped probe walks a board twice, ~1.4-1.6 s a call even over an EMPTY board, and
+    there are eleven fold nodes here.
+
+    What this is NOT any more: the reason the other nodes needed it. Every fold node used
+    to refuse over the fixture and stay green on the refusal, because the shipped probe
+    asked `board_health()` for its own `time.time()` on each call and the payloads
+    therefore disagreed at `.decisions.window.since`/`.decisions.window.until` — the two
+    window stamps `board_decisions.py:339` writes from `now` — even over BYTE-IDENTICAL
+    bytes. That was a defect in the proof, not a property of a fixture, and it is fixed:
+    the rung now passes its one `now` into both calls. Two nodes drive the shipped path
+    with `health=None` and no injected probe —
+    `test_the_shipped_probe_writes_a_fold_the_board_cannot_see` and
+    `test_the_shipped_probe_refuses_a_fold_that_loses_a_triaged_item` — and they are what
+    says the proof is neither inert in both directions.
+    """
+    return {"triaged": 1, "statuses": {"up_next": 1}}
+
+def test_the_fold_moves_rows_past_the_window_into_their_own_month_bucket(rs, capsys):
+    """Clause 1: what leaves, which bucket it lands in, and that its bytes survive.
+
+    Four rows, chosen so every keep-or-move reason is exercised by one run.
+    `SM_MOVED_BOTH` has two rows past the window in DIFFERENT months (45d and 80d): two
+    buckets is what makes the month observable, because with a single month a name taken
+    from the wall clock passes too. `SM_ONE_KEPT` has one old row, so the newest-of-round
+    rule must hold it back. `SM_STAYS` is inside the window. The archived lines are then
+    compared to the originals byte-for-byte and the live file to the survivors in order,
+    because "recoverable" and "not duplicated" are separate claims one write must satisfy
+    together.
+    """
+    now = time.time()
+    rows = _write_ledger(rs, [
+        _fold_row(now - _OLD * 86400, event="gate", round_id="SM_MOVED_BOTH",
+                  rung="tests"),
+        _fold_row(now - _OTHER_MONTH * 86400, event="review", round_id="SM_MOVED_BOTH",
+                  findings="x" * 4000),
+        _fold_row(now - _OLD * 86400, event="settled", round_id="SM_ONE_KEPT"),
+        _fold_row(now - _YOUNG * 86400, event="gate", round_id="SM_STAYS"),
+        # The two moved rows share a round, so that round needs a NEWER row inside the
+        # window: the newest-of-round rule keeps one row per round, and with only two
+        # rows for `SM_MOVED_BOTH` the 45-day one is its round's newest and stays live.
+        _fold_row(now - _YOUNG * 86400, event="promoted", round_id="SM_MOVED_BOTH"),
+    ])
+    assert time.strftime("%Y%m", time.gmtime(now - _OLD * 86400)) != \
+        time.strftime("%Y%m", time.gmtime(now - _OTHER_MONTH * 86400)), (
+        "this fixture only proves month bucketing when the two ages fall in different "
+        "UTC months; run in the first days of a month and they can coincide")
+
+    out = rs.sweep_promotions_ledger(True, now, health=_neutral_health)
+    capsys.readouterr()
+
+    assert out["moved"] == 2, out
+    assert out["kept_newest"] == 1, out
+    assert out["after"] == out["before"] - len(rows[0]) - len(rows[1]), out
+
+    buckets = [a.name for a in _archives(rs)]
+    assert len(buckets) == 2, (
+        f"two rows from two different months must land in two buckets; got {buckets}")
+    for a in _archives(rs):
+        month = a.name[len(rs.LEDGER_ARCHIVE_PREFIX):-len(".jsonl.gz")]
+        assert month.isdigit() and len(month) == 6, (
+            f"archive named {a.name}: the bucket must be a row's own 6-digit YYYYMM, and "
+            f"a name that is not one is the `promotions-archive-None.jsonl.gz` defect")
+
+    assert _archived(rs) == [rows[1], rows[0]], (
+        "the archived lines must be the originals byte-for-byte, oldest month first")
+    assert _live_lines(rs) == [rows[2], rows[3], rows[4]], (
+        "the live file must hold exactly the survivors in order; a survivor rewritten on "
+        "the way through is a second copy of the file's meaning")
+    line = rs._ledger_line(out)
+    assert line.startswith("  promotions ledger: 2 archived ("), line
+    assert f"{out['before']} -> {out['after']} bytes live)" in line, line
+
+
+def test_a_dry_run_counts_the_same_rows_and_changes_neither_file(rs):
+    """The preview an operator approves against, pinned to the run it previews.
+
+    `0` is not the only number a dry run reports. The failure here is mode-dependent in
+    two directions: an `apply`-only line is invisible to the dry run task #79 shows, and a
+    dry run whose COUNTS differ from the apply's has the operator approve a different run
+    than the one that happens. So both the counts and the untouched bytes are asserted:
+    same `moved`/`bytes`/`kept_newest` from the two modes, and a dry run that leaves the
+    live file and the archive glob exactly as it found them. A preview that gzips is not
+    a preview.
+    """
+    now = time.time()
+    _write_ledger(rs, [
+        _fold_row(now - 41 * 86400, event="gate", round_id="SM_D"),
+        _fold_row(now - 40 * 86400, event="settled", round_id="SM_D"),
+        _fold_row(now - 39 * 86400, event="gate", round_id="SM_E"),
+        _fold_row(now - _YOUNG * 86400, event="gate", round_id="SM_F"),
+    ])
+    live_before = rs.AUTOMOD_LEDGER.read_bytes()
+
+    preview = rs.sweep_promotions_ledger(False, now, health=_neutral_health)
+    assert rs.AUTOMOD_LEDGER.read_bytes() == live_before, "dry run rewrote the ledger"
+    assert not _archives(rs), f"dry run wrote archives: {_archives(rs)}"
+    assert preview["moved"] == 1, preview
+    assert preview["kept_newest"] == 2, preview
+
+    applied = rs.sweep_promotions_ledger(True, now, health=_neutral_health)
+    for key in ("moved", "bytes", "kept_newest"):
+        assert applied[key] == preview[key], (
+            f"dry run and apply disagree on {key}: {preview[key]} vs {applied[key]}")
+
+
+def test_a_second_run_over_the_same_ledger_moves_nothing_and_touches_nothing(rs):
+    """Clause 1's idempotence, measured as unchanged bytes and an unchanged archive.
+
+    `moved == 0` is the cheap half. The half that catches a real bug is that the live byte
+    count is the same number on both sides of the run's own arrow, that the file's bytes
+    are untouched at all (a rewrite with nothing to move is a rewrite with no reason), and
+    that no archive grew a second copy of last week's rows.
+    """
+    now = time.time()
+    _write_ledger(rs, [
+        _fold_row(now - 45 * 86400, round_id="SM_R", event="gate"),
+        _fold_row(now - 44 * 86400, round_id="SM_R", event="settled"),
+        _fold_row(now - 43 * 86400, round_id="SM_S", event="gate"),
+    ])
+    first = rs.sweep_promotions_ledger(True, now, health=_neutral_health)
+    assert first["moved"] == 1 and first["kept_newest"] == 2, first
+
+    size_after = rs.AUTOMOD_LEDGER.stat().st_size
+    live_after = rs.AUTOMOD_LEDGER.read_bytes()
+    archive_after = _archive_bytes(rs)
+    archived_after = _archived(rs)
+
+    second = rs.sweep_promotions_ledger(True, now, health=_neutral_health)
+    assert second["moved"] == 0 and second["archived"] == 0, second
+    assert second["before"] == second["after"] == size_after, second
+    assert rs.AUTOMOD_LEDGER.read_bytes() == live_after, second
+    assert _archive_bytes(rs) == archive_after, (
+        "an idempotent run appended to the archive anyway")
+    assert _archived(rs) == archived_after, "an idempotent run duplicated archived rows"
+    assert "0 archived" in rs._ledger_line(second), rs._ledger_line(second)
+
+
+def test_an_already_archived_row_is_not_written_to_the_gzip_twice(rs, tmp_path):
+    """The archive-side dedupe, driven through the shipped append helper.
+
+    The gzip is written before the live file is renamed, so a run that dies in between
+    leaves rows in both places and the next run must not write a second copy. The helper
+    compares WHOLE lines, not hashes and not field subsets — which is the difference
+    between "the same row" and "a row with the same id": two `gate` events for one round
+    are ordinary, and collapsing them would quietly lose a run's verdicts.
+    """
+    line = _fold_row(time.time() - 45 * 86400, event="gate", round_id="SM_DUP")
+    target = tmp_path / f"{rs.LEDGER_ARCHIVE_PREFIX}202608.jsonl.gz"
+
+    assert rs._archive_append(target, [line]) == 1, "first append must write"
+    assert rs._archive_append(target, [line]) == 0, "the same line must not go twice"
+    assert _gzip_lines(target) == [line], _gzip_lines(target)
+
+    near = json.loads(line)
+    near["ts"] = near["ts"] + 0.5
+    second = (json.dumps(near) + "\n").encode()
+    assert rs._archive_append(target, [second]) == 1, (
+        "a row differing by half a second of `ts` is a different event, not a duplicate "
+        "of the first: the comparison is the whole line")
+    assert len(_gzip_lines(target)) == 2
+def test_a_row_appended_under_the_rewrite_is_grafted_back_before_the_rename(rs):
+    """Clause 2: a concurrent `state.append_event` row survives the rename.
+
+    `on_attempt` is the seam the previous round left for exactly this proof and never
+    used: production passes nothing, and this passes a hook that appends a line the way
+    `append_event` does — after the snapshot was read, before the rename. The rung holds
+    its read position fixed at the snapshot's end for every attempt, so the appended tail
+    is grafted rather than stepped over. Getting that wrong by one seek loses the row with
+    no error anywhere, which is the worst failure a store with an audit duty can have.
+    """
+    now = time.time()
+    keeper = _fold_row(now - 2 * 86400, round_id="SM_LIVE", event="promoted")
+    old = _fold_row(now - 45 * 86400, round_id="SM_LIVE", event="gate")
+    _write_ledger(rs, [old, keeper])
+    appended = _fold_row(now, round_id="SM_LIVE", event="promoted", commit="a" * 40)
+
+    def graft(attempt: int) -> None:
+        # Once, on the first attempt — the shape of one real `append_event` racing the
+        # rewrite. It lands AFTER the rung's read and BEFORE its size re-check, so the
+        # first attempt is refused by design and the graft happens on the retry, which
+        # re-reads the whole tail since the fixed snapshot position. A hook that
+        # appended on every attempt could never settle, which is the other node's job.
+        if attempt == 0:
+            with rs.AUTOMOD_LEDGER.open("ab") as fh:
+                fh.write(appended)
+
+    out = rs.sweep_promotions_ledger(True, now, on_attempt=graft,
+                                   health=_neutral_health)
+
+    assert out["refused"] is None, out
+    assert out["moved"] == 1, out
+    assert _live_lines(rs) == [keeper, appended], (
+        "the file after the rename must be the kept bytes plus every byte appended since "
+        f"the snapshot, verbatim and in that order; got {_live_lines(rs)}")
+    assert _archived(rs) == [old], "the moved row still has to be archived"
+    assert not list(rs.AUTOMOD_LEDGER.parent.glob(
+        f".{rs.AUTOMOD_LEDGER.name}.archiving")), "the temp file outlived the rename"
+
+
+def test_a_ledger_that_never_settles_refuses_and_leaves_the_live_file_alone(rs):
+    """Clause 2's other edge: a file that keeps growing is not renamed onto.
+
+    The hook appends on every attempt, so the size re-check before `os.replace` can never
+    be satisfied and the rung runs out of retries. What is asserted beyond the refusal is
+    its shape: the live file keeps every byte it had — including the ones the hook added,
+    because "untouched" means THIS run changed nothing, not that nothing else was writing
+    — the reported byte pair stays at the snapshot rather than inventing an after count,
+    and no temp file is left in the state dir for the next run to reason about.
+    """
+    now = time.time()
+    keeper = _fold_row(now - 1 * 86400, round_id="SM_R", event="promoted")
+    _write_ledger(rs, [_fold_row(now - 45 * 86400, round_id="SM_R", event="gate"),
+                       keeper])
+    seen = rs.AUTOMOD_LEDGER.read_bytes()
+
+    def always_grows(attempt: int) -> None:
+        with rs.AUTOMOD_LEDGER.open("ab") as fh:
+            fh.write(_fold_row(now + attempt, round_id="SM_R", event="gate"))
+
+    out = rs.sweep_promotions_ledger(True, now, on_attempt=always_grows,
+                                   health=_neutral_health)
+
+    assert out["refused"] and "growing" in out["refused"], out
+    assert out["moved"] == 0 and out["archived"] == 0, out
+    assert out["after"] == out["before"], (
+        "a refusal repeats the before count rather than invent an after one")
+    after = rs.AUTOMOD_LEDGER.read_bytes()
+    assert after.startswith(seen), (
+        "the live file lost bytes it had before the run: a refusal's whole promise is "
+        "that the rung changed nothing")
+    assert not list(rs.AUTOMOD_LEDGER.parent.glob(
+        f".{rs.AUTOMOD_LEDGER.name}.archiving")), out["refused"]
+    line = rs._ledger_line(out)
+    assert line.startswith("  promotions ledger: REFUSED (") \
+        and "live file untouched" in line and str(out["before"]) in line, line
+
+
+def test_archiving_changes_no_settle_time_and_no_deletion_rung_decision(rs, automod,
+                                                                        capsys):
+    """Clause 3: both deletion rungs decide identically before and after a fold.
+
+    Both rungs date a round from `_settle_times`, which is a max over the ledger, and both
+    REFUSE to touch a round with no row at all — so the invariant is two-sided: every
+    round with a live directory or a branch keeps its newest row AND keeps having at least
+    one row. Asserting only the first lets a fold move a lone old row and turn the round
+    into `no ledger row`, which the rungs answer by not deleting: residue nothing bounds,
+    reported as a clean run.
+
+    Both rungs are then run as dry runs before and after and their WHOLE dicts compared.
+    An equal `reclaimed` with a different `untracked` is the failure mode, and only the
+    full dict sees it.
+    """
+    now = time.time()
+    repo = automod
+    plan = {
+        "SM_OLD_TWO": [(_OLD, "gate"), (40.0, "settled")],
+        "SM_OLD_ONE": [(_OLD, "round_aborted")],
+        "SM_OLD_MANY": [(70.0, "gate"), (65.0, "gate"), (44.0, "round_aborted")],
+    }
+    rows = [_fold_row(now - days * 86400, event=event, round_id=rid)
+            for rid, group in plan.items() for days, event in group]
+    rows.append(_fold_row(now - 2 * 86400, event="gate", round_id="SM_YOUNG"))
+    _write_ledger(rs, rows)
+
+    for rid in plan:
+        _workdir(rs, rid)
+        _branch(repo, rid, landed=(rid != "SM_OLD_MANY"))
+
+    # Both rungs are aimed at the fixture's paths, not at the defaults the `rs`
+    # fixture leaves in place: `sweep_automod_branches` falls back to `_TREE`, the
+    # checkout the script was loaded from, whose 233 live `automod/*` refs would be
+    # counted as `untracked` and drown the one number this node reads.
+    settle_before = rs._settle_times(rs.AUTOMOD_LEDGER)
+    dirs_before = rs.sweep_automod_worktrees(False, now, repo=repo)
+    branches_before = rs.sweep_automod_branches(False, now, repo=repo)
+    capsys.readouterr()
+
+    assert len(settle_before) == len(plan) + 1, settle_before
+    assert dirs_before["untracked"] == 0, (
+        "the fixture's rounds must all have ledger rows, or the `no ledger row` arm is "
+        f"what this node is measuring: {dirs_before}")
+    assert branches_before["untracked"] == 0, branches_before
+    # The equality below is only worth having if the rungs were about to ACT. A
+    # before/after comparison over a fixture nothing would have deleted is green
+    # whether or not the fold preserved anything, so this demands a live decision to
+    # preserve: rounds old enough and landed enough to delete, and directories old
+    # enough to reclaim. A dry run only counts them, so the same state is still on
+    # disk for the after measurement.
+    assert branches_before["deleted"] >= 1, (
+        f"the fixture seeded no branch the 30-day arm would delete, so the before/after "
+        f"equality below proves nothing: {branches_before}")
+    assert dirs_before["reclaimed"] >= 1, (
+        f"the fixture seeded no directory the 7-day arm would reclaim: {dirs_before}")
+
+    out = rs.sweep_promotions_ledger(True, now, health=_neutral_health)
+    # 3 move and 3 stay, counted off the plan: `SM_OLD_TWO` loses its 45d row and keeps
+    # the 40d one, `SM_OLD_MANY` loses 70d and 65d and keeps 44d, and `SM_OLD_ONE`'s
+    # single past-window row IS its newest, so it stays. Those three kept rows are the
+    # whole reason the equality below can hold, and they are one per round — the narrow
+    # exception, not a broad one.
+    assert out["moved"] == 3, out
+    assert out["kept_newest"] == len(plan) == 3, out
+
+    settle_after = rs._settle_times(rs.AUTOMOD_LEDGER)
+    assert settle_after == settle_before, (
+        f"a fold moved a round's dating row: {settle_before} -> {settle_after}")
+
+    dirs_after = rs.sweep_automod_worktrees(False, now, repo=repo)
+    branches_after = rs.sweep_automod_branches(False, now, repo=repo)
+    capsys.readouterr()
+    assert dirs_after == dirs_before, f"{dirs_before} -> {dirs_after}"
+    assert branches_after == branches_before, f"{branches_before} -> {branches_after}"
+    assert _branches(repo) == {f"automod/{r}" for r in plan}, (
+        "a dry run deleted a branch it was only asked to count")
+
+
+def test_the_newest_row_is_kept_for_a_round_whose_rows_are_all_old(rs):
+    """The rule that keeps clause 3 true, pinned on its own for one round.
+
+    Kept is not free: the point of the store is to shrink it, so the exception has to be
+    as narrow as "one row per round that still has something on disk to age". This pins
+    WHICH row it is — the NEWEST, the one `_settle_times` answers with — because keeping an
+    arbitrary old row would preserve "has a row" and destroy the settle time, and a round
+    aged on the wrong day is a round whose directory is reclaimed early: work deleted.
+    """
+    now = time.time()
+    rows = _write_ledger(rs, [
+        _fold_row(now - 60 * 86400, event="gate", round_id="SM_K"),
+        _fold_row(now - 50 * 86400, event="review", round_id="SM_K"),
+        _fold_row(now - 40 * 86400, event="round_aborted", round_id="SM_K"),
+    ])
+
+    out = rs.sweep_promotions_ledger(True, now, health=_neutral_health)
+    assert out["moved"] == 2 and out["kept_newest"] == 1, out
+    assert _live_lines(rs) == [rows[2]], (
+        "the survivor must be the round's NEWEST row, which is the one `_settle_times` "
+        f"returns; the live file holds {_live_lines(rs)}")
+    assert rs._settle_times(rs.AUTOMOD_LEDGER)["SM_K"] == pytest.approx(
+        now - 40 * 86400, abs=1.0)
+    assert _archived(rs) == [rows[0], rows[1]], _archived(rs)
+
+
+def test_a_fold_that_moves_a_board_health_number_refuses_untouched(rs):
+    """Clause 4: the proof runs first, and a non-empty diff means no write at all.
+
+    The injected probe stands in for a fold that changed one `board_health()` key: same
+    rows, different answer. The assertions after the refusal are the substance — no
+    archive written (the proof is checked BEFORE the gzip, so a refusal cannot leave rows
+    in two places at once), the live bytes unchanged, the byte pair repeated rather than
+    invented, no temp file, and the two sides of the diff evaluated at DIFFERENT paths
+    over DIFFERENT bytes. Two identical copies would give an empty diff for the wrong
+    reason and the node would be certifying a proof that never ran.
+    """
+    now = time.time()
+    _write_ledger(rs, [
+        _fold_row(now - 45 * 86400, round_id="SM_R", event="gate"),
+        _fold_row(now - 44 * 86400, round_id="SM_R", event="settled"),
+        _fold_row(now - 4 * 86400, round_id="SM_R", event="gate"),
+    ])
+    live_before = rs.AUTOMOD_LEDGER.read_bytes()
+    asked = []
+
+    def mutated(ledger, backlog_dir=None):
+        asked.append((Path(ledger), Path(ledger).read_bytes()))
+        return {"triaged": 7} if len(asked) == 1 else {"triaged": 8}
+
+    out = rs.sweep_promotions_ledger(True, now, health=mutated)
+
+    assert out["moved"] == 0 and out["refused"], out
+    assert "board_health()" in out["refused"] and "triaged" in out["refused"], out
+    assert rs.AUTOMOD_LEDGER.read_bytes() == live_before, (
+        "the live file must be byte-identical on a refusal — that is the clause")
+    assert out["after"] == out["before"], out
+    assert not _archives(rs), "a refused run wrote an archive: rows in two places"
+    assert not list(rs.AUTOMOD_LEDGER.parent.glob(
+        f".{rs.AUTOMOD_LEDGER.name}.archiving")), out["refused"]
+    assert len(asked) == 2, f"the diff needs both sides; the probe saw {len(asked)} calls"
+    assert asked[0][1] != asked[1][1], (
+        "both sides were fed the same bytes, so an empty diff would prove nothing about "
+        "the fold; the before side is the live bytes and the after side the rewrite")
+    assert asked[0][0] != rs.AUTOMOD_LEDGER, (
+        "the proof must fold a COPY: reading the live file is not a copy")
+    line = rs._ledger_line(out)
+    assert line.startswith("  promotions ledger: REFUSED (") \
+        and "live file untouched" in line and str(out["before"]) in line, line
+
+
+def test_the_probe_refuses_loudly_when_board_health_cannot_be_used(rs, monkeypatch):
+    """Clause 4's unavailable half: no usable probe means no write, in both shapes.
+
+    `board_health()` can be unusable two ways and the rung answers differently, because an
+    operator has to tell them apart from the report line alone: the module cannot be
+    imported or the call cannot be made, which the shipped helper reports as `None`, and
+    the call raised, which is a defect in the probe and names the exception type. Either
+    way the rung must NOT proceed — a probe whose failure were treated as "no differences"
+    would make the neutrality proof vacuously true on every tree that cannot import the
+    loop, which is exactly where a rung that rewrites the loop's audit trail would most
+    like to be certain.
+    """
+    now = time.time()
+    _write_ledger(rs, [
+        _fold_row(now - 45 * 86400, round_id="SM_R", event="gate"),
+        _fold_row(now - 44 * 86400, round_id="SM_R", event="settled"),
+        _fold_row(now - 4 * 86400, round_id="SM_R", event="gate"),
+    ])
+    live_before = rs.AUTOMOD_LEDGER.read_bytes()
+
+    # `now=` is part of the shipped helper's signature (see `_board_health_payload`), so
+    # the stand-ins take it too: a stub that could not receive the clock would fail the
+    # call with `TypeError` and this node would be pinning the wrong refusal.
+    monkeypatch.setattr(rs, "_board_health_payload",
+                        lambda ledger, backlog_dir=None, now=None: None)
+    missing = rs.sweep_promotions_ledger(True, now)
+    assert missing["refused"] and "unavailable" in missing["refused"], missing
+    assert missing["moved"] == 0 and missing["after"] == missing["before"], missing
+    assert not _archives(rs), missing
+
+    def explode(ledger, backlog_dir=None, now=None):
+        raise ImportError("No module named 'scripts.automod.backlog'")
+
+    monkeypatch.setattr(rs, "_board_health_payload", explode)
+    raised = rs.sweep_promotions_ledger(True, now)
+    assert raised["refused"] and "ImportError" in raised["refused"], raised
+    assert "No module named" in raised["refused"], raised
+    assert raised["moved"] == 0, raised
+    assert rs.AUTOMOD_LEDGER.read_bytes() == live_before, (
+        "both arms refuse with the live file untouched, the only promise that matters "
+        "when the proof cannot be run")
+
+
+#: An item id no real board can hold, so a fixture `draft` item cannot collide with one.
+_NEUTRALITY_FIXTURE_ID = 9901975
+
+
+def _open_draft(board: Path, item_id: int) -> None:
+    """One open `draft` item on the board the proof reads.
+
+    A `draft` with no triage row is the pool; the same draft WITH a terminal triage row is
+    `draft.triaged` instead (`backlog.py:5919`), and that flip is the change owed clause 3
+    says the fold can cause. So this is the fixture both directions are measured against.
+    """
+    (board / f"{item_id}-an-open-draft.md").write_text(
+        "---\ntype: backlog\nsegment: backlog\nstatus: draft\npriority: low\n"
+        "board: lloyd\nblocked: false\nassigned: false\n---\n\n# An open draft\n\n"
+        "Body.\n", encoding="utf-8")
+
+
+def test_the_shipped_probe_writes_a_fold_the_board_cannot_see(rs, tmp_path, capsys):
+    """Clause 4's default path: with NO `health=`, a neutral fold writes.
+
+    Every other fold node injects a probe, so none of them had ever run the shipped
+    `_board_health_payload` — which is how a round shipped a proof that asked
+    `board_health()` for its own `time.time()` on each of its two calls and therefore
+    disagreed at `.decisions.window.since`/`.until` (`board_decisions.py:339` stamps both
+    from `now`) over BYTE-IDENTICAL bytes. Measured on this tree: two calls over one
+    423-byte fixture, 1.44 s and 0.87 s apart, diff exactly those two keys. The rung
+    refused EVERY fold — in the suite, where a node could assert the refusal and stay green
+    on a store that was never being bounded, and in production, where the store stays
+    unbounded — and no test in the diff could see it (#1975 review attempt 2, upheld by a
+    reader who reproduced it on the round's tree).
+
+    This node and the one after it are the only two that leave `health=` out, and together
+    they say the shipped proof is inert in neither direction. The rows here are `gate` and
+    `review` events, which no `board_health()` reader joins to a board item, so the panel
+    really is unchanged and nothing but a second clock could make the diff non-empty. The
+    board is a temp dir holding one fixture item, not the live vault: the proof walks it
+    twice, ~1.9 s for two calls over that, and 1,975 item files would be measuring the
+    machine rather than the rung.
+    """
+    now = time.time()
+    board = tmp_path / "board"
+    board.mkdir()
+    _open_draft(board, _NEUTRALITY_FIXTURE_ID)
+    rows = _write_ledger(rs, [
+        _fold_row(now - _OLD * 86400, round_id="SM_SHIPPED", rung="tests"),
+        _fold_row(now - 44 * 86400, event="review", round_id="SM_SHIPPED"),
+        _fold_row(now - _OLD * 86400, round_id="SM_SHIPPED_KEPT"),
+        _fold_row(now - _YOUNG * 86400, round_id="SM_SHIPPED"),
+    ])
+
+    out = rs.sweep_promotions_ledger(True, now, backlog_dir=board)
+    capsys.readouterr()
+
+    assert out["refused"] is None, (
+        f"the shipped proof refused a fold that changes no `board_health()` key — that is "
+        f"the per-call-clock refusal returning ({out['refused']}). A fold that cannot "
+        "write is a store that never gets bounded, whatever the other nodes say")
+    assert out["moved"] == 2 and out["kept_newest"] == 1, out
+    assert out["after"] < out["before"], out
+    assert _live_lines(rs) == [rows[2], rows[3]], _live_lines(rs)
+    assert sorted(_archived(rs)) == sorted([rows[0], rows[1]]), (
+        "the two moved lines have to be in the gzip byte-for-byte")
+
+
+def test_the_shipped_probe_refuses_a_fold_that_loses_a_triaged_item(rs, tmp_path):
+    """Clause 4's other default arm: a fold the board would feel does not write.
+
+    The mutation is not a stand-in that returns a different dict — it is the effect owed
+    clause 3 names in the item: an item sitting open past the window whose `backlog_triage`
+    row archives with it drops out of `triaged_ids()`, so `board_health()` moves it from
+    `draft.triaged` to `draft.pool`. Measured on this tree: diff
+    `['.draft.pool', '.draft.triaged']`, before `{triaged: 1, pool: 0}`, after
+    `{triaged: 0, pool: 1}`. That is the change the proof exists to catch, and the only way
+    to know the DEFAULT probe catches it is to drive the default probe over a fixture that
+    really has it: the mutation node injects a hand-mutated payload, so it pins the diff
+    arithmetic and the write guard, never the probe.
+
+    Consequence worth having in writing: on the live ledger this refusal is what the weekly
+    run will print for as long as a triaged item stays open past the window — owed clause 3
+    is the ruling on whether that ends by making the readers archive-aware or by accepting
+    the flip. Until it is ruled, the rung refusing is correct.
+    """
+    now = time.time()
+    board = tmp_path / "board"
+    board.mkdir()
+    _open_draft(board, _NEUTRALITY_FIXTURE_ID)
+    _write_ledger(rs, [
+        _fold_row(now - _OLD * 86400, event="backlog_triage",
+                  item_id=_NEUTRALITY_FIXTURE_ID, verdict="confirmed"),
+        _fold_row(now - _YOUNG * 86400, round_id="SM_SHIPPED_MUT"),
+    ])
+    live_before = rs.AUTOMOD_LEDGER.read_bytes()
+
+    out = rs.sweep_promotions_ledger(True, now, backlog_dir=board)
+
+    assert out["refused"], (
+        "a fold that moved an item out of the `draft` partition's `triaged` bucket wrote "
+        "the live ledger: the proof is inert in the direction that matters")
+    assert out["moved"] == 0 and out["after"] == out["before"], out
+    assert rs.AUTOMOD_LEDGER.read_bytes() == live_before, (
+        "a refused fold leaves every byte of the live ledger where it was")
+    assert not _archives(rs), "a refused fold creates no archive file either"
+    assert ".draft.triaged" in out["refused"], out
+    line = rs._ledger_line(out)
+    assert out["refused"] in line, (
+        f"a refusal that reaches the weekly report as anything other than itself is how a "
+        f"store silently stays unbounded: {line}")
+    assert f"{out['before']} bytes" in line, (
+        "the refused line has to repeat the live byte count, because `0 archived` would "
+        f"read as an empty window to whoever approves this run: {line}")
+
+
+def test_the_neutrality_proof_has_exactly_one_clock(rs, tmp_path, monkeypatch):
+    """Clause 4's mechanism, pinned so the fix cannot be quietly reverted.
+
+    `_board_health_payload` takes `now` keyword-only with NO default, on purpose: the
+    refusal this round had to fix came from a per-call clock, and a `now=None` default
+    would leave that exact path open while looking like it was fixed. The behavioural half
+    is that calling it without `now` raises `TypeError` — and the proof turns that into a
+    refusal naming the type rather than a verdict about the store, which is what the third
+    block below pins through the rung.
+    """
+    signature = inspect.signature(rs._board_health_payload)
+    param = signature.parameters["now"]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY, signature
+    assert param.default is inspect.Parameter.empty, (
+        "a default for `now` re-opens the per-call clock: each of the proof's two calls "
+        "would take its own `time.time()` and disagree at `.decisions.window` over "
+        "byte-identical bytes, which is the refusal that made every fold useless")
+
+    with pytest.raises(TypeError):
+        rs._board_health_payload(rs.AUTOMOD_LEDGER, None)
+
+    monkeypatch.setattr(rs, "_board_health_payload",
+                        lambda ledger, backlog_dir=None: {"triaged": 1})
+    now = time.time()
+    _write_ledger(rs, [
+        _fold_row(now - _OLD * 86400, round_id="SM_CLOCK"),
+        _fold_row(now - _YOUNG * 86400, round_id="SM_CLOCK"),
+    ])
+    live_before = rs.AUTOMOD_LEDGER.read_bytes()
+    out = rs.sweep_promotions_ledger(True, now)
+    assert "TypeError" in out["refused"], (
+        f"a probe that cannot receive the run's clock has to be reported as the missing "
+        f"argument it is, not as a green fold: {out}")
+    assert out["moved"] == 0, out
+    assert rs.AUTOMOD_LEDGER.read_bytes() == live_before, out
+
+
+def test_a_fold_of_every_event_name_in_the_witness_stays_neutral(rs):
+    """Clause 4's sweep: one synthetic row for every `event` value the witness has.
+
+    Driven off the committed witness rather than a list of names typed here, because a
+    typed list is the thing that goes stale: a new event type is a new shape of row, and
+    the only way to know the fold is neutral for it is to fold one.
+
+    `health=` is injected because the real `board_health()` costs seconds per call and this
+    runs the fold once per name — dozens of full board walks to compare two answers the
+    fold did not change. What is NOT injected is the fold itself: every name goes through
+    the shipped `sweep_promotions_ledger(apply=True)` over its own fixture ledger and must
+    actually move its row, keep the round's newest, and archive the moved line
+    byte-for-byte. A name that archived nothing would sail through a neutrality proof that
+    never ran, which is why a refusal is not the only thing checked here.
+    """
+    raw = _witness_bytes(rs)
+    if raw is None:
+        pytest.skip(f"no witness ledger in this vault: {_WITNESS}")
+
+    names: list[str] = []
+    for line in raw.splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        name = row.get("event") if isinstance(row, dict) else None
+        if isinstance(name, str) and name and name not in names:
+            names.append(name)
+    assert len(names) >= 40, (
+        f"the witness yields only {len(names)} event names; this node's premise is that "
+        f"it covers the real ledger's vocabulary, so a thin witness has to be re-taken")
+
+    now = time.time()
+    failures = []
+    for name in names:
+        mover = _fold_row(now - 40 * 86400, event=name, round_id="SM_PROOF",
+                          payload="x" * 300)
+        young = _fold_row(now - 20 * 86400, event=name, round_id="SM_PROOF")
+        _write_ledger(rs, [mover, young])
+        for stale in rs.AUTOMOD_LEDGER.parent.glob(
+                f"{rs.LEDGER_ARCHIVE_PREFIX}*.jsonl.gz"):
+            stale.unlink()
+        out = rs.sweep_promotions_ledger(
+            True, now, health=lambda ledger, backlog_dir=None: {"triaged": 1})
+        # `kept_newest == 0` here by design: the fixture round's NEWEST row is the
+        # 20-day one, inside the window, so no past-window row is anyone's newest and
+        # the row that moves is simply moved. The keep rule has its own node; what this
+        # sweep asks of each event name is that its row moves, archives byte-exact, and
+        # leaves the panel answer unchanged.
+        if out["refused"]:
+            failures.append(f"{name}: REFUSED {out['refused']}")
+        elif out["moved"] != 1 or out["kept_newest"] != 0:
+            failures.append(f"{name}: moved={out['moved']} "
+                            f"kept_newest={out['kept_newest']}, expected 1 and 0")
+        elif _archived(rs) != [mover]:
+            failures.append(f"{name}: archive is {_archived(rs)}, not the one moved row")
+        elif _live_lines(rs) != [young]:
+            failures.append(f"{name}: live file is {_live_lines(rs)}")
+    assert not failures, (
+        f"the fold failed for {len(failures)} of {len(names)} event names:\n  "
+        + "\n  ".join(failures))
+
+
+def _witness_bytes(rs):
+    """The committed witness ledger's bytes, or None when this vault has no copy.
+
+    A function rather than a constant because the vault is a resolved path, not a literal:
+    `rs.vault_root()` is the redirected one under the suite, which is the point — the node
+    that reads witness bytes must read them from the vault the run is configured with, and
+    a hardcoded `~/obsidian` would make a gate run certify the real vault from a sandbox
+    that has its own.
+    """
+    witness = rs.vault_root() / "backlog" / "data" / _WITNESS
+    return witness.read_bytes() if witness.is_file() else None
+
+
+def test_the_witness_ledger_reproduces_the_row_count_the_item_quotes(rs):
+    """Clause 6: the quoted report is re-derivable from bytes in the vault's history.
+
+    The clause names the command — a line count over a committed file — and whatever it
+    prints is the figure the item must quote. The node exists because the first review of
+    this round found the vault's ledger copy still another item's 26,903-row snapshot,
+    which left every ledger number on the item unfalsifiable: a report whose source is one
+    machine's state dir is a claim about a machine, not about the store. Three things are
+    pinned. The bytes are COMMITTED, because an uncommitted file is the same one-machine
+    evidence with a path on it, and the row and byte counts are EQUAL to the figures on the
+    constants above, which is what makes this file the witness and not merely a ledger.
+
+    Equality and not a floor, and no separate line-count agreement. Two earlier versions of
+    these lines asserted `rows >= 28_476` and `len(raw) >= 32_797_574`, and the second
+    review refused that shape: a re-copy of a different, larger ledger satisfies a floor, so
+    the node stayed green while the file underneath it changed identity and the figure it
+    printed was no longer the figure the item quoted. A third line, since deleted, compared
+    `len(raw.splitlines())` against a count of the same splitlines filtered for blanks — two
+    ways of counting one list, which can only disagree if a line is blank, and blank lines
+    would move `rows` off `_WITNESS_ROWS` anyway. The reopen ruling named both fixes: assert
+    the equality, in the node that prints the numbers, and drop the self-agreeing one.
+    """
+    raw = _witness_bytes(rs)
+    if raw is None:
+        pytest.skip(f"no witness ledger in this vault: {_WITNESS}")
+    witness = rs.vault_root() / "backlog" / "data" / _WITNESS
+
+    tracked = subprocess.run(
+        ["git", "-C", str(rs.vault_root()), "ls-files", "--error-unmatch",
+         f"backlog/data/{_WITNESS}"], capture_output=True, text=True)
+    assert tracked.returncode == 0, (
+        f"the witness is on disk but not in the vault's history: "
+        f"{tracked.stderr.strip()[:160]}")
+
+    rows = len(raw.splitlines())
+    assert rows == _WITNESS_ROWS, (
+        f"{rows} rows at {witness}; the copy this item's report was re-derived from has "
+        f"{_WITNESS_ROWS} (vault commit 4bc93177). A different count means the file at the "
+        "clause-named path is some other ledger, and every figure on the item that cites "
+        "it is then about a file nobody measured")
+    assert len(raw) == _WITNESS_BYTES, (
+        f"{len(raw):,} bytes at {witness}; the copy the report was re-derived from is "
+        f"{_WITNESS_BYTES:,}")
+    print(f"witness: {rows} rows, {len(raw):,} bytes at {witness}")
+
+
+def test_the_witness_is_a_ledger_and_not_just_a_row_count(rs):
+    """The witness is bytes the fold could actually run over, not a count in a file.
+
+    Three properties, all load-bearing for the nodes around it. Every line parses as an
+    object carrying at least one age field, because the window and the month bucket are
+    computed from those and a witness that cannot be aged reproduces a row count while being
+    useless as evidence about a fold. The rows are objects with an `event`, because a file
+    that is mostly blank lines or bare JSON values has a line count and no ledger — and the
+    DISTINCT count of those names is `_WITNESS_EVENT_NAMES`, the figure
+    `test_a_fold_of_every_event_name_in_the_witness_stays_neutral` iterates, so a witness
+    that lost a whole event type could not quietly shrink the sweep it is supposed to drive.
+    And the report the item quotes about the window is re-derived here: `_archive_plan` over
+    the witness's own rows, aged by the rung's own `_ledger_row_seconds`, answers `0` —
+    which is clause 6's "re-derive the quoted report", not a restatement of it.
+
+    The window is measured from the NEWEST row's own timestamp, not from `time.time()`. The
+    report on the item ("rows older than 30 days = 0 rows / 0 bytes") was a statement about
+    that copy as of the minute it was taken; against the wall clock it stays true for five
+    more days and then goes false because the calendar turned, which would hand a red test
+    to an unrelated round on 2026-10-06 for no reason but time.
+    """
+    raw = _witness_bytes(rs)
+    if raw is None:
+        pytest.skip(f"no witness ledger in this vault: {_WITNESS}")
+
+    lines = [ln for ln in raw.splitlines() if ln.strip()]
+    rows = [json.loads(ln) for ln in lines]
+    assert all(isinstance(r, dict) for r in rows), (
+        "a line parsed as a non-object JSON value: this is not the JSONL the ledger is")
+    unageable = [r.get("event") for r in rows
+                 if r.get("ts") is None and r.get("created_at") is None]
+    assert not unageable, (
+        f"{len(unageable)} rows carry no age field at all, so neither the 30-day window "
+        f"nor the month bucket can be computed from the witness: {unageable[:8]}")
+    with_event = sum(1 for r in rows if r.get("event"))
+    assert with_event == len(rows), (
+        f"only {with_event} of {len(rows)} rows have an `event`, which is not the ledger "
+        f"the fold runs over")
+    names = {r["event"] for r in rows}
+    assert len(names) == _WITNESS_EVENT_NAMES, (
+        f"{len(names)} distinct `event` values in the witness; the copy the report was "
+        f"re-derived from has {_WITNESS_EVENT_NAMES}, and every one of them is a shape the "
+        "fold is supposed to be neutral over")
+    assert min(r.get("created_at") or "" for r in rows).startswith(_WITNESS_OLDEST_DAY), (
+        f"the witness's oldest `created_at` is no longer {_WITNESS_OLDEST_DAY}, so the "
+        "window report below is about a different copy than the one the item describes")
+
+    as_of = max(rs._ledger_row_seconds(r) for r in rows)
+    archive, kept = rs._archive_plan([(b"", r) for r in rows], as_of)
+    print(f"witness report: {len(archive)} of {len(rows)} rows past "
+          f"{rs.LEDGER_ARCHIVE_AGE_DAYS} d as of "
+          f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(as_of))}; "
+          f"{len(names)} event names")
+    assert len(archive) == 0, (
+        f"{len(archive)} rows are past the window in the committed copy, which is not the "
+        "report the item quotes — and `kept` says why: "
+        f"{sorted(set(kept.values()))}")
+    assert len(kept) == len(rows), (
+        f"{len(kept)} rows carry a keep reason against {len(rows)} rows: every archived "
+        "row is a row the live file lost")
+
+
+def test_the_overwritten_witness_keeps_the_other_items_bytes_recoverable(rs):
+    """The path now holds #1975's witness, and #1903's bytes survive in history intact.
+
+    Clause 6 names `backlog/data/promotions.jsonl`; that path used to be #1903's ledger
+    snapshot (26,903 lines / 10,917,874 bytes, vault commit `0d96fdb0`), cited by #1903,
+    #2024 and `backlog/data/2026-09-30.confirm-replay-witness.md`. Replacing a witness is
+    only safe while the bytes it displaces stay addressable, so this node reads the
+    displaced snapshot OUT OF HISTORY and refuses the arrangement if the history has been
+    rewritten. That is the property that actually matters — a name nobody can cite is not
+    evidence, and an overwritten predecessor that cannot be recovered is data loss — and
+    it is what any future round that replaces these bytes will be held to.
+    """
+    vault = rs.vault_root()
+    named = vault / "backlog" / "data" / "promotions.jsonl"
+    if not named.is_file():
+        pytest.skip(f"no ledger witness on disk at {named}")
+
+    live_rows = len(named.read_bytes().splitlines())
+    assert live_rows == _WITNESS_ROWS, (
+        f"the witness at the clause-named path holds {live_rows} lines; the copy the item's "
+        f"findings quote, and the copy `test_the_witness_ledger_reproduces_the_row_count_"
+        f"the_item_quotes` pins in the same run, is {_WITNESS_ROWS}. This node and that one "
+        "have to agree, or the file changed between the two reads")
+
+    history = subprocess.run(
+        ["git", "-C", str(vault), "show", "0d96fdb0:backlog/data/promotions.jsonl"],
+        capture_output=True, text=True)
+    assert history.returncode == 0, (
+        "#1903's snapshot is no longer readable out of the vault's history, so the "
+        f"overwrite became a loss rather than a replacement: {history.stderr[:200]}")
+    prior_rows = len([ln for ln in history.stdout.splitlines() if ln.strip()])
+    assert prior_rows == 26_903, (
+        f"the displaced witness reads {prior_rows} rows from `0d96fdb0`, not the 26,903 "
+        f"#1903 and the confirm-replay witness cite")
+    prior_bytes = len(history.stdout.encode("utf-8"))
+    assert prior_bytes == 10_917_874, (
+        f"the displaced witness is {prior_bytes} bytes, not the 10,917,874 the records "
+        f"quoting it say")
+
+

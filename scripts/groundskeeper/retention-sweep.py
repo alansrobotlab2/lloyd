@@ -92,10 +92,32 @@ the transcript scratch home from backlog #566:
     `.git` above 500 MB that an unreachable-branch pin is holding open. The held count
     on the report line is the series to watch for the first of those.
 
-Neither store is under `DATA_ROOT`, and the second is not even on the filesystem: it is
-the live repo's refs. That is the hazard the production-checkout guard exists for — a
-round's worktree shares those refs, so `git branch -D` run from inside a gate would
-delete production branches. `automod_rung_refusal()` therefore refuses both rungs unless
+13. ~/.local/state/lloyd-automod/promotions.jsonl — the promotion ledger: the loop's own
+    append-only audit trail, 32,979,950 bytes / 28,600 rows on 2026-10-01 and growing
+    2,007,947 bytes a day on the 7-day mean of its rows' own `created_at`. `board_health`
+    and the two rungs above read it whole on every pass, and nothing has ever taken a row
+    out of it (#1858's owed entry 2 ruled it a store; #1975 gives it a window). ARCHIVE
+    OUT — never fold in place, never delete: a row older than LEDGER_ARCHIVE_AGE_DAYS (30)
+    leaves the live file for `promotions-archive-<YYYYMM>.jsonl.gz` beside it, bucketed by
+    the month of the row's OWN age and copied byte-for-byte, so the archive holds the rows
+    and not a summary of them. Two rules are what keep the two rungs above intact while
+    the file shrinks: each round's NEWEST row is never archived, because `_settle_times`
+    takes a max and a round with no live row is a round both rungs count `no ledger row`
+    and therefore never delete — bounding this store would otherwise unbound stores 11 and
+    12; and the rewrite happens only on a PROOF, `board_health()` run over the live file
+    and over the new file as a copy beside it, refusing to write if any key of the two
+    payloads differs. Rewrite is temp-file + `os.replace` with every line appended since
+    the read grafted back verbatim and `st_size` re-checked before the rename, because
+    `state.append_event` appends and fsyncs under no lock and an unconditional rename
+    would rename a live audit row out of existence.
+
+Stores 11, 12 and 13 are the three the loop leaves behind, and 13 is the one the other two
+read. None of the three is under `DATA_ROOT`, and store 12 is not even on the filesystem:
+it is the live repo's refs. That is the hazard the production-checkout guard exists for —
+a round's worktree shares those refs, so `git branch -D` run from inside a gate would
+delete production branches. `automod_rung_refusal()` therefore refuses all three loop
+rungs — the ledger included, which rewrites no ref but rewrites the loop's own audit file,
+and a tree that is not the live checkout has no business deciding to compress it — unless
 the tree this script was loaded from IS the production checkout (`app.data_root`'s own
 two predicates for that, not a restatement), and `--apply` exits
 NOT_PRODUCTION_EXIT (2) naming the tree it resolved, in the manner of the
@@ -116,9 +138,12 @@ production checkout — and only while that root carries `.lloyd-data-root`, sin
 without the marker the sweep refuses and exits 2 rather than fall back — else
 `<tree>/.lloyd-data` for any other checkout. So a sandbox's or a round's
 `--apply` reaches only that tree's own data (#1415). The run prints the root it
-resolved, in dry run and in `--apply` alike, above the numbers it describes. One
-rung writes outside the data root: bounding the activity logs in the vault's
-`autonomy/*.md`, which `LLOYD_VAULT_ROOT` points at a copy. The bound is two rules,
+resolved, in dry run and in `--apply` alike, above the numbers it describes. Two rungs
+write outside the data root at a path a knob points at a copy: bounding the activity logs
+in the vault's `autonomy/*.md`, which `LLOYD_VAULT_ROOT` points at a copy, and archiving
+the promotion ledger, which `LLOYD_AUTOMOD_STATE` points at a copy — the same shape as
+`scripts/automod/state.py`'s own resolution, so a round's or a sandbox's `--apply` can
+only ever reach its own ledger. The bound is two rules,
 not one — the last `ACTIVITY_LOG_MAX_ENTRIES` entry bullets are kept and every other
 non-blank line under the heading is removed, because a line the entry cap does not
 count is a line the cap could never remove (#845).
@@ -1424,6 +1449,429 @@ def _branch_line(b: dict) -> str:
             f"held tips or a .git above {BRANCH_UNREACHABLE_REOPEN_GIT_MB} MB")
 
 
+# ── 13. promotions ledger — archive the rows the loop no longer reads ──────────
+#
+# Alan's ruling on #1975 (2026-10-01) chose archive-out over digest-in-place after
+# triage measured that the cold cycle's cost tracks ROW COUNT, not payload bytes: the
+# same 28,476 rows padded from 32.8 MB to 61.8 MB decoded in 0.26-0.29 s (+49% bytes,
+# +0.01 s) while cutting to 21,050 rows decoded in 0.20 s. So the rows leave. What the
+# ruling did not lift, and what the two rungs above depend on, is that no row is lost:
+# the gzip beside the ledger holds the original line, byte for byte.
+
+#: Age after which a promotions-ledger row leaves the live file for the monthly
+#: archive (#1975, from #1858's owed entry 2). 30 is every other window in this file and
+#: the same horizon `BRANCH_MAX_AGE_DAYS` uses — which is exactly why a round's newest
+#: row has to stay live (see `_archive_plan`): the two rungs age rounds older than
+#: this same 30 days off this ledger, and a round with no live row is a round they never
+#: delete. The window VALUE is what decides whether this store is bounded usefully —
+#: at the measured 2,007,947 B/day a 30-day window caps the live file near 60 MB, only
+#: 6.9 MB under `state.py`'s `_ROWS_CACHE_MAX_BYTES` — and that ruling is owed to
+#: owed-check, recorded on #1975, not decided here.
+LEDGER_ARCHIVE_AGE_DAYS = 30
+
+#: Prefix of the monthly gzip that receives the archived rows, beside the ledger. One
+#: file per month of the ledger's OWN history, never one per sweep, so a reader who wants
+#: September's rows opens September's file whatever week the sweep ran in.
+LEDGER_ARCHIVE_PREFIX = "promotions-archive-"
+
+#: How many times the settled rewrite re-reads the tail before it gives up. The ledger is
+#: appended to by `state.append_event` with no lock (`LOCK_PATH` guards round
+#: transitions, not appends), and `os.replace` is unconditional, so the only thing
+#: standing between this rung and a vanished audit row is re-reading the bytes that
+#: appeared since the read that built the new file, and refusing to rename while the file
+#: will not hold still.
+LEDGER_REWRITE_ATTEMPTS = 5
+
+
+def _ledger_row_seconds(row: dict) -> float | None:
+    """The age `sweep_promotions_ledger` window-members on — `_settle_times`'s own rule.
+
+    `ts` when it is numeric, else the `created_at` ISO stamp, else None. Not a second
+    clock: the rungs that age round residue read exactly this pair through
+    `_settle_times`, so a row that is "31 days old" to this rung is the same 31 days to
+    them. Two clocks here is how a row ends up archived on one and still load-bearing on
+    the other.
+    """
+    seconds = row.get("ts")
+    if not isinstance(seconds, (int, float)) or isinstance(seconds, bool):
+        seconds = _iso_seconds(row.get("created_at"))
+    return float(seconds) if seconds is not None else None
+
+
+def _archive_plan(rows: list[tuple[bytes, dict]],
+                  now: float) -> tuple[list[int], dict[int, str]]:
+    """Which row indexes archive, and why each other row stayed.
+
+    A row archives when it is past `LEDGER_ARCHIVE_AGE_DAYS` AND it is not the NEWEST row
+    of its round. The second condition is the one that keeps stores 11 and 12 bounded
+    rather than unbounded: `_settle_times` answers "when did this round last matter" with
+    a MAX over the round's rows, and both deletion rungs refuse to touch a round whose
+    answer is missing — `sweep_automod_branches` counts it `untracked` and prints it as
+    `no ledger row` forever. Archiving a settled round's last live row would therefore
+    take its settle time with it, on the same 30-day horizon those rungs age at, and the
+    new store would have quietly re-opened the two old ones (#1975 re-triage finding 3).
+    Keeping one row per round costs one row per round and preserves every answer
+    `_settle_times` gives — max untouched, exactly.
+
+    Returns `(archive_indexes, kept_reason)` where `kept_reason` names, per kept index,
+    the rule that kept it (`young`, `newest-of-round`, `no-age`, `not-a-dict`,
+    `malformed`) so the report can tell "the window held nothing" from "every candidate
+    was somebody's newest row".
+    """
+    newest: dict[str, float] = {}
+    for _line, row in rows:
+        if not isinstance(row, dict):
+            continue
+        rid = row.get("round_id")
+        seconds = _ledger_row_seconds(row)
+        if not isinstance(rid, str) or not rid or seconds is None:
+            continue
+        if seconds > newest.get(rid, float("-inf")):
+            newest[rid] = seconds
+
+    archive: list[int] = []
+    kept: dict[int, str] = {}
+    horizon = LEDGER_ARCHIVE_AGE_DAYS * 86400
+    for index, (_line, row) in enumerate(rows):
+        if not isinstance(row, dict):
+            kept[index] = "malformed"
+            continue
+        seconds = _ledger_row_seconds(row)
+        if seconds is None:
+            kept[index] = "no-age"
+            continue
+        if (now - seconds) < horizon:
+            kept[index] = "young"
+            continue
+        rid = row.get("round_id")
+        if isinstance(rid, str) and rid and seconds >= newest.get(rid, seconds):
+            # Somebody's newest row, on the same clock `_settle_times` answers with.
+            kept[index] = "newest-of-round"
+            continue
+        archive.append(index)
+    return archive, kept
+
+
+def _board_health_diff(before, after, path: str = "") -> list[str]:
+    """Dotted paths where two `board_health()` payloads disagree, [] if they agree.
+
+    Compares values, not bytes: `board_health()` returns a dict and its consumers read
+    keys, so a payload that re-serialises in a different order is the same output. A type
+    change at an equal-valued pair (`1` vs `True`) is a difference. The list is the
+    refusal message, so it names the keys and stops at a handful.
+    """
+    if before == after and type(before) is type(after):
+        return []
+    if isinstance(before, dict) and isinstance(after, dict):
+        out: list[str] = []
+        for key in sorted(set(before) | set(after)):
+            out.extend(_board_health_diff(before.get(key), after.get(key),
+                                          f"{path}.{key}"))
+        return out
+    return [path or "<root>"]
+
+
+def _board_health_payload(ledger: Path, backlog_dir: Path | None = None, *,
+                          now: float):
+    """`board_health()` over one specific ledger file, or None if it cannot be had.
+
+    Resolved through `scripts.automod.backlog`, the module that DEFINES it, so the proof
+    is against the function the dashboard calls and not a copy of its logic. Returns None
+    — which the caller reads as "neutrality unprovable" and refuses to write — when the
+    module cannot be imported or does not answer that name. Both halves matter:
+    `scripts/automod/state.py` is imported by path from a tree whose repo root is not on
+    `sys.path` when a test loads this file with `importlib`, so a missing module must read
+    as an absent proof rather than a green one, and a module that is present but has been
+    refactored away from `board_health` must not raise `AttributeError` and take the run
+    down mid-sweep instead of refusing.
+
+    `now` is REQUIRED and keyword-only, and it is the whole reason the two calls of one
+    proof are comparable. `board_health` stamps `.decisions.window.since/.until` from its
+    own `now` (`board_decisions.py:339`), second precision, and the calls are 1-3 s apart,
+    so with a per-call clock the payload differs at those two keys over BYTE-IDENTICAL
+    bytes — measured on this tree at 1.44 s and 0.87 s a call, diff
+    `['.decisions.window.since', '.decisions.window.until']`. That made the shipped probe
+    refuse EVERY fold, in production as in the suite, and the fold never wrote (#1975
+    review, upheld on reproduction). A keyword default of `None` would leave that clock
+    reachable, so a caller that forgets it gets a `TypeError` the rung reports as a
+    refusal naming the type — not a silent verdict that the store is unsafe to bound.
+    """
+    try:
+        backlog = _automod_module("backlog")
+        if backlog is None or not hasattr(backlog, "board_health"):
+            return None
+        return backlog.board_health(ledger, backlog_dir=backlog_dir, now=now)
+    except Exception as exc:  # noqa: BLE001 - an unprovable fold is a refused fold
+        print(f"  promotions ledger: board_health() unreadable ({exc}); not archiving")
+        return None
+
+
+def _ledger_archive_path(ledger: Path, age_seconds: float) -> Path:
+    """`promotions-archive-<YYYYMM>.jsonl.gz` beside the ledger, for that row's month.
+
+    Keyed off the row's own age in seconds, which the caller has already proven it has
+    (window membership needs it) — never off a `created_at` string that a `ts`-only row
+    does not carry, which is how the first draft of this rung produced a file called
+    `promotions-archive-None.jsonl.gz` (#1975 round finding). UTC month, because
+    `created_at` is written UTC and a month that shifts with the operator's timezone
+    splits one month of rows across two files.
+    """
+    month = time.strftime("%Y%m", time.gmtime(age_seconds))
+    return ledger.parent / f"{LEDGER_ARCHIVE_PREFIX}{month}.jsonl.gz"
+
+
+def _archive_append(target: Path, lines: list[bytes]) -> int:
+    """Append the lines not already in `target`, and return how many went.
+
+    Read-then-append rather than blind append because the rewrite that follows can still
+    refuse: rows are archived BEFORE they leave the live file — the order that makes loss
+    impossible — so a refused rewrite leaves them in both places, and a later run would
+    append them again. A duplicate is the lesser evil against deleting a row that never
+    reached an archive, and this closes it anyway. Memory is bounded by `lines`, not by
+    the archive: the pending set shrinks as matching lines stream past.
+    """
+    pending = set(lines)
+    if not pending:
+        return 0
+    if target.is_file():
+        try:
+            with gzip.open(target, "rb") as fh:
+                for line in fh:
+                    pending.discard(line)
+        except OSError:
+            pass
+    rest = [ln for ln in lines if ln in pending]
+    if not rest:
+        return 0
+    with gzip.open(target, "ab") as fh:
+        for ln in rest:
+            fh.write(ln)
+    return len(rest)
+
+
+def _rewrite_live_ledger(ledger: Path, body: bytes, read_bytes: int, *,
+                        attempts: int = LEDGER_REWRITE_ATTEMPTS,
+                        on_attempt=None) -> tuple[bool, str | None]:
+    """Rename `body` over the live ledger only once it has stopped growing.
+
+    The race this exists for: `state.append_event` opens the ledger in append mode and
+    fsyncs under no lock, at ~2.3 appends a minute on 2026-10-01, while building this
+    file takes seconds. `os.replace` is unconditional, so a rename of a snapshot taken
+    before those appends silently renames live audit rows out of existence. So: everything
+    appended after the snapshot at `read_bytes` is grafted on verbatim — those rows are
+    minutes old, never archive candidates — and the rename only goes ahead when
+    `st_size` still says `read_bytes + len(appended)`, i.e. nothing landed between the
+    tail read and the rename. Five attempts, then a refusal that leaves the live file
+    exactly as it was: a sweep that cannot get the ledger to hold still is a sweep that
+    does not touch it.
+
+    Returns `(settled, refusal)`. `on_attempt` exists for the test that proves the graft:
+    the same hook production never passes, called with the attempt index immediately
+    before each rename.
+    """
+    tmp = ledger.parent / f".{ledger.name}.archiving"
+    # The snapshot's end, FIXED for the whole loop. Advancing it to the current size
+    # between attempts is the off-by-one that loses a row: the bytes that made this
+    # attempt unsafe are exactly the bytes a re-read from the new end would step over.
+    # Every attempt therefore re-reads the entire tail since the snapshot.
+    seen = read_bytes
+    landed = 0
+    for attempt in range(attempts):
+        try:
+            with open(ledger, "rb") as src:
+                src.seek(seen)
+                appended = src.read()
+        except OSError as exc:
+            return False, f"ledger unreadable ({exc})"
+        payload = body + appended
+        try:
+            with open(tmp, "wb") as fh:
+                fh.write(payload)
+                fh.flush()
+                os.fsync(fh.fileno())
+        except OSError as exc:
+            _unlink_quietly(tmp)
+            return False, f"temp file unwritable ({exc})"
+        if on_attempt is not None:
+            on_attempt(attempt)
+        try:
+            settled = ledger.stat().st_size == seen + len(appended)
+        except OSError as exc:
+            _unlink_quietly(tmp)
+            return False, f"ledger vanished ({exc})"
+        if settled:
+            os.replace(tmp, ledger)
+            return True, None
+        landed = max(landed, ledger.stat().st_size - seen)
+    _unlink_quietly(tmp)
+    return False, (f"ledger kept growing under the archive ({landed} bytes landed in "
+                   f"{attempts} attempts); live file untouched")
+
+
+def _unlink_quietly(path: Path) -> None:
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def sweep_promotions_ledger(apply: bool, now: float, *, ledger: Path | None = None,
+                            backlog_dir: Path | None = None, health=None,
+                            on_attempt=None) -> dict:
+    """Archive promotions-ledger rows older than LEDGER_ARCHIVE_AGE_DAYS.
+
+    `~/.local/state/lloyd-automod/promotions.jsonl` is the loop's own audit trail: 32
+    MB, ~28,600 rows, +2 MB a day, decoded whole by `board_health()` on every dashboard
+    cycle and pruned by nothing until now. Rows past the window are copied into
+    `promotions-archive-<YYYYMM>.jsonl.gz` beside the ledger and taken out of the live
+    file; each round's newest row stays (see `_archive_plan`), and the whole write
+    happens only after `board_health()` answers identically over the file as it is and the
+    file as it would be.
+
+    Order of one applied run, which is the order that makes a crash survivable:
+
+    1. Read the ledger once, as BYTES. The bytes are the snapshot every later decision is
+       taken from, and the size the graft compares against.
+    2. Choose the rows (`_archive_plan`).
+    3. Prove neutrality over two temp files — the snapshot's bytes, and the kept bytes —
+       so a row appended while the proof ran cannot make the diff non-empty and cannot
+       make it empty either. Non-empty diff, or no `board_health` to ask: refuse, live
+       file untouched, and the byte pair reported is the size the store still is.
+    4. Append the archived lines to their monthly gzips (deduped, so a retry of a run
+       that refused at step 5 cannot double-write).
+    5. Rename over the live file through `_rewrite_live_ledger`, grafting the tail.
+
+    A dry run stops after step 3 and writes nothing at all — not even the archive — so
+    the numbers an operator approves are the numbers this function computed over the bytes
+    it actually read.
+
+    `health` injects the probe (`(path) -> payload`) so a test never pays for a real board
+    walk: the real `board_health()` costs ~1.4-1.6 s over an EMPTY board and this calls it
+    twice. `backlog_dir` redirects the board for the same reason. With `health` absent the
+    shipped probe asks `board_health()` twice on THIS run's `now` — see
+    `_board_health_payload` — so the only thing a non-empty diff can be is a real change in
+    what the board panel answers, which is what makes a write admissible.
+    """
+    ledger = Path(ledger) if ledger is not None else Path(AUTOMOD_LEDGER)
+    out = {"moved": 0, "bytes": 0, "archived": 0, "before": 0, "after": 0,
+           "refused": None, "candidates": 0, "kept_newest": 0}
+    try:
+        raw = ledger.read_bytes()
+    except OSError:
+        out["after"] = 0
+        return out
+    out["before"] = len(raw)
+    out["after"] = len(raw)
+
+    lines = raw.splitlines(keepends=True)
+    rows: list[tuple[bytes, dict]] = []
+    for line in lines:
+        body = line.strip()
+        try:
+            row = json.loads(body.decode("utf-8", "replace")) if body else None
+        except ValueError:
+            row = None
+        rows.append((line, row if isinstance(row, dict) else None))
+
+    archive_idx, kept = _archive_plan(rows, now)
+    out["kept_newest"] = sum(1 for why in kept.values() if why == "newest-of-round")
+    out["candidates"] = len(archive_idx) + out["kept_newest"]
+    if not archive_idx:
+        return out
+
+    dropped = set(archive_idx)
+    moved = [rows[i][0] for i in archive_idx]
+    kept_bytes = b"".join(line for i, (line, _r) in enumerate(rows) if i not in dropped)
+    out["bytes"] = sum(len(ln) for ln in moved)
+
+    # ── the neutrality proof, in both modes ───────────────────────────────────
+    # It runs on a dry run too, because it is the only thing that says this archive is
+    # safe, and a safety check that only runs when it is already too late to change its
+    # mind is a log line and not a gate. Both sides are COPIES of the snapshot: comparing
+    # the live file against a copy would let a row that landed in the 3 s between the two
+    # reads decide the verdict.
+    probe = health or (lambda path: _board_health_payload(path, backlog_dir, now=now))
+    before_copy = ledger.parent / f".{ledger.name}.neutral-before"
+    after_copy = ledger.parent / f".{ledger.name}.neutral-after"
+    try:
+        before_copy.write_bytes(raw)
+        after_copy.write_bytes(kept_bytes)
+    except OSError as exc:
+        out["refused"] = f"proof copy unwritable ({exc})"
+    try:
+        if out["refused"] is None:
+            try:
+                bh_before, bh_after = probe(before_copy), probe(after_copy)
+            except Exception as exc:  # noqa: BLE001 - see _board_health_payload
+                bh_before = bh_after = None
+                out["refused"] = f"board_health() raised {type(exc).__name__}: {exc}"
+            if out["refused"] is None:
+                if bh_before is None or bh_after is None:
+                    out["refused"] = "board_health() unavailable — neutrality unprovable"
+                else:
+                    moved_keys = _board_health_diff(bh_before, bh_after)
+                    if moved_keys:
+                        out["refused"] = ("board_health() changed at "
+                                          f"{', '.join(moved_keys[:5])}")
+    finally:
+        _unlink_quietly(before_copy)
+        _unlink_quietly(after_copy)
+    if out["refused"] is not None:
+        # `X -> 0 bytes live` is the one sentence this store must never print while the
+        # audit ledger is still 32 MB: a refused archive leaves the live file at the size
+        # it was, so the pair repeats the before count instead of inventing an after one.
+        out["after"] = out["before"]
+        out["moved"] = out["bytes"] = out["archived"] = 0
+        return out
+
+    out["moved"] = len(moved)
+    if not apply:
+        return out
+
+    months: dict[str, list[bytes]] = {}
+    for index in archive_idx:
+        seconds = _ledger_row_seconds(rows[index][1])
+        month = time.strftime("%Y%m", time.gmtime(seconds))
+        months.setdefault(month, []).append(rows[index][0])
+    for month in sorted(months):
+        target = ledger.parent / f"{LEDGER_ARCHIVE_PREFIX}{month}.jsonl.gz"
+        out["archived"] += _archive_append(target, months[month])
+
+    settled, refusal = _rewrite_live_ledger(ledger, kept_bytes, len(raw),
+                                           on_attempt=on_attempt)
+    if not settled:
+        out["refused"] = refusal
+        out["moved"] = out["archived"] = 0
+        out["after"] = out["before"]
+        return out
+    try:
+        out["after"] = ledger.stat().st_size
+    except OSError:
+        out["after"] = len(kept_bytes)
+    return out
+
+
+def _ledger_line(l: dict) -> str:
+    """The thirteenth store line, identical in dry run and `--apply`.
+
+    `0 archived` means the window held nothing, and the byte pair is then the same number
+    twice — the honest shape of "this run changed nothing". A refusal is not a `0`: it is
+    printed as a refusal repeating the live byte count, because `0 archived` would read to
+    the operator who approves this run as an empty window when in fact a 32 MB audit file
+    is sitting there unbounded and the rung knows it.
+    """
+    if l["refused"]:
+        return (f"  promotions ledger: REFUSED ({l['refused']}) — live file untouched, "
+                f"{l['before']} bytes")
+    if l["moved"] == 0 and l["kept_newest"]:
+        return (f"  promotions ledger: 0 archived ({l['before']} -> {l['after']} bytes "
+                f"live) — all {l['kept_newest']} rows past "
+                f"{LEDGER_ARCHIVE_AGE_DAYS}d are their round's newest, kept so the "
+                f"round-dir and branch rungs still have a settle time")
+    return (f"  promotions ledger: {l['moved']} archived ({l['before']} -> "
+            f"{l['after']} bytes live)")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--apply", action="store_true",
@@ -1452,10 +1900,15 @@ def main() -> int:
     # the reason for running it (#1415, pinned by
     # `test_a_bare_interpreter_reports_the_root_it_resolved`).
     refusal = automod_rung_refusal()
-    dirs = branches = None
+    dirs = branches = ledger_rows = None
     if refusal is None:
         dirs = sweep_automod_worktrees(args.apply, now, repo=AUTOMOD_REPO)
         branches = sweep_automod_branches(args.apply, now, repo=AUTOMOD_REPO)
+        # LAST of the three, because the two rungs above have just read this file: an
+        # archive that ran first would move the settle times they are about to be
+        # reported on, and the dry run an operator approved would not be the run that
+        # happened.
+        ledger_rows = sweep_promotions_ledger(args.apply, now)
 
     logs_n, logs_b = sweep_task_logs(args.apply, now)
     sess_n, sess_b = sweep_sessions(args.apply, now)
@@ -1518,6 +1971,10 @@ def main() -> int:
     else:
         print(_worktree_line(dirs))
         print(_branch_line(branches))
+        # Printed only here, inside the same guard that refused the other two: the fold
+        # rewrites the loop's own audit trail, so a run from a round's worktree or a
+        # sandbox declines it too and still prints ten store lines plus one refusal line.
+        print(_ledger_line(ledger_rows))
     if refusal and args.apply:
         return NOT_PRODUCTION_EXIT
     return 0

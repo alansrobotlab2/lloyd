@@ -925,7 +925,10 @@ def test_a_guard_that_mutates_the_vault_it_judges():
 
 #: The two nodes clause 5 is about, named exactly as they exist in the repo.
 RETENTION_NODES = (
-    "test_the_skill_says_twelve_stores_and_its_table_has_a_row_per_report_line",
+    # The name #1975's own diff gives this guard: shipping the thirteenth store line
+    # renames the node, and a citation of the twelve-store name would fail on a file
+    # guarding the count harder than before, not less.
+    "test_the_skill_says_thirteen_stores_and_its_table_has_a_row_per_report_line",
     "test_the_task_description_names_every_store_the_sweep_prints",
 )
 
@@ -1293,12 +1296,13 @@ def test_the_two_retention_count_guards_stay_in_the_default_selection(tmp_path):
                        env=env)
     line = r.stdout.strip().splitlines()[-1]
     counts = summary(r.stdout)
-    # Two nodes RUN. Which way they fail is #1975's business (they fail today, on
-    # the thirteen-vs-twelve count, and pass once its code half lands); that they
-    # are neither deselected nor skipped is clause 5, and is what a `live_vault`
-    # mark or a `pytest.skip` on either node would turn red. Counted from the
-    # summary line rather than grepped, because the file's other 66 nodes are
-    # legitimately deselected by `-k` and the word alone says nothing.
+    # Two nodes RUN. Which way they fail is #1975's business — the diff that ships
+    # the thirteenth store line is the diff that makes those two counts agree, so
+    # which way they agreed is that item's, never a fact this node can hold over a
+    # moving tree. That they are neither deselected nor skipped is clause 5, and is
+    # what a `live_vault` mark or a `pytest.skip` on either node would turn red.
+    # Counted from the summary line rather than grepped, because the file's other 83
+    # nodes are legitimately deselected by `-k` and the word alone says nothing.
     assert counts["passed"] + counts["failed"] == 2, line
     assert counts["tests_skipped"] == 0, line
 

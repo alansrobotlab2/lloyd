@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -179,6 +180,105 @@ def assert_board_within_calibration_drift(live_board_files: int) -> None:
         f"`COLD_BUDGET_MARGIN` instead keeps a green node that no longer "
         f"measures the board anyone has."
     )
+
+
+def assert_ledger_within_calibration_drift(live_ledger_bytes: int) -> None:
+    """Redden when the ledger this cycle decodes is no longer the one measured.
+
+    The same band as the board\'s, applied to the cycle\'s other input. Cost has
+    two inputs and only one of them used to be checked: the board walked and the
+    ledger decoded, and the unchecked half was the cheaper way to break the
+    budget — `scripts.automod.state` re-reads `promotions.jsonl` whole on every
+    cycle that misses its cache, and skips that cache entirely above 64 MiB, so a
+    store nothing bounds can exhaust this budget with no code change and no
+    warning. That is #1858\'s owed clause 2, and #1975 closed it by giving the
+    store an owner.
+
+    The remedy points the other way from the board\'s. A board grows only through
+    work; this store has a bound now (`retention-sweep.py`\'s promotion ledger
+    rung, store thirteen, which archives rows past `LEDGER_ARCHIVE_AGE_DAYS` into
+    a gzip beside the live file), so the first question when this reddens is
+    whether that rung ran and refused — and only then whether the calibration is
+    simply older than the ledger. What is never the remedy is
+    `COLD_BUDGET_MARGIN`: raising it accepts the slower cycle and leaves the
+    store growing, which is the one thing the bound exists to prevent.
+
+    `live_ledger_bytes` is a parameter and the caller reads it, exactly as the
+    board arm does, so the band and the measurement are one comparison rather
+    than two claims that have to be kept in agreement by hand.
+    """
+    low = int(CALIBRATED_LEDGER_BYTES * (1.0 - BOARD_DRIFT_FRACTION))
+    high = int(CALIBRATED_LEDGER_BYTES * (1.0 + BOARD_DRIFT_FRACTION))
+    assert low <= live_ledger_bytes <= high, (
+        f"the cold cycle is calibrated on {CALIBRATED_LEDGER_BYTES:,} decoded "
+        f"ledger bytes and the live `promotions.jsonl` holds "
+        f"{live_ledger_bytes:,} — outside the "
+        f"+/-{BOARD_DRIFT_FRACTION:.0%} band ({low:,}..{high:,}). FOLD THE STORE "
+        f"OR RE-MEASURE, do not raise the budget: run "
+        f"`scripts/groundskeeper/retention-sweep.py --apply` and read its "
+        f"`promotions ledger:` line (a `REFUSED` there is this drift with a named "
+        f"cause and the live file untouched), and if the rung reports the window "
+        f"empty then `LEDGER_ARCHIVE_AGE_DAYS` needs the owed ruling rather than "
+        f"a bigger constant. Re-basing means setting `CALIBRATED_LEDGER_BYTES` to "
+        f"what the live file measures now. Raising `COLD_BUDGET_MARGIN` instead "
+        f"accepts the slower cycle and leaves the store unbounded."
+    )
+
+
+def live_ledger_bytes() -> tuple[int, str]:
+    """Bytes in the promotion ledger, and which file that was.
+
+    Deliberately the OPPOSITE precedence from `board_presence.timed_ledger_or_stop`,
+    which the cycle's own timing node uses. That helper takes the configured state
+    dir whenever it holds any bytes at all, because what a timing run needs is
+    *something to decode*; this measurement needs the *store* the calibration was
+    walked over, and the two differ exactly where a sandbox is involved. The gate
+    runs a round with `LLOYD_AUTOMOD_STATE` on a scratch dir that other tests in
+    the same session append a few rows to, so the configured path there holds a
+    kilobyte stub — the first run of the drift node measured it and reddened on
+    1,000-odd bytes against a 23 MB floor. A stub is not a shrunken store, and
+    reporting one as the live size makes the check fire on the sandbox rather than
+    on the world.
+
+    So: the fixed home path (`board_presence.live_ledger()`, the seam the suite
+    already uses for exactly this) first, because the calibration table describes
+    that file; the configured path only when the home path holds no bytes; and a
+    loud failure when neither does. Never 0, which would sit inside the band and
+    read as a bounded store.
+
+    Returns `(bytes, provenance)` — the caller prints which file it measured,
+    because "inside the band" over the home store and over a configured fallback
+    are different sentences.
+    """
+    live = board_presence.live_ledger()
+    if live.is_file() and live.stat().st_size > 0:
+        return live.stat().st_size, f"the live store ({live})"
+
+    from scripts.automod import state as st
+    configured = Path(st.LEDGER_PATH)
+    floor = int(CALIBRATED_LEDGER_BYTES * (1.0 - BOARD_DRIFT_FRACTION))
+    if configured.is_file() and configured.stat().st_size > 0:
+        size = configured.stat().st_size
+        if size >= floor:
+            return (size, f"the configured store ({configured}); the live path "
+                         f"{live} has no bytes")
+        # Below the floor with no live store to compare against, this file is a
+        # run's scratch ledger and not a shrunken store: a real trim of this
+        # corpus is what the fold rung does, and it says so in its own report
+        # line. Naming it a drift would send a reader to look for a rung that
+        # truncated a file that was never a store.
+        raise AssertionError(
+            f"no promotion ledger to measure: {live} is absent and {configured} "
+            f"holds {size:,} bytes, under the band's {floor:,}-byte floor — that "
+            f"is a run's scratch state dir, not the store "
+            f"`CALIBRATED_LEDGER_BYTES` describes. Red rather than skipped: 0 or a "
+            f"stub would report an unbounded store as a bounded one")
+
+    raise AssertionError(
+        f"no promotion ledger to measure at {live} or {configured}: the cold cycle "
+        f"decodes this file, so `CALIBRATED_LEDGER_BYTES` cannot be checked here. "
+        f"Red rather than skipped, because 0 bytes would sit inside the band and "
+        f"report an unbounded store as a bounded one")
 
 
 def empty_both_caches() -> None:
@@ -348,6 +448,66 @@ def test_the_board_is_still_the_size_the_budget_was_calibrated_on():
           f"calibrated — inside the +/-{BOARD_DRIFT_FRACTION:.0%} band")
 
 
+def test_the_ledger_is_still_the_size_the_budget_was_calibrated_on():
+    """Redden when the ledger this cycle decodes has drifted out of its band.
+
+    The board's twin, and the reason it exists is the sentence in the table beside
+    `COLD_P90_S`: a cycle decodes two things, the board and the ledger, and until
+    #1975 only the first had a bound and only the first was checked. Ledger growth
+    was therefore the silent way to break this budget — no code change, no test
+    red, just a slower cycle until the timing node flaked and the flake got blamed
+    on the machine.
+    """
+    size, why = live_ledger_bytes()
+    assert_ledger_within_calibration_drift(size)
+    print(f"ledger drift: {size:,} bytes live vs {CALIBRATED_LEDGER_BYTES:,} "
+          f"calibrated — inside the +/-{BOARD_DRIFT_FRACTION:.0%} band; {why}")
+
+
+@pytest.mark.parametrize("live_ledger_bytes", [
+    pytest.param(0, id="a-ledger-with-nothing-to-decode"),
+    pytest.param(1024, id="a-ledger-truncated-to-noise"),
+])
+def test_a_ledger_far_smaller_than_the_calibration_reddens_the_drift_check(
+        live_ledger_bytes):
+    """A ledger much smaller than the calibration is as uncalibrated as a grown one.
+
+    Two-sided for the board's reason, and one more reason that is this store's
+    own: a truncate is exactly what a badly-written sixth rung would do to this
+    file, and a budget that reads a shrunken decode as a win would call that an
+    improvement. It is data loss; the node should say so.
+    """
+    with pytest.raises(AssertionError) as caught:
+        assert_ledger_within_calibration_drift(live_ledger_bytes)
+    message = str(caught.value)
+    assert f"{CALIBRATED_LEDGER_BYTES:,}" in message, message
+    assert f"{live_ledger_bytes:,}" in message, message
+    assert "FOLD THE STORE" in message and "do not raise the budget" in message, message
+
+
+def test_a_ledger_that_outgrew_the_calibration_reddens_with_the_rung_named():
+    """Past the band upward, the message points at the store's owner before the knob.
+
+    The 7-day mean growth at calibration was about 2 MB/day, so this store leaves
+    its band in days, not quarters — a month of unminded growth is enough, which
+    is exactly how #1858 found the live file 4.5x its own docstring baseline with
+    nothing red anywhere. The message has to name the rung that bounds the file
+    first: a reader who reaches for `COLD_BUDGET_MARGIN` here has accepted the
+    slower cycle and left the store growing.
+    """
+    outside = int(CALIBRATED_LEDGER_BYTES * 1.5)
+    with pytest.raises(AssertionError) as caught:
+        assert_ledger_within_calibration_drift(outside)
+    message = str(caught.value)
+    assert "retention-sweep.py" in message, message
+    assert "promotions ledger:" in message, message
+    assert "LEDGER_ARCHIVE_AGE_DAYS" in message, message
+    assert "COLD_BUDGET_MARGIN" in message, message
+    assert message.index("retention-sweep.py") < message.index("COLD_BUDGET_MARGIN"), (
+        "the instruction to bound the store must come before the warning about "
+        "the knob that hides the drift")
+
+
 @pytest.mark.parametrize("live_board_files", [
     pytest.param(0, id="an-empty-board"),
     pytest.param(1, id="a-one-file-board"),
@@ -421,13 +581,53 @@ def test_the_calibrated_board_count_is_written_once_in_this_file():
     stay where the story needs them; what may not exist is a second copy of the
     number the budget and the drift band are both derived from.
     """
-    text = Path(__file__).read_text(encoding="utf-8")
-    hits = [i for i, line in enumerate(text.splitlines(), 1)
-            if str(CALIBRATED_BOARD_FILES) in line]
-    assert len(hits) == 1, (
-        f"{CALIBRATED_BOARD_FILES} is written on {len(hits)} lines "
-        f"({hits}); only the definition of `CALIBRATED_BOARD_FILES` may hold it, "
-        f"because every other copy is a number nothing re-computes")
+    text = _file_text_without_this_node()
+    for name, value in (("CALIBRATED_BOARD_FILES", CALIBRATED_BOARD_FILES),
+                        ("CALIBRATED_LEDGER_BYTES", CALIBRATED_LEDGER_BYTES)):
+        digits = str(value)
+        spaced = f"{value:,}"
+        # What may not exist is the number written anywhere but its own
+        # assignment. An underscored literal (`28_960_660`) is caught because the
+        # digits are compared with underscores stripped, and a thousands-separated
+        # one in prose is caught through `spaced`. Historical counts (1,142 and
+        # 1,450 files) are different numbers and stay where the story needs them.
+        definition = f"{name} = "
+        hits = [i for i, line in enumerate(text.splitlines(), 1)
+                if (digits in line.replace("_", "") or spaced in line)
+                and definition not in line]
+        assert not hits, (
+            f"{value} is written on {len(hits)} lines beyond its own assignment "
+            f"({hits}); every one of those is a number nothing re-computes, and "
+            f"`{name}`'s band, its budget-table row and its drift message are all "
+            f"derived from the single definition")
+
+
+def _file_text_without_this_node() -> str:
+    """This file's text, minus the body of the written-once node itself.
+
+    A node that greps its own file for a number necessarily matches the literals
+    it types to do the grep, and counting those as drift makes it redder the more
+    carefully it is written — which is how the first version of this check, with
+    one constant, came back reporting the number on its own assertion lines. The
+    node's own body is therefore cut before searching: what remains is the
+    calibration's prose and every other line in the file, which is the surface
+    that actually goes stale quietly.
+    """
+    lines = Path(__file__).read_text(encoding="utf-8").splitlines()
+    marker = "def test_the_calibrated_board_count_is_written_once"
+    out, skipping = [], False
+    for line in lines:
+        if line.startswith(marker):
+            skipping = True
+        elif skipping and (line.startswith("def ") or line.startswith("@")
+                           or line.startswith("class ") or line.startswith("async def ")):
+            skipping = False
+        if not skipping:
+            out.append(line)
+    assert not any(line.startswith(marker) for line in out), (
+        "the written-once node's own body was not excluded from its own search, "
+        "which makes it red on its own literals")
+    return "\n".join(out)
 
 
 def _valid_payload() -> dict:
@@ -562,6 +762,80 @@ async def test_the_confirming_cycle_starts_from_emptied_caches(tmp_path):
         f"the confirming cycle found the decoded ledger still cached "
         f"(reads={reads_found} since the last reset), so it would have been timed "
         f"with the ledger already in memory")
+
+
+def test_a_sandbox_ledger_stub_never_becomes_the_drift_measurement(tmp_path, monkeypatch):
+    """A few rows in the configured state dir is not the store this constant bounds.
+
+    The regression this node exists for: the gate's first run of the drift arm
+    reddened on a 1 KB file, because the suite's own `timed_ledger_or_stop` prefers
+    the configured path whenever it has any bytes and a gate session seeds that
+    path with rows appended by other tests. For a timing run a stub is fine — any
+    bytes exercise the decode — but a SIZE assertion measured against a stub is a
+    verdict about the sandbox, so the drift arm reads the live store first. Here
+    the configured path holds a stub and the live path a full store, and the
+    measurement must be the full store's.
+    """
+    from scripts.automod import state as st
+    stub = tmp_path / "scratch" / "promotions.jsonl"
+    stub.parent.mkdir(parents=True)
+    stub.write_bytes(b'{"ts": 1.0, "event": "gate"}\n')
+    full = tmp_path / "live-promotions.jsonl"
+    full.write_bytes(b'{"ts": 1.0, "event": "gate"}\n' * 5000)
+    monkeypatch.setattr(st, "LEDGER_PATH", stub)
+    monkeypatch.setattr(board_presence, "live_ledger", lambda: full)
+
+    size, why = live_ledger_bytes()
+    assert size == full.stat().st_size, (
+        f"the drift arm measured the {stub.stat().st_size}-byte sandbox stub at "
+        f"{stub} instead of the {full.stat().st_size}-byte store the calibration "
+        f"describes; the band is about the store, not about the run's scratch dir")
+    assert "live store" in why, why
+
+    # The fallback needs the configured file to be plausible as a store, and the
+    # only test that can say so is one that sets the bar: with the calibration
+    # re-based to the fixture's own size, the configured path IS the store and the
+    # number comes from it, with `why` naming which file was read.
+    monkeypatch.setattr(board_presence, "live_ledger",
+                        lambda: tmp_path / "nothing-here.jsonl")
+    real_calibration = CALIBRATED_LEDGER_BYTES
+    monkeypatch.setattr(sys.modules[__name__], "CALIBRATED_LEDGER_BYTES",
+                        stub.stat().st_size)
+    size2, why2 = live_ledger_bytes()
+    assert size2 == stub.stat().st_size, size2
+    assert "configured store" in why2 and "no bytes" in why2, why2
+
+    # And with the calibration back at the real number, that same stub is refused:
+    # below the band's floor with no live store beside it, it is a scratch file,
+    # and a node that measured it would report a sandbox as a bounded store. The
+    # number is carried in a variable, never retyped — the written-once node below
+    # reddens on a second copy of it in this file, including one in a test.
+    monkeypatch.setattr(sys.modules[__name__], "CALIBRATED_LEDGER_BYTES",
+                        real_calibration)
+    with pytest.raises(AssertionError) as caught:
+        live_ledger_bytes()
+    assert "scratch state dir" in str(caught.value), caught.value
+
+
+def test_no_ledger_at_all_is_red_and_not_a_zero(tmp_path, monkeypatch):
+    """Neither path holding a ledger is red, never a 0 that sits inside the band.
+
+    Zero would clear the band's floor and be reported as a drift, so the outcome
+    is red either way; what this node pins is WHICH failure it is — the message has
+    to name the missing store, because "0 bytes, outside the band" reads as a
+    shrunken corpus and sends the reader looking for the rung that truncated a file
+    that was never there.
+    """
+    from scripts.automod import state as st
+    monkeypatch.setattr(st, "LEDGER_PATH", tmp_path / "absent" / "promotions.jsonl")
+    monkeypatch.setattr(board_presence, "live_ledger",
+                        lambda: tmp_path / "absent-live.jsonl")
+    with pytest.raises(AssertionError) as caught:
+        live_ledger_bytes()
+    message = str(caught.value)
+    assert "no promotion ledger to measure" in message, message
+    assert "outside the" not in message, (
+        f"a missing store must be named as missing, not as a byte drift: {message}")
 
 
 def test_a_repointed_ledger_says_so(tmp_path, monkeypatch):
