@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef, type DragEvent } from "react";
+import { useEffect, useMemo, useState, useCallback, useRef, type DragEvent } from "react";
 import { useReportMcFocus, usePendingFocusFor, useMcUi } from "../../contexts/McUiContext";
 import {
   LayoutGrid,
@@ -12,6 +12,7 @@ import {
   Search,
 } from "lucide-react";
 import { api, type BacklogBoard, type BacklogTask } from "../../api";
+import { DEFAULT_BOARD_NAME, pickDefaultBoard } from "./backlogBoardDefault";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -573,10 +574,18 @@ const DONE_WINDOW_DAYS = 7;
 /** The `done_since` value for *this* request: today − DONE_WINDOW_DAYS.
  *
  * Called inside `loadData`, never hoisted to mount or module scope. The page
- * refetches on a 15-second interval that is not gated on tab visibility, so a
- * page left open across midnight would otherwise keep asking for the same
- * seven days forever — the window would freeze on the day the tab was opened
- * and quietly show an ageing set until someone reloaded.
+ * refetches on a 15-second interval, so a page left open across midnight would
+ * otherwise keep asking for the same seven days forever — the window would
+ * freeze on the day the tab was opened and quietly show an ageing set until
+ * someone reloaded.
+ *
+ * The interval is gated on tab visibility since #2068, and that changes how
+ * often this runs but not where it may run: a hidden tab issues no poll, and
+ * the act of becoming visible is itself a fetch, so the value has to be
+ * produced by the request that carries it. Anything that computes it once —
+ * module scope, a `useState` initialiser, a `useMemo` with no clock in its
+ * deps — reintroduces the frozen window on the first tab that stays open
+ * overnight.
  *
  * Local date parts, deliberately: `toISOString()` is UTC, and this box is
  * UTC−7, so slicing it would name a day up to seven hours out of step with the
@@ -620,7 +629,108 @@ export default function BacklogPage() {
   // The board list as `loadData` last saw it, so a refetch can tell which
   // board the active id *used* to name before the ids renumbered.
   const boardsRef = useRef<BacklogBoard[]>([]);
+  // The selected board as the request path sees it, mirrored from state below.
+  // It exists because `loadData` must not be re-made when the board changes:
+  // that is what used to restart the 15-second clock on every board click and,
+  // with the board write inside the same callback, what made a mount fetch
+  // twice (#2068). A ref is the honest instrument — it is deliberately not
+  // reactive, and every place that changes the board selects it through
+  // `selectBoard`, which writes this before it asks for data.
+  const activeBoardRef = useRef<number | null>(null);
+  useEffect(() => {
+    activeBoardRef.current = activeBoard;
+  }, [activeBoard]);
   const activeBoardName = boards.find((b) => b.id === activeBoard)?.name ?? null;
+
+  // Ask the board route who is there, decide which board this page stands on,
+  // and hand back its id. Deliberately *not* folded back into `loadData`: the
+  // id has to be known before a task request is built (#2068), and the moment
+  // the function that writes `activeBoard` is also the function that issues
+  // `api.backlogTasks`, the write re-runs the callback and the mount fetches
+  // twice — which is what it did, and the first of the two requests carried no
+  // `board_id` at all: every board, 2,006 rows and 1,601,469 bytes on the box
+  // this was filed from, for a page that then threw almost all of it away.
+  const resolveBoard = useCallback(async (): Promise<number | null> => {
+    // The board the user is standing on, by name, taken from the list as last
+    // seen — before this call's answer overwrites it.
+    const previousName = boardsRef.current.find(
+      (b) => b.id === activeBoardRef.current,
+    )?.name;
+    const boardsData = await api.backlogBoards();
+    boardsRef.current = boardsData;
+    setBoards(boardsData);
+    let resolved: number | null;
+    if (previousName) {
+      // Board ids are positional over the sorted board names, so a board
+      // appearing or vanishing renumbers every board after it — and one
+      // vanishes exactly when its last task is moved off, which the modal
+      // now does in one click. Following the id would leave the user on a tab
+      // that is quietly a different board, so follow the name; a board that is
+      // gone falls back to the default below.
+      const sameBoard = boardsData.find((b) => b.name === previousName);
+      resolved = sameBoard
+        ? sameBoard.id
+        : pickDefaultBoard(boardsData, DEFAULT_BOARD_NAME)?.id ?? null;
+    } else {
+      // Nothing selected yet — a mount, or an explicit choice that has not
+      // landed. Both this site and the vanished-board site above used to read
+      // `boardsData[0].id`, which is the board that sorts first: `alfie`, 7
+      // tasks, all of them done and so all outside the window, on a box where
+      // `lloyd` holds 1,997. The default is now a name, and the name is one
+      // constant in `backlogBoardDefault.ts`.
+      resolved = pickDefaultBoard(boardsData, DEFAULT_BOARD_NAME)?.id ?? null;
+    }
+    if (resolved !== activeBoardRef.current) {
+      activeBoardRef.current = resolved;
+      setActiveBoard(resolved);
+    }
+    return resolved;
+  }, []);
+
+  const loadData = useCallback(async () => {
+    try {
+      // Boards first, and the board they name resolved, before a single task
+      // row is asked for. The two fetches used to run in one `Promise.all`,
+      // which is exactly one round trip cheaper and the reason the request
+      // below used to be built without knowing the board.
+      const boardId = await resolveBoard();
+      // `done_since` is computed here, in the request, for two reasons. It has
+      // to move with the calendar (see `doneSinceDate`), and the two omissions
+      // below are only expressible at the place the query is assembled: the
+      // checkbox drops the parameter outright, and a search drops it too, so a
+      // query for an item closed last month can still come back — the server
+      // matches `?q=` against whole bodies, and cutting the row by date first
+      // would make old done items permanently unfindable.
+      const tasksData = await api.backlogTasks({
+        ...(boardId ? { board_id: String(boardId) } : {}),
+        ...(searchParam ? { q: searchParam } : {}),
+        ...(windowActive ? { done_since: doneSinceDate() } : {}),
+      });
+      setTasks(tasksData);
+    } catch (err) {
+      console.error("Backlog load failed:", err);
+    } finally {
+      setLoading(false);
+    }
+    // No `activeBoard` here, and that omission is the fix: the board write in
+    // `resolveBoard` must not re-make this callback, because a new identity is
+    // what re-ran the effect below and produced the mount's second tasks
+    // request. The board the request is filtered to arrives as `resolveBoard`'s
+    // return value instead.
+  }, [resolveBoard, searchParam, includeAllDone]);
+
+  // A board change is a request to load, not a re-render to react to — see the
+  // dependency note above. The ref goes first because `resolveBoard` follows
+  // the board by name off it, and `setActiveBoard` has not applied yet at the
+  // point `loadData` reads it.
+  const selectBoard = useCallback(
+    (id: number) => {
+      activeBoardRef.current = id;
+      setActiveBoard(id);
+      void loadData();
+    },
+    [loadData],
+  );
 
   // Mirror current focus for the agent. Editing-task wins; otherwise
   // active board.
@@ -653,7 +763,11 @@ export default function BacklogPage() {
     // must stay a board switch), then ask the detail route, which takes an id
     // and knows nothing about windows. Only a failed fetch is a board id.
     if (boardsRef.current.some((b) => b.id === asNum)) {
-      setActiveBoard(asNum);
+      // Through `selectBoard`, not a bare `setActiveBoard`: nothing re-runs
+      // `loadData` when the board changes any more, so an agent-issued board
+      // switch that only wrote state would move the tab and leave the columns
+      // showing the board that was there before.
+      selectBoard(asNum);
       return;
     }
     let stale = false;
@@ -663,12 +777,19 @@ export default function BacklogPage() {
         if (!stale) setEditingTask(loaded);
       })
       .catch(() => {
-        if (!stale) setActiveBoard(asNum);
+        // Same reason as the branch above: an unknown id is read as a board,
+        // and a board change that should show its rows has to go through the
+        // one path that also asks for them.
+        if (!stale) selectBoard(asNum);
       });
     return () => {
       stale = true;
     };
-  }, [pendingFocus, tasks]);
+    // `selectBoard` is in the list because it is what writes the board now. It
+    // changes identity only when `loadData` does — a search or the done-window
+    // checkbox — and a re-run then is free: the body returns at once unless an
+    // agent focus is actually pending.
+  }, [pendingFocus, tasks, selectBoard]);
 
   // Apply agent-issued close_modal for the backlog tab.
   const { pendingCloseModal } = useMcUi();
@@ -681,50 +802,6 @@ export default function BacklogPage() {
     setShowCreateModal(false);
   }, [pendingCloseModal]);
 
-  const loadData = useCallback(async () => {
-    try {
-      // The board the user is standing on, by name, taken before the refetch.
-      const previousName = boardsRef.current.find((b) => b.id === activeBoard)?.name;
-      // `done_since` is computed here, in the request, for two reasons. It has
-      // to move with the calendar (see `doneSinceDate`), and the two omissions
-      // below are only expressible at the place the query is assembled: the
-      // checkbox drops the parameter outright, and a search drops it too, so a
-      // query for an item closed last month can still come back — the server
-      // matches `?q=` against whole bodies, and cutting the row by date first
-      // would make old done items permanently unfindable.
-      const [boardsData, tasksData] = await Promise.all([
-        api.backlogBoards(),
-        api.backlogTasks({
-          ...(activeBoard ? { board_id: String(activeBoard) } : {}),
-          ...(searchParam ? { q: searchParam } : {}),
-          ...(windowActive ? { done_since: doneSinceDate() } : {}),
-        }),
-      ]);
-      boardsRef.current = boardsData;
-      setBoards(boardsData);
-      setTasks(tasksData);
-      if (!activeBoard && boardsData.length > 0) {
-        setActiveBoard(boardsData[0].id);
-      } else if (previousName) {
-        // Board ids are positional over the sorted board names, so a board
-        // appearing or vanishing renumbers every board after it — and one
-        // vanishes exactly when its last task is moved off, which the modal
-        // now does in one click. Following the id would leave the user on a
-        // tab that is quietly a different board. Follow the name; the id
-        // change re-runs this callback with the correct filter.
-        const sameBoard = boardsData.find((b) => b.name === previousName);
-        if (sameBoard) {
-          if (sameBoard.id !== activeBoard) setActiveBoard(sameBoard.id);
-        } else if (boardsData.length > 0) {
-          setActiveBoard(boardsData[0].id);
-        }
-      }
-    } catch (err) {
-      console.error("Backlog load failed:", err);
-    } finally {
-      setLoading(false);
-    }
-  }, [activeBoard, searchParam, includeAllDone]);
 
   useEffect(() => {
     const timer = setTimeout(() => setSearchParam(searchQuery.trim()), 250);
@@ -733,8 +810,33 @@ export default function BacklogPage() {
 
   useEffect(() => {
     loadData();
-    const interval = setInterval(loadData, 15_000);
-    return () => clearInterval(interval);
+    // Polling a hidden tab burns the backend and bandwidth for nobody: every
+    // tick here is a boards request plus a task request, 488,497 bytes of
+    // windowed JSON measured on the box this was filed from, every 15 seconds,
+    // per open tab, including the tab nobody is looking at (#2068). So the
+    // clock is stopped on hide and started again on show — with one immediate
+    // read, because the tab that just became visible is exactly the one whose
+    // data is 15 seconds stale. Same shape as `DashboardPage.tsx`'s poll, and
+    // one thing stricter than it: the clock does not start at all when the
+    // first paint happens in a background tab, which is how a link-click in
+    // Mission Control usually opens.
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const startPolling = () => {
+      timer = setInterval(loadData, 15_000);
+    };
+    if (document.visibilityState === "visible") startPolling();
+    const onVisibility = () => {
+      clearInterval(timer);
+      if (document.visibilityState === "visible") {
+        void loadData();
+        startPolling();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [loadData]);
 
   const handleDrop = async (taskId: number, newStatus: string, insertIndex: number) => {
@@ -821,18 +923,29 @@ export default function BacklogPage() {
   // server-side over the whole body, and re-filtering the returned rows against a
   // 300-character snippet would discard exactly the mid-body matches the server
   // just found (item #1199).
-  const filteredTasks = activeBoard
-    ? tasks.filter((t) => t.board_id === activeBoard)
-    : tasks;
+  //
+  // Memoised because the board's rows only change with the payload or the
+  // selected board, while this component re-renders on every keystroke in the
+  // search box, every drag, and every open modal — each of which used to rebuild
+  // both this array and the per-status buckets below (item #2068). No behaviour
+  // rides on it, which is why nothing here pins it beyond `tsc` and the build.
+  const filteredTasks = useMemo(
+    () => (activeBoard ? tasks.filter((t) => t.board_id === activeBoard) : tasks),
+    [tasks, activeBoard],
+  );
 
-  const tasksByStatus = STATUSES.reduce(
-    (acc, status) => {
-      acc[status] = filteredTasks
-        .filter((t) => t.status === status)
-        .sort((a, b) => a.position - b.position);
-      return acc;
-    },
-    {} as Record<string, BacklogTask[]>,
+  const tasksByStatus = useMemo(
+    () =>
+      STATUSES.reduce(
+        (acc, status) => {
+          acc[status] = filteredTasks
+            .filter((t) => t.status === status)
+            .sort((a, b) => a.position - b.position);
+          return acc;
+        },
+        {} as Record<string, BacklogTask[]>,
+      ),
+    [filteredTasks],
   );
 
   return (
@@ -847,7 +960,7 @@ export default function BacklogPage() {
           {boards.map((board) => (
             <button
               key={board.id}
-              onClick={() => setActiveBoard(board.id)}
+              onClick={() => selectBoard(board.id)}
               className={`px-3 py-1.5 text-xs rounded-lg transition-colors ${
                 activeBoard === board.id
                   ? "bg-primary/15 text-primary font-medium"
