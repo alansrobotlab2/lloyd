@@ -3252,8 +3252,32 @@ _WITNESS_BYTES = 33113707
 _WITNESS_EVENT_NAMES = 61
 
 #: The day of the witness's oldest `created_at` (`2026-09-06T17:27:02Z`), the figure every
-#: "rows past 30 days = 0" claim on the item rests on.
+#: "rows past the window = 0" claim on #1975 rested on, and the reason the fold's age clock
+#: has to be the rows' own rather than the calendar.
 _WITNESS_OLDEST_DAY = "2026-09-06"
+
+#: What the same committed bytes say about the WINDOW, not merely about their size. #2043
+#: shortened `LEDGER_ARCHIVE_AGE_DAYS` from 30 to 14, and every figure in this repo that
+#: described a 30-day window went with it; these three are the replacements, and all three
+#: come OUT of the witness rather than being typed beside it, which is what lets a reader
+#: holding only the vault check the script's prose without this machine's `~/.local/state`.
+#:
+#:   _WITNESS_RATE_B_PER_DAY    bytes a day the witness's OWN last 7 days added, measured
+#:                              from its newest row backwards: `13,944,009 // 7`
+#:   _WITNESS_ARCHIVED_ROWS     rows `_archive_plan` moves at the shipped window, as of that
+#:                              same newest row: 5,990 of 28,678
+#:   _WITNESS_LIVE_AFTER_BYTES  bytes the live file holds after exactly that fold, and the
+#:                              figure that has to land inside the +/-20% band around
+#:                              `CALIBRATED_LEDGER_BYTES`. It is the whole argument for 14:
+#:                              a 30-day window leaves this file where it is and grows, so
+#:                              the fold has nothing to move and the drift node reddens
+#:                              first (see `test_the_fold_moves_rows_past_the_window_into_their_own_month_bucket`)
+#:
+#: No digit separators, and asserted by equality, both for `_WITNESS_ROWS`'s reasons: a
+#: floor is satisfied by a different ledger, and `git grep -n 26633023` has to hit.
+_WITNESS_RATE_B_PER_DAY = 1992001
+_WITNESS_ARCHIVED_ROWS = 5990
+_WITNESS_LIVE_AFTER_BYTES = 26633023
 
 
 def _fold_row(ts: float, *, event: str = "gate", **extra) -> bytes:
@@ -3921,9 +3945,13 @@ def test_a_fold_of_every_event_name_in_the_witness_stays_neutral(rs):
     now = time.time()
     failures = []
     for name in names:
-        mover = _fold_row(now - 40 * 86400, event=name, round_id="SM_PROOF",
+        # `_OLD`/`_YOUNG` rather than the literals this node carried at a 30-day window
+        # (40 and 20 days): the pair's whole job is to straddle the window, and a literal
+        # 20 silently stops straddling it the moment the window is shortened — which is
+        # exactly what #2043 did, and this node was the one that reddened for it.
+        mover = _fold_row(now - _OLD * 86400, event=name, round_id="SM_PROOF",
                           payload="x" * 300)
-        young = _fold_row(now - 20 * 86400, event=name, round_id="SM_PROOF")
+        young = _fold_row(now - _YOUNG * 86400, event=name, round_id="SM_PROOF")
         _write_ledger(rs, [mover, young])
         for stale in rs.AUTOMOD_LEDGER.parent.glob(
                 f"{rs.LEDGER_ARCHIVE_PREFIX}*.jsonl.gz"):
@@ -3931,10 +3959,10 @@ def test_a_fold_of_every_event_name_in_the_witness_stays_neutral(rs):
         out = rs.sweep_promotions_ledger(
             True, now, health=lambda ledger, backlog_dir=None: {"triaged": 1})
         # `kept_newest == 0` here by design: the fixture round's NEWEST row is the
-        # 20-day one, inside the window, so no past-window row is anyone's newest and
-        # the row that moves is simply moved. The keep rule has its own node; what this
-        # sweep asks of each event name is that its row moves, archives byte-exact, and
-        # leaves the panel answer unchanged.
+        # `_YOUNG` one, inside `LEDGER_ARCHIVE_AGE_DAYS`, so no past-window row is
+        # anyone's newest and the row that moves is simply moved. The keep rule has its
+        # own node; what this sweep asks of each event name is that its row moves,
+        # archives byte-exact, and leaves the panel answer unchanged.
         if out["refused"]:
             failures.append(f"{name}: REFUSED {out['refused']}")
         elif out["moved"] != 1 or out["kept_newest"] != 0:
@@ -3960,6 +3988,47 @@ def _witness_bytes(rs):
     """
     witness = rs.vault_root() / "backlog" / "data" / _WITNESS
     return witness.read_bytes() if witness.is_file() else None
+
+
+def _witness_rate_b_per_day(rs, lines: list[bytes], rows: list[dict]) -> int:
+    """Bytes a day the committed witness's own last 7 days add to the live file.
+
+    Measured from the NEWEST row's timestamp backwards and never from `time.time()`, for the
+    reason `test_the_witness_is_a_ledger_and_not_just_a_row_count` states: these bytes are a
+    fixed copy, so a rate taken against the wall clock walks off the end of the file within a
+    week and becomes a measurement of nothing. `_ledger_row_seconds` is the rung's own age
+    rule, so this is the same clock that decides window membership, and the `+ 1` is the
+    newline `splitlines()` dropped — the live file grows by the whole line, separator
+    included, and the store-thirteen prose quotes a rate in bytes per day.
+
+    Floor-divided, because the figure it exists to check is a whole number of bytes written
+    into a comment; `13,944,009 // 7` is that number and the division is exact enough that
+    the rounding direction is not a claim (`.29` of a byte per day).
+    """
+    stamps = [s for s in (rs._ledger_row_seconds(r) for r in rows) if s is not None]
+    newest = max(stamps)
+    floor = newest - 7 * 86400
+    total = sum(len(ln) + 1 for ln, r in zip(lines, rows)
+                if (rs._ledger_row_seconds(r) or 0) > floor)
+    return total // 7
+
+
+def _calibration_band() -> tuple[int, int]:
+    """The +/-`BOARD_DRIFT_FRACTION` band the cold cycle's ledger budget is held to.
+
+    Read from `tests/test_dashboard_cold_render.py`, the file that OWNS both numbers, and
+    combined with that file's own arithmetic (`int(CALIBRATED_LEDGER_BYTES * (1 +/- f))`)
+    rather than a copy of the products. The retention sweep's ledger rung has one job —
+    keep the file the cold cycle decodes inside this band — so the band is the only
+    yardstick that can say whether a given window bounds the store usefully, and a
+    re-calibration that moves `CALIBRATED_LEDGER_BYTES` has to move this check with it
+    instead of leaving a stale pair of literals behind.
+    """
+    import test_dashboard_cold_render as cold
+
+    low = int(cold.CALIBRATED_LEDGER_BYTES * (1.0 - cold.BOARD_DRIFT_FRACTION))
+    high = int(cold.CALIBRATED_LEDGER_BYTES * (1.0 + cold.BOARD_DRIFT_FRACTION))
+    return low, high
 
 
 def test_the_witness_ledger_reproduces_the_row_count_the_item_quotes(rs):
@@ -4020,14 +4089,20 @@ def test_the_witness_is_a_ledger_and_not_just_a_row_count(rs):
     `test_a_fold_of_every_event_name_in_the_witness_stays_neutral` iterates, so a witness
     that lost a whole event type could not quietly shrink the sweep it is supposed to drive.
     And the report the item quotes about the window is re-derived here: `_archive_plan` over
-    the witness's own rows, aged by the rung's own `_ledger_row_seconds`, answers `0` —
-    which is clause 6's "re-derive the quoted report", not a restatement of it.
+    the witness's own rows, aged by the rung's own `_ledger_row_seconds`, moves
+    `_WITNESS_ARCHIVED_ROWS` of them and leaves `_WITNESS_LIVE_AFTER_BYTES` live at the
+    shipped window — which is clause 6's "re-derive the quoted report", not a restatement of
+    it. The surviving byte count is then put against the cold cycle's own calibration band,
+    because that band is the only yardstick that says whether a window bounds the store
+    usefully: a fold that leaves the file outside it has bounded nothing, and a window that
+    leaves the file exactly where it found it has not even done that.
 
-    The window is measured from the NEWEST row's own timestamp, not from `time.time()`. The
-    report on the item ("rows older than 30 days = 0 rows / 0 bytes") was a statement about
-    that copy as of the minute it was taken; against the wall clock it stays true for five
-    more days and then goes false because the calendar turned, which would hand a red test
-    to an unrelated round on 2026-10-06 for no reason but time.
+    The window is measured from the NEWEST row's own timestamp, not from `time.time()`. These
+    bytes are a fixed copy, so an age taken against the wall clock walks one day further into
+    the file every day the vault copy is not re-cut — at a 14-day window the report below was
+    true when #2043 measured it and would go false four days later for no reason but the
+    calendar, which is how a red test reaches an unrelated round. Measuring from the newest
+    row makes these three figures properties of the bytes rather than of the date.
     """
     raw = _witness_bytes(rs)
     if raw is None:
@@ -4040,7 +4115,7 @@ def test_the_witness_is_a_ledger_and_not_just_a_row_count(rs):
     unageable = [r.get("event") for r in rows
                  if r.get("ts") is None and r.get("created_at") is None]
     assert not unageable, (
-        f"{len(unageable)} rows carry no age field at all, so neither the 30-day window "
+        f"{len(unageable)} rows carry no age field at all, so neither the window "
         f"nor the month bucket can be computed from the witness: {unageable[:8]}")
     with_event = sum(1 for r in rows if r.get("event"))
     assert with_event == len(rows), (
@@ -4056,18 +4131,44 @@ def test_the_witness_is_a_ledger_and_not_just_a_row_count(rs):
         "window report below is about a different copy than the one the item describes")
 
     as_of = max(rs._ledger_row_seconds(r) for r in rows)
-    archive, kept = rs._archive_plan([(b"", r) for r in rows], as_of)
+    archive, kept = rs._archive_plan([(ln, r) for ln, r in zip(lines, rows)], as_of)
+    archived_bytes = sum(len(lines[i]) + 1 for i in archive)
+    live_after = len(raw) - archived_bytes
     print(f"witness report: {len(archive)} of {len(rows)} rows past "
           f"{rs.LEDGER_ARCHIVE_AGE_DAYS} d as of "
           f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(as_of))}; "
+          f"{archived_bytes:,} B archived, {live_after:,} B left live; "
           f"{len(names)} event names")
-    assert len(archive) == 0, (
-        f"{len(archive)} rows are past the window in the committed copy, which is not the "
-        "report the item quotes — and `kept` says why: "
-        f"{sorted(set(kept.values()))}")
-    assert len(kept) == len(rows), (
-        f"{len(kept)} rows carry a keep reason against {len(rows)} rows: every archived "
-        "row is a row the live file lost")
+    assert len(archive) == _WITNESS_ARCHIVED_ROWS, (
+        f"{len(archive)} rows are past the shipped {rs.LEDGER_ARCHIVE_AGE_DAYS}-day window in "
+        f"the committed copy, and the report #2043 quotes is {_WITNESS_ARCHIVED_ROWS}. This "
+        "is the node that says the window has work to do at all: at 30 days the same call "
+        "answered 0, the fold moved nothing, and the store's only bound was the calendar — "
+        f"and `kept` says which rule held them: {sorted(set(kept.values()))}")
+    assert live_after == _WITNESS_LIVE_AFTER_BYTES, (
+        f"the fold leaves {live_after:,} bytes live against the {_WITNESS_LIVE_AFTER_BYTES:,} "
+        "the report was re-derived from; the two figures describe two different folds")
+    assert len(kept) == len(rows) - len(archive), (
+        f"{len(kept)} rows carry a keep reason against {len(rows) - len(archive)} survivors: "
+        "every archived row is a row the live file lost, and a row that is neither archived "
+        "nor kept is a row this rung has lost count of")
+    assert set(kept.values()) == {"young", "newest-of-round"}, (
+        f"keep reasons {sorted(set(kept.values()))} on the committed copy; only these two "
+        "exist for a ledger whose rounds all have a live newest row, and a third would mean "
+        "the witness carries malformed or ageless rows the fold has to route around")
+    low, high = _calibration_band()
+    assert low <= live_after <= high, (
+        f"{live_after:,} bytes live after the fold is outside the {low:,}..{high:,} band the "
+        "cold cycle is calibrated on. This is the clause #2043 is about: a window whose "
+        "steady state is outside that band bounds the store by spending the budget the store "
+        "exists to protect, and the drift node in test_dashboard_cold_render.py reddens "
+        "before the fold ever gets a row to move")
+    assert _witness_rate_b_per_day(rs, lines, rows) == _WITNESS_RATE_B_PER_DAY, (
+        f"the witness's own last 7 days add {_witness_rate_b_per_day(rs, lines, rows):,} "
+        f"bytes a day, not the {_WITNESS_RATE_B_PER_DAY:,} the script's prose derives its "
+        "live-file cap from. That cap is a product of this rate and the window, so a "
+        "disagreement here means the comment above `LEDGER_ARCHIVE_AGE_DAYS` is quoting a "
+        "growth figure no bytes reproduce")
 
 
 def test_the_overwritten_witness_keeps_the_other_items_bytes_recoverable(rs):
@@ -4108,5 +4209,277 @@ def test_the_overwritten_witness_keeps_the_other_items_bytes_recoverable(rs):
     assert prior_bytes == 10_917_874, (
         f"the displaced witness is {prior_bytes} bytes, not the 10,917,874 the records "
         f"quoting it say")
+
+
+# ── #2043: the window VALUE, and the two rungs that read this ledger ─────────
+#
+# #1975 shipped the fold and left the value open ("that ruling is owed to
+# owed-check, not decided here"). #2043 decides it: 14 days, because at the
+# witness's own growth rate a 30-day window holds the live file above the top of
+# the cold cycle's calibration band, where the fold has nothing to move and the
+# drift node reddens first. Shortening the window is what makes the `newest of
+# round` rule load-bearing rather than decorative — a round's rows go archivable
+# 16 days before the 30-day branch horizon asks this ledger when that round
+# settled — so the second node below is the one carrying this item's real risk.
+
+
+def test_the_ledger_window_is_14_days_and_the_horizons_around_it_are_unchanged(rs):
+    """Clause 1: this item moves ONE number, so the three it must not move are pinned too.
+
+    `LEDGER_ARCHIVE_AGE_DAYS` is 14. `BRANCH_MAX_AGE_DAYS` is still 30 and
+    `WORKTREE_DIR_MAX_AGE_DAYS` still 7 — both re-asserted here not as decoration but
+    because a shortened LEDGER window is precisely what makes this store's horizon
+    ASYMMETRIC with the two rungs that read it, and that asymmetry is the state clause 2
+    has to survive rather than an inconsistency to smooth away. The branch arm's own 30 is
+    already asserted by
+    `test_a_branch_goes_only_at_thirty_days_and_only_when_its_tip_is_in_main`, which is the
+    test a "harmonise the windows" edit would have to break first.
+
+    `CALIBRATED_LEDGER_BYTES` is read out of `tests/test_dashboard_cold_render.py`, the
+    module that owns it, rather than copied: the case for 14 days is that the folded file
+    lands inside that module's band, so a round that shortened the window AND re-based the
+    calibration would make its own argument true by construction. #1858's calibration is
+    not this item's to move.
+    """
+    assert rs.LEDGER_ARCHIVE_AGE_DAYS == 14, (
+        f"{rs.LEDGER_ARCHIVE_AGE_DAYS}. #2043's ruling is a 14-day window: on a ledger whose "
+        "whole history is younger than 30 days, a 30-day window gives the fold no candidate "
+        "at all, which leaves the store bounded by the calendar and the cold cycle's drift "
+        "node reddening before any row can move")
+    assert rs.BRANCH_MAX_AGE_DAYS == 30, (
+        "#1037's ruled branch horizon. It stays 30 while the ledger window goes to 14 on "
+        "purpose: `test_a_window_14_fold_leaves_a_mid_aged_round_the_settle_time_the_branch_"
+        "rung_ages_on` is what makes that safe, and quietly matching the two windows would "
+        "retire that question instead of answering it")
+    assert rs.WORKTREE_DIR_MAX_AGE_DAYS == 7, "#1037's ruled horizon, as carried by #1644"
+
+    import test_dashboard_cold_render as cold
+
+    assert cold.CALIBRATED_LEDGER_BYTES == 28_960_660, (
+        f"{cold.CALIBRATED_LEDGER_BYTES:,}: the byte count the cold cycle was calibrated on "
+        "is #1858's, and #2043's whole case is that a 14-day fold lands the live file inside "
+        "its band. Re-basing it here would move the target the window was aimed at")
+    assert cold.BOARD_DRIFT_FRACTION == 0.20, (
+        "the +/-20% the band above is ±of; the ledger-drift node reads this same pair, so a "
+        "window judged against a different fraction is judging a different budget")
+
+
+def test_a_window_14_fold_leaves_a_mid_aged_round_the_settle_time_the_branch_rung_ages_on(
+        rs, automod, capsys, monkeypatch):
+    """Clause 2: the fold's other half, across the seam that actually reads this ledger.
+
+    One round, three rows, all of them past the 14-day window and none past the 30-day
+    branch horizon — 22, 20 and 18 days. That is the state a 14-day window reaches for the
+    first time: every row is a candidate, so the only thing standing between this round and
+    amnesia is `_archive_plan`'s newest-of-round rule. Both halves of the clause are asserted
+    on the far side of that rule, by calling the OTHER rung over the file the fold just
+    rewrote:
+
+      * the fold moved the two older rows and kept the newest (`moved == 2`,
+        `kept_newest == 1`) — without this the node would pass at window 30, where nothing
+        moves and nothing is at risk;
+      * `_settle_times` still answers `SM_MID` at its TRUE settle date, 18 days, not absent;
+      * `sweep_automod_branches` counts it `young` — aged on that date, inside its 30-day
+        horizon — and `untracked == 0`, which is the count the report prints as
+        `0 no ledger row`. A round with no live row is a round neither deletion rung will
+        ever touch, so `untracked == 1` here is store 11 and store 12 going unbounded
+        through the store that was supposed to be the only one getting smaller.
+
+    The branch is asserted still present after an `apply=True` branch sweep, because the
+    failure it is guarding is a deletion decision made off a settle time the fold stole.
+    """
+    now = time.time()
+    _branch(automod, "SM_MID", landed=True)
+    _write_ledger(rs, [
+        _fold_row(now - 22 * 86400, event="gate", round_id="SM_MID", rung="tests"),
+        _fold_row(now - 20 * 86400, event="review", round_id="SM_MID"),
+        _fold_row(now - 18 * 86400, event="settled", round_id="SM_MID"),
+    ])
+
+    folded = rs.sweep_promotions_ledger(True, now, health=_neutral_health)
+    assert folded["moved"] == 2, (
+        f"{folded}: the two rows older than the {rs.LEDGER_ARCHIVE_AGE_DAYS}-day window have "
+        "to leave, or this node is watching a fold that did not happen and every assertion "
+        "below it is about an untouched file")
+    assert folded["kept_newest"] == 1, (
+        f"{folded}: the round's newest row is the one the two deletion rungs date it by, so "
+        "exactly one row stays and it is this one")
+
+    settled = rs._settle_times(rs.AUTOMOD_LEDGER)
+    assert "SM_MID" in settled, (
+        f"`_settle_times` lost the round entirely: {sorted(settled)}. Both deletion rungs "
+        "read this answer and refuse to touch a round that is not in it, which is stores 11 "
+        "and 12 becoming unbounded from the inside")
+    assert settled["SM_MID"] == pytest.approx(now - 18 * 86400, abs=1.0), (
+        f"the round's settle date moved to {settled['SM_MID']}: the fold must preserve the "
+        "MAX of a round's rows exactly, and an 18-day-old round that reports a different age "
+        "after a fold will be aged by the branch rung on a date the ledger never recorded")
+
+    branches = rs.sweep_automod_branches(apply=True, now=now, repo=automod)
+    assert branches["untracked"] == 0, (
+        f"{branches}: a mid-aged round counted `no ledger row` after the fold. That count is "
+        "the rung's own word for 'I cannot date this, so I will never delete it', and it is "
+        "how bounding this store silently unbounds the other two")
+    assert branches["young"] == 1, (
+        f"{branches}: 18 days is inside the {rs.BRANCH_MAX_AGE_DAYS}-day horizon, so the "
+        "round should be kept as young on its true settle date")
+    assert branches["deleted"] == 0, (
+        f"{branches}: the branch rung deleted a round 12 days before its horizon, on a settle "
+        "time this round's own fold supplied")
+    assert "automod/SM_MID" in _branches(automod), (
+        "the ref outlived the assertion that said it was kept")
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py"])
+    assert rs.main() == 0
+    report = capsys.readouterr().out
+    ledger_line = _store_line(report, "promotions ledger")
+    assert "0 archived" in ledger_line and "their round's newest" in ledger_line, (
+        f"{ledger_line}: the operator's line has to say WHY a second pass moves nothing — a "
+        "survivor that is somebody's settle time is a different fact from an empty window, "
+        "and `0 archived` alone reads as both")
+    branch_line = _store_line(report, "automod/* branches")
+    assert "0 no ledger row" in branch_line, (
+        f"{branch_line}: the printed count is the one an operator reads, and it says a round "
+        "lost its date")
+
+
+def _constant_comment(source: str, name: str) -> str:
+    """The `#:` block sitting immediately above a module constant, with its lines joined.
+
+    Read out of the script's own text because the clause is about that text, and located by
+    the assignment rather than by a line number: the comment has to travel with the constant
+    it prices, and a node that read line 1462 would keep passing after the block moved away
+    from it.
+    """
+    lines = source.splitlines()
+    at = next((i for i, ln in enumerate(lines) if ln.startswith(f"{name} =")), None)
+    assert at is not None, f"{name} is not assigned at the top level of the script"
+    start = at
+    while start and lines[start - 1].lstrip().startswith("#:"):
+        start -= 1
+    assert start < at, f"no `#:` comment above {name}"
+    return "\n".join(ln.lstrip()[2:] for ln in lines[start:at])
+
+
+def _docstring_store_entry(module, number: int) -> str:
+    """Numbered store entry `number` from the module docstring, up to its blank line.
+
+    The module docstring is this store's only prose that a reader of `--help` sees
+    (`main()` hands it to `argparse`), so clause 3 names it alongside the comment. One
+    entry, not the whole docstring: store 12 legitimately discusses 500 MB of `.git`, and a
+    check that scanned every store's prose would either fail on that or be scoped so
+    loosely it could not fail at all.
+    """
+    text = inspect.getdoc(module)
+    assert text, "the module has no docstring to hold the store list"
+    marker = f"\n{number}. "
+    assert marker in text, f"store {number} is not a numbered entry in the module docstring"
+    rest = text[text.index(marker) + 1:]
+    end = rest.find("\n\n")
+    return rest if end == -1 else rest[:end]
+
+
+_PRICE = re.compile(r"(\d+)\s*x\s*([\d,]+)\s*=\s*([\d,]+)")
+
+
+def test_the_ledger_window_prose_prices_the_shipped_window_from_the_measured_rate(rs):
+    """Clause 3: the prose states a window, and the number it prices it at is arithmetic.
+
+    Two blocks — the `#:` comment above `LEDGER_ARCHIVE_AGE_DAYS` and the module docstring's
+    store-thirteen entry — and four claims about each, all of them falsifiable without
+    reading them:
+
+      * each block prices exactly one window, and the day-count in that product IS the
+        shipped constant. This is the check that catches the real defect class here: a
+        future round changes `LEDGER_ARCHIVE_AGE_DAYS` and leaves the comment describing the
+        window it replaced. Changing the constant without touching the prose reddens this
+        node, because the days figure in the product no longer equals the constant;
+      * the rate in the product is `_WITNESS_RATE_B_PER_DAY`, which
+        `test_the_witness_is_a_ledger_and_not_just_a_row_count` re-derives from the committed
+        ledger copy in the vault. The prose therefore quotes a growth figure bytes reproduce,
+        not one somebody measured on this machine's state dir and re-typed;
+      * the product is the right product, it sits inside the cold cycle's calibration band,
+        under half of `state.py`'s decode-cache ceiling, and the percentage of that ceiling
+        the block prints is `cap / ceiling` to one decimal;
+      * no block prices a 30-day window in bytes, and neither contains the sentence #2043
+        retired: that a 30-day window "caps the live file near" some tidy figure. That claim
+        was what made 30 look safe, and the arithmetic it rested on put the file above the
+        band the store exists to protect.
+    """
+    source = _SCRIPT.read_text(encoding="utf-8")
+    blocks = {
+        "`#:` comment above LEDGER_ARCHIVE_AGE_DAYS":
+            _constant_comment(source, "LEDGER_ARCHIVE_AGE_DAYS"),
+        "module docstring store-thirteen entry":
+            _docstring_store_entry(rs, 13),
+    }
+    state = rs._automod_module("state")
+    assert state is not None, "cannot read scripts.automod.state to get the ceiling"
+    ceiling = state._ROWS_CACHE_MAX_BYTES
+    low, high = _calibration_band()
+
+    for label, block in blocks.items():
+        priced = {int(days): (int(rate.replace(",", "")), int(cap.replace(",", "")))
+                  for days, rate, cap in _PRICE.findall(block)}
+        assert list(priced) == [rs.LEDGER_ARCHIVE_AGE_DAYS], (
+            f"{label} prices {sorted(priced)} day-windows; exactly one product is allowed, "
+            f"and its day-count has to be the shipped {rs.LEDGER_ARCHIVE_AGE_DAYS}. A block "
+            "still reciting the old window is how a retired ruling keeps being quoted")
+        rate, cap = priced[rs.LEDGER_ARCHIVE_AGE_DAYS]
+        assert rate == _WITNESS_RATE_B_PER_DAY, (
+            f"{label} grows at {rate:,} B/day; the committed ledger copy gives "
+            f"{_WITNESS_RATE_B_PER_DAY:,}")
+        assert rate * rs.LEDGER_ARCHIVE_AGE_DAYS == cap, (
+            f"{label}: {rate:,} x {rs.LEDGER_ARCHIVE_AGE_DAYS} != {cap:,}")
+        assert low <= cap <= high, (
+            f"{label}: a {rs.LEDGER_ARCHIVE_AGE_DAYS}-day window steady-states at {cap:,} "
+            f"bytes, outside the {low:,}..{high:,} band the cold cycle is calibrated on. The "
+            "window is chosen to land in that band; a prose figure outside it is describing a "
+            "window nobody chose")
+        assert cap < ceiling / 2, (
+            f"{label}: {cap:,} bytes is not comfortably under the {ceiling:,}-byte decode "
+            f"cache ceiling (`state.py`), which is the bound this store was given a window "
+            "for in the first place")
+        stated_pct = re.search(r"(\d+(?:\.\d+)?)%\s*of", block)
+        assert stated_pct is not None, f"{label} states no share of the ceiling"
+        assert float(stated_pct.group(1)) == round(cap / ceiling * 100, 1), (
+            f"{label} prints {stated_pct.group(1)}% of the ceiling; {cap:,} of {ceiling:,} is "
+            f"{round(cap / ceiling * 100, 1)}%")
+        assert re.search(r"\d(?:\.\d+)?\s?MB", block) is None, (
+            f"{label} prices something in MB. Every figure in these two blocks is a byte "
+            "count arithmetic can check; an MB figure is the shape the retired 30-day claim "
+            "took (`caps the live file near 60 MB`), and it is one a reader cannot verify")
+        stale = re.search(r"30[- ]day[^.]*\d[\d,]{5,}", block)
+        assert stale is None, (
+            f"{label} still costs a 30-day window in bytes: `{stale.group(0)[:120]}` — the "
+            "claim #2043 retired was that a 30-day window caps the live file near 60 MB")
+        assert (f"{rs.LEDGER_ARCHIVE_AGE_DAYS}-day" in block
+                or f"{rs.LEDGER_ARCHIVE_AGE_DAYS} days" in block), (
+            f"{label} never says the window it is describing is "
+            f"{rs.LEDGER_ARCHIVE_AGE_DAYS} days, so its arithmetic has no stated subject")
+
+    # The operator's copy of the same sentence: the skill's store-thirteen row is what the
+    # weekly job reads, and it carried the retired ruling too — ">30d", "~60 MB", and a
+    # date after which `0 archived` would stop being the expected line. A retraction that
+    # moves the script and not the skill leaves the alarm printed where the operator looks
+    # for the number, which is the shape this corpus keeps hitting (#1464's `~940s` row was
+    # the same defect one store over).
+    skill = rs.vault_root() / "skills" / "retention-sweep" / "SKILL.md"
+    if skill.is_file():
+        row = next((ln for ln in skill.read_text(encoding="utf-8").splitlines()
+                    if ln.startswith("| `~/.local/state/lloyd-automod/promotions.jsonl`")),
+                   None)
+        assert row is not None, (
+            "the skill's table no longer has a row for this store, so nothing here can say "
+            "what the weekly job is told it does")
+        assert f">{rs.LEDGER_ARCHIVE_AGE_DAYS}d" in row, (
+            f"the skill's row does not carry the shipped window: {row[:120]}")
+        assert "60 MB" not in row, (
+            "the skill still prices the retired 30-day window at ~60 MB")
+        assert re.search(r"until ~\d{4}-", row) is None, (
+            "the skill still dates the day this store would start moving rows. The claim was "
+            "true of a 30-day window on a ledger younger than it; #2043 shortened the window, "
+            "and a dated all-clear is the one prose figure that goes false with nobody "
+            "editing it")
 
 

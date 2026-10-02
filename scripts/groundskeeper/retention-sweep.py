@@ -93,18 +93,25 @@ the transcript scratch home from backlog #566:
     on the report line is the series to watch for the first of those.
 
 13. ~/.local/state/lloyd-automod/promotions.jsonl — the promotion ledger: the loop's own
-    append-only audit trail, 32,979,950 bytes / 28,600 rows on 2026-10-01 and growing
-    2,007,947 bytes a day on the 7-day mean of its rows' own `created_at`. `board_health`
-    and the two rungs above read it whole on every pass, and nothing has ever taken a row
-    out of it (#1858's owed entry 2 ruled it a store; #1975 gives it a window). ARCHIVE
-    OUT — never fold in place, never delete: a row older than LEDGER_ARCHIVE_AGE_DAYS (30)
-    leaves the live file for `promotions-archive-<YYYYMM>.jsonl.gz` beside it, bucketed by
-    the month of the row's OWN age and copied byte-for-byte, so the archive holds the rows
-    and not a summary of them. Two rules are what keep the two rungs above intact while
-    the file shrinks: each round's NEWEST row is never archived, because `_settle_times`
-    takes a max and a round with no live row is a round both rungs count `no ledger row`
-    and therefore never delete — bounding this store would otherwise unbound stores 11 and
-    12; and the rewrite happens only on a PROOF, `board_health()` run over the live file
+    append-only audit trail, 33,113,707 bytes / 28,678 rows in the copy the vault commits at
+    `backlog/data/promotions.jsonl`, and growing 1,992,001 bytes a day on the 7-day mean of
+    that copy's own rows — both figures re-derived from those committed bytes by
+    `tests/test_retention_sweep.py` rather than typed. `board_health` and the two rungs above
+    read it whole on every pass, and nothing had taken a row out of it until #1975 gave it a
+    window and #2043 set its value. ARCHIVE OUT — never fold in place, never delete: a row
+    older than LEDGER_ARCHIVE_AGE_DAYS (14 days: 14 x 1,992,001 = 27,888,014 bytes of live
+    file, 41.6% of the `state.py` decode-cache ceiling, and inside the ±20% band the cold
+    cycle's ledger budget is calibrated on) leaves the live file for
+    `promotions-archive-<YYYYMM>.jsonl.gz` beside it, bucketed by the month of the row's OWN
+    age and copied byte-for-byte, so the archive holds the rows and not a summary of them.
+    Two rules are what keep the two rungs above intact while the file shrinks: each round's
+    NEWEST row is never archived, because `_settle_times` takes a max and a round with no
+    live row is a round both rungs count `no ledger row` and therefore never delete —
+    bounding this store would otherwise unbound stores 11 and 12. #2043's 14 is what makes
+    that first rule load-bearing rather than a courtesy: a round's rows go archivable a
+    fortnight before the 30-day branch horizon asks this ledger when the round settled, so
+    the keep, and not the window, is what keeps stores 11 and 12 bounded. And the rewrite
+    happens only on a PROOF, `board_health()` run over the live file
     and over the new file as a copy beside it, refusing to write if any key of the two
     payloads differs. Rewrite is temp-file + `os.replace` with every line appended since
     the read grafted back verbatim and `st_size` re-checked before the rename, because
@@ -1459,15 +1466,21 @@ def _branch_line(b: dict) -> str:
 # the gzip beside the ledger holds the original line, byte for byte.
 
 #: Age after which a promotions-ledger row leaves the live file for the monthly
-#: archive (#1975, from #1858's owed entry 2). 30 is every other window in this file and
-#: the same horizon `BRANCH_MAX_AGE_DAYS` uses — which is exactly why a round's newest
-#: row has to stay live (see `_archive_plan`): the two rungs age rounds older than
-#: this same 30 days off this ledger, and a round with no live row is a round they never
-#: delete. The window VALUE is what decides whether this store is bounded usefully —
-#: at the measured 2,007,947 B/day a 30-day window caps the live file near 60 MB, only
-#: 6.9 MB under `state.py`'s `_ROWS_CACHE_MAX_BYTES` — and that ruling is owed to
-#: owed-check, recorded on #1975, not decided here.
-LEDGER_ARCHIVE_AGE_DAYS = 30
+#: archive (#1975, from #1858's owed entry 2; the VALUE is #2043's ruling). 14 is
+#: deliberately NOT the horizon every other store in this file uses. At the
+#: 1,992,001 B/day the committed copy of this ledger adds over its own last 7 days,
+#: 14 days is 14 x 1,992,001 = 27,888,014 bytes of live file, 41.6% of the
+#: `state.py` decode-cache ceiling and inside the ±20% band the cold cycle's ledger
+#: budget is calibrated on. The 30-day alternative — every other horizon here —
+#: steady-states above the TOP of that band, so it would bound this store by spending
+#: the budget the store exists to protect, and on a ledger whose whole history is
+#: younger than the window it would leave the fold with nothing to move at all. The
+#: shortened value is also what makes `newest-of-round` load-bearing rather than a
+#: courtesy (see `_archive_plan`): a round's rows go archivable a fortnight before the
+#: 30-day branch horizon asks this ledger when that round settled, and a round with no
+#: live row is a round the two rungs above count `no ledger row` and therefore never
+#: delete.
+LEDGER_ARCHIVE_AGE_DAYS = 14
 
 #: Prefix of the monthly gzip that receives the archived rows, beside the ledger. One
 #: file per month of the ledger's OWN history, never one per sweep, so a reader who wants
@@ -1508,10 +1521,13 @@ def _archive_plan(rows: list[tuple[bytes, dict]],
     a MAX over the round's rows, and both deletion rungs refuse to touch a round whose
     answer is missing — `sweep_automod_branches` counts it `untracked` and prints it as
     `no ledger row` forever. Archiving a settled round's last live row would therefore
-    take its settle time with it, on the same 30-day horizon those rungs age at, and the
-    new store would have quietly re-opened the two old ones (#1975 re-triage finding 3).
-    Keeping one row per round costs one row per round and preserves every answer
-    `_settle_times` gives — max untouched, exactly.
+    take its settle time with it. #1975 re-triage finding 3 saw that coming at a 30-day
+    window, where this store's horizon and those rungs' coincided by construction; #2043's
+    14-day window makes the rule load-bearing rather than redundant, because a round's rows
+    go archivable a fortnight before either rung asks about it at all — so this condition,
+    and not the size of the window, is what keeps stores 11 and 12 bounded. Keeping one row
+    per round costs one row per round and preserves every answer `_settle_times` gives — max
+    untouched, exactly.
 
     Returns `(archive_indexes, kept_reason)` where `kept_reason` names, per kept index,
     the rule that kept it (`young`, `newest-of-round`, `no-age`, `not-a-dict`,
