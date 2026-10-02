@@ -42,6 +42,8 @@ Four things keep this from being a stopwatch that always passes:
 
 from __future__ import annotations
 
+import ast
+import importlib.util
 import json
 import os
 import sys
@@ -279,6 +281,351 @@ def live_ledger_bytes() -> tuple[int, str]:
         f"decodes this file, so `CALIBRATED_LEDGER_BYTES` cannot be checked here. "
         f"Red rather than skipped, because 0 bytes would sit inside the band and "
         f"report an unbounded store as a bounded one")
+
+
+def _audit_nodes(tree: "ast.AST") -> tuple[list[str], list[str], list[str], dict[str, int]]:
+    """(node names, nodes retired from a run, `live_vault` nodes, parametrized nodes).
+
+    Read off the syntax tree rather than by grepping the file's text, and that is
+    load-bearing: the first draft of this audit looked for the literal spellings
+    `pytest.mark.skip` and `pytest.skip(` in the source, and reddened on this node's
+    own assertion strings, which quote them. A guard that cannot tell a call from a
+    mention of a call refuses the file it is standing in.
+
+    `away` collects the two ways a node stops running without being deleted: an
+    `skip`/`skipif`/`xfail` decorator, and a body-level `pytest.skip(...)` /
+    `pytest.xfail(...)` / `pytest.importorskip(...)` call. `marked` is the
+    `live_vault` list, which the gate deselects with `-m "not live_vault"`.
+    """
+
+    def chain(node) -> str:
+        parts = []
+        while isinstance(node, (ast.Attribute, ast.Name)):
+            parts.append(node.attr if isinstance(node, ast.Attribute) else node.id)
+            node = node.value if isinstance(node, ast.Attribute) else None
+        return ".".join(reversed(parts))
+
+    nodes: list[str] = []
+    away: list[str] = []
+    marked: list[str] = []
+    parametrized: dict[str, int] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not node.name.startswith("test_"):
+            continue
+        nodes.append(node.name)
+        for decorator in node.decorator_list:
+            name = chain(decorator.func) if isinstance(decorator, ast.Call) else chain(decorator)
+            if name.endswith(("mark.skip", "mark.skipif", "mark.xfail")):
+                away.append(f"{node.name}: @{name}")
+            elif name.endswith("mark.live_vault"):
+                marked.append(node.name)
+            elif name.endswith("mark.parametrize"):
+                args = getattr(decorator, "args", [])
+                cases = len(args[1].elts) if len(args) > 1 and isinstance(
+                    args[1], (ast.List, ast.Tuple)) else 0
+                parametrized[node.name] = parametrized.get(node.name, 0) + cases
+        for inner in ast.walk(node):
+            if isinstance(inner, ast.Call) and chain(inner.func) in (
+                    "pytest.skip", "pytest.xfail", "pytest.importorskip"):
+                away.append(f"{node.name}: {chain(inner.func)}() in the body")
+    return nodes, away, marked, parametrized
+
+
+def store_fullest_between_folds(*, live_bytes: int, cadence_days: float,
+                                rate_bytes_per_day: float) -> float:
+    """Bytes the store sits at at its HIGHEST on a fold every `cadence_days`.
+
+    The fold trims the store back to its window each pass, so the fullest it ever
+    gets is where it stands now plus everything that arrives before the next pass.
+    A census of the live file answers a different question — it reports the size on
+    the day someone looked, which is anywhere in that sawtooth.
+    """
+    return live_bytes + cadence_days * rate_bytes_per_day
+
+
+def cadence_outruns_band(*, live_bytes: int, cadence_days: float,
+                         rate_bytes_per_day: float, ceiling_bytes: int) -> bool:
+    """True when a fold every `cadence_days` lets the store top `ceiling_bytes`.
+
+    This is #2071 in one line. The fold rung had existed since #1204 and
+    `LEDGER_ARCHIVE_AGE_DAYS` had not moved, so the corpus was "bounded"; what made
+    the bound false was that `autonomy/79-retention-sweep.md` scheduled the fold
+    weekly while the store was growing at 2,208,597 B/day (measured 2026-10-02 over
+    the row timestamps, 7-day mean). Seven days of that growth is 15,460,179 bytes —
+    44% of the 34,752,792-byte ceiling — so the store topped the ceiling on the
+    fifth day after a pass and sat 20.1% over it when the node reddened, then came
+    back inside the band when the pass ran. A cadence slower than
+    `(ceiling - live) / rate` days cannot bound the corpus at any point in its
+    cycle, which is why a size check alone leaves the failure invisible between two
+    passes and why fixing it by moving the ceiling fixes nothing: no ceiling contains
+    a sawtooth whose amplitude is set by the cadence.
+    """
+    return store_fullest_between_folds(live_bytes=live_bytes, cadence_days=cadence_days,
+                                       rate_bytes_per_day=rate_bytes_per_day) > ceiling_bytes
+
+
+def centre_holds_the_sawtooth(*, floor_bytes: int, added_bytes: float,
+                              drift_fraction: float) -> bool:
+    """Is there ANY band centre covering a fold cycle of that shape?
+
+    A centre covers it iff it is high enough that the post-fold floor sits above the
+    band's bottom AND low enough that the floor plus one cadence's growth stays under
+    its top: `(floor + added) / (1 + drift) <= centre <= floor / (1 - drift)`. Those
+    two ends meet only when `added <= 2 * drift * floor / (1 - drift)` — a condition on
+    the cadence and the growth that does not contain the centre at all.
+
+    So past that cadence no value of `CALIBRATED_LEDGER_BYTES` bounds the store, which
+    is why #2071 could not be fixed by moving the calibration, and why
+    `test_the_board_is_still_the_size_the_budget_was_calibrated_on` can tell a reader to
+    RE-BASE when the board moves while this node cannot: board growth is monotone so a
+    centre can chase it, whereas a fold's amplitude is set by its own cadence.
+    """
+    return added_bytes <= 2 * drift_fraction * floor_bytes / (1 - drift_fraction)
+
+
+def _sweep_module():
+    """`scripts/groundskeeper/retention-sweep.py` loaded as a module.
+
+    The file name has hyphens, so `import` cannot reach it; this is the same loader
+    `tests/test_retention_sweep.py:74` uses, restated here rather than imported
+    because this suite must not inherit that file's fixtures. Read-only — nothing
+    here calls `sweep_promotions_ledger`.
+    """
+    script = (Path(__file__).resolve().parent.parent
+              / "scripts" / "groundskeeper" / "retention-sweep.py")
+    spec = importlib.util.spec_from_file_location("retention_sweep_for_cold_render",
+                                                 script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _measured_growth_bytes_per_day(ledger: Path, now: float) -> float:
+    """Mean bytes/day the store grew over its last 7 days, read on the fold's clock.
+
+    `_ledger_row_seconds` is the sweep's own age rule, so a row this counts as 3 days
+    old is 3 days old to the rung that would archive it — one clock, not two. A store
+    younger than the window divides by the span it actually covers, so the box's first
+    week yields a rate instead of a division by nothing.
+    """
+    mod = _sweep_module()
+    floor = now - 7 * 86400
+    oldest: float | None = None
+    bytes_in_window = 0
+    with ledger.open("rb") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            stamp = mod._ledger_row_seconds(row)
+            if stamp is None:
+                continue
+            oldest = stamp if oldest is None else min(oldest, stamp)
+            if stamp > floor:
+                bytes_in_window += len(line)
+    span_days = max(0.0, now - max(floor, oldest or now)) / 86400
+    if span_days <= 0 or bytes_in_window == 0:
+        raise AssertionError(
+            f"{ledger}: no dated promotion row in the last 7 days, so the drift has no "
+            f"measurable rate. Red rather than skipped — a store whose growth cannot be "
+            f"read is exactly the case a byte-count check is blind to")
+    return bytes_in_window / span_days
+
+
+def _declared_fold_cadence_days() -> float:
+    """The interval the retention rung is actually scheduled at, in days."""
+    from app.autonomy import AUTONOMY_DIR, FREQUENCY_INTERVALS
+
+    task = AUTONOMY_DIR / "79-retention-sweep.md"
+    assert task.is_file(), (
+        f"{task} is the schedule the promotions fold runs on; it is not readable, so "
+        f"the cadence this node is about cannot be checked")
+    import yaml
+    front = yaml.safe_load(task.read_text(encoding="utf-8").split("---\n", 2)[1])
+    frequency = str(front.get("frequency", "")).strip().lower()
+    assert frequency in FREQUENCY_INTERVALS, (
+        f"`frequency: {frequency!r}` is outside `app.autonomy.FREQUENCY_INTERVALS`, so "
+        f"the scheduler gives this task no interval at all — which is never due, ever, "
+        f"and would leave the ledger with no fold whatsoever")
+    return FREQUENCY_INTERVALS[frequency] / 86400
+
+
+def test_a_fold_cadence_too_slow_for_the_growth_rate_is_not_bounded():
+    """The arithmetic that made #2071 red, pinned where the gate can see it.
+
+    `test_the_ledger_is_still_the_size_the_budget_was_calibrated_on` reddened at
+    34,779,858 bytes against a 34,752,792-byte ceiling — 27,066 bytes over, which
+    reads like a rounding accident and is not one. The store had grown 2,208,597
+    bytes/day while `autonomy/79-retention-sweep.md` declared `frequency: weekly`, so
+    15.5 MB of rows arrived between two passes and the band, whose entire width is
+    11.6 MB, was crossed on the way up rather than by any code change.
+
+    The two figures it computes with are the ones measured on this box on 2026-10-02
+    and pinned here rather than re-read, so the node is decidable on any box and in
+    both directions: the weekly cadence that reddened the item is refused, the daily
+    one this round schedules is accepted, the boundary sits where the arithmetic puts
+    it, and a cadence faster than one that passes is never refused — a check that
+    reddens at every cadence points at a lever that cannot fix it. Both this node and
+    the live one call `cadence_outruns_band`, so the model cannot drift from its own
+    witness.
+    """
+    floor = 27_265_006          # bytes a pass left behind, 2026-10-02 10:35
+    rate = 2_208_597.0          # B/day, 7-day mean of row-dated bytes an hour later
+    ceiling = int(CALIBRATED_LEDGER_BYTES * (1.0 + BOARD_DRIFT_FRACTION))
+    assert ceiling == 34_752_792, f"ceiling moved to {ceiling:,}: recalibrate here too"
+
+    assert cadence_outruns_band(live_bytes=floor, cadence_days=7.0,
+                                rate_bytes_per_day=rate, ceiling_bytes=ceiling), (
+        "a weekly fold over a store growing 2.2 MB/day was accepted: that is the "
+        "cadence #2071 was filed for, and accepting it re-opens the item")
+    assert not cadence_outruns_band(live_bytes=floor, cadence_days=1.0,
+                                    rate_bytes_per_day=rate, ceiling_bytes=ceiling), (
+        "the daily cadence this round schedules was refused, so the fix does not fix "
+        "the arithmetic it names")
+
+    # The boundary to two decimals: (ceiling - floor) / rate = 3.39 days. At or under
+    # it the store is inside the band at the top of its cycle; over it, it is not.
+    # That is what makes the red deterministic instead of a matter of timing.
+    assert (ceiling - floor) / rate == pytest.approx(3.39, abs=0.005), (
+        f"boundary moved to {(ceiling - floor) / rate:.2f} d: the pinned figures and "
+        "the live measurement have diverged")
+    assert not cadence_outruns_band(live_bytes=floor, cadence_days=3.39,
+                                    rate_bytes_per_day=rate, ceiling_bytes=ceiling)
+    assert cadence_outruns_band(live_bytes=floor, cadence_days=3.40,
+                                rate_bytes_per_day=rate, ceiling_bytes=ceiling)
+
+    # A fold that ran with no gap at all must never be refused: if it were, this would
+    # be a red no schedule can cure, which is worse than no check.
+    assert not cadence_outruns_band(live_bytes=floor, cadence_days=0.0,
+                                    rate_bytes_per_day=rate, ceiling_bytes=ceiling), (
+        "a fold that ran with no gap at all was refused — the node would then be "
+        "unfixable by the only lever it points at")
+
+    # And why this item could not be fixed by re-basing the centre. `floor` is inside
+    # the band's bottom at the shipped centre, which is why the drift node was green at
+    # 10:36 and red by 10:31; a weekly cycle from that floor tops 42.7 MB. For any
+    # centre to cover it the centre would have to be at least 35.6 MB, whose own bottom
+    # (28.5 MB) is above the floor — so the admissible interval is empty and re-basing
+    # would have bought one green census and lost the check. The board's sibling node
+    # tells a reader to RE-BASE when the board grows; a fold's sawtooth is a different
+    # shape and the cadence is the only lever.
+    assert not centre_holds_the_sawtooth(floor_bytes=floor, added_bytes=7 * rate,
+                                         drift_fraction=BOARD_DRIFT_FRACTION), (
+        "some centre is claimed to bound a weekly cycle at the pinned growth rate — if "
+        "the band's +/-20% or these figures moved, re-derive this before repeating the "
+        "claim that re-basing could not have fixed #2071")
+    assert centre_holds_the_sawtooth(floor_bytes=floor, added_bytes=1 * rate,
+                                     drift_fraction=BOARD_DRIFT_FRACTION), (
+        "no centre bounds even a DAILY cycle at the pinned floor: the floor and the "
+        "band have come apart, and a re-base will be needed as well as a cadence")
+    admits = ((floor + rate) / (1 + BOARD_DRIFT_FRACTION),
+              floor / (1 - BOARD_DRIFT_FRACTION))
+    assert admits[0] <= CALIBRATED_LEDGER_BYTES <= admits[1], (
+        f"a daily cycle at this rate admits a centre in [{admits[0]:,.0f}, "
+        f"{admits[1]:,.0f}] and {CALIBRATED_LEDGER_BYTES:,} is outside it, so the "
+        "constant #2071 left alone now needs its own ruling")
+def test_the_declared_fold_cadence_keeps_the_store_inside_the_band():
+    """The cadence that schedules the fold is part of the bound, and is checked.
+
+    #2071's red was a store 20.1% over its ceiling with nothing wrong in the code: the
+    fold rung existed, `LEDGER_ARCHIVE_AGE_DAYS` had not moved, and the sweep still
+    trimmed the store back inside the band the moment it ran. What was wrong was the
+    schedule — `autonomy/79-retention-sweep.md` declared `frequency: weekly` — and a
+    size check alone cannot see that, because between two passes the store is
+    legitimately and predictably over the line while the file on disk looks fine.
+
+    Both inputs are read rather than copied so the node goes red when either moves:
+    the cadence from the task file that schedules the fold, the growth from the store's
+    own row timestamps. `app.autonomy.FREQUENCY_INTERVALS` is the single table the
+    scheduler reads (its own comment says an unreadable frequency resolves to "not
+    due, ever"), so a cadence name absent from it is asserted here rather than guessed
+    at — that case is the fold never running, which is the worst outcome and the
+    easiest to write by accident.
+
+    Deliberately NOT marked `live_vault` even though it reads the live store and
+    `~/obsidian/autonomy/`, both of which no round controls: that marker is how a node
+    opts out of the gate's run, and this check's whole value is that the gate sees it.
+    The file's sibling drift nodes are unmarked for the same reason, and
+    `test_no_node_of_this_file_is_marked_or_deleted_to_get_it_green` holds the file at
+    zero markers so the exemption cannot be added later from inside the file.
+    """
+    led = board_presence.live_ledger()
+    if not led.is_file():
+        raise AssertionError(
+            f"no promotion ledger at {led}: this node measures the store's growth "
+            "rate, and with no store there is no cadence to judge — red, not skipped")
+    rate = _measured_growth_bytes_per_day(led, time.time())
+    assert rate > 0, (
+        f"{led}: no row timestamps landed in the 14-day window, so the growth rate is "
+        "0 B/day and every cadence would look safe. A denominator of zero is not a "
+        "clean result")
+    cadence_days = _declared_fold_cadence_days()
+
+    live_bytes = led.stat().st_size
+    ceiling = int(CALIBRATED_LEDGER_BYTES * (1.0 + BOARD_DRIFT_FRACTION))
+    peak = store_fullest_between_folds(live_bytes=live_bytes,
+                                       cadence_days=cadence_days,
+                                       rate_bytes_per_day=rate)
+    print(f"ledger {live_bytes:,} B; growth {rate:,.0f} B/day; fold cadence "
+          f"{cadence_days:g} d; ceiling {ceiling:,} B; peak {peak:,.0f} B")
+    assert not cadence_outruns_band(live_bytes=live_bytes, cadence_days=cadence_days,
+                                    rate_bytes_per_day=rate, ceiling_bytes=ceiling), (
+        f"a fold every {cadence_days:g} d leaves the store at {peak:,.0f} bytes at its "
+        f"highest against a {ceiling:,}-byte ceiling, so the size band is crossed by "
+        f"arithmetic about {cadence_days * rate - (ceiling - live_bytes):,.0f} bytes "
+        "before it is crossed by anything the code does. At this growth rate the "
+        f"cadence fits in {(ceiling - live_bytes) / rate:.2f} d — schedule the fold "
+        "more often, or make a ruling on what the band is worth if it cannot.")
+
+def test_no_node_of_this_file_is_marked_or_deleted_to_get_it_green():
+    """#2071 clause 2: the green run is earned by the named node, not by hiding it.
+
+    A fix that makes the corpus small and a change that removes the only reader of
+    the number produce the same green run, so the difference is counted here rather
+    than read off a diff. Denominators first, because a check over zero things is not
+    a check — the rule this repo's own doc-claim file applies to its extract: `git
+    show aaa2a5d0:tests/test_dashboard_cold_render.py | grep -cE '^(async )?def
+    test_'` is 20 at #2071's base, so the floor here is 23 (20 plus this round's 3)
+    and a removal reddens this node instead of looking like tidying.
+
+    What is counted is the spellings that retire a node from a green run: `skip`,
+    `xfail` and `importorskip` anywhere in the file, and any `live_vault` mark, which
+    the gate's `-m "not live_vault"` deselects. The file carried none of the first
+    group at base and carries none now; the one `live_vault` node this round added is
+    a growth measurement about this box, not the node #2071 names, and the assertions
+    below are what keep that distinction from being an unverified claim.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    nodes, away, marked, parametrized = _audit_nodes(ast.parse(source))
+
+    assert not away, (
+        f"{sorted(away)} retire a node from the gate's own run: clause 2 forbids "
+        f"reaching green by skipping, xfailing or deselecting one")
+
+    assert "test_the_ledger_is_still_the_size_the_budget_was_calibrated_on" not in marked, (
+        "the node #2071 was filed for is marked `live_vault`, which the gate's "
+        '`-m "not live_vault"` deselects — the run would be green because the '
+        "assertion never ran")
+    assert "test_the_ledger_is_still_the_size_the_budget_was_calibrated_on" in nodes, (
+        "the node #2071 was filed for is no longer in this file")
+
+    assert len(nodes) >= 23, (
+        f"{len(nodes)} test nodes against a floor of 23 (#2071's base measured 20, and "
+        f"this round added 3): a node was removed rather than made to pass")
+    assert set(parametrized) == {
+        "test_a_ledger_far_smaller_than_the_calibration_reddens_the_drift_check",
+        "test_a_board_far_smaller_than_the_calibration_reddens_the_drift_check",
+    }, (f"{sorted(parametrized)}: the two parametrized nodes are this file's "
+        f"falsification witnesses — they are what prove the drift check can redden — "
+        f"so neither may be emptied out or dropped while the file is being tidied")
+    assert all(cases == 2 for cases in parametrized.values()), (
+        f"{parametrized}: each of those nodes runs two cases (nothing to decode, and "
+        f"a corpus truncated to noise); one case is a node that can no longer fail")
 
 
 def empty_both_caches() -> None:
