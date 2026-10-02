@@ -2004,6 +2004,12 @@ AUDIT_PARSE_ERROR = "sweep/parse_error"          # bash: …: unexpected EOF whi
 AUDIT_NO_SUCH_COMMAND = "sweep/no_such_command"  # rc 127
 AUDIT_HANGS = "sweep/hangs"                      # exceeds --timeout
 AUDIT_FAILED_BUT_RAN = "sweep/error_2"           # rc 2, nothing missing: ran and failed
+#: #2048's fifth state and its control: the first exits 0 and declares it read no input,
+#: the second exits 0 declaring the 9 rows it read. Both print a count, so the pair is the
+#: exact shape the item's proof has — rc 0 and a number — and only the denominator tells
+#: them apart. Neither is in AUDIT_DEAD: `unrunnable:` is about executing, not grounding.
+AUDIT_EMPTY_INPUT = "sweep/zero_denominator"     # rc 0, stdout declares input_rows=0
+AUDIT_DECLARES = "sweep/declared_nonzero"        # rc 0, stdout declares input_rows=9
 
 AUDIT_CMDS = {
     AUDIT_SEES: "echo 'sweep/observed_x count=4'",
@@ -2013,6 +2019,8 @@ AUDIT_CMDS = {
     AUDIT_NO_SUCH_COMMAND: "definitely-not-a-command-1533",
     AUDIT_HANGS: "sleep 5",
     AUDIT_FAILED_BUT_RAN: "grep -c x .",
+    AUDIT_EMPTY_INPUT: "echo 'sweep/zero_denominator input_rows=0 matched=0'",
+    AUDIT_DECLARES: "echo 'sweep/declared_nonzero input_rows=9 matched=2'",
 }
 AUDIT_DEAD = {AUDIT_MISSING_FILE, AUDIT_PARSE_ERROR, AUDIT_NO_SUCH_COMMAND, AUDIT_HANGS}
 
@@ -2083,8 +2091,12 @@ def test_audit_tally_is_its_final_line(tmp_path):
     last = out.splitlines()[-1]
 
     assert last == f"keys: {len(AUDIT_DEAD) + 3} unrunnable: {len(AUDIT_DEAD)}", out
-    assert len(out.splitlines()) == len(AUDIT_DEAD) + 1, (
-        f"tally must be the {len(AUDIT_DEAD) + 1}th line of its own output: {out}")
+    # +2, not +1: #2048 added one line above the tally (`denominators: …`), and the whole
+    # point of counting lines here is that the published figure stays LAST — a nightly
+    # takes splitlines()[-1], so any new tally has to arrive above it.
+    assert len(out.splitlines()) == len(AUDIT_DEAD) + 2, (
+        f"tally must be the {len(AUDIT_DEAD) + 2}th and last line of its own output: {out}")
+    assert out.splitlines()[-2] == "denominators: empty_input 0 undeclared 7", out
     assert out.count("UNRUNNABLE ") == len(AUDIT_DEAD), out
 
 
@@ -3222,3 +3234,352 @@ def test_the_module_describes_its_own_write_surfaces(tmp_path):
     assert store.is_file() and mirror.is_file(), "record did not write both surfaces"
     md = [p for p in tmp_path.iterdir() if p.suffix == ".md"]
     assert not md, f"record wrote a markdown file after all: {[p.name for p in md]}"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #2048: a falsifier that declares it read nothing is a state, not a healthy zero
+#
+# `audit`'s published `unrunnable:` figure is about whether a stored check can execute.
+# The live ledger proves that is not the same question as whether it can see its input:
+# tonight it published `keys: 109 unrunnable: 0` with exit 0 while 28 of those 109
+# latest-wins keys reference no absolute path that resolves. The item's executed proof is
+# one of them verbatim — the `backlog_write_task/validation` falsifier's
+# `print(sum(...))` over `/home/alansrobotlab/lloyd/_pipeline/trajectories/2026-09-*.jsonl`,
+# a root deleted on 2026-09-22 — which exits 0 printing `0`, exactly the bytes a healthy
+# count prints. #1588 repaired the paths it was handed and cannot reach this class at all,
+# because its repair pass is driven by the keys `audit` calls UNRUNNABLE. So the fix is in
+# the executor: a command that declares its own denominator as zero is reported, named and
+# refused, and a command that declares nothing is tallied, not refused.
+# ═══════════════════════════════════════════════════════════════════════════
+
+#: rc 0, and its stdout says it read nothing. The shape of the item's proof, in the
+#: `name=value` form Phase 0.6 of `nightly-skill-consolidation` already asks for.
+ZERO_DENOMINATOR_CMD = "echo 'tool=x input_rows=0 matched=0'"
+
+#: The control: rc 0 as well, and it read 9 rows. Both print a count, so only the
+#: declared denominator separates an observation from a measurement of nothing.
+NONZERO_DENOMINATOR_CMD = "echo 'tool=x input_rows=9 matched=2'"
+
+
+def test_a_check_that_declares_it_read_nothing_is_neither_a_healthy_zero_nor_unrunnable():
+    """Clause 1: `EMPTY_INPUT` is a third answer, and its detail names the declared zero.
+
+    Three refusals of the same temptation, each pinned beside the case it would corrupt:
+    labelling the state `UNRUNNABLE` would hand these keys to #1588's repair pass, which
+    repairs paths and would "fix" a command whose input is an empty glob into a different
+    empty glob; folding it into rc 0 is the status quo that let 28 keys be honoured on
+    nothing; and re-running the command to read its denominator would give `audit` two
+    answers about one ledger. And a falsifier that exits nonzero beside `input_rows=0`
+    stays exactly the rc it returned — that is a check answering no, which is the ledger
+    working, and relabelling it would train `check` to distrust a real falsification.
+    """
+    # One three-way comparison, because the three answers must differ from each other:
+    # pinned separately from the ledger's healthy rc 0 (the status quo this item exists to
+    # end) and from `UNRUNNABLE` (a different repair route — #1588 repairs a missing path
+    # and would "fix" a command whose glob matched nothing into a different glob matching
+    # nothing). Asserting the triple also pins the sentinel's *value*, which a bare
+    # `rc != sv.UNRUNNABLE` cannot: it can never fail once `rc == sv.EMPTY_INPUT` is
+    # pinned above it, since the two are different objects by definition.
+    triple = (sv.evidence_cmd_status({"evidence_cmd": ZERO_DENOMINATOR_CMD})[0],
+              sv.evidence_cmd_status({"evidence_cmd": "echo 0"})[0],
+              sv.evidence_cmd_status(
+                  {"evidence_cmd": "grep -c x /tmp/definitely-missing-2048-b.md"})[0])
+    assert triple == (sv.EMPTY_INPUT, 0, sv.UNRUNNABLE), \
+        f"zero-denominator / healthy / unrunnable came back {triple}"
+    assert sv.EMPTY_INPUT != 0 and sv.EMPTY_INPUT != sv.UNRUNNABLE, \
+        "a sentinel that collided with rc 0 or with 127 would silently merge the states"
+    assert sv.evidence_cmd_status({"evidence_cmd": ZERO_DENOMINATOR_CMD})[1] \
+        == "input_rows=0", "the detail must name the declared zero, not just the state"
+
+    assert sv.evidence_cmd_status({"evidence_cmd": "echo 0"}) == (0, ""), \
+        "the proof's own output — a bare 0 with no claim — is still an observation"
+    assert sv.evidence_cmd_status({"evidence_cmd": NONZERO_DENOMINATOR_CMD}) == (0, "")
+    assert sv.evidence_cmd_status(
+        {"evidence_cmd": f"{NONZERO_DENOMINATOR_CMD}; exit 3"}) == (3, ""), \
+        "a declared denominator must not disturb a real exit status"
+    assert sv.evidence_cmd_status(
+        {"evidence_cmd": "echo 'input_rows=0'; exit 1"}) == (1, ""), \
+        "rc 1 beside a zero denominator is the falsifier answering no, not an empty input"
+    assert sv.evidence_cmd_status({"evidence_cmd": "echo 'input_rows=0' >&2"}) == (0, ""), \
+        "the claim is read on stdout, where a measurement goes; stderr is not a denominator"
+    assert sv.evidence_cmd_status({"evidence_cmd": "echo 'total_input_rows=0'"}) == (0, ""), \
+        "a longer field name is not this one"
+    assert sv.evidence_cmd_status(
+        {"evidence_cmd": "grep -c x /tmp/definitely-missing-2048-a.md; echo 'input_rows=0'"})[0] \
+        == sv.UNRUNNABLE, \
+        "a command whose input file is gone is #1588's to repair, not this state's"
+
+
+def test_record_refuses_a_check_that_declares_it_read_no_input_and_accepts_everything_else(store):
+    """Clause 2: the zero denominator is refused at the mint, and nothing else moves.
+
+    The refusal is for the same reason #1586 refuses an unrunnable command: a verdict born
+    on a check that read nothing can never be falsified, and this shape is worse — it looks
+    healthy to every later tally. The accepted group is the clause's other half and it is
+    measured, not asserted away: 109 of the live ledger's keys record a command that declares
+    no denominator at all, so refusing those would quarantine a ledger nobody authored
+    wrongly, and making the field mandatory is a ruling on an authoring convention that
+    lives in the vault skill, not a fact this function gets to decide alone.
+    """
+    with pytest.raises(ValueError, match="input_rows=0"):
+        sv.record_verdict(store=store, pattern_key="Bash/validation",
+                          verdict="reviewed_no_skill",
+                          reason="falsifier globs a root deleted on 2026-09-22",
+                          evidence_cmd=ZERO_DENOMINATOR_CMD, occurrences=4)
+    assert not store.exists(), "a refused verdict reached the ledger"
+
+    accepted = ["echo 'count=0'",                                # the live ledger's own shape
+                NONZERO_DENOMINATOR_CMD,
+                f"{NONZERO_DENOMINATOR_CMD}; exit 1"]            # falsified, and recorded
+    for index, cmd in enumerate(accepted):
+        sv.record_verdict(store=store, pattern_key=f"test/denominator-{index}",
+                          verdict="reviewed_no_skill",
+                          reason="one row per case, so the accepted ones are countable",
+                          evidence_cmd=cmd)
+    rows = [json.loads(ln) for ln in store.read_text().splitlines()]
+    assert [r["pattern_key"] for r in rows] == ["test/denominator-0", "test/denominator-1",
+                                                "test/denominator-2"], rows
+    assert rows[0]["evidence_observed"] == "count=0", \
+        "a command with no denominator field records exactly as it did before this rail"
+
+
+def test_the_shipped_cli_refuses_a_zero_denominator_check_and_leaves_the_ledger_alone(tmp_path):
+    """Clause 2 across its process boundary: the CLI nightly jobs call, not the import.
+
+    `nightly-skill-consolidation` Phase 5.1 records through `python scripts/skill_verdicts.py
+    record`, so the refusal has to survive argv, `main()`'s error path and the exit code —
+    an in-process `ValueError` that `cmd_record` swallowed into a 0 would be invisible to a
+    nightly that reads only exit codes.
+    """
+    store = tmp_path / "verdicts.jsonl"
+    # `record` writes two or three trees, and the refusal has to leave all of them
+    # alone: the scratch ledger, the mirror `sync_orphans` appends alongside it, and the
+    # real vault copy at `mirror_path()` — which is the shipped ledger the nightly reads,
+    # so a refusal that reached it would be an unobserved write to the vault. Pointing
+    # $SKILL_VERDICTS_MIRROR at a tmp file keeps that vault file out of reach of the
+    # subprocess at all, and leaves a witness that says the same thing.
+    mirror = tmp_path / "mirror.jsonl"
+    vault_copy = Path(sv.DEFAULT_MIRROR)   # the shipped ledger, not a scratch copy
+    before = (store.read_bytes() if store.is_file() else b"",
+              mirror.read_bytes() if mirror.is_file() else b"",
+              vault_copy.read_bytes() if vault_copy.is_file() else None)
+
+    proc = subprocess.run([sys.executable, str(_ROOT / "scripts" / "skill_verdicts.py"),
+                           "record", "--store", str(store),
+                           "--pattern", "Bash/validation", "--verdict", "reviewed_no_skill",
+                           "--reason", "globs a deleted root",
+                           "--occurrences", "4",
+                           "--evidence-cmd", ZERO_DENOMINATOR_CMD],
+                          capture_output=True, text=True,
+                          env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1",
+                               "SKILL_VERDICTS_MIRROR": str(mirror)})
+
+    assert proc.returncode != 0, (proc.returncode, proc.stdout, proc.stderr)
+    assert "input_rows=0" in proc.stderr, proc.stderr
+    assert (store.read_bytes() if store.is_file() else b"",
+            mirror.read_bytes() if mirror.is_file() else b"",
+            vault_copy.read_bytes() if vault_copy.is_file() else None) == before, \
+        "a refused verdict reached the ledger, the mirror or the vault copy"
+
+
+def test_audit_names_the_zero_denominator_keys_and_tallies_denominators_above_its_tally(tmp_path):
+    """Clauses 3 and 4 together: one named line per key, one tally line, `unrunnable:` intact.
+
+    Four keys, four states, so the tallies are read against each other rather than against
+    an empty ledger: one that cannot run, one that ran and declared a zero, one that ran and
+    declared 9 rows, and one that ran and declared nothing (`AUDIT_SEES` is tonight's ledger
+    shape — a bare count). `undeclared` counts all four of the keys whose command named no
+    field, the unrunnable one included, which is why `empty_input + undeclared + declared`
+    adds to `keys:` and a reader can check that arithmetic on the printed line alone.
+    """
+    store = tmp_path / "verdicts.jsonl"
+    write_ledger(store, [AUDIT_MISSING_FILE, AUDIT_EMPTY_INPUT, AUDIT_DECLARES, AUDIT_SEES])
+
+    rc, out = run_audit(store)
+    lines = out.splitlines()
+
+    assert f"EMPTY_INPUT {AUDIT_EMPTY_INPUT} :: input_rows=0" in lines, out
+    assert lines.count(f"EMPTY_INPUT {AUDIT_EMPTY_INPUT} :: input_rows=0") == 1, out
+    assert f"UNRUNNABLE {AUDIT_MISSING_FILE} " in "\n".join(lines), out
+    assert AUDIT_DECLARES not in "\n".join(ln for ln in lines
+                                          if ln.startswith(("EMPTY_INPUT", "UNRUNNABLE"))), out
+    assert lines[-2] == "denominators: empty_input 1 undeclared 2", out
+    assert lines[-1] == "keys: 4 unrunnable: 1", out
+    assert rc == 1, out
+
+
+def test_the_denominators_tally_never_touches_the_published_unrunnable_figure(tmp_path):
+    """Clause 4: a zero or undeclared denominator is never counted in `unrunnable:`.
+
+    The figure is the nightly's published health number
+    (`skills/nightly-skill-consolidation/SKILL.md` writes it as `ledger_unrunnable:`), so a
+    key counted there twice would report the new blind spot using the number #1587 was added
+    to expose — and a key counted in neither would vanish. Both ledgers here hold the same
+    four states; only the ledger without the dead key is allowed to exit 0.
+    """
+    mixed = tmp_path / "mixed.jsonl"
+    write_ledger(mixed, [AUDIT_EMPTY_INPUT, AUDIT_DECLARES, AUDIT_SEES, AUDIT_SEES_NONE])
+    rc_mixed, out_mixed = run_audit(mixed)
+    assert out_mixed.splitlines()[-1] == "keys: 4 unrunnable: 0", out_mixed
+    assert rc_mixed == 1, "an empty-input ledger exits 1 on its own, with nothing unrunnable"
+
+    clean = tmp_path / "clean.jsonl"
+    write_ledger(clean, [AUDIT_DECLARES, AUDIT_SEES, AUDIT_SEES_NONE])
+    rc_clean, out_clean = run_audit(clean)
+    assert out_clean.splitlines()[-1] == "keys: 3 unrunnable: 0", out_clean
+    assert out_clean.splitlines()[-2] == "denominators: empty_input 0 undeclared 2", out_clean
+    assert "EMPTY_INPUT " not in out_clean, out_clean
+
+
+def test_an_undeclared_denominator_is_published_but_never_fails_a_run(tmp_path):
+    """Clause 5's other half: exit 1 follows the zero denominator, not the missing field.
+
+    A ledger of nothing but undeclared keys is tonight's live ledger — 109 keys, every one
+    recorded before the field existed — so this exit code is what keeps the rail from being
+    a retroactive refusal: the count is published so the trend is measurable, and a run is
+    not failed for an authoring convention nobody had taught it. Adding one zero-denominator
+    key to the same ledger must flip it, which is the pair the clause is stated as.
+    """
+    undeclared = tmp_path / "undeclared.jsonl"
+    write_ledger(undeclared, [AUDIT_SEES, AUDIT_SEES_NONE, AUDIT_FAILED_BUT_RAN])
+    rc, out = run_audit(undeclared)
+    assert rc == 0, out
+    assert out.splitlines()[-2] == "denominators: empty_input 0 undeclared 3", out
+
+    one_zero = tmp_path / "one-zero.jsonl"
+    write_ledger(one_zero, [AUDIT_SEES, AUDIT_SEES_NONE, AUDIT_FAILED_BUT_RAN,
+                            AUDIT_EMPTY_INPUT])
+    rc_zero, out_zero = run_audit(one_zero)
+    assert rc_zero == 1, out_zero
+    assert out_zero.splitlines()[-2] == "denominators: empty_input 1 undeclared 3", out_zero
+
+
+def test_the_shipped_cli_prints_the_denominator_state_on_its_check_surface(tmp_path):
+    """The advisory's seam: `check`'s new line over a real pipe, not a redirected buffer.
+
+    Phase 5 reads `check`'s stdout from a subprocess, and every existing node on this
+    surface captures it in-process with `capsys` or `redirect_stdout`, which cannot see a
+    write that never reaches a file descriptor — a `sys.stdout` buffering difference or a
+    message that reaches stderr instead would pass those nodes and print nothing for the
+    nightly. So this node runs the shipped script as a child over a pipe, and asserts the
+    line there: the state named, its detail naming the declared zero, `unrunnable` not
+    borrowed, the tally line still last, exit 0 for a ledger that is un-falsifiable rather
+    than un-runnable, and the candidate's own `status:` unchanged — naming the state
+    publishes it, it does not un-honour the verdict.
+    """
+    cands = tmp_path / "candidates"
+    cands.mkdir()
+    raw_candidate(cands, "candidate-bash-timeout-zero-denominator.md", "reviewed_no_skill")
+    store = tmp_path / "verdicts.jsonl"
+    # The row is written by hand for the reason `write_ledger` gives: `record_verdict` now
+    # refuses exactly this command, so a row of this shape can only have arrived from
+    # before the rail — which is the population this node is about.
+    with store.open("w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"logged_at": "2026-10-02T07:00:00+00:00",
+                             "pattern_key": "Bash/timeout", "candidate": "x",
+                             "occurrences": 9, "verdict": "reviewed_no_skill",
+                             "reason": "fixture: zero-denominator falsifier",
+                             "scope": "project", "skill": "",
+                             "evidence_cmd": ZERO_DENOMINATOR_CMD,
+                             "source": "nightly-skill-consolidation"}) + "\n")
+
+    proc = subprocess.run([sys.executable, str(_ROOT / "scripts" / "skill_verdicts.py"),
+                           "check", "--candidates", str(cands), "--store", str(store)],
+                          capture_output=True, text=True,
+                          env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+
+    assert "EVIDENCE_CMD_EMPTY_INPUT Bash/timeout :: input_rows=0" in proc.stdout, proc.stdout
+    assert "EVIDENCE_CMD_UNRUNNABLE" not in proc.stdout, \
+        "the two states must not be reported by one name; only one of them is repairable"
+    assert proc.stdout.splitlines()[-1] == "checked: 1  skipped_by_verdict: 1", proc.stdout
+    assert proc.returncode == 0, (proc.returncode, proc.stderr)
+    # And the verdict still honoured, untouched: `check` only reads candidates here (its
+    # write-back is `mine-trajectories.py`'s `superseded_by_verdict`, scripts/skill_verdicts.py:196,
+    # which this invocation does not perform), so a file that arrived as
+    # `reviewed_no_skill` — the status that makes it a skip in the first place — leaves as
+    # the same thing. Naming the state is a publication about the check, not a re-decision.
+    assert status_of(next(cands.glob("*.md"))) == "reviewed_no_skill"
+
+
+def test_the_shipped_cli_publishes_both_tallies_over_stdout_in_the_agreed_order(tmp_path):
+    """Clause 3 and 4 across their process boundary: the bytes `splitlines()[-1]` sees.
+
+    Phase 0.0 of `nightly-skill-consolidation` parses the LAST line of this surface's
+    stdout, and every audit node above captures it in-process with `capsys`, which cannot
+    see a write that never reaches a file descriptor nor the order two `print` calls reach
+    a pipe in. So the child's stdout is read here as the nightly reads it: the published
+    figure is last and byte-identical, the new tally sits immediately above it, one
+    `EMPTY_INPUT` line names the key and its declared zero, and the two counts are of
+    different keys — this ledger holds one unrunnable key, one empty-input key and one
+    healthy declared key, so `unrunnable: 1` cannot have absorbed the empty input and
+    `undeclared 1` counts only the key whose command named no field. Exit 1 is the
+    `unrunnable` rule extended to `empty_input`; the all-undeclared 0 case is pinned by
+    the node named for it.
+    """
+    store = tmp_path / "verdicts.jsonl"
+    stored_row(store, AUDIT_MISSING_FILE, AUDIT_CMDS[AUDIT_MISSING_FILE])
+    stored_row(store, AUDIT_EMPTY_INPUT, AUDIT_CMDS[AUDIT_EMPTY_INPUT])
+    stored_row(store, AUDIT_DECLARES, AUDIT_CMDS[AUDIT_DECLARES])
+
+    proc = subprocess.run([sys.executable, str(_ROOT / "scripts" / "skill_verdicts.py"),
+                           "audit", "--store", str(store), "--timeout", "1"],
+                          capture_output=True, text=True,
+                          env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+    lines = proc.stdout.splitlines()
+
+    assert proc.returncode == 1, (proc.returncode, proc.stdout, proc.stderr)
+    assert lines[-1] == "keys: 3 unrunnable: 1", lines
+    assert lines[-2] == "denominators: empty_input 1 undeclared 1", lines
+    assert f"EMPTY_INPUT {AUDIT_EMPTY_INPUT} :: input_rows=0" in lines, lines
+    assert sum(ln.startswith("UNRUNNABLE ") for ln in lines) == 1, lines
+
+
+#: #2048 clause 6's witness: the verdicts ledger the item's figures are measured over, as
+#: committed bytes with history. `wc -l` on it is the row count the item quotes; the
+#: latest-wins table read out of it is the 109 keys every percentage divides by. The live
+#: file under `_pipeline` gains a row with every consolidation run and is folded by
+#: retention, so a figure quoted from it rots (#1193) — these bytes cannot.
+WITNESS_2048_ROWS = 282
+WITNESS_2048_KEYS = 109
+WITNESS_2048_VAULT_PATH = "backlog/data/verdicts.jsonl"
+
+
+def test_the_verdicts_ledger_the_item_measures_is_committed_and_declares_nothing():
+    """Clause 6: re-derive the item's two denominators from bytes a reader can hold.
+
+    Both figures come from one read of the durable copy: the row count the clause's own
+    `wc -l` command gives (282), and the latest-wins key count those rows collapse to (109),
+    which is the denominator of every percentage in the item — 28 of 109 with no resolving
+    path, 95 of 109 naming an absolute path. Any other key count contradicts #2048's report
+    of the same ledger, so the node refuses rather than restating it.
+
+    The third assertion is why the rail lands with zero findings instead of quarantining a
+    ledger: not one of those 109 commands even mentions `input_rows`, so none of them can be
+    reporting a denominator, which is exactly what `audit`'s `undeclared:` figure counts and
+    why it reads 109 on this copy. It is a text test on the stored commands, deliberately —
+    the alternative is executing 109 of them inside a unit node, and a claim about what the
+    ledger *holds* does not need a run to be true. The count can only fall by new records.
+
+    The copy is on the vault's main at WITNESS_2048_VAULT_PATH (landed through
+    `automod_vault_land`, so it is not in this diff), which is also what makes the ledger
+    citable by the review's own resolver; with no vault present the node skips, as
+    `write_ledger`'s durable-copy leg does.
+    """
+    durable = Path.home() / "obsidian" / WITNESS_2048_VAULT_PATH
+    if not durable.is_file():
+        pytest.skip("no vault durable copy of the verdicts ledger here")
+
+    rows = [ln for ln in durable.read_text(errors="replace").splitlines() if ln.strip()]
+    assert len(rows) == WITNESS_2048_ROWS, (
+        f"#2048's report re-derived {WITNESS_2048_ROWS} rows from this file and this copy has "
+        f"{len(rows)}, so the ratio quoted over it is no longer the one the item measured")
+    table = sv.load_verdicts(durable)
+    assert len(table) == WITNESS_2048_KEYS, (
+        f"latest-wins gives {len(table)} keys, not the {WITNESS_2048_KEYS} the item divides "
+        "its figures by — the copy and the report disagree")
+    mentioning = sorted(k for k, r in table.items()
+                        if sv.INPUT_ROWS_FIELD in (r.get("evidence_cmd") or ""))
+    assert mentioning == [], (
+        f"{mentioning[:3]} mention the field, so this ledger is no longer the "
+        "all-undeclared population the witness is for — re-cut the figures from a copy "
+        "taken before the rail landed")

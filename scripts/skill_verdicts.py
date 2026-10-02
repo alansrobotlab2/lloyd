@@ -751,6 +751,21 @@ def record_verdict(
             f"re-check it — `test ! -f <path> && echo absent` — instead of letting grep's "
             "error stand in for the observation (#1586)"
         )
+    if status_rc == EMPTY_INPUT:
+        # The other born-uncheckable shape, and the one no exit code reports: the command
+        # ran, exited 0, and declared that it read no input, so its output is a statement
+        # about the empty set and no future run can falsify the verdict it grounds. Refused
+        # at the mint, not repaired afterwards, because afterwards is `audit`, which sees a
+        # zero-denominator key as a *finding* on a ledger that already made its decision —
+        # and #1588's repair pass, keyed on UNRUNNABLE, cannot reach it at all (#2048).
+        raise ValueError(
+            f"evidence_cmd declares an empty input — it printed {status_detail!r} over "
+            f"zero input rows, so it measured nothing and falsifies nothing: "
+            f"{evidence_cmd!r}. Point it at the input it is meant to read, or record the "
+            "verdict without a claim that a check backs it. A command that prints no "
+            f"{INPUT_ROWS_FIELD} field at all still records exactly as before (#2048 "
+            "rails the state, it does not yet mandate the field)"
+        )
     row = {
         "pattern_key": pattern_key,
         "verdict": verdict,
@@ -828,6 +843,41 @@ UNRUNNABLE = 127
 #: ledger line it is quoted in.
 EVIDENCE_OBSERVED_MAX = 200
 
+#: The fifth answer a stored falsifier gives, and the only one no exit code carries: the
+#: command ran, exited 0, and declared that it read nothing — `input_rows=0` on its own
+#: stdout. It is neither of the two states a reader already knows: not rc 0 (a healthy
+#: observation — #2048's executed proof prints `0` over a directory that does not exist
+#: and `audit` booked it as healthy), and not `UNRUNNABLE` (the command ran, and
+#: `cmd_repair` must not be handed it, since #1588's repair pass is driven by UNRUNNABLE
+#: keys and cannot reach this class even in principle). It is a string and not an int
+#: precisely so no tally keyed on an exit status can absorb it: `audit`'s `unrunnable:`
+#: figure is the nightly's published health number, and folding a zero denominator into
+#: it would report the blind spot as the thing it already measures. Compare it with
+#: `==` against this name, never by truthiness or ordering.
+EMPTY_INPUT = "empty_input"
+
+#: The field a falsifier declares its input count in, in the `name=value` shape Phase 0.6
+#: of `nightly-skill-consolidation` already asks a recorded command's output for. stdout
+#: only, because that is where a measurement goes — `run_evidence` reads it first too —
+#: and a grep *pattern* containing the field name must not decide the state. The leading
+#: boundary keeps `total_input_rows=7` from answering for `input_rows`; first match wins,
+#: so a command that prints its denominator before its findings declares the one it means.
+INPUT_ROWS_FIELD = "input_rows"
+_INPUT_ROWS_RE = re.compile(r"(?:^|[\s,;:/(=])" + INPUT_ROWS_FIELD + r"\s*=\s*(\d+)")
+
+
+def declared_denominator(stdout: str) -> int | None:
+    """What a command's stdout says about its own input: the count, or None for no claim.
+
+    None is not zero. A command that declares nothing may well have read plenty — 109 of
+    the live ledger's latest-wins keys print a bare count tonight and are counted
+    `undeclared` by `audit`, not refused (#2048 leaves refusing them to a ruling on the
+    authoring convention, which lives in the vault skill). Zero is a claim: the command
+    saw no input, so whatever it printed next describes an empty set.
+    """
+    found = _INPUT_ROWS_RE.search(stdout or "")
+    return int(found.group(1)) if found else None
+
 
 def run_evidence(evidence_cmd: str, timeout: int = EVIDENCE_TIMEOUT_SECONDS) -> tuple[int, str]:
     """Execute a check the way `record` needs it: `(rc, observed)`, `observed` being the
@@ -871,6 +921,60 @@ def run_evidence(evidence_cmd: str, timeout: int = EVIDENCE_TIMEOUT_SECONDS) -> 
                              if len(line) > EVIDENCE_OBSERVED_MAX else line)
 
 
+def _run_stored_check(row: dict, timeout: int = EVIDENCE_TIMEOUT_SECONDS):
+    """Execute a stored falsifier once: `(state, detail, declared_denominator)`.
+
+    `state` is a real exit status, `UNRUNNABLE`, or `EMPTY_INPUT`. The third value is
+    `declared_denominator()` read over the run's stdout and it is returned on every path,
+    the unrunnable ones included, because `audit` tallies declarations over the ledger's
+    keys rather than over its successes — and `cmd_audit` calls *this* function so that a
+    full audit still executes each stored command exactly once. `evidence_cmd_status`
+    below is this with the third value dropped, which is what every other reader wants.
+    """
+    cmd = (row.get("evidence_cmd") or "").strip()
+    if not cmd:
+        return UNRUNNABLE, "no evidence_cmd recorded", None
+    try:
+        proc = subprocess.run(["bash", "-c", cmd], capture_output=True,
+                              text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # Reported as unrunnable rather than passed over: a check that never finishes
+        # disarms a verdict exactly as quietly as one that cannot start, and the bounded
+        # timeout is worthless if nothing is printed when it fires.
+        return UNRUNNABLE, f"still running after {timeout}s", None
+    except OSError as exc:  # bash itself unusable: no verdict either way
+        return UNRUNNABLE, str(exc), None
+    declared = declared_denominator(proc.stdout)
+    if proc.returncode == UNRUNNABLE:
+        return UNRUNNABLE, (proc.stderr.strip().splitlines() or ["exit 127"])[0], declared
+    missing = next((ln for ln in proc.stderr.splitlines()
+                    if "No such file or directory" in ln), "")
+    if missing:
+        return UNRUNNABLE, missing.strip(), declared
+    # A command the shell itself refuses to parse can never run either, and this is not
+    # speculation about an exit code: as measured on the live ledger 2026-09-19, the key
+    # `seq-2-read-edit` — whose falsifier the 09-15 triage confirmed re-executed at rc 0 —
+    # exits 2 with `bash: -c: line 1: unexpected EOF while looking for matching '"'`,
+    # because the stored string lost a quote. Detecting only exit 127 would leave the one
+    # falsifier that is actually broken on this box silent, which is the fail-shut case
+    # clause 4 exists to surface. Keyed on bash's own prefix, not on rc 2 at large: a tool
+    # inside the command may exit 2 for its own reasons, and that is a result, not a fault.
+    if proc.returncode == 2 and _BASH_PARSE_ERROR_RE.search(proc.stderr):
+        return UNRUNNABLE, (proc.stderr.strip().splitlines() or ["bash parse error"])[0], declared
+    if proc.returncode == 0 and declared == 0:
+        # Every rail above is silent here — the command started, parsed, and exited 0 — and
+        # its own stdout says it read nothing. `print(sum(...))` over a glob that matched no
+        # file prints `0` byte-identically to a healthy count, which is why an exit status
+        # can never decide this and why the field has to be the command's own claim: the
+        # live ledger held 28 latest-wins keys whose every referenced absolute path is gone
+        # and `audit` reported `unrunnable: 0` for all of them (#2048's executed proof).
+        # Keyed on rc 0 only: a nonzero rc beside `input_rows=0` is the falsifier answering
+        # no, which is the ledger working, and relabelling it would teach `check` to stop
+        # trusting a real falsification.
+        return EMPTY_INPUT, f"{INPUT_ROWS_FIELD}=0", declared
+    return proc.returncode, "", declared
+
+
 def evidence_cmd_status(row: dict, timeout: int = EVIDENCE_TIMEOUT_SECONDS):
     """Re-execute a verdict's stored check: `(rc, detail)`, rc `UNRUNNABLE` for a command
     that cannot produce a verdict at all — absent, unparseable, unstartable, or hung.
@@ -882,37 +986,20 @@ def evidence_cmd_status(row: dict, timeout: int = EVIDENCE_TIMEOUT_SECONDS):
     more — which is invisible from the ledger alone (#772: `scan_candidates` never
     executed these commands, so a wiped falsifier silenced nothing and the verdict kept
     suppressing candidates).
+
+    The third state is `EMPTY_INPUT`: an rc-0 run whose stdout declares `input_rows=0`,
+    so it observed an empty input set. Neither of the other two, and named so a caller
+    need not re-read the detail to tell them apart — a command exiting 0 over the files it
+    believes it read is the shape that kept being honoured for 60 days on a check that
+    could not see them, and `record_verdict` refuses to mint one while `audit` publishes
+    it. The `UNRUNNABLE` rails are checked first and unchanged, so a command whose input
+    file is gone is still reported as unrunnable, not as empty input: those two facts have
+    different repairs, and only one of them is a path (#1588's repair pass reads
+    `UNRUNNABLE` and never sees this state, which is the whole reason #2048 is a separate
+    item from it).
     """
-    cmd = (row.get("evidence_cmd") or "").strip()
-    if not cmd:
-        return UNRUNNABLE, "no evidence_cmd recorded"
-    try:
-        proc = subprocess.run(["bash", "-c", cmd], capture_output=True,
-                              text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        # Reported as unrunnable rather than passed over: a check that never finishes
-        # disarms a verdict exactly as quietly as one that cannot start, and the bounded
-        # timeout is worthless if nothing is printed when it fires.
-        return UNRUNNABLE, f"still running after {timeout}s"
-    except OSError as exc:  # bash itself unusable: no verdict either way
-        return UNRUNNABLE, str(exc)
-    if proc.returncode == UNRUNNABLE:
-        return UNRUNNABLE, (proc.stderr.strip().splitlines() or ["exit 127"])[0]
-    missing = next((ln for ln in proc.stderr.splitlines()
-                    if "No such file or directory" in ln), "")
-    if missing:
-        return UNRUNNABLE, missing.strip()
-    # A command the shell itself refuses to parse can never run either, and this is not
-    # speculation about an exit code: as measured on the live ledger 2026-09-19, the key
-    # `seq-2-read-edit` — whose falsifier the 09-15 triage confirmed re-executed at rc 0 —
-    # exits 2 with `bash: -c: line 1: unexpected EOF while looking for matching '"'`,
-    # because the stored string lost a quote. Detecting only exit 127 would leave the one
-    # falsifier that is actually broken on this box silent, which is the fail-shut case
-    # clause 4 exists to surface. Keyed on bash's own prefix, not on rc 2 at large: a tool
-    # inside the command may exit 2 for its own reasons, and that is a result, not a fault.
-    if proc.returncode == 2 and _BASH_PARSE_ERROR_RE.search(proc.stderr):
-        return UNRUNNABLE, (proc.stderr.strip().splitlines() or ["bash parse error"])[0]
-    return proc.returncode, ""
+    state, detail, _declared = _run_stored_check(row, timeout)
+    return state, detail
 
 
 # --------------------------------------------------------------- root-move repair --
@@ -1411,6 +1498,13 @@ def cmd_check(args: argparse.Namespace) -> int:
         rc, detail = evidence_cmd_status(table.get(key) or {})
         if rc == UNRUNNABLE:
             print(f"EVIDENCE_CMD_UNRUNNABLE {key} :: {detail}")
+        elif rc == EMPTY_INPUT:
+            # The same decision `audit` publishes, on the surface a nightly actually reads
+            # between its SKIP choices: the verdict was honoured, and its own falsifier
+            # says it read nothing. Named rather than silently honoured because
+            # "honoured on a check that cannot see its input" is the state #2048 exists to
+            # make visible, and this loop is where 2 of the ledger's keys get exercised.
+            print(f"EVIDENCE_CMD_EMPTY_INPUT {key} :: {detail}")
     if fell_back:
         print(f"verdict source: {source} (live ledger {live} is absent)")
     print(f"checked: {len(rows)}  skipped_by_verdict: {len(skipped)}")
@@ -1442,20 +1536,46 @@ def cmd_audit(args: argparse.Namespace) -> int:
     mandatory), and `record` refuses to write it.
 
     Output is read by the nightly jobs, so the shape is the contract: one
-    `UNRUNNABLE <pattern_key> :: <detail>` line per dead key, then
+    `UNRUNNABLE <pattern_key> :: <detail>` line per dead key, then one
+    `EMPTY_INPUT <pattern_key> :: <detail>` line per key whose rc-0 check declared
+    `input_rows=0`, then `denominators: empty_input N undeclared M`, then
     `keys: N unrunnable: M` as the LAST line — `check`'s shape, so a reader that takes
-    `splitlines()[-1]` gets the tally here too. Exit 1 when M > 0, so an unverifiable
-    ledger fails a run instead of printing into a log nobody re-reads.
+    `splitlines()[-1]` gets the tally here too. Exit 1 when M > 0 or the empty-input count
+    does, so an unverifiable ledger fails a run instead of printing into a log nobody
+    re-reads.
+
+    The two tallies answer different questions and a key can appear in both. `unrunnable:`
+    is about whether the check can execute; `denominators:` is about whether it says what
+    it read — `undeclared` counts every key whose command named no `input_rows`, the
+    unrunnable ones included, so `empty_input + undeclared + declared` adds up to `keys:`
+    and a reader can check the arithmetic. That is why the figure is a separate line and a
+    separate exit: #2048's whole finding is that a ledger can be fully honoured on
+    falsifiers that can no longer see their input while `unrunnable:` reads 0, and a
+    number that already covers the case cannot expose it. An undeclared denominator is not
+    a fault yet — 109 of the live ledger's keys are undeclared tonight, every one of them
+    recorded before the field existed, and refusing them at read time would quarantine a
+    ledger nobody authored wrongly. Making the field mandatory at `record` is a ruling on
+    the authoring convention, which lives in `nightly-skill-consolidation`'s Phase 0.6, not
+    a fact this function can decide alone.
     """
     table = load_verdicts(store_path(args.store))      # latest-wins, the table check reads
-    dead = []
+    dead, empty_input, undeclared = [], [], 0
     for key in sorted(table):
-        status = evidence_cmd_status(table[key], timeout=args.timeout)
-        if status and status[0] == UNRUNNABLE:
+        # The three-value form, so one audit still runs each stored command once: the
+        # denominator comes off the same execution that decided runnability, never from a
+        # second run that could disagree with the first.
+        state, detail, declared = _run_stored_check(table[key], timeout=args.timeout)
+        if declared is None:
+            undeclared += 1
+        if state == UNRUNNABLE:
             dead.append(key)
-            print(f"UNRUNNABLE {key} :: {status[1]}")
+            print(f"UNRUNNABLE {key} :: {detail}")
+        elif state == EMPTY_INPUT:
+            empty_input.append(key)
+            print(f"EMPTY_INPUT {key} :: {detail}")
+    print(f"denominators: empty_input {len(empty_input)} undeclared {undeclared}")
     print(f"keys: {len(table)} unrunnable: {len(dead)}")
-    return 1 if dead else 0
+    return 1 if (dead or empty_input) else 0
 
 
 def _read_reanchors(path: str | None) -> dict[str, str]:
