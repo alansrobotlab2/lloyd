@@ -685,16 +685,19 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
 
     `ack` is this module's ONE excuse, and it is narrow by construction: a list of
     vault-relative paths whose pinned witness the SAME change is re-deriving. #2047 is the
-    shape it exists for — `backlog/data/promotions.jsonl` is a copy of the live promotions
-    ledger, `tests/test_retention_sweep.py` pins figures measured FROM that copy, and no
-    ordering lets both move together: bytes first, and HEAD's code disagrees with the new
-    bytes; pins first, and the candidate disagrees with the bytes still on disk. An
-    acknowledged path must be one this land declares (`accepted_ack`), it speaks only for
-    nodes whose own test file names that file (`excused_ids`), and every node it excuses goes
-    on the report — and therefore on the ledger row — with its id, so an excused failure is
-    recorded rather than quiet. Everything else about the probe is unchanged: it still judges
-    HEAD's code, it still builds the proposal by putting these paths back, and an
-    unacknowledged disagreement still refuses.
+    shape it was written for — `backlog/data/promotions.jsonl` was then a rolling copy of the
+    live promotions ledger, `tests/test_retention_sweep.py` pinned figures measured FROM that
+    copy, and no ordering let both move together: bytes first, and HEAD's code disagreed with
+    the new bytes; pins first, and the candidate disagreed with the bytes still on disk. That
+    copy is RETIRED: #2054 re-aimed its readers at the blob in the vault's history and #2064
+    deletes the working-tree file, so what the excuse stands for is the shape, not that path —
+    any vault path whose pinned witness the same change is re-deriving, identified by the test
+    file that names it. An acknowledged path must be one this land declares (`accepted_ack`),
+    it speaks only for nodes whose own test file names that file (`excused_ids`), and every
+    node it excuses goes on the report — and therefore on the ledger row — with its id, so an
+    excused failure is recorded rather than quiet. Everything else about the probe is
+    unchanged: it still judges HEAD's code, it still builds the proposal by putting these paths
+    back, and an unacknowledged disagreement still refuses.
 
     `timeout` is the WHOLE probe: the queue for the gate's tests lock and every
     pytest run together — the proposed-vault run, the serial re-ask of its

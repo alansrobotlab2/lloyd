@@ -2255,9 +2255,10 @@ _MIRROR_READER_MARKS = ("read_text", "read_bytes", "open(", "vault_root(", "unli
 _MIRROR_MENTION_FILES = {
     "scripts/automod/vault_guards.py":
         "the agreement probe's docstring naming the copy as the pinned-witness shape an "
-        "acknowledgement was written for (#2049's mechanism text). NOT touched by #2054: "
-        "scripts/automod/** is a protected surface and a docstring is not a safety property, "
-        "so the tense of that sentence is recorded as a finding on #2054 instead",
+        "acknowledgement was written for (#2049's mechanism text). #2064 re-timed it: it now "
+        "says the copy is RETIRED and the excuse stands for any pinned witness whose test file "
+        "names the path, which "
+        "test_the_agreement_excuse_text_says_the_copy_is_retired_not_current pins",
     "scripts/groundskeeper/retention-sweep.py":
         "the store-13 paragraph, whose figures #2054 re-aimed at vault commit "
         f"{LEDGER_WITNESS_COMMIT} and whose retire that paragraph records",
@@ -2355,6 +2356,76 @@ def test_no_reader_under_tests_or_scripts_opens_the_retired_mirror():
         "unacknowledged pinned witness — #2049's subject — is no longer tested")
     print(f"clause 5: {len(hits)} mentions in {len({h[0] for h in hits})} files, "
           f"{len(readers)} of them readers, none outside the permitted set")
+
+
+def test_the_agreement_excuse_text_says_the_copy_is_retired_not_current():
+    """#2064 clause 4: the excuse's own text must not still describe the mirror as live.
+
+    `agreement()`'s docstring is the only description of when an ack is legitimate, and it said
+    the 2026-10 arrangement in the present tense: "`backlog/data/promotions.jsonl` is a copy of
+    the live promotions ledger, `tests/test_retention_sweep.py` pins figures measured FROM that
+    copy, and no ordering lets both move together". #2054 moved every reader to the blob in the
+    vault's history and #2064 deletes the file, so the paragraph is read AFTER the thing it
+    describes in the present tense has gone — and a false mechanism note in the module that
+    IMPLEMENTS the excuse is worse than no note, because it teaches the next round that
+    re-committing a 33,113,707-byte mirror is what an ack is for. The price of re-timing it is
+    gate rung 6's live rollback drill, since `scripts/automod/**` is in `PROTECTED_GLOBS`
+    (`scripts/automod/spec.py`); the item rules that worth paying rather than leaving the lie.
+
+    Pinned on the docstring of the IMPORTED function, not a re-read of the file: `agreement` is
+    the probe that enforces the ack rule, so certifying a second copy of the text would let the
+    shipped module say something different from what this node passes.
+
+    Non-vacuity runs both ways. The paragraph must still NAME the path, or every absence assert
+    below would be satisfied by deleting the example wholesale — which is the shape of green
+    this loop has been burned by before. And the stale wording is checked against a control
+    string that still carries it, so a marker that had silently stopped matching anything is
+    caught here rather than passing forever.
+    """
+    import inspect
+
+    flat = " ".join((inspect.getdoc(VG.agreement) or "").split())
+
+    assert "backlog/data/promotions.jsonl" in flat, (
+        "the agreement docstring no longer names the pinned-witness path at all, so each "
+        "assert below would pass on a paragraph that says nothing about the excuse — the "
+        "#2049 shape has to stay the worked example, in past tense")
+
+    # The present-tense claims, exactly as #2054 left them, and a control that still says them.
+    STALE = ("`backlog/data/promotions.jsonl` is a copy of the live promotions ledger, "
+             "`tests/test_retention_sweep.py` pins figures measured FROM that copy, "
+             "and no ordering lets both move together")
+    STALE_IS = "is a copy of the live promotions"
+    STALE_NOW = "no ordering lets both move together"
+    assert STALE_IS in STALE and STALE_NOW in STALE, (
+        "the control paragraph no longer carries the present-tense claims this node refuses, "
+        f"so `{STALE_IS!r}` / `{STALE_NOW!r}` match nothing and the absence asserts below are "
+        "green by construction")
+    assert STALE_IS not in flat, (
+        f"the agreement docstring still says the promotions mirror `{STALE_IS}` ledger. The "
+        "working-tree copy is retired (#2054's readers, #2064's delete); a note claiming it is "
+        "there invites a round to re-commit it, which is the cost clause 5 of #2054 exists to "
+        "keep paid")
+    assert STALE_NOW not in flat, (
+        f"the docstring still claims `{STALE_NOW}` in the present tense. That deadlock was the "
+        "#2047 arrangement; with the copy gone the ordering problem is historical, and prose "
+        "that says otherwise is a reason to reach for an ack that is no longer needed")
+
+    # The re-timing, positively: retired, attributed, and generalised over any pinned witness.
+    assert "was then a rolling copy of the live promotions ledger" in flat, (
+        "the paragraph no longer tells the #2047 story in the past tense, so a reader cannot "
+        "tell what the excuse was written for — the history is the point of naming it")
+    assert "RETIRED" in flat, (
+        "the docstring does not say the copy is retired, which is the sentence a round "
+        "considering an ack actually needs")
+    assert "#2054" in flat and "#2064" in flat, (
+        "the retirement is unattributed: the reader has no way to find the round that moved "
+        "the readers and the round that deleted the file")
+    assert ("any vault path whose pinned witness the same change is re-deriving" in flat
+            and "nodes whose own test file names that file" in flat), (
+        "the excuse is no longer stated as standing for ANY pinned witness whose own test file "
+        "names the path. The mechanism text is what makes the rail reusable after this "
+        "particular path is gone; narrowed to one dead path it becomes an artefact")
 
 
 # --------------------------------------------------------------------------- #

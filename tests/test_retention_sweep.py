@@ -4362,14 +4362,20 @@ def test_the_witness_reader_reads_history_and_not_the_working_tree(rs, tmp_path,
     lands, the copy's absence turns those nodes into skips, and the re-aim nobody ever
     proved was in fact the thing that was never done. They only become checks once the file
     is gone, and that delete is an owed step AFTER this round lands, so the proof cannot
-    wait for it. This node builds the condition instead: a vault whose HEAD still lists the
-    path, in which a working-tree reader would find bytes, but whose working tree does not
-    contain them. Reproducing both generations out of THAT tree is what "the figure comes
-    from the commit" means, and it is the only way to know the answer before the delete.
+    wait for it. This node builds the condition instead: a vault whose object store holds the
+    path at `4bc93177` and whose working tree holds nothing at that path — which is also
+    precisely what the vault looks like once the delete lands, so the tree this node reads is
+    the post-delete tree whether or not the delete has happened yet. Reproducing both
+    generations out of THAT tree is what "the figure comes from the commit" means, and it is
+    the only way to know the answer before the delete.
 
-    `git clone --no-checkout`: HEAD's tree is checked for the path (`ls-tree` below, so a
-    disk-reading reader is provably out of work rather than merely untested) and no file is
-    laid down, which is the whole condition and costs a pack copy and nothing else.
+    `git clone --no-checkout`: the path is asked for in the WITNESS COMMIT's tree (`ls-tree
+    4bc93177` below, so the emptiness asserted of the disk next is emptiness beside bytes that
+    are provably present, and a disk-reading reader is caught rather than merely untested),
+    and no file is laid down — which is the whole condition and costs a pack copy and nothing
+    else. `HEAD` is deliberately NOT the tree asked for: #2064's delete removes the path from
+    HEAD's tree, so a HEAD-aimed non-vacuity assert would go red on the very commit the delete
+    is supposed to produce, which is the opposite of what it is for.
     `--no-local` is load-bearing: the default local clone hardlinks the object pool AND
     checks out the tree, which would hand this node the very file it is asserting the reader
     does not need. `--single-branch` keeps the clone on the line both witness commits are
@@ -4392,12 +4398,17 @@ def test_the_witness_reader_reads_history_and_not_the_working_tree(rs, tmp_path,
                           capture_output=True, text=True)
     assert proc.returncode == 0, f"clone of the witness vault failed: {proc.stderr[:200]}"
 
-    listed = subprocess.run(["git", "-C", str(clone), "ls-tree", "HEAD", "--",
+    # Asked of the WITNESS COMMIT, never of HEAD: #2064's owed delete takes the path out of
+    # HEAD's tree, and an assert aimed there would go red on the very commit this node exists
+    # to keep green. The blob at `_WITNESS_COMMIT` is what the reader has to read, so that is
+    # the tree whose non-emptiness makes the rest of this node a check.
+    listed = subprocess.run(["git", "-C", str(clone), "ls-tree", _WITNESS_COMMIT, "--",
                              _WITNESS_REPO_PATH], capture_output=True, text=True)
     assert listed.returncode == 0 and listed.stdout.strip(), (
-        f"the clone's HEAD does not list `{_WITNESS_REPO_PATH}`, so a working-tree reader "
-        "would have found nothing here either and this node would prove nothing about "
-        "whether the reader is reading the file")
+        f"the clone's tree at `{_WITNESS_COMMIT}` does not list `{_WITNESS_REPO_PATH}`, so "
+        "nothing in this object store holds the witness: a reader opening the file and a "
+        "reader reading history would both come back empty here, and the asserts below would "
+        "prove nothing about which of the two the reader is")
     assert not (clone / _WITNESS_REPO_PATH).exists(), (
         f"the clone has a working-tree copy at {_WITNESS_REPO_PATH} despite "
         "`--no-checkout`, so 'nothing on disk to read' is false in this tree and every "
