@@ -6,6 +6,7 @@ lands unverified" has to be enforced after the edit, not before it.
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -1769,25 +1770,75 @@ WITNESS_LEDGER_LINES = 28678
 
 def test_a_killed_run_ledges_the_seconds_the_selection_and_its_own_tail(
         tmp_path, monkeypatch):
-    """Clause 2 at the child boundary: the numbers a kill leaves behind.
+    """Clause 2 at the child boundary: the numbers a kill leaves behind, and which
+    channel the tail came from.
 
-    A deterministic stand-in for the kill — `subprocess.run` raising the
-    `TimeoutExpired` the real one raises, carrying the bytes its pipe held. The
-    point is not that a timeout is reported (the old code did that) but what it
-    reports: the three real rows said only `timed out after 300s`, which cannot be
-    told apart from a hang by anyone reading the ledger afterwards.
+    A deterministic stand-in for the kill — a `Popen` whose first `communicate`
+    raises the `TimeoutExpired` the real one raises and whose second is the drain
+    after the process-group kill. The #2042 node this one replaces built its
+    `held` bytes into the exception it raised and then asserted those bytes came
+    out: a literal the test itself made, over a channel a killed child may not
+    even have. So the fake child here is parameterised over every source the kill
+    can leave behind, and the cases below pin the ORDER they are consulted in —
+    the seam a reviewer of this diff called unverified.
+
+    What `TimeoutExpired.output` actually holds for a killed child is not
+    asserted anywhere here, deliberately: the two measurements of it taken on this
+    box disagreed (`_tail`'s docstring names both), and a test that predicted it
+    would be a claim about CPython rather than about this module. `_run_selection`
+    is written to work whichever it turns out to be, and that is what the case
+    table proves.
+
+    The point beside it is not that a timeout is reported (the old code did that)
+    but what it reports: the three real rows said only `timed out after 300s`,
+    which cannot be told apart from a hang by anyone reading the ledger.
     """
+    import signal
     import subprocess as SP
 
-    held = b"collected 7065 items\n.... GUARD-IS-HANGING prose 4, script 4\n"
+    held = "collected 7065 items\n.... GUARD-IS-HANGING prose 4, script 4\n"
 
-    def killed(cmd, **kw):
-        raise SP.TimeoutExpired(cmd, kw.get("timeout"), output=held)
+    class KilledController:
+        """The run's controller, still alive when the budget gives up on it.
 
-    monkeypatch.setattr(VG.subprocess, "run", killed)
-    r = VG._run_selection(Path(sys.executable), tmp_path,
-                          ["tests/test_a.py", "tests/test_b.py"],
-                          tmp_path / "vault", tmp_path / "data", None, 42.0)
+        `carries` is what the exception hands back, `drain` what the post-reap
+        `communicate` does — the two things a killed child can and must not be
+        assumed to agree about.
+        """
+
+        pid = 4242          # nothing owns this pid; `killpg` is patched below
+        returncode = None
+
+        def __init__(self, carries=(None, None), drain=(None, None)) -> None:
+            self.carries, self.drain = carries, drain
+            self.communicates = 0
+
+        def communicate(self, timeout=None):
+            self.communicates += 1
+            if self.communicates == 1:
+                raise SP.TimeoutExpired(["pytest"], timeout,
+                                        output=self.carries[0], stderr=self.carries[1])
+            return self.drain          # what the drain after the reap takes back
+
+        def wait(self, timeout=None) -> int:
+            return -9
+
+        def kill(self) -> None:
+            pass
+
+    signalled: list[int] = []
+    monkeypatch.setattr(VG.os, "killpg", lambda pgid, sig: signalled.append(sig))
+
+    def kill(carries=(None, None), drain=(None, None)) -> dict:
+        child = KilledController(carries, drain)
+        monkeypatch.setattr(VG.subprocess, "Popen", lambda cmd, **kw: child)
+        out = VG._run_selection(Path(sys.executable), tmp_path,
+                                ["tests/test_a.py", "tests/test_b.py"],
+                                tmp_path / "vault", tmp_path / "data", None, 42.0)
+        out["communicates"] = child.communicates
+        return out
+
+    r = kill(drain=(held, ""))
     assert r["ran"] == 0
     # The denominator and the cost, in the note itself: "over 2 vault-reading
     # file(s)" and the seconds it was given are what a future reader needs to tell
@@ -1800,6 +1851,38 @@ def test_a_killed_run_ledges_the_seconds_the_selection_and_its_own_tail(
     # code failed, whose timeout branch returned `"excerpt": ""` unconditionally.
     assert "GUARD-IS-HANGING" in r["excerpt"], r
     assert "GUARD-IS-HANGING" in r["note"], r["note"]
+    # The run was given up on by GROUP, and reaped: SIGTERM for the grace, SIGKILL
+    # for the certainty, and a second `communicate` that ends the pipes and takes
+    # the controller out of the process table. `test_a_killed_parallel_run_leaves_
+    # no_worker_of_its_scratch_tree_alive` is the real-children witness of the same
+    # rule; this half is the deterministic order.
+    assert signalled == [signal.SIGTERM, signal.SIGKILL], signalled
+    assert r["communicates"] == 2, "the killed child was left unreaped"
+    # A clean reap adds nothing to the note: only a survivor is worth reporting.
+    assert "; " not in r["note"], r["note"]
+
+    # The seam above only shows the LAST channel winning, because that case had
+    # nothing anywhere else. Which of the four the code consults first is the other
+    # half of "where did this tail come from", and each row below is a killed child
+    # that could have supplied the note from more than one place. The order is
+    # `_run_selection`'s, and the bytes row is why `_tail` decodes: an exception
+    # built by a bytes-mode pipe hands over `bytes` even when the reader wanted text.
+    for carries, drain, want in (
+            (("FROM-EXC-OUTPUT", "FROM-EXC-STDERR"),
+             ("FROM-DRAIN-OUT", "FROM-DRAIN-ERR"), "FROM-EXC-OUTPUT"),
+            ((None, "FROM-EXC-STDERR"),
+             ("FROM-DRAIN-OUT", "FROM-DRAIN-ERR"), "FROM-EXC-STDERR"),
+            ((None, None), ("FROM-DRAIN-OUT", "FROM-DRAIN-ERR"), "FROM-DRAIN-OUT"),
+            ((None, None), (None, "FROM-DRAIN-ERR"), "FROM-DRAIN-ERR"),
+            ((b"FROM-EXC-BYTES", None), (None, None), "FROM-EXC-BYTES"),
+    ):
+        got = kill(carries, drain)
+        assert want in got["note"], (carries, drain, got["note"])
+        assert want in got["excerpt"], (carries, drain, got["excerpt"])
+    # And a killed child that left nothing anywhere says so, rather than being
+    # reported as if a tail had been read and found empty.
+    empty = kill()
+    assert empty["excerpt"] == "" and "no output captured" in empty["note"], empty["note"]
 
 
 def test_a_budget_that_cannot_hold_a_run_reports_it_before_starting_one(
@@ -1850,14 +1933,35 @@ def test_a_probe_that_hangs_states_its_seconds_and_still_lands(vault, tmp_path, 
                                 "seconds": row["candidate"]["seconds"], "files": 1}
     assert "answered nothing" in row["reason"] and "timed out after" in row["reason"]
     assert "over 1 vault-reading file" in row["reason"], row["reason"]
-    # The child spent most of the 12 s it was handed: that is the difference
-    # between "the run was slow" and "the budget was already gone", which is the
-    # ruling #2042 leaves to the owed-check job and which the old row could not
-    # support either way.
-    assert row["candidate"]["seconds"] >= 8.0, row["candidate"]
+    # The child spent real seconds and was then killed for spending them: that is
+    # the difference between "the run was slow" and "the budget was already gone",
+    # which is the ruling #2042 leaves to the owed-check job and which the old row
+    # could not support either way. The floor is the arithmetic one, not a guess at
+    # how much of the 12 s is left: `run_budget()` refuses to start a run under
+    # `MIN_RUN_SECONDS`, so a run that started had at least that much and a run that
+    # timed out spent all of it. The first cut of this line asked for >= 8.0 and
+    # failed under the gate's own `-n 8` (`seconds: 7.9`): the worktree, the mirror
+    # and — since #2044 — the interpreter boot of the `import xdist` probe all come
+    # out of the same deadline before the child is handed what is left. Asserting a
+    # fixed share of the budget would make this node measure the box's load; the
+    # rail's own floor measures the code.
+    assert row["candidate"]["seconds"] >= VG.MIN_RUN_SECONDS, row["candidate"]
     assert row["seconds"] >= row["candidate"]["seconds"], row
-    assert "lock_wait_s" not in row or row["lock_wait_s"] < 1.0, (
-        f"the queue ate the budget here: {row['lock_wait_s']}s of a 12s probe")
+    # What the rail promises about the queue is that it is REPORTED and that the
+    # probe stays inside its own deadline (plus the bounded reap), not that the wait
+    # is short. Two reasons not to bound the length here. The measured one: the `-n
+    # 8` run that broke the previous line lost ~4 s of this node's 12 s BEFORE the
+    # child was spawned (`seconds: 7.9`), and a bound on what the child gets is a
+    # bound on what the box let the probe prepare. The structural one: the tests lock
+    # is one real path (`S.GATE_TESTS_LOCK_PATH`, printed from `scripts.automod.state`
+    # on 2026-10-02, not a per-test file), and a sibling node in this very file —
+    # `test_the_probe_waits_for_the_gate_tests_slot_before_it_starts_a_child` — holds
+    # it for eight seconds from a timer thread, so under `-n 8` how long this probe
+    # may queue is decided by which worker got there first. The queue's cost is on
+    # the row beside the run's, which is the half #2042 actually asked for.
+    assert row["seconds"] <= 12.0 + VG.GROUP_TERM_GRACE_S + VG.REAP_DRAIN_S, (
+        f"the probe overran its own 12s deadline by more than the bounded reap: "
+        f"{row['seconds']}s, lock_wait_s={row.get('lock_wait_s')}")
 
 
 def test_the_probe_waits_for_the_gate_tests_slot_before_it_starts_a_child(
@@ -2023,3 +2127,542 @@ def test_the_probe_timeout_witness_is_the_three_rows_the_item_quotes():
         assert all("guards" not in r for r in vl), (
             "the refreshed mirror now contains post-ship rows, so the extract above "
             "must be re-cut from the live ledger before this claim is repeated")
+
+
+# --------------------------------------------------------------------------- #
+#  #2044: the proposed-vault run goes out on pytest-xdist, and a failure that
+#  only parallelism caused is re-asked serially before it can refuse anything.
+#
+#  Why: `PROBE_TIMEOUT_SECONDS` is 300 s and the production selection is 196
+#  files / ~7,000 nodes, which #2044 puts at ~735 s run serially (its `[34%]`-at
+#  250 s progress line — the figure `SERIAL_SELECTION_COST_S` carries and labels
+#  there as a claim nobody re-ran, corroborated in order by the gate's own ~600 s
+#  for a ~5,900-node suite at `gate.py:1792-1796`) — so every one of the
+#  five real probes the promotion ledger ever recorded came back
+#  `state=skipped ran=0 "timed out after 300s"`, and the #2036 guard has never
+#  once judged a land. The gate stopped paying that cost on its own `tests` rung
+#  at `gate.py:1842` (~600 s serial → ~76 s on 8 xdist workers). What that fix
+#  also had to bring is the re-ask: eight workers make load, and a node that
+#  loses under load is a fact about the box during the run, not about the prose
+#  being landed (`gate.py:1798-1806` records the gate learning this the hard
+#  way). These nodes pin both halves.
+# --------------------------------------------------------------------------- #
+
+#: A vault-reading guard that loses ONLY under a parallel run, asked two ways
+#: because the first cut of this file was refused at review for asking it one.
+#: `request.config.workerinput` is pytest-xdist's own documented "am I a worker"
+#: handle and exists in no other run; `PYTEST_XDIST_WORKER` is what xdist writes
+#: into each worker (`xdist/remote.py:417` at 3.8.0). The env var is only a
+#: faithful signal once `_run_selection` strips the OUTER run's identity
+#: (`PYTEST_CHILD_ENV_DROP`) — and it was not when this guard was first written:
+#: the suite runs on 8 xdist workers, so the worker executing the probe leaked its
+#: `gw3` into a child the probe had asked to run serially, the re-ask inherited the
+#: flake it exists to clear, and the node below went red under `-n` for a reason
+#: that had nothing to do with the code. Both signals, so the guard says what it
+#: means whichever of the two moves, with the same shape as the gate's recorded
+#: flaker: green serially, red on any worker.
+GUARD_SRC_FLAKES = '''"""A vault-reading guard that loses only when the selection runs parallel."""
+import os
+from pathlib import Path
+
+
+def test_a_guard_that_flakes_only_under_parallelism(request):
+    v = Path(os.environ["LLOYD_VAULT_ROOT"])
+    assert (v / "skills" / "foo" / "SKILL.md").exists()
+    assert not hasattr(request.config, "workerinput"), (
+        "lost in an xdist worker process, not under this land")
+    assert not os.environ.get("PYTEST_XDIST_WORKER"), (
+        "lost under a parallel run, not under this land")
+'''
+
+FLAKER_NODE = "tests/test_flaker.py::test_a_guard_that_flakes_only_under_parallelism"
+COUNT_NODE = "tests/test_guard.py::test_the_prose_states_the_count_the_script_prints"
+
+
+def _two_workers(monkeypatch, n: int = 2) -> list:
+    """Pin the worker count the probe reads, without touching `config.yaml`.
+
+    `config.yaml` is a path the loop may never write, and the clause is that the
+    probe reads the count through the gate's own accessor — so the patch goes on
+    the accessor, which is also the only way to hold a test to two workers instead
+    of eight.
+
+    The literal `("test_workers", 1)` is the pin, and it is inside the patched
+    accessor rather than beside it because of the failure this guards: a probe that
+    asked `_gate_cfg` for any other spelling — `test_worker_count`, or with a
+    default of 8 — gets the REAL config's answer for a key nobody reads, which for
+    a missing key is its default, which is 1, which serialises the selection and
+    skips every land with the entire suite green. Handing `n` to whoever asked for
+    whatever they asked for is precisely the lie that would let that pass. So this
+    answers only the exact key-and-default #2044 names, and delegates anything else
+    to the real accessor, where a wrong key lands on the box's real 8 and the
+    caller's `workers == 2` assertion goes red at once. The returned list records
+    every ask, which one node reads to name the spelling in its failure output.
+    """
+    import scripts.automod.gate as GATE
+
+    asks: list[tuple] = []
+    real = GATE._gate_cfg
+
+    def accessor(key, default):
+        asks.append((key, default))
+        if key == "test_workers" and default == 1:
+            return n
+        return real(key, default)
+
+    monkeypatch.setattr(GATE, "_gate_cfg", accessor)
+    return asks
+
+
+def _add_flaker(tree) -> None:
+    """Add `GUARD_SRC_FLAKES` to a guard tree as its second vault-reading file."""
+    (tree / "tests/test_flaker.py").write_text(GUARD_SRC_FLAKES)
+    git(tree, "add", "-A")
+    git(tree, "commit", "-q", "-m", "a guard that loses only under parallelism")
+
+
+def _probe(tree, vault, tmp_path, *, paths=("skills/foo/SKILL.md",), **kw) -> dict:
+    """One real `agreement` call, the same one `land()` makes, report in hand.
+
+    `land()` hands the projection in `_guards_row` to the ledger and keeps only
+    some keys; the clauses below are about the report itself, so they are read
+    from the source rather than from what the row projection chose to carry.
+    """
+    return VG.agreement(paths=list(paths), live_root=tree, live_vault=vault,
+                        python=Path(sys.executable),
+                        scratch_parent=tmp_path / "probe-scratch", **kw)
+
+
+def test_the_proposed_vault_run_gets_the_gates_worker_count_on_its_argv(monkeypatch, tmp_path):
+    """Clause 1 and clause 3's env half, at the boundary the child is spawned over.
+
+    `subprocess.Popen` is recorded, not written out of the picture, so what is
+    asserted is the command line, the environment and the spawn flags the probe
+    actually hands pytest — the ones `grep -n '"-n"'` in the item's check is a
+    proxy for. The mark expression is asserted beside the flags because both live
+    in the same list and a reordering that pushed the files ahead of `-m` would
+    silently change the selection. `start_new_session` is asserted here for the
+    same reason it exists: without it the group kill in `_reap_group` has no group
+    of its own to kill, and it is a kwarg, so nothing on the argv would show it.
+    """
+    import scripts.automod.gate as GATE
+
+    cmds: list[list[str]] = []
+    envs: list[dict] = []
+    flags: list[dict] = []
+
+    class OnePassRun:
+        """A controller that answers immediately with a one-node summary."""
+
+        pid = 4243
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return "collected 1 item\n1 passed in 0.1s\n", ""
+
+    def record(cmd, **kw):
+        cmds.append([str(c) for c in cmd])
+        envs.append(dict(kw.get("env") or {}))
+        flags.append(kw)
+        return OnePassRun()
+
+    monkeypatch.setattr(VG.subprocess, "Popen", record)
+    r = VG._run_selection(Path(sys.executable), tmp_path, ["tests/test_guard.py"],
+                          tmp_path / "vault", tmp_path / "data", None, 30.0, 3)
+
+    pytest_cmds = [c for c in cmds if "pytest" in c]
+    assert len(pytest_cmds) == 1, f"the probe launched {len(pytest_cmds)} children: {cmds}"
+    argv = pytest_cmds[0]
+    i = argv.index("-n")
+    assert argv[i:i + 4] == ["-n", "3", "--dist", "loadfile"], argv
+    marks = [i for i, t in enumerate(argv) if t == "-m"]
+    assert len(marks) == 2 and argv[marks[1] + 1] == GATE.TESTS_MARK_EXPR, argv
+    assert argv[-1] == "tests/test_guard.py", f"the file set moved: {argv}"
+    assert argv.index("-n") < argv.index("tests/test_guard.py")
+    assert r["ran"] == 1 and r["workers"] == 3, r
+    assert flags[0].get("start_new_session") is True, (
+        "the child has no process group of its own to kill")
+    # The child inherits the process that launched the probe, which the suite runs
+    # inside of, on 8 xdist workers. Its own identity has to go, or the serial
+    # re-ask runs inside a leaked `gw3` and a node can be red for the outer run's
+    # parallelism instead of its own — which is the bug that made this node fail
+    # its first gate. EVERY name the drop list claims to strip is put into this
+    # process's environment first and proven present right after the call: a name
+    # the outer run never held comes back absent from the child's env whatever the
+    # code does, so injecting two of four and asserting the absence of four pins two
+    # of four and leaves the other two assertions vacuous.
+    injected = {"PYTEST_XDIST_WORKER": "gw7",
+                "PYTEST_XDIST_WORKER_COUNT": "8",
+                "PYTEST_XDIST_TESTRUNUID": "c0ffee00cafe1234",
+                "PYTEST_CURRENT_TEST": "outer::test"}
+    for _name, _value in injected.items():
+        monkeypatch.setenv(_name, _value)
+    cmds.clear()
+    envs.clear()
+    flags.clear()
+    VG._run_selection(Path(sys.executable), tmp_path, ["tests/test_guard.py"],
+                      tmp_path / "vault", tmp_path / "data", None, 30.0, 3)
+    assert set(injected) == set(VG.PYTEST_CHILD_ENV_DROP), (
+        f"the injected set {sorted(injected)} no longer covers the drop list "
+        f"{sorted(VG.PYTEST_CHILD_ENV_DROP)}, so the loop below is asserting the "
+        f"absence of a name nothing ever put there")
+    for _name, _value in injected.items():
+        assert os.environ.get(_name) == _value, (
+            f"{_name} was never in the environment the child inherits, so its "
+            f"absence below would pass on an absent input")
+    assert len(envs) == 1, f"the probe launched {len(envs)} children: {cmds}"
+    child_env = envs[0]
+    for name in VG.PYTEST_CHILD_ENV_DROP:
+        assert name not in child_env, f"the outer run's {name} reached the child"
+    for name, want in (("LLOYD_VAULT_ROOT", str(tmp_path / "vault")),
+                       ("LLOYD_DATA", str(tmp_path / "data")),
+                       (VG.NESTING_ENV, "1")):
+        assert child_env[name] == want, child_env
+    # The other half of clause 3 at the same boundary: `workers=1` is a serial
+    # run, and a serial run never grew these two tokens. `-n 1` is not how you
+    # ask for one, because passing `-n` at all hands the run to xdist.
+    cmds.clear()
+    envs.clear()
+    flags.clear()
+    VG._run_selection(Path(sys.executable), tmp_path, ["tests/test_guard.py"],
+                      tmp_path / "vault", tmp_path / "data", None, 30.0)
+    assert "-n" not in cmds[0] and "--dist" not in cmds[0], cmds[0]
+
+
+def test_the_two_runs_choose_their_parallelism_independently_over_real_children(
+        vault, guard_tree, probed, tmp_path, monkeypatch):
+    """Clauses 1 and 3, with real children: the big run parallel, the re-ask serial.
+
+    Not a recorded argv — an actual `python -m pytest` that either accepts
+    `-n 2 --dist loadfile` and reports a denominator or the node fails. What each
+    run's `workers` field is is the count `_run_selection` ECHOES back from its own
+    parameter, so it witnesses the count the caller asked for and the fact that a
+    real child ran (`ran`) beside it — it is not by itself proof that the `-n`
+    tokens reached the command line. Those two things live in the nodes beside this
+    one, which is where a reviewer of this diff looked for them and was right to:
+    `test_the_proposed_vault_run_gets_the_gates_worker_count_on_its_argv` pins the
+    tokens on the argv (and goes red when they are removed), and
+    `test_a_flaker_cannot_refuse_and_a_real_failure_still_does` is the behavioural
+    witness that the proposed run really ran in parallel — its guard loses ONLY
+    under an xdist scheduler, and it is red in `candidate` here and green in a
+    serial run. What this node adds over both is that the SELECTION, the mark object
+    and the real children all still work together end to end at `-n 2`, and that the
+    pre-land run stays serial where a parallel base would corrupt the delta.
+
+    The tree is red at both ends (prose says six stores, the script prints four,
+    before and after the reword), which is the case that reaches the pre-land run:
+    that run must be serial, because a parallel base could cancel a parallel
+    proposed run's flake and take a real refusal down with it.
+    """
+    asks = _two_workers(monkeypatch)
+    _prose(vault, "---\nname: foo\n---\nstores: 6\n", commit=True)   # red at vault HEAD
+    probed(guard_tree, vault)
+    _prose(vault, "---\nname: foo\n---\nstores: 6\n\n#2044 reworded on a red tree.\n")
+    rep = _probe(guard_tree, vault, tmp_path)
+
+    # The spelling, named rather than inferred from a number that happened to match:
+    # `_two_workers` answers ONLY this key-and-default pair, so a probe reading any
+    # other one would have got the box's real 8 and failed below.
+    assert ("test_workers", 1) in asks, (
+        f"the probe never asked automod.gate._gate_cfg('test_workers', 1); it asked "
+        f"{sorted(set(asks))}")
+    assert rep["workers"] == 2, rep
+    assert rep["candidate"]["workers"] == 2 and rep["candidate"]["ran"] == 1, rep["candidate"]
+    assert rep["candidate"]["failed"] == [COUNT_NODE], rep["candidate"]
+    # The serial re-ask ran, serially, over the proposed vault.
+    assert rep["parallel_retry"]["workers"] == 1, rep["parallel_retry"]
+    assert rep["parallel_retry"]["ran"] == 1, rep["parallel_retry"]
+    assert rep["parallel_retry"]["files"] == 1, rep["parallel_retry"]
+    # And the pre-land run over the failing files, also serially.
+    assert rep["baseline"]["workers"] == 1, rep["baseline"]
+    assert rep["baseline"]["failed"] == [COUNT_NODE], rep["baseline"]
+    assert "parallel_only_failures" not in rep, rep
+    assert rep["state"] == "checked" and rep["refuse"] is False, rep
+    assert "pre-existing" in rep["reason"], rep["reason"]
+    # #2042's arithmetic is untouched: the whole probe still costs at least the
+    # runs it launched, and the queue for the gate's slot is still reported.
+    assert rep["seconds"] >= (rep["candidate"]["seconds"]
+                              + rep["parallel_retry"]["seconds"]
+                              + rep["baseline"]["seconds"]), rep
+
+
+def test_a_flaker_cannot_refuse_and_a_real_failure_still_does(
+        vault, guard_tree, probed, tmp_path, monkeypatch):
+    """Clauses 4 and 5 in one selection, with both kinds of failure in it.
+
+    Two guards, one tree. The count guard is red against the vault as proposed and
+    green against the vault before the land — prose said five, the tree prints four
+    — which is the real case this check exists for. The flaker is red only under
+    xdist, which is the load case, and the parallel run cannot tell them apart: its
+    failure set names both. The serial re-ask can. So the refusal must name exactly
+    the count guard, the flaker must be named as a parallel-only failure the way
+    `gate.py:1861` names them, and the land must still be refused — clause 5 is
+    that none of this softened the answer for a failure that is real.
+    """
+    _two_workers(monkeypatch)
+    _add_flaker(guard_tree)
+    assert len(VG.guard_selection(guard_tree)) == 2, "the flaker is not in the selection"
+    _prose(vault, SKILL_AT_FOUR, commit=True)     # vault HEAD agrees with the tree
+    probed(guard_tree, vault)
+    _prose(vault, "---\nname: foo\n---\nstores: 5\n")
+    rep = _probe(guard_tree, vault, tmp_path)
+
+    cand = rep["candidate"]
+    assert cand["workers"] == 2 and cand["ran"] == 2, cand
+    assert sorted(cand["failed"]) == sorted([COUNT_NODE, FLAKER_NODE]), cand
+    assert rep["parallel_retry"]["workers"] == 1, rep["parallel_retry"]
+    assert rep["parallel_retry"]["failed"] == [COUNT_NODE], rep["parallel_retry"]
+    assert rep["parallel_only_failures"] == [FLAKER_NODE], rep
+    assert rep["state"] == "checked" and rep["refuse"] is True, rep
+    assert rep["nodes"] == [COUNT_NODE], rep["nodes"]
+    # Read the other way, the same report says the re-ask is what separated them:
+    # the flaker is nowhere in `nodes`, so it bought no refusal, and `excerpt` —
+    # what `refusal_text` prints as the guard output — is the serial run's tail.
+    assert FLAKER_NODE not in str(rep["excerpt"]), rep["excerpt"][-400:]
+    assert rep["baseline"] == {"ran": 1, "failed": [], "note": rep["baseline"]["note"],
+                              "seconds": rep["baseline"]["seconds"], "files": 1,
+                              "workers": 1}, rep["baseline"]
+    # The seam to the route itself: a real failure still blocks the commit, with
+    # the flaker nowhere in the refusal a human reads.
+    head = _head(vault)
+    with pytest.raises(V.VaultRoundError) as ei:
+        V.land(["skills/foo/SKILL.md"], "#2044 a flaker and a real one", item_id=None)
+    msg = str(ei.value)
+    assert COUNT_NODE in msg and "prose 5, script 4" in msg, msg
+    assert FLAKER_NODE not in msg, f"a load flaker reached the refusal: {msg}"
+    assert _head(vault) == head, "refused before any vault commit"
+
+
+@pytest.mark.parametrize("mode", ["too-many-files", "names-no-file"], ids=["41-files", "no-file"])
+def test_an_unattributable_parallel_failure_set_never_buys_a_serial_whole_selection_run(
+        vault, guard_tree, probed, tmp_path, monkeypatch, mode):
+    """Clause 4's second half: past the ceiling, the answer is the non-answer.
+
+    `gate.py:1851` answers "more than `PARALLEL_RETRY_MAX_FILES` files failed" by
+    re-running its whole suite serially, and for this probe that IS the ~735 s run
+    the budget cannot hold — so copying the fallback would trade an honest
+    `skipped` for a timeout that reports nothing, which is the exact state of all
+    five real ledger rows. The child runner is stood in for with a return dict
+    shaped exactly like `_run_selection`'s own, because the condition needs a
+    failure set naming 41 files (or none), and the thing under test is what
+    `agreement` does with it: the assertion that carries the clause is that the
+    child runner was called ONCE, with the parallel count, and never again with
+    the whole selection at 1 worker.
+    """
+    calls: list[dict] = []
+    failed = ([f"tests/test_synth{i}.py::test_x" for i in range(41)]
+              if mode == "too-many-files" else ["::a_failure_that_names_no_file"])
+
+    def fake_run(python, tree, files, vroot, data, mark, budget, workers=1):
+        calls.append({"files": list(files), "workers": workers, "budget": budget})
+        return {"ran": 41, "failed": list(failed), "seconds": 1.0,
+                "files": len(files), "workers": workers, "note": "canned run",
+                "excerpt": ""}
+
+    _two_workers(monkeypatch)
+    monkeypatch.setattr(VG, "_run_selection", fake_run)
+    probed(guard_tree, vault)
+    _prose(vault, "---\nname: foo\n---\nstores: 4\n\n#2044 an unattributable set.\n")
+    rep = _probe(guard_tree, vault, tmp_path)
+
+    assert rep["state"] == "skipped" and rep["refuse"] is False, rep
+    assert rep["nodes"] == [], rep
+    assert rep["parallel_failures"] == failed[:50], rep
+    # Literals, not the same expressions that build the string: an assertion that
+    # re-evaluates `_parallel_retry_max_files()` or `SERIAL_SELECTION_COST_S` cannot
+    # fail however the reason is worded, so it would pin nothing about clause 4's
+    # ceiling or about the cost the non-answer has to name.
+    assert "40-file ceiling" in rep["reason"], rep["reason"]
+    assert "~735s" in rep["reason"], rep["reason"]
+    assert len(calls) == 1, f"a serial re-run happened after the ceiling: {calls}"
+    assert calls[0]["workers"] == 2, calls[0]
+    assert calls[0]["files"] == VG.guard_selection(guard_tree), calls[0]
+    # And the same shape out through the route: an unattributable probe is a
+    # landed land with a `skipped` row, not a refused one.
+    out = V.land(["skills/foo/SKILL.md"], "#2044 an unattributable set", item_id=None)
+    assert out["commit"], out
+    row = out["guards"]
+    assert row["state"] == "skipped" and row["refuse"] is False, row
+
+
+def test_a_serial_re_ask_that_answers_buys_neither_a_refusal_nor_a_second_run(
+        vault, guard_tree, probed, tmp_path, monkeypatch):
+    """Clause 4's other unanswered branch: the re-ask itself says nothing.
+
+    The node above covers a failure set that cannot BE re-asked (41 files, or no
+    file at all). This is the branch where the re-ask launches and answers nothing:
+    the parallel run reports a failing node, the serial re-ask of its file times
+    out. Both easy ways out are wrong. Refusing would blame the land for a node
+    nothing has confirmed red at the proposed vault; falling through to the pre-land
+    run would report a `checked` whose delta was computed against a failure that may
+    have been load. So the answer is `skipped`, and the witness that this branch is
+    not the one above is the number and shape of the child runs: two — the parallel
+    proposed run and the serial re-ask — and no third over the pre-land mirror.
+    """
+    calls: list[dict] = []
+
+    def fake_run(python, tree, files, vroot, data, mark, budget, workers=1):
+        calls.append({"files": list(files), "workers": workers})
+        if workers > 1:
+            return {"ran": 3, "failed": [COUNT_NODE], "seconds": 1.0,
+                    "files": len(files), "workers": workers,
+                    "note": "canned parallel run", "excerpt": ""}
+        return {"ran": 0, "failed": [], "seconds": 1.0, "files": len(files),
+                "workers": 1, "note": "canned: timed out after 1.0s", "excerpt": ""}
+
+    _two_workers(monkeypatch)
+    monkeypatch.setattr(VG, "_run_selection", fake_run)
+    probed(guard_tree, vault)
+    _prose(vault, "---\nname: foo\n---\nstores: 4\n\n#2044 the re-ask answers nothing.\n")
+    rep = _probe(guard_tree, vault, tmp_path)
+
+    assert rep["state"] == "skipped" and rep["refuse"] is False, rep
+    assert rep["nodes"] == [], rep
+    assert "parallel_only_failures" not in rep, rep
+    assert rep["parallel_retry"] == {"ran": 0, "failed": [], "seconds": 1.0,
+                                     "files": 1, "workers": 1,
+                                     "note": "canned: timed out after 1.0s"}, \
+        rep["parallel_retry"]
+    assert "re-ask" in rep["reason"] and "answered nothing" in rep["reason"], rep["reason"]
+    assert rep["candidate"]["failed"] == [COUNT_NODE], rep["candidate"]
+    assert [c["workers"] for c in calls] == [2, 1], (
+        f"expected the parallel proposed run and the serial re-ask and nothing else: "
+        f"{calls}")
+    assert "baseline" not in rep, (
+        "a pre-land run was launched off a failure nothing confirmed")
+
+
+#: Every live process whose working directory is `tree`, however it was started.
+#: Read out of `/proc` and not out of anything Python is tracking, because the whole
+#: question is which processes the probe LOST track of. A zombie has no `cmdline`,
+#: so a reaped corpse is not counted as a survivor.
+def _procs_of(tree: Path) -> list[int]:
+    root, procs = str(tree), []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            if os.readlink(f"/proc/{entry.name}/cwd") != root:
+                continue
+            cmd = Path(f"/proc/{entry.name}/cmdline").read_bytes() \
+                .replace(b"\0", b" ").decode("utf-8", "replace")
+        except OSError:
+            continue
+        if "pytest" in cmd or "exec(" in cmd:
+            procs.append(int(entry.name))
+    return procs
+
+
+def test_a_killed_parallel_run_leaves_no_worker_of_its_scratch_tree_alive(
+        tmp_path):
+    """The boundary #2044's own `-n` opens, tested across it with real processes.
+
+    A serial run is one process and a timeout kills it. Adding the worker count
+    turns a killed run into a controller plus `workers` workers, and killing only
+    the process the probe started abandons the rest — which is not hypothetical for
+    this probe: measured on this box before the fix, a `pytest -n 4` against a guard
+    that sleeps, killed by the timeout at 10 s, left a worker alive THIRTY seconds
+    later with its cwd still inside the tree, while the same command launched in its
+    own session and killed by process group left nothing alive one second later.
+    That survivor is a guard still reading a vault mirror `agreement` deletes one
+    `finally` later, on cores the next gate `tests` rung needs.
+
+    Nothing here is faked: a real hanging guard, a real `-n 2`, a real timeout, and
+    the assertion is the absence of processes afterwards. The positive control is
+    the same scan taken DURING the run — without it an empty result would only show
+    that nothing ever started.
+    """
+    import threading
+
+    tree = make_guard_tree(tmp_path / "killed-parallel", src=GUARD_SRC_HANGS)
+    files = VG.guard_selection(tree)
+    assert files, "the hanging guard is not in the selection this probe would run"
+
+    seen: list[int] = []
+    stop = threading.Event()
+
+    def watch() -> None:
+        while not stop.is_set():
+            seen.append(len(_procs_of(tree)))
+            time.sleep(0.25)
+
+    watcher = threading.Thread(target=watch, daemon=True)
+    watcher.start()
+    try:
+        r = VG._run_selection(Path(sys.executable), tree, files, tmp_path / "mirror",
+                              tmp_path / "data", None, 12.0, 2)
+    finally:
+        stop.set()
+        watcher.join(timeout=5)
+
+    assert r["ran"] == 0 and r["workers"] == 2, r
+    assert "timed out" in r["note"], r["note"]
+    assert max(seen) >= 2, (
+        f"the run was never parallel, so an empty survivor list would prove "
+        f"nothing; the scan saw {seen}")
+    survivors = _procs_of(tree)
+    for pid in survivors:          # a red node must not leave the box dirty either
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    assert survivors == [], (
+        f"{len(survivors)} process(es) outlived the run the probe gave up on: "
+        f"{survivors}, still rooted at {tree}")
+
+
+@pytest.mark.parametrize("mode", ["workers-1", "no-xdist"], ids=["workers-1", "no-xdist"])
+def test_a_probe_that_cannot_get_pytest_xdist_says_so_rather_than_running_serially(
+        vault, guard_tree, probed, tmp_path, monkeypatch, mode):
+    """Clause 2: no xdist is a named non-answer, never a 735 s serial timeout.
+
+    Both ways the gate's `_test_workers` reaches serial: the config says one
+    worker, or `import xdist` fails in the interpreter that would launch the child
+    (`gate.py:1781`'s probe, and the reason the gate's candidate venv still
+    gates). Here the degraded answer is worse than the gate's, because a serial
+    probe of a 196-file selection does not degrade, it times out — so the clause
+    is that nothing is run at all, and `calls` being empty is the witness of
+    "nothing", while the `skipped` state is what keeps the outage from reading as
+    agreement. The land still goes through: #2036's rule is that a probe outage
+    never blocks, and it never passes either.
+    """
+    import subprocess as SP
+
+    calls: list[list] = []
+    monkeypatch.setattr(VG, "_run_selection",
+                        lambda *a, **kw: (calls.append(list(map(str, a))), {})[1])
+    _two_workers(monkeypatch, 1 if mode == "workers-1" else 8)
+    if mode == "no-xdist":
+        real = subprocess.run
+
+        def no_xdist(cmd, **kw):
+            if str(cmd[-1]) == "import xdist":
+                return SP.CompletedProcess(cmd, 1, "",
+                                           "ModuleNotFoundError: No module named 'xdist'")
+            return real(cmd, **kw)
+
+        monkeypatch.setattr(VG.subprocess, "run", no_xdist)
+
+    _prose(vault, SKILL_AT_FOUR, commit=True)
+    probed(guard_tree, vault)
+    _prose(vault, "---\nname: foo\n---\nstores: 4\n\n#2044 xdist is not available.\n")
+    rep = _probe(guard_tree, vault, tmp_path)
+    assert rep["state"] == "skipped" and rep["refuse"] is False, rep
+    assert "pytest-xdist" in rep["reason"], rep["reason"]
+    assert "~735s" in rep["reason"], rep["reason"]
+    assert rep["workers"] == 1, rep
+    assert calls == [], f"a child run was launched without xdist: {calls}"
+    # Absence, not falsiness: a pre-seeded `{"ran": 0, "failed": []}` would satisfy
+    # `not rep["candidate"]` while telling the reader a run reported zero, which is
+    # the placeholder-as-denominator shape #1691 is about. `_guards_row` already
+    # writes the key only `if cand:`; the report now agrees with the ledger.
+    assert "candidate" not in rep, rep
+    assert "baseline" not in rep, rep
+    assert "parallel_retry" not in rep, rep
+
+    out = V.land(["skills/foo/SKILL.md"], "#2044 the probe cannot get xdist", item_id=None)
+    assert out["commit"], "a probe outage must not stop the land"
+    row = _events("vault_land")[0]["guards"]
+    assert row["state"] == "skipped" and row["refuse"] is False, row
+    assert "pytest-xdist" in row["reason"] and "735" in row["reason"], row
+    assert "candidate" not in row, row

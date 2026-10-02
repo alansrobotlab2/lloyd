@@ -36,6 +36,15 @@ tree red, which is the land this item is about. The cost of the narrower rule is
 that a prose land onto an already-red count is waved through; the cost of the
 wider one is that the vault route stops working.
 
+The proposed run goes out on pytest-xdist, on the gate's own worker count
+(#2044), because the selection it runs is 196 files that cost several times this
+budget serially. Parallelism is a second thing to get right, not a free speedup:
+eight workers make load, so a node that fails there is re-asked serially against
+the SAME vault — the proposed one — before it is allowed to refuse anything, and
+only a node that survives that re-ask goes to the pre-land baseline. Where xdist
+cannot be had the answer is a `skipped` that says so, never the serial run that
+would spend the budget to report nothing.
+
 Failure to judge is never reported as agreement, and never as a refusal either:
 an unbuildable probe, a timed-out run, or a selection that collected nothing
 returns `state="skipped"` with the reason in `reason`, and `land()` writes that
@@ -44,12 +53,15 @@ must not be worse than the grader outage two lines above it in `land()`, which
 also proceeds — but unlike the reviewer's abstention this one carries its
 denominator (`candidate.ran`), so "the check ran nothing" is distinguishable from
 "the check found nothing" in the ledger, which is the failure #1691 and the
-zero-denominator rule are both about.
+zero-denominator rule are both about. And a probe that never launched a run does
+not carry a zeroed-out `candidate` pretending to be a result: the block is absent,
+which is its own statement that nothing ran.
 """
 from __future__ import annotations
 
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -86,6 +98,21 @@ VAULT_ROOT_TOKENS: tuple[str, ...] = (
 #: production backend never sets it, so every real landing is probed.
 NESTING_ENV = "LLOYD_VAULT_GUARD_PROBE"
 
+#: What `_run_selection` strips from the environment it hands its child, on top of
+#: the identity it sets. The three `PYTEST_XDIST_*` names are the whole set pytest-xdist
+#: writes into a worker (`xdist/remote.py:416-418` at 3.8.0), plus pytest core's
+#: `PYTEST_CURRENT_TEST`, which names the test the OUTER run is executing.
+#:
+#: #2044 found this by being unable to test itself: the probe is armed and re-asked
+#: from inside a pytest run, and the suite runs on 8 xdist workers, so the worker that
+#: happened to be running the probe leaked `PYTEST_XDIST_WORKER=gw3` into a child the
+#: probe had asked to run SERIALLY — which made the serial re-ask of a parallel failure
+#: inherit the parallel flake it exists to clear. Strip the outer run's identity, and
+#: the only parallelism a probe child can see is the `-n` this module put on its own
+#: command line.
+PYTEST_CHILD_ENV_DROP = ("PYTEST_XDIST_WORKER", "PYTEST_XDIST_WORKER_COUNT",
+                         "PYTEST_XDIST_TESTRUNUID", "PYTEST_CURRENT_TEST")
+
 #: Whole probe: the queue for the gate's tests lock plus both pytest runs
 #: together, not either run on its own (`_deadline` below). Restated on
 #: 2026-10-02 because the figure it was calibrated on was wrong: the comment
@@ -97,7 +124,32 @@ NESTING_ENV = "LLOYD_VAULT_GUARD_PROBE"
 #: `pytest-xdist` the way `gate.py` runs its own rung — is the ruling #2042's
 #: owed-check job owns, not this constant; what this constant owns is that a
 #: probe which exceeds it is a non-answer, never a verdict.
+#:
+#: The xdist half of that ruling is what #2044 landed below: the proposed-vault
+#: run now goes out on `pytest-xdist` with the gate's own worker count, so this
+#: budget is no longer charged against a serial run it cannot hold. The number
+#: is untouched, and so is the other half of the ruling — whether ~300 s is the
+#: right ceiling once the run is parallel is still the owed-check job's, read off
+#: `candidate.seconds` beside `lock_wait_s` on the next real `vault_land` row.
 PROBE_TIMEOUT_SECONDS = 300.0
+
+#: What the selection costs when nothing runs it in parallel: ~735 s for the 196
+#: files / ~7,000 nodes it is in production. The figure is #2044's, read off a
+#: serial run's own progress line (`[34%]` of the selection at 250 s), and the
+#: triage that re-confirmed this item on 2026-10-02 did NOT re-run that 735 s
+#: probe, so treat it as a claim and not a fresh measurement. What was measured
+#: on this box is the corroborating one: `gate.py:1792-1796` records the gate's
+#: own ~5,900-node suite at ~600 s serially (and ~76 s on 8 xdist workers) on
+#: this 32-core machine, and this selection is larger than that suite, so the
+#: two agree on the order of magnitude without one being the other's number.
+#: A named constant rather than a figure inside a sentence, because it is the
+#: whole reason for the skip rule in `_parallel_workers`: a serial probe of this
+#: selection is not a slow answer, it is a guaranteed non-answer at more than
+#: twice this budget — which is exactly what the five `state="skipped" ran=0
+#: "timed out after 300s"` rows in the promotion ledger were (all five re-read
+#: out of `~/.local/state/lloyd-automod/promotions.jsonl` on 2026-10-02), and
+#: why running it serially anyway is worse than saying so up front.
+SERIAL_SELECTION_COST_S = 735.0
 
 #: A run started with less than this much of the budget left cannot report
 #: anything, and a subprocess killed while importing pytest is a worse
@@ -154,6 +206,86 @@ def _tests_lock():
     """
     from scripts.automod.gate import Gate
     return S.GATE_TESTS_LOCK_PATH, Gate.SERIAL_MAX_WAIT
+
+
+def _parallel_retry_max_files() -> int:
+    """How many failing files a parallel failure may name and still be re-asked.
+
+    `Gate.PARALLEL_RETRY_MAX_FILES` read from the class that owns it, for the
+    reason `_tests_lock` gives for `SERIAL_MAX_WAIT`. What to do once the set is
+    bigger than that is NOT shared: `gate.py:1851` answers it by re-running the
+    whole suite serially, and for this probe the whole selection run serially is
+    the ~`SERIAL_SELECTION_COST_S` s run that cannot fit this budget — so the
+    bigger-than-that answer here is the non-answer it already is (`agreement`'s
+    "could not attribute"), never the serial re-run.
+    """
+    from scripts.automod.gate import Gate
+    return Gate.PARALLEL_RETRY_MAX_FILES
+
+
+def _parallel_workers(python: Path) -> tuple[int, str]:
+    """`(workers, why_serial)` for the probe's proposed-vault run.
+
+    #2044: the selection is 196 files / ~7,074 nodes and costs
+    ~`SERIAL_SELECTION_COST_S` s run serially against a `PROBE_TIMEOUT_SECONDS`
+    budget that is also charged for the lock queue, so a serial probe of it has
+    never once reached a verdict — all five real `vault_land` rows with a
+    `candidate` block are `ran=0` and `"timed out after 300s"`. The gate stopped
+    paying that cost on its own rung by running the suite on xdist (~600 s
+    serial → ~76 s on 8 workers, `gate.py:1792-1796`); this reads the same two
+    facts the gate reads, through the gate's own accessors, so the probe and the
+    rung that holds the same lock agree on the worker count rather than each
+    keeping a copy of a config key.
+
+    `why_serial` is non-empty exactly when the answer is serial: `test_workers`
+    ≤ 1, or the interpreter that will launch the child failing `import xdist` the
+    way `gate.py:1781` probes it for its own venv — a candidate venv, a fresh
+    clone and a box that never installed pytest-xdist all differ, and here a
+    serial run is not a degraded answer but a guaranteed timeout, which is why
+    the caller reports instead of running.
+    """
+    from scripts.automod.gate import _gate_cfg
+    try:
+        n = int(_gate_cfg("test_workers", 1) or 1)
+    except (TypeError, ValueError):
+        n = 1
+    if n <= 1:
+        return 1, (f"automod.gate.test_workers is {n}, so even the gate runs its "
+                   f"own suite on one worker")
+    try:
+        probe = subprocess.run([str(python), "-c", "import xdist"],
+                               capture_output=True, text=True, timeout=60,
+                               check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return 1, f"pytest-xdist could not be probed in the probe's interpreter: {exc}"
+    if probe.returncode != 0:
+        err = str(probe.stderr or "").strip().splitlines()
+        return 1, ("pytest-xdist is not importable in the interpreter the probe "
+                   f"would launch its child with (rc={probe.returncode}"
+                   f"{': ' + err[-1][:120] if err else ''})")
+    return n, ""
+
+
+def _failing_files(node_ids: list[str]) -> list[str]:
+    """The distinct files the failing node ids live in, in first-seen order.
+
+    One helper for both re-asks below (the serial re-ask over the proposed vault
+    and the pre-land run) because both hand pytest back a command line, and a
+    second way to split a node id is a second way to name a file that is not the
+    one that failed.
+
+    An id whose file part is empty contributes nothing: a re-ask cannot name such
+    a file on a command line, and `agreement` has to be able to tell "this failure
+    set names no file" from one that does — the gate's `gate.py:1851` reads that
+    same emptiness as "not load, something broke", and here it is the
+    could-not-attribute non-answer.
+    """
+    out: list[str] = []
+    for nid in node_ids:
+        f = nid.split("::", 1)[0]
+        if f and f not in out:
+            out.append(f)
+    return out
 
 
 def _wait_for_tests_slot(remaining: float) -> tuple:
@@ -238,11 +370,26 @@ def baseline_vault(dest: Path, live_vault: Path, paths: list[str]) -> dict:
 def _tail(output) -> str:
     """The last three lines of a child's output, as text, whatever it died with.
 
-    `TimeoutExpired.output`/`.stderr` are what `communicate()` managed to drain
-    before the kill and may be `None`, `bytes` or `str` depending on how the child
-    died and whether it was opened in text mode. A timeout note that says
-    "captured nothing" when the pipe held three lines is the difference between a
-    hang and a slow selection, which is the question #2042 was filed to answer.
+    Accepts `None`, `bytes` or `str` because a killed run really does arrive with
+    any of the three and nothing here may depend on which. What `TimeoutExpired`
+    holds is a function of the CPython build, of whether the pipes were opened in
+    text mode, and of whether the child was still alive at the deadline or had
+    died just before it — and the two measurements of it taken on this box
+    disagreed: a run at `Python 3.12.14` against a guard still sleeping at its
+    deadline came back `None` for both channels, while the gate's reviewer of this
+    same diff reports a killed text-mode child returning bytes. So this helper
+    normalises whatever it is handed instead of predicting, and `_run_selection`
+    returns `seconds`, `files` and `workers` whatever the tail turned out to be —
+    those three, not the tail, are what distinguish a hang from a selection that
+    simply does not fit the budget.
+
+    A child that dies by ITSELF — a crash, a collection error — has its output and
+    it is not empty, so this is not dead code: a note that said "captured nothing"
+    when the pipe held three lines would lose the difference #2042 was filed to
+    answer. Which of the channels `_run_selection` consults first is pinned by
+    `test_a_killed_run_ledges_the_seconds_the_selection_and_its_own_tail`, which
+    exercises both an exception carrying nothing (the tail then comes from the
+    post-reap drain) and one carrying all four sources at once.
     """
     if not output:
         return ""
@@ -251,9 +398,86 @@ def _tail(output) -> str:
     return " | ".join(str(output).strip().splitlines()[-3:])[:200]
 
 
+#: How long a run the probe has given up on gets to come down on `SIGTERM` before
+#: the whole group is `SIGKILL`ed, and how long the drain of its pipes may then
+#: take. Both are seconds spent AFTER the run's own budget was already spent, so
+#: both are small, and both are bounded so a probe cannot exceed the budget the
+#: land was granted by more than a couple of seconds.
+GROUP_TERM_GRACE_S = 1.0
+REAP_DRAIN_S = 3.0
+
+
+def _reap_group(proc: subprocess.Popen) -> str:
+    """Kill everything a run the probe gave up on actually started; say what happened.
+
+    A timeout is charged to one process while a parallel pytest is several: an
+    xdist controller plus `workers` workers. Killing only the controller leaves the
+    workers running, and that is measured, not assumed —
+    `test_a_killed_parallel_run_leaves_no_worker_of_its_scratch_tree_alive` runs a
+    real `-n 2` selection against a guard that hangs, lets the budget give up on it,
+    and scans `/proc` for anything left with its cwd inside the tree: with
+    `proc.kill()` alone the scan finds a survivor, with this function it finds none.
+    That survivor is not merely untidy — it is a pytest worker still executing
+    guards against a vault mirror `agreement`'s `finally` is about to delete and a
+    tree it has already deleted underneath it, spending cores the next gate `tests`
+    rung needs, which is the contention #2042 exists to stop.
+
+    The house pattern (`agent_mcp/builtin_bash.py:62-88`, `scripts/automod/canary.py:134`):
+    `start_new_session=True` at spawn so the child leads its own group, `SIGTERM`
+    for the grace, `SIGKILL` for the certainty. Never `getpgid` on a pid we may
+    have already reaped — the group id IS the child's pid once it leads its own
+    session, and taking it from `proc.pid` is what keeps this from ever signalling
+    the OUTER pytest run that happens to be executing the probe.
+
+    Returns the words that go into the ledger's timeout note, so the row says
+    what became of the child and not only that it was too slow. An empty string
+    means the group went down as asked and there is nothing to report.
+    """
+    pgid = proc.pid          # own session ⇒ pgid == pid; never read it back
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return ""            # the whole group was already gone: nothing orphaned
+    except OSError as exc:
+        proc.kill()
+        return (f"its process group {pgid} could not be signalled ({exc}); "
+                f"only the run itself was killed, so a worker may still be alive")
+    try:
+        proc.wait(timeout=GROUP_TERM_GRACE_S)
+    except subprocess.TimeoutExpired:
+        pass                 # the grace bought nothing; the kill below is the answer
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+        return ""
+    except ProcessLookupError:
+        return ""
+    except OSError as exc:
+        proc.kill()
+        return (f"its process group {pgid} survived `SIGKILL` ({exc}); a worker may "
+                f"still be alive")
+
+
 def _run_selection(python: Path, tree: Path, files: list[str], vault: Path,
-                   data_root: Path, mark_expr: str, budget: float) -> dict:
+                   data_root: Path, mark_expr: str, budget: float,
+                   workers: int = 1) -> dict:
     """One pytest run of `files` against `vault`, with the gate's mark expression.
+
+    `workers` is per call, not a property of the function, and that is the whole
+    of #2044 clause 3: `agreement` asks the two runs it makes for different
+    things. The proposed-vault run is the whole 196-file selection and has to fit
+    the budget, so it gets the worker count `_parallel_workers` read from the
+    gate's config. The runs that follow it — the serial re-ask of a parallel
+    failure and the pre-land run over the failing files — are both the answer to
+    "is this failure real?", and a run that is itself parallel cannot answer
+    that: a load flake at base would cancel a load flake at proposed and a real
+    refusal would vanish with it. They stay at 1, and they are small enough to
+    afford it.
+
+    `--dist loadfile`, the scheduler `gate.py:1842` picks for the same reason:
+    one file's tests stay on one worker in order, so a guard's module-scoped
+    fixture (a temp repo, a booted server) is built once per file exactly as it
+    was serially. `--dist load` would spread one file's nodes across workers and
+    make the probe's own denominator depend on the scheduler.
 
     A fresh data root, for the reason `_failures_at_base` records at #1436: the
     probe must not see a store the candidate's own run created, or a defect the
@@ -266,6 +490,15 @@ def _run_selection(python: Path, tree: Path, files: list[str], vault: Path,
     the same cores and never reported how long it had actually been alive; every
     return below therefore carries `seconds` and `files` beside `ran`, so a
     non-answer names its own cost and its own denominator.
+
+    **What happens to the run when the budget runs out is part of the contract.**
+    The child is spawned in its own session and, on a timeout, killed by process
+    group — see `_reap_group`, which is the measurement behind that. Not doing
+    this is what `subprocess.run(timeout=…)` does: it kills the one process it
+    started, and a run launched with the `-n` this function now adds for #2044 is
+    a controller plus `workers` workers, so the cheap version abandons live
+    guards running against a vault mirror this probe deletes one `finally` later.
+    The fate goes into the returned note whenever it was not the clean one.
     """
     mark, failed_ids, summary = _gate_tools()
     started = time.time()
@@ -275,27 +508,73 @@ def _run_selection(python: Path, tree: Path, files: list[str], vault: Path,
            "LLOYD_VAULT_ROOT": str(vault),
            "LLOYD_DATA": str(data_root),
            NESTING_ENV: "1"}
+    # The child is a fresh pytest run, and this module is one of the few places
+    # where a pytest run legitimately launches another (`NESTING_ENV` exists to
+    # stop the recursion, which also means "launched from inside a test run" is a
+    # supported state, not an accident). So the outer run's own identity must not
+    # ride along: `PYTEST_XDIST_WORKER` names whichever worker happened to be
+    # executing the probe, and a guard that reads it — or any plugin that does —
+    # would then see the OUTER run's parallelism instead of this run's. That is
+    # not cosmetic at #2044: the whole serial re-ask exists to ask "is this
+    # failure real when nothing ran it in parallel", and an inherited `gw0` makes
+    # that question unanswerable, because the re-ask inherits the very flake it is
+    # meant to clear.
+    for _leaked in PYTEST_CHILD_ENV_DROP:
+        env.pop(_leaked, None)
     cmd = [str(python), "-m", "pytest", "-q", "--no-header", "-p", "no:cacheprovider",
-           "--continue-on-collection-errors", "-m", mark_expr or mark, *files]
+           "--continue-on-collection-errors", "-m", mark_expr or mark]
+    if workers > 1:
+        # #2044: the flag is here and not baked into the list above because the
+        # caller decides per run (`workers`), and the two runs that follow the
+        # proposed-vault one must not have it. `-n 1` is not how you ask for a
+        # serial run — passing `-n` at all makes xdist the scheduler — so a
+        # serial run is one that never grew these two tokens.
+        cmd += ["-n", str(workers), "--dist", "loadfile"]
+    cmd += list(files)
 
     def spent() -> float:
         return round(time.time() - started, 1)
 
     try:
-        r = subprocess.run(cmd, cwd=str(tree), capture_output=True, text=True,
-                           env=env, timeout=budget, check=False)
-        text = (r.stdout or "") + (r.stderr or "")
-        rc = r.returncode
-    except subprocess.TimeoutExpired as exc:
-        tail = _tail(exc.output) or _tail(exc.stderr)
-        return {"ran": 0, "failed": [], "seconds": spent(), "files": len(files),
-                "note": (f"timed out after {spent():.1f}s (the {budget:.0f}s it was "
-                         f"given) over {len(files)} vault-reading file(s)"
-                         + (f": {tail}" if tail else ", with no output captured")),
-                "excerpt": tail}
+        # `capture_output`-equivalent pipes in text mode, and `start_new_session`
+        # so the child leads a process group this function can kill wholesale.
+        # `subprocess.run(timeout=…)` cannot do that: by the time its
+        # `TimeoutExpired` is in hand the child's pid is reaped and every worker it
+        # left behind is unsignalable by group. Hence `Popen` and the reaping
+        # below.
+        proc = subprocess.Popen(cmd, cwd=str(tree), env=env, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                start_new_session=True)
     except OSError as exc:
         return {"ran": 0, "failed": [], "seconds": spent(), "files": len(files),
+                "workers": workers,
                 "note": f"pytest would not start: {exc}", "excerpt": ""}
+    try:
+        out, err = proc.communicate(timeout=budget)
+    except subprocess.TimeoutExpired as exc:
+        reaped = _reap_group(proc)
+        try:
+            # The group is dead, so the pipes have no writer left and this ends
+            # immediately — and it is also what reaps the controller. Bounded
+            # anyway: a guard that daemonised something OUTSIDE this group could
+            # hold a descriptor open forever, and a probe that hangs after it gave
+            # up on a hang is the worse non-answer.
+            late_out, late_err = proc.communicate(timeout=REAP_DRAIN_S)
+        except subprocess.TimeoutExpired as drained:
+            late_out, late_err = drained.output, drained.stderr
+            reaped = (reaped or f"process group {proc.pid} was killed") + \
+                     ", and something outside it still holds the run's pipes"
+        tail = _tail(exc.output) or _tail(exc.stderr) or _tail(late_out) or _tail(late_err)
+        return {"ran": 0, "failed": [], "seconds": spent(), "files": len(files),
+                "workers": workers,
+                "note": (f"timed out after {spent():.1f}s (the {budget:.0f}s it was "
+                         f"given) over {len(files)} vault-reading file(s)"
+                         + (f" on {workers} worker(s)" if workers > 1 else "")
+                         + (f"; {reaped}" if reaped else "")
+                         + (f": {tail}" if tail else ", with no output captured")),
+                "excerpt": tail}
+    text = (out or "") + (err or "")
+    rc = proc.returncode
     counts = summary(text)
     tail = _tail(text)
     # The denominator is the nodes that RAN, not the nodes that were collected. A
@@ -306,14 +585,14 @@ def _run_selection(python: Path, tree: Path, files: list[str], vault: Path,
     ran = int(counts["collected"]) - int(counts["tests_skipped"])
     if not int(counts["collected"]):
         return {"ran": 0, "failed": failed_ids(text), "seconds": spent(),
-                "files": len(files),
+                "files": len(files), "workers": workers,
                 "note": f"pytest produced no summary (rc={rc}): {tail}",
                 "excerpt": text[-1500:]}
     return {"ran": ran, "failed": failed_ids(text), "seconds": spent(),
-            "files": len(files),
+            "files": len(files), "workers": workers,
             "note": (f"collected {counts['collected']} ({counts['tests_skipped']} "
                      f"skipped), failed {counts['failed']}, errors {counts['errors']} "
-                     f"(rc={rc})"),
+                     f"(rc={rc}) on {workers} worker(s)"),
             "excerpt": text[-2500:]}
 
 
@@ -359,15 +638,25 @@ def agreement(*, paths: list[str], live_root: Path | None = None,
     question can be asked: after the commit the vault has no "before" to compare
     against, and before the edit there is nothing to judge.
 
-    `timeout` is the WHOLE probe: the queue for the gate's tests lock and both
-    pytest runs together, handed out to each run as it goes. It was per run until
-    #2042, which is the arithmetic that made every real probe a non-answer — a
-    probe could spend 300 s queueing behind a gate `tests` rung and still be
-    refused by its own next 300 s, and the row said only "timed out after 300s".
+    `timeout` is the WHOLE probe: the queue for the gate's tests lock and every
+    pytest run together — the proposed-vault run, the serial re-ask of its
+    failures when it ran parallel, and the pre-land run — handed out to each run
+    as it goes. It was per run until #2042, which is the arithmetic that made
+    every real probe a non-answer — a probe could spend 300 s queueing behind a
+    gate `tests` rung and still be refused by its own next 300 s, and the row
+    said only "timed out after 300s".
 
-    Both child runs happen inside the gate's tests lock (`_wait_for_tests_slot`),
+    Every child run happens inside the gate's tests lock (`_wait_for_tests_slot`),
     taken before the vault is mirrored so both mirrors are witnesses of one moment
     and released once, in the `finally`.
+
+    The proposed-vault run is the only one that runs parallel (`_parallel_workers`):
+    it is the whole selection, and serially the selection does not fit this budget
+    at all — so where xdist is unusable the answer is a `skipped` that names
+    pytest-xdist and the ~735 s serial cost, launched over no child run. Running
+    the selection serially "anyway" is how five real probes came back `ran=0`, and
+    a non-answer that arrives after five minutes is no better than one that
+    arrives at once.
 
     Returns `{"state": "checked" | "skipped", "refuse": bool, "reason": str, ...}`.
     `refuse` is true only for a node that passed with this land's paths put back
@@ -377,8 +666,14 @@ def agreement(*, paths: list[str], live_root: Path | None = None,
     """
     started = time.time()
     deadline = started + max(float(timeout), 0.0)
+    # `candidate` and `baseline` are deliberately ABSENT rather than empty: a
+    # run that was never launched has no numbers, and `_guards_row`
+    # (`vault_round.py:654-666`) already writes them only `if cand:`/`if base:`,
+    # so the ledger's rule is "no key means no run was started". A `{}` seeded
+    # here would make the report say a key exists when every one of its numbers
+    # is a placeholder — the same zero-denominator shape #1691 is about.
     report: dict = {"state": "skipped", "refuse": False, "reason": "", "nodes": [],
-                    "tree": {}, "files": [], "candidate": {}, "baseline": {},
+                    "tree": {}, "files": [],
                     "excerpt": "", "seconds": 0.0, "lock_wait_s": 0.0}
 
     def done(**kw) -> dict:
@@ -417,6 +712,22 @@ def agreement(*, paths: list[str], live_root: Path | None = None,
     report["files"] = files
     if not files:
         return done(reason=f"no test file under {root / 'tests'} names a vault root")
+
+    workers, why_serial = _parallel_workers(interp)
+    report["workers"] = workers
+    if workers <= 1:
+        # Before the scratch directory, the probe worktree and the queue for the
+        # gate's lock, all of which a run that will not fit the budget would only
+        # have cost. `refuse` stays False: this is #2036's standing rule that a
+        # probe outage never blocks a land, and it is also never a pass — the
+        # state stays `skipped` and the reason names the missing thing.
+        return done(reason=(
+            f"the selection was not run: {why_serial}, and "
+            f"{len(files)} vault-reading file(s) cost ~{SERIAL_SELECTION_COST_S:.0f}s "
+            f"serially against this {timeout:.0f}s probe budget — which is how the "
+            f"five probes that ran serially all ended at `ran=0`. pytest-xdist is "
+            f"what makes this probe answerable at all, so this is a non-answer and "
+            f"not agreement"))
 
     parent = Path(scratch_parent) if scratch_parent else W.WORK_ROOT
     report["leaked_scratch_pruned"] = _prune_leaked_scratch(parent)
@@ -466,10 +777,10 @@ def agreement(*, paths: list[str], live_root: Path | None = None,
         if why:
             return done(reason=f"cannot mirror the vault as proposed: {why}")
         cand = _run_selection(interp, tree, files, proposed_vault, probe_data,
-                              mark_expr or mark, run_budget())
+                              mark_expr or mark, run_budget(), workers)
         report["candidate"] = {"ran": cand["ran"], "failed": cand["failed"],
                                "note": cand["note"], "seconds": cand["seconds"],
-                               "files": cand["files"]}
+                               "files": cand["files"], "workers": cand["workers"]}
         report["excerpt"] = cand["excerpt"]
         if not cand["ran"]:
             return done(state="skipped",
@@ -481,11 +792,72 @@ def agreement(*, paths: list[str], live_root: Path | None = None,
                                 f"{'pass' if n != 1 else 'passes'} against the vault "
                                 f"as proposed"))
 
-        failing_files = []
-        for nid in cand["failed"]:
-            f = nid.split("::", 1)[0]
-            if f not in failing_files:
-                failing_files.append(f)
+        # #2044, the gate's own rule at `gate.py:1856-1869` moved beside a parallel
+        # run: a node that failed only when the selection ran on `workers` workers
+        # is a fact about the box during the run, not about this land. The gate
+        # learned that the hard way — a guard of its own asserting a 90 ms budget
+        # lost it under eight workers — and its answer is to re-ask every failing
+        # file serially and let THAT run be the verdict. Without the same step here
+        # a load flaker would fabricate a refusal against a prose land that agrees
+        # with the tree, which is the one thing this check must never do.
+        still_failed = list(cand["failed"])
+        if cand["workers"] > 1:
+            retry_files = _failing_files(cand["failed"])
+            max_files = _parallel_retry_max_files()
+            if not retry_files or len(retry_files) > max_files:
+                # Past the gate's ceiling the failure set is a broken tree, not
+                # load — but `gate.py:1852`'s answer to that (re-run the WHOLE suite
+                # serially) is exactly the ~`SERIAL_SELECTION_COST_S` s run this
+                # probe cannot fit, so what it cannot attribute it says it cannot
+                # attribute. Never a refusal, and never a serial whole-selection
+                # re-run that would answer nothing anyway.
+                report["parallel_failures"] = cand["failed"][:50]
+                return done(reason=(
+                    f"the parallel proposed-vault run's {len(cand['failed'])} failing "
+                    f"node(s) name {len(retry_files)} file(s), past the "
+                    f"{max_files}-file ceiling at which a parallel failure is still "
+                    f"re-askable file by file, and the whole {len(files)}-file "
+                    f"selection re-run serially is the "
+                    f"~{SERIAL_SELECTION_COST_S:.0f}s run this {timeout:.0f}s probe "
+                    f"cannot fit — so they are neither this land's nor the tree's"))
+            if run_budget() < MIN_RUN_SECONDS:
+                return done(reason=(
+                    f"the serial re-ask of the parallel run's "
+                    f"{len(cand['failed'])} failing node(s) could not start inside the "
+                    f"{timeout:.0f}s probe budget ({left():.1f}s left), so they are "
+                    f"neither this land's nor the tree's"))
+            reask = _run_selection(interp, tree, retry_files, proposed_vault,
+                                   probe_data, mark_expr or mark, run_budget(), 1)
+            report["parallel_retry"] = {"ran": reask["ran"], "failed": reask["failed"],
+                                        "note": reask["note"],
+                                        "seconds": reask["seconds"],
+                                        "files": reask["files"],
+                                        "workers": reask["workers"]}
+            if not reask["ran"]:
+                return done(reason=(f"the serial re-ask of the parallel run's failures "
+                                    f"answered nothing, so they cannot be attributed to "
+                                    f"this land: {reask['note']}"))
+            flinched = [n for n in cand["failed"] if n not in set(reask["failed"])]
+            if flinched:
+                # Named on the report the way `gate.py:1861` names them on the rung's
+                # counts, so a flaker is a number in the ledger and not a mystery.
+                report["parallel_only_failures"] = flinched
+            # The captured output follows the run the verdict came from. The
+            # parallel run's tail still names the nodes that were just dismissed
+            # as load, and `refusal_text` prints what `excerpt` holds — so leaving
+            # it would put a flaker's FAILED line into the prose bug report of a
+            # land that agrees with the tree.
+            report["excerpt"] = reask["excerpt"]
+            still_failed = list(reask["failed"])
+            if not still_failed:
+                n = int(cand["ran"])
+                return done(state="checked", refuse=False,
+                            reason=(f"{n} vault-reading node{'s' if n != 1 else ''} "
+                                    f"{'pass' if n != 1 else 'passes'} against the vault "
+                                    f"as proposed, once the "
+                                    f"{len(flinched)} that failed only under parallelism "
+                                    f"were re-asked serially and pass"))
+        failing_files = _failing_files(still_failed)
         if run_budget() < MIN_RUN_SECONDS:
             # Asking for the pre-land run here would burn a second vault mirror and
             # then report nothing, which is the state the three #2042 rows are in.
@@ -493,7 +865,7 @@ def agreement(*, paths: list[str], live_root: Path | None = None,
             # refuses to adopt, so the honest answer is "could not attribute".
             return done(reason=(f"the pre-land run could not start inside the "
                                 f"{timeout:.0f}s probe budget ({left():.1f}s left), so "
-                                f"the {len(cand['failed'])} failing node(s) are neither "
+                                f"the {len(still_failed)} failing node(s) are neither "
                                 f"this land's nor the tree's"))
         why = baseline_vault(base_vault, vault, list(paths))
         report["baseline_vault"] = {"restored": why["restored"],
@@ -501,17 +873,17 @@ def agreement(*, paths: list[str], live_root: Path | None = None,
         if not why["ok"]:
             return done(reason=f"cannot build the pre-land vault: {why['reason']}")
         base = _run_selection(interp, tree, failing_files, base_vault, probe_data,
-                              mark_expr or mark, run_budget())
+                              mark_expr or mark, run_budget(), 1)
         report["baseline"] = {"ran": base["ran"], "failed": base["failed"],
                               "note": base["note"], "seconds": base["seconds"],
-                              "files": base["files"]}
+                              "files": base["files"], "workers": base["workers"]}
         if not base["ran"]:
             return done(reason=(f"the pre-land run answered nothing, so a failure "
                                 f"cannot be attributed to this land: {base['note']}"))
-        new = [n for n in cand["failed"] if n not in set(base["failed"])]
+        new = [n for n in still_failed if n not in set(base["failed"])]
         if not new:
             return done(state="checked", refuse=False,
-                        reason=(f"{len(cand['failed'])} failing node(s) fail against the "
+                        reason=(f"{len(still_failed)} failing node(s) fail against the "
                                 f"pre-land vault too — pre-existing, not this land"))
         return done(state="checked", refuse=True, nodes=new)
     finally:
