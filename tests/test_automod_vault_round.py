@@ -1776,11 +1776,24 @@ def test_a_decoy_that_must_never_run_under_the_gates_marks():
 #: about bytes in the tree rather than about a live file that moves.
 WITNESS_2042 = repo() / "tests/fixtures/promotions_vault_land_rows_2026-10-02-item2042.jsonl"
 WITNESS_2042_VAULT_PATH = "backlog/data/2026-10-02.2042-probe-timeout-witness.jsonl"
-#: `wc -l < backlog/data/promotions.jsonl`, the row-count figure #2042 quotes.
-#: `tests/test_retention_sweep.py::_WITNESS_ROWS` pins the same number for #1975's
-#: clause; a mirror refresh has to move both nodes, which is the point of pinning
-#: the figure in two items rather than trusting a sentence in either.
+#: `git show 4bc93177:backlog/data/promotions.jsonl | wc -l`, the row-count figure #2042
+#: quotes. The figure is unchanged from the one this item measured off the working-tree
+#: copy at that path; what #2054 changed is where a reader gets it, because that copy is
+#: retired — a refresh cost ~7.7 MB of vault-git history and #2043's 14-day window means
+#: the sweep rewrites the ledger it was cut from, so the file could never be re-compared
+#: again. The commit is the dated extract now, and it is pinned HERE as well as in
+#: `tests/test_retention_sweep.py` for the reason that file names: a figure held in two
+#: items moves both when it moves, and neither gets to be a sentence about the other.
+LEDGER_WITNESS_COMMIT = "4bc93177"
+LEDGER_WITNESS_PATH = "backlog/data/promotions.jsonl"
 WITNESS_LEDGER_LINES = 28678
+#: The `vault_land` rows those same bytes hold. None of them can carry a `guards` key:
+#: 4bc93177 is #1975's third land, and #2036's guard — the thing that writes the key —
+#: shipped on 2026-10-01T22:41:51Z, after every row in this ledger. That is the anti-marking
+#: fact the node below asserts. The three rows #2042 quotes are in their own extract because
+#: they post-date this copy entirely: the copy is cut from the ledger before the land
+#: appends its row, so no refresh of a copy can ever hold the row of the land that made it.
+WITNESS_LEDGER_VAULT_LAND_ROWS = 453
 
 
 def test_a_killed_run_ledges_the_seconds_the_selection_and_its_own_tail(
@@ -2100,13 +2113,27 @@ def test_the_probe_timeout_witness_is_the_three_rows_the_item_quotes():
     blindness the item filed, and a witness that grew the new fields would stop
     being evidence of it.
 
-    The row-count figure the item asks to be reproduced by
-    `wc -l < backlog/data/promotions.jsonl` is recomputed from the same committed
-    bytes that command reads, and pinned to the 28678 the item quotes. That mirror
-    is five rows behind the live ledger, so its copy holds 453 `vault_land` rows and
-    none of them post-dates the ship — which is why the three rows this report
-    quotes are committed as their own extract, the way #2040 committed its review
-    rows, instead of being looked for inside the mirror.
+    The row-count figure the item asks to be reproduced comes from the same committed
+    bytes that command read, and is pinned to the 28678 the item quotes — but read out of
+    the vault's history at `4bc93177`, not out of `backlog/data/promotions.jsonl` on disk.
+    #2050 owed 5 retired that working-tree copy (a refresh costs ~7.7 MB of permanent
+    vault-git history on a 110 MB `.git` with no remote, and #2043's 14-day window means
+    the sweep rewrites the very ledger the copy was cut from, so a prefix-compare against it
+    was going to stop being askable whatever this node did), and #2054 re-aimed this node at
+    the commit instead. Those bytes hold 453 `vault_land` rows and none of them
+    post-dates the ship — which is why the three rows this report quotes are committed as
+    their own extract, the way #2040 committed its review rows, instead of being looked for
+    inside the ledger.
+
+    Two things about that ordering are asserted rather than recited, because the prose
+    above is the rotting kind of claim if anything is: the row count and the `vault_land`
+    count are taken from ONE read of ONE blob, so they cannot describe two ledgers; and the
+    anti-marking assert runs over both generations of committed bytes this item has — the
+    453 `vault_land` rows of the frozen ledger, and the three rows of #1975's extract,
+    whose newest is the very commit being read here. Both sets are pre-#2036 and so carry
+    no `guards` key at all. The three rows this node is about are the opposite: they carry
+    `guards`, and `state == "skipped"` inside it, and that is the blindness, which is why
+    they are an extract of their own and are asserted above rather than below.
 
     As #2040's witness node records, no digest is written down as a literal here: a
     bare hex token in a grader note is validated as a commit of the tree under
@@ -2116,6 +2143,7 @@ def test_the_probe_timeout_witness_is_the_three_rows_the_item_quotes():
     import hashlib
     import json
     import scripts.automod.review as RV
+    import test_retention_sweep as RS
 
     raw = WITNESS_2042.read_bytes()
     rows = [json.loads(l) for l in raw.decode("utf-8").splitlines() if l.strip()]
@@ -2145,17 +2173,188 @@ def test_the_probe_timeout_witness_is_the_three_rows_the_item_quotes():
         assert len([l for l in durable.read_text().splitlines() if l.strip()]) == 3
         assert hashlib.sha256(durable.read_bytes()).hexdigest() == \
             hashlib.sha256(raw).hexdigest(), "the two copies diverged"
-        ledger = vault / "backlog/data/promotions.jsonl"
-        assert len(ledger.read_text().splitlines()) == WITNESS_LEDGER_LINES, (
-            f"`wc -l < backlog/data/promotions.jsonl` moved off the figure the item "
-            f"quotes ({WITNESS_LEDGER_LINES}); the mirror needs refreshing, or both "
-            f"this node and test_retention_sweep's pin of it need the new number")
-        vl = [json.loads(l) for l in ledger.read_text().splitlines()
-              if '"vault_land"' in l]
-        assert len(vl) == 453, f"the mirror holds {len(vl)} vault_land rows, not 453"
+        # One read of one blob, and both figures come off it: a line count taken from the
+        # commit and a `vault_land` count taken from somewhere else would be two numbers
+        # about two ledgers, which is the defect this node's own history is full of.
+        raw_ledger = RS._blob_at(vault, LEDGER_WITNESS_COMMIT, LEDGER_WITNESS_PATH)
+        lines = raw_ledger.splitlines()
+        assert len(lines) == WITNESS_LEDGER_LINES, (
+            f"`git show {LEDGER_WITNESS_COMMIT}:{LEDGER_WITNESS_PATH} | wc -l` is "
+            f"{len(lines)}, not the {WITNESS_LEDGER_LINES} the item quotes. The copy this "
+            "figure was measured on is retired, so the commit is where it lives: a move "
+            "here means both this node and test_retention_sweep's pin of it need the new "
+            "number, and the named commit needs re-picking with them")
+        vl = [json.loads(ln) for ln in lines if b'"vault_land"' in ln]
+        assert len(vl) == WITNESS_LEDGER_VAULT_LAND_ROWS, (
+            f"the frozen ledger holds {len(vl)} `vault_land` rows, not "
+            f"{WITNESS_LEDGER_VAULT_LAND_ROWS}: the bytes at "
+            f"{LEDGER_WITNESS_COMMIT} are not the copy the extract below was cut from")
         assert all("guards" not in r for r in vl), (
-            "the refreshed mirror now contains post-ship rows, so the extract above "
-            "must be re-cut from the live ledger before this claim is repeated")
+            f"a `vault_land` row at {LEDGER_WITNESS_COMMIT} carries a `guards` key, so the "
+            "frozen ledger now holds post-#2036 rows and the extract above is no longer the "
+            "only witness of the blindness #2042 filed")
+        # The same anti-marking fact over the other committed extract this item has: #1975's
+        # three `vault_land` rows. The property is that a land before #2036's guard existed
+        # wrote no marking AT ALL — #2036's premise, and the reason this node's own three rows
+        # carry `guards` and these do not.
+        markless = [json.loads(l) for l in WITNESS.read_text().splitlines() if l.strip()]
+        assert len(markless) == 3, f"#1975's extract is {len(markless)} rows, not 3"
+        assert all("guards" not in r for r in markless), (
+            "#1975's extract grew a `guards` key, so it is no longer the pre-#2036 "
+            "generation this node's anti-marking claim rests on")
+
+        # The relation between the two committed witnesses, and it is NOT containment. The
+        # copy is refreshed from the live ledger BEFORE the land appends its own row, so a
+        # copy committed by a land can never contain the row for that land: #1975's first land
+        # is in these bytes, its own final row is not. That lag is the exact mechanism #2042
+        # is the report of — a `vault_land` row invisible to the guard that was supposed to
+        # see it — and it is why the three rows this node is about are committed as an extract
+        # rather than looked for in the copy. A reader who assumed containment would run the
+        # lookup, find nothing, and conclude the land never happened.
+        frozen_commits = {r.get("commit") for r in vl}
+        assert markless[0]["commit"] in frozen_commits, (
+            f"the first of #1975's lands ({markless[0]['commit'][:8]}) is not a `vault_land` "
+            "row of the copy that land refreshed, so the copy and the extract are not the "
+            "same ledger and one of the two figures above is about a file nobody is citing")
+        assert markless[-1]["commit"] not in frozen_commits, (
+            f"the copy committed at {LEDGER_WITNESS_COMMIT} now contains the row for that same "
+            "land, which the refresh order cannot produce — the copy is cut from the ledger "
+            "before the land appends its row. If this ever passes, the lag described above has "
+            "stopped being real and committing an extract was not necessary")
+
+
+# --------------------------------------------------------------------------- #
+#  #2054 clause 5: after the retire, nothing under tests/ or scripts/ opens the
+#  promotions mirror as a file; the only surviving mentions are the tmp-vault
+#  stand-ins, the two history-path constants, and prose that names a commit.
+#
+#  Why this is a node and not the proving command: `git grep -n
+#  'backlog/data/promotions.jsonl' -- tests scripts` is a LIST, and a list is only
+#  an acceptance test if something says which entries are allowed and why. Every
+#  one of the four surviving code lines names the path to a `git show` argument or
+#  to a tmp vault the node itself built; the moment anyone writes a line that
+#  joins it onto `vault_root()` or opens it, the string's neighbours change, and
+#  this node is what reddens. The mirror is a 33 MB file whose working-tree copy
+#  #2050 owed 5 retired, so a fresh reader is not untidy — it is the cost paid
+#  again, plus a figure that stops being reproducible the day task 79 rewrites the
+#  live ledger (#2043's window).
+# --------------------------------------------------------------------------- #
+
+#: The ways a mention of a path stops being a citation and becomes a READ: the literal
+#: joined onto a resolved root, or the file opened. Each is checked on the line that holds
+#: the path, which is where a reader has to spell its root or its call.
+_MIRROR_READER_MARKS = ("read_text", "read_bytes", "open(", "vault_root(", "unlink(",
+                        "write_text", "write_bytes", '"backlog" / "data"',
+                        "'backlog' / 'data'", ".readlines", ".readline(")
+
+#: The files permitted to name the retired mirror at all, and what each one's mention is.
+#: A NEW file appearing here is the event this node is for: it means somebody started
+#: talking about the retired copy again. The list is deliberately about WHERE a mention may
+#: live and not about line counts, because the counts move with every comment edit while the
+#: set of readers is the property the clause is stated over.
+_MIRROR_MENTION_FILES = {
+    "scripts/automod/vault_guards.py":
+        "the agreement probe's docstring naming the copy as the pinned-witness shape an "
+        "acknowledgement was written for (#2049's mechanism text). NOT touched by #2054: "
+        "scripts/automod/** is a protected surface and a docstring is not a safety property, "
+        "so the tense of that sentence is recorded as a finding on #2054 instead",
+    "scripts/groundskeeper/retention-sweep.py":
+        "the store-13 paragraph, whose figures #2054 re-aimed at vault commit "
+        f"{LEDGER_WITNESS_COMMIT} and whose retire that paragraph records",
+    "tests/fixtures/promotions_vault_land_rows_2026-10-01-item1975.jsonl":
+        "a `vault_land` row recording the land that wrote the copy: the ledger's own history, "
+        "which is the reason the path cannot be erased from the repository",
+    "tests/test_automod_hardening.py":
+        "ACK_MIRROR, a string the ack-rail nodes pass to a lander they have all replaced",
+    "tests/test_automod_vault_round.py":
+        "this file: the history-path constant, the #2049 MIRROR_PATH stand-in, and prose "
+        "about the retire",
+    "tests/test_retention_sweep.py":
+        "test_retention_sweep: its history-path constant and the prose of the nodes #2054 "
+        "re-cut",
+    "tests/test_vault_sync_refusals.py":
+        "the #1903 generation's citations — 10,917,874 bytes at vault 0d96fdb0 — and the "
+        "transport file-type claim about that file",
+}
+
+
+def test_no_reader_under_tests_or_scripts_opens_the_retired_mirror():
+    """#2054 clause 5, pinned as four questions instead of a list someone reviewed.
+
+    The clause's own instrument is `git grep -n 'backlog/data/promotions.jsonl' -- tests
+    scripts`, and this node runs the same walk over `git ls-files` (tracked files, both
+    trees, so a file no test imports cannot hide in it). A grep is only an acceptance test
+    once something decides which lines are admissible, so every hit is asked:
+
+    1. Does the file of the hit belong to the set permitted to mention the path at all? A
+       new file is somebody resuming the copy's career, and it is refused by name.
+    2. Does the line READ it — the literal joined onto a resolved vault root, or the file
+       opened? That is the clause, and it is refused outright.
+    3. Are there hits at all? A scan that finds none has stopped checking, which is the
+       failure mode of every absence test this loop has written: the pattern was wrong, or
+       the citations it protects were deleted, and the node reports green either way.
+    4. Do the tmp-vault stand-ins survive, in the files that own them? Getting a clean grep
+       by deleting `MIRROR_PATH` and `ACK_MIRROR` would produce a green clause 5 by removing
+       the only tests of the agreement probe's refusal of an unacknowledged pinned witness —
+       the rail #2049 built and #2054's owed delete may have to be `--ack`'d through.
+
+    The surviving mentions are citations by construction: `git show <sha>:<path>` arguments
+    (which read the object store, not the working tree), two string constants handed to
+    `git show`, two stand-ins rooted in a tmp vault each node builds itself, and prose that
+    names a commit or records the retire.
+    """
+    import subprocess as SP
+
+    root = repo()
+    listed = SP.run(["git", "-C", str(root), "ls-files", "--", "tests", "scripts"],
+                    capture_output=True, text=True, check=True).stdout.splitlines()
+    hits: list[tuple[str, int, str]] = []
+    for rel in listed:
+        p = root / rel
+        if not p.is_file():
+            continue
+        try:
+            text = p.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue                       # binary: a path inside it is data, not a reader
+        for n, line in enumerate(text.splitlines(), 1):
+            if "backlog/data/promotions.jsonl" in line:
+                hits.append((rel, n, line.strip()))
+
+    assert hits, (
+        "no tracked file under tests/ or scripts/ names `backlog/data/promotions.jsonl`, so "
+        "this node is checking nothing. The retired-history citations are what it protects "
+        "(#1903's 10,917,874 bytes at vault 0d96fdb0, the two `git show` path constants, the "
+        "tmp-vault stand-ins); if they have been deleted the clause-5 grep is green for the "
+        "wrong reason")
+
+    from_new_files = sorted({rel for rel, _, _ in hits} - set(_MIRROR_MENTION_FILES))
+    assert not from_new_files, (
+        f"these files name the retired promotions mirror and are not in the permitted set: "
+        f"{from_new_files}. Every file that may mention "
+        "`backlog/data/promotions.jsonl` is listed with its reason in `_MIRROR_MENTION_FILES` "
+        "— if this is a legitimate new citation, add the file and say what its mention is; if "
+        "it is a reader, the figures belong at vault commit "
+        f"{LEDGER_WITNESS_COMMIT}, read with `git show`")
+
+    readers = [(rel, n, line) for rel, n, line in hits
+               if any(mark in line for mark in _MIRROR_READER_MARKS)]
+    assert not readers, (
+        "these lines open or root the retired promotions mirror instead of citing it: "
+        f"{readers}. The working-tree copy is retired (#2050 owed 5) and the figures live in "
+        "the vault's history; a file-level reader re-buys the 33 MB copy and pins a number "
+        "the sweep rewrites, which is what #2043's window guarantees")
+
+    hardening = (root / "tests/test_automod_hardening.py").read_text(encoding="utf-8")
+    this_file = Path(__file__).read_text(encoding="utf-8")
+    assert 'ACK_MIRROR = "backlog/data/promotions.jsonl"' in hardening, (
+        "test_automod_hardening's ACK_MIRROR stand-in is gone, so the ack rail's "
+        "pinned-witness nodes no longer exist to be run")
+    assert 'MIRROR_PATH = "backlog/data/promotions.jsonl"' in this_file, (
+        "this file's MIRROR_PATH stand-in is gone, so the agreement probe's refusal of an "
+        "unacknowledged pinned witness — #2049's subject — is no longer tested")
+    print(f"clause 5: {len(hits)} mentions in {len({h[0] for h in hits})} files, "
+          f"{len(readers)} of them readers, none outside the permitted set")
 
 
 # --------------------------------------------------------------------------- #

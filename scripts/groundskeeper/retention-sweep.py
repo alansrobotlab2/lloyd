@@ -93,10 +93,17 @@ the transcript scratch home from backlog #566:
     on the report line is the series to watch for the first of those.
 
 13. ~/.local/state/lloyd-automod/promotions.jsonl — the promotion ledger: the loop's own
-    append-only audit trail, 33,113,707 bytes / 28,678 rows in the copy the vault commits at
-    `backlog/data/promotions.jsonl`, and growing 1,992,001 bytes a day on the 7-day mean of
-    that copy's own rows — both figures re-derived from those committed bytes by
-    `tests/test_retention_sweep.py` rather than typed. `board_health` and the two rungs above
+    append-only audit trail, 33,113,707 bytes / 28,678 rows in the copy the vault committed
+    at vault commit `4bc93177` (`git show 4bc93177:backlog/data/promotions.jsonl`), and
+    growing 1,992,001 bytes a day on the 7-day mean of that copy's own rows — both figures
+    re-derived from those committed bytes by `tests/test_retention_sweep.py` rather than
+    typed. The commit and not a file, because #2050 owed 5 retired the rolling working-tree
+    copy at `backlog/data/promotions.jsonl`: refreshing it re-commits the whole 33,113,707-byte
+    ledger into the vault's history every time, on a repository with no LFS and no remote to
+    put it on, and this store's own window rewrites the ledger that copy was cut from — so the
+    copy could not stay true even while it was being paid for. #2054 re-aimed every reader at
+    the commit, which is the dated extract: history is the thing that cannot be rewritten
+    under a reader's feet. `board_health` and the two rungs above
     read it whole on every pass, and nothing had taken a row out of it until #1975 gave it a
     window and #2043 set its value. ARCHIVE OUT — never fold in place, never delete: a row
     older than LEDGER_ARCHIVE_AGE_DAYS (14 days: 14 x 1,992,001 = 27,888,014 bytes of live

@@ -3229,16 +3229,40 @@ _OLD = 45.0
 _OTHER_MONTH = 80.0
 _YOUNG = 5.0
 
-#: The witness #1975 committed, at the path clause 6 names it by.
-_WITNESS = "promotions.jsonl"
+#: The witness ledger's path in the VAULT, repo-relative. It used to name a file on disk:
+#: #1975 clause 6 put a rolling copy of the live promotions ledger there and every figure
+#: below was measured on that copy. #2050 owed 5 retired the copy — each refresh cost
+#: ~7.7 MB of permanent vault-git history (`4bc93177` 7,666,300 B zlib'd, the refresh
+#: `59a07c63` 7,821,666 B, on a 110 MB `.git` with no LFS and no remote), and #2043's
+#: 14-day window means the sweep rewrites the live ledger this one was cut from, so a
+#: prefix-compare against it can never hold again. #2054 retired the copy and re-aimed
+#: every reader here at history, which is the immutable dated extract: the bytes are read
+#: with `git show 4bc93177:backlog/data/promotions.jsonl` and nothing here opens a
+#: working-tree file any more. That is why no node below can skip "for want of the file":
+#: there is no file to want, and a reader that needed one would go quiet exactly when the
+#: witness is the only surviving record of these figures.
+_WITNESS_REPO_PATH = "backlog/data/promotions.jsonl"
 
-#: What those bytes are, measured with `wc -l` and `stat -c %s` on the committed copy at
+#: The commit whose copy of the ledger every figure here is a measurement OF. #1975 clause
+#: 6 committed those bytes; the working-tree copy is gone, and this sha is how a reader
+#: holding only the vault gets them back: `git show 4bc93177:backlog/data/promotions.jsonl`.
+_WITNESS_COMMIT = "4bc93177"
+
+#: #1903's displaced generation, and the second half of the pair #2054 clause 4 pins: a
+#: replacement whose predecessor cannot be read back is data loss, so both generations have
+#: to stay addressable from history, the older one at `0d96fdb0`.
+_PRIOR_COMMIT = "0d96fdb0"
+_PRIOR_ROWS = 26903
+_PRIOR_BYTES = 10917874
+
+#: What those bytes are: 28,678 lines, 33,113,707 bytes, 61 distinct `event` values, oldest
+#: `created_at` 2026-09-06T17:27:02Z, measured with `wc -l` and `stat -c %s` on the copy at
 #: vault commit `4bc93177` (`#1975 clause 6: put the ledger witness at the path the clause
-#: names`): 28,678 lines, 33,113,707 bytes, 61 distinct `event` values, oldest `created_at`
-#: 2026-09-06T17:27:02Z. Equality, not a range or a floor: the review of the last round
-#: refused both (`28,500 < rows <= 32,000`, and `rows >= 28_476`), because a re-copy of a
-#: DIFFERENT ledger satisfies either, and then the figure the item quotes and the figure the
-#: node printed are two numbers about two files and nothing says so.
+#: names`) and re-derived from that same blob by `_witness_bytes` below. Equality, not a
+#: range or a floor: the review of the last round refused both (`28,500 < rows <= 32,000`,
+#: and `rows >= 28_476`), because a re-copy of a DIFFERENT ledger satisfies either, and
+#: then the figure the item quotes and the figure the node printed are two numbers about
+#: two files and nothing says so.
 #:
 #: Written WITHOUT digit separators on purpose: the last round's proving command was
 #: `git grep -n 28678 tests/test_retention_sweep.py`, which `28_678` does not satisfy.
@@ -3926,8 +3950,6 @@ def test_a_fold_of_every_event_name_in_the_witness_stays_neutral(rs):
     never ran, which is why a refusal is not the only thing checked here.
     """
     raw = _witness_bytes(rs)
-    if raw is None:
-        pytest.skip(f"no witness ledger in this vault: {_WITNESS}")
 
     names: list[str] = []
     for line in raw.splitlines():
@@ -3938,9 +3960,17 @@ def test_a_fold_of_every_event_name_in_the_witness_stays_neutral(rs):
         name = row.get("event") if isinstance(row, dict) else None
         if isinstance(name, str) and name and name not in names:
             names.append(name)
+    # A floor and not the equality, which
+    # `test_the_witness_is_a_ledger_and_not_just_a_row_count` owns for the same bytes: this
+    # node only needs the sweep to cover the vocabulary, and the bytes it is reading are a
+    # fixed blob at `_WITNESS_COMMIT` that cannot quietly grow thin. A short answer here
+    # therefore says the reader stopped reading THAT blob, which is the failure the floor
+    # is for.
     assert len(names) >= 40, (
-        f"the witness yields only {len(names)} event names; this node's premise is that "
-        f"it covers the real ledger's vocabulary, so a thin witness has to be re-taken")
+        f"the witness yields only {len(names)} event names; the blob at "
+        f"`{_WITNESS_COMMIT}:{_WITNESS_REPO_PATH}` has {_WITNESS_EVENT_NAMES} and this "
+        "node's premise is that it drives the sweep over the real ledger's vocabulary, so a "
+        "short answer means `_witness_bytes` is reading something other than that commit")
 
     now = time.time()
     failures = []
@@ -3977,17 +4007,63 @@ def test_a_fold_of_every_event_name_in_the_witness_stays_neutral(rs):
         + "\n  ".join(failures))
 
 
-def _witness_bytes(rs):
-    """The committed witness ledger's bytes, or None when this vault has no copy.
+#: One blob read at a time per process: `git show` hands back 33,113,707 bytes, the suite
+#: runs on eight xdist workers, and every node that wants the witness wants the SAME bytes.
+#: Keyed by everything the answer depends on — vault, commit AND path — because a cache
+#: keyed on the commit alone would hand one file's bytes to a caller asking for another,
+#: and a node that redirects `LLOYD_VAULT_ROOT` to a repo of its own must not be served the
+#: real vault's blob.
+_WITNESS_CACHE: dict[tuple[str, str, str], bytes] = {}
+
+
+def _blob_at(vault, sha: str, repo_path: str) -> bytes:
+    """`git show <sha>:<repo_path>` over one vault, as bytes, or a refusal that says why.
+
+    Raw stdout bytes, never decoded: the figures these nodes pin are byte counts, and a
+    text-mode round trip through `subprocess(text=True)` would make `len(raw)` a claim
+    about an encoding rather than about the file — this repo already carries one node that
+    pays that cost (see `prior_bytes` in
+    `test_both_promotions_witness_generations_stay_addressable_in_history`).
+
+    A refusal and not a `None` when git cannot answer, because the missing thing is always
+    load-bearing here. A caller used to `pytest.skip` on absent bytes is a caller that goes
+    green while checking nothing, and after #2054 deleted the working-tree copy there is no
+    file whose absence could be anybody's excuse: the blob is the witness, and a vault that
+    cannot produce it is a vault that cannot certify these figures.
+    """
+    key = (str(vault), sha, repo_path)
+    if key not in _WITNESS_CACHE:
+        proc = subprocess.run(["git", "-C", str(vault), "show", f"{sha}:{repo_path}"],
+                              capture_output=True)
+        assert proc.returncode == 0, (
+            f"`git -C {vault} show {sha}:{repo_path}` exited {proc.returncode}: "
+            f"{proc.stderr.decode('utf-8', 'replace')[:200]}. Every promotions-ledger "
+            "witness figure in this file is re-derived from that blob, so a vault whose "
+            "history does not hold it is not a vault these nodes can be run in.")
+        _WITNESS_CACHE[key] = proc.stdout
+    return _WITNESS_CACHE[key]
+
+
+def _witness_bytes(rs) -> bytes:
+    """The witness ledger's bytes, read out of the vault's history at `_WITNESS_COMMIT`.
 
     A function rather than a constant because the vault is a resolved path, not a literal:
     `rs.vault_root()` is the redirected one under the suite, which is the point — the node
     that reads witness bytes must read them from the vault the run is configured with, and
     a hardcoded `~/obsidian` would make a gate run certify the real vault from a sandbox
     that has its own.
+
+    History and not the working tree, and that is the whole of #2054: the rolling copy at
+    `backlog/data/promotions.jsonl` cost ~7.7 MB of vault-git history per refresh and
+    #2043's 14-day window makes the sweep rewrite the ledger it was cut from, so the copy
+    is retired and the commit is the dated extract. The reader is the one place that
+    difference could hide — a working-tree read with these figures pinned beside it would
+    keep reproducing 28,678 rows and 33,113,707 bytes right up until the copy was deleted,
+    and would then report those nodes as `skipped`, which is green without evidence.
+    `test_the_witness_reader_reads_history_and_not_the_working_tree` is the node that
+    cannot pass on such a reader.
     """
-    witness = rs.vault_root() / "backlog" / "data" / _WITNESS
-    return witness.read_bytes() if witness.is_file() else None
+    return _blob_at(rs.vault_root(), _WITNESS_COMMIT, _WITNESS_REPO_PATH)
 
 
 def _witness_rate_b_per_day(rs, lines: list[bytes], rows: list[dict]) -> int:
@@ -4032,16 +4108,37 @@ def _calibration_band() -> tuple[int, int]:
 
 
 def test_the_witness_ledger_reproduces_the_row_count_the_item_quotes(rs):
-    """Clause 6: the quoted report is re-derivable from bytes in the vault's history.
+    """Clause 6, re-aimed by #2054: the quoted report is re-derivable from bytes in the
+    vault's history, at the commit this file names, with no file on disk involved.
 
     The clause names the command — a line count over a committed file — and whatever it
     prints is the figure the item must quote. The node exists because the first review of
     this round found the vault's ledger copy still another item's 26,903-row snapshot,
     which left every ledger number on the item unfalsifiable: a report whose source is one
     machine's state dir is a claim about a machine, not about the store. Three things are
-    pinned. The bytes are COMMITTED, because an uncommitted file is the same one-machine
-    evidence with a path on it, and the row and byte counts are EQUAL to the figures on the
-    constants above, which is what makes this file the witness and not merely a ledger.
+    pinned. The bytes are COMMITTED and reachable from the vault's current `HEAD`, and the
+    row and byte counts are EQUAL to the figures on the constants above — which is what
+    makes that blob the witness and not merely some ledger an object database happens to
+    still hold.
+
+    What #2054 changed here is the first of those three, and it is worth naming because it
+    is an assertion being dropped rather than added. This node used to prove the bytes were
+    committed by running `git ls-files --error-unmatch backlog/data/promotions.jsonl`, and
+    the assertion it replaced read:
+
+        assert tracked.returncode == 0, ("the witness is on disk but not in the vault's
+        history: ...")
+
+    #2050 owed 5 retires the working-tree copy that command was reading, so `ls-files` goes
+    from a PASS to a 128 the moment the delete lands and the node would redden for the very
+    success it exists to record. Addressability is the property that survives the delete, so
+    this node now proves that instead, two ways: `git cat-file -e` that the blob is in the
+    object store, and `git merge-base --is-ancestor` that `_WITNESS_COMMIT` is an ancestor
+    of the vault's `HEAD`. The second is the one with teeth. A commit only reachable from a
+    side branch or a reflog entry is an object a `gc` reaps, and a witness that can be
+    reaped is not evidence. Reachability from `HEAD` — which is what `--is-ancestor`
+    decides, not the first-parent line — is what makes "history is the dated extract" true
+    instead of a way of saying "we kept no copy".
 
     Equality and not a floor, and no separate line-count agreement. Two earlier versions of
     these lines asserted `rows >= 28_476` and `len(raw) >= 32_797_574`, and the second
@@ -4054,27 +4151,34 @@ def test_the_witness_ledger_reproduces_the_row_count_the_item_quotes(rs):
     the equality, in the node that prints the numbers, and drop the self-agreeing one.
     """
     raw = _witness_bytes(rs)
-    if raw is None:
-        pytest.skip(f"no witness ledger in this vault: {_WITNESS}")
-    witness = rs.vault_root() / "backlog" / "data" / _WITNESS
+    vault = rs.vault_root()
+    at = f"{_WITNESS_COMMIT}:{_WITNESS_REPO_PATH}"
 
-    tracked = subprocess.run(
-        ["git", "-C", str(rs.vault_root()), "ls-files", "--error-unmatch",
-         f"backlog/data/{_WITNESS}"], capture_output=True, text=True)
-    assert tracked.returncode == 0, (
-        f"the witness is on disk but not in the vault's history: "
-        f"{tracked.stderr.strip()[:160]}")
+    present = subprocess.run(["git", "-C", str(vault), "cat-file", "-e", at],
+                             capture_output=True, text=True)
+    assert present.returncode == 0, (
+        f"the vault's history holds no blob at {at}: "
+        f"{present.stderr.strip()[:160]}. Every figure this file quotes about the promotion "
+        "ledger is a measurement of that blob, and the working-tree copy it used to also "
+        "read is retired — so nothing is left to measure if the object is gone")
+    ancestor = subprocess.run(["git", "-C", str(vault), "merge-base", "--is-ancestor",
+                               _WITNESS_COMMIT, "HEAD"], capture_output=True, text=True)
+    assert ancestor.returncode == 0, (
+        f"`{_WITNESS_COMMIT}` is not an ancestor of this vault's HEAD: "
+        f"{ancestor.stderr.strip()[:160]}. A witness commit off the main line is a reachable "
+        "only from a reflog entry, which `git gc` reaps — and a dated extract that a routine "
+        "maintenance run can collect is not a dated extract")
 
     rows = len(raw.splitlines())
     assert rows == _WITNESS_ROWS, (
-        f"{rows} rows at {witness}; the copy this item's report was re-derived from has "
-        f"{_WITNESS_ROWS} (vault commit 4bc93177). A different count means the file at the "
-        "clause-named path is some other ledger, and every figure on the item that cites "
-        "it is then about a file nobody measured")
+        f"{rows} rows at {at}; the copy this item's report was re-derived from has "
+        f"{_WITNESS_ROWS} (vault commit {_WITNESS_COMMIT}). A different count means "
+        "`_witness_bytes` is reading some other ledger, and every figure on the item that "
+        "cites it is then about a file nobody measured")
     assert len(raw) == _WITNESS_BYTES, (
-        f"{len(raw):,} bytes at {witness}; the copy the report was re-derived from is "
+        f"{len(raw):,} bytes at {at}; the copy the report was re-derived from is "
         f"{_WITNESS_BYTES:,}")
-    print(f"witness: {rows} rows, {len(raw):,} bytes at {witness}")
+    print(f"witness: {rows} rows, {len(raw):,} bytes at {at} in {vault}")
 
 
 def test_the_witness_is_a_ledger_and_not_just_a_row_count(rs):
@@ -4105,8 +4209,6 @@ def test_the_witness_is_a_ledger_and_not_just_a_row_count(rs):
     row makes these three figures properties of the bytes rather than of the date.
     """
     raw = _witness_bytes(rs)
-    if raw is None:
-        pytest.skip(f"no witness ledger in this vault: {_WITNESS}")
 
     lines = [ln for ln in raw.splitlines() if ln.strip()]
     rows = [json.loads(ln) for ln in lines]
@@ -4171,44 +4273,321 @@ def test_the_witness_is_a_ledger_and_not_just_a_row_count(rs):
         "growth figure no bytes reproduce")
 
 
-def test_the_overwritten_witness_keeps_the_other_items_bytes_recoverable(rs):
-    """The path now holds #1975's witness, and #1903's bytes survive in history intact.
+def test_both_promotions_witness_generations_stay_addressable_in_history(rs):
+    """Both generations of the promotions witness read out of history, file or no file.
 
-    Clause 6 names `backlog/data/promotions.jsonl`; that path used to be #1903's ledger
-    snapshot (26,903 lines / 10,917,874 bytes, vault commit `0d96fdb0`), cited by #1903,
-    #2024 and `backlog/data/2026-09-30.confirm-replay-witness.md`. Replacing a witness is
-    only safe while the bytes it displaces stay addressable, so this node reads the
-    displaced snapshot OUT OF HISTORY and refuses the arrangement if the history has been
-    rewritten. That is the property that actually matters — a name nobody can cite is not
-    evidence, and an overwritten predecessor that cannot be recovered is data loss — and
-    it is what any future round that replaces these bytes will be held to.
+    #2054 clause 4: TWO generations of this witness exist, and both have to stay
+    addressable before the working-tree copy is deleted. #1903's snapshot (26,903 lines /
+    10,917,874 bytes) lives at vault commit `0d96fdb0`, cited by #1903, #2024 and
+    `backlog/data/2026-09-30.confirm-replay-witness.md`; the retiring copy itself (28,678
+    lines / 33,113,707 bytes) lives at `4bc93177`, cited by #1975, #2042 and by this file's
+    own constants. Replacing a witness is only safe while the bytes it displaces stay
+    addressable — a name nobody can cite is not evidence, and a predecessor that cannot be
+    read back is data loss — and after the retire that is the ONLY property left, because
+    there is no file on disk to point at. So both generations are read out of history here,
+    and this is the node that says the delete is a replacement with a recoverable
+    predecessor rather than a loss.
+
+    Read with the blob primitives and not `text=True`, twice over. The first is the byte
+    count: `subprocess(text=True)` decodes, and the ledger holds non-ASCII payload bytes, so
+    `len(stdout)` is a character count — the pair `33,062,687 / 33,113,707` measured on
+    #1975's round is that exact defect, a 51,020-byte hole opened by the reader and not by
+    the file, and a byte assert written against it fails on an intact witness. The second is
+    the row count: `text=True` also drops a trailing-`CRLF` distinction the ledger does not
+    have, and this node's job is to reproduce a `wc -l` figure.
+
+    Reachability from `HEAD` is asserted per generation, and it is the assert with teeth.
+    `git show` answers from any object the pool still holds — including one kept alive only
+    by a reflog entry, which the next `git gc` reaps — so a blob that prints is not yet a
+    recoverable predecessor. An ancestor of `HEAD` is.
     """
     vault = rs.vault_root()
-    named = vault / "backlog" / "data" / "promotions.jsonl"
-    if not named.is_file():
-        pytest.skip(f"no ledger witness on disk at {named}")
+    measured = {}
+    for sha, want_rows, want_bytes in ((_PRIOR_COMMIT, _PRIOR_ROWS, _PRIOR_BYTES),
+                                       (_WITNESS_COMMIT, _WITNESS_ROWS, _WITNESS_BYTES)):
+        at = f"{sha}:{_WITNESS_REPO_PATH}"
+        ancestor = subprocess.run(["git", "-C", str(vault), "merge-base", "--is-ancestor",
+                                   sha, "HEAD"], capture_output=True, text=True)
+        assert ancestor.returncode == 0, (
+            f"`{sha}` is not an ancestor of this vault's HEAD: "
+            f"{ancestor.stderr.strip()[:160]}. {at} is cited as evidence by name, and an "
+            "object reachable only from a reflog entry is one `git gc` away from making that "
+            "citation unverifiable — which is the data-loss incident this node exists to "
+            "refuse, not a condition to skip past")
+        blob = _blob_at(vault, sha, _WITNESS_REPO_PATH)
+        rows = len(blob.splitlines())
+        nbytes = len(blob)
+        assert rows == want_rows, (
+            f"{at} reads {rows} rows out of history, not the {want_rows:,} the items that "
+            "cite it publish — so either the history is not the one that commit made, or the "
+            "figure every one of those citations quotes was never its line count")
+        assert nbytes == want_bytes, (
+            f"{at} reads {nbytes:,} bytes out of history, not the {want_bytes:,} the items "
+            "that cite it publish. The row count and the byte count together are what make a "
+            "'snapshot' a re-derivable thing rather than an adjective, and both have to hold "
+            "for a citation to still be about the file it names")
+        measured[sha] = (rows, nbytes)
 
-    live_rows = len(named.read_bytes().splitlines())
-    assert live_rows == _WITNESS_ROWS, (
-        f"the witness at the clause-named path holds {live_rows} lines; the copy the item's "
-        f"findings quote, and the copy `test_the_witness_ledger_reproduces_the_row_count_"
-        f"the_item_quotes` pins in the same run, is {_WITNESS_ROWS}. This node and that one "
-        "have to agree, or the file changed between the two reads")
+    (old_rows, old_bytes) = measured[_PRIOR_COMMIT]
+    (new_rows, new_bytes) = measured[_WITNESS_COMMIT]
+    assert old_rows < new_rows and old_bytes < new_bytes, (
+        f"the retiring generation ({new_rows} rows / {new_bytes:,} bytes) is not the larger "
+        f"one it is described as displacing ({old_rows} rows / {old_bytes:,} bytes), so this "
+        "is not the arrangement clause 4 describes: a replacement that supersedes a smaller "
+        "snapshot, with that snapshot still readable behind it")
+    print(f"addressable: {_PRIOR_COMMIT} -> {old_rows} rows / {old_bytes:,} bytes; "
+          f"{_WITNESS_COMMIT} -> {new_rows} rows / {new_bytes:,} bytes")
 
-    history = subprocess.run(
-        ["git", "-C", str(vault), "show", "0d96fdb0:backlog/data/promotions.jsonl"],
-        capture_output=True, text=True)
-    assert history.returncode == 0, (
-        "#1903's snapshot is no longer readable out of the vault's history, so the "
-        f"overwrite became a loss rather than a replacement: {history.stderr[:200]}")
-    prior_rows = len([ln for ln in history.stdout.splitlines() if ln.strip()])
-    assert prior_rows == 26_903, (
-        f"the displaced witness reads {prior_rows} rows from `0d96fdb0`, not the 26,903 "
-        f"#1903 and the confirm-replay witness cite")
-    prior_bytes = len(history.stdout.encode("utf-8"))
-    assert prior_bytes == 10_917_874, (
-        f"the displaced witness is {prior_bytes} bytes, not the 10,917,874 the records "
-        f"quoting it say")
+
+def test_the_witness_reader_reads_history_and_not_the_working_tree(rs, tmp_path,
+                                                                   monkeypatch):
+    """The re-aim itself, proven hermetically: the figures reproduce with no file to read.
+
+    The vault the sweep resolves is redirected to the clone through `rs.vault_root` — the
+    same accessor every witness node in this file uses — so what is exercised is the reader
+    the witness nodes call, not a blob helper this node calls by hand. That is the whole
+    point of the redirect: a draft of this node called `_blob_at(clone, ...)` directly and
+    passed while `_witness_bytes` was still reading the working tree, which tests the helper
+    and not the re-aim. Two controls, one for each direction the reader could cheat: the
+    figures must reproduce with the root pointed at a tree with no file, and the reader must
+    REFUSE with the root pointed at a repository that never held the path — because a reader
+    that ignored the resolved root and opened the live vault would satisfy the first control
+    from the very file this change retires.
+
+    Every other witness node in this file is satisfied by BOTH arrangements. A reader that
+    quietly reverted to reading `backlog/data/promotions.jsonl` off the working tree would
+    still reproduce 28,678 rows and 33,113,707 bytes exactly, because on the live vault the
+    file and the blob at `4bc93177` are byte-identical TODAY — which is the exact shape of
+    the false green this round had to defend against: the suite goes green, the delete
+    lands, the copy's absence turns those nodes into skips, and the re-aim nobody ever
+    proved was in fact the thing that was never done. They only become checks once the file
+    is gone, and that delete is an owed step AFTER this round lands, so the proof cannot
+    wait for it. This node builds the condition instead: a vault whose HEAD still lists the
+    path, in which a working-tree reader would find bytes, but whose working tree does not
+    contain them. Reproducing both generations out of THAT tree is what "the figure comes
+    from the commit" means, and it is the only way to know the answer before the delete.
+
+    `git clone --no-checkout`: HEAD's tree is checked for the path (`ls-tree` below, so a
+    disk-reading reader is provably out of work rather than merely untested) and no file is
+    laid down, which is the whole condition and costs a pack copy and nothing else.
+    `--no-local` is load-bearing: the default local clone hardlinks the object pool AND
+    checks out the tree, which would hand this node the very file it is asserting the reader
+    does not need. `--single-branch` keeps the clone on the line both witness commits are
+    ancestors of — the property
+    `test_both_promotions_witness_generations_stay_addressable_in_history` asserts of the
+    real vault, re-checked here on the tree the reader is actually reading.
+
+    The second half pins the readers in text: `_witness_bytes`, `_blob_at` and the four
+    witness nodes may not contain `pytest.skip`. That is clause 1's "no node in that file
+    skips for want of the file", and it needs a static assert precisely because the
+    behavioural half cannot see it — a re-added skip changes no byte count, it changes
+    whether a future run is allowed to say nothing at all.
+    """
+    import inspect
+
+    vault = rs.vault_root()
+    clone = tmp_path / "vault-no-worktree"
+    proc = subprocess.run(["git", "clone", "--quiet", "--no-local", "--no-checkout",
+                           "--single-branch", str(vault), str(clone)],
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, f"clone of the witness vault failed: {proc.stderr[:200]}"
+
+    listed = subprocess.run(["git", "-C", str(clone), "ls-tree", "HEAD", "--",
+                             _WITNESS_REPO_PATH], capture_output=True, text=True)
+    assert listed.returncode == 0 and listed.stdout.strip(), (
+        f"the clone's HEAD does not list `{_WITNESS_REPO_PATH}`, so a working-tree reader "
+        "would have found nothing here either and this node would prove nothing about "
+        "whether the reader is reading the file")
+    assert not (clone / _WITNESS_REPO_PATH).exists(), (
+        f"the clone has a working-tree copy at {_WITNESS_REPO_PATH} despite "
+        "`--no-checkout`, so 'nothing on disk to read' is false in this tree and every "
+        "assert below is vacuous")
+
+    monkeypatch.setattr(rs, "vault_root", lambda: clone)
+
+    # The reader the witness nodes actually call, with the sweep's vault resolved to a tree
+    # holding no copy of the file. It either reproduces the witness out of history or it has
+    # nothing to reproduce them from.
+    raw = _witness_bytes(rs)
+    assert len(raw.splitlines()) == _WITNESS_ROWS and len(raw) == _WITNESS_BYTES, (
+        f"`_witness_bytes` yields {len(raw.splitlines())} rows / {len(raw):,} bytes when "
+        f"`rs.vault_root()` resolves to a vault with no working-tree copy of "
+        f"`{_WITNESS_REPO_PATH}`, against the {_WITNESS_ROWS:,} / {_WITNESS_BYTES:,} the "
+        "witness is. A reader still opening that path reports zero here, which is the false "
+        "green this node exists to catch: it would have passed every other witness node in "
+        "this file right up until the owed delete removed the file")
+
+    # The other direction: resolved to a repository that never held the path, the reader has
+    # to refuse rather than answer. Without this the control above could still be satisfied
+    # by a reader that ignores the resolved root and opens the real vault — the substitution
+    # `_witness_bytes`' own docstring warns about, a gate run certifying the live vault from
+    # a sandbox that has its own.
+    empty = tmp_path / "vault-without-the-witness"
+    empty.mkdir()
+    init = subprocess.run(["git", "init", "-q", "-b", "main", str(empty)],
+                          capture_output=True, text=True)
+    assert init.returncode == 0, init.stderr
+    monkeypatch.setattr(rs, "vault_root", lambda: empty)
+    try:
+        returned = _witness_bytes(rs)
+    except AssertionError as exc:
+        assert _WITNESS_COMMIT in str(exc), (
+            f"reading the witness out of a repository with no history refused, but not by "
+            f"name of `{_WITNESS_COMMIT}`: {str(exc)[:200]}")
+    else:
+        raise AssertionError(
+            "`_witness_bytes` returned "
+            f"{len(returned.splitlines())} rows for a vault whose object database has never "
+            f"held `{_WITNESS_REPO_PATH}`. It is not reading the vault the run resolved, so "
+            "the figures it reports certify nothing about the tree being promoted")
+
+    monkeypatch.setattr(rs, "vault_root", lambda: clone)
+    for sha, want_rows, want_bytes in ((_PRIOR_COMMIT, _PRIOR_ROWS, _PRIOR_BYTES),
+                                       (_WITNESS_COMMIT, _WITNESS_ROWS, _WITNESS_BYTES)):
+        ancestor = subprocess.run(["git", "-C", str(clone), "merge-base", "--is-ancestor",
+                                   sha, "HEAD"], capture_output=True, text=True)
+        assert ancestor.returncode == 0, (
+            f"`{sha}` is not an ancestor of the clone's HEAD, so the clone is not on the "
+            "line the witness commits live on and its bytes are not the ones being certified")
+        blob = _blob_at(rs.vault_root(), sha, _WITNESS_REPO_PATH)
+        assert len(blob.splitlines()) == want_rows, (
+            f"{len(blob.splitlines())} rows read from {sha} in a vault with no working-tree "
+            f"copy at all, against the {want_rows:,} the witness is. `_blob_at` is the only "
+            "reader these figures have now, so this is where 'history is the dated extract' "
+            "is either true or a sentence")
+        assert len(blob) == want_bytes, (
+            f"{len(blob):,} bytes read from {sha} with no file on disk, against "
+            f"{want_bytes:,}")
+
+    # Parsed, not grepped. Every one of these functions DOCUMENTS the skip it no longer
+    # contains, so a substring test on the source fails on its own prose — which is the
+    # wrong instrument anyway: what is forbidden is a call, and a call is what `ast` sees.
+    import ast
+    import textwrap
+
+    for fn in (_witness_bytes, _blob_at,
+               test_a_fold_of_every_event_name_in_the_witness_stays_neutral,
+               test_the_witness_ledger_reproduces_the_row_count_the_item_quotes,
+               test_the_witness_is_a_ledger_and_not_just_a_row_count,
+               test_both_promotions_witness_generations_stay_addressable_in_history):
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+        skipped = [n.lineno for n in ast.walk(tree)
+                   if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                   and n.func.attr == "skip" and isinstance(n.func.value, ast.Name)
+                   and n.func.value.id == "pytest"]
+        assert not skipped, (
+            f"`{fn.__name__}` calls `pytest.skip` at line(s) {skipped} again. In this file a "
+            "skip is how 'the witness is gone' has historically arrived as a green run: the "
+            "node reports nothing, the suite reports no failure, and the figure nobody "
+            "re-derived stays the figure the item quotes")
+
+    # Whole file, and not just the six functions named above: clause 1's sentence is about
+    # ANY node in this file skipping for want of the witness, and a re-added skip would most
+    # likely arrive in a node that does not read the blob directly — a helper, or a node
+    # added next round that copies the shape of an old one. What identifies those is the
+    # message, so the file is walked for a `pytest.skip` whose reason mentions the ledger or
+    # the witness. The skips this file legitimately keeps are for a vault that is away and
+    # for task #79's front matter being absent; neither reason names either.
+    module = ast.parse((Path(__file__).resolve()).read_text(encoding="utf-8"))
+    for node in ast.walk(module):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "skip" and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "pytest"):
+            continue
+        # Literal pieces of the message, f-string parts included: the skips this file has
+        # ever carried were formatted (`f"no witness ledger in this vault: {_WITNESS}"`), so
+        # reading only bare string arguments would have missed exactly the case it is for.
+        reason = " ".join(c.value for arg in node.args for c in ast.walk(arg)
+                          if isinstance(c, ast.Constant) and isinstance(c.value, str))
+        names_witness = ("promotions" in reason.lower()
+                         or "witness" in reason.lower()
+                         or _WITNESS_REPO_PATH in reason)
+        assert not names_witness, (
+            f"line {node.lineno} skips for want of the promotions witness "
+            f"({reason!r}). After the retire there is no file whose absence is anybody's "
+            "excuse: the blob at the named commit is the witness, and a node that is quiet "
+            "about it is a figure nobody re-measured")
+
+
+def test_the_store_13_paragraph_cites_the_commit_the_figures_come_from(rs):
+    """#2054 clause 3: the store-13 prose derives its figures from the commit, not the file.
+
+    The paragraph used to say "in the copy the vault commits at
+    `backlog/data/promotions.jsonl`", which after the delete is a citation to a path that
+    holds nothing — and a reader who followed it would find no bytes and no note saying the
+    numbers had moved, which is how a stale prose claim outlives the file it described. So
+    this node asks the paragraph three things: it names the commit, it names it in the form
+    that actually retrieves the bytes (`git show <sha>:<path>`), and it no longer says the
+    copy is being committed. Then the figures themselves are re-derived from that blob and
+    put against the paragraph character for character: the row count, the byte count, the
+    bytes-per-day growth, the window product and the live-file remainder. A paragraph that
+    re-points at the commit but keeps a stale number, or re-derives the number and keeps the
+    file citation, fails here rather than in the next round's diff.
+    """
+    src = (Path(__file__).resolve().parents[0] / ".." / "scripts" / "groundskeeper" /
+           "retention-sweep.py").resolve().read_text(encoding="utf-8")
+    # Sliced between the store's own heading and the next section of the block, not at the
+    # first blank line: store 13's entry is several paragraphs long, and the first blank
+    # line inside it lands before the window arithmetic this node reads.
+    start = src.index("13. ~/.local/state/lloyd-automod/promotions.jsonl")
+    end = src.index("\nAge signal:", start)
+    para = src[start:end]
+
+    assert f"`{_WITNESS_COMMIT}`" in para, (
+        "the store-13 paragraph names no witness commit, so its figures have no source a "
+        "reader can retrieve now that the working-tree copy is retired")
+    assert f"git show {_WITNESS_COMMIT}:{_WITNESS_REPO_PATH}" in para, (
+        f"the store-13 paragraph names `{_WITNESS_COMMIT}` but not the command that reads "
+        f"it: `git show {_WITNESS_COMMIT}:{_WITNESS_REPO_PATH}`. A sha with no retrieval "
+        "form is a breadcrumb, not a citation")
+    assert "the copy the vault commits" not in para, (
+        "the store-13 paragraph still describes its figures as measurements of 'the copy the "
+        "vault commits' — that copy is retired, and prose is the one surface that keeps "
+        "asserting a file exists after the code stopped reading it")
+    assert "retired" in para, (
+        "the paragraph cites a commit but never says why the file it used to name is gone, "
+        "so the next reader of `backlog/data/promotions.jsonl` has nothing to conclude")
+
+    raw = _witness_bytes(rs)
+    lines = [ln for ln in raw.splitlines() if ln.strip()]
+    rows = [json.loads(ln) for ln in lines]
+    rate = _witness_rate_b_per_day(rs, lines, rows)
+    assert len(lines) == _WITNESS_ROWS and len(raw) == _WITNESS_BYTES, (
+        "the blob this paragraph is supposed to cite no longer yields the figures pinned on "
+        f"the constants ({len(lines)} rows / {len(raw):,} bytes), so the paragraph and the "
+        "constants cannot both be current")
+    for label, figure in (("row", f"{_WITNESS_ROWS:,}"),
+                          ("byte", f"{_WITNESS_BYTES:,}"),
+                          ("growth", f"{rate:,}"),
+                          ("window product",
+                           f"{rate * rs.LEDGER_ARCHIVE_AGE_DAYS:,}")):
+        assert figure in para, (
+            f"the store-13 paragraph does not state its {label} figure as {figure}, which is "
+            f"what the blob at {_WITNESS_COMMIT} yields for it")
+    assert f"{_WITNESS_RATE_B_PER_DAY:,}" == f"{rate:,}", (
+        f"the derived growth rate is {rate:,} B/day, not the {_WITNESS_RATE_B_PER_DAY:,} the "
+        "constants and the paragraph both quote — the paragraph is being checked against a "
+        "figure that is itself stale, so fix the constant first and then this node")
+
+    # The paragraph's window arithmetic is the part that depends on the growth rate being
+    # this blob's, so the fold is run over the same bytes here: the window the prose names
+    # must still move the row count the constants carry and leave the live remainder they
+    # carry. Those two figures are not quoted in this paragraph — the fold's own node
+    # (`test_the_witness_is_a_ledger_and_not_just_a_row_count`) is where they are pinned to
+    # bytes — and the prose's `41.6% of the state.py decode-cache ceiling` clause is the
+    # reading of the remainder, so pinning the remainder here is what says that clause is
+    # still an arithmetic consequence of the named commit and not a sentence left behind.
+    as_of = max(rs._ledger_row_seconds(r) for r in rows)
+    archive, _kept = rs._archive_plan([(ln, r) for ln, r in zip(lines, rows)], as_of)
+    live_after = len(raw) - sum(len(lines[i]) + 1 for i in archive)
+    assert len(archive) == _WITNESS_ARCHIVED_ROWS, (
+        f"over the named commit the shipped {rs.LEDGER_ARCHIVE_AGE_DAYS}-day window moves "
+        f"{len(archive)} rows, not the {_WITNESS_ARCHIVED_ROWS:,} this store's whole "
+        "justification is built on")
+    assert live_after == _WITNESS_LIVE_AFTER_BYTES, (
+        f"the fold leaves {live_after:,} bytes live over the named commit, not "
+        f"{_WITNESS_LIVE_AFTER_BYTES:,}, so the ceiling percentage and the band claim in "
+        "this paragraph are about a remainder nothing produces")
 
 
 # ── #2043: the window VALUE, and the two rungs that read this ledger ─────────
