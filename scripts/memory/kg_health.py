@@ -219,6 +219,9 @@ def build_snapshot(baseline_path=None) -> dict[str, Any]:
         "aliases": {
             "count": alias_count,
             "coverage_pct": _pct(alias_count, entity_count),
+            # #2074: entry 3's collision ruling had no detector, so a collision
+            # returning would look exactly like a clean store.
+            "collisions": _alias_collision_watch(st),
         },
         # Work queue: relationship prose extracted but never promoted to an
         # edge. Measured against the fact index, so it counts the documents
@@ -233,6 +236,130 @@ def build_snapshot(baseline_path=None) -> dict[str, Any]:
             collections.Counter(categories).most_common()
         ),
     }
+
+
+#: Provenance whose collisions entry 3's ruling is about: a declaration or a
+#: write path wrote the row, not a sweep that guesses. #2074 clause 3.
+SCHEMA_ORIGIN = "schema"
+
+
+def alias_collisions(rows: list[dict], resolve, lower_map: dict[str, str]) -> dict[str, Any]:
+    """The alias-collision counts (#2074), from one read of the alias table.
+
+    Entry 3's ruling in #1234 — declaration/write path wins, oldest row wins
+    among case-variants, and `periodic memory capture` means the skill Periodic
+    Memory Capture and never the pipeline Memory Capture — had no detector, so
+    a collision returning would rot the ruling silently. Four counts, all over
+    the same population, plus the denominators they are fractions of.
+
+    Population: the `surface_lc` values the ALIASES table holds (187 of 190
+    rows on the 2026-10-02 live store), not the 13,041 keys of `all_lower()`.
+    The extra 12,854 keys are the entities self-identity leg
+    (`app/kg_store.py:993-995`), and `resolve()` answers from the alias table
+    alone by design, so `None` there is the documented answer rather than a
+    disagreement — counting them would report ~12.8k "collisions" nightly and
+    the line would be unread the way the 50% edge-type bound became unread.
+
+    Two views of each surface are compared, both obtained the way the runtime
+    obtains them: `resolve(spelling)` for every exact spelling the table holds
+    (which prefers an exact-case row and falls back to the oldest,
+    `app/kg_store.py:913-919`) against `lower_map[surface_lc]` (which takes the
+    oldest row per `surface_lc`, `app/kg_store.py:991-992`). A surface counts
+    as diverging when the named canonical differs, OR when the map names one
+    while `resolve()` answers `None` — the #1234 shape, where the cached hot
+    map routes a surface no alias row supports any more. `resolve()` reads the
+    table this population came from, so that leg can only fire when the two
+    views are generations apart; it is counted rather than assumed impossible,
+    and pinned at `test_the_none_leg_counts…`. The mirror case — `resolve()`
+    names a canonical the map has no key for — is NOT counted: the clause names
+    one direction, and an absent key has no canonical to disagree with.
+
+    Clause 3's schema restriction is reading (ii) of the two the item leaves
+    open, pinned by its own seed: a `surface_lc` counts in the schema figure if
+    ANY of its rows carries `origin='schema'`. The other reading (filter rows to
+    schema first, then group) gives 0 for that seed, and the item expects 1.
+    """
+    by_lc: dict[str, list[dict]] = collections.defaultdict(list)
+    for r in rows:
+        lc = r.get("surface_lc") or (r.get("surface") or "").lower()
+        by_lc[lc].append(r)
+
+    multi = divergence = 0
+    schema_multi = schema_divergence = 0
+    schema_surfaces = 0
+
+    for lc, group in by_lc.items():
+        touched_by_schema = any(r.get("origin") == SCHEMA_ORIGIN for r in group)
+        if touched_by_schema:
+            schema_surfaces += 1
+
+        spellings = {g["surface"] for g in group} | {lc}
+        colliding_canonicals = len({g["canonical"] for g in group}) > 1
+        named = lower_map.get(lc)
+        diverging = named is not None and any(resolve(v) != named for v in spellings)
+
+        multi += 1 if colliding_canonicals else 0
+        divergence += 1 if diverging else 0
+        if touched_by_schema:
+            schema_multi += 1 if colliding_canonicals else 0
+            schema_divergence += 1 if diverging else 0
+
+    return {
+        # denominators, from the same read: `surfaces` is what the two first
+        # counts are fractions of, `alias_rows` is what the alias table holds.
+        "alias_rows": len(rows),
+        "schema_rows": sum(1 for r in rows if r.get("origin") == SCHEMA_ORIGIN),
+        "surfaces": len(by_lc),
+        "schema_touched_surfaces": schema_surfaces,
+        "surfaces_multi_canonical": multi,
+        "resolve_all_lower_divergences": divergence,
+        "schema_surfaces_multi_canonical": schema_multi,
+        "schema_resolve_all_lower_divergences": schema_divergence,
+    }
+
+
+def _alias_collision_watch(st) -> dict[str, Any]:
+    """The same counts, read through the store's own API — the alias rows,
+    `aliases.resolve` and the cached `aliases.all_lower()` map. Nothing here
+    writes: the whole point is that a health run leaves both maps as it found
+    them (#2074 clause 5)."""
+    return alias_collisions(st.aliases.rows(), st.aliases.resolve, st.aliases.all_lower())
+
+
+def _plural(n: int, singular: str) -> str:
+    return f"{n:,} {singular}" if n == 1 else f"{n:,} {singular}s"
+
+
+def alias_collision_lines(col: dict | None) -> list[str]:
+    """The three collision counts on two lines, each carrying the denominator
+    its count is a fraction of — a bare count is how #1535's regrowth line read
+    `51 of 12027 new dirs` with nothing on the page saying what 12027 was.
+
+    The second line adds the same two counts restricted to surfaces ANY of whose
+    rows is `origin='schema'`, with the schema totals beside them, so a collision
+    a declaration or write path created is never mistaken for one a sweep or a
+    migration guessed (#2074 clause 3).
+
+    A snapshot with no `collisions` key renders nothing rather than rendering
+    zeros: the JSONs already on disk under `_pipeline/metrics/` predate this
+    check, and printing `0 of 0` for them would claim a measurement the run
+    never took."""
+    if not col:
+        return []
+    surfaces = f"of {col['surfaces']:,} distinct surface_lc"
+    rows = _plural(col["alias_rows"], "alias row")
+    schema_rows = _plural(col["schema_rows"], "origin='schema' row")
+    return [
+        f"  alias collisions         {col['surfaces_multi_canonical']:>8,}"
+        f"   surface_lc route to >1 canonical ({surfaces}, {rows} total)",
+        f"  alias resolve/all_lower  {col['resolve_all_lower_divergences']:>8,}"
+        f"   diverge, or resolve→None while the lower map names one"
+        f" ({surfaces}, {rows} total)",
+        f"  alias collisions/schema  {col['schema_surfaces_multi_canonical']:>8,}"
+        f"   and {col['schema_resolve_all_lower_divergences']:,} divergent,"
+        f" of {col['schema_touched_surfaces']:,} surface_lc touched by"
+        f" {schema_rows} ({rows} total)",
+    ]
 
 
 def _latent_relationship_entities(st) -> int:
@@ -301,6 +428,8 @@ def print_summary(s: dict[str, Any]) -> None:
           f"   (largest: {gr['largest_component']:,})")
     print(f"  alias coverage           {s['aliases']['count']:>8,}"
           f"   ({s['aliases']['coverage_pct']}%)")
+    for line in alias_collision_lines(s["aliases"].get("collisions")):
+        print(line)
     print()
     print(f"  PHASE 2 QUEUE — entities with relationship prose")
     print(f"  not yet promoted to edges {s['latent_relationship_entities']:>8,}")
