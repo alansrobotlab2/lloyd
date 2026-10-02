@@ -1,0 +1,13 @@
+# Runtime data is being written into the code tree
+
+level: error
+written: 2026-10-02T04:48:34.043345-07:00
+
+Runtime data is being written into the code tree
+
+These exist inside the tree again:
+  /home/alansrobotlab/lloyd/workers.db
+
+Something still resolves a data path off the code instead of app.paths.DATA_ROOT (/home/alansrobotlab/lloyd-data). Find the writer, move the data across, and remove the in-tree copy.
+
+If one of these is tooling or a rebuildable cache and not a writer, it belongs in KNOWN_GOOD_TOPLEVEL in agent-services/guardian/datawatch.py — adding its name there is what stops this alert; deleting the directory is not.

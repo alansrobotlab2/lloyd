@@ -34,9 +34,11 @@ import argparse
 import json
 import os
 import socket
+import stat
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -108,6 +110,121 @@ def rollback_title(current: dict | None, bad: str | None, expected: str) -> str:
 #: only readable record of the incident (#1536).
 RUNTIME_DATA_ALERT_TITLE = "Runtime data is being written into the code tree"
 
+#: The one cause sentence the stray alert may print, and the only reading of its
+#: own numbers that earns it: a stray `mtime` inside the window between this
+#: check and the previous one. Before #2057 this sentence sat in a constant body
+#: printed next to a 0-byte stub whose mtime predated the window, so the alert
+#: asserted a mechanism it had not measured — and the file it wrote is read as
+#: fact by the next session (`~/.local/state/lloyd-guardian/ALERT.md`).
+_WRITER_CLAIM = ("something on this box still resolves a data path off the code "
+                 "instead of app.paths.DATA_ROOT")
+
+
+def _stamp(ts: float) -> str:
+    """Offset-bearing local stamp for a measured time.
+
+    Never naive: a local time with no offset in this body is read as UTC by every
+    later reader, and these bytes are read by sessions as well as by people
+    (#1912, `notify._alert_file`)."""
+    return datetime.fromtimestamp(ts).astimezone().isoformat()
+
+
+def _measure_strays(tree: str, names) -> list[tuple[str, str, float | None]]:
+    """`(name, rendered, mtime)` per named stray, one row per name, in order.
+
+    `lstat`, not `stat`, for two reasons, both of them the "the number, not a
+    story about the number" half of #2057 clause 1: `stray_in_tree` reports a path
+    on `lexists`, so a dangling symlink is a stray that `stat` would answer
+    `ENOENT` for and drop, and a symlink's `st_size` is the length of its target
+    path — printed bare, 87 bytes of link reads like 87 bytes of data. So the link
+    is named as one and its target is printed.
+
+    One name's failure never decides another's: the row list is always as long as
+    `names`, and a path that vanished between the check and this call is printed as
+    unmeasurable rather than omitted. `mtime` is `None` exactly when the render says
+    `unmeasurable`, which is what keeps the writer claim off an unmeasured path
+    (#2057 clause 4)."""
+    rows: list[tuple[str, str, float | None]] = []
+    for name in names:
+        path = os.path.join(tree, name)
+        try:
+            st = os.lstat(path)
+        except OSError as exc:
+            rows.append((name, f"unmeasurable (lstat: "
+                               f"{exc.strerror or exc.__class__.__name__})", None))
+            continue
+        link = (f", symlink → {os.readlink(path)}"
+                if stat.S_ISLNK(st.st_mode) else "")
+        rows.append((name,
+                     f"{st.st_size} bytes, mtime {_stamp(st.st_mtime)}{link}",
+                     st.st_mtime))
+    return rows
+
+
+def _stray_alert_body(tree: str, names, now: float,
+                      prev_check: float | None) -> str:
+    """The stray alert's whole body, built from nothing but this check's numbers.
+
+    Three sections, each derived from the same `_measure_strays` rows the check
+    took (#2057): the named paths with their measured size and mtime; a cause
+    sentence only if a measured mtime falls inside the window this check actually
+    observed; and the remedy routing, which refuses to offer a retained runtime
+    store for deletion or for the exclusion list. The deletion instruction and the
+    `KNOWN_GOOD_TOPLEVEL` offer used to be unconditional text, and for a retained
+    store both are wrong: the first orders someone to delete a store, the second
+    asks a name-list to close a property the check holds over the open set of the
+    tree's top level — the standing 2026-09-20 rule.
+    """
+    rows = _measure_strays(tree, names)
+    window = (f"({_stamp(prev_check)} → {_stamp(now)})"
+              if prev_check is not None else None)
+    written = [name for name, _, mtime in rows
+               if prev_check is not None and mtime is not None
+               and prev_check < mtime <= now]
+    if written:
+        cause = (f"Written inside the window this check observed {window}: "
+                 f"{', '.join(written)}. That mtime is this check's own "
+                 f"measurement, so the cause it carries is measured: "
+                 f"{_WRITER_CLAIM} ({policy.DATA_ROOT}).")
+    elif prev_check is None:
+        cause = ("This check does not identify a writer: it is the first stray "
+                 "check since this guardian started, so no window bounds when "
+                 "the mtimes above were written.")
+    else:
+        cause = (f"This check does not identify a writer: no mtime above falls "
+                 f"inside the window it observed {window}, so those bytes say "
+                 f"nothing about what is writing now.")
+
+    retained = [n for n in names if n in datawatch.RUNTIME_NAMES]
+    free = [n for n in names if n not in datawatch.RUNTIME_NAMES]
+    paras = ["These exist inside the tree again:\n"
+             + "\n".join(f"  {os.path.join(tree, name)} — {rendered}"
+                         for name, rendered, _ in rows),
+             cause]
+    if free:
+        # The widened check (#1541) reports anything at the top of the tree git
+        # does not track, so a name here may be tooling or a rebuildable cache
+        # rather than a writer; the residual of an open-set check is a human
+        # deciding which side of the list it is on, and say so where they read it
+        # or the cheapest answer to a new `.mypy_cache` is to switch the check off.
+        # Named individually and *only* the non-retained ones: a retained path must
+        # never appear in the same breath as either offer (#2057 clause 3).
+        paras.append(f"Not on the watch list: {', '.join(free)}. If it is tooling "
+                     "or a rebuildable cache and not a writer, it belongs in "
+                     "KNOWN_GOOD_TOPLEVEL in agent-services/guardian/datawatch.py "
+                     "— adding its name there is what stops this alert; deleting "
+                     "the directory is not.")
+    if retained:
+        paras.append(f"Retained ({', '.join(retained)}): already on this check's "
+                     "own watch list (`RUNTIME_NAMES`, "
+                     "agent-services/guardian/datawatch.py), so neither response "
+                     "applies to it: it is not offered for deletion, and it is "
+                     "not offered for the exclusion list either — no name-list "
+                     "closes a check that enumerates the tree's top level, which "
+                     "is an open set. The size and mtime above are where a hunt "
+                     "for the writer starts.")
+    return "\n\n".join(paras)
+
 
 class Guardian:
     def __init__(self, args):
@@ -133,6 +250,10 @@ class Guardian:
         self.vault = vaultwatch.VaultWatch(policy.VAULT_ROOT, self.gdir)
         self.data = datawatch.DataWatch(policy.DATA_ROOT, self.gdir)
         self._strays_checked_at = 0.0
+        # When the stray check last ran, which is the only window the stray alert
+        # is allowed to cite as evidence of a live writer. `None` until it has run
+        # twice, and the alert says "first check" rather than guessing (#2057).
+        self._strays_prev_check_at: float | None = None
         self._snapshots_checked_at = 0.0
         self.mem = memwatch.MemWatch(self.gdir, memwatch.unit_cgroup(policy.SUPERVISORD_UNIT))
         self.tmp = tmpwatch.TmpWatch()
@@ -978,12 +1099,21 @@ class Guardian:
         Split out of `check_data` so the incident's two edges are testable without
         booting a supervisor, a probe set and a rollback history — `check_data`
         calls this unmodified on the same tick it always did (#1536).
+
+        The body is built here, from an `lstat` taken on this same call, and the
+        window it may cite runs from the previous call of *this* method — recorded
+        on the way in, so an alert can never print an interval it did not observe
+        (#2057 clauses 1 and 4). Read with `getattr` because the tests build a
+        `Guardian` with `__new__`; a first check has no previous one and says so
+        rather than inventing a bound.
         """
         try:
             strays = datawatch.stray_in_tree(policy.REPO)
         except Exception as exc:  # noqa: BLE001
             log(f"stray check failed (continuing): {exc}")
             strays = []
+        prev_check = getattr(self, "_strays_prev_check_at", None)
+        self._strays_prev_check_at = now
         if strays and self.data.armed:
             # `coalesce` is what keeps one incident to one section on the daily
             # note. This check runs every STRAY_CHECK_SECONDS (3600 s) and the
@@ -993,24 +1123,13 @@ class Guardian:
             # and none ever retracted. Guardian's own repeat guard cannot help:
             # ALERT_REPEAT_SECONDS is 900 s and 3600 > 900 always, so every
             # finding passed straight through (#1536).
+            # Every sentence below is `_stray_alert_body`'s, from the `lstat` this
+            # call takes — including the cause, which used to be a remembered
+            # mechanism rather than a reading of these numbers, and the two offers,
+            # which used to be unconditional and were both wrong for a retained
+            # store (#2057).
             self.alert("error", RUNTIME_DATA_ALERT_TITLE,
-                       "These exist inside the tree again:\n  "
-                       + "\n  ".join(f"{policy.REPO}/{n}" for n in strays)
-                       + f"\n\nSomething still resolves a data path off the code "
-                       f"instead of app.paths.DATA_ROOT ({policy.DATA_ROOT}). Find the "
-                       "writer, move the data across, and remove the in-tree copy."
-                       # The widened check (#1541) reports anything at the top of
-                       # the tree git does not track, so one of these names may be
-                       # tooling or a rebuildable cache rather than a writer, and
-                       # "remove the in-tree copy" is the wrong order for it. The
-                       # residual of an open-set check is a human deciding which
-                       # side of the list a new name is on; say so where they read
-                       # it, or the honest response to a new `.mypy_cache` is to
-                       # switch the check off.
-                       + "\n\nIf one of these is tooling or a rebuildable cache and "
-                       "not a writer, it belongs in KNOWN_GOOD_TOPLEVEL in "
-                       "agent-services/guardian/datawatch.py — adding its name there "
-                       "is what stops this alert; deleting the directory is not.",
+                       _stray_alert_body(policy.REPO, strays, now, prev_check),
                        coalesce=True)
         elif not strays:
             # The condition cleared, so the retraction goes on the SAME surface

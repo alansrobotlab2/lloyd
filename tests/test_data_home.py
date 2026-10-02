@@ -1439,3 +1439,20 @@ def test_the_cutover_fleet_stop_survives_a_unit_that_is_not_loaded(tmp_path):
     assert control.returncode != 0, (
         "the stop survives a not-loaded unit even with the tolerance stripped, so "
         "nothing here is pinning the tolerance")
+
+
+def test_a_fresh_guardian_has_no_previous_stray_check(guardian):
+    """#2057: a real `Guardian` starts with no previous stray check to cite.
+
+    `guardian.py`'s stray alert may only call something a live writer when a measured
+    mtime falls between the check that raised it and the one before, so the value that
+    decides the alert's whole cause sentence has to start empty — `None`, not `0.0`,
+    which would put every file ever written inside the first window. `__init__` is the
+    only thing that puts it there, and this is the node that says so; every other
+    stray node builds the object with `__new__`, which is why absence of the attribute
+    could stand in for it but never prove it.
+    """
+    g, _root, _counters = guardian
+    assert g._strays_prev_check_at is None, (
+        "a fresh Guardian believes a stray check has already run, so its first alert "
+        f"would cite a window: {g._strays_prev_check_at!r}")

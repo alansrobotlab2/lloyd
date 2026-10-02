@@ -2301,3 +2301,337 @@ def test_no_board_reply_lacking_a_positive_integer_id_reads_as_delivered(tmp_pat
     reply either.
     """
     assert _board_verdict(tmp_path, reply) is False
+
+
+# ---------------------------------------------------------------------------
+# #2057 — the stray alert may print only what this check measured.
+#
+# `~/.local/state/lloyd-guardian/ALERT.md` (642 B at triage, mtime 2026-10-02
+# 03:48) asserted "Something still resolves a data path off the code" and then
+# ordered two actions for a retained `workers.db`: delete the in-tree copy, or add
+# the name to `KNOWN_GOOD_TOPLEVEL`. Neither sentence had a number behind it — the
+# whole body was one constant string (`guardian.py:996-1014`), and `stray_in_tree`
+# returns bare names — so the alert stated a cause it had not measured and offered
+# the one remedy the standing class rule calls wrong for a retained store. Its cost
+# was multiplied by the same text: `grep -c 'remove the in-tree copy'` per daily
+# note gave 3 on 2026-10-02, 8 on 2026-09-30, 3 on 2026-09-29, zero on the others.
+#
+# Every node below judges the alert body as the bytes that reach the two surfaces a
+# reader meets — the daily-note section and ALERT.md — over a scratch tree the test
+# owns, because a measurement quoted from the live tree would be a second claim
+# rather than the check's own number.
+# ---------------------------------------------------------------------------
+
+_STRAY_EPOCH = 1_700_000_000.0   # the clock `_stray_incident` starts on
+
+
+def _measured_stray_incident(tmp_path, monkeypatch, strays, files):
+    """`_stray_incident` with `policy.REPO` moved onto a scratch tree.
+
+    `files` maps a name to `(size_bytes, mtime)` and is written before the check
+    runs, so the numbers the alert prints are this test's own constants. A name in
+    `strays` with no entry is a path `lstat` cannot answer: clause 1 says it is
+    printed as unmeasurable, so it belongs in the set and not on the filesystem.
+    """
+    import os
+
+    import guardian as gmod
+
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    for name, (size, mtime) in files.items():
+        path = tree / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"\0" * size)
+        os.utime(path, (mtime, mtime))
+    monkeypatch.setattr(gmod.policy, "REPO", str(tree))
+    g, note, tick, clears = _stray_incident(tmp_path, monkeypatch, strays)
+    return g, note, tick, clears, tree
+
+
+def _alert_md(g) -> str:
+    """ALERT.md as the next process will read it.
+
+    The acceptance check is stated against that file, and `Notifier._alert_file`
+    writes it above the `external` gate, so a body that only reached the daily note
+    would pass three nodes here and still leave the live artefact stale."""
+    return (g.notifier.state_dir / "ALERT.md").read_text(encoding="utf-8")
+
+
+def test_the_stray_alert_prints_the_size_and_mtime_it_measured(tmp_path, monkeypatch):
+    """#2057 clause 1: every named path carries the check's own `lstat` numbers.
+
+    Three shapes in one set. A measurable file, 5 bytes at a mtime this test wrote,
+    so the printed figure is a constant and not a re-read of whatever the tree
+    happens to hold. A name the filesystem has no entry for — the race the check can
+    actually lose, a stray deleted between `stray_in_tree` and the stat — which has
+    to be printed as unmeasurable and stay on the list, not vanish from it. And a
+    dangling symlink: `stray_in_tree` reports on `lexists` so it is a stray, `lstat`
+    answers for it when `stat` would say `ENOENT`, and its `st_size` is the length of
+    its target path, so the row has to name it as a link or "87 bytes" reads as 87
+    bytes of data — a number that needs a story is the thing this item is about.
+
+    The stamp carries a UTC offset, because a naive local time here is read as UTC by
+    the next reader (#1912). The rows are also read back from `_measure_strays`
+    itself, which is where "mtime is None exactly when the render says unmeasurable"
+    lives — the fact the writer claim two nodes down depends on.
+    """
+    from datetime import datetime
+
+    import guardian as gmod
+
+    mtime = 1_760_000_000
+    g, note, tick, clears, tree = _measured_stray_incident(
+        tmp_path, monkeypatch, ["workers.db", "gone.db", "dangling.db"],
+        {"workers.db": (5, mtime)})
+    (tree / "dangling.db").symlink_to(tree / "not-there")
+    tick()
+
+    stamp = datetime.fromtimestamp(mtime).astimezone().isoformat()
+    secs = _sections(note, gmod.RUNTIME_DATA_ALERT_TITLE)
+    assert len(secs) == 1, secs
+    assert f"{tree}/workers.db — 5 bytes, mtime {stamp}" in secs[0], secs[0]
+    printed_row = next(ln for ln in secs[0].splitlines() if "workers.db —" in ln)
+    assert re.search(r"mtime \d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?[+-]\d\d:\d\d$",
+                     printed_row), (
+        "the offset the alert prints is not the machine's, or is naive — a naive "
+        f"local time here is read as UTC by the next reader (#1912): {printed_row}")
+    assert f"{tree}/gone.db — unmeasurable" in secs[0], (
+        "a path the stat cannot answer was dropped from the list instead of "
+        f"printed as unmeasurable:\n{secs[0]}")
+    assert f"{tree}/dangling.db — unmeasurable" not in secs[0], secs[0]
+    assert f"symlink → {tree / 'not-there'}" in secs[0], (
+        f"a symlink's size is its target path's length; the row does not say so:\n"
+        f"{secs[0]}")
+    assert f"workers.db — 5 bytes, mtime {stamp}" in _alert_md(g), (
+        "the file the next process reads has no measured number in it")
+
+    rows = gmod._measure_strays(str(tree), ["workers.db", "gone.db", "dangling.db"])
+    assert [r[0] for r in rows] == ["workers.db", "gone.db", "dangling.db"], rows
+    assert [r[2] is None for r in rows] == [False, True, False], rows
+    assert rows[0][2] == mtime and rows[0][1].startswith("5 bytes"), rows
+    assert rows[1][1].startswith("unmeasurable"), rows
+
+
+def test_a_retained_stray_alert_offers_neither_deletion_nor_the_exclusion_list(
+        tmp_path, monkeypatch):
+    """#2057 clause 2: for a `RUNTIME_NAMES` member both offers are withheld.
+
+    `workers.db` is a retained store (`datawatch.py:67`), so "remove the in-tree
+    copy" orders someone to delete a store — and 0 bytes made it look deletable,
+    which is exactly the response the standing class rule exists to stop — while
+    the `KNOWN_GOOD_TOPLEVEL` offer asks a name-list to close a property the check
+    holds over the open set of the tree's top level. In their place the body has to
+    say what the name is: retained, already on the watch list, open set.
+    """
+    import guardian as gmod
+
+    assert "workers.db" in gmod.datawatch.RUNTIME_NAMES, "the fixture's premise"
+    g, note, tick, clears, tree = _measured_stray_incident(
+        tmp_path, monkeypatch, ["workers.db"], {"workers.db": (0, 1_760_000_000)})
+    tick()
+
+    secs = _sections(note, gmod.RUNTIME_DATA_ALERT_TITLE)
+    assert len(secs) == 1, secs
+    for text in (secs[0], _alert_md(g)):
+        assert "remove the in-tree copy" not in text, text
+        assert "KNOWN_GOOD_TOPLEVEL" not in text, text
+    assert "Retained (workers.db)" in secs[0], secs[0]
+    assert "watch list" in secs[0] and "RUNTIME_NAMES" in secs[0], secs[0]
+    assert "not offered for deletion" in secs[0], secs[0]
+    assert "no name-list closes" in secs[0], secs[0]
+
+
+def test_the_exclusion_list_offer_names_only_the_non_retained_paths(
+        tmp_path, monkeypatch):
+    """#2057 clause 3: a mixed set routes the tooling half without touching the store.
+
+    The #1541 routing sentence has to survive — with no place to classify a new
+    `.mypy_cache` the cheapest answer to an hourly alarm is to switch the check off
+    — but it may name only the non-retained path. Paragraph-scoped, because the
+    whole body legitimately mentions both names: the offer and the retained
+    warning must never share a paragraph, which is what makes "you could delete or
+    allowlist this one" unreadable for a store.
+    """
+    import guardian as gmod
+
+    g, note, tick, clears, tree = _measured_stray_incident(
+        tmp_path, monkeypatch, ["workers.db", "runs"],
+        {"workers.db": (0, 1_760_000_000)})
+    tick()
+
+    secs = _sections(note, gmod.RUNTIME_DATA_ALERT_TITLE)
+    assert len(secs) == 1, secs
+    paras = secs[0].split("\n\n")
+    offered = [p for p in paras if "KNOWN_GOOD_TOPLEVEL" in p]
+    assert len(offered) == 1, f"the offer appears {len(offered)} times:\n{secs[0]}"
+    assert "runs" in offered[0], offered[0]
+    assert "workers.db" not in offered[0], (
+        f"a retained store is offered for the exclusion list:\n{offered[0]}")
+    assert "remove the in-tree copy" not in secs[0], secs[0]
+    retained = [p for p in paras if p.startswith("Retained (workers.db)")]
+    assert len(retained) == 1, secs[0]
+    assert "KNOWN_GOOD_TOPLEVEL" not in retained[0], retained[0]
+    assert f"{tree}/runs — unmeasurable" in secs[0], secs[0]
+
+
+def test_the_writer_claim_appears_only_on_an_mtime_inside_the_observed_window(
+        tmp_path, monkeypatch):
+    """#2057 clause 4, the only reading that carries the cause.
+
+    The stray is written 60 s before this check, and the previous check ran one
+    interval earlier, so the mtime falls inside a window the guardian itself
+    observed: this is the one case in which "something still resolves a data path
+    off the code" is a measurement rather than a memory. The window's end is the
+    clock reading this node derives from `_stray_incident`'s own arithmetic, and
+    asserting it appears in the body is also what proves the alert printed the
+    `now` the check was handed rather than a timestamp of its own.
+    """
+    import guardian as gmod
+
+    now = _STRAY_EPOCH + gmod.policy.STRAY_CHECK_SECONDS
+    g, note, tick, clears, tree = _measured_stray_incident(
+        tmp_path, monkeypatch, ["workers.db"],
+        {"workers.db": (0, now - 60.0)})
+    g._strays_prev_check_at = now - gmod.policy.STRAY_CHECK_SECONDS
+    tick()
+
+    secs = _sections(note, gmod.RUNTIME_DATA_ALERT_TITLE)
+    assert len(secs) == 1, secs
+    assert gmod._stamp(now) in secs[0], (
+        f"the alert did not print the window it was given "
+        f"(expected end {gmod._stamp(now)}):\n{secs[0]}")
+    assert "still resolves a data path off the code" in secs[0], secs[0]
+    assert "Written inside the window this check observed" in secs[0], secs[0]
+
+
+def test_an_older_mtime_prints_the_window_and_says_the_writer_is_not_identified(
+        tmp_path, monkeypatch):
+    """#2057 clause 4, the case the live incident is actually in.
+
+    `~/lloyd/workers.db` was 0 bytes with mtime 2026-10-02 01:01:36 against an alert
+    that fired at 03:48 — outside any window an hourly check could have watched it
+    happen. So the body prints both window bounds and the size and mtime that
+    exclude them, and states plainly that this check did not identify a writer: the
+    triage recorded that `paths.WORKERS_DB` refutes "move the data across", while a
+    post-cutover mtime still leaves the writer hypothesis open, and neither
+    conclusion is the alert's to draw from a number it did not watch change.
+    """
+    import guardian as gmod
+
+    now = _STRAY_EPOCH + gmod.policy.STRAY_CHECK_SECONDS
+    prev = now - gmod.policy.STRAY_CHECK_SECONDS
+    g, note, tick, clears, tree = _measured_stray_incident(
+        tmp_path, monkeypatch, ["workers.db"],
+        {"workers.db": (0, now - 7200.0)})
+    g._strays_prev_check_at = prev
+    tick()
+
+    secs = _sections(note, gmod.RUNTIME_DATA_ALERT_TITLE)
+    assert len(secs) == 1, secs
+    assert "still resolves a data path off the code" not in secs[0], secs[0]
+    assert "does not identify a writer" in secs[0], secs[0]
+    assert gmod._stamp(prev) in secs[0], (
+        "the window's start is not printed, so the reader cannot see the exclusion")
+    assert gmod._stamp(now) in secs[0], secs[0]
+    assert "0 bytes" in secs[0], secs[0]
+
+
+def test_the_first_stray_check_has_no_window_and_claims_no_writer(
+        tmp_path, monkeypatch):
+    """#2057 clause 4, the boundary case: a first check has no previous one.
+
+    With no earlier reading there is no interval to fall inside, so the alert says
+    it is the first check and prints no cause. The alternative — borrowing the
+    process start or the file's own age as a window — would be the same invented
+    mechanism this item exists to remove, and would fire on the very first hourly
+    check of every guardian restart.
+    """
+    import guardian as gmod
+
+    g, note, tick, clears, tree = _measured_stray_incident(
+        tmp_path, monkeypatch, ["workers.db"],
+        {"workers.db": (0, _STRAY_EPOCH + 3_000_000_000.0)})
+    # The state a real `Guardian.__init__` leaves behind — `None`, pinned on a real
+    # construction by tests/test_data_home.py::test_a_fresh_guardian_has_no_previous_stray_check.
+    # Set here rather than left absent so this node exercises production's value and
+    # not the fact that `__new__` skipped the initialiser.
+    g._strays_prev_check_at = None
+    tick()
+
+    secs = _sections(note, gmod.RUNTIME_DATA_ALERT_TITLE)
+    assert len(secs) == 1, secs
+    assert "still resolves a data path off the code" not in secs[0], secs[0]
+    assert "first stray check" in secs[0], secs[0]
+    # The premise above (`not hasattr`) is why this node is the no-window arm: after
+    # one call the reading exists, and the next check would have a window.
+    assert g._strays_prev_check_at == _STRAY_EPOCH + gmod.policy.STRAY_CHECK_SECONDS, (
+        "the check did not record its own reading, so the next one has no window")
+
+
+def test_the_committed_alert_witness_carries_the_defect_and_the_new_body_carries_a_number(
+        tmp_path, monkeypatch):
+    """#2057 clause 5: the alert's own bytes are the witness, before and after.
+
+    `tests/fixtures/guardian/2057-stray-alert.sample` is
+    `~/.local/state/lloyd-guardian/ALERT.md` copied byte for byte — 642 bytes, which
+    is the figure the item and its triage both quote, so this node re-derives a quoted
+    number from committed bytes rather than from a pointer into a live store. (The
+    vault path the clause names, `backlog/data/workers.db`, is a separate tree no
+    commit in this repo can contain, and the bytes already at it are #1949's
+    schema-only witness, 126,976 B of mtime 2026-09-30 23:27, whose
+    `count(*) from sqlite_master` is 12; overwriting that with the 9.2 MB live DB to
+    re-derive a 19 this item never quotes would retire another item's evidence, so the
+    vault copy is recorded as owed instead.)
+
+    The stray that artefact names was measured by the check that raised it, and that
+    is the input rebuilt here:
+
+        $ stat -c '%n %s bytes mtime=%y' /home/alansrobotlab/lloyd/workers.db
+        /home/alansrobotlab/lloyd/workers.db 0 bytes mtime=2026-10-02 01:01:36.605042322 -0700
+
+    So the file is created 0 bytes with that exact mtime, and the body rendered for it
+    is graded against the witness beside it: the old bytes carry both wrong offers and
+    no measurement at all, the new ones print the size and mtime, withhold both
+    offers, and — 01:01 against a 03:48 alert, an hour's interval apart — say the
+    writer is not identified. The incident's own numbers, not synthetic ones.
+    """
+    import os
+    from datetime import datetime
+
+    import guardian as gmod
+
+    witness = (Path(__file__).resolve().parent
+               / "fixtures" / "guardian" / "2057-stray-alert.sample").read_bytes()
+    assert len(witness) == 642, (
+        f"the committed witness is no longer the 642 B ALERT.md the item quotes: "
+        f"{len(witness)} B")
+    text = witness.decode("utf-8")
+    assert "/home/alansrobotlab/lloyd/workers.db" in text, text
+    assert "remove the in-tree copy" in text, "the witness is not the pre-fix artefact"
+    assert "KNOWN_GOOD_TOPLEVEL" in text, "the witness is not the pre-fix artefact"
+    assert "still resolves a data path off the code instead of" in text, text
+    assert "bytes, mtime" not in text, (
+        "the witness already prints a measurement, so it cannot pin the defect")
+
+    when = datetime.fromisoformat("2026-10-02 01:01:36.605042-07:00").timestamp()
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "workers.db").write_bytes(b"")
+    os.utime(tree / "workers.db", (when, when))
+    # The incident's own two stamps, both readable in the witness above: the stub's
+    # mtime is 01:01:36 and the body's `written:` line is 04:48:34, 13,618 s apart, so
+    # `now` renders 04:48:34 and the previous reading one `STRAY_CHECK_SECONDS`
+    # earlier renders 03:48:34 — the hour the triage recorded the file at. The
+    # 01:01:36 mtime is 2h47m below that window's start, which is why this body is the
+    # writer-not-identified one.
+    now = when + 13618.0
+    body = gmod._stray_alert_body(str(tree), ["workers.db"], now,
+                                  now - gmod.policy.STRAY_CHECK_SECONDS)
+    assert "03:48:34" in body and "04:48:34" in body, (
+        f"the window printed is not the incident's two stamps: {body}")
+    assert "workers.db — 0 bytes, mtime 2026-10-02T01:01:36" in body, body
+    for phrase in ("remove the in-tree copy", "KNOWN_GOOD_TOPLEVEL",
+                   "still resolves a data path off the code"):
+        assert phrase not in body, f"{phrase} survived into the new body:\n{body}"
+    assert "does not identify a writer" in body, body
