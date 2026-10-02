@@ -52,6 +52,7 @@ from intel_pipeline import vault_writer as vw_mod  # noqa: E402
 from intel_pipeline.models import FeedItem, ScoredItem  # noqa: E402
 from intel_pipeline.scanners import github_scanner as gh_mod  # noqa: E402
 from intel_pipeline.scanners import youtube_scanner as yt_mod  # noqa: E402
+from tests._live_data import require_live_data  # noqa: E402
 
 # Keyword fallback for a topic at weight 0.9: int(round(0.9 * 10)). Tests name
 # this number so "the model was consulted" and "the model was ignored" cannot
@@ -2853,3 +2854,504 @@ def test_the_drop_list_folds_past_twenty_and_is_absent_when_nothing_dropped(
     out = capsys.readouterr().out
     assert "dropped" not in out, out
     assert "Stage 1" not in out, out
+
+
+# --- Backlog #2081: the call budget is allocated, not spent in arrival order ----
+#
+# `stage2_score` granted its `max_llm_calls` to whoever stood first in the caller's
+# list, and `run_scoring_pipeline` handed it the stage-1 survivors in the order the
+# day's raw file holds them: `state.save_raw_items` opens it `"a"` (state.py:77), so
+# each scan pass of the day appends its own block — that pass's GitHub rows in
+# `github-repos.yml` order, then its videos in feed order. Which survivor went
+# ungraded was therefore a positional property of two config files and of the clock.
+#
+# The first day the cap bound is the day that cost something. Measured over
+# `intel-2026-10-02.jsonl` (42 survivors, `LLM_MAX_CALLS = 40`, in four
+# `discovered_at` minute-stamps at 05:02, 13:10, 21:12 and 21:13Z): the two items
+# refused were the LAST TWO ROWS of the day file — both YouTube videos, each
+# still carrying the keyword fallback's relevance 10 — so both headlined the run's
+# own `=== Top Results ===` block as `[URGENT] 10/10` while the writer was refusing
+# them. Meanwhile 21 of the 40 grades the budget did buy came in below
+# `vault_writer.RELEVANCE_FLOOR = 4` and wrote nothing: 20 of the 33 graded GitHub
+# items, against 1 of the 7 graded videos. Survivors had also doubled in ten days
+# (21, 16, 25, 21, 26, 21, 22, 31, 31, 42 over 2026-09-23…10-02), so the cap was
+# going to bind more often, not less.
+#
+# The item's own proposed key — order by `keyword_score` — is a measured no-op and
+# is deliberately NOT implemented: `keyword_score` is `max(topic weight)` and every
+# one of those 42 survivors scores exactly 1.0 (no topic in `interests.md` sets
+# `**Weight:**`, and weights are Alan's call, ruled 2026-09-27 on #1380), so sorting
+# by it refuses the same two videos. What discriminates on that day is the feed
+# source, which is already on `FeedItem.source` and needs no model call to read.
+#
+# Untouched by every test below: #1380's rule that a `call_cap` item is never
+# written. Ordering changes who is asked, never what an ungraded item may do.
+
+SURVIVORS_2026_10_02 = (REPO_ROOT / "tests" / "fixtures" / "intel_pipeline"
+                        / "intel_survivors_2026-10-02.jsonl")
+
+# The keyword vocabulary that day admitted them, reduced to the 15 phrases that
+# matched at least one row. See `_survivor_profile` for why it is bundled.
+SURVIVOR_PROFILE_2026_10_02 = (REPO_ROOT / "tests" / "fixtures" / "intel_pipeline"
+                               / "interests_2026-10-02.md")
+
+# The two videos the 2026-10-02 run refused, by their YouTube video ids: the day's
+# two headlining items, both absent from `feeds/vault-written.json`.
+CAP_REFUSED_VIDEO_IDS = ("pAnLpiAG6Es", "50IgNjRtwNE")
+
+# What #2081 quotes as that day's scoring report, restated here as the number the
+# repo pins. `vault_writer.RELEVANCE_FLOOR` is 4, and the histogram is over the 40
+# model grades only. The fixture's `report_as_run` holds the same object read off the
+# committed day witness; clause 5's two nodes are what tie these literals to it.
+DAY_REPORT_AS_RUN = {
+    "grade_source": {"model": 40, "call_cap": 2},
+    "graded_relevance_histogram": {"1": 12, "2": 9, "4": 1, "6": 4, "8": 11,
+                                   "9": 1, "10": 2},
+    "below_relevance_floor_4": 21,
+    "relevance_floor": 4,
+    "call_cap_ids": ["youtube:UCLKPca3kwwd-B59HNr-_lvA:pAnLpiAG6Es",
+                     "youtube:UCNA9ph14moX5Ywxk9Y1qEJA:50IgNjRtwNE"],
+    "call_cap_relevance": [10],
+}
+
+# The day witness itself, in the vault repo — the surface the item's numbers were
+# read from, and the thing clause 5 asks to be committed rather than re-derived from
+# a runtime store that keeps no history.
+VAULT_WITNESS_2026_10_02 = (Path.home() / "obsidian" / "backlog" / "data"
+                            / "intel-2026-10-02.jsonl")
+
+# A profile whose single topic carries an explicit weight of 1.0, so an item that
+# matches it scores `keyword_score` 1.0 — the value every 2026-10-02 survivor
+# scored. Clause 3 needs two survivors that tie on that number and differ only in
+# source, which this profile makes expressible without editing `interests.md`.
+TIE_WEIGHT_PROFILE_MD = """---
+title: Interests
+---
+# Interests
+
+## Inference
+**Weight:** 1.0
+vllm, speculative decoding
+"""
+
+
+def _survivor_fixture():
+    """Header record first, then one FeedItem per line — see the fixture's own note."""
+    lines = SURVIVORS_2026_10_02.read_text().splitlines()
+    header = json.loads(lines[0])
+    items = [FeedItem.from_dict(json.loads(l)) for l in lines[1:] if l.strip()]
+    return header, items
+
+
+def _survivor_profile(tmp_path):
+    """The day's own keyword vocabulary, through the real loader.
+
+    Bundled instead of read live because the gate's `tests` rung deselects
+    `live_vault` tests — interests.md is under a person's pen between rounds, and a
+    replay of one frozen day must not move with it. The file is that day's live
+    topics reduced to the keywords that matched at least one fixture row, and it
+    declares no `**Weight:**` because the live file declares none: the loader's 1.0
+    default is what makes every one of the 42 rows score `keyword_score` 1.0.
+    """
+    (tmp_path / "obsidian" / "interests.md").write_text(
+        SURVIVOR_PROFILE_2026_10_02.read_text())
+    return profile_mod.load_profile()
+
+
+def _require_replayable_day(items, profile) -> None:
+    """Precondition of the day replay: raise if the fixture is no longer that day.
+
+    These are premises the replay consumes, not claims about the code under test, so
+    they live here rather than as assertions inside a clause test — a fixture that
+    drifted must report itself as the broken thing instead of showing up as a
+    suspicious pass or an unexplained failure. Two premises, both measured on
+    2026-10-02:
+
+    * all 42 survivors are stage-1 eligible, so 42 items press on a 40-call budget
+      and the cap actually binds;
+    * `keyword_score` is degenerate over them (every survivor scores the same),
+      which is why source leads the allocation key. Should Alan re-scale the interest
+      weights (#1380, ruled 2026-09-27), keyword score starts ordering survivors and
+      this fixture stops being the discriminating case.
+    """
+    if len(items) != 42:
+        raise AssertionError(f"fixture holds {len(items)} rows, not the day's 42")
+    if len(scoring_mod.stage1_filter(items, profile)) != 42:
+        raise AssertionError(
+            "the bundled vocabulary no longer admits the day it was cut from, so "
+            f"only {len(scoring_mod.stage1_filter(items, profile))} survivors press "
+            "on a 40-call budget and the cap may not bind")
+    scores = {profile_mod.keyword_score(f"{i.title} {i.summary}", profile)
+              for i in items}
+    if len(scores) != 1:
+        raise AssertionError(
+            f"keyword_score now discriminates over this fixture ({sorted(scores)}), "
+            "so it no longer pins the case source-first allocation was chosen for — "
+            "re-read #2081 clause 3 before trusting a pass here")
+
+
+def test_the_call_budget_is_spent_by_feed_source_not_arrival_order(redirect_paths):
+    """Clause 1: 5 GitHub + 3 YouTube eligible survivors, a 3-call budget.
+
+    The day's shape in miniature: GitHub concatenated first, videos last — which is
+    exactly the order that made 2026-10-02 refuse both of its videos. Pre-fix the
+    three calls went to `gh0..gh2` and every video came back `call_cap`; now the
+    budget is allocated by the documented source-first key, so all three videos are
+    asked, exactly 3 calls are made, and the 5 GitHub commits are what overflow.
+    """
+    profile = _profile(redirect_paths)
+    items = ([_item(f"gh{i}", source="github", title="vllm speculative decoding",
+                    summary="vllm") for i in range(5)]
+             + [_item(f"yt{i}", source="youtube", title="vllm mixture of experts",
+                      summary="vllm") for i in range(3)])
+    llm = RecordingLLM(relevance=6)
+
+    scored = scoring_mod.stage2_score(items, profile, llm_call=llm, max_llm_calls=3)
+
+    assert scoring_mod.stage2_score.last_llm_calls == 3, (
+        f"the budget is not what decided this: "
+        f"{scoring_mod.stage2_score.last_llm_calls} calls made")
+    assert [s.grade_source for s in scored if s.source == "youtube"] == \
+        ["model", "model", "model"], (
+        "a YouTube item came back unasked: "
+        f"{[(s.id, s.grade_source) for s in scored]}")
+    assert [s.grade_source for s in scored if s.source == "github"] == \
+        ["call_cap"] * 5, (
+        "the overflow landed somewhere other than the source whose grades the "
+        f"floor threw away: {[(s.id, s.grade_source) for s in scored]}")
+    assert [s.id for s in scored] == [i.id for i in items], (
+        "allocation order must decide who is asked, not reshape the day file the "
+        "writer reads back")
+
+
+def test_replaying_the_2026_10_02_overflow_grades_both_headlining_videos(
+        redirect_paths):
+    """Clause 2: the day itself, at the real cap, from the checked-in fixtures.
+
+    The day's 42 survivors, admitted by the day's own bundled vocabulary, against
+    `max_llm_calls=40` — so the budget is what binds. The two videos the run refused
+    come back `model`, and the two items that overflow are GitHub commits, the
+    source whose grades 20 of 33 then fell below the floor. Every assertion below
+    reads the output of `run_scoring_pipeline`; what the fixtures still hold the day
+    is `_require_replayable_day`'s job, and the `last_llm_calls == 40` /
+    `last_cap_refused == 2` pair is what stops this passing vacuously — were the
+    allocation not spending the budget, the replay would have nothing left to
+    allocate and would have to say so in red.
+    """
+    header, items = _survivor_fixture()
+    profile = _survivor_profile(redirect_paths)
+    _require_replayable_day(items, profile)
+
+    scored = scoring_mod.run_scoring_pipeline(items, profile,
+                                              llm_call=RecordingLLM(relevance=6),
+                                              max_llm_calls=40)
+
+    assert len(scored) == 42
+    assert scoring_mod.stage2_score.last_llm_calls == 40
+    assert scoring_mod.stage2_score.last_cap_refused == 2
+    for video_id in CAP_REFUSED_VIDEO_IDS:
+        hit = [s for s in scored if video_id in s.id]
+        assert len(hit) == 1, f"{video_id} is not in the day's fixture"
+        assert hit[0].grade_source == models_mod.GRADE_MODEL, (
+            f"{hit[0].id} was refused again: {hit[0].grade_source}")
+    refused = [s for s in scored if s.grade_source == models_mod.GRADE_CALL_CAP]
+    assert {s.source for s in refused} == {"github"}, (
+        f"the overflow went to {[s.id for s in refused]}")
+    assert not {s.id for s in refused} & set(header["call_cap_as_run"]), (
+        "the replay refused an item the real run refused, so the allocation did not "
+        f"move: {sorted(s.id for s in refused)}")
+
+
+def test_the_allocation_key_is_not_keyword_score_alone(redirect_paths):
+    """Clause 3: two survivors that tie on keyword_score, decided by source.
+
+    Both match exactly one topic at an explicit weight of 1.0, so the stage-1
+    keyword signal is identical and cannot break the tie — which is the exact state
+    of all 42 survivors of 2026-10-02. With a 1-call budget the GitHub commit is the
+    one the arrival order puts first, so pre-fix it is the one asked; the documented
+    key must ask the video instead.
+    """
+    (redirect_paths / "obsidian" / "interests.md").write_text(TIE_WEIGHT_PROFILE_MD)
+    profile = profile_mod.load_profile()
+    gh = _item("gh-tie", source="github", title="vllm speculative decoding",
+               summary="vllm")
+    yt = _item("yt-tie", source="youtube", title="vllm speculative decoding",
+               summary="vllm")
+
+    for item in (gh, yt):
+        text = f"{item.title} {item.summary}"
+        assert len(profile_mod.keyword_match(text, profile)) == 1, item.id
+        assert profile_mod.keyword_score(text, profile) == 1.0, item.id
+
+    scored = scoring_mod.stage2_score([gh, yt], profile,
+                                      llm_call=RecordingLLM(relevance=6),
+                                      max_llm_calls=1)
+
+    assert [s.grade_source for s in scored] == ["call_cap", "model"], (
+        "the video is the ranked-higher survivor of this pair, so it is the one a "
+        f"1-call budget must ask: {[(s.id, s.grade_source) for s in scored]}")
+    assert scoring_mod.stage2_score.last_cap_refused == 1
+
+
+def test_a_call_cap_item_never_headlines_the_top_results_block(tmp_path):
+    """Clause 4, across the process boundary the block is printed in.
+
+    `python -m intel_pipeline --score` is the process autonomy task #30 spawns, so
+    the run goes over it: 20 GitHub items concatenated ahead of 21 videos, 41
+    eligible survivors against the real `LLM_MAX_CALLS = 40`, and the stub model
+    grading everything 6. The margin is deliberately one item over the cap, so the
+    whole exclusion the block performs is one row wide — a renderer that filtered by
+    anything other than grade would have to get that single row wrong to look right,
+    and the `refused == {cap-18} == the day file's only call_cap row` check below is
+    what says the cap is the thing deciding it.
+
+    Every item matches the CLI profile's `AI & LLMs` topic, which declares
+    `**Weight:** 0.9`, so an item the cap never asks keeps `_keyword_fallback`'s
+    `int(round(0.9 * 10))` = 9, and `determine_urgency` calls 9 `urgent` while the
+    graded 6s are only `morning`. That is what makes the block assertion bite: any
+    `[URGENT]` line in it is an item the cap refused, since no model grade in this
+    run can reach 8. Pre-fix the unasked row was the last of the concatenation —
+    `yt20`, `[URGENT]` at `Relevance: 9/10` — the block printed no `grade_source` at
+    all, and named the URL `write_all_to_vault` was about to refuse.
+
+    The day file is read back too, because it is the artefact `vault_writer`
+    consumes in the separate `--write` phase: `stage2_score` walks the allocation
+    order but returns caller order, so the rows must still arrive 42-strong and in
+    raw order with a single `call_cap` row, whatever the budget did on the way in.
+    """
+    home, feeds = _cli_home(tmp_path)
+    today = _today_str()
+    cap = scoring_mod.LLM_MAX_CALLS
+    items = ([_item(f"gh{i}", source="github", title="vllm speculative decoding",
+                    summary="vllm") for i in range(20)]
+             + [_item(f"yt{i}", source="youtube", title="vllm speculative decoding",
+                      summary="vllm") for i in range(cap + 1 - 20)])
+    assert len(items) == cap + 1 == 41
+    (feeds / "raw" / f"{today}.jsonl").write_text(
+        "\n".join(i.to_json() for i in items) + "\n")
+
+    day, proc = _run_cli(home, 6, "--score")
+
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    rows = [json.loads(l) for l in
+            (feeds / f"intel-{day}.jsonl").read_text().splitlines()]
+    assert [r["id"] for r in rows] == [i.id for i in items], (
+        "the allocation order must not reshape the day file the writer reads back")
+    sources = [r["grade_source"] for r in rows]
+    assert sources.count("model") == cap, (
+        f"the budget did not spend itself exactly: {sources}")
+    refused = [r["id"] for r, s in zip(rows, sources) if s == "call_cap"]
+    assert refused == ["gh19"], (
+        "the overflow must land on the one GitHub item the key ranks last, not on "
+        f"the tail of the concatenation: {refused}")
+    assert dict((r["id"], r["grade_source"]) for r in rows)["yt20"] == "model", (
+        "the last video is the last row of the file, past the cap's position, and "
+        "ahead of every commit on the key, so it must be asked")
+
+    assert "=== Top Results ===" in proc.stdout, proc.stdout[-2000:]
+    top = proc.stdout.split("=== Top Results ===", 1)[1]
+    entries = [ln for ln in top.splitlines() if ln.startswith("[")]
+    assert len(entries) == 5, top[:3000]
+    assert "[URGENT]" not in top, (
+        "a cap-refused item at the fallback 9 headlined the block again:\n"
+        + top[:1500])
+    assert top.count("Grade: model") == 5, (
+        "every entry must carry its own grade_source: " + top[:600])
+    shown = {ln.split("URL: ", 1)[1].strip() for ln in top.splitlines()
+             if "URL: " in ln}
+    refused_urls = {f"https://example.com/{rid}" for rid in refused}
+    assert len(shown) == 5, top[:600]
+    assert not (shown & refused_urls), (
+        f"{sorted(shown & refused_urls)} was never asked, so it may not be in the "
+        "block:\n" + top[:1500])
+    assert "https://example.com/gh0" in shown, (
+        "the block must still show what the model graded\n" + top[:1500])
+    # Relevance ordering cannot be what filtered the block, and this says so with
+    # numbers: the one row it excluded carries the keyword fallback's 9 and every row
+    # it shows carries the model's 6, so the block passed over the day's highest score
+    # precisely because that row was never graded.
+    day_rows = {json.loads(l)["id"]: json.loads(l) for l in
+                (feeds / f"intel-{day}.jsonl").read_text().splitlines() if l.strip()}
+    assert len(day_rows) == 41, len(day_rows)
+    scored = {i: ScoredItem.from_dict(r) for i, r in day_rows.items()}
+    assert {scored[rid].relevance for rid in refused} == {KW_SCORE_09}, (
+        f"the excluded rows do not carry the fallback 9: "
+        f"{[(rid, scored[rid].relevance) for rid in refused]}")
+    assert all(s.relevance == 6 for s in scored.values()
+               if s.grade_source == "model"), "the stub grades every row 6"
+    # And the block selects through the writer's own predicate, not a copy of it: the
+    # one row it passed over is the one row `refused_by_call_cap` refuses, read off
+    # the file this run wrote.
+    assert {i for i, s in scored.items()
+            if vw_mod.refused_by_call_cap(s)} == set(refused), (
+        "refused_by_call_cap disagrees with the block's exclusion, so the block is "
+        "not selecting through the writer's predicate after all")
+
+
+def test_the_writer_omits_from_its_ledger_the_row_the_block_excluded(tmp_path):
+    """Clause 4's other half: `--score`'s excluded row is `--write`'s non-write.
+
+    The block lives in the scoring phase; `vault-written.json` is written by a
+    separate `--write` phase of the same CLI over the same day file. Running both
+    phases against the stub and the real 40-call cap therefore puts a test across the
+    seam #2081's argument rests on — the row the block hid is the row the ledger
+    never gains, and the rows the block showed are all in it. This is the 2026-10-02
+    evidence (`pAnLpiAG6Es` and `50IgNjRtwNE` ABSENT from `feeds/vault-written.json`)
+    reproduced as a test instead of a report, on a cap-bound day.
+    """
+    home, feeds = _cli_home(tmp_path)
+    today = _today_str()
+    cap = scoring_mod.LLM_MAX_CALLS
+    items = ([_item(f"gh{i}", source="github",
+                    title="vllm speculative decoding", summary="vllm")
+              for i in range(20)]
+             + [_item(f"yt{i}", source="youtube",
+                      title="vllm speculative decoding", summary="vllm")
+              for i in range(cap + 1 - 20)])
+    (feeds / "raw" / f"{today}.jsonl").write_text(
+        "\n".join(i.to_json() for i in items) + "\n")
+
+    _, scored_proc = _run_cli(home, 6, "--score")
+    assert scored_proc.returncode == 0, scored_proc.stderr[-2000:]
+    top = scored_proc.stdout.split("=== Top Results ===", 1)[1]
+    rows = [json.loads(l) for l in
+            (feeds / f"intel-{today}.jsonl").read_text().splitlines() if l.strip()]
+    excluded = [r["id"] for r in rows if r["grade_source"] == "call_cap"]
+    assert excluded == ["gh19"], excluded
+    assert "URL: https://example.com/gh19" not in top, top[:800]
+
+    _, write_proc = _run_cli(home, 6, "--write")
+    assert write_proc.returncode == 0, write_proc.stderr[-2000:]
+    state_path = feeds / "vault-written.json"
+    assert state_path.exists(), (
+        "the write phase left no ledger under the redirected home: "
+        + write_proc.stdout[-600:])
+    written = json.loads(state_path.read_text())["written"]
+    assert "gh19" not in written, (
+        "the writer recorded the row the block had already hidden, so the two "
+        "surfaces disagree about who was refused")
+    shown = [r["id"] for r in rows if r["grade_source"] == "model"]
+    assert set(shown) <= set(written), (
+        "graded rows the block was entitled to show are missing from the ledger: "
+        f"{sorted(set(shown) - set(written))[:5]}")
+
+
+
+def _day_report(rows):
+    """#2081's day report, re-derived from rows that carry scoring output.
+
+    Deliberately a re-derivation and not a read of the fixture header: the numbers
+    the item quotes have to fall out of the witness bytes, or the test would only be
+    proving that a file says what it says.
+    """
+    graded = [r for r in rows if r.get("grade_source") == models_mod.GRADE_MODEL]
+    refused = [r for r in rows
+               if r.get("grade_source") == models_mod.GRADE_CALL_CAP]
+    histogram = {}
+    for r in graded:
+        histogram[str(r["relevance"])] = histogram.get(str(r["relevance"]), 0) + 1
+    return {
+        "grade_source": {models_mod.GRADE_MODEL: len(graded),
+                         models_mod.GRADE_CALL_CAP: len(refused)},
+        "graded_relevance_histogram": dict(sorted(histogram.items())),
+        "below_relevance_floor_4": sum(
+            1 for r in graded if r["relevance"] < vw_mod.RELEVANCE_FLOOR),
+        "relevance_floor": vw_mod.RELEVANCE_FLOOR,
+        "call_cap_ids": [r["id"] for r in refused],
+        "call_cap_relevance": sorted({r["relevance"] for r in refused}),
+    }
+
+
+def test_the_day_report_the_item_quotes_is_pinned_inside_the_repo():
+    """Clause 5, the half that holds under the gate (`-m "not live_vault"`).
+
+    #2081's numbers are about one run on one day, and the runtime store that holds
+    that run's day file keeps no history. The pinned numbers therefore live in the
+    fixture header as `report_as_run`, and this node is what stops them being prose:
+    the literals this round quoted (40 `model` / 2 `call_cap`, the graded histogram,
+    21 grades below `RELEVANCE_FLOOR`, the two refused ids, both at relevance 10)
+    must equal what the fixture records, and the structural facts those numbers rest
+    on — 42 rows, 33 GitHub and 9 YouTube, and the two refused ids sitting at rows
+    41 and 42 of a list the pre-fix budget walked in order — must still be what the
+    fixture's own rows say.
+    """
+    header, items = _survivor_fixture()
+
+    assert header["report_as_run"] == DAY_REPORT_AS_RUN, header["report_as_run"]
+    assert header["counts"]["rows"] == len(items) == 42, len(items)
+    assert {i.source for i in items} == {"github", "youtube"}
+    assert sum(1 for i in items if i.source == "github") == 33
+    assert sum(1 for i in items if i.source == "youtube") == 9
+    assert [i.id for i in items[-2:]] == DAY_REPORT_AS_RUN["call_cap_ids"], (
+        "the two refused rows are no longer the last two, so the day this fixture "
+        "pins is not the day the cap bound on")
+    assert vw_mod.RELEVANCE_FLOOR == header["report_as_run"]["relevance_floor"] == 4
+
+
+def test_the_day_fixture_header_describes_the_row_order_the_bytes_hold():
+    """The provenance header's row-order claim, graded against the rows themselves.
+
+    The first round of this item shipped a header that said "33 GitHub items in
+    `github-repos.yml` order, then 9 YouTube videos in feed order" over bytes that
+    are a day's accumulation across scan passes, and the review rung caught it by
+    reading the file. So a fixture whose header is prose nobody re-runs is a defect:
+    the pass groups the header counts must be the groups the rows carry, and every
+    minute-stamp the rows carry must be named in the header.
+    """
+    header, items = _survivor_fixture()
+
+    groups = []
+    for item in items:
+        stamp = item.discovered_at[:16]
+        if groups and groups[-1]["discovered_from"] <= stamp <= groups[-1]["discovered_to"]:
+            groups[-1]["discovered_to"] = stamp
+        else:
+            groups.append({"discovered_from": stamp, "discovered_to": stamp,
+                           "rows": 0, "github": 0, "youtube": 0})
+        groups[-1]["rows"] += 1
+        groups[-1][item.source] += 1
+
+    assert groups == header["counts"]["pass_groups"], (
+        f"header says {header['counts']['pass_groups']}, rows say {groups}")
+    for group in groups:
+        # The header names each pass by its `HH:MMZ` clock time, not by the full
+        # ISO stamp the rows carry.
+        assert f'{group["discovered_from"][11:16]}Z' in header["provenance"], group
+    assert "NOT one github-then-youtube concatenation" in header["provenance"], (
+        "the header stopped disclaiming the single-concatenation reading the first "
+        "round got wrong")
+
+
+@pytest.mark.live_vault
+def test_the_committed_vault_day_witness_still_reads_as_the_pinned_report():
+    """Clause 5, the vault half: the committed witness re-derives the pinned report.
+
+    `backlog/data/intel-2026-10-02.jsonl` on the vault's main (`1bdb798c`) is the
+    surface #2081 was written from. This node recomputes the report from those bytes
+    and requires them to equal both the literals above and the fixture header — three
+    copies of one day that can now only drift together. Marked `live_vault` because
+    it reads a person's vault, which no round under test controls, so the gate's
+    `tests` rung deselects it; the clause is NOT pinned by this node alone —
+    `test_the_day_report_the_item_quotes_is_pinned_inside_the_repo` pins the same
+    numbers where the gate can see it, and this is the bridge that keeps the vault
+    copy honest about them.
+    """
+    require_live_data(VAULT_WITNESS_2026_10_02,
+                      "the 2026-10-02 intel day witness committed under backlog/data",
+                      kind="file")
+    rows = [json.loads(l) for l in
+            VAULT_WITNESS_2026_10_02.read_text().splitlines() if l.strip()]
+
+    assert _day_report(rows) == DAY_REPORT_AS_RUN, _day_report(rows)
+    assert len(rows) == 42, len(rows)
+    refused_ids = [r["id"] for r in rows if r.get("grade_source")
+                   == models_mod.GRADE_CALL_CAP]
+    assert len(refused_ids) == 2, refused_ids
+    for video_id in CAP_REFUSED_VIDEO_IDS:
+        assert any(video_id in rid for rid in refused_ids), (
+            f"{video_id} is not among the refused: {refused_ids}")
+    header, items = _survivor_fixture()
+    assert header["report_as_run"] == _day_report(rows)
+    assert [r["id"] for r in rows] == [i.id for i in items], (
+        "the witness and the repo fixture are no longer the same 42 rows in the "
+        "same order, so the replay is not a replay of the day the cap bound on")

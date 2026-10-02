@@ -37,6 +37,72 @@ LLM_KEYWORD_THRESHOLD = 0.3
 LLM_MAX_CALLS = 40
 LLM_TIMEOUT_SECONDS = 90
 
+# ── which survivor the call budget is spent on (backlog #2081) ────────────────
+#
+# Spending `LLM_MAX_CALLS` in the caller's list order made an ungraded item a
+# positional property of two config files *and of the clock*. The raw day file is
+# opened `"a"` by `state.save_raw_items` (state.py:77), so it accumulates every scan
+# pass of the day, and each pass appends its own block: that pass's GitHub rows in
+# `github-repos.yml` order, then its videos in feed order. A survivor's index
+# therefore says which pass found it and where it sat inside that pass — nothing
+# about the item. On the first day the cap bound — 2026-10-02, 42 survivors, four
+# `discovered_at` minute-stamps at 05:02, 13:10, 21:12 and 21:13Z — the two items
+# never asked were
+# simply the last two rows of the file, both YouTube videos, each still
+# carrying the keyword fallback's relevance 10. All 33 GitHub items got a call, and
+# 20 of those 33 grades then fell below `vault_writer.RELEVANCE_FLOOR` and wrote
+# nothing, against 1 of the 7 graded videos. More than half a capped budget bought
+# grades the floor threw away while the writer refused the day's two headlining
+# items.
+#
+# The key below is the cheapest stage-1 signal that actually discriminates, and it
+# needs no model call to read. Components, highest priority first:
+#
+# 1. feed source, by the rank table. On that day 20 of 33 graded GitHub items fell
+#    below the floor against 1 of 7 graded videos, so a call spent on a commit was
+#    far likelier to be discarded than one spent on a video.
+# 2. the stage-1 `keyword_score`, hardest match first — the same number that
+#    decided the item was worth asking, so the cap bites the marginal admits. It is
+#    second rather than first because today it carries no ordering information at
+#    the top of the scale: it is `max(topic weight)` and all 42 survivors score
+#    exactly 1.0, which is why ordering by it alone is a measured no-op (it refuses
+#    the same two videos). Weights are Alan's call — ruled 2026-09-27 on #1380 — so
+#    this key reads them rather than inventing replacements, and the day they are
+#    re-scaled the budget follows them without a second change here.
+# 3. the caller's position, last, purely to make the order total and stable.
+#
+# What this does NOT do: it never changes what an item past the cap may do. Those
+# still carry `GRADE_CALL_CAP`, and the vault writer still refuses them (#1380).
+SOURCE_ALLOCATION_RANK: Dict[str, int] = {"youtube": 0, "github": 1}
+
+# A source with no measured overflow cost does not get to jump the feeds that have
+# one, so an unranked source is allocated after every ranked one.
+SOURCE_ALLOCATION_RANK_DEFAULT = 1 + max(SOURCE_ALLOCATION_RANK.values())
+
+
+def source_allocation_rank(source: str) -> int:
+    """Allocation rank of a feed source; lower is asked first. See the table above."""
+    return SOURCE_ALLOCATION_RANK.get(source, SOURCE_ALLOCATION_RANK_DEFAULT)
+
+
+def stage2_allocation_order(items: List[FeedItem], profile: dict) -> List[int]:
+    """Indices of `items` in the order the stage-2 call budget is spent (#2081).
+
+    Every index appears exactly once, so this is an ordering of the whole list, not
+    a shortlist: items the keyword stage rated below `LLM_KEYWORD_THRESHOLD` are
+    never candidates for a call wherever they land, and the caller's own order is
+    preserved by `stage2_score` on the way out — the allocation decides who is
+    asked, never the shape of the day file the writer reads back.
+    """
+    def rank(index: int):
+        item = items[index]
+        return (source_allocation_rank(item.source),
+                -keyword_score(f"{item.title} {item.summary}", profile),
+                index)
+
+    return sorted(range(len(items)), key=rank)
+
+
 # Dropped titles the stage-1 line names before folding the rest into a count.
 # A day's raw file holds ~25-100 rows, so an unbounded list would be most of
 # the run log; twenty is enough to read a bad-recall day for what it is.
@@ -223,6 +289,13 @@ def stage2_score(
     engine is unavailable and turning an outage into a zero-write day is not what
     the fallback is for.
 
+    Which eligible survivors the ``max_llm_calls`` calls are spent on is decided by
+    ``stage2_allocation_order`` (#2081) — feed source first, then the stage-1
+    keyword score — and not by where an item happened to sit in ``items``, which is
+    the order the day's scan passes appended their rows and says nothing about the
+    item. The list returned
+    is still in the caller's order.
+
     Sets ``stage2_score.last_llm_calls`` to the number of model calls made,
     ``stage2_score.last_graded`` to how many came back as a usable grade, and
     ``stage2_score.last_cap_refused`` to how many eligible survivors the budget
@@ -235,13 +308,15 @@ def stage2_score(
     scorer = llm_call or call_local_llm
     use_model = llm_call is not None or os.environ.get("INTEL_DISABLE_LLM") != "1"
 
-    scored_items = []
+    scored_by_position: Dict[int, ScoredItem] = {}
     all_projects = get_all_projects(profile)
     llm_calls = 0
     graded_calls = 0  # of those calls, how many produced a usable grade
     cap_refused = 0   # eligible survivors the budget never reached
 
-    for item in items:
+    # Allocation order, caller order out (#2081) — see stage2_allocation_order.
+    for index in stage2_allocation_order(items, profile):
+        item = items[index]
         # Combine title and summary for matching
         text = f"{item.title} {item.summary}"
 
@@ -288,7 +363,7 @@ def stage2_score(
                         category = model_category
                 graded_calls += 1
 
-        scored_items.append(ScoredItem(
+        scored_by_position[index] = ScoredItem(
             id=item.id,
             source=item.source,
             title=item.title,
@@ -307,7 +382,7 @@ def stage2_score(
             # the scanner passes but this omits never reaches
             # `intel-<date>.jsonl` — the only file the writer reads.
             published=item.published,
-        ))
+        )
 
     # Three numbers, because they answer three questions: calls made says the
     # budget was spent, grades produced says the model contributed, and cap
@@ -318,7 +393,9 @@ def stage2_score(
     stage2_score.last_llm_calls = llm_calls
     stage2_score.last_graded = graded_calls
     stage2_score.last_cap_refused = cap_refused
-    return scored_items
+    # Back to the caller's order: the allocation above decides who is asked, and the
+    # day file the writer reads must not change shape because the budget moved.
+    return [scored_by_position[i] for i in range(len(items))]
 
 
 def determine_urgency(relevance: int) -> str:

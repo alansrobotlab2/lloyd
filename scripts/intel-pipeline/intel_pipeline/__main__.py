@@ -7,7 +7,41 @@ from pathlib import Path
 
 from .profile import load_profile, PROFILE_FILE
 from .scoring import run_scoring_pipeline
+from .vault_writer import refused_by_call_cap
 from . import state
+
+# How many items the run's `=== Top Results ===` block names.
+TOP_RESULTS_LIMIT = 5
+
+
+def top_results_block(scored, limit: int = TOP_RESULTS_LIMIT) -> str:
+    """Render the run's `=== Top Results ===` block (backlog #2081).
+
+    Two rules, both learned from the 2026-10-02 run.
+
+    Only items the writer may accept are eligible, decided by the writer's own
+    `refused_by_call_cap` rather than a copy of it, so the block and the write
+    cannot drift apart. That run's block led with two videos at `[URGENT] 10/10`
+    that `write_all_to_vault` was about to refuse: their relevance was the keyword
+    fallback's 10 and `scoring.determine_urgency` reads relevance alone, so the
+    run headlined items it was itself refusing to write — #1380's
+    SM_20260923_001010 finding, reproduced the first day the call cap bound.
+
+    Every entry prints its `grade_source`, so a reader can tell a model grade from
+    a keyword stand-in in the entries that do appear.
+    """
+    eligible = [item for item in scored if not refused_by_call_cap(item)]
+    lines = ["=== Top Results ==="]
+    for item in sorted(eligible, key=lambda x: x.relevance, reverse=True)[:limit]:
+        lines.append("")
+        lines.append(f"[{item.urgency.upper()}] {item.title}")
+        lines.append(f"  Source: {item.source}")
+        lines.append(f"  Relevance: {item.relevance}/10")
+        lines.append(f"  Grade: {item.grade_source}")
+        lines.append(f"  Category: {item.category}")
+        lines.append(f"  Why: {item.why}")
+        lines.append(f"  URL: {item.url}")
+    return "\n".join(lines)
 
 
 def main():
@@ -118,15 +152,8 @@ def main():
                     f.write(item.to_json() + "\n")
             print(f"Saved scored items to: {intel_path}")
             
-            # Display top results
-            print("\n=== Top Results ===")
-            for item in sorted(scored, key=lambda x: x.relevance, reverse=True)[:5]:
-                print(f"\n[{item.urgency.upper()}] {item.title}")
-                print(f"  Source: {item.source}")
-                print(f"  Relevance: {item.relevance}/10")
-                print(f"  Category: {item.category}")
-                print(f"  Why: {item.why}")
-                print(f"  URL: {item.url}")
+            # Display top results — see top_results_block for who may appear
+            print("\n" + top_results_block(scored))
     
     # Run vault writer
     if run_all or args.write:

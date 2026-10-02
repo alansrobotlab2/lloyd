@@ -43,6 +43,11 @@ Extended FeedItem with scoring:
 - `why`: Explanation for scoring
 - `projects`: Matched projects
 - `category`: Primary category
+- `grade_source`: why the item has the score it has — `model` (the stage-2 call
+  returned a usable grade), `no_usable_grade` (it was asked and nothing usable came
+  back), `call_cap` (eligible, but `LLM_MAX_CALLS` came first — the writer refuses
+  this one, #1380), or `keyword` (never eligible: engine off, or below the keyword
+  threshold)
 
 ## Write guards (`vault_writer.py`)
 
@@ -133,6 +138,31 @@ for item in scored:
 - Generate explanation
 - Match to projects
 - Assign category
+
+#### Who gets a model call (`LLM_MAX_CALLS`, backlog #2081)
+`stage2_score` buys at most `LLM_MAX_CALLS = 40` model grades, and
+`scoring.stage2_allocation_order` decides who they go to. The key, highest priority
+first: **feed source** (`SOURCE_ALLOCATION_RANK`: youtube before github), then the
+stage-1 `keyword_score` descending, then position. Items the keyword stage rated
+below `LLM_KEYWORD_THRESHOLD` never get a call wherever they land, and the returned
+list stays in the caller's order — allocation decides who is asked, not the shape of
+the day file.
+
+Source is first because it is the cheapest stage-1 signal that discriminates. On
+2026-10-02, the first day the cap bound, 20 of the 33 graded GitHub items came in
+below the writer's relevance floor and wrote nothing, against 1 of the 7 graded
+videos — and the budget, spent in the day file's row order (the raw file is appended
+to, so it is the order the day's scan passes found things), was what left the two
+YouTube videos at the tail of the day ungraded. Keyword score is second
+because it carries no ordering information at the top of the scale today: it is
+`max(topic weight)` and every one of those 42 survivors scored exactly 1.0, so
+ordering by it alone refuses the same items. Weights are a human decision (#1380,
+ruled 2026-09-27) and this key reads them rather than inventing replacements.
+
+What does not change: an item the cap never reached keeps
+`grade_source = "call_cap"` and `vault_writer.refused_by_call_cap` still refuses to
+write it (#1380). The `=== Top Results ===` block applies that same predicate, so a
+refused item cannot headline a run.
 
 ## Requirements
 
