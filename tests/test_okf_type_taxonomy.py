@@ -1314,3 +1314,214 @@ def test_the_deferral_fires_on_an_empty_type_wherever_it_sits():
                  "---\nsegment: knowledge\n---\n\n# A\n"):
         assert okf_taxonomy.normalize_document_type(text) == (text, None)
         assert okf_taxonomy.rejected_document_type(text) is None
+
+
+# ── 9. the SECOND knowledge lane: the harness Write and Edit tools (#2070) ─────
+#
+# Section 8 guards `vault_write`. The tree went red anyway: on 2026-10-01 an
+# inner-voice turn created `knowledge/memory/2026-10-01-prefetch-rawspan-no-model-
+# result.md` with `type: measurement-note`, and it went in through the built-in
+# `Write` tool — a lane that asked nothing of a `type:` at all. One note, one
+# unknown type, and the floor this file exists to hold ("155 at triage, 194 on
+# 2026-09-09") sat at 1 for a day until #2070 found it. The rule is on both lanes
+# now, and the witnesses below drive the real handlers rather than a copy of the
+# predicate.
+#
+# `measurement-note` is the value that actually got through, so it is the value
+# these tests use: a guard tested only against an invention nobody wrote tests the
+# guard's imagination.
+
+def _fs_scratch(tmp_path, monkeypatch):
+    """The built-in Write/Edit handlers aimed at a scratch tree, not ~/obsidian.
+
+    `_knowledge_root()` reads `app.paths.VAULT_ROOT` at call time, so patching the
+    module attribute moves the lane. Nothing else in `builtin_fs` needs patching for
+    a temp path: the guards that key off the real vault (`_protect_reason`, the edit
+    ledger's vault branch) fall through for a directory outside it.
+    """
+    import agent_mcp.builtin_fs as fs
+    import app.paths as paths
+    monkeypatch.setattr(paths, "VAULT_ROOT", tmp_path)
+    return fs
+
+
+def _fs_note(type_value: str) -> str:
+    return f"---\nsegment: knowledge\ntype: {type_value}\n---\n\n# A note\n"
+
+
+def _fs_refusal(result: str) -> dict:
+    """The refusal payload when the lane refused, `{}` when it wrote.
+
+    This lane answers success with a sentence (`File written: …`, `Edited …`) and
+    failure with a JSON object, so a test that parses every result as JSON dies on
+    the write it was checking for. `{"error": …}` is also what `text_result` sniffs
+    to set `isError`, which is why the distinction is worth one helper.
+    """
+    import json
+    stripped = result.lstrip()
+    return json.loads(stripped) if stripped.startswith("{") else {}
+
+
+def test_the_harness_write_lane_refuses_an_invented_knowledge_type(tmp_path, monkeypatch):
+    """The exact write #2070 is about: `Write`, knowledge/, an invented type."""
+    import json
+    fs = _fs_scratch(tmp_path, monkeypatch)
+    target = tmp_path / "knowledge" / "memory" / "a-new-measurement.md"
+    result = json.loads(fs._write({"file_path": str(target),
+                                   "content": _fs_note("measurement-note")}))
+    assert "error" in result, f"`measurement-note` reached knowledge/ again: {result}"
+    assert result.get("invalid_type") == "measurement-note", result
+    assert "measurement-note" in result["error"], result["error"]
+    assert not target.exists()
+    assert not (tmp_path / "knowledge" / "memory").exists(), (
+        "the guard ran after the mkdir: a refused Write still leaves a directory")
+
+
+def test_the_harness_write_lane_writes_a_canonical_type_unchanged(tmp_path, monkeypatch):
+    """Positive control, so the refusal above is not a lane that simply never writes.
+
+    The bytes land exactly as the caller sent them: this lane refuses a bad `type` or
+    writes the caller's text, and corrects neither — which is the one way it differs
+    from `vault_write`, whose `_guard_knowledge_type` folds a retired spelling onto
+    its canonical value before writing.
+    """
+    fs = _fs_scratch(tmp_path, monkeypatch)
+    target = tmp_path / "knowledge" / "ai" / "plain.md"
+    note = _fs_note("gap-analysis")
+    refusal = _fs_refusal(fs._write({"file_path": str(target), "content": note}))
+    assert refusal == {}, f"a canonical type was refused: {refusal}"
+    assert target.read_text(encoding="utf-8") == note, (
+        "the caller's bytes were rewritten by a lane that promises not to")
+
+
+def test_the_harness_edit_lane_refuses_an_edit_that_introduces_one(tmp_path, monkeypatch):
+    """`Edit` reaches the same bytes, so it needs the same refusal.
+
+    Priced on `updated`, the same `Write` prices on `content`: an Edit arrives as a
+    delta, and asking the question of the delta is what lets a repair through the
+    file that carries a bad value — see the test below, which is the other half.
+    """
+    import json
+    fs = _fs_scratch(tmp_path, monkeypatch)
+    target = tmp_path / "knowledge" / "ai" / "drift.md"
+    target.parent.mkdir(parents=True)
+    original = _fs_note("gap-analysis")
+    target.write_text(original, encoding="utf-8")
+    result = json.loads(fs._edit({"file_path": str(target),
+                                  "old_string": "type: gap-analysis",
+                                  "new_string": "type: measurement-note"}))
+    assert "error" in result, f"an Edit invented a knowledge type: {result}"
+    assert result.get("invalid_type") == "measurement-note", result
+    assert target.read_text(encoding="utf-8") == original, (
+        "the bad bytes were written, then refused — the file is the refusal")
+
+
+def test_an_edit_that_repairs_an_invented_type_reaches_the_file(tmp_path, monkeypatch):
+    """The file #2070 fixes is repaired through this lane, so it had better work."""
+    fs = _fs_scratch(tmp_path, monkeypatch)
+    target = tmp_path / "knowledge" / "memory" / "broken.md"
+    target.parent.mkdir(parents=True)
+    target.write_text(_fs_note("measurement-note"), encoding="utf-8")
+    refusal = _fs_refusal(fs._edit({"file_path": str(target),
+                                    "old_string": "type: measurement-note",
+                                    "new_string": "type: gap-analysis"}))
+    assert refusal == {}, f"the repair this item made was refused: {refusal}"
+    assert "type: gap-analysis" in target.read_text(encoding="utf-8")
+
+
+def test_the_harness_lane_leaves_anything_outside_knowledge_alone(tmp_path, monkeypatch):
+    """The guard's scope is `vault_write`'s `_guard_knowledge_type`: `knowledge/` + `.md`.
+
+    `memory/` is #442's open question, `research/raw/` is outside the segment the
+    taxonomy governs, and a `.txt` has no front matter to validate. All three must
+    land verbatim, or the guard has quietly gone stricter than the lane it matches —
+    which is how a vocabulary check ends up refusing daily notes it was never about.
+    The last case is the boundary's other edge: `raw/` carves nothing out of
+    `knowledge/`, so the same bytes one directory deeper are refused.
+    """
+    fs = _fs_scratch(tmp_path, monkeypatch)
+    for rel in ("memory/2026-10-02.md", "research/raw/inbox.md",
+                "knowledge/raw/notes.txt"):
+        target = tmp_path / rel
+        refusal = _fs_refusal(fs._write({"file_path": str(target),
+                                         "content": _fs_note("measurement-note")}))
+        assert refusal == {}, f"{rel}: refused outside the shared scope: {refusal}"
+        assert target.exists(), rel
+    inside = tmp_path / "knowledge" / "raw" / "inbox.md"
+    refusal = _fs_refusal(fs._write({"file_path": str(inside),
+                                     "content": _fs_note("measurement-note")}))
+    assert refusal.get("invalid_type") == "measurement-note", (
+        f"`knowledge/` + `.md` is the scope and raw/ does not exempt it: {refusal}")
+
+
+def test_the_harness_dispatch_path_enforces_the_same_rule(tmp_path, monkeypatch):
+    """The seam the code graph cannot see, on the lane a session actually uses.
+
+    `_write` is reached through the `name in ("Write", "Edit")` branch of
+    `agent_mcp/builtin_fs.call_tool`, keyed on a string — no symbol reference for a
+    grep or the graph to find. A guard that lived only in a helper the dispatcher
+    skipped would pass every direct-handler test above.
+    """
+    import asyncio
+    import json
+    fs = _fs_scratch(tmp_path, monkeypatch)
+    target = tmp_path / "knowledge" / "ai" / "dispatched.md"
+    out = asyncio.run(fs.call_tool("Write", {"file_path": str(target),
+                                             "content": _fs_note("measurement-note")}))
+    assert out.is_error is True, (
+        "the tool result said success; the caller will retry the write, not fix it")
+    payload = json.loads(out.content[0].text)
+    assert payload.get("invalid_type") == "measurement-note", payload
+    assert not target.exists()
+
+
+def test_both_knowledge_lanes_refuse_the_same_invented_value(scratch_vault, tmp_path,
+                                                             monkeypatch):
+    """One vocabulary, two writers: neither is more permissive than the other.
+
+    #2070 is not "a file had a bad type" — `vault_write` has refused this one since
+    #872 put `_guard_knowledge_type` on that path. It is that a second lane existed,
+    reached the same bytes, and did not. Until one test names both, adding a third
+    writer (a batch importer, a template job) has no question to be asked by.
+    """
+    fs = _fs_scratch(tmp_path, monkeypatch)
+    through_write_tool = _fs_refusal(fs._write({
+        "file_path": str(tmp_path / "knowledge" / "ai" / "a.md"),
+        "content": _fs_note("measurement-note")}))
+    through_vault_write = _write_note(scratch_vault, "knowledge/ai/b.md", "measurement-note")
+    assert through_write_tool != {}, through_write_tool
+    assert "error" in through_vault_write, through_vault_write
+    assert through_write_tool["invalid_type"] == "measurement-note"
+    assert through_vault_write.get("invalid_type") == "measurement-note", through_vault_write
+
+
+def test_no_node_of_this_suite_is_marked_away_to_get_it_green():
+    """#2070 clause 2, on the file the clause's own red node lives in.
+
+    The clause forbids reaching green by skipping, xfail-ing, deleting or re-marking
+    a test `live_vault`. A fix that makes the number zero and a change that hides the
+    only reader of the number produce the same green run, so the difference is
+    counted here rather than read off a diff.
+
+    Denominators first, because a check over zero things is not a check (the rule
+    #2069's own sibling file enforces on its own extract): `git show
+    1b733440:tests/test_okf_type_taxonomy.py | grep -c '^def test_'` is 47 at this
+    item's base, so the floor is 48 or more and a removal fails here rather than
+    reading as a tidy file. And exactly one away-mark is allowed — the
+    `@pytest.mark.live_vault` on the extraction-run check, which is a real run
+    against the real vault and not the unknown-type count.
+    """
+    src = Path(__file__).read_text(encoding="utf-8")
+    nodes = re.findall(r"(?m)^def (test_[A-Za-z0-9_]+)\(", src)
+    assert len(nodes) >= 48, (
+        f"{len(nodes)} test nodes — the floor is 48, so a node was removed; "
+        "fix the data, do not delete the witness")
+    assert "test_validator_reports_no_unknown_types_in_knowledge" in nodes, (
+        "the node #2070 was filed for is gone from the file that owns it")
+    marked = re.findall(r"(?m)^@(pytest\.mark\.(?:skip|skipif|xfail|live_vault)"
+                        r"|xfail\(|skip\()", src)
+    assert len(marked) == 1, (
+        f"{len(marked)} away-marks (skip/skipif/xfail/live_vault); #2070 was filed "
+        "against 1 — a new one has to be a decision someone named, not a green run")
+    assert "@pytest.mark.live_vault" in src, (
+        "the one permitted mark is the live-vault extraction check, by name")

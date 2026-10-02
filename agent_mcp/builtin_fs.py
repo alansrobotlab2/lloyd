@@ -269,6 +269,111 @@ def _protected_path_refusal(mut: _Mutation) -> str | None:
     })
 
 
+# ── the knowledge/ vocabulary, on this lane too ─────────────────────────────
+#
+# #872 put the OKF vocabulary in front of `vault_write` (#780: a nightly job
+# invented `type: note`, the file landed, and every automod promotion on the box
+# blocked until someone found the word). It did not put it in front of THIS lane,
+# and this lane writes the same files: on 2026-10-01 an inner-voice turn wrote
+# `knowledge/memory/2026-10-01-prefetch-rawspan-no-model-result.md` with
+# `type: measurement-note` — a value in no vocabulary, no alias table and no
+# revision of anything — through `Write`, and the vault carried one unknown type
+# until #2070 found it. A rule that lives on one of two write surfaces is not a
+# rule; the surface with the rule is only a detour.
+#
+# The rule is the strict one — `rejected_document_type`, the read-only half the
+# vault lander already asks, not `normalize_document_type`. Not because this lane
+# could not rewrite: it could. Because it writes the bytes its caller handed it,
+# and a lane that silently edits those bytes behind the caller's back leaves the
+# caller's own transcript describing a file that does not exist. The rewriting
+# lane is `vault_write`, and the refusal below says so. An alias is therefore
+# refused here and rewritten there — the same asymmetry the lander documents, in
+# the same direction: a caller that cannot rewrite must not accept.
+
+
+def _knowledge_root() -> str:
+    """`<vault>/knowledge` realpathed, resolved per call so a relocated HOME or a
+    monkeypatched `app.paths.VAULT_ROOT` moves the guard with it — the reason
+    `protected_paths.protected_roots()` resolves per call too. The `app.paths`
+    fallback is the same literal that module is built from."""
+    try:
+        from app.paths import VAULT_ROOT
+        vault = str(VAULT_ROOT)
+    except Exception:  # noqa: BLE001 — a checker that cannot import still checks
+        vault = os.path.join(os.path.expanduser("~"), "obsidian")
+    return os.path.realpath(os.path.join(vault, "knowledge"))
+
+
+def _knowledge_vocabulary_refusal(target: Path, text: str, tool: str) -> str | None:
+    """Refusal for the bytes about to land at `target`, or None to write them.
+
+    The boundary is `agent_mcp/vault.py`'s `_guard_knowledge_type`, restated:
+    `knowledge/` and `.md`, nothing else — so a `type:` in `memory/`, in a skill or
+    in a scratch file is not this guard's business, and neither is a `.txt` under
+    `knowledge/`. What is NOT restated is the rewrite: `vault_write` folds a retired
+    spelling onto its canonical value, and this lane corrects nobody's bytes, so an
+    alias that would land folded through `vault_write` is refused here rather than
+    silently reworded. (Aliases are a one-way change to a caller's text, and this
+    tool's contract is that the caller's text lands.)
+
+    Judged on the POST bytes, not the request: an Edit that *repairs* a bad type must
+    be allowed through the file that carries it, which is exactly what an earlier
+    placement in `_gate_check` could not do — `post_text` is not populated there, and
+    for `_edit` the new text only exists under the commit lock. Both call sites below
+    price it on `content`/`updated`, beside the identical `memory_write_error` call,
+    for the same reason.
+
+    Fails closed on an unimportable vocabulary, in `agent_mcp/vault.py`'s words:
+    "a guard whose input cannot be read reports a verdict it cannot justify", and
+    failing open here is precisely how an invented value gets back in.
+    """
+    real = os.path.realpath(str(target))
+    if not real.endswith(".md"):
+        return None
+    knowledge = _knowledge_root()
+    if not (real == knowledge or real.startswith(knowledge + os.sep)):
+        return None
+    try:
+        from scripts.vault import okf_taxonomy
+    except Exception as exc:  # noqa: BLE001
+        return _knowledge_guard_unavailable(
+            target, tool, f"scripts.vault.okf_taxonomy is unimportable ({exc})")
+    try:
+        bad = okf_taxonomy.rejected_document_type(text)
+    except Exception as exc:  # noqa: BLE001
+        return _knowledge_guard_unavailable(target, tool, str(exc))
+    if bad is None:
+        return None
+    try:  # one durable row per refusal (app/harness/denial_journal.py); never decides
+        from app.harness import denial_journal
+        denial_journal.record(guard="knowledge_type", where="dispatch",
+                              session_id=get_bound_session(), tool=tool,
+                              reason=f"invented knowledge type ({bad})",
+                              excerpt=str(target), label=str(bad))
+    except Exception:  # noqa: BLE001
+        pass
+    return json.dumps({
+        "error": (
+            f"{tool} refused: {target} declares `type: {bad}`, which is not one of "
+            f"the {len(okf_taxonomy.CANONICAL_TYPES)} canonical knowledge types "
+            f"({', '.join(sorted(okf_taxonomy.CANONICAL_TYPES))}). Nothing was "
+            f"written. This lane does not rewrite a retired spelling either: "
+            f"`vault_write` normalises one to its canonical value, and "
+            f"`automod_vault_land` lands a note whose type is already canonical. "
+            f"Pick one of the values above."),
+        "code": ErrorCode.INVALID_PARAM, "invalid_type": bad, "path": str(target)})
+
+
+def _knowledge_guard_unavailable(target: Path, tool: str, why: str) -> str:
+    """The fail-closed refusal, separate so it is never mistaken for a verdict."""
+    logger.error("knowledge/ type guard unavailable for %s: %s", target, why)
+    return json.dumps({
+        "error": (f"{tool} refused: the knowledge/ type vocabulary could not be "
+                  f"read ({why}), so {target} is not being written. Report this "
+                  f"rather than working around it."),
+        "code": ErrorCode.INTERNAL})
+
+
 def _gate_check(mut: _Mutation) -> str | None:
     """The refusal, as a JSON error string, or None to proceed.
 
@@ -451,6 +556,14 @@ def _write(args: dict, mut: _Mutation | None = None) -> str:
             if ceiling_msg:
                 return json.dumps({"error": ceiling_msg})
 
+            # Same position and same reasoning as the ceiling: a rule about the
+            # bytes about to land, priced on `content`, refusing before the undo
+            # record opens. This is the lane that put `type: measurement-note`
+            # into `knowledge/` on 2026-10-01 (#2070).
+            vocab = _knowledge_vocabulary_refusal(p, content, "Write")
+            if vocab is not None:
+                return vocab
+
             _ledger_begin(mut, op="write" if mut.existed else "create")
 
             try:
@@ -552,6 +665,13 @@ def _edit(args: dict, mut: _Mutation | None = None) -> str:
             ceiling_msg = memory_write_error(p, updated)
             if ceiling_msg:
                 return json.dumps({"error": ceiling_msg})
+            # Priced on `updated`, not on the file as it stands, so an Edit that
+            # REPAIRS a bad `type:` gets through the file that carries one — and
+            # one that introduces it is refused with nothing written. `Write`
+            # asks the same predicate of `content`, above.
+            vocab = _knowledge_vocabulary_refusal(p, updated, "Edit")
+            if vocab is not None:
+                return vocab
             _ledger_begin(mut, op="edit")
 
             try:
