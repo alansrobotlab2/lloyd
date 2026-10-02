@@ -36,6 +36,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from app import frontmatter as FM
 from app.routers import dashboard as dash
 import board_presence
 from board_presence import VAULT_ROOT_ENV, board_files_or_stop
@@ -80,10 +81,16 @@ def _readers():
     `_split_frontmatter` takes the file's text, not a path, so its wrapper does
     the read — the caller that matters (`load_item`) reads the file too.
     """
+    # Each label is `module.fn (repo-relative path)` with NO line number: all
+    # three carried one at #2069's triage and all three had drifted off the def
+    # they named (`backlog.py:886` against a def at 1490, `scorecard.py:150`
+    # against 230, `dashboard.py:118` against 112), because a label is a string
+    # and nothing re-reads it. `test_every_reader_label_names_a_symbol_and_a_path`
+    # is what keeps this form.
     return [
-        ("dashboard._frontmatter (app/routers/dashboard.py:118)", dash._frontmatter, dash),
-        ("scorecard._frontmatter (scripts/automod/scorecard.py:150)", SC._frontmatter, SC),
-        ("backlog._split_frontmatter (scripts/automod/backlog.py:886)",
+        ("dashboard._frontmatter (app/routers/dashboard.py)", dash._frontmatter, dash),
+        ("scorecard._frontmatter (scripts/automod/scorecard.py)", SC._frontmatter, SC),
+        ("backlog._split_frontmatter (scripts/automod/backlog.py)",
          lambda p: B._split_frontmatter(p.read_text(encoding="utf-8"))[0], B),
     ]
 
@@ -588,3 +595,254 @@ def test_the_helper_counts_the_real_board_and_the_numeric_subset(tmp_path, monke
         "numeric_names is the first-token-is-a-digit rule: `11.md` is the 11th "
         "item and `999.md` the 999th (the board passes 999, and the old "
         "three-digit regex would have dropped it). README.md is not an item.")
+
+
+# ── #2069: the loader-swap ERROR path — one malformed item, never the walk ──
+#
+# `scripts/automod/backlog.py::_split_frontmatter` documented its own error path
+# as "pinned" by a test that no revision of this repository ever contained
+# (`git log --all -S` on the name cited returns only the commit that wrote the
+# sentence). What was unpinned was worse than the cross-loader equivalence the
+# sentence described: no fixture anywhere drove a malformed front matter through
+# that reader under *either* loader, so `except yaml.YAMLError: fm = {}` had
+# never run. These two tests are the witness the sentence claimed already existed.
+
+#: Front matter whose `title` opens a double quote and never closes it: the shape
+#: `_unparsed_guard`'s docstring records as the one that actually corrupted an
+#: item (#1020) — the parse comes back empty, and a writer that re-dumped it
+#: would have written back only the keys that writer sets itself, with the
+#: surviving front-matter text glued onto the top of the body.
+_BROKEN_FM_BLOCK = (
+    "type: note\n"
+    "status: up_next\n"
+    'title: "an unterminated quote that runs off the end of the block\n'
+    "board: lloyd\n"
+)
+
+#: What the body must come back as: verbatim, `# ` heading still in place, which
+#: is the line `load_item` reads an item's name from.
+_BROKEN_FM_BODY = ("\n# Item with an unterminated quote\n\n"
+                   "Body prose that must survive the unread item.\n")
+
+_BROKEN_FM_TEXT = f"---\n{_BROKEN_FM_BLOCK}---\n{_BROKEN_FM_BODY}"
+
+#: The same body behind front matter that *does* parse, so the empty dict the
+#: broken file gets is a degradation and not this reader answering `{}` to
+#: everything.
+_GOOD_FM_TEXT = ("---\ntype: note\nstatus: up_next\n"
+                 "title: A well-formed item\nboard: lloyd\n---\n" + _BROKEN_FM_BODY)
+
+#: `_YamlLoader`'s two possible bindings, as `(label, class)`.
+def _loader_arms() -> list[tuple[str, type]]:
+    """Both arms, and the test that needs two of them says so when there is one.
+
+    No conditional skip marker anywhere in here, in the policy of `HAVE_LIBYAML`
+    above: `test_all_three_modules_select_the_c_loader_when_libyaml_is_present`
+    already fails red on a box with no C extension, and a marker keyed on the box
+    is where an unmade comparison goes to hide.
+    """
+    return [("CSafeLoader", getattr(yaml, "CSafeLoader", yaml.SafeLoader)),
+            ("SafeLoader", yaml.SafeLoader)]
+
+
+def _two_loaders_present_or_fail(arms) -> None:
+    """Refuse to compare a loader with itself.
+
+    A comparison whose two arms are one class cannot fail, which is the shape the
+    review refused on #1975. On a box with libyaml the two are distinct — the
+    assert below is the positive control on that, not a formality: `CSafeLoader`
+    resolving to `SafeLoader` while `yaml._yaml` reports present is exactly the
+    drift `test_all_three_modules_select_the_c_loader_when_libyaml_is_present`
+    exists to catch.
+    """
+    assert HAVE_LIBYAML, (
+        "this box's PyYAML has no C extension (`yaml._yaml` is None), so both arms "
+        "here are SafeLoader and 'identical under the C loader and the pure-Python "
+        "one' is a comparison this run cannot make. NOT pinned by this run.")
+    names = {label: loader for label, loader in arms}
+    assert names["CSafeLoader"] is not names["SafeLoader"], (
+        "CSafeLoader resolved to SafeLoader on a box that reports libyaml present, "
+        "so the two arms below are one class")
+
+
+def test_unterminated_front_matter_degrades_the_same_under_either_loader(monkeypatch):
+    """`_split_frontmatter` swallows the scanner error from BOTH loaders, alike.
+
+    Three things, in the order the clause names them:
+
+    1. The bytes are malformed **to the parse the handler catches**. Handed the
+       block directly, each loader raises a *subclass* of `yaml.YAMLError`
+       (`yaml.scanner.ScannerError` from both arms, the C one carrying a
+       `yaml._yaml.Mark`) — that subclass relation is the whole claim that
+       "`yaml.YAMLError` still catches both", and it is now pinned instead of
+       asserted by a citation to a test that did not exist. Without this step the
+       test would be proving a degradation that never happens.
+    2. Handed the same text through the reader, `_split_frontmatter` returns an
+       **empty front-matter dict and the body untouched**, under the C loader and
+       under the pure-Python one, and the two results are equal to each other. No
+       exception reaches the caller — the `except yaml.YAMLError: fm = {}` arm is
+       what the docstring's stakes depend on, and delete it and step 2 fails with
+       the scanner error named in this test's output.
+    3. The same reader on well-formed bytes returns its keys, so the empty dict in
+       (2) is a degradation rather than a reader that returns `{` for every file.
+    """
+    arms = _loader_arms()
+    _two_loaders_present_or_fail(arms)
+
+    split = FM.split_frontmatter(_BROKEN_FM_TEXT)
+    assert split is not None and split[0] == _BROKEN_FM_BLOCK, (
+        "the fixture's fences are not the fences the reader splits on, so the "
+        "parse below would be handed the wrong bytes")
+
+    raised: dict[str, type] = {}
+    for label, loader in arms:
+        with pytest.raises(yaml.YAMLError) as caught:
+            yaml.load(_BROKEN_FM_BLOCK, Loader=loader)
+        exc = caught.value
+        assert type(exc) is not yaml.YAMLError, (
+            f"{label}: raised `yaml.YAMLError` itself rather than a subclass, so "
+            f"'the C scanner raises subclasses of it too' is not what this box "
+            f"does — the handler catches it, but not as the docstring says")
+        raised[label] = type(exc)
+    # `ScannerError` from BOTH arms: the pure-Python scanner's class, which the
+    # libyaml extension constructs too (with its own `yaml._yaml.Mark`). One
+    # `except yaml.YAMLError` therefore covers the box with libyaml and the box
+    # without it — the claim this item's whole change rests on, measured here
+    # rather than cited.
+    got = {label: cls.__name__ for label, cls in raised.items()}
+    assert got == {"CSafeLoader": "ScannerError", "SafeLoader": "ScannerError"}, (
+        f"expected a ScannerError subclass out of each loader, got {got}")
+
+    results: dict[str, tuple[dict, str]] = {}
+    for label, loader in arms:
+        monkeypatch.setattr(B, "_YamlLoader", loader)
+        try:
+            results[label] = B._split_frontmatter(_BROKEN_FM_TEXT)
+        except Exception as exc:  # noqa: BLE001 — reaching here IS the failure
+            pytest.fail(
+                f"{label}: `_split_frontmatter` let the parse error escape "
+                f"({type(exc).__module__}.{type(exc).__name__}: {exc}), so one "
+                f"malformed item now raises through every caller of it — the "
+                f"25 functions in scripts/automod/backlog.py whose board walks "
+                f"this reader is called from. The `except yaml.YAMLError` arm is "
+                f"the only thing between a broken item and a dead walk.")
+        good_fm, good_body = B._split_frontmatter(_GOOD_FM_TEXT)
+        assert good_fm.get("status") == "up_next", (
+            f"{label}: the well-formed control parsed to {good_fm!r}, so an empty "
+            f"dict from the broken file above proves nothing — a reader that "
+            f"returns {{}} to every file would pass step 2 by accident")
+        assert good_body == _BROKEN_FM_BODY, f"{label}: control body came back changed"
+
+    under_c, under_py = results["CSafeLoader"], results["SafeLoader"]
+    assert under_c[0] == {}, (
+        f"CSafeLoader: malformed front matter produced {under_c[0]!r} rather than "
+        f"an empty dict — a half-parsed item is what a writer re-dumps and loses")
+    assert under_c[1] == _BROKEN_FM_BODY, (
+        f"CSafeLoader: the body came back changed — {under_c[1][:80]!r} — which is "
+        f"the #1020 corruption: the unread front matter landing on the body and "
+        f"destroying the `# ` heading every later read extracts the name from")
+    assert under_c == under_py, (
+        f"the two loaders do not degrade the same item the same way: "
+        f"CSafeLoader {under_c[0]!r}, SafeLoader {under_py[0]!r}. The claim that "
+        f"`yaml.YAMLError` catches both is what makes the loader swap safe, and "
+        f"it has to hold on the error path, not only on files that parse.")
+
+
+def test_one_malformed_item_costs_one_item_not_the_whole_board_walk(tmp_path, monkeypatch):
+    """The consequence the docstring's stakes assert: the walk survives the bad file.
+
+    Three item files, one of them the unterminated-quote front matter, walked by
+    `all_items` — the function the board steward and the dispatch loop read —
+    under each loader in turn. All three items come back: the two well-formed
+    ones with the status their own front matter states, the broken one on the
+    reader's defaults with its `# ` heading still readable out of the body. That
+    is "one malformed item degrades to one unread item": a status the loop does
+    not dispatch on, not an exception through the walk.
+
+    The walk is a cached one (`_load_item_cached`), so the parse counter
+    `_items_parses` — the instrument `tests/test_backlog_item_cache.py` reads — is
+    checked beside it: a second arm that served the cache would compare nothing,
+    so each arm must prove it parsed all three files again.
+
+    `_unparsed_guard` is asserted at the end because it is why degrading to `{}`
+    is safe rather than lossy: the guard is what stops a writer re-dumping an
+    unread item and destroying it (#1020).
+    """
+    arms = _loader_arms()
+    _two_loaders_present_or_fail(arms)
+
+    board = tmp_path / "board"
+    board.mkdir()
+    good_open = board / "2069001-open.md"
+    good_open.write_text(_GOOD_FM_TEXT, encoding="utf-8")
+    broken = board / "2069002-broken.md"
+    broken.write_text(_BROKEN_FM_TEXT, encoding="utf-8")
+    good_done = board / "2069003-done.md"
+    good_done.write_text(_GOOD_FM_TEXT.replace("status: up_next", "status: done"),
+                         encoding="utf-8")
+    paths = [good_open, broken, good_done]
+
+    for label, loader in arms:
+        monkeypatch.setattr(B, "_YamlLoader", loader)
+        B._items_cache.clear()
+        before = sum(B._items_parses.get(str(p), 0) for p in paths)
+        items = B.all_items(boards=None, backlog_dir=board)
+        parsed = sum(B._items_parses.get(str(p), 0) for p in paths) - before
+        assert parsed == len(paths), (
+            f"{label}: the walk parsed {parsed} of {len(paths)} files, the rest "
+            f"served from `_items_cache` — so this arm did not read the broken "
+            f"file with this loader at all and proved nothing")
+        assert len(items) == len(paths), (
+            f"{label}: the walk returned {len(items)} of {len(paths)} items, so "
+            f"the malformed file took something other than itself")
+        by_id = {item.id: item for item in items}
+        assert by_id[2069001].status == "up_next", (
+            f"{label}: the well-formed open item came back {by_id[2069001].status!r}")
+        assert by_id[2069003].status == "done", (
+            f"{label}: the well-formed done item came back {by_id[2069003].status!r}")
+        unread = by_id[2069002]
+        assert unread.status == "draft", (
+            f"{label}: the malformed item read as {unread.status!r}, not the "
+            f"reader's `draft` default — an unread item that reports a status it "
+            f"did not state is a dispatch decision out of a parse failure")
+        assert unread.name == "Item with an unterminated quote", (
+            f"{label}: name extracted as {unread.name!r}, so the body heading the "
+            f"unread front matter used to be glued onto is gone (#1020)")
+        assert "Body prose that must survive the unread item." in unread.body, (
+            f"{label}: the malformed item's body did not survive the walk")
+
+    # The writer half of the same shape: an unread item must not be re-dumped.
+    assert B._unparsed_guard(broken, _BROKEN_FM_TEXT, {}, "test-guard") is True, (
+        "a fenced file that parsed to no keys is not refused, so the empty dict "
+        "this degradation produces would be written back as an item stripped of "
+        "everything the writer did not itself set")
+    assert B._unparsed_guard(good_open, _GOOD_FM_TEXT, {"status": "up_next"},
+                             "test-guard") is False, (
+        "a well-formed item is refused by the guard, which would make the board "
+        "unwritable rather than degrading one item")
+
+
+def test_every_reader_label_names_a_symbol_and_a_path():
+    """The labels in `_readers()` resolve; the line numbers they used to carry did not.
+
+    All three carried a `file.py:NNN` and #2069's triage found all three off the
+    def they named — `backlog._split_frontmatter` labelled `backlog.py:886` while
+    the def sat at 1490. A label is printed into every failure message in this
+    file, so a drifted one points a reader at unrelated code while looking like a
+    citation. The form now is symbol plus path, which cannot drift, and this is
+    the guard that keeps it: no `:digits`, and the named path must exist and
+    really define the symbol the label claims.
+    """
+    root = Path(__file__).resolve().parents[1]
+    for label, _call, module in _readers():
+        assert ":" not in label, f"{label!r}: a label that carries a line number drifts"
+        symbol, _, path = label.partition(" (")
+        path = path.rstrip(")")
+        assert path, f"{label!r}: no path in the label"
+        source = root / path
+        assert source.is_file(), f"{label!r}: names {path}, which is not a file"
+        fn = symbol.split(".")[-1]
+        assert f"def {fn}(" in source.read_text(encoding="utf-8"), (
+            f"{label!r}: {path} does not define `{fn}`")
+        assert fn in dir(module), (
+            f"{label!r}: {module.__name__} has no attribute `{fn}`")

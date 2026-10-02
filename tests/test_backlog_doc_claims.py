@@ -14,14 +14,28 @@ A `substring in document` check passes the moment the sentence is quoted
 somewhere — say in a paragraph about how it used to be false — which is not the
 claim clause 5 asks for. Each check therefore names the heading it must live
 under, and fails if the section moved or lost the sentence.
+
+The last section checks the *code* prose of `scripts/automod/backlog.py` instead
+of this document, for the same reason and with the same failure behind it:
+#2069 found that module telling a reader that an error path was "pinned" by a
+test which no revision of this repository ever contained, so the sentence read as
+a guarantee while the behaviour it promised had never run. Prose that points at a
+test is a claim, and a claim with no check behind it rots silently — so now a
+citation in that file's comments and docstrings is only allowed if it resolves.
 """
 
 from __future__ import annotations
 
+import io
+import re
+import subprocess
+import tokenize
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DOC = ROOT / "architecture" / "backlog.md"
+BACKLOG_PY = ROOT / "scripts" / "automod" / "backlog.py"
+TESTS = ROOT / "tests"
 
 
 def _section(heading: str) -> str:
@@ -99,6 +113,172 @@ def test_a_save_that_moves_nothing_is_documented_as_recording_nothing():
 
     assert "TaskModal" in section
     assert "no move" in section.lower()
+
+
+# ── prose that cites a test: the citation has to resolve (#2069) ─────────
+#
+# `_split_frontmatter`'s docstring said the error path was "pinned" by a test. It
+# named one that had never existed — `git log --all -S` on that name returns only
+# the commit that wrote the sentence — so the sentence certified a guarantee
+# nobody was keeping while the `except yaml.YAMLError` it described had never run
+# in a test. A citation is a pointer, and a pointer is worth exactly what happens
+# when you follow it.
+
+_BACKTICK = re.compile(r"`([^`]+)`")
+_TESTISH = re.compile(r"(?:^|[/\s:.])test_")
+
+
+def _cited_test_witnesses(path: Path) -> list[tuple[int, str]]:
+    """`(line, citation)` for every back-quoted test reference in a file's prose.
+
+    Comments and strings only, taken with `tokenize` rather than a line scan: a
+    citation lives in prose, and the alternative is reading a `test_…` name in
+    live code (a fixture name, a parametrize id) as a claim about a witness.
+    Multi-line strings count, which is what makes a module docstring's citation
+    checked too.
+    """
+    out: list[tuple[int, str]] = []
+    text = path.read_text(encoding="utf-8", errors="replace")
+    for tok in tokenize.generate_tokens(io.StringIO(text).readline):
+        if tok.type not in (tokenize.COMMENT, tokenize.STRING):
+            continue
+        for span in _BACKTICK.findall(tok.string):
+            span = " ".join(span.split())     # a citation wrapped over lines
+            if _TESTISH.search(span):
+                out.append((tok.start[0], span))
+    return out
+
+
+def _test_node_names() -> set[str]:
+    """Every `def test_…` defined under `tests/`, from the source, not the runner.
+
+    Collected by regex rather than `pytest --collect-only` because the runner
+    refuses to start in the production tree (`tests/conftest.py`'s
+    `_refuse_the_production_tree`), and a citation check that only works inside a
+    worktree is a citation check that is not run.
+    """
+    names: set[str] = set()
+    for p in sorted(TESTS.rglob("*.py")):
+        names |= set(re.findall(r"^def (test_[A-Za-z0-9_]+)\(",
+                                p.read_text(encoding="utf-8", errors="replace"), re.M))
+    return names
+
+
+def _resolves(citation: str, nodes: set[str]) -> bool:
+    """Does a citation point at something real?
+
+    Three shapes the prose uses: a node name on its own, a test module path, and
+    the two joined by `::`. Each is checked against the tree it points at.
+    """
+    # Both halves get stripped: prose wraps, and `...py::\n    test_x` is the same
+    # citation as `...py::test_x` once the token's whitespace is collapsed.
+    head, sep, node = (p.strip() for p in citation.partition("::"))
+    if "/" in head or head.endswith(".py"):
+        target = ROOT / head.rstrip(":0123456789")
+        if not target.is_file():
+            return False
+        if sep and _TESTISH.match(node):
+            body = target.read_text(encoding="utf-8", errors="replace")
+            return bool(re.search(rf"^def {re.escape(node)}\(", body, re.M))
+        return True
+    return head in nodes
+
+
+def test_every_test_the_backlog_prose_cites_exists():
+    """No sentence in `scripts/automod/backlog.py` may cite a witness that is not there.
+
+    The denominator is asserted before the sweep, because a scan that finds
+    nothing reports a clean file: 15 citations live in this module today, so an
+    empty list means the extractor stopped seeing them, not that the prose got
+    honest. This is the same "a check whose denominator can be zero is not a
+    check" that #1287's own safety reading wrote down.
+    """
+    citations = _cited_test_witnesses(BACKLOG_PY)
+    assert len(citations) >= 5, (
+        f"{BACKLOG_PY.name} yielded {len(citations)} test citations; the prose "
+        f"carries 15 (comments and docstrings both), so the extractor is reading "
+        f"the wrong thing and a dead name would pass as resolved")
+    nodes = _test_node_names()
+    assert nodes, "no test node found under tests/, so nothing here could resolve"
+    dead = [(line, cite) for line, cite in citations
+            if not _resolves(cite, nodes)]
+    assert not dead, (
+        f"{len(dead)} of {len(citations)} test citations in {BACKLOG_PY.name} "
+        f"point at nothing: {dead[:4]}. A docstring that says a behaviour is "
+        f"'pinned by `test_x`' is a claim that the reader stops looking — which "
+        f"is how #2069's unpinned error path read as covered for a fortnight.")
+
+
+def test_split_frontmatter_s_error_path_citation_points_at_a_test_that_runs():
+    """The one sentence #2069 was filed about, checked by name rather than in aggregate.
+
+    It cites the witness for "one malformed item costs one item, never the walk",
+    so the citation must be a node the suite actually contains. Asserting the
+    positive (this function's docstring cites N nodes, all defined) rather than
+    the negative of one retired name: the retired name is only the instance, and
+    a check written around it would miss the next one.
+    """
+    from scripts.automod import backlog as B
+
+    doc = B._split_frontmatter.__doc__ or ""
+    cited = [c for c in _BACKTICK.findall(doc) if _TESTISH.search(c)]
+    cited = [" ".join(c.split()) for c in cited]
+    nodes = _test_node_names()
+    node_cited = [c for c in cited if c in nodes]
+    assert node_cited, (
+        f"`_split_frontmatter`'s docstring cites no defined test node (cited: "
+        f"{cited}). #2069 exists because this docstring's citation was a name no "
+        f"revision of this repo ever had; 'no citation' is not the fix, a real "
+        f"witness is.")
+    dead = [c for c in cited if not _resolves(c, nodes)]
+    assert not dead, f"dead citations in the docstring: {dead}"
+
+
+def test_nothing_left_in_the_tree_names_the_front_matter_witness_that_never_was():
+    """The aggregate check above's literal twin: the retired name is gone tree-wide.
+
+    Written as a `git grep` because that is the check the item recorded, and a
+    test that reproduces the accepted command is a test a reader can re-run by
+    hand. The pattern carries a bracket class (`test_[m]alformed…`) so that this
+    file is not itself the hit the search reports — the same reason a `ps | grep`
+    spells its target with a class.
+
+    A 0-hit grep is only evidence with a positive control beside it, so the same
+    instrument is run on a name that must be found first. Without that, a broken
+    cwd, a git that refused, or a pattern that matches nothing anywhere would all
+    report this as a pass.
+    """
+    def search(pattern: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", "grep", "-n", "-e", pattern, "--", "."],
+                              cwd=str(ROOT), capture_output=True, text=True,
+                              timeout=120)
+
+    control = search("test_unterminated_front_matter_degrades_the_same")
+    assert control.returncode == 0, (
+        f"the positive control found nothing, so the instrument, not the tree, is "
+        f"the problem: rc={control.returncode} "
+        f"cwd={ROOT} stderr={control.stderr[:200]!r}")
+
+    gone = search("test_[m]alformed_front_matter_behaves_the_same")
+    assert gone.returncode == 1, (
+        f"the retired witness name is still cited (rc={gone.returncode}): "
+        f"{gone.stdout[:400]!r} {gone.stderr[:200]!r}")
+
+
+def test_no_reader_label_in_the_loader_suite_carries_a_line_number():
+    """`file.py:886` in a printed label is a citation with nothing re-reading it.
+
+    All three reader labels in `tests/test_dashboard_yaml_loader.py` carried a
+    line number at #2069's triage and all three were off (886 against a def at
+    1490, 150 against 230, 118 against 112). The sibling test in that file checks
+    the labels it prints; this one checks the source, so a re-added `:NNN` fails
+    here even if the reader-side assert never sees it.
+    """
+    src = (TESTS / "test_dashboard_yaml_loader.py").read_text(encoding="utf-8")
+    offenders = re.findall(r'"[\w.]+\([^"]*\.(?:py|tsx|ts):\d+\)"', src)
+    assert not offenders, (
+        f"reader labels carrying line numbers: {offenders[:3]} — a line number in "
+        f"a string literal moves with the code and the string does not")
 
 
 def test_every_backlog_module_the_prose_blames_actually_defines_that_symbol():

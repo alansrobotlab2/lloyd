@@ -1504,10 +1504,18 @@ def _split_frontmatter(text: str) -> tuple[dict, str]:
 
     Parses through `_YamlLoader` — libyaml's `CSafeLoader` where libyaml is
     importable, `SafeLoader` where it is not (see the import at the top of the
-    file). `yaml.YAMLError` still catches both: the C scanner raises
-    subclasses of it too, which `test_malformed_front_matter_behaves_the_same`
-    pins, because a loader swap that turned a malformed item into an
-    exception instead of an empty dict would take the whole board walk down.
+    file). `yaml.YAMLError` still catches both, and the word has a witness:
+    handed one unterminated-quote front matter each, both arms raise
+    `yaml.scanner.ScannerError`, a subclass of it, and this function returns the
+    same `(dict, body)` from either — `tests/test_dashboard_yaml_loader.py`'s
+    `test_unterminated_front_matter_degrades_the_same_under_either_loader`,
+    with `test_one_malformed_item_costs_one_item_not_the_whole_board_walk` for
+    the consequence: a malformed item costs that item, never the walk, which is
+    the shape a loader swap would otherwise make fatal. (The citation that stood
+    here named a test no revision of this repo ever contained — #2069 — so the
+    claim was unguarded from 2026-09-17 until the round that fixed it, and
+    `tests/test_backlog_doc_claims.py` now resolves every test name this module's
+    prose cites.)
     """
     block = FM.split_frontmatter(text)
     if block is None:
