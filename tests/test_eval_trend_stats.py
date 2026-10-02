@@ -1612,3 +1612,347 @@ def test_the_question_stamp_is_written_beside_the_labels_stamp_and_ignores_gold(
         loaded = _ts.load_night(p)
     assert loaded.questions_sha256 == base_q
     assert loaded.questions == {"a": "what is x", "b": "what is y"}
+
+
+# ===========================================================================
+# #2060 — a printed binary-leg rate must name the denominator it divided over
+# ===========================================================================
+#
+# #1663 moved the five SCORED rates onto the gold-bearing subset in
+# `eval/run_eval.py` alone, so the published headline for
+# `nightly-20261002-20261002-060315.json` is 43 hits over 66 gold-bearing queries
+# = 0.652 (`ci95.entity_hit_rate.n` = 66) while this tool's own transition line
+# printed 43/81 = 0.531 — a rate over every joined query — in the same column
+# position, with no denominator beside it. A reader comparing the two saw a 0.12
+# regression that does not exist. Whether the audit should move onto the gold
+# subset or stay on the joined population is a ruling #2060 reserves to a person;
+# what is not open is a bare figure that can be read as the headline, so every
+# binary rate and Wilson interval has to say which count it used.
+
+
+def _labelled_pair(tmp_path: Path, prev_bits, cur_bits,
+                   entity_gold: set[str]) -> Path:
+    """Two nights whose entity leg is fully specified and whose doc leg stands still.
+
+    `entity_gold` decides which records carry a non-empty ``expected.entities``, the
+    way ``run_eval`` writes per-query gold (`_gold` above). The doc leg is all-hits
+    and all-gold on both nights so it cannot move and cannot interfere with an
+    entity-leg assertion.
+    """
+    a = _night("nightly-20260101", 1, prev_bits, [1] * len(IDS),
+               [0.5] * len(IDS), [0.5] * len(IDS), CORPUS_A)
+    b = _night("nightly-20260102", 2, cur_bits, [1] * len(IDS),
+               [0.5] * len(IDS), [0.5] * len(IDS), CORPUS_A)
+    for night in (a, b):
+        _gold(night, entity_gold, set(IDS))
+    _write(tmp_path, "nightly-a.json", a)
+    return _write(tmp_path, "nightly-b.json", b)
+
+
+def _leg_line(out: str, label: str) -> str:
+    """The one TRANSITION line this section is about, for one binary leg.
+
+    Matched on `label` plus its `delta` field, because the report also carries an
+    `entity_hit_rate series:` line that shares the leg's name and is the other figure
+    #2060 is about.
+    """
+    needle = label + " delta "
+    hits = [ln for ln in out.splitlines() if needle in ln]
+    assert len(hits) == 1, f"expected exactly one {label} leg line, got {hits}"
+    return hits[0]
+
+
+def _named_ns(line: str) -> list[int]:
+    """Every query count the line spells out as its own divisor."""
+    return [int(g) for g in re.findall(r"over (\d+) paired queries", line)]
+
+
+def test_a_binary_leg_rate_and_wilson_name_the_divisor_they_used(tmp_path, capsys):
+    """Clause 1: the count printed beside a rate is the count that rate divided by.
+
+    Eight queries join and six carry entity gold; three score a hit on the later
+    night, two of them gold-bearing. So the joined figure is 3/8 = 0.375 while the
+    gold-subset figure the artifact would publish is 2/6 = 0.333 — the two candidates
+    that on the real 2026-10-02 night were 43/81 = 0.531 against a published
+    43/66 = 0.652. The line must name a count, must name the SAME count for the rate
+    and for the interval, and that count must be the divisor the arithmetic actually
+    used: `cur_rate` times it is the hit count, and `wilson` is the interval at that n
+    and not at the gold n. Naming a number that is not the divisor would satisfy a
+    grep and repeat the bug.
+    """
+    cur = [1, 1, 0, 0, 0, 0, 1, 0]        # q1, q2 (both gold-bearing) + q7 (no gold)
+    d = _labelled_pair(tmp_path, cur, cur, entity_gold=set(IDS[:6]))
+    prev, night = load_window(d)
+    t = audit_transition(prev, night)
+    print_transition(t)
+    line = _leg_line(capsys.readouterr().out, "entity_hit")
+    leg = t.legs["entity_hit"]
+    hits = sum(cur)
+
+    assert hits == 3 and len(night.gold_ids["entities"]) == 6, (
+        "fixture guard: the joined population and the gold subset must differ, "
+        "or naming one of them proves nothing")
+    named = _named_ns(line)
+    assert named, f"the line prints its rate and interval over an unnamed count: {line}"
+    assert len(named) == 2, f"the rate and the interval must each name a count: {line}"
+    assert named == [leg["rate_n"]] * 2, (
+        f"the count named must be the count the leg's arithmetic used: {line}")
+    assert leg["rate_n"] == len(t.prev.ids) == 8, (
+        "the divisor in use is the joined paired-query count")
+    assert leg["cur_rate"] == pytest.approx(hits / named[0]), (
+        "the named count must be the divisor the printed rate used")
+    assert leg["wilson"] == wilson_interval(hits, named[1]), (
+        "the named count must be the divisor the printed interval used")
+    assert leg["wilson"] != wilson_interval(2, 6), (
+        "fixture guard: the gold-subset interval must be a different interval, or "
+        "this assertion cannot tell the two denominators apart")
+    assert "0.375" in line and "0.333" not in line, (
+        f"the printed rate must be the one the named divisor produces: {line}")
+
+
+def test_the_rescored_claim_line_names_the_divisor_beside_its_wilson(tmp_path, capsys):
+    """Clause 2: no `Wilson 95% [a, b]` leaves this tool without an n.
+
+    The RE-SCORED CLAIM line is the surface the nightly loop quotes when it rules a
+    written regression claim SUPPORTED or UNSUPPORTED, so an unlabelled interval there
+    is worse than one on the transition page, not better. The claim is asked for a
+    rise that does not clear the test, which is the case that matters: the numbers are
+    printed either way. Asserted over the whole report, because the clause is that no
+    interval is printed bare anywhere in it.
+    """
+    cur = [1, 1, 0, 0, 0, 0, 1, 0]
+    d = _labelled_pair(tmp_path, [0] * len(IDS), cur, entity_gold=set(IDS[:6]))
+    assert main(["--baselines", str(d), "--reps", "200",
+                 "--claim",
+                 "entity_hit:rise:nightly-20260101:nightly-20260102"]) == 0
+    out = capsys.readouterr().out
+    claim_block = out.split("RE-SCORED VERDICTS", 1)[1]
+    printed = [ln for ln in claim_block.splitlines() if "Wilson 95%" in ln]
+    assert printed, f"the exact leg printed no interval at all:\n{claim_block[:600]}"
+    want = audit_transition(*load_window(d)).legs["entity_hit"]["rate_n"]
+    for ln in printed:
+        assert "exact McNemar p=" in ln, f"an exact leg must be named as exact: {ln}"
+        assert _named_ns(ln) == [want], f"interval without its denominator: {ln}"
+    for ln in out.splitlines():
+        if "Wilson 95%" in ln:
+            assert _named_ns(ln), f"bare Wilson interval on this line: {ln}"
+
+
+def test_a_no_gold_query_is_still_a_concordant_pair_for_mcnemar(tmp_path, capsys):
+    """Clause 3: the McNemar test still runs over every joined query.
+
+    Three entity hits flip 1 -> 0 between the nights and only one of the three carries
+    entity gold, so the joined test is (b=3, c=0) with p = 2 * 0.5**3 = 0.250 while the
+    same test over the five gold-bearing queries is (b=1, c=0) and p = 1.000. A no-gold
+    query scores `entity_hit: False` — a bool, never null — on both nights, which is
+    the fact that made the original framing of #2060 look unfixable: it is not a hole in
+    the test, it is a concordant non-hit, and it stays one whatever the rate's divisor
+    is. Pinning the joined values is what stops a change to the printed denominator
+    from quietly filtering the bits the p-value is derived from.
+    """
+    prev = [1, 1, 1, 0, 0, 1, 1, 0]        # q6 and q7 carry no entity gold
+    cur = [0, 1, 1, 0, 0, 0, 0, 0]        # three losses: q1 gold, q6 + q7 not
+    d = _labelled_pair(tmp_path, prev, cur, entity_gold=set(IDS[:5]))
+    a_doc = json.loads((d / "nightly-a.json").read_text(encoding="utf-8"))
+    no_gold = [r for r in a_doc["records"] if r["id"] in ("q6", "q7", "q8")]
+    assert all(r["expected"]["entities"] == [] for r in no_gold), (
+        "fixture guard: these queries carry no gold")
+    assert all(isinstance(r["scoring"]["entity_hit"], bool) for r in no_gold), (
+        "fixture guard: a no-gold record's entity_hit is a bool, so `None` is never "
+        "what a missing-gold query looks like")
+
+    prev_n, night = load_window(d)
+    t = audit_transition(prev_n, night)
+    print_transition(t)
+    line = _leg_line(capsys.readouterr().out, "entity_hit")
+    leg = t.legs["entity_hit"]
+
+    assert (leg["b"], leg["c"], leg["m"]) == (3, 0, 3), line
+    assert leg["p"] == pytest.approx(0.25), line
+    assert leg["exact"] is True and leg["n"] == 8
+    assert _named_ns(line) == [leg["n"]] * 2, (
+        f"the named denominator must be the population the test ran over: {line}")
+    assert "b=3 c=0" in line and "p=0.250" in line, line
+
+    gold = sorted(prev_n.gold_ids["entities"])
+    subset = mcmemar_exact([_ts._bit(prev_n.scores[i], "entity_hit") for i in gold],
+                           [_ts._bit(night.scores[i], "entity_hit") for i in gold])
+    assert (subset["b"], subset["c"], subset["p"]) == (1, 0, pytest.approx(1.0)), (
+        "fixture guard: the gold-subset test must give a different verdict, or "
+        "pinning the joined one above would pin nothing")
+
+
+def test_a_night_carrying_no_expected_block_still_names_its_denominator(tmp_path,
+                                                                        capsys):
+    """Clause 4: unknown gold is not a zero denominator, and never a crash.
+
+    Every artifact predating the `expected` block loads with `gold_ids is None` — the
+    state #1822 documented as "this artifact says nothing about gold". A print that
+    reached for the gold subset would either raise or divide by an empty set, and an
+    audit that crashed on a legacy night would simply not run, which is how the
+    phantom regression survives a fix that only handles the new shape.
+    """
+    a = _night("nightly-20260101", 1, [1, 1, 0, 0, 1, 1, 0, 0], [1] * 8,
+               [0.5] * 8, [0.5] * 8, CORPUS_A)
+    b = _night("nightly-20260102", 2, [1, 0, 0, 0, 1, 1, 0, 0], [1] * 8,
+               [0.5] * 8, [0.5] * 8, CORPUS_A)
+    d = _write(tmp_path, "nightly-a.json", a)
+    _write(tmp_path, "nightly-b.json", b)
+    nights = load_window(d)
+    assert all(n.gold_ids is None for n in nights), (
+        "fixture guard: neither night says anything about gold")
+
+    assert main(["--baselines", str(d), "--reps", "200", "--no-claims"]) == 0, (
+        "a legacy artifact must still be auditable")
+    out = capsys.readouterr().out
+    line = _leg_line(out, "entity_hit")
+    t = audit_transition(*nights)
+    leg = t.legs["entity_hit"]
+
+    assert t.n == 8, "fixture guard: eight queries joined the two nights"
+    assert _named_ns(line) == [8, 8], (
+        f"a rate printed over an unknown-gold night must still name its count: {line}")
+    assert leg["rate_n"] == 8, "no gold subset may be invented out of an absent block"
+    assert leg["cur_rate"] == pytest.approx(3 / 8), (
+        "the rate is still the joined rate: 3 hits over the 8 queries that joined")
+    assert not math.isnan(leg["cur_rate"]) and leg["wilson"][0] >= 0.0, (
+        "an invented empty gold subset would divide by zero and print nan")
+    # Scoped to the audit block: the re-base chronology below SUMMARY quotes the words
+    # "DEFINITION BREAK" as prose about the line, and that sentence is not an annotation.
+    assert "DEFINITION BREAK:" not in out.split("SUMMARY")[0], (
+        "absence of gold evidence annotates nothing, the #1822 rule")
+
+
+def test_the_per_night_rate_series_header_names_the_population_it_means(capsys,
+                                                                        tmp_path):
+    """The `entity_hit_rate series:` line borrows the published metric's name.
+
+    `_report_rate_series` folds every night of the window into one number per night by
+    averaging `scoring.entity_hit` across EVERY record of that night, while
+    `summary.overall.entity_hit_rate` of the same name and in the same artifact divides
+    over the queries carrying entity gold (#1663). On nightly-20261002 the two are 0.531
+    and 0.652, so an unlabelled series line is the second way this tool reports a
+    regression that does not exist. This node owns that header alone: clause 1 is about
+    the TRANSITION leg line, and one node per surface keeps a rewording from breaking a
+    denominator test two clauses away.
+    """
+    # Gold on q7 alone: that one query is a hit, so the gold-subset figure is 1/1 =
+    # 1.000 while the all-records figure is 3/8 = 0.375. Two candidates 0.04 apart
+    # would not discriminate at the series line's two-decimal print.
+    d = _labelled_pair(tmp_path, [1, 1, 0, 0, 0, 0, 1, 0], [1, 1, 0, 0, 0, 0, 1, 0],
+                       entity_gold={"q7"})
+    assert main(["--baselines", str(d), "--reps", "200", "--no-claims"]) == 0
+    out = capsys.readouterr().out
+    series = [ln for ln in out.splitlines() if "entity_hit_rate series" in ln]
+    assert len(series) == 1, f"expected one series line, got {series}"
+    header = series[0].split(":")[0]
+    assert "every record" in header, (
+        f"the header must say which records it averaged: {series[0]}")
+    assert "gold" in header, (
+        f"the header must name the gold-bearing population the published rate of the "
+        f"same name divides over instead: {series[0]}")
+    printed = series[0].rsplit("=", 1)[1].strip()
+    # Compared in the same two-decimal form the print uses, so the assertion is about
+    # which population was divided over and not about float epsilon.
+    assert printed == f"{3 / len(IDS):.2f}", (
+        f"the series averages every record of the night: 3 hits over {len(IDS)} prints "
+        f"{3 / len(IDS):.2f}, and it printed {printed}")
+    assert printed != f"{1 / 1:.2f}", (
+        "the one query carrying entity gold here is a hit, so a series that divided "
+        f"over the gold subset would print {1 / 1:.2f}")
+
+
+def test_the_denominator_survives_the_stdout_boundary_the_nightly_loop_reads(
+        tmp_path):
+    """The seam #82 actually crosses: this tool as a subprocess, its stdout as text.
+
+    Every other node here calls `main()` in-process, which proves the formatter. What
+    the nightly retrieval-eval run does is spawn the script and read its stdout, and a
+    label that only exists in an in-process capture is not a label on the surface that
+    gets quoted into a run note. So this runs the real argv through a real pipe and
+    asserts the counts are in the bytes that crossed it.
+    """
+    d = _labelled_pair(tmp_path, [0] * len(IDS), [1, 1, 0, 0, 0, 0, 1, 0],
+                       entity_gold=set(IDS[:6]))
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "eval_trend_stats.py"),
+         "--baselines", str(d), "--reps", "200",
+         "--claim", "entity_hit:rise:nightly-20260101:nightly-20260102"],
+        capture_output=True, text=True, cwd=str(ROOT), timeout=120)
+    assert proc.returncode == 0, proc.stderr[-400:]
+    leg = _leg_line(proc.stdout, "entity_hit")
+    assert "(over 8 paired queries)" in leg, leg
+    block = proc.stdout.split("RE-SCORED VERDICTS", 1)[1]
+    claim = [ln for ln in block.splitlines()
+             if "Wilson 95%" in ln and "exact McNemar p=" in ln]
+    assert claim, "the claim audit printed no exact-leg interval across the pipe"
+    for ln in claim:
+        assert _named_ns(ln) == [8], f"interval crossed the pipe unnamed: {ln}"
+
+
+#: The path clause 5 names, in the vault. `Path.home()` is how every other
+#: vault-reading node here locates the vault (tests/test_action_review_calibration.py
+#: :399), and the gate's round home symlinks `obsidian` to the live vault, so this
+#: resolves identically in a round and on the box.
+WITNESS = Path.home() / "obsidian" / "backlog" / "data" \
+    / "nightly-20261002-20261002-060315.json"
+
+
+def test_the_witness_bytes_re_derive_the_two_denominators_the_item_quotes():
+    """Clause 5: the quoted figures come out of committed bytes, not out of prose.
+
+    One JSON line per record of `nightly-20261002-20261002-060315.json`, in that
+    artifact's order, keeping the query id, whether the query carries gold on each leg
+    (`expected.entities` / `expected.docs` non-empty -- the population #1663 divides the
+    published rate over), and the two binary scores. The expected values below are the
+    figures #2060 quotes; every value on the left is counted out of the committed bytes,
+    so replacing the extract without re-deriving the report turns this red.
+
+    The two pairs are the whole item: 43 hits over the 66 queries carrying entity gold
+    is the 0.652 that artifact publishes (`summary.overall.ci95.entity_hit_rate.n` = 66),
+    and 43 over all 81 joined records is the 0.531 this tool printed beside it. The same
+    on the doc leg, 54/74 = 0.730 against 54/81 = 0.667.
+    """
+    assert WITNESS.is_file(), f"missing witness {WITNESS}"
+    rows = [json.loads(ln) for ln in WITNESS.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 81, (
+        f"`wc -l` of the witness is the 81 the item quotes; it is {len(rows)}, so "
+        "these are not the bytes the report was re-derived from")
+
+    gold_e = [r for r in rows if r["gold_entities"]]
+    gold_d = [r for r in rows if r["gold_docs"]]
+    hits_e = sum(1 for r in gold_e if r["entity_hit"])
+    hits_d = sum(1 for r in gold_d if r["doc_hit"])
+    joined_e = sum(1 for r in rows if r["entity_hit"])
+    joined_d = sum(1 for r in rows if r["doc_hit"])
+
+    assert (hits_e, len(gold_e)) == (43, 66), (
+        f"the item quotes 43 entity hits over 66 gold-bearing queries, the bytes say "
+        f"{hits_e} over {len(gold_e)}")
+    assert round(hits_e / len(gold_e), 3) == 0.652, "the published entity rate"
+    assert round(joined_e / len(rows), 3) == 0.531, (
+        "0.531 is 43 hits over ALL 81 joined records — the figure #2060 is about")
+    assert (hits_d, len(gold_d)) == (54, 74), (
+        f"the item quotes 54 doc hits over 74 gold-bearing queries, the bytes say "
+        f"{hits_d} over {len(gold_d)}")
+    assert round(hits_d / len(gold_d), 3) == 0.730, "the published doc rate"
+    assert round(joined_d / len(rows), 3) == 0.667, "0.667 is 54 over all 81"
+
+    # The two counts the item's blocking fact rests on: the queries whose gold is empty
+    # carry a bool score, never a null, which is why the subset cannot come out of
+    # `scoring` and why McNemar keeps them.
+    assert len(rows) - len(gold_e) == 15, "15 queries carry no entity gold"
+    assert len(rows) - len(gold_d) == 7, "7 queries carry no doc gold"
+    assert all(isinstance(r["entity_hit"], bool) for r in rows if not r["gold_entities"])
+    assert joined_e == hits_e and joined_d == hits_d, (
+        "a query with no gold can still score a hit, so the joined numerator is not "
+        "the gold subset's numerator by construction — the two rates differ only in "
+        "the population under them")
+
+    committed = subprocess.run(
+        ["git", "-C", str(Path.home() / "obsidian"), "diff", "--quiet", "--",
+         "backlog/data/nightly-20261002-20261002-060315.json"],
+        capture_output=True)
+    assert committed.returncode == 0, (
+        "the witness on disk differs from the witness in the vault's git, so the bytes "
+        "this checked are not the bytes anyone else can re-check")

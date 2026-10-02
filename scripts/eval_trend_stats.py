@@ -690,9 +690,20 @@ def audit_transition(prev: Night, cur: Night, reps: int = BOOT_REPS,
         prev_bits = [_bit(prev.scores[i], key) for i in ids]
         cur_bits = [_bit(cur.scores[i], key) for i in ids]
         leg = mcmemar_exact(prev_bits, cur_bits)
-        k = sum(cur_bits)
+        # #2060: `rate_n` is the divisor read back off the very lists the rate and the
+        # interval are computed from, so the count a print names beside them cannot
+        # drift away from the arithmetic behind them. It is deliberately NOT the
+        # artifact's headline denominator: `summary.overall.ci95[<metric>].n` divides
+        # over the queries carrying gold for the leg (#1663), which on
+        # nightly-20261002 is 43/66 = 0.652 published against 43/81 = 0.531 here — a
+        # 0.12 regression that exists only in the difference between the two
+        # denominators. Whether the audit's rate should move onto that gold subset is
+        # the ruling #2060 reserves to a person, and taking it would leave `delta`,
+        # which is `(c - b)/n` over the joined population, printing beside a rate on
+        # another one; what is not open is a bare figure in the headline's column.
+        leg["rate_n"] = len(cur_bits)
         leg["prev_rate"], leg["cur_rate"] = _mean(prev_bits), _mean(cur_bits)
-        leg["wilson"] = wilson_interval(k, len(ids))
+        leg["wilson"] = wilson_interval(sum(cur_bits), leg["rate_n"])
         legs[label] = leg
     for label, key in CONT_LEGS:
         legs[label] = paired_bootstrap(
@@ -905,11 +916,18 @@ def print_transition(t: Transition, alpha: float = ALPHA) -> None:
         leg = t.legs[label]
         lo, hi = leg["wilson"]
         call = "rejects H0" if leg["significant"] else "does not reject H0"
+        # The divisor spelled out twice, once beside the rates and once beside the
+        # interval, because the figure this line used to print — 0.531 for a night the
+        # report publishes as 0.652 — sat in the same column position as the headline
+        # and differed only by the population underneath it (#2060). Naming the count
+        # is what turns 0.531 and 0.652 into two measurements instead of a regression.
         print(f"  {label:<10} delta {leg['delta']:+.3f}  "
-              f"rates {leg['prev_rate']:.3f} -> {leg['cur_rate']:.3f}  "
+              f"rates {leg['prev_rate']:.3f} -> {leg['cur_rate']:.3f} "
+              f"(over {leg['rate_n']} paired queries)  "
               f"discordant b={leg['b']} c={leg['c']}  "
               f"exact McNemar p={leg['p']:.3f} ({call})  "
-              f"Wilson 95% on {t.cur.label}: [{lo:.3f}, {hi:.3f}]")
+              f"Wilson 95% on {t.cur.label} over {leg['rate_n']} paired queries: "
+              f"[{lo:.3f}, {hi:.3f}]")
     for label, _ in CONT_LEGS:
         leg = t.legs[label]
         if leg["significant"]:
@@ -1062,8 +1080,12 @@ def rescore_claim(claim: dict, by_label: dict[str, Night], reps: int, seed: int,
         supported = direction_ok and not (t.drift_moved is not False)
         detail = (f"delta {leg['delta']:+.3f}")
         if leg["exact"]:
+            # This is the line the nightly loop quotes when it rules a written
+            # regression claim SUPPORTED or UNSUPPORTED, so an interval printed here
+            # without its denominator is the one that reaches a verdict first (#2060).
             detail += (f", exact McNemar p={leg['p']:.3f}, discordant b={leg['b']} c={leg['c']}, "
-                       f"Wilson 95% [{leg['wilson'][0]:.3f}, {leg['wilson'][1]:.3f}]")
+                       f"Wilson 95% over {leg['rate_n']} paired queries "
+                       f"[{leg['wilson'][0]:.3f}, {leg['wilson'][1]:.3f}]")
         else:
             detail += (f", paired bootstrap 95% [{leg['lo']:+.3f}, {leg['hi']:+.3f}] "
                        f"(resampling approximation) p={leg['p']:.3f}")
@@ -1129,7 +1151,14 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  nights: {len(nights)}  {nights[0].label} .. {nights[-1].label}  "
           f"(alpha={args.alpha:.2f}, {args.reps} bootstrap replicates, seed {args.seed})")
     series = _rate_series(nights, "entity_hit")
-    print("  entity_hit_rate series: "
+    # Named as what it is: the mean of `scoring.entity_hit` over EVERY record of the
+    # night, which is why it sits below the published `entity_hit_rate` of the same
+    # night — #1663 divides that one over the queries carrying entity gold. The series
+    # borrows the published metric's name, so its denominator has to travel with it
+    # (#2060).
+    print("  entity_hit_rate series (one mean per night over every record of that "
+          "night, so below the published rate of the same name, which divides over "
+          "the queries carrying entity gold): "
           + "  ".join(f"{lab}={val:.2f}" for lab, val in series))
 
     transitions = [audit_transition(prev, cur, reps=args.reps, seed=args.seed)
