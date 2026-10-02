@@ -1,4 +1,5 @@
-"""Which untracked paths belong to the live checkout, and which appeared during a round.
+"""Which paths git is not carrying — untracked or ignored — belong to the live checkout,
+and which of them appeared during a round.
 
 #1906. A worker's Bash inherits the MCP server's cwd, which is `~/lloyd`, so a
 relative write from a review grader or a nightly task lands on production `main`. The
@@ -8,11 +9,27 @@ it: the 09-29/30 incident ran eleven `alert` rows over nine hours naming
 belonged to the grader for round SM_20260930_031934, and only the round's own record
 could have said so.
 
-So: snapshot the tree's untracked paths when a round opens, take the tree again after
+So: snapshot the tree's stray paths when a round opens, take the tree again after
 the round's turn has run, and name what appeared IN THAT ROUND'S RECORD. Detection is
 the cheap half; this module exists for the half that makes the alert useless today —
 attribution — which is why the answer to "did this round add anything" is never
 guessed.
+
+"Untracked" here means what `git status` reports as `??` AND as `!!` (#2059). The first
+question this module was asked was the wrong one: `--untracked-files=all` on its own
+lists untracked-and-not-ignored paths, and every runtime store `datawatch` alerts on is
+ignored — `.gitignore:37` is `*.db` — so on 2026-10-02 the alert named the checkout's own
+`workers.db` hourly for twelve hours while this instrument, the only thing on the machine
+that can name a writer, reported `stray_count: 0` in 136 consecutive ledger rows. (The
+alert prints that file by absolute path; this module may not repeat the spelling —
+`tests/test_no_runtime_paths_in_code.py` refuses a home-qualified runtime path in
+tracked code outside its own allowlist, and a docstring line is in that corpus while a
+`#` comment is not.) A stray the tree's own ignore rules hide is still a stray
+written into the code tree, so the read asks git the wider question. The one word that
+keeps that affordable is `matching`: a wholly-ignored directory is reported as itself,
+not enumerated, which is what stops the answer becoming the 367k-path `node_modules`
+set. The live checkout measures 45 lines in 0.007 s, all of them `!!`, with `.venvs/`
+standing as a single entry.
 
 Three states, deliberately not two:
 
@@ -38,7 +55,20 @@ from pathlib import Path
 
 #: Read-only, and the same call `round.py` already makes for its red-tree check, so
 #: a round's two views of the tree are one command with one flag set.
-UNTRACKED_CMD = ("git", "-C", "{root}", "status", "--porcelain", "--untracked-files=all")
+#:
+#: ONE constant, and both readers use it: `scripts/automod/round.py` takes the
+#: baseline, `scripts/automod/gate.py` takes the after-view. That is the whole reason
+#: `--ignored=matching` goes here and nowhere else. A second command for one side only
+#: would make the pair asymmetric, and the asymmetry is an accusation — the after-read
+#: seeing `workers.db` while the baseline could not would credit every round with
+#: every ignored store the tree already held.
+#:
+#: `=matching`, not a bare `--ignored`: bare `--ignored` with `-uall` descends into an
+#: ignored directory and prints a line per file, which is the vendored-tree blow-up
+#: `agent-services/guardian/datawatch.py`'s `_top_level` docstring records (367k paths).
+#: `matching` prints the directory once.
+UNTRACKED_CMD = ("git", "-C", "{root}", "status", "--porcelain",
+                 "--untracked-files=all", "--ignored=matching")
 
 #: A `git` failure is not an empty tree. `None` means "the tree could not be read",
 #[] and every caller must treat that as unknown rather than as clean.
@@ -46,16 +76,28 @@ UNREADABLE = None
 
 
 def untracked(root: Path | str) -> set[str] | None:
-    """The paths `git status` calls untracked under `root`, or None if git refused.
+    """The paths `git status` calls untracked OR ignored under `root`, or None if git
+    refused.
 
     `--untracked-files=all` matters: the default collapses a directory to one line,
     and a fixture written as `.t/05431072c3/r1873/` plus nine files inside it would
     diff as one path, which is one fewer path than anyone can then go and look at.
     Nine entries name nine files, and the one the round actually wrote is among them.
 
+    `--ignored=matching` adds the other half of the stray class (#2059), and it is
+    asymmetric in a way the caller should know: git lists an ignored FILE on its own
+    line, so `workers.db` and `usage.db` are attributed file by file, while a directory
+    whose contents are wholly ignored arrives as the directory — `!! .venvs/`, one
+    entry. A stray written inside a wholly-ignored directory is therefore credited at
+    directory granularity, not per file. That is the exact trade the flag buys: the
+    class `datawatch` alerts on is top-level ignored files, and the class it would cost
+    to enumerate is the vendored tree.
+
     A non-zero exit returns None rather than raising. This runs inside a round's
     promotion, and a tree that cannot be read must cost a piece of attribution, not
-    the promotion — but it must say so, which is what None is for.
+    the promotion — but it must say so, which is what None is for. The flag does not
+    soften that: a `git` that fails on the wider question is just as unreadable as one
+    that fails on the narrow one, and an empty set here would read as a clean tree.
     """
     argv = [part.format(root=str(root)) for part in UNTRACKED_CMD]
     try:
@@ -67,25 +109,33 @@ def untracked(root: Path | str) -> set[str] | None:
     return parse_porcelain(proc.stdout)
 
 
+#: The porcelain statuses that mean "a path in the tree that git is not carrying":
+#: untracked, and ignored (#2059 — the second is the class `datawatch` alerts on and
+#: this parser used to discard). Both are strays; ` M`, `M `, `A `, `R ` are not.
+STRAY_STATUSES = frozenset({"??", "!!"})
+
+
 def parse_porcelain(text: str) -> set[str]:
-    """The untracked paths out of `git status --porcelain` output.
+    """The stray paths — untracked and ignored — out of `git status --porcelain` output.
 
     Kept separate from the subprocess so the parser is testable on recorded output —
     and so a rename or a quote-escaped path is a parsing question with a text answer,
     not something only reproducible by laying a working tree.
 
-    The two-character status field is the contract: `??` is untracked, everything
-    else (` M`, `M `, `A `, `R `, `!!` when ignores are shown) belongs to a
-    different question. Splitting on the first space would lose a leading space
-    entirely — `" M modified.py"` starts with one — which is how a modified file
-    ends up looking untracked.
+    The two-character status field is the contract, and the two statuses that answer
+    this question are `STRAY_STATUSES`: `??` untracked and `!!` ignored. Everything
+    else (` M`, `M `, `A `, `R `) is a tracked file and belongs to a different
+    question — a modified file is not a stray, and crediting one to a round would
+    report an ordinary edit as a write into the code tree. Splitting on the first space
+    would lose a leading space entirely — `" M modified.py"` starts with one — which is
+    how a modified file ends up looking untracked.
     """
     out: set[str] = set()
     for line in text.splitlines():
         if len(line) < 4:
             continue
         status, path = line[:2], line[3:]
-        if status == "??":
+        if status in STRAY_STATUSES:
             # A path git had to quote is printed `"with spaces"`; the quotes are
             # git's, not part of the name, and leaving them in produces a path
             # nobody can `ls`.
@@ -121,7 +171,8 @@ def baseline_path(round_id: str, rounds_dir: Path | str | None = None) -> Path:
 
 def write_baseline(round_id: str, paths: set[str],
                    rounds_dir: Path | str | None = None) -> Path | None:
-    """Record the whole untracked set, uncapped, as this round's baseline.
+    """Record the whole stray set — untracked and ignored — uncapped, as this
+    round's baseline.
 
     Returns the path written, or None if it could not be. A None here costs the round
     its attribution — `read_baseline` will then report unknown — and must never be
@@ -162,7 +213,8 @@ def read_baseline(round_id: str,
 
 
 def appeared(baseline: set[str] | None, now: set[str] | None) -> list[str] | None:
-    """The paths that are untracked NOW and were not at the baseline.
+    """The stray paths — untracked or ignored — that exist NOW and were not at the
+    baseline.
 
     None from either side, and None back: an unreadable baseline or an unreadable
     second look both make "nothing new appeared" an unsupported claim, and both are

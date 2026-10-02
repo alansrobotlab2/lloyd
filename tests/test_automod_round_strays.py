@@ -9,23 +9,26 @@ day, each naming the tree and none naming a round.
 
 The shape is the one `workers/sources/arch_review.py:1722` and
 `workers/sources/arch_review.py:1827-1829` already use for a worker turn: read
-`git status --porcelain --untracked-files=all` before, read it after, and diff.
-`app/live_strays.py` is that diff and nothing else. Its four call sites are the reason
-it exists, named here fully qualified so no number in this file can be read against the
-wrong file:
+`git status --porcelain --untracked-files=all --ignored=matching` before, read it after,
+and diff. (`--ignored=matching` is #2059, and it is one flag on the module's single
+`UNTRACKED_CMD` at `app/live_strays.py:70-71` — so every read named below, baseline and
+after alike, is the widened one.) `app/live_strays.py` is that diff and nothing else. Its
+four call sites are the reason it exists, named here fully qualified so no number in this
+file can be read against the wrong file:
 
-- `scripts/automod/round.py:191` — `round.start` writes the baseline into the round's
-  own directory, and the `round_start` row at `scripts/automod/round.py:194-205` carries
-  that set and its uncapped `live_untracked_count`;
+- `scripts/automod/round.py:169` reads the tree at round open and
+  `scripts/automod/round.py:205-207` writes that set as the baseline into the round's own
+  directory; the `round_start` row at `scripts/automod/round.py:210-235` carries a capped
+  sample of it and its uncapped `live_untracked_count`;
 - `scripts/automod/gate.py:1079` / `scripts/automod/gate.py:1101` — the gate's own
   `start_live_strays` / `end_live_strays`, bracketing the ladder at
-  `scripts/automod/gate.py:1159` and `scripts/automod/gate.py:1219`, the second inside
+  `scripts/automod/gate.py:1160` and `scripts/automod/gate.py:1219`, the second inside
   the `finally`, so a round that stops mid-ladder still records.
 
 Two windows, because a round has two halves and only one of them is the gate: the
-baseline the round recorded at open (`scripts/automod/round.py:191`) reaches back over
+baseline the round recorded at open (`scripts/automod/round.py:205-207`) reaches back over
 the implement turn that ran before the gate process existed, while the gate's own
-snapshot (`scripts/automod/gate.py:1159`) covers only the ladder. `end_live_strays`
+snapshot (`scripts/automod/gate.py:1160`) covers only the ladder. `end_live_strays`
 subtracts the round's baseline when it has one and falls back to its own snapshot when
 it does not. A row that measured just the ladder says so
 (`stray_window: gate_ladder_only`, `implement_turn_measured: false`) rather than reading
@@ -65,6 +68,36 @@ def live_repo(tmp_path):
     (repo / "tracked.py").write_text("x = 1\n", encoding="utf-8")
     _git(repo, "add", "tracked.py")
     _git(repo, "commit", "-q", "-m", "base")
+    return repo
+
+
+@pytest.fixture
+def ignore_repo(tmp_path):
+    """A working tree whose committed `.gitignore` hides the class `datawatch` alerts on.
+
+    `*.db` is the live checkout's own rule — `.gitignore:37`, which is what made
+    `/home/alansrobotlab/lloyd/workers.db` invisible to this instrument while the alert
+    named it hourly — and `/node_modules/` is the vendored-tree shape whose cost the fix
+    must not pay. Both rules are committed rather than written loose, so the ignores are
+    a fact about the tree and not about the test's ordering.
+
+    `workers.db` is the top-level ignored FILE (the class the alert fires on, and the
+    only ignored class git prints individually), and `node_modules/` holds three files
+    across two nested directories (the class that must stay ONE entry).
+    """
+    repo = tmp_path / "ignoring"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    (repo / ".gitignore").write_text("*.db\n/node_modules/\n", encoding="utf-8")
+    (repo / "tracked.py").write_text("x = 1\n", encoding="utf-8")
+    _git(repo, "add", ".gitignore", "tracked.py")
+    _git(repo, "commit", "-q", "-m", "base")
+    (repo / "workers.db").write_bytes(b"")
+    (repo / "node_modules" / "pkg" / "deep").mkdir(parents=True)
+    for name in ("index.js", "pkg/index.js", "pkg/deep/index.js"):
+        (repo / "node_modules" / name).write_text("x\n", encoding="utf-8")
     return repo
 
 
@@ -126,6 +159,153 @@ def test_untracked_parsing_survives_a_quoted_and_a_nested_path():
         ".t/05431072c3/r1873/old_relabel.py", "weird name.py"}
 
 
+# ── the ignored class: what #2059 opens the instrument's other half for ─
+# `git status --porcelain --untracked-files=all` answers "untracked AND NOT ignored",
+# so every store `.gitignore` hides was outside this instrument's answer entirely. The
+# live tree proved it on 2026-10-02: `git status --porcelain -uall | grep -c workers.db`
+# → 0, while the same command with `--ignored=matching` printed `!! workers.db`, and
+# 136 `round_live_strays` ledger rows in a row said `stray_count: 0` about a tree the
+# alert was naming that file in, hourly.
+def test_a_gitignored_file_is_inside_the_instruments_answer(ignore_repo):
+    """Clause 1: an ignored stray is inside the set, or it can never be attributed."""
+    found = live_strays.untracked(ignore_repo)
+
+    assert found is not None, found
+    assert "workers.db" in found, (
+        f"the tree's own `*.db` rule must not take the stray out of the answer git is "
+        f"asked for the stray question: {sorted(found)}")
+    # A tracked file is still not an untracked one: widening to ignored paths must not
+    # turn the check into "everything in the tree", which would credit every round with
+    # the whole checkout.
+    assert "tracked.py" not in found, sorted(found)
+
+
+def test_parse_porcelain_keeps_ignored_paths_and_still_drops_tracked_ones():
+    """Clause 2: `!!` is the same question as `??`, and ` M`/`A ` still are not.
+
+    Recorded output rather than a laid tree, for the reason the node above gives: the
+    status field is a parsing contract. The nested `??` path and the quote-escaped `!!`
+    path ride along so the two rules — keep both statuses, unquote both — cannot be
+    satisfied by two one-line branches that each forget the other's path shape.
+    """
+    text = ("?? .t/05431072c3/r1873/old_relabel.py\n"
+            "?? \"weird name.py\"\n"
+            "!! workers.db\n"
+            "!! node_modules/\n"
+            "!! \"ignored odd name.db\"\n"
+            " M tracked.py\n"
+            "A  staged-new.py\n")
+
+    found = live_strays.parse_porcelain(text)
+
+    assert found == {".t/05431072c3/r1873/old_relabel.py", "weird name.py",
+                     "workers.db", "node_modules/", "ignored odd name.db"}, found
+    assert "tracked.py" not in found and "staged-new.py" not in found, (
+        f"a modified or staged file is not a stray: {sorted(found)}")
+
+
+def test_an_ignored_file_written_during_the_round_is_named_and_its_neighbour_is_not(
+        ignore_repo, monkeypatch):
+    """Clause 3: one command, read twice, so the new ignored file is the only name.
+
+    Two halves. The subtraction half: `workers.db` was already ignored when the baseline
+    was taken and `usage.db` is what the round wrote, so `appeared` must name exactly
+    `usage.db`. The one-command half: git is asked to run the SAME argv for both reads and
+    that argv carries `--ignored=matching` once — a second command on one side only is
+    what would invent strays, and had the flag gone to just the after-read, that read
+    would see `workers.db` while the baseline could not, and the subtraction would
+    convict this round of a file it never touched. The recorder below still runs the real
+    `subprocess.run`, so git is doing the reading in both halves; only the argv is
+    observed.
+    """
+    baseline = live_strays.untracked(ignore_repo)
+    assert baseline is not None and "workers.db" in baseline, baseline
+
+    (ignore_repo / "usage.db").write_bytes(b"")
+
+    assert live_strays.appeared(baseline, live_strays.untracked(ignore_repo)) == [
+        "usage.db"], "only the newly written ignored file is this round's"
+
+    asked: list[list[str]] = []
+    real_run = subprocess.run
+
+    def _record(argv, **kwargs):
+        asked.append(list(argv))
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(live_strays.subprocess, "run", _record)
+    before = live_strays.untracked(ignore_repo)
+    assert before is not None, before
+    (ignore_repo / "audit.db").write_bytes(b"")
+    after = live_strays.untracked(ignore_repo)
+    assert after is not None, after
+
+    assert len(asked) == 2, asked
+    assert asked[0] == asked[1], (
+        f"the baseline read and the after read diverged — an asymmetric pair credits a "
+        f"round with every path the missing side could not see: {asked}")
+    assert all(a.count("--ignored=matching") == 1 for a in asked), asked
+    assert live_strays.appeared(before, after) == ["audit.db"], (before, after)
+
+
+def test_a_failed_widened_git_read_is_unknown_and_never_clean(ignore_repo,
+                                                              tmp_path,
+                                                              monkeypatch):
+    """Clause 4: `UNREADABLE` survives the flag, three ways.
+
+    A directory that is not a checkout fails `git status` for real — 128 on stderr, no
+    parsing involved — so the first assertion cannot be satisfied by a mock. The fake
+    that follows pins both halves of the module's own failure handling, a non-zero exit
+    and a raised `OSError` from a missing binary, and records the argv git was asked to
+    run so the None being asserted is the widened command's None and not some other
+    call's. An empty set here would report every stray in the tree as clean, and the
+    ledger row would carry `stray_count: 0` while doing it.
+    """
+    assert live_strays.untracked(tmp_path / "not-a-checkout") is None
+
+    asked: list[list[str]] = []
+
+    def _fail(argv, **_kwargs):
+        asked.append(argv)
+        return subprocess.CompletedProcess(argv, 128, stdout="",
+                                          stderr="fatal: not a git repository")
+
+    monkeypatch.setattr(live_strays.subprocess, "run", _fail)
+    assert live_strays.untracked(ignore_repo) is None
+    assert "--ignored=matching" in asked[0], asked[0]
+
+    def _raise(argv, **_kwargs):
+        raise OSError("No such file or directory: 'git'")
+
+    monkeypatch.setattr(live_strays.subprocess, "run", _raise)
+    assert live_strays.untracked(ignore_repo) is None
+
+
+def test_a_wholly_ignored_directory_is_one_entry_not_one_per_file(ignore_repo):
+    """Clause 5: reported by MATCH, which is what bounds the cost.
+
+    `node_modules/` holds three files in two nested directories and arrives as one
+    entry, because `--ignored=matching` reports a directory whose contents are wholly
+    ignored rather than descending into it. The distinction is a real one and this
+    assertion is what pins it, because bare `--ignored` combined with `-uall` does
+    enumerate: a scratch repo whose `/venv/` rule hid four files across two nested
+    directories printed four lines (`!! venv/a.py`, `!! venv/b.py`, `!! venv/lib/c.py`,
+    `!! venv/lib/site-packages/d.py`) under `--ignored` and one (`!! venv/`) under
+    `--ignored=matching`, both with `-uall`, on git 2.55.0. The enumerated shape is the
+    367k-path `node_modules`/`.venvs`/`.git` blow-up
+    `agent-services/guardian/datawatch.py`'s `_top_level` docstring warns about. The
+    live checkout measures the matched shape today at 45 lines in 0.007 s, all of them
+    `!!`, with `.venvs/`, `qmd/` and `web/node_modules/` each standing as one entry.
+    """
+    found = live_strays.untracked(ignore_repo)
+
+    assert found == {"workers.db", "node_modules/"}, (
+        f"an ignored directory must collapse to its own name, not to its contents: "
+        f"{sorted(found)}")
+    assert not [p for p in found if p.startswith("node_modules/")
+                and p != "node_modules/"], sorted(found)
+
+
 # ── the round's own record ────────────────────────────────────────────
 def test_the_gate_records_what_appeared_during_the_round(live_repo, tmp_path, ledger,
                                                          monkeypatch):
@@ -153,6 +333,36 @@ def test_the_gate_records_what_appeared_during_the_round(live_repo, tmp_path, le
     # and nothing else — and the row has to say so, or it reads as a clean round.
     assert row["stray_window"] == "gate_ladder_only", row
     assert row["implement_turn_measured"] is False, row
+
+
+def test_the_gate_names_an_ignored_stray_in_its_own_row(ignore_repo, tmp_path, ledger,
+                                                        monkeypatch):
+    """The widened read across the seam it actually crosses: instrument → gate → row.
+
+    `untracked()` is only worth widening because `Gate.start_live_strays` and
+    `Gate.end_live_strays` are the two readers, and the answer a human reads is the
+    `round_live_strays` line in the promotion ledger — the artifact that held 136
+    `stray_count: 0` rows while `datawatch` named `/home/alansrobotlab/lloyd/workers.db`
+    hourly. Both reads happen here through the real methods on a tree whose `.gitignore`
+    already hid one `.db` file before the round opened, so this node fails if the flag
+    reaches only one of them (the pre-existing file is then credited to the round) and
+    fails if it reaches neither (the new one is not named at all).
+    """
+    monkeypatch.chdir(tmp_path)
+    g = G.Gate("SM_STRAY_11", tmp_path / "wt", "deadbeef", live_root=ignore_repo)
+
+    g.start_live_strays()
+    (ignore_repo / "usage.db").write_bytes(b"")
+    g.end_live_strays()
+
+    rows = [r for r in _rows(ledger) if r["event"] == "round_live_strays"]
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row["stray_status"] == "recorded", row
+    assert row["strays"] == ["usage.db"], (
+        f"the row must name the ignored file that appeared and not the one that "
+        f"predated the baseline: {row}")
+    assert row["stray_count"] == 1, row
 
 
 def test_a_stray_written_by_the_implement_turn_is_named_by_its_round(live_repo,
