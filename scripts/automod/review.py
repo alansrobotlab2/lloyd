@@ -1382,6 +1382,9 @@ Paths changed: {', '.join(paths)}.
 Per clause, in order: say what in the changed text satisfies it (file and line) \
 or what is missing. `met` needs an evidence_path under the vault and \
 how_verified `read`; there are no tests here, so leave test_node_id empty. \
+A clause about something this edit REMOVES cites it as `<path> (absent)` — the \
+removed path itself, or the directory it empties, with that marker on it. The \
+absence is the witness, so never go looking for a deleted file on disk. \
 Then judge the premise: `unsound` only for a false premise or an edit that \
 cannot satisfy the item by construction. You cannot edit anything. You will be \
 asked to restate the review as one JSON object.
@@ -1443,8 +1446,16 @@ def grade_vault(*, item_id: int, paths: list[str], diff: str,
                      backend=backend, sessions_dir=sessions_dir, timeout=timeout, model=model)
     if not res["ok"]:
         return "skipped", f"grader did not answer: {res.get('error')}", []
+    # `paths` IS the lander's list — `vault_round._vault_review` passes `land()`'s own
+    # normalised argument — and it is the only witness a deletion clause has: the file it
+    # cites is off disk because this very edit is removing it. Left at `parse_review`'s
+    # default `()`, `evidence_of_absence`'s changed-and-gone arm was unreachable on this
+    # surface while `gate.py` and `review_tools.py` both pass the list, and #2038 spent
+    # both attempts on clauses [1,2] downgraded for citing paths its own `paths` array
+    # carried. See tests/fixtures/promotions_vault_review_rows_2026-10-01-item2038.jsonl.
     parsed = parse_review(res["structured"], worktree=vault, changed_tests=[],
-                          n_clauses=len(contract["clauses"]), require_tests=False)
+                          n_clauses=len(contract["clauses"]), require_tests=False,
+                          changed_paths=list(paths))
     if parsed is None:
         return "skipped", "grader returned an unusable object", []
     # A landing clause is graded by the caller from the sha, never here — in
@@ -1463,13 +1474,20 @@ def grade_vault(*, item_id: int, paths: list[str], diff: str,
     # already overridden, which is what #1868 spent #1621's attempts on.
     kind, findings = decide(parsed, [], attempt=attempt, policy=seams_policy())
     graded = {c["clause"]: c["verdict"] for c in parsed["clauses"]}
+    # Which clauses stood on a waived rail. A `met` is one word whether it was
+    # earned by a file on disk or by the absence of one, and on the vault surface
+    # the `vault_land` row is the only record the landing has — #2038's two graded
+    # attempts are readable only because the refusal text named the rail. So the
+    # waiver rides out with the verdict instead of dying in `parsed`.
+    waived = {c["clause"]: c["accepted"] for c in parsed["clauses"] if c.get("accepted")}
     # One row per clause of the contract as it stood when graded, so a reader
     # needs no second lookup of a contract that may have changed since; a
     # clause the grader never reached is `ungraded`, which is not `met`. A
     # landing clause is marked `subject: landing` so `vault_round.land()` knows
     # which verdicts to overwrite with the one it derives from the sha.
     return kind, findings, [{"clause": i, "verdict": graded.get(i, "ungraded"),
-                             **({"subject": "landing"} if i in landing else {})}
+                             **({"subject": "landing"} if i in landing else {}),
+                             **({"accepted": waived[i]} if i in waived else {})}
                             for i in range(1, len(contract["clauses"]) + 1)]
 
 

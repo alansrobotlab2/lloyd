@@ -1406,3 +1406,249 @@ def test_a_vault_surface_items_land_is_checked_by_the_same_call(vault, guard_tre
     lands = _events("vault_land")
     assert lands[0]["guards"]["refuse"] is True and lands[0]["ok"] is False
     assert lands[0]["item_id"] == 43
+
+
+# ── #2040: a vault round cannot be refused for citing evidence its own edit removed ──
+#
+# `grade_vault` called `parse_review` without `changed_paths`, so `evidence_of_absence`'s
+# "the first path token is one the diff touched and is not on disk" arm was unreachable
+# on this surface while `gate.py:2274` and `review_tools.py:159` both pass it. #2038 spent
+# both attempts on it: clauses [1 partial, 2 partial, 3 met, 4 met, 5 met] twice, the
+# refusal text naming the rail and not the diff, over a staged deletion whose witness is
+# the file's absence. Those two rows are the witness committed at
+# tests/fixtures/promotions_vault_review_rows_2026-10-01-item2038.jsonl.
+
+#: The leaf `automod_vault_land` for #2038 deleted and the grader cited, verbatim from the
+#: ledger row: `paths` carries it, the disk does not.
+DELETED_CITATION = ("_pipeline/tmp/pt1018/test_run_records_age_by_frontm0"
+                    "/autonomy-runs/24/run_24_20260903_120000.md")
+
+#: The two rows, in the tree. The review rung grades from a candidate checkout with a
+#: stub HOME, so a claim that lives only in a live state file cannot be opened by the
+#: reader who has to judge it; these bytes travel with the diff.
+WITNESS_2038_REVIEW = repo() / "tests/fixtures/promotions_vault_review_rows_2026-10-01-item2038.jsonl"
+
+#: The same grading's second refusal, whose evidence was the directory alone. `_pipeline`
+#: is in NO path list, so no `changed_paths` argument could have saved it — the only shape
+#: that answers a removal at directory level is the `(absent)` marker, which the vault
+#: prompt never named. That is why half of this fix is prose to the grader.
+DIRECTORY_CITATION = "_pipeline"
+
+
+def _deleted_paths_grader(path: str) -> dict:
+    """A grader object whose one clause is `met` on a removal, citing `path`.
+
+    The real answer #2038 got twice, not one invented to be refused: `met`, `how_verified:
+    read`, no test node (the vault prompt says leave it empty), and evidence that is a
+    path the lander is in the middle of deleting.
+    """
+    return {"premise": "sound", "summary": "the scratch tree is gone", "test_honesty": [],
+            "seams_unverified": [],
+            "clauses": [{"clause": 1, "verdict": "met", "evidence_path": path,
+                         "evidence_line": 0, "test_node_id": "",
+                         "how_verified": "read", "note": "witness is the path's absence"}]}
+
+
+def _grade_a_deletion(vault, items, monkeypatch, *, evidence: str,
+                      paths: list[str]) -> tuple[str, str, list[dict]]:
+    """One real `grade_vault` over a one-clause deletion item, grader answer fixed.
+
+    The scratch paths are written and then removed wholesale, so the tree the rails read is
+    the tree a deletion land stands in: the leaf listed by the lander and gone from disk,
+    and no `_pipeline` directory left behind either — which is the state #2038's own
+    findings record (`test -e ~/obsidian/_pipeline -> ABSENT`). Leaving the emptied
+    directory standing would quietly change the question, because a directory on disk
+    resolves as an evidence path and the far-wall node below would pass for the wrong
+    reason.
+    """
+    import scripts.automod.review as RV
+    # The rails must read ONLY the tree under review. `REVIEW_EVIDENCE_ROOTS` names the
+    # live vault, where `_pipeline/` still stands after #2038's attempt 2 was reverted, so
+    # unisolated these nodes would grade against the machine and not against the deletion.
+    monkeypatch.setattr(RV, "REVIEW_EVIDENCE_ROOTS", ())
+    write_item(items, 2038, ["the tracked `_pipeline/*` scratch paths are gone from the vault"])
+    import shutil
+    target = vault / DELETED_CITATION
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("run record\n", encoding="utf-8")
+    shutil.rmtree(vault / "_pipeline")
+    monkeypatch.setattr(RV, "run_grader", lambda **kw: {
+        "ok": True, "structured": _deleted_paths_grader(evidence)})
+    return RV.grade_vault(item_id=2038, paths=paths, diff="D " + DELETED_CITATION, attempt=1)
+
+
+def test_a_deletion_clause_citing_a_removed_but_listed_path_stays_met(vault, items,
+                                                                     monkeypatch):
+    """Clause 1: the lander's own path list is what makes a removal citable.
+
+    Across the boundary the round actually crosses — `land()` hands `_vault_review` its
+    normalised `paths`, which reaches `grade_vault` and had stopped there. Before the fix
+    this returns `retry` with clause 1 `partial`; after it, the clause keeps `met` and the
+    waiver is recorded rather than silent, because a waived rail that leaves no trace is
+    indistinguishable from a rail that was never there.
+    """
+    kind, findings, clauses = _grade_a_deletion(
+        vault, items, monkeypatch, evidence=DELETED_CITATION,
+        paths=[".gitignore", DELETED_CITATION])
+    assert kind == "pass", f"a removal was refused for its own witness: {findings}"
+    assert [c["verdict"] for c in clauses] == ["met"], clauses
+    assert DELETED_CITATION in clauses[0]["accepted"][0], clauses
+    assert "evidence of absence" in clauses[0]["accepted"][0], clauses
+
+
+def test_a_deletion_clause_citing_an_unlisted_unmarked_path_is_still_refused(vault, items,
+                                                                            monkeypatch):
+    """The narrowing has a far wall: a removal whose evidence is a bare directory the
+    lander never listed and never marks is still refused.
+
+    This is #2038's attempt-1 clause 2 verbatim — `_pipeline`, a prefix of the listed
+    leaves but not itself one of them. Same fixture, same real `grade_vault`, one word
+    changed in the citation, and the round comes back: absence is admissible when the
+    change is named, not whenever a path looks like one.
+    """
+    kind, findings, clauses = _grade_a_deletion(
+        vault, items, monkeypatch, evidence=DIRECTORY_CITATION,
+        paths=[".gitignore", DELETED_CITATION])
+    assert kind == "retry", f"the absence rail stopped refusing anything: {findings}"
+    assert [c["verdict"] for c in clauses] == ["partial"], clauses
+    assert "evidence_path missing or not on disk" in findings, findings
+    assert "'_pipeline'" in findings, "the refusal must name what the grader wrote"
+
+
+#: Where the durable copy lives, beside the vault's own dated extracts. NOT
+#: `backlog/data/promotions.jsonl`, which the item named: that file is another job's
+#: rolling mirror, 28678 lines against a live ledger of 28824, and it carries ZERO
+#: `vault_review` rows for item 2038 — quoting it could not have reproduced these
+#: figures, which is what the last round was refused for asserting.
+WITNESS_VAULT_PATH = "backlog/data/2026-10-01.2040-vault-review-witness.jsonl"
+
+
+def _witness_rows(text: str) -> list[dict]:
+    """The two `vault_review` rows for item 2038, and only those, as graded."""
+    import json
+    rows = [json.loads(l) for l in text.splitlines() if l.strip()]
+    assert [r["event"] for r in rows] == ["vault_review"] * len(rows)
+    assert [r["item_id"] for r in rows] == [2038] * len(rows)
+    return rows
+
+
+def _assert_the_rail_refused_them(rows: list[dict]) -> None:
+    """What the rows say, in the words the refusal was written in.
+
+    Both attempts carry clauses [1,2] `partial` and [3,4,5] `met`, both block, and the
+    findings name the rail rather than the work. The leaf attempt 1's clause 1 cited is
+    IN that row's `paths` array — `vault_round` had already handed it to `grade_vault`,
+    which is the whole of half (a). The bare `_pipeline` that clause 2 cited is NOT: a
+    directory is in no path list, so no argument could admit it and only the prompt's
+    marker answers it, which is the whole of half (b). Attempt 2 reverted all 64 staged
+    paths, so the rail refused a tree that had already done the work twice over.
+    """
+    assert [r["attempt"] for r in rows] == [1, 2]
+    assert [r["kind"] for r in rows] == ["retry", "retry"]
+    assert [r["blocking"] for r in rows] == [True, True]
+    for r in rows:
+        assert [(c["clause"], c["verdict"]) for c in r["clauses"]] == [
+            (1, "partial"), (2, "partial"), (3, "met"), (4, "met"), (5, "met")]
+        assert DELETED_CITATION in r["paths"], "the cited leaf is in the lander's own list"
+        assert DIRECTORY_CITATION not in r["paths"], "a directory is never a listed path"
+        assert "evidence_path missing or not on disk" in r["findings"]
+    assert "'_pipeline'" in rows[0]["findings"], "attempt 1 cited the bare directory"
+    assert "_pipeline/tmp/pt1018/usagecurrent" in rows[1]["findings"]
+    assert "_pipeline/tmp/pt1018/usagecurrent" in rows[1]["paths"]
+    assert len(rows[0]["reverted"]) == 0 and len(rows[1]["reverted"]) == 64
+    assert len(rows[0]["paths"]) == 64, "63 `_pipeline/*` leaves plus .gitignore"
+
+
+def test_the_witness_rows_are_in_the_tree_and_the_vault_copy_is_the_same_bytes():
+    """#2040's evidence, readable from the bytes the review can open.
+
+    A `vault_review` citation is resolved against the vault, so the durable copy goes
+    there and the assertion below resolves it the way the rail will — through
+    `review._resolve_in_worktree` at the vault root the guards themselves use. What this
+    node refuses is the last round's failure: prose quoting a ledger that had already
+    moved. Every figure #2040 quotes is re-derived here from the bytes — two rows,
+    16506 of them — and nothing else is claimed.
+
+    No digest is written down as a literal anywhere in this file, and that is a mechanism,
+    not tidiness: the review rung validates a bare hex token in a grader note as a commit
+    of the tree under review, so quoting a file checksum in prose made the rung report
+    itself unreliable — "note cites commit <the checksum>, which `git cat-file -t` does
+    not resolve" — over a round whose code was graded sound. Identity is pinned instead as
+    bytes a reader can re-measure with `wc`, and as a digest COMPARED between the two
+    copies, which catches them diverging without naming either with a number a citation
+    validator can mistake for the repo's history.
+    """
+    import hashlib
+    import scripts.automod.review as RV
+
+    raw = WITNESS_2038_REVIEW.read_bytes()
+    assert len(raw) == 16506, f"the witness bytes changed: {len(raw)}"
+    rows = _witness_rows(WITNESS_2038_REVIEW.read_text(encoding="utf-8"))
+    assert len(rows) == 2
+    _assert_the_rail_refused_them(rows)
+
+    # Where a vault is reachable, its committed copy must be the same bytes; where one
+    # is not (`REVIEW_EVIDENCE_ROOTS` is `~/obsidian`, and a candidate checkout under a
+    # stub HOME has none), the node reports the same green for the claims that hold
+    # everywhere. No `pytest.skip`: a skipped node is a claim the review rung cannot
+    # read, and #2040's clause 4 was refused once for exactly that. The path is spelled
+    # out rather than read back from `WITNESS_VAULT_PATH`, so a constant that moved
+    # cannot take its own assertion with it.
+    for vault in RV.REVIEW_EVIDENCE_ROOTS:
+        if not vault.is_dir():
+            continue
+        durable = vault / "backlog/data/2026-10-01.2040-vault-review-witness.jsonl"
+        assert durable.is_file(), f"the durable copy is not on the vault's main: {durable}"
+        assert hashlib.sha256(durable.read_bytes()).hexdigest() == \
+            hashlib.sha256(raw).hexdigest(), "the two copies diverged"
+        assert len(_witness_rows(durable.read_text(encoding="utf-8"))) == 2
+        assert RV._resolve_in_worktree(WITNESS_VAULT_PATH, vault) == WITNESS_VAULT_PATH
+
+
+def test_the_waiver_reaches_the_promotions_row_beside_the_verdict(vault, items,
+                                                                 monkeypatch):
+    """The seam #2040 crossed on paper and did not: waiver -> ledger, end to end.
+
+    `review.grade_vault` records an admitted absence into the clause, and the row the
+    promotions ledger keeps is built by a projection in `vault_round` that carried
+    `clause`, `verdict` and `subject` and nothing else — so the record #2040's own fix
+    produces died one function before the only place a vault landing is written down. A
+    `met` earned from a deleted file then looked exactly like a `met` earned from a file
+    on disk, and the round is unreadable to the next reader except by re-running it.
+    This drives the real `land()` with the real `grade_vault` — lander, grader, rails,
+    projection, ledger — over a working tree whose staged change is a deletion, which is
+    the shape #2038 was in.
+    """
+    import scripts.automod.review as RV
+    monkeypatch.setattr(RV, "REVIEW_EVIDENCE_ROOTS", ())
+    write_item(items, 2038, ["the tracked `_pipeline/*` scratch paths are gone from the vault"])
+    S.append_event({"event": "backlog_triage", "item_id": 2038, "verdict": "confirmed",
+                    "surface": "vault", "acceptance": "a",
+                    "acceptance_clauses": ["the tracked `_pipeline/*` scratch paths are "
+                                           "gone from the vault"]}, path=S.LEDGER_PATH)
+    target = vault / DELETED_CITATION
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("run record\n", encoding="utf-8")
+    git(vault, "add", "-A")
+    git(vault, "commit", "-q", "-m", "the scratch file, tracked at HEAD")
+    target.unlink()                      # the land's change IS the deletion
+    monkeypatch.setattr(RV, "run_grader", lambda **kw: {
+        "ok": True, "structured": _deleted_paths_grader(DELETED_CITATION)})
+    monkeypatch.setattr(V, "GRADER", RV.grade_vault)
+    out = V.land([DELETED_CITATION], "#2038 delete the tracked scratch paths", item_id=2038)
+    assert out["review"] == "pass", out
+    rows = _events("vault_review")
+    assert len(rows) == 1, rows
+    clause = rows[0]["clauses"][0]
+    assert clause["verdict"] == "met", clause
+    assert DELETED_CITATION in clause["accepted"][0], clause
+    assert "evidence of absence" in clause["accepted"][0], clause
+    # And on the row the landing itself writes: `vault_land.review_clauses` is what
+    # `backlog.vault_review_outcome` reads back, so the waiver has to survive that
+    # projection too — a reader of the landing alone must be able to see which rail
+    # the deletion clause stood on.
+    lands = _events("vault_land")
+    assert len(lands) == 1 and lands[0]["ok"] is True, lands
+    landed = [c for c in lands[0]["review_clauses"] if c["clause"] == 1]
+    assert len(landed) == 1 and landed[0]["verdict"] == "met", landed
+    assert "evidence of absence" in landed[0]["accepted"][0], landed

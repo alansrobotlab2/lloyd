@@ -3019,3 +3019,86 @@ def test_a_second_reader_may_retire_only_the_entry_it_was_named():
                              reader=lambda t: {"retire": True, "reason": "all clear"})
     assert got5["asked"] == RV.CONFIRM_MAX_ENTRIES, "the offered entries are capped"
     assert got5["outcome"] == RV.UPHELD, "an entry never asked about is never retired"
+
+
+# ── #2040: a deletion clause's evidence, on the vault shape ──────────────────
+#
+# `grade_vault` passed `parse_review` no `changed_paths`, so of the two readings
+# `evidence_of_absence` accepts only the `(absent)` marker arm could fire here, and the
+# vault prompt never told the grader that arm existed. #2038's two refusals are the
+# outcome; the rows are committed at
+# tests/fixtures/promotions_vault_review_rows_2026-10-01-item2038.jsonl and pinned by
+# tests/test_automod_vault_round.py::test_the_promotions_witness_rows_still_show_the_rail_not_the_diff_refusing_them.
+
+#: A leaf the lander listed and its own edit deleted — clause 1 of #2038's grading
+#: cited exactly this, verbatim from the ledger row.
+REMOVED_LEAF = ("_pipeline/tmp/pt1018/test_run_records_age_by_frontm0"
+                "/autonomy-runs/24/run_24_20260903_120000.md")
+
+
+def _vault_met(wt, monkeypatch, *, changed_paths=(), **clause):
+    """A `met` graded the way a vault round grades one: `require_tests=False`, so no
+    test node is asked for and the path rail is the only rail standing between the
+    grader's word and a `partial`.
+
+    `REVIEW_EVIDENCE_ROOTS` is emptied first: its one entry is the live vault, where
+    `_pipeline/` still stands (attempt 2's 64 staged deletions were reverted), so an
+    unisolated node here would be graded against the machine rather than the tree under
+    review — the leak that made this node pass or fail on the state of `~/obsidian`.
+    """
+    monkeypatch.setattr(RV, "REVIEW_EVIDENCE_ROOTS", ())
+    base = {"evidence_path": REMOVED_LEAF, "evidence_line": 0, "test_node_id": "",
+            "how_verified": "read", "note": "witness is the path's absence"}
+    base.update(clause)
+    parsed = RV.parse_review(_obj(**base), worktree=wt, changed_tests=[], n_clauses=1,
+                             require_tests=False, changed_paths=list(changed_paths))
+    return parsed["clauses"][0]
+
+
+def test_a_vault_met_citing_an_unlisted_unmarked_removal_is_still_downgraded(wt,
+                                                                            monkeypatch):
+    """The absence rail narrowed, not deleted — #2040 clause 2.
+
+    Three arms of one grader object, one call each. A path the lander listed and removed
+    is admitted, because the diff is the only witness a removal has. A path marked with an
+    admissible marker is admitted, because that is what the marker is for. A path that is
+    in neither — this file, on this surface, before the fix, for every clause — is refused
+    with the words the ledger shows, and `accepted` stays empty: a waived rail announces
+    itself, and a rail that fired does not.
+    """
+    listed = _vault_met(wt, monkeypatch, changed_paths=[".gitignore", REMOVED_LEAF])
+    assert listed["verdict"] == "met" and "downgraded" not in listed
+    assert "evidence of absence" in listed["accepted"][0], listed
+
+    marked = _vault_met(wt, monkeypatch, evidence_path="_pipeline (absent)")
+    assert marked["verdict"] == "met" and "evidence of absence" in marked["accepted"][0]
+
+    neither = _vault_met(wt, monkeypatch, evidence_path="_pipeline")
+    assert neither["verdict"] == "partial", "the rail stopped refusing anything"
+    assert "evidence_path missing or not on disk" in neither["downgraded"][0]
+    assert "'_pipeline'" in neither["downgraded"][0], "the refusal names what was cited"
+    # `parse_review` clears the key and then omits it entirely (review.py's
+    # `if accepted: out["accepted"] = accepted`), so the ONLY shape a refused clause
+    # has is the absent key. Asserted as such: an `or not ...` half here would be a
+    # branch no code path can reach, and a test arm that cannot fail is not a check.
+    assert "accepted" not in neither, neither
+
+
+def test_the_vault_prompt_offers_the_reviewer_a_marker_the_rails_accept(isolated):
+    """#2040 clause 3: the prompt has to name a shape the rails will take.
+
+    The code-surface prompt already names the escape; the vault one stopped at "`met`
+    needs an evidence_path under the vault", so a grader grading a removal had a correct
+    citation to write and no admissible way to write it. The marker asserted here is not a
+    string this test picked: it is drawn from `RV._ABSENCE_MARKERS`, the same tuple
+    `evidence_of_absence` matches, so a prompt that drifts away from what the rails accept
+    — in either direction, wording or vocabulary — goes red here rather than in a round's
+    last attempt.
+    """
+    p = RV.build_vault_prompt(contract=_vault_contract(["content"]),
+                              paths=["skills/x/SKILL.md"], diff="+x", vault=isolated)
+    marker = next(m for m in RV._ABSENCE_MARKERS if m in p)
+    anchor = p.index("`met` needs an evidence_path under the vault")
+    assert p.index(marker) > anchor, "the marker belongs beside the evidence rule"
+    removed = [w for w in ("removed", "deletes", "delete", "gone") if w in p[anchor:]]
+    assert removed, "the sentence has to say when the marker is the right citation"

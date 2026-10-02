@@ -487,6 +487,26 @@ GRADER = None
 VAULT_REVIEW_MAX = 2
 
 
+def _ledger_clause(c: dict) -> dict:
+    """One graded clause, as the promotions ledger records it.
+
+    Three keys travel, each for a different reason. `clause` and `verdict` are the
+    grading. `subject: landing` is how `land()` finds the clauses it overwrites with the
+    verdict it derives from the sha. `accepted` is the record of a rail that was WAIVED —
+    on a deletion clause, the evidence of absence the grader was allowed to cite — and it
+    has to reach the row because on this surface the `vault_review` / `vault_land` rows
+    are the only account a landing has: #2038 is readable at all today only because its
+    refusal named the rail, and a `met` earned from a file's absence is otherwise
+    indistinguishable in the ledger from one earned from a file. A waiver that leaves no
+    trace is a rail that quietly stopped existing, which is what #2040 exists to prevent.
+    """
+    row = {"clause": int(c["clause"]), "verdict": str(c["verdict"])}
+    if c.get("subject"):
+        row["subject"] = str(c["subject"])
+    if c.get("accepted"):
+        row["accepted"] = c["accepted"]
+    return row
+
 def _vault_review(norm: list[str], item_id: int,
                   attempt: int = 1) -> tuple[str, str, list[dict]]:
     """`(kind, findings, clauses)` from the grader over the staged diff. Never
@@ -533,9 +553,7 @@ def _vault_review(norm: list[str], item_id: int,
                 diff += f"\n+++ new file {p}\n" + (VAULT / p).read_text(encoding="utf-8", errors="replace")
         res = tuple(GRADER(item_id=item_id, paths=norm, diff=diff, attempt=attempt))
         graded = res[2] if len(res) > 2 else []
-        clauses = [{"clause": int(c["clause"]), "verdict": str(c["verdict"]),
-                    **({"subject": str(c["subject"])} if c.get("subject") else {})}
-                   for c in (graded or []) if isinstance(c, dict)
+        clauses = [_ledger_clause(c) for c in (graded or []) if isinstance(c, dict)
                    and str(c.get("clause", "")).isdigit() and c.get("verdict")]
         return str(res[0]), str(res[1]), clauses
     except Exception as exc:  # noqa: BLE001 — the grader never fails a landing on its own
