@@ -106,6 +106,22 @@ def _ts_old(hours: float = 400.0) -> str:
     return (datetime.utcnow() - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%S")
 
 
+def _ts_recent(hours: float = 1.0) -> str:
+    """A `ts` string safely INSIDE a 168-hour window, same spelling as `_ts_old`.
+
+    The counterpart exists because the two are the same hazard in opposite
+    directions: a row stamped with a literal date and priced by a RELATIVE window
+    (`hours=168`) has a shelf life measured in wall-clock time, and when the
+    window's left edge slides past it the table comes back empty and an
+    attribution check reads as a broken attribution. `#2053` is that failure
+    caught in the wild. Stamp relative to the clock the reader reads, or pin an
+    absolute interval on both sides; never mix the two.
+    """
+    from datetime import datetime, timedelta
+
+    return (datetime.utcnow() - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%S")
+
+
 @pytest.fixture
 def store(tmp_path, monkeypatch):
     """A fresh usage.db. `_conn()` reopens whenever the file behind `DB_PATH` is
@@ -531,6 +547,17 @@ def test_a_dropped_microcompacted_renames_the_bucket_with_its_tokens(tmp_path,
     produce the stored `compaction` JSON, and read by `attribution_bucket` in a later
     process. A key renamed or dropped on the producer side shows up here and nowhere
     else, because every other node in this file constructs its rows by hand.
+
+    The rows are stamped with `_ts_recent`, not a literal date, and the node asserts
+    `rows == 2` before it reads any bucket. Both halves are #2053: this node used to
+    stamp `2026-09-25T10:00:00` and `2026-09-25T10:01:00` and then ask for a
+    RELATIVE window (`hours=168`), so its own left edge `now - 168 h` passed
+    `2026-09-25T10:00:00` at `2026-10-02T10:00Z` and both rows fell out. `rows` was
+    0, every bucket printed `n=0`, `gap_pct` stayed 0.0, and the rename check failed
+    as `assert 0 == 1` while the attribution code behind it was doing nothing wrong —
+    the same shape as a dropped provenance key, arriving on a schedule nobody wrote
+    down. An empty table is a fixture that stopped being in the window; it must never
+    be able to imitate a mis-named bucket again.
     """
     from app import compaction_record as CR
 
@@ -560,13 +587,17 @@ def test_a_dropped_microcompacted_renames_the_bucket_with_its_tokens(tmp_path,
     # total check cannot tell a named bucket from an anonymous one.
     extract = tmp_path / "rename.jsonl"
     extract.write_text(
-        json.dumps({"ts": "2026-09-25T10:00:00", "input_tokens": 150_000,
+        json.dumps({"ts": _ts_recent(2.0), "input_tokens": 150_000,
                     "reprefill_tokens": 400_000, "compaction": record}) + "\n"
-        + json.dumps({"ts": "2026-09-25T10:01:00", "input_tokens": 150_000,
+        + json.dumps({"ts": _ts_recent(1.0), "input_tokens": 150_000,
                       "reprefill_tokens": 400_000, "compaction": stripped}) + "\n")
     db = usage_store.replay_usage_extract(extract, db_path=tmp_path / "rename.db")
     monkeypatch.setattr(usage_store, "DB_PATH", db)
     attr = usage_store.reprefill_attribution(hours=168)
+    assert attr["rows"] == 2, (
+        f"the window priced {attr['rows']} row(s), not the 2 the node just wrote "
+        f"(since={attr['since']}), so a bucket assertion below would be reading an "
+        "empty table — a fixture outside the window it asks about, not a rename")
     assert _row(attr, "turn_start:microcompact")["n"] == 1
     assert _row(attr, "turn_start:other")["n"] == 1
     assert _row(attr, "turn_start:microcompact")["reprefill_tokens"] == \
