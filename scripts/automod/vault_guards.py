@@ -56,6 +56,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from scripts.automod import state as S
 from scripts.automod import worktree as W
 
 #: The checkout whose guards run. `~/lloyd` in the running system — this module
@@ -85,10 +86,23 @@ VAULT_ROOT_TOKENS: tuple[str, ...] = (
 #: production backend never sets it, so every real landing is probed.
 NESTING_ENV = "LLOYD_VAULT_GUARD_PROBE"
 
-#: Per pytest run. The vault-reading selection measured 453 nodes in 65 s on
-#: 2026-10-01; 300 s is that with room for a cold cache, and a run that exceeds
-#: it is a non-answer, not a verdict.
+#: Whole probe: the queue for the gate's tests lock plus both pytest runs
+#: together, not either run on its own (`_deadline` below). Restated on
+#: 2026-10-02 because the figure it was calibrated on was wrong: the comment
+#: cited "453 nodes in 65 s", but the selection measured from a detached
+#: worktree at `405efe57` with the gate's own mark expr is **196 files, 7,065
+#: nodes collected (141 deselected), 32.81 s to COLLECT alone**
+#: (`guard_selection` + `pytest --collect-only`, exit 0). Whether that fits a
+#: land budget at all — raise it, or run the probe on the installed
+#: `pytest-xdist` the way `gate.py` runs its own rung — is the ruling #2042's
+#: owed-check job owns, not this constant; what this constant owns is that a
+#: probe which exceeds it is a non-answer, never a verdict.
 PROBE_TIMEOUT_SECONDS = 300.0
+
+#: A run started with less than this much of the budget left cannot report
+#: anything, and a subprocess killed while importing pytest is a worse
+#: non-answer than one that says so up front.
+MIN_RUN_SECONDS = 5.0
 
 
 def guard_selection(tree: Path) -> list[str]:
@@ -124,6 +138,41 @@ def _gate_tools():
     from scripts.automod.gate import (TESTS_MARK_EXPR, _failed_node_ids,
                                       _parse_pytest_summary)
     return TESTS_MARK_EXPR, _failed_node_ids, _parse_pytest_summary
+
+
+def _tests_lock():
+    """The lock the gate's `tests` rung holds, and how long the gate queues for it.
+
+    Read from the two modules that own them — `state.GATE_TESTS_LOCK_PATH`, the
+    path `gate.py:1251` acquires for its `tests` rung, and `gate.Gate.SERIAL_MAX_WAIT`,
+    the same ceiling that rung waits — rather than restated here, for the reason
+    `_gate_tools` gives for the mark expr: a second copy of the string or the
+    number is a second source of truth, and the two drift. The `Gate` import is
+    lazy for the reason `_gate_tools` gives for its own: `gate.py` pulls in the
+    canary, spec and vet modules, and this module is imported by the landing route
+    inside the running backend.
+    """
+    from scripts.automod.gate import Gate
+    return S.GATE_TESTS_LOCK_PATH, Gate.SERIAL_MAX_WAIT
+
+
+def _wait_for_tests_slot(remaining: float) -> tuple:
+    """Take the gate's tests-rung lock; `(lock, seconds waited)`.
+
+    The queue is capped twice over: by `remaining`, because seconds spent waiting
+    are seconds no run gets back and a run started on an empty budget reports
+    nothing, and by the gate's own `SERIAL_MAX_WAIT`, because a land that
+    out-queues a gate is a synchronous request left hanging longer than any rung
+    that gates the code half. `state.LockHeld` after that is the caller's signal to
+    report that it could not judge — never a reason to run anyway, which is the
+    contention #2042 names: three probes each spent their whole 300 s competing
+    with a gate `tests` rung that was holding this same lock.
+    """
+    path, serial_max = _tests_lock()
+    lock = S.Lock(path, owner=f"vault-probe pid={os.getpid()}")
+    started = time.time()
+    lock.acquire_wait(max(0.0, min(remaining, serial_max)), poll=2.0)
+    return lock, round(time.time() - started, 1)
 
 
 def _copy_vault(dest: Path, live_vault: Path) -> str | None:
@@ -186,15 +235,40 @@ def baseline_vault(dest: Path, live_vault: Path, paths: list[str]) -> dict:
     return {"ok": True, "reason": "", "restored": restored, "removed": removed}
 
 
+def _tail(output) -> str:
+    """The last three lines of a child's output, as text, whatever it died with.
+
+    `TimeoutExpired.output`/`.stderr` are what `communicate()` managed to drain
+    before the kill and may be `None`, `bytes` or `str` depending on how the child
+    died and whether it was opened in text mode. A timeout note that says
+    "captured nothing" when the pipe held three lines is the difference between a
+    hang and a slow selection, which is the question #2042 was filed to answer.
+    """
+    if not output:
+        return ""
+    if isinstance(output, bytes):
+        output = output.decode("utf-8", "replace")
+    return " | ".join(str(output).strip().splitlines()[-3:])[:200]
+
+
 def _run_selection(python: Path, tree: Path, files: list[str], vault: Path,
-                   data_root: Path, mark_expr: str, timeout: float) -> dict:
+                   data_root: Path, mark_expr: str, budget: float) -> dict:
     """One pytest run of `files` against `vault`, with the gate's mark expression.
 
     A fresh data root, for the reason `_failures_at_base` records at #1436: the
     probe must not see a store the candidate's own run created, or a defect the
     candidate wrote looks like a condition of the tree.
+
+    `budget` is the seconds this run may spend, handed out by `agreement` out of
+    what the probe's whole-probe deadline still allows — which is why it is spent
+    only here, after the tests lock has been won. The three #2042 rows each spent
+    their entire 300 s inside a run that was competing with a gate `tests` rung for
+    the same cores and never reported how long it had actually been alive; every
+    return below therefore carries `seconds` and `files` beside `ran`, so a
+    non-answer names its own cost and its own denominator.
     """
     mark, failed_ids, summary = _gate_tools()
+    started = time.time()
     data_root.mkdir(parents=True, exist_ok=True)
     env = {**os.environ,
            "PYTHONPATH": str(tree),
@@ -203,19 +277,27 @@ def _run_selection(python: Path, tree: Path, files: list[str], vault: Path,
            NESTING_ENV: "1"}
     cmd = [str(python), "-m", "pytest", "-q", "--no-header", "-p", "no:cacheprovider",
            "--continue-on-collection-errors", "-m", mark_expr or mark, *files]
+
+    def spent() -> float:
+        return round(time.time() - started, 1)
+
     try:
         r = subprocess.run(cmd, cwd=str(tree), capture_output=True, text=True,
-                           env=env, timeout=timeout, check=False)
+                           env=env, timeout=budget, check=False)
         text = (r.stdout or "") + (r.stderr or "")
         rc = r.returncode
-    except subprocess.TimeoutExpired:
-        return {"ran": 0, "failed": [], "note": f"timed out after {timeout:.0f}s",
-                "excerpt": ""}
+    except subprocess.TimeoutExpired as exc:
+        tail = _tail(exc.output) or _tail(exc.stderr)
+        return {"ran": 0, "failed": [], "seconds": spent(), "files": len(files),
+                "note": (f"timed out after {spent():.1f}s (the {budget:.0f}s it was "
+                         f"given) over {len(files)} vault-reading file(s)"
+                         + (f": {tail}" if tail else ", with no output captured")),
+                "excerpt": tail}
     except OSError as exc:
-        return {"ran": 0, "failed": [], "note": f"pytest would not start: {exc}",
-                "excerpt": ""}
+        return {"ran": 0, "failed": [], "seconds": spent(), "files": len(files),
+                "note": f"pytest would not start: {exc}", "excerpt": ""}
     counts = summary(text)
-    tail = " | ".join(text.strip().splitlines()[-3:])[:200]
+    tail = _tail(text)
     # The denominator is the nodes that RAN, not the nodes that were collected. A
     # selection whose one vault-reading guard is `skipif`-skipped collects fine,
     # exits 0, and asserts nothing — which is exactly the "a check whose
@@ -223,10 +305,12 @@ def _run_selection(python: Path, tree: Path, files: list[str], vault: Path,
     # instances of. `collected` counts a skipped node; `ran` must not.
     ran = int(counts["collected"]) - int(counts["tests_skipped"])
     if not int(counts["collected"]):
-        return {"ran": 0, "failed": failed_ids(text),
+        return {"ran": 0, "failed": failed_ids(text), "seconds": spent(),
+                "files": len(files),
                 "note": f"pytest produced no summary (rc={rc}): {tail}",
                 "excerpt": text[-1500:]}
-    return {"ran": ran, "failed": failed_ids(text),
+    return {"ran": ran, "failed": failed_ids(text), "seconds": spent(),
+            "files": len(files),
             "note": (f"collected {counts['collected']} ({counts['tests_skipped']} "
                      f"skipped), failed {counts['failed']}, errors {counts['errors']} "
                      f"(rc={rc})"),
@@ -275,20 +359,40 @@ def agreement(*, paths: list[str], live_root: Path | None = None,
     question can be asked: after the commit the vault has no "before" to compare
     against, and before the edit there is nothing to judge.
 
+    `timeout` is the WHOLE probe: the queue for the gate's tests lock and both
+    pytest runs together, handed out to each run as it goes. It was per run until
+    #2042, which is the arithmetic that made every real probe a non-answer — a
+    probe could spend 300 s queueing behind a gate `tests` rung and still be
+    refused by its own next 300 s, and the row said only "timed out after 300s".
+
+    Both child runs happen inside the gate's tests lock (`_wait_for_tests_slot`),
+    taken before the vault is mirrored so both mirrors are witnesses of one moment
+    and released once, in the `finally`.
+
     Returns `{"state": "checked" | "skipped", "refuse": bool, "reason": str, ...}`.
     `refuse` is true only for a node that passed with this land's paths put back
     and failed with them in place; `reason` says which of the non-answers it was
-    whenever `state` is `skipped`.
+    whenever `state` is `skipped`, and each run's own `seconds`, `files` and
+    captured `excerpt` ride along so a non-answer explains itself.
     """
     started = time.time()
+    deadline = started + max(float(timeout), 0.0)
     report: dict = {"state": "skipped", "refuse": False, "reason": "", "nodes": [],
                     "tree": {}, "files": [], "candidate": {}, "baseline": {},
-                    "excerpt": "", "seconds": 0.0}
+                    "excerpt": "", "seconds": 0.0, "lock_wait_s": 0.0}
 
     def done(**kw) -> dict:
         report.update(kw)
         report["seconds"] = round(time.time() - started, 1)
         return report
+
+    def left() -> float:
+        """Seconds of the probe's own budget still unspent."""
+        return deadline - time.time()
+
+    def run_budget() -> float:
+        """What the next run may spend: the whole probe budget still unspent."""
+        return max(left(), 0.0)
 
     if os.environ.get(NESTING_ENV) == "1":
         return done(reason=(f"not run inside a test run or a probe child "
@@ -322,10 +426,32 @@ def agreement(*, paths: list[str], live_root: Path | None = None,
     probe_data = scratch / "probe-data"
     proposed_vault = scratch / "vault-proposed"
     base_vault = scratch / "vault-head"
+    slot = None
     try:
         wt = W.git(root, "worktree", "add", "--detach", "-q", str(tree), "HEAD")
         if wt.returncode != 0:
             return done(reason=f"probe worktree failed: {wt.stderr.strip()[:200]}")
+        if run_budget() < MIN_RUN_SECONDS:
+            return done(reason=(f"no run fits what is left of the {timeout:.0f}s probe "
+                                f"budget: {left():.1f}s for {len(files)} vault-reading "
+                                f"file(s), less than the {MIN_RUN_SECONDS:.0f}s a pytest "
+                                f"run needs to report anything"))
+
+        # One slot for both runs: the lock the gate's `tests` rung holds for its
+        # whole suite (`gate.py:1251`). Before #2042 this module launched its child
+        # pytest with no lock at all while the gate ran eight xdist workers on
+        # 32 cores holding that lock for minutes — two pytest runs of an overlapping
+        # file set on one box do not finish in half the time of one, and all three
+        # probes that were ever armed spent their entire budget inside that
+        # contention and answered nothing. Held from here to the `finally`, so the
+        # two mirrors below are witnesses of one moment rather than of two
+        # separated by whatever the queue costs.
+        try:
+            slot, waited = _wait_for_tests_slot(left())
+        except S.LockHeld as exc:
+            return done(reason=(f"the gate's tests lock stayed busy for the whole "
+                                f"queue: {exc}"))
+        report["lock_wait_s"] = waited
 
         # The proposed run reads a MIRROR too, and that is the whole safety
         # argument for copying rather than linking: `land()` calls this with the
@@ -340,9 +466,11 @@ def agreement(*, paths: list[str], live_root: Path | None = None,
         if why:
             return done(reason=f"cannot mirror the vault as proposed: {why}")
         cand = _run_selection(interp, tree, files, proposed_vault, probe_data,
-                              mark_expr or mark, timeout)
+                              mark_expr or mark, run_budget())
         report["candidate"] = {"ran": cand["ran"], "failed": cand["failed"],
-                               "note": cand["note"]}
+                               "note": cand["note"], "seconds": cand["seconds"],
+                               "files": cand["files"]}
+        report["excerpt"] = cand["excerpt"]
         if not cand["ran"]:
             return done(state="skipped",
                         reason=f"the proposed-vault run answered nothing: {cand['note']}")
@@ -353,31 +481,42 @@ def agreement(*, paths: list[str], live_root: Path | None = None,
                                 f"{'pass' if n != 1 else 'passes'} against the vault "
                                 f"as proposed"))
 
-        why = baseline_vault(base_vault, vault, list(paths))
-        report["baseline_vault"] = {"restored": why["restored"],
-                                    "removed": why["removed"]}
-        if not why["ok"]:
-            return done(reason=f"cannot build the pre-land vault: {why['reason']}")
         failing_files = []
         for nid in cand["failed"]:
             f = nid.split("::", 1)[0]
             if f not in failing_files:
                 failing_files.append(f)
+        if run_budget() < MIN_RUN_SECONDS:
+            # Asking for the pre-land run here would burn a second vault mirror and
+            # then report nothing, which is the state the three #2042 rows are in.
+            # Refusing on a red node alone is the wider rule the module docstring
+            # refuses to adopt, so the honest answer is "could not attribute".
+            return done(reason=(f"the pre-land run could not start inside the "
+                                f"{timeout:.0f}s probe budget ({left():.1f}s left), so "
+                                f"the {len(cand['failed'])} failing node(s) are neither "
+                                f"this land's nor the tree's"))
+        why = baseline_vault(base_vault, vault, list(paths))
+        report["baseline_vault"] = {"restored": why["restored"],
+                                    "removed": why["removed"]}
+        if not why["ok"]:
+            return done(reason=f"cannot build the pre-land vault: {why['reason']}")
         base = _run_selection(interp, tree, failing_files, base_vault, probe_data,
-                              mark_expr or mark, timeout)
+                              mark_expr or mark, run_budget())
         report["baseline"] = {"ran": base["ran"], "failed": base["failed"],
-                              "note": base["note"]}
+                              "note": base["note"], "seconds": base["seconds"],
+                              "files": base["files"]}
         if not base["ran"]:
             return done(reason=(f"the pre-land run answered nothing, so a failure "
                                 f"cannot be attributed to this land: {base['note']}"))
         new = [n for n in cand["failed"] if n not in set(base["failed"])]
-        report["excerpt"] = cand["excerpt"]
         if not new:
             return done(state="checked", refuse=False,
                         reason=(f"{len(cand['failed'])} failing node(s) fail against the "
                                 f"pre-land vault too — pre-existing, not this land"))
         return done(state="checked", refuse=True, nodes=new)
     finally:
+        if slot is not None:
+            slot.release()
         W.git(root, "worktree", "remove", "--force", str(tree))
         W.git(root, "worktree", "prune")
         shutil.rmtree(scratch, ignore_errors=True)

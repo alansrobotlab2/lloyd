@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -990,14 +991,24 @@ def probed(tmp_path, monkeypatch):
     subprocess — so a test of the probe has to clear it as well as point the
     roots. Production never sets it, so every real landing is probed.
     """
-    def arm(tree, vault):
+    def arm(tree, vault, *, python=None, timeout=None):
+        """Point the real probe at a fixture tree and vault.
+
+        `python` and `timeout` are passed through to `agreement` itself, so the
+        #2042 nodes can watch when the probe's child is spawned and hand it a
+        budget it cannot spend, instead of standing in for the probe they are
+        meant to be measuring.
+        """
         monkeypatch.delenv(VG.NESTING_ENV, raising=False)
         real = VG.agreement
+        extra = {} if timeout is None else {"timeout": timeout}
         monkeypatch.setattr(
             V.VG, "agreement",
-            lambda *, paths, **kw: real(paths=list(paths), live_root=tree,
-                                        live_vault=vault, python=Path(sys.executable),
-                                        scratch_parent=tmp_path / "probe-scratch"))
+            lambda *, paths, **ignored: real(paths=list(paths), live_root=tree,
+                                             live_vault=vault,
+                                             python=python or Path(sys.executable),
+                                             scratch_parent=tmp_path / "probe-scratch",
+                                             **extra))
     return arm
 
 
@@ -1040,10 +1051,28 @@ def test_a_refusal_leaves_the_vault_at_its_previous_head_and_is_ledged(
     assert row["ok"] is False and "commit" not in row
     assert row["item_id"] == 42
     assert row["reverted"] == ["skills/foo/SKILL.md"]
-    assert row["guards"] == {
+    g = row["guards"]
+    # The decision keys, unchanged in value by #2042.
+    assert {k: g[k] for k in ("state", "refuse", "nodes")} == {
         "state": "checked", "refuse": True,
-        "candidate": {"ran": 1, "failed": 1}, "baseline": {"ran": 1, "failed": 0},
         "nodes": ["tests/test_guard.py::test_the_prose_states_the_count_the_script_prints"]}
+    assert g["candidate"]["ran"] == 1 and g["candidate"]["failed"] == 1
+    assert g["baseline"]["ran"] == 1 and g["baseline"]["failed"] == 0
+    # The row's shape is still closed: a key appears only because a clause put it
+    # there. `lock_wait_s` is absent because nothing was queued behind here, and
+    # `_guards_row` writes detail keys only when there is something to say.
+    assert set(g) == {"state", "refuse", "seconds", "candidate", "baseline",
+                      "nodes", "excerpt"}, g
+    # #2042: a refusal row now carries its own cost beside its verdict — the seconds
+    # each run took and how many vault-reading files it ran over — and the guard
+    # output that states the counts. Before this, only the verdict was ledgered.
+    assert g["candidate"]["files"] == 1 and g["baseline"]["files"] == 1
+    assert 0 < g["candidate"]["seconds"] < 60 and 0 < g["baseline"]["seconds"] < 60
+    assert g["seconds"] >= g["candidate"]["seconds"] + g["baseline"]["seconds"]
+    # The row's own excerpt is pytest's tail, so it names the node that failed;
+    # the guard's stated counts reach the ledger through `errors`, via
+    # `refusal_text`, which is where the refusal a human reads gets them.
+    assert "tests/test_guard.py::test_the_prose_states_the_count" in g["excerpt"], g["excerpt"]
     assert "prose 5, script 4" in row["errors"][0]
     assert row["review_reason"] == "code agreement refused the land"
     # The prose is back at the vault's HEAD state: "nothing lands" has to mean
@@ -1061,7 +1090,10 @@ def test_a_land_whose_stated_count_agrees_with_the_tree_still_commits(
     out = V.land(["skills/foo/SKILL.md"], "#2036 reworded", item_id=None)
     assert _head(vault) != head
     assert out["guards"]["state"] == "checked" and out["guards"]["refuse"] is False
-    assert out["guards"]["candidate"] == {"ran": 1, "failed": 0}
+    cand = out["guards"]["candidate"]
+    assert cand["ran"] == 1 and cand["failed"] == 0
+    # #2042: the pass row states what it spent and over how much of the selection.
+    assert cand["files"] == 1 and 0 < cand["seconds"] < 60, cand
     assert _events("vault_land")[0]["guards"]["refuse"] is False
 
 
@@ -1079,10 +1111,14 @@ def test_a_count_land_whose_code_half_already_landed_proceeds(vault, guard_tree,
     probed(guard_tree, vault)
     _prose(vault, "---\nname: foo\n---\nstores: 5\n")
     out = V.land(["skills/foo/SKILL.md"], "#2036 five stores, code first", item_id=None)
-    assert out["guards"] == {"state": "checked", "refuse": False,
-                             "candidate": {"ran": 1, "failed": 0},
-                             "reason": "1 vault-reading node passes against the "
-                                       "vault as proposed"}
+    g = out["guards"]
+    assert {k: g[k] for k in ("state", "refuse", "reason")} == {
+        "state": "checked", "refuse": False,
+        "reason": "1 vault-reading node passes against the vault as proposed"}
+    # The one-run pass path never reaches the baseline, and it now states its cost.
+    assert "baseline" not in g, g
+    assert g["candidate"]["ran"] == 1 and g["candidate"]["failed"] == 0
+    assert g["candidate"]["files"] == 1 and 0 < g["candidate"]["seconds"] < 60, g
 
 
 def test_a_guard_already_red_before_the_land_does_not_refuse_it(vault, guard_tree, probed):
@@ -1101,8 +1137,12 @@ def test_a_guard_already_red_before_the_land_does_not_refuse_it(vault, guard_tre
     out = V.land(["skills/foo/SKILL.md"], "#2036 reword while main is red", item_id=None)
     assert out["guards"]["state"] == "checked" and out["guards"]["refuse"] is False
     # Both runs red, the same node: that is what "pre-existing" measured.
-    assert out["guards"]["candidate"] == {"ran": 1, "failed": 1}
-    assert out["guards"]["baseline"] == {"ran": 1, "failed": 1}
+    cand, base = out["guards"]["candidate"], out["guards"]["baseline"]
+    assert cand["ran"] == 1 and cand["failed"] == 1
+    assert base["ran"] == 1 and base["failed"] == 1
+    # Both runs red on the same node, and both say how long and over what.
+    assert cand["files"] == 1 and base["files"] == 1
+    assert cand["seconds"] > 0 and base["seconds"] > 0
 
 
 #: `scripts/automod/review.py:1433`'s own abstention for a surface that is not
@@ -1656,3 +1696,330 @@ def test_the_waiver_reaches_the_promotions_row_beside_the_verdict(vault, items,
     landed = [c for c in lands[0]["review_clauses"] if c["clause"] == 1]
     assert len(landed) == 1 and landed[0]["verdict"] == "met", landed
     assert "evidence of absence" in landed[0]["accepted"][0], landed
+
+
+# --------------------------------------------------------------------------- #
+#  #2042: the probe has to reach a verdict inside the land budget, and a probe
+#  that cannot reach one has to say so in numbers.
+#
+#  Three real item-bound lands armed the #2036 probe — #2040 at
+#  2026-10-01T23:26:32Z, #2027 at 23:36:50Z, #2038 at 2026-10-02T01:03:30Z — and
+#  every one recorded `guards.state = "skipped"`, `refuse = False`,
+#  `candidate.ran = 0` and the reason "the proposed-vault run answered nothing:
+#  timed out after 300s". `checked` has never appeared on a `vault_land` row.
+#  Two causes, one fix: the probe launched its child pytest while a gate `tests`
+#  rung was holding the box on eight xdist workers, and the budget was quoted per
+#  run so the queue for one was charged to the other.
+# --------------------------------------------------------------------------- #
+
+#: A vault-reading guard that says one line at import and then hangs. The line is
+#: written at import, not inside the test, because pytest redirects the child's
+#: descriptors at session start and a hung test never gets to flush — the bytes
+#: that survive in the pipe the probe is reading are the ones written before the
+#: kill, which is exactly what clause 2 asks the ledger to carry.
+GUARD_SRC_HANGS = '''"""A vault-reading guard that says one line and then never answers again."""
+import os
+import sys
+import time
+from pathlib import Path
+
+import pytest
+
+sys.stderr.write("GUARD-IS-HANGING prose 4, script 4\\n")
+sys.stderr.flush()
+
+
+@pytest.fixture
+def _unused():
+    yield None
+
+
+def test_the_prose_states_the_count_the_script_prints():
+    time.sleep(120)
+    text = (Path(os.environ["LLOYD_VAULT_ROOT"]) / "skills" / "foo" / "SKILL.md").read_text()
+    stated = [int(l.split()[-1]) for l in text.splitlines() if l.startswith("stores: ")]
+    assert stated == [4], f"prose {stated}, script 4"
+'''
+
+#: A vault-reading file the gate's mark expression deselects and nothing else can:
+#: it names `obsidian`, so `guard_selection` must pick it, and it fails if the
+#: child is ever given a mark expression that does not mention its own marker.
+#: Clause 4's witness that the child is handed the gate's CURRENT object and not a
+#: copy of its text.
+DECOY_SRC = '''"""A vault-reading guard the gate deselects: it names ~/obsidian and is marked."""
+import pytest
+
+
+@pytest.mark.probed_decoy
+def test_a_decoy_that_must_never_run_under_the_gates_marks():
+    raise AssertionError("the decoy ran: the child was not given the gate's mark expr")
+'''
+
+#: The three post-ship `vault_land` rows, re-read out of the promotions ledger on
+#: 2026-10-02 and committed here so every number in the section below is a fact
+#: about bytes in the tree rather than about a live file that moves.
+WITNESS_2042 = repo() / "tests/fixtures/promotions_vault_land_rows_2026-10-02-item2042.jsonl"
+WITNESS_2042_VAULT_PATH = "backlog/data/2026-10-02.2042-probe-timeout-witness.jsonl"
+#: `wc -l < backlog/data/promotions.jsonl`, the row-count figure #2042 quotes.
+#: `tests/test_retention_sweep.py::_WITNESS_ROWS` pins the same number for #1975's
+#: clause; a mirror refresh has to move both nodes, which is the point of pinning
+#: the figure in two items rather than trusting a sentence in either.
+WITNESS_LEDGER_LINES = 28678
+
+
+def test_a_killed_run_ledges_the_seconds_the_selection_and_its_own_tail(
+        tmp_path, monkeypatch):
+    """Clause 2 at the child boundary: the numbers a kill leaves behind.
+
+    A deterministic stand-in for the kill — `subprocess.run` raising the
+    `TimeoutExpired` the real one raises, carrying the bytes its pipe held. The
+    point is not that a timeout is reported (the old code did that) but what it
+    reports: the three real rows said only `timed out after 300s`, which cannot be
+    told apart from a hang by anyone reading the ledger afterwards.
+    """
+    import subprocess as SP
+
+    held = b"collected 7065 items\n.... GUARD-IS-HANGING prose 4, script 4\n"
+
+    def killed(cmd, **kw):
+        raise SP.TimeoutExpired(cmd, kw.get("timeout"), output=held)
+
+    monkeypatch.setattr(VG.subprocess, "run", killed)
+    r = VG._run_selection(Path(sys.executable), tmp_path,
+                          ["tests/test_a.py", "tests/test_b.py"],
+                          tmp_path / "vault", tmp_path / "data", None, 42.0)
+    assert r["ran"] == 0
+    # The denominator and the cost, in the note itself: "over 2 vault-reading
+    # file(s)" and the seconds it was given are what a future reader needs to tell
+    # a hang from a selection that simply does not fit the budget.
+    assert r["files"] == 2 and isinstance(r["seconds"], float)
+    assert "over 2 vault-reading file" in r["note"], r["note"]
+    assert "the 42s it was given" in r["note"], r["note"]
+    assert "timed out after" in r["note"], r["note"]
+    # The tail is the child's bytes, not a placeholder: this is the half the old
+    # code failed, whose timeout branch returned `"excerpt": ""` unconditionally.
+    assert "GUARD-IS-HANGING" in r["excerpt"], r
+    assert "GUARD-IS-HANGING" in r["note"], r["note"]
+
+
+def test_a_budget_that_cannot_hold_a_run_reports_it_before_starting_one(
+        vault, guard_tree, probed):
+    """Clause 1's other half: a wait is never charged to a run that cannot finish.
+
+    One second of total budget, which is less than the five a pytest child needs to
+    import and report. The probe must say that up front instead of starting a run
+    whose kill is certain — and say it in a sentence that names the budget, the
+    seconds left and the size of the selection, which is the same self-explaining
+    rule clause 2 asks of a timeout.
+    """
+    _prose(vault, "---\nname: foo\n---\nstores: 4\n", commit=True)
+    probed(guard_tree, vault, timeout=1.0)
+    _prose(vault, "---\nname: foo\n---\nstores: 4\n\nReworded under a tight budget.\n")
+    head = _head(vault)
+    out = V.land(["skills/foo/SKILL.md"], "#2042 no room for a run", item_id=None)
+    assert out["commit"], "a probe with no room must not stop the land"
+    assert _head(vault) != head
+    row = _events("vault_land")[0]["guards"]
+    assert row["state"] == "skipped" and row["refuse"] is False
+    assert "no run fits" in row["reason"], row
+    assert "1 vault-reading file" in row["reason"], row
+    assert row["seconds"] < VG.MIN_RUN_SECONDS, f"the rail spoke after {row['seconds']}s"
+    assert "candidate" not in row, "no run started, so no run may be reported"
+
+
+def test_a_probe_that_hangs_states_its_seconds_and_still_lands(vault, tmp_path, probed):
+    """Clauses 2 and 3 together, on the path the three real rows died on.
+
+    End to end this time, with a guard that really hangs and a budget short enough
+    to kill it. What the ledger gets: a `skipped` (clause 3 — a probe that answers
+    nothing is never a silent pass), the seconds the child was alive, the size of
+    the selection it was running, and the whole-probe seconds beside the queue for
+    the gate's tests slot. The land still goes through: the #2036 rule is that a
+    non-answer does not hold a landing hostage.
+    """
+    tree = make_guard_tree(tmp_path / "hanging-tree", src=GUARD_SRC_HANGS)
+    _prose(vault, "---\nname: foo\n---\nstores: 5\n", commit=True)   # red at vault HEAD
+    probed(tree, vault, timeout=12.0)
+    _prose(vault, "---\nname: foo\n---\nstores: 5\n\nReworded while the probe hangs.\n")
+    head = _head(vault)
+    out = V.land(["skills/foo/SKILL.md"], "#2042 the probe hangs", item_id=None)
+    assert out["commit"] and _head(vault) != head
+    row = _events("vault_land")[0]["guards"]
+    assert row["state"] == "skipped" and row["refuse"] is False
+    assert row["candidate"] == {"ran": 0, "failed": 0,
+                                "seconds": row["candidate"]["seconds"], "files": 1}
+    assert "answered nothing" in row["reason"] and "timed out after" in row["reason"]
+    assert "over 1 vault-reading file" in row["reason"], row["reason"]
+    # The child spent most of the 12 s it was handed: that is the difference
+    # between "the run was slow" and "the budget was already gone", which is the
+    # ruling #2042 leaves to the owed-check job and which the old row could not
+    # support either way.
+    assert row["candidate"]["seconds"] >= 8.0, row["candidate"]
+    assert row["seconds"] >= row["candidate"]["seconds"], row
+    assert "lock_wait_s" not in row or row["lock_wait_s"] < 1.0, (
+        f"the queue ate the budget here: {row['lock_wait_s']}s of a 12s probe")
+
+
+def test_the_probe_waits_for_the_gate_tests_slot_before_it_starts_a_child(
+        vault, guard_tree, probed, tmp_path):
+    """Clause 1: the probe's pytest never runs alongside a gate `tests` rung.
+
+    Timed from outside the probe, on the child's own spawn time: the interpreter it
+    is handed is a one-line wrapper that touches a file and execs. Uncontended the
+    child is spawned at once — the queue must not cost anything when the lock is
+    free, or this fix would have traded a timeout for a stall. Contended, with the
+    gate's own tests lock held here and released from a timer thread, the child may
+    not exist before the release: the 300 s starts counting after the slot, not
+    during the wait, which is the arithmetic that made all three real probes
+    non-answers.
+    """
+    import threading
+    started = tmp_path / "child-spawned"
+    wrapper = tmp_path / "python-shim"
+    wrapper.write_text(f'#!/bin/sh\n: > "{started}"\nexec {sys.executable} "$@"\n')
+    wrapper.chmod(0o755)
+    probed(guard_tree, vault, python=wrapper)
+
+    _prose(vault, SKILL_AT_FOUR, commit=True)
+    _prose(vault, "---\nname: foo\n---\nstores: 4\n\n#2042 uncontended.\n")
+    t0 = time.time()
+    out = V.land(["skills/foo/SKILL.md"], "#2042 the slot is free", item_id=None)
+    assert out["guards"]["state"] == "checked" and out["guards"]["refuse"] is False
+    assert out["guards"]["candidate"]["ran"] == 1, out["guards"]
+    free_spawn = started.stat().st_mtime - t0
+    assert "lock_wait_s" not in out["guards"], "a probe that did not queue said it did"
+
+    started.unlink()
+    held = S.Lock(S.GATE_TESTS_LOCK_PATH, owner="test-holding-the-gate-tests-rung")
+    held.acquire()
+    released: list[float] = []
+    timer = threading.Timer(8.0, lambda: (released.append(time.time()), held.release()))
+    timer.daemon = True
+    timer.start()
+    try:
+        _prose(vault, "---\nname: foo\n---\nstores: 4\n\n#2042 contended.\n")
+        t1 = time.time()
+        out2 = V.land(["skills/foo/SKILL.md"], "#2042 the slot is busy", item_id=None)
+    finally:
+        timer.cancel()
+        held.release()
+    assert out2["guards"]["state"] == "checked" and out2["guards"]["refuse"] is False
+    assert out2["guards"]["candidate"]["ran"] == 1, out2["guards"]
+    assert released, "the timer never fired, so the contention this node names never existed"
+    contended_spawn = started.stat().st_mtime - t1
+    assert started.stat().st_mtime >= released[0] - 0.05, (
+        f"the child started {released[0] - started.stat().st_mtime:+.1f}s around the "
+        f"release: the probe ran its selection over a gate tests rung")
+    # The load-robust half of the claim, and the one the clause is actually about:
+    # the same land that spawned its child after `free_spawn` s of validators and
+    # mirror took `contended_spawn` s to get there, because the queue was in front
+    # of it. A loaded box inflates both terms equally; it cannot inflate one alone.
+    assert contended_spawn - free_spawn >= 3.0, (
+        f"uncontended child at {free_spawn:.1f}s, contended at "
+        f"{contended_spawn:.1f}s: the hold changed nothing")
+    assert out2["guards"]["lock_wait_s"] >= 1.0, out2["guards"]
+
+
+def test_the_child_is_given_the_gate_mark_object_not_a_copy_of_its_text(
+        vault, guard_tree, probed, monkeypatch):
+    """Clause 4: the selection invariant survives, and it survives by identity.
+
+    Two halves, both behavioural. First the mark expression: a decoy file that
+    `guard_selection()` must pick (it names `obsidian`) and that fails if pytest
+    runs it is added to the tree, and the gate's own constant is then changed — not
+    this file's copy of it, the attribute on `scripts.automod.gate` that
+    `_gate_tools` imports. The child obeys the change, so the string in its argv
+    came through the object; a retyped literal would hand the child the old text,
+    run the decoy and refuse a land that agrees with the tree.
+
+    Second the mirror, which the node below it already pins
+    (`test_the_probe_judges_a_copy_so_a_writing_guard_cannot_reach_the_live_vault`):
+    `LLOYD_VAULT_ROOT` names a throwaway copy, never `~/obsidian`.
+    """
+    import scripts.automod.gate as GATE
+    (guard_tree / "tests/test_decoy.py").write_text(DECOY_SRC)
+    git(guard_tree, "add", "-A")
+    git(guard_tree, "commit", "-q", "-m", "a decoy the gate's marks deselect")
+    assert VG.guard_selection(guard_tree) == ["tests/test_decoy.py", "tests/test_guard.py"], \
+        "the decoy is not in the file set the probe runs"
+    monkeypatch.setattr(GATE, "TESTS_MARK_EXPR",
+                        f"{GATE.TESTS_MARK_EXPR} and not probed_decoy")
+    _prose(vault, SKILL_AT_FOUR, commit=True)         # the prose agrees: nothing to refuse
+    probed(guard_tree, vault)
+    _prose(vault, "---\nname: foo\n---\nstores: 4\n\n#2042 the marks are the gate's.\n")
+    out = V.land(["skills/foo/SKILL.md"], "#2042 the mark expr is the gate's object",
+                 item_id=None)
+    cand = out["guards"]["candidate"]
+    assert cand["ran"] == 1 and cand["failed"] == 0, (
+        f"the decoy ran, so the child was not handed the gate's mark object: {cand}")
+    assert cand["files"] == 2, f"the selection is not guard_selection()'s file set: {cand}"
+    assert out["guards"]["refuse"] is False
+
+
+def test_the_probe_timeout_witness_is_the_three_rows_the_item_quotes():
+    """#2042's premise, re-derived from bytes a reader can hold in their hands.
+
+    Every figure the item states about its own witness is recomputed here: three
+    `vault_land` rows after #2036 shipped, each `guards.state == "skipped"`,
+    `refuse` false and `candidate.ran == 0`, each reason the same 300-second
+    non-answer, every one a real item-bound land that went through unjudged. The
+    rows deliberately carry no `seconds` and no `excerpt`: that absence is the
+    blindness the item filed, and a witness that grew the new fields would stop
+    being evidence of it.
+
+    The row-count figure the item asks to be reproduced by
+    `wc -l < backlog/data/promotions.jsonl` is recomputed from the same committed
+    bytes that command reads, and pinned to the 28678 the item quotes. That mirror
+    is five rows behind the live ledger, so its copy holds 453 `vault_land` rows and
+    none of them post-dates the ship — which is why the three rows this report
+    quotes are committed as their own extract, the way #2040 committed its review
+    rows, instead of being looked for inside the mirror.
+
+    As #2040's witness node records, no digest is written down as a literal here: a
+    bare hex token in a grader note is validated as a commit of the tree under
+    review, so identity is pinned as bytes to re-measure and a digest COMPARED
+    between the two copies.
+    """
+    import hashlib
+    import json
+    import scripts.automod.review as RV
+
+    raw = WITNESS_2042.read_bytes()
+    rows = [json.loads(l) for l in raw.decode("utf-8").splitlines() if l.strip()]
+    assert [r["event"] for r in rows] == ["vault_land"] * 3
+    assert [r["item_id"] for r in rows] == [2040, 2027, 2038]
+    assert [r["created_at"] for r in rows] == ["2026-10-01T23:26:32Z",
+                                               "2026-10-01T23:36:50Z",
+                                               "2026-10-02T01:03:30Z"]
+    assert all(r["created_at"] >= "2026-10-01T22:41:51Z" for r in rows), \
+        "a row predates #2036's ship, so the probe could not have been armed"
+    assert [r["ok"] for r in rows] == [True, True, True], "these lands went through"
+    for r in rows:
+        g = r["guards"]
+        assert g["state"] == "skipped" and g["refuse"] is False
+        assert g["candidate"] == {"ran": 0, "failed": 0}, r["item_id"]
+        assert g["reason"] == ("the proposed-vault run answered nothing: "
+                               "timed out after 300s"), r["item_id"]
+        assert "seconds" not in g and "excerpt" not in g, (
+            f"#2040's row grew the fields #2042 is filing the absence of: item "
+            f"{r['item_id']} is no longer the witness")
+
+    for vault in RV.REVIEW_EVIDENCE_ROOTS:
+        if not vault.is_dir():
+            continue
+        durable = vault / WITNESS_2042_VAULT_PATH
+        assert durable.is_file(), f"the durable copy is not on the vault's main: {durable}"
+        assert len([l for l in durable.read_text().splitlines() if l.strip()]) == 3
+        assert hashlib.sha256(durable.read_bytes()).hexdigest() == \
+            hashlib.sha256(raw).hexdigest(), "the two copies diverged"
+        ledger = vault / "backlog/data/promotions.jsonl"
+        assert len(ledger.read_text().splitlines()) == WITNESS_LEDGER_LINES, (
+            f"`wc -l < backlog/data/promotions.jsonl` moved off the figure the item "
+            f"quotes ({WITNESS_LEDGER_LINES}); the mirror needs refreshing, or both "
+            f"this node and test_retention_sweep's pin of it need the new number")
+        vl = [json.loads(l) for l in ledger.read_text().splitlines()
+              if '"vault_land"' in l]
+        assert len(vl) == 453, f"the mirror holds {len(vl)} vault_land rows, not 453"
+        assert all("guards" not in r for r in vl), (
+            "the refreshed mirror now contains post-ship rows, so the extract above "
+            "must be re-cut from the live ledger before this claim is repeated")

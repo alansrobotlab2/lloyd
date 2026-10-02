@@ -635,19 +635,40 @@ def _guards_row(guards: dict) -> dict:
     only when there is something to say, so an absent key means "nothing reported"
     and never "reported as nothing", the convention `review_findings` below uses
     for #1868.
+
+    The cost keys are what #2042 added, and they are the row's answer to its own
+    `skipped`: `seconds` is the whole probe and `lock_wait_s` how much of it was
+    queueing behind the gate's `tests` rung, while each run carries the seconds it
+    actually ran and how many vault-reading files it ran over. Before this the
+    projection dropped both, and a `timed out after 300s` row could not be told
+    apart from a hang: three lands (#2040, #2027, #2038) recorded `ran=0` with an
+    empty reason and no witness of the run at all. `excerpt` is the pytest tail the
+    pipe held when the child was killed.
     """
     out: dict = {"state": guards.get("state", "skipped"),
                  "refuse": bool(guards.get("refuse"))}
+    if guards.get("seconds") is not None:
+        out["seconds"] = guards["seconds"]
+    if guards.get("lock_wait_s"):
+        out["lock_wait_s"] = guards["lock_wait_s"]
     cand = guards.get("candidate") or {}
     if cand:
         out["candidate"] = {"ran": cand.get("ran", 0), "failed": len(cand.get("failed") or [])}
+        for k in ("seconds", "files"):
+            if cand.get(k) is not None:
+                out["candidate"][k] = cand[k]
     base = guards.get("baseline") or {}
     if base:
         out["baseline"] = {"ran": base.get("ran", 0), "failed": len(base.get("failed") or [])}
+        for k in ("seconds", "files"):
+            if base.get(k) is not None:
+                out["baseline"][k] = base[k]
     if guards.get("nodes"):
         out["nodes"] = list(guards["nodes"])[:10]
     if guards.get("reason"):
         out["reason"] = str(guards["reason"])[:400]
+    if guards.get("excerpt"):
+        out["excerpt"] = str(guards["excerpt"])[-200:]
     return out
 
 
