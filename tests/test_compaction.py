@@ -762,8 +762,14 @@ def _clean_spill_dir(sid: str) -> None:
         d.rmdir()
 
 
-def _spill_block(disallowed):
-    """One spilled `<persisted-output>` block, with the turn's deny list."""
+def _spill_block(disallowed, tool_name="Grep"):
+    """One spilled `<persisted-output>` block, with the turn's deny list and
+    the tool that produced the result.
+
+    The tool defaults to `Grep` because every test written before #2067 asks
+    about a spill the knob list really describes, and #1066's fix must not
+    move for it.
+    """
     from app.harness.tool_result_spill import maybe_spill
 
     # One fixed session id: the two calls in the "unchanged" test below must
@@ -772,11 +778,19 @@ def _spill_block(disallowed):
     sid = "spill_notice_probe"
     try:
         return maybe_spill(
-            "y" * 60_000, tool_name="Grep", tool_use_id="call_spill",
+            "y" * 60_000, tool_name=tool_name, tool_use_id="call_spill",
             session_id=sid, disallowed_tools=disallowed,
         )
     finally:
         _clean_spill_dir(sid)
+
+
+#: Every argument the without-Read sentence used to name. None of them is a
+#: parameter of `http_fetch` (`agent_mcp/http_tools.py:390` takes `url`,
+#: `extract_mode`, `max_chars`), so for a fetch each one is a call the model
+#: cannot make — the #1066 false promise wearing another tool's clothes.
+_KNOB_PHRASES = ("narrower query", "hops", "min_confidence", "--glob",
+                 "--type", "head_limit")
 
 
 def test_spill_notice_stops_offering_read_to_a_turn_that_cannot_use_it():
@@ -806,6 +820,75 @@ def test_the_spill_notice_is_unchanged_for_a_turn_that_has_read():
     # Omitting the argument is the other shape of "allowed": a caller that
     # passes nothing must not read as a turn with everything denied.
     assert _spill_block(None) == with_read
+
+
+def test_a_spilled_fetch_on_a_read_denied_turn_is_told_there_is_no_route():
+    """The pointer named an argument the fetching tool does not have (#2067).
+
+    `recovery_notice` chose its sentence from the deny list alone, so a
+    spilled `http_fetch` on a turn with `Read` denied got the graph/grep knob
+    list — and `http_fetch` takes `url`, `extract_mode` and `max_chars`, none
+    of which selects a region of a page.
+
+    The population is the 202 committed witness rows, one per spilled
+    `http_fetch` result whose block carried both the without-Read sentence and
+    that knob list: `wc -l < backlog/data/20261001_191646_deepresearch_715a.json`
+    in the vault, where those bytes have history the session store has never
+    had. Over those bytes `raw_chars` is
+    median 13,894, p90 35,547, max 72,348, and the text that reached the
+    transcript (`result_chars`) is 2,527–2,529 in all 202 — the page was
+    closed at its first ~2.5 KB every time. The same pairing scan over every
+    tool found 446 such blocks that day, 202 `http_fetch` and 163
+    `http_search`; the item's median 12,395 is over all 295 spilled fetches,
+    Read-owning turns included, so it is not the figure these 202 rows yield.
+    The `item_quoted_example` row is the one the item names: that session's own
+    `messages` hold the fetch asked for at `max_chars: 20000` whose block ends
+    in the unsatisfiable advice.
+    """
+    for denied in (["Read", "Bash"], ["mcp__lloyd-mcp__Read"]):
+        for fetch in ("http_fetch", "mcp__lloyd-mcp__http_fetch"):
+            block = _spill_block(denied, tool_name=fetch)
+            for phrase in _KNOB_PHRASES:
+                assert phrase not in block, (
+                    f"{fetch} on {denied}: the block still names {phrase!r}, "
+                    f"an argument that tool does not accept")
+            # Clauses 1 and 4: the file is still named, and the sentence that
+            # replaces the knob list says plainly that re-running gets you
+            # nothing — and names the path it is the only copy of.
+            assert "saved to:" in block, "the file itself is still named"
+            assert "cannot recover the part past this preview" in block, (
+                "no explicit no-route sentence was printed")
+            assert block.count("call_spill.txt") == 2, (
+                "the no-route sentence must name the saved path itself, not "
+                "only lean on the header line that already does")
+
+
+def test_a_spilled_fetch_points_at_read_and_says_so_when_the_turn_has_read():
+    """The other branch of the same tool test: a chat turn owns `Read`, and
+    for a fetch that is not merely the route it is the *only* one, so the
+    sentence says that instead of offering a narrower query as well."""
+    block = _spill_block(["Bash"], tool_name="http_fetch")
+    assert "Read the full file with the Read tool" in block
+    for phrase in _KNOB_PHRASES:
+        assert phrase not in block, f"a fetch was told about {phrase!r} anyway"
+
+
+def test_a_grep_or_graph_spill_keeps_the_narrowing_it_really_has():
+    """#2067 must not undo #1066: for a tool that does take an argument
+    selecting a smaller slice, "re-run it narrower" is the true advice, on a
+    denied turn as much as on any other.
+
+    Only tools the knob list actually names: `Grep` takes `--glob`, `--type`
+    and `head_limit`, `graph_affected` takes `prefix`, `depth` and `limit`
+    (`app/harness/tool_result_spill.py`, the comment above `HEAD_ONLY_TOOLS`).
+    `mcp__lloyd-mcp__Grep` is here for the other half of that claim — the MCP
+    spelling of a tool with the knobs must keep them too, so the bare-name cut
+    cannot quietly widen the fix past the tools that need it.
+    """
+    for tool in ("Grep", "graph_affected", "mcp__lloyd-mcp__Grep"):
+        block = _spill_block(["Read", "Bash"], tool_name=tool)
+        assert "narrower query" in block, f"{tool} lost advice that is real for it"
+        assert "Read the full file" not in block
 
 
 def test_context_pressure_notice_stops_offering_read_to_a_turn_that_cannot_use_it():

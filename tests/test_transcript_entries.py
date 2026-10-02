@@ -118,6 +118,59 @@ def test_an_already_spilled_block_is_stored_whole_not_cut_at_2k(spill_dir):
     assert te.persisted_path_of(out) == str(spill_dir / "c1.txt")
 
 
+def test_one_fetched_page_gets_one_recovery_text_at_both_spill_sizes(spill_dir):
+    """The recovery sentence comes from the producing tool at BOTH spill
+    sites, so the turn and the record cannot tell a fetch opposite stories.
+
+    Two sizes, one defect: the loop spills a result over 50k in front of the
+    model (`app/harness/loop.py`, `SPILL_THRESHOLD_CHARS`) and this module
+    spills anything over 2k into the row that later history is rebuilt from
+    (`TOOL_RESULT_MAX_CHARS` above). Each passes the tool name it was handed —
+    `evt["name"]` from the harness event, by `app/routers/messages.py` and
+    `app/run_recorder.py` — so one call of one tool must close with one
+    sentence. #2067 is the case where it did not: the sentence was chosen from
+    the deny list alone, so both sites offered a graph/grep re-run that
+    `http_fetch` has no argument for.
+    """
+    from app.harness.tool_result_spill import (
+        PERSISTED_OUTPUT_CLOSING_TAG,
+        SPILL_THRESHOLD_CHARS,
+        maybe_spill,
+        recovery_notice,
+    )
+    denied = ["Read", "Bash"]
+    fetch = "mcp__lloyd-mcp__http_fetch"
+    page = _body(4_000)                       # ~84 kB: over the live 50k spill
+    assert len(page) > SPILL_THRESHOLD_CHARS
+
+    live = maybe_spill(page, tool_name=fetch, tool_use_id="c_live",
+                       session_id=SID, disallowed_tools=denied)
+    row_text = te.shape_tool_result_for_transcript(
+        page, call_id="c_row", session_id=SID, tool_name=fetch,
+        disallowed_tools=denied)
+
+    for label, text, cid in (("the live-turn block", live, "c_live"),
+                             ("the 2k row", row_text, "c_row")):
+        assert text.endswith(
+            recovery_notice(denied, tool_name=fetch,
+                            saved_path=str(spill_dir / f"{cid}.txt"))
+            + PERSISTED_OUTPUT_CLOSING_TAG
+        ), f"{label} did not close with the recovery this tool actually has"
+        assert "narrower query" not in text
+
+    def _recovery(text: str, cid: str) -> str:
+        return text.split("\n...\n", 1)[1].replace(
+            str(spill_dir / f"{cid}.txt"), "<saved path>")
+    assert _recovery(live, "c_live") == _recovery(row_text, "c_row"), (
+        "the two spill sites told one fetch result two different recoveries")
+
+    # And the row that receives the live block keeps it whole, recovery and
+    # all — the other way the two sites could disagree about one result.
+    assert te.shape_tool_result_for_transcript(
+        live, call_id="c_live", session_id=SID, tool_name=fetch,
+        disallowed_tools=denied) == live
+
+
 def test_a_failed_spill_falls_back_to_the_old_truncation(tmp_path, monkeypatch):
     # A sessions "dir" that is a file: mkdir under it fails, maybe_spill
     # hands the original back, and the row gets the old cut — never 18 kB.

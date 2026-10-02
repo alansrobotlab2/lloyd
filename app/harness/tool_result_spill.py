@@ -8,7 +8,9 @@ block containing:
 
   * total size + filepath, and the recovery the reading turn can actually
     take — the ``Read`` tool when it owns one, a narrower re-run when the
-    turn's deny list has that tool (#1066)
+    turn's deny list has that tool (#1066), and neither of those for a tool
+    with no argument that selects part of its answer, which is told plainly
+    that no re-run of it reaches past the preview (#2067)
   * a short preview (first ``PREVIEW_CHARS`` chars, cut at a newline)
   * a "...(more)" marker
 
@@ -104,8 +106,49 @@ def _generate_preview(content: str, max_chars: int) -> tuple[str, bool]:
 #: policy refused (#1066).
 READ_TOOL = "Read"
 
-#: Two recoveries, chosen per turn, because the honest one depends on a fact
-#: about the turn rather than about the file.
+#: Tools whose whole answer is one fixed object, and every argument of which
+#: only takes *less* of that object from the top. ``http_fetch`` takes
+#: ``url``, ``extract_mode`` and ``max_chars`` — ``agent_mcp/http_tools.py:390``,
+#: schema a few lines below it — and ``http_request`` takes ``method``,
+#: ``url``, ``headers``, ``body``, ``timeout``; none of those six selects a
+#: region, so there is no re-run that reaches the middle of a page. For them
+#: the "(smaller hops, higher min_confidence, --glob, --type, head_limit)"
+#: advice is not merely useless, it is a call shape the tool refuses to
+#: accept — the #1066 wrong-branch bug with a different tool (#2067).
+#:
+#: Deliberately the small set that can be checked against a schema in this
+#: tree, and measured: of the 446 spilled blocks that pair the without-Read
+#: sentence with the knob list, 202 are ``http_fetch`` and 163 ``http_search``.
+#: An unlisted tool keeps the pre-#2067 wording, which is right for the tools
+#: the sentence names — ``Grep``/``Glob`` (``--glob``, ``--type``,
+#: ``head_limit``) and the graph tools (``prefix``, ``limit``, ``depth``) all
+#: take an argument that returns a different, smaller slice — and right for
+#: the rest of the measured population (``vault_search`` ``scope``/
+#: ``max_results``, 27 rows; ``vault_read`` ``start_line``/``num_lines``, 20;
+#: ``fact_get`` ``category``, 1). A tool whose schema lives outside this repo
+#: cannot be checked here at all; it keeps the old advice rather than being
+#: told a falsehood about arguments nobody read.
+HEAD_ONLY_TOOLS = frozenset({"http_fetch", "http_request"})
+
+#: The recoveries for a tool above, one per branch of the same deny-list test.
+#: Neither names an argument: the honest version of "re-run it narrower" for a
+#: fetch is that no re-run of it is a route past the preview.
+_RECOVERY_WITH_READ_HEAD_ONLY = (
+    "Read the full file with the Read tool if you need more than the preview; "
+    "{tool} takes no argument that selects part of its answer, so that file "
+    "is the only way past the preview.\n"
+)
+_RECOVERY_WITHOUT_READ_HEAD_ONLY = (
+    "The Read tool is not available on this turn, so the path above cannot be "
+    "opened from here — do not reach for it. {tool} takes no argument that "
+    "selects part of its answer — every one of its arguments returns less of "
+    "the same text from the beginning — so re-running this call cannot "
+    "recover the part past this preview: {path} is the only copy of it, and "
+    "nothing on this turn can open it.\n"
+)
+
+#: Two recoveries for every other tool, chosen per turn, because the honest
+#: one depends on a fact about the turn rather than about the file.
 _RECOVERY_WITH_READ = (
     "Read the full file with the Read tool if you need more than the preview. "
     "If you don't actually need it all, narrow your next query "
@@ -139,16 +182,51 @@ def tool_is_denied(name: str, disallowed) -> bool:
     return any(t.endswith(f"__{name}") for t in deny)
 
 
-def recovery_notice(disallowed) -> str:
+def bare_tool_name(name: str) -> str:
+    """``mcp__lloyd-mcp__http_fetch`` and ``http_fetch`` are one tool.
+
+    The deny list and the tool menu both carry either spelling, so every test
+    this module makes about *which* tool produced a result asks it of the bare
+    name — the same cut ``fallback_for_empty_result`` makes for the label.
+    """
+    return name.rsplit("__", 1)[-1] if "__" in name else name
+
+
+def recovery_notice(
+    disallowed,
+    tool_name: str = "",
+    saved_path: str = "",
+) -> str:
     """The sentence that closes a spilled-result notice for this turn.
 
+    Chosen from two facts, not one: whether the turn can open the file
+    (``disallowed``), and whether re-running the call could reach the rest of
+    it (``tool_name``). #1066 fixed the first test — a turn with ``Read``
+    denied was told to ``Read`` the path — and #2067 is the second: the
+    without-Read branch then offered a narrower re-run with graph and grep
+    arguments, which ``http_fetch`` has none of, so 202 fetched pages on
+    Read-denied turns were closed at their first 2 KB with the pointer
+    pointing at an argument that does not exist.
+
+    ``saved_path`` is only used by the sentence that has no other route to
+    name, so the one notice that says "nothing here can get you the rest"
+    still says where the rest is.
+
     Lives apart from both renderers because two call sites need it — the
-    ``<persisted-output>`` block and the context-pressure notice — and the
+    spill at 50k inside the turn (``app/harness/loop.py``) and the pointer
+    row written at 2k for the record (``app/transcript_entries.py``) — and the
     pair that drifted is exactly how a model ends up being told to do
-    something it cannot.
+    something it cannot. Both pass the producing tool, so one call of one
+    tool yields one recovery text at both sizes.
     """
-    return _RECOVERY_WITHOUT_READ if tool_is_denied(READ_TOOL, disallowed) \
-        else _RECOVERY_WITH_READ
+    read_denied = tool_is_denied(READ_TOOL, disallowed)
+    bare = bare_tool_name(tool_name or "")
+    if bare in HEAD_ONLY_TOOLS:
+        if read_denied:
+            return _RECOVERY_WITHOUT_READ_HEAD_ONLY.format(
+                tool=bare, path=saved_path or "the saved file")
+        return _RECOVERY_WITH_READ_HEAD_ONLY.format(tool=bare)
+    return _RECOVERY_WITHOUT_READ if read_denied else _RECOVERY_WITH_READ
 
 
 def maybe_spill(
@@ -174,6 +252,11 @@ def maybe_spill(
     ``Read`` and ``Bash`` denials on the ``<sid>.tool-results/`` path it was
     just pointed at, seven Bash and three Read of them in the 09-14→09-17
     window. Pass the turn's list and the block offers only what it can do.
+
+    ``tool_name`` is load-bearing for the same reason: the recovery has to be
+    a call *that tool* accepts, so it goes to :func:`recovery_notice` with the
+    deny list. Every caller already passes it — this loop site and the two
+    transcript writers — so nothing here can silently fall back to a guess.
     """
     if not isinstance(content, str):
         return content   # type: ignore[return-value]
@@ -206,7 +289,9 @@ def maybe_spill(
         msg += "\n...\n"
     else:
         msg += "\n"
-    msg += recovery_notice(disallowed_tools) + PERSISTED_OUTPUT_CLOSING_TAG
+    msg += recovery_notice(
+        disallowed_tools, tool_name=tool_name, saved_path=str(path),
+    ) + PERSISTED_OUTPUT_CLOSING_TAG
     return msg
 
 
@@ -307,8 +392,7 @@ def fallback_for_empty_result(content: str | None, tool_name: str) -> str:
     an empty tool result as an end-of-turn signal and stop generating.
     """
     if content is None or not str(content).strip():
-        short = tool_name.rsplit("__", 1)[-1] if "__" in tool_name else tool_name
-        return f"({short} completed with no output)"
+        return f"({bare_tool_name(tool_name)} completed with no output)"
     return content
 
 
