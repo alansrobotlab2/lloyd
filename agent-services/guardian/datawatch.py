@@ -31,13 +31,14 @@ newest snapshot in that directory is is the only check that separates alive from
 dead, because pruning never deletes the newest one whatever its age, so the
 entry *count* looks healthy forever (#1416).
 
-Stdlib only. CLI:  datawatch.py status | clear | snapshot-gate | snapshot-age | strays
+Stdlib only. CLI:  datawatch.py status | clear | snapshot-gate | snapshot-age | strays | inert
 """
 
 from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -174,6 +175,106 @@ def stray_in_tree(tree: str = TREE) -> list[str]:
     return sorted(n for n in present
                   if not under(tracked, n)
                   or (n in kept and under(untracked, n)))
+
+
+#: An empty file younger than this may be a store its writer has only just opened
+#: (`sqlite3` creates the file on connect and writes the header on first use), so it
+#: is left for the next check rather than moved from under a live handle.
+INERT_MIN_AGE_SECONDS = 600.0
+#: Where inert residue goes, under the data root. A move, so the hourly snapshots
+#: carry it and nothing is ever deleted on this check's say-so.
+QUARANTINE_SUBDIR = os.path.join("quarantine", "tree-strays")
+_SQLITE_SIDECARS = ("-wal", "-shm", "-journal")
+
+
+def inert_residue(tree: str, names, data_root: str = DATA_ROOT,
+                  now: float | None = None) -> list[str]:
+    """The strays in `names` that are provably nothing: empty, idle, and a second
+    copy of a store that lives in the data root.
+
+    On 2026-10-02 a nightly task ran `cd ~/lloyd && sqlite3 workers.db "select …"`
+    against a path it had guessed. `sqlite3` created the file to open it, the query
+    failed, and a 0-byte `workers.db` sat in the tree for seven hours: an alert every
+    hour, two backlog items, and both parked on a human because a file git ignores
+    yields no diff for a round to land. Nothing was ever going to be learned from the
+    file itself — every fact about it was in the first `lstat`.
+
+    Every condition is a measurement of the file, and all must hold:
+
+    * a retained runtime name at the top of the tree — the open-set strays
+      (`.t`, a new tooling directory) are a classification a person makes, never this;
+    * a regular file, not a link, one name, zero bytes: there is no content to lose;
+    * untouched for `INERT_MIN_AGE_SECONDS`, with no SQLite sidecar beside it: no
+      writer is mid-open;
+    * the same name exists in the data root: the real store is elsewhere, so this
+      one is a copy a wrong path made, not the only one there is.
+
+    Anything else — one byte of data, a directory, a name nobody listed — still
+    alerts exactly as before."""
+    now = time.time() if now is None else now
+    out: list[str] = []
+    for name in names:
+        if name not in RUNTIME_NAMES or "/" in name:
+            continue
+        path = os.path.join(tree, name)
+        try:
+            st = os.lstat(path)
+        except OSError:
+            continue
+        if not stat.S_ISREG(st.st_mode) or st.st_size != 0 or st.st_nlink != 1:
+            continue
+        if now - st.st_mtime < INERT_MIN_AGE_SECONDS:
+            continue
+        if any(os.path.lexists(path + suffix) for suffix in _SQLITE_SIDECARS):
+            continue
+        if not os.path.lexists(os.path.join(data_root, name)):
+            continue
+        out.append(name)
+    return out
+
+
+def quarantine_inert(tree: str, names, data_root: str = DATA_ROOT,
+                     now: float | None = None) -> list[tuple[str, str]]:
+    """Move each `inert_residue` file out of the tree. Returns `(name, destination)`
+    for the ones that moved; a file that could not be moved is simply not in the list
+    and goes on to alert.
+
+    The move is an empty file created at the destination and the source unlinked,
+    in that order, because the data root is its own subvolume and `rename` across it
+    is EXDEV. The source is re-read immediately before the unlink and must be the
+    same inode, still empty — a writer that arrived between the two reads keeps its
+    file. One JSONL line per move records what the file was, so the quarantine
+    directory is its own audit and not just a pile of empty files."""
+    now = time.time() if now is None else now
+    moved: list[tuple[str, str]] = []
+    qdir = os.path.join(data_root, QUARANTINE_SUBDIR)
+    for name in inert_residue(tree, names, data_root, now):
+        src = os.path.join(tree, name)
+        try:
+            before = os.lstat(src)
+            os.makedirs(qdir, exist_ok=True)
+            stamp = datetime.fromtimestamp(now, timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            dest = os.path.join(qdir, f"{stamp}-{name}")
+            os.close(os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+            os.utime(dest, (before.st_atime, before.st_mtime))
+            again = os.lstat(src)
+            if (again.st_ino, again.st_dev, again.st_size) != (
+                    before.st_ino, before.st_dev, 0) or not stat.S_ISREG(again.st_mode):
+                os.unlink(dest)
+                continue
+            os.unlink(src)
+            with open(os.path.join(qdir, "log.jsonl"), "a", encoding="utf-8") as fh:
+                fh.write(json.dumps({
+                    "at": datetime.fromtimestamp(now, timezone.utc).isoformat(timespec="seconds"),
+                    "source": src, "destination": dest, "size": 0,
+                    "inode": before.st_ino,
+                    "mtime": datetime.fromtimestamp(before.st_mtime, timezone.utc)
+                    .isoformat(timespec="seconds"),
+                }, sort_keys=True) + "\n")
+        except OSError:
+            continue
+        moved.append((name, dest))
+    return moved
 
 
 #: Top-level folders of the data root that are rebuildable caches, not data:
@@ -356,7 +457,13 @@ def main(argv: list[str]) -> int:
         for n in found:
             print(os.path.join(TREE, n))
         return 1 if found else 0
-    print(f"usage: {argv[0]} status|clear|snapshot-gate|snapshot-age|strays", file=sys.stderr)
+    if cmd == "inert":
+        # Read-only: which of the current strays the hourly check would move.
+        for n in inert_residue(TREE, stray_in_tree()):
+            print(os.path.join(TREE, n))
+        return 0
+    print(f"usage: {argv[0]} status|clear|snapshot-gate|snapshot-age|strays|inert",
+          file=sys.stderr)
     return 2
 
 

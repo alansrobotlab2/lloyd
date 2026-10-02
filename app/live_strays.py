@@ -115,8 +115,11 @@ def untracked(root: Path | str) -> set[str] | None:
 STRAY_STATUSES = frozenset({"??", "!!"})
 
 
-def parse_porcelain(text: str) -> set[str]:
+def parse_porcelain(text: str, statuses: frozenset[str] | None = None) -> set[str]:
     """The stray paths — untracked and ignored — out of `git status --porcelain` output.
+
+    `statuses` narrows the answer to some of `STRAY_STATUSES` (`ignored` asks for
+    `!!` alone); None is both, which is every caller before it.
 
     Kept separate from the subprocess so the parser is testable on recorded output —
     and so a rename or a quote-escaped path is a parsing question with a text answer,
@@ -135,12 +138,46 @@ def parse_porcelain(text: str) -> set[str]:
         if len(line) < 4:
             continue
         status, path = line[:2], line[3:]
-        if status in STRAY_STATUSES:
+        if status in (STRAY_STATUSES if statuses is None else statuses):
             # A path git had to quote is printed `"with spaces"`; the quotes are
             # git's, not part of the name, and leaving them in produces a path
             # nobody can `ls`.
             out.add(path[1:-1] if path.startswith('"') and path.endswith('"') else path)
     return out
+
+
+#: Path components that are a build or test cache wherever they appear. Ignored, and
+#: created by ordinary work — running a module for the first time writes a
+#: `__pycache__/` beside it — so they are not what `ignored` is asked about.
+CACHE_PARTS = frozenset({"__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache",
+                         "node_modules", ".venvs", ".vite", "graphify-out"})
+
+
+def ignored(root: Path | str) -> set[str] | None:
+    """The paths under `root` that git IGNORES, caches left out, or None if git refused.
+
+    The per-call question the Bash tool asks (`agent_mcp/_bash_tree_strays.py`), and
+    narrower than `untracked` on purpose. A `??` path is a file a job may be about to
+    `git add` — a nightly task writing a new module is doing its job — while an ignored
+    path can never be committed: in the live checkout it is runtime data or scratch
+    that belongs in the data root. That is the class a wrong path creates
+    (`sqlite3 workers.db` run from the tree, 2026-10-02) and the one nothing reports
+    until the guardian's hourly check.
+
+    `--no-optional-locks` because this runs beside the command it is measuring: a
+    plain `git status` may take `index.lock` to refresh the index, and a worker's own
+    `git commit` in the same second would fail on it.
+    """
+    argv = ["git", "--no-optional-locks",
+            *(part.format(root=str(root)) for part in UNTRACKED_CMD[1:])]
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return UNREADABLE
+    if proc.returncode != 0:
+        return UNREADABLE
+    return {path for path in parse_porcelain(proc.stdout, frozenset({"!!"}))
+            if not CACHE_PARTS.intersection(path.rstrip("/").split("/"))}
 
 
 #: Name of the file a round's own uncapped baseline is kept in, inside its round dir.

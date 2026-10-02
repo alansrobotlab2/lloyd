@@ -17,6 +17,9 @@ dispatch — there is no gate at all.
 A foreground command that rewrites a `.py` inside a git work tree gets the
 same pyflakes delta block `Edit` does (`_bash_edit_diagnostics`, #695).
 
+A background session's foreground command that leaves a git-ignored path in the
+live checkout is told so on the same result (`_bash_tree_strays`).
+
 Background mode (``run_in_background=true``) spawns the command with
 stdout/stderr redirected to a file under ``~/lloyd-data/_pipeline/tasks/``,
 returns the task id and output path immediately, and lets the harness
@@ -37,7 +40,8 @@ from typing import Any
 
 from mcp.types import Tool
 
-from agent_mcp import _bash_edit_diagnostics, _rpc, _task_registry, _tool_sandbox
+from agent_mcp import (_bash_edit_diagnostics, _bash_tree_strays, _rpc, _task_registry,
+                       _tool_sandbox)
 from agent_mcp._shared import get_bound_session, text_result
 
 logger = logging.getLogger("lloyd-builtin-bash")
@@ -488,7 +492,16 @@ async def call_tool(name: str, arguments: dict):
         token = _bash_failed.set(False)
         ptok = _rpc.current_parent.set(None)
         try:
+            # A background session's call is bracketed by a read of the live
+            # checkout's ignored paths; one that appeared is named on this result
+            # (`_bash_tree_strays`). None for every other session, and a no-op then.
+            sid = get_bound_session()
+            sandboxed = _tool_sandbox.current_sandboxed.get()
+            stray_snap = (None if sandboxed
+                          else await _bash_tree_strays.before(sid, arguments))
             text = await _bash(arguments)
+            text = await _bash_tree_strays.after(
+                text, stray_snap, sid, (arguments or {}).get("command"))
             # P9: one line saying how many tool calls this shell made through
             # lloyd_rpc, after the output (so a JSON error payload is sniffed
             # before it, below, via the explicit flag). Nothing when none.

@@ -217,6 +217,44 @@ opt-in as the tree guard. The live-data cross-checks in `tests/` read through
   side directory with reflinks, so it is instant, and integrity-checks every
   database. Swapping it in is a human step. The order is in the script's header.
 
+### A stray in the tree: three layers (2026-10-02)
+
+At 01:01:36 on 2026-10-02 the nightly trajectory task (#56, session
+`20261002_010103_autonomy_1d90`) ran `cd ~/lloyd && sqlite3 workers.db "select … from
+autonomy_runs …"`. Both the path and the table were guesses; `sqlite3` creates a file
+to open it, so a 0-byte `workers.db` appeared in the checkout. The session saw it,
+confirmed git ignored it, and moved on. The guardian alerted hourly for seven hours,
+two backlog items were filed, and both were parked as human-only because an ignored
+file gives a round no diff to land. The start-directory fix (#1906) does not help: the
+command went to the tree itself.
+
+Three layers, in the order a turn meets them:
+
+1. **The prompt says where the data is** (`prompt_builder._data_home_hint`). The
+   platform paragraph named `Home:` and nothing else, so the checkout was the only
+   directory a turn had been told about. The paragraph names the data root,
+   `workers.db` and its `runs` table, and the rule that the checkout is code only.
+2. **The Bash tool names a stray on the call that made it**
+   (`agent_mcp/_bash_tree_strays.py`). For a background session, each foreground call
+   is bracketed by a read of the live checkout's *ignored* paths
+   (`live_strays.ignored`, ~7 ms, `--no-optional-locks`). One that appeared is appended
+   to the result — what it is, where it belongs, remove it if you made it — and
+   journaled to `$DATA_ROOT/safety/tree-strays.jsonl` with the session and command. No
+   command shape is matched, so a redirect, `sqlite3` and a Python one-liner are one
+   case. Ignored only: an untracked `??` file may be about to be committed. Caches
+   (`live_strays.CACHE_PARTS`) are left out. It is a note, not a refusal, and
+   fail-open. Not covered: `run_in_background` commands, and attribution between two
+   sessions writing in the same second (the note says "appeared during this call").
+3. **The guardian moves provably inert residue instead of alerting on it**
+   (`datawatch.quarantine_inert`, called from `_runtime_data_incident`). A stray is
+   moved to `$DATA_ROOT/quarantine/tree-strays/` and announced as news only when every
+   one of these is measured: a top-level `RUNTIME_NAMES` entry, a regular file with
+   one link and zero bytes, untouched for `INERT_MIN_AGE_SECONDS` (600), no SQLite
+   sidecar beside it, and the same name present in the data root. A move, never a
+   delete; `log.jsonl` there records each one. Anything else — one byte, a directory,
+   an unlisted name — alerts as before. `datawatch.py inert` lists what the next check
+   would move.
+
 ## The move (2026-09-22)
 
 `scripts/migrate_data_home.py` did the move once, dry run by default. It:

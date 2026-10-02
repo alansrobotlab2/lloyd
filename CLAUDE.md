@@ -86,6 +86,7 @@ the tree.
 - `app.paths.DATA_ROOT` is the one resolver. Write a new data path as a `paths` constant, and in `config.yaml` as `${LLOYD_DATA}/…`. Never `Path.home()/"lloyd"/…` or `__file__`-relative (`tests/test_no_runtime_paths_in_code.py` greps for them).
 - **Never export `LLOYD_DATA` in production** — a worktree's code run from Bash would inherit the live root. Only the gate, the canary and conftest set it.
 - Restore with `scripts/backup/restore-data.sh` (into a side directory).
+- **A stray in the tree is caught in three places** (2026-10-02, a worker's `cd ~/lloyd && sqlite3 workers.db`): the prompt names the data root (`_data_home_hint`), a background session's Bash call that leaves an ignored path in the checkout is told on that result and journaled (`agent_mcp/_bash_tree_strays.py` → `safety/tree-strays.jsonl`), and the guardian moves an empty, idle second copy of a runtime store to `quarantine/tree-strays/` instead of alerting (`datawatch.quarantine_inert`; never a delete).
 
 Long version: `architecture/data-home.md`.
 

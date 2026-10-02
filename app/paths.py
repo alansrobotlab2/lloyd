@@ -108,6 +108,9 @@ CODE_GRAPH_DIR = DATA_ROOT / "code-graph"
 # Every guard's refusals, one JSONL row each (`app/harness/denial_journal.py`).
 SAFETY_DIR = DATA_ROOT / "safety"
 DENIAL_JOURNAL_PATH = SAFETY_DIR / "denials.jsonl"
+# One row per Bash call during which an ignored path appeared in the live checkout
+# (`agent_mcp/_bash_tree_strays.py`): the session and the command, at the time.
+TREE_STRAY_JOURNAL_PATH = SAFETY_DIR / "tree-strays.jsonl"
 
 VAULT_ROOT = Path.home() / "obsidian"
 

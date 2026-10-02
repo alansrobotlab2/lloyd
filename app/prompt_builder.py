@@ -102,7 +102,7 @@ def log_prompt_size(
 # The checkout root, from the one resolver. This module used to sit at the repo
 # root and spell it `Path(__file__).parent`, which silently became `app/` when it
 # moved into the package.
-from app.paths import LLOYD_HOME
+from app.paths import DATA_ROOT, LLOYD_HOME
 
 # Anchor paths to the repo location rather than Path.home() so they resolve
 # regardless of who/where the process runs as.
@@ -479,6 +479,7 @@ def build_system_prompt(
         "go in the vault (~/obsidian/), NOT in the lloyd project directory."
     )
     parts.append(platform_hints)
+    parts.append(_data_home_hint())
 
     bg_tasks = (
         "Background bash tasks: pass run_in_background=true to Bash for any "
@@ -953,6 +954,28 @@ def rpc_hint_enabled() -> bool:
     except Exception:  # noqa: BLE001
         return False
     return enabled()
+
+
+def _data_home_hint() -> str:
+    """Where runtime data is, said next to the line that says where the code is.
+
+    The platform paragraph gives `Home:` and nothing else, so a turn that wanted its
+    own run history went to the only directory it had been told about: on 2026-10-02
+    a nightly task ran `sqlite3 workers.db` from the checkout, against a table name
+    it had also guessed, and the empty database `sqlite3` created to open sat in the
+    tree alerting hourly. The paragraph names the root, the one store a turn most
+    often looks for, and the rule; the Bash tool reports a stray on the call that made
+    it (`agent_mcp/_bash_tree_strays.py`) and the guardian is the backstop.
+    """
+    return (
+        f"Runtime data: everything Lloyd writes while running lives in {DATA_ROOT}, "
+        f"not in {LLOYD_HOME} — sessions/, logs/, _pipeline/, autonomy-runs/, usage.db, "
+        f"and workers.db (the job queue; run history is its `runs` table). {LLOYD_HOME} "
+        "is code only: read it, and edit tracked source there when the task is a code "
+        "change, but never create a database, log, scratch or output file in it. Open a "
+        f"store by its full path under {DATA_ROOT}; `sqlite3 <name>` on a path that does "
+        "not exist creates an empty database there."
+    )
 
 
 def _refusal_hint() -> str:

@@ -1144,6 +1144,28 @@ class Guardian:
             # in the log line above.
             return
         if strays and self.data.armed:
+            # Residue first: an empty, idle second copy of a store that lives in the
+            # data root is moved there and reported as news, not as an incident — on
+            # 2026-10-02 one such 0-byte `workers.db` alerted hourly for seven hours
+            # and was parked on a human because a file git ignores gives a round no
+            # diff to land. Whatever is left alerts exactly as before, and a tree the
+            # move emptied falls through to the retraction below.
+            try:
+                moved = datawatch.quarantine_inert(policy.REPO, strays,
+                                                   policy.DATA_ROOT, now)
+            except Exception as exc:  # noqa: BLE001
+                log(f"stray quarantine failed (continuing): {exc}")
+                moved = []
+            if moved:
+                gone = {name for name, _ in moved}
+                strays = [s for s in strays if s not in gone]
+                self.notifier.announce(
+                    "Moved an empty stray out of the code tree",
+                    "\n".join(f"{os.path.join(policy.REPO, name)} → {dest}"
+                              for name, dest in moved)
+                    + "\n\n0 bytes, idle, and the real store is in "
+                    f"{policy.DATA_ROOT}; nothing was deleted.")
+        if strays and self.data.armed:
             # `coalesce` is what keeps one incident to one section on the daily
             # note. This check runs every STRAY_CHECK_SECONDS (3600 s) and the
             # condition can outlast many of them, so the hourly cadence used to

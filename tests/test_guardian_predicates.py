@@ -1890,6 +1890,10 @@ def _stray_incident_with(tmp_path, monkeypatch, detector):
     clock = {"t": 1_700_000_000.0}
     monkeypatch.setattr(gmod.time, "time", lambda: clock["t"])
     monkeypatch.setattr(gmod.datawatch, "stray_in_tree", detector)
+    # The detector is synthetic and `policy.REPO` is not: left real, the inert-residue
+    # move would `lstat` — and could unlink — a name in the production checkout.
+    # `tests/test_guardian_inert_stray.py` drives it against a tree of its own.
+    monkeypatch.setattr(gmod.datawatch, "quarantine_inert", lambda *a, **k: [])
 
     g = gmod.Guardian.__new__(gmod.Guardian)   # no supervisor, no probes, no ledger
     g.notifier = notify.Notifier(ledger=tmp_path / "l.jsonl", state_dir=tmp_path,
