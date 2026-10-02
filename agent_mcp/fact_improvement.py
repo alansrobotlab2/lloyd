@@ -40,7 +40,15 @@ detector's pairing:
                 write inside the same document is the whole evidentiary value of
                 write order, and vetoing it there is vetoing the basis.
   created_at    one was written ≥ MIN_STALE_GAP_DAYS after the other, so the
-                older one is the one a later write superseded → expire it
+                older one is the one a later write superseded → expire it.
+                *Write order alone is not a basis* (#2078): the pair also has to
+                name one identifier-shaped PREDICATE TOKEN — `/rtx/dldenoiser/
+                responsiveDenoising`, `sim.has_gui` — in BOTH facts, because
+                otherwise the only evidence that the two rows are about the same
+                thing is the keyword opposition that already paired them, which
+                is #701's screen being read as an authority. A pair that clears
+                the age test and fails the predicate test is reported in the
+                plan's and the record's `keyword_only_flags`, never acted on.
   same day, same confidence → no basis. Reported, never acted on.
 
 Each admitted action also names the detector's own trigger — the
@@ -167,6 +175,30 @@ MIN_CONFIDENCE_GAP = 0.1
 # specified finer than three decimals, so this cannot let a 0.0999999 pair
 # through; it only undoes representation error.
 _GAP_TOLERANCE = 1e-9
+# The shape that makes an equal-confidence pair's age worth acting on (#2078):
+# one identifier-shaped PREDICATE token that BOTH facts name. A fact that names
+# a predicate — `/rtx/dldenoiser/responsiveDenoising`, `sim.has_gui` — is a
+# claim about one named thing, so "the later write supersedes it" is a claim
+# about that thing. A fact that names no predicate can only be paired by its
+# wording, and wording is what `opposing_terms` already read: keyword opposition
+# plus `created_at` order is the detector agreeing with itself, which is #701's
+# ruling ("a required screen, not an authority").
+#
+# The shape is deliberately narrow: a SLASH PATH (`rtx/dldenoiser/
+# responsiveDenoising`, `agent_mcp/fact_improvement.py`) or a DOTTED IDENTIFIER
+# (`sim.has_gui`, `voice.log`), over `[A-Za-z0-9_]` segments. Hyphens are not
+# joiners, on purpose — `connection-refused`, `read-only`, `state-of-the-art`
+# are English compounds, and counting them is the "shared word is too loose"
+# failure: both of the live false witnesses say "TTS", and a shared word would
+# have paired them again. URLs are stripped before the read, so a shared
+# citation cannot become a basis either — co-naming one source document is
+# #1941's ONE reason, not a predicate.
+_URL_RE = re.compile(r"""\b(?:https?|ftp)://\S+""", re.I)
+_PREDICATE_TOKEN_RE = re.compile(
+    r"[A-Za-z_][A-Za-z0-9_]*(?:(?:/|\.)[A-Za-z0-9_]+)+")
+#: Shortest token counted. Below this a `.` or `/` in a sentence is more likely
+#: punctuation than part of a name.
+_MIN_PREDICATE_TOKEN_LEN = 4
 # The two fields that name WHERE a row came from, checked for agreement across a
 # pair (#1941). Both are per-record fields on the fact markdown itself, read
 # through the same YAML parse that produced the rows the plan loop is holding —
@@ -815,6 +847,79 @@ def _loser_by_age(f1: dict, f2: dict) -> tuple[dict, dict, str] | None:
         f"written {gap:.1f} days later; created_at order makes the older claim the superseded one")
 
 
+def _predicate_tokens(text: str) -> set[str]:
+    """The identifier-shaped tokens one fact's own wording names (#2078).
+
+    Lowercased, because the same flag reaches a fact as `/RTX/DLDenoiser/…` in
+    one note and `responsiveDenoising` in another, and the basis has to survive
+    the casing. URLs go first: two facts citing one page share
+    `github.com/isaac-sim/…`, which is a shared source, not a shared predicate.
+    """
+    stripped = _URL_RE.sub(" ", text or "")
+    return {m.group(0).lower()
+            for m in _PREDICATE_TOKEN_RE.finditer(stripped)
+            if len(m.group(0)) >= _MIN_PREDICATE_TOKEN_LEN}
+
+
+def _shared_predicate(t1: str, t2: str) -> str | None:
+    """One identifier-shaped predicate token BOTH texts name, else None.
+
+    A property of the PAIR, which is the whole point (#2078). A basis keyed on
+    ONE side's wording is unsafe: the live false witness's own loser reads
+    "flipped `/rtx/dldenoiser/responsiveDenoising` from false to true", so it
+    contains an explicit supersession statement and would authorise its own
+    expiry. Two texts agreeing on one name cannot do that to each other.
+    """
+    shared = _predicate_tokens(t1) & _predicate_tokens(t2)
+    return sorted(shared)[0] if shared else None
+
+
+def _keyword_only_age_flags(entity: str, pairs: list[dict]) -> list[dict]:
+    """Pairs whose ONLY basis for an expiry is keyword opposition plus write order.
+
+    Reported, never acted on (#2078). A pair is flagged when three things hold:
+    the two rows carry equal confidence (so the confidence branch, with its own
+    floor and vetoes, was never the question), `_loser_by_age` finds an age
+    basis (so this is a pair that WAS about to be expired), and
+    `_shared_predicate` finds nothing naming both facts (so the age basis had
+    nothing under it but the trigger string). A pair with no age basis is not
+    flagged: nothing was ever going to happen to it, and calling it a withheld
+    expiry would report a veto that was never exercised — the #1348 lesson about
+    a zero that reads as a clean night.
+
+    Computed over every actable pair, not over the action loop, so the figure
+    does not depend on `max_actions`: an entity whose first five pairs filled
+    the cap still reports the keyword-only pairs behind them.
+    """
+    flags: list[dict] = []
+    for item in pairs:
+        f1 = item.get("fact1") or {}
+        f2 = item.get("fact2") or {}
+        if not f1.get("fact") or not f2.get("fact"):
+            continue
+        # `!=` mirrors the branch below: same test, opposite side of it.
+        if float(f1.get("confidence") or 0.5) != float(f2.get("confidence") or 0.5):
+            continue
+        ordered = _loser_by_age(f1, f2)
+        if ordered is None:
+            continue
+        loser, winner, _ = ordered
+        if _shared_predicate(str(loser.get("fact") or ""), str(winner.get("fact") or "")):
+            continue
+        flags.append({
+            "entity": entity,
+            "trigger": str(item.get("reason") or "").strip(),
+            "older_fact": loser.get("fact", ""),
+            "older_created_at": loser.get("created_at"),
+            "newer_fact": winner.get("fact", ""),
+            "newer_created_at": winner.get("created_at"),
+            "basis": ("opposing_terms keyword plus created_at order only; neither "
+                      "fact names an identifier-shaped predicate token the other "
+                      "also names"),
+        })
+    return flags
+
+
 #: How a plan's pair counts were produced. `entity` is one whole-entity
 #: pairwise scan, which is the only scope that can pair two facts living in
 #: different category files. `by_category` is the retry below, reached only by an
@@ -917,6 +1022,37 @@ def plan_entity(entity: str, max_actions: int = MAX_ACTIONS_PER_ENTITY) -> dict:
     `MIN_CONFIDENCE_GAP` to be condemned; a smaller gap says the two facts were
     captured differently, not that one is weaker. Each action's `reason` names
     the trigger that admitted it, so a reviewer can reject the specific pair.
+
+    A third rule (#2078, from #701's owed ruling) narrows the equal-confidence
+    path: **a keyword-opposition match is a screen, never a sole authority to
+    expire.** `created_at` order says only which row was written last, and the
+    `opposing_terms:<a>/<b>` trigger that got the pair into this loop was read
+    off the two sentences' wording, so keyword opposition plus write order is
+    the detector agreeing with itself. A `superseded` action therefore needs a
+    non-lexical, pair-level basis: both facts must name one identifier-shaped
+    predicate token (`/rtx/dldenoiser/responsiveDenoising`, `sim.has_gui`).
+    Without it the pair plans nothing and is reported in `keyword_only_flags`.
+    The basis is keyed on the PAIR, not on one side's wording, because a
+    one-sided "explicit supersession" test is self-authorising — the second
+    witness below is itself a sentence saying something was "flipped … from
+    false to true".
+
+    Both actions this guard planned after #701 landed are false, and both are
+    what the new basis rejects. `opposing_terms:success/failure` paired "TTS
+    success JSON response reads were bounded in commit #96984." (2026-09-26)
+    with "TTS failure during an outage results in a connection-refused error and
+    leaves only a `voice.log` line." (2026-09-29, 3.4 days later) — a
+    success-path claim and a failure-path claim about one subsystem, where the
+    older row names no predicate at all. `opposing_terms:true/false` paired the
+    Kit row recording that `/rtx/dldenoiser/responsiveDenoising` was flipped
+    from false to true (2026-09-28) with "The sim.has_gui property is always
+    False in Isaac Lab 3.0.0-beta2.patch1, leading to a missing IsaacLab GUI
+    tab." (2026-09-30, 1.7 days later) — two unrelated subsystems, each naming
+    its own identifier and neither naming the other's. Records:
+    `_pipeline/improvement/20260930-210019-dryrun.json` and
+    `20261001-210151-dryrun.json`; both rows are on disk under
+    `_pipeline/vault-derived/facts/`, and both pairs are rebuilt as fixtures in
+    `tests/test_memory_improvement.py`.
 
     An entity too big for one pairwise scan is not skipped: it is scanned in
     category-sized pieces, which is what the detector's own refusal tells the
@@ -1035,11 +1171,32 @@ def plan_entity(entity: str, max_actions: int = MAX_ACTIONS_PER_ENTITY) -> dict:
             if ordered is None:
                 continue          # equal confidence, no age basis → leave it
             loser, winner, age_reason = ordered
+            # #2078: a keyword-opposition match is a screen, never a sole
+            # authority to expire. Everything above this line is a property of
+            # the pair's WORDING (`opposing_terms:<a>/<b>`) or of the fact
+            # layer's clock, and the two false witnesses this guard was filed
+            # from both passed all of it: the TTS pair's older row names no
+            # identifier at all, and the Kit/Isaac pair names two DIFFERENT
+            # ones (`responsiveDenoising` against `sim.has_gui`, two unrelated
+            # subsystems). So the age basis needs something under it that is
+            # not the pair's wording: one identifier-shaped predicate token
+            # both facts name. Absent it, no action — and the pair is reported
+            # in `keyword_only_flags`, where `_keyword_only_age_flags` counts
+            # exactly the pairs declining here.
+            shared = _shared_predicate(str(loser.get("fact") or ""),
+                                       str(winner.get("fact") or ""))
+            if shared is None:
+                continue
             kind = "superseded"
             # Same rule on this basis: the trigger that admitted the pair is
             # part of the record, and `MIN_CONFIDENCE_GAP` does not apply here
-            # — this pair's basis is write order, not a confidence gap.
-            reason = f"{trigger}; {age_reason}"
+            # — this pair's basis is write order, not a confidence gap. The
+            # token that makes the write order about one named thing is named
+            # beside it (#701's rule that an admitted action says what admitted
+            # it, now applied to the non-lexical half of the basis too), so a
+            # reviewer can reject the co-naming without re-reading both files.
+            reason = (f"{trigger}; {age_reason}; both facts name `{shared}`, so "
+                      f"the later write is about that predicate")
         action = {"kind": kind, "entity": entity,
                   "category": loser.get("category"),
                   "loser_fact": loser.get("fact", ""), "loser_id": loser.get("id"),
@@ -1073,6 +1230,16 @@ def plan_entity(entity: str, max_actions: int = MAX_ACTIONS_PER_ENTITY) -> dict:
         planned_against.add(key)
         actions.append(action)
 
+    # The class this round narrowed, stated as a number beside the pairs it was
+    # computed over (#2078). Read off `actable` — every pair the opposing-terms
+    # screen let through — and not off the action loop above, so an entity whose
+    # cap filled on its first `max_actions` pairs still reports the keyword-only
+    # pairs that sat behind them. With `REQUIRE_OPPOSING_TERMS` on, which is the
+    # only shipped setting, every entry here carries an `opposing_terms:*`
+    # trigger by construction; flipping that screen off would widen this list to
+    # the near-duplicate class as well, which is one more reason it stays on.
+    keyword_only_flags = _keyword_only_age_flags(entity, actable)
+
     return {"entity": entity, "refused": False, "checked": detection.get("checked", 0),
             "contradictions": len(contradictions),
             # The number this mechanism can move, which `fact_entity_recall` is
@@ -1094,6 +1261,16 @@ def plan_entity(entity: str, max_actions: int = MAX_ACTIONS_PER_ENTITY) -> dict:
             # the inflation was invisible in the delta and visible only in the
             # absolute count, which is the half anyone reads.
             "pairs_before": len(contradictions),
+            # The pairs that reached this loop with an age basis and nothing
+            # else (#2078), reported beside that denominator rather than summed
+            # into it: a flagged pair is still a contradiction the detector
+            # found, and `pairs_before` is the loop's own denominator, so
+            # removing them would move the denominator to match the guard and
+            # leave nothing to compare a future run against. Each entry names
+            # both facts and both timestamps, because the thing an operator has
+            # to be able to check is whether the guard's judgement that these
+            # two facts are about different things is right.
+            "keyword_only_flags": keyword_only_flags,
             # Reported so the near-duplicate class stays visible: it is the
             # auto-capture noise this loop declines to delete, and the reason
             # the metric does not move. A subset of `pairs_before`, never added
@@ -1202,6 +1379,21 @@ def apply_action(action: dict, now_iso: str) -> dict:
         field, reason_field = "invalid_at", "invalid_reason"
     else:
         field, reason_field = "expired_at", "expire_reason"
+    if not is_confidence and not _shared_predicate(str(action.get("loser_fact") or ""),
+                                                   str(action.get("winner_fact") or "")):
+        # #2078 at the write seam, not only the plan seam. `plan_entity` cannot
+        # produce such an action any more, so this refuses the shapes that reach
+        # a writer without one: a record written by an older revision and
+        # hand-applied later, an action dict assembled by hand, or a plan built
+        # against a tree whose guard was not yet deployed. It reads the two
+        # FACT TEXTS the action itself carries rather than re-planning, so it
+        # asks the same question the planner asked and cannot be talked out of it
+        # by the plan that brought the action here. Fails closed on a missing
+        # `winner_fact`: no second text, no co-naming, no write.
+        return {"expired_count": 0,
+                "skipped": ("supersession basis is keyword opposition plus write "
+                            "order only — no predicate token named by both facts"),
+                "field": field, "traces_written": 0, "traces": [], "untraceable": 0}
     aim = _aim_substring(action["entity"], action)
     if aim is None:
         # Same keys as every other return, so a caller summing a run's actions reads a
@@ -1545,6 +1737,15 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
                  # The loop's own denominator, before its writes. `pairs_after`
                  # is measured the same way after them.
                  "pairs_before": plan.get("pairs_before", 0),
+                 # The #2078 class, per entity, beside that denominator. Null for
+                 # a refused entity on the same #702 reasoning as
+                 # `lineage_pairs`: it was never scanned, so how many of its
+                 # pairs rested on keyword-plus-write-order alone is unknown, not
+                 # zero. A `planned: 0` night is otherwise indistinguishable from
+                 # one where the guard refused everything it saw — which is the
+                 # exact shape #1348 and #1941 each had to be filed for.
+                 "keyword_only_flags": (None if plan["refused"]
+                                        else plan.get("keyword_only_flags", [])),
                  "planned": len(plan["actions"]), "taken": 0, "actions": []}
         planned += len(plan["actions"])
         if apply_writes:
@@ -1668,6 +1869,20 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
         # continuity, does not: see the comment on `pairs_before` in plan_entity.
         "pairs_before": sum(e.get("pairs_before", 0) for e in per_entity),
         "pairs_after": sum(e.get("pairs_after", 0) for e in per_entity),
+        # Every pair this pass declined to expire because its only basis was a
+        # keyword opposition plus `created_at` order (#2078), flattened across
+        # the entities scanned and named by entity. The pass-level `planned`
+        # count cannot tell a quiet night from a guarded one, and this is the
+        # third refusal the loop has made that leaves `actions_planned` at zero
+        # either way (#1348's attribution guard, #1941's lineage veto, this):
+        # `lineage_withheld_pairs` above is the same statement for the
+        # confidence basis, and its absence here is what made a 2-action night
+        # read as a 2-action night rather than as a 2-of-4 night. `len()`, not a
+        # count field, because the list is what names the pairs and a second
+        # number beside it could be computed from a different set than the one
+        # an operator is reading.
+        "keyword_only_flags": [f for e in per_entity
+                               for f in (e.get("keyword_only_flags") or [])],
         "fact_entity_recall": None if recall is None else recall["score"],
         # The evidence behind that number, or None when the eval did not run —
         # null is the only spelling of "not measured" on both keys (#702).

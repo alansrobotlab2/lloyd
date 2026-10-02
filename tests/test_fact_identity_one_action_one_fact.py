@@ -575,9 +575,9 @@ def test_the_absent_script_ledger_holds_exactly_the_cited_debts():
 def test_record_carries_a_pair_count_its_own_writes_can_move(tree):
     facts_root, st, _vault = tree
     _write(facts_root, "TTS", "state", [
-        {"fact": "TTS built-in voices are working and returning 200 OK.",
+        {"fact": "TTS built-in voices are working and returning 200 OK (tts.builtin).",
          "confidence": 0.9, "id": "stat-001", "created_at": _iso(30)},
-        {"fact": "TTS built-in voices are broken and returning 500 errors.",
+        {"fact": "TTS built-in voices are broken and returning 500 errors (tts.builtin).",
          "confidence": 0.9, "id": "stat-002", "created_at": _iso(2)},
     ])
     _reindex(st, facts_root)

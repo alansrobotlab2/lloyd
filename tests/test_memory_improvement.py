@@ -721,9 +721,9 @@ def test_equal_confidence_contradiction_needs_a_time_order_reason(world):
     by created_at, and only when the loser is clearly older."""
     facts_root, st, _ = world
     _write_facts(facts_root, "TTS", "state", [
-        {"fact": "TTS built-in voices are working and returning 200 OK.",
+        {"fact": "TTS built-in voices are working and returning 200 OK (tts.builtin).",
          "created_at": _days_ago(30), "confidence": 0.9},
-        {"fact": "TTS built-in voices are broken and returning 500 errors.",
+        {"fact": "TTS built-in voices are broken and returning 500 errors (tts.builtin).",
          "created_at": _days_ago(2), "confidence": 0.9},
     ])
     _reindex(st, facts_root)
@@ -761,10 +761,10 @@ def test_one_action_cannot_touch_a_fact_it_did_not_condemn(world):
     facts to change 2 on the live `Assistant` entity. An improve action may
     expire only the fact it names."""
     facts_root, st, _ = world
-    loser = "Lloyd built-in voices are working and returning 200 OK."
+    loser = "Lloyd built-in voices are working and returning 200 OK (lloyd.voices)."
     _write_facts(facts_root, "Lloyd", "state", [
         {"fact": loser, "created_at": _days_ago(30)},
-        {"fact": "Lloyd built-in voices are broken and returning 500 errors.",
+        {"fact": "Lloyd built-in voices are broken and returning 500 errors (lloyd.voices).",
          "created_at": _days_ago(2)},
     ])
     _write_facts(facts_root, "Lloyd", "usage", [
@@ -856,8 +856,8 @@ def test_entity_over_bound_with_small_categories_is_scanned_by_category(world):
     _write_facts(facts_root, "MULTI", "state", _filler("MULTI", 26))
     _write_facts(facts_root, "MULTI", "event", _filler("MULTI", 23))
     _write_facts(facts_root, "MULTI", "preference", [
-        {"fact": "MULTI cache eviction is enabled.", "created_at": _days_ago(20)},
-        {"fact": "MULTI cache eviction is disabled.", "created_at": _days_ago(2)},
+        {"fact": "MULTI cache eviction is enabled (multi.cache.evict).", "created_at": _days_ago(20)},
+        {"fact": "MULTI cache eviction is disabled (multi.cache.evict).", "created_at": _days_ago(2)},
         *_filler("MULTI", 4),
     ])
     _reindex(st, facts_root)
@@ -876,7 +876,7 @@ def test_entity_over_bound_with_small_categories_is_scanned_by_category(world):
     act = plan["actions"][0]
     assert act["category"] == "preference", act
     assert act["kind"] == "superseded", act
-    assert act["loser_fact"] == "MULTI cache eviction is enabled.", act
+    assert act["loser_fact"] == "MULTI cache eviction is enabled (multi.cache.evict).", act
 
 
 def test_category_over_bound_is_skipped_and_named_in_the_plan(world):
@@ -892,8 +892,8 @@ def test_category_over_bound_is_skipped_and_named_in_the_plan(world):
     _write_facts(facts_root, "MIXED", "state",
                  _filler("MIXED", FACT_GODNODE_THRESHOLD + 1))       # 51: unscanable
     _write_facts(facts_root, "MIXED", "event", [
-        {"fact": "MIXED tailnet relay is working.", "created_at": _days_ago(18)},
-        {"fact": "MIXED tailnet relay is broken.", "created_at": _days_ago(3)},
+        {"fact": "MIXED tailnet relay is working (mix.tailnet.relay).", "created_at": _days_ago(18)},
+        {"fact": "MIXED tailnet relay is broken (mix.tailnet.relay).", "created_at": _days_ago(3)},
         *_filler("MIXED", 8),
     ])
     _write_facts(facts_root, "MIXED", "preference", _filler("MIXED", 5))
@@ -905,7 +905,7 @@ def test_category_over_bound_is_skipped_and_named_in_the_plan(world):
     assert plan["categories_scanned"] == ["event", "preference"], plan
     assert plan["checked"] == 15, plan                    # 10 + 5; the 51 never read
     assert len(plan["actions"]) == 1, plan
-    assert plan["actions"][0]["loser_fact"] == "MIXED tailnet relay is working.", plan
+    assert plan["actions"][0]["loser_fact"] == "MIXED tailnet relay is working (mix.tailnet.relay).", plan
 
     # Distinguishability, asserted on the record FILE and with all three shapes in
     # one run side by side — that is what clause 2 actually claims, and it is the
@@ -945,11 +945,11 @@ def test_entity_under_bound_is_still_scanned_whole_across_categories(world):
     action below is the assertion that the entity-level scan answered."""
     facts_root, st, _ = world
     _write_facts(facts_root, "SPLIT", "state", [
-        {"fact": "SPLIT ingestion watcher is enabled.", "created_at": _days_ago(21)},
+        {"fact": "SPLIT ingestion watcher is enabled (split.ingest.watch).", "created_at": _days_ago(21)},
         *_filler("SPLIT", 19),
     ])
     _write_facts(facts_root, "SPLIT", "event", [
-        {"fact": "SPLIT ingestion watcher is disabled.", "created_at": _days_ago(4)},
+        {"fact": "SPLIT ingestion watcher is disabled (split.ingest.watch).", "created_at": _days_ago(4)},
         *_filler("SPLIT", 19),
     ])
     _reindex(st, facts_root)
@@ -958,15 +958,15 @@ def test_entity_under_bound_is_still_scanned_whole_across_categories(world):
     assert plan["scan_scope"] == "entity", plan
     assert plan["checked"] == 40, plan                    # both categories, one scan
     assert len(plan["actions"]) == 1, plan                # the cross-category pair
-    assert plan["actions"][0]["loser_fact"] == "SPLIT ingestion watcher is enabled.", plan
+    assert plan["actions"][0]["loser_fact"] == "SPLIT ingestion watcher is enabled (split.ingest.watch).", plan
 
 
 def test_run_is_dry_run_by_default_and_acts_on_request(world):
     facts_root, st, _ = world
     _write_facts(facts_root, "TTS", "state", [
-        {"fact": "TTS built-in voices are working and returning 200 OK.",
+        {"fact": "TTS built-in voices are working and returning 200 OK (tts.builtin).",
          "created_at": _days_ago(30)},
-        {"fact": "TTS built-in voices are broken and returning 500 errors.",
+        {"fact": "TTS built-in voices are broken and returning 500 errors (tts.builtin).",
          "created_at": _days_ago(2)},
     ])
     _reindex(st, facts_root)
@@ -994,9 +994,9 @@ def test_run_is_dry_run_by_default_and_acts_on_request(world):
 def test_run_record_carries_before_after_counts_and_is_persisted(world):
     facts_root, st, tmp_vault = world
     _write_facts(facts_root, "TTS", "state", [
-        {"fact": "TTS built-in voices are working and returning 200 OK.",
+        {"fact": "TTS built-in voices are working and returning 200 OK (tts.builtin).",
          "created_at": _days_ago(30)},
-        {"fact": "TTS built-in voices are broken and returning 500 errors.",
+        {"fact": "TTS built-in voices are broken and returning 500 errors (tts.builtin).",
          "created_at": _days_ago(2)},
     ])
     _reindex(st, facts_root)
@@ -1036,9 +1036,9 @@ def test_record_names_the_fact_tree_store_and_commit_it_acted_on(world, apply):
     deleted from — dry-run and apply alike."""
     facts_root, st, _ = world
     _write_facts(facts_root, "TTS", "state", [
-        {"fact": "TTS built-in voices are working and returning 200 OK.",
+        {"fact": "TTS built-in voices are working and returning 200 OK (tts.builtin).",
          "created_at": _days_ago(30)},
-        {"fact": "TTS built-in voices are broken and returning 500 errors.",
+        {"fact": "TTS built-in voices are broken and returning 500 errors (tts.builtin).",
          "created_at": _days_ago(2)},
     ])
     _reindex(st, facts_root)
@@ -1236,6 +1236,222 @@ def test_run_with_no_signals_changes_nothing(world):
     assert _active(st) == 1
 
 
+# ── #2078: a keyword-opposition match is a screen, not an authority ──────────
+#
+# #701's owed ruling: `opposing_terms:<a>/<b>` is a required screen and never
+# the sole authority to expire a fact. `created_at` order says only which row
+# was written last, so on the equal-confidence branch the whole basis was the
+# detector reading its own keyword match twice. These nodes are graded against
+# the two actions that guard planned after #701 landed, as the corpus wrote
+# them: `_pipeline/improvement/20260930-210019-dryrun.json` and
+# `20261001-210151-dryrun.json`, whose rows sit on disk under
+# `_pipeline/vault-derived/facts/TTS/TTS-event.md` and `.../Kit/`.
+
+#: The TTS pair, both rows at the 0.95 the live rows carry (equal, so the pair
+#: reaches the age branch and never #701's floor), 3.4 days apart as recorded.
+#: A success-path claim and a failure-path claim about one subsystem: the older
+#: row names no identifier at all, so nothing here is about the same named
+#: thing as the newer one.
+_LIVE_TTS_OLDER = "TTS success JSON response reads were bounded in commit #96984."
+_LIVE_TTS_NEWER = ("TTS failure during an outage results in a connection-refused "
+                   "error and leaves only a `voice.log` line.")
+
+#: The Kit pair, 0.95 on both live rows, 1.7 days apart. Two unrelated
+#: subsystems: each names its own identifier-shaped predicate and neither names
+#: the other's. The older row is also the reason the basis has to be a property
+#: of the PAIR — it is itself a sentence saying something was "flipped ... from
+#: false to true", so a basis keyed on one side's wording ("an explicit
+#: supersession statement") would let it authorise its own expiry.
+_LIVE_KIT_OLDER = ("Kit commit 9e5dd32c (OMPE-65433) flipped "
+                   "`/rtx/dldenoiser/responsiveDenoising` from false to true.")
+_LIVE_KIT_NEWER = ("The sim.has_gui property is always False in Isaac Lab "
+                   "3.0.0-beta2.patch1, leading to a missing IsaacLab GUI tab.")
+
+
+def test_a_kit_flag_and_an_isaac_lab_property_are_not_one_predicate():
+    """The basis unit on its own, with no tree: what counts as "the same named
+    thing", and what does not, at the level of the two live witnesses."""
+    from agent_mcp.fact_improvement import _predicate_tokens, _shared_predicate
+
+    # The two false witnesses: co-naming a subsystem in prose is not a
+    # predicate, and each side naming its OWN flag is not co-naming either.
+    assert _shared_predicate(_LIVE_TTS_OLDER, _LIVE_TTS_NEWER) is None
+    assert _shared_predicate(_LIVE_KIT_OLDER, _LIVE_KIT_NEWER) is None
+    # The witness that is a real supersession: the same flag, different value.
+    assert _shared_predicate(
+        "/rtx/dldenoiser/responsiveDenoising is false in the shipping build.",
+        "/rtx/dldenoiser/responsiveDenoising is true in the current build."
+    ) == "rtx/dldenoiser/responsivedenoising"
+    # A dotted identifier is a predicate; a hyphenated English compound is not,
+    # because `connection-refused` and `read-only` are how prose is written and
+    # counting them is the "shared word is too loose" failure — both live TTS
+    # witnesses say "TTS".
+    assert _predicate_tokens("The read-only view of sim.has_gui is cached.") == {
+        "sim.has_gui"}
+    # A citation is a shared source, which is #1941's ONE reason, never a
+    # predicate either of the facts is about.
+    assert _predicate_tokens(
+        "See https://github.com/isaac-sim/IsaacLab/pull/5941.") == set()
+
+
+def test_the_live_tts_pair_plans_nothing_and_is_flagged(world):
+    """Clause 1 and 2, on the witness the record calls
+    `opposing_terms:success/failure`, written 3.4 days later."""
+    facts_root, st, _ = world
+    _write_facts(facts_root, "TTS", "event", [
+        {"fact": _LIVE_TTS_OLDER, "created_at": _days_ago(3.4), "confidence": 0.95},
+        {"fact": _LIVE_TTS_NEWER, "created_at": _days_ago(0), "confidence": 0.95},
+    ])
+    _reindex(st, facts_root)
+    plan = fi.plan_entity("TTS")
+    # The pair is still a contradiction — the screen found something, and that
+    # finding is what is worth reporting. What it is no longer worth is a write.
+    assert plan["pairs_before"] == 1, plan
+    assert plan["contradictions"] == 1, plan
+    assert plan["actions"] == [], plan
+    assert len(plan["keyword_only_flags"]) == 1, plan
+    flag = plan["keyword_only_flags"][0]
+    assert flag["entity"] == "TTS", flag
+    assert flag["trigger"] == "opposing_terms:success/failure", flag
+    assert flag["older_fact"] == _LIVE_TTS_OLDER, flag
+    assert flag["newer_fact"] == _LIVE_TTS_NEWER, flag
+    assert _active(st, "TTS") == 2, "a flagged pair must not have been touched"
+
+
+def test_the_live_kit_pair_against_an_isaac_lab_property_plans_nothing(world):
+    """Clause 2, on the witness that paired two unrelated subsystems:
+    `opposing_terms:true/false`, the Kit flag against Isaac Lab's `sim.has_gui`,
+    written 1.7 days later. Each fact names an identifier; neither names the
+    other's, which is what makes the pairing false and what the co-naming test
+    is there to catch."""
+    facts_root, st, _ = world
+    _write_facts(facts_root, "Kit", "event", [
+        {"fact": _LIVE_KIT_OLDER, "created_at": _days_ago(1.7), "confidence": 0.95},
+        {"fact": _LIVE_KIT_NEWER, "created_at": _days_ago(0), "confidence": 0.95},
+    ])
+    _reindex(st, facts_root)
+    plan = fi.plan_entity("Kit")
+    assert plan["pairs_before"] == 1, plan
+    assert plan["actions"] == [], plan
+    assert len(plan["keyword_only_flags"]) == 1, plan
+    flag = plan["keyword_only_flags"][0]
+    assert flag["trigger"] == "opposing_terms:true/false", flag
+    assert flag["older_fact"] == _LIVE_KIT_OLDER, flag
+    assert flag["newer_fact"] == _LIVE_KIT_NEWER, flag
+    assert _active(st, "Kit") == 2
+
+
+def test_a_later_fact_naming_the_same_predicate_still_supersedes(world):
+    """Clause 3: the age path narrowed, not deleted. Two rows on ONE flag, the
+    later one 3 days newer, both at 0.95 — a real supersession of exactly the
+    shape the live Kit witness has, minus the second subsystem. The write seam is
+    in here too: `apply_action` may not refuse what the planner just planned."""
+    facts_root, st, _ = world
+    _write_facts(facts_root, "Kit", "state", [
+        {"fact": "/rtx/dldenoiser/responsiveDenoising is false in the shipping build.",
+         "created_at": _days_ago(4), "confidence": 0.95},
+        {"fact": "/rtx/dldenoiser/responsiveDenoising is true in the current build.",
+         "created_at": _days_ago(1), "confidence": 0.95},
+    ])
+    _reindex(st, facts_root)
+    plan = fi.plan_entity("Kit")
+    assert plan["keyword_only_flags"] == [], plan
+    assert len(plan["actions"]) == 1, plan
+    action = plan["actions"][0]
+    assert action["kind"] == "superseded", action
+    assert action["loser_fact"].startswith("/rtx/dldenoiser/responsiveDenoising is false")
+    assert action["winner_fact"].startswith("/rtx/dldenoiser/responsiveDenoising is true")
+    # The basis is in the reason beside the trigger (#701's rule that an
+    # admitted action names what admitted it, now covering the non-lexical half
+    # of the basis too).
+    assert "rtx/dldenoiser/responsiveDenoising" in action["reason"], action
+    rec = fi.run_improvement(apply=True, entities=["Kit"], record=False)
+    assert rec["actions_taken"] == 1, rec["per_entity"]
+    assert _active(st, "Kit") == 1, "the same-predicate supersession did not apply"
+
+
+def test_the_run_record_reports_the_flagged_pairs_beside_the_pair_count(world):
+    """Clause 1's reporting half: the withheld class is a number the record can
+    be asked for, in the same field group as the denominator it is a subset of.
+    Without it `actions_planned: 0` cannot tell a clean tree from a tree whose
+    every pair rested on keyword-plus-write-order alone — the #1348 and #1941
+    lesson, one refusal later."""
+    facts_root, st, _ = world
+    _write_facts(facts_root, "TTS", "event", [
+        {"fact": _LIVE_TTS_OLDER, "created_at": _days_ago(3.4), "confidence": 0.95},
+        {"fact": _LIVE_TTS_NEWER, "created_at": _days_ago(0), "confidence": 0.95},
+    ])
+    _reindex(st, facts_root)
+    rec = fi.run_improvement(sources=("drift",), days=3)
+    assert rec["actions_planned"] == 0, rec["per_entity"]
+    assert rec["pairs_before"] == 1, rec["pairs_before"]
+    assert len(rec["keyword_only_flags"]) == 1, rec["keyword_only_flags"]
+    assert rec["keyword_only_flags"][0]["older_fact"] == _LIVE_TTS_OLDER
+    per_entity = rec["per_entity"][0]
+    assert per_entity["entity"] == "TTS", per_entity
+    assert per_entity["pairs_before"] == 1, per_entity
+    assert [f["older_fact"] for f in per_entity["keyword_only_flags"]] == [_LIVE_TTS_OLDER]
+    on_disk = _persisted_record(rec)
+    assert len(on_disk["keyword_only_flags"]) == 1, on_disk["keyword_only_flags"]
+
+
+def test_the_opposing_terms_screen_still_classifies_and_still_admits_confidence(world):
+    """Clause 4: the narrowing is in the branch, not in the screen. The whole-word
+    classifier still fires on `enabled` against `disabled`, and the pair it
+    classifies still reaches the confidence basis at a gap of 0.3 — and the flag
+    list stays empty for it, because a pair with a confidence basis was never
+    asking the age question. `MIN_CONFIDENCE_GAP` is #701's, and the confidence
+    nodes above and beside this one are that floor's own guards."""
+    from agent_mcp import facts as facts_mod
+    from agent_mcp.fact_improvement import REQUIRE_OPPOSING_TERMS
+    assert REQUIRE_OPPOSING_TERMS is True
+    assert facts_mod._opposing_reason(
+        "The gate is enabled.", "The gate is disabled.") == "opposing_terms:enabled/disabled"
+    assert facts_mod._opposing_reason(
+        "A redeployed container.", "He re-enabled the sync.") is None
+    facts_root, st, _ = world
+    _write_facts(facts_root, "Gate", "state", [
+        {"fact": "The gate is enabled.", "created_at": _days_ago(30), "confidence": 0.9},
+        {"fact": "The gate is disabled.", "created_at": _days_ago(2), "confidence": 0.6},
+    ])
+    _reindex(st, facts_root)
+    plan = fi.plan_entity("Gate")
+    assert len(plan["actions"]) == 1, plan
+    assert plan["actions"][0]["kind"] == "confidence", plan
+    assert plan["actions"][0]["loser_fact"] == "The gate is disabled.", plan
+    assert plan["keyword_only_flags"] == [], plan
+
+
+def test_an_assembled_superseded_action_with_no_shared_predicate_is_refused(world):
+    """Clause 5's apply seam: the write path refuses a superseded action whose
+    only basis is keyword opposition plus write order, even one that did not come
+    from this planner — an action dict assembled by hand, or a record written by
+    an older revision and applied later. A `skipped` refusal, not an error: the
+    caller's loop reads a skip as "took none of these", and the #1255 invariant
+    (a reported count equals the marks it wrote) is what that reading rests on."""
+    facts_root, st, _ = world
+    _write_facts(facts_root, "TTS", "event", [
+        {"fact": _LIVE_TTS_OLDER, "created_at": _days_ago(3.4), "confidence": 0.95},
+        {"fact": _LIVE_TTS_NEWER, "created_at": _days_ago(0), "confidence": 0.95},
+    ])
+    _reindex(st, facts_root)
+    plan = fi.plan_entity("TTS")
+    assert plan["actions"] == [], plan
+    hand_built = {
+        "entity": "TTS", "category": "event",
+        "kind": "superseded",
+        "loser_fact": _LIVE_TTS_OLDER, "loser_id": "evnt-001",
+        "loser_confidence": 0.95, "winner_confidence": 0.95,
+        "winner_fact": _LIVE_TTS_NEWER, "winner_id": "evnt-002",
+        "loser_source_file": "TTS/TTS-event.md", "winner_source_file": "TTS/TTS-event.md",
+        "reason": "opposing_terms:success/failure; written 3.4 days later",
+    }
+    result = fi.apply_action(hand_built, _days_ago(0))
+    assert result["expired_count"] == 0, result
+    assert "keyword opposition" in result["skipped"], result
+    assert result["traces_written"] == 0, result
+    assert _active(st, "TTS") == 2, "the write seam expired a keyword-only pair"
+
 # ── 2b. #701: what may authorise an expiry, and what a reviewer can see ──────
 #
 # `REQUIRE_OPPOSING_TERMS` is the only gate between a detected pair and a
@@ -1259,8 +1475,8 @@ def test_every_admitted_action_names_the_opposing_pair_that_admitted_it(world):
         {"fact": "The gate is disabled.", "confidence": 0.3, "created_at": _days_ago(30)},
     ])
     _write_facts(facts_root, "Trig", "usage", [
-        {"fact": "The build is working.", "confidence": 0.9, "created_at": _days_ago(30)},
-        {"fact": "The build is broken.", "confidence": 0.9, "created_at": _days_ago(2)},
+        {"fact": "The build is working (build.lloyd.ci).", "confidence": 0.9, "created_at": _days_ago(30)},
+        {"fact": "The build is broken (build.lloyd.ci).", "confidence": 0.9, "created_at": _days_ago(2)},
     ])
     _reindex(st, facts_root)
     plan = fi.plan_entity("Trig")
@@ -1321,21 +1537,23 @@ def test_the_confidence_floor_admits_a_gap_of_exactly_its_value(world):
 
 def test_the_equal_confidence_age_basis_is_unmoved_by_the_floor(world):
     """MIN_CONFIDENCE_GAP bounds the CONFIDENCE basis only. An equal-confidence
-    pair has a gap of 0.0 — below any floor — and its basis is write order, so
-    a 30-day gap still plans a `superseded` expiry exactly as it did before
-    #701. A pair of whole-word opposing terms, so `REQUIRE_OPPOSING_TERMS` lets
-    it through and only the basis is in question."""
+    pair has a gap of 0.0 — below any floor — and its own basis is write order
+    plus the predicate BOTH rows name, so a 28-day gap still plans a
+    `superseded` expiry. #2078 narrowed that basis to pairs co-naming one
+    identifier (`build.lloyd.ci` here) and did not move the floor: a pair of
+    whole-word opposing terms still reaches this branch through
+    `REQUIRE_OPPOSING_TERMS`, and only the basis is in question."""
     facts_root, st, _ = world
     _write_facts(facts_root, "Ageway", "state", [
-        {"fact": "The build is working.", "confidence": 0.9, "created_at": _days_ago(30)},
-        {"fact": "The build is broken.", "confidence": 0.9, "created_at": _days_ago(2)},
+        {"fact": "The build is working (build.lloyd.ci).", "confidence": 0.9, "created_at": _days_ago(30)},
+        {"fact": "The build is broken (build.lloyd.ci).", "confidence": 0.9, "created_at": _days_ago(2)},
     ])
     _reindex(st, facts_root)
     plan = fi.plan_entity("Ageway")
     assert len(plan["actions"]) == 1, plan["actions"]
     action = plan["actions"][0]
     assert action["kind"] == "superseded"
-    assert action["loser_fact"] == "The build is working."
+    assert action["loser_fact"] == "The build is working (build.lloyd.ci)."
     assert "created_at" in action["reason"], action["reason"]
 
 
@@ -1559,9 +1777,9 @@ def test_fact_invalidate_refuses_to_blank_an_entity(world):
 def test_improvement_defaults_to_dry_run(world):
     facts_root, st, _ = world
     _write_facts(facts_root, "TTS", "state", [
-        {"fact": "TTS built-in voices are working and returning 200 OK.",
+        {"fact": "TTS built-in voices are working and returning 200 OK (tts.builtin).",
          "created_at": _days_ago(30)},
-        {"fact": "TTS built-in voices are broken and returning 500 errors.",
+        {"fact": "TTS built-in voices are broken and returning 500 errors (tts.builtin).",
          "created_at": _days_ago(2)},
     ])
     _reindex(st, facts_root)
@@ -1576,9 +1794,9 @@ def test_an_applied_improvement_records_what_it_acted_on(world):
     whose record cannot."""
     facts_root, st, _ = world
     _write_facts(facts_root, "TTS", "state", [
-        {"fact": "TTS built-in voices are working and returning 200 OK.",
+        {"fact": "TTS built-in voices are working and returning 200 OK (tts.builtin).",
          "created_at": _days_ago(30)},
-        {"fact": "TTS built-in voices are broken and returning 500 errors.",
+        {"fact": "TTS built-in voices are broken and returning 500 errors (tts.builtin).",
          "created_at": _days_ago(2)},
     ])
     _reindex(st, facts_root)
@@ -1796,9 +2014,9 @@ def test_record_carries_the_store_verdict_and_the_pass_still_plans(world, monkey
     while the markdown half still produces its plan."""
     facts_root, _st, _vault = world
     _write_facts(facts_root, "TTS", "state", [
-        {"fact": "TTS built-in voices are working and returning 200 OK.",
+        {"fact": "TTS built-in voices are working and returning 200 OK (tts.builtin).",
          "created_at": _days_ago(30)},
-        {"fact": "TTS built-in voices are broken and returning 500 errors.",
+        {"fact": "TTS built-in voices are broken and returning 500 errors (tts.builtin).",
          "created_at": _days_ago(2)},
     ])
     missing = _point_the_store_at_nothing(monkeypatch, tmp_path)
@@ -1992,9 +2210,9 @@ def _write_voices_pair(root, entity):
     action — the unit the apply loop is required to take or leave.
     """
     _write_facts(root, entity, "state", [
-        {"fact": "TTS built-in voices are working and returning 200 OK.",
+        {"fact": "TTS built-in voices are working and returning 200 OK (tts.builtin).",
          "created_at": _days_ago(30)},
-        {"fact": "TTS built-in voices are broken and returning 500 errors.",
+        {"fact": "TTS built-in voices are broken and returning 500 errors (tts.builtin).",
          "created_at": _days_ago(2)},
     ])
     return root / entity / f"{entity}-state.md"

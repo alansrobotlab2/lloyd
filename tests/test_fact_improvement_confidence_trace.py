@@ -570,17 +570,18 @@ def test_the_mark_count_reported_is_the_count_the_writer_returned(
 def _planned_superseded_action(tmp_path, monkeypatch):
     """`plan_entity`'s write-order action, with nothing about it restated here.
 
-    The pair is the detector's own opposing-terms shape with confidences 0.02 apart:
-    too close for `MIN_CONFIDENCE_GAP`, 37 days apart for `MIN_STALE_GAP_DAYS`, which is
-    exactly the ground the planner's `_age_basis` stands on. Separate entity so this
-    node's store cannot be the one a confidence node is reading.
+    The pair is the detector's own opposing-terms shape at equal confidences: no gap
+    for `MIN_CONFIDENCE_GAP` to read, 37 days apart for `MIN_STALE_GAP_DAYS`, and both
+    rows co-naming `aged.indexer.state`, which since #2078 is the non-lexical ground
+    the planner's age branch stands on. Separate entity so this node's store cannot be
+    the one a confidence node is reading.
     """
     root, st = _fresh_tree(tmp_path, monkeypatch)
     _write(root, [
         {"file": "Aged/Aged-state.md", "id": "fact-001",
-         "fact": "The indexer is disabled.", "confidence": 0.9, "age_days": 40},
+         "fact": "The indexer is disabled (aged.indexer.state).", "confidence": 0.9, "age_days": 40},
         {"file": "Aged/Aged-state.md", "id": "fact-002",
-         "fact": "The indexer is enabled.", "confidence": 0.9, "age_days": 3},
+         "fact": "The indexer is enabled (aged.indexer.state).", "confidence": 0.9, "age_days": 3},
     ])
     st.facts_idx.reindex(root=root)
     planned = fi.plan_entity("Aged")

@@ -102,7 +102,7 @@ _HASH_B = "b" * 64
 # `_detect_contradictions_sync` returning `contradictions: 0` for two
 # same-subject numeric texts, and a fixture like that plans nothing and proves
 # nothing.
-_LOSER_TEXT, _WINNER_TEXT = ("The daemon is inactive.", "The daemon is active.")
+_LOSER_TEXT, _WINNER_TEXT = ("The daemon lld.indexerd is inactive.", "The daemon lld.indexerd is active.")
 _GAP_LOSER_CONF, _GAP_WINNER_CONF = 0.3, 0.9
 # Ages that would be a write-order story if the confidences were equal: 37 days
 # apart, four times over MIN_STALE_GAP_DAYS. They are not the basis for these
@@ -394,11 +394,13 @@ def test_a_same_document_pair_still_supersedes_on_write_order(tmp_path, monkeypa
     """Clause 4: one document CAN correct itself, and that is the other basis's job.
 
     Equal confidences and 37 days between the writes, both rows on
-    `_DOC_A`. `MIN_CONFIDENCE_GAP` cannot fire on equal confidences, so the basis
-    here is `_loser_by_age` — and a later write inside one document is the whole
-    evidentiary value of write order. A pair-level veto applied to both bases
-    would block exactly this action, which is why the check sits inside the
-    `c1 != c2` branch and not above it.
+    `_DOC_A`, and both rows naming `lld.indexerd` — the predicate both facts
+    co-name, which since #2078 is what the age basis stands on.
+    `MIN_CONFIDENCE_GAP` cannot fire on equal confidences, so the basis here is
+    `_loser_by_age` plus that co-named predicate, and a later write inside one
+    document is the whole evidentiary value of write order. A pair-level veto
+    applied to both bases would block exactly this action, which is why the
+    lineage check sits inside the `c1 != c2` branch and not above it.
     """
     records = _pair("LinSupersede", loser_doc=_DOC_A, loser_hash=_HASH_A,
                     winner_doc=_DOC_A, winner_hash=_HASH_A,
