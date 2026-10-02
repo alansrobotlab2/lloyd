@@ -56,7 +56,30 @@ mt = _load("mine_trajectories_530", "scripts/mine-trajectories.py")
 #: fixtures that used to read `true`, `false` and `grep x` (which blocks on stdin) can no
 #: longer be recorded at all. A test that needs a particular exit code, or a particular
 #: silence, builds its own command and says why in its docstring.
-PRINTING_CMD = f"grep -c '^def ' {_ROOT / 'scripts' / 'skill_verdicts.py'}"
+#:
+#: Since #2052 the mint also refuses an rc-0 command whose stdout declares no input count,
+#: and this fixture is the one most nodes mint through, so it declares: `input_rows=1` is the
+#: honest count for a `grep -c` over the one file it names — the input it inspected. Two
+#: shapes here are load-bearing, and both are why adopting the field is cheap: the declaration
+#: rides on a SECOND line, because `run_evidence` stores the FIRST non-empty line as
+#: `evidence_observed` and nodes assert against that string; and the exit code is captured and
+#: re-raised, because `check` and `audit` read rc, and `cmd; echo …` alone would turn a
+#: falsifier answering no (rc 1) into one answering yes (rc 0).
+PRINTING_CMD = (f"grep -c '^def ' {_ROOT / 'scripts' / 'skill_verdicts.py'}; "
+                "rc=$?; echo 'input_rows=1'; exit $rc")
+
+
+def declares(cmd: str, rows: int = 1) -> str:
+    """Add the #2052 declaration to a fixture command, changing nothing else about it.
+
+    For a node minting a verdict in order to test some other property. The second line and
+    the preserved exit status are `PRINTING_CMD`'s reasons above. A node that IS about the
+    denominator builds its command text itself and says so, because a fixture declaring a
+    count it did not read is the field-with-no-measurement state: as in the ledger,
+    `input_rows=<N>` is a claim about inputs, and `rows` here is only ever a file count the
+    calling node can point at.
+    """
+    return f'{cmd}; rc=$?; echo "{sv.INPUT_ROWS_FIELD}={rows}"; exit $rc'
 
 
 def stored_row(store: Path, pattern_key: str, evidence_cmd: str,
@@ -153,7 +176,7 @@ def seeded(store) -> Path:
         pattern_key="Bash/timeout",
         verdict="reviewed_no_skill",
         reason="installed skill bash-timeout Pattern 3 cites this exact signature",
-        evidence_cmd="grep -c 'command timed out' ~/obsidian/skills/bash-timeout/SKILL.md",
+        evidence_cmd=declares("grep -c 'command timed out' ~/obsidian/skills/bash-timeout/SKILL.md"),
         occurrences=13,
         source_candidate="candidate-bash-timeout-20260909.md",
     )
@@ -202,7 +225,7 @@ def test_non_terminal_verdict_does_not_block(store, tmp_path):
     sv.record_verdict(
         store=store, pattern_key="Bash/timeout", verdict="proposed",
         reason="patch below auto-apply threshold",
-        evidence_cmd="echo 'proposed: patch below the auto-apply threshold'", occurrences=13,
+        evidence_cmd=declares("echo 'proposed: patch below the auto-apply threshold'"), occurrences=13,
     )
     path = Path(mt.write_candidate_file(error_pattern(), tmp_path / "c", verdict_store=store))
 
@@ -225,7 +248,7 @@ def test_sequence_keys_are_gated_too(seeded, store, tmp_path):
     sv.record_verdict(
         store=store, pattern_key="seq-2-bash-fs-read", verdict="rejected_false_positive",
         reason="co-occurs by accident, no causal link",
-        evidence_cmd="echo 'seq-2-bash-fs-read co-occurs without a causal link'",
+        evidence_cmd=declares("echo 'seq-2-bash-fs-read co-occurs without a causal link'"),
         occurrences=40,
     )
     path = Path(mt.write_candidate_file(sequence_pattern(), tmp_path / "c", verdict_store=store))
@@ -379,6 +402,11 @@ def test_record_refuses_exactly_what_the_classifier_calls_unrunnable(store):
     (`check`, `audit`) reports as not-UNRUNNABLE. Every case prints at least one line, so
     #736's emptiness guard is inert across this table and the classifier is the only
     refusal on the table — `true`, runnable but silent, is clause 3's case, not one here.
+    Since #2052 the accepted group has one more thing to satisfy: an rc-0 command that
+    declares no input count is refused too, which is why the prose-only case below carries
+    `declares(...)` while the two cases that ride on a non-zero exit (`grep -c` at rc 1, the
+    stderr measurement at rc 3) do not need it — the mandate is keyed on rc 0, so a falsifier
+    answering no stays recordable exactly as #2048 left it.
     The accepted group includes the two shapes a rule keyed on exit code would wrongly
     refuse: `grep -c` exiting 1 with its `0`, and a measurement on stderr at exit 3.
     """
@@ -388,7 +416,7 @@ def test_record_refuses_exactly_what_the_classifier_calls_unrunnable(store):
         (UNRUNNABLE_SHAPES["absent-file"], True),
         (UNRUNNABLE_SHAPES["bash-parse-error"], True),
         (UNRUNNABLE_SHAPES["not-found-binary"], True),
-        ("echo 'bash-timeout owns this signature'", False),
+        (declares("echo 'bash-timeout owns this signature'"), False),
         (PRINTING_CMD, False),
         (count_cmd, False),
         (STDERR_MEASUREMENT, False),
@@ -473,7 +501,7 @@ def test_latest_line_per_key_wins(store):
                       reason="no error text to ground a skill in", evidence_cmd=PRINTING_CMD)
     sv.record_verdict(store=store, pattern_key="Bash/logic", verdict="reviewed_no_skill",
                       reason="mechanised since: error_tools[] now carries result_summary",
-                      evidence_cmd="grep result_summary scripts/mine-trajectories.py")
+                      evidence_cmd=declares("grep result_summary scripts/mine-trajectories.py"))
     rows = sv.load_verdicts(store)
 
     assert len(rows) == 1
@@ -896,7 +924,7 @@ def test_record_lands_the_identical_line_in_both_trees(store, mirror, monkeypatc
     row = sv.record_verdict(
         store=store, pattern_key="Bash/timeout", verdict="reviewed_no_skill",
         reason="installed skill bash-timeout Pattern 3 cites this exact signature",
-        evidence_cmd="grep -c 'command timed out' ~/obsidian/skills/bash-timeout/SKILL.md",
+        evidence_cmd=declares("grep -c 'command timed out' ~/obsidian/skills/bash-timeout/SKILL.md"),
         occurrences=13)
 
     live, durable = store.read_text().splitlines(), mirror.read_text().splitlines()
@@ -963,7 +991,7 @@ def test_check_answers_from_the_mirror_and_says_it_did(store, mirror, tmp_path, 
     sv.record_verdict(
         store=store, pattern_key="Bash/timeout", verdict="reviewed_no_skill",
         reason="installed skill bash-timeout Pattern 3 cites this exact signature",
-        evidence_cmd="grep -c 'command timed out' ~/obsidian/skills/bash-timeout/SKILL.md",
+        evidence_cmd=declares("grep -c 'command timed out' ~/obsidian/skills/bash-timeout/SKILL.md"),
         occurrences=13)
     cands = tmp_path / "candidates"
     cands.mkdir()
@@ -1009,7 +1037,7 @@ def test_check_reports_a_verdict_whose_check_can_no_longer_run(tmp_path, store, 
     # the write path now turns away, and that refusal is why a broken falsifier can only
     # arrive here as a row written before it: 99 of the live ledger's keys were recorded
     # before any guard existed and will be read long after this one.
-    for key, cmd in (("Bash/timeout", "echo 'bash-timeout owns this signature'"),
+    for key, cmd in (("Bash/timeout", declares("echo 'bash-timeout owns this signature'")),
                      ("Edit/not_found", "echo 'the grounds are gone'; exit 1")):
         sv.record_verdict(store=store, pattern_key=key, verdict="reviewed_no_skill",
                           reason=f"grounds for {key}", evidence_cmd=cmd)
@@ -1076,18 +1104,19 @@ def test_a_recorded_check_script_is_copied_into_the_mirror(tmp_path, store, mirr
                            tracked.name], capture_output=True).returncode == 0, \
         "control: git really tracks this script, so the skip below has something to bite on"
 
+    untracked_cmd = declares(f"python3 {untracked}")
     sv.record_verdict(store=store, pattern_key="seq-3-bash-fs-bash-other",
                       verdict="reviewed_no_skill", reason="grounds",
-                      evidence_cmd=f"python3 {untracked}")
+                      evidence_cmd=untracked_cmd)
 
     copied = mirror.parent / untracked.name
     assert copied.is_file()
     assert copied.read_bytes() == untracked.read_bytes()
-    assert json.loads(mirror.read_text().splitlines()[-1])["evidence_cmd"] == f"python3 {untracked}"
+    assert json.loads(mirror.read_text().splitlines()[-1])["evidence_cmd"] == untracked_cmd
 
     sv.record_verdict(store=store, pattern_key="Bash/timeout", verdict="reviewed_no_skill",
                       reason="grounds checked by a tracked module",
-                      evidence_cmd=f"python3 {tracked}")
+                      evidence_cmd=declares(f"python3 {tracked}"))  # stored verbatim
     assert not (mirror.parent / tracked.name).exists(), \
         "a tracked script is durable already; a vault copy of it is a fork"
 
@@ -1113,12 +1142,13 @@ def test_the_stored_check_is_run_by_a_real_child_process(tmp_path, store, mirror
     # cannot be recorded at all, and writing a marker file is not output.
     script.write_text(f'echo "$$" > {marker}; echo "child $$ wrote {marker}"\n',
                       encoding="utf-8")
+    minted = declares(f"bash {script}")
     sv.record_verdict(store=store, pattern_key="Bash/timeout", verdict="reviewed_no_skill",
                       reason="grounds with a real re-executable check",
-                      evidence_cmd=f"bash {script}")
+                      evidence_cmd=minted)
 
     row = sv.load_verdicts(store)["Bash/timeout"]
-    assert row["evidence_cmd"] == f"bash {script}", "the seam's input is the stored string"
+    assert row["evidence_cmd"] == minted, "the seam's input is the stored string"
     rc, detail = sv.evidence_cmd_status(row)
     assert (rc, detail) == (0, ""), f"a runnable falsifier must return its own exit code: {detail}"
     child_pid = int(marker.read_text().strip())
@@ -1457,11 +1487,11 @@ def test_a_correction_without_a_new_count_keeps_the_reopen_baseline(store):
     key = "seq-2-bash-explore-bash-fs"
     sv.record_verdict(store=store, pattern_key=key, verdict="reviewed_no_skill",
                       reason="names the wrong owning skill",
-                      evidence_cmd="echo '367 occurrences over 41 sessions'",
+                      evidence_cmd=declares("echo '367 occurrences over 41 sessions'"),
                       occurrences=367)
     sv.record_verdict(store=store, pattern_key=key, verdict="reviewed_no_skill",
                       reason="correction: the owning skill is bash-fs, not bash-explore",
-                      evidence_cmd="echo '367 occurrences over 41 sessions'",
+                      evidence_cmd=declares("echo '367 occurrences over 41 sessions'"),
                       decided_by="self-correction")
 
     row = sv.load_verdicts(store)[key]
@@ -1486,7 +1516,7 @@ def test_an_explicit_zero_count_is_still_stored_as_zero(store):
     key = "Bash/network"
     sv.record_verdict(store=store, pattern_key=key, verdict="reviewed_no_skill",
                       reason="one signature's count, recorded first",
-                      evidence_cmd="echo '90 over 6 sessions'", occurrences=90)
+                      evidence_cmd=declares("echo '90 over 6 sessions'"), occurrences=90)
     sv.record_verdict(store=store, pattern_key=key, verdict="reviewed_no_skill",
                       reason="re-seeded as a merged unit; units not comparable",
                       evidence_cmd=PRINTING_CMD,
@@ -1503,7 +1533,7 @@ def test_the_cli_carries_the_count_forward_when_the_flag_is_omitted(store, capsy
     part of what is under test.
     """
     base = ["record", "--pattern", "Bash/timeout", "--verdict", "reviewed_no_skill",
-            "--evidence-cmd", "echo '13 over 3 sessions'", "--store", str(store)]
+            "--evidence-cmd", declares("echo '13 over 3 sessions'"), "--store", str(store)]
     assert sv.main([*base, "--reason", "installed skill bash-timeout owns this signature",
                     "--occurrences", "13"]) == 0
     assert sv.main([*base, "--reason", "correction: it is Pattern 3, not Pattern 4",
@@ -1538,7 +1568,7 @@ def test_a_check_that_observes_nothing_is_refused_and_writes_no_line(store, mirr
     # The same call with a command that prints a measurement is accepted.
     assert sv.main(["record", "--pattern", "Bash/timeout", "--verdict", "reviewed_no_skill",
                     "--reason", "installed skill bash-timeout owns this signature",
-                    "--evidence-cmd", "echo '13 occurrences over 3 sessions'",
+                    "--evidence-cmd", declares("echo '13 occurrences over 3 sessions'"),
                     "--occurrences", "13", "--store", str(store)]) == 0
     assert len(store.read_text().splitlines()) == 1
 
@@ -1570,14 +1600,14 @@ def test_an_accepted_row_stores_what_the_check_printed(tmp_path, store):
     script = tmp_path / "seq_falsifier.py"
     script.write_text("print('sess=7 steps_ok=4 steps_err=3 has_error_recovery=True')\n"
                       "print('this line is not quoted')\n", encoding="utf-8")
+    minted = declares(f"{sys.executable} {script}")
     assert sv.main(["record", "--pattern", "seq-2-read-write", "--verdict", "reviewed_no_skill",
                     "--reason", "3 of 7 steps have no recovery, under the threshold",
-                    "--evidence-cmd", f"{sys.executable} {script}",
-                    "--occurrences", "275", "--store", str(store)]) == 0
+                    "--evidence-cmd", minted, "--occurrences", "275", "--store", str(store)]) == 0
     row = sv.load_verdicts(store)["seq-2-read-write"]
     assert row["evidence_observed"] == "sess=7 steps_ok=4 steps_err=3 has_error_recovery=True"
     assert "not quoted" not in row["evidence_observed"], "the first line only"
-    assert row["evidence_cmd"] == f"{sys.executable} {script}", "the command is unchanged"
+    assert row["evidence_cmd"] == minted, "the command is stored byte-for-byte as minted"
 
     # A command reporting through stderr is stored with what it printed, not with nothing.
     # The fixture here used to be `grep -c 'x' /nope/nothing-here`, whose entire output was
@@ -1594,7 +1624,7 @@ def test_an_accepted_row_stores_what_the_check_printed(tmp_path, store):
     long_line = "M" * (sv.EVIDENCE_OBSERVED_MAX + 50)
     assert sv.main(["record", "--pattern", "Bash/logic", "--verdict", "reviewed_no_skill",
                     "--reason", "a falsifier that prints a wall of text",
-                    "--evidence-cmd", f"printf '{long_line}\\n'",
+                    "--evidence-cmd", declares(f"printf '{long_line}\\n'"),
                     "--occurrences", "2", "--store", str(store)]) == 0
     observed = sv.load_verdicts(store)["Bash/logic"]["evidence_observed"]
     assert len(observed) == sv.EVIDENCE_OBSERVED_MAX + 1, \
@@ -2374,7 +2404,7 @@ def test_reanchor_lands_the_identical_row_in_both_trees(store, mirror):
     _write_rows(mirror, [json.loads(ln) for ln in _lines(store)])
 
     rc = sv.main(["reanchor", "--store", str(store), "--pattern", "Bash/timeout",
-                  "--evidence-cmd", f"grep -c 'survived' {genuine}"])
+                  "--evidence-cmd", declares(f"grep -c 'survived' {genuine}")])
 
     assert rc == 0, "an authored falsifier that executes is accepted"
     assert len(_lines(store)) == len(_lines(mirror)) == 2, "each tree gained exactly one row"
@@ -2402,8 +2432,11 @@ def test_the_repair_pass_writes_both_trees_for_every_class_it_records(
     stored_row(store, "ledger/evidence_cmd_syntax", f"python3 {dead}/skills/tools/m.py",
                verdict="reviewed_no_skill", reason="guard lives in the tool", occurrences=7)
     authored = store.parent / "reanchors.json"
+    # The authored falsifier declares its denominator (#2052): a re-anchor is a freshly
+    # written command, so the mandate applies to it, unlike the two commands this pass
+    # writes itself. The count is one file — the module it greps.
     authored.write_text(json.dumps({"ledger/evidence_cmd_syntax":
-                                    f"grep -c . {live}/skills/tools/m.py"}),
+                                    declares(f"grep -c . {live}/skills/tools/m.py")}),
                         encoding="utf-8")
     _write_rows(mirror, [json.loads(ln) for ln in _lines(store)])
 
@@ -2458,7 +2491,7 @@ def test_record_verdict_says_which_copy_it_could_not_write(tmp_path, monkeypatch
 
     sv.record_verdict(scratch, pattern_key="Bash/timeout", verdict="noise",
                       reason="fixture grounds",
-                      evidence_cmd="grep -c '^status:' /dev/null || true")
+                      evidence_cmd=declares("grep -c '^status:' /dev/null || true"))
 
     err = capfd.readouterr().err
     assert sv.MIRROR_NOT_WRITTEN in err, err
@@ -2974,7 +3007,7 @@ def test_the_pass_appends_an_authored_reanchor_and_keeps_the_decision(tmp_path):
                       occurrences=7)
     authored = tmp_path / "reanchors.json"
     authored.write_text(json.dumps(
-        {"ledger/evidence_cmd_syntax": f"grep -c . {live}/skills/tools/m.py"}),
+        {"ledger/evidence_cmd_syntax": declares(f"grep -c . {live}/skills/tools/m.py")}),
         encoding="utf-8")
     before = store.read_text()
 
@@ -2990,7 +3023,7 @@ def test_the_pass_appends_an_authored_reanchor_and_keeps_the_decision(tmp_path):
     assert "REANCHORED ledger/evidence_cmd_syntax" in out, out
     assert out.splitlines()[-1].startswith("repaired: 0  reanchored: 1"), out
     latest = sv.load_verdicts(store)["ledger/evidence_cmd_syntax"]
-    assert latest["evidence_cmd"] == f"grep -c . {live}/skills/tools/m.py", latest
+    assert latest["evidence_cmd"] == json.loads(authored.read_text())["ledger/evidence_cmd_syntax"], latest
     assert latest["verdict"] == root["verdict"] == "reviewed_no_skill", latest
     assert latest["reason"] == root["reason"] == "guard lives in the tool", latest
     assert latest["occurrences_at_decision"] == 7, latest
@@ -3226,7 +3259,7 @@ def test_the_module_describes_its_own_write_surfaces(tmp_path):
         rc = sv.main(["record", "--pattern", "Bash/prose-check", "--verdict",
                       "reviewed_no_skill", "--reason", "surface count",
                       "--occurrences", "3", "--evidence-cmd",
-                      "echo prose-check: 3 keys"])
+                      declares("echo prose-check: 3 keys")])
     finally:
         os.environ.pop("SKILL_VERDICTS_STORE", None)
         os.environ.pop("SKILL_VERDICTS_MIRROR", None)
@@ -3310,16 +3343,22 @@ def test_a_check_that_declares_it_read_nothing_is_neither_a_healthy_zero_nor_unr
         "a command whose input file is gone is #1588's to repair, not this state's"
 
 
-def test_record_refuses_a_check_that_declares_it_read_no_input_and_accepts_everything_else(store):
-    """Clause 2: the zero denominator is refused at the mint, and nothing else moves.
+def test_record_refuses_a_check_that_declares_it_read_no_input_and_a_check_saying_nothing(store):
+    """Clause 2 of #2048, and the half of it #2052 reversed.
 
-    The refusal is for the same reason #1586 refuses an unrunnable command: a verdict born
-    on a check that read nothing can never be falsified, and this shape is worse — it looks
-    healthy to every later tally. The accepted group is the clause's other half and it is
-    measured, not asserted away: 109 of the live ledger's keys record a command that declares
-    no denominator at all, so refusing those would quarantine a ledger nobody authored
-    wrongly, and making the field mandatory is a ruling on an authoring convention that
-    lives in the vault skill, not a fact this function gets to decide alone.
+    The zero-denominator refusal is for the same reason #1586 refuses an unrunnable command:
+    a verdict born on a check that read nothing can never be falsified, and this shape is
+    worse — it looks healthy to every later tally. That half is untouched.
+
+    What moved is the silence beside it. This node used to accept `echo 'count=0'` as proof
+    that "making the field mandatory is a ruling on the authoring convention, not a fact this
+    function gets to decide alone". The ruling was made on 2026-10-02 (#2052), so the mint
+    refuses an undeclared rc-0 command too, and the accepted group is now the commands that
+    DO declare: a count over a real input, and that same count at a non-zero exit, which is a
+    falsifier answering no and stays recordable because the mandate is keyed on rc 0. The
+    109 legacy keys that declare nothing are not refused anywhere here — they are history, and
+    `audit` goes on counting them `undeclared` without faulting them, which is what the
+    re-cut row below is for.
     """
     with pytest.raises(ValueError, match="input_rows=0"):
         sv.record_verdict(store=store, pattern_key="Bash/validation",
@@ -3328,7 +3367,8 @@ def test_record_refuses_a_check_that_declares_it_read_no_input_and_accepts_every
                           evidence_cmd=ZERO_DENOMINATOR_CMD, occurrences=4)
     assert not store.exists(), "a refused verdict reached the ledger"
 
-    accepted = ["echo 'count=0'",                                # the live ledger's own shape
+    accepted = [declares("echo 'count=0'"),          # zero matched over one read input: a
+                                                            # conclusion, not an empty input
                 NONZERO_DENOMINATOR_CMD,
                 f"{NONZERO_DENOMINATOR_CMD}; exit 1"]            # falsified, and recorded
     for index, cmd in enumerate(accepted):
@@ -3340,7 +3380,14 @@ def test_record_refuses_a_check_that_declares_it_read_no_input_and_accepts_every
     assert [r["pattern_key"] for r in rows] == ["test/denominator-0", "test/denominator-1",
                                                 "test/denominator-2"], rows
     assert rows[0]["evidence_observed"] == "count=0", \
-        "a command with no denominator field records exactly as it did before this rail"
+        "a zero conclusion measured over a real input records; only a zero INPUT is refused"
+    with pytest.raises(ValueError, match="input_rows="):
+        sv.record_verdict(store=store, pattern_key="test/undeclared",
+                          verdict="reviewed_no_skill",
+                          reason="the shape 109 live keys are stored in",
+                          evidence_cmd="echo 'count=0'")
+    assert len(store.read_text().splitlines()) == 3, \
+        "the refused undeclared mint still wrote a row"
 
 
 def test_the_shipped_cli_refuses_a_zero_denominator_check_and_leaves_the_ledger_alone(tmp_path):
@@ -3583,3 +3630,225 @@ def test_the_verdicts_ledger_the_item_measures_is_committed_and_declares_nothing
         f"{mentioning[:3]} mention the field, so this ledger is no longer the "
         "all-undeclared population the witness is for — re-cut the figures from a copy "
         "taken before the rail landed")
+
+
+# ── the mandate at the mint (#2052) ──────────────────────────────────────────
+#
+# #2048 built the zero-denominator rail and stopped at the authoring convention: it
+# published `undeclared` and refused to fault a field nothing in the code or the
+# convention asked anybody to write. That left the rail covering 0% of future verdicts
+# — 0 of the 109 latest-wins keys in the committed witness mention `input_rows=` — so
+# #2052 makes the mint ask, with the convention written first, in
+# `nightly-skill-consolidation`'s Phase 0.6. The five nodes below are the two halves of
+# that pair and the one thing it must not do: reach backwards into the ledger.
+
+#: rc 0, a real observation, and no denominator anywhere in it — the shape 109 witness
+#: keys are stored in, and the one the mint now turns away.
+UNDECLARED_CMD = "echo 'matched=3 of 9 candidate files'"
+
+#: The same observation with its denominator: three matches over three files READ. The count
+#: is of the input, per the vault bullet, and it is a non-zero count, which is what keeps this
+#: out of `EMPTY_INPUT` — the clause's other half is the zero that stays refused.
+DECLARED_THREE_CMD = "echo 'matched=3 input_rows=3 candidate_files=3'"
+
+
+def test_the_mint_refuses_an_undeclared_command_naming_the_field_on_both_surfaces(store,
+                                                                                   tmp_path):
+    """Clause 1: a verdict cannot be born without saying what its check read.
+
+    Two seams, because the mandate has two callers reaching one function. The direct call is
+    the runbook's (`record_verdict` is what `nightly-skill-consolidation` Phase 0.6 binds),
+    and the CLI is what a person at a terminal and any future worker hit — and the CLI has to
+    be asserted separately because `main` turns the `ValueError` into an exit code, so a
+    handler that swallowed it would still satisfy the first half.
+
+    Both halves assert that NOTHING landed, which is the property that makes a mint-time
+    refusal worth having at all: a row written beside a refusal is a verdict with no
+    denominator and a run that believes it passed. The message must name the literal
+    `input_rows=` — a refusal that says "declare your denominator" in prose the author cannot
+    grep for is a refusal that has to be decoded before it can be obeyed.
+    """
+    cli_store = tmp_path / "cli.jsonl"
+
+    with pytest.raises(ValueError, match="input_rows="):
+        sv.record_verdict(store=store, pattern_key="Bash/validation",
+                          verdict="reviewed_no_skill", reason="grounds, no denominator",
+                          evidence_cmd=UNDECLARED_CMD, occurrences=2)
+    assert not store.exists(), "a refused mint still wrote a ledger"
+
+    proc = subprocess.run([sys.executable, str(_ROOT / "scripts" / "skill_verdicts.py"),
+                           "record", "--store", str(cli_store), "--pattern", "Bash/validation",
+                           "--verdict", "reviewed_no_skill",
+                           "--reason", "grounds, no denominator", "--occurrences", "2",
+                           "--evidence-cmd", UNDECLARED_CMD],
+                          capture_output=True, text=True, timeout=30)
+    assert proc.returncode != 0, f"the CLI accepted what the function refuses: {proc.stdout}"
+    assert "input_rows=" in proc.stderr + proc.stdout, proc.stderr or proc.stdout
+    assert not cli_store.exists(), "the refused CLI record still wrote a ledger"
+
+
+def test_a_declared_denominator_records_and_a_declared_zero_keeps_the_other_refusal(store):
+    """Clause 2: the new refusal did not swallow the two verdicts that already worked.
+
+    `input_rows=3` over a real input records a row exactly as it did before the mandate —
+    same fields, command stored byte-for-byte as minted — because the field is a claim to be
+    checked, not a tax that changes what a passing row looks like.
+
+    And `input_rows=0` is still refused by #2048's `EMPTY_INPUT`, not by the new branch. The
+    distinction is the clause: both messages name `input_rows=`, so matching on that string
+    alone cannot tell them apart, and the two refusals mean different things. One says the
+    command measured nothing and its conclusion is vacuous; the other says the command never
+    said what it measured. Re-routing the zero through the new branch would publish a fix
+    that does not fix the thing #2048 found, and the ledger would fill with rows whose check
+    saw an empty directory while every message blamed the missing field.
+    """
+    sv.record_verdict(store=store, pattern_key="Sweep/declared",
+                      verdict="reviewed_no_skill", reason="3 of 9 files matched",
+                      evidence_cmd=DECLARED_THREE_CMD, occurrences=1)
+    row = sv.load_verdicts(store)["Sweep/declared"]
+    assert row["evidence_cmd"] == DECLARED_THREE_CMD, "the command was not stored as minted"
+    assert row["verdict"] == "reviewed_no_skill" and row["occurrences_at_decision"] == 1, row
+    assert len(store.read_text().splitlines()) == 1, "the accepted mint wrote more than one row"
+
+    with pytest.raises(ValueError) as exc:
+        sv.record_verdict(store=store, pattern_key="Sweep/zero",
+                          verdict="reviewed_no_skill", reason="globs a pruned root",
+                          evidence_cmd=ZERO_DENOMINATOR_CMD)
+    assert "input_rows=0" in str(exc.value), str(exc.value)
+    assert "empty input" in str(exc.value).lower(), (
+        f"the zero was refused by the wrong rail: {exc.value}")
+    assert len(store.read_text().splitlines()) == 1, "the refused zero wrote a row"
+
+
+def test_the_mint_and_the_read_rail_agree_when_the_zero_hides_behind_a_header_line(store):
+    """Clause 3: one parse of one stream, so the two rails cannot disagree on one run.
+
+    The command prints its findings header first and the `input_rows=0` claim on the second
+    line. `run_evidence` keeps only the first non-empty line as `evidence_observed`, so a mint
+    guard written against that line would see "no denominator" and refuse the command as
+    undeclared — while `audit`, which scans the whole stdout through `declared_denominator`,
+    reports the same bytes as `EMPTY_INPUT`. That pair is the failure this node exists for:
+    the author is told to add a field that is already there, the real reason (an empty input)
+    stays invisible, and the two surfaces of one tool tell one story each.
+
+    The clause has a positive half, and it is the half that catches the cheap implementation:
+    a command whose declaration sits on the second line and is NON-zero must RECORD. A mint
+    guard written against `run_evidence`'s first line alone refuses that verdict outright —
+    the author is told their command declares nothing while `audit`, reading the whole stream,
+    reports the count sitting in it — which is the divergence this clause exists to forbid, and
+    the reason the guard reads `declared_denominator` over the same bytes `_run_stored_check`
+    reads rather than the one-line summary the row stores.
+
+    Every assertion therefore goes through the same helper the rails use, and the expected
+    verdict is named explicitly: `EMPTY_INPUT` on both surfaces, never the undeclared refusal.
+    """
+    header_then_zero = ("printf 'candidate sweep, 9 files considered\\n'; "
+                        "echo 'sweep/hidden_zero input_rows=0 matched=0'")
+    assert sv._run_stored_check({"evidence_cmd": header_then_zero})[2] == 0, (
+        "the read rail does not see the zero behind the header line, so there is nothing for "
+        "the mint to agree with")
+
+    with pytest.raises(ValueError) as exc:
+        sv.record_verdict(store=store, pattern_key="Sweep/hidden_zero",
+                          verdict="reviewed_no_skill", reason="header line first",
+                          evidence_cmd=header_then_zero)
+    assert "input_rows=0" in str(exc.value), str(exc.value)
+    assert "empty input" in str(exc.value).lower(), (
+        f"the mint refused a declared zero as undeclared: {exc.value}")
+    assert not store.exists(), "a refused mint reached the ledger"
+
+    write_ledger(store, [AUDIT_EMPTY_INPUT])
+    state, detail = sv.evidence_cmd_status({"evidence_cmd": AUDIT_CMDS[AUDIT_EMPTY_INPUT]})
+    assert state == sv.EMPTY_INPUT, (state, detail)
+    rc, out = run_audit(store)
+    assert rc == 1 and "EMPTY_INPUT" in out, out
+    assert "undeclared 0" in out, out
+
+    # The positive half: a NON-zero declaration on the second line is a real denominator, so
+    # the verdict records and `audit` counts it declared rather than undeclared.
+    header_then_nine = ("printf 'candidate sweep, 9 files considered\\n'; "
+                        "echo 'sweep/hidden_nine input_rows=9 matched=0'")
+    assert sv._run_stored_check({"evidence_cmd": header_then_nine})[2] == 9, (
+        "the read rail does not see a declaration behind the header line")
+    sv.record_verdict(store=store, pattern_key="Sweep/hidden_nine",
+                      verdict="reviewed_no_skill", reason="header line first, then a count",
+                      evidence_cmd=header_then_nine)
+    assert "Sweep/hidden_nine" in sv.load_verdicts(store), (
+        "the mint refused a command whose denominator the read rail can see, which is the "
+        "divergence this clause forbids")
+    assert sv.evidence_cmd_status({"evidence_cmd": header_then_nine})[0] not in (
+        sv.UNRUNNABLE, sv.EMPTY_INPUT), "the read rail called a 9-row input empty"
+
+
+def test_reading_a_ledger_of_legacy_undeclared_rows_faults_nothing_and_writes_nothing(
+        tmp_path):
+    """Clause 4: the mandate points forward, and both read surfaces stayed where #2048 left them.
+
+    `AUDIT_SEES` and `AUDIT_SEES_NONE` are the two legacy shapes in the fixture table — an rc-0
+    run printing a bare count, an rc-1 run printing one — and neither mentions the field, which
+    is the population the live ledger and the committed witness are made of. #2048's own
+    `test_an_undeclared_denominator_is_published_but_never_fails_a_run` pins the exit code and
+    the tally line over three such keys; this node adds the two halves the mandate could have
+    broken and did not.
+
+    The byte comparison is the half that cannot be asserted from stdout. A read path that
+    "helped" by stamping `input_rows=1` into the rows it audited would print the same report,
+    exit the same, and quietly re-judge 109 keys nobody authored wrongly — which is exactly the
+    retroactive quarantine the item's clause 4 forbids and the vault paragraph now states twice.
+    """
+    ledger = tmp_path / "legacy.jsonl"
+    write_ledger(ledger, [AUDIT_SEES, AUDIT_SEES_NONE])
+    before = ledger.read_bytes()
+
+    rc, out = run_audit(ledger)
+    assert rc == 0, out
+    assert "denominators: empty_input 0 undeclared 2" in out, out
+
+    assert ledger.read_bytes() == before, (
+        "audit rewrote the ledger it was asked to read: a read path that stamps "
+        "`input_rows=` into legacy rows re-judges history one silent write at a time")
+
+    for key in (AUDIT_SEES, AUDIT_SEES_NONE):
+        state, detail = sv.evidence_cmd_status({"evidence_cmd": AUDIT_CMDS[key]})
+        assert state not in (sv.UNRUNNABLE, sv.EMPTY_INPUT), (key, state, detail)
+
+
+def test_the_mandate_is_taught_in_the_vault_before_it_is_enforced_in_code():
+    """Clause 5: a refusal nobody was taught is a bug report, not a convention.
+
+    Three assertions, one per surface the ruling had to reach, and the order matters more than
+    the wording: `nightly-skill-consolidation` Phase 0.6 is where a runbook authors its
+    `--evidence-cmd`, so the mandate is useless if it is not there; the two #2051 retirement
+    paragraphs in both templates used to state the OPPOSITE — "The ruling is owed-check's, not a
+    run's. Until it is made, publish the figure", and "mandating the field at `record` is #58's
+    Phase 0.6 ruling, not this stage's call" — and a stale pending sentence there now contradicts
+    code that refuses; `nightly-skills-management` is the other template that publishes
+    `undeclared` and has to describe the same rule in the same terms.
+
+    Each paragraph must ALSO keep publishing the figure with no target value: the mandate does
+    not make `undeclared` a fault, and a paragraph that quietly became a goal line would put a
+    target on a number only ageing can move. That is what the last assertion reads for.
+    """
+    cons = CONSOLIDATION_RUNBOOK.read_text(encoding="utf-8", errors="replace")
+    start = cons.index("**0.6 Authoring")
+    phase06 = cons[start:cons.index("## Phase 1:", start)]
+    assert "input_rows=" in phase06, (
+        "Phase 0.6 does not teach the field the mint now refuses without")
+    assert "input_rows=0" in phase06, (
+        "Phase 0.6 must distinguish the refused zero-input from an absence probe's zero")
+
+    retire_start = cons.index("**When the key retires (#2051).**")
+    retirement = cons[retire_start:cons.index("## Guardrails", retire_start)]
+    assert "mandatory at `record`" in retirement, (
+        "the retirement paragraph still states the ruling as pending while the code enforces it")
+    assert "no target" in retirement, retirement
+    assert "owed-check" in retirement, (
+        "the key's own retirement is still owed-check's; the paragraph must not claim otherwise")
+
+    mgmt = (Path.home() / "obsidian" / "skills" / "nightly-skills-management"
+            / "SKILL.md").read_text(encoding="utf-8", errors="replace")
+    assert "mandatory at `record`" in mgmt or "mandated now" in mgmt, (
+        "nightly-skills-management still describes the field as somebody else's pending call")
+    assert "input_rows=$(ls -1" in mgmt, (
+        "the mirror must carry the same two shapes the mandate teaches: a count of the input, "
+        "and an absence probe printing the rows it inspected")

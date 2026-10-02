@@ -669,6 +669,8 @@ def record_verdict(
     decided_by: str = "agent",
     source_candidate: str = "",
     decided_at: str | None = None,
+    *,
+    require_input_rows: bool = True,
 ) -> dict:
     """Append one decision. Never mutates an earlier line.
 
@@ -688,6 +690,20 @@ def record_verdict(
     so a correction appended without it cannot disarm the growth reopen (#736 clause 1).
     An explicit `0` is stored as given — `cmd_seed` passes one for a merged candidate
     whose units are not comparable with a one-bucket baseline.
+
+    The third refusal is the undeclared denominator (#2052): a command that ran, exited 0,
+    and printed no `input_rows=<N>` is refused too, because 0 of the live ledger's 109
+    latest-wins keys declared the field on 2026-10-02, which left #2048's zero-denominator
+    rail with nothing to read on any key and `audit` printing `undeclared 109` as a figure
+    it could only publish, never act on. Refusing at the mint is what makes the figure
+    fall, and it is keyed on rc 0 for the same reason EMPTY_INPUT is: a falsifier exiting
+    nonzero beside a printed count is the ledger answering no, not a vacuous success.
+    `require_input_rows=False` is for the mint paths where this module wrote the command
+    text itself — `cmd_repair`'s root-move substitution, its disposal tombstone, and
+    `cmd_seed`'s harvest grep — so nobody is refused over a field no author was ever asked
+    to write; those rows stay `undeclared` in `audit`, which is where the mandate keeps
+    counting them. It is keyword-only and unreachable from the CLI, so `record` cannot
+    talk itself out of the rule it is being refused by.
 
     The line lands in two trees (#772): the ledger, then the durable copy, which is
     seeded from the ledger first so a verdict recorded before the mirror existed is in
@@ -733,12 +749,17 @@ def record_verdict(
     # re-execution prints EVIDENCE_CMD_UNRUNNABLE (#1586: the write path was minting the
     # exact ledger state #1533 measures with `audit`). Refuse precisely what the ledger's
     # own readers already report, by asking that classifier rather than inventing a second
-    # rule — which costs a second execution of the check, because `evidence_cmd_status`
-    # needs the exit code and the whole stderr and `run_evidence` keeps only one line of
-    # one stream. That is bounded and cheap next to what it prevents: the live ledger's 170
-    # rows fall on 15 dates, busiest night 21, and every one of them is read by every later
-    # night for its full 60 days.
-    status_rc, status_detail = evidence_cmd_status({"evidence_cmd": evidence_cmd})
+    # rule — which costs a second execution of the check, because the classifier needs the
+    # exit code and the whole stderr and `run_evidence` keeps only one line of one stream.
+    # That is bounded and cheap next to what it prevents: the live ledger's 170 rows fall on
+    # 15 dates, busiest night 21, and every one of them is read by every later night for its
+    # full 60 days. `_run_stored_check` rather than its two-value wrapper `evidence_cmd_status`
+    # because the third value is the denominator parse, and the two rails below must decide
+    # from one read of one stream: an rc-0 command that prints its findings header before
+    # `input_rows=0` would be recorded by a mint reading only the first line while `audit`,
+    # scanning the whole stdout, would report the zero it was shown (#2052 clause 3 — one
+    # measurement, both sides).
+    status_rc, status_detail, declared = _run_stored_check({"evidence_cmd": evidence_cmd})
     if status_rc == UNRUNNABLE:
         raise ValueError(
             "evidence_cmd is UNRUNNABLE — it cannot run at all, so it falsifies nothing "
@@ -762,9 +783,34 @@ def record_verdict(
             f"evidence_cmd declares an empty input — it printed {status_detail!r} over "
             f"zero input rows, so it measured nothing and falsifies nothing: "
             f"{evidence_cmd!r}. Point it at the input it is meant to read, or record the "
-            "verdict without a claim that a check backs it. A command that prints no "
-            f"{INPUT_ROWS_FIELD} field at all still records exactly as before (#2048 "
-            "rails the state, it does not yet mandate the field)"
+            "verdict without a claim that a check backs it. Printing no "
+            f"{INPUT_ROWS_FIELD} field at all is now refused too, one guard below — the "
+            "silence and the declared zero are the same unusable evidence (#2052)"
+        )
+    if require_input_rows and status_rc == 0 and declared is None:
+        # The silence, and the reason #2048's rail could not do its job: a declared zero is a
+        # claim `audit` can tally and a repair can act on, while an absent field is nothing to
+        # read. Measured on the live ledger 2026-10-02: 109 latest-wins keys, 0 of them
+        # declaring `input_rows=` in either `evidence_cmd` or `evidence_observed`, so
+        # `audit` printed `denominators: empty_input 0 undeclared 109` with every one of those
+        # 109 re-executing at rc 0 — a rail over a denominator nobody publishes. Refuse the
+        # silence at the mint, where a command can still be written differently, and leave the
+        # 109 legacy rows alone: re-judging them is `audit`'s non-fault denominator, not a
+        # refusal it can retroactively issue (#2052 clause 4). Keyed on rc 0 for the same
+        # reason EMPTY_INPUT is — a falsifier exiting 1 beside its count is the ledger working,
+        # and requiring a declaration from the answer "no" would teach `check` to distrust a
+        # real falsification.
+        raise ValueError(
+            f"evidence_cmd declares no input count — it ran and exited 0 without printing an "
+            f"{INPUT_ROWS_FIELD}=<N> field, so no later run can tell a measurement taken over "
+            f"a real corpus from the same numbers printed over none: {evidence_cmd!r}. Print "
+            'the count beside the values it grounds — `echo "matched=3 '
+            f'{INPUT_ROWS_FIELD}=$(ls -1 "$DIR" | wc -l)"` — and an absence probe prints the '
+            f"inputs it inspected, not the empty listing, so its zero stays the visible claim "
+            f"EMPTY_INPUT refuses rather than an invisible one. `audit` has been publishing "
+            f"`undeclared` for a field nothing in the code or the convention asked for: 0 of "
+            f"the live ledger's 109 latest-wins keys declared {INPUT_ROWS_FIELD}= on "
+            f"2026-10-02 (#2052)"
         )
     row = {
         "pattern_key": pattern_key,
@@ -870,10 +916,12 @@ def declared_denominator(stdout: str) -> int | None:
     """What a command's stdout says about its own input: the count, or None for no claim.
 
     None is not zero. A command that declares nothing may well have read plenty — 109 of
-    the live ledger's latest-wins keys print a bare count tonight and are counted
-    `undeclared` by `audit`, not refused (#2048 leaves refusing them to a ruling on the
-    authoring convention, which lives in the vault skill). Zero is a claim: the command
-    saw no input, so whatever it printed next describes an empty set.
+    the live ledger's latest-wins keys print a bare count tonight and `audit` still counts
+    them `undeclared`, a non-fault denominator, because those rows are history and a later
+    read cannot refuse a decision already made. What changed on 2026-10-02 is the mint: the
+    ruling on the authoring convention was made, and `record_verdict` refuses to create a
+    new one of them (#2052), so the figure can only fall as keys get re-recorded. Zero is a
+    claim: the command saw no input, so whatever it printed next describes an empty set.
     """
     found = _INPUT_ROWS_RE.search(stdout or "")
     return int(found.group(1)) if found else None
@@ -1260,10 +1308,16 @@ def repair_verdicts(store: str | Path | None = None, *, dry_run: bool = False,
                 out["repaired"].append(key)
                 continue
             try:
+                # This module wrote `new_cmd`: it is the superseded command with one dead
+                # root replaced, so the field the #2052 mandate asks for is not this pass's
+                # to author — and refusing here would turn a repair into a `refused` entry
+                # and leave the key's falsifier pointing at the root retention moved. The
+                # row still lands `undeclared`, where `audit` keeps counting it.
                 record_verdict(store, pattern_key=key, verdict=row["verdict"],
                                reason=row["reason"], evidence_cmd=new_cmd,
                                occurrences=None, decided_by=REPAIR_DECIDED_BY,
-                               source_candidate=row.get("source_candidate") or "")
+                               source_candidate=row.get("source_candidate") or "",
+                               require_input_rows=False)
                 out["repaired"].append(key)
             except ValueError as exc:
                 out["refused"].append(f"{key} :: {exc}")
@@ -1293,12 +1347,20 @@ def repair_verdicts(store: str | Path | None = None, *, dry_run: bool = False,
         out["disposed"].append(key)
         if dry_run:
             continue
+        # The tombstone is this module's own template, and its whole claim is an absence:
+        # `dated_corpus_files=0` over a corpus retention pruned. Asking it to declare a
+        # denominator would put the #2048 EMPTY_INPUT rail and #1588's disposal in one
+        # argument — the disposal exists precisely because the input is gone — so the
+        # mandate is waived here and the row is published `undeclared` for `audit` to
+        # count. A re-anchor, whose command a person authors against a surviving artifact,
+        # is not waived: it reaches the mandate through `reanchor_verdict`.
         record_verdict(store, pattern_key=key, verdict=verdict,
                        reason=(f"{row['reason']} "
                                f"{DISPOSAL_NOTE.format(input=pinned, kept=kept)}"),
                        evidence_cmd=TOMBSTONE_TEMPLATE.format(input=pinned),
                        occurrences=None, decided_by=DISPOSE_DECIDED_BY,
-                       source_candidate=row.get("source_candidate") or "")
+                       source_candidate=row.get("source_candidate") or "",
+                       require_input_rows=False)
     # Carried in the returned tally, not only on `record_verdict`'s stderr, because this
     # pass is the writer that produced #1717: 79 appends, one tree, no line anywhere that a
     # nightly could have grepped. `single_tree_rows` is the count of rows this pass wrote
@@ -1551,12 +1613,14 @@ def cmd_audit(args: argparse.Namespace) -> int:
     and a reader can check the arithmetic. That is why the figure is a separate line and a
     separate exit: #2048's whole finding is that a ledger can be fully honoured on
     falsifiers that can no longer see their input while `unrunnable:` reads 0, and a
-    number that already covers the case cannot expose it. An undeclared denominator is not
-    a fault yet — 109 of the live ledger's keys are undeclared tonight, every one of them
-    recorded before the field existed, and refusing them at read time would quarantine a
-    ledger nobody authored wrongly. Making the field mandatory at `record` is a ruling on
-    the authoring convention, which lives in `nightly-skill-consolidation`'s Phase 0.6, not
-    a fact this function can decide alone.
+    number that already covers the case cannot expose it. An undeclared denominator is not a
+    fault at this surface and does not move the exit code — 109 of the live ledger's keys are
+    undeclared tonight, every one of them recorded before the field existed, and refusing
+    them at read time would quarantine a ledger nobody authored wrongly. The mandate landed
+    where it can still be obeyed instead: `record_verdict` refuses to mint a new one of them
+    (#2052), so this figure falls only as keys are re-recorded, and it is published here with
+    no target value attached — `nightly-skill-consolidation`'s Phase 0.6 states the
+    convention, and this line is what measures whether it is biting.
     """
     table = load_verdicts(store_path(args.store))      # latest-wins, the table check reads
     dead, empty_input, undeclared = [], [], 0
@@ -1798,6 +1862,11 @@ def cmd_seed(args: argparse.Namespace) -> int:
         raw = _STATUS_RE.search(head)
         reason = raw.group(1).strip() if raw else status
         reason = reason.split("—", 1)[1].strip() if "—" in reason else reason
+        # Same waiver as #1588's two machine-written mints, and for the same reason: the
+        # command below is this function's own template over one candidate file, so the
+        # denominator it would print is a constant `1` that can never fall to 0 and would
+        # buy the ledger a declaration that detects nothing. `audit` counts these rows
+        # `undeclared`, which is the honest tally of a bootstrapped ledger (#2052).
         record_verdict(
             store=args.store,
             pattern_key=key,
@@ -1807,6 +1876,7 @@ def cmd_seed(args: argparse.Namespace) -> int:
             occurrences=occurrences,
             decided_by="seed-from-candidates",
             source_candidate=file.name,
+            require_input_rows=False,
         )
         seeded += 1
         print(f"  seed: {key} -> {status}")

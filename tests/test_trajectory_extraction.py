@@ -2502,6 +2502,24 @@ def test_the_verdict_ledger_join_still_resolves_every_coarse_error_key():
 # ── live-data guard: one candidate per key over the real corpus ───────────────
 
 
+def mint_falsifier(tmp_path) -> str:
+    """A falsifier these three nodes mint as a stand-in, with the denominator #2052 mandates.
+
+    Their subject is the candidate's UNITS — a bucket count versus a stored baseline — and
+    none of them reads the falsifier, so its command used to be `python3 -c 'print(1)'`:
+    runnable, rc 0, and declaring nothing, which is precisely the shape the mint now refuses.
+    The count it declares is honest and checkable — the one file written here for the purpose,
+    via the form the vault convention teaches (the count of the INPUT, from `ls | wc -l`, not a
+    bare literal) — and it cannot be `input_rows=0`, because the file exists before the command
+    is ever run: a zero would put these nodes in #2048's `EMPTY_INPUT` instead.
+    """
+    probe_dir = tmp_path / "_falsifier_input"
+    probe_dir.mkdir(exist_ok=True)
+    (probe_dir / "one.md").write_text("signature\n", encoding="utf-8")
+    return (f'grep -c . {probe_dir / "one.md"}; rc=$?; '
+            f'echo "input_rows=$(ls -1 {probe_dir} | wc -l)"; exit $rc')
+
+
 def test_a_merged_key_does_not_reopen_on_growth_measured_in_other_units(tmp_path):
     """The >10x growth reopen compares a live count against a baseline the ledger
     recorded from ONE bucket's file (#530 seeded it before #515 merged buckets), so the
@@ -2516,7 +2534,7 @@ def test_a_merged_key_does_not_reopen_on_growth_measured_in_other_units(tmp_path
     sv = mt._verdicts_module()
     sv.record_verdict(store, pattern_key="Bash/logic",
                       verdict="rejected_false_positive", reason="one signature judged",
-                      evidence_cmd="python3 -c 'print(1)'", occurrences=1,
+                      evidence_cmd=mint_falsifier(tmp_path), occurrences=1,
                       decided_by="unit-test")
     merged = mt.merge_error_patterns([
         {"type": "error", "tool_name": "Bash", "error_type": "logic",
@@ -2573,7 +2591,7 @@ def test_the_verdict_checker_reads_a_merged_candidate_as_one_unit(tmp_path):
     sv = mt._verdicts_module()
     sv.record_verdict(store, pattern_key="Bash/logic",
                       verdict="rejected_false_positive", reason="one signature judged",
-                      evidence_cmd="python3 -c 'print(1)'", occurrences=1,
+                      evidence_cmd=mint_falsifier(tmp_path), occurrences=1,
                       decided_by="unit-test")
     merged = mt.merge_error_patterns([
         {"type": "error", "tool_name": "Bash", "error_type": "logic",
@@ -2615,7 +2633,7 @@ def test_a_one_bucket_candidate_still_reopens_the_checker_on_growth(tmp_path):
     sv = mt._verdicts_module()
     sv.record_verdict(store, pattern_key="Bash/logic",
                       verdict="rejected_false_positive", reason="small at decision",
-                      evidence_cmd="python3 -c 'print(1)'", occurrences=1,
+                      evidence_cmd=mint_falsifier(tmp_path), occurrences=1,
                       decided_by="unit-test")
     lone = {"type": "error", "tool_name": "Bash", "error_type": "logic",
             "params_signature": "cmd:prog0",
