@@ -617,3 +617,122 @@ def test_the_note_published_command_runs_over_the_vault_copy_and_prints_the_six_
                              capture_output=True, text=True)
         assert run.returncode == 0, run.stderr
         assert run.stdout.strip() == SIX_FIGURES, run.stdout
+
+
+# ── #2076: the helper's two views must answer the way the store answers ───────
+#
+# `_store_views_from` decides, inside this file, what `resolve()` and
+# `all_lower()` would answer, and the two witness nodes above run the shipped
+# predicate over those rebuilt views. Its docstring says the rebuild follows
+# "the semantics `app/kg_store.py` documents"; until this section nothing
+# checked that sentence. The node below does: seed a store through the store's
+# own alias write path, then require the model and the store to answer the same
+# thing for every spelling and every `surface_lc` the seed holds.
+
+#: The equivalence seed, spelled once. Three case variants share one
+#: `surface_lc` at three distinct `created_at`s and name two canonicals, so
+#: `resolve('Alpha')` answers the exact-case row while `all_lower()['alpha']`
+#: answers the oldest row — the divergence the watch counts, inside one group.
+#: `beta` / `Beta` is the mixed-origin group (`schema` + `sweep`) on one
+#: canonical, and `gamma` is a lone row: the uncontested case, so the node also
+#: proves the model matches where nothing is in dispute.
+_EQUIV_SEED = (
+    # surface, canonical, kind, origin, created_at (oldest first by intent)
+    ("alpha", "Alpha Entity", "case", "sweep", "2026-01-01T00:00:00+00:00"),
+    ("ALPHA", "Alpha Entity", "case", "migration", "2026-02-01T00:00:00+00:00"),
+    ("Alpha", "Bravo Entity", "semantic", "schema", "2026-03-01T00:00:00+00:00"),
+    ("beta", "Beta Widget", "case", "schema", "2026-01-05T00:00:00+00:00"),
+    ("Beta", "Beta Widget", "case", "sweep", "2026-02-05T00:00:00+00:00"),
+    ("gamma", "Gamma Index", "case", "sweep", "2026-01-09T00:00:00+00:00"),
+)
+
+
+def test_the_rebuilt_views_answer_every_surface_the_store_answers(db, monkeypatch):
+    """#2076: `_store_views_from` is checked against `app.kg_store`, not asserted.
+
+    Why the seed needs the clock and not just `aliases.set`: the store's only
+    alias writer (`set` at `app/kg_store.py:920`) stamps `created_at` from
+    `_now()` (`:177`) inside its insert at `:933-937` and takes no timestamp
+    argument, and the ordering this node is about IS `created_at`. So the monkey-
+    patch hands the write path the seed's stamps in row order and every row still
+    goes through the store's own write path — `_seed` is not used here precisely
+    because it lets the wall clock decide the order.
+
+    What the store's side of the comparison is: `resolve()` (`:905-919`) answers
+    the OLDEST row of the exact-case spelling when one exists and the oldest
+    case-insensitive match otherwise; `all_lower()` (`:991-992`) takes the oldest
+    row per `surface_lc`. Both are oldest-first, so a later case-variant row moves
+    `resolve()` and not the map. The map is read after seeding and after
+    `invalidate_caches()`, because it is memoised (`cached("alias_map_lower", …)`
+    at `:996`, keyed on `PRAGMA data_version` by `KGStore.cached` at `:316-325`)
+    and a read taken before the last write would be compared against a build that
+    never saw it.
+
+    The map comparison is one-directional over the seed's own `surface_lc` keys,
+    never full-dict equality: `all_lower()` also folds `entities.name_lc → name`
+    (`:993-995`), so the store's map is strictly larger than the model's by
+    design, and `assert model == store` would fail on entity self-identities
+    rather than on anything about aliases.
+
+    The seed is not vacuous, and the node says so twice. The row-order assert
+    pins the three `alpha` stamps the tie-break reads, so the node cannot go
+    quiet if the clock patch ever stops landing; and the disagreement assert
+    names the one seeded spelling where the two views answer differently —
+    `resolve('Alpha')` is Bravo Entity, `all_lower()['alpha']` is Alpha Entity —
+    which is the shape that makes a changed tie-break flip an answer instead of
+    re-printing the same canonical. Measured against the committed witness, that
+    shape is exactly what the witness does NOT have: with `oldest` flipped from
+    `min` to `max`, every `surface_lc` in the 190-row extract holds one canonical,
+    so no answer moves and both witness nodes stay green. This node is the one
+    that goes red."""
+    stamps = [row[4] for row in _EQUIV_SEED]
+    monkeypatch.setattr(kg_store, "_now", lambda: stamps.pop(0))
+    for surface, canonical, kind, origin, _when in _EQUIV_SEED:
+        db.aliases.set(surface, canonical, kind=kind, origin=origin)
+    assert stamps == [], \
+        f"the seeded clock was read {len(_EQUIV_SEED) - len(stamps)} of " \
+        f"{len(_EQUIV_SEED)} writes; unused stamps {stamps}"
+
+    rows = db.aliases.rows()
+    assert len(rows) == len(_EQUIV_SEED), \
+        f"`surface` is the PRIMARY KEY (`app/kg_store.py:100-109`) and `set` " \
+        f"upserts ON CONFLICT(surface) (`:934`), so a seed that silently " \
+        f"replaced a row would shrink this set: {len(rows)} rows"
+    by_lc_seed = sorted((r["surface"], r["created_at"], r["canonical"])
+                        for r in rows if r["surface_lc"] == "alpha")
+    assert by_lc_seed == [
+        ("ALPHA", "2026-02-01T00:00:00+00:00", "Alpha Entity"),
+        ("Alpha", "2026-03-01T00:00:00+00:00", "Bravo Entity"),
+        ("alpha", "2026-01-01T00:00:00+00:00", "Alpha Entity"),
+    ], "the tie-break's input order is not what this node reasons about"
+    assert {r["origin"] for r in rows if r["surface_lc"] == "beta"} == {"schema", "sweep"}, \
+        "the mixed-origin group is not mixed"
+
+    db.invalidate_caches()
+    model_resolve, model_lower = _store_views_from(rows)
+    store_lower = db.aliases.all_lower()
+
+    for row in rows:
+        surface = row["surface"]
+        assert model_resolve(surface) == db.aliases.resolve(surface), \
+            f"resolve({surface!r}): model {model_resolve(surface)!r} vs store " \
+            f"{db.aliases.resolve(surface)!r}"
+    # Each spelling's swapcase is a spelling NO row carries, so this leg walks
+    # the case-insensitive fallback in both sides rather than the exact-case
+    # branch the loop above already covers.
+    for row in rows:
+        spelled = row["surface"].swapcase()
+        assert model_resolve(spelled) == db.aliases.resolve(spelled), \
+            f"resolve({spelled!r}) (no row of that spelling): model " \
+            f"{model_resolve(spelled)!r} vs store {db.aliases.resolve(spelled)!r}"
+    for surface_lc in sorted({r["surface_lc"] for r in rows}):
+        assert model_lower[surface_lc] == store_lower[surface_lc], \
+            f"all_lower()[{surface_lc!r}]: model {model_lower[surface_lc]!r} vs " \
+            f"store {store_lower[surface_lc]!r}"
+
+    disagree = sorted(row["surface"] for row in rows
+                      if db.aliases.resolve(row["surface"])
+                      != store_lower[row["surface_lc"]])
+    assert disagree == ["Alpha"], \
+        f"the equivalence must be checked where the two orderings disagree; this " \
+        f"seed has {disagree}"
