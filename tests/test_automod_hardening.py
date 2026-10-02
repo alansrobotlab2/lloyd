@@ -1830,3 +1830,123 @@ def test_the_production_write_carries_the_axis_into_the_record(monkeypatch, tmp_
     assert "tool call" in refused and "turn count" in refused and "model decision" in refused
     assert captured["commit"] == "b" * 40 and captured["baseline_commit"] == "a" * 40, (
         "the axis arrived but the measurement it describes lost its subject")
+
+
+# ── the acknowledgement reaches the surfaces that land vault changes (#2050) ──
+#
+# #2049 built the ack INSIDE `scripts/automod/vault_round.land()`: the one
+# acknowledged excuse the code-agreement probe accepts, recorded loudly on the
+# `vault_land` row as `guards.ack.accepted` and `guards.excused`. It left the door
+# unreachable, though — the route has exactly two callers, the MCP handler and the
+# CLI, and neither could name the keyword. So the refresh that motivated the ack
+# (the rolling promotions mirror, whose row-count the agreement probe pins) stayed
+# impossible through the loop and possible only by hand outside it. The four nodes
+# below pin the two callers and the two ways each could be decorative.
+
+#: A rolling witness extract — the real case the ack was built for. Just a string
+#: here: every node below replaces the lander, so no vault is in reach.
+ACK_MIRROR = "backlog/data/promotions.jsonl"
+
+
+def _vault_land_input_schema():
+    """The `automod_vault_land` inputSchema as an MCP client receives it."""
+    import asyncio
+
+    import agent_mcp.automod as AM
+    tool = next(t for t in asyncio.run(AM.list_tools())
+                if t.name == "automod_vault_land")
+    return getattr(tool, "inputSchema", None) or tool.input_schema
+
+
+def test_the_vault_land_schema_offers_the_ack_without_moving_what_is_required():
+    """Clause 1. An `ack` the caller can never type is the same as no ack at all.
+
+    `required` staying exactly `["paths", "message"]` is the other half of the
+    clause: an ack promoted to required would make every ack-less land in the
+    ledger's history malformed, and the whole point of the door is that the
+    ordinary land does not use it.
+    """
+    schema = _vault_land_input_schema()
+    assert schema["required"] == ["paths", "message"], schema["required"]
+    ack = schema["properties"]["ack"]
+    assert ack["type"] == "array" and ack["items"]["type"] == "string", ack
+    # And nothing else crossed with it: the handler is not quietly given a way to
+    # point the probe at a tree, which is the hole #2036 closed.
+    assert set(schema["properties"]) == {"paths", "message", "item_id", "ack"}, (
+        sorted(schema["properties"]))
+
+
+async def test_an_acked_vault_land_crosses_the_mcp_dispatch_seam_to_the_lander(
+        monkeypatch, tmp_path):
+    """Clause 2 across the boundary that actually matters: the client's argument
+    dict, through `agent_mcp.main.call_tool`, into `land()`'s `ack` keyword.
+
+    `land()`'s own handling of the keyword is pinned elsewhere
+    (`test_automod_vault_round.py::
+     test_land_asks_the_probe_about_its_paths_and_the_ack_and_nothing_that_moves_it`,
+    which asserts the probe receives it), and nothing between the two existed. A
+    handler that read `arguments["paths"]` and forgot `arguments["ack"]` passed
+    every test written before this item, which is how #2049 shipped a parameter no
+    caller could reach.
+
+    The IV gate refuses the first turn of the session, so the first dispatch below
+    is the refusal and the second is the observed turn that reaches the handler —
+    the same shape as the sticky-refusal node above.
+    """
+    import inspect
+
+    from scripts.automod import vault_round as VR
+
+    bind = inspect.signature(VR.land).bind
+    seen: list = []
+    monkeypatch.setattr(VR, "land",
+                        lambda *a, **k: seen.append(bind(*a, **k).arguments)
+                        or {"sha": "not-landed"})
+    call = _dispatch_automod(monkeypatch, tmp_path, "s-ack-on")
+    args = {"paths": [ACK_MIRROR], "message": "refresh the witness", "ack": [ACK_MIRROR]}
+
+    first, is_error = await call("automod_vault_land", args, "turn-1")
+    assert is_error and "land a vault change" in first["error"], first
+    assert not seen, "the unobserved refusal still reached the lander"
+
+    out, is_error = await call("automod_vault_land", args, "turn-2")
+    assert not is_error, out
+    assert len(seen) == 1, seen
+    assert seen[0]["paths"] == [ACK_MIRROR], dict(seen[0])
+    assert seen[0]["message"] == "refresh the witness", dict(seen[0])
+    assert seen[0].get("ack") == [ACK_MIRROR], (
+        f"the ack never crossed the handler: {dict(seen[0])}")
+
+
+async def test_a_vault_land_with_no_ack_in_its_arguments_fabricates_nothing(
+        monkeypatch, tmp_path):
+    """Clause 3. No `ack` in the arguments means `land()` gets no `ack` keyword.
+
+    Asserted at the handler rather than at the probe, and the reason is that the
+    probe-side pin cannot see this bug: `land()` expands the ack as
+    `**({"ack": …} if ack else {})` (`scripts/automod/vault_round.py:881`), so a
+    handler that fabricated `ack=[]` still produces the pinned exactly-`{"paths"}`
+    probe call and reads as correct while putting an empty acknowledgement on the
+    route's ledger row. The keyword's ABSENCE is the property; the node named in the
+    docstring above keeps the downstream half, that a real ack reaches the probe.
+    """
+    import inspect
+
+    from scripts.automod import vault_round as VR
+
+    bind = inspect.signature(VR.land).bind
+    seen: list = []
+    monkeypatch.setattr(VR, "land",
+                        lambda *a, **k: seen.append(bind(*a, **k).arguments)
+                        or {"sha": "not-landed"})
+    call = _dispatch_automod(monkeypatch, tmp_path, "s-ack-off")
+    args = {"paths": [ACK_MIRROR], "message": "an ordinary land"}
+
+    await call("automod_vault_land", args, "turn-1")      # the refusal
+    out, is_error = await call("automod_vault_land", args, "turn-2")
+    assert not is_error, out
+    assert len(seen) == 1, seen
+    assert seen[0]["paths"] == [ACK_MIRROR], dict(seen[0])
+    assert "ack" not in seen[0], (
+        f"the handler invented an ack of {seen[0]['ack']!r}; an unacknowledged land "
+        "must make the call it made before the parameter existed")

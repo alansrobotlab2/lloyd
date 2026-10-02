@@ -802,6 +802,15 @@ async def list_tools() -> list[Tool]:
                     "message": {"type": "string", "description": "Commit message"},
                     "item_id": {"type": "integer",
                                 "description": "Backlog item this implements, if any"},
+                    # 45 characters, deliberately. Every character is billed on every chat and
+                    # worker turn: `tests/test_mcp_layer.py` caps the advertised catalog at
+                    # 22,500 estimated tokens and the catalog stood at 22,466 without this key,
+                    # whose bare `"ack":{"type":"array","items":…}` structure takes 14 of the
+                    # remaining 34. The mechanism — which nodes an ack speaks for, why an entry
+                    # naming an undeclared path is void — is in `vault_round.land`'s probe-call
+                    # comment and in `python -m scripts.automod.vault_round land --help`.
+                    "ack": {"type": "array", "items": {"type": "string"},
+                            "description": "Excuse a `paths` entry's witness-count change"},
                 },
                 "required": ["paths", "message"],
             },
@@ -912,6 +921,15 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             if gate:
                 return text_result(json.dumps(gate, indent=2))
             paths = [str(x) for x in (arguments.get("paths") or []) if str(x).strip()]
+            # `ack` is forwarded only when the caller actually named something, the same
+            # shape `vault_round.land` itself uses at its probe call (:881). Passing
+            # `arguments.get("ack")` straight through would hand the lander `None` or
+            # `[]` on every ordinary land, and the probe-side pin cannot see that:
+            # `if ack` drops a falsy value before the probe, so the exactly-`{"paths"}`
+            # call stays green while the row reads as though someone excused something.
+            # Pinned at this boundary by
+            # `tests/test_automod_hardening.py::test_a_vault_land_with_no_ack_in_its_arguments_fabricates_nothing`.
+            ack = [str(a) for a in (arguments.get("ack") or []) if str(a).strip()]
             # The turn's own session id, from the `_meta` the harness stamps — not
             # from `arguments`, which the caller controls. It is the attribution
             # that survives an omitted optional `item_id`, and 56 of the 172
@@ -922,7 +940,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             try:
                 out = VR.land(paths, str(arguments.get("message") or ""),
                               item_id=arguments.get("item_id"),
-                              session_id=str(_task_registry.current_session_id.get("") or ""))
+                              session_id=str(_task_registry.current_session_id.get("") or ""),
+                              **({"ack": ack} if ack else {}))
             except VR.VaultRoundError as exc:
                 return text_result(_err(str(exc)))
             out["note"] = ("Committed on the vault's main and live already — nothing "

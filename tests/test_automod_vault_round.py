@@ -3283,3 +3283,46 @@ def test_land_asks_the_probe_about_its_paths_and_the_ack_and_nothing_that_moves_
     V.land(["backlog/9-item.md"], "a land with no ack", item_id=10)
     assert set(seen) == {"paths"}, (
         f"an unacknowledged land changed the probe call: {sorted(seen)}")
+
+
+def test_the_cli_land_forwards_its_ack_flag_and_invents_none_without_it(monkeypatch):
+    """Clause 4: `--ack` is the human-driven half of the same door.
+
+    The MCP handler is the surface an autonomous round drives; the CLI is the one a
+    person at a terminal drives, and the land that needed the acknowledgement in the
+    first place — refreshing the rolling promotions mirror, whose row count the code
+    agreement probe pins — is the kind of one-off a human runs. A flag argparse never
+    declared makes the acknowledgement chat-only, so `land()`'s parameter stays
+    unreachable off the MCP path.
+
+    Both halves are here because the interesting failure is the second one: a
+    subparser that declares `--ack` and then forwards it unconditionally, so an
+    ordinary `land -m MSG PATH` sends `ack=None` or `ack=[]` and the row reads as
+    though somebody excused a change they did not name. Nothing reaches a real vault:
+    the lander is replaced, and `main()` only parses and calls it.
+    """
+    import inspect
+
+    bind = inspect.signature(V.land).bind
+    seen: list = []
+
+    def rec(*a, **k):
+        seen.append(bind(*a, **k).arguments)
+        return {"ok": True, "commit": "not-landed", "paths": list(a[0])}
+
+    monkeypatch.setattr(V, "land", rec)
+
+    rc = V.main(["land", "-m", "refresh the witness", "--ack", MIRROR_PATH, MIRROR_PATH])
+    assert rc == 0, "the acked land exited non-zero"
+    assert len(seen) == 1, seen
+    assert seen[0]["paths"] == [MIRROR_PATH], dict(seen[0])
+    assert seen[0]["message"] == "refresh the witness", dict(seen[0])
+    assert seen[0].get("ack") == [MIRROR_PATH], (
+        f"--ack never reached land(): {dict(seen[0])}")
+
+    seen.clear()
+    rc = V.main(["land", "-m", "an ordinary land", "backlog/9-item.md"])
+    assert rc == 0, "the ack-less land exited non-zero"
+    assert len(seen) == 1, seen
+    assert "ack" not in seen[0], (
+        f"an ack-less CLI land handed land() an ack of {seen[0]['ack']!r}")

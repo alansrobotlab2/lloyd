@@ -997,7 +997,16 @@ def main(argv=None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     a = sub.add_parser("validate"); a.add_argument("paths", nargs="+")
     b = sub.add_parser("land"); b.add_argument("-m", "--message", required=True)
-    b.add_argument("--item", type=int); b.add_argument("paths", nargs="+")
+    b.add_argument("--item", type=int)
+    # Repeatable, so `--ack` is a list the way the MCP tool's `ack` is a list, and it
+    # stays `None` when absent — argparse's `default=[]` would make every ordinary land
+    # look like a land that acknowledged something.
+    b.add_argument("--ack", action="append", metavar="PATH",
+                   help="Excuse PATH's witness-count change (repeatable). PATH must be one of "
+                        "the paths being landed — an entry naming anything else is recorded and "
+                        "void. The code agreement probe excuses only the test nodes that read "
+                        "the named file, and records the whole exchange on the vault_land row.")
+    b.add_argument("paths", nargs="+")
     c = sub.add_parser("revert"); c.add_argument("sha"); c.add_argument("--reason", default="manual")
     args = ap.parse_args(argv)
     try:
@@ -1006,7 +1015,14 @@ def main(argv=None) -> int:
             print(json.dumps({"ok": not errors, "errors": errors, "buckets": buckets}, indent=2))
             return 0 if not errors else 1
         if args.cmd == "land":
-            print(json.dumps(land(args.paths, args.message, item_id=args.item), indent=2))
+            # Same conditional as the MCP handler (`agent_mcp/automod.py`) and for the
+            # same reason: an absent `--ack` must reach `land` as no keyword at all, so
+            # the lander's probe call is byte-identically the one it made before the
+            # parameter existed. Pinned by
+            # `tests/test_automod_vault_round.py::test_the_cli_land_forwards_its_ack_flag_and_invents_none_without_it`.
+            ack = [str(a) for a in (args.ack or []) if str(a).strip()]
+            print(json.dumps(land(args.paths, args.message, item_id=args.item,
+                                  **({"ack": ack} if ack else {})), indent=2))
             return 0
         print(json.dumps(revert(args.sha, args.reason), indent=2))
         return 0
