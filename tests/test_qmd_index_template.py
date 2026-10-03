@@ -11,11 +11,16 @@ session exports really are and where ~650 indexed documents were being served, a
 `facts` was dropped. Following SETUP.md's install direction during that window
 retargeted a live collection at an empty directory (#1298).
 
-The reconciliation #1298 wrote as a patch (`agent-services/**` and `SETUP.md`
-are outside what a round may land) was applied by hand on 2026-09-22, together
-with the data-home move that put both checkout-rooted collections under
-`~/lloyd-data` (`architecture/data-home.md`). These tests read the files as
-they now stand.
+The reconciliation #1298 wrote as a patch was applied by hand on 2026-09-22,
+together with the data-home move that put both checkout-rooted collections under
+`~/lloyd-data` (`architecture/data-home.md`). It could not have been landed by a
+round: at that point `agent-services/**` was outside the writable set entirely.
+#2136 admitted this one file — the tracked template and nothing else beside it,
+so `livekit.yaml` and the untracked 0600 `livekit.yaml.runtime` in the same
+directory are still a human's, and the daemon's own file is outside the repo and
+reaches nobody — which is what makes the next drift a round's job instead of a
+ten-day wait for a person (the 09-19 to 09-28 gap #1652 eventually closed). These
+tests read the files as they now stand.
 """
 import re
 from pathlib import Path
@@ -182,3 +187,66 @@ def test_the_drift_check_names_a_collection_the_daemon_dropped(tmp_path):
     out = config_drift(tmpl, _live_like(tmp_path, colls, drop=("memory",)))
     assert [d["collection"] for d in out["drift"]] == ["memory"], out
     assert out["drift"][0]["kind"] == "template_only"
+
+
+# --- the #2136 grant: what a round may now rewrite, and what it still may not --
+
+GRANTED_TEMPLATE = "agent-services/conf/qmd-index.yml"
+
+
+def test_the_file_a_round_may_now_rewrite_is_the_one_the_drift_check_reads():
+    """#2136: the grant, the check's template side and the printed re-sync name
+    one path, and the live file stays outside all three.
+
+    #1301's owed decision 2 widened `ALLOWED_GLOBS` by exactly this one file so
+    that the report's own prescription becomes a round's job. A grant aimed at a
+    lookalike buys nothing, so the three names have to be one string: the entry
+    spec.py admits, the file `config_drift` compares from, and the destination of
+    the `cp` the nightly report prints. All three are read from their modules
+    rather than restated, so a `REPO_ROOT` derivation that moved (`qmd_index_maintenance.py:150`,
+    `parents[2]` of its own `__file__`) or a re-pointed `RESYNC_COMMAND` goes red
+    here instead of leaving a round to land a reconcile nobody reads.
+
+    The fourth assertion is the grant's boundary: `LIVE_CONFIG` is
+    `~/.config/qmd/index.yml` (:152), outside the repo, so admitting the tracked
+    half cannot make the daemon's file writable and the direction stays
+    live -> template.
+
+    Drift itself is *measured* at this head — `comparable: True, drift: [],
+    in_sync: True` against this box's live file, which is why the facts drift of
+    2026-09-19 to 09-28 is not in this file's future — but deliberately not
+    asserted. `config_drift` is "a report entry and never an exit code" (:85-86,
+    restated :889) by design, and the failure mode a hard assert would install is
+    worse than the one it would catch: the live file is edited by hand, drift sat
+    non-empty for ten days last time, and a red node here would refuse *every*
+    round in the loop over a stale copy of a doc file — the exact outcome that
+    rule exists to prevent. What the suite does hold a rewrite to is everything
+    checkable without the live file: `test_the_patched_setup_md_accounts_for_every_collection_the_template_defines`
+    (SETUP.md must still describe exactly the collections the template defines) and
+    `test_the_dropped_facts_collection_stays_dropped` (14 collections, no `facts`).
+    The comparable assertion below is the denominator control: it fails if either
+    side stops being readable, because a drift check that compared nothing would
+    otherwise report zero drift forever.
+    """
+    from scripts.automod import spec
+    from scripts.maintenance import qmd_index_maintenance as qm
+
+    rel = TEMPLATE.relative_to(ROOT).as_posix()
+    assert rel == GRANTED_TEMPLATE
+    assert spec.classify(rel) == "allowed", (
+        "the file this file guards is not writable by a round, so the drift report "
+        "is still a human's errand and #1301's decision did not land")
+    assert qm.TEMPLATE_CONFIG == TEMPLATE, (
+        f"the drift check compares {qm.TEMPLATE_CONFIG}, not the granted "
+        f"{TEMPLATE} — two different files, so the grant protects nothing")
+    assert qm.RESYNC_COMMAND.split()[-1] == GRANTED_TEMPLATE, qm.RESYNC_COMMAND
+    assert qm.RESYNC_DIRECTION.startswith("live -> template"), qm.RESYNC_DIRECTION
+    assert qm.RESYNC_COMMAND in _collections_section(SETUP.read_text()), (
+        "the command a round can now run is not the command SETUP.md prescribes")
+    assert not qm.LIVE_CONFIG.is_relative_to(ROOT), (
+        f"{qm.LIVE_CONFIG} moved inside the repo, where a grant over the tracked "
+        f"half reaches it — the live file being unreachable is what keeps the "
+        f"reconcile one-directional")
+    out = qm.config_drift()
+    assert out.get("comparable") is True, out
+    assert out["resync_command"].split()[-1] == GRANTED_TEMPLATE, out

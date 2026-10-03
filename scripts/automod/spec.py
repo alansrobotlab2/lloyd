@@ -98,6 +98,24 @@ ALLOWED_GLOBS: tuple[str, ...] = (
     # and restarting `agent-tts` stays a human action (SETUP.md); this entry
     # only makes the tracked half of that fix landable by a round.
     "agent-services/services/tts/qwen3-tts-local.patch",
+    # #1301 / #1298 (2026-10-03): the tracked qmd collection template, one
+    # verbatim path again and not `agent-services/conf/**` — that directory also
+    # holds the tracked `livekit.yaml` and `livekit.yaml.runtime`, the 0600
+    # live-credentials copy `.gitignore:95` keeps out of the index, so a
+    # directory grant would widen a secret-bearing launcher config to buy one
+    # text file. Admitted for the reason the two above do not share: the guard on
+    # a stale template is a report, not a wall. The nightly check compares this
+    # file with the config the daemon reads and records drift as "a report entry
+    # and never an exit code"
+    # (scripts/maintenance/qmd_index_maintenance.py:85-86, restated at :889),
+    # then prints `cp ~/.config/qmd/index.yml agent-services/conf/qmd-index.yml`
+    # (:156) for a person to run — and the `facts` drift sat reported-but-unfixed
+    # for ten days, 2026-09-19 to 09-28, because no round could run it. What this
+    # entry does NOT buy: the live file is outside the repo and stays unreachable,
+    # so the direction stays live -> template, and once the tracked half is
+    # writable the only thing between a bad rewrite and a stale contract is
+    # tests/test_qmd_index_template.py.
+    "agent-services/conf/qmd-index.yml",
     "web/src/**",
     "web/index.html",
     "web/public/**",

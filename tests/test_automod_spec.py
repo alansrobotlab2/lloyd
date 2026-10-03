@@ -760,9 +760,9 @@ def test_the_verdicts_these_rails_pin_are_the_ones_another_interpreter_prints():
     holding only inside the pytest process would certify a widening the gate
     never sees. Same construction as
     `test_a_second_interpreter_reaches_the_same_verdict_as_rung_0`, on the paths
-    this section owns: the child's verdicts must equal the parent's, so the test
-    stays green whichever way a later widening moves them and red only if the two
-    interpreters disagree.
+    this section owns plus the three the #2136 grant made load-bearing: the
+    child's verdicts must equal the parent's, so the test stays green whichever
+    way a later widening moves them and red only if the two interpreters disagree.
     """
     universe = tracked_agent_services_paths() + list(AGENT_SERVICES_GLOB_PROBES)
     probe = (
@@ -771,7 +771,14 @@ def test_the_verdicts_these_rails_pin_are_the_ones_another_interpreter_prints():
         "print(spec.classify('agent-services/livekit_worker.py')); "
         "print(spec.classify('agent-services/models/wakeword/hey_lloyd.onnx')); "
         "print(spec.classify('scripts/automod/spec.py')); "
-        "print(len([p for p in sys.argv[1:] if spec.classify(p) == 'allowed']))"
+        "print(len([p for p in sys.argv[1:] if spec.classify(p) == 'allowed'])); "
+        # #2136 added these three: the reconcile diff this grant exists to make
+        # landable has exactly one path, so it is the one verdict in this section
+        # that the gate's own interpreter has to agree on before that round gets a
+        # tests rung at all.
+        "print(spec.classify('agent-services/conf/qmd-index.yml')); "
+        "print(spec.classify('agent-services/conf/livekit.yaml')); "
+        "print(spec.classify('agent-services/conf/livekit.yaml.runtime'))"
     )
     out = subprocess.run([sys.executable, "-c", probe, *universe], cwd=REPO_ROOT,
                          capture_output=True, text=True, timeout=120)
@@ -781,6 +788,12 @@ def test_the_verdicts_these_rails_pin_are_the_ones_another_interpreter_prints():
     assert lines[1] == spec.classify("agent-services/models/wakeword/hey_lloyd.onnx"), out.stdout
     assert lines[2] == "protected", out.stdout
     assert int(lines[3]) == len([p for p in universe if spec.classify(p) == "allowed"]), out.stdout
+    assert lines[4] == spec.classify(QMD_TEMPLATE) == "allowed", (
+        f"the interpreter that will grade rung 0 reads the template as {lines[4]!r}: "
+        f"the tuple in this tree is not the tuple the gate reads, so the "
+        f"reconcile round #2136 exists for dies at preflight")
+    assert lines[5] == spec.classify("agent-services/conf/livekit.yaml") == "unlisted", out.stdout
+    assert lines[6] == spec.classify("agent-services/conf/livekit.yaml.runtime") == "unlisted", out.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -960,8 +973,16 @@ def test_the_tts_grant_moves_exactly_one_tracked_agent_services_verdict(monkeypa
     assert sorted(p for p in corpus if before[p] != after[p]) == [TTS_PATCH]
     assert (before[TTS_PATCH], after[TTS_PATCH]) == ("unlisted", "allowed")
     allowed_after = {p for p in after if after[p] == "allowed"}
-    assert allowed_after == {TTS_PATCH, "agent-services/livekit_worker.py"}, (
-        f"the named grants over tracked agent-services paths are exactly the two "
+    # #2136 added the third name, the qmd collection template, exactly as the
+    # message below instructs: a verbatim grant is a legitimate edit, and the rail
+    # that decides legality is `agent_services_paths_admitted_without_being_named()`
+    # — which this round's own node
+    # (`test_the_qmd_grant_moved_exactly_one_classification`) calls with the entry
+    # shipped. `pre` above strips only TTS_PATCH, so the before/after diff this
+    # node computes is still exactly one path: the qmd entry is in both tuples.
+    assert allowed_after == {TTS_PATCH, "agent-services/livekit_worker.py",
+                             QMD_TEMPLATE}, (
+        f"the named grants over tracked agent-services paths are exactly the three "
         f"this node pins; found {sorted(allowed_after)}. A new verbatim grant is "
         f"a legitimate edit — add its path to this pin, and check it against "
         f"`agent_services_paths_admitted_without_being_named()`, which is the "
@@ -1064,3 +1085,164 @@ def test_the_rung_0_refusal_this_item_quotes_has_committed_witness_bytes():
         assert raw == WITNESS_SOURCE.read_text(), (
             "the committed witness and the state-dir artefact have come apart, "
             "so neither one is the witness any more")
+
+
+# ---------------------------------------------------------------------------
+# #2136: the qmd collection template grant — one path, and the drift it buys
+# ---------------------------------------------------------------------------
+#
+# `agent-services/conf/qmd-index.yml` is the hand-maintained copy of the config
+# the qmd daemon reads. Nothing enforces the two agreeing: the nightly check
+# compares them and records the answer as "a report entry and never an exit
+# code" (`scripts/maintenance/qmd_index_maintenance.py:85-86`, restated at :889),
+# then prints `cp ~/.config/qmd/index.yml agent-services/conf/qmd-index.yml`
+# (:156) for a person to run. That is why the 2026-09 `facts` drift sat reported
+# but unfixed from 09-19 to 09-28 (#1298, closed by #1652's `72112b77`) — not
+# because nobody saw it, but because the only writer of the tracked half was a
+# human. #1301's owed decision 2 asked whether to widen `ALLOWED_GLOBS` and
+# ruled the `SETUP.md` half already code, `agent-services/conf/**` illegal under
+# #1376 clause 1, and this one verbatim path the surviving residue.
+
+#: The granted path: the reconcile diff is this file and nothing else.
+QMD_TEMPLATE = "agent-services/conf/qmd-index.yml"
+
+#: What else lives in that directory. Two of these exist on disk and one does
+#: not: `livekit.yaml` is tracked, `livekit.yaml.runtime` is the 0600
+#: live-credentials copy `.gitignore:95` keeps out of the index — a diff of it
+#: would be unreviewable, which is half of why a directory grant is refused — and
+#: `probe.yml` is #1376's probe for a conf file nobody has written yet.
+QMD_TEMPLATE_SIBLINGS: tuple[str, ...] = (
+    "agent-services/conf/livekit.yaml",
+    "agent-services/conf/livekit.yaml.runtime",
+    "agent-services/conf/probe.yml",
+)
+
+
+def test_the_qmd_template_grant_is_one_exact_path_and_no_shape():
+    """#2136 clause 1: the entry is that path, and no grant reaching it is a shape.
+
+    `classify` is the verdict rung 0 records and `check_scope` is the call it makes
+    (`gate.py:1381`), so the third assertion is the reconcile diff itself —
+    `cp live -> template` touches exactly this one file — coming back in scope with
+    an empty `unlisted` bucket and no guardian drill. At the round's base the same
+    call bucketed it `unlisted: ['agent-services/conf/qmd-index.yml']` and refused
+    the round at preflight, which is the state #1301 recorded as human-only.
+
+    The `_match` half is what makes this a test of the clause rather than of a
+    literal this file wrote: an entry spelled `agent-services/conf/*` satisfies
+    `classify` on the template AND admits `livekit.yaml` plus the 0600
+    `livekit.yaml.runtime`, because fnmatch's `*` crosses `/` (the matcher rung 0
+    uses is `spec._match`, spec.py:188-198). Asking the tuple which entries reach
+    the path turns that red while leaving
+    `classify` green, which is the gap the #1376 rail exists to close.
+    """
+    assert QMD_TEMPLATE in spec.ALLOWED_GLOBS
+    assert spec.classify(QMD_TEMPLATE) == "allowed"
+    ok, reason, buckets = spec.check_scope([QMD_TEMPLATE])
+    assert (ok, reason) == (True, "in scope"), (ok, reason, buckets)
+    assert not buckets["unlisted"] and not buckets["protected"], buckets
+    assert spec.requires_drill([QMD_TEMPLATE]) is False, (
+        "a one-file config reconcile must not buy a guardian drill")
+    reaching = [g for g in spec.ALLOWED_GLOBS if spec._match(QMD_TEMPLATE, (g,))]
+    assert reaching == [QMD_TEMPLATE], (
+        f"the template is admitted by {reaching}: only a verbatim entry is legal "
+        f"under #1376 clause 1, and a wildcard here reaches its siblings too")
+
+
+@pytest.mark.parametrize("path", QMD_TEMPLATE_SIBLINGS)
+def test_every_sibling_of_the_qmd_template_stays_outside_the_writable_set(path):
+    """#2136 clause 2, asked twice of each sibling: the verdict, and the grant.
+
+    Red the moment the entry is widened. `agent-services/conf/*` makes all three
+    `allowed` — that is the harm the entry refuses rather than the shape of it:
+    `livekit.yaml` is tracked launcher config no round has business editing, and
+    `livekit.yaml.runtime` holds live credentials at mode 0600, outside the index,
+    so no diff of it is reviewable by any rung. `probe.yml` is the case the
+    on-disk pair cannot cover: a file added tomorrow under a directory some later
+    entry globbed.
+    """
+    assert spec.classify(path) == "unlisted", (
+        f"{path} became writable as collateral of the #2136 grant")
+    assert [g for g in spec.ALLOWED_GLOBS if spec._match(path, (g,))] == [], (
+        f"an ALLOWED_GLOBS entry reaches {path}; the grant was one path")
+
+
+def test_the_qmd_grant_moved_exactly_one_classification():
+    """#2136 clause 3: the rails that bound a widening stay green, executed, and
+    exactly one path's verdict moved.
+
+    The rails are called, not restated — `test_only_a_verbatised_path_under_agent_services_may_be_admitted`
+    is #1376 clause 1 as a property over every tracked `agent-services/` file plus
+    the five probes, and it is the assertion that fires if this grant is ever
+    re-spelled as a directory. Then the count: the granted file must appear in the
+    `allowed` set (a grant that silently stopped applying reads to the corpus as
+    "nothing changed", which is the vacuity direction this whole section has to
+    guard as carefully as the widening direction), every allowed path must be named
+    verbatim, and the conf slice must contain exactly one entry.
+    """
+    test_only_a_verbatised_path_under_agent_services_may_be_admitted()
+    corpus = tracked_agent_services_paths() + list(AGENT_SERVICES_GLOB_PROBES)
+    allowed = sorted(p for p in corpus if spec.classify(p) == "allowed")
+    assert QMD_TEMPLATE in allowed, (
+        "the template is not `allowed` anywhere in the corpus this rail reads, so "
+        "the assertions below about 'nothing else moved' would be vacuously true")
+    verbatim = {g for g in spec.ALLOWED_GLOBS if "*" not in g}
+    assert [p for p in allowed if p not in verbatim] == []
+    assert [p for p in allowed if p.startswith("agent-services/conf/")] == [QMD_TEMPLATE]
+    conf = [p for p in corpus if p.startswith("agent-services/conf/")]
+    assert "agent-services/conf/probe.yml" in conf, (
+        "the corpus stopped containing the conf probe, so the line above guards "
+        "an empty set")
+    unlisted = [p for p in tracked_agent_services_paths()
+                if spec.classify(p) == "unlisted"]
+    assert len(unlisted) >= 70, (
+        f"{len(unlisted)} tracked agent-services paths still unlisted, below the "
+        f"70 the #1376 rail is sized on")
+    models = [p for p in tracked_agent_services_paths()
+              if p.startswith("agent-services/models/")]
+    assert models and [p for p in models if spec.classify(p) == "allowed"] == []
+
+
+def test_the_reconcile_diff_clears_scope_in_an_interpreter_that_imported_the_tuple():
+    """The boundary this grant exists to cross: a scope verdict made by a process
+    that never ran this test, importing `spec` from a checkout.
+
+    Every assertion above is evaluated inside the pytest process, whose `spec`
+    arrived through this file's `sys.path.insert` (:31) — so all of them would keep
+    passing on an entry that reached only an already-imported module and not a
+    fresh import of the file. Rung 0 is that other kind of process: the gate ladder
+    is spawned detached (`round.py:642`) and its preflight calls
+    `spec.check_scope(changed, contents=…)` (`gate.py:1381`) on a `spec` it imported
+    itself. So ask a fresh interpreter the same question about the exact diff a
+    reconcile round commits — the template plus the test that covers the reconciled
+    bytes — and require an equality with the parent rather than a hard-coded
+    verdict, plus one concrete pin (`in scope`, nothing unlisted, no drill), because
+    an equality between two readings of the same wrong tuple would otherwise be
+    vacuously true.
+
+    The narrower claim is deliberate. The gate's own interpreter runs with
+    `cwd=LIVE_ROOT` and therefore reads the *live* tree's tuple, which cannot
+    contain this entry until it lands — the reason `scripts/automod/spec.py` is
+    `protected` and drilled rather than merely allowed, and the reason this node
+    pins a checkout import rather than pretending to grade the gate's process.
+    """
+    probe = (
+        "from scripts.automod import spec; "
+        "print(spec.check_scope(['agent-services/conf/qmd-index.yml', "
+        "'tests/test_qmd_index_template.py'])[0:2]); "
+        "print(sorted(spec.check_scope(['agent-services/conf/qmd-index.yml', "
+        "'tests/test_qmd_index_template.py'])[2]['allowed'])); "
+        "print(spec.requires_drill(['agent-services/conf/qmd-index.yml', "
+        "'tests/test_qmd_index_template.py']))"
+    )
+    out = subprocess.run([sys.executable, "-c", probe], cwd=REPO_ROOT,
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    lines = out.stdout.strip().splitlines()
+    parent = spec.check_scope(["agent-services/conf/qmd-index.yml",
+                              "tests/test_qmd_index_template.py"])
+    assert lines[0] == repr(parent[0:2]) == "(True, 'in scope')", (lines[0], parent)
+    assert lines[1] == repr(sorted(parent[2]["allowed"])), lines[1]
+    assert lines[2] == "False", lines[2]
+    assert sorted(parent[2]["allowed"]) == [QMD_TEMPLATE,
+                                            "tests/test_qmd_index_template.py"], parent
