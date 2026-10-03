@@ -397,6 +397,42 @@ def test_a_date_stamped_nightly_artifact_is_one_step_across_days():
     assert sc.normalized_basename("/p/knowledge-handoff-2026-09-21.md") == "knowledge-handoff-<date>.md"
 
 
+def test_an_unexpanded_shell_substitution_in_a_redirect_target_names_no_artifact():
+    """Clause 1 of #2104: a captured path still carrying an unexpanded shell construct is a
+    truncated capture, not an artifact. `REDIRECT_RE` cannot express quoting, so the capture of
+    a redirect into `"/tmp/preflight-$(date +%F).md"` stops at the first space *inside* the
+    substitution and comes back `/tmp/preflight-$(date` — the step `write:preflight-$(date`,
+    printed with the quote left beside it. Measured on the 14-day live replay of 2026-10-03:
+    that one name carried 4 of the 22 deviations over 3,783 scored runs, and task 38's learned
+    `expected_steps` contained it, so every run of that task was flagged against an artifact
+    nothing ever wrote. The trace proves a file was written; it does not prove which one."""
+    steps = sc.steps_from_tools(
+        [_tool("Bash", command="echo hi > /tmp/preflight-$(date +%F).md", seq=1)]
+    )
+    assert steps == ["tool:Bash"]
+    assert sc.normalized_basename("/tmp/preflight-$(date +%F).md") == ""
+    assert sc.normalized_basename("/tmp/preflight-$(date") == ""
+
+
+def test_the_shell_token_reject_drops_the_truncated_capture_and_nothing_else():
+    """The reject is a truncation test, not a ban on punctuation, and the difference is what
+    keeps the learned set from silently shrinking: a balanced paren is a real filename, and a
+    variable *directory* still leaves a basename that names the artifact. What goes is a
+    substitution marker the capture never closed, or a grouping bracket left unbalanced by a
+    capture that ran off the inside of a subshell."""
+    assert sc.normalized_basename("/tmp/report(1).md") == "report(1).md"
+    assert sc.normalized_basename("/tmp/report(1.md") == ""
+    assert sc.normalized_basename("${OUT}/knowledge-handoff-2026-09-20.md") == (
+        "knowledge-handoff-<date>.md"
+    )
+    assert sc.normalized_basename("${OUT%%/x") == ""  # `${` never closed: still a fragment
+    assert sc.normalized_basename("/tmp/log-`date`.md") == ""
+    via_shell = sc.steps_from_tools(
+        [_tool("Bash", command="echo x | tee /tmp/report(1).md", seq=1)]
+    )
+    assert "write:report(1).md" in via_shell
+
+
 def test_an_error_free_trace_keeps_call_order_and_drops_a_generic_target():
     steps = sc.steps_from_tools(
         [

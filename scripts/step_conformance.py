@@ -17,7 +17,12 @@ Two rules this deliberately does NOT do:
 * **It does not alert.** It emits reports; wiring them to a surface is a human decision
   (#673's own "do not alert yet", and the guardian's record that every rollback so far was
   a false positive). There is no mail, HTTP or notification import in this file on purpose,
-  and `tests/test_step_conformance.py` pins that.
+  and `tests/test_step_conformance.py` pins that. The one escalation #2104 clause 4 added is
+  opt-in (`replay --escalate-writes`) and is not an alert either: it files a backlog **draft**
+  — a queue entry a human adjudicates — for a flagged run that never wrote an artifact every
+  other run of its task wrote, and it is the only third store this module may ever write. The
+  flag is off by default, so a replay nobody asked to escalate still writes nothing anywhere
+  (`tests/test_step_conformance_escalation.py::test_replay_without_the_flag_files_nothing`).
 * **It does not re-implement the dependency gate.** That is #558's decision, live at
   `app/autonomy.py::_is_dependency_met`. Where the 09-08 inversion shows up here it shows up as
   a *missing consumption step in a trace* — the structural signature — never as a verdict
@@ -117,16 +122,44 @@ READ_TOOLS = {"Read", "vault_read", "Grep", "Glob", "note_read"}
 # Basenames that name nothing: a trace that "wrote" one of these proved nothing, and the
 # first pass over live data produced a `write:null` expected step out of exactly one.
 GENERIC_BASENAMES = {"", "null", "none", "dev", "stdout", "stderr", "input", "output"}
+# The constructs that make a capture a fragment rather than a path — see
+# `_unclosed_shell_word`, which is the only reader and states the measured case. A *closed*
+# expansion (`${OUT}`, `$VAR`) is not in here on purpose: an unexpanded variable directory still
+# leaves a basename that names the artifact, and rejecting those would shrink the learned set.
+SHELL_TOKEN_RE = re.compile(r"\$\(|`|\$\{[^}]*\Z")
 
 
 def _expand(path) -> Path:
     return Path(os.path.expandvars(str(path))).expanduser()
 
 
+def _unclosed_shell_word(text: str) -> bool:
+    """True when a captured string is not a complete shell word.
+
+    `REDIRECT_RE` ends a capture at whitespace, `;`, `&`, `|`, a backtick or a quote — it cannot
+    express quoting, so a redirect into a quoted path whose name contains a substitution is
+    captured up to the first space *inside* that substitution. What comes back is therefore a
+    fragment that still carries an open construct: `$(…` with no `)`, `${…` with no `}`, a lone
+    backtick, or a `(` left unbalanced. Measured on the 14-day live replay of 2026-10-03, the
+    family is exactly one name — `write:preflight-$(date`, from `echo hi >
+    "/tmp/preflight-$(date +%F).md"` — 4 of the 22 deviations over 3,783 scored runs, sitting in
+    task 38's learned `expected_steps` so every run of that task was flagged against an artifact
+    nothing ever wrote."""
+    return bool(SHELL_TOKEN_RE.search(text)) or text.count("(") != text.count(")")
+
+
 def normalized_basename(raw) -> str:
-    """Basename of a path-ish value, with a date stamp elided so a nightly file is one step."""
+    """Basename of a path-ish value, with a date stamp elided so a nightly file is one step.
+
+    Empty for a name that is not a name: a value in `GENERIC_BASENAMES`, and a capture that is
+    not a complete shell word (#2104 clause 1, `_unclosed_shell_word`). The test is on the whole
+    captured word rather than the basename, because a truncation in the directory part means the
+    shell never wrote the path the basename appears to name; a *closed* expansion is not a
+    truncation, so `${OUT}/knowledge-handoff-2026-09-20.md` still contributes
+    `knowledge-handoff-<date>.md` — banning `$` outright would shrink the learned set in silence.
+    """
     text = str(raw or "").strip().strip("\"'")
-    if not text:
+    if not text or _unclosed_shell_word(text):
         return ""
     base = os.path.basename(text.rstrip("/"))
     return DATE_RE.sub("<date>", base)
@@ -992,6 +1025,192 @@ def _hash_inputs(paths) -> dict:
     return out
 
 
+# ---------------------------------------------------------------------------
+# The one escalation (#2104 clause 4): a missing *written* artifact files a draft
+# ---------------------------------------------------------------------------
+#
+# Why it exists: the detector shipped as a report, and a report nobody reads every morning is
+# an undetected failure. Why it is a draft and not an alert: every rollback on the guardian's
+# record was a false positive, so the surface has to be a queue entry a human adjudicates at
+# their desk rather than one that pages anybody — and `draft` is the status the autocode loop
+# never reads, which is the difference between queueing a judgement and queueing work nobody
+# made.
+#
+# Which deviations qualify, measured on the 14-day live replay of 2026-10-03 (11 flagged runs,
+# 22 deviations). A missing `write:` is the only one of the three step kinds that proves a stage
+# did not happen, because it names an artifact that does not exist. A missing `tool:` is one
+# call replaced by another, which is legal and common — `tool:TodoWrite` alone is 11 of those 22
+# deviations, so escalating it would file on 9 of the 11 flagged runs. A missing `read:` is the
+# same shape one step over: a read is evidence of *how* a stage ran, not that it ran, and task
+# 42's live `expected_steps` that day were nothing but `read:` ids, so escalating reads would
+# pile a second draft on top of task 40's genuinely missing write.
+ESCALATE_PREFIX = "write:"
+# The tag the write-time merge rule and `expire_stale_spawns` both act on: an escalation is
+# loop output, so it must be mergeable and it must expire if nobody ever reads it.
+ESCALATION_TAG = "spawned-by-step-conformance"
+ESCALATION_BOARD = "lloyd"      # Alan's own code board — the one autotriage reads
+ESCALATION_STATUS = "draft"     # never `up_next`: a candidate is not a task
+
+
+def escalates(step: str) -> bool:
+    """True for the one deviation shape that files, and false for the other two.
+
+    One positive gate, on purpose: `write:` is the only prefix that names an artifact, so it is
+    the only one that can be *missing* in the evidential sense. What a run did instead of
+    calling a tool, or which file it read on the way to the same output, is named by its own
+    prefix and stays a report line. The measurement above is why a broader rule is not merely
+    noisier: escalating `tool:` would have filed on 9 of the 11 flagged runs of the 2026-10-03
+    replay."""
+    return step.startswith(ESCALATE_PREFIX)
+
+
+def _backlog_store():
+    """The shared backlog writer, imported lazily.
+
+    `scripts/automod/backlog.py::new_item` is the Python half of the board the MCP tool, the
+    HTTP route and the red-tree filer all write through — id allocation `max + 1` under
+    `O_EXCL`, front matter and tags by the create-time rule, and the store's one clock. This
+    module is loaded by `importlib` from a path *and* run by the nightly subprocess, so the
+    import lives inside the call and costs a replay that never escalates nothing. It is also the
+    only write this file makes outside its own report: see
+    `tests/test_step_conformance_escalation.py::test_the_draft_is_the_only_file_the_escalation_creates`."""
+    from scripts.automod import backlog
+
+    return backlog
+
+
+def escalation_targets(result: dict) -> list[dict]:
+    """The deviations of one replay that qualify, at most one per run.
+
+    Read off `replay`'s own reports, so what files is exactly what printed: a deviation with a
+    `state` of `deviation` (a `pending` one is inside the grace window and not yet a finding)
+    whose step names a written artifact. The run ids the expectation was learned from ride along,
+    because the draft is a handoff and the evidence is the handoff."""
+    out: list[dict] = []
+    for report in result.get("reports") or []:
+        for deviation in report.get("deviations") or []:
+            step = str(deviation.get("step") or "")
+            if not escalates(step):
+                continue
+            out.append({
+                "task_id": report.get("task_id"),
+                "session_source": report.get("session_source") or "",
+                "run_id": report.get("run_id") or "",
+                "session_key": report.get("session_key") or "",
+                "run_status": report.get("run_status"),
+                "step": step,
+                "learned_from": list(deviation.get("learned_from") or []),
+                "learned_from_n": deviation.get("learned_from_n", 0),
+                "baseline_runs": deviation.get("baseline_runs", 0),
+                "run_completed_at": deviation.get("run_completed_at"),
+            })
+            break  # one escalation per run, whatever else that run is missing
+    return out
+
+
+def escalation_name(target: dict) -> str:
+    """The draft's title, and the key its dedupe turns on.
+
+    `new_item` slugifies the name and keeps the first 50 characters, and a full run id is longer
+    than the budget leaves room for after the prefix — so the name keeps the run id's leading
+    `run_<source>_<date>_<time>`, which is unique per run. The dedupe below compares full names,
+    never filenames, so it does not depend on that truncation."""
+    artifact = target["step"].split(":", 1)[1]
+    return (f"step-conformance: task {target.get('task_id')} run {target['run_id']}"
+            f" never wrote {artifact}")
+
+
+def escalation_body(target: dict) -> str:
+    """The draft's prose: every identifier needed to reproduce the judgement, and the reason it
+    is a candidate rather than a finding."""
+    learned = ", ".join(target["learned_from"]) or "(none recorded)"
+    return "\n".join([
+        "The read-only step-conformance replay (`scripts/step_conformance.py replay`) flagged"
+        " this run: it recorded a terminal status while a step that every *other* run of its"
+        " task took — writing an artifact — never happened. The artifact is the evidence, which"
+        " is why this is the one deviation shape the replay escalates.",
+        "",
+        "It is a **candidate**, not a finding. The corpus is unlabelled real traffic, so the"
+        " false-alarm rate here is UNMEASURED; the labelled rate comes from the detector's"
+        " `validate` subcommand. A renamed output, a deliberately dropped stage, or a baseline"
+        " still learning from a thin history all look like this. Adjudicate before promoting"
+        " it: a draft is the status the autocode loop never reads, which is the point.",
+        "",
+        f"- task_id: {target.get('task_id')}",
+        f"- session_source: {target['session_source']}",
+        f"- run_id: {target['run_id']}",
+        f"- session_key: {target['session_key']}",
+        f"- run_status: {target['run_status']}",
+        f"- missing_step: {target['step']}",
+        f"- learned_from_n: {target['learned_from_n']} of {target['baseline_runs']} baseline runs",
+        f"- learned_from: {learned}",
+        f"- run_completed_at: {target.get('run_completed_at')}",
+        "",
+        "Reproduce it read-only (a replay writes nothing unless `--escalate-writes` is passed,"
+        " and this item is what that flag writes):",
+        "",
+        "```",
+        f"python3 scripts/step_conformance.py replay --days 14 | grep -F {target['run_id']!r}",
+        "```",
+    ])
+
+
+def file_escalations(result: dict, *, backlog_dir=None, dry_run: bool = False) -> list[dict]:
+    """File one backlog draft per escalating run and return what was filed.
+
+    Three rules the tests read off the disk. One draft per run: a re-check days later sees the
+    same deviation and files nothing, because the dedupe compares the *name this escalation would
+    file* against every item already on the board — so two runs of one task file twice (both are
+    evidence) while one run never files twice. `dry_run` prints the same answer without writing.
+    And the only write is the item: no ledger handle, no statement, no notification — see
+    `tests/test_step_conformance_escalation.py::test_the_escalation_path_makes_no_alert_call_and_writes_no_store`.
+    """
+    targets = escalation_targets(result)
+    if not targets:
+        return []
+    store = _backlog_store()
+    root = _expand(backlog_dir) if backlog_dir else store.BACKLOG_DIR
+    filed: list[dict] = []
+    known = {item.name for item in store.all_items(None, backlog_dir=root)}
+    for target in targets:
+        name = escalation_name(target)
+        if name in known:
+            continue
+        if dry_run:
+            filed.append({**target, "name": name, "path": "", "dry_run": True})
+            continue
+        item = store.new_item(
+            name,
+            escalation_body(target),
+            priority="low",
+            tags=(ESCALATION_TAG,),
+            status=ESCALATION_STATUS,
+            board=ESCALATION_BOARD,
+            backlog_dir=root,
+        )
+        known.add(name)
+        filed.append({**target, "name": name, "path": str(item.path), "item_id": item.id})
+    return filed
+
+
+def print_escalations(filed: list[dict], result: dict, *, dry_run: bool) -> None:
+    """The escalation block. The count goes beside its denominators — qualifying deviations and
+    flagged runs — never as a lone number, because a filer that filed 1 of 0 qualifying deviations
+    would be a filer silently doing nothing."""
+    targets = escalation_targets(result)
+    print(
+        f"\nescalations_filed={len(filed)}/{len(targets)}"
+        f" escalations_deduped={len(targets) - len(filed)}"
+        f" runs_flagged={result['runs_flagged']}"
+        f" dry_run={str(dry_run).lower()}"
+        f" — non-alerting: the only write is a backlog draft"
+        f" (board={ESCALATION_BOARD}, status={ESCALATION_STATUS}, tag={ESCALATION_TAG})"
+    )
+    for entry in filed:
+        print(f"  - task {entry.get('task_id')} {entry['run_id']} missing {entry['step']!r}"
+              f" -> {entry['path'] or '(not written: dry run)'}")
+
+
 def print_replay(result: dict) -> None:
     print(f"# step conformance replay (read-only) — {result['trajectory_dir']} + {result['db']}")
     print(
@@ -1051,6 +1270,15 @@ def main(argv=None) -> int:
 
     p_replay = sub.add_parser("replay", parents=[common], help="read-only replay over real history")
     p_replay.add_argument("--json", default=None, help="write the full report here (outside the corpus)")
+    # Off by default: a human running the replay to look at something must not be able to put
+    # work on the board by looking at it. The nightly task names the flag on purpose.
+    p_replay.add_argument("--escalate-writes", action="store_true",
+                          help="file a backlog DRAFT for each flagged run missing a written "
+                               "artifact (non-alerting; the only write outside --json)")
+    p_replay.add_argument("--dry-run", action="store_true",
+                          help="with --escalate-writes: print what would be filed, write nothing")
+    p_replay.add_argument("--backlog-dir", default=None,
+                          help="board directory to file into (default: the store's own)")
 
     p_learn = sub.add_parser("learn", parents=[common], help="publish the learned baseline")
     p_learn.add_argument("--out", default=None)
@@ -1072,6 +1300,11 @@ def main(argv=None) -> int:
             support=args.support,
         )
         print_replay(result)
+        if args.escalate_writes:
+            filed = file_escalations(
+                result, backlog_dir=args.backlog_dir, dry_run=args.dry_run
+            )
+            print_escalations(filed, result, dry_run=args.dry_run)
         if args.json:
             payload = {k: v for k, v in result.items() if k != "corpus"}
             _expand(args.json).write_text(json.dumps(payload, indent=2), encoding="utf-8")
