@@ -1632,3 +1632,211 @@ def test_the_committed_witness_backs_the_bun_prefix_claim():
     _, body, _ = _setup_bun_region()
     assert re.search(r"[Nn]o qmd build (?:lives|is installed)", " ".join(body.split())), (
         "the witness is on disk but the section stopped claiming what it proves")
+
+
+# ── #2147: SETUP.md's TTS first-boot window, bind order and where the knob lives ──
+#
+# SETUP.md Part 8 published "First boot compiles with `max-autotune` and takes
+# ~75 s before the port opens" and "`startsecs=10` … tolerates this because
+# uvicorn binds before compilation finishes". Both are false. Across the 13 eager
+# boots in `~/lloyd-data/logs/services/agent-tts.err` the window from
+# `Backend=optimized lazy_load=False` to the next `Backend ready` is bimodal on the
+# Triton / torch-inductor cache: autotune ran in 7 of them and they took 93-216 s
+# (2026-10-02: 16:31:48 → 16:35:12 = 204 s), and it ran in none of the other 6 and
+# they took 16-48 s. "~75 s" is neither regime. And the port is shut for the whole
+# of both: `uvicorn.server.Server.startup()` awaits `lifespan.startup()` before its
+# first `loop.create_server(...)`, which the last node below re-reads out of
+# uvicorn's own source rather than taking the doc's word for it. An operator
+# hand-restarting `agent-tts` who believes the old sentence reads a 3-minute
+# silence as a hang and restarts it again, which is how a cold boot becomes two.
+#
+# The assertions are scoped to Part 8 on purpose. `grep -c "75 s" SETUP.md` is 2,
+# and the other one is Part 4's agent-llm-primary figure, which measures true and
+# which clause 1 names as must-survive; a whole-file ban would fail on a true
+# measurement and invite deleting it to get green.
+
+_TTS_PART8_HEADING = "## Part 8 — Qwen3-TTS"
+
+#: Where Part 8 stops: the next top-level `## Part` heading, wherever the doc's
+#: parts have moved to.
+_PART8_END_RE = re.compile(r"^## ", re.M)
+
+#: Part 4's agent-llm-primary boot figure, byte for byte, line breaks included.
+#: The positive control for the scoping above: it fails if anyone "fixes" the
+#: substring collision by touching the number that was never wrong.
+_PART4_LLM_BOOT_FACT = (
+    "minutes filling the compile/JIT cache (775 s to health; 265 s on the next\n"
+    "boot), which is why that conf's `startsecs` is 900;")
+
+
+def _setup_part8() -> str:
+    """SETUP.md's Part 8 (Qwen3-TTS) alone, up to the next `## Part` heading.
+
+    Scoped by heading rather than by line numbers so the region cannot silently
+    slide: the clause that says "Part 8" means the TTS part, wherever it sits.
+    """
+    text = _setup_text()
+    start = text.find(_TTS_PART8_HEADING)
+    assert start >= 0, f"SETUP.md lost its {_TTS_PART8_HEADING!r} heading"
+    nxt = _PART8_END_RE.search(text, start + len(_TTS_PART8_HEADING))
+    return text[start:nxt.start()] if nxt else text[start:]
+
+
+def _setup_part8_flat() -> str:
+    return " ".join(_setup_part8().split())
+
+
+def _uvicorn_server_startup() -> str:
+    """The body of uvicorn's `Server.startup()`, from the installed package.
+
+    Read through `inspect.getsourcefile`, so it is the code this interpreter would
+    actually run — the same one the service boots under, since uvicorn is a
+    requirement and the suite and `agent-tts` share this venv.
+    """
+    import inspect
+
+    import uvicorn.server
+
+    src = Path(inspect.getsourcefile(uvicorn.server.Server)).read_text(encoding="utf-8")
+    anchor = "    async def startup("
+    assert anchor in src, "uvicorn's Server.startup() moved; the bind order needs re-checking"
+    start = src.index(anchor)
+    rest = src[start + len(anchor):]
+    nxt = rest.find("\n    async def ")
+    assert nxt >= 0, "could not find the method after Server.startup()"
+    return src[start:start + len(anchor) + nxt]
+
+
+def test_part8_publishes_no_75_second_boot_claim_and_part_4_keeps_its_775():
+    """Clause 1, both halves: the false figure is gone from the TTS part, and the
+    true one three hundred lines earlier is untouched."""
+    part8 = _setup_part8()
+    assert "~75 s" not in part8, (
+        "SETUP.md is again quoting a ~75 s first boot: the cold-cache window "
+        "measures 204 s and the warm-cache one 16-48 s, so 75 s is not a "
+        "conservative rounding of anything, it is a number from neither regime")
+    assert "75 s" not in part8
+    text = _setup_text()
+    assert "75 s" in text, (
+        "the substring this node deliberately does NOT ban has gone missing: the "
+        "only other 75 s in SETUP.md is Part 4's real 775 s measurement, whose "
+        "bytes are pinned below")
+    assert _PART4_LLM_BOOT_FACT in text, (
+        "Part 4's agent-llm-primary boot figure changed bytes. It is a different "
+        "service and it measures true; if it legitimately changed, update this "
+        "constant to the new measurement, do not restore it blind")
+    assert _PART4_LLM_BOOT_FACT not in _setup_part8()
+
+
+def test_part8_names_both_measured_boot_regimes_and_the_cache_that_splits_them():
+    """Clause 2: two regimes, each with its date and its number, and the
+    discriminator named as the thing that separates them."""
+    flat = _setup_part8_flat()
+    assert "3 min 24 s" in flat and "204 s" in flat
+    assert "2026-10-02" in flat, "the cold measurement must carry its date"
+    assert "16:31:48" in flat and "16:35:12" in flat, (
+        "the window has to be re-derivable: the doc publishes the log's own "
+        "timestamps, not just a duration")
+    assert "93-216 s" in flat, "the cold range over the 7 autotune boots"
+    assert "16-48 s" in flat, "the warm range over the 6 cache-hit boots"
+    for cache in ("~/.triton/cache", "/tmp/torchinductor_alansrobotlab"):
+        assert cache in flat, f"{cache} is the discriminator and the doc stopped naming it"
+    assert "Cold cache" in flat and "Warm cache" in flat
+    assert "max-autotune" in flat, "autotune is why the cold regime is slow at all"
+    assert "agent-tts.err" in flat, "the doc must say where the 13 boots were measured"
+
+
+def test_the_boot_windows_the_doc_publishes_reconcile_with_each_other():
+    """The published numbers have to be one arithmetic, not four independent
+    assertions that happen to be true today.
+
+    The quoted timestamps must differ by the quoted duration (this is the check
+    that goes red if someone edits 204 s to something remembered rather than
+    re-measured), the cold range must bracket it, and the warm range must sit
+    entirely below the cold range — which is the whole bimodality claim, and what
+    makes a single averaged figure a lie in both directions.
+    """
+    flat = _setup_part8_flat()
+    m = re.search(r"(\d{2}):(\d{2}):(\d{2})\s*(?:→|->)\s*(?:.*?\W)?(\d{2}):(\d{2}):(\d{2})"
+                  r"\s*=\s*(\d+) min (\d+) s", flat)
+    assert m, "the cold window must be published as both timestamps AND a duration"
+    t0 = int(m[1]) * 3600 + int(m[2]) * 60 + int(m[3])
+    t1 = int(m[4]) * 3600 + int(m[5]) * 60 + int(m[6])
+    stated = int(m[7]) * 60 + int(m[8])
+    assert t1 - t0 == stated, f"{m[4]}:{m[5]}:{m[6]} minus {m[1]}:{m[2]}:{m[3]} is not {stated} s"
+    # Each range is read out of the bullet that claims it, so the two cannot be
+    # swapped or guessed at by position: "Cold cache" carries the autotune range and
+    # "Warm cache" the cache-hit range.
+    def range_after(label: str) -> tuple[int, int]:
+        at = flat.find(label)
+        assert at >= 0, f"the doc no longer has a {label!r} regime to attach a range to"
+        m2 = re.search(r"(\d+)-(\d+) s", flat[at:])
+        assert m2, f"no `N-M s` range follows the {label!r} label"
+        return int(m2[1]), int(m2[2])
+
+    cold_lo, cold_hi = range_after("Cold cache")
+    warm_lo, warm_hi = range_after("Warm cache")
+    assert cold_lo < cold_hi and warm_lo < warm_hi
+    assert cold_lo <= stated <= cold_hi, (
+        f"the window the doc quotes ({stated} s) is outside the cold range it claims "
+        f"({cold_lo}-{cold_hi} s)")
+    assert warm_hi < cold_lo, (
+        f"the ranges now overlap (warm up to {warm_hi} s, cold from {cold_lo} s): the "
+        "two-regime story is what tells an operator a quiet 30 s is normal, and a "
+        "single figure in the gap would be false for both cases")
+
+
+def test_part8_states_the_real_bind_order_and_uvicorn_still_binds_after_startup():
+    """Clause 3, both halves: the doc's claim, and uvicorn's source agreeing.
+
+    The old sentence said uvicorn "binds before compilation finishes", which is
+    backwards, and it is the half that mattered: it is why the port looking closed
+    read as a hang instead of as boot. The seam here is the process boundary
+    between the service and the framework that binds its socket, so the check is
+    uvicorn's own `startup()` body, not the log's line order — a doc about bind
+    order pinned to a doc about bind order would prove nothing.
+    """
+    flat = _setup_part8_flat()
+    assert "binds before compilation" not in flat, "the pre-compile bind claim is back"
+    assert "lifespan.startup()" in flat and "create_server" in flat
+    assert "startsecs=10" in flat
+    assert re.search(r"startsecs=10[^.]*?\*?\*?process", flat), (
+        "startsecs=10 must be explained by the process surviving 10 s, not by the "
+        "port being up — that conflation is the bug being fixed")
+
+    startup = _uvicorn_server_startup()
+    life = startup.find("lifespan.startup()")
+    bind = startup.find("create_server")
+    assert life >= 0 and bind >= 0, "uvicorn's startup() no longer names both calls"
+    assert life < bind, (
+        "uvicorn now binds before lifespan startup, so SETUP.md's 'nothing is "
+        "listening until the compile finishes' is the stale claim — update the doc")
+
+
+def test_part8_says_where_the_lazy_load_knob_is_defined_and_where_it_is_overridden():
+    """Clause 4: the two files, and the spelling the launcher really carries.
+
+    The quote is the point, not the filename: the doc tells an operator what to
+    look for at that path, so the literal has to be the one in the script. The
+    default living in the launcher rather than only in the conf is #1446's fix, and
+    the conf winning over it is why the doc may not call the launcher's line the
+    override.
+    """
+    launcher = (ROOT / "agent-services" / "bin" / "start-qwen3-tts.sh").read_text(encoding="utf-8")
+    conf = (ROOT / "agent-services" / "supervisor" / "conf.d" / "agent-tts.conf").read_text(
+        encoding="utf-8")
+    definition = 'export TTS_LAZY_LOAD="${TTS_LAZY_LOAD:-false}"'
+    assert definition in launcher, (
+        "the launcher's default changed spelling; SETUP.md quotes this exact line "
+        "as the definition, so both have to move together")
+    assert re.search(r'environment=.*TTS_LAZY_LOAD="false"', conf), (
+        "the conf no longer carries the eager override the doc points at")
+
+    flat = _setup_part8_flat()
+    assert "start-qwen3-tts.sh" in flat and "agent-tts.conf" in flat
+    assert definition in flat, "the doc stopped quoting the line it tells people to find"
+    assert "environment=" in flat, "the override channel must be named, not just the file"
+    assert re.search(r"environment=[^.]*\b(?:line of|line in)\b", flat) or \
+        re.search(r"`environment=`[^.]*override", flat), (
+        "the conf's `environment=` must be presented as the override over the "
+        "launcher's default, not as a second copy of it")

@@ -1008,9 +1008,35 @@ curl -s -X POST localhost:8090/v1/audio/speech -H 'Content-Type: application/jso
   -d '{"model":"qwen3-tts","voice":"Ryan","input":"test"}' -o /tmp/v.wav -w '%{http_code} %{size_download}\n'
 ```
 
-First boot compiles with `max-autotune` and takes ~75 s before the port opens —
-`startsecs=10` in the supervisor config tolerates this because uvicorn binds
-before compilation finishes.
+First boot is slow in two different regimes, and the Triton / torch-inductor
+compile cache (`~/.triton/cache` and `/tmp/torchinductor_alansrobotlab`) decides
+which one you are in: with `compile_mode: max-autotune` a cold cache re-benchmarks
+every kernel, a warm one is replayed. Measured across all 13 eager boots in
+`~/lloyd-data/logs/services/agent-tts.err` (the window is `Backend=optimized
+lazy_load=False` → the next `Backend ready`):
+
+- **Cold cache, ~3 min.** 2026-10-02: `lazy_load=False` at 16:31:48 → `Backend
+  ready` at 16:35:12 = 3 min 24 s (204 s). The seven cold boots span 93-216 s. A
+  boot after a fresh install is cold — this is the silence nobody expects.
+- **Warm cache, under a minute.** The six boots with the cache populated ran
+  16-48 s (measured 2026-09-23 → 2026-09-29). That is the ordinary hand-restart,
+  so 30 quiet seconds on `restart agent-tts` is not a hang.
+
+Either way **nothing is listening on :8090 until the compile finishes**: uvicorn's
+`Server.startup()` awaits `lifespan.startup()` — which is where the model loads
+and compiles — *before* its first `loop.create_server(...)`, and logs "Uvicorn
+running on …" only after. So `curl localhost:8090/health` is refused for the whole
+window and answers as soon as it ends. `startsecs=10` in the supervisor config
+still holds because supervisord waits for the *process* to survive 10 s, not for
+the port.
+
+The knob is `TTS_LAZY_LOAD`, and its default lives in the launcher, not the conf:
+`agent-services/bin/start-qwen3-tts.sh` carries
+`export TTS_LAZY_LOAD="${TTS_LAZY_LOAD:-false}"` so a hand-run of the script boots
+eagerly too. The override is the `environment=` line of
+`agent-services/supervisor/conf.d/agent-tts.conf` (`TTS_LAZY_LOAD="false"`), which
+supervisor exports into the script before bash runs it — so that line, not the
+launcher's default, is where an operator sets it back to lazy.
 
 ---
 
