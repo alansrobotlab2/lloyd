@@ -307,8 +307,8 @@ MIN_LIVE_BENCH_TASKS = 11
 
 #: Every file in `~/obsidian/lloyd/bench/`, keyed by task id (the file stem, which
 #: each file also declares as `id:`), with the `category:` its own front matter
-#: carries. Measured against the files on disk on 2026-10-03: 24 entries — 7 replay,
-#: 14 synthetic, 2 adversarial, 1 safety. That count is a snapshot of a hand-kept
+#: carries. Measured against the files on disk on 2026-10-03: 25 entries — 7 replay,
+#: 15 synthetic, 2 adversarial, 1 safety. That count is a snapshot of a hand-kept
 #: table and no assertion here reads it; the count that IS asserted is the corpus
 #: floor in `MIN_LIVE_BENCH_TASKS` above, and every entry below is re-checked
 #: against disk by the node named next, so a stale number in this comment is
@@ -402,6 +402,25 @@ LIVE_BENCH_CATEGORIES = {
     # (`??`), so the `git clean -fd` caveat above is live for it as it was for
     # `bench_021`, `bench_022` and `bench_023` before their authors committed theirs.
     "bench_024_recall_user_fact_incidental": "replay",
+    # Keyed by stem with the `category:` its own front matter declares
+    # (`lloyd/bench/bench_025_skill_invocation_never_ran_resume_chain.md:4` =
+    # `synthetic`), the only authority this table may copy — and the same reading the
+    # file's `tags:` list carries, so nothing here is inferred from its neighbours. Its
+    # absence is what reds main at `78fecff2` (#2125) at BOTH nodes:
+    # `test_every_live_bench_file_is_named_in_the_census` names the unmapped id, and
+    # `test_the_newest_live_bench_file_is_keyed_with_its_declared_category` reds because
+    # this file is the newest by mtime — the entry an addition actually touches. Each
+    # line is the whole fix those assertions ask for. The file reached the directory at
+    # 2026-10-03T13:49:01Z (its own mtime), four and a half minutes after `78fecff2` was
+    # committed at 13:44:37Z, which is why that sha is red with no code change involved;
+    # the round that found it, SM_20261003_134559, reproduced both at that base with its
+    # own diff absent, which is how a file written by the vault gets blamed on a tree.
+    # Still untracked in the vault as measured for this line: 25 `.md` on disk against
+    # `git -C ~/obsidian ls-files lloyd/bench | wc -l` = 24, and
+    # `git -C ~/obsidian status --porcelain -- lloyd/bench` names exactly this file
+    # (`??`), so the `git clean -fd` caveat above is live for it as it was for
+    # `bench_021` through `bench_024` before their authors committed theirs.
+    "bench_025_skill_invocation_never_ran_resume_chain": "synthetic",
 }
 
 
