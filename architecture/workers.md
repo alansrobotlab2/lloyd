@@ -524,6 +524,7 @@ what it reads, what it writes, and the measured state of it.
 | `youtube-digest` | 45 | one tracked-channel video: transcript → vault note → Lloyd eval → backlog draft | session, IV off |
 | `session-distill` | 70 | mines finished chats for gaps and patterns | direct |
 | `bench-mine` | 80 | new bench tasks from failed autonomy runs, and from baseline losses when the ledger has any it can read | direct |
+| `failure-ledger` | 75 | sweeps the automod promotions ledger into the failure-issue ledger and sends one investigation a day after the strongest family — registered so a claimed row runs instead of being poisoned, and unscheduled until a person adds its config block (#2079) | direct |
 
 Priorities are each module's `DEFAULT_PRIORITY` unless config overrides it, and
 two do: `youtube-digest` (45, so a digest beats low/background autonomy work

@@ -94,6 +94,11 @@ SESSIONS_DIR = DATA_ROOT / "sessions"
 EVENT_LOGS_DIR = DATA_ROOT / "event_logs"
 USAGE_DB = DATA_ROOT / "usage.db"
 WORKERS_DB = DATA_ROOT / "workers.db"
+# The failure-issue ledger (#2079): recurring failures dated and counted, over an
+# insert-only event log. `app/failure_ledger.py` owns the schema. A database, so
+# it hangs off DATA_ROOT and never off the code tree — the 2026-09-22 rule that a
+# `rm -r` or a fixture aimed at `~/lloyd` must not be able to reach runtime state.
+FAILURE_LEDGER_DB = DATA_ROOT / "failure-ledger.db"
 MC_STATE_PATH = DATA_ROOT / "mc-state.json"
 TOOL_OVERRIDES_PATH = DATA_ROOT / "data" / "tool_overrides.yaml"
 PIPELINE_DIR = DATA_ROOT / "_pipeline"

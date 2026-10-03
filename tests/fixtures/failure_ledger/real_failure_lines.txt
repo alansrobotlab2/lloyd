@@ -1,0 +1,38 @@
+# Failure lines the ledger must resolve, pinned verbatim.
+#
+# Format: `group<TAB>logger<TAB>message`. `#` lines are comments.
+#
+# Provenance, group by group, because which of these are recovered verbatim and
+# which are written in a recorded shape is the difference between a fixture that
+# measures something and one that asserts its own contents:
+#
+# `hypothesis-echo-truncation` and `hypothesis-schema-invalid` are the two error
+# lines #446 and #489 counted over the 192 dumps in `_pipeline/research/_debug/`
+# — `Unterminated string starting at: line 6 column 16/18` x178 and
+# `overlay_files missing/empty` x6. The dumps are gone (the retention sweep
+# prunes that scratch after 30 days; the directory held exactly 1 file at triage)
+# so the two lines are pinned here rather than read from the corpus, and the pair
+# must resolve to TWO signatures — one signature would mean the normalizer is
+# over-collapsing and the two root causes #446 and #489 split by hand would be
+# merged back into the blob that made the item necessary.
+#
+# `hypothesis-contract-anchor` is verbatim from the one surviving dump,
+# `_pipeline/research/_debug/hypothesis_reject_2026-09-26T05-14-27Z_v3.txt`, the
+# first line after the `=== ERROR ===` header. It is here so the file is not all
+# reconstruction.
+#
+# `fetch-crashed` is the pair #611 named: `fetch crashed: --fetch rc=2` on two
+# distinct video ids, `pAnLpiAG6Es` and `50IgNjRtwNE`, the 84 `runs` rows from
+# 2026-09-09 that the sweep has since pruned (`workers.db` holds exactly 1
+# `fetch crashed` row today, run_youtube-digest_20260930_150852_2fb1ce, an
+# `rc=-15` shape). Written here in the shape #611 recorded — the id appears only
+# inside the `youtu.be/<id>` URL in the crash text, not as a bare token — which
+# is the shape that collapses: `_PATH` eats `/youtu.be/<id>`. A bare id does NOT
+# collapse, and that gap is recorded on #2079 rather than patched into the
+# guardian's normalizer.
+group	logger	message
+fetch-crashed	youtube-digest	ai-engineer: fetch crashed: --fetch rc=2: usage: /home/alansrobotlab/lloyd/scripts/youtube/fetch_bundle.py [-h] [--fetch FETCH] [--fail FAIL] /home/alansrobotlab/lloyd/scripts/youtube/fetch_bundle.py: error: could not resolve https://youtu.be/pAnLpiAG6Es
+fetch-crashed	youtube-digest	ai-engineer: fetch crashed: --fetch rc=2: usage: /home/alansrobotlab/lloyd/scripts/youtube/fetch_bundle.py [-h] [--fetch FETCH] [--fail FAIL] /home/alansrobotlab/lloyd/scripts/youtube/fetch_bundle.py: error: could not resolve https://youtu.be/50IgNjRtwNE
+hypothesis-echo-truncation	autoresearch.hypothesis	Unterminated string starting at: line 6 column 16 (char 32000)
+hypothesis-schema-invalid	autoresearch.hypothesis	overlay_files missing/empty
+hypothesis-contract-anchor	autoresearch.hypothesis	contract: edit 0: anchor too long (1914 > 1200 chars) — quote the span to replace, not the file

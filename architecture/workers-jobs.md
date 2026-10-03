@@ -20,7 +20,7 @@ chain and the morning triage are all autonomy *task files* that reach the pool
 through the single `scheduled-task` source — [[autonomy]] is that mechanism
 and [[autonomy-jobs]] is what each of those jobs is for, not this document.
 
-The thirteen are grouped here by **what they are for**, not by priority, because
+The fifteen are grouped here by **what they are for**, not by priority, because
 the families share more than the members do:
 
 | § | family | sources | what it is for |
@@ -28,19 +28,32 @@ the families share more than the members do:
 | §3 | **dispatch** | `scheduled-task` | one door onto the autonomy fleet |
 | §4 | **self-mod** | `arch-review`, `backlog-cluster`, `board-steward`, `owed-check`, `autotriage`, `autocode`, `automod-regression`, `autoresearch`, `frontend-probe-canary` | change Lloyd's own code, behind a gate |
 | §5 | **intake** | `youtube-digest`, `deep-research` | turn outside text into vault knowledge |
-| §6 | **mining** | `session-distill`, `bench-mine` | turn Lloyd's own exhaust into staged notes |
+| §6 | **mining** | `session-distill`, `bench-mine`, `failure-ledger` | turn Lloyd's own exhaust into staged notes, and into dated failure issues |
 
-§1's roster is the other view — the same thirteen in priority order, which is
+§1's roster is the other view — the same fifteen in priority order, which is
 the order the pool considers them.
 
 ---
 
 ## 1. The roster
 
-Fourteen sources are registered. Priority is `DEFAULT_PRIORITY` unless config
-overrides it — `youtube-digest` is the only real override (45, not the default
-60); `arch-review` and `board-steward` state 62 and 68 in config, though those
-equal their defaults — and **lower runs sooner**.
+Fifteen sources are registered.
+
+Fourteen of them have a block under `workers.sources`; `failure-ledger` has none
+yet, which is why its **on** column is the only **no** in the table and why its
+cadence is a module constant rather than a configured interval (see §6's last
+entry). Priority is `DEFAULT_PRIORITY` unless config overrides it — `youtube-digest`
+is the only real override (45, not the default 60); `arch-review` and
+`board-steward` state 62 and 68 in config, though those equal their defaults — and
+**lower runs sooner**.
+
+*That first sentence is one clause ending in a full stop, on purpose:*
+`tests/test_automod_doc_claims.py::test_workers_jobs_counts_and_rosters_every_registered_source`
+parses `^(\w+) sources are registered\.` and compares the word with the number of
+`register(` lines in `workers/sources/__init__.py`. The rail exists because §1 said
+twelve while thirteen were registered; it fired on this round's first version of the
+paragraph, which had joined the count to the next clause with a comma and so read to
+the parser as the count sentence being gone.
 
 | source | family | prio | cadence | inflight | turn path | KV-gated | IV | on |
 |---|---|---|---|---|---|---|---|---|
@@ -56,6 +69,7 @@ equal their defaults — and **lower runs sooner**.
 | `deep-research` | intake | 70 | 3600 s | 1 | session | **yes** | off | yes |
 | `session-distill` | mining | 70 | 1800 s | 1 | direct (primary) | no | — | yes |
 | `automod-regression` | self-mod | 70 | 900 s | 1 | none (subprocess) | no | — | yes |
+| `failure-ledger` | mining | 75 | 24 h module default — **no config block, so the scheduler skips it** | 1 | direct (primary) | no | — | **no** |
 | `bench-mine` | mining | 80 | 7200 s | 1 | direct (primary) | no | — | yes |
 | `frontend-probe-canary` | self-mod | 80 | 3600 s poll, one run a day | 1 | none (subprocess) | no | — | yes |
 
@@ -1062,6 +1076,37 @@ skipped, 11 of them "no parseable bench-task frontmatter", again on
 `bench_007_skill_invocation`. 6.42 GPU-hours. The failure that matters is not in
 the failed column: it is 118 successes writing 113 copies of one candidate. §2's
 49-of-60 is the window to 2026-09-11.
+
+### `failure-ledger` — the same fault counted, and one run a day sent after it (#2079)
+
+`app/failure_ledger.py` is the store; this source is its only caller. One pass is
+ingest → sweep → detect → dispatch, and the two properties worth knowing before
+touching it are both about not lying to the reader.
+
+- **Ingest reads the rotated archive *and* the live ledger.** Over the committed
+  fixtures the guardian's `Service down, but no promotion to revert` family is 18
+  rows with `first_seen` 2026-09-06T18:34Z; the live file alone is 2 rows starting
+  three weeks later. A store whose whole job is a `first_seen` that does not move
+  cannot afford a reader that opens one file and invents an onset.
+- **The daily cap is a row, not a variable.** `failure_dispatches` is keyed on the
+  day, so a second dispatch the same day writes nothing, and the findings the cap
+  held back stay in `failure_findings` with `dispatched = 0` — which is the figure
+  that says how much was deliberately left uninvestigated.
+
+The prompt names at most `DISPATCH_MAX_RECORDS` finding ids plus a window of
+`DISPATCH_WINDOW_DAYS` around `first_seen`, and `execute` pastes the ledger's own
+rows in above it: a worker turn has `Read` and `Bash`, not a reader for a second
+sqlite file, so forwarding the prompt alone would send a run off to describe rows
+it cannot open. `tests/test_failure_ledger_dispatch.py` pins exactly that — the
+sample text it asserts on is in the store and nowhere in the queue payload.
+
+**Registered, not scheduled.** `WorkerPool._scheduler_pass` skips a source with no
+block under `workers.sources`, `config.yaml` is outside what the automod loop may
+write, and the guardian is not this job's owner (#2080), so as of 2026-10-03 nothing
+runs it on a timer: a row enqueued by hand or by a test executes, and
+`DEFAULT_INTERVAL_SECONDS` is a cadence awaiting a person's decision. Before this
+module existed the rows were worse than unscheduled — the pool looked the source
+name up, missed, and marked each one poisoned at `attempts = 0`, which is terminal.
 
 ---
 
