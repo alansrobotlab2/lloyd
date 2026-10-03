@@ -37,9 +37,9 @@ its own text "Absolute paths, `Read`/`Write`/`Bash` only. `vault_read`/`vault_wr
 reject…", so the job that took `lloyd/USER.md` from 48,068 B to 95,302 B in five days
 (#507) never once called the tool that has a ceiling. A guard on the append tool
 alone would have guarded the path nobody walks. `Bash` stays outside every tool
-handler by design and is therefore outside this module: the route and what should be
-done about it are #1010's remaining human clause, not a thing a Python import can
-reach.
+handler by design and is therefore outside this module — guarded elsewhere, not
+uncovered: `profile_argv` in `agent_mcp/_path_sandbox.py` passes one `--ro-bind` per
+`PROTECTED_SHELL_RO_ROOTS` entry, which names both these files, to every shell child.
 """
 
 from __future__ import annotations

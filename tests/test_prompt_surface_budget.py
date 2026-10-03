@@ -218,6 +218,198 @@ def test_the_live_memory_index_validates():
                            "--mode", mode], capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
+# ── live vault: the claims #507's audit note is allowed to make (#2131) ─────
+#
+# These read `lloyd/reviews/2026-09-14-user-md-audit.md`, and they are deliberately NOT
+# marked `live_vault`. That mark is for the group above, whose subject is `SOUL.md` — a
+# file an hourly autoresearch promotion can rewrite between two rounds, so one
+# re-inflation would fail every future round whatever its diff. A review artifact has no
+# such writer: a change under `lloyd/**` has to come through `automod_vault_land`, which
+# validates it before it commits. #2131 was filed because five sentences of this note had
+# quietly gone false — a byte ceiling the code had since replaced, a constant attributed
+# to a module that never held it, a guard that shipped while the note still called the
+# path open, and two test nodes this repository has never contained. The only thing that
+# ever noticed was a person re-reading the file. These are that person, on every round.
+
+USER_MD_AUDIT = VAULT / "reviews" / "2026-09-14-user-md-audit.md"
+
+#: The audit's `## ` heading inventory as #2131 left it, in the file's own order. A
+#: heading is the only structure the artifact has, and #2131's standing constraint is
+#: that the note gains or loses none; this tuple is what holds that once the round is a
+#: memory rather than a diff.
+USER_MD_AUDIT_HEADINGS = (
+    "The measurement this was cut against",
+    "Per-section decisions",
+    "Why these decisions, in one paragraph each",
+    "What was NOT cut, and why that is the load-bearing half",
+    "Durability",
+    "Per-entry ledger",
+    "Reproducing the numbers in this file",
+)
+
+#: `path:line` citations inside backticks, over the code roots the note cites. `tests/`
+#: is deliberately not one of them: a test node is cited by name, and
+#: `test_the_audit_cites_only_test_nodes_that_exist` checks those.
+_CITED_CODE_LINE = re.compile(r"`((?:app|agent_mcp|scripts|eval)/[\w./]+\.py):(\d+)`")
+
+
+@pytest.fixture(scope="module")
+def user_md_audit() -> str:
+    return USER_MD_AUDIT.read_text(encoding="utf-8")
+
+
+def _audit_section(text: str, heading: str) -> str:
+    """The body of one `## ` section of the audit, and nothing else.
+
+    Clauses 1-3 are all about `## Durability`. A whole-file search would let a figure
+    stated in the ledger table or the reproducing block stand in for a durability claim
+    that is not actually there.
+    """
+    assert f"## {heading}" in text, f"the audit lost its `## {heading}` section"
+    rest = text.split(f"## {heading}", 1)[1]
+    end = rest.find("\n## ")
+    return rest if end == -1 else rest[:end]
+
+
+@vault_only
+def test_the_audit_durability_states_the_shipped_ceilings(user_md_audit):
+    """Clauses 1 and 2: the note's byte figures agree with the live constants.
+
+    Every figure is formatted from the constant rather than typed, so this asks "does
+    the prose agree with the code" and cannot be closed by writing the same wrong number
+    on both sides of the assert.
+    """
+    dur = _audit_section(user_md_audit, "Durability")
+    user_ceiling = f"{ps.USER_MD_CEILING_BYTES:,}"
+    index_ceiling = f"{ps.MEMORY_MD_INDEX_CEILING_BYTES:,}"
+    tight = f"{int(ps.MEMORY_MD_INDEX_CEILING_BYTES * mc.MEMORY_TIGHTNESS):,}"
+
+    for figure, symbol in ((user_ceiling, "USER_MD_CEILING_BYTES"),
+                           (index_ceiling, "MEMORY_MD_INDEX_CEILING_BYTES"),
+                           (tight, "MEMORY_TIGHTNESS")):
+        assert figure in dur, f"`## Durability` never states the {figure} B figure"
+        assert symbol in dur, f"`## Durability` states {figure} B without naming {symbol}"
+    assert (index_ceiling, tight) == ("25,600", "20,480"), \
+        f"the ceilings moved to ({index_ceiling}, {tight}) and the note is now stale"
+    assert "24,576" not in user_md_audit, \
+        "the note quotes 24,576 B, the proposal MEMORY_MD_INDEX_CEILING_BYTES replaced"
+
+
+@vault_only
+def test_the_audit_names_the_module_that_holds_each_number(user_md_audit):
+    """Clause 2: `prompt_surface` holds the numbers, `memory_ceiling` the path predicate.
+
+    The retired citation `app/memory_ceiling.USER_MD_CEILING_BYTES` named an attribute
+    that has never existed — `memory_ceiling` imports the figure from `prompt_surface`
+    and owns only the path question — so a reader who followed it grepped for a
+    constant, found nothing, and concluded the guard itself was missing.
+    """
+    dur = _audit_section(user_md_audit, "Durability")
+    assert "app/memory_ceiling.USER_MD_CEILING_BYTES" not in user_md_audit
+    assert "memory_append_error" not in user_md_audit, \
+        "no handler by that name exists; every writer calls memory_write_error"
+    assert "memory_write_error" in dur, "`## Durability` never names the path predicate"
+    assert hasattr(mc, "memory_write_error")
+    assert not hasattr(mc, "USER_MD_CEILING_BYTES"), \
+        "memory_ceiling now owns the USER.md ceiling, so the note's attribution moved"
+    assert ps.MEMORY_MD_CEILING_BYTES == ps.MEMORY_MD_INDEX_CEILING_BYTES, \
+        "MEMORY.md's live ceiling is no longer the index figure the note quotes"
+
+
+@vault_only
+def test_the_audit_says_bash_writes_are_read_only_not_uncovered(user_md_audit):
+    """Clause 3: the Bash hole the note described as open has been closed since.
+
+    The positive half runs the real seam — `protected_shell_ro_paths()` feeding
+    `ro_bind_argv()` — so it fails if a future diff drops either memory file from the
+    read-only bind, and passes on the argv the shipped code emits rather than on entries
+    this test built for it.
+    """
+    from agent_mcp import _path_sandbox as psb
+    from app.harness import protected_paths as pp
+
+    dur = _audit_section(user_md_audit, "Durability")
+    assert "NOT covered" not in dur, \
+        "the note still declares some writer path uncovered"
+    assert "PROTECTED_SHELL_RO_ROOTS" in dur and "--ro-bind" in dur, \
+        "the note does not name the guard that closed the Bash path"
+    assert "CONTRACT_PATHS" in dur, \
+        "the note never says what the automod vault route validates now"
+
+    listed = pp.protected_shell_ro_paths()
+    for name in ("SOUL.md", "USER.md", "MEMORY.md"):
+        assert any(p.endswith(f"/lloyd/{name}") for p in listed), \
+            f"lloyd/{name} is off the shell read-only list: {listed}"
+    argv = psb.ro_bind_argv()
+    pairs = {(argv[i + 1], argv[i + 2])
+             for i, tok in enumerate(argv) if tok == "--ro-bind"}
+    missing = [p for p in listed if (p, p) not in pairs]
+    assert not missing, f"`ro_bind_argv` emits no `--ro-bind` for {missing}"
+
+
+@vault_only
+def test_the_audit_keeps_its_headings_and_cites_only_tests_that_exist(user_md_audit):
+    """Clause 4: the heading inventory is frozen, and every node cited really exists.
+
+    The note claimed coverage from two nodes this repository has never contained — the
+    enforcement claim #2131 clause 4 retires, and its twin one section further down.
+    Existence is checked inside the file the citation names, so a node that exists
+    somewhere else in the suite does not rescue a citation to the wrong path.
+    """
+    assert tuple(re.findall(r"^## (.+)$", user_md_audit, re.M)) == USER_MD_AUDIT_HEADINGS, \
+        "the audit's `## ` headings changed; #2131 forbids adding or dropping one"
+
+    cited = re.findall(r"`tests/(test_[a-z0-9_]+)\.py::\s*(test_[a-z0-9_]+)`",
+                       user_md_audit)
+    assert cited, "the note cites no test node at all; this check has no denominator"
+    for fname, node in cited:
+        src = (LLOYD_REPO / "tests" / f"{fname}.py").read_text(encoding="utf-8")
+        assert f"def {node}(" in src, \
+            f"the note cites {fname}.py::{node}, which no def in {fname}.py defines"
+
+
+@vault_only
+def test_every_code_line_the_audit_cites_is_the_line_it_claims(user_md_audit):
+    """Clauses 1-3 lean on `path:line` citations that have to outlive this round.
+
+    The rule: the longest identifier on the cited line has to be a name the note itself
+    uses. That is what prose rot looks like from the other side — the line moved, or the
+    symbol on it did, and only a reader following the citation would notice. No table of
+    expected numbers is involved, so a note that gains a citation gains its check for
+    free, and a note whose citation goes stale fails with the line it found.
+    """
+    cited = _CITED_CODE_LINE.findall(user_md_audit)
+    assert len(cited) >= 6, \
+        f"the audit yields only {len(cited)} code-line citations; the matcher broke"
+    for rel, lineno in cited:
+        src = (LLOYD_REPO / rel).read_text(encoding="utf-8").splitlines()
+        assert int(lineno) <= len(src), \
+            f"the note cites {rel}:{lineno}; that file has {len(src)} lines"
+        line = src[int(lineno) - 1]
+        names = re.findall(r"[A-Za-z_][A-Za-z0-9_]{3,}", line)
+        assert names, f"the note cites {rel}:{lineno}, which is `{line!r}` — nothing to cite"
+        longest = max(names, key=len)
+        assert longest in user_md_audit, (
+            f"the note cites {rel}:{lineno} = `{line.strip()}`, but never names {longest}"
+        )
+
+
+def test_the_retired_human_clause_sentence_stays_out_of_the_ceiling_sources():
+    """#2131 clause 5, checked without touching the vault.
+
+    Both sources said the unwritten half of the Bash guard was "#1010's remaining human
+    clause". The bwrap read-only bind settled that, so the sentence is gone — and
+    `memory_ceiling`'s docstring now names the guard that settled it, which is the
+    difference between correcting a docstring and merely shortening one.
+    """
+    retired = "#1010's remaining human clause"
+    for rel in ("app/memory_ceiling.py", "app/prompt_surface.py"):
+        src = (LLOYD_REPO / rel).read_text(encoding="utf-8")
+        assert retired not in src, f"{rel} still calls the closed Bash route a human's"
+    assert "PROTECTED_SHELL_RO_ROOTS" in (
+        LLOYD_REPO / "app/memory_ceiling.py").read_text(encoding="utf-8"), \
+        "memory_ceiling dropped the old claim without naming the shipped guard"
+
 # ── prompt_builder: the measurement that did not exist (#466) ───────────────
 
 def test_prompt_budget_constant_exists():

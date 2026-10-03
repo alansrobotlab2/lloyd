@@ -92,8 +92,8 @@ USER_MD_CEILING_BYTES = 16_384
 #: (`wc -c ~/obsidian/lloyd/MEMORY.md`, 2026-09-23) — a ceiling below the file it
 #: bounds is not a tripwire but a freeze: it refuses every writer that touches
 #: MEMORY.md from the moment it ships, *including* the trim it is waiting for, and
-#: freezing the nightly knowledge-write route from an unattended round is
-#: #1010's remaining human clause and not this round's call. 72 KiB leaves that
+#: freezing the nightly knowledge-write route from an unattended round was not a call
+#: a byte ceiling could make for a person. 72 KiB leaves that
 #: measurement 3,879 B of headroom — an ordinary nightly cycle passes, the
 #: 48 KB-in-five-nights climb that filed #507 does not. Re-settle the number with
 #: the trim in the same commit, never by lowering it alone.
