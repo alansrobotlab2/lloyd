@@ -1812,6 +1812,36 @@ def evidence_line_past_eof(path: str, line: int, worktree: Path) -> int | None:
     return count if line > count else None
 
 
+def worktree_line_count(rel: str, worktree: Path) -> int | None:
+    """Lines in a file inside the worktree, or None when it cannot be counted.
+
+    #2083 needs a POSITIVE count, which is why this is a separate function and
+    not a second call to `evidence_line_past_eof`: that helper answers None for
+    "inside", "unreadable" and "outside the worktree" alike, so reading its None
+    as "the line is in range" would rescue a fabricated line on a file the rail
+    could not open — the catalogued guard-that-reads-its-own-missing-input shape.
+    A number and a "cannot read" are different answers, and only this function
+    keeps them apart.
+
+    Same boundary as the rail above: only a file inside the worktree is counted,
+    because the worktree is the detached checkout of the commit under review and
+    its count IS the count at the graded head.
+    """
+    if not rel:
+        return None
+    try:
+        root = Path(worktree).resolve()
+        target = Path(rel)
+        if not target.is_absolute():
+            target = root / rel
+        target = target.resolve()
+        if not target.is_relative_to(root) or not target.is_file():
+            return None
+        return len(target.read_bytes().splitlines())
+    except (OSError, ValueError):
+        return None
+
+
 _ABSENCE_MARKERS = ("(absent)", "(deleted)", "(removed)")
 
 
@@ -1965,7 +1995,9 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
     suite-level run, an existing test outside the diff, and evidence of a
     deleted file stand as `met` (see `_node_rail`, `evidence_of_absence`).
     Each acceptance is recorded on the clause under `accepted`, the mirror
-    of `downgraded`, so a waived rail is visible, not silent.
+    of `downgraded`, so a waived rail is visible, not silent. Since #2083 that
+    includes a `evidence_line` bounded against the file `test_node_id` names
+    rather than the one `evidence_path` names, when that file is in the diff.
 
     Clause entries that carry no usable 1-based `clause` index at all make the
     whole verdict unreadable rather than unmet: the result then carries
@@ -2046,6 +2078,27 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
         tokens = _citation_tokens(raw_path)
         eof = (evidence_line_past_eof(path, line, worktree)
                if tokens and normalize_evidence_path(tokens[0], worktree) == path else None)
+        # #2083: the clause names TWO files — `evidence_path` and the file its own
+        # `test_node_id` points into — and the number may belong to either. A grader
+        # that cites `tests/test_intel_pipeline_scorer.py:2474` while `evidence_path`
+        # holds the fixture that node reads has mispaired its citation, not
+        # fabricated support: measured over `promotions.jsonl`, 33 review events
+        # across 24 rounds tripped this rail, and 14 of the 22 whose graded head is
+        # still a git object had the line inside their own node file — each one a
+        # full grading turn (median 271 s) spent before the grader re-anchored.
+        # `ghost` is exactly that file (`_test_file_cited`, computed above for the
+        # phantom-file check, which is all it was ever used for). Honour the line
+        # only when it is POSITIVELY inside that file AND the diff touched it, so
+        # the #1254 rail still refuses a number neither file can contain, and a
+        # number inside a file this round never changed.
+        line_accepted = ""
+        if eof is not None and ghost and ghost in touched:
+            node_lines = worktree_line_count(ghost, worktree)
+            if node_lines is not None and 0 < line <= node_lines:
+                line_accepted = (f"evidence_line {line} read against {ghost} "
+                                 f"({node_lines} lines at the graded head), the file "
+                                 f"test_node_id names")
+                eof = None
         if eof is not None:
             unresolved.append(f"evidence_line {line} is past EOF of {path} ({eof} lines at the "
                               f"graded head)")
@@ -2091,6 +2144,11 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
                                + (f" (grader wrote {raw_path[:120]!r})" if raw_path else ""))
             elif eof is not None:
                 why.insert(0, f"evidence_line {line} past EOF ({eof} lines) of {path}")
+            if line_accepted:
+                # A waived rail is a decision, so it is recorded like the other
+                # waivers this block already logs under `accepted`: a reader of
+                # `gate.json` can see WHICH file the number was bounded against.
+                accepted.append(line_accepted)
             if how not in ("ran", "read"):
                 why.append("how_verified is not ran|read")
             if why:

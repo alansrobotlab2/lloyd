@@ -2425,6 +2425,286 @@ def test_a_vault_path_outside_the_worktree_is_not_line_checked(wt, tmp_path_fact
     assert RV.evidence_line_past_eof("app/nope.py", 1, wt) is None
 
 
+# ── #2083: a line the clause's OWN node file contains is not a fabricated citation ──
+#
+# A clause names TWO files — `evidence_path`, and the file its `test_node_id`
+# points into — and `evidence_line` describes only the first. A grader citing
+# `tests/test_intel_pipeline_scorer.py:2474` while `evidence_path` holds the
+# fixture that node reads has mispaired its citation, and until #2083 the line
+# rail bounded the number against the SHORTER file: the clause went `met`→
+# `partial`, was marked `citation_only`, the whole review came back `unreliable`,
+# and a full grading turn went with it (median 271 s across the 33 past-EOF
+# review events in `promotions.jsonl`). The widening honours the number against
+# the node file; the tests below hold the three shapes it must NOT swallow — a
+# line neither file can contain, a node file the diff never touched, and a node
+# that names no countable test file at all.
+
+@pytest.fixture
+def wt_pair(tmp_path):
+    """A worktree whose two cited files differ in length, which is the whole
+    point of it: `app/x.py` is SIX lines and `tests/test_pair.py` is TWELVE, so
+    line 10 is inside the node file and past EOF of the paired path. The line
+    counts below are this fixture's, and the assertions quote them."""
+    (tmp_path / "app").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "app" / "x.py").write_text("1\n" * 6)
+    (tmp_path / "tests" / "test_pair.py").write_text(
+        "\n".join(f"# l{i}" for i in range(1, 13)) + "\n")
+    return tmp_path
+
+
+def _mispaired_obj(**clause):
+    """A `met` clause in the `wt_pair` shape: line 10, `evidence_path` the 6-line
+    `app/x.py`, `test_node_id` inside the 12-line `tests/test_pair.py`. Every
+    other rail holds, so the line is the only thing in dispute."""
+    base = {"clause": 1, "verdict": "met", "evidence_path": "app/x.py", "evidence_line": 10,
+            "test_node_id": "tests/test_pair.py::test_it", "how_verified": "ran", "note": "ok"}
+    base.update(clause)
+    return {"premise": "sound", "clauses": [base], "test_honesty": [], "seams_unverified": [],
+            "summary": "fine"}
+
+
+# The diff of a round that changed the implementation AND its test — the shape
+# the honour is scoped to.
+PAIR_DIFF = {"changed_tests": ["tests/test_pair.py"],
+             "changed_paths": ["app/x.py", "tests/test_pair.py"]}
+
+
+def test_a_line_inside_the_node_file_is_graded_met_though_past_the_paired_path(wt_pair):
+    """Clause 1: the line is past EOF of the paired `evidence_path` but inside the
+    12-line file the clause's own node names, and that file is in the diff, so the
+    clause stands `met` and the review grades the diff.
+
+    The demotion this removes is the expensive one: `citation_only` routes the
+    clause to the #1750 re-ask, `unreliable` means nothing on the diff was graded,
+    and the round pays a grading turn to find out the number was fine all along.
+    Line 12 is the node file's last line and is honoured too — the bound is
+    inclusive, and an off-by-one here is the same wasted turn.
+    """
+    for line in (10, 12):
+        parsed = RV.parse_review(_mispaired_obj(evidence_line=line), worktree=wt_pair,
+                                 n_clauses=1, tests_passed=True, **PAIR_DIFF)
+        c = parsed["clauses"][0]
+        assert c["verdict"] == "met", (line, c)
+        assert "citation_only" not in c, (line, c)
+        assert "downgraded" not in c, (line, c)
+        assert "citation_unresolved" not in c, (line, c)
+        assert parsed["downgraded"] == [], (line, parsed["downgraded"])
+        assert parsed["unreliable"] == [], (line, parsed["unreliable"])
+
+
+def test_a_line_past_eof_of_both_named_files_is_still_fabricated_support(wt_pair):
+    """Clause 2: the #1254 rail is intact. 999 is past EOF of `app/x.py` AND past
+    EOF of the 12-line node file, so nothing about the widening may excuse it — the
+    clause keeps its `partial`, its `citation_only` mark, and the verbatim reason
+    that 15 rounds of fabricated line numbers were caught by.
+
+    Line 13 is the other half of the inclusive bound from clause 1: one past the
+    node file's end, and still refused. The `{eof}` in the reason stays the count
+    of the paired path (6), because that is the file the number was cited against.
+    """
+    for line in (13, 999):
+        parsed = RV.parse_review(_mispaired_obj(evidence_line=line), worktree=wt_pair,
+                                 n_clauses=1, tests_passed=True, **PAIR_DIFF)
+        c = parsed["clauses"][0]
+        assert c["verdict"] == "partial", (line, c)
+        assert c.get("citation_only") is True, (line, c)
+        assert c["downgraded"] == [PAST_EOF.format(line=line, eof=6, path="app/x.py")], \
+            (line, c)
+        assert parsed["downgraded"] == [1], (line, parsed["downgraded"])
+
+
+def test_the_honour_does_not_fire_for_a_node_file_the_diff_never_touched(wt_pair):
+    """Clause 3: the widening is scoped to files this round changed. Here the diff
+    is only `app/x.py`, so line 10 sits inside a test file the round never touched
+    — and a number into an untouched file is a claim about a file nobody is
+    grading on this round's authority, so the clause is still demoted.
+
+    `unreliable` stays empty, which is the half that makes this a grade: the node
+    rail has its own reason to speak here (`how_verified: read` never carries an
+    existing test outside the diff — the suite was not measured), so the clause is
+    demoted on findings the author can act on rather than routed to #1750's
+    re-ask. If the honour had been scoped only by file LENGTHS and not by the
+    diff, the past-EOF sentence would be gone from `downgraded` even though the
+    verdict stayed `partial` — so the reason text is what this assertion pins.
+    `accepted` is absent outright, which is the strong form: `parse_review` only
+    writes the key when a waiver exists, so an empty list and a missing key are the
+    same record and a populated one would mean the honour had fired.
+    """
+    parsed = RV.parse_review(_mispaired_obj(how_verified="read"), worktree=wt_pair,
+                             n_clauses=1, tests_passed=True,
+                             changed_tests=[], changed_paths=["app/x.py"])
+    c = parsed["clauses"][0]
+    assert c["verdict"] == "partial", c
+    assert PAST_EOF.format(line=10, eof=6, path="app/x.py") in c["downgraded"], c
+    assert c.get("citation_only") is not True, c
+    assert parsed["unreliable"] == [], parsed["unreliable"]
+    assert "accepted" not in c, c
+
+
+def test_a_lone_past_eof_line_beside_an_untouched_node_file_still_routes_to_re_ask(
+        wt_pair):
+    """The other shape of the same scope guard: when the node IS the
+    existing-test-outside-the-diff shape the node rail accepts (a suite run that
+    passed), the past-EOF line is again un-honoured — and now it is the clause's
+    ONLY defect, so #1750's flag and its re-ask sentence apply exactly as they did
+    before this round. The scope guard removes honour, never routing: a number
+    into a file the diff never touched is still a grader citation, and an
+    untouched node file is still not the author's to fix by editing code.
+    """
+    parsed = RV.parse_review(_mispaired_obj(), worktree=wt_pair, n_clauses=1,
+                             tests_passed=True, changed_tests=[], changed_paths=["app/x.py"])
+    c = parsed["clauses"][0]
+    assert c["verdict"] == "partial" and c.get("citation_only") is True, c
+    assert c["downgraded"] == [PAST_EOF.format(line=10, eof=6, path="app/x.py")], c
+    assert "accepted" not in c, c
+    assert len(parsed["unreliable"]) == 1 and "clause 1" in parsed["unreliable"][0], \
+        parsed["unreliable"]
+
+
+@pytest.mark.parametrize("node_kind,changed_tests,how_verified,tests_passed", [
+    # A suite-level run. `tests/ -k test_pair` names a directory, so
+    # `_test_file_cited` rightly returns "" (reading its first word as a path
+    # would invent a phantom for an honest answer) — and the node rail still
+    # holds because the tests rung passed, which makes the line the clause's
+    # ONLY defect and the flag the correct mark.
+    ("suite", ["tests/test_pair.py"], "ran", True),
+    # A node whose file part IS shaped like a test file, in the diff, but is not
+    # on disk at the graded head. This is the clause's whole point: the honour is
+    # a POSITIVE read of a line count, never "the rail did not say past EOF".
+    # `evidence_line_past_eof` answers None for unreadable, outside-the-worktree
+    # and in-range alike, so an absent file would sail through on that reading.
+    ("absent", ["tests/test_gone.py"], "ran", True),
+])
+def test_a_node_that_names_no_countable_test_file_never_rescues_a_past_eof_line(
+        wt_pair, node_kind, changed_tests, how_verified, tests_passed):
+    """Clause 4: with no countable file inside the diff, line 10 stays past EOF of
+    `app/x.py`, and in both shapes the line is the clause's only defect, so it
+    still carries `citation_only` exactly as it did before the widening.
+    """
+    node = {"suite": "tests/ -k test_pair",
+            "absent": "tests/test_gone.py::test_it"}[node_kind]
+    parsed = RV.parse_review(_mispaired_obj(test_node_id=node, how_verified=how_verified),
+                             worktree=wt_pair, n_clauses=1, tests_passed=tests_passed,
+                             changed_tests=changed_tests,
+                             changed_paths=["app/x.py"] + list(changed_tests))
+    c = parsed["clauses"][0]
+    assert c["verdict"] == "partial", c
+    assert PAST_EOF.format(line=10, eof=6, path="app/x.py") in c["downgraded"], c
+    assert c.get("citation_only") is True, (node_kind, c)
+    assert "accepted" not in c, (node_kind, c)
+
+
+def test_a_node_naming_a_test_file_outside_the_worktree_is_refused_by_both_rails(
+        wt_pair, tmp_path_factory):
+    """Clause 4's other shape, recorded with the outcome it actually has.
+
+    A node naming a test file that exists one directory OUT of the worktree is the
+    case where the honour's two conditions come apart: `_test_file_cited` hands
+    back that absolute path (it is on disk, so it is no phantom) and line 10 really
+    is inside it, so only the diff-scope condition can decline it. The node rail
+    declines independently — a file outside the commit under review is not
+    #487's existing-test shape either — so the clause carries TWO reasons and
+    #1750's single-reason guard leaves `citation_only` unset. That is the older
+    ruling holding: a clause with a defect the author can act on is a graded
+    refusal, not a free re-ask. `accepted` is cleared with `why`, so no waiver of
+    the line rail is recorded either way.
+    """
+    outside = tmp_path_factory.mktemp("outside-2083") / "test_x.py"
+    outside.write_text("\n".join(f"# l{i}" for i in range(1, 13)) + "\n")
+    parsed = RV.parse_review(_mispaired_obj(test_node_id=f"{outside}::test_it"),
+                             worktree=wt_pair, n_clauses=1, tests_passed=True,
+                             changed_tests=["tests/test_pair.py"],
+                             changed_paths=["app/x.py", "tests/test_pair.py"])
+    c = parsed["clauses"][0]
+    assert c["verdict"] == "partial", c
+    assert PAST_EOF.format(line=10, eof=6, path="app/x.py") in c["downgraded"], c
+    assert any("not in a test file this diff changed" in d for d in c["downgraded"]), c
+    assert c.get("citation_only") is not True, c
+    assert "accepted" not in c, c
+    # The number really is inside that file — 12 lines, line 10 — so what refused
+    # it is the two rails, not the arithmetic. `worktree_line_count` is not the
+    # witness: a file outside the worktree is exactly what it refuses to count.
+    assert len(outside.read_text().splitlines()) == 12, "line 10 is inside it"
+    assert RV.worktree_line_count(str(outside), wt_pair) is None
+
+
+def test_a_honoured_line_is_recorded_under_accepted_naming_the_file_it_was_read(wt_pair):
+    """Clause 5: a waived rail is a decision, so the clause says which file the
+    number was bounded against and how long that file was at the graded head, and
+    the top-level `downgraded` does not name the clause at all.
+
+    Without this the honour would be a silent exemption: `gate.json` would show a
+    clean `met` and a reader could not tell a genuinely short path from a line
+    rescued by the widening — which is exactly how the #1254 fabrications hid.
+    """
+    parsed = RV.parse_review(_mispaired_obj(), worktree=wt_pair, n_clauses=1,
+                             tests_passed=True, **PAIR_DIFF)
+    c = parsed["clauses"][0]
+    assert c["verdict"] == "met", c
+    assert len(c.get("accepted") or []) == 1, c
+    honour = c["accepted"][0]
+    assert honour.startswith("evidence_line 10 read against tests/test_pair.py "), honour
+    assert "12 lines at the graded head" in honour, honour
+    assert "test_node_id" in honour, honour
+    assert parsed["downgraded"] == [], parsed["downgraded"]
+    assert 1 not in parsed["downgraded"], parsed["downgraded"]
+
+
+def test_worktree_line_count_counts_only_files_inside_the_worktree(wt_pair, tmp_path_factory):
+    """The helper behind clause 4, on its own terms: a number, or None when there
+    is no number to have — never a None that a caller can misread as `in range`.
+
+    The outside case is a file that EXISTS, is readable and has lines to count, one
+    directory out. Asserting None for a path that names nothing at all would pass
+    whatever the boundary code said, which is the difference between pinning the
+    worktree rail and pinning `is_file()`.
+    """
+    outside = tmp_path_factory.mktemp("outside-count") / "test_x.py"
+    outside.write_text("1\n2\n3\n")
+    assert RV.worktree_line_count("tests/test_pair.py", wt_pair) == 12
+    assert RV.worktree_line_count("app/x.py", wt_pair) == 6
+    assert RV.worktree_line_count(str(outside), wt_pair) is None
+    assert RV.worktree_line_count("app/nope.py", wt_pair) is None
+    assert RV.worktree_line_count("", wt_pair) is None
+    assert RV.worktree_line_count("../outside.py", wt_pair) is None
+
+
+def test_a_mispaired_citation_no_longer_sends_the_round_back_for_a_re_gate(
+        monkeypatch, tmp_path):
+    """The seam the whole item is about: `Gate.rung_review` is what consumes
+    `parse_review` in production (`scripts/automod/gate.py:2265`), and before
+    #2083 the mispaired clause came back through it as `unreliable` — an
+    `external_blocker` that tells the author to re-gate and re-runs the grader
+    for a number that was never wrong.
+
+    Same tree as `wt_pair`, built here because the rung takes `tmp_path` as its
+    worktree. The honoured clause now walks the rung's clean-pass arm: the rung
+    passes, the round is not asked to re-gate, and the ledger row carries the
+    honour on the clause so the waiver is in the record and not only in the
+    verdict. Without the widening this is `ok is False` with
+    `external_blocker: True`, which is what makes this a test of the seam and
+    not of the fixture.
+    """
+    (tmp_path / "app").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "app" / "x.py").write_text("1\n" * 6)
+    (tmp_path / "tests" / "test_pair.py").write_text(
+        "\n".join(f"# l{i}" for i in range(1, 13)) + "\n")
+    events = _arm(monkeypatch, tmp_path, grade=_grader(_mispaired_obj()))
+    ok, detail, data = _Gate(7, ["app/x.py", "tests/test_pair.py"],
+                             tmp_path).rung_review()
+    assert ok is True, (detail, data)
+    assert "1 met of 1" in detail, detail
+    assert data.get("external_blocker") is not True, data
+    assert "review_retry" not in data, "an honoured citation is not a re-ask"
+    ev = events[-1]
+    assert ev["event"] == "review" and ev["ok"] is True and ev["kind"] == "pass", ev
+    assert ev["downgraded"] == [], ev
+    assert any("read against tests/test_pair.py" in a
+               for a in ev["clauses"][0].get("accepted") or []), ev
+
+
 # ── a `landed: true` the ledger cannot see is not stored as landed ──────────
 #
 # `landed` came straight out of the implementer's structured self-report
