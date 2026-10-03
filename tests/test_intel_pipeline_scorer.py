@@ -2402,9 +2402,15 @@ def test_autonomy_task_30_still_parses_as_scheduler_config():
 # the keyword fallback exists for, and a bar that reached it turns an engine outage
 # into a zero-write day.
 #
-# Deliberately untouched: `interests.md`. A `**Weight:**` below ~0.4 skips the
-# stage-2 call *and* cannot clear the floor, so weights are an off switch and their
-# relative values are Alan's call (see the #852 note above).
+# Deliberately untouched then; #2092 documented it instead of changing it. A
+# `**Weight:**` at or below `LLM_KEYWORD_THRESHOLD` — 0.3, not the ~0.4 this comment
+# used to say, and 0.34 still gets its call — skips the stage-2 call *and* leaves a
+# keyword score that cannot clear the floor, so weights are an off switch and their
+# relative values are Alan's call (see the #852 note above). The sentence now sits
+# in `interests.md` beside the field format, and the run prints the
+# `SWITCHED_OFF_MARK` line for any such topic loaded: the nodes at the bottom of
+# this file pin both, and the one of them that reads the vault file keeps the prose
+# honest about the two numbers this paragraph names.
 
 CAP_OUTCOMES = ("model", "no_usable_grade", "call_cap", "keyword")
 
@@ -3355,3 +3361,285 @@ def test_the_committed_vault_day_witness_still_reads_as_the_pinned_report():
     assert [r["id"] for r in rows] == [i.id for i in items], (
         "the witness and the repo fixture are no longer the same 42 rows in the "
         "same order, so the replay is not a replay of the day the cap bound on")
+
+
+# ══ #2092: a sub-threshold `**Weight:**` is an off switch, and the run says so ══
+#
+# The trap this section closes: `**Weight:**` reads like a dial and behaves like a
+# switch. `stage2_score` asks the model only when `keyword_score > LLM_KEYWORD_THRESHOLD`
+# (0.3, scoring.py:31), `keyword_score` is `max(weight)` over the matched topics
+# (profile.py:206-208), and when no call is made the item's relevance is
+# `round(weight * 10)` against the writer's `RELEVANCE_FLOOR` (vault_writer.py:47).
+# So a topic at 0.2 gets no model grade for an item matching *only* it, and that
+# item's 2/10 cannot clear a floor of 4: the topic is off, not turned down. Two
+# details the item's own wording got wrong and this section pins against the code
+# rather than a typed number: the edge is 0.3 and not 0.4 (0.34 still gets its
+# call), and the zeroing reaches only items that match that topic alone — an item
+# also matching a 1.0 topic scores 1.0, is graded, and is filed under the *other*
+# topic, because the bucket is `max(matched_topics, key=weight)`.
+#
+# Nothing in `interests.md` sets a weight today (loader default 1.0,
+# profile.py:62), so this is armed-not-triggered: the line below prints on the day
+# a weight is written, which is the day nobody is watching.
+
+OFF_SWITCH_MD = """---
+title: Interests
+---
+# Interests
+
+## Wearables
+**Weight:** 0.2
+**Keywords:** imu, wrist
+
+## AI & LLMs
+**Keywords:** vllm, agent
+"""
+
+# The same two topics with the `**Weight:**` line absent, which is the state of the
+# live `interests.md`: every topic takes the loader's 1.0 default.
+ALL_DEFAULT_MD = OFF_SWITCH_MD.replace(
+    "**Weight:** 0.2\n**Keywords:** imu, wrist", "**Keywords:** imu, wrist")
+
+# Weight 0.2's keyword-only relevance, computed the way `_keyword_fallback`
+# computes it, so the number in the warning and the number on the item are the
+# same measurement and cannot drift apart.
+KW_SCORE_02 = max(1, min(10, int(round(0.2 * 10))))
+
+
+def _written_profile(tmp_path, text: str) -> dict:
+    """Write an interests.md and load it through the real loader."""
+    (tmp_path / "obsidian" / "interests.md").write_text(text)
+    return profile_mod.load_profile()
+
+
+def _off_switch_lines(out: str) -> list:
+    """The run-output lines naming a switched-off topic, by the marker the code owns.
+
+    Selecting on `scoring_mod.SWITCHED_OFF_MARK` rather than on prose this file
+    wrote is what lets the silent-profile node below mean something: a test that
+    searched for its own sentence could only ever find what it expected, and a
+    renamed marker would make an absent line and an absent feature look alike.
+    """
+    return [ln for ln in out.splitlines() if scoring_mod.SWITCHED_OFF_MARK in ln]
+
+
+def test_a_sub_threshold_weight_prints_the_topic_that_cannot_be_graded_or_written(
+        redirect_paths, capsys):
+    """Clause 2, and it names the behaviour behind the sentence.
+
+    One topic carries `**Weight:** 0.2`; the item matches only that topic. The
+    output must name the topic as one the run can neither grade nor write, and the
+    line must carry the two numbers that made it so — the weight it tripped over
+    and the threshold value, the latter read from the code rather than typed here
+    so a re-tuned threshold cannot leave this node asserting a stale number.
+
+    Asserted alongside the line, because a warning that contradicts the run is
+    worthless: the model was never asked about the item, its relevance is the
+    keyword score 2, and 2 is below the writer's floor, so `write_all_to_vault`
+    holds it. Those three facts are what the line claims.
+    """
+    from intel_pipeline import vault_writer as VW
+
+    profile = _written_profile(redirect_paths, OFF_SWITCH_MD)
+    wearable = _item("imu-1", title="a new imu wrist board", summary="wrist imu")
+
+    scored = scoring_mod.run_scoring_pipeline([wearable], profile,
+                                              llm_call=RecordingLLM(9))
+    out = capsys.readouterr().out
+
+    lines = _off_switch_lines(out)
+    assert len(lines) == 1, (
+        f"exactly one switched-off line expected, got {lines}\n--- run output "
+        "---\n{out}")
+    line = lines[0]
+    assert "wearables" in line.lower(), (
+        f"the line must name the topic it is about: {line}")
+    assert "0.2" in line, f"the line must carry the weight it tripped over: {line}"
+    assert str(scoring_mod.LLM_KEYWORD_THRESHOLD) in line, (
+        f"the line must carry the threshold value the weight tripped: {line}")
+    assert "graded" in line and "written" in line, (
+        f"the line must say the topic can neither be graded nor written: {line}")
+
+    # The three claims above, measured on the run itself.
+    assert scored[0].grade_source == models_mod.GRADE_KEYWORD, (
+        "the item was graded by something other than keywords, so the warning's "
+        f"cause is false: {scored[0].grade_source}")
+    assert scored[0].relevance == KW_SCORE_02, (
+        f"expected the keyword-only relevance {KW_SCORE_02}: {scored[0].relevance}")
+    assert VW.below_floor(scored[0]) is True, (
+        "the warning says the item is never written; the writer's own gate says "
+        "otherwise")
+
+
+def test_a_profile_with_no_weight_declared_prints_no_switched_off_line(
+        redirect_paths, capsys):
+    """Clause 3: the line is a finding about a weight, not a banner on every run.
+
+    Same two topics, same item, with the `**Weight:**` line gone — the live
+    `interests.md` state, where every topic takes the 1.0 default. The fixture is
+    asserted to be that state first, because an absent line proves nothing if the
+    profile quietly kept a weight: a test that cannot tell "no warning" from "no
+    switch" would pass on a broken loader.
+    """
+    profile = _written_profile(redirect_paths, ALL_DEFAULT_MD)
+    assert [t.get("weight") for t in profile["topics"]] == [1.0, 1.0], (
+        "this fixture is supposed to be today's live profile, weights unset: "
+        f"{[(t['name'], t.get('weight')) for t in profile['topics']]}")
+
+    scored = scoring_mod.run_scoring_pipeline(
+        [_item("imu-2", title="a new imu wrist board", summary="wrist imu")],
+        profile, llm_call=RecordingLLM(9))
+    out = capsys.readouterr().out
+
+    assert _off_switch_lines(out) == [], (
+        "a profile declaring no weight was told it switched something off:\n" + out)
+    assert scored[0].grade_source == models_mod.GRADE_MODEL, (
+        "the control that keeps the assertion above from being vacuous: with no "
+        "weight declared the item is graded by the model, so the same run that "
+        "prints nothing is a run the warning had a chance to speak in "
+        f"(got {scored[0].grade_source})")
+
+
+def test_the_switched_off_line_names_the_topic_no_item_matched(redirect_paths,
+                                                               capsys):
+    """Clause 4: the line is a property of the profile, not of the day's items.
+
+    The item matches only the 1.0 topic, so the 0.2 topic produces no symptom at
+    all this run — nothing is dropped, nothing is held, the model grades the one
+    survivor and the summary reads as a clean day. If the warning were derived from
+    what stage 2 refused, this is precisely the run that would stay silent, and it
+    is the run where the topic is invisible: an item that matches the off topic AND
+    a 1.0 topic is graded and filed under the other topic, so a low-weight topic
+    can lose its exclusive matches and gain no visible loss at all.
+    """
+    profile = _written_profile(redirect_paths, OFF_SWITCH_MD)
+
+    scored = scoring_mod.run_scoring_pipeline(
+        [_item("vllm-1", title="vllm agent serving", summary="vllm")],
+        profile, llm_call=RecordingLLM(9))
+    out = capsys.readouterr().out
+
+    lines = _off_switch_lines(out)
+    assert len(lines) == 1 and "wearables" in lines[0].lower(), (
+        f"the off topic must be named on a day nothing matched it: {lines}\n{out}")
+    assert "imu" not in " ".join(i.title + " " + i.summary for i in scored), (
+        "the fixture stopped being the case: an item matched the off topic, so "
+        "this is clause 2's run and not clause 4's")
+    assert [s.grade_source for s in scored] == [models_mod.GRADE_MODEL], (
+        "the healthy-looking day is the point of this node: the one survivor was "
+        f"graded by the model: {[s.grade_source for s in scored]}")
+
+
+def test_the_interests_md_weight_paragraph_calls_an_off_switch_an_off_switch():
+    """Clause 1, against the file a person actually edits, not a copy in this one.
+
+    Unmarked, and deliberately so. `test_the_interests_md_the_pipeline_loads_carries_the_bare_ai_words`
+    above is `live_vault` because it counts keywords, and keywords move under a
+    person's pen between rounds; that reason does not reach this node, which reads
+    one paragraph and asserts only what #2092 made true — that the paragraph beside
+    the `**Weight:**` format names the threshold and the floor as the code defines
+    them, says the effect is an off switch and not a dial, scopes it to items
+    matching only that topic, and says weights do not rank topics. An unrelated
+    keyword edit cannot break that; deleting the sentence is the regression the node
+    is for, and a `live_vault` mark would hide it from the gate's `tests` rung,
+    which is the difference between pinning clause 1 and describing it.
+
+    The two numbers come from the modules, never typed, and the paragraph is
+    located by its `**Weight:**` mention rather than a line number, so the
+    assertion is that the doc and the code agree — not that the doc still has the
+    bytes this round wrote.
+    """
+    import os
+
+    from intel_pipeline import vault_writer as VW
+
+    raw = os.environ.get("LLOYD_OBSIDIAN_VAULT")
+    vault = Path(raw).expanduser() if raw else Path.home() / "obsidian"
+    path = vault / "interests.md"
+    if not path.exists():
+        pytest.fail(f"clause 1 of #2092 is unpinned: no interests.md at {path}. "
+                    "The claim is about that file, so no file is no evidence.")
+
+    paragraphs = [p for p in path.read_text().split("\n\n") if "**Weight:**" in p]
+    assert paragraphs, (
+        f"{path} no longer explains the `**Weight:**` field anywhere, so the "
+        "sentence this clause is about has nowhere to live")
+    paragraph = " ".join(paragraphs[0].split())
+
+    threshold = str(scoring_mod.LLM_KEYWORD_THRESHOLD)
+    assert threshold in paragraph, (
+        f"the paragraph must state the threshold as the code defines it "
+        f"(LLM_KEYWORD_THRESHOLD={threshold}), not a hand-typed number a later "
+        f"re-tune leaves wrong: {paragraph}")
+    assert "0.4" not in paragraph, (
+        "0.4 is the number #2092's own wording got wrong: 0.34 still gets its "
+        f"model call, so a paragraph quoting it is wrong in both directions: "
+        f"{paragraph}")
+    assert str(VW.RELEVANCE_FLOOR) in paragraph, (
+        f"the paragraph must name the writer's relevance floor "
+        f"({VW.RELEVANCE_FLOOR}) — the off switch has two halves and the second "
+        f"is what stops a write: {paragraph}")
+    assert "off switch" in paragraph, (
+        f"the clause's own word for what a sub-threshold weight is: {paragraph}")
+    assert "dial" in paragraph, (
+        "the reading the paragraph exists to stop is a dial, so it has to name it "
+        f"and refuse it: {paragraph}")
+    assert "only" in paragraph, (
+        "a low weight zeroes only the items that match that topic alone — an item "
+        "also matching a 1.0 topic is graded and filed under the other topic, so a "
+        f"paragraph without the scope invites blaming this for written items: "
+        f"{paragraph}")
+    assert "rank" in paragraph, (
+        "the clause's second half: weights do not rank topics, the model's grade "
+        f"does: {paragraph}")
+
+
+def _one_weight_run(tmp_path, capsys, weight):
+    """Run the pipeline over a profile whose Wearables topic carries `weight`.
+
+    `PROFILE_FILE` is rebound with a `MonkeyPatch` the helper undoes, not the
+    `redirect_paths` fixture, so a single test can read two profiles. The captured
+    output is returned drained, because the caller is asserting on it.
+    """
+    (tmp_path / "interests.md").write_text(
+        OFF_SWITCH_MD.replace("**Weight:** 0.2", f"**Weight:** {weight:g}"))
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(profile_mod, "PROFILE_FILE", tmp_path / "interests.md")
+    try:
+        profile = profile_mod.load_profile()
+        scored = scoring_mod.run_scoring_pipeline(
+            [_item(f"w-{weight}", title="a new imu wrist board", summary="wrist imu")],
+            profile, llm_call=RecordingLLM(9))
+    finally:
+        monkey.undo()
+    return profile, scored, capsys.readouterr().out
+
+
+def test_the_line_fires_at_the_threshold_and_not_one_hundredth_above_it(tmp_path,
+                                                                       capsys):
+    """The edge is the threshold, not the 0.4 #2092's wording quoted — both sides.
+
+    A paragraph saying "below 0.4" is wrong twice, and each half costs something
+    different: someone who set 0.35 believing it was off would watch items the
+    pipeline does write and disbelieve the warning, and someone who set 0.32
+    believing it was a dial would watch them disappear. So: 0.3 gets the line,
+    because eligibility is strictly `keyword_score > threshold` (scoring.py:336) and
+    a topic at the threshold is never eligible; 0.34 gets no line, and the witness
+    that it is not off is the model's own grade on its item.
+    """
+    at, scored_at, out_at = _one_weight_run(tmp_path, capsys, 0.3)
+    assert [t["weight"] for t in at["topics"] if t["name"] == "wearables"] == [0.3], (
+        "the loader must read 0.3 as written or the run below is not the case")
+    assert len(_off_switch_lines(out_at)) == 1, (
+        f"a topic at exactly the threshold is off and must be named:\n{out_at}")
+    assert [s.grade_source for s in scored_at] == [models_mod.GRADE_KEYWORD], (
+        "the line would be a lie if something had graded the item: "
+        f"{[s.grade_source for s in scored_at]}")
+
+    above, scored_above, out_above = _one_weight_run(tmp_path, capsys, 0.34)
+    assert _off_switch_lines(out_above) == [], (
+        "0.34 clears the threshold, so naming it off is the false alarm this node "
+        f"exists to catch:\n{out_above}")
+    assert [s.grade_source for s in scored_above] == [models_mod.GRADE_MODEL], (
+        "0.34 is not named because the item was graded by the model — "
+        f"{[s.grade_source for s in scored_above]}")

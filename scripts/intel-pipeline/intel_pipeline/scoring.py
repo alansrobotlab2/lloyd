@@ -22,6 +22,12 @@ from typing import Callable, List, Optional, Dict, Any
 from .models import (FeedItem, ScoredItem, GRADE_CALL_CAP, GRADE_KEYWORD,
                      GRADE_MODEL, GRADE_NO_USABLE_GRADE)
 from .profile import load_profile, keyword_match, keyword_score, get_all_projects
+# The floor the second half of the #2092 warning is measured against. vault_writer
+# imports models/profile/state/body/_paths and never scoring, so this direction adds
+# no cycle; and the number is imported rather than typed because a warning quoting a
+# floor that has since moved would be the same misreport this warning exists to
+# prevent, one step further down the chain.
+from .vault_writer import RELEVANCE_FLOOR
 
 # Stage 2 only runs for items the keyword stage already rates above this.
 # Matches the design the `intelligence-pipeline` skill documents ("LLM
@@ -29,6 +35,45 @@ from .profile import load_profile, keyword_match, keyword_score, get_all_project
 # real weights, 0.3 is a floor an unweighted topic (1.0) clears and a
 # non-match (0.0) never does.
 LLM_KEYWORD_THRESHOLD = 0.3
+
+# ── a topic weighted at/below that threshold is off, and the run says so (#2092) ──
+#
+# `**Weight:**` in `interests.md` reads like a dial and behaves like a switch.
+# `keyword_score` is `max(weight)` over the topics an item matched
+# (profile.py:206-208) and stage 2 asks the model only above the threshold above
+# (:336), so a topic at or below 0.3 gets no grade for an item that matches only
+# it; what is left is `_keyword_fallback`'s `round(weight * 10)` (scoring.py:211),
+# which at that weight cannot clear the vault writer's relevance floor of 4
+# (vault_writer.py:47). The item is therefore neither graded nor written.
+#
+# Nothing between the profile and the vault said so. Stage 1 keeps the item on any
+# keyword match whatever its weight (scoring.py:249), it leaves stage 2 carrying
+# `grade_source=keyword` — the SAME value an engine outage leaves, so the cause is
+# invisible — and the writer's only remark is a bare count: `Held N item(s) below
+# relevance floor 4` (vault_writer.py:678), naming neither topic nor weight. So a
+# person who sets 0.2 to "turn the interest down a little" sees their topic's items
+# vanish from the vault with no sentence anywhere explaining that a weight is an
+# off switch. This is a profile-level report, printed whether or not today's items
+# matched the topic, because the topic that produces no symptom is the one whose
+# silence is misleading: an item matching a 0.2 topic AND a 1.0 topic is graded and
+# filed under the other topic (`max(matched, key=weight)`, vault_writer.py:277), so
+# a low-weight topic loses its shared matches without ever showing a loss.
+SWITCHED_OFF_MARK = "SWITCHED OFF:"
+
+
+def topics_switched_off(profile: dict,
+                        threshold: float = LLM_KEYWORD_THRESHOLD) -> List[Dict[str, Any]]:
+    """Topics whose declared weight sits at or below the stage-2 call threshold.
+
+    `<=`, not `<`: eligibility is `keyword_score > threshold` (scoring.py:336), so a
+    topic at exactly the threshold gets no call either. A topic declaring no
+    `**Weight:**` takes the loader's 1.0 default (profile.py:62) and never lands
+    here, which is why the shipped `interests.md` — which declares none — prints
+    nothing.
+    """
+    return [topic for topic in profile.get("topics", [])
+            if float(topic.get("weight", 1.0)) <= threshold]
+
 
 # The pipeline runs under a 1800 s task timeout (autonomy task #30) and a model
 # call costs seconds. Uncapped, a bad day of items becomes a timeout, which is
@@ -513,5 +558,19 @@ def run_scoring_pipeline(
               "without a usable grade — every relevance below is keyword-only. "
               "Check the engine is up and still replying with JSON before "
               "trusting this run's scores.")
+
+    # A property of the loaded profile, not of the day's items: no `if filtered`, no
+    # reference to `scored` below, because the topic this names is the one that
+    # produced no visible symptom today (#2092 — see topics_switched_off).
+    for topic in topics_switched_off(profile):
+        weight = float(topic.get("weight", 1.0))
+        keyword_relevance = max(1, min(10, int(round(weight * 10))))
+        print(f"  {SWITCHED_OFF_MARK} topic {topic['name']!r} carries weight "
+              f"{weight:g}, at or below the stage-2 keyword threshold "
+              f"{LLM_KEYWORD_THRESHOLD:g}, so an item matching only that topic is "
+              f"never put to the model — it can be neither graded nor written: its "
+              f"keyword score {keyword_relevance} cannot clear the vault writer's "
+              f"relevance floor {RELEVANCE_FLOOR}. A weight is an off switch, not a "
+              f"dial; ranking an item is the model's grade, not its topic's weight.")
 
     return scored
