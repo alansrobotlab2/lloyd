@@ -11,8 +11,9 @@ Inner Voice and no L0 block on any path these tests touch — which is the
 point: enforcement that needs the prompt to say so is not enforcement.
 The prompt-independence of that is itself pinned below, at source level.
 
-One case is deliberately not hermetic: the last one reads the shipped
-`autonomy/40-*.md` from the real vault, because clause 4 of #724 is a claim
+One case is deliberately not hermetic: the one under the `#2093` heading reads
+the shipped `autonomy/40-*.md` from the real vault, because #2093's claim — that
+the file the scheduler reads declares no `grants:` block any more — is a claim
 about that file and a fixture cannot evidence it. Its rationale, and why it
 fails rather than skips, are at its own docstring.
 
@@ -1185,7 +1186,18 @@ def test_the_gate_lives_in_policy_not_in_the_prompt():
     assert "system_prompt" not in src
 
 
-# ── Clause 4: the shipped nightly re-arm, read from the scheduler's own dir ──
+# ── #2093: the shipped #40 file declares NO re-arm authority, read from the
+#      scheduler's own dir ─────────────────────────────────────────────────────
+#
+# This section is the deliberate reversal of what #724 clause 4 shipped. That
+# clause required `40-nightly-reflection-config.md` to carry a `grants:` block
+# so the nightly could re-arm #68 and #85 (repo `5b1c62db`, vault `160cbfa3`).
+# Both targets are gone — #68 sits at `status: draft` under Alan's 2026-09-17
+# do-not-restore ruling, and #85 was retired by vault `bf363373` — and
+# `skills/nightly-reflection-config/SKILL.md` has no re-arm step, so #2093
+# deleted the block. What is left standing here is the same measurement run in
+# the opposite direction: the file parses and keeps its dispatch fields, and the
+# schedule write the block used to pay for is now denied and ledgered.
 
 
 def _real_task_40() -> Path:
@@ -1194,8 +1206,9 @@ def _real_task_40() -> Path:
     `LLOYD_OBSIDIAN_VAULT` is the override `tests/board_presence.py` honours,
     read per call so a caller's `monkeypatch.setenv` moves it. Failing on an
     absent file — never skipping — is that file's policy, and the reason it
-    transfers: this task's `grants:` block *is* the authorisation the nightly
-    re-arm runs on, so no file means no authorisation, not no measurement.
+    transfers: #2093's claim is about that exact file, so a missing file is a
+    missing measurement, and a skip would report the authority as gone on the
+    strength of never having looked.
     """
     import os
 
@@ -1204,58 +1217,119 @@ def _real_task_40() -> Path:
     board = vault / "autonomy"
     hits = sorted(board.glob("40-*.md"))
     if not hits:
-        pytest.fail(f"clause 4 of #724 is unpinned: no 40-*.md under {board}. "
-                    "The nightly #40 → #68/#85 re-arm is meant to be authorised "
-                    "by a `grants:` block in that file, so a missing file is a "
-                    "missing authorisation.")
+        pytest.fail(f"#2093's absence claim is unpinned: no 40-*.md under {board}. "
+                    "The item is that the nightly config task declares no "
+                    "`grants:` block, so no file is no evidence, not a pass.")
     return hits[0]
 
 
-def test_the_shipped_nightly_rearm_grant_materialises_and_reopens_the_write(tmp_path):
-    """The acceptance's third half, run against the file the scheduler reads.
+def test_the_shipped_task_declares_no_rearm_grant_and_the_write_stays_denied(tmp_path):
+    """#2093, against the file the scheduler reads: no authority, so no re-arm.
 
-    Every other case in this file parses a fixture, so it stays true whatever
-    the shipped task file says. This one cannot: it reads the real
-    `40-nightly-reflection-config.md` through the scheduler's own
-    `_parse_task_file`, validates the block, materialises it with
-    `sync_task_grants`, and then asks the question the clause is about — does a
-    `autonomy-task:40` turn holding nothing but that declared block get to move
-    #68 to `up_next`?
+    The node that shipped here asserted the opposite — that the block in
+    `40-nightly-reflection-config.md` materialised into a row and re-opened
+    `{"id": 68, "status": "up_next"}`. Removing the block makes that node false,
+    so it is rewritten rather than deleted, and each half of the old positive
+    assertion is kept as a negative one over the same call: the file still
+    parses with the fields the scheduler dispatches on, nothing validates or
+    mints from it, and the same schedule write is denied and ledgered as a
+    denial naming target #68.
 
-    No `now=` anywhere below, because dispatch passes no `now=`: the expiry is
-    judged by the real clock, so a block nobody renews goes red here on the same
-    day it starts denying the nightly, and `#534` deliberately gives the run no
-    way to extend it.
+    Why `now=NOW` here when the deleted node passed no clock: that node's point
+    was an expiry, and an expiry has to be judged by the clock dispatch uses
+    (#534 gives a run no way to extend its own expiry). There is no expiry left
+    to judge, so the file-wide rule applies instead — every fixture derives from
+    one clock, because a fixture that reads the wall clock turns red on its own
+    day and blocks every automod round (#848/#853, #973). The falsification
+    survives the choice either way: re-add a block and `sync_task_grants` mints
+    a row under the real clock too, since the file's declared expiry is
+    2026-12-31.
     """
     from app import autonomy
 
     path = _real_task_40()
     task = autonomy._parse_task_file(path)
     assert task is not None, f"{path.name} does not parse; the scheduler would not run it"
+
+    # Clause 1: giving up the authority must not cost the task its own dispatch.
+    assert task.get("status") == "up_next", (
+        f"{path.name} is {task.get('status')!r}, not up_next. #2093 removes an "
+        "authority from this task, not the task — a status that moved here is a "
+        "different change, and a stopped nightly hides the rest of this node")
+    assert task.get("skill_name") == "nightly-reflection-config", (
+        f"{path.name} resolves skill_name={task.get('skill_name')!r}; without "
+        "that name the run has no SKILL.md to follow, whatever its grants say")
+
+    # The absence itself, stated before anything else can depend on it. Re-adding
+    # a block fails here, and the message is the reason it was removed.
+    assert "grants" not in task, (
+        f"{path.name} declares a `grants:` block again: {task.get('grants')!r}. "
+        "#2093 deleted #724 clause 4's block because both things it authorised "
+        "are gone — #68 is parked by Alan's 2026-09-17 ruling and #85 was "
+        "retired by vault bf363373 — so putting one back is a human decision, "
+        "not drift this file can accept quietly")
+
+    # Clause 2: a file declaring nothing yields neither specs nor errors, and
+    # materialising it leaves no row behind.
     specs, errors = policy.validate_task_grants(task.get("grants"))
-    assert errors == [], f"the shipped grants block is not acceptable: {errors}"
-    assert [s["tool"] for s in specs] == ["autonomy_write_task"], (
-        "clause 4 names exactly one authority; any other entry is a scope call "
-        "a human has to make, not drift this file can accept quietly")
-    assert specs[0]["expires_at"] > dt.datetime.now(dt.timezone.utc), (
-        f"{path.name}'s grant expired on "
-        f"{specs[0]['expires_at'].isoformat()}; renewal is a human editing the "
-        "block, and until then the nightly re-arm is denied, as it should be")
+    assert (specs, errors) == ([], []), (
+        f"a file with no `grants:` key must validate to no specs and no errors; "
+        f"got specs={specs} errors={errors}")
 
     store = GrantStore(tmp_path / "workers.db")
     store.ensure_schema()
-    assert policy.sync_task_grants(store, task_id=40, scope="autonomy-task:40",
-                                   grants=task["grants"]) >= 1
+    minted = policy.sync_task_grants(store, task_id=40, scope="autonomy-task:40",
+                                     grants=task.get("grants"), now=NOW)
+    assert minted == 0, (
+        f"the dispatcher put {minted} authority row(s) on the books from a file "
+        "that declares none")
+    assert store.live(scope="autonomy-task:40") == [], (
+        "a row exists for the nightly's scope although its file declares no "
+        f"grant: {store.live(scope='autonomy-task:40')}")
 
+    # Clause 3: the write the block used to pay for is denied, and the denial
+    # names the task and the field it would have moved.
     d = check_grants(store, scope="autonomy-task:40",
-                     tool_name="autonomy_write_task", tool_input=SCHED_CALL)
-    assert d.allowed is True, f"the shipped block does not re-open the write: {d.reason}"
-    assert d.grant_id is not None, ("allowed without consuming a row means the "
-                                    "gate was absent, not satisfied")
-    # The control: the allow came from #40's row, not from the tool being open.
+                     tool_name="autonomy_write_task", tool_input=SCHED_CALL,
+                     now=NOW)
+    assert d.allowed is False, (
+        f"an unattended nightly turn can still re-arm the parked #68: {d.reason}")
+    assert d.grant_id is None, (
+        "denied while consuming a row — then what stopped it was the quota, not "
+        "the removed authority")
+    assert "target #68" in d.reason, (
+        f"denied, but not naming the task the call targets: {d.reason}")
+
+    # The denial has to be countable afterwards: this is the row a human reads
+    # to learn a nightly tried to re-arm a parked task, and the ruling on #2093
+    # is that such a row is the gate working, not a regression to silence.
+    rows = [r for r in store.dispatch_rows() if r["tool"] == "autonomy_write_task"]
+    assert len(rows) == 1, f"expected exactly one ledger row, got {rows}"
+    assert rows[0]["decision"] == "deny", rows[0]
+    assert rows[0]["scope"] == "autonomy-task:40", rows[0]
+    assert "target #68" in rows[0]["reason"], rows[0]
+
+    # The control that keeps the deny above from being the tool-wide stop sign:
+    # in the SAME store, one minted row re-opens the identical call, so the gate
+    # is authority-absent rather than closed. Clause 5 pins the same property at
+    # the MCP seam; it is pinned here because this is the node whose deny would
+    # otherwise pass on an empty registry.
+    granted = store.mint(scope="autonomy-task:40",
+                         tool_pattern="autonomy_write_task", arg_predicate="",
+                         quota=None, issued_by="alan", expires_at=_iso(24.0))
+    reopened = check_grants(store, scope="autonomy-task:40",
+                            tool_name="autonomy_write_task",
+                            tool_input=SCHED_CALL, now=NOW)
+    assert reopened.allowed is True, (
+        f"the gate became tool-wide: a live row no longer re-opens the write — "
+        f"{reopened.reason}")
+    assert reopened.grant_id == granted["id"], reopened
+
+    # ...and the row did not leak: a scope holding nothing is still denied.
     other = check_grants(store, scope="autonomy-task:41",
-                         tool_name="autonomy_write_task", tool_input=SCHED_CALL)
-    assert other.allowed is False, "a declared grant leaked to another task's scope"
+                         tool_name="autonomy_write_task", tool_input=SCHED_CALL,
+                         now=NOW)
+    assert other.allowed is False, "a row minted for #40 leaked to another task's scope"
 
 
 # ── Bash tiered by command shape (#740) ────────────────────────────────────

@@ -14,9 +14,12 @@ its predicate the governing condition for that pair. A call outside the
 predicate is denied even while the predicate-less grant for the same pair is
 live, and a call inside it is paid by the bounded grant. A pair holding only a
 predicate-less grant behaves exactly as it did before, so nothing that exists
-today moves: the live store holds one grant and no pair holds two, and
-`autonomy/40-nightly-reflection-config.md` is the only task declaring a `grants:`
-block, with one entry.
+today moves: no shipped pair holds two rows, and since #2093 deleted the block
+on `autonomy/40-nightly-reflection-config.md` no autonomy task file declares a
+`grants:` block at all — the single live row in the store is the one that block
+minted (`minted_by frontmatter:40`), which nothing re-declares now, and this
+file's own nodes never read it because every one of them mints into a scratch
+store.
 
 The process boundary this change crosses is the shared grant database:
 `check_grants` runs in the backend's dispatch hook, and the same function runs

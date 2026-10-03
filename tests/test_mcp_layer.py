@@ -693,7 +693,7 @@ def test_a_declared_grant_reopens_the_seam(tmp_path, monkeypatch):
     denied a moment ago now passes. Without this the fix is a stop sign, not a
     gate, and the #40 -> #68/#85 re-arm breaks on the first nightly.
 
-    What this does NOT prove, and the two nodes after it exist to prove: that
+    What this does NOT prove, and the nodes after it exist to prove: that
     `run_task` reaches that sync call. The row here is synced by the test, with
     the task dict handed in explicitly, so the dispatcher's own reading of
     `grants` from the file — clause 3's parser output — is still unexercised,
@@ -741,15 +741,16 @@ def test_a_declared_grant_reopens_the_seam(tmp_path, monkeypatch):
 #
 # The node above this seam calls `sync_task_grants` with a grant list the test
 # wrote out by hand, and `tests/unit/test_grant_policy.py::
-# test_the_shipped_nightly_rearm_grant_materialises_and_reopens_the_write` reads
-# the shipped #40 block and then syncs it itself, from the tuple it named. Both
-# are a mock AT the seam clause 4 names — "sync_task_grants materialises it at
-# dispatch". What neither touches is the dispatcher: `run_task` takes the block
+# test_the_shipped_task_declares_no_rearm_grant_and_the_write_stays_denied` reads
+# the shipped #40 file and pins that it declares no block at all since #2093.
+# The first is a mock AT the seam clause 4 names — "sync_task_grants materialises
+# it at dispatch"; the second is the same seam read in reverse, over the file the
+# scheduler actually ships. Neither touches the dispatcher: `run_task` takes the block
 # out of `_parse_task_file`'s output (`app/autonomy.py:1860` and `:1868`), syncs it
 # into `default_store()`, and installs the hook three statements later
 # (`:1881-1882`). A `grants` key lost between the parse and the sync, or an
 # install that ran before the sync, left both green while the task whose only
-# authority is its frontmatter was denied on its first nightly. These two nodes
+# authority is its frontmatter was denied on its first nightly. The nodes below
 # run the real `autonomy.run_task` and assert on the store rows it leaves.
 
 _GRANT_BLOCK = (
@@ -968,6 +969,56 @@ def test_run_task_refuses_to_dispatch_a_task_whose_grants_block_is_malformed(
     assert "hooks" not in captured, (
         "the turn was dispatched anyway: the refusal is decoration and the task "
         "runs with whatever the accidental scope resolves to")
+
+
+def test_a_task_file_with_no_grants_block_still_dispatches_and_stays_denied(
+        tmp_path, monkeypatch):
+    """#2093, at the dispatcher seam: a file that declares NO authority.
+
+    The two nodes above this one hand `run_task` a file carrying a `grants:`
+    block, and the malformed one proves a broken block costs the run before the
+    turn starts. Nothing pinned the third case, which is the only case the fleet
+    ships since #2093 deleted #40's block: `_grant_block_errors` returns no
+    errors for a file with no `grants` key at all, so an absent block is
+    runnable, and `run_task` calls `sync_task_grants` only when the validated
+    spec list is non-empty. Two halves, both on the real dispatcher:
+
+      * the task still runs. A dropped authority must never cost the nightly its
+        own dispatch — a task that stays stopped because it is safer is a silent
+        hole in the nightly chain, and it would hide every other failure;
+      * the schedule write is still denied, naming target #68. That is what makes
+        the removal a real loss of authority rather than an edit to bytes nothing
+        reads: the row the block used to mint is gone, so the gate denies.
+
+    `_TASK_ONLY` is `_GRANT_BLOCK` with the block cut out, so the only difference
+    between this node and
+    `test_run_task_materialises_the_declared_grant_before_arming_the_hook` is the
+    lines #2093 deleted — which is what makes the deny below a measurement of
+    the absence and not of the fixture. The gate is authority-absent here, not
+    tool-wide: the sibling node re-opens the byte-identical call with a row."""
+    import asyncio
+
+    from app import autonomy as AUT
+
+    captured, store = _grant_dispatch_env(monkeypatch, tmp_path, _TASK_ONLY)
+    out = asyncio.run(AUT.run_task(40))
+
+    assert out.get("success") is True, (
+        f"a task that declares no authority was refused its own run: {out}")
+    assert store.live(scope="autonomy-task:40") == [], (
+        "the dispatcher minted an authority the file does not declare: "
+        f"{store.live(scope='autonomy-task:40')}")
+
+    hooks = captured["hooks"]
+    assert hooks is not None, "the turn was dispatched with no gate at all"
+    denied = asyncio.run(hooks.fire_pre_tool_use(
+        session_id="s", tool_name="mcp__lloyd-mcp__autonomy_write_task",
+        tool_input={"id": 68, "status": "up_next"}, tool_use_id="t1"))
+    spec = denied.get("hookSpecificOutput", {})
+    assert spec.get("permissionDecision") == "deny", (
+        f"the nightly kept the re-arm #2093 removed: {denied}")
+    assert "autonomy-task:40" in spec.get("permissionDecisionReason", ""), denied
+    assert "target #68" in spec.get("permissionDecisionReason", ""), denied
 
 
 # ── Catalog size (2026-09-23) ────────────────────────────────────────────────
