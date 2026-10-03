@@ -28,6 +28,16 @@ Why every corpus here has exactly one faulty run: at strict `support` an expecta
 `n_runs - 1` of `n_runs`, so the moment two runs of one task miss the same step the step stops
 being expected of either of them and nothing flags. Two escalating runs therefore come from two
 tasks, which is also how the real board looks.
+
+What the clause-5 fixture comparison compares, and what it cannot (#2118): the committed copy of
+the nightly task is witness to the instruction the scheduler dispatches, and the live vault file
+it is checked against is one the scheduler itself rewrites on every run — `_update_task_field`
+restamps its clock keys and `_append_activity_log` appends a bullet, and the whole front-matter
+block comes back through `yaml.dump` re-quoted and re-wrapped. Byte equality therefore went red
+the morning after task 93's first daily run, with no field of the job changed. `_witnessed_surface`
+is what the two files are compared on instead, `SCHEDULER_OWNED_KEYS` excluded, and the three
+nodes after it pin both halves of that: a restamp through the shipped writer is not drift, an edit
+to a kept key is, and the gate's own selection still collects the node and runs it to a verdict.
 """
 
 from __future__ import annotations
@@ -399,6 +409,46 @@ FIXTURE_DIR = REPO_ROOT / "tests/fixtures/step_conformance_replay"
 FIXTURE_TASK = FIXTURE_DIR / "nightly-task.md"
 FIXTURE_SKILL = FIXTURE_DIR / "SKILL.md"
 
+#: Every front-matter key `_update_task_field` (`app/autonomy.py:174`) writes about a RUN
+#: rather than about the job: `status` (`:120`, `:582`, `:4069`, `:4506`), `updated`
+#: (`:120`, `:582`, `:4069`, `:4506`), `next_run` (`:582`, and the dict `_record_failure`
+#: splats at `:3752`), `last_run` and `last_attempt` (`:3037`, `:4506`), `failure_count`
+#: (`:582`, `:3037`, `:4506`), and `infra_failure_count` with `infra_rest_until` (`:4506`).
+#: This is the task's clock, not its instruction: complete one run of task 93 and `status`,
+#: `updated`, `last_run`, `last_attempt` and `next_run` all move with nobody having edited
+#: the job, so a witness that graded them had to be re-committed after every daily run to
+#: stay green — which is the red tree #2118 is. `_append_activity_log` (`app/autonomy.py:324`)
+#: writes the same fact into the body as one bullet under `ACTIVITY_LOG_HEADING`, so that
+#: section is out for the same reason. Dropping `status` costs no coverage clause 5 needs:
+#: the copy's own node above asserts the copy declares `up_next`, while the live file's
+#: `status` is `in_progress` for the whole length of every run by construction (`:4069`).
+SCHEDULER_OWNED_KEYS = frozenset({
+    "status", "updated", "next_run", "last_run", "last_attempt",
+    "failure_count", "infra_failure_count", "infra_rest_until",
+})
+
+
+def _witnessed_surface(path: Path) -> tuple[dict, str]:
+    """The part of a task file the committed copy is a witness for: the front matter minus
+    `SCHEDULER_OWNED_KEYS`, and the body up to the Activity Log the scheduler appends to.
+
+    Both sides go through the real loader on purpose. `_update_task_field` rewrites the whole
+    block with `yaml.dump`, which re-quotes `'runs_flagged=\\d+/\\d+'` as plain and re-wraps
+    the folded `description` at its own width without changing one field's value, and that
+    re-styling is the other half of what the byte comparison mistook for drift at 7069eebd.
+    """
+    from app.autonomy import ACTIVITY_LOG_HEADING, _parse_task_file  # the real loader
+
+    task = _parse_task_file(path)
+    assert task is not None, f"the real loader cannot read {path}"
+    body = str(task.pop("body", ""))
+    cut = body.find(ACTIVITY_LOG_HEADING)
+    if cut >= 0:
+        body = body[:cut]
+    surface = {k: v for k, v in task.items()
+               if not str(k).startswith("_") and k not in SCHEDULER_OWNED_KEYS}
+    return surface, body.rstrip()
+
 
 @pytest.fixture(scope="module")
 def nightly_task():
@@ -440,13 +490,113 @@ def test_the_nightly_task_fixture_names_a_skill_that_exists_on_disk(nightly_task
 
 def test_the_nightly_task_fixture_copy_has_not_drifted_from_the_live_task():
     """The fixture is a copy, so it only witnesses clause 5 while it matches the file the
-    scheduler reads. Red here means the vault task changed and the committed witness is
-    stale — update the copy, or the file, not this node."""
+    scheduler reads — and the match that matters is the dispatched surface
+    (`_witnessed_surface`), not the bytes. Red here still means the vault task changed and
+    the committed witness is stale; it no longer means the scheduler stamped its own clock
+    onto the file since the copy was taken. At base 7069eebd the two files differed in
+    nothing but `last_attempt`, `last_run`, `next_run` and `updated` — restamped at
+    11:00:22Z by run_93_20261003_110001 — one bullet that run appended under
+    `## Activity Log`, and the `yaml.dump` re-quote and re-wrap that same writer applies to
+    the rest of the block: no field of the job had moved, and task 93 runs daily, so the
+    bytes could only be kept equal by re-committing the copy after every run. Update the
+    copy, or the file, not this node."""
     live_task = sorted(AUTONOMY_DIR.glob("*-step-conformance-replay.md"))
     live_skill = (Path("~/obsidian/skills") / "step-conformance-replay" / "SKILL.md").expanduser()
     if not live_task or not live_skill.is_file():
         pytest.skip("the vault task or its skill has not landed yet")
-    assert FIXTURE_TASK.read_text(encoding="utf-8") == live_task[0].read_text(encoding="utf-8"), (
-        f"{FIXTURE_TASK} and {live_task[0].name} disagree")
+    copy_surface, copy_body = _witnessed_surface(FIXTURE_TASK)
+    live_surface, live_body = _witnessed_surface(live_task[0])
+    assert (copy_surface, copy_body) == (live_surface, live_body), (
+        f"{FIXTURE_TASK} and {live_task[0].name} disagree: front-matter keys "
+        f"{sorted(k for k in set(copy_surface) | set(live_surface)
+                  if copy_surface.get(k) != live_surface.get(k))}, "
+        f"body prose differs: {copy_body != live_body}")
+    # The skill copy stays a byte comparison: no scheduler writer touches a SKILL.md, so
+    # every byte difference there is somebody editing the protocol the run is driven from.
     assert FIXTURE_SKILL.read_text(encoding="utf-8") == live_skill.read_text(encoding="utf-8"), (
         f"{FIXTURE_SKILL} and {live_skill} disagree")
+
+
+def test_the_drift_witness_still_bites_on_an_edited_instruction(tmp_path):
+    """The other half of narrowing the comparison, and the reason it is not a weakening: a
+    real edit to any key the witness keeps still turns this red. The three mutants are edits
+    a person or a nightly job actually makes to a task file, one per key the clause-5 nodes
+    above assert on — re-pointing `skill_name`, giving the job the completion notice clause 5
+    forbids (`notify_on_complete: false` -> `true`), and dropping the `runs_flagged=N/M` line
+    the description orders pasted verbatim out of the description. Each edits the
+    front-matter block only, and each needle is asserted absent from the body first: the same
+    words do occur down there (`--support 1.0` among them), and a file-wide replace would
+    report drift off the body prose while the field under test went unwitnessed — which is
+    exactly how a witness like this goes quietly blind. What it must NOT report is the
+    scheduler's own restamp, which the node below pins through the shipped writer."""
+    blank, front_matter, body = FIXTURE_TASK.read_text(encoding="utf-8").split("---\n", 2)
+    for key, needle, replacement in (
+            ("skill_name", "skill_name: step-conformance-replay", "skill_name: other-skill"),
+            ("notify_on_complete", "notify_on_complete: false", "notify_on_complete: true"),
+            ("description", "runs_flagged=N/M", "runs_flagged=X/Y")):
+        assert needle in front_matter, (
+            f"{needle!r} is not in the copy's front matter, so this mutant is not the "
+            f"{key} edit it claims")
+        assert needle not in body, (
+            f"{needle!r} also occurs in the body, so this mutant would not isolate {key}")
+        mutant = tmp_path / f"{key}-mutant.md"
+        mutant.write_text(f"{blank}---\n"
+                          + front_matter.replace(needle, replacement)
+                          + f"---\n{body}", encoding="utf-8")
+        assert _witnessed_surface(mutant) != _witnessed_surface(FIXTURE_TASK), (
+            f"editing {key} in the front matter ({needle!r} -> {replacement!r}) "
+            "left the drift witness blind")
+
+
+def test_the_drift_witness_survives_the_shipped_writer_stamping_its_own_run_fields(
+        tmp_path, monkeypatch):
+    """#2118's own regression, pinned across the seam instead of in prose.
+    `_update_task_field` and `_append_activity_log` are the functions the scheduler runs when
+    a task completes, and they are what reddened the tree: they rewrote the live task file
+    under the committed copy. Running them over that copy here must leave the witnessed
+    surface untouched while the bytes on disk demonstrably change — `yaml.dump` re-quotes and
+    re-wraps the block on the way through, which is why comparing bytes could not survive one
+    run and comparing parsed fields does. If a future writer starts stamping a key that is
+    not in `SCHEDULER_OWNED_KEYS`, this node names it; if `SCHEDULER_OWNED_KEYS` is widened
+    past the writer's own keys, the node above goes red."""
+    import app.autonomy as autonomy
+
+    stamped = tmp_path / "93-step-conformance-replay.md"
+    stamped.write_text(FIXTURE_TASK.read_text(encoding="utf-8"), encoding="utf-8")
+    monkeypatch.setattr(autonomy, "AUTONOMY_DIR", tmp_path)
+    completed = "2026-10-04T11:00:22.509721+00:00"
+    # The success path's own kwargs, `app/autonomy.py:4506`.
+    autonomy._update_task_field(
+        93, status="up_next", last_run=completed, last_attempt=completed,
+        updated=completed, failure_count=0, infra_failure_count=0,
+        infra_rest_until=None, next_run="2026-10-05T11:00:00+00:00")
+    autonomy._append_activity_log(93, "Run run_93_20261004_110001 — success (21s)")
+    assert stamped.read_text(encoding="utf-8") != FIXTURE_TASK.read_text(encoding="utf-8"), (
+        "the shipped writer left the file alone, so this node never crossed the seam")
+    assert _witnessed_surface(stamped) == _witnessed_surface(FIXTURE_TASK), (
+        "one run of the task, through the writer that makes it, now reads as drift")
+
+
+def test_the_gate_selection_collects_the_drift_witness_and_it_reaches_a_verdict():
+    """Clause 2 as behaviour, not as a claim about this file: run the drift witness's own
+    node id out of process under the tests rung's exact selection — the constant is imported
+    from `scripts/automod/gate.py`, not restated, so what this pins is the expression the
+    gate runs. Reaching `1 passed` there means the node was COLLECTED, so it is neither
+    deleted nor marked `live_vault` (which `-m "not live_vault"` would have deselected), and
+    that it RAN TO A VERDICT, so it is neither skipped nor xfailed. All four of those answer
+    a red tree by not running the test, which is what #2118 forbids; each one trips exactly
+    one assert below."""
+    from scripts.automod.gate import TESTS_MARK_EXPR
+
+    node = (f"{Path(__file__).resolve().relative_to(REPO_ROOT)}::"
+            f"{test_the_nightly_task_fixture_copy_has_not_drifted_from_the_live_task.__name__}")
+    run = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         "-m", TESTS_MARK_EXPR, "-rs", "-rx", node],
+        cwd=REPO_ROOT, capture_output=True, text=True, timeout=600)
+    out = run.stdout + run.stderr
+    assert "deselected" not in out, f"{node} is deselected by {TESTS_MARK_EXPR!r}: {out[-800:]}"
+    assert "skipped" not in out.lower(), f"{node} skipped rather than ran: {out[-800:]}"
+    assert "xfail" not in out.lower(), f"{node} was xfailed rather than run: {out[-800:]}"
+    assert "1 passed" in out, f"{node} did not reach a pass: {out[-1500:]}"
+    assert run.returncode == 0, f"pytest exited {run.returncode}: {out[-1500:]}"
