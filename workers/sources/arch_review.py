@@ -895,6 +895,17 @@ live health routes for anything the doc states as a measured number:
     curl -s 'localhost:8080/api/autonomy/health?days=7'
     curl -s 'localhost:8080/api/autonomy/tasks'
 
+Read `window_clamped_to_hours` and `oldest_input` — top level on \
+`/api/workers/health`, under `fleet` on `/api/autonomy/health` — BEFORE \
+quoting any per-source or per-task figure from those routes as an N-day \
+number. Both are `null` when the store really does cover the window you \
+asked for; a value means the payload's `days` is a request the store could \
+not satisfy, and every count, rate and GPU-hour in it spans only those \
+hours (`oldest_input` is the age of the oldest run row the store holds). A \
+larger `days` is never a longer look: measured 2026-10-03, `days=90` on the \
+workers route covered 10.8 days. Quote the corrected span (`~11-day fail \
+rate`), or re-ask with a `days` the store covers — never carry the label.
+
 Then check the unit **against itself**. For each quantity, path, count or \
 cadence it states, grep the unit for every other statement of the same thing \
 and require them to agree — an armed/disarmed, on/off or N-vs-M pair can sit \

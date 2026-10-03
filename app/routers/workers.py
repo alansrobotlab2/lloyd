@@ -167,14 +167,37 @@ async def workers_health(days: int = 7, runs: int = 10):
     Degrades a section at a time rather than 503-ing the page, the same rule
     the dashboard follows: a health view is most useful when something is
     broken, so it must not be the second thing to break.
+
+    Top-level `oldest_input` / `window_clamped_to_hours` (#2127) mirror the pair
+    `/api/autonomy/health` has carried since #1401, because this endpoint has the
+    identical blindness: `days` is a request and not a measurement, so
+    a source's `fail_rate` and `gpu_hours` printed under a 90-day label rest on
+    however many hours of `runs` the store actually holds. Measured on
+    2026-10-03: `?days=90` over a workers.db whose oldest run row was 10.8 days
+    old named neither field, while the autonomy route on the same box named
+    `window_clamped_to_hours: 257.81` for the same table.
+
+    The pair is a FLEET bound, not a per-source measurement: `oldest_input` is
+    `MIN(completed_at)` over every source, so a young source whose own history
+    starts days after it can be under-covered while the top-level field still
+    reads null. Per-source fields are an open scope call (#2127 owed item 2);
+    read a source's own `health.last_completed` beside its `total` before
+    treating one row's rate as a `days`-long one.
     """
     import asyncio as _asyncio
     from datetime import timedelta, timezone
 
+    from app.autonomy import _health_window_fields
+
     days = max(1, min(90, int(days)))
     runs = max(0, min(50, int(runs)))
     sources_cfg = CONFIG.get("workers", {}).get("sources", {}) or {}
-    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    # ONE clock reading, feeding both the query bound and the clamp (#1401's
+    # lesson, applied here): the span the clamp reports is measured from this
+    # instant, so a second `datetime.now` for the window edge would make the
+    # figure describe a window this query did not run.
+    now = datetime.now(timezone.utc)
+    since = (now - timedelta(days=days)).isoformat()
 
     try:
         q = get_queue()
@@ -223,6 +246,26 @@ async def workers_health(days: int = 7, runs: int = 10):
         logger.warning("workers health dispatch check failed: %s", e)
         dispatch = {}
 
+    # The store's own age, read UNFILTERED by the window (#2127). It cannot come
+    # from `rollup`: that read is `WHERE completed_at >= ?`, so on the store this
+    # field exists to expose — every row older than the window — it is empty, and
+    # a min over an empty rollup is exactly the absent field that wears the
+    # clean bill's face. `oldest_run_completed_at()` with no source is
+    # `SELECT MIN(completed_at) FROM runs`: no date predicate at all.
+    try:
+        oldest_input = await loop.run_in_executor(None, q.oldest_run_completed_at)
+    except Exception as e:  # noqa: BLE001 - a section, not the page
+        logger.warning("workers health store-age read failed: %s", e)
+        oldest_input = None
+    # "Did the window return anything that reached the tallies". False here means
+    # the rollup came back empty or blank, which is a verdict over nothing — and
+    # nothing is shorter than any window, so the clamp reads 0.0 rather than
+    # absent. Derived from the rollup rows, never from `oldest_input`: the two
+    # questions ("how old is the store", "did this window hold a run") have
+    # different answers, and `_health_window_fields` keeps them apart.
+    observed = any(int((r or {}).get("total", 0) or 0) for r in rollup.values())
+    window_fields = _health_window_fields(now, days, oldest_input, observed)
+
     # Every source the config names AND every source the runs table knows
     # about. A source removed from config still has history worth reading,
     # and one whose runs all predate the window still has to appear.
@@ -267,7 +310,8 @@ async def workers_health(days: int = 7, runs: int = 10):
             "dispatch": dispatch.get(name),
             "recent": recent,
         })
-    return JSONResponse({"initialized": True, "days": days, "sources": out})
+    return JSONResponse({"initialized": True, "days": days,
+                         **window_fields, "sources": out})
 
 
 @router.get("/api/workers/queue")

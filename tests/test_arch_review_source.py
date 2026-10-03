@@ -448,6 +448,32 @@ def test_a_doc_prompt_carries_its_slug_tags_and_provenance_rule(tree):
     assert "Review log" in p
 
 
+def test_the_prompt_makes_the_reviewer_read_the_window_clamp_before_quoting(tree):
+    """A `days=90` answer over a 10.8-day store is not a 90-day measurement.
+
+    Step 1 tells the reviewer to check a doc's stated numbers against the live
+    health routes. Measured 2026-10-03, `/api/workers/health?days=90` named no
+    clamp at all (`['days', 'initialized', 'sources']`) over a `workers.db`
+    whose oldest run row was 10.8 days old — so any `fail_rate` or `gpu_hours`
+    it copied into an architecture doc was a ~11-day figure carrying a 90-day
+    label, and the doc became the durable record of the wrong span. #2127 put
+    the pair on that route; this pins the half that makes it useful: the step
+    reading the route is told to read the clamp FIRST.
+    """
+    p = _prompt_for(tree, "memory", "doc")
+    curl = p.index("curl -s 'localhost:8080/api/workers/health?days=7'")
+    named = p.index("window_clamped_to_hours")
+    assert named > curl, "the clamp is named where the route is being curled"
+    assert named < p.index("Then check the unit **against itself**"), (
+        "the rule belongs to step 1's accuracy pass, where the curl lives")
+    assert ("BEFORE quoting any per-source or per-task figure from those routes "
+            "as an N-day number") in p
+    assert "under `fleet` on `/api/autonomy/health`" in p, (
+        "the two routes carry the pair at different depths — top level here, "
+        "under `fleet` there — and naming only one path lets the reviewer read "
+        "one route's field as the other's absence")
+
+
 def test_a_group_prompt_carries_the_three_lenses_and_its_own_lines(tree):
     p = _prompt_for(tree, "workers-jobs", "group", "Dispatch")
     start, end = A.find_section((tree["arch"] / "workers-jobs.md").read_text(), "Dispatch")

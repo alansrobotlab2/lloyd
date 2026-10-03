@@ -1263,8 +1263,8 @@ class WorkQueue:
             }
         return out
 
-    def oldest_run_completed_at(self, source: str) -> Optional[str]:
-        """The oldest `completed_at` this source has ever recorded, unfiltered.
+    def oldest_run_completed_at(self, source: Optional[str] = None) -> Optional[str]:
+        """The oldest `completed_at` the store holds, unfiltered.
 
         `/api/autonomy/health` needs it to say how old its own verdict is
         (#1401), and it cannot get that from the window-filtered read: with
@@ -1272,11 +1272,22 @@ class WorkQueue:
         "no data" is precisely the shape the clamp exists to tell apart from a
         clean bill of health. So this queries the store, not the window — no
         `completed_at >= ?` predicate, deliberately.
+
+        `source=None` drops the source predicate too and returns the age of the
+        whole `runs` table, which is what `/api/workers/health` needs for its
+        top-level clamp (#2127): that endpoint answers for every source at once,
+        and picking one source's age to stand for all of them would be a verdict
+        about a source nobody asked about. One call, one `MIN()`, rather than a
+        connection per source (15 on the live box) reduced in Python.
         """
         with self._connect() as conn:
-            row = conn.execute(
-                "SELECT MIN(completed_at) FROM runs WHERE source=?",
-                (source,)).fetchone()
+            if source is None:
+                row = conn.execute(
+                    "SELECT MIN(completed_at) FROM runs").fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT MIN(completed_at) FROM runs WHERE source=?",
+                    (source,)).fetchone()
         return row[0] if row and row[0] else None
 
     def list_runs_joined(self, source: str, since_iso: str,

@@ -1354,3 +1354,199 @@ def test_a_source_with_no_runs_still_reads_no_runs_and_neither_span():
     assert spans == ["<span>no runs in the window</span>"], spans
     assert "deadline_cut" not in null_branch and "matrix_shrunk" not in null_branch
 
+
+# ── /api/workers/health names its own window clamp (#2127) ───────────────────
+#
+# `days` is a request, not a measurement, and until now this endpoint reported
+# nothing to check it against. Measured on the live box 2026-10-03:
+# `?days=90` returned top-level keys `['days', 'initialized', 'sources']` over a
+# `workers.db` whose oldest run row was 10.8 days old, so every per-source
+# `fail_rate` and `gpu_hours` in that payload was a ~10.8-day figure wearing a
+# 90-day label — while `/api/autonomy/health`, over the same table, named
+# `fleet.window_clamped_to_hours: 257.81` (#1401). These tests drive the real
+# route over a real `WorkQueue` sqlite file: the clamp is a
+# `SELECT MIN(completed_at) FROM runs` with no date predicate, and a stubbed
+# queue can return whatever its caller asks for, which proves nothing about the
+# read being unfiltered.
+
+
+def _clamp_client(monkeypatch, tmp_path: Path, name: str = "workers-health.db"):
+    """The real route over a real queue file with one configured source."""
+    from workers.queue import WorkQueue
+
+    q = WorkQueue(tmp_path / name)
+    client = _client(monkeypatch, tmp_path)
+    monkeypatch.setattr(router, "get_queue", lambda: q)
+    monkeypatch.setattr(router, "CONFIG", {"workers": {"sources": {
+        "probe": {"enabled": True, "interval_seconds": 60}}}}, raising=False)
+    return client, q
+
+
+def _seed_run(q, when, *, run_id: str = "run-1", source: str = "probe",
+              status: str = "success") -> str:
+    """One `runs` row stamped exactly `when`, returning the stamp it stored.
+
+    `record_run` takes an explicit `completed_at`, which is the only way a
+    ten-day-old store exists in a test that takes milliseconds.
+    """
+    stamp = when.isoformat()
+    q.record_run(run_id=run_id, queue_id=None, source=source, status=status,
+                 started_at=stamp, completed_at=stamp, duration_seconds=60.0,
+                 summary="ok")
+    return stamp
+
+
+def test_days_beyond_the_store_names_the_hours_the_verdict_covers(
+        monkeypatch, tmp_path):
+    """Clause 1 + 2: the clamp is the span the numbers really rest on.
+
+    A store holding one run at `now - 10 days`, asked for 90 days: the answer
+    must say 240 hours, not silently agree it covered the 2160 it was asked for.
+    """
+    client, q = _clamp_client(monkeypatch, tmp_path)
+    stamp = _seed_run(q, datetime.now(timezone.utc) - timedelta(days=10))
+
+    body = client.get("/api/workers/health?days=90").json()
+
+    assert body["initialized"] is True and body["days"] == 90, body
+    assert body["oldest_input"] == stamp, body
+    assert isinstance(body["window_clamped_to_hours"], float), body
+    assert abs(body["window_clamped_to_hours"] - 240.0) < 0.05, (
+        f"the rollup spans ~10 days, so the field must say ~240 h and not the "
+        f"2160 h `days=90` asked for: {body['window_clamped_to_hours']}")
+
+
+def test_a_store_that_covers_the_window_keeps_both_fields_null(
+        monkeypatch, tmp_path):
+    """Clause 1, the null half — and the discriminator for a window-min build.
+
+    `days=7` over a store whose rows are 10 days and 1 day old: the window has
+    one row in it and the store reaches back past the window edge, so the
+    verdict genuinely spans seven days and both fields go. An implementation
+    that derived the clamp from the WINDOW-filtered rollup would see its oldest
+    in-window row (1 day old) here and report a 24-hour clamp — the wrong answer
+    on a healthy store, which is the other way this pair could mislead.
+    """
+    client, q = _clamp_client(monkeypatch, tmp_path)
+    now = datetime.now(timezone.utc)
+    _seed_run(q, now - timedelta(days=10), run_id="old")
+    _seed_run(q, now - timedelta(days=1), run_id="new")
+
+    body = client.get("/api/workers/health?days=7").json()
+
+    assert body["days"] == 7 and body["initialized"] is True, body
+    assert body["oldest_input"] is None, body
+    assert body["window_clamped_to_hours"] is None, body
+    assert body["sources"][0]["health"]["total"] == 1, (
+        "the window is not empty here; the nulls mean it is fully covered")
+
+
+def test_a_window_holding_no_run_still_names_the_store_age_at_zero(
+        monkeypatch, tmp_path):
+    """Clause 3: an empty window is never shaped like a clean bill of health.
+
+    Every row predates the window, so `run_rollup_by_source` returns nothing —
+    the exact store the clamp exists for. A min over that rollup is `None`, and
+    `None` is what a covered window also prints; the unfiltered store read is
+    the only thing that tells these two apart.
+    """
+    client, q = _clamp_client(monkeypatch, tmp_path)
+    stamp = _seed_run(q, datetime.now(timezone.utc) - timedelta(days=30))
+
+    body = client.get("/api/workers/health?days=7").json()
+
+    assert body["oldest_input"] == stamp, body
+    assert body["window_clamped_to_hours"] == 0.0, body
+    assert body["sources"][0]["health"] is None, (
+        "the row itself still reads as no runs in the window: the clamp pair is "
+        "the only signal that the store is old rather than empty")
+
+
+def test_the_window_edge_and_the_clamp_share_one_clock_reading(
+        monkeypatch, tmp_path):
+    """Clause 3's second half: one `now`, feeding both.
+
+    Two readings would let the clamp report a span the query did not run over,
+    and nothing else in the payload could reveal the disagreement. Pinning the
+    clock turns `~240 h` into `240.0` exactly and makes the count of clock reads
+    an observable rather than a property of the code.
+    """
+    client, q = _clamp_client(monkeypatch, tmp_path)
+    pin = datetime(2026, 10, 3, 12, 0, 0, tzinfo=timezone.utc)
+    stamp = _seed_run(q, pin - timedelta(days=10))
+    reads: list[int] = []
+
+    class _Pinned(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            reads.append(1)
+            instant = cls(2026, 10, 3, 12, 0, 0, tzinfo=timezone.utc)
+            return instant if tz is None else instant.astimezone(tz)
+
+    monkeypatch.setattr(router, "datetime", _Pinned)
+
+    body = client.get("/api/workers/health?days=90").json()
+
+    assert len(reads) == 1, (
+        f"the route read the clock {len(reads)} times; the clamp is only "
+        "trustworthy if the `since` bound and the clamp come from one reading")
+    assert body["oldest_input"] == stamp, body
+    assert body["window_clamped_to_hours"] == 240.0, body
+
+
+def test_the_clamp_arrives_without_renaming_anything_else(
+        monkeypatch, tmp_path):
+    """Clause 4 at the route: the envelope grew by exactly two keys.
+
+    Top-level set-equality is the pin — an additive change may add, and the
+    per-source rows must come back with the eleven keys `web/src/api.ts` types
+    and the Background tab reads, unchanged.
+    """
+    client, q = _clamp_client(monkeypatch, tmp_path)
+    _seed_run(q, datetime.now(timezone.utc) - timedelta(hours=6))
+
+    body = client.get("/api/workers/health?days=7&runs=1").json()
+
+    assert set(body) == {"initialized", "days", "oldest_input",
+                         "window_clamped_to_hours", "sources"}, sorted(body)
+    row = body["sources"][0]
+    assert set(row) == {"name", "configured", "enabled", "inner_voice",
+                        "interval_seconds", "max_inflight", "priority", "depth",
+                        "health", "dispatch", "recent"}, sorted(row)
+    assert row["name"] == "probe" and row["configured"] is True
+    health = row["health"]
+    assert health["total"] == 1 and health["ok"] == 1, health
+    assert health["fail_rate"] == 0.0, health
+    assert health["gpu_hours"] == round(60.0 / 3600.0, 2), health
+    assert len(row["recent"]) == 1 and row["recent"][0]["status"] == "success"
+
+
+def test_the_store_age_read_is_unfiltered_across_sources(monkeypatch, tmp_path):
+    """The queue read behind the clamp, pinned at its own level.
+
+    `oldest_run_completed_at()` with no source is the whole `runs` table; with a
+    source it stays what `/api/autonomy/health` has always needed — that source
+    alone. Both matter: the autonomy route must not silently start reading the
+    fleet's age as its own.
+    """
+    from workers.queue import WorkQueue
+
+    q = WorkQueue(tmp_path / "oldest.db")
+    now = datetime.now(timezone.utc)
+    old_stamp = _seed_run(q, now - timedelta(days=30), run_id="old", source="probe")
+    _seed_run(q, now - timedelta(days=2), run_id="new", source="other")
+
+    fleet_oldest = q.oldest_run_completed_at()
+    per_source = q.oldest_run_completed_at("other")
+
+    assert fleet_oldest == old_stamp, (fleet_oldest, old_stamp)
+    assert per_source > fleet_oldest, (
+        "the all-source read must be the oldest row in the table, older than any "
+        "single source's: %r vs %r" % (fleet_oldest, per_source))
+    assert q.oldest_run_completed_at("nobody") is None, (
+        "a source with no rows has no age, which is not the same as age zero")
+
+    empty = WorkQueue(tmp_path / "empty.db")
+    assert empty.oldest_run_completed_at() is None, (
+        "an empty store is nameless, not clamped to zero")
+

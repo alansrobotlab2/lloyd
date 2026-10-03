@@ -114,19 +114,61 @@ async def test_the_two_listings_are_complements(client,
     assert not (chats & background)
 
 
-async def test_workers_health_shape(client):
+#: The exact top-level envelope `web/src/api.ts`'s `workersHealth` reads, and the
+#: exact per-source row its `WorkerSourceHealth` type declares. Asserted by
+#: EQUALITY, not superset: this is the contract the Background tab breaks at
+#: click-time if a key is renamed. #2127 grew the envelope by exactly
+#: `oldest_input` + `window_clamped_to_hours` and the rows by nothing at all —
+#: that addition-only property is what these two sets pin.
+WORKERS_HEALTH_KEYS = {"initialized", "days", "oldest_input",
+                       "window_clamped_to_hours", "sources"}
+WORKER_SOURCE_HEALTH_KEYS = {"name", "configured", "enabled", "inner_voice",
+                             "interval_seconds", "max_inflight", "priority",
+                             "depth", "health", "dispatch", "recent"}
+
+
+async def test_workers_health_shape(client, monkeypatch, tmp_path):
+    """Clause 4 of #2127: the window clamp arrived without renaming anything.
+
+    A real `WorkQueue` is wired in so `initialized` is true rather than
+    whatever order the suite happened to run in — the branch that carries the
+    new keys is the branch worth pinning. Two rows, one older than the default
+    7-day window and one inside it, are the healthy case: the store covers the
+    window, so both new fields read null and every older key keeps its name and
+    its numeric meaning.
+    """
+    import datetime as dt
+
+    from app.routers import workers as workers_router
+    from workers.queue import WorkQueue
+
+    q = WorkQueue(tmp_path / "contract-health.db")
+    now = dt.datetime.now(dt.timezone.utc)
+    for age, rid in ((dt.timedelta(days=10), "old"), (dt.timedelta(hours=1), "new")):
+        stamp = (now - age).isoformat()
+        q.record_run(run_id=f"contract-{rid}", queue_id=None, source="contract-src",
+                     status="success", started_at=stamp, completed_at=stamp,
+                     duration_seconds=60.0, summary="ok")
+    monkeypatch.setattr(workers_router, "get_queue", lambda: q)
+
     r = await client.get("/api/workers/health")
     assert r.status_code == 200
     body = r.json()
-    assert set(body) >= {"initialized", "days", "sources"}
+    assert set(body) == WORKERS_HEALTH_KEYS, sorted(body)
+    assert body["initialized"] is True and body["days"] == 7
+    assert body["oldest_input"] is None and body["window_clamped_to_hours"] is None, (
+        "the seeded store spans the whole default window, so the payload must "
+        "claim no clamp: %r" % ({k: body[k] for k in ("oldest_input",
+                                                     "window_clamped_to_hours")},))
     for src in body["sources"]:
-        # api.ts WorkerSourceHealth type.
-        assert set(src) >= {"name", "enabled", "inner_voice", "depth",
-                            "health", "recent"}
+        assert set(src) == WORKER_SOURCE_HEALTH_KEYS, sorted(src)
         # `health` is None for a source with no runs in the window — a rate
         # over zero runs is unknown, not 0%.
         assert src["health"] is None or set(src["health"]) >= {
             "total", "ok", "failed", "fail_rate", "gpu_hours"}
+    seeded = next(s for s in body["sources"] if s["name"] == "contract-src")
+    assert seeded["configured"] is False and seeded["dispatch"] is None, seeded
+    assert seeded["health"]["total"] == 1, seeded["health"]
 
 
 async def test_created_sessions_are_never_background_shaped(client, tmp_path,
