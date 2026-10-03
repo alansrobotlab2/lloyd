@@ -2,10 +2,14 @@
 
 `agent_mcp/vault.py` carries the measurement. Pinned here: the request the doc
 leg sends when djev ranks, the shape of the djev call, the fallback that sends a
-recall djev did not answer down the cross-encoder path (counted, never raised),
-the kill switch, and that the regression pin warms the same request.
+recall djev did not answer down the cross-encoder path (counted, never raised)
+and which of its causes the log and the toast name (#2112), the one declared
+canvas width the pool ceiling is derived from at call time, the kill switch, and
+that the regression pin warms the same request.
 """
 from __future__ import annotations
+
+import time
 
 import pytest
 
@@ -107,7 +111,72 @@ def test_a_djev_that_does_not_answer_sends_the_recall_down_the_cross_encoder_pat
     assert out["documents"], "a fallback still answers"
     stats = qmd_health.stats()
     assert stats["djev_fallbacks"] == 1 and stats["djev_ranked"] == 0
-    assert stats["last_djev_fallback_reason"]
+    # The sentence that was always right for THIS cause, and the one #2112 kept
+    # for it alone: an engine that never answered reads exactly as it did before
+    # the causes were separated, so the two lines are never interchangeable.
+    assert stats["last_djev_fallback_reason"] == qmd_health.RANK_FALLBACK_NO_ANSWER
+
+
+def test_a_canvas_split_names_the_split_and_not_an_outage(djev_ranks, wire, monkeypatch,
+                                                          capsys):
+    """#2112 end to end. At `CANVAS="128"` a 32-row pool is the most djev is ever
+    asked to order, so a split is only reachable on a boot with a narrower canvas
+    — and when it happens the degraded line and the toast must say the canvas
+    split. "djev did not answer" there sends the next reader to restart an engine
+    that is up and answered: the two such lines already in the log surface are
+    indistinguishable precisely because the cause was never passed."""
+    monkeypatch.setattr(djev, "rank", lambda *a, **k: djev.CANVAS_SPLIT)
+    toasts: list[tuple[str, str]] = []
+    monkeypatch.setattr(qmd_health, "_default_announce", lambda t, b: toasts.append((t, b)))
+    out = _recall()
+    assert out["documents"], "a split still answers, down the cross-encoder"
+    err = capsys.readouterr().err
+    assert "canvas" in err.lower(), err
+    assert "did not answer" not in err, f"a split is not an outage: {err}"
+    time.sleep(0.05)   # the toast fans out off the recall path, as the fallback's does
+    assert toasts and "canvas" in toasts[0][1].lower(), toasts
+    assert "did not answer" not in toasts[0][1], toasts[0][1]
+    assert (qmd_health.stats()["last_djev_fallback_reason"]
+            == qmd_health.RANK_FALLBACK_CANVAS_SPLIT)
+
+
+def test_the_recall_pool_is_the_declared_canvas_read_at_call_time(monkeypatch):
+    """The ceiling exists in one declared place (`app/djev.py`) and the recall
+    reads it per call, so a fixture declaring a narrower engine moves the pool
+    with NO second constant edited (#2112). An import-time copy of the number
+    could not move under a patch, which is the only reason this is a call and not
+    a module constant — and `tests/test_episodic_recall.py` reads the same
+    function, so the head-plus-floors arithmetic is checked against the derived
+    value rather than a literal that could drift from it."""
+    assert vault.recall_djev_pool() == 32
+    monkeypatch.setattr(djev, "SERVED_CANVAS_ROWS", 64)
+    assert vault.recall_djev_pool() == 16
+    shape = vault.recall_doc_leg_shape("djev")
+    assert shape["limit"] == 16, "the doc leg asks qmd for what one canvas holds"
+    # The head and the floors do NOT follow the canvas, on purpose: they are
+    # measured numbers (18 + (2+2+2+1) x 2 = 32 at the declared width), and
+    # re-deriving them is the joint-satisfiability trap this item rules out —
+    # a wider canvas was measured and rejected (#1345), so nothing at the top
+    # of this file is a quotient of anything.
+    assert shape["candidateLimit"] == vault.RECALL_DJEV_HEAD == 20
+    assert shape["floor"] == vault.RECALL_DJEV_FLOOR
+    assert "extra" not in shape
+
+
+def test_a_narrower_declared_canvas_narrows_what_the_recall_asks_for(djev_ranks, wire,
+                                                                    monkeypatch):
+    """The pool asked of qmd and the pool handed to djev are the same derived
+    number: declaring a canvas that holds 16 rank questions asks the doc leg for
+    16 rows and `max_n` 16, so the client cannot be the thing that splits the
+    request — which is the misroute #2112 is about, and it needs no engine to
+    observe, only the declared width."""
+    monkeypatch.setattr(djev, "SERVED_CANVAS_ROWS", 64)
+    out = _recall()
+    assert out["documents"]
+    leg = _doc_legs(wire)[0]
+    assert leg["limit"] == 16
+    call = djev_ranks[0]
+    assert call["n"] == 16 and call["max_n"] == 16
 
 
 def test_a_djev_that_raises_is_a_fallback_not_a_failed_recall(djev_ranks, wire, monkeypatch):

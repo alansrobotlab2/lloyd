@@ -241,12 +241,37 @@ def test_rank_default_is_below_the_ceiling():
     assert djev.RANK_DEFAULT_N < djev.RANK_MAX_N <= djev.CANVAS_CHUNK_QUESTIONS
 
 
+def test_the_row_ceiling_is_derived_from_one_declared_canvas_width(monkeypatch):
+    """The ceiling used to be a hand-written 32 with nothing behind it, and the
+    recall's pool was a SECOND hand-written 32 in another module — two numbers
+    that agreed only for as long as someone kept both in their head. Now one
+    declared width does the arithmetic: a rank-shaped question costs 4 rows of
+    canvas, measured at both widths the engine has been served at (33 questions
+    fitted in one chunk at 128, and the first split at 256 was at 65 —
+    `architecture/djev.md` §3.3, and #1345's widening measurement). So 128 // 4
+    = 32 is the number §3.3 measured there, one row under its tested capacity,
+    and 256 // 4 = 64 is one row under the 65 measured at 256.
+    """
+    assert djev.SERVED_CANVAS_ROWS == 128          # the conf's `CANVAS="128"`
+    assert djev.CANVAS_ROWS_PER_RANK_QUESTION == 4
+    assert djev.CANVAS_CHUNK_QUESTIONS == djev.canvas_rows() == 32
+    monkeypatch.setattr(djev, "SERVED_CANVAS_ROWS", 64)
+    assert djev.canvas_rows() == 16, "the width is read, not remembered"
+
+
 def test_rank_refuses_an_answer_split_across_canvas_chunks(monkeypatch):
     """Different chunks are different shared contexts. Upstream says plainly
     that a partitioned listwise score is not comparable across them, and the
     n=64 run ranked first a candidate that was the LONE member of a one-item
     chunk — scored against nothing. Sorting the union looks exactly like a
-    ranking."""
+    ranking.
+
+    The refusal is `CANVAS_SPLIT` and not `None`. This node used to assert
+    `is None` — byte-for-byte the shape of the transport-failure tests above —
+    and that shared value is precisely how the recall came to book a split as an
+    engine outage (#2112). The witness stays falsy, so a caller that only asks
+    `if not rows:` carries on with the fallback exactly as it did.
+    """
     answers = {f"c{i}": {"type": "score", "score": float(i),
                          "legend": {"0": "a", "1": "b"},
                          "probabilities": {"0": 0.5, "1": 0.5},
@@ -255,7 +280,19 @@ def test_rank_refuses_an_answer_split_across_canvas_chunks(monkeypatch):
     payload = _response(answers, diag)
     payload["diagnostics"]["chunks"] = [["c0", "c1"], ["c2"]]
     _serve(monkeypatch, payload)
-    assert djev.rank("q", ["a", "b", "c"]) is None
+    rows = djev.rank("q", ["a", "b", "c"])
+    assert rows is djev.CANVAS_SPLIT
+    assert not rows, "a split carries no ordering, exactly like `None`"
+
+
+def test_an_engine_that_never_answered_is_none_and_not_a_split(monkeypatch):
+    """The other half of the distinction #2112 asks for: a transport failure
+    reaches `rank()` as the plain `None` it always was, so neither cause borrows
+    the other's story — an outage is not a split, and a split is not an outage."""
+    def _open(req, timeout=None):
+        raise ConnectionRefusedError("no engine")
+    monkeypatch.setattr(djev.urllib.request, "urlopen", _open)
+    assert djev.rank("q", ["a", "b"]) is None
 
 
 def test_rank_orders_best_first(monkeypatch):

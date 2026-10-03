@@ -272,7 +272,12 @@ RECALL_RERANKER = "djev"
 RECALL_LEX_MODE = "or"
 RECALL_DJEV_HEAD = 20
 RECALL_DJEV_FLOOR = {"autonomy": 2, "architecture": 2, "skills": 2}
-RECALL_DJEV_POOL = 32     # head + floors can never pass it: 20 + (2+2+2) x 2 searches
+# The pool this ranker orders is deliberately NOT a number written here. It is
+# derived from the canvas the engine is served with — `recall_djev_pool()`,
+# reading `app/djev.py` at call time (#2112) — so the width lives in exactly one
+# place and a narrower engine moves the pool with no second constant to edit. At
+# the declared 128 that is 32 rows, which head + floors can never pass:
+# 20 + (2+2+2) x 2 searches, or 18 + (2+2+2+1) x 2 with the episodic floors on.
 RECALL_DJEV_CHARS = 160
 RECALL_DJEV_SAMPLES = 1
 RECALL_DJEV_TIMEOUT_S = 4.0
@@ -341,6 +346,26 @@ def recall_reranker() -> str:
         return "qmd"
 
 
+def recall_djev_pool() -> int:
+    """Rows the djev ranker orders: what one served canvas holds (#2112).
+
+    Read through `djev.canvas_rows()` at CALL time, never copied into a constant
+    here. An import-time product of another module's constant is frozen at import
+    — so the two numbers agree only until someone edits one, and nothing in the
+    running system would ever say so: `GET /health` on the engine answers only
+    `{"status": "ok"}` and has no width to report. Re-reading it is also what
+    makes the width testable at all: a fixture that declares a narrower canvas
+    moves this and the recall's request with it, with no second constant to edit.
+
+    The head and the floors are NOT derived and must not become derived. They
+    are measured numbers — 18 + (2+2+2+1) x 2 = 32 with the episodic floors on —
+    and `tests/test_episodic_recall.py` checks that arithmetic against this
+    function's value, which is why it reads a function and not a literal.
+    """
+    from app import djev
+    return djev.canvas_rows()
+
+
 def recall_doc_leg_shape(reranker: str | None = None) -> dict:
     """What the recall's document leg asks qmd for. The one definition the doc
     leg and `scripts/automod/evalpin.production_payload` both read."""
@@ -348,7 +373,7 @@ def recall_doc_leg_shape(reranker: str | None = None) -> dict:
     # Off, the shape is today's dict exactly — no `extra` key at all.
     extra = {"extra": list(RECALL_EPISODIC_FLOOR)} if episodic else {}
     if (reranker or recall_reranker()) == "djev":
-        return {"limit": RECALL_DJEV_POOL,
+        return {"limit": recall_djev_pool(),
                 "candidateLimit": RECALL_EPISODIC_DJEV_HEAD if episodic else RECALL_DJEV_HEAD,
                 "rerank": False,
                 "floor": {**RECALL_DJEV_FLOOR, **(RECALL_EPISODIC_FLOOR if episodic else {})},
@@ -1819,8 +1844,11 @@ def _djev_rerank_pool(documents: list[dict], query: str, top: int) -> list[dict]
     the union produces an artefact that looks exactly like a ranking.
 
     Fail-open at every exit. `None` from the client means the engine did not
-    answer — or answered across a canvas split, which it refuses to sort — and
-    the pool keeps the order qmd gave it.
+    answer, and `CANVAS_SPLIT` means it answered across a canvas split it refuses
+    to sort (#2112); both are falsy, and the pool keeps the order qmd gave it
+    either way. This arm reports nothing, so the two stay indistinguishable here
+    — the ranker arm is the one that books a cause, and the only one that can
+    reach a split at today's canvas.
     """
     try:
         from app import djev
@@ -1830,7 +1858,7 @@ def _djev_rerank_pool(documents: list[dict], query: str, top: int) -> list[dict]
         head, tail = documents[:n], documents[n:]
         rows = djev.rank(query, [_djev_doc_text(d) for d in head],
                          seam="recall_arm")
-        if rows is None:
+        if not rows:
             return documents
         return [head[r["index"]] for r in rows] + tail
     except Exception as e:  # noqa: BLE001 — an advisory reranker never fails a recall
@@ -1838,35 +1866,53 @@ def _djev_rerank_pool(documents: list[dict], query: str, top: int) -> list[dict]
         return documents
 
 
-def _djev_rank_recall(documents: list[dict], query: str) -> list[dict] | None:
-    """djev orders the recall's whole pool (#1336); `None` when it did not answer.
+def _djev_rank_recall(documents: list[dict], query: str) -> tuple[list[dict] | None, str]:
+    """djev orders the recall's whole pool (#1336); returns `(ordered, reason)`.
 
-    The pool is at most `RECALL_DJEV_POOL` rows, which one canvas holds, so
+    `ordered` is the pool in djev's order, or `None` when it did not get one — and
+    then `reason` is the string the caller books into `qmd_health.note_ranker`,
+    which is what the degraded line and the toast print. The three ways to get
+    here used to collapse into one bare `None` and one reason the caller wrote by
+    hand, so a canvas split — the engine ANSWERING with an unusable answer — was
+    announced as an engine that was down (#2112). An engine that simply did not
+    answer still reads "djev did not answer".
+
+    The pool is at most `recall_djev_pool()` rows, which one canvas holds, so
     nothing is cut. Each document's fusion score is kept as `_fusion_score` and
     `score` becomes djev's, so a consumer that re-sorts by score keeps djev's
     order rather than undoing it.
     """
     try:
-        from app import djev
-        head, tail = documents[:RECALL_DJEV_POOL], documents[RECALL_DJEV_POOL:]
+        from app import djev, qmd_health
+        pool = recall_djev_pool()
+        head, tail = documents[:pool], documents[pool:]
         if len(head) < 2:
-            return documents
+            return documents, ""
         rows = djev.rank(query, [_djev_doc_text(d) for d in head],
                          seam="recall_rank", timeout=RECALL_DJEV_TIMEOUT_S,
                          chars=RECALL_DJEV_CHARS, samples=RECALL_DJEV_SAMPLES,
-                         max_n=RECALL_DJEV_POOL)
+                         max_n=pool)
+        if rows is djev.CANVAS_SPLIT:
+            # Distinct from `None` since #2112, and the whole point of asking:
+            # the engine is up and answered; the canvas it answered on was too
+            # narrow for the pool. Say that, or the next reader restarts a
+            # service that is fine.
+            return None, qmd_health.RANK_FALLBACK_CANVAS_SPLIT
         if not rows:
-            return None
+            return None, qmd_health.RANK_FALLBACK_NO_ANSWER
         ordered = []
         for r in rows:
             d = head[r["index"]]
             d["_fusion_score"] = d.get("score", 0)
             d["score"] = round(float(r["score"]), 6)
             ordered.append(d)
-        return ordered + tail
+        return ordered + tail, ""
     except Exception as e:  # noqa: BLE001 — a ranker failure is a fallback, not a failed recall
         logger.warning("djev recall ranking failed: %s", e)
-        return None
+        # Names itself, because this is the third cause and the one that used to
+        # be indistinguishable from the other two: the `ValueError` of a
+        # too-narrow canvas reaches here too, from `djev.rank`'s own guard.
+        return None, f"{type(e).__name__}: {e}"
 
 
 def _djev_shadow_rerank(documents: list[dict], query: str) -> None:
@@ -2339,10 +2385,14 @@ def _vault_recall_base(params: dict, *, seed_top_k: int | None = None,
         if facts_only:
             pass  # no documents to order, and no ranker verdict to record
         elif ranker == "djev":
-            ranked = _djev_rank_recall(documents, query)
+            # The cause travels with the verdict: `note_ranker` prints the reason
+            # it is handed, and until #2112 this call site handed it the same
+            # "djev did not answer" for a canvas split as for an engine that was
+            # unreachable. The ranker now says which one it hit.
+            ranked, rank_reason = _djev_rank_recall(documents, query)
             if ranked is None:
                 from app import qmd_health
-                qmd_health.note_ranker(False, "djev did not answer")
+                qmd_health.note_ranker(False, rank_reason)
                 return _vault_recall(params, seed_top_k=seed_top_k, reranker="qmd")
             from app import qmd_health
             qmd_health.note_ranker(True)

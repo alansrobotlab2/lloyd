@@ -49,7 +49,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "agent-services"))
 
 RECALL_CHARS = 160      # vault.RECALL_DJEV_CHARS
-RECALL_POOL = 32        # vault.RECALL_DJEV_POOL
+RECALL_POOL = 32        # vault.recall_djev_pool(), 32 at the declared canvas
 RECALL_LIMIT = 20       # the recall's default output cut
 ADDRESSEE_THRESHOLD = 0.7
 TIERS = {"easy.jsonl": "easy", "original.jsonl": "standard", "hard.jsonl": "hard"}
@@ -95,7 +95,10 @@ def cmd_pools(args) -> int:
         captured[query] = [{"path": d.get("path"), "title": d.get("title"),
                             "snippet": d.get("snippet"), "text": vault._djev_doc_text(d)}
                            for d in documents[:RECALL_POOL]]
-        return documents  # fusion order: the ranker is what is being compared
+        # (ordered, reason) is the ranker's contract: it reports a cause along
+        # with a refusal (#2112). Fusion order here — the ranker is what is
+        # being compared, so this shim claims it ordered the pool as given.
+        return documents, ""
 
     vault._djev_rank_recall = capture
     pools = []

@@ -107,6 +107,16 @@ def test_none_from_the_client_leaves_the_order_untouched(monkeypatch):
     assert vault._djev_rerank_pool(list(DOCS), "q", 12) == DOCS
 
 
+def test_a_canvas_split_leaves_the_order_untouched_too(monkeypatch):
+    """The other refusal `rank()` can hand back. Since #2112 a split is
+    `djev.CANVAS_SPLIT` rather than `None`, and this arm — which books no cause
+    and asks only `if not rows:` — keeps qmd's order for it exactly as it does
+    for an outage: falsy is the whole contract a caller that reports nothing
+    needs."""
+    monkeypatch.setattr(djev, "rank", lambda *a, **k: djev.CANVAS_SPLIT)
+    assert vault._djev_rerank_pool(list(DOCS), "q", 12) == DOCS
+
+
 def test_an_exception_in_the_arm_never_fails_the_recall(monkeypatch):
     monkeypatch.setattr(djev, "rank",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))

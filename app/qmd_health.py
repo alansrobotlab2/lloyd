@@ -113,6 +113,16 @@ def note_response(rerank_requested: bool, meta: dict | None, *,
     return fell_back
 
 
+#: The reasons a djev recall fallback can be booked with (#2112). The recall used
+#: to pass the first for EVERY cause, so an engine that ANSWERED and whose answer
+#: was unusable — a ranking the server split across canvas chunks — was logged and
+#: toasted as an engine that was down. A caller that means "down" still says this
+#: exactly: the first is `note_ranker`'s own default, now named.
+RANK_FALLBACK_NO_ANSWER = "djev did not answer"
+RANK_FALLBACK_CANVAS_SPLIT = ("the engine split the pool across canvas chunks, "
+                              "whose scores are not comparable")
+
+
 def note_ranker(ok: bool, reason: str = "", *,
                 announce: Callable[[str, str], None] | None = None,
                 now: float | None = None) -> None:
@@ -120,7 +130,12 @@ def note_ranker(ok: bool, reason: str = "", *,
 
     A fallback still answers — it takes qmd's cross-encoder path, ~2 s instead of
     ~0.5 s — so, like a rerank fallback, it is counted, logged and announced,
-    never raised. Same cooldowns, its own clock."""
+    never raised. Same cooldowns, its own clock.
+
+    `reason` is WHICH cause the caller hit, and it is what the degraded line and
+    the toast interpolate verbatim, so it is the only place a reader ever learns
+    the difference between an engine that did not answer and one that answered
+    with something unusable. The recall started passing the real one in #2112."""
     global _last_ranker_log_at, _last_ranker_announce_at
     now = time.time() if now is None else now
     ring = log = False

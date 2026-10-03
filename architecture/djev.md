@@ -337,7 +337,14 @@ them (§4):
   it falls depends on the ids and types. Measured with rank-shaped questions:
   34 → chunks of 33 and 1, 48 → 33 and 15, 64 → 33, 30 and 1. The client's
   `CANVAS_CHUNK_QUESTIONS` 32 is a conservative bound under that, and it
-  refuses to sort a ranking the server split anyway.
+  refuses to sort a ranking the server split anyway. Since #2112 that refusal is
+  `djev.CANVAS_SPLIT` and not `None`, so a caller can tell a split from an engine
+  that never answered — until then the two were the same value, and the recall
+  booked a split as an outage in its log and its toast. Nor is 32 a hand-written
+  number any more: it is `SERVED_CANVAS_ROWS` (128, the conf's `CANVAS=`) over
+  `CANVAS_ROWS_PER_RANK_QUESTION` (4), the two measurements above read from one
+  place, so the ceiling moves with the declared canvas instead of with someone
+  remembering to edit a second file.
 - The same question moves with the request shape. `urgent` read `label_mass`
   0.80 beside two other questions, and 0.47 beside one. That is §7.3's rule
   showing up in a single example.
@@ -357,7 +364,7 @@ httpx appears only behind the function-local import in `ask()`.
 |---|---|
 | `ask_sync(state, questions, *, timeout=15, seam="", floor=None, samples=None, instructions=None, seed=None)` | `Answers` or `None` |
 | `ask(...)` | the async twin, for callers already on the event loop. A tool handler calling `ask_sync` on the loop would block it for as long as the engine takes |
-| `rank(query, candidates, *, timeout, seam="rank", floor, levels, chars=1200, samples=None, max_n=16)` | `[{index, score, label, confidence, label_mass, argmax_is_label, low_trust}]` best first, `[]` for no candidates, or `None`. **Raises** `ValueError` above `max_n` candidates, and on a `max_n` past `CANVAS_CHUNK_QUESTIONS` (32). The recall ranker is the one caller that raises it to 32 (§8.1) |
+| `rank(query, candidates, *, timeout, seam="rank", floor, levels, chars=1200, samples=None, max_n=16)` | `[{index, score, label, confidence, label_mass, argmax_is_label, low_trust}]` best first, `[]` for no candidates, `CANVAS_SPLIT` for an answer the server split across chunks (§3.3), or `None` for no answer at all — the last two are the only two ways to get no ordering, and since #2112 they are different values. **Raises** `ValueError` above `max_n` candidates, and on a `max_n` past `CANVAS_CHUNK_QUESTIONS` (32). The recall ranker is the one caller that raises it to 32 (§8.1) |
 | `rank_questions(candidates, levels)`, `rank_state(query, candidates, chars=1200)` | the question map (`c0`…`cN`) and canvas state a ranking sends, shared with the shadow seam |
 | `enabled()`, `structured_url()` | the slot switch (through `llm_slots`) and `djev.structured_url` |
 | `reachable(timeout=2)` | a live `GET /health`. Never called from `list_tools()` |
@@ -366,7 +373,10 @@ httpx appears only behind the function-local import in `ask()`.
 
 Constants: `DEFAULT_TIMEOUT_S` 15 (the server's own upstream read is 600 s and
 has no 504, so this is the only bound on a wedged engine), `RANK_DEFAULT_N` 12,
-`RANK_MAX_N` 16, `CANVAS_CHUNK_QUESTIONS` 32, and `RANK_LEVELS` (`irrelevant`,
+`RANK_MAX_N` 16, `CANVAS_CHUNK_QUESTIONS` 32 — derived at import from
+`SERVED_CANVAS_ROWS` 128 over `CANVAS_ROWS_PER_RANK_QUESTION` 4, the one place a
+served canvas width is written, read by callers through `canvas_rows()` (§3.3) —
+and `RANK_LEVELS` (`irrelevant`,
 `tangential`, `partly answers it`, `directly answers it`). The levels are
 ordered worst to best, because `score` is an expected value over the level
 *index*. Reversing the list reverses every ranking silently.
@@ -1018,7 +1028,13 @@ has to match it (Alan: equal accuracy plus throughput is a win).
 - **Deployed shape:** global fusion's 20-row head + floors 2/2/2 for autonomy,
   architecture and skills, cross-encoder off, `rank(chars=160, samples=1,
   max_n=32, timeout=4)`, seam `recall_rank` (`RECALL_DJEV_HEAD`, `_FLOOR`,
-  `_POOL`, `_CHARS`, `_SAMPLES`, `_TIMEOUT_S`). Each row is the title and qmd's
+  `_CHARS`, `_SAMPLES`, `_TIMEOUT_S`). The 32 is not one of those names any
+  more: the pool comes from `recall_djev_pool()`, which reads `canvas_rows()` at
+  call time, so the width lives in `app/djev.py` alone and a narrower canvas
+  narrows the recall's request with no second constant to edit (#2112). The head
+  and the floors stay measured numbers — 18 + (2+2+2+1) x 2 = 32 with the
+  episodic floors on, which `tests/test_episodic_recall.py` checks against
+  `recall_djev_pool()` rather than a literal. Each row is the title and qmd's
   snippet through `strip_qmd_snippet` (#1467, 2026-09-25): unstripped, qmd's
   diff header and line prefixes left ~40 of the 160 characters for document
   text, and stripping them gave NDCG@10 +0.036 [+0.001, +0.075] as a pure
@@ -1030,7 +1046,12 @@ has to match it (Alan: equal accuracy plus throughput is a win).
   the recall on the cross-encoder path rather than serving fusion order (0.05
   MRR worse). `app/qmd_health.py::note_ranker` counts it, logs it and rings
   `announce()` once per 30 minutes. The shadow seam does not run when djev
-  ranks, nor inside that fallback.
+  ranks, nor inside that fallback. **The reason it logs is the cause the caller
+  hit** (#2112): an engine that did not answer still reads `djev did not answer`,
+  a split reads the canvas split whose scores are not comparable, and a raise
+  names its own exception type — because the degraded line and the toast
+  interpolate that string verbatim, and one sentence for all three made a
+  misrouting look like an outage.
 - **The line holds:** this orders documents and gates nothing. `RANK_MAX_N`
   stays 16 for every other caller.
 

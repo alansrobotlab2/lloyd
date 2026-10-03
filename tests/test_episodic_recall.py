@@ -39,8 +39,12 @@ def test_on_names_both_collections_and_still_fits_one_canvas(monkeypatch):
     shape = vault_mod.recall_doc_leg_shape("djev")
     assert shape["extra"] == ["sessions"]
     assert shape["floor"]["sessions"] == 1
-    # head + every floor x two search legs must fit the rows djev ranks in one read
-    assert shape["candidateLimit"] + 2 * sum(shape["floor"].values()) <= vault_mod.RECALL_DJEV_POOL
+    # head + every floor x two search legs must fit the rows djev ranks in one
+    # read. The ceiling is the derived one (`recall_djev_pool()` reads the canvas
+    # width `app/djev.py` declares — 128 here, nothing patched), so this checks
+    # the arithmetic against the value the recall actually uses rather than a
+    # literal that could drift from it (#2112).
+    assert shape["candidateLimit"] + 2 * sum(shape["floor"].values()) <= vault_mod.recall_djev_pool()
     assert vault_mod.recall_doc_leg_shape("qmd")["extra"] == ["sessions"]
 
 

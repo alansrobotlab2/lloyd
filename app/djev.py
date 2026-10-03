@@ -102,8 +102,43 @@ DEFAULT_TIMEOUT_S = 15.0
 RANK_DEFAULT_N = 12
 RANK_MAX_N = 16
 
-#: The canvas split. A ranking that crosses it is not a ranking.
-CANVAS_CHUNK_QUESTIONS = 32
+#: The canvas width this engine is SERVED with — the `CANVAS="128"` of
+#: `agent-services/supervisor/conf.d/agent-djev.conf`, declared here as well
+#: because this module is the one that has to refuse a ranking the canvas cannot
+#: hold. The mirror is not checkable at runtime: `GET /health` answers only
+#: `{"status": "ok"}`, so no client-side route reads the served width off the
+#: running engine. Widening it was measured and rejected (#1345, 2026-09-21) and
+#: the conf is a protected path plus a planned outage of the shadow seams, so no
+#: round edits the pair together — `CANVAS_SPLIT` below is what makes a mismatch
+#: between the two visible instead of silent.
+SERVED_CANVAS_ROWS = 128
+
+#: What one rank-shaped question's answer template costs of that canvas, in the
+#: canvas's own rows. Measured at both widths it has been served at, never
+#: guessed: at 128 the server put 33 rank questions in one chunk (48 → 33 and 15,
+#: 64 → 33, 30 and 1 — `architecture/djev.md` §3.3), and at 256 the first split
+#: was at 65 (#1345's widening measurement). So the quotient sits one row under
+#: the measured capacity at each width — the same conservative relation the
+#: hand-picked 32 had at 128, now computed instead of asserted.
+CANVAS_ROWS_PER_RANK_QUESTION = 4
+
+#: The canvas split. A ranking that crosses it is not a ranking. DERIVED from
+#: the two numbers above, so this is the only place the width is written: 32 at
+#: the declared 128, the number §3.3 measured there.
+CANVAS_CHUNK_QUESTIONS = SERVED_CANVAS_ROWS // CANVAS_ROWS_PER_RANK_QUESTION
+
+
+def canvas_rows() -> int:
+    """Rank questions one served canvas holds in a single shared context.
+
+    A function next to the constant, because a caller that sizes itself by the
+    canvas has to re-read it. `CANVAS_CHUNK_QUESTIONS` is fixed at import, so an
+    import-time copy of it into another module's constant is frozen there and the
+    two numbers are free to disagree from the day one of them is edited — which
+    is drift this module has no other way to see, `GET /health` having no width
+    to report. The vault recall's pool reads this (#2112).
+    """
+    return SERVED_CANVAS_ROWS // CANVAS_ROWS_PER_RANK_QUESTION
 
 #: Recent latencies kept for `djev_status`, per seam. A ring, not a counter:
 #: the question a status route is asked is "is it answering, and how fast
@@ -619,13 +654,40 @@ def rank_state(query: str, candidates: Sequence[str], *,
     return f"Query: {query}\n\nCandidates:\n{body}"
 
 
+class CanvasSplit:
+    """The witness that the SERVER split a ranking across canvas chunks (#2112).
+
+    `rank()` returns the singleton `CANVAS_SPLIT` for that one cause instead of
+    `None`, so a caller can test it — `rows is djev.CANVAS_SPLIT` — and say what
+    actually happened. "The engine answered and its answer was unusable" is not
+    the same sentence as "the engine did not answer", and until #2112 `rank()`
+    returned the identical value for both, so the recall booked a split as an
+    outage in its log and its toast.
+
+    Falsy, and deliberately not a list: every caller written against the old
+    contract asks `if not rows:` first and carries on unchanged, and like `None`
+    this carries no ordering to use.
+    """
+
+    __slots__ = ()
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __repr__(self) -> str:
+        return "djev.CANVAS_SPLIT"
+
+
+CANVAS_SPLIT = CanvasSplit()
+
+
 def rank(query: str, candidates: Sequence[str], *,
          timeout: float = DEFAULT_TIMEOUT_S, seam: str = "rank",
          floor: float | None = None,
          levels: Sequence[str] = RANK_LEVELS,
          chars: int = 1200, samples: int | None = None,
-         max_n: int = RANK_MAX_N) -> list[dict] | None:
-    """`[{index, score, label_mass, ...}]` best first, or `None`.
+         max_n: int = RANK_MAX_N) -> list[dict] | CanvasSplit | None:
+    """`[{index, score, label_mass, ...}]` best first, `CANVAS_SPLIT`, or `None`.
 
     Refuses more than `RANK_MAX_N` candidates rather than truncating: a caller
     that hands over 40 rows means to rank 40, and quietly scoring 16 of them
@@ -633,7 +695,10 @@ def rank(query: str, candidates: Sequence[str], *,
     an answer the SERVER split across canvas chunks, which is the same failure
     arriving from the other side — different chunks are different shared
     contexts, so their scores are not comparable and sorting the union
-    produces an artefact that looks exactly like a ranking.
+    produces an artefact that looks exactly like a ranking. That refusal is
+    `CANVAS_SPLIT`, distinct from the `None` of an engine that did not answer at
+    all, because the two are different sentences to say about the machine and
+    one value for both made the recall report a split as an outage (#2112).
 
     `max_n` raises the cap for a caller that measured a wider window, never past
     `CANVAS_CHUNK_QUESTIONS`: the vault recall ranks up to 32 (#1336), measured
@@ -659,9 +724,12 @@ def rank(query: str, candidates: Sequence[str], *,
     if out is None:
         return None
     if out.cross_chunk:
+        # Still `debug`, on purpose: the caller now gets `CANVAS_SPLIT` and
+        # reports the cause through `qmd_health`, which rate-limits its own line.
+        # This one has no cooldown, so promoting it would print once per recall.
         logger.debug("djev %s: refusing a ranking split across %d canvas chunks",
                      seam, len(out.chunks))
-        return None
+        return CANVAS_SPLIT
     rows = []
     for i in range(n):
         a = out.get(f"c{i}")
