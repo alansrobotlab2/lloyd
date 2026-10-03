@@ -21,6 +21,7 @@ from typing import Callable, List, Optional, Dict, Any
 
 from .models import (FeedItem, ScoredItem, GRADE_CALL_CAP, GRADE_KEYWORD,
                      GRADE_MODEL, GRADE_NO_USABLE_GRADE)
+from ._paths import GRADE_STORE
 from .profile import load_profile, keyword_match, keyword_score, get_all_projects
 # The floor the second half of the #2092 warning is measured against. vault_writer
 # imports models/profile/state/body/_paths and never scoring, so this direction adds
@@ -301,6 +302,116 @@ def stage1_filter(
     return filtered_items
 
 
+# ── the first model grade an item id ever got, kept on disk (#2139) ──────────
+#
+# `temperature: 0` and `seed: 0` (#1232) do not pin the grade, because the flip is
+# not sampling. Measured on 2026-10-03 by replaying byte-identical
+# `_score_prompt` output for `youtube:UC0C-17n9iuUQPylguM1d-lQ:pvXmMntEIPY`
+# against the live `primary` engine: relevance 3 five times in a row with nothing
+# else in flight, then 4 once two other items' prompts were interleaved between the
+# calls. The server runs `--enable-prefix-caching` with MTP speculation, fp8 KV and
+# `--async-scheduling`, so the answer depends on batch state. `RELEVANCE_FLOOR = 4`
+# with a strict `<` (vault_writer.py:47, :53) turns that 3-vs-4 into write-vs-refuse,
+# and the two artifacts the day produces then disagree by construction:
+# `--score` truncates and rewrites `intel-<date>.jsonl` wholesale
+# (`__main__.py:150`) so it keeps the newest grade, while the writer dedupes by
+# item id (`is_written`, vault_writer.py:229) so the vault keeps the first one that
+# cleared the floor.
+#
+# The only layer that can pin an answer the engine will not pin is a store keyed by
+# item id, so that is what this is: one JSON line per grade, appended, never
+# rewritten, first row per id winning. Nothing about the sampler, the floor or the
+# prompt moves.
+#
+# What it costs, stated plainly: a grade is a point-in-time judgement, so if Alan
+# re-weights `interests.md` an item graded last month keeps the grade it got. That
+# is the designed semantics — the alternative is the coin flip above — and the store
+# is a plain JSONL a person can delete to re-grade the world. Its growth is one line
+# per graded id (tens a day), bounded by the retention sweep like the other stores.
+def load_grade_store() -> Dict[str, dict]:
+    """Item id -> the first model grade it received, read back from the store.
+
+    A row with no id, no parseable JSON, or a relevance `_clamp_relevance` refuses
+    is skipped rather than fatal. The store grows for the life of the machine and a
+    scoring pass must not die on one bad line in it — and a grade the store cannot
+    read degrades to the pre-#2139 behaviour (ask the model again), never to a
+    refused run.
+    """
+    grades: Dict[str, dict] = {}
+    try:
+        raw = GRADE_STORE.read_text()
+    except OSError:
+        return grades  # no store yet: a fresh machine, or a redirected test path
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        item_id = row.get("id")
+        relevance = _clamp_relevance(row.get("relevance"))
+        if not isinstance(item_id, str) or not item_id or relevance is None:
+            continue
+        if item_id in grades:
+            continue  # append-only, first write wins: a later row cannot revise it
+        why = row.get("why")
+        category = row.get("category")
+        projects = row.get("projects")
+        grades[item_id] = {
+            "relevance": relevance,
+            "why": why if isinstance(why, str) else "",
+            "projects": [str(p) for p in projects] if isinstance(projects, list) else [],
+            "category": category if isinstance(category, str) else "",
+        }
+    return grades
+
+
+def append_grade(item_id: str, relevance: int, why: str = "",
+                 projects: Optional[List[str]] = None, category: str = "") -> None:
+    """Append one item id's first model grade. Never rewrites the store.
+
+    An unwritable store is said out loud and the grade still stands: the run must
+    not lose a grade it already has because the cache could not be fed.
+    """
+    row = {"id": item_id, "relevance": relevance, "why": why,
+           "projects": list(projects or []), "category": category}
+    try:
+        GRADE_STORE.parent.mkdir(parents=True, exist_ok=True)
+        with open(GRADE_STORE, "a") as handle:
+            handle.write(json.dumps(row) + "\n")
+    except OSError as exc:
+        print(f"  could not record the grade for {item_id} in {GRADE_STORE}: {exc}")
+
+
+def _apply_model_grade(graded: dict, fallback_why: str,
+                       fallback_projects: List[str], fallback_category: str):
+    """(relevance, why, projects, category) from a grade, or None if it has none.
+
+    One applier for both routes a grade can arrive by — the live reply from
+    `_parse_score_json`, and a row read back from the store — because the defect
+    #2139 is about is the day file and the vault disagreeing, and a cache that
+    restored only the relevance would still rewrite `why`, `projects` and
+    `category` on every pass.
+    """
+    relevance = _clamp_relevance(graded.get("relevance"))
+    if relevance is None:
+        return None
+    why = (graded.get("why") or "").strip() or fallback_why
+    projects = fallback_projects
+    graded_projects = graded.get("projects")
+    if isinstance(graded_projects, list) and graded_projects:
+        projects = [str(p) for p in graded_projects]
+    category = fallback_category
+    graded_category = (graded.get("category") or "").strip()
+    if graded_category:
+        category = graded_category
+    return relevance, why, projects, category
+
+
 def stage2_score(
     items: List[FeedItem],
     profile: dict,
@@ -341,11 +452,25 @@ def stage2_score(
     item. The list returned
     is still in the caller's order.
 
-    Sets ``stage2_score.last_llm_calls`` to the number of model calls made,
-    ``stage2_score.last_graded`` to how many came back as a usable grade, and
-    ``stage2_score.last_cap_refused`` to how many eligible survivors the budget
-    never reached, so the run summary can tell "the model judged nothing" from "the
-    model was not asked" from "the model ran out of calls".
+    An eligible item whose id already has a grade in the store
+    (``load_grade_store``, #2139) is not put to the model again: it comes back with
+    that grade and ``grade_source=model``, because the engine does not answer the
+    same prompt twice once its batch state moves and ``RELEVANCE_FLOOR`` makes the
+    difference a write/refuse decision. A stored grade costs no call, and it does not
+    buy another item out of the budget either — it occupies the allocation slot it
+    would have occupied, so the ids the cap bites are the same ids they were before
+    the store existed and a second pass over one day's raw set reproduces that day
+    instead of spending its freed budget on the items the first pass never reached.
+    An id with no stored grade behaves exactly as it did before: asked live, in
+    allocation order, until the budget is spent.
+
+    Sets ``stage2_score.last_llm_calls`` to the number of model calls made
+    (cache hits are not calls), ``stage2_score.last_graded`` to how many came back as
+    a usable grade, ``stage2_score.last_cap_refused`` to how many eligible survivors
+    the budget never reached, and ``stage2_score.last_grade_cache_hits`` to how many
+    grades came from the store, so the run summary can tell "the model judged
+    nothing" from "the model was not asked" from "the model ran out of calls" from
+    "the model was asked about these on an earlier pass".
 
     Returns:
         List of ScoredItem objects
@@ -355,9 +480,20 @@ def stage2_score(
 
     scored_by_position: Dict[int, ScoredItem] = {}
     all_projects = get_all_projects(profile)
+    # Re-read per pass, not memoised at import: the store is written by the scan
+    # pass that graded the item and read by the next one, which is a different
+    # process (`python -m intel_pipeline --score` runs once per scheduled tick).
+    grades = load_grade_store()
     llm_calls = 0
     graded_calls = 0  # of those calls, how many produced a usable grade
     cap_refused = 0   # eligible survivors the budget never reached
+    cache_hits = 0    # eligible survivors answered by the store instead of the model
+    # Allocation slots spent — cache hits included, calls included. The cap is
+    # compared against THIS and not against `llm_calls`, so a cached id cannot free
+    # a call for an item the first pass never reached: which ids go ungraded stays a
+    # property of `stage2_allocation_order` alone (#2081), exactly as it was before
+    # any store existed, and that is what makes two passes agree item for item.
+    budget_used = 0
 
     # Allocation order, caller order out (#2081) — see stage2_allocation_order.
     for index in stage2_allocation_order(items, profile):
@@ -379,8 +515,25 @@ def stage2_score(
         grade_source = GRADE_KEYWORD
 
         eligible = use_model and kw_score > LLM_KEYWORD_THRESHOLD
-        wants_model = eligible and llm_calls < max_llm_calls
-        if eligible and not wants_model:
+        # The store is consulted exactly where a call would otherwise be made, so an
+        # ineligible item (engine off, or rated at/below the threshold) keeps its
+        # keyword score and its `grade_source=keyword` whether or not it was ever
+        # graded — a disabled engine must keep looking like a disabled engine.
+        stored = grades.get(item.id) if eligible else None
+        wants_model = (eligible and stored is None
+                       and budget_used < max_llm_calls)
+        if stored is not None:
+            # Graded on an earlier pass, so the number the engine would produce
+            # today is not the point: this item's relevance is the grade it got,
+            # whatever a re-draw would have said. `_apply_model_grade` cannot return
+            # None here — `load_grade_store` already dropped every row whose
+            # relevance `_clamp_relevance` refuses — so the tuple unpack is safe.
+            relevance, why, matched_projects, category = _apply_model_grade(
+                stored, why, matched_projects, category)
+            grade_source = GRADE_MODEL
+            budget_used += 1
+            cache_hits += 1
+        elif eligible and not wants_model:
             # Same eligibility test as `wants_model`, so the one thing that can
             # have failed here is the budget: this item's relevance is a stand-in
             # for a grade that was never taken, which is what the writer refuses.
@@ -389,23 +542,22 @@ def stage2_score(
         if wants_model:
             grade_source = GRADE_NO_USABLE_GRADE
             llm_calls += 1
+            budget_used += 1
             try:
                 graded = _parse_score_json(scorer(_score_prompt(item, profile)))
             except Exception as exc:  # transport/model failure -> keyword score
                 graded = None
                 print(f"  LLM scoring failed for {item.id}: {exc}")
             if graded:
-                model_relevance = _clamp_relevance(graded.get("relevance"))
-                if model_relevance is not None:
+                applied = _apply_model_grade(graded, why, matched_projects, category)
+                if applied is not None:
+                    relevance, why, matched_projects, category = applied
                     grade_source = GRADE_MODEL
-                    relevance = model_relevance
-                    why = (graded.get("why") or "").strip() or why
-                    projects = graded.get("projects")
-                    if isinstance(projects, list) and projects:
-                        matched_projects = [str(p) for p in projects]
-                    model_category = (graded.get("category") or "").strip()
-                    if model_category:
-                        category = model_category
+                    # Only a usable grade is recorded: an id the engine answered
+                    # with junk stays ungraded in the store, so the next pass asks
+                    # again instead of locking in a non-grade.
+                    append_grade(item.id, relevance, why=why,
+                                 projects=matched_projects, category=category)
                 graded_calls += 1
 
         scored_by_position[index] = ScoredItem(
@@ -438,6 +590,7 @@ def stage2_score(
     stage2_score.last_llm_calls = llm_calls
     stage2_score.last_graded = graded_calls
     stage2_score.last_cap_refused = cap_refused
+    stage2_score.last_grade_cache_hits = cache_hits
     # Back to the caller's order: the allocation above decides who is asked, and the
     # day file the writer reads must not change shape because the budget moved.
     return [scored_by_position[i] for i in range(len(items))]
@@ -542,8 +695,17 @@ def run_scoring_pipeline(
     calls = getattr(stage2_score, "last_llm_calls", 0)
     graded = getattr(stage2_score, "last_graded", 0)
     cap_refused = getattr(stage2_score, "last_cap_refused", 0)
+    cache_hits = getattr(stage2_score, "last_grade_cache_hits", 0)
     print(f"LLM scored {graded} of {calls} items it was asked about "
           f"(threshold {LLM_KEYWORD_THRESHOLD}); the rest kept their keyword score")
+    # Said separately because the line above counts calls, and a pass that asked
+    # nothing has to say why: on the second `--score` of one day those numbers are 0
+    # calls and 0 grades, which reads exactly like an engine outage unless the pass
+    # that reused the day's grades out of the store says where they came from.
+    if cache_hits:
+        print(f"  REUSED: {cache_hits} of {len(scored)} survivors were already "
+              f"graded and were not put to the model again — their relevance is the "
+              f"first grade their id ever received, from {GRADE_STORE}.")
     # Said separately, because the line above cannot carry it: `calls` is the
     # budget, not the survivor count, so on 2026-09-22 a fully-spent budget over
     # 258 survivors printed "LLM scored 40 of 40" — a sentence that reads as a

@@ -87,6 +87,19 @@ reach it again. `intel_pipeline/_paths.py` derives all three from `app.paths`:
 - **Seen items**: `~/lloyd-data/_pipeline/vault-derived/memory/feeds/scanner-state.json`
 - **Raw items**: `~/lloyd-data/_pipeline/vault-derived/memory/feeds/raw/YYYY-MM-DD.jsonl`
 - **Scoring output**: `~/lloyd-data/_pipeline/vault-derived/memory/feeds/intel-YYYY-MM-DD.jsonl`
+- **First grade per item id**: `~/lloyd-data/_pipeline/vault-derived/memory/feeds/grades.jsonl`
+  (`_paths.GRADE_STORE`). Appended when stage 2 gets a usable grade and never
+  rewritten, so the first grade an id received is the grade it keeps. An eligible item
+  whose id is already there is not put to the model again — it comes back with the
+  stored grade and `grade_source=model`, costing no call and not freeing a call for
+  anything else, so which ids `--max-calls` bites is unchanged (#2081). This is why it
+  exists: greedy + seed (`#1232`) did not pin the answer, because the movement is not
+  sampling — the same prompt bytes graded 3 five times in a row and then 4 once other
+  prompts were interleaved — and `RELEVANCE_FLOOR = 4` with a strict `<` makes 4-vs-3
+  write-vs-refuse, while `--score` rewrites the day file and the writer dedupes by id,
+  so the day file kept the newest grade and the vault the first. Backlog #2139.
+  Consequence: a grade is a point-in-time judgement, so re-weighting `interests.md`
+  does not re-grade ids that already have one. Delete the file to re-grade.
 
 ## Usage
 

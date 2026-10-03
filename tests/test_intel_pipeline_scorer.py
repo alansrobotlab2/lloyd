@@ -43,6 +43,7 @@ INTEL_DIR = REPO_ROOT / "scripts" / "intel-pipeline"
 if str(INTEL_DIR) not in sys.path:
     sys.path.insert(0, str(INTEL_DIR))
 
+from intel_pipeline import _paths as paths_mod  # noqa: E402
 from intel_pipeline import body as body_mod  # noqa: E402
 from intel_pipeline import models as models_mod  # noqa: E402
 from intel_pipeline import profile as profile_mod  # noqa: E402
@@ -79,6 +80,10 @@ def redirect_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(vw_mod, "KNOWLEDGE_DIR", vault / "knowledge")
     monkeypatch.setattr(vw_mod, "VAULT_ROOT", vault)
     monkeypatch.setattr(profile_mod, "PROFILE_FILE", vault / "interests.md")
+    # The grade store (#2139) is written by every pass that grades something, so an
+    # un-moved `scoring.GRADE_STORE` would have the suite appending real rows into
+    # the live …/memory/feeds/grades.jsonl on every run.
+    monkeypatch.setattr(scoring_mod, "GRADE_STORE", feeds / "grades.jsonl")
     monkeypatch.delenv("INTEL_DISABLE_LLM", raising=False)
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.setattr(gh_mod, "CONFIG_PATH", tmp_path / "absent-github-config.yml")
@@ -980,7 +985,13 @@ class _StubModel(BaseHTTPRequestHandler):
 
     def do_POST(self):  # noqa: N802
         length = int(self.headers.get("Content-Length", 0))
-        self.rfile.read(length)
+        request = json.loads(self.rfile.read(length).decode())
+        # A test that needs to know whether a request ARRIVED — as opposed to what
+        # the scoring code says it did — sets `server.prompts`. Nothing else here
+        # reads it, so the existing stubs are untouched.
+        prompts = getattr(self.server, "prompts", None)
+        if prompts is not None:
+            prompts.append(request["messages"][-1]["content"])
         body = json.dumps({"choices": [{"message": {
             "content": json.dumps({
                 "relevance": getattr(self.server, "relevance", 6),
@@ -1038,6 +1049,33 @@ def _run_cli(home, relevance, *flags, extra_env=None):
         server.shutdown()
         thread.join(timeout=5)
     return today, proc
+
+
+def _score_pass(home, prompts, relevance):
+    """One `python -m intel_pipeline --score` process, answered by a recording stub.
+
+    Same scratch HOME and `LLOYD_DATA` as `_run_cli`, so two calls here are two runs
+    of the real command sharing one feeds directory — which is the pair #2139 is
+    about, and the reason the prompts list is passed in rather than made here.
+    Counting on the server is the point: "this pass made no model call" is then a
+    count of requests that ARRIVED, not an inference from a counter the scoring code
+    set for itself.
+    """
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _StubModel)
+    server.relevance = relevance
+    server.prompts = prompts
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        env = dict(os.environ, HOME=str(home), LLOYD_DATA=str(home / "lloyd-data"),
+                   INTEL_DISABLE_LLM="0",
+                   INTEL_LLM_URL=f"http://127.0.0.1:{server.server_port}/v1/chat/completions")
+        return subprocess.run(
+            [sys.executable, "-m", "intel_pipeline", "--score"],
+            cwd=str(INTEL_DIR), env=env, capture_output=True, text=True, timeout=180)
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
 
 
 _RAW_DAY = "\n".join([
@@ -3643,3 +3681,263 @@ def test_the_line_fires_at_the_threshold_and_not_one_hundredth_above_it(tmp_path
     assert [s.grade_source for s in scored_above] == [models_mod.GRADE_MODEL], (
         "0.34 is not named because the item was graded by the model — "
         f"{[s.grade_source for s in scored_above]}")
+
+
+# ── backlog #2139: the first model grade per item id is kept and reused ────────
+#
+# Greedy and seeded (#1232) did not stop the grade moving, because the flip is not
+# sampling. Measured 2026-10-03 by replaying byte-identical `_score_prompt` output
+# for `youtube:UC0C-17n9iuUQPylguM1d-lQ:pvXmMntEIPY` against the live `primary`
+# engine: relevance 3 five times in a row in one process, then 4 once two other
+# items' prompts were interleaved between the calls. `RELEVANCE_FLOOR = 4` with a
+# strict `<` makes that one integer a write/refuse decision, and the two artifacts
+# then disagree by construction — `--score` truncates and rewrites
+# `intel-<date>.jsonl` (`__main__.py:150`) so the day file keeps the newest grade,
+# while the writer dedupes by item id (`is_written`, `vault_writer.py:229`) so the
+# vault keeps the first. The fix is a store keyed by item id, append-only, first row
+# winning; the five nodes below are the item's five clauses.
+
+def _seed_grade_store(rows) -> None:
+    """Append rows to the redirected grade store, as an earlier pass left them.
+
+    Written in the one-object-per-line shape `append_grade` writes, so the tests
+    drive the real reader instead of a fixture-shaped shortcut of it.
+    """
+    scoring_mod.GRADE_STORE.parent.mkdir(parents=True, exist_ok=True)
+    with open(scoring_mod.GRADE_STORE, "a") as handle:
+        for row in rows:
+            handle.write(json.dumps(row) + "\n")
+
+
+def _stored(item_id, relevance, **fields):
+    """One store row, shaped like the grade `RecordingLLM` would have produced."""
+    row = {"id": item_id, "relevance": relevance,
+           "why": "Directly relevant to the agent-architecture thread",
+           "projects": ["Lloyd"], "category": "ai-llms"}
+    row.update(fields)
+    return row
+
+
+def _eligible(item_id, source="youtube", word="speculative decoding"):
+    """An item stage 1 admits and stage 2 would want to ask (keyword 0.9 > 0.3)."""
+    return _item(item_id, source=source, title=f"vllm {word}", summary="vllm")
+
+
+def test_a_stored_grade_is_returned_even_when_the_model_would_answer_differently(
+        redirect_paths):
+    """Clause 1, on the one number that changes an outcome.
+
+    The store holds `borderline` at 4 — the floor itself — and the injected engine
+    would answer 3. `below_floor` is `relevance < RELEVANCE_FLOOR`, so the stored 4
+    is written and that fresh 3 would not be: prefer the live answer and this fails
+    on the relevance AND on the writer's own predicate for it.
+    """
+    profile = _profile(redirect_paths)
+    _seed_grade_store([_stored("borderline", 4)])
+    llm = RecordingLLM(relevance=3)
+
+    scored = scoring_mod.stage2_score([_eligible("borderline")], profile, llm_call=llm)
+
+    assert scored[0].relevance == 4, (
+        f"the store holds 4 and the pass returned {scored[0].relevance}: a grade "
+        "already recorded must beat a re-draw")
+    assert scored[0].grade_source == models_mod.GRADE_MODEL, (
+        "a reused grade is still the model's grade — the writer must keep accepting it")
+    assert llm.asked == [], "an id already in the store must not be put to the model"
+    assert scoring_mod.stage2_score.last_llm_calls == 0
+    assert not vw_mod.below_floor(scored[0]), "the stored 4 must clear the floor"
+    assert vw_mod.below_floor(
+        _scored(_eligible("borderline"), vw_mod.RELEVANCE_FLOOR - 1)), (
+        "the 3 the engine would have drawn is a refuse, so 4-vs-3 is not a rounding "
+        "difference — it is write-versus-drop")
+
+
+def test_two_scoring_passes_over_one_item_set_return_identical_relevance(
+        redirect_paths):
+    """Clause 1's stated check: pass two moves nobody's relevance.
+
+    Three eligible items. Pass one asks the model, which says 4. Pass two is handed
+    an engine that would say 3 — the exact floor crossing measured live on
+    2026-10-03 — and must return the same three numbers, having asked nothing. The
+    store also has to stay append-only: a second pass that rewrote it would read as
+    a correct answer here and silently lose the first grade.
+    """
+    profile = _profile(redirect_paths)
+    items = [_eligible(f"yt{i}") for i in range(3)]
+
+    first = scoring_mod.stage2_score(items, profile,
+                                     llm_call=RecordingLLM(relevance=4))
+    rows_after_first = scoring_mod.GRADE_STORE.read_text().splitlines()
+
+    second_llm = RecordingLLM(relevance=3)
+    second = scoring_mod.stage2_score(items, profile, llm_call=second_llm)
+
+    assert [s.relevance for s in second] == [s.relevance for s in first] == [4, 4, 4], (
+        f"pass one gave {[s.relevance for s in first]}, pass two gave "
+        f"{[s.relevance for s in second]} — the day file rewrites itself, so any "
+        "movement here is the vault and the day file disagreeing")
+    assert second_llm.asked == [], "the second pass re-drew grades it already had"
+    assert scoring_mod.stage2_score.last_llm_calls == 0
+    assert scoring_mod.stage2_score.last_grade_cache_hits == 3
+    assert scoring_mod.GRADE_STORE.read_text().splitlines() == rows_after_first, (
+        "the store is append-only: a re-run must not rewrite or append the day over")
+
+
+def test_a_cached_id_costs_no_call_and_a_new_id_raises_it_by_one(redirect_paths):
+    """Clause 2: cache hits are free, a never-graded id still costs exactly one.
+
+    `last_llm_calls` counts calls, so a pass answering three items from the store
+    must report 0 — and adding one id the store has never seen must raise it to
+    exactly 1, with that id carrying `grade_source="model"` and the live answer.
+    """
+    profile = _profile(redirect_paths)
+    already = [_eligible("old1"), _eligible("old2", word="quantization")]
+    _seed_grade_store([_stored("old1", 4), _stored("old2", 7)])
+
+    scored = scoring_mod.stage2_score(already, profile,
+                                      llm_call=RecordingLLM(relevance=2))
+
+    assert scoring_mod.stage2_score.last_llm_calls == 0, (
+        f"a fully-cached pass made {scoring_mod.stage2_score.last_llm_calls} calls")
+    assert [s.relevance for s in scored] == [4, 7], (
+        f"the stored grades must come back whole, not the engine's 2: "
+        f"{[s.relevance for s in scored]}")
+
+    llm = RecordingLLM(relevance=2)
+    scored = scoring_mod.stage2_score(already + [_eligible("fresh1", word="moe")],
+                                      profile, llm_call=llm)
+    by_id = {s.id: s for s in scored}
+
+    assert len(llm.asked) == 1, (
+        f"one never-graded id must cost exactly one call, got {len(llm.asked)}")
+    assert scoring_mod.stage2_score.last_llm_calls == 1
+    assert by_id["fresh1"].grade_source == models_mod.GRADE_MODEL
+    assert by_id["fresh1"].relevance == 2, (
+        "an id the store has never seen is scored live, exactly as it was before the "
+        f"store existed: got {by_id['fresh1'].relevance}")
+    assert [by_id["old1"].relevance, by_id["old2"].relevance] == [4, 7]
+    assert scoring_mod.load_grade_store()["fresh1"]["relevance"] == 2, (
+        "the new grade must be recorded for the next pass, not just returned")
+
+
+def test_the_grade_store_survives_into_the_next_process(tmp_path):
+    """Clause 3, over the seam that makes it real: two `python -m intel_pipeline`
+    processes, which is how task #30 actually runs — a fresh interpreter per tick.
+
+    Pass one grades `yt1` at 6 through the loopback stub. Pass two, a fresh process
+    with nothing memoised, is handed a stub that would answer 3, and must not so much
+    as open a connection to it: the store on disk is the only thing the two runs
+    share. The stub records the prompts it received, so "zero calls" is a count of
+    requests that arrived, not an inference from a counter the code set itself.
+    """
+    home, feeds = _cli_home(tmp_path)
+    today = _today_str()
+    (feeds / "raw" / f"{today}.jsonl").write_text(_RAW_DAY)
+
+    first_prompts: list = []
+    first = _score_pass(home, first_prompts, relevance=6)
+    assert first.returncode == 0, first.stderr[-2000:]
+    store = feeds / "grades.jsonl"
+    assert store.exists(), (
+        f"the scoring process wrote no grade store beside the day files\n{store}\n"
+        + first.stdout[-2000:])
+    assert {json.loads(l)["id"]: json.loads(l)["relevance"]
+            for l in store.read_text().splitlines() if l.strip()} == {"yt1": 6}, (
+        f"the store the subprocess left is not keyed by item id as designed: "
+        f"{store.read_text()}")
+
+    second_prompts: list = []
+    second = _score_pass(home, second_prompts, relevance=3)
+    assert second.returncode == 0, second.stderr[-2000:]
+
+    assert second_prompts == [], (
+        f"a fresh process re-asked the engine for an id the store already holds: "
+        f"{len(second_prompts)} request(s) arrived")
+    rows = [json.loads(l) for l in
+            (feeds / f"intel-{today}.jsonl").read_text().splitlines() if l.strip()]
+    assert {r["id"]: r["relevance"] for r in rows} == {"yt1": 6}, (
+        f"the rewritten day file no longer holds the first grade: {rows}")
+    assert "REUSED: 1" in second.stdout, (
+        "a pass that asked nothing has to say why, or it reads as an engine outage\n"
+        + second.stdout[-2500:])
+
+
+def test_a_stored_grade_does_not_buy_another_item_out_of_the_call_cap(redirect_paths):
+    """Clause 4: the cap bites the same ids it always bit, cache or no cache.
+
+    Four eligible survivors — two YouTube, two GitHub — and a 2-call budget. Since
+    #2081 the YouTube pair is asked first, so before any store existed both GitHub
+    items left stage 2 `call_cap` and the writer refused them. With the YouTube pair
+    already in the store the result must be identical item for item: a cache hit
+    occupies the allocation slot it would have taken. Free the budget on a hit and
+    the GitHub pair gets the calls the first pass never had, which is a second pass
+    disagreeing with the first — the exact drift this item exists to kill.
+    """
+    profile = _profile(redirect_paths)
+    items = [_eligible("yt-a"), _eligible("gh-a", source="github"),
+             _eligible("yt-b", word="moe"), _eligible("gh-b", source="github",
+                                                      word="prefix caching")]
+
+    fresh = scoring_mod.stage2_score(items, profile,
+                                     llm_call=RecordingLLM(relevance=5),
+                                     max_llm_calls=2)
+
+    assert [s.grade_source for s in fresh] == ["model", "call_cap", "model",
+                                               "call_cap"], (
+        "the 2-call budget goes to the YouTube pair in allocation order: "
+        f"{[s.grade_source for s in fresh]}")
+    assert [s.relevance for s in fresh] == [5, KW_SCORE_09, 5, KW_SCORE_09]
+    assert scoring_mod.stage2_score.last_llm_calls == 2
+    assert scoring_mod.stage2_score.last_cap_refused == 2
+
+    _seed_grade_store([_stored("yt-a", 5), _stored("yt-b", 5)])
+    llm = RecordingLLM(relevance=5)
+    cached = scoring_mod.stage2_score(items, profile, llm_call=llm, max_llm_calls=2)
+
+    assert llm.asked == [], (
+        "a cache hit freed a call for an item the first pass never reached")
+    assert scoring_mod.stage2_score.last_llm_calls == 0
+    assert [s.grade_source for s in cached] == [s.grade_source for s in fresh], (
+        f"the cap moved because the cache moved: {[s.grade_source for s in cached]} "
+        f"vs {[s.grade_source for s in fresh]}")
+    assert [s.relevance for s in cached] == [s.relevance for s in fresh], (
+        f"{[s.relevance for s in cached]} vs {[s.relevance for s in fresh]}")
+    assert scoring_mod.stage2_score.last_cap_refused == 2
+
+    day = _write_day(redirect_paths, cached)
+    reloaded = vw_mod.load_scored_items(day)
+    assert [vw_mod.refused_by_call_cap(i) for i in reloaded] == [False, True, False,
+                                                                 True], (
+        "the overflow cause must still survive the day file for the writer to act on")
+    assert vw_mod.write_all_to_vault(day) == 2, (
+        "the writer must keep refusing exactly the two items the cap never asked")
+
+
+def test_the_grade_store_ships_beside_the_day_files_and_the_fixture_moves_it(
+        redirect_paths):
+    """Clause 5, the one that keeps the other four off the production disk.
+
+    Two halves, because the failure being guarded is silent: `GRADE_STORE` ships as
+    a name in `_paths` beside `intel-<date>.jsonl` (so a re-run genuinely reads what
+    an earlier process wrote), and `redirect_paths` rebinds the copy `scoring` holds.
+    Forget the first and a pass reads grades from nowhere; forget the second and the
+    suite appends real grades into the live …/memory/feeds/ on every run, with no
+    assertion here able to notice.
+    """
+    assert paths_mod.GRADE_STORE.parent == paths_mod.FEEDS_DIR, (
+        "the store must ship in the feeds runtime dir, beside the day files it is "
+        f"there to keep consistent: {paths_mod.GRADE_STORE}")
+    assert paths_mod.GRADE_STORE.name == "grades.jsonl"
+
+    store = scoring_mod.GRADE_STORE
+    assert str(store).startswith(str(redirect_paths)), (
+        f"redirect_paths left the scorer writing to {store}")
+
+    profile = _profile(redirect_paths)
+    scoring_mod.stage2_score([_eligible("written")], profile,
+                             llm_call=RecordingLLM(relevance=6))
+
+    assert store.exists(), "the pass wrote no store where the fixture pointed it"
+    assert [json.loads(l)["id"] for l in store.read_text().splitlines() if l.strip()] \
+        == ["written"]
+    assert scoring_mod.load_grade_store()["written"]["relevance"] == 6

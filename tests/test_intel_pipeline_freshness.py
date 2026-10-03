@@ -108,6 +108,9 @@ def redirect_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(vw_mod, "KNOWLEDGE_DIR", vault / "knowledge")
     monkeypatch.setattr(vw_mod, "VAULT_ROOT", vault)
     monkeypatch.setattr(profile_mod, "PROFILE_FILE", vault / "interests.md")
+    # scoring.GRADE_STORE (#2139) is read by every stage-2 pass, so it moves with the
+    # rest — otherwise these tests read the live …/memory/feeds/grades.jsonl.
+    monkeypatch.setattr(scoring_mod, "GRADE_STORE", feeds / "grades.jsonl")
     monkeypatch.setenv("INTEL_DISABLE_LLM", "1")
     return tmp_path
 
