@@ -763,3 +763,170 @@ def test_warn_stays_documented_as_a_live_mode_of_the_injection_probe():
     assert "warn also appends one <warning>" in half, half
     assert "deprecated" not in half, (
         f"the probe half calls a mode it still honours deprecated: {half!r}")
+
+
+# ── #2137: config.yaml's `inner_voice.model` pin must carry ONE dated verdict ─
+#
+# Two paragraphs sat above `model: primary` and contradicted each other: one
+# ended "Revisit only with iv_grade evidence.", the next said "That evidence is
+# now stale in the observer's favour… The pin stays until someone actually
+# re-runs iv_grade against the 35B". The second paragraph was written on 2026-09-06
+# (`608dd15c`); the engine it told a reader to re-run against was retired on
+# 2026-09-20 when `secondary_enabled` went false and GPU 2 was reassigned to
+# `djev` (`551e9044` rewrote that block and never touched this comment). So the
+# file still ended on an instruction nobody can follow — and, worse, framed a
+# shipped-state value as an open question.
+#
+# The pre-fix text is kept verbatim below as the firing control for every scan
+# here, exactly as `9dc0403f` (#1962) does for the action_review comment: an
+# empty scan on a file that never contained the phrase proves nothing.
+
+#: The two paragraphs as `config.yaml:125-136` carried them until #2137, joined
+#: with the blank comment line that separated them. The control text for clauses
+#: 1 and 4 — the scan must fire on this and come back empty on the live file.
+PREFIX_PIN_COMMENT = (
+    "Pinned to primary deliberately. `secondary_enabled: true` (2026-09-03, "
+    "de893d7) made resolve_model_alias stop rewriting secondary -> primary, "
+    "which silently moved the observer from Flash-Next to Qwen3.5-4B. On the "
+    "first day it ran there it intervened on 40% of LLM-judged events vs 1.7% "
+    "on primary, fabricated a finding the primary never reported, and cancelled "
+    "a turn. Revisit only with iv_grade evidence. "
+    "That evidence is now stale in the observer's favour: the secondary became "
+    "Qwen3.6-35B-A3B on 2026-09-06, so the 40%-intervention result was measured "
+    "against a 4B model this slot no longer runs. The pin stays until someone "
+    "actually re-runs iv_grade against the 35B — but the reason to re-run it is "
+    "much stronger than it was.")
+
+#: The two sentences the item's own premise greps for, verbatim.
+STALE_PIN_PHRASES = ("stale in the observer", "Revisit only with iv_grade evidence")
+
+#: A model name or a quant size: what a re-run instruction must not name. The
+#: retirement is the whole point of the verdict, so an instruction that survives
+#: naming an occupant is an instruction to re-run against a retired arm.
+ENGINE_OR_QUANT_RE = re.compile(r"\b\d+B\b|\bGGUF\b|Qwen[\w.+-]*|Flash-Next", re.I)
+#: A sentence telling the reader to run the observer eval again.
+RERUN_INSTRUCTION_RE = re.compile(r"\bre-?runs?\b|\bre-?run\b|run it again", re.I)
+
+
+def _inner_voice_section(rel: str = "config.yaml") -> str:
+    """The `inner_voice:` block: its lines up to the next column-0 key.
+
+    Scoped because the pin line is `model: primary` and that string occurs three
+    times in this file (:137, :1646, :1675) — `_comment_block_above` asserts its
+    anchor is unique and would fail on the assert, not on the comment.
+    """
+    lines = (ROOT / rel).read_text(encoding="utf-8").splitlines()
+    top = [i for i, ln in enumerate(lines) if ln == "inner_voice:"]
+    assert len(top) == 1, f"`inner_voice:` matched {len(top)} lines in {rel}"
+    start = top[0]
+    end = next((i for i, ln in enumerate(lines[start + 1:], start + 1)
+                if ln and not ln[0].isspace() and not ln.lstrip().startswith("#")),
+               len(lines))
+    return "\n".join(lines[start:end])
+
+
+def _pin_comment_block(rel: str = "config.yaml") -> str:
+    """The `#` lines directly above `model:` inside the `inner_voice:` block."""
+    sec_lines = _inner_voice_section(rel).splitlines()
+    hits = [i for i, ln in enumerate(sec_lines) if ln.strip() == "model: primary"]
+    assert len(hits) == 1, (
+        f"`model: primary` matched {len(hits)} lines inside `inner_voice:`; the "
+        "pin this comment describes is no longer uniquely identifiable there")
+    block: list[str] = []
+    i = hits[0]
+    while i > 0 and sec_lines[i - 1].lstrip().startswith("#"):
+        block.append(sec_lines[i - 1].lstrip().lstrip("#").strip())
+        i -= 1
+    assert block, f"no comment block above `model: primary` in `inner_voice:` ({rel})"
+    return " ".join(" ".join(reversed(block)).split())
+
+
+def _stale_pin_phrases(text: str) -> list[str]:
+    return [p for p in STALE_PIN_PHRASES if p in text]
+
+
+def _rerun_instructions(text: str) -> list[str]:
+    """Sentences that tell the reader to re-run the observer eval, and name the
+    engine or quant to run it against. An instruction with no named arm (a person
+    has to stand a slot up first) is a condition, not a stale command."""
+    return [s.strip() for s in re.split(r"(?<=\.)\s+", text)
+            if RERUN_INSTRUCTION_RE.search(s) and ENGINE_OR_QUANT_RE.search(s)]
+
+
+def test_config_yaml_no_longer_carries_the_two_contradictory_pin_paragraphs():
+    """#2137 clause 1. Both premise greps return 0 on the live file, and the scan
+    is shown to work by firing on the pre-fix text."""
+    assert sorted(_stale_pin_phrases(PREFIX_PIN_COMMENT)) == sorted(STALE_PIN_PHRASES), (
+        "the pre-fix text no longer trips the scan, so a clean config.yaml "
+        "proves nothing — update the control text and the phrases together")
+    text = (ROOT / "config.yaml").read_text(encoding="utf-8")
+    stale = _stale_pin_phrases(text)
+    assert stale == [], f"config.yaml still carries the contradictory pin text: {stale}"
+    # And what replaces them is ONE dated verdict: exactly one date-stamped
+    # verdict line heads the block, so a later edit cannot stack a second,
+    # unreconciled paragraph underneath this one the way 608dd15c stacked one
+    # under 2026-09-03's.
+    block = _pin_comment_block()
+    assert len(re.findall(r"Verdict \d{4}-\d{2}-\d{2}", block)) == 1, (
+        f"the pin block does not read as one dated verdict: {block!r}")
+    assert PREFIX_PIN_COMMENT[:60] not in block, (
+        "the pre-fix paragraph survived inside the block the greps scan: the two "
+        "contradictory paragraphs are still the text a reader sees")
+
+
+def test_the_pin_verdict_states_the_primary_only_deployment_and_is_cross_checked():
+    """#2137 clause 2. The comment's operative reason is the deployment, so the
+    test reads the code the comment describes: if the secondary slot comes back,
+    THIS test fails and says to re-read the comment, rather than the comment
+    rotting in silence next to a live second arm."""
+    from app.config import resolve_model_alias
+
+    block = _pin_comment_block()
+    assert "primary-only since 2026-09-20" in block, block
+    assert "secondary_enabled" in block and "resolve_model_alias" in block, block
+
+    assert CONFIG["secondary_enabled"] is False, (
+        "the secondary slot is enabled again: the comment's stated reason is "
+        "false, and the observer's model is a live choice again — re-read #771")
+    assert resolve_model_alias("secondary") == "primary", (
+        "`resolve_model_alias` stopped rewriting the alias, so `secondary` means "
+        "an arm again and this pin no longer describes what runs")
+    assert CONFIG["inner_voice"]["model"] == "primary"
+
+
+def test_the_pin_verdict_retires_the_2026_09_03_a_b_with_its_arm_and_cites_771():
+    """#2137 clause 3. The number stays in the comment as history, framed as a
+    retired measurement — and the retirement is checked against config, because
+    ':8091 serves nothing' is a claim about a slot this file itself configures."""
+    block = _pin_comment_block()
+    assert "40%" in block and "1.7%" in block, block
+    assert "8091" in block, f"the comment must say which arm is gone: {block}"
+    assert "djev" in block, f"the comment must say what occupies that GPU: {block}"
+    assert "#771" in block, f"the verdict states a ruling with no citation: {block}"
+    assert "retire" in block.lower(), block
+
+    assert CONFIG["secondary_enabled"] is False
+    assert CONFIG["djev"]["enabled"] is True, (
+        "djev no longer holds GPU 2, so the reason the A/B cannot run may have "
+        "changed — re-read the #771 close before trusting this comment")
+    assert CONFIG["models"]["secondary"]["base_url"].endswith(":8091"), (
+        "the secondary slot moved off :8091, so the comment's 'nothing serves "
+        ":8091' is describing a port this file no longer configures")
+
+
+def test_the_pin_verdict_names_what_reopens_the_question_and_instructs_no_rerun():
+    """#2137 clause 4. The reopen condition is a person standing a second slot up
+    on spare hardware; inside the `inner_voice:` block no sentence may order a
+    re-run against a named occupant, because every occupant it could name is
+    retired."""
+    block = _pin_comment_block()
+    assert "re-enabling a second engine slot on spare hardware" in block, block
+    assert "iv_grade" not in _inner_voice_section(), (
+        "the block names the eval again, which is how the pre-#2137 comment read "
+        "as a standing instruction")
+
+    assert _rerun_instructions(PREFIX_PIN_COMMENT), (
+        "the control text no longer trips the re-run scan, so the empty result on "
+        "config.yaml proves nothing")
+    bad = _rerun_instructions(_inner_voice_section())
+    assert bad == [], f"`inner_voice:` still instructs a re-run against an arm: {bad}"

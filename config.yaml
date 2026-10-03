@@ -122,18 +122,27 @@ djev:
       # recorded in the backend. Also off by harness.action_review.mode.
       action_review: true
 inner_voice:
-  # Pinned to primary deliberately. `secondary_enabled: true` (2026-09-03,
-  # de893d7) made resolve_model_alias stop rewriting secondary -> primary,
-  # which silently moved the observer from Flash-Next to Qwen3.5-4B. On the
-  # first day it ran there it intervened on 40% of LLM-judged events vs 1.7%
-  # on primary, fabricated a finding the primary never reported, and cancelled
-  # a turn. Revisit only with iv_grade evidence.
+  # Verdict 2026-10-03 (#2137, settling #771's owed entry): this pin is shipped
+  # state, not a pending decision. The deployment has been primary-only since
+  # 2026-09-20 — `secondary_enabled: false` at config.yaml:38 — so
+  # `resolve_model_alias` (app/config.py:487) rewrites `secondary` onto
+  # `primary` for every caller, this slot among them: the observer resolves the
+  # name below through it (app/inner_voice/observer.py::_resolve_endpoint).
+  # There is no second arm on this box to compare the observer against.
   #
-  # That evidence is now stale in the observer's favour: the secondary became
-  # Qwen3.6-35B-A3B on 2026-09-06, so the 40%-intervention result was measured
-  # against a 4B model this slot no longer runs. The pin stays until someone
-  # actually re-runs iv_grade against the 35B — but the reason to re-run it is
-  # much stronger than it was.
+  # The 2026-09-03 A/B that originally moved the pin — the secondary
+  # intervening on 40% of LLM-judged events vs 1.7% on primary, fabricating a
+  # finding the primary never reported and cancelling a turn — retires with the
+  # arm it measured: nothing serves :8091 and GPU 2 carries `djev`, the ground
+  # on which #771 was closed on 2026-09-24. It is a retired measurement of a
+  # retired slot, not an eval waiting to be done again.
+  #
+  # What reopens the question: a person re-enabling a second engine slot on
+  # spare hardware. architecture/inner-voice.md records that an
+  # observer-model replay against such a slot is an attended window, not a
+  # round. Until that exists, the value below is a deployment decision, and
+  # tests/test_harness_doc_claims.py fails if the slot comes back without this
+  # comment being re-read.
   model: primary
   observer:
     max_tokens: 400
