@@ -27,7 +27,7 @@ handing it to the executor makes things worse — says the value is in accumulat
 already-adjudicated knowledge, not in rewriting skills more often. So this ledger is
 a development-side instrument. It must never be injected into a runtime prompt.
 
-Six invariants:
+Eight invariants:
 
 * **Append-only, latest-wins per key.** A verdict is never edited or deleted; a
   reopen is a new line. Rollback is asymmetric the way WikiSkill's is: a skill can
@@ -60,6 +60,23 @@ Six invariants:
   it printed as `evidence_observed` — a required field becomes a required observation,
   and a later run sees the measurement that justified the decision beside the command
   that re-makes it.
+* **A stored falsifier has to read the same way it will be re-read (#2103).** An
+  `evidence_observed` of `0` is two different facts and nothing in the row tells them apart:
+  the owner lost the section, or the grep was case-sensitive and the owner's own nightly
+  rewrite re-cased the sentence — `grep -c` prints `0` and exits 1, and no rc is stored at all.
+  So the classifier asks a case-sensitive literal grep the same question with `-i` added and
+  reports `STRANDED_CASE` when that is the difference between absent and present, which
+  `audit` publishes as one line per key plus its own tally and `check` names in its existing
+  `EVIDENCE_CMD_*` shape; and `record` refuses to mint a new case-sensitive literal grep of a
+  `skills/**/SKILL.md` at all, because that file is the one its owner's refresh edits under the
+  verdict, and the 24 such falsifiers already in the ledger are history no refusal reaches.
+* **A field the record names is a field the record has to carry (#2103).** `record` refuses a
+  command that exits 0 and whose stored line holds a `name=` with nothing after it — the shape
+  that put `echo 'newest_bucket= newest_rows= prev_rows= input_rows=2812'` into the durable
+  ledger with its denominator real and the three numbers that make that run's window auditable
+  simply absent, because all four of those words are field names and three had lost their
+  value. #2052's rail reads the count, so it passed; `audit` re-executes the same half-empty
+  line and reports the ledger clean over it.
 * **The ledger exists in two trees (#772).** This store lives under `_pipeline/`,
   which `.gitignore` excludes from every repo on the box and no backup job reads, so
   one truncated append or one `rm -rf _pipeline` used to erase every decision with no
@@ -117,6 +134,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -705,6 +723,19 @@ def record_verdict(
     counting them. It is keyword-only and unreachable from the CLI, so `record` cannot
     talk itself out of the rule it is being refused by.
 
+    Two refusals joined on 2026-10-03, both on the same evidence that the four above read
+    as healthy (#2103). A command that exits 0 and whose stored first line carries a `name=`
+    field with nothing after it is refused, naming the field — the shape that let
+    `echo 'newest_bucket= newest_rows= prev_rows= input_rows=2812'` into the durable record
+    with a real denominator and no numbers, because each of those four words is a field name
+    and three of them lost their value. And a command that greps a `skills/<name>/SKILL.md`
+    path case-sensitively is refused before it runs, naming `grep -i` as the fix: that file is
+    the one its owner's own nightly rewrite edits, so a falsifier minted against one casing
+    re-executes as `0` the night the casing moves and the ledger cannot tell that from the
+    owner deleting the section. Neither is keyed on `require_input_rows`: a mint that is
+    exempt from the denominator convention is not exempt from writing an observation that
+    means something.
+
     The line lands in two trees (#772): the ledger, then the durable copy, which is
     seeded from the ledger first so a verdict recorded before the mirror existed is in
     it too. A script the new `evidence_cmd` names is copied beside the mirror.
@@ -730,6 +761,29 @@ def record_verdict(
         )
     if occurrences is None:
         occurrences = carried_forward_occurrences(store, pattern_key)
+    # The casing mandate is decided from the command text alone, before it is executed,
+    # because the defect is the shape of the read and not its answer: a case-sensitive
+    # literal grep of an installed `SKILL.md` is born falsifiable by somebody else's nightly
+    # whether or not it matches tonight. Keyed on nothing else — not `require_input_rows`,
+    # not the verdict, not the rc — because every flag that could relax it is a way for a
+    # mint to talk itself out of the rule it exists to enforce.
+    if (skill_file := case_sensitive_skill_md_grep(evidence_cmd)) is not None:
+        raise ValueError(
+            f"evidence_cmd greps {skill_file} case-sensitively, and an owner-coverage "
+            "falsifier cannot survive that: the file it names is the one its owner's own "
+            "nightly rewrite edits. #2103 measured the invalidation end to end — "
+            "`seq-2-edit-err-read` was minted 2026-09-12 with `grep -c \"one mechanism, two "
+            "symptoms\"` and re-executed 2026-10-03 as `0`, because the installed skill's "
+            "09-29 refresh made the sentence read `One mechanism, two symptoms.` A stored `0` "
+            "is then indistinguishable from the owner DELETING the section, and the rc is no "
+            "help: `grep -c` prints `0` and exits 1, no rc is stored in the row, and `audit` "
+            "re-runs the same case-sensitive read and reports the key healthy. Read it "
+            "case-insensitively — `grep -ci` — so the falsifier measures the coverage and not "
+            "the casing. Rows stored before this mandate stay as the recorded history they "
+            "are: it is a mint-time rule, not a rewrite of the ledger, and a stored "
+            "case-sensitive grep is named by `audit` and `check` the night its own re-read "
+            "comes back absent while `-i` matches (#2103)"
+        )
     rc, observed = run_evidence(evidence_cmd)
     if not observed:
         raise ValueError(
@@ -811,6 +865,37 @@ def record_verdict(
             f"`undeclared` for a field nothing in the code or the convention asked for: 0 of "
             f"the live ledger's 109 latest-wins keys declared {INPUT_ROWS_FIELD}= on "
             f"2026-10-02 (#2052)"
+        )
+    if rc == 0 and (blank := empty_valued_fields(observed)):
+        # The half-empty line, and the reason every rail above let it through: the command
+        # ran, exited 0, printed a line, and declared a real denominator — all four rails read
+        # that as healthy evidence, while three of the line's fields carried their names and no
+        # values. Measured on the live ledger the night #2103 was filed: the run-level key
+        # `run:2026-10-03-nightly-mining` was minted with `newest_bucket= newest_rows=
+        # prev_rows= input_rows=2812`, the values lost to an unquoted multi-word shell variable
+        # under the mining writer's `sh`, and because `input_rows=2812` matched the miner's own
+        # printed `Window: 2812 row(s)` exactly, #2052's denominator rail passed it and the row
+        # was accepted — the three numbers that make that run's window auditable were simply
+        # absent from the durable record, and `audit`, which re-executes the same half-empty
+        # line, reported the ledger clean over it. Four such rows were already in the ledger
+        # from 2026-09-27 (`seq-2-bash-fs-edit` and three others, each printing `snapshot= …
+        # sessions= `), so the shape is the writer's, not a one-off.
+        #
+        # Keyed on rc 0 for the reason the rails above are: a falsifier that exits nonzero
+        # beside a blank field is answering no, which is the ledger working, and the rc here is
+        # `run_evidence`'s rather than the classifier's because the pair being tested is the
+        # pair about to be written — this execution's exit status and this execution's first
+        # line, one measurement, not two executions that may print different numbers. Mint-only
+        # like #2052's declaration rule: the five rows already in the ledger are history that
+        # no refusal can retroactively issue, and `audit` is the surface that reads them.
+        raise ValueError(
+            f"evidence_cmd exited 0 and printed a field with no value — "
+            f"{', '.join(name + '=' for name in blank)} — so the durable record would carry "
+            f"the field names and lose the numbers beside them: {observed!r} over "
+            f"{evidence_cmd!r}. Quote what you interpolate (`echo \"newest_bucket=$bucket\"`) "
+            "or print the measurement as a count; a field that prints empty is a field the "
+            "next run cannot re-check, and it is not the same defect as a missing field or a "
+            "declared zero, both of which are refused above (#2103)"
         )
     row = {
         "pattern_key": pattern_key,
@@ -902,6 +987,20 @@ EVIDENCE_OBSERVED_MAX = 200
 #: `==` against this name, never by truthiness or ordering.
 EMPTY_INPUT = "empty_input"
 
+#: The sixth answer a stored falsifier gives, and like `EMPTY_INPUT` no exit code carries
+#: it: the command ran, answered "absent", and would answer "present" if it read
+#: case-insensitively. A verdict that rests on it is not wrong about the corpus — it is
+#: measuring its own grep. #2103's witness: the key `seq-2-edit-err-read` carried
+#: `grep -c "one mechanism, two symptoms" …/file-mutation-safety/SKILL.md`, minted 2026-09-12
+#: when the sentence existed with that casing, and re-executed 2026-10-03 as `0` because the
+#: owner skill's own nightly rewrite made the sentence read `One mechanism, two symptoms.` —
+#: 24 of the ledger's 27 latest-wins falsifiers that name a `SKILL.md` read it
+#: case-sensitively that night. It is a string and not an int for the same reason
+#: `EMPTY_INPUT` is, so no
+#: tally keyed on an exit status can absorb it, and `audit`'s published `unrunnable:` figure
+#: stays the count of checks that cannot execute. Compare with `==` against this name.
+STRANDED_CASE = "stranded_case"
+
 #: The field a falsifier declares its input count in, in the `name=value` shape Phase 0.6
 #: of `nightly-skill-consolidation` already asks a recorded command's output for. stdout
 #: only, because that is where a measurement goes — `run_evidence` reads it first too —
@@ -925,6 +1024,305 @@ def declared_denominator(stdout: str) -> int | None:
     """
     found = _INPUT_ROWS_RE.search(stdout or "")
     return int(found.group(1)) if found else None
+
+
+#: The only `grep` flag letters the recogniser below accepts, because every one of them
+#: takes no argument: a token made solely of these letters is unambiguously a flag cluster,
+#: so the token after the cluster is the pattern and the tokens after that are files. One
+#: argument-taking flag (`-f FILE`, `-m N`, `-e PATTERN`, `-A N`) would make the parser guess
+#: which operand is the pattern, and a wrong guess here re-cases the wrong string.
+_GREP_ARG_FREE_FLAGS = "bchilnoqrsvwx"
+
+#: A `grep` pattern is a literal string only if it holds none of these. A pattern with a
+#: metacharacter is a regular expression, and `grep -i '^status:'` matches lines no literal
+#: read does — so the re-read would be a different measurement, not the same one case-folded.
+_GREP_META_RE = re.compile(r"[\.^$*+?()\[\]{}|\\]")
+
+#: The shell structures that make a command more than one `grep`. The live ledger's 27 keys
+#: that name a `SKILL.md` include 8 of the shape `S=…/SKILL.md; printf 'a=%s b=%s' "$(grep
+#: -c 'lit' "$S")"` — a variable assignment and a command substitution whose output is one
+#: field among several. Adding `-i` inside one of those is a rewrite of a command this module
+#: cannot read, so those keys are left to their own readings.
+_SHELL_COMPOSITION_RE = re.compile(r"[<>&|;$`*\n?]")
+
+#: A file operand this module is willing to touch: a plain path. A glob would be expanded by
+#: the shell into N files, and `grep -c` over N files prints N prefixed counts, which is not
+#: the single number an absent-read is decided from; a `$VAR` operand expands to something the
+#: stored text does not say, so what it would match case-insensitively is unknowable here.
+_PLAIN_PATH_RE = re.compile(r"[A-Za-z0-9_./~+:@-]+")
+
+#: A `SKILL.md` inside a `skills/` directory, matched on the raw stored token so both
+#: spellings the ledger uses for it — `/home/<user>/obsidian/skills/x/SKILL.md` and
+#: `~/obsidian/skills/x/SKILL.md` — land the same way. This is the owner-coverage shape #2103
+#: is about: the file is the one an owner's own nightly rewrite edits under the verdict.
+_SKILL_MD_OPERAND_RE = re.compile(r"(?:^|/)skills/[^/]+/SKILL\.md$")
+
+#: The same shape over raw command text, for the mint-side check — deliberately wider than
+#: `_SKILL_MD_OPERAND_RE`, and it is safe to be: this rail decides, it never rewrites the
+#: command, so it does not need to know the operand is a plain path the way the strand rail
+#: does before it re-executes one. Any token ending in `SKILL.md` counts, including one built
+#: through a variable — `K=…/skills; grep -Fc 'command (string) is required'
+#: "$K/tool-parameter-validation/SKILL.md"` is one of the ledger's own latest-wins falsifiers,
+#: and a mint rule keyed on a literal `skills/` prefix would be a rule that `$K` walks through,
+#: which is the same hole #2052's `--no-input-rows` flag was.
+_SKILL_MD_PATH_RE = re.compile(r"[^\s'\"]+SKILL\.md")
+
+#: Every `grep` invocation in a command, whether or not this module can parse it.
+_GREP_MENTION_RE = re.compile(r"\bgrep\b")
+
+#: The flag run immediately after the word `grep`: zero or more `-flag` tokens. Group 1
+#: being empty means the very next token is the pattern, which is a case-sensitive read.
+_GREP_FLAGS_AFTER_RE = re.compile(r"\s*((?:-[A-Za-z]+[ \t]+)*)")
+
+#: A shell assignment — `rc=$?`, `S=~/obsidian/skills/x/SKILL.md`. One of the two wrapper
+#: statements a denominator-carrying falsifier is written with since #2052, and a statement
+#: that cannot change what grep matched.
+_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+
+#: `exit` of a captured status or a literal number: the other half of that wrapper.
+_EXIT_STATUS_RE = re.compile(r"exit\s+(?:\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|\d+)")
+
+#: A `name=` field carrying no value: the name, an `=`, then end of line or the next field
+#: boundary. `input_rows=2812` is not it; `newest_bucket=` at end of line, or `newest_bucket= `
+#: before the next field, is.
+_EMPTY_VALUED_FIELD_RE = re.compile(r"(?:^|[\s,;(/])([A-Za-z_][A-Za-z0-9_-]*)=(?=$|[\s,;)])")
+
+
+def _parse_grep_invocation(toks: list[str]):
+    """`(flags, pattern, operands)` for token list `toks` beginning with `grep`, else None.
+
+    The token list is already one shell segment, so this answers only whether THAT invocation
+    is a literal read of plain paths: flags drawn solely from `_GREP_ARG_FREE_FLAGS` (one
+    argument-taking flag — `-m N`, `-f FILE`, `-e PATTERN`, `-A N` — would make the parser
+    guess which token is the pattern, and a wrong guess re-cases the wrong string), no
+    `--long` option, a pattern with no regex metacharacter, and at least one plain-path
+    operand. Grep with no operand reads stdin, where the child inherits whatever the nightly's
+    pipe holds, so that is refused too.
+    """
+    rest = toks[1:]
+    flags: list[str] = []
+    while rest and rest[0].startswith("-") and rest[0] != "-":
+        flag = rest.pop(0)
+        if flag.startswith("--") or any(ch not in _GREP_ARG_FREE_FLAGS for ch in flag[1:]):
+            return None
+        flags.append(flag[1:])
+    if not rest:
+        return None
+    pattern, operands = rest[0], rest[1:]
+    if not pattern or _GREP_META_RE.search(pattern):
+        return None
+    if not operands or any(not _PLAIN_PATH_RE.fullmatch(op) for op in operands):
+        return None
+    return flags, pattern, operands
+
+
+def _grep_readings(evidence_cmd: str):
+    """`(greps, variant)` for a command this module can read as a whole, else None.
+
+    `greps` holds one `(flags, pattern, operands)` per `grep` invocation; `variant` is the
+    same command text with `-i` inserted into every case-sensitive one and is otherwise
+    byte-for-byte the stored command. A falsifier is written one of two ways now that #2052
+    demands a denominator — a bare `grep -c 'lit' path`, or that grep with an `rc=$?` capture
+    and an `echo input_rows=N` beside it — and BOTH have to be readable, because a mandate or
+    a re-read that reached only the bare form could be minted around by appending the very
+    declaration the other rail demands. So a `;`/`&&`/`||`-separated command is read segment
+    by segment and the whole command is refused unless every segment is a plain literal grep,
+    an assignment, an `echo`/`printf`, an `exit` of a captured status, or empty.
+
+    Refused outright, and therefore left to its own readings rather than rewritten on a guess:
+    a command substitution (`$( )`, a backquote), a redirect, a subshell parenthesis, a `test`
+    or `if`, a pipeline stage that is neither echo nor printf, and a `grep` this parser will
+    not sign off on. The live ledger holds 8 keys of the refused shape (`S=…/SKILL.md; printf
+    'a=%s' "$(grep -c 'lit' "$S")"`); they are history, and the mint rule below is what stops
+    new ones arriving.
+    """
+    bounds: list[tuple[int, int]] = []
+    start, i, quote = 0, 0, ""
+    while i < len(evidence_cmd):
+        ch = evidence_cmd[i]
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch in "'\"":
+            quote = ch
+        elif ch in "<>()" or evidence_cmd.startswith("$(", i) or ch == "`":
+            return None
+        elif ch in ";\n|&":
+            bounds.append((start, i))
+            start = i + 1
+        i += 1
+    if quote:
+        return None  # an unbalanced quote: bash cannot run this either
+    bounds.append((start, len(evidence_cmd)))
+
+    greps: list[tuple[list[str], str, list[str]]] = []
+    rewrites: list[tuple[int, int, str]] = []
+    for lo, hi in bounds:
+        while lo < hi and evidence_cmd[lo] in " \t":
+            lo += 1
+        while hi > lo and evidence_cmd[hi - 1] in " \t":
+            hi -= 1
+        body = evidence_cmd[lo:hi]
+        if not body:
+            continue
+        try:
+            toks = shlex.split(body)
+        except ValueError:
+            return None
+        if not toks:
+            return None
+        if toks[0] in ("echo", "printf") or _ASSIGNMENT_RE.match(body):
+            continue
+        if toks[0] == "exit" and _EXIT_STATUS_RE.fullmatch(body):
+            continue
+        if toks[0] != "grep" or (parsed := _parse_grep_invocation(toks)) is None:
+            return None
+        flags, pattern, operands = parsed
+        greps.append((flags, pattern, operands))
+        if not any("i" in flag for flag in flags):
+            # Splice the flag into the segment's own text rather than re-joining its tokens.
+            # `shlex.join(["grep", "-i", …])` single-quotes every operand that contains a
+            # metacharacter, and bash does not expand a tilde or a variable inside single
+            # quotes — so the re-read of the ledger's tilde-spelled falsifiers, which is how
+            # most of them are written (`grep -c 'lit' ~/obsidian/skills/x/SKILL.md`), would
+            # die on a file literally named `'~/obsidian/…'` and the strand would go
+            # undiagnosed on exactly the corpus this rail exists for. Inserting at the end of
+            # the flag run leaves every operand byte-identical to the stored spelling, shell
+            # expansions included; `-i` goes immediately after the word `grep`, which GNU grep
+            # accepts before any other flag, so the only bytes that move are the three inserted
+            # ones and the published line reads `grep -i -c …` — the command an author would
+            # write by hand to fix the key.
+            rewrites.append((lo, hi, f"{body[:len('grep')]} -i{body[len('grep'):]}".strip()))
+    if not greps:
+        return None
+    variant = evidence_cmd
+    for lo, hi, text in reversed(rewrites):
+        variant = variant[:lo] + text + variant[hi:]
+    return greps, variant
+
+
+def case_insensitive_reread(evidence_cmd: str) -> str | None:
+    """The same check with `grep -i` added, or None when there is nothing to re-case.
+
+    None three ways, each one a reason the re-read would prove nothing: the command is not
+    one this module can read as a whole (`_grep_readings`), it holds no `grep` at all, or
+    every `grep` in it already reads case-insensitively — which is the fix, not the defect,
+    and also what bounds the recursion in `_run_stored_check`. `-i` is inserted as its own
+    token in front of a re-quoted invocation, so the variant differs from the stored command
+    by exactly one argument per grep and the wrapper around it (`rc=$?`, the denominator
+    `echo`, `exit $rc`) survives byte for byte.
+
+    This is the only place a re-read is computed, and both read surfaces ask it:
+    `_run_stored_check` for a key already in the ledger, which is what makes `audit`'s
+    `STRANDED_CASE` set and `check`'s line the same classifier's answer rather than two
+    readings of the same row. It is deliberately NARROWER than the mint rule in
+    `case_sensitive_skill_md_grep`, and the asymmetry has a reason: this one executes what it
+    builds, so an unreadable command must be left alone; that one only refuses a write and
+    names the exact edit that clears it, so being wide there costs an author one `-i` and
+    closes the bypass the narrow form would leave open.
+    """
+    readings = _grep_readings(evidence_cmd)
+    if readings is None:
+        return None
+    _greps, variant = readings
+    return variant if variant != evidence_cmd else None
+
+
+def _reads_case_insensitively(evidence_cmd: str) -> bool:
+    """True when some `grep` mention in the command carries an `i` in its flag run.
+
+    The exemption both case rails honour, decided from the flag run alone rather than from a
+    full parse, because the flag run is legible exactly where the parse is not: the ledger's
+    repaired key `seq-2-edit-err-read` interleaves `$(grep -ci …)` with `$(grep -c …)` and a
+    `grep -m1 '^sessions:' $(ls -t …)` that no forward parse can finish, and a rule that could
+    only be evaluated on a fully parseable command would refuse the one mint that has actually
+    written the case-insensitive read down. Coarse by design, and coarse the same way in both
+    rails: `case_insensitive_reread` asks no second question of a command that already reads
+    case-insensitively, so a key can never be exempt at the mint and stranded at the audit.
+    """
+    # Same comment convention as `_grep_readings`: a trailing comment is not a reading, so a
+    # note that mentions `grep -i` cannot exempt the command it describes.
+    code = evidence_cmd.split("#")[0]
+    for mention in _GREP_MENTION_RE.finditer(code):
+        flags = _GREP_FLAGS_AFTER_RE.match(code, mention.end())
+        if flags and any("i" in f for f in flags.group(1).split()):
+            return True
+    return False
+
+
+def case_sensitive_skill_md_grep(evidence_cmd: str) -> str | None:
+    """The `SKILL.md` path this command greps case-sensitively, or None.
+
+    Owner-coverage is the one falsifier shape whose target is edited by somebody else's
+    nightly: `autonomy-83`'s skills refresh re-writes an installed `SKILL.md` whenever a
+    measurement under it changes, and #2103's witness key is the sentence that refresh
+    re-cased — `grep -c "one mechanism, two symptoms"` minted 2026-09-12 against a file whose
+    sentence read `One mechanism, two symptoms.` by 2026-10-03. The verdict then reads as
+    though the owner had DELETED its section, and a later run that trusts it re-adjudicates or
+    reopens a closed key on an artefact of casing. Measured on the live ledger
+    2026-10-03: 27 latest-wins falsifiers name a `SKILL.md`, and this rail refuses 24 of them
+    as new mints — the other 3 read something case-insensitively and are exempt. The mandate
+    lands where it can still be obeyed, at the mint, and leaves those 24 rows as history.
+
+    A command that reads anything case-insensitively is exempt (see
+    `_reads_case_insensitively`): that is the ledger's repair idiom, `owner_section_ci=`
+    beside `owner_section_case_sensitive=`, recording the artefact next to the coverage claim.
+    Beyond that exemption there are two readings, widest first, because a mandate here is only
+    as good as its narrowest bypass. Where `_grep_readings` can parse the command its verdict is
+    used exactly; where it cannot (a command substitution, a `test`, a `$VAR` operand) the
+    command is decided from its text and the tie goes against the mint: a path of that shape
+    plus a `grep` whose flag run carries no `i` is refused. Both routes name the same remedy —
+    read it case-insensitively — so the cost of the wide one is that an author adds the flag the
+    refusal is asking for, while the cost of the narrow one is that `grep -c 'lit'
+    skills/x/SKILL.md; echo 'input_rows=$(wc -l < f)'` walks straight past it.
+    """
+    path = _SKILL_MD_PATH_RE.search(evidence_cmd)
+    if path is None or _reads_case_insensitively(evidence_cmd):
+        return None
+    readings = _grep_readings(evidence_cmd)
+    if readings is not None:
+        for flags, _pattern, operands in readings[0]:
+            if "i" in "".join(flags):
+                continue
+            named = next((op for op in operands if _SKILL_MD_OPERAND_RE.search(op)), None)
+            if named:
+                return named
+        return None
+    return path.group(0)
+
+
+def empty_valued_fields(observed: str) -> list[str]:
+    """The `name=` fields in one recorded evidence line that carry no value, in order.
+
+    The shape #2103 measured on the live ledger: `echo 'newest_bucket= newest_rows=
+    prev_rows= input_rows=2812'` — an unquoted multi-word shell variable under the mining
+    writer's `sh`, which printed the field *names*, lost their values, exited 0, and
+    declared a real denominator. Every rail then in place read that line as healthy: the
+    emptiness guard saw a printed line, `UNRUNNABLE` saw a command that ran, `EMPTY_INPUT`
+    saw a nonzero denominator, and `audit` re-executes the same half-empty line and reports
+    it clean. The durable record of the run's window was three numbers short of being
+    auditable while its `input_rows=2812` matched the miner's own printed count exactly.
+
+    Deliberately literal, and no wider: only a bare `name=` at a field boundary followed by
+    end-of-line or the next boundary is a missing value. A quoted empty (`note=''`) and a
+    value spelled as whitespace are different defects and this function does not claim them.
+    The false-positive cost is a line of prose that happens to hold `word= ` before a space;
+    rc 0 has to be true as well, and an author who meets the refusal can put a value in the
+    field or print the measurement as a count.
+    """
+    return _EMPTY_VALUED_FIELD_RE.findall(observed or "")
+
+
+def printed_count_is_zero(stdout: str) -> bool:
+    """Whether a check's whole answer was the single number `0`.
+
+    `grep -c` prints `0` and exits 1 when it matches nothing, so an rc-keyed rail cannot
+    tell this from a healthy count and #2103's witness read as a measurement rather than a
+    non-answer. Only the first non-empty line counts, and only when it is nothing but `0`:
+    a findings header followed by a zero is the command reporting something else.
+    """
+    first = next((ln.strip() for ln in (stdout or "").splitlines() if ln.strip()), "")
+    return first == "0"
 
 
 def run_evidence(evidence_cmd: str, timeout: int = EVIDENCE_TIMEOUT_SECONDS) -> tuple[int, str]:
@@ -972,11 +1370,11 @@ def run_evidence(evidence_cmd: str, timeout: int = EVIDENCE_TIMEOUT_SECONDS) -> 
 def _run_stored_check(row: dict, timeout: int = EVIDENCE_TIMEOUT_SECONDS):
     """Execute a stored falsifier once: `(state, detail, declared_denominator)`.
 
-    `state` is a real exit status, `UNRUNNABLE`, or `EMPTY_INPUT`. The third value is
-    `declared_denominator()` read over the run's stdout and it is returned on every path,
-    the unrunnable ones included, because `audit` tallies declarations over the ledger's
-    keys rather than over its successes — and `cmd_audit` calls *this* function so that a
-    full audit still executes each stored command exactly once. `evidence_cmd_status`
+    `state` is a real exit status, `UNRUNNABLE`, `EMPTY_INPUT` or `STRANDED_CASE`. The
+    third value is `declared_denominator()` read over the run's stdout and it is returned
+    on every path, the unrunnable ones included, because `audit` tallies declarations over
+    the ledger's keys rather than over its successes — and `cmd_audit` calls *this* function
+    so that a full audit still executes each stored command exactly once. `evidence_cmd_status`
     below is this with the third value dropped, which is what every other reader wants.
     """
     cmd = (row.get("evidence_cmd") or "").strip()
@@ -1020,6 +1418,32 @@ def _run_stored_check(row: dict, timeout: int = EVIDENCE_TIMEOUT_SECONDS):
         # no, which is the ledger working, and relabelling it would teach `check` to stop
         # trusting a real falsification.
         return EMPTY_INPUT, f"{INPUT_ROWS_FIELD}=0", declared
+    if (variant := case_insensitive_reread(cmd)) is not None and (
+            proc.returncode != 0 or printed_count_is_zero(proc.stdout)):
+        # The answer no exit code reports, and the reason a rail keyed on rc 0 would miss it:
+        # a case-sensitive `grep -c` that matches nothing exits **1** and prints `0` (measured,
+        # #2103), which every rail above reads as the ledger answering no. So ask the same
+        # command the question a second time with `-i` added: when absent becomes present, the
+        # verdict is not measuring the corpus at all, it is measuring its own grep. The string
+        # is there in another casing, which is exactly what an owner's nightly rewrite of its
+        # own `SKILL.md` does to a falsifier minted against the old one — `seq-2-edit-err-read`
+        # read `0` on 2026-10-03 for that reason, six weeks after it was minted against a
+        # sentence that then read with the intended casing. Ordered after `EMPTY_INPUT`
+        # because a run that read no input has nothing to be stranded about, and after the
+        # `UNRUNNABLE` rails because a command that cannot execute is a different repair. The
+        # second execution happens only on this branch, so a key whose first read found its
+        # string still costs `audit` exactly one run, and `case_insensitive_reread` returns
+        # None for a command that already reads case-insensitively — which is what bounds the
+        # recursion here rather than letting a re-read re-read itself.
+        again, _again_detail, _again_declared = _run_stored_check(
+            {"evidence_cmd": variant}, timeout=timeout)
+        if again == 0:
+            return (STRANDED_CASE,
+                    "the stored grep is case-sensitive and read absent while the same command "
+                    f"with `-i` matches: {variant} — the string is present in another casing, "
+                    "so this key measures its own grep and not the corpus; re-anchor it with "
+                    "`-i` (#2103)",
+                    declared)
     return proc.returncode, "", declared
 
 
@@ -1045,6 +1469,13 @@ def evidence_cmd_status(row: dict, timeout: int = EVIDENCE_TIMEOUT_SECONDS):
     different repairs, and only one of them is a path (#1588's repair pass reads
     `UNRUNNABLE` and never sees this state, which is the whole reason #2048 is a separate
     item from it).
+
+    The fourth is `STRANDED_CASE`: the command ran and answered "absent", and answers
+    "present" with `grep -i` added, so what it observed is its own casing rather than the
+    corpus (#2103). `check` reports it on the same surface as the other two, one
+    `EVIDENCE_CMD_STRANDED_CASE` line per blocked key, because the whole cost of this state
+    is that a nightly reading the stored `0` concludes the owner LOST the section and
+    re-adjudicates a closed key.
     """
     state, detail, _declared = _run_stored_check(row, timeout)
     return state, detail
@@ -1567,6 +1998,22 @@ def cmd_check(args: argparse.Namespace) -> int:
             # "honoured on a check that cannot see its input" is the state #2048 exists to
             # make visible, and this loop is where 2 of the ledger's keys get exercised.
             print(f"EVIDENCE_CMD_EMPTY_INPUT {key} :: {detail}")
+        elif rc == STRANDED_CASE:
+            # The third instrument failure, named here because this is the loop that reads a
+            # stored `0` and decides what it means. A key whose case-sensitive literal grep
+            # reads absent while `-i` finds the string is measuring its own grep, and the
+            # inference a nightly draws from `evidence_observed: "0"` in this key family is
+            # "the owner skill does not hold this section" — which is how a closed key gets
+            # re-adjudicated on a casing artefact six weeks after it was minted (#2103). The
+            # line carries the key and the classifier's detail, which names the `-i` command
+            # that re-reads it, and nothing else changes: the block the verdict produced is
+            # untouched, and the strand never enters `unverified`, because the classifier hands
+            # this loop the instrument's state rather than the row's underlying exit status and
+            # a strand arises at rc 0 and at rc 1 alike — counting it would need a third
+            # execution to learn which, for a number `audit` already fails the run over. Same
+            # classifier as `audit`, so a key named here is named there and cannot be named by
+            # one surface alone.
+            print(f"EVIDENCE_CMD_STRANDED_CASE {key} :: {detail}")
     if fell_back:
         print(f"verdict source: {source} (live ledger {live} is absent)")
     print(f"checked: {len(rows)}  skipped_by_verdict: {len(skipped)}")
@@ -1598,22 +2045,46 @@ def cmd_audit(args: argparse.Namespace) -> int:
     mandatory), and `record` refuses to write it.
 
     Output is read by the nightly jobs, so the shape is the contract: one
-    `UNRUNNABLE <pattern_key> :: <detail>` line per dead key, then one
+    `UNRUNNABLE <pattern_key> :: <detail>` line per dead key, one
     `EMPTY_INPUT <pattern_key> :: <detail>` line per key whose rc-0 check declared
-    `input_rows=0`, then `denominators: empty_input N undeclared M`, then
+    `input_rows=0`, and one `STRANDED_CASE <pattern_key> :: <detail>` line per key whose
+    case-sensitive literal grep read absent while the same command with `-i` matches — all
+    three in key order, since they interleave and a reader greps for the class, not the
+    position. Then the tallies, and their order is load-bearing: `stranded:
+    case_sensitive_grep N`, then `denominators: empty_input N undeclared M`, then
     `keys: N unrunnable: M` as the LAST line — `check`'s shape, so a reader that takes
-    `splitlines()[-1]` gets the tally here too. Exit 1 when M > 0 or the empty-input count
-    does, so an unverifiable ledger fails a run instead of printing into a log nobody
-    re-reads.
+    `splitlines()[-1]` gets the ledger tally and one that takes `[-2]` gets the denominator
+    tally it has been reading since #2048. The new count enters ABOVE those two rather than
+    between them, because displacing a published line to make room for a new one is how a
+    reader that is not looking for the change silently reads the wrong figure; five tests
+    pin those two positions. Exit 1 when `unrunnable:` > 0 or either count above does, so an
+    unverifiable ledger fails a run instead of printing into a log nobody re-reads.
 
-    The two tallies answer different questions and a key can appear in both. `unrunnable:`
-    is about whether the check can execute; `denominators:` is about whether it says what
-    it read — `undeclared` counts every key whose command named no `input_rows`, the
+    The stranded line exists because the ledger's own worst silent failure is not a command
+    that cannot run. A falsifier that greps an installed `SKILL.md` for a literal string
+    case-sensitively keeps exiting 1 and printing `0` after the owner's nightly rewrite
+    re-cases that sentence, and `grep -c` leaves no trace of the difference in the row: no rc
+    is stored, and this surface's `unrunnable: 0` was reported over exactly that reading the
+    night #2103 was filed. It is a third question, asked of the same execution — can the
+    check run, what did it read, and would it answer differently case-folded — which is why
+    the count has its own line and is never folded into `unrunnable:`: a case-stranded key ran
+    fine, and calling it unrunnable would both hide #1533's real figure and point the repair
+    at the wrong thing (the fix is `grep -i`, not a re-anchored path). `check` names the same
+    keys on the same classifier, one `EVIDENCE_CMD_STRANDED_CASE` line each, so the nightly
+    that reaches for `evidence_observed` alone is the one most likely to conclude the owner
+    deleted a section — that reader now sees the artefact instead.
+
+    The tallies answer different questions and one key can appear in more than one.
+    `unrunnable:` is about whether the check can execute; `denominators:` is about whether it
+    says what it read — `undeclared` counts every key whose command named no `input_rows`, the
     unrunnable ones included, so `empty_input + undeclared + declared` adds up to `keys:`
-    and a reader can check the arithmetic. That is why the figure is a separate line and a
-    separate exit: #2048's whole finding is that a ledger can be fully honoured on
-    falsifiers that can no longer see their input while `unrunnable:` reads 0, and a
-    number that already covers the case cannot expose it. An undeclared denominator is not a
+    and a reader can check the arithmetic. `stranded:` is a third axis again, overlapping the
+    other two freely: a key can be stranded and undeclared, and cannot be stranded and
+    unrunnable, because the re-read that proves the artefact has to run, so #2103 leaves that
+    pairing to `UNRUNNABLE`, which the classifier decides first. That is why each figure is a
+    separate line and a separate exit: #2048's whole finding is that a ledger can be fully
+    honoured on falsifiers that can no longer see their input while `unrunnable:` reads 0, and
+    a number that already covers the case cannot expose it. An undeclared denominator is not a
     fault at this surface and does not move the exit code — 109 of the live ledger's keys are
     undeclared tonight, every one of them recorded before the field existed, and refusing
     them at read time would quarantine a ledger nobody authored wrongly. The mandate landed
@@ -1623,11 +2094,13 @@ def cmd_audit(args: argparse.Namespace) -> int:
     convention, and this line is what measures whether it is biting.
     """
     table = load_verdicts(store_path(args.store))      # latest-wins, the table check reads
-    dead, empty_input, undeclared = [], [], 0
+    dead, empty_input, stranded, undeclared = [], [], [], 0
     for key in sorted(table):
         # The three-value form, so one audit still runs each stored command once: the
         # denominator comes off the same execution that decided runnability, never from a
-        # second run that could disagree with the first.
+        # second run that could disagree with the first. `STRANDED_CASE` costs a second
+        # execution and only for a key whose first read already came back absent, so
+        # publishing it here cannot slow the hundred-odd keys that answered normally.
         state, detail, declared = _run_stored_check(table[key], timeout=args.timeout)
         if declared is None:
             undeclared += 1
@@ -1637,9 +2110,13 @@ def cmd_audit(args: argparse.Namespace) -> int:
         elif state == EMPTY_INPUT:
             empty_input.append(key)
             print(f"EMPTY_INPUT {key} :: {detail}")
+        elif state == STRANDED_CASE:
+            stranded.append(key)
+            print(f"STRANDED_CASE {key} :: {detail}")
+    print(f"stranded: case_sensitive_grep {len(stranded)}")
     print(f"denominators: empty_input {len(empty_input)} undeclared {undeclared}")
     print(f"keys: {len(table)} unrunnable: {len(dead)}")
-    return 1 if (dead or empty_input) else 0
+    return 1 if (dead or empty_input or stranded) else 0
 
 
 def _read_reanchors(path: str | None) -> dict[str, str]:

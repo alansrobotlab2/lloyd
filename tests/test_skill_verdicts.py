@@ -24,6 +24,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -176,7 +177,8 @@ def seeded(store) -> Path:
         pattern_key="Bash/timeout",
         verdict="reviewed_no_skill",
         reason="installed skill bash-timeout Pattern 3 cites this exact signature",
-        evidence_cmd=declares("grep -c 'command timed out' ~/obsidian/skills/bash-timeout/SKILL.md"),
+        evidence_cmd=declares("grep -ci 'command timed out' "
+                              "~/obsidian/skills/bash-timeout/SKILL.md"),
         occurrences=13,
         source_candidate="candidate-bash-timeout-20260909.md",
     )
@@ -924,7 +926,8 @@ def test_record_lands_the_identical_line_in_both_trees(store, mirror, monkeypatc
     row = sv.record_verdict(
         store=store, pattern_key="Bash/timeout", verdict="reviewed_no_skill",
         reason="installed skill bash-timeout Pattern 3 cites this exact signature",
-        evidence_cmd=declares("grep -c 'command timed out' ~/obsidian/skills/bash-timeout/SKILL.md"),
+        evidence_cmd=declares("grep -ci 'command timed out' "
+                              "~/obsidian/skills/bash-timeout/SKILL.md"),
         occurrences=13)
 
     live, durable = store.read_text().splitlines(), mirror.read_text().splitlines()
@@ -991,7 +994,8 @@ def test_check_answers_from_the_mirror_and_says_it_did(store, mirror, tmp_path, 
     sv.record_verdict(
         store=store, pattern_key="Bash/timeout", verdict="reviewed_no_skill",
         reason="installed skill bash-timeout Pattern 3 cites this exact signature",
-        evidence_cmd=declares("grep -c 'command timed out' ~/obsidian/skills/bash-timeout/SKILL.md"),
+        evidence_cmd=declares("grep -ci 'command timed out' "
+                              "~/obsidian/skills/bash-timeout/SKILL.md"),
         occurrences=13)
     cands = tmp_path / "candidates"
     cands.mkdir()
@@ -2121,12 +2125,16 @@ def test_audit_tally_is_its_final_line(tmp_path):
     last = out.splitlines()[-1]
 
     assert last == f"keys: {len(AUDIT_DEAD) + 3} unrunnable: {len(AUDIT_DEAD)}", out
-    # +2, not +1: #2048 added one line above the tally (`denominators: …`), and the whole
-    # point of counting lines here is that the published figure stays LAST — a nightly
-    # takes splitlines()[-1], so any new tally has to arrive above it.
-    assert len(out.splitlines()) == len(AUDIT_DEAD) + 2, (
-        f"tally must be the {len(AUDIT_DEAD) + 2}th and last line of its own output: {out}")
+    # +3, not +1: #2048 added one line above the tally (`denominators: …`) and #2103 another
+    # above that one (`stranded: case_sensitive_grep …`), and the whole point of counting
+    # lines here is that the published figure stays LAST — a nightly takes splitlines()[-1],
+    # so any new tally has to arrive above it. Nothing in this ledger is case-stranded, which
+    # is why the line reads 0 rather than being absent: a tally that only appears with
+    # findings cannot tell a clean night from a check nobody ran.
+    assert len(out.splitlines()) == len(AUDIT_DEAD) + 3, (
+        f"tally must be the {len(AUDIT_DEAD) + 3}th and last line of its own output: {out}")
     assert out.splitlines()[-2] == "denominators: empty_input 0 undeclared 7", out
+    assert out.splitlines()[-3] == "stranded: case_sensitive_grep 0", out
     assert out.count("UNRUNNABLE ") == len(AUDIT_DEAD), out
 
 
@@ -3586,9 +3594,21 @@ def test_the_shipped_cli_publishes_both_tallies_over_stdout_in_the_agreed_order(
 #: latest-wins table read out of it is the 109 keys every percentage divides by. The live
 #: file under `_pipeline` gains a row with every consolidation run and is folded by
 #: retention, so a figure quoted from it rots (#1193) — these bytes cannot.
+#:
+#: The dated name is #2103's doing, and it is a move, not a rewrite. #2048 landed these bytes
+#: at `backlog/data/verdicts.jsonl` (vault `8cbecceb`) and nothing ever refreshed that path, so
+#: by 2026-10-03 `wc -l < backlog/data/verdicts.jsonl` printed 282 while #2103 was quoting a
+#: 291-row ledger — the same rot this witness exists to prevent, reached by the mechanism
+#: built to prevent it. #2103 refreshed the undated path to the bytes IT measured (vault
+#: `ef42b40a`) and moved these 282 rows here, byte-identical to the copy it replaced and to the
+#: live ledger's first 282 lines (`cmp` clean against each; the ledger is append-only, so an
+#: older population is exactly a prefix). Two things follow, and both are the point: the three
+#: assertions below are #2048's, unchanged, and a witness is now pinned to a path nothing can
+#: refresh under it — `verdicts.jsonl` is the live-facing copy, for whoever needs the clause's
+#: own command to answer about tonight's ledger.
 WITNESS_2048_ROWS = 282
 WITNESS_2048_KEYS = 109
-WITNESS_2048_VAULT_PATH = "backlog/data/verdicts.jsonl"
+WITNESS_2048_VAULT_PATH = "backlog/data/2026-10-02.2048-verdicts-witness.jsonl"
 
 
 def test_the_verdicts_ledger_the_item_measures_is_committed_and_declares_nothing():
@@ -3610,7 +3630,9 @@ def test_the_verdicts_ledger_the_item_measures_is_committed_and_declares_nothing
     The copy is on the vault's main at WITNESS_2048_VAULT_PATH (landed through
     `automod_vault_land`, so it is not in this diff), which is also what makes the ledger
     citable by the review's own resolver; with no vault present the node skips, as
-    `write_ledger`'s durable-copy leg does.
+    `write_ledger`'s durable-copy leg does. It reached that dated name in #2103, which needed
+    the undated `verdicts.jsonl` to carry its own figures — the move is `cmp`-proven lossless
+    and none of the three assertions below moved with it.
     """
     durable = Path.home() / "obsidian" / WITNESS_2048_VAULT_PATH
     if not durable.is_file():
@@ -3852,3 +3874,596 @@ def test_the_mandate_is_taught_in_the_vault_before_it_is_enforced_in_code():
     assert "input_rows=$(ls -1" in mgmt, (
         "the mirror must carry the same two shapes the mandate teaches: a count of the input, "
         "and an absence probe printing the rows it inspected")
+
+
+"""#2103: the two reads no exit code reports.
+
+Both holes are the same shape — a falsifier that ran, answered, and left the ledger unable
+to tell what its answer measured — and both were invisible to every existing rail because
+each rail reads the exit status. A case-sensitive `grep -c` with no match exits 1 while
+printing `0`, so a verdict can only ever be *provisionally* blocked by a check whose casing
+the owner's own nightly rewrite is free to move (#530's caveat, unenforced for six weeks);
+and a command that exits 0 while leaving three of its fields empty satisfies a rail that
+only reads the fourth (#2052's `input_rows`). So the fix is not a fourth exit code: the
+classifier asks the stored command its question a second way and publishes `STRANDED_CASE`,
+and the write path refuses to mint the two shapes it can see coming.
+"""
+
+
+def grep_owner(skill: Path, literal: str, flags: str = "-c") -> str:
+    """The owner-coverage falsifier shape #57 minted, on a temp skill file instead of the vault.
+
+    Built by hand rather than through `declares` because these nodes are about the read: the
+    declaration is the honest count of the one file the command inspects, and the captured
+    exit status is what makes a no-match grep (rc 1, stdout `0`) distinguishable from a match
+    — the exact pair whose readings the classifier now has to tell apart.
+    """
+    return (f"grep {flags} '{literal}' {skill}; rc=$?; "
+            f"echo '{sv.INPUT_ROWS_FIELD}=1'; exit $rc")
+
+
+def skill_fixture(tmp_path) -> Path:
+    """A skill file holding the witness sentence, capitalised as its owner wrote it.
+
+    Mirrors `file-mutation-safety:96` after its 09-29 refresh: the sentence sits
+    sentence-initially, so the ledger's lower-case literal no longer matches it even though
+    the coverage is verbatim present. Deliberately under `tmp_path`, so a mint-time refusal
+    of a `skills/**/SKILL.md` grep needs no vault write to be exercised.
+    """
+    skill = tmp_path / "vault" / "skills" / "file-mutation-safety" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# Skill\n\nSix such sessions in the window. One mechanism, two "
+                     "symptoms.\n", encoding="utf-8")
+    return skill
+
+
+def test_record_refuses_a_falsifier_whose_rc_zero_line_leaves_its_fields_empty(tmp_path, store):
+    """Clause 1: the shape that minted `run:2026-10-03-nightly-mining` cannot be minted again.
+
+    Three of that line's four words are field names and three lost their value, so the
+    durable record carried `input_rows=2812` (real, and matching the miner's own printed
+    window) beside `newest_bucket=`, `newest_rows=` and `prev_rows=` printing nothing — which
+    is the whole window denominator, missing from the record while every rail read rc 0 and a
+    declared count. The refusal has to name each empty field, because the honest repair is to
+    re-run the command with its variables quoted, not to invent three numbers.
+    """
+    with pytest.raises(ValueError) as exc:
+        sv.record_verdict(store=store, pattern_key="run:2026-10-03-nightly-mining",
+                          verdict="reviewed_no_skill",
+                          reason="no signature clears the threshold",
+                          evidence_cmd="echo 'newest_bucket= newest_rows= prev_rows= "
+                                       f"{sv.INPUT_ROWS_FIELD}=2812'")
+
+    msg = str(exc.value)
+    for field in ("newest_bucket", "newest_rows", "prev_rows"):
+        assert field in msg, f"the refusal must name the empty field {field}: {msg}"
+    assert sv.empty_valued_fields("newest_bucket= newest_rows= prev_rows= input_rows=2812") == [
+        "newest_bucket", "newest_rows", "prev_rows"], (
+        "the named fields are the ones that lost their value, and the denominator that "
+        "carried its number is not one of them")
+    assert not store.exists(), "a refused mint writes nothing to either tree"
+
+
+def test_the_empty_field_refusal_never_fires_on_a_no_answer_or_a_populated_line(tmp_path, store):
+    """Clause 2: the rail is keyed on rc 0 and on a genuinely empty value, both halves pinned.
+
+    The first case is the one the item's own correction makes load-bearing: the ledger
+    answering *no* (nonzero rc beside its fields) is the falsifier working, and refusing it
+    would teach `record` to reject a real falsification — the same mistake #1586's fix had to
+    be careful of on the other axis. The second is a line whose every field carries a value.
+    The third is a `0`: a zero is a measurement, not an absence, and `empty_input` already
+    owns that state with its own name and its own tally.
+    """
+    line = (f"newest_bucket= newest_rows= prev_rows= {sv.INPUT_ROWS_FIELD}=2812")
+    sv.record_verdict(store=store, pattern_key="run:no-answer",
+                      verdict="rejected_false_positive", reason="falsifier answered no",
+                      evidence_cmd=f"echo '{line}'; exit 1")
+    sv.record_verdict(store=store, pattern_key="run:fully-populated",
+                      verdict="reviewed_no_skill", reason="window auditable",
+                      evidence_cmd="echo 'newest_bucket=2026-10-03 newest_rows=12 "
+                                   f"prev_rows=9 {sv.INPUT_ROWS_FIELD}=2812'")
+    sv.record_verdict(store=store, pattern_key="run:zero-is-a-value",
+                      verdict="reviewed_no_skill", reason="zero counted, not missing",
+                      evidence_cmd=f"echo 'newest_rows=0 {sv.INPUT_ROWS_FIELD}=2812'")
+
+    rows = sv.load_verdicts(store)
+    assert set(rows) == {"run:no-answer", "run:fully-populated", "run:zero-is-a-value"}, rows
+    assert rows["run:no-answer"]["evidence_observed"] == line, (
+        "a falsifier answering no is recorded unchanged, including the empties it printed — "
+        "that row's rc is what makes it readable, and no rail may rewrite it")
+    assert rows["run:fully-populated"]["evidence_observed"] == (
+        "newest_bucket=2026-10-03 newest_rows=12 prev_rows=9 input_rows=2812")
+
+
+def test_audit_names_one_stranded_case_line_per_key_and_tallies_it_outside_unrunnable(tmp_path):
+    """Clause 3: `audit` asks the third question, and its figure is not `unrunnable`'s.
+
+    Three keys, one line each expected. `k:stranded` is the repaired witness's own command
+    text — case-sensitive, rc 1, stdout `0` — which is the state every existing rail reads as
+    the ledger working. `k:absent` is a genuinely missing string and must NOT be reported: the
+    rail's whole cost is a second execution, so a key whose case-insensitive re-read is also
+    empty has to fall through to its real exit status. `k:present` already matched and must
+    not be run twice.
+
+    The strand is published beside the key because a nightly reading `evidence_observed: "0"`
+    concludes the owner LOST the section, and that is how a closed key gets re-adjudicated on
+    an instrument artefact. It gets its own count, and `unrunnable: 0` stays 0, because a
+    case-stranded key ran fine — folding it in would both hide #1533's real figure and point
+    the repair at a re-anchored path when the fix is `grep -i`.
+    """
+    skill = skill_fixture(tmp_path)
+    store = tmp_path / "verdicts.jsonl"
+    stored_row(store, "k:stranded", grep_owner(skill, "one mechanism, two symptoms"))
+    stored_row(store, "k:absent", grep_owner(skill, "no such section anywhere"))
+    stored_row(store, "k:present", grep_owner(skill, "one mechanism, two symptoms", flags="-ci"))
+
+    proc = subprocess.run([sys.executable, str(_ROOT / "scripts" / "skill_verdicts.py"),
+                           "audit", "--store", str(store), "--timeout", "5"],
+                          capture_output=True, text=True,
+                          env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+    out = proc.stdout
+
+    found = [ln for ln in out.splitlines() if ln.startswith("STRANDED_CASE")]
+    assert len(found) == 1 and found[0].startswith("STRANDED_CASE k:stranded :: "), out
+    assert "k:absent" not in out and "k:present" not in out, (
+        f"a string absent under `-i` too is the ledger answering no, and a key that matched "
+        f"is not measured twice — both belong in no line at all: {out}")
+    detail = [ln for ln in out.splitlines() if ln.startswith("STRANDED_CASE")][0]
+    assert "grep -i -c" in detail, f"the line has to carry the read that does match: {detail}"
+    assert "stranded: case_sensitive_grep 1" in out, out
+    assert "keys: 3 unrunnable: 0" == out.splitlines()[-1], out
+    assert "unrunnable: 1" not in out, "the count is never folded into the published figure"
+    assert proc.returncode == 1, "a stranded key fails the run: 1 if dead or stranded"
+
+
+def test_the_shipped_cli_publishes_the_stranded_count_without_moving_the_published_tallies(
+        tmp_path):
+    """Clause 3's process boundary: the numbers a nightly reads, at the positions it reads them.
+
+    In-process assertions can miss a print that goes to the wrong stream or a tally pushed off
+    the end of the output, and this surface's contract is positional — `splitlines()[-1]` is the
+    ledger tally and `[-2]` is the denominator tally, both published before #2103 and both
+    pinned by existing nodes. So the new line enters above them, and this node runs the real
+    program over a temp ledger with exactly one stranded key to pin all four at once.
+    """
+    skill = skill_fixture(tmp_path)
+    store = tmp_path / "verdicts.jsonl"
+    stored_row(store, "seq-2-edit-err-read", grep_owner(skill, "one mechanism, two symptoms"))
+    stored_row(store, "k:healthy", grep_owner(skill, "one mechanism, two symptoms", flags="-ci"))
+
+    proc = subprocess.run([sys.executable, str(_ROOT / "scripts" / "skill_verdicts.py"),
+                           "audit", "--store", str(store), "--timeout", "5"],
+                          capture_output=True, text=True,
+                          env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+    lines = proc.stdout.splitlines()
+
+    assert proc.returncode == 1, (proc.returncode, proc.stdout, proc.stderr)
+    assert lines[-1] == "keys: 2 unrunnable: 0", lines
+    assert lines[-2] == "denominators: empty_input 0 undeclared 0", lines
+    assert lines[-3] == "stranded: case_sensitive_grep 1", lines
+    assert lines[0].startswith("STRANDED_CASE seq-2-edit-err-read ::"), lines
+    assert proc.stdout.count("STRANDED_CASE ") == 1, (
+        "exactly one finding line: the tally is spelled `stranded: case_sensitive_grep`, so a "
+        f"reader counting the uppercase token counts keys and never tally lines: {lines}")
+
+
+def test_check_names_the_case_stranded_key_on_its_existing_evidence_cmd_line(tmp_path):
+    """Clause 4: the surface a step-0 SKIP falsifier actually re-executes says so too.
+
+    The failure this closes is not a wrong block. The key is terminal, so it blocks either
+    way; the failure is that the nightly which then reads `evidence_observed: "0"` writes a
+    finding saying the owner skill no longer holds the section, and the run after that
+    re-adjudicates or reopens a closed key on the casing of a grep. Named in the
+    `EVIDENCE_CMD_*` shape the loop already prints and already teaches, and the ledger's own
+    figure stays untouched — no `LEDGER_UNVERIFIABLE`, no exit 1: an instrument note is not a
+    veto, exactly as an absent denominator is not one (#2052's ruling, adopted here unchanged).
+    """
+    skill = skill_fixture(tmp_path)
+    store = tmp_path / "verdicts.jsonl"
+    stored_row(store, "Bash/timeout", grep_owner(skill, "one mechanism, two symptoms"))
+    cands = tmp_path / "candidates"
+    mt.write_candidate_file(error_pattern(), cands)
+
+    proc = subprocess.run([sys.executable, str(_ROOT / "scripts" / "skill_verdicts.py"),
+                           "check", "--candidates", str(cands), "--store", str(store)],
+                          capture_output=True, text=True,
+                          env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+
+    assert "EVIDENCE_CMD_STRANDED_CASE Bash/timeout ::" in proc.stdout, proc.stdout
+    assert "SKIP Bash/timeout" in proc.stdout, (
+        "the key blocks exactly as it did before this line existed")
+    assert "LEDGER_UNVERIFIABLE" not in proc.stdout, proc.stdout
+    assert proc.returncode == 0, (proc.returncode, proc.stdout)
+    assert proc.stdout.splitlines()[-1] == "checked: 1  skipped_by_verdict: 1", proc.stdout
+
+
+def test_the_stranded_note_changes_the_line_and_never_the_block_it_reports(tmp_path):
+    """Clause 4's other half: the strand is a note about a grep, never a second verdict.
+
+    Two ledgers, same key, same candidate, differing only in the casing of the stored read:
+    the case-insensitive one matches, so it is not stranded, and the case-sensitive one reads
+    `0` at rc 1 and is. Both must `SKIP` identically and exit 0, and only the stranded one
+    carries the line — because if publishing the artefact could move a decision, this surface
+    would be silently reopening verdicts on a casing change, the exact instability #2103 exists
+    to remove. The `check` loop reaches a stored command only for a key its verdict is
+    currently blocking, which is the right scope and not an accident to widen: a key with no
+    terminal verdict stands in front of nothing, so there is no "owner lost the section"
+    inference for the artefact to poison.
+
+    The third ledger is the strand's other origin: a stored command that swallows grep's exit
+    status (`cmd; echo …` with no `exit $rc`, the shape this file's own fixtures had to stop
+    writing) prints `0` and exits 0, so its answer is a count rather than a falsification — and
+    it is reported exactly as the rc-1 one is, because `check` receives the instrument's state
+    from the classifier and not the row's underlying exit status. What neither one touches is
+    `unverified`, and that is deliberate: folding a strand into the unverifiable figure would
+    need a third execution to learn which rc produced it, for a signal `audit` already fails the
+    run over. Both exit 0: an instrument note has never been a veto on this surface (#2052's
+    ruling, adopted unchanged).
+    """
+    skill = skill_fixture(tmp_path)
+    ledgers = {
+        "stranded": grep_owner(skill, "one mechanism, two symptoms"),
+        "matched": grep_owner(skill, "one mechanism, two symptoms", flags="-ci"),
+        "swallowed": (f"grep -c 'one mechanism, two symptoms' {skill}; "
+                      f"echo '{sv.INPUT_ROWS_FIELD}=1'"),
+    }
+
+    outputs = {}
+    for name, cmd in ledgers.items():
+        store = tmp_path / name / "verdicts.jsonl"
+        stored_row(store, "Bash/timeout", cmd, verdict="reviewed_no_skill")
+        cands = tmp_path / name / "candidates"
+        mt.write_candidate_file(error_pattern(), cands)
+        proc = subprocess.run([sys.executable, str(_ROOT / "scripts" / "skill_verdicts.py"),
+                               "check", "--candidates", str(cands), "--store", str(store)],
+                              capture_output=True, text=True,
+                              env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+        assert proc.returncode == 0, (name, proc.returncode, proc.stdout)
+        assert any(ln.startswith("SKIP Bash/timeout :: reviewed_no_skill")
+                   for ln in proc.stdout.splitlines()), (name, proc.stdout)
+        assert "REOPEN" not in proc.stdout, (name, proc.stdout)
+        outputs[name] = proc.stdout
+
+    stranded_lines = [ln for ln in outputs["stranded"].splitlines()
+                      if ln.startswith("EVIDENCE_CMD_")]
+    assert [ln.split(" :: ")[0] for ln in stranded_lines] == [
+        "EVIDENCE_CMD_STRANDED_CASE Bash/timeout"], outputs["stranded"]
+    assert not [ln for ln in outputs["matched"].splitlines()
+                if ln.startswith("EVIDENCE_CMD_")], (
+        "a read that matches is not an artefact, and the block above proves the line is the "
+        "only difference between the two runs")
+    assert "LEDGER_UNVERIFIABLE" not in outputs["stranded"], (
+        "rc 1 beside a strand is a falsifier answering no, which is the ledger working")
+    assert "EVIDENCE_CMD_STRANDED_CASE Bash/timeout ::" in outputs["swallowed"], (
+        outputs["swallowed"])
+    assert "LEDGER_UNVERIFIABLE" not in outputs["swallowed"], outputs["swallowed"]
+
+
+def test_record_refuses_a_new_case_sensitive_owner_grep_and_names_the_case_insensitive_read(
+        tmp_path, store):
+    """Clause 5: a falsifier born falsifiable by somebody else's nightly is refused at the mint.
+
+    Refused before the command runs, because the defect is the shape of the read and not its
+    answer — the same command that matches tonight is the one that reads `0` the night the
+    owner re-cases its sentence, and by then the verdict is six weeks old and a stored `0` is
+    indistinguishable from the owner deleting the section. Naming `grep -i` in the message is
+    the whole repair, so the message has to carry it: #83's nightly write path is the one that
+    strands these greps and it does not read this file.
+    """
+    skill = skill_fixture(tmp_path)
+    cmd = grep_owner(skill, "one mechanism, two symptoms")
+
+    with pytest.raises(ValueError) as exc:
+        sv.record_verdict(store=store, pattern_key="seq-2-edit-err-read",
+                          verdict="reviewed_no_skill", reason="owner holds the section",
+                          evidence_cmd=cmd, occurrences=11)
+
+    msg = str(exc.value)
+    assert str(skill) in msg, f"the refusal must name the file it refuses to read: {msg}"
+    assert "grep -ci" in msg, f"the refusal must name the read that survives a rewrite: {msg}"
+    assert "#2103" in msg, msg
+    assert not store.exists(), "a refused mint writes nothing to either tree"
+
+    # The same command with the case-insensitive read mints, and mints *clean*: the mandate is
+    # about casing, and a refusal that also rejected `-i` would teach a mint to drop the
+    # falsifier rather than fix it.
+    sv.record_verdict(store=store, pattern_key="seq-2-edit-err-read",
+                      verdict="reviewed_no_skill", reason="owner holds the section",
+                      evidence_cmd=grep_owner(skill, "one mechanism, two symptoms", flags="-ci"),
+                      occurrences=11)
+    assert sv.load_verdicts(store)["seq-2-edit-err-read"]["evidence_observed"] == "1"
+
+
+def test_the_case_sensitive_mint_rail_leaves_other_shapes_and_the_stored_history_alone(
+        tmp_path, store):
+    """Clause 5's second half: the mandate is mint-time, and the ledger's history is untouched.
+
+    Three things have to stay true while that rail fires, and each is a way a naive version
+    would be wrong. A case-sensitive grep of a file that is not an installed skill is the
+    common falsifier in this very test file (`PRINTING_CMD` greps `skill_verdicts.py`), and a
+    rail widened to all greps would refuse most of the ledger's healthy keys; a key stored
+    before the mandate is the recorded history #2103 explicitly does not re-record — the 25
+    case-sensitive `SKILL.md` falsifiers stay in the ledger, still blocking, and `audit`
+    publishes them nightly rather than `record` pretending they were never written.
+    """
+    skill = skill_fixture(tmp_path)
+    sv.record_verdict(store=store, pattern_key="k:source-grep", verdict="reviewed_no_skill",
+                      reason="greps the script, not a skill",
+                      evidence_cmd=grep_owner(_ROOT / "scripts" / "skill_verdicts.py",
+                                              "def load_verdicts"))
+    # And the rail is about the READ, not the string: a command that greps some other file and
+    # happens to name a skill path in prose is not an owner-coverage falsifier, and a rail that
+    # refused on the mention would be refusing on a substring — the same over-broad reflex that
+    # made this class of rail wrong before it shipped.
+    other = tmp_path / "window.txt"
+    other.write_text("newest_bucket=2026-10-03\n", encoding="utf-8")
+    sv.record_verdict(store=store, pattern_key="k:mentions-a-skill", verdict="reviewed_no_skill",
+                      reason="greps the window, names a skill in passing",
+                      evidence_cmd=declares(f"grep -c 'newest_bucket=' {other}; "
+                                           f"echo 'see {skill}'"))
+    legacy = grep_owner(skill, "one mechanism, two symptoms")
+    stored_row(store, "Bash/timeout", legacy)
+
+    with pytest.raises(ValueError):
+        sv.record_verdict(store=store, pattern_key="k:second-attempt",
+                          verdict="reviewed_no_skill", reason="same shape refused",
+                          evidence_cmd=legacy)
+
+    rows = sv.load_verdicts(store)
+    assert set(rows) == {"k:source-grep", "k:mentions-a-skill", "Bash/timeout"}, rows
+    assert rows["Bash/timeout"]["evidence_cmd"] == legacy, (
+        "a stored row is never rewritten: append-only, latest-wins, and the 24 legacy "
+        "SKILL.md greps are history that `audit` reports, not that `record` repairs")
+
+    cands = tmp_path / "candidates"
+    mt.write_candidate_file(error_pattern(), cands)
+    proc = subprocess.run([sys.executable, str(_ROOT / "scripts" / "skill_verdicts.py"),
+                           "check", "--candidates", str(cands), "--store", str(store)],
+                          capture_output=True, text=True,
+                          env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+    assert "EVIDENCE_CMD_STRANDED_CASE Bash/timeout ::" in proc.stdout, proc.stdout
+    assert "SKIP Bash/timeout" in proc.stdout, (
+        "a row stored before the mandate blocks exactly as it did the night it was written")
+    assert proc.returncode == 0, (proc.returncode, proc.stdout)
+
+
+def test_the_mint_rail_catches_a_skill_path_built_through_a_variable(tmp_path, store):
+    """Clause 5's bypass, closed on the shape the live ledger actually uses.
+
+    The strand rail may only rewrite a command whose operand it can prove is a plain path,
+    because it re-executes what it rewrites. The mint rail only decides, so it is wider: a
+    command whose `SKILL.md` arrives through `$K` is refused on its text. Measured on
+    2026-10-03, one of the ledger's 27 latest-wins `SKILL.md` falsifiers is exactly this shape —
+    `K=/home/<user>/obsidian/skills; grep -Fc 'command (string) is required'
+    "$K/tool-parameter-validation/SKILL.md"` — and a rule that required a literal `skills/`
+    prefix in the command would let every one of them be re-minted behind a variable, which is
+    #2052's `--no-input-rows` hole wearing different clothes.
+    """
+    cmd = ("K=" + str(tmp_path / "vault" / "skills")
+           + "; grep -Fc 'command (string) is required' \"$K/tool-parameter-validation/SKILL.md\""
+           + "; rc=$?; echo 'input_rows=1'; exit $rc")
+    (tmp_path / "vault" / "skills" / "tool-parameter-validation").mkdir(parents=True)
+    (tmp_path / "vault" / "skills" / "tool-parameter-validation" / "SKILL.md").write_text(
+        "Tool Parameter Validation\n\ncommand (string) is required\n", encoding="utf-8")
+    with pytest.raises(ValueError) as exc:
+        sv.record_verdict(store=store, pattern_key="k:variable-path",
+                          verdict="reviewed_no_skill", reason="fixture: greps via $K",
+                          evidence_cmd=cmd)
+    assert "grep -ci" in str(exc.value), str(exc.value)
+    assert not store.exists()
+
+
+def test_a_falsifier_that_records_both_casings_is_not_refused(tmp_path, store):
+    """The exemption's own shape: the ledger's repair idiom stays mintable.
+
+    `seq-2-edit-err-read` was hand-repaired on 2026-10-03 by recording the coverage
+    case-insensitively *beside* the case-sensitive read that had gone to `0`, so the artefact
+    and the claim sit in one line. A mint rail that refused that would forbid the only
+    authoring pattern that has actually demonstrated it knows about casing, and would disagree
+    with the strand rail, which asks no second question of a command that already reads
+    case-insensitively — a key must not be exempt at the mint and stranded at the audit.
+    """
+    skill = skill_fixture(tmp_path)
+    cmd = (f"echo {sv.INPUT_ROWS_FIELD}=1 "
+           f"owner_section_ci=$(grep -ci 'one mechanism, two symptoms' {skill}) "
+           f"owner_section_case_sensitive=$(grep -c 'one mechanism, two symptoms' {skill})")
+    sv.record_verdict(store=store, pattern_key="seq-2-edit-err-read",
+                      verdict="reviewed_no_skill",
+                      reason="fixture: both casings recorded", evidence_cmd=cmd)
+    observed = sv.load_verdicts(store)["seq-2-edit-err-read"]["evidence_observed"]
+    assert "owner_section_ci=1" in observed, observed
+    assert "owner_section_case_sensitive=0" in observed, (
+        "the line the ledger was repaired to write is the line this mint must still produce")
+
+
+def test_the_case_insensitive_reread_survives_a_tilde_spelled_operand(tmp_path):
+    """Clause 3 on the spelling most of the ledger actually uses.
+
+    The live falsifiers name `~/obsidian/skills/<x>/SKILL.md`, and a `~` survives `shlex.split`
+    only to be single-quoted back by `shlex.join` — which bash does not expand, so the re-read
+    targets a path literally named `'~/obsidian/…'`, dies at rc 2, and the key is published as
+    a healthy rc-1 falsifier instead of `STRANDED_CASE`. Measured on 2026-10-03: of the 12
+    latest-wins `SKILL.md` falsifiers this module can parse at all, 10 are tilde-spelled, so a
+    rail built that way would be blind to five sixths of the corpus it was written for. The fixture therefore sits
+    under the real home, in a uniquely named directory removed afterwards.
+    """
+    home = Path.home()
+    rel = ".cache/lloyd-skill-verdicts-tilde-2103/skills/file-mutation-safety"
+    target = home / rel
+    target.mkdir(parents=True, exist_ok=True)
+    try:
+        (target / "SKILL.md").write_text(
+            "# Skill\n\nSix such sessions in the window. One mechanism, two symptoms.\n",
+            encoding="utf-8")
+        cmd = f"grep -c 'one mechanism, two symptoms' ~/{rel}/SKILL.md"
+        variant = sv.case_insensitive_reread(cmd)
+        assert variant is not None and f"~/{rel}/SKILL.md" in variant and "'~" not in variant, variant
+        state, detail = sv.evidence_cmd_status({"evidence_cmd": cmd})
+        assert state == sv.STRANDED_CASE, (state, detail)
+    finally:
+        shutil.rmtree(home / ".cache" / "lloyd-skill-verdicts-tilde-2103", ignore_errors=True)
+
+
+# ── the witness bytes behind this item's figures (#2103 clause 6) ─────────────
+#
+# Everything #2103 asserts about the ledger — "110 keys", "25 case-sensitive greps", "5 rows
+# with an empty field", "undeclared 102" — is a claim about a file under `_pipeline/`, which
+# `.gitignore` excludes from every repo on the box and gains a row from every consolidation
+# run. A figure quoted from a moving file cannot be re-checked by the reader who is asked to
+# act on it, which is the same defect #1193 named and #2048's clause 6 answered by committing
+# the copy it measured. These bytes are that copy for this item: the live ledger as of
+# 2026-10-03T07:18:12Z, byte-identical (sha256 4c5ed7beb86c1320bc4d84245f1bfbe48227265f212d85928b1ede352d6a03d0),
+# landed on the vault's main and dated so it can never be re-cut under a quoted figure.
+#
+# Why a dated copy and not the undated one. `backlog/data/verdicts.jsonl` IS refreshed to these
+# bytes in this round (vault `ef42b40a`), so the clause's own command now answers about
+# tonight's ledger instead of printing #2048's 282 — that stale contradiction is what the first
+# review of this round refused on. But an item's figures stay pinned here, because a path that
+# gets refreshed for the next item goes red under the previous one, and that is exactly how
+# #2048's witness came to disagree with this item's report. So the rule the round landed on:
+# the undated name is live-facing, every quoted figure reads a dated copy, and a refresh moves
+# the old population to its own dated sibling rather than overwriting it — #2048's 282 rows are
+# at `2026-10-02.2048-verdicts-witness.jsonl`, `cmp`-identical to what was there before.
+
+#: The committed copy, as a path relative to the vault root (the same resolution
+#: `sv.DEFAULT_MIRROR` uses for the durable ledger copy, and for the same reason: the vault is
+#: a second tree, so it is never a function of `--store`).
+WITNESS_2103_VAULT_PATH = "backlog/data/2026-10-03.2103-verdicts-witness.jsonl"
+
+#: Every figure #2103's report and its triage quote, measured off those bytes on
+#: 2026-10-03. They are the item's claims, not this file's inventions: the row count is what
+#: the clause's own `wc -l` command prints, 110 is the `keys:` line `audit` published at
+#: 06:14Z, 102 is the `undeclared` figure on the line above it, and 27/24 is the exposure
+#: count the automod triage recorded ("25 of 26" there is corrected in the round-findings
+#: section of the item, because that scan counted only keys whose path it could parse and
+#: missed 3 keys that read case-insensitively and one that reads a `SKILL.md` through `$K`).
+WITNESS_2103_ROWS = 291
+WITNESS_2103_KEYS = 110
+WITNESS_2103_SKILL_MD_KEYS = 27
+WITNESS_2103_CASE_SENSITIVE_KEYS = 24
+WITNESS_2103_UNDECLARED_KEYS = 102
+
+#: The three exempt keys by name, because "exempt" here is a claim with a reason: each one
+#: reads something case-insensitively already, which is the repair, so the mint rail asks it
+#: no second question. One is the hand-repaired witness key; two were never in the triage
+#: scan's population at all.
+WITNESS_2103_EXEMPT_KEYS = [
+    "seq-2-edit-err-bash-fs",
+    "seq-2-edit-err-read",
+    "seq-3-bash-fs-bash-explore-bash-fs-err",
+]
+
+#: The five rows whose stored `evidence_observed` carries a field name with no value — the
+#: population clause 1's rail exists for, and the count `audit` could not see at 06:14Z. Four
+#: are the 2026-09-27 mining batch (`snapshot=`/`sessions=`), one is the run-level line filed
+#: the night this item opened (`newest_bucket=`/`newest_rows=`/`prev_rows=`).
+WITNESS_2103_EMPTY_FIELD_ROWS = [
+    "run:2026-10-03-nightly-mining",
+    "seq-2-bash-fs-edit",
+    "seq-3-bash-explore-bash-fs-read",
+    "seq-3-bash-fs-backlog-write-task-bash-fs",
+    "seq-3-read-edit-bash-fs",
+]
+
+
+def _witness_2103() -> Path:
+    """The committed witness bytes, or a skip when this machine has no vault.
+
+    The same shape as #2048's witness node: the durable copy is a second tree, and a ledger
+    on a box without one is not a failing ledger.
+    """
+    durable = Path.home() / "obsidian" / WITNESS_2103_VAULT_PATH
+    if not durable.is_file():
+        pytest.skip(f"no committed verdicts witness at {WITNESS_2103_VAULT_PATH} here")
+    return durable
+
+
+def test_the_verdicts_ledger_this_item_measures_is_committed_and_re_derivable():
+    """Clause 6: the item's denominators come out of bytes a reader can hold.
+
+    Four figures, one read. The row count is taken by the clause's own command — a real
+    `wc -l` child process, not a line count this file invents, because the clause publishes
+    that command as the re-check and a test that computes the number another way proves
+    nothing about it; the splitlines count is asserted to agree, since a file whose last
+    line has no newline would make the two disagree and every figure below would then be a
+    count of a different corpus. The key count is `load_verdicts`, i.e. the latest-wins
+    table `audit` and `check` both read, so the published `keys: 110` is the same number.
+    `undeclared` is a text count of the commands that name no `input_rows=`, which is exactly
+    how `audit` defines it, unrunnable keys included — deliberately not a re-execution of
+    110 stored commands inside a unit node.
+
+    The 27/24 pair is the exposure figure the round re-measured at head `8e9befbd` and the
+    only one of the four that depends on this diff, since 24 is the count `
+    case_sensitive_skill_md_grep` would refuse **as a new mint**: the rule that lands here,
+    read back over the history it deliberately does not rewrite. A witness that stopped
+    matching would mean either the copy is not the one the item measured or the mint rail
+    moved under the report, and both are reasons to stop and re-derive the item, so each
+    assertion names which figure broke rather than just failing.
+    """
+    durable = _witness_2103()
+
+    counted = subprocess.run(["wc", "-l", str(durable)], capture_output=True, text=True)
+    assert counted.returncode == 0, counted.stderr
+    assert int(counted.stdout.split()[0]) == WITNESS_2103_ROWS, counted.stdout
+    rows = [ln for ln in durable.read_text(errors="replace").splitlines() if ln.strip()]
+    assert len(rows) == WITNESS_2103_ROWS, (
+        f"`wc -l` and a filtered read disagree, so this copy is not newline-terminated and "
+        f"the {WITNESS_2103_ROWS}-row figure the item quotes is ambiguous")
+
+    table = sv.load_verdicts(durable)
+    assert len(table) == WITNESS_2103_KEYS, (
+        f"latest-wins gives {len(table)} keys, not the 110 in `audit`'s published line, so "
+        "this copy is not the ledger the item's percentages divide by")
+
+    skill_keys = sorted(k for k, r in table.items()
+                        if "SKILL.md" in (r.get("evidence_cmd") or ""))
+    assert len(skill_keys) == WITNESS_2103_SKILL_MD_KEYS, (
+        f"{len(skill_keys)} latest-wins keys name a SKILL.md, not "
+        f"{WITNESS_2103_SKILL_MD_KEYS}, so the exposure figure is not this population")
+    refused = sorted(k for k in skill_keys
+                     if sv.case_sensitive_skill_md_grep(table[k]["evidence_cmd"]))
+    assert len(refused) == WITNESS_2103_CASE_SENSITIVE_KEYS, (
+        f"the mint rail would refuse {len(refused)} of those keys as new mints, not "
+        f"{WITNESS_2103_CASE_SENSITIVE_KEYS} — the rail and the item's report no longer agree")
+    assert sorted(set(skill_keys) - set(refused)) == WITNESS_2103_EXEMPT_KEYS, (
+        "a different set of keys reads something case-insensitively, so the exemption rule "
+        "moved and the item's 3-exempt figure is stale")
+
+    undeclared = sorted(k for k, r in table.items()
+                        if sv.INPUT_ROWS_FIELD not in (r.get("evidence_cmd") or ""))
+    assert len(undeclared) == WITNESS_2103_UNDECLARED_KEYS, (
+        f"{len(undeclared)} commands name no {sv.INPUT_ROWS_FIELD}=, not the 102 `audit` "
+        "printed beside `keys: 110`, so these bytes are not the ledger that printed it")
+
+
+def test_the_committed_witness_carries_the_rows_with_a_field_and_no_value():
+    """Clause 6 on the second defect's population: the five half-empty rows are in the copy.
+
+    Clause 1's rail is decided by `empty_valued_fields`, so reading that same predicate over
+    the committed bytes is what turns "5 ledger rows carry an empty-valued field today" from
+    a sentence into a check. It runs over every row and not the latest-wins table on purpose:
+    a half-empty line stays in the durable record after a later verdict supersedes its key,
+    which is the whole reason `audit`, not `record`, has to be the surface that reads them.
+    The list is sorted by key rather than by row number because the item's row numbering is
+    zero-based and a reader re-deriving it from `enumerate(..., 1)` gets numbers one higher —
+    the keys cannot be off by one.
+    """
+    durable = _witness_2103()
+    rows = [json.loads(ln) for ln in durable.read_text(errors="replace").splitlines()
+            if ln.strip()]
+
+    blanked = sorted({r.get("pattern_key", "") for r in rows
+                      if sv.empty_valued_fields(r.get("evidence_observed") or "")})
+    assert blanked == WITNESS_2103_EMPTY_FIELD_ROWS, (
+        f"{blanked} carry a field with no value, not the five the item names — so either "
+        "this copy is not the ledger it measured or the rail's predicate does not fire on "
+        "the stored shape")
+    run_row = [r for r in rows if r.get("pattern_key") == "run:2026-10-03-nightly-mining"]
+    assert len(run_row) == 2, (
+        f"the run-level key has {len(run_row)} rows; the item's account is a half-empty mint "
+        "and one hand correction, and clause 1's refusal is what keeps the first shape from "
+        "being minted again")
+    assert sv.empty_valued_fields(run_row[0].get("evidence_observed") or "") == [
+        "newest_bucket", "newest_rows", "prev_rows"]
+    assert not sv.empty_valued_fields(run_row[1].get("evidence_observed") or ""), (
+        "the correcting line is itself half-empty, so the mint that clears the rail is wrong")
