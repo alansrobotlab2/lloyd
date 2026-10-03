@@ -39,3 +39,18 @@
 # pins nothing. Scoped to the label_agreement extract rather than to nightly baselines
 # whole, so a real baseline JSON is still ignored: it carries gold quotes and query text.
 !nightly-*-label_agreement.json
+
+# The fourth family is a report this job wrote about itself. #2119's premise is one
+# `stray_retention` block — a 1,250,205,696 B retired backup held from reclaim by a
+# `-wal` 2.0 ms newer than its own main file, `planned` empty, `dry_run` false — and the
+# item quotes numbers out of it. Its durable home is the vault witness under
+# `backlog/data/` (clause 6), which a test cannot open for exactly the reason the
+# paragraph above gives, and this family holds the same bytes again for that reason
+# rather than as an extract: clause 6's own re-derive is `wc -l` of the whole report,
+# and a block cut out of it cannot answer a line count. Byte-identical to the vault copy,
+# md5 16647dfffb2d18a1a3ef84bd4059f91e, and
+# `test_the_held_backup_witness_bytes_still_carry_the_measured_hold` re-derives every
+# quoted figure from them. Scoped to this job's report family rather than to all JSON: a
+# live report of this name belongs to `~/lloyd-data/_pipeline/reflection/`, never here,
+# so the negation only ever reaches a witness somebody chose to commit.
+!qmd-index-maintenance-*.json

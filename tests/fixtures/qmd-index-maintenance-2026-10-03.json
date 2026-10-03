@@ -1,0 +1,113 @@
+{
+  "ran_at": "2026-10-03T05:01:10.548913",
+  "actions": [
+    "stray files: 6 file(s), 2.58 GB beside the live index; kept newest index.sqlite.bak-gemma-20260921; deleted 0 (0.00 GB), 0 planned on an acting run, 1 .bak held + 0 outside the series"
+  ],
+  "before": {
+    "index_bytes": 1761794672,
+    "footprint": {
+      "total": 1761794672,
+      "main": 877858816,
+      "wal": 882199152,
+      "shm": 1736704
+    },
+    "vectors_total": 39979,
+    "vectors_orphaned": 114,
+    "documents": 13105,
+    "vec0": {
+      "chunks": 133,
+      "allocated_slots": 136192,
+      "live_rows": 39979,
+      "occupancy": 0.2935,
+      "allocated_mib": 532.0,
+      "dead_mib": 375.8
+    },
+    "vectors_live": 39865,
+    "orphan_ratio": 0.0029
+  },
+  "stray": [
+    {
+      "name": "index.sqlite.bak-20260919-203417",
+      "bytes": 1250205696,
+      "mtime": "2026-09-19T20:34:17"
+    },
+    {
+      "name": "index.sqlite.bak-20260919-203417-shm",
+      "bytes": 32768,
+      "mtime": "2026-10-02T19:12:39"
+    },
+    {
+      "name": "index.sqlite.bak-20260919-203417-wal",
+      "bytes": 0,
+      "mtime": "2026-09-19T20:34:17"
+    },
+    {
+      "name": "index.sqlite.bak-gemma-20260921",
+      "bytes": 1327300608,
+      "mtime": "2026-09-21T16:26:55"
+    },
+    {
+      "name": "index.sqlite.bak-gemma-20260921-shm",
+      "bytes": 32768,
+      "mtime": "2026-10-02T19:11:48"
+    },
+    {
+      "name": "index.sqlite.bak-gemma-20260921-wal",
+      "bytes": 0,
+      "mtime": "2026-09-24T13:36:55"
+    }
+  ],
+  "stray_bytes": 2577571840,
+  "stray_retention": {
+    "bak_series": [
+      "index.sqlite.bak-gemma-20260921",
+      "index.sqlite.bak-20260919-203417"
+    ],
+    "kept": [
+      "index.sqlite.bak-gemma-20260921"
+    ],
+    "planned": [],
+    "deleted": [],
+    "deleted_bytes": 0,
+    "held": [
+      {
+        "name": "index.sqlite.bak-20260919-203417",
+        "bytes": 1250205696,
+        "code_references": [],
+        "because": [
+          "its -wal sidecar is newer than the database itself, so something has opened it read-write since",
+          "its -shm sidecar is newer than the database itself, so something has opened it read-write since"
+        ]
+      }
+    ],
+    "held_for_person": [],
+    "errors": [],
+    "dry_run": false
+  },
+  "pending_embeddings": 0,
+  "config_drift": {
+    "template": "/home/alansrobotlab/lloyd/agent-services/conf/qmd-index.yml",
+    "live": "/home/alansrobotlab/.config/qmd/index.yml",
+    "drift": [],
+    "drift_count": 0,
+    "resync_command": "cp ~/.config/qmd/index.yml agent-services/conf/qmd-index.yml",
+    "resync_direction": "live -> template (the file the daemon reads is the truth)",
+    "comparable": true,
+    "in_sync": true
+  },
+  "embed_guard": {
+    "pending_embeddings": 0,
+    "denominator": "documents (rows in the `documents` table, from inspect_index)",
+    "denominator_value": 13105,
+    "ratio": 0.0,
+    "threshold_fraction": 0.25,
+    "max_pending": 3276,
+    "configured_embed_model": "hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf",
+    "tripped": false
+  },
+  "need_prune": false,
+  "need_embed": false,
+  "need_capacity": false,
+  "vec0_rebuild": "ruled out as an unattended action: the one measured rebuild (2026-09-21 model switch) was a side copy re-embedded in full and swapped in, 1.25 GB -> 481 MB, 56% occupancy after; an in-place drop would leave the serving daemon with no vector leg for the whole re-embed. A fired need_capacity means rebuild a side copy and swap it, by hand.",
+  "daemon_healthy": true
+}

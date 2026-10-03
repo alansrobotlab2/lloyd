@@ -340,6 +340,24 @@ def index_footprint(index: Path) -> dict:
 LIVE_SIDECARS = ("-wal", "-shm")
 # The side-copy series a rebuild leaves behind (`index.sqlite.bak-<something>`).
 BACKUP_INFIX = ".bak"
+#: How much newer than its own main file a `-wal`/`-shm` may be and still be the copy
+#: rather than a reader (#2119). A `cp` stamps a database and then its sidecars a few
+#: milliseconds apart and never returns to them: the 2026-09-19 copy in `~/.cache/qmd`
+#: has main at 1789875257.592136740 and `-wal` at 1789875257.594136775 — 2.0 ms newer,
+#: 0 bytes, unmodified since it was made — and with no window that artifact held
+#: 1,250,205,696 B unreclaimable across every run from 2026-09-28 to 2026-10-03, on a
+#: reason ("something has opened it read-write since") that was false on its face. The
+#: touches that *do* mean a reader are days wide: the 2026-09-27 pile had
+#: `bak-gemma`'s `-wal` at 09-24 13:36 and both `-shm` files at 09-24 14:07 against
+#: main files from 09-19 and 09-21, and both `-shm` files were stamped again
+#: 2026-10-02 19:11:48 and 19:12:39 — 51 s apart, the evening before that night's run.
+#: 60 seconds leaves the 2 ms artifact four orders of magnitude below it and the
+#: tightest days-wide touch on record three orders above, so it separates the copy from
+#: the reader without ever having to decide between two candidates that are days apart.
+SIDECAR_COPY_TOLERANCE_S = 60.0
+#: What this job names its own dated reports. `previous_run_started` reads the series
+#: and `_write_report` writes it, so the pattern lives in one place.
+REPORT_PREFIX = "qmd-index-maintenance-"
 # What counts as "Lloyd's own code" when asking whether a file still has a reader.
 # Prose is deliberately absent: the four 2026-09-27 strays are named in
 # `architecture/qmd.md` and `qmd/WORKLOG.md` and opened by no program, and the
@@ -429,8 +447,49 @@ def bak_series(index: Path | None = None) -> list[Path]:
     return sorted(mains, key=lambda p: (p.stat().st_mtime, p.name), reverse=True)
 
 
+def previous_run_started(report_dir: Path | None = None) -> float | None:
+    """When the run before this one began, in epoch seconds — or None for no bound.
+
+    #2119 needed a way to tell "a sidecar is newer than its database" from "a sidecar
+    is evidence somebody has it open *now*", and the job already writes the bound
+    itself: `_write_report` lands one dated report per day, named
+    `REPORT_PREFIX + "<YYYY-MM-DD>.json"`, whose `ran_at` is that run's own start —
+    `datetime.now()` taken before it touched anything. So the question is answerable
+    from artefacts this job produces, with no new state to keep in sync and no new
+    clock to trust.
+
+    None means *no bound*, and every road to it keeps the hold on purpose: no such
+    directory, no earlier file, JSON that will not parse, a `ran_at` that is absent or
+    will not parse, or a stamp that is not before now — a report from a clock that ran
+    ahead is not an earlier run, and reading one would release every held file at
+    once. This run's own report is never read either, because the plan is made before
+    `_write_report`; a same-date report left by an earlier run that day *is* an earlier
+    run and does bound the hold.
+
+    A naive `ran_at` is read back in the current local zone, which is the zone it was
+    written in; an offset-bearing one parses aware and converts exactly.
+    """
+    report_dir = REPORT_DIR if report_dir is None else report_dir
+    now = time.time()
+    best: float | None = None
+    try:
+        reports = list(report_dir.glob(REPORT_PREFIX + "*.json"))
+    except OSError:
+        return None
+    for p in reports:
+        try:
+            stamp = datetime.fromisoformat(json.loads(p.read_text())["ran_at"])
+        except (OSError, ValueError, TypeError, KeyError):
+            continue
+        started = stamp.timestamp()
+        if started < now and (best is None or started > best):
+            best = started
+    return best
+
+
 def plan_stray_retention(index: Path | None = None,
-                         repo_root: Path | None = None) -> dict:
+                         repo_root: Path | None = None,
+                         report_dir: Path | None = None) -> dict:
     """Decide what the retention rule would do to the index directory. Touches nothing.
 
     Three rules, in the order the safety of each matters:
@@ -440,13 +499,24 @@ def plan_stray_retention(index: Path | None = None,
        that is not the live index".
     2. An older one is a delete candidate, together with its own `-wal`/`-shm`, and
        is *held* instead if a code reference still names it or if either sidecar is
-       newer than its main file. A newer sidecar means something opened that
-       database read-write after the copy was made — measured on the 2026-09-27
-       pile, the newest copy's `-wal` was 09-24 13:36 and both `-shm` files 09-24
-       14:07 against main files from 09-19 and 09-21, three days after each of them
-       stopped being the newest thing in the directory — and a filename grep
-       structurally cannot see whoever did it, because a grep cannot match a path
-       assembled at runtime. So the hold is reported, not resolved.
+       mtime evidence of a read-write open that is still current. "Newer than its main
+       file" alone is not that evidence — it is a comparison with no tolerance and no
+       upper bound, so a sidecar stamped by the copy itself holds a file forever, and
+       a sidecar last touched before the last nightly run looked at it protects
+       nothing that run did not already know. Both legs are measured against
+       `SIDECAR_COPY_TOLERANCE_S` and `previous_run_started()` (#2119); with no
+       readable earlier report the tolerance is the only bound that applies, which is
+       the state the 2026-09-28 to 2026-10-03 reports were written in — except that
+       they had no tolerance either, and that is why a sidecar 2 ms newer than its own
+       main file held 1.19 GB for six runs.
+       The touches that do read as a current open are days wide — on the 2026-09-27
+       pile the newest copy's `-wal` was 09-24 13:36 and both `-shm` files 09-24 14:07
+       against main files from 09-19 and 09-21, three days after each of them stopped
+       being the newest thing in the directory, and both `-shm` files were stamped
+       again 2026-10-02 19:11:48 and 19:12:39 — and a filename grep structurally cannot
+       see whoever did it, because a grep cannot match a path assembled at runtime. So
+       a sidecar that still reads as a current open is reported and held, not resolved;
+       one that stopped reading as one is a delete candidate like any other.
     3. Anything outside the series is never this job's to delete. The directory is
        shared write home for live eval side-indexes
        (`eval/contextual_titles.py:41,71` opens `sub06.sqlite`,
@@ -457,6 +527,7 @@ def plan_stray_retention(index: Path | None = None,
     """
     index = INDEX if index is None else index
     repo_root = REPO_ROOT if repo_root is None else repo_root
+    report_dir = REPORT_DIR if report_dir is None else report_dir
     out: dict = {"bak_series": [], "kept": [], "planned": [], "deleted": [],
                  "deleted_bytes": 0, "held": [], "held_for_person": [], "errors": []}
     if not index.exists():
@@ -471,6 +542,7 @@ def plan_stray_retention(index: Path | None = None,
     out["kept"] = [p.name for p in mains[:1]]
     candidates = mains[1:]
     hits = code_reference_hits([p.name for p in candidates], repo_root)
+    prev_run = previous_run_started(report_dir)
     for p in candidates:
         ref = hits.get(p.name, [])
         reasons = []
@@ -479,9 +551,15 @@ def plan_stray_retention(index: Path | None = None,
                            + ", ".join(ref[:3]))
         for sfx in LIVE_SIDECARS:
             side = p.with_name(p.name + sfx)
-            if side.is_file() and side.stat().st_mtime > p.stat().st_mtime:
-                reasons.append(f"its {sfx} sidecar is newer than the database itself, "
-                               f"so something has opened it read-write since")
+            if not side.is_file():
+                continue
+            touched = side.stat().st_mtime
+            if touched - p.stat().st_mtime <= SIDECAR_COPY_TOLERANCE_S:
+                continue          # stamped by the copy, not by a reader (#2119)
+            if prev_run is not None and touched <= prev_run:
+                continue     # stale before the last run even looked (#2119)
+            reasons.append(f"its {sfx} sidecar is newer than the database itself, "
+                           f"so something has opened it read-write since")
         if reasons:
             out["held"].append({"name": p.name, "bytes": p.stat().st_size,
                                 "code_references": ref, "because": reasons})
@@ -1231,7 +1309,7 @@ def _write_report(report: dict, started: datetime) -> Path:
     worth running nightly if its answer is on disk nightly.
     """
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    out = REPORT_DIR / f"qmd-index-maintenance-{started:%Y-%m-%d}.json"
+    out = REPORT_DIR / f"{REPORT_PREFIX}{started:%Y-%m-%d}.json"
     out.write_text(json.dumps(report, indent=2))
     return out
 

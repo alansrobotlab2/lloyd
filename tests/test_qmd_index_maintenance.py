@@ -987,22 +987,32 @@ def test_an_embed_that_landed_carries_no_not_landed_verdict(monkeypatch, tmp_pat
 # comment* as its reader — which the first live dry run of this change did, until the
 # names were reworded out.
 
-def _qmd_dir(tmp_path: Path, spec: list[tuple[str, int, float]]) -> Path:
-    """Build a fixture index directory: (name, bytes, days ago as mtime)."""
+def _qmd_dir_at(tmp_path: Path, spec: list[tuple[str, int, float]]) -> Path:
+    """Build a fixture index directory from absolute mtimes: (name, bytes, epoch).
+
+    #2119's cases turn on gaps of two milliseconds, 45 seconds and days between one
+    file and the sidecar beside it, so they name each file's mtime outright: every gap
+    they assert is the fixture's, never the interpreter's.
+    """
     d = tmp_path / "qmd"
     d.mkdir(parents=True, exist_ok=True)
-    # One clock reading for the whole fixture: two files given the same `days_ago`
-    # must come out with *equal* mtimes, the way a `cp -a` leaves a database and its
-    # WAL. Reading the clock per file would make each sidecar a few microseconds
-    # newer than the main file beside it, and the hold-under-test would fire on the
-    # clock rather than on the fact.
-    now = time.time()
-    for name, size, days_ago in spec:
+    for name, size, ts in spec:
         p = d / name
         p.write_bytes(b"\0" * size)
-        ts = now - days_ago * 86400
         os.utime(p, (ts, ts))
     return d
+
+
+def _qmd_dir(tmp_path: Path, spec: list[tuple[str, int, float]]) -> Path:
+    """Build a fixture index directory: (name, bytes, days ago as mtime)."""
+    # One clock reading for the whole fixture: two files given the same `days_ago`
+    # must come out with *equal* mtimes, the way a `cp -a` leaves a database and its
+    # WAL. That equality is the fact the "a sidecar the same age as its main file is a
+    # clean close" assertions below are about, and a clock read per file would put the
+    # interpreter's speed into the number being asserted instead.
+    now = time.time()
+    return _qmd_dir_at(tmp_path, [(n, s, now - days * 86400)
+                                 for n, s, days in spec])
 
 
 def _listing(d: Path) -> dict[str, int]:
@@ -1015,8 +1025,58 @@ LIVE_TRIO = [("index.sqlite", 4000, 0.0), ("index.sqlite-wal", 3000, 0.0),
              ("index.sqlite-shm", 200, 0.0)]
 
 
+def _live_trio_at(base: float) -> list[tuple[str, int, float]]:
+    """`LIVE_TRIO` with every file stamped at the absolute epoch `base`.
+
+    The trio is the swap guard's subject and never a candidate: the nodes that hand
+    `_qmd_dir_at` absolute times use `base` for the strays beside it, and assert the live
+    three are still there afterwards.
+    """
+    return [(name, size, base) for name, size, _ in LIVE_TRIO]
+
+
+def _prior_report_at(report_dir: Path, at: int) -> Path:
+    """Leave an earlier run's report whose `ran_at` decodes back to exactly `at`.
+
+    The recency bound is `datetime.fromisoformat(report["ran_at"]).timestamp()`, so a case
+    that wants a sidecar stamped *exactly on* the boundary, or a day clear of it, has to
+    write the stamp and read the bound back the way the job does rather than assume a float
+    survives the trip. `at` is therefore whole seconds: a report's own stamp carries
+    microseconds, and a fractional instant loses the tail of itself going through it —
+    1790342381.5067723 comes back as 1790342381.506772 — which would put a rounding error
+    of a fraction of a microsecond into a comparison this file is about seconds and days.
+    The round-trip is asserted rather than assumed, so a zone that ever refuses to
+    reproduce the instant says so here instead of in the arithmetic above it.
+    """
+    assert int(at) == at, f"a boundary must be whole seconds to survive the stamp: {at!r}"
+    when = datetime.fromtimestamp(at)
+    p = _prior_report(report_dir, when)
+    assert datetime.fromisoformat(
+        json.loads(p.read_text())["ran_at"]).timestamp() == at, (
+        f"local clock cannot round-trip {at!r} ({when.isoformat()}), so nothing on this "
+        "box can test the previous-run boundary")
+    return p
+
+
+def _prior_report(report_dir: Path, when: datetime, body: str | None = None) -> Path:
+    """Leave one earlier run's dated report where the job leaves its own.
+
+    The sidecar hold is bounded by the previous run's start, which the job reads back
+    out of this very file series (#2119), so a case that wants a previous run has to
+    put one on disk rather than patch a value: the reader, the glob and the `ran_at`
+    key are all under test together. `body` overrides the JSON, for the cases that hand
+    the reader something it cannot use.
+    """
+    report_dir.mkdir(parents=True, exist_ok=True)
+    out = report_dir / f"{m.REPORT_PREFIX}{when:%Y-%m-%d}.json"
+    out.write_text(body if body is not None
+                   else json.dumps({"ran_at": when.isoformat()}))
+    return out
+
+
 def _retention_run(monkeypatch, tmp_path, index_dir: Path, repo_root: Path, *,
-                   dry_run: bool, capsys=None) -> dict:
+                   dry_run: bool, capsys=None,
+                   prior_reports: list[tuple[datetime, str | None]] = ()) -> dict:
     """Run `main()` over a fixture index directory and a fixture code tree.
 
     The index and the daemon are stubbed to "nothing to do" the way the helpers
@@ -1024,12 +1084,20 @@ def _retention_run(monkeypatch, tmp_path, index_dir: Path, repo_root: Path, *,
     the only files it can do it to are the ones the case built. `repo_root` is what
     the code-reference re-run walks in place of the real tree.
 
+    `prior_reports` are the runs this one comes after: each `(when, body)` pair leaves
+    a dated report for that day before `main()` starts, so the run reads a real earlier
+    report off disk the way a nightly run does (#2119). Every `when` has to fall on a
+    day earlier than today — a report dated today would carry this run's own file name,
+    and the run would overwrite the very fixture it was supposed to read.
+
     An acting run's report is read back off the dated file, the way the helpers
     above do. A dry run's comes off `--json` stdout instead, because `--dry-run`
     writes no file at all — and "the file is not the proof" is the point: the dry
     run still has to say what it would have deleted, and it does so on the only
     surface it has.
     """
+    for when, body in prior_reports:
+        _prior_report(tmp_path / "reflection", when, body)
     t, l = _pair(tmp_path)
     monkeypatch.setattr(m, "TEMPLATE_CONFIG", t)
     monkeypatch.setattr(m, "LIVE_CONFIG", l)
@@ -1049,9 +1117,13 @@ def _retention_run(monkeypatch, tmp_path, index_dir: Path, repo_root: Path, *,
     assert rc == 0, "measuring or retaining a backup never changes the exit code"
     if dry_run:
         return json.loads(capsys.readouterr().out)
-    reports = sorted((tmp_path / "reflection").glob("qmd-index-maintenance-*.json"))
-    assert len(reports) == 1, f"expected exactly one dated report, got {reports}"
-    return json.loads(reports[0].read_text())
+    # Read back by *this run's* dated name rather than by counting files: a case that
+    # leaves an earlier report behind with `_prior_report_at` writes it directly, so the
+    # directory legitimately holds one file per prior run plus this run's own.
+    own = (tmp_path / "reflection"
+           / f"{m.REPORT_PREFIX}{datetime.now():%Y-%m-%d}.json")
+    assert own.is_file(), f"an acting run writes its own dated report to {own}"
+    return json.loads(own.read_text())
 
 
 # --- clause 1: the dated report measures the pile -----------------------------
@@ -1230,6 +1302,411 @@ def test_a_candidate_whose_sidecar_is_newer_than_its_own_main_file_is_held(
     assert any("-wal" in b for b in held["index.sqlite.bak-z"]["because"]), held
     assert "index.sqlite.bak-m" not in _listing(d), (
         "a sidecar the same age as its main file is a clean close, not a hold")
+
+
+# --- #2119: the hold has to age out, or it is a permanent delete ban ----------
+#
+# "Either sidecar is newer than its main file" has no tolerance and no upper bound, so
+# two different things both satisfy it and only one of them is a reason not to delete:
+# a `cp` that stamped its own `-wal` 2.0 ms after the database (measured on the retired
+# 1,250,205,696 B copy in `~/.cache/qmd`: main 1789875257.592136740, `-wal`
+# 1789875257.594136775, 0 bytes, unmodified since), and a real read-write open whose
+# `-shm` is days older than the main file but still days *younger* than nothing. The
+# first held that file across all six reports from 2026-09-28 to 2026-10-03 and would
+# have held it forever; the second is what the rule exists for. The two bounds below —
+# `SIDECAR_COPY_TOLERANCE_S` and the start of the previous run read out of this job's
+# own report series — are what tell them apart.
+#
+# The live pile is reproduced at fixture scale (2,032 B in place of 1.25 GB) with every
+# relation kept: main, `-wal` 2 ms later, `-shm` days later still but older than the
+# previous run's start.
+
+def test_a_sidecar_stamped_within_the_copy_window_is_the_copy_not_a_reader(
+        monkeypatch, tmp_path):
+    """Clause 1: 45 s and exactly 60 s are the copy, and 90 s is a reader.
+
+    Three gaps around one boundary in a single acting run, because a tolerance is only
+    pinned by what it lets go *and* what it keeps — and the middle one is the number the
+    constant names. Every stamp here is whole seconds or whole seconds plus a whole
+    number, so the subtraction the rule performs is exactly 45.0, 60.0 and 90.0 rather
+    than approximately them: the `<=` beside `SIDECAR_COPY_TOLERANCE_S` is then the only
+    thing that decides whether `bak-e` is freed, and a `<` there leaves it on disk and
+    reddens this node. With no earlier report on disk the recency bound has nothing to
+    say, so `bak-m` still holds on the window's own boundary.
+    """
+    base = float(int(time.time()))      # whole seconds: the 60.0 gap has to be exact
+    d = _qmd_dir_at(tmp_path, _live_trio_at(base) + [
+        ("index.sqlite.bak-a", 3000, base - 2 * 86400),
+        ("index.sqlite.bak-e", 1500, base - 4 * 86400),
+        ("index.sqlite.bak-e-wal", 16, base - 4 * 86400 + 60.0),
+        ("index.sqlite.bak-z", 2000, base - 5 * 86400),
+        ("index.sqlite.bak-z-wal", 20, base - 5 * 86400 + 45),
+        ("index.sqlite.bak-z-shm", 32, base - 5 * 86400 + 45),
+        ("index.sqlite.bak-m", 1000, base - 9 * 86400),
+        ("index.sqlite.bak-m-shm", 32, base - 9 * 86400 + 90),
+    ])
+    report = _retention_run(monkeypatch, tmp_path, d, tmp_path / "repo", dry_run=False)
+    sr = report["stray_retention"]
+    assert sr["kept"] == ["index.sqlite.bak-a"]
+    assert sr["planned"] == ["index.sqlite.bak-e", "index.sqlite.bak-z"], (
+        "45 s and exactly 60 s are both inside the window, so both copies are deletes")
+    held = {h["name"]: h for h in sr["held"]}
+    assert list(held) == ["index.sqlite.bak-m"], (
+        "a sidecar 90 s newer than its main file is past the copy window and holds")
+    assert any("-shm" in b for b in held["index.sqlite.bak-m"]["because"]), held
+    after = _listing(d)
+    for gone in ("index.sqlite.bak-e", "index.sqlite.bak-e-wal", "index.sqlite.bak-z",
+                 "index.sqlite.bak-z-wal", "index.sqlite.bak-z-shm"):
+        assert gone not in after, gone
+    assert sr["deleted_bytes"] == 1500 + 16 + 2000 + 20 + 32
+    assert after["index.sqlite.bak-m"] == 1000, "a held candidate stays on disk"
+    assert "index.sqlite.bak-m-shm" in after
+
+
+def test_a_sidecar_the_previous_run_had_already_outlived_is_released(monkeypatch,
+                                                                    tmp_path):
+    """Clause 2: newer than the database is only evidence until the next run passed it.
+
+    The candidate's `-shm` was last written 4 days ago and the newest earlier report
+    started 3 days ago, so this run is the second one to see that touch: whatever made
+    it is not holding the file now, and every run since has carried the hold forward
+    for free. Two earlier reports are on disk — starts 3 and 5 days ago — and the touch
+    sits between them, so the case releases only if the *newest* readable earlier
+    report is the bound. A min() where the max() belongs, or a first-match loop over an
+    unordered glob, fails right here.
+    """
+    base = time.time()
+    newer, older = (datetime.fromtimestamp(base - 3 * 86400),
+                    datetime.fromtimestamp(base - 5 * 86400))
+    d = _qmd_dir_at(tmp_path, _live_trio_at(base) + [
+        ("index.sqlite.bak-a", 3000, base - 2 * 86400),
+        ("index.sqlite.bak-z", 2000, base - 6 * 86400),
+        ("index.sqlite.bak-z-shm", 32, base - 4 * 86400),
+    ])
+    report = _retention_run(monkeypatch, tmp_path, d, tmp_path / "repo", dry_run=False,
+                            prior_reports=[(newer, None), (older, None)])
+    sr = report["stray_retention"]
+    assert sr["planned"] == ["index.sqlite.bak-z"], sr
+    assert sr["held"] == [], sr
+    assert sr["deleted"] == ["index.sqlite.bak-z"]
+    assert sr["deleted_bytes"] == 2000 + 32
+    assert "index.sqlite.bak-z" not in _listing(d)
+
+
+def test_a_sidecar_stamped_exactly_when_the_previous_run_started_is_released(
+        monkeypatch, tmp_path):
+    """Clause 2's edge: the bound is *later than* the previous run's start, so an equal
+    mtime is not later and releases.
+
+    One candidate's `-shm` was written at the very instant the previous run began and
+    another five minutes after it, and the instant is the report's own decoded stamp —
+    `_prior_report_at` asserts that ISO round-trip rather than assuming it, so the first
+    candidate sits on the boundary by construction and not by approximation. The `<=`
+    beside `prev_run` releases it and holds the later one; a `<` there holds both and
+    reddens this node, and a copy window widened past 60 s would release both too.
+    """
+    bound = float(int(time.time())) - 3 * 86400
+    d = _qmd_dir_at(tmp_path, _live_trio_at(bound + 3 * 86400) + [
+        ("index.sqlite.bak-a", 3000, bound + 86400),
+        ("index.sqlite.bak-e", 1500, bound - 4 * 86400),
+        ("index.sqlite.bak-e-shm", 32, bound),
+        ("index.sqlite.bak-m", 1000, bound - 6 * 86400),
+        ("index.sqlite.bak-m-shm", 32, bound + 300),
+    ])
+    _prior_report_at(tmp_path / "reflection", bound)
+    report = _retention_run(monkeypatch, tmp_path, d, tmp_path / "repo", dry_run=False)
+    sr = report["stray_retention"]
+    assert sr["planned"] == ["index.sqlite.bak-e"], sr
+    held = {h["name"]: h for h in sr["held"]}
+    assert list(held) == ["index.sqlite.bak-m"], sr
+    assert any("-shm" in b for b in held["index.sqlite.bak-m"]["because"]), held
+    assert sr["deleted_bytes"] == 1500 + 32
+    after = _listing(d)
+    assert "index.sqlite.bak-e" not in after and "index.sqlite.bak-e-shm" not in after
+    assert after["index.sqlite.bak-m"] == 1000, "a touch after the previous run still holds"
+
+
+def test_an_earlier_run_from_the_same_local_day_is_still_the_bound(monkeypatch, tmp_path,
+                                                                  capsys):
+    """Clause 2 across a local date: the bound is an instant, not a calendar day.
+
+    `_write_report` names one file per local date and the plan is made before it runs, so
+    the only same-date file a run can read is an earlier run's — left by a manual acting
+    run at 04:00 before the nightly at 05:00, or by a run that has since been re-run. A
+    `-shm` last touched an hour before that morning's run is evidence the run already had
+    in hand, so it does not hold. Selecting earlier reports by *date* instead of by
+    `ran_at` would find nothing here, fall back to no bound, and redden this node.
+    """
+    bound = float(int(time.time()))      # an earlier run *today*, as far as the file name
+    d = _qmd_dir_at(tmp_path, _live_trio_at(bound) + [
+        ("index.sqlite.bak-a", 3000, bound - 86400),
+        ("index.sqlite.bak-z", 2000, bound - 2 * 86400),
+        ("index.sqlite.bak-z-shm", 32, bound - 3600),
+    ])
+    out = _prior_report_at(tmp_path / "reflection", bound)
+    assert out.name == f"{m.REPORT_PREFIX}{datetime.now():%Y-%m-%d}.json", (
+        "this case only means anything if the earlier report carries today's date")
+    report = _retention_run(monkeypatch, tmp_path, d, tmp_path / "repo", dry_run=True,
+                            capsys=capsys)
+    sr = report["stray_retention"]
+    assert sr["planned"] == ["index.sqlite.bak-z"], sr
+    assert sr["held"] == [], sr
+
+
+@pytest.mark.parametrize("body", [
+    "",                                      # a write killed halfway through
+    '{"ran_at": "not-a-date"}',               # a stamp this job cannot parse
+    '{"before": {}}',                         # a report with no ran_at in it at all
+    '{"ran_at": "2099-01-01T00:00:00"}',      # not an *earlier* run at all
+])
+def test_a_prior_report_that_is_not_a_readable_earlier_run_leaves_the_hold_as_it_was(
+        monkeypatch, tmp_path, body):
+    """Clause 2's fallback: no usable previous run means the hold stays as it was.
+
+    The bound comes out of the job's own report series, so every way of not getting one
+    — a truncated file, an unparseable stamp, a missing key, or a clock that ran ahead
+    of today — has exactly one safe direction to fail in: hold, as
+    `test_a_candidate_whose_sidecar_is_newer_than_its_own_main_file_is_held` pins for
+    the case where there is no earlier file at all. A report that cannot be read must
+    never be what frees 1.19 GB.
+    """
+    base = time.time()
+    d = _qmd_dir_at(tmp_path, _live_trio_at(base) + [
+        ("index.sqlite.bak-a", 3000, base - 2 * 86400),
+        ("index.sqlite.bak-z", 2000, base - 5 * 86400),
+        ("index.sqlite.bak-z-shm", 32, base - 5 * 86400 + 7200),
+    ])
+    report = _retention_run(monkeypatch, tmp_path, d, tmp_path / "repo", dry_run=False,
+                            prior_reports=[(datetime.fromtimestamp(base - 2 * 86400),
+                                            body)])
+    held = {h["name"]: h for h in report["stray_retention"]["held"]}
+    assert list(held) == ["index.sqlite.bak-z"], report["stray_retention"]
+    assert any("-shm" in b for b in held["index.sqlite.bak-z"]["because"]), held
+    assert "index.sqlite.bak-z" in _listing(d), body
+
+
+def test_the_measured_held_pile_is_deleted_by_the_next_acting_run(monkeypatch,
+                                                                 tmp_path):
+    """Clause 3: the retired copy in `~/.cache/qmd` today, reproduced, and it goes.
+
+    The live relations, at fixture scale (2,032 B where the real file is
+    1,250,205,696 B): a retired copy 12 days old; a `-wal` 2 ms newer than it, 0 bytes,
+    which is the copy's own stamp; a `-shm` touched 3 days after the copy and a day before
+    the previous run's start, where the live gaps were 12.9 days and 9.81 hours — the
+    measured `-shm` is 2026-10-02 19:12:39 and the report that held it carried `ran_at`
+    2026-10-03T05:01:10.548913; and a newest copy whose `-shm` sits 51 s behind its main
+    file, as `bak-gemma`'s does. One sidecar is excused by the copy window and the other by
+    the previous run, so the plan is to delete, and the acting run unlinks all three files
+    and reports their bytes.
+
+    Every gap and byte count below is measured back off the fixture's own files, and the
+    bound is read out of the report file on disk the way the job reads it, so the relations
+    this node claims about the pile it built are checked against the pile, not restated
+    from the numbers that built it.
+    """
+    base = float(int(time.time()))      # whole seconds: the bound has to round-trip
+    d = _qmd_dir_at(tmp_path, _live_trio_at(base) + [
+        ("index.sqlite.bak-a", 3000, base - 10 * 86400),
+        ("index.sqlite.bak-a-shm", 32, base - 10 * 86400 + 51),
+        ("index.sqlite.bak-z", 2000, base - 12 * 86400),
+        ("index.sqlite.bak-z-wal", 0, base - 12 * 86400 + 0.002),
+        ("index.sqlite.bak-z-shm", 32, base - 9 * 86400),
+    ])
+    fs = {n: (d / n).stat() for n in ("index.sqlite.bak-z", "index.sqlite.bak-z-wal",
+                                      "index.sqlite.bak-z-shm")}
+    out = _prior_report_at(tmp_path / "reflection", int(base) - 8 * 86400)
+    bound = datetime.fromisoformat(
+        json.loads(out.read_text())["ran_at"]).timestamp()
+    assert fs["index.sqlite.bak-z-wal"].st_mtime - fs["index.sqlite.bak-z"].st_mtime \
+        == pytest.approx(0.002, abs=1e-3), \
+        "the wal here is the copy's own stamp, 2 ms behind its main file"
+    assert fs["index.sqlite.bak-z-shm"].st_mtime > fs["index.sqlite.bak-z"].st_mtime, \
+        "the shm is the leg the copy window cannot excuse"
+    assert bound > fs["index.sqlite.bak-z-shm"].st_mtime, (
+        "the previous run started after that touch, which is the whole case for release")
+    report = _retention_run(monkeypatch, tmp_path, d, tmp_path / "repo", dry_run=False)
+    sr = report["stray_retention"]
+    assert sr["kept"] == ["index.sqlite.bak-a"], "the newest copy is still kept"
+    assert sr["planned"] == ["index.sqlite.bak-z"], sr
+    assert sr["held"] == [], sr
+    assert sr["deleted"] == ["index.sqlite.bak-z"], sr
+    assert sr["deleted_bytes"] == sum(s.st_size for s in fs.values()) == 2000 + 0 + 32, sr
+    assert sr["errors"] == [], sr
+    after = _listing(d)
+    for gone in ("index.sqlite.bak-z", "index.sqlite.bak-z-wal",
+                 "index.sqlite.bak-z-shm"):
+        assert gone not in after, gone
+    assert after["index.sqlite.bak-a"] == 3000
+    assert after["index.sqlite"] == 4000 and after["index.sqlite-wal"] == 3000, (
+        "the live trio is never this job's to touch")
+
+
+def test_a_sidecar_touched_after_the_previous_run_still_holds_the_backup(
+        monkeypatch, tmp_path):
+    """Clause 4: the guard still guards — an open after the last run is still an open.
+
+    Two candidates, one held by each sidecar leg, each touched days after its own main
+    file *and* after the previous run started. Both keep the read-write reason and both
+    stay on disk: bounding the evidence is not the same as dropping it, and a change
+    that deleted these would be worse than the hold it is fixing.
+    """
+    base = time.time()
+    d = _qmd_dir_at(tmp_path, _live_trio_at(base) + [
+        ("index.sqlite.bak-a", 3000, base - 3 * 86400),
+        ("index.sqlite.bak-z", 2000, base - 6 * 86400),
+        ("index.sqlite.bak-z-wal", 20, base - 4 * 86400),
+        ("index.sqlite.bak-m", 1000, base - 7 * 86400),
+        ("index.sqlite.bak-m-shm", 32, base - 2 * 86400),
+    ])
+    report = _retention_run(monkeypatch, tmp_path, d, tmp_path / "repo", dry_run=False,
+                            prior_reports=[(datetime.fromtimestamp(base - 5 * 86400),
+                                            None)])
+    sr = report["stray_retention"]
+    held = {h["name"]: h for h in sr["held"]}
+    assert sorted(held) == ["index.sqlite.bak-m", "index.sqlite.bak-z"], sr
+    assert any("-wal" in b and "read-write" in b
+               for b in held["index.sqlite.bak-z"]["because"]), held
+    assert any("-shm" in b and "read-write" in b
+               for b in held["index.sqlite.bak-m"]["because"]), held
+    assert sr["planned"] == [] and sr["deleted"] == [], sr
+    after = _listing(d)
+    assert after["index.sqlite.bak-z"] == 2000 and after["index.sqlite.bak-m"] == 1000
+    assert "index.sqlite.bak-z-wal" in after and "index.sqlite.bak-m-shm" in after
+
+
+def test_a_code_reference_holds_a_candidate_whatever_its_sidecar_ages(monkeypatch,
+                                                                     tmp_path):
+    """Clause 5: both new bounds are on the sidecar leg alone, and never on this one.
+
+    One named candidate, held on two runs whose sidecar ages differ. On the first it
+    carries exactly the sidecars the bounds excuse — a `-wal` 45 s after its main file, an
+    `-shm` last touched a day before the previous run started — and is held with the code
+    reference as its *only* reason, which is also what proves the bounds were the thing
+    that aged out: before #2119 the same pile reported a sidecar reason too. On the second
+    run, over the same pile and the same code tree, the `-shm` has been touched since the
+    first run began, and the candidate is still held, now with the read-write reason
+    beside the reference. Held either way is the clause: what the two bounds move is which
+    reasons fire, never whether a name in our own tree holds a file. An unnamed candidate
+    in the same pile is freed on the first run, so the hold is the name's and not the
+    directory's.
+    """
+    repo = tmp_path / "repo"
+    (repo / "app").mkdir(parents=True)
+    (repo / "app" / "bench.py").write_text(
+        "DB = Path.home() / '.cache/qmd/index.sqlite.bak-z'\n")
+    base = time.time()
+    d = _qmd_dir_at(tmp_path, _live_trio_at(base) + [
+        ("index.sqlite.bak-a", 3000, base - 10 * 86400),
+        ("index.sqlite.bak-z", 2000, base - 12 * 86400),
+        ("index.sqlite.bak-z-wal", 20, base - 12 * 86400 + 45),
+        ("index.sqlite.bak-z-shm", 32, base - 9 * 86400),
+        ("index.sqlite.bak-m", 1000, base - 13 * 86400),
+    ])
+    report = _retention_run(monkeypatch, tmp_path, d, repo, dry_run=False,
+                            prior_reports=[(datetime.fromtimestamp(base - 8 * 86400),
+                                            None)])
+    sr = report["stray_retention"]
+    held = {h["name"]: h for h in sr["held"]}
+    assert list(held) == ["index.sqlite.bak-z"], sr
+    assert held["index.sqlite.bak-z"]["code_references"] == ["app/bench.py"]
+    assert any("code reference" in b
+               for b in held["index.sqlite.bak-z"]["because"]), held
+    assert not any("sidecar" in b
+                   for b in held["index.sqlite.bak-z"]["because"]), (
+        "both sidecar legs are aged out, so the code reference is holding alone")
+    assert "index.sqlite.bak-z" in _listing(d)
+    assert "index.sqlite.bak-m" not in _listing(d), (
+        "a candidate nobody names is still freed beside one that is held")
+
+    # A second run over the same pile and the same code tree, with the sidecar ages
+    # changed underneath it: `-shm` touched since the first run started, which is what the
+    # first run's own `ran_at` — read back out of the report it wrote — now bounds on. The
+    # reference reason is there on both runs and the hold is there on both runs; what
+    # changed is only that a sidecar reason joined it. What the two bounds move is which
+    # reasons fire, never whether a name in our own tree holds a file.
+    side = d / "index.sqlite.bak-z-shm"
+    late = time.time()
+    os.utime(side, (late, late))
+    assert late > datetime.fromisoformat(report["ran_at"]).timestamp(), (
+        "this run's own stamp has to be the next run's bound for the case to mean what "
+        "it says")
+    second = _retention_run(monkeypatch, tmp_path, d, repo, dry_run=False)
+    sr2 = second["stray_retention"]
+    held2 = {h["name"]: h for h in sr2["held"]}
+    assert list(held2) == ["index.sqlite.bak-z"], sr2
+    assert any("code reference" in b for b in held2["index.sqlite.bak-z"]["because"]), held2
+    assert any("-shm" in b for b in held2["index.sqlite.bak-z"]["because"]), (
+        "the sidecar reason is back now that the touch is recent; the hold was never away")
+    assert sr2["planned"] == [] and sr2["deleted"] == [], sr2
+    assert _listing(d)["index.sqlite.bak-z"] == 2000
+
+
+#: The one night this round's premise was measured on, committed under
+#: `tests/fixtures/` so the gate that does not have the vault can still read it.
+#: `tests/fixtures/.gitignore` explains why the bytes live in two places.
+WITNESS = ROOT / "tests" / "fixtures" / "qmd-index-maintenance-2026-10-03.json"
+
+
+def test_the_held_backup_witness_bytes_still_carry_the_measured_hold():
+    """Clause 6's re-derive: the numbers this item quotes come out of the committed bytes.
+
+    The durable witness is the vault file `backlog/data/qmd-index-maintenance-2026-10-03.json`
+    (vault commit `ec02ee92`, landed by this round), and the bytes are byte-identical
+    here — md5 `16647dfffb2d18a1a3ef84bd4059f91e`, 112 lines, 3,523 bytes, copied out of
+    `~/lloyd-data/_pipeline/reflection/qmd-index-maintenance-2026-10-03.json`. A node
+    cannot read the vault one, because the gate runs the suite with `HOME` pointed at a
+    round home where `~/obsidian` does not exist — `test_skill_tool_names.py` documents
+    exactly that and skips rather than pretends — so the re-derive happens against these
+    committed bytes, and the vault copy is checked by eye with::
+
+        wc -l < backlog/data/qmd-index-maintenance-2026-10-03.json   # -> 112
+        sha256sum backlog/data/qmd-index-maintenance-2026-10-03.json \\
+          tests/fixtures/qmd-index-maintenance-2026-10-03.json        # -> one digest
+
+    What is re-derived is what the item quotes: 6 stray files, 2,577,571,840 B of pile,
+    one candidate held at 1,250,205,696 B on both sidecar legs, nothing planned, nothing
+    deleted, on an acting run. A digest pinned in code would only restate that the file is
+    itself, so each figure is read out of the parsed report instead, and each is a number
+    the fix is about to change on the next acting run.
+    """
+    raw = WITNESS.read_text(encoding="utf-8")
+    assert raw.count("\n") == 112, f"`wc -l` of the witness is not 112: {len(raw)} B"
+    assert len(raw.encode()) == 3523, "the committed witness is not the file #2119 quoted"
+    rep = json.loads(raw)
+    ran_at = rep["ran_at"]
+    assert ran_at == "2026-10-03T05:01:10.548913"
+    assert rep["stray_bytes"] == 2_577_571_840, rep
+    pile = {e["name"]: e for e in rep["stray"]}
+    assert len(pile) == 6 and sum(e["bytes"] for e in pile.values()) == rep["stray_bytes"], (
+        "the pile the report measured is not the pile its total quotes")
+
+    # The two release-relations, computed from the report's own `stray` block rather than
+    # from the item's prose: at the report's one-second resolution the `-wal` carries its
+    # main file's mtime exactly, so the copy window excuses it outright, and the `-shm` is
+    # older than the `ran_at` of the very run that held it, so the previous-run bound
+    # excuses it too. Both legs of the hold in these bytes are legs the fix releases.
+    main, wal = pile["index.sqlite.bak-20260919-203417"], pile[
+        "index.sqlite.bak-20260919-203417-wal"]
+    shm = pile["index.sqlite.bak-20260919-203417-shm"]
+    assert wal["mtime"] == main["mtime"] == "2026-09-19T20:34:17", (main, wal)
+    assert wal["bytes"] == 0, "the held pile's wal is empty: nothing was ever written to it"
+    assert shm["mtime"] == "2026-10-02T19:12:39", shm
+    assert (datetime.fromisoformat(shm["mtime"])
+            < datetime.fromisoformat(ran_at)), "the shm predates the run that held the file"
+
+    sr = rep["stray_retention"]
+    assert sr["dry_run"] is False, "the hold was reported by an acting run, not a rehearsal"
+    assert sr["kept"] == ["index.sqlite.bak-gemma-20260921"], sr
+    assert sr["planned"] == [] and sr["deleted"] == [] and sr["deleted_bytes"] == 0, sr
+    assert len(sr["held"]) == 1, sr
+    (held,) = sr["held"]
+    assert held["name"] == "index.sqlite.bak-20260919-203417", held
+    assert held["bytes"] == 1_250_205_696 == main["bytes"], (held, main)
+    assert held["code_references"] == [], "neither leg of this hold was a code reference"
+    assert len(held["because"]) == 2, held
+    assert any(b.startswith("its -wal ") for b in held["because"]), held
+    assert any(b.startswith("its -shm ") for b in held["because"]), held
+    assert all("newer than the database itself" in b for b in held["because"]), held
 
 
 @pytest.mark.parametrize("relpath", [
