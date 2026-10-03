@@ -280,20 +280,46 @@ FLOOR_BY_RESOLUTION = "resolution"
 # or a recall falling off djev onto the cross-encoder, is exactly the change that
 # moves this number and nothing else.
 #
-# paired_check — ONE rule, re-derived 2026-09-24 (#1247): twice the worst
-# average EITHER ARM has read in the current era, rounded up to the next
-# 100 ms. The population is the ledger, not `eval/baselines/` (the 2026-09-22
-# data wipe took every artifact before that day): `regression_check` rows in
-# `promotions.jsonl` whose `pin.daemon.source` names `agent-qmd-daemon.conf`,
-# created at or after the first check under c6e79b45 (2026-09-22T04:08:33Z).
-# Read 2026-09-24T13:46Z: 98 rows, 196 arm readings. Graded arm (current,
-# replayed): median 161.5, p95 248.5, max 274.9 ms (2026-09-22T06:07:48Z).
-# Fresh baseline arm: median 587.3, max 752.3 ms (2026-09-23T14:39:59Z) — it
-# is in the population because a change that moves djev's input is judged on
-# the fresh floor, and a healthy fresh reading must not report. 2 x 752.3 =
-# 1,504.6 -> 1,600 ms. The cross-encoder path this replaced read a median
-# 4,257-4,305 ms, so a recall that falls back onto it (djev not answering, or a
-# re-widening) reads over budget, which is the report this ceiling is for.
+# paired_check — SET 2026-09-24 (#1247) by ONE rule: twice the worst average
+# EITHER ARM had read in the current era, rounded up to the next 100 ms. The
+# population is the ledger, not `eval/baselines/` (the 2026-09-22 data wipe took
+# every artifact before that day): `regression_check` rows in `promotions.jsonl`
+# whose `pin.daemon.source` names `agent-qmd-daemon.conf`, created at or after
+# the first check under c6e79b45 (2026-09-22T04:08:33Z).
+# Re-checked 2026-10-03T23:28Z (#2145): 482 rows, 964 arm readings, spanning
+# 2026-09-22T04:08:33Z to 2026-10-03T22:23Z. Graded arm (current, replayed):
+# median 209.9, p95 247.4, max 274.9 ms (2026-09-22T06:07:48Z). Fresh baseline
+# arm: median 596.0, p95 648.8, max 824.3 ms — 824.268 as the ledger stores it —
+# at 2026-09-29T00:56:17Z, commit 81dabeff) — it is in the population because a change that moves djev's input
+# is judged on the fresh floor, and a healthy fresh reading must not report.
+# 0 of the 482 rows reads over 1,600 ms on either arm. The cross-encoder path
+# this replaced read a median 4,257-4,305 ms, so a recall that falls back onto
+# it (djev not answering, or a re-widening) reads over budget, which is the
+# report this ceiling is for. Re-check the population with this (run from the
+# repo root; it prints n, fresh median, graded median, fresh max, graded max,
+# and the count of rows over 1,600):
+#
+#   .venvs/lloyd/bin/python -c "import json,pathlib,statistics as S; \
+#     P=pathlib.Path.home()/'.local/state/lloyd-automod/promotions.jsonl'; \
+#     A=[(r['detail'] or {}).get('latency_ms_avg') or {} \
+#        for r in [json.loads(l) for l in P.read_text().splitlines() if l.strip()] \
+#        if r.get('event')=='regression_check' \
+#        and (r.get('created_at') or '')>='2026-09-22T04:08:33Z' \
+#        and 'agent-qmd-daemon.conf' in str(r['pin']['daemon']['source']) \
+#        and r.get('detail')]; \
+#     print(len(A), round(S.median([a['before'] for a in A]),1), \
+#     round(S.median([a['after'] for a in A]),1), round(max(a['before'] for a in A),1), \
+#     round(max(a['after'] for a in A),1), sum(1 for a in A if max(a['before'],a['after'])>1600))"
+#
+# 1,600 ms is a FIXED bound RE-CHECKED against that ledger, NOT recomputed from
+# the max. The rule above run over the same 482 rows today reads 2 x 824.268 =
+# 1,648.5 -> 1,700 ms, and that looser number was declined: 0 of 482 rows even
+# reaches 1,600, the ~4,250 ms cross-encoder step this ceiling exists to catch
+# reports under either, and a constant re-derived from the running max can only
+# grow — every new record silently widens the tolerance the check is there to
+# hold, which is the defect #2145 closes. If a current-era row one day reads
+# over 1,600, the bound is re-DECIDED by a ruling; it is never lifted to clear
+# the new max.
 #
 # Three era breaks bound that population, and readings before each are NOT
 # comparable with what follows:
@@ -307,22 +333,32 @@ FLOOR_BY_RESOLUTION = "resolution"
 #     median 4,305 ms; 68 after, median 4,257 ms — both cross-encoder).
 #   * e7bb4280 + c6e79b45 (2026-09-21T19:45Z / 2026-09-22T00:50Z): djev ranks
 #     the recall and the check replays its answers per request. The era above.
-# The 2026-09-20 tail — 11,561 / 11,868 / 16,256 ms on three healthy runs — is
-# deliberately NOT cleared: the verdict is report-only, so a ceiling that
-# admits the tail reports nothing, and the tail was never attributed (median
-# 4,282-4,302 ms in every +/-15 min activity bucket around it; a human's call).
+# The 2026-09-20 tail — 16,256 / 11,868 / 11,561 ms on three healthy runs
+# (28812b97 at 03:23:02Z, bc13c5cc at 05:00:17Z, 202a00db at 05:36:01Z) — is
+# deliberately NOT cleared: the verdict is report-only, so a ceiling that admits
+# the tail reports nothing. And it is no longer an open question (ruled
+# 2026-10-03, #1247's owed entry 2): an unattributed HOST-LEVEL latency stall of
+# the excluded cross-encoder era, explicitly NOT a retrieval degradation. Each
+# of the three is slow on BOTH arms at once — before-arm 8,053.5 / 6,798.7 /
+# 11,973.5 ms against that era's ~4,300 ms before-median — while its ranking
+# quality is identical to those eras' medians (ndcg10 0.592 / 0.582, doc_hit_rate
+# 1.00 on both arms), none of it recurs in the 482 current-era rows, and the raw
+# logs that could pin a cause have rotated away. It therefore stays outside the
+# population, and the 4,282-4,302 ms activity-bucket median measured in every
+# +/-15 min window around it stands.
 #
 # nightly — NOT re-derived here. Its population is the nightly artifacts in
 # `eval/baselines/`, and the wipe left two: 766.4 ms (nightly-20260923-073952)
 # and 540.9 ms (nightly-20260924-065033), both djev-ranked at production
-# defaults. Two readings are not a population; the same rule over them would
-# read 1,600 ms and is a human's re-derivation once a week of nightlies exists.
+# defaults. Two readings are not a population; the paired rule run over them
+# would read 1,600 ms (2 x 766.4 = 1,532.8), and applying it there is a human's
+# re-derivation once a week of nightlies exists.
 # 4,800 clears the worst nightly ever recorded before the wipe, 4,408.0 ms on
 # 2026-09-04 (nine days BEFORE #504, on the narrow pool — an outlier the
 # widening does not account for, a finding on #1129), and every nightly since.
 LATENCY_BUDGET_MS = {
     "nightly": 4800.0,          # worst ever 4,408.0 (nightly-20260904-060219, pre-wipe)
-    "paired_check": 1600.0,     # worst ever 752.3 (ledger 2026-09-23T14:39:59Z, fresh arm) x 2
+    "paired_check": 1600.0,     # worst ever 824.3 (ledger 2026-09-29T00:56:17Z, fresh arm); fixed, not recomputed
 }
 # The two contexts this module knows, named so a caller passes one rather than a
 # free-text string that silently falls through to a default.

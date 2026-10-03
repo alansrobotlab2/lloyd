@@ -100,10 +100,12 @@ def test_report_only_metrics_never_fire():
 # off `eval/baselines/*.json` on 2026-09-18 — artifacts the 2026-09-22 data wipe
 # has since deleted, so they are cited from the ledger and architecture/automod.md
 # §8.1a, not from disk. `paired_check` is this module's own two-arm run against
-# the frozen snapshot, and its figures are the current era's, read 2026-09-24
+# the frozen snapshot, and its figures are the current era's, re-read 2026-10-03
 # from `promotions.jsonl` (`regression_check` rows since c6e79b45's first check,
-# 2026-09-22T04:08:33Z, pin naming `agent-qmd-daemon.conf`; n=98, 196 arm
-# readings) — the population the ceiling itself was set from (#1247).
+# 2026-09-22T04:08:33Z, pin naming `agent-qmd-daemon.conf`; n=482, 964 arm
+# readings, none of them over the bound) — the population the ceiling was set
+# from on 2026-09-24 (#1247) and is re-checked against since (#2145). The bound
+# is fixed; these constants are its evidence, not its formula.
 POST_WIDENING_MS = {
     # The step #504 bought: 708 ms nightly before it, 4,230-4,379 ms after, and
     # nobody graded it because nothing read the field.
@@ -115,10 +117,15 @@ POST_WIDENING_MS = {
 # must clear for "no recorded run reads over budget" to be literally true. The
 # nightly one is a 2026-09-04 outlier that predates #504. The paired one is the
 # fresh BASELINE arm — in the population because a change that moves djev's
-# input is judged on the fresh floor — and the ceiling is twice it.
+# input is judged on the fresh floor. It is NOT half the ceiling: the ceiling
+# was set at twice the fresh-arm worst on 2026-09-24 and has been FIXED since,
+# re-checked against this population rather than recomputed from it, so a new
+# record here moves this number and not the bound (the module comment above
+# LATENCY_BUDGET_MS says why — 2 x 824.3 would round to 1,700 ms, and the
+# looser bound was declined on 2026-10-03 with 0 of 482 rows over 1,600).
 WORST_EVER_MS = {
     R.CONTEXT_NIGHTLY: 4408.0,        # nightly-20260904-20260904-060219.json
-    R.CONTEXT_PAIRED_CHECK: 752.3,    # ledger 2026-09-23T14:39:59Z, commit 133a224a
+    R.CONTEXT_PAIRED_CHECK: 824.3,    # ledger 2026-09-29T00:56:17Z, commit 81dabeff
 }
 # Excluded from the paired population on purpose: readings before a54ccda
 # (2026-09-19T01:22Z) measured a pin that restated qmd's settings, not
@@ -195,6 +202,157 @@ def test_the_paired_ceiling_is_derived_from_the_corrected_pin_not_the_defect():
     for needle in ("promotions.jsonl", "agent-qmd-daemon.conf", "2026-09-22T04:08:33Z",
                    "a54ccda", "aa6bee8", "c6e79b45", "report-only", "NOT cleared"):
         assert needle in rule, f"the budget comment no longer names {needle!r}"
+
+
+def _budget_prose() -> tuple[str, str]:
+    """The paired_check provenance block, as flattened prose and as raw lines.
+
+    Two shapes because the two things worth pinning have opposite needs: a
+    sentence is only contiguous once the line wraps are folded (the comment reflows
+    at ~78 columns, so `"= 1,648.5 -> 1,700"` straddles a newline in the file), and a
+    command is only runnable with its `# ` prefixes stripped and its continuations
+    kept apart.
+    """
+    src = Path(R.__file__).read_text(encoding="utf-8")
+    block = src[src.index("# paired_check —"):src.index("LATENCY_BUDGET_MS = {")]
+    lines = [ln[1:].strip() if ln.lstrip().startswith("#") else ln for ln in block.splitlines()]
+    return " ".join(" ".join(lines).split()), lines
+
+
+def test_the_paired_provenance_publishes_the_era_d_recomputation():
+    """Clause 1 (#2145): the comment states the 2026-10-03 re-read, and the
+    figures it replaced are gone from the file.
+
+    This is the defect the item exists to close: the comment carried the
+    2026-09-24 read as though it were current and derived the ceiling as twice that
+    read's fresh-arm max, rounded up. Over the same filter the ledger now answers
+    482 rows, graded arm median 209.9 / max 274.9 ms, fresh arm median 596.0 / max
+    824.3 ms, with 0 of the 482 over 1,600 (the published command re-run
+    2026-10-03T23:28Z; last row in the population 2026-10-03T22:23:42Z). A reader
+    who took the old sentence as a live formula would recompute a looser ceiling
+    and believe they had corrected it, so the superseded read may not survive as
+    the comment's stamp — and the derivation chain that priced the bound from a max
+    may not reappear in any form (pinned below without re-typing the retired
+    figures, because this file's own constants are a provenance surface too).
+    """
+    src = Path(R.__file__).read_text(encoding="utf-8")
+    prose, _ = _budget_prose()
+    for needle in ("482 rows", "209.9", "274.9", "596.0", "824.3",
+                   "2026-10-03", "2026-09-22T04:08:33Z", "c6e79b45",
+                   "agent-qmd-daemon.conf", "promotions.jsonl"):
+        assert needle in prose, f"the paired_check provenance no longer states {needle!r}"
+    assert "0 of 482" in prose or "0 of the 482" in prose, (
+        "the comment does not say how many of the population read over the bound, "
+        "which is the evidence the fixed bound stands on")
+
+    # The re-check command the comment publishes must survive as a command: it is
+    # the only thing a later reader has, and a `# ` prefix folded into the string
+    # or a broken line join silently returns nothing while looking complete. The
+    # block is a shell line continued with `\` inside comment lines, so the same
+    # join the shell does has to be the join here.
+    lines = src.splitlines()
+    start = next(i for i, ln in enumerate(lines) if '-c "import json' in ln)
+    pieces = []
+    for ln in lines[start:]:
+        body = ln[1:].strip() if ln.lstrip().startswith("#") else ln
+        cont = body.endswith("\\")
+        pieces.append(body[:-1] if cont else body)
+        if not cont:
+            break
+    code = " ".join(pieces).split(' -c "', 1)[1].rstrip().rstrip('"')
+    assert code, "the published re-check command is gone from the comment"
+    # What the command ASKS for, rather than what it prints: the population filter
+    # is the part that rots, and a live ledger read here would make the suite
+    # depend on traffic that has not happened yet.
+    assert "regression_check" in code and "agent-qmd-daemon.conf" in code, (
+        "the published command no longer selects the era-D population")
+    assert "2026-09-22T04:08:33Z" in code, (
+        "the published command no longer bounds the population at era D's first check")
+    compile(code, "<published-recheck-command>", "exec")
+
+    # The superseded read may not survive as the comment's own stamp. Its DATE is
+    # named below — a stamp carries no price, so naming it costs nothing, and it is
+    # the thing whose absence the clause is about. The stale ARITHMETIC, by
+    # contrast, is pinned structurally: this file's constants are themselves a
+    # provenance surface, so a retired ms figure belongs in one file at a time
+    # (`test_automod_doc_claims.py` is where the doc's retired figures are named),
+    # and re-typing one here to assert it is gone would double the rot surface.
+    assert "2026-09-24T13:46Z" not in src, (
+        "the paired_check comment is stamped with the superseded read again")
+    assert "-> 1,600 ms" not in prose, (
+        "the comment has grown back a max-derived `… -> 1,600 ms` chain; the bound "
+        "is fixed and says so")
+    paired_only = prose[:prose.index("nightly —")]
+    assert "2 x " not in paired_only.replace("2 x 824.268", ""), (
+        "a second max-derivation has appeared in the paired_check provenance; the "
+        "one that SET the bound is quoted and declined, and nothing else is priced "
+        "from a max here")
+
+
+def test_the_paired_ceiling_is_a_fixed_bound_not_a_max_derived_number():
+    """Clause 2 (#2145): 1,600 ms is re-checked against the ledger, not recomputed.
+
+    The rule the ceiling was SET by — twice the worst arm reading, rounded up — run
+    over the 482 era-D rows today reads 2 x 824.268 = 1,648.5 -> 1,700 ms. Stating
+    that number and declining it in the same comment is the whole point: a constant
+    re-derived from the running max can only grow, so every new record quietly
+    widens the tolerance the check exists to hold, and the looser bound reports
+    nothing new (the ~4,250 ms cross-encoder step this ceiling is for reads over
+    either figure, and 0 of 482 rows reaches 1,600).
+    """
+    prose, _ = _budget_prose()
+    assert "1,700" in prose, (
+        "the comment does not name the number the rule WOULD produce today, which "
+        "is the number a reader would otherwise 'correct' the ceiling up to")
+    assert "1,648.5" in prose, "the 2 x 824.268 arithmetic behind 1,700 is missing"
+    assert "not recomputed" in prose.lower() or "NOT recomputed" in prose, (
+        "the comment does not say plainly that the bound is not recomputed from "
+        "the max")
+    assert "re-checked" in prose.lower(), (
+        "the comment does not say the bound is re-checked against the ledger")
+    assert "4,250" in prose, (
+        "the comment does not name the step the ceiling catches, which is why the "
+        "looser bound was declined")
+    assert "can only grow" in prose, (
+        "the comment does not name the monotonic-growth defect this closes")
+    # The declined alternative must stay declined in the constant, not just in
+    # prose: 1,700 is what recomputation gives, so the shipped value being 1,600
+    # IS the decision.
+    assert R.LATENCY_BUDGET_MS[R.CONTEXT_PAIRED_CHECK] == 1600.0, (
+        "the paired_check bound moved: it is re-decided by a ruling, never lifted "
+        "to clear a new max")
+    assert R.LATENCY_BUDGET_MS[R.CONTEXT_NIGHTLY] == 4800.0, (
+        "the nightly bound is not this round's to move either")
+
+
+def test_the_2026_09_20_tail_is_ruled_not_left_to_a_human():
+    """Clause 3 (#2145): the hedge is gone and the ruling is in its place.
+
+    #1247's owed entry 2 ruled the three 2026-09-20 rows (03:23:02Z 28812b97,
+    05:00:17Z bc13c5cc, 05:36:01Z 202a00db) an unattributed HOST-LEVEL latency
+    stall of the excluded cross-encoder era — not a retrieval degradation. Its
+    evidence, all four of it: both arms slow together (before-arm 8,053.5 / 6,798.7
+    / 11,973.5 ms against that era's ~4,300 ms before-median), ranking quality
+    identical to those eras' medians (ndcg10 0.592 / 0.582, doc_hit_rate 1.00 on
+    both arms), no recurrence in the 482 era-D rows, and the raw logs that could
+    pin a cause rotated away. "a human's call" was still standing when the tail had
+    already been called, so the module read as open on a question the board closed.
+    """
+    src = Path(R.__file__).read_text(encoding="utf-8")
+    assert "a human's call" not in src, (
+        "the tail hedge is back: the ruling is 2026-10-03, #1247 owed entry 2")
+    prose, _ = _budget_prose()
+    for needle in ("16,256", "11,868", "11,561", "HOST-LEVEL", "cross-encoder era",
+                   "NOT a retrieval degradation", "BOTH arms", "482"):
+        assert needle in prose, f"the tail ruling no longer states {needle!r}"
+    assert "28812b97" in prose and "bc13c5cc" in prose and "202a00db" in prose, (
+        "the tail ruling no longer names the three runs it rules on, so a reader "
+        "cannot re-check it against the ledger")
+    # The ruling is an ATTRIBUTION of kind, not a cause: it must not be rewritten
+    # into something the evidence does not support.
+    assert "unattributed" in prose.lower(), (
+        "the tail is recorded as attributed; the ruling is that its cause is "
+        "unknown but its class is not a retrieval degradation")
 
 
 def test_the_nightly_default_tolerates_a_paired_check_sized_run():

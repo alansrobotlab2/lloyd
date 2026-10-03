@@ -543,6 +543,51 @@ def test_the_doc_still_states_the_limits_that_survive_the_pin():
     assert "Graph EDGE quality is not checked by anything" in flat
 
 
+def test_row_7_carries_the_era_d_ceiling_provenance_and_the_tail_ruling():
+    """§8.1a row 7 mirrors the module's ceiling provenance, so it rots in lockstep.
+
+    The row used to end "…98 rows from 2026-09-22T04:08Z to 2026-09-24T13:46Z,
+    graded arm median 161.5 / max 274.9 ms, fresh arm max 752.3 ms, so **1,600
+    ms** … the tail was never attributed". Re-running the row's own filter on
+    2026-10-03 answers 482 rows, fresh arm max 824 ms, none over the bound; and the
+    2026-09-20 tail has since been ruled (#1247 owed entry 2: an unattributed
+    host-level stall of the excluded cross-encoder era, not a retrieval
+    degradation). Both halves are pinned because the doc is where a reader who never
+    opens `workers/sources/automod_regression.py` gets the ceiling, and because
+    `test_the_doc_states_the_limits_that_survive_the_pin` shows how reliably this
+    paragraph drifts from the code it describes.
+    """
+    from workers.sources import automod_regression as R
+    flat = _flat(DOC)
+    assert "482 rows" in flat, "row 7 no longer states the era-D population"
+    assert "824 ms" in flat, "row 7 no longer states the fresh arm's era-D maximum"
+    assert "not recomputed" in flat.lower(), (
+        "row 7 does not say the bound is re-checked rather than recomputed, so a "
+        "reader of the doc alone would still recompute it from the max")
+    assert "1,700 ms" in flat, (
+        "row 7 does not name the number recomputation would give (2 × 824), which "
+        "is the number the fixed bound was declined against")
+    assert "host-level" in flat and "not a retrieval degradation" in flat, (
+        "row 7 has not recorded the 2026-09-20 tail ruling")
+    assert "unattributed" in flat.lower(), (
+        "row 7 records the tail as attributed; the ruling fixes its class, not its "
+        "cause")
+
+    # The retired provenance may not linger beside the new one. These are absent
+    # from the doc today; the numbers are named here and not in
+    # `test_automod_regression.py`, whose own constants ARE a provenance surface —
+    # a stale figure belongs in exactly one file at a time.
+    for retired in ("752.3", "98 rows", "161.5", "1,504.6",
+                    "the tail was never attributed"):
+        assert retired not in flat, f"row 7 still carries the retired claim {retired!r}"
+
+    # And the two ceilings must still be stated in the rendering the code's values
+    # are graded in (`f"{int(v):,} ms"`, same as the limits test above).
+    for value in R.LATENCY_BUDGET_MS.values():
+        assert f"{int(value):,} ms" in flat, (
+            f"the doc no longer states the {int(value):,} ms ceiling the code has")
+
+
 def test_the_grep_corpus_is_pinnable():
     """§8.1: this retriever greps the repository it ships in, so the code
     under test is also part of the corpus it is scored against."""
