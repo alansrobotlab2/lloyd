@@ -249,9 +249,19 @@ attached.
 **Default-off, and the config key is absent.** `enabled()` reads
 `harness.skill_dispatch.enabled`, where an absent key, an unreadable config or
 a false flag all mean not installed. There is no `skill_dispatch` block in
-`config.yaml` today, so the feature is off; `skills: [...]` restricts the
-active rule set for a per-protocol rollout. Both keys are set by a human — the
-automod preflight denies the runtime config.
+`config.yaml` because enablement was **decided against** on 2026-10-03, on the
+probe's own numbers (#750's `owed_settled` ruling): `spurious_rate` 0.04% over
+9250 replayed dispatches, projected compliance delta **+0**, and the one
+protocol whose rule fired was already at 100% — shipping it would have bought
+injected characters and nothing else. Quote the rate and you have to quote its
+`n`: the corpus is the live session store, so the next run replays a different
+count. The bar that would change this is **re-enable** a rule only when
+`eval/run_skill_dispatch_probe.py` reports it firing on **non-meta** traffic —
+not a round grading or testing the rule table, which is what all four triggering
+dispatches were — with measured compliance **below 100%**. `skills: [...]` scopes
+a rollout to one rule; the automod preflight denies the runtime config, so
+setting either key is outside a round's reach — which is why the bar above, not
+an approval queue, is what this section points at.
 
 `eval/run_skill_dispatch_probe.py` is the offline probe: it replays drafted
 tool calls harvested from real session transcripts against the rule set with no
