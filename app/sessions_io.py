@@ -348,6 +348,50 @@ def note_run_session(session_id: str) -> None:
     bucket.append(session_id)
 
 
+#: Steps taken by the harness turns a worker-pool job ran. Same binder, same
+#: reader and the same reason as `current_run_sessions` immediately above, so it
+#: lives beside it rather than in a module of its own: the pool binds an empty
+#: list around the claimed job and reads it back at the moment it writes the run
+#: row, which is what puts `num_turns` on the row of a source that never
+#: returned it. #2087 measured the consequence of not having this: the four
+#: highest-volume sources — autotriage, autocode, owed-check, board-steward,
+#: together 3,348 runs in the window — carry the key on none of them, because
+#: each of them reads `num_turns` off the terminal event and then drops it on
+#: the floor between there and `meta_json`. Autocode is also the one source that
+#: genuinely runs long (median 98 tool calls per session), so the ledger could
+#: not say how many steps its most expensive work takes.
+#:
+#: A list of per-turn counts and not a running total, because the sum is the
+#: job's step count and one job may run several turns. It has to be a mutable
+#: container for the same reason `current_run_sessions` is: the note is often
+#: appended from inside `asyncio.wait_for`, whose task gets a COPY of the
+#: context, so a `set()` there would be invisible to the pool while a mutation
+#: of the shared object is not.
+#:
+#: Default `None` means "nobody is collecting" — an interactive turn, an
+#: autonomy task that writes its own run row, a bare script.
+current_run_turns: contextvars.ContextVar[Optional[list[int]]] = \
+    contextvars.ContextVar("lloyd_run_turns", default=None)
+
+
+def note_run_turns(num_turns: object) -> None:
+    """Add one finished turn's step count to the job currently claimed.
+
+    A turn that ended without reporting a count contributes nothing rather than
+    a zero: `workers/pool.py` omits the key when the bucket is empty, and a run
+    that ran no harness turn has to stay distinguishable from one whose turns
+    took no steps. Non-numbers are dropped for the same reason — a stray `None`
+    in the middle of a job must not poison the sum of the turns that did
+    report.
+    """
+    bucket = current_run_turns.get()
+    if bucket is None:
+        return
+    if isinstance(num_turns, bool) or not isinstance(num_turns, int):
+        return
+    bucket.append(num_turns)
+
+
 def create_session(session_id: str, *, platform: str, model: str = "",
                    title: str = "", source: str = "",
                    inner_voice: bool = False, preview: str = "",

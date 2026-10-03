@@ -27,7 +27,7 @@ from typing import Any, Optional
 
 from app import engine_pressure
 from app.harness.policy import current_effect_scope, current_scope
-from app.sessions_io import current_run_sessions
+from app.sessions_io import current_run_sessions, current_run_turns
 from workers.dispatch_watch import OK_WM_KEY
 from workers.evidence import gaps_key, verify_bundle
 from workers.queue import (WorkQueue, QueueItem, get_queue, new_run_id,
@@ -357,6 +357,47 @@ def _scratchpad_meta() -> dict[str, int]:
     except Exception:
         logger.debug("scratchpad tally failed; recording zeros", exc_info=True)
         return {"writes": 0, "bytes": 0, "sessions": 0}
+
+
+def _bind_step_count(meta: dict[str, Any]) -> dict[str, Any]:
+    """Put the steps this job's harness turns took onto a run row's meta.
+
+    #2087. `runs.meta_json.num_turns` was written for only 6 of the 15 sources,
+    and on none of the four highest-volume ones: autotriage (1,702 runs),
+    autocode (688), owed-check (591) and board-steward (366) all reported 0 of
+    their own turns, because each reads `num_turns` off the terminal event and
+    only puts it in `meta` when it happens to build one. Autocode is also the
+    source that runs longest (median 98 tool calls, p95 304 per session), so the
+    ledger held no step count for the fleet's most expensive work, and #583's
+    overrun prediction has no denominator to predict against.
+
+    So the count is collected, not reported: `app.sessions_io.current_run_turns`
+    is bound empty around the claimed job, every turn path in
+    `workers/sources/_common.py` appends the number it already read, and this is
+    where it is read back — the same shape as `session_ids` and `scratchpad`
+    beside it, and for the same reason stated at the binding site: "the handler
+    remembered to pass it back" is not a property worth depending on eleven
+    times. Three consequences the clauses pin, each a different way this could
+    have been got wrong:
+
+    * The key is **omitted, not zeroed**, when no turn reported. The item's own
+      instrument is `meta_json LIKE '%num_turns%'`, so writing a null on every
+      skipped run would make "measured" and "never ran a turn" the same query
+      result, which is the ambiguity this replaces.
+    * A source that already reports its own `num_turns` **keeps it**. That value
+      came from the same event and the code that wrote it may reason about it;
+      the collected number exists to fill gaps, and overwriting a report with an
+      aggregate would silently change the meaning of six sources' rows.
+    * A multi-turn job's value is the **sum**, because the question #583 asks is
+      how many steps a job took, and a job that ran two turns of 3 and 5 took
+      eight.
+    """
+    if "num_turns" in meta:
+        return meta
+    turns = current_run_turns.get()
+    if turns:
+        meta["num_turns"] = sum(turns)
+    return meta
 
 
 def _task_id_of(item: QueueItem, result: Any = None) -> Optional[str]:
@@ -1294,6 +1335,15 @@ class WorkerPool:
             # "the handler remembered to pass it back" is not a property worth
             # depending on eleven times.
             sessions_token = current_run_sessions.set([])
+            # #2087, the same argument one field further on. The step count each
+            # turn reports is collected here so the run row can carry it whether
+            # or not the handler put it in its `meta` — which four of the
+            # fifteen sources, holding 3,348 of the window's runs between them,
+            # never did. A list shared through a ContextVar rather than a
+            # counter set by the turn, because the note often fires inside the
+            # `wait_for` below, whose task holds a copy of this context: only a
+            # mutation of the shared object survives that hop.
+            turns_token = current_run_turns.set([])
             # #2037: has THIS attempt written its task-file verdict yet? The
             # flag is what stops a death after `run_task` returned from charging
             # the budget a second time, and the token is what stops one item's
@@ -1313,6 +1363,10 @@ class WorkerPool:
                 norm["meta"] = {**norm["meta"],
                                 "session_ids": list(current_run_sessions.get() or []),
                                 "scratchpad": _scratchpad_meta()}
+                # After the merge, and it is the order that carries clause 5:
+                # `norm["meta"]` may already hold a `num_turns` the source
+                # reported for itself, and that one stays.
+                _bind_step_count(norm["meta"])
                 run_status = norm["status"]
                 # #525 — verify the run's claims at the moment its record is
                 # written, and only for a source that emitted any (`claims`
@@ -1399,7 +1453,17 @@ class WorkerPool:
                         # A timed-out run is the one most worth reading, so
                         # its transcript is named here too — not only on the
                         # success path.
-                        meta_json=json.dumps({
+                        # #2087: the same key as a successful run, on the arm
+                        # that has no handler return to read it from. A run
+                        # killed at its cap is the population #583 and #1554
+                        # both want a denominator for — a turn that finished
+                        # before the kill already reported its count, and the
+                        # one in flight when the cap fired did not, so the sum
+                        # is exactly "the steps it got through". Omitted, not
+                        # zeroed, if it never finished a turn: a killed run that
+                        # never got a count must not read as one that took no
+                        # steps.
+                        meta_json=json.dumps(_bind_step_count({
                             "pool_timeout": True,
                             "max_duration_seconds": max_duration,
                             "session_ids": list(current_run_sessions.get() or []),
@@ -1408,7 +1472,7 @@ class WorkerPool:
                             # died is the comparison the item's whole hypothesis
                             # rests on, and this branch is where that run's row is
                             # written.
-                            "scratchpad": _scratchpad_meta()}),
+                            "scratchpad": _scratchpad_meta()})),
                     )
                 )
                 new_state = await asyncio.to_thread(
@@ -1445,7 +1509,14 @@ class WorkerPool:
                         # record a person reads after a timeout.
                         summary=error_msg,
                         task_id=_task_id_of(item),
-                        meta_json=json.dumps({
+                        # #2087, and wrapped around the whole dict rather than
+                        # the pieces: `death` is spread last so a source's own
+                        # death metadata still wins, and the step count goes on
+                        # whatever survives that. The exception arm is where a
+                        # turn that died mid-flight leaves no return value
+                        # behind, so the collected count is the only record of
+                        # how far the run got.
+                        meta_json=json.dumps(_bind_step_count({
                             "exception": type(e).__name__,
                             "session_ids": list(current_run_sessions.get() or []),
                             "scratchpad": _scratchpad_meta(),
@@ -1454,7 +1525,7 @@ class WorkerPool:
                             # artifact the item is about: a week of a task dying
                             # every minute was a NULL in `meta_json` that no
                             # reader grouped on.
-                            **death}),
+                            **death})),
                     )
                 )
                 new_state = await asyncio.to_thread(
@@ -1465,6 +1536,7 @@ class WorkerPool:
                 current_scope.reset(scope_token)
                 current_effect_scope.reset(effect_token)
                 current_run_sessions.reset(sessions_token)
+                current_run_turns.reset(turns_token)
                 current_task_verdict.reset(verdict_token)
                 self._in_flight.pop(item.id, None)
                 await self._repoll_on_complete(source)

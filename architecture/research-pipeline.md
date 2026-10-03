@@ -227,7 +227,7 @@ passes its `run_id` into `execute`, so the queue id is the link.
   registry is doing its job (391 topics, 33 `written` since the 09-08 cutover,
   last note 09-19 05:20Z, #65 succeeding nightly). Corrections: the retired
   source's staging root is `~/lloyd-data/_pipeline/...`, not vault-relative; the
-  pool's inversion now cites `workers/pool.py:717` / `:744` / `:773` and names
+  pool's inversion now cites `workers/pool.py:758` / `:785` / `:814` and names
   the retry ladder's real numbers; §4's `compute_health` analogy is stated as
   the joined-row task-id recovery it actually is; the shell read path is
   `python -m app.research_store stats`, not `sqlite3` on a file §2 says nothing

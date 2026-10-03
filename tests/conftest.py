@@ -749,23 +749,70 @@ def worker_turn_post(monkeypatch):
     is exactly what a test that is verifying a real POST wants and what every
     other test would choke on. `tests/test_session_platform_checks.py` owns the
     variant that crosses the wire for real.
+
+    `.report(3, 5)` says what each turn's `done` event reports, consumed one
+    element per POST in turn order; an element of `None` means a `done` with no
+    `num_turns` key at all. Calling it is optional and every test that skips it
+    gets what it always got — one turn reporting one step — because the return
+    value is still the same list of bodies, read by index and length exactly as
+    before. It lives on the fixture rather than in a second stub because the
+    number a turn reports is the fixture's business, and `#2087` is the reason:
+    the copies of this stub that sources wrote for themselves could not express
+    "the turn reported 7 steps", which is why nothing pinned the step count on a
+    run row until that item.
     """
     import httpx
 
-    captured: list[dict] = []
+    class _Posts(list):
+        """The captured bodies, plus the knob for what each turn reports."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._report: list = []
+            self._configured = False
+
+        def report(self, *num_turns) -> "_Posts":
+            self._report = list(num_turns)
+            self._configured = True
+            return self
+
+        def _next(self):
+            """What the next turn's `done` reports, and loudly if it shouldn't.
+
+            A test that scripts `(3, 5)` and then gets a third turn has a wrong
+            expectation, not a stubbed environment: silently answering `1` would
+            shift the sum the test is asserting and read as a product bug. So the
+            exhaustion is an error, and only once `report()` has been called — a
+            test that never configured anything keeps the historical answer.
+            """
+            if self._report:
+                return self._report.pop(0)
+            if self._configured:
+                raise AssertionError(
+                    "worker_turn_post.report() was given "
+                    f"{self._report!r} and has run out, so the job ran more turns "
+                    "than the test scripted — fix the test, do not assume 1")
+            return 1
+
+    captured = _Posts()
 
     class _Streamed:
         """A finished turn, in the SSE shape `_aiter_sse` parses."""
 
         status_code = 200
 
+        def __init__(self, num_turns):
+            self._num_turns = num_turns
+
         async def aread(self) -> bytes:
             return b""
 
         async def aiter_lines(self):
+            payload = '{"response": "stubbed", "stop_reason": "end_turn"'
+            if self._num_turns is not None:
+                payload += f', "num_turns": {self._num_turns}'
             yield "event: done"
-            yield 'data: {"response": "stubbed", "stop_reason": "end_turn", ' \
-                  '"num_turns": 1}'
+            yield "data: " + payload + "}"
 
         async def __aenter__(self):
             return self
@@ -785,7 +832,7 @@ def worker_turn_post(monkeypatch):
 
         def stream(self, method, url, json=None, headers=None):
             captured.append(dict(json or {}))
-            return _Streamed()
+            return _Streamed(captured._next())
 
     monkeypatch.setattr(httpx, "AsyncClient", _Client)
     return captured

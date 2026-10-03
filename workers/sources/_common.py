@@ -57,6 +57,15 @@ POOL_TIMEOUT_MARGIN_SECONDS = 60
 # aggregator can read them without importing this package; re-exported here
 # because every source and a dozen tests import them from this module.
 from app.tool_bans import WORKER_AUTOMOD_BAN, WORKER_GRANT_MINT_BAN  # noqa: E402,F401
+# #2087: the step count a turn reports is noted for the run record here, at the
+# one place the terminal event is read, rather than being carried back by every
+# source. `sessions_io` is where the pool-bound collector lives, next to the
+# `current_run_sessions` precedent this copies; the import is module-level
+# because the three turn paths below are all inside this module, and
+# `app.sessions_io` imports neither `workers.*` nor `app.harness.*`, so this
+# adds no edge the lazy `from app.sessions_io import ...` lines below did not
+# already cross at call time.
+from app.sessions_io import note_run_turns  # noqa: E402
 
 
 def build_skill_prompt(skill_text: str, *, job: str, task_block: str) -> str:
@@ -612,6 +621,14 @@ async def run_prompt_on_primary(prompt: str, max_turns: int = 20, *,
             # what made an empty answer look like a successful one.
             out.stop_reason = evt.get("stop_reason")
             out.num_turns = evt.get("num_turns")
+            # #2087: and hand it to the run record, not only to the caller. The
+            # number is in hand exactly here and nowhere later — a source that
+            # wants it writes it into its own `meta`, and the four that do not
+            # (autotriage, autocode, owed-check, board-steward) had it on 0 of
+            # their 3,348 runs. `note_run_turns` is a no-op outside a claimed
+            # pool job, so an interactive turn and an autonomy task that
+            # already writes its own count are untouched.
+            note_run_turns(out.num_turns)
             out.usage = evt.get("usage") or {}
             if not chunks and evt.get("response_text"):
                 chunks.append(str(evt["response_text"]))
@@ -680,6 +697,14 @@ async def run_prompt_with_run_state(
         max_steps=max_steps,
         iterations_per_step=iterations_per_step,
     )
+    # #2087, once for the whole state-turn: `result.num_turns` is already the
+    # sum over the driver's steps (`RunStateResult.num_turns`), so noting the
+    # aggregate here is the same number the driver took, added once and not
+    # once per segment. The driver calls `run_query` through `_run_segment`
+    # rather than through `run_prompt_on_primary`, so nothing else on this path
+    # notes anything — this is the third of the three turn paths, and the one
+    # no production source reaches yet.
+    note_run_turns(result.num_turns)
     return TurnResult(
         text=result.text,
         # "stop" only when the model declared the deliverable complete AND there
@@ -1046,6 +1071,16 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
                             if data.get("error"):
                                 out["errors"].append(str(data["error"])[:400])
                         out["num_turns"] = data.get("num_turns")
+                        # #2087, and this is the site the item's four zero
+                        # sources actually reach. It is a seam worth naming:
+                        # `_stream` runs inside `asyncio.wait_for`, whose task
+                        # holds a COPY of the context, so the collector is a
+                        # shared list precisely because appending to the object
+                        # the ContextVar holds reaches the pool while a `set()`
+                        # here would not. The count crossed the loopback POST
+                        # into this process on the `done` event; the run row is
+                        # written in the pool's process, and this is the hop.
+                        note_run_turns(out["num_turns"])
                         out["structured"] = data.get("structured")
                         out["structured_error"] = str(data.get("structured_error") or "")
                         out["finalizer_tokens"] = data.get("finalizer_output_tokens")

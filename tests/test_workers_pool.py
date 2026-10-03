@@ -1613,3 +1613,274 @@ async def test_a_death_the_pool_must_not_charge_is_still_classified(
         "countable, or the same silence is back under a different name")
     assert "task_budget_charged" not in _meta_of(runs[0]), (
         "the row claims a charge the task file never saw")
+
+
+# ── #2087: the run row carries the step count of the turns it ran ─────────────
+#
+#: `runs.meta_json.num_turns` existed on 6 of the 15 sources and on NONE of the
+#: four highest-volume ones — autotriage 1,702 runs, autocode 688, owed-check 591,
+#: board-steward 366, zero between them — because each of those four reads the
+#: count off the terminal event and then only writes it when it happens to build a
+#: `meta` dict at all. The fix collects rather than reports: `workers/pool.py` binds
+#: an empty bucket around the claimed job, every turn path in
+#: `workers/sources/_common.py` appends what it read, and the pool reads it back at
+#: all three `record_run` sites.
+#:
+#: So every test below drives the REAL `run_prompt_in_session`, and only its
+#: transport is swapped onto a stubbed SSE `done` event — the same shape
+#: `tests/conftest.py::worker_turn_post` uses and for the same reason: the number
+#: must be produced by the parse the four sources actually read it from, not handed
+#: to the pool by the test. A test that called `note_run_turns` itself would still
+#: pass if the note were deleted from `_common.py`, which is precisely the drop this
+#: item is about.
+
+
+async def test_a_turn_that_reported_its_steps_puts_them_on_the_run_row(q, monkeypatch, worker_turn_post):
+    """Clause 1, in the shape of the sources that were missing it.
+
+    The handler returns no `meta` key at all — autotriage.py and autocode.py both
+    return `{"summary": ..., "artifact_path": ...}` and nothing else — so the only
+    way this number can reach the row is by being collected. The count itself comes
+    from the real SSE parse inside the real `run_prompt_in_session`.
+    """
+    from workers.sources._common import run_prompt_in_session
+
+    worker_turn_post.report(7)
+
+    async def execute(item):
+        run = await run_prompt_in_session("classify the queue",
+                                          title="triage", source="s")
+        assert run["num_turns"] == 7, (
+            "the stub turn did not report 7 steps through the real parser, so "
+            "this is no longer measuring the drop this item is about")
+        return {"summary": "verdicts written"}      # no `meta` key, like autotriage
+
+    q.enqueue("s", "k")
+    runs = await _drain_one(q, monkeypatch, SimpleNamespace(NAME="s", execute=execute))
+    assert _meta_of(runs[0]).get("num_turns") == 7, (
+        f"the row does not carry the 7 steps its one turn reported: {_meta_of(runs[0])}")
+    # And the turn was a real loopback POST rather than a call stubbed at both
+    # ends: its body carried the instruction, so the count on the row is
+    # downstream of the same request a live autotriage tick sends.
+    assert worker_turn_post[0]["text"] == "classify the queue", (
+        "the turn was asked something else, so this step count did not arrive on "
+        f"the payload a real run sends: {worker_turn_post[0].get('text')!r}")
+
+
+async def test_a_two_turn_job_records_the_sum_and_not_the_last_turn(q, monkeypatch, worker_turn_post):
+    """Clause 2: 3 then 5 is 8, because the field is the job's steps.
+
+    #583 wants to predict how long a job will take, and a job whose turns are
+    3 and 5 took eight steps. Reading the last turn only would have been the
+    lazier implementation and would have passed clause 1, so this is the test that
+    tells the two apart — owed_check.py runs a turn per owed item, and board_steward
+    likewise, so multi-turn jobs are ordinary here, not a corner.
+    """
+    from workers.sources._common import run_prompt_in_session
+
+    worker_turn_post.report(3, 5)
+
+    async def execute(item):
+        first = await run_prompt_in_session("first pass", title="p1", source="s")
+        second = await run_prompt_in_session("second pass", title="p2", source="s")
+        assert (first["num_turns"], second["num_turns"]) == (3, 5)
+        return {"summary": "two passes"}
+
+    q.enqueue("s", "k")
+    runs = await _drain_one(q, monkeypatch, SimpleNamespace(NAME="s", execute=execute))
+    meta = _meta_of(runs[0])
+    assert meta.get("num_turns") == 8, (
+        f"a job whose turns reported 3 and 5 must record 8 steps, got {meta}")
+
+
+async def test_a_run_killed_at_its_cap_keeps_the_steps_it_already_took(q, monkeypatch, worker_turn_post):
+    """Clause 3, timeout arm: the count of the turns that FINISHED, on the same key.
+
+    A run killed at `max_duration_seconds` is the population #583 and #1554 both
+    want a denominator for, and it is the arm that has no handler return to read a
+    number from. One real turn reports 6 steps, the job then sleeps past the 1 s cap
+    the way `test_a_timed_out_run_still_records_how_much_it_had_externalised` drives
+    the same path — so 6 is exactly how far the run got, and the turn still in
+    flight when the cap fired contributes nothing rather than a zero.
+    """
+    from workers.sources._common import run_prompt_in_session
+
+    worker_turn_post.report(6)
+
+    async def execute(item):
+        run = await run_prompt_in_session("long haul", title="slow", source="s")
+        assert run["num_turns"] == 6
+        await asyncio.sleep(5)                    # past the 1 s pool timeout
+        return {"summary": "never reaches here"}
+
+    q.enqueue("s", "k")
+    runs = await _drain_one(q, monkeypatch, SimpleNamespace(NAME="s", execute=execute),
+                            cfg={"max_duration_seconds": 1})
+    meta = _meta_of(runs[0])
+    assert meta.get("pool_timeout") is True, f"this is not the timeout arm: {meta}"
+    assert meta.get("num_turns") == 6, (
+        f"a run killed after one finished turn of 6 steps must record 6, got {meta}")
+
+
+async def test_a_run_that_raised_keeps_the_steps_it_already_took(q, monkeypatch, worker_turn_post):
+    """Clause 3, exception arm — the other death, and the one with no return value.
+
+    Same 6 steps from one real finished turn, then the handler raises. This is the
+    arm #2037 exists for: a death used to record the exception and nothing else, so
+    how far the run got was not on the row at all.
+    """
+    from workers.sources._common import run_prompt_in_session
+
+    worker_turn_post.report(6)
+
+    async def execute(item):
+        run = await run_prompt_in_session("doomed pass", title="die", source="s")
+        assert run["num_turns"] == 6
+        raise RuntimeError("engine refused the prompt")
+
+    q.enqueue("s", "k")
+    runs = await _drain_one(q, monkeypatch, SimpleNamespace(NAME="s", execute=execute))
+    meta = _meta_of(runs[0])
+    assert meta.get("exception") == "RuntimeError", f"not the death arm: {meta}"
+    assert meta.get("num_turns") == 6, (
+        f"a run that died after one finished turn of 6 steps must record 6, got {meta}")
+
+
+async def test_a_job_that_ran_no_turn_omits_the_count_rather_than_calling_it_zero(
+        q, monkeypatch):
+    """Clause 4: "not measured" must stay a different shape from "took no steps".
+
+    A `skipped` run is most of what autotriage and board_steward produce on a quiet
+    tick, and this is the query the item's own check runs:
+    `SUM(CASE WHEN meta_json LIKE '%num_turns%' THEN 1 ELSE 0 END)`. Writing a
+    `"num_turns": null` onto every one of those rows would make that count non-zero
+    for the emptiest possible reason — it would count rows that measured nothing —
+    which is the ambiguity the zero set was. So the key is absent here, and the
+    test asserts absence rather than a particular null, because the difference is
+    the whole content of this clause.
+    """
+    async def execute(item):
+        return {"status": "skipped", "summary": "nothing owed"}
+
+    q.enqueue("s", "k")
+    runs = await _drain_one(q, monkeypatch, SimpleNamespace(NAME="s", execute=execute))
+    meta = _meta_of(runs[0])
+    assert "num_turns" not in meta, (
+        f"a job that ran no harness turn must not be stamped with a step count; "
+        f"a null or a 0 here reads as a measurement: {meta}")
+    assert runs[0]["status"] == "skipped", runs[0]
+
+
+async def test_a_turn_that_reported_no_count_leaves_the_key_absent(q, monkeypatch, worker_turn_post):
+    """Clause 4's other edge: the turn ran, and the harness never said how long.
+
+    A `done` event with no `num_turns` is not a turn that took zero steps. This is
+    the arm a wedged engine produces, and a `0` would be the one value a later
+    reader could not tell apart from an idle job.
+    """
+    from workers.sources._common import run_prompt_in_session
+
+    worker_turn_post.report(None)
+
+    async def execute(item):
+        run = await run_prompt_in_session("wedged", title="wedged", source="s")
+        assert run["num_turns"] is None, "the stub turn reported a count after all"
+        return {"summary": "turn ended without a count"}
+
+    q.enqueue("s", "k")
+    runs = await _drain_one(q, monkeypatch, SimpleNamespace(NAME="s", execute=execute))
+    meta = _meta_of(runs[0])
+    assert "num_turns" not in meta, (
+        f"a turn that never reported a count must leave the key absent, not 0: {meta}")
+
+
+async def test_a_source_that_reports_its_own_count_keeps_it(q, monkeypatch, worker_turn_post):
+    """Clause 5: the collector fills gaps, it does not overrule a report.
+
+    Six sources already write `num_turns` into the meta they return
+    (`workers/sources/youtube_digest.py:901`, `bench_mine.py:920`,
+    `session_distill.py:342`, `arch_review.py:1928`, `deep_research.py:639` and the
+    autonomy path at `app/autonomy.py:4393`), and some report a subset of the job's
+    turns — youtube_digest reports one turn's count, not a sum. Overwriting those
+    with the collected aggregate would silently change the meaning of every row they
+    already wrote — 661 of them in the committed witness, from its own
+    `SUM(CASE WHEN meta_json LIKE '%num_turns%' THEN 1 ELSE 0 END)` — so the reported
+    value wins. Here the turn really reports 4 and the handler says 11; the row has
+    to read 11.
+    """
+    from workers.sources._common import run_prompt_in_session
+
+    worker_turn_post.report(4)
+
+    async def execute(item):
+        run = await run_prompt_in_session("self-reported", title="own", source="s")
+        assert run["num_turns"] == 4, (
+            "the collected count would be 4, so this test needs the turn to "
+            "actually report 4 before the handler's 11 can overrule it")
+        return {"summary": "reported myself",
+                "meta": {"num_turns": run["num_turns"] + 7}}
+
+    q.enqueue("s", "k")
+    runs = await _drain_one(q, monkeypatch, SimpleNamespace(NAME="s", execute=execute))
+    meta = _meta_of(runs[0])
+    assert meta.get("num_turns") == 11, (
+        f"a source that reported 11 kept {meta.get('num_turns')!r} — the collected "
+        "4 must fill a gap, not overwrite a report")
+
+
+def test_the_committed_witness_bytes_reproduce_the_zero_set_this_item_is_about():
+    """Clause 6: the report is re-derivable from committed bytes, read-only.
+
+    `backlog/data/workers-runs-2087.db` is an extract of `runs` for
+    `started_at >= '2026-09-03'` whose 13 columns are identical to the live store.
+    The live store is retention-pruned, so without it the claim that autotriage,
+    autocode, owed-check and board-steward carried `num_turns` on ZERO of their
+    runs would be a sentence about a table nobody can open again — and this round's
+    own fix starts making that query non-zero, so after landing it could never be
+    re-checked at all.
+
+    Read `mode=ro`, in place, for the same reason the companion witness test does:
+    a test must not write the artifact it certifies. Two assertions, and the second
+    one is the load-bearing half — a query whose `LIKE` pattern had silently broken
+    would report zero for the four AND zero for everyone else, and read as a clean
+    result. `scheduled-task` and `bench-mine` carrying counts in the same bytes is
+    what proves the instrument distinguishes the two states.
+
+    The exact per-source figures live in `workers-runs-2087.witness.md` and are not
+    asserted here: the extract is frozen so those cannot drift, and pinning them
+    again in Python would only mean a future re-extract trips a test that is not
+    grading anything.
+    """
+    import sqlite3
+    from pathlib import Path
+
+    path = (Path.home() / "obsidian" / "backlog" / "data"
+            / "workers-runs-2087.db")
+    if not path.exists():
+        pytest.skip(f"no vault witness at {path} on this machine")
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        rows = dict(conn.execute(
+            "SELECT source, SUM(CASE WHEN meta_json LIKE '%num_turns%' "
+            "THEN 1 ELSE 0 END) FROM runs WHERE started_at >= '2026-09-03' "
+            "GROUP BY source").fetchall())
+        totals = dict(conn.execute(
+            "SELECT source, COUNT(*) FROM runs WHERE started_at >= '2026-09-03' "
+            "GROUP BY source").fetchall())
+    finally:
+        conn.close()
+
+    for source in ("autotriage", "autocode", "owed-check", "board-steward"):
+        assert totals.get(source, 0) > 0, (
+            f"{source} has no runs in the witness at all, so its zero below is "
+            "an empty result dressed as a measurement")
+        assert rows.get(source, 0) == 0, (
+            f"{source} carries num_turns on {rows[source]} of {totals[source]} "
+            "witnessed runs, so this is no longer the zero set the item filed")
+
+    populated = {s: rows[s] for s in ("scheduled-task", "bench-mine")
+                 if rows.get(s, 0) > 0}
+    assert len(populated) == 2, (
+        f"positive control failed: no `num_turns` in the bytes for scheduled-task "
+        f"or bench-mine ({rows}), so the LIKE pattern is measuring nothing and the "
+        "four zeros above prove nothing either")

@@ -262,7 +262,7 @@ and each stops the reporting of the problem along with the work:
 
 - **`workers.enabled: false` at boot.** `start_worker_pool()`
   (`app/routers/workers.py:765-770`) returns before `WorkerPool` is constructed, so
-  `_scheduler_loop` (`workers/pool.py:960`) never runs at all.
+  `_scheduler_loop` (`workers/pool.py:1001`) never runs at all.
 - **`POST /api/workers/enable {"enabled": false}`.** `app/routers/workers.py:409`
   awaits `pool.stop()`, which clears `_running` and cancels `_scheduler_task`
   (`workers/pool.py:526-531`).
@@ -270,7 +270,7 @@ and each stops the reporting of the problem along with the work:
 What either one silences is everything that rides that loop, not just dispatch: the
 parse announcement and both stall alarms above, `workers/service_probe.py`'s port
 watch, and — because the sources that *create* work are polled from `_scheduler_pass`
-on the same loop (`workers/pool.py:982`, body `:987`) — the entire autonomy/nightly chain,
+on the same loop (`workers/pool.py:1023`, body `:1028`) — the entire autonomy/nightly chain,
 including the job that would have written the alert. `/api/workers/status` and
 `/health` both publish the state honestly (`{"initialized": false}` on the boot
 route, with no `pool` key at all, because `get_queue()` raises to tell "switched off"
