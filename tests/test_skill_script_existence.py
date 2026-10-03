@@ -262,20 +262,38 @@ def test_the_retired_repo_ledger_entry_is_not_an_allowlist_any_more(tmp_path):
     not merely untidy — it is a permanently open permit for that exact absent
     path, granted by a line nobody can point to in the corpus any more. Retiring
     `tests/test_system_health_check_frontend_endpoint.py` therefore has to be
-    *observable*: before this commit the synthetic citation below came back with
-    the note `"system-health-check; test never landed"` and was excused; after
-    it, the same citation is an offender. That flip is the clause, and it is
-    asserted as a whole-record comparison rather than `any(...)` so a hit with a
-    note still present fails rather than passing a membership test.
+    *observable*, and it has stayed observable through a second flip: the entry
+    began as an excuse for an absent path, #1417 removed it once the skill's lone
+    citation lost its `~/lloyd/` anchor — which made that same citation an
+    unexcused offender, the flip this node shipped with — and #2129 then landed the
+    file, after which the citation is no finding at all, because a path that exists
+    is not drift and an allowance for it would permit nothing.
+
+    So the claim is two records over ONE citation and two roots, and they only mean
+    anything together. Over a tree without the file the scan must still return the
+    unexcused hit: that is what proves the rule is not blind, since a scan that
+    reported nothing at all would satisfy "no findings" for entirely the wrong
+    reason. Over the real checkout, where the file's existence is asserted beside
+    it as a node-for-node fact, the scan must return nothing. Both are whole-record
+    comparisons rather than `any(...)`, so a hit that came back carrying a ledger
+    note fails here instead of slipping through a membership test.
     """
     skill_lint = _load_skill_lint()
     retired = "tests/test_system_health_check_frontend_endpoint.py"
     assert retired not in skill_lint.KNOWN_ABSENT_SCRIPTS, (
         "the entry is back, so the path is silently allowed again")
+    citation = f"Run `~/lloyd/{retired}` for the frontend certificate.\n"
 
+    empty_checkout = tmp_path / "checkout"
+    (empty_checkout / "tests").mkdir(parents=True)
     hits = skill_lint.check_script_paths(
-        f"Run `~/lloyd/{retired}` for the frontend certificate.\n",
-        skill_dir=tmp_path, repo_root=ROOT)
+        citation, skill_dir=tmp_path, repo_root=empty_checkout)
     assert hits == [{"path": retired, "known_stale": ""}], (
-        f"a skill citing the retired path must be reported as an unexcused "
-        f"absent script: {hits}")
+        f"the citation must be reported as an unexcused absent script whenever the "
+        f"file is not in the tree it is scanned against: {hits}")
+
+    assert (ROOT / retired).is_file(), (
+        f"{retired} is the file #2129 was opened to write; with it gone, the empty "
+        "result below would be the rule going blind, not the citation being met")
+    assert skill_lint.check_script_paths(
+        citation, skill_dir=tmp_path, repo_root=ROOT) == []

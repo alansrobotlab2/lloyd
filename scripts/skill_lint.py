@@ -459,8 +459,11 @@ _TEMPLATE_PATHS = re.compile(r"[<>{}*]|\.\.\.|path/to|exact/path|example|placeho
 # `test_the_absent_script_ledger_only_carries_drift_still_cited` exists to
 # catch. The exact set is pinned by
 # `test_the_absent_script_ledger_holds_exactly_the_cited_debts`; the
-# never-landed test that entry recorded is still owed debt and is named on
-# backlog #1417, not here.
+# never-landed test that entry recorded landed on 2026-10-03 as
+# `tests/test_system_health_check_frontend_endpoint.py` (item #2129, the
+# successor #1417's retired entry named for the owed scope), which is also why
+# no entry for it is re-added below — an allowance for a file in the checkout
+# excuses nothing and keeps the debt alive on paper.
 KNOWN_ABSENT_SCRIPTS: dict[str, str] = {
     "scripts/memory/extract-session-log.py":
         "historical-knowledge-refresh; superseded by extract-transcript.py",

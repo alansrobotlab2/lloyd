@@ -476,7 +476,15 @@ PATH_KNOWN_UNFIXED: set[str] = {
     "skills/poisoned-worker-troubleshoot/SKILL.md::vault:logs/autonomy_runs/run_",
     "skills/powerpoint/SKILL.md::repo:scripts/office/soffice.py",
     "skills/system-health-check/SKILL.md::repo:tests/test_health_skill_docs_live_fleet.py",
-    "skills/system-health-check/SKILL.md::repo:tests/test_system_health_check_frontend_endpoint.py",
+    # `tests/test_system_health_check_frontend_endpoint.py` left this set on 2026-10-03
+    # with the node that landed it (#2129). The path is in the checkout now, so the
+    # allowance excused nothing: an allowance for a file that exists is how a ledger
+    # starts lying about what is owed, and this row was already dead before the file
+    # landed — the skill's only citation of it lost its `~/lloyd/` anchor in the
+    # 2026-09-23 edit, which is the state
+    # `test_the_absent_script_ledger_only_carries_drift_still_cited` catches. Its two
+    # siblings (the lines this comment sits between) stay: those paths are still absent
+    # and still cited, at `check-components.md:57` and `:61`.
     "skills/system-health-check/SKILL.md::repo:tests/test_system_health_check_skill_fleet.py",
     "skills/voice-clone-sample/SKILL.md::repo:references/ed/ed_001.wav",
     "skills/voice-clone-sample/SKILL.md::repo:references/ed/ed_002.wav",
