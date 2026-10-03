@@ -21,11 +21,22 @@ here rather than asserted in prose:
   so a second regex cannot drift from the one that decides IV de-duplication.
   Pinned by muting that module's regex and requiring both readers to go blind.
 
+* **A delivery is a name the skill library serves.** Both usage write sites hand
+  the parser the whole turn prompt, so `<skill name="X">` quoted inside a backlog
+  item body used to be stored as a delivery: 9 of the 78 distinct names ever
+  stored in `usage.skills` resolve to no directory, on real turns, and the only two
+  `route: "dispatch"` rows in the table came from a doc example on a box where
+  `harness.skill_dispatch` is not configured at all. The gate sits at the one
+  walk's output (#2134), pinned here and in `tests/test_skill_lint_size.py`
+  (the sizes) and `tests/test_turn_options.py` (the IV de-dup set).
+
 Not instrumented by this change, and named so the next reader does not assume it:
 `app/run_recorder.py`'s background-run row (post-landing on #783), the
 `skills_read` tool path, and the `dispatch` route, whose
 `harness.skill_dispatch.enabled` key is absent from `config.yaml` and is a
-human edit.
+human edit. Rewriting the 9 historical phantom rows is out of scope by contract:
+`usage.db` is append-only to this change, so the live re-measure of that number
+covers turns written after landing.
 """
 
 from __future__ import annotations
@@ -36,6 +47,7 @@ import sqlite3
 
 from app import usage_store
 from app.harness import skill_dispatch as sd
+from tests._skill_phantoms import QUOTED_MARKUP, install_skill_names
 
 #: The `usage` table as it stood before #783: the 14 columns of
 #: `usage_store._init_schema` including the prefix-miss pair, no skill column.
@@ -72,7 +84,7 @@ def _real_prefetch_text(first_body: str = "body\n",
 
     Every route assertion below reads this, so the markup is `prefetch`'s and not
     a copy: the attribute that separates `prefetch` from `prefetch_excerpt` is
-    written at `app/prefetch.py:941` and nowhere else in this file. A hand-written
+    written at `app/prefetch.py:1316` and nowhere else in this file. A hand-written
     fixture would keep passing after a renderer change that dropped or renamed
     `excerpt="true"` — the recorded route would silently call every excerpt a
     full body, which is the mislabel this column exists to remove.
@@ -358,10 +370,17 @@ def test_an_excerpt_render_is_a_different_route_from_a_full_body():
 
 def test_a_skill_named_in_both_renders_is_recorded_once_per_route():
     """A repeated name/route pair would double the `requests` count for a turn
-    that only spent its tokens once."""
-    text = ('<skill name="alpha" score="1.0">\nb\n</skill>\n'
-            '<skill name="alpha" score="1.0">\nb again\n</skill>')
-    assert sd.skill_deliveries(text) == [{"name": "alpha", "route": "prefetch"}]
+    that only spent its tokens once.
+
+    Named with a skill the library serves. It used to be `alpha`, and #2134 is
+    why that no longer proves anything: an unresolvable name is dropped at the
+    walk, so a phantom rendered twice would have asserted `[] == []` and stayed
+    green with dedup deleted. `alpha` is still asserted about — as a phantom, in
+    `test_quoted_skill_markup_is_not_recorded_as_a_delivery`.
+    """
+    text = (f'<skill name="{FULL_SKILL}" score="1.0">\nb\n</skill>\n'
+            f'<skill name="{FULL_SKILL}" score="1.0">\nb again\n</skill>')
+    assert sd.skill_deliveries(text) == [{"name": FULL_SKILL, "route": "prefetch"}]
 
 
 def test_a_prefetched_turn_produces_a_usage_row_naming_skill_and_route():
@@ -379,6 +398,120 @@ def test_a_prefetched_turn_produces_a_usage_row_naming_skill_and_route():
          "input_tokens": 500, "output_tokens": 25,
          "cache_create": 0, "cache_read": 400},
     ]
+
+
+# ── #2134 clause 1/2: only a name the skill library serves is a delivery ──
+
+
+def test_quoted_skill_markup_is_not_recorded_as_a_delivery():
+    """#2134 clause 1, over the library this box actually has.
+
+    `QUOTED_MARKUP` is the text a turn gets when a backlog item body or a doc
+    example is quoted into its prompt: the only `<skill>` tags in it quote the
+    mechanism instead of using it. Before the gate this returned three
+    deliveries — and `usage.db` shows them on real rows, one of them as
+    `route: "dispatch"`, on a box with no `harness.skill_dispatch` key.
+
+    The library is not stubbed here, which is the point: the acceptance
+    expression is `skill_deliveries('<skill name="X">…') == []` against the
+    production resolver, not against a fixture. `install_skill_names` supplies the
+    hermetic counterpart below, so neither test trusts the vault's contents on its
+    own.
+
+    The denominator is named before the assertion, because the gate fails OPEN when
+    the library cannot be read: a run with the vault unmounted would otherwise
+    report these three names as delivered and read as a broken filter rather than
+    as an unreadable skill root.
+    """
+    assert sd.known_skill_names() is not None, (
+        "no skill root was readable, so the gate below is fail-open by design and "
+        "cannot say whether a phantom name is dropped"
+    )
+    assert sd.skill_deliveries(QUOTED_MARKUP) == []
+    assert sd.injected_skill_names(QUOTED_MARKUP) == set()
+    assert sd.skill_delivery_sizes(QUOTED_MARKUP) == []
+
+
+def test_the_drop_is_the_library_answering_not_a_list_of_bad_names(monkeypatch):
+    """The same bytes, the opposite answer, with only the library changed.
+
+    That the phantom names are absent above is only evidence about the product if
+    the gate asks a resolver rather than comparing against a denylist copied into
+    the parser. Serving `alpha` from the library — nothing else about the text or
+    the code moves — makes it a delivery again, and the other two stay dropped in
+    the same string.
+    """
+    install_skill_names(monkeypatch, "alpha")
+    assert sd.skill_deliveries(QUOTED_MARKUP) == [{"name": "alpha",
+                                                   "route": "prefetch"}]
+    assert sd.injected_skill_names(QUOTED_MARKUP) == {"alpha"}
+
+
+def test_the_one_tag_regex_still_decides_what_counts(monkeypatch):
+    """No second scanner: with the module's single skill-tag regex muted, every
+    reader goes blind even with the gate wide open.
+
+    A filter implemented as its own pass over the text — or one kept by a caller —
+    would keep reporting names here, which is how two parsers over one markup
+    start disagreeing about what a delivery is.
+    """
+    install_skill_names(monkeypatch, FULL_SKILL, EXCERPT_SKILL)
+    assert len(sd.skill_deliveries(PREFETCH_TEXT)) == 2, (
+        "the gate is not open in this fixture, so mutating the regex below would "
+        "prove nothing about it"
+    )
+
+    class _Blind:
+        @staticmethod
+        def finditer(_text):
+            return iter(())
+
+    monkeypatch.setattr(sd, "_SKILL_TAG_RE", _Blind())
+    assert sd.skill_deliveries(PREFETCH_TEXT) == []
+    assert sd.skill_delivery_sizes(PREFETCH_TEXT) == []
+    assert sd.injected_skill_names(PREFETCH_TEXT) == set()
+
+
+def test_the_gate_keeps_every_skill_the_renderer_actually_injected():
+    """#2134 clause 2, the positive control: a name the library serves is never
+    dropped, and its route survives.
+
+    Read over `PREFETCH_TEXT` — the output of `prefetch._format_context`, the
+    renderer that writes both tag forms — and against the live resolver, with the
+    denominator named first: an unreadable library returns `None`, and the gate
+    fails OPEN on `None` rather than treating it as "no skill exists", so a
+    control that skipped that check could pass in a run where the vault was
+    unreachable and every real delivery had been kept by the fallback instead.
+    """
+    known = sd.known_skill_names()
+    assert known is not None, (
+        "the skill library could not be read, so this control cannot tell a kept "
+        "delivery from a fail-open one"
+    )
+    assert {FULL_SKILL, EXCERPT_SKILL} <= known, (
+        f"the fixture's two names are not in the {len(known)} the library serves, "
+        "so the routes asserted below would be describing nothing"
+    )
+    assert sd.skill_deliveries(PREFETCH_TEXT) == [
+        {"name": FULL_SKILL, "route": "prefetch"},
+        {"name": EXCERPT_SKILL, "route": "prefetch_excerpt"},
+    ]
+    assert [(d["name"], d["route"]) for d in sd.skill_delivery_sizes(PREFETCH_TEXT)] == [
+        (FULL_SKILL, "prefetch"), (EXCERPT_SKILL, "prefetch_excerpt")
+    ]
+    assert sd.injected_skill_names(PREFETCH_TEXT) == {FULL_SKILL, EXCERPT_SKILL}
+
+
+def test_a_phantom_beside_a_real_injection_loses_only_the_phantom():
+    """One prompt carrying both: the quotations and a genuine injection. The
+    turn that spends six thousand characters of protocol must still be booked,
+    or the fix would be a blinder rather than a filter."""
+    text = QUOTED_MARKUP + "\n" + PREFETCH_TEXT
+    assert sd.skill_deliveries(text) == [
+        {"name": FULL_SKILL, "route": "prefetch"},
+        {"name": EXCERPT_SKILL, "route": "prefetch_excerpt"},
+    ]
+    assert sd.injected_skill_names(text) == {FULL_SKILL, EXCERPT_SKILL}
 
 
 # ── the chat-turn write sites actually pass the deliveries ───────────────
@@ -725,3 +858,68 @@ def test_a_fault_after_the_result_row_does_not_book_the_turn_twice(tmp_path, mon
     rows = _usage_rows()
     assert len(rows) == 1, f"one turn, one usage row; got {len(rows)}"
     assert (rows[0]["input_tokens"], rows[0]["output_tokens"]) == (4000, 50)
+
+
+# ── #2134 clause 4: a turn that only quotes the markup stores nothing ─────
+
+
+def test_a_turn_that_only_quotes_skill_markup_stores_no_skill_dimension(
+        tmp_path, monkeypatch):
+    """#2134 clause 4, driven through `_run_turn` like the two turns above.
+
+    The prompt is `QUOTED_MARKUP` plus a question — a turn whose `<skill>` tags
+    are all quotations, the shape that put `{"name": "X", "route": "prefetch"}`
+    and `{"name": "{rule.skill}", "route": "dispatch"}` on production rows. The
+    row it writes now carries NULL, and `skill_breakdown` publishes no phantom
+    axis, which is what the dashboard's `by_skill_24h` reads.
+
+    Asserted first, because it is the half that is easy to get wrong from the
+    other side: the quotation still reaches the model verbatim. This change is
+    about what is *recorded*; a fix that edited the prompt instead would be
+    deleting evidence of a skill from a turn that did quote one.
+    """
+    import asyncio
+
+    prefetched = QUOTED_MARKUP + "\nwhat does the doc example mean?"
+    seen = asyncio.run(_drive_run_turn(
+        tmp_path, monkeypatch, prefetched=prefetched,
+        events=[{"type": "text_delta", "text": "an example"}, _fake_result_event()]))
+
+    user_contents = [m["content"] for m in seen["harness_messages"]
+                     if m.get("role") == "user"]
+    assert prefetched in user_contents, (
+        "the quotation stopped reaching the prompt: the record is what this "
+        "change is allowed to change"
+    )
+
+    rows = _usage_rows()
+    assert len(rows) == 1, f"one turn, one usage row; got {len(rows)}"
+    assert rows[0]["skills"] is None, (
+        f"a turn whose markup was only quoted must store NULL, not a phantom row: "
+        f"{rows[0]['skills']!r}"
+    )
+    assert usage_store.skill_breakdown(hours=24) == [], (
+        "a phantom delivery would still reach the published per-skill breakdown"
+    )
+
+
+def test_a_turn_quoting_markup_beside_an_injection_stores_only_the_skill_that_arrived(
+        tmp_path, monkeypatch):
+    """The same driven path with both in one prompt: three quotations and a real
+    body plus excerpt. Only what the library serves is booked, and the real
+    routes are untouched — the filter must not read as a turn that delivered
+    nothing."""
+    import asyncio
+
+    prefetched = QUOTED_MARKUP + "\n" + _real_prefetch_text(
+        "full protocol body\n", "one excerpt line\n")
+    asyncio.run(_drive_run_turn(
+        tmp_path, monkeypatch, prefetched=prefetched,
+        events=[{"type": "text_delta", "text": "working"}, _fake_result_event()]))
+
+    rows = _usage_rows()
+    assert len(rows) == 1, f"one turn, one usage row; got {len(rows)}"
+    assert json.loads(rows[0]["skills"]) == [
+        {"name": FULL_SKILL, "route": "prefetch"},
+        {"name": EXCERPT_SKILL, "route": "prefetch_excerpt"},
+    ], rows[0]["skills"]

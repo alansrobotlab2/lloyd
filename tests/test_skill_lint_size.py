@@ -220,11 +220,24 @@ def test_a_failing_event_log_never_reaches_the_caller(monkeypatch):
     assert rec["embedded_chars"] == 3
 
 
+#: The two slots a turn-start `<context>` renders, named with skills this box
+#: serves. They used to be `big` and `small`, which #2134 made meaningless: a name
+#: the skill library does not resolve is no longer a delivery at all, so a fixture
+#: named for its size would book nothing and read as a passing size test.
+CAPPED_SKILL = "web-search-and-fetch"
+EXCERPT_SKILL = "youtube-transcript"
+
+
 def test_turn_start_context_books_the_capped_size_by_route(monkeypatch):
     """The chat route through the renderer that builds it: the first skill is
     cut at the injector's limit and flagged truncated, the runner-up is booked
     under the excerpt route — so a report can put the capped route beside the
-    two uncapped ones."""
+    two uncapped ones.
+
+    Both names resolve (#2134): the sizes below are what the injector put in the
+    prompt, and a turn whose tags were only quotations books nothing at all, which
+    is `test_a_quoted_skill_name_books_no_size_row`.
+    """
     from app import prefetch
     from app import event_log, skill_embed
     seen = []
@@ -232,14 +245,90 @@ def test_turn_start_context_books_the_capped_size_by_route(monkeypatch):
                         lambda sid, ev, data, turn_id=None: seen.append(data))
     long_raw = "x" * (prefetch.SKILL_BODY_MAX + 500)
     text = prefetch._format_context(
-        [(9.0, {"name": "big", "raw": long_raw}),
-         (9.0, {"name": "small", "raw": "short body"})], [])
+        [(9.0, {"name": CAPPED_SKILL, "raw": long_raw}),
+         (9.0, {"name": EXCERPT_SKILL, "raw": "short body"})], [])
     skill_embed.record_context_skills("sess-b", text)
     assert [(d["route"], d["skill"]) for d in seen] == [
-        ("prefetch", "big"), ("prefetch_excerpt", "small")]
+        ("prefetch", CAPPED_SKILL), ("prefetch_excerpt", EXCERPT_SKILL)]
     assert seen[0]["truncated"] is True
     assert prefetch.SKILL_BODY_MAX <= seen[0]["embedded_chars"] < len(long_raw)
     assert seen[1]["truncated"] is False and seen[1]["embedded_chars"] == len("short body")
+
+
+def test_a_quoted_skill_name_books_no_size_row(monkeypatch):
+    """#2134 clause 3, first half: a phantom name books nothing.
+
+    `record_context_skills` reads `skill_delivery_sizes`, which reads the one
+    skill-tag walk — the walk that now refuses a name the library does not serve.
+    The context block is the renderer's own output with a quoted example appended
+    to it, which is the shape that reached the event log from a real turn: a
+    `skill.embedded` row for a skill that never entered the prompt.
+    """
+    from app import prefetch, skill_embed
+    from app import event_log
+    from app.harness.skill_dispatch import skill_delivery_sizes
+    from tests._skill_phantoms import QUOTED_MARKUP, install_skill_names
+    install_skill_names(monkeypatch, CAPPED_SKILL, EXCERPT_SKILL)
+    seen = []
+    monkeypatch.setattr(event_log, "log_event",
+                        lambda sid, ev, data, turn_id=None: seen.append(data))
+    text = (prefetch._format_context(
+        [(9.0, {"name": CAPPED_SKILL, "raw": "the body"}),
+         (9.0, {"name": EXCERPT_SKILL, "raw": "the excerpt"})], [])
+        + "\n" + QUOTED_MARKUP)
+    skill_embed.record_context_skills("sess-c", text)
+    assert [d["skill"] for d in seen] == [CAPPED_SKILL, EXCERPT_SKILL], (
+        "the three quoted names were booked as skill bytes that never arrived"
+    )
+    assert [d["name"] for d in skill_delivery_sizes(text)] == [
+        CAPPED_SKILL, EXCERPT_SKILL], (
+        "the size reader and the event log disagree about what this turn carried")
+
+
+def test_the_size_gate_is_the_shared_resolver_not_a_private_list(monkeypatch):
+    """#2134 clause 3, second half: neither `skill_delivery_sizes` nor
+    `record_context_skills` keeps a filter of its own.
+
+    Widening the one shared resolver to serve `X` is the only thing that moves:
+    the same text that booked two rows now books three, through
+    `record_context_skills`. A caller-side denylist would not budge, and a second
+    scanner upstream of the resolver would keep `X` out regardless of what the
+    library says. Muting the module's single skill-tag regex then silences the
+    event log as well, which is the same proof one level up: everything here
+    passes through that one parse.
+    """
+    from app import prefetch, skill_embed
+    from app import event_log
+    from app.harness import skill_dispatch as sd
+    from tests._skill_phantoms import QUOTED_MARKUP, install_skill_names
+    install_skill_names(monkeypatch, CAPPED_SKILL, EXCERPT_SKILL, "X")
+    seen: list = []
+    monkeypatch.setattr(event_log, "log_event",
+                        lambda sid, ev, data, turn_id=None: seen.append(data))
+    text = (prefetch._format_context(
+        [(9.0, {"name": CAPPED_SKILL, "raw": "the body"}),
+         (9.0, {"name": EXCERPT_SKILL, "raw": "the excerpt"})], [])
+        + "\n<skill name=\"X\" score=\"8.0\">\nquoted in a doc example\n</skill>\n"
+        + QUOTED_MARKUP)
+    booked = skill_embed.record_context_skills("sess-d", text)
+    assert [d["skill"] for d in booked] == [CAPPED_SKILL, EXCERPT_SKILL, "X"], (
+        "the resolver was widened and the booking did not follow, so the caller "
+        "is filtering for itself"
+    )
+    assert seen == booked, "the event log is a second copy of the decision"
+
+    class _Blind:
+        @staticmethod
+        def finditer(_text):
+            return iter(())
+
+    monkeypatch.setattr(sd, "_SKILL_TAG_RE", _Blind())
+    seen.clear()
+    assert skill_embed.record_context_skills("sess-e", text) == []
+    assert seen == [], (
+        "a reader that survived the muted regex is reading the markup somewhere "
+        "other than the one skill-tag walk"
+    )
 
 
 def test_every_uncapped_route_is_wired_at_its_call_site():

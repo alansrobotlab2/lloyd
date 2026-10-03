@@ -452,3 +452,52 @@ def test_a_racily_fresh_file_is_never_cached(world, monkeypatch):
     text = json.dumps(doc, indent=2)
     path.write_text(text)
     assert SessionSnapshot.load(sid, world["dir"]).plan_mode
+
+
+# ── #2134 clause 5: what the dispatch hook is told has already arrived ─────
+
+def test_the_dispatch_hook_is_told_only_names_the_library_serves(world, monkeypatch):
+    """`already_injected` is the set that withholds a delivery, so a phantom in it
+    shadows a real skill of the same name and the turn never gets its protocol.
+
+    Driven through the stream build rather than by calling `injected_skill_names`
+    a second time: the prefetched text is what the prefetch stub returns, and the
+    set is read back out of the hook the builder actually installed — the same
+    `_recorded` closure the golden table above describes, so this is the seam
+    `arm_skill_dispatch` crosses, not a re-derivation of the parse.
+
+    The prompt this turn carries quotes the mechanism three times
+    (`QUOTED_MARKUP`) and genuinely injects two skills, so the one assertion holds
+    both halves: every injected name survives, and no quotation is in the set.
+    Before #2134 all five names reached the hook — the two real ones and the three
+    quotations — because the parser could not tell a rendered tag from a tag
+    quoted in prose about the renderer.
+    """
+    from app import prefetch
+    from tests._skill_phantoms import (PHANTOM_NAMES, QUOTED_MARKUP,
+                                       install_skill_names)
+
+    full, excerpt = "web-search-and-fetch", "youtube-transcript"
+    install_skill_names(monkeypatch, full, excerpt)
+
+    async def _prefetch_marked_up(text, session_id="", plan_mode=False, **_):
+        return QUOTED_MARKUP + "\n" + prefetch._format_context(
+            [(9.9, {"name": full, "raw": "the protocol"}),
+             (4.4, {"name": excerpt, "raw": "one line of it"})], [])
+
+    for mod in _modules():
+        monkeypatch.setattr(mod, "prefetch_context_async", _prefetch_marked_up,
+                            raising=False)
+
+    got = capture(world, "stream", "chat")
+    (dispatch,) = [entry for entry in got["options"]["hooks"]["pre"]
+                   if entry["name"] == "skill_dispatch"]
+    handed = dispatch["args"]["already_injected"]
+    assert handed == sorted([full, excerpt]), (
+        f"the set handed to the dispatcher is {handed}: both injected skills must "
+        "survive and none of the quoted markup may be in it"
+    )
+    assert not set(handed) & set(PHANTOM_NAMES), (
+        f"{sorted(set(handed) & set(PHANTOM_NAMES))} are quoted in the prompt, not "
+        "injected into it"
+    )

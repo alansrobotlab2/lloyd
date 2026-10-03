@@ -383,29 +383,103 @@ def delivered_skill_names(text: str) -> set[str]:
     return set(_DISPATCH_TAG_RE.findall(text))
 
 
+#: Cached answer to "which skill names does the library serve right now":
+#: `(expires_at, the knobs the set was built from, the names)`. The knobs — the
+#: walker and the roots it walks — are part of the key on purpose: a test that
+#: swaps `agent_mcp.skills._iter_skills` or replaces `SKILLS_DIRS` gets a fresh
+#: set instead of the live library's cached one, so nothing has to know this cache
+#: exists in order to test around it. Same lifetime as `_BODY_CACHE`, because the
+#: library changes on a nightly cadence, not a per-turn one.
+_NAMES_CACHE: "tuple[float, tuple[Any, tuple[str, ...]], frozenset[str]] | None" = None
+
+
+def known_skill_names() -> frozenset[str] | None:
+    """Every skill name the library can serve, or None when it cannot be asked.
+
+    The walk is `agent_mcp.skills._iter_skills` — the one the turn-start injector
+    scores and `skill_body` above already reads: a directory under a `SKILLS_DIRS`
+    root with a loadable `SKILL.md`, minus the `status:` values that quarantine it.
+    So this is neither a second registry nor a hand-kept list; it is the same
+    universe that decides which name can appear in a `<skill name="…">` tag in the
+    first place, which is precisely why a name outside it is not a delivery (#2134).
+
+    `None` means the question could not be answered — the import failed, the walk
+    raised, or it yielded no names at all. That is deliberately not the empty set,
+    and a caller must not read it as one: with the vault unmounted or mid-sync the
+    alternative is dropping every *real* delivery, and a turn that spent six
+    thousand characters of skill protocol in its prompt would be recorded as
+    delivering nothing. This filter exists to remove false rows; a column gone
+    quietly dark is the worse failure, so the empty-walk case says so in the log
+    before it stops filtering.
+    """
+    global _NAMES_CACHE
+    try:
+        from agent_mcp.skills import SKILLS_DIRS, _iter_skills as walk
+    except Exception as exc:  # pragma: no cover - only at a broken install
+        logger.warning("skill_dispatch: cannot import the skill library, not "
+                       "filtering deliveries: %s", exc)
+        return None
+    knobs = (walk, tuple(str(p) for p in SKILLS_DIRS))
+    now = time.time()
+    hit = _NAMES_CACHE
+    if hit is not None and hit[1] == knobs and hit[0] > now:
+        return hit[2]
+    try:
+        names = frozenset(str(skill["name"]) for skill in walk() if skill.get("name"))
+    except Exception as exc:
+        logger.warning("skill_dispatch: skill-library walk failed, not filtering "
+                       "deliveries: %s", exc)
+        return None
+    if not names:
+        logger.warning("skill_dispatch: skill-library walk yielded no names over %s; "
+                       "not filtering this turn", list(knobs[1]))
+        return None
+    _NAMES_CACHE = (now + _SKILL_CACHE_TTL_S, knobs, names)
+    return names
+
+
 def _walk_deliveries(context_text: str):
     """Yield `(name, route, body)` once per delivered (name, route) in the text.
 
     The one walk of the one skill-tag regex that both `skill_deliveries` and
     `skill_delivery_sizes` read, so the usage row and the size record cannot
     disagree about which skills were delivered or by which route.
+
+    A name the library does not serve is not yielded at all (#2134). Both readers
+    are fed the *whole turn prompt* — `prefetched_text` is the user message
+    verbatim (`app/routers/messages.py:1086`) — so a `<skill name="X">` quoted
+    inside a backlog item body, or `<skill name="{rule.skill}">` quoted out of a
+    doc example, matches `_SKILL_TAG_RE` exactly as a real injection does. Nine
+    such names reached `usage.skills` that way, among them both
+    `route: "dispatch"` rows the table holds, on a box where dispatch is switched
+    off. Dropping them here rather than in each reader is the point of the walk:
+    `skill_deliveries`, `skill_delivery_sizes`, `injected_skill_names` and the
+    `skill_embed.record_context_skills` that reads the sizes all come through this
+    one place, so none of them can keep a filter of its own and drift from it.
     """
     if not context_text:
         return
+    known = known_skill_names()
     seen: set[tuple[str, str]] = set()
     for match in _SKILL_TAG_RE.finditer(context_text):
+        name = match.group(1)
+        # `None` is "could not ask the library", not "nothing is a skill" — see
+        # `known_skill_names`. Every other answer here must contain the name for
+        # the tag to count, because it is the set the injector renders from.
+        if known is not None and name not in known:
+            continue
         tag_end = context_text.find(">", match.start())
         body_start = len(context_text) if tag_end < 0 else tag_end + 1
         tag = context_text[match.start():body_start]
         route = (ROUTE_DISPATCH if tag.startswith("<skill-dispatch")
                  else ROUTE_PREFETCH_EXCERPT if _EXCERPT_ATTR in tag
                  else ROUTE_PREFETCH)
-        key = (match.group(1), route)
+        key = (name, route)
         if key in seen:
             continue
         seen.add(key)
         close = context_text.find("</skill", body_start)
-        yield key[0], route, context_text[body_start:close if close >= 0 else None]
+        yield name, route, context_text[body_start:close if close >= 0 else None]
 
 
 def skill_deliveries(context_text: str) -> list[dict[str, str]]:
@@ -422,6 +496,12 @@ def skill_deliveries(context_text: str) -> list[dict[str, str]]:
     the *turn's* tokens: a skill rendered twice in one turn is one entry, not two
     requests. A `<skill-dispatch …>` marker matched by the same tag regex is
     attributed to `dispatch`, which is what it is.
+
+    A name `known_skill_names` does not recognise is absent, so text that merely
+    quotes the markup — a backlog item body, a doc example, a format string like
+    `{rule.skill}` — delivers nothing (#2134). That gate is in the walk, not here,
+    which is why `skill_delivery_sizes` and `injected_skill_names` have it too
+    without either carrying a copy.
     """
     return [{"name": name, "route": route}
             for name, route, _body in _walk_deliveries(context_text)]
@@ -446,11 +526,14 @@ def injected_skill_names(context_text: str) -> set[str]:
     """Skills the turn-start prefetch already injected into this turn.
 
     Parses the `<skill name="...">` blocks `_format_context` renders
-    (`app/prefetch.py:933/:941`) rather than reaching into prefetch's internals, so
-    this keeps working if the injector changes shape and cannot accidentally
-    diverge from what actually landed in the prompt. It is the name-only
-    projection of `skill_deliveries` — one parser, and the usage row and the IV
-    guard cannot disagree about which skills were in front of the model.
+    (`app/prefetch.py:1312` for the body, `:1316` for the excerpt) rather than
+    reaching into prefetch's internals, so this keeps working if the injector
+    changes shape and cannot accidentally diverge from what actually landed in the
+    prompt. It is the name-only projection of `skill_deliveries` — one parser, and
+    the usage row and the IV guard cannot disagree about which skills were in
+    front of the model, including over the names the library does not serve: a
+    phantom reaching this set would shadow a real skill of the same name and
+    withhold its delivery (#2134).
     """
     return {delivery["name"] for delivery in skill_deliveries(context_text)}
 
