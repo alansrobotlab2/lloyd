@@ -250,32 +250,88 @@ def test_session_age_prefers_last_active_over_mtime(rs):
     assert rs._session_age_days(p, time.time()) > 190
 
 
+def _run_record(runs: Path, run_id: str, now: float, days_ago: float) -> Path:
+    """Write one run record dated `days_ago` before `now`, named and stamped from it.
+
+    The name and the `completed_at` are both formatted from the same instant, so a reader
+    checking the fixture can see the file agrees with its own frontmatter. The frontmatter
+    carries the `+00:00` form the sweep parses, not a local wall-clock time: a naive stamp
+    is read as UTC by `_run_record_age_seconds`, and a fixture written from local time
+    would put the machine's offset into an age the node is about to assert on.
+    """
+    ts = now - days_ago * 86400
+    p = runs / f"run_24_{time.strftime('%Y%m%d_%H%M%S', time.gmtime(ts))}.md"
+    p.write_text(f"---\nrun_id: {run_id}\ncompleted_at: "
+                 f"'{time.strftime('%Y-%m-%dT%H:%M:%S+00:00', time.gmtime(ts))}'\n"
+                 f"status: success\n---\n\nbody\n")
+    return p
+
+
 def test_run_records_age_by_frontmatter_not_mtime(rs, tmp_path):
     """A bulk operation on 2026-08-22 reset every run record's mtime, which made
     this sweep silently inert — 0 of 3,350 files matched. Age must come from the
-    record's own frontmatter."""
+    record's own frontmatter.
+
+    Both records are dated from the same `now` handed to the sweep, one at four times
+    `RUN_RECORD_MAX_AGE_DAYS` and one at half of it, because a record that has to stay
+    *inside* a 30-day window cannot be a calendar date. The literal this node carried for
+    three weeks — `completed_at: '2026-09-03T12:00:00+00:00'` — was 12 days old when it
+    was written and stopped being a fresh record at 2026-10-03T12:00Z, that date plus the
+    window to the second; the sweep then found two candidates instead of one and the node
+    went red on the calendar while the code it pins had not changed. A retention sweep's
+    own test going red for that reason reads exactly like the inertness this node exists to
+    catch, which is the opposite of what a regression test is for.
+    """
     runs = tmp_path / "autonomy-runs" / "24"
     runs.mkdir(parents=True)
     monkey = rs.AUTONOMY_RUNS_DIR
     assert monkey  # fixture wired it
 
-    old = runs / "run_24_20260329_120000.md"
-    old.write_text("---\nrun_id: x\ncompleted_at: '2026-03-29T12:00:00+00:00'\n"
-                   "status: success\n---\n\nbody\n")
-    fresh = runs / "run_24_20260903_120000.md"
-    fresh.write_text("---\nrun_id: y\ncompleted_at: '2026-09-03T12:00:00+00:00'\n"
-                     "status: success\n---\n\nbody\n")
-    # Both look brand-new on disk, exactly like the post-bulk-operation state.
     now = time.time()
+    horizon = rs.RUN_RECORD_MAX_AGE_DAYS
+    old = _run_record(runs, "x", now, 4 * horizon)
+    fresh = _run_record(runs, "y", now, horizon / 2)
+    # Both look brand-new on disk, exactly like the post-bulk-operation state.
     for p in (old, fresh):
         os.utime(p, (now, now))
 
     count, _ = rs.sweep_autonomy_runs(apply=False, now=now)
-    assert count == 1, "the March record should be selected despite a fresh mtime"
+    assert count == 1, (
+        f"the {4 * horizon}-day record should be selected despite a fresh mtime")
 
     rs.sweep_autonomy_runs(apply=True, now=now)
     assert not old.exists()
     assert fresh.exists()
+
+
+@pytest.mark.parametrize("shift_days", [0, 400, 4000])
+def test_run_record_ages_track_the_clock_the_sweep_is_handed(rs, tmp_path,
+                                                             shift_days):
+    """#2122 clause 2: the pass above is not a date-dependent accident.
+
+    `test_run_records_age_by_frontmatter_not_mtime` was green for three weeks and red on
+    2026-10-03T12:00Z with its code untouched, because one of its records had to be inside
+    `RUN_RECORD_MAX_AGE_DAYS` and was written as a calendar date instead. Here the same two
+    records are built against three different clocks — today, 400 days on (past the date
+    that killed the old fixture), and 4,000 days on — and the sweep is handed the clock its
+    records were dated against each time, so a candidate count of 1 has to hold whatever
+    day the suite runs. Reintroducing an absolute `completed_at` puts a fixed instant
+    beside a moving `now`, and the 400- and 4,000-day parameters are what catch it.
+    """
+    runs = tmp_path / "autonomy-runs" / "24"
+    runs.mkdir(parents=True)
+    assert rs.AUTONOMY_RUNS_DIR  # fixture wired it
+
+    horizon = rs.RUN_RECORD_MAX_AGE_DAYS
+    now = time.time() + shift_days * 86400
+    old = _run_record(runs, "x", now, 4 * horizon)
+    fresh = _run_record(runs, "y", now, horizon / 2)
+    for p in (old, fresh):
+        os.utime(p, (now, now))
+
+    count, _ = rs.sweep_autonomy_runs(apply=False, now=now)
+    assert count == 1, (
+        f"at {shift_days} days on, the {4 * horizon}-day record is the only candidate")
 
 
 def test_legacy_epoch_named_records_are_swept(rs, tmp_path):
