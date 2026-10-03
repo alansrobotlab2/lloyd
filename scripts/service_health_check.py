@@ -462,6 +462,33 @@ DEPLOYED_COPIES = (
 CA_TRUST_CATEGORY = "ca"
 INSTALL_CA = _TREE / "scripts" / "install-ca.sh"
 
+# The wattage the driver is enforcing right now versus the wattage the unit
+# declares (#2135). Its own category, not `deploy`, for #1726's reason verbatim:
+# a heading goes degraded when ANY member is unhealthy, so filing silicon drift
+# under `deploy` would make "the installed bytes are stale" and "a hand
+# `nvidia-smi -pl` moved the hardware off the unit" the same heading — and the
+# deployed-copy check above compares sha256 of tracked-vs-installed BYTES, so it
+# structurally cannot see the second one. `check_ca_trust` above and the
+# single-row unit-enabledness category in `main` are the two precedents for a
+# private category with no supervisor program behind it.
+GPU_POWER_CATEGORY = "gpu-power"
+GPU_POWER_UNIT = "nvidia-power-limit.service"
+GPU_POWER_SCRIPT = "/usr/local/sbin/set-gpu-power-limit.sh"
+#: The declared side is asked through a shell guard, not a call made here, because
+#: this file's string constants are barred from naming the systemd verb at all
+#: (#1951's rail, quoted on `_declared_power_limits`). `UNIT_ENABLEDNESS` above is the
+#: same shape for the same reason.
+GPU_POWER_GUARD = _TREE / "scripts" / "maintenance" / "read-gpu-power-limit.sh"
+#: `GPU_POWER_LIMIT_W_0=275` names one card; bare `GPU_POWER_LIMIT_W=300` is the
+#: fallback the script applies to every card without a per-index line.
+GPU_POWER_PER_INDEX = re.compile(r"\bGPU_POWER_LIMIT_W_(\d+)=(\d+)\b")
+GPU_POWER_FALLBACK = re.compile(r"\bGPU_POWER_LIMIT_W=(\d+)\b")
+#: The live side arrives as `0, 275.00 W`: index, a decimal wattage, and a unit
+#: suffix the declared side does not carry. Parsing the number out of the string
+#: is the whole comparison — a raw string compare of `275.00 W` against a declared
+#: `275` reports drift on a card that is exactly where the unit put it.
+GPU_POWER_LIVE_ROW = re.compile(r"^\s*(\d+)\s*,\s*([0-9]+(?:\.[0-9]+)?)\s*W?\s*$")
+
 # install-ca.sh's three verdict words, and the two fingerprints it prints beside
 # them. Parsing the WORD rather than the exit code is the whole grade: exit 1 is
 # also what `ERROR: no CA certificate at ...` returns, before the store has been
@@ -695,6 +722,12 @@ CATEGORIES = {
     CA_TRUST_CATEGORY: [],
     # Same shape again: `main` answers it from `check_unit_enabledness`.
     UNITS_CATEGORY: [],
+    # And again: `main` answers it from `check_gpu_power_limit`, which is neither a
+    # supervisor program, a deployed file, nor a certificate — it is the wattage the
+    # driver is enforcing versus what the unit declares (#2135). It is its own
+    # heading rather than a member of `deploy` for the #1726 reason recorded on
+    # GPU_POWER_CATEGORY.
+    GPU_POWER_CATEGORY: [],
     "all": list(SERVICES.keys()),
 }
 
@@ -741,6 +774,169 @@ def check_deployed_copies(pairs=DEPLOYED_COPIES) -> list:
             "category": DEPLOY_CATEGORY,
             "tracked": str(tracked),
             "deployed": str(deployed),
+        })
+    return results
+
+
+def _declared_power_limits(runner=subprocess.run):
+    """What the unit DECLARES, as `(per_index, default)` — watts keyed by GPU index.
+
+    `GPU_POWER_GUARD` runs `systemctl show nvidia-power-limit.service
+    --property=Environment`, which is the declared side: what the next boot and the
+    next unit restart will enforce, the half nobody can see from the hardware. It goes
+    through a shell guard rather than a direct call here for #1951's reason, which
+    `tests/test_unit_enabledness_route.py::test_no_enabledness_assertion_is_reimplemented_in_python`
+    enforces over this file's string constants: a systemd question answered in Python
+    is a second implementation with no guard in front of it. `None` means the question
+    cannot be answered — the unit is not installed, systemd could not be reached, or
+    it declares no power-limit variable at all — and the caller reads that as unknown,
+    never as zero or as drift. A missing `_0` beside a present bare
+    `GPU_POWER_LIMIT_W` is NOT unknown: the bare name is that card's declared value.
+    """
+    try:
+        out = runner(["bash", str(GPU_POWER_GUARD)],
+                     capture_output=True, text=True, timeout=8)
+    except Exception:
+        return None
+    if out.returncode != 0 or not (out.stdout or "").strip():
+        return None
+    text = out.stdout
+    per_index = {int(i): float(w) for i, w in GPU_POWER_PER_INDEX.findall(text)}
+    fallback = GPU_POWER_FALLBACK.search(text)
+    return per_index, (float(fallback.group(1)) if fallback else None)
+
+
+def _live_power_limits(runner=subprocess.run):
+    """What the driver is enforcing NOW, as `{index: watts}`.
+
+    `enforced.power.limit` is deliberately the field that reflects a hand
+    `nvidia-smi -pl 400`: it is the limit in force, not the card's ceiling
+    (`power.limit`, which `app/host_metrics.py` publishes for the layout
+    fingerprint, is a different field and does not move the way this one does).
+    Raises if `nvidia-smi` is absent or answers non-zero — the caller turns that
+    into an unknown row; returns `{}` for a machine that answers with no GPU rows,
+    which is a real answer and not a failure.
+    """
+    out = runner(["nvidia-smi", "--query-gpu=index,enforced.power.limit",
+                  "--format=csv,noheader"],
+                 capture_output=True, text=True, timeout=15)
+    if out.returncode != 0:
+        raise RuntimeError((out.stderr or out.stdout or "nvidia-smi failed").strip()[:200])
+    limits = {}
+    for line in (out.stdout or "").splitlines():
+        row = GPU_POWER_LIVE_ROW.match(line)
+        if row:
+            limits[int(row.group(1))] = float(row.group(2))
+    return limits
+
+
+def check_gpu_power_limit(declared=None, live=None):
+    """Live watts versus declared watts, per GPU index (#2135).
+
+    Resolved at CALL time, not at import, so a test that monkeypatches
+    `_declared_power_limits` on the module moves the check too — which is how
+    `main()` is driven below without a GPU. The defaults are the two real readers.
+
+    The failure this exists for happened twice and was invisible both times: a hand
+    `nvidia-smi -pl` moves the hardware off the unit, and nothing in the loop is
+    comparing the two — `check_deployed_copies` above hashes the unit's BYTES, and
+    a byte-identical unit with a re-tuned card passes it. The unit edit and the root
+    reinstall landed in `36ba27ec`; this is the probe #1107 owed, the one that makes
+    the next hand edit show up in a health check instead of at the next boot.
+
+    A comparison happens only where both sides are known. `declared`/`live` are
+    injectable so the readers are the seam the tests stub — no root, no GPU, no
+    `nvidia-smi` needed for the graded path. Three rules the shape of the output has
+    to keep:
+
+      * An index whose declared number it cannot find is not compared. Silence
+        would be a missed check, so it is its own unknown row.
+      * A card that answers `275.00 W` against a declared `275` is NOT drift: the
+        suffix and the decimals are formatting, so watts are compared as numbers.
+      * Nothing here can make a machine without a GPU go red. `advisory=True`
+        follows `check_ca_trust`'s precedent, which keeps an unknown out of both the
+        category's healthy/unhealthy arithmetic and `main`'s exit code, so `no GPU`
+        reads as the word and not as an outage.
+    """
+    declared = declared or _declared_power_limits
+    live = live or _live_power_limits
+
+    results = []
+    try:
+        dec = declared()
+    except Exception:  # noqa: BLE001 - a reader blowing up is unknown, never drift
+        dec = None
+    if dec is None:
+        results.append({
+            "name": f"{GPU_POWER_CATEGORY}:declared",
+            "status": "declared limit unknown (unit not installed?)",
+            "healthy": False, "exit_code": 0,
+            "output": "read it with: bash %s  (which asks systemd for %s's "
+                      "Environment= lines)" % (GPU_POWER_GUARD.name, GPU_POWER_UNIT),
+            "category": GPU_POWER_CATEGORY, "verdict": "unknown", "advisory": True,
+        })
+        return results
+    per_index, default = dec
+    try:
+        limits = live()
+    except FileNotFoundError:
+        limits = None
+        why = "nvidia-smi not on PATH"
+    except Exception as exc:  # noqa: BLE001 - absent, timed out, or refused: unknown
+        limits = None
+        why = str(exc)[:120] or "nvidia-smi failed"
+    if limits is None:
+        results.append({
+            "name": f"{GPU_POWER_CATEGORY}:live",
+            "status": "live limit unavailable",
+            "healthy": False, "exit_code": 0,
+            "output": why, "category": GPU_POWER_CATEGORY,
+            "verdict": "unknown", "advisory": True,
+        })
+        return results
+    if not limits:
+        results.append({
+            "name": f"{GPU_POWER_CATEGORY}:live",
+            "status": "no GPU enumerated",
+            "healthy": False, "exit_code": 0,
+            "output": "nvidia-smi listed no GPU; nothing to compare",
+            "category": GPU_POWER_CATEGORY, "verdict": "unknown", "advisory": True,
+        })
+        return results
+    for index in sorted(limits):
+        watts = limits[index]
+        if index in per_index:
+            want, source = per_index[index], "per-index"
+        elif default is not None:
+            want, source = default, "default"
+        else:
+            results.append({
+                "name": f"{GPU_POWER_CATEGORY}:{index}",
+                "status": f"GPU {index}: live {watts:g} W, no declared limit to "
+                          f"compare against",
+                "healthy": False, "exit_code": 0,
+                "output": f"declared side carries neither "
+                          f"GPU_POWER_LIMIT_W_{index} nor a GPU_POWER_LIMIT_W "
+                          f"default",
+                "category": GPU_POWER_CATEGORY, "verdict": "unknown",
+                "advisory": True, "index": index, "live_w": watts,
+            })
+            continue
+        ok = watts == want
+        results.append({
+            "name": f"{GPU_POWER_CATEGORY}:{index}",
+            "status": (f"GPU {index}: {watts:g} W as declared" if ok else
+                       f"GPU {index}: live {watts:g} W, declared {want:g} W"),
+            "healthy": ok, "exit_code": 0 if ok else 1,
+            "output": (f"live {watts:g} W == declared {want:g} W ({source}, "
+                       f"{GPU_POWER_UNIT})" if ok else
+                       f"live {watts:g} W != declared {want:g} W, which came from "
+                       f"{source} on {GPU_POWER_UNIT}; fix with "
+                       f"sudo {GPU_POWER_SCRIPT}"),
+            "category": GPU_POWER_CATEGORY,
+            "verdict": "ok" if ok else "drift",
+            "index": index, "live_w": watts, "declared_w": want,
+            "declared_source": source,
         })
     return results
 
@@ -1004,6 +1200,12 @@ def main():
     # category, never a `--services` ask.
     if not args.services and args.category in (None, UNITS_CATEGORY):
         results.extend(check_unit_enabledness())
+    # The GPU power guard, on the same rule again: whole-fleet run or its own
+    # category, never a `--services` ask. It shells out to systemctl and nvidia-smi
+    # with no root and no config, and on a box with neither it returns one advisory
+    # unknown row that changes no verdict (#2135).
+    if not args.services and args.category in (None, GPU_POWER_CATEGORY):
+        results.extend(check_gpu_power_limit())
 
     # Calculate summary
     summary = {}
