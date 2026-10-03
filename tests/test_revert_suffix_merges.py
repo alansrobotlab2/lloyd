@@ -11,7 +11,7 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts" / "memory"))
-from app.kg_store import KGStore  # noqa: E402
+from app.kg_store import KGStore, parse_fact_file  # noqa: E402
 _spec = importlib.util.spec_from_file_location("revert_suffix_merges", ROOT / "scripts/memory/revert-suffix-merges.py")
 rv = importlib.util.module_from_spec(_spec); sys.modules["revert_suffix_merges"] = rv; _spec.loader.exec_module(rv)
 
@@ -436,3 +436,47 @@ def test_a_resumed_apply_still_reverts_exactly_by_id(tmp_path, monkeypatch):
         st.close()
     assert (canonical, "Ray") in live and (v_lower, "Triton") in live, \
         "the merged edges are not live again, so the revert did not invert them by id"
+
+
+# ── a fact whose own text carries a fence (#2138) ────────────────────────────
+#
+# `yaml.dump` renders a multi-line fact as a single-quoted scalar with INDENTED
+# continuation lines, and prose like the live corpus's `` `---segment:` `` keeps a
+# fence inline. Either way the file's own `---` sits after the opening fence, so
+# `_read`'s old `text.split("---", 2)` cut the block in half — and the truncated
+# slice still LOADS, as `{type, entity, category, facts}` with the half-cut fact in
+# the list and `source_doc` gone. This module writes what `_read` returns and then
+# unlinks the source, so a revert of a `---`-bearing file deleted the facts it had
+# never read: 4 facts in, 2 out, no witness.
+
+
+def test_revert_moves_a_fence_bearing_file_with_every_fact_intact(world):   # clause 4
+    root, st, report, V, C = world
+    src_doc = "knowledge/software/fact-file-fence-handling.md"
+    texts = ["Scan ArXiv nightly.",
+             "The digest is cut at `---segment:` when the insert is anchored on the fence line.",
+             "Score Hacker News nightly, then re-dump:\n---\nand a naive cut loses what follows.",
+             "Anchored closing fences survive every writer."]
+    fm = {"type": "facts", "entity": V, "category": "goal",
+          "facts": [{"id": f"goal-00{i}", "entity": V, "fact": t, "confidence": 0.9,
+                     "category": "goal", "created_at": f"2026-09-01T04:00:0{i}+00:00",
+                     "source_doc": src_doc} for i, t in enumerate(texts, 1)],
+          "source_doc": src_doc}
+    goal = root / C / "Intel-goal.md"
+    _write(goal, fm, "# Intel Pipeline System - goal\n")
+
+    ops = rv.plan_revert(report, {"SUFFIX_SAFE"}, root)
+    assert {f["file"]: f["action"] for f in ops[0]["files"]}["Intel-goal.md"] == "move_whole"
+    rv.execute(ops, root, st, apply=True)
+
+    dest = root / V / f"{V}-goal.md"
+    assert dest.exists() and not goal.exists(), "the whole-file move did not happen"
+    out_fm, out_body = rv._read(dest)
+    assert [f["fact"] for f in out_fm["facts"]] == texts, \
+        "the revert wrote back only what its read could see"
+    assert [f["fact"] for f in parse_fact_file(dest)[1]] == texts, \
+        "the store's own reader must see the same four facts the revert wrote"
+    assert out_fm["source_doc"] == src_doc, "file-level provenance was never in a truncated read"
+    assert all(f.get("created_at") and f.get("source_doc") == src_doc for f in out_fm["facts"]), \
+        "per-fact provenance has to survive the re-dump, not just the fact text"
+    assert out_body.startswith("# Intel Pipeline System - goal"), repr(out_body)

@@ -56,6 +56,7 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent.parent))
 from app.paths import PIPELINE_DIR, VAULT_FACTS_ROOT, VAULT_KG_DB  # noqa: E402
 from app.fact_ids import dedupe_ids
+from app.frontmatter import split_frontmatter  # noqa: E402
 from app.atomic_io import atomic_write_text  # noqa: E402
 from app.kg_store import KGStore  # noqa: E402
 from _invocation import invocation_ledger  # noqa: E402
@@ -73,17 +74,26 @@ def _body(entity: str, category: str, n: int) -> str:
 
 
 def _read(path: Path) -> tuple[dict, str]:
+    """`(front matter, body)` for one fact file, cut at the ANCHORED closing fence.
+
+    #2138, the same rule #1400 gave the extractor. This module READS a fact file
+    with `_read` and writes one back with `_dump`, so the unanchored three-way
+    split on the fence that used to sit here was not a read bug but a delete: a fact whose own
+    text holds a fence line (which is what `yaml.dump` emits for a multi-line
+    fact — an INDENTED `---` continuation) truncated the block, and the truncated
+    slice still loads, as `{type, entity, category, facts}` with the half-cut fact
+    in the list and `source_doc` gone. `execute` then wrote that dict out and
+    unlinked the original, so reverting a merge lost the facts it never read.
+    """
     text = path.read_text(encoding="utf-8", errors="replace")
-    if not text.startswith("---"):
-        return {}, text
-    parts = text.split("---", 2)
-    if len(parts) < 3:
+    split = split_frontmatter(text)
+    if split is None:
         return {}, text
     try:
-        fm = yaml.safe_load(parts[1]) or {}
+        fm = yaml.safe_load(split[0]) or {}
     except Exception:
         fm = {}
-    return (fm if isinstance(fm, dict) else {}), parts[2].lstrip("\n")
+    return (fm if isinstance(fm, dict) else {}), split[1].lstrip("\n")
 
 
 def _same(a: str, b: str) -> bool:

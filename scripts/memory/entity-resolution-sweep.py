@@ -76,6 +76,7 @@ from app.entity_naming import looks_like_junk_entity
 # row. See `_is_exhaust_surface`.
 from app.entity_naming import _CODE_FILE_RE, _CODE_CALL_RE, _CODE_CALL_CONTENT_RE
 from app.fact_ids import dedupe_ids
+from app.frontmatter import split_frontmatter   # #2138: one anchored closing-fence rule
 from app.kg_store import KGStore
 from app.atomic_io import atomic_write_text
 
@@ -602,16 +603,84 @@ def build_plan(edges: list[dict], existing_dirs: set[str],
 
 
 def _parse_frontmatter(text: str) -> tuple[dict, str]:
-    if not text.startswith("---"):
-        return {}, text
-    parts = text.split("---", 2)
-    if len(parts) < 3:
+    """`(front matter, body)` for a fact file, cut at the ANCHORED closing fence.
+
+    #1400 gave the extractor `app.frontmatter.split_frontmatter`; this is that
+    same rule reaching the sweep (#2138). The rule is "the first *line* that is
+    exactly `---`", and the difference is not cosmetic, because a fact's own text
+    can hold a fence. `yaml.dump` writes a multi-line fact as a single-quoted
+    scalar whose continuation lines are INDENTED, so a fact whose prose carries a
+    `---` — a fenced line, or the live corpus's `` `---segment:` `` — survives
+    this module's own re-dump and then defeats its next read. What the old
+    unanchored three-way split on that fence did is worse than an error: the
+    truncated slice PARSES, returning just `{type, entity, category, facts}` with
+    the half-cut fact still in the list and `source_doc`/`last_updated` gone. So
+    neither `if not fm` in `retag_fact_file` nor `if not merged` in
+    `_merge_fact_file_into` fires, and the writer re-dumps the truncated dict
+    over the file — 4 facts in, 2 out on the live
+    `Zero-width assertion regex bug/Zero-width assertion regex bug-skill.md`,
+    6 in / 4 out on `False Absence Guard Pattern/…-state.md`.
+
+    A non-dict load (a list, a bare string) comes back as `{}` too: every caller
+    below reads `fm.get(...)`, and this is the shape
+    `revert-suffix-merges.py::_read` has always returned.
+    """
+    split = split_frontmatter(text)
+    if split is None:
         return {}, text
     try:
-        fm = yaml.safe_load(parts[1]) or {}
+        fm = yaml.safe_load(split[0]) or {}
     except Exception:
         fm = {}
-    return fm, parts[2].lstrip("\n")
+    return (fm if isinstance(fm, dict) else {}), split[1].lstrip("\n")
+
+
+def _frontmatter_unreadable(text: str) -> bool:
+    """True for a file this sweep must not write back, because it cannot read it.
+
+    The pair to the anchored read. `_parse_frontmatter` answers `{}` both for a
+    file with no front matter and for one whose YAML will not load, and the apply
+    path used to treat those as "nothing to do here" while still MOVING the file
+    and — when the destination existed — MERGING into it and UNLINKING the source
+    (`_merge_fact_file_into(f, dest); f.unlink()`). Writing a file whose dict is
+    missing keys is one loss; deleting the copy you never read is another, and
+    neither leaves a witness. So a file that CLAIMS front matter (a `---` first
+    line) and cannot be parsed — no anchored closing fence, or YAML that will not
+    load — is left exactly where it is and named in the apply report.
+
+    False for a file that does not open with a fence: that is not a fact file, and
+    moving it is a rename which costs no facts.
+    """
+    if not text.startswith("---"):
+        return False
+    split = split_frontmatter(text)
+    if split is None:
+        return True
+    try:
+        fm = yaml.safe_load(split[0])
+    except Exception:
+        return True
+    return fm is not None and not isinstance(fm, dict)
+
+
+def _unreadable_paths(*paths: Path | None) -> list[Path]:
+    """Which of `paths` this sweep cannot round-trip (and so must not write or move).
+
+    An `OSError` counts: a file that cannot be read is exactly as unsafe to
+    overwrite or unlink as one whose YAML is broken.
+    """
+    out: list[Path] = []
+    for p in paths:
+        if p is None:
+            continue
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            out.append(p)
+            continue
+        if _frontmatter_unreadable(text):
+            out.append(p)
+    return out
 
 
 def _dump_frontmatter(fm: dict, body: str) -> str:
@@ -1032,6 +1101,9 @@ def _move_fact_dirs(variant_to_canonical: dict[str, str], st, facts_root: Path, 
         # restored file cannot put back — which is exactly what
         # `revert-suffix-merges.py` does on a revert.
         retired: list[Path] = []
+        # #2138: files this run refused to touch, by full path, so the apply
+        # report can name them instead of a later reader finding them still here.
+        skipped_unreadable: list[str] = []
         for f in list(vdir.iterdir()):
             if not f.is_file():
                 continue
@@ -1041,6 +1113,17 @@ def _move_fact_dirs(variant_to_canonical: dict[str, str], st, facts_root: Path, 
                     new_name = new_prefix + f.name[len(old_prefix):]
                     break
             dest = cdir / new_name
+            # Both sides are checked because the merge writes the destination and
+            # then unlinks this file: an unreadable DESTINATION would be re-dumped
+            # from a truncated dict, and an unreadable SOURCE contributes nothing
+            # to the merge and is deleted anyway. Neither is a reason to lose a
+            # fact, so the pair stays exactly where it is and says so.
+            unreadable = _unreadable_paths(f, dest if dest.exists() else None)
+            if unreadable:
+                for p in unreadable:
+                    print(f"    [skip] unparseable front matter, left untouched: {p}")
+                skipped_unreadable.extend(str(p) for p in unreadable)
+                continue
             if dest.exists():
                 # Merge YAML facts list instead of creating _dup{N} sidecar.
                 # Sidecars accumulated 499 files of cleanup debt (see
@@ -1068,6 +1151,12 @@ def _move_fact_dirs(variant_to_canonical: dict[str, str], st, facts_root: Path, 
                     if not inner.is_file():
                         continue
                     dest_file = dest / inner.name
+                    bad = _unreadable_paths(inner, dest_file if dest_file.exists() else None)
+                    if bad:
+                        for p in bad:
+                            print(f"    [skip] unparseable front matter, left untouched: {p}")
+                        skipped_unreadable.extend(str(p) for p in bad)
+                        continue
                     if dest_file.exists():
                         _merge_fact_file_into(inner, dest_file)
                         inner.unlink()
@@ -1110,15 +1199,20 @@ def _move_fact_dirs(variant_to_canonical: dict[str, str], st, facts_root: Path, 
             st.entities.remove(variant) if removed else None
         except Exception as exc:  # index is derived; never fail a merge on it
             print(f"    [warn] index update for {variant!r} failed: {exc}")
-        dir_ops.append(
-            {
-                "variant": variant,
-                "canonical": canonical,
-                "files_moved": moved,
-                "removed_dir": removed,
-                "done": True,
-            }
-        )
+        entry = {
+            "variant": variant,
+            "canonical": canonical,
+            "files_moved": moved,
+            "removed_dir": removed,
+            "done": True,
+        }
+        if skipped_unreadable:
+            # `done` is still True — every file this run COULD read has moved,
+            # and a resume must not re-run the merge to chase a file it is
+            # deliberately leaving alone. The refusal is the extra field, and it
+            # is journaled with the variant, so it survives a kill in this window.
+            entry["skipped_unparseable"] = skipped_unreadable
+        dir_ops.append(entry)
         # One journal step per finished variant: the most a kill can cost is the
         # variant it landed inside, and a resume re-does exactly that one.
         _journal_dir_progress(report_path, dir_ops, dict(extra or {}))
@@ -1491,6 +1585,9 @@ def _resume_apply(args, st, facts_root: Path) -> int:
         else:
             print(f"  {op['variant']} → {op['canonical']}: {op['files_moved']} file(s) moved, "
                   f"removed_dir={op['removed_dir']}")
+        if op.get("skipped_unparseable"):
+            print(f"  {op['variant']} → {op['canonical']}: SKIPPED as unparseable, left in place: "
+                  + ", ".join(op["skipped_unparseable"]))
     print(f"  Store: entities {before['entities']}→{after['entities']}, "
           f"aliases {before['aliases']}→{after['aliases']}, "
           f"edges {before['edges_active']}→{after['edges_active']} "
@@ -1659,6 +1756,9 @@ def main() -> int:
                 f"    {op['variant']!r} → {op['canonical']!r}: "
                 f"moved {op['files_moved']} files, removed_dir={op['removed_dir']}"
             )
+        if op.get("skipped_unparseable"):
+            print(f"    {op['variant']!r}: SKIPPED as unparseable, left in place: "
+                  + ", ".join(op["skipped_unparseable"]))
     print(f"  Store: {before} → {after}")
     print()
 

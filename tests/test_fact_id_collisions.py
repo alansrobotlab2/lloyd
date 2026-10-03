@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts" / "memory"))
 
 from app.fact_ids import assign_ids, dedupe_ids  # noqa: E402
+from app.frontmatter import split_frontmatter  # noqa: E402
 
 
 def _facts(*ids):
@@ -130,3 +131,47 @@ def test_repair_is_idempotent(tmp_path):
     ])
     assert repair_fact_ids.repair(tmp_path, apply=True)["renumbered"] == 1
     assert repair_fact_ids.repair(tmp_path, apply=True)["renumbered"] == 0
+
+
+# ── a fact whose own text carries a fence (#2138) ────────────────────────────
+#
+# `_repair_one` read through `agent_mcp.facts._parse_fact_frontmatter`, which cuts
+# at `content.find("---", 3)` — the first `---` anywhere — and took its body with
+# `raw.split("---", 2)[-1]`. A fact whose prose carries a fence defeats both: the
+# parse comes back truncated but TRUTHY (2 of 4 facts, `source_doc` dropped), so the
+# `if not fm` guard below it never fires, and a renumbering that counted 2 facts
+# rewrote a file holding 4 — while the "body" it appended was the front-matter tail
+# it had just cut, re-emitted under the new block.
+
+
+def test_repair_one_keeps_every_fact_of_a_fence_bearing_file(tmp_path):    # clause 5
+    src_doc = "knowledge/software/fact-file-fence-handling.md"
+    entity, category = "Fence Fusion Guard", "state"
+    texts = ["alpha",
+             "The insert lands inside `---segment:` when it is anchored on the fence line.",
+             "A re-dump reproduces the fence:\n---\nand a naive cut loses what follows.",
+             "delta"]
+    fm = {"type": "facts", "entity": entity, "category": category,
+          "facts": [{"id": i, "entity": entity, "fact": t, "confidence": 0.9, "category": category,
+                     "created_at": f"2026-09-23T05:18:39.0620{n:02d}+00:00", "source_doc": src_doc}
+                    for i, n, t in zip(["stat-001", "stat-001", "stat-002", "stat-003"], (1, 2, 3, 4), texts)],
+          "source_doc": src_doc}
+    d = tmp_path / entity; d.mkdir(parents=True)
+    p = d / f"{entity}-{category}.md"
+    p.write_text(f"---\n{yaml.dump(fm, sort_keys=False)}---\n\n# {entity} - {category}\n",
+                 encoding="utf-8")
+
+    moved = repair_fact_ids._repair_one(p)
+
+    assert moved == 1, f"the duplicated stat-001 is one renumbering: moved={moved}"
+    # Read the result back through `app.frontmatter`, not through the module under
+    # test, so a pre-change tree fails on the facts it dropped and not on a name.
+    out = yaml.safe_load(split_frontmatter(p.read_text(encoding="utf-8"))[0])
+    assert [f["fact"] for f in out["facts"]] == texts, "the rewrite lost what the read never saw"
+    assert len({f["id"] for f in out["facts"]}) == 4, [f["id"] for f in out["facts"]]
+    assert out["source_doc"] == src_doc, "file-level provenance is not in a truncated read"
+    assert all(f.get("source_doc") == src_doc and f.get("created_at") for f in out["facts"])
+    body = split_frontmatter(p.read_text(encoding="utf-8"))[1]
+    assert body.strip() == f"# {entity} - {category}", repr(body)
+    assert "source_doc" not in body and "facts:" not in body, \
+        "front-matter text leaked into the body, duplicating the block just written"

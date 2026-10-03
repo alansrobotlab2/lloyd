@@ -26,14 +26,46 @@ import json
 import sys
 from pathlib import Path
 
+import yaml
+
 HERE = Path(__file__).resolve().parent
 LLOYD = HERE.parent.parent
 sys.path.insert(0, str(LLOYD))
 
 from app.paths import VAULT_FACTS_ROOT, VAULT_KG_DB  # noqa: E402
 from app.fact_ids import dedupe_ids  # noqa: E402
+from app.frontmatter import split_frontmatter  # noqa: E402
 from app.atomic_io import atomic_write_text, locked_file  # noqa: E402
-from agent_mcp.facts import _parse_fact_frontmatter, _write_fact_frontmatter  # noqa: E402
+# The EMITTER is still the shared one; the PARSER is not (#2138, see `_parse_fm`).
+from agent_mcp.facts import _write_fact_frontmatter  # noqa: E402
+
+
+def _parse_fm(raw: str) -> dict:
+    """Parse a fact file's front matter at the ANCHORED closing fence, or `{}`.
+
+    This module used to read through `agent_mcp.facts._parse_fact_frontmatter`,
+    which searches forward from offset 3 for the next fence — the first `---`
+    anywhere in the file, anchored or not. A fact
+    whose own text carries a fence defeats it: `yaml.dump` writes a multi-line
+    fact as a single-quoted scalar with INDENTED continuation lines, and prose
+    like the live corpus's `` `---segment:` `` puts a fence mid-sentence. The
+    truncated slice then still LOADS — `{type, entity, category, facts}`, with the
+    half-cut fact as the last entry and `source_doc` dropped — so `if not fm`
+    below never fires and a renumbering that counted 2 facts rewrites a file that
+    holds 4. Reading the same file through the anchored rule (the one #1400 gave
+    the extractor) is what makes the rewrite describe the file on disk.
+
+    The `agent_mcp` parser itself is untouched: it backs the live MCP fact
+    writers, and migrating it is a scope ruling #2138 records rather than takes.
+    """
+    split = split_frontmatter(raw)
+    if split is None:
+        return {}
+    try:
+        fm = yaml.safe_load(split[0]) or {}
+    except Exception:
+        return {}
+    return fm if isinstance(fm, dict) else {}
 
 
 def _duplicate_pairs(db: Path) -> int:
@@ -71,7 +103,7 @@ def _repair_one(path: Path) -> int:
     """
     with locked_file(path):
         raw = path.read_text(encoding="utf-8")
-        fm = _parse_fact_frontmatter(raw)
+        fm = _parse_fm(raw)
         if not fm:
             return 0
         facts = fm.get("facts")
@@ -79,7 +111,13 @@ def _repair_one(path: Path) -> int:
             return 0
         moved = dedupe_ids(facts, fm.get("category"))
         if moved:
-            body = raw.split("---", 2)[-1]
+            # The body comes from the SAME anchored split as the dict above. The
+            # old tail-of-the-third-part trick took everything after the first inner
+            # `---`, which is front-matter text — for the live file shape the tail
+            # of the cut scalar and the keys that followed it — and re-emitted it
+            # under the new block as if it were prose, duplicating the block that
+            # `_write_fact_frontmatter` had just written.
+            body = split_frontmatter(raw)[1]
             atomic_write_text(path, _write_fact_frontmatter(fm) + body)
         return moved
 
@@ -95,7 +133,7 @@ def repair(facts_dir: Path, apply: bool) -> dict:
             raw = path.read_text(encoding="utf-8")
         except OSError:
             continue
-        fm = _parse_fact_frontmatter(raw)
+        fm = _parse_fm(raw)              # the same rule `_repair_one` applies
         if not fm:
             continue
         facts = fm.get("facts")

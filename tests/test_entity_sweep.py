@@ -12,7 +12,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / "scripts" / "memory"))
-from app.kg_store import KGStore  # noqa: E402
+from app.kg_store import KGStore, parse_fact_file  # noqa: E402
 SWEEP = ROOT / "scripts" / "memory" / "entity-resolution-sweep.py"
 _spec = importlib.util.spec_from_file_location("ers_test", SWEEP)
 ers = importlib.util.module_from_spec(_spec); sys.modules["ers_test"] = ers; _spec.loader.exec_module(ers)
@@ -948,3 +948,136 @@ def test_resume_finishes_only_the_dirs_the_kill_left_pending(tmp_path, monkeypat
         "vllm aims to halve cold start.", "Gemma serves 40 req/s.",
         "gemma restarts nightly at 04:00.", "gemma aims to halve cold start.",
     ]), "each moved fact must be counted exactly once under the canonical"
+
+
+# ── a fact file whose OWN text carries a fence (#2138) ───────────────────────
+#
+# Two shapes, both produced by the fact writers themselves and both present in the
+# live corpus (`Zero-width assertion regex bug/…-skill.md` reads 4 facts anchored /
+# 2 naive, `False Absence Guard Pattern/…-state.md` 6 / 4):
+#
+#   * `yaml.dump` renders a multi-line fact as a single-quoted scalar whose
+#     continuation lines are INDENTED, so a fact quoting a fence line keeps it —
+#     indented, the only place YAML allows one inside a value;
+#   * a fact quoting `` `---segment:` `` mid-sentence keeps the fence inline.
+#
+# Both sit after the opening `---`, so `text.split("---", 2)` cut the block in
+# half there. What made that a data-loss bug rather than a parse error is that the
+# truncated slice LOADS: it answers `{type, entity, category, facts}` with the
+# half-cut fact still in the list and `source_doc`/`last_updated` gone. Every
+# guard on this module's write path is an `if not fm`, so none of them fired, and
+# the writer re-dumped the truncated dict over the file — 4 facts in, 2 out.
+
+FENCE_ENTITY = "Fence Fusion Guard"
+FENCE_SRC = "knowledge/software/fact-file-fence-handling.md"
+FENCE_FACTS = [
+    ("stat-001", 1, "The extractor anchors its insert on the opening fence line only.", 1.0),
+    ("stat-002", 2, "Anchored with `$`, the insert lands inside `---segment:` and swallows the next key.", 0.9),
+    ("stat-003", 3, "A re-dump reproduces the hazard line:\n---\nand a cut at the first fence loses the tail.", 0.9),
+    ("stat-004", 4, "The anchored closing fence is the only rule that survives a re-dump.", 0.8),
+]
+
+
+def _fenced_fm(entity: str = FENCE_ENTITY, category: str = "state",
+               facts: list | None = None) -> dict:
+    """Front matter for a fact file whose facts carry a fence in their own text."""
+    return {
+        "type": "facts", "entity": entity, "category": category,
+        "facts": [{"id": fid, "entity": entity, "fact": text, "confidence": conf,
+                   "category": category, "provenance": "EXTRACTED",
+                   "created_at": f"2026-09-23T05:18:39.0620{n:02d}+00:00",
+                   "source_doc": FENCE_SRC}
+                  for fid, n, text, conf in (facts or FENCE_FACTS)],
+        "source_doc": FENCE_SRC, "last_updated": "2026-09-30T05:29:51.000000",
+    }
+
+
+def _write_fence_file(dir_: Path, fm: dict, entity: str = FENCE_ENTITY,
+                      category: str = "state") -> Path:
+    """Write it the way the fact writers do: `yaml.dump` between two bare fences."""
+    dir_.mkdir(parents=True, exist_ok=True)
+    p = dir_ / f"{entity}-{category}.md"
+    p.write_text(f"---\n{yaml.dump(fm, sort_keys=False, allow_unicode=True)}---\n\n"
+                 f"# {entity} - {category}\n", encoding="utf-8")
+    return p
+
+
+def test_parse_frontmatter_finds_every_fact_the_store_reader_finds(tmp_path):   # clause 1
+    p = _write_fence_file(tmp_path / FENCE_ENTITY, _fenced_fm())
+    text = p.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    assert any(ln.strip() == "---" and ln.startswith(" ") for ln in lines), \
+        "fixture drift: no fact's own fence line survives inside its scalar any more"
+    assert any("---" in ln and not ln.strip().startswith("---")
+               for ln in lines), "fixture drift: no fact carries a fence inside its own prose"
+    # The naive rule this replaces, recorded as the witness of what the file defeats:
+    # the truncated slice PARSES, returning 2 of the 4 facts, the second one cut
+    # mid-sentence, and no `source_doc`. `if not fm` cannot see that file.
+    naive = yaml.safe_load(text.split("---", 2)[1]) or {}
+    naive_texts = [f["fact"] for f in naive.get("facts") or []]
+    assert len(naive_texts) == 2, f"fixture drift: the naive read no longer truncates: {naive_texts}"
+    assert naive_texts[0] == FENCE_FACTS[0][2], naive_texts[0]
+    assert FENCE_FACTS[1][2].startswith(naive_texts[1]), naive_texts[1]
+    assert "source_doc" not in naive, naive
+
+    fm, body = ers._parse_frontmatter(text)
+    assert fm["facts"] == parse_fact_file(p)[1], \
+        "the sweep's reader and the store's reader must name the same facts for one file"
+    assert [f["id"] for f in fm["facts"]] == ["stat-001", "stat-002", "stat-003", "stat-004"]
+    assert fm["source_doc"] == FENCE_SRC, "the keys sitting after the inner fence must come back"
+    assert fm["last_updated"] == "2026-09-30T05:29:51.000000"
+    assert body.startswith(f"# {FENCE_ENTITY} - state"), repr(body)
+
+
+def test_merging_into_a_fence_bearing_destination_loses_no_fact(tmp_path):      # clause 2
+    dst = _write_fence_file(tmp_path / FENCE_ENTITY, _fenced_fm())
+    before = [f["fact"] for f in parse_fact_file(dst)[1]]
+    assert len(before) == 4, before
+    variant = f"{FENCE_ENTITY} System"
+    src = _write_fence_file(tmp_path / variant,
+                            _fenced_fm(entity=variant, facts=[
+                                ("stat-001", 1, "A variant file: the insert is anchored on the newline, not the fence.", 0.9),
+                                ("stat-002", 2, "A re-dump keeps a quoted fence inside the scalar, indented.", 0.8)]),
+                            entity=variant)
+
+    ers._merge_fact_file_into(src, dst)
+
+    after = [f["fact"] for f in parse_fact_file(dst)[1]]   # anchored reader, post-write
+    assert [t for t in before if t not in after] == [], "a destination fact vanished in the re-dump"
+    assert len(after) == 6, f"4 destination facts plus the source's 2, got {len(after)}: {after}"
+    fm = parse_fact_file(dst)[0]
+    assert fm["entity"] == FENCE_ENTITY and fm["category"] == "state", fm
+    assert fm["source_doc"] == FENCE_SRC, \
+        "the file-level provenance key survived only in a read that never saw it"
+    assert all(f.get("created_at") and f.get("source_doc") for f in parse_fact_file(dst)[1])
+
+
+def test_apply_refuses_to_write_or_unlink_an_unparseable_fact_file(tmp_path):   # clause 3
+    """A front matter with no closing fence cannot be read, so the apply must not
+    write it and must not move it. Both files on the merge path are unparseable
+    here: the variant's, which the loop used to merge-and-unlink, and the
+    canonical's, which it used to re-dump from a dict it never parsed."""
+    root, db = _tree(tmp_path)
+    out = tmp_path / "out"; out.mkdir()
+    src = root / "vllm" / "vllm-state.md"            # the name this loop maps onto the dest below
+    dst = root / "vLLM" / "vLLM-state.md"
+    src.write_text("---\ntype: facts\nentity: vllm\ncategory: state\nfacts:\n"
+                   "- entity: vllm\n  fact: front matter that never closes, so no rule can read it\n",
+                   encoding="utf-8")
+    dst.write_text("---\ntype: facts\nentity: vLLM\ncategory: state\nfacts: [\n", encoding="utf-8")
+    src_bytes, dst_bytes = src.read_bytes(), dst.read_bytes()
+
+    r = _run(root, db, out, "--apply")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert src.exists(), "the merge unlinked a source file this run had never read"
+    assert src.read_bytes() == src_bytes, "an unreadable source was rewritten"
+    assert dst.read_bytes() == dst_bytes, "an unreadable destination was re-dumped from nothing"
+    assert str(src) in r.stdout and str(dst) in r.stdout, \
+        f"the apply output must name each skipped path:\n{r.stdout}"
+
+    rep = json.loads(next(out.glob("entity-merges-applied-*.json")).read_text())
+    entry = [op for op in rep["dir_operations"] if op["variant"] == "vllm"]
+    assert len(entry) == 1, rep["dir_operations"]
+    assert sorted(entry[0].get("skipped_unparseable") or []) == sorted([str(src), str(dst)]), \
+        "the refusal has to survive into the apply report, not just the terminal"
+    assert entry[0]["files_moved"] == 0
