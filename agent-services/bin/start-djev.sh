@@ -4,6 +4,11 @@
 #   :8010  vLLM, OpenAI API + /metrics   (what Mission Control scrapes)
 #   :8011  structured decisions, POST /v1/systemone + /health
 #
+# scripts/djev_determinism_probe.py is the instrument that decides which of the
+# levers below ships, and its gate is the SEEDED PAIR: the worst |delta| between
+# byte-identical reads of the shape production reads, warm and cold. The verdict
+# column of the table further down holds that pair and nothing else (#2116).
+#
 # This is upstream's entrypoint.sh (github.com/mmastrac/djev-spark) adapted from
 # a DGX Spark to a discrete 24 GiB card. Build the venv first with
 # setup/setup-djev.sh, which documents why an SM86 card can serve an NVFP4
@@ -109,8 +114,15 @@
 #   printed per-request delta is there to prove; read run 1 as the fill, not as
 #   a miss that makes the pair incomparable. Both regimes must
 #   print 0.0000: a config that passes one and not the other has hidden a regime,
-#   not fixed the kernels. Measured at the probe's default shape, prompt_tokens
-#   4800, 2026-09-22.
+#   not fixed the kernels — but BOTH REGIMES OF WHICH SHAPE. These rows were all
+#   measured before #2116, when the probe sent the request with no
+#   diffusion_seed_canvas, so every number below is canvas-RNG spread: the engine
+#   drew the canvas the read conditions on from torch.randint, and the rows differ
+#   from each other as much by that draw as by their levers. They are the control
+#   the probe still prints, kept for the ranking they give and the boots they rule
+#   out, not for a verdict. A new trial pastes the seeded pair, which is what the
+#   exit code now keys off — see THE GATE IS THE SEEDED PAIR below. Measured at the
+#   probe's default shape, prompt_tokens 4800, 2026-09-22.
 #
 #   variant                             cold nats  warm nats  recall p50 ms
 #   auto (Marlin FP4 MoE) / 0              5.0156     8.2064       510.5
@@ -133,8 +145,9 @@
 #   refuse, 81920 is the largest power-of-two step that boots. `marlin` is what
 #   `auto` resolves to (the boot logs it), so it is the incumbent row.
 #
-#   NO ROW ABOVE CAN PRINT 0.0000, AND THAT IS THE PROBE, NOT THE KERNELS.
-#   scripts/djev_determinism_probe.py sends a bare /v1/completions with no
+#   THE GATE IS THE SEEDED PAIR (#2116), AND NO ROW ABOVE CAN PRINT 0.0000 —
+#   WHICH WAS THE PROBE, NOT THE KERNELS. Up to #2116 the graded instrument
+#   sent a bare /v1/completions with no
 #   diffusion_seed_canvas, so every read starts from torch.randint's canvas
 #   (vllm .../models/diffusion_gemma.py init_canvas) and its logprobs move with
 #   that RNG. Production never reads that way: structured_server.one_read
@@ -154,6 +167,18 @@
 #   MAX_MODEL_LEN 81920 is therefore the one measured configuration whose
 #   production-shaped reads repeat, at +26 ms recall p50 (547.5 vs 521.4, 2.5 ms
 #   under the 550 ceiling) and 131072 -> 81920 context.
+#
+#   The probe now sends that shape and the gate is its pair: the exit code keys
+#   off the seeded numbers alone; the unseeded read is still replayed, labelled a
+#   control, and it cannot fail a run (#1357 clause 4 asked for delta 0
+#   against production and no round could ever have reported it).
+#
+#   Re-measured on the shipped boot 2026-10-03: auto, BATCH_INVARIANT=1,
+#   MAX_MODEL_LEN 81920, where kernel_bisect_2026-09-24.jsonl had logged
+#   seeded 0.0000 / cold 0.0000 beside a probe exiting 1. The probe
+#   prints seeded warm/cold 0.0000 / 0.0000 and exits 0; its unseeded
+#   control prints 4.7391 warm / 4.9645 cold, and that number is the
+#   spread of a draw, not a verdict — CONTROLLED: 4.7391 4.9645.
 #
 #   SHIPPED 2026-09-24 on Alan's call: the defaults below and agent-djev.conf's
 #   environment= are BATCH_INVARIANT="1" and MAX_MODEL_LEN="81920" together —
