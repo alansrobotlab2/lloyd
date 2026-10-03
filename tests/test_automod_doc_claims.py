@@ -1482,3 +1482,153 @@ def test_a_line_citation_of_claude_md_must_land_on_the_venv_rule():
     venv_line = next(i for i, ln in enumerate(claude, 1) if "**Venv**:" in ln)
     assert _stale_claude_line_citations(f"CLAUDE.md:{venv_line}", claude) == []
     assert VAULT_FILE_COUNT_RE.search(was)
+
+
+# ── #2140: SETUP.md's ### bun section describes the prefix that is really there ──
+#
+# "Installs to `~/.bun`. Only `@tobilu/qmd` lives here." stood in Part 2 for a
+# fortnight after the 2026-09-19 uninstall removed that package, and it
+# contradicted Part 6 of the same file, which forbids the published install and
+# gives the removal command. Measured 2026-10-03: `~/.bun/bin` holds `bun` and
+# the `bunx` symlink to it and nothing else; `~/.bun/install/global/node_modules/@tobilu/`
+# is an EMPTY directory — the husk of the uninstall, which a glob over `@tobilu/`
+# reads as an install — and the global `package.json` names no dependency at all.
+# The bytes behind that last claim are committed at
+# `~/obsidian/backlog/data/package.json` (vault `3488566`, `cmp`-clean), because
+# a claim about a file outside this repo has no history and no reviewer otherwise.
+
+BUN_INSTALL_CMD = "curl -fsSL https://bun.sh/install | bash"
+NPM_PREFIX_HEADING = "### npm global prefix"
+BUN_PATH_EXPORT = 'export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.bun/bin:$PATH"'
+#: The acceptance reads the three keep-anchors out of ONE window — `sed -n
+#: '168,190p'`, 23 lines, as filed. Stated as a span from the `### bun` heading
+#: it is the same measurement with no absolute line number left to rot: 19 on
+#: 2026-10-03 before the rewrite, 21 after it.
+BUN_KEEP_ANCHOR_SPAN = 23
+
+#: A predicate that puts a qmd build inside the bun prefix. `~/.bun` need not be
+#: spelled for the sentence to mislead — "lives here", inside the bun section, is
+#: the same claim, and it is the spelling this rot actually used.
+QMD_IN_BUN_CLAIM_RE = re.compile(
+    r"\bqmd\b.{0,60}?\b(lives?|installed|install|present|ships|lived)\b", re.I | re.S)
+#: A sentence carrying one of these is reporting the prefix's real state, not
+#: asserting an install: "No qmd build lives here" is the truth this section now
+#: tells, and a detector that flags it would pin prose nobody can write.
+QMD_CLAIM_NEGATION_RE = re.compile(r"\b(no|not|never|without|uninstalled|no longer)\b", re.I)
+
+
+def _setup_bun_region() -> tuple[str, str, str]:
+    """(the `### bun` heading, its body, the heading that follows the section)."""
+    text = _setup_text()
+    m = re.search(r"(?ms)^(### bun[^\n]*)\n(.*?)(?=^#{2,3} )", text)
+    assert m, "SETUP.md has no `### bun` section in Part 2's package roots"
+    nxt = re.match(r"#{2,3} [^\n]*", text[m.end():])
+    assert nxt, "nothing follows the `### bun` section"
+    return m.group(1), m.group(2), nxt.group(0).rstrip()
+
+
+def _sentences(text: str) -> list[str]:
+    """Sentences, with the doc's ~80-column wraps collapsed away first: a
+    wrapped sentence and an absent sentence are different findings."""
+    return [s for s in re.split(r"(?<=[.!?])\s+", " ".join(text.split())) if s]
+
+
+def _qmd_in_bun_prefix_claims(text: str) -> list[str]:
+    """Sentences asserting a qmd build is installed in, or lives in, the bun prefix."""
+    return [s for s in _sentences(text)
+            if "qmd" in s.lower()
+            and QMD_IN_BUN_CLAIM_RE.search(s)
+            and not QMD_CLAIM_NEGATION_RE.search(s)]
+
+
+def test_setup_bun_section_claims_no_qmd_build_lives_in_the_bun_prefix():
+    """#2140 clause 1: neither the heading nor any sentence puts a qmd build in
+    `~/.bun`. The heading counts — `### bun (qmd only)` made the false claim in
+    the one position a skimmer is guaranteed to read."""
+    heading, body, _ = _setup_bun_region()
+    assert "qmd" not in heading.lower(), f"the heading locates qmd again: {heading!r}"
+    assert _qmd_in_bun_prefix_claims(body) == [], (
+        "the bun section is claiming a qmd build is installed there again")
+    # The detector bites: the sentence this clause exists to keep out, verbatim
+    # out of SETUP.md at eb6645ed, is caught rather than merely absent. A pin
+    # that only greps for that one string would survive a reworded reinstatement.
+    assert _qmd_in_bun_prefix_claims(
+        "Installs to `~/.bun`. Only `@tobilu/qmd` lives here.") == [
+        "Only `@tobilu/qmd` lives here."]
+
+
+def test_setup_bun_section_states_the_measured_state_of_the_bun_prefix():
+    """#2140 clause 2: the four measured facts are IN the section — where the
+    prefix is, what its bin holds, that nothing qmd is in it, and which qmd the
+    PATH actually resolves to."""
+    _, body, _ = _setup_bun_region()
+    flat = " ".join(body.split())
+    assert "Installs to `~/.bun`" in flat
+    assert re.search(r"`~/\.bun/bin` holds only `bun` and[^.]*`bunx`", flat), flat
+    assert re.search(r"[Nn]o qmd build (?:lives|is installed)", flat), (
+        "the section no longer says outright that nothing qmd is in the prefix")
+    assert "`~/.local/bin/qmd` → `~/lloyd/qmd/bin/qmd`" in flat, (
+        "the fork is the qmd on PATH, so the section has to say how it is reached")
+
+
+def test_setup_bun_section_agrees_with_part_6_rather_than_contradicting_it():
+    """#2140 clause 3, pinned at both ends. Part 6 forbids the published install
+    and carries the removal command; a bun section that quietly re-asserted the
+    install would leave the file arguing with itself, and a section pointing at
+    a Part 6 that had since dropped the prohibition would point at nothing."""
+    text = _setup_text()
+    _, body, _ = _setup_bun_region()
+    flat = " ".join(body.split())
+    assert "must not be installed" in flat, (
+        "the bun section no longer states that the published build stays uninstalled")
+    assert "Part 6" in flat, "and it no longer points at the prose that says why"
+    anchor = "## Part 6 — qmd (vault search)"
+    assert anchor in text, "the section this one points at is gone: the pointer dangles"
+    part6 = text[text.index(anchor):]
+    assert "must not be installed" in " ".join(part6.split()), (
+        "Part 6 no longer forbids the published install")
+    assert "bun remove -g @tobilu/qmd" in part6, "Part 6 lost the removal command"
+
+
+def test_setup_bun_section_keeps_the_install_block_and_the_npm_prefix_section():
+    """#2140 clause 4: the rewrite took one claim out and nothing else. The curl
+    command is still the section's own, `### npm global prefix` is still the
+    heading that follows, and the `~/.bun/bin` entry is still in the PATH export
+    — all three within the single window the acceptance reads them from."""
+    text = _setup_text()
+    heading, body, following = _setup_bun_region()
+    assert BUN_INSTALL_CMD in body, "the bun install command left the section"
+    assert following == NPM_PREFIX_HEADING, f"{following!r} is in its place instead"
+    lines = text.splitlines()
+    head_n = next((i + 1 for i, ln in enumerate(lines) if ln == heading), 0)
+    path_n = next((i + 1 for i, ln in enumerate(lines) if ln.strip() == BUN_PATH_EXPORT), 0)
+    assert head_n and path_n, f"`### bun` at {head_n}, the PATH export at {path_n}"
+    assert BUN_INSTALL_CMD in "\n".join(lines[head_n - 1:path_n]), (
+        "an anchor fell outside the span between the section and the PATH export")
+    assert path_n - head_n <= BUN_KEEP_ANCHOR_SPAN, (
+        f"the keep-anchors now span {path_n - head_n} lines from `### bun`; the "
+        f"acceptance reads all three out of one {BUN_KEEP_ANCHOR_SPAN}-line window")
+
+
+def test_the_committed_witness_backs_the_bun_prefix_claim():
+    """#2140 clause 5: the claim is about a file outside this repo, so its bytes
+    are committed and re-read here. `wc -l < backlog/data/package.json` → 4 is
+    the re-derivation, and the file names no dependency at all — which is what
+    lets the section say no qmd build is installed under the bun prefix. Read
+    through `board_presence`, unmarked like the other board-reading claims in
+    this tree: a `live_vault`-marked node is deselected by the gate's own
+    `-m "not live_vault"` and would certify nothing."""
+    import board_presence
+    import json
+
+    witness = board_presence.BOARD_DIR / "data" / "package.json"
+    assert witness.is_file(), (
+        f"{witness} is the only history behind SETUP.md's claim that the published "
+        "build is not installed under ~/.bun; a claim about an unrepo file with no "
+        "committed bytes is a sentence nobody can re-check")
+    doc = json.loads(witness.read_text(encoding="utf-8"))
+    assert "dependencies" not in doc, f"something is globally installed again: {doc}"
+    assert doc["trustedDependencies"] == ["node-llama-cpp"], doc
+    _, body, _ = _setup_bun_region()
+    assert re.search(r"[Nn]o qmd build (?:lives|is installed)", " ".join(body.split())), (
+        "the witness is on disk but the section stopped claiming what it proves")

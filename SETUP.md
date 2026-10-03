@@ -166,13 +166,15 @@ for the dependency set):
 uv python install 3.12
 ```
 
-### bun (qmd only)
+### bun
 
 ```bash
 curl -fsSL https://bun.sh/install | bash
 ```
 
-Installs to `~/.bun`. Only `@tobilu/qmd` lives here.
+Installs to `~/.bun`; `~/.bun/bin` holds only `bun` and its `bunx` symlink.
+**No qmd build lives here** — the published `@tobilu/qmd` must not be installed
+(Part 6); the `qmd` on PATH is the fork: `~/.local/bin/qmd` → `~/lloyd/qmd/bin/qmd`.
 
 ### npm global prefix
 
