@@ -64,7 +64,10 @@ WM_LAST_ENQUEUED = "last_enqueued"
 #: `len(frontend_probe_canary.must_detect_seeds())` today. If the table grows the
 #: floor is merely conservative; if it shrinks the CLI exits 2 ("nothing measured")
 #: and the run fails loudly, which is the right answer to a seed going missing.
-SEEDS = 12
+#: 12 -> 16 on #2130: four layout seeds joined the table. The number is pinned
+#: against the table by `test_the_declared_interval_is_a_day_and_the_seed_floor_is_the_whole_table`,
+#: so a seed that stops being must-detect has to be deleted here as well as there.
+SEEDS = 16
 MODULE = "scripts.automod.frontend_probe_canary"
 #: What the item's payload carries, and what a human types to reproduce the run.
 COMMAND = f"python -m {MODULE} --seeds {SEEDS}"

@@ -41,12 +41,13 @@ from __future__ import annotations
 import contextlib
 import functools
 import http.server
+import json
 import socket
 import socketserver
 import tempfile
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import urlsplit
 
 from scripts.automod import state as S
@@ -330,6 +331,18 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, *_args) -> None:      # silence: the gate's stdout is the ledger's
         pass
 
+    #: Set by `serve_build(api_stub=...)`; None means `/api/...` is not served at
+    #: all, which is what the load probe has always had.
+    api_stub: Mapping[str, Any] | None = None
+
+    def __init__(self, *args, api_stub: Mapping[str, Any] | None = None,
+                 **kwargs) -> None:
+        # Must be on the instance BEFORE `BaseHTTPRequestHandler.__init__`, which
+        # handles the one request this instance exists for and returns done — set
+        # it after and every request is answered as if the stub were absent.
+        self.api_stub = api_stub
+        super().__init__(*args, **kwargs)
+
     def translate_path(self, path: str = "") -> str:
         found = super().translate_path(path)
         if Path(found).exists():
@@ -338,6 +351,39 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             return found                       # a missing asset stays a 404
         return super().translate_path("/index.html")
 
+    def _answer_api(self) -> bool:
+        """Answer an `/api/...` request from `api_stub`; True if this answered it.
+
+        `sort_keys` so the bytes a page sees are a function of the stub alone: a
+        dict literal's own order is not part of its value, and a response whose
+        bytes moved because a key was re-ordered is a diff with no cause.
+        """
+        stub = self.api_stub
+        if stub is None:
+            return False
+        path = urlsplit(self.path).path
+        if not path.startswith("/api/"):
+            return False
+        length = int(self.headers.get("Content-Length") or 0)
+        if length:                              # drain the body or keep-alive stalls
+            self.rfile.read(length)
+        key = path if path in stub else ("*" if "*" in stub else None)
+        payload = b"{}" if key is None else json.dumps(stub[key], sort_keys=True).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+        return True
+
+    def do_GET(self) -> None:                   # noqa: N802 - stdlib name
+        if not self._answer_api():
+            super().do_GET()
+
+    def do_POST(self) -> None:                  # noqa: N802 - stdlib name
+        if not self._answer_api():
+            self.send_error(501, "Unsupported method ('POST')")
+
 
 class _Server(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
@@ -345,12 +391,23 @@ class _Server(socketserver.ThreadingTCPServer):
 
 
 @contextlib.contextmanager
-def serve_build(out_dir: Path):
+def serve_build(out_dir: Path, *, api_stub: Mapping[str, Any] | None = None):
     """Serve `out_dir` on a spare loopback port and yield its base URL.
 
     Port 0, so two gates never choose the same one and no rung has to know what
     `:5173` or the canary ports are doing; loopback only, so nothing on the LAN
     reaches a tree that is under review.
+
+    `api_stub` is for a caller that needs the app to have DATA, which is not the
+    same thing as needing it to load. Left None the server answers nothing under
+    `/api/`, and Mission Control then boots into `Dashboard unavailable: ...`
+    because its 5-second poll fails — the load probe is unaffected (the bundle
+    still mounts, which is all it asserts) but a caller reading geometry would be
+    reading an error message. When a mapping is passed it is consulted per path,
+    with `"*"` as the default, and every `/api/...` request is answered from it as
+    JSON — POST included, because the app reports its own tab with one and a
+    `501 Unsupported method` there becomes a console error the caller did not ask
+    for. Keys are request paths (`/api/dashboard`); values are JSON documents.
     """
     out_dir = Path(out_dir).resolve()
     with socket.socket() as probe:
@@ -364,7 +421,8 @@ def serve_build(out_dir: Path):
     # the app (`#root`'s two children being the listing's `<pre>` and `<table>`,
     # and every script 404ing so no pageerror can ever fire). The probe would have
     # been quietly blind to every broken frontend it was ever pointed at.
-    handler = functools.partial(_Handler, directory=str(out_dir))
+    handler = functools.partial(_Handler, directory=str(out_dir),
+                              api_stub=api_stub)
 
     class Bound(_Server):
         def __init__(self) -> None:

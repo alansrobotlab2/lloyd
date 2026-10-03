@@ -69,6 +69,7 @@ from pathlib import Path
 from app import lint_findings
 from scripts.automod import canary as C
 from scripts.automod import canary_smoke as CS
+from scripts.automod import frontend_layout as _fe_layout
 from scripts.automod import frontend_probe as _fe_probe
 from scripts.automod import spec, state as S, testpaths as TP, vet as V, worktree as W
 
@@ -1561,7 +1562,7 @@ class Gate:
             if ok:
                 # Probe the output THIS build produced, while it is still on disk.
                 # Never :5173 — that dev server serves the live tree (docstring).
-                probe = self._frontend_probe(out_dir)
+                probe = self._frontend_probe(out_dir, changed_web)
         finally:
             _drop_scratch(out_dir, self.round_id)
         if not ok:
@@ -1572,12 +1573,14 @@ class Gate:
         unit = "vitest ok" if tested else f"vitest SKIPPED ({vt_tail})"
         return True, (f"tsc: no new errors ({sum(head.values())} pre-existing); "
                       f"vite build ok; {unit}; {_fe_probe.summary(probe)}; "
+                      f"{_fe_layout.summary(probe.get('layout') or {})}; "
                       f"{len(changed_web)} frontend file(s)"), {
                           "changed_web": changed_web, "vitest": tested,
                           "probe": probe,
                           **({} if tested else {"vitest_skipped": vt_tail})}
 
-    def _frontend_probe(self, built_dir: Path) -> dict:
+    def _frontend_probe(self, built_dir: Path,
+                        changed_web: list[str] | None = None) -> dict:
         """Load the build this rung just produced in a headless browser (#1601).
 
         The verdict is recorded, never believed enough to block: this is `vet`'s
@@ -1606,6 +1609,35 @@ class Gate:
         verdict = _fe_probe.run(built_dir, shots_dir=shots)
         if not verdict.get("ok") and not verdict.get("skipped"):
             verdict["artifact"] = str(_fe_probe.write_artifact(self.round_id, verdict))
+        # The layout leg (#2130), record-only like the probe above and for the same
+        # reason: the probe's own canary measures its channel as blind to a
+        # stylesheet that loads and matches nothing, so a change to one component
+        # that visibly breaks ANOTHER reaches no other check in this rung. Its
+        # checks are reported and never gate — promotion needs the 10-landing
+        # false-fire number owed on #2130 first. The leg crashing is reported as a
+        # skipped capture rather than reaching the rung's own except, which would
+        # otherwise make a layout tooling failure a frontend failure and block on
+        # layout by the back door.
+        try:
+            layout = _fe_layout.run(
+                built_dir, changed_paths=list(changed_web or []),
+                source_root=self.worktree / "web", shots_dir=shots,
+                round_id=self.round_id, baseline=_fe_layout.load_baseline())
+        except Exception as exc:                          # noqa: BLE001
+            layout = {"captured": False, "baseline": "crashed", "checks": [],
+                      "no_verdict": [], "widths": [], "sections_compared": 0,
+                      "fingerprint": None,
+                      "skipped": f"the leg raised {exc.__class__.__name__}: "
+                                 f"{str(exc)[:160]}"}
+        verdict["layout"] = _fe_layout.without_fingerprint(layout)
+        # `maybe_advance` says "stored" on success; the field is the REASON the
+        # baseline was held, so the one outcome it did not hold gets an empty
+        # string and a reader of the ledger never has to know the sentinel.
+        _held = _fe_layout.maybe_advance(layout, advanced=bool(verdict.get("ok")),
+                                         round_id=self.round_id)
+        verdict["layout"]["baseline_held"] = "" if _held == "stored" else _held
+        verdict["layout"]["artifact"] = str(
+            _fe_layout.write_artifact(self.round_id, verdict["layout"]))
         return verdict
 
     # Files whose edit changes what the model is *told*, rather than what the

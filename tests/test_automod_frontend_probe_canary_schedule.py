@@ -92,7 +92,7 @@ def test_one_item_per_declared_interval(tmp_path):
     rows = _queued(q)
     assert len(rows) == 1
     payload = json.loads(rows[0]["payload_json"])
-    assert payload["command"] == "python -m scripts.automod.frontend_probe_canary --seeds 12"
+    assert payload["command"] == "python -m scripts.automod.frontend_probe_canary --seeds 16"
 
     # Inside the interval, with the first item still queued: nothing.
     asyncio.run(src.enqueue_if_due(q, {}))
@@ -134,7 +134,7 @@ def test_config_enables_the_source():
 def test_the_command_carries_no_state_dir_override():
     src = _source()
     argv = src.build_argv()
-    assert argv[1:] == ["-m", "scripts.automod.frontend_probe_canary", "--seeds", "12"]
+    assert argv[1:] == ["-m", "scripts.automod.frontend_probe_canary", "--seeds", "16"]
     assert "LLOYD_AUTOMOD_STATE" not in src.COMMAND
     assert not any("LLOYD_AUTOMOD_STATE" in a for a in argv)
     # ...and the child is spawned with no env= at all, so it inherits the pool's.

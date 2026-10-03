@@ -9,6 +9,7 @@ and production.
 from __future__ import annotations
 
 import os
+import json
 import subprocess
 import sys
 import time
@@ -16,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts.automod import frontend_layout as FL
 from scripts.automod import gate as G
 
 
@@ -526,7 +528,8 @@ def test_the_rung_probes_the_build_it_just_made_and_records_a_failing_verdict_wi
             "check": "console-error",
             "problem": "a console error was logged: TypeError: boom in App",
             "screenshot": "/tmp/state/frontend_probe/broken.png"}])
-    monkeypatch.setattr(g, "_frontend_probe", fake_probe)
+    monkeypatch.setattr(g, "_frontend_probe",
+                        lambda d, changed_web=None: fake_probe(d))
     ok, detail, res = g.rung_frontend()
     assert ok, "observe-only: a failing probe must never refuse the round"
     assert len(seen) == 1, seen
@@ -538,6 +541,167 @@ def test_the_rung_probes_the_build_it_just_made_and_records_a_failing_verdict_wi
     assert res["probe"]["ok"] is False and res["probe"]["checks"][0]["check"] == "console-error"
 
 
+# ── the layout leg (#2130): the same observe-only contract, one level down ───
+# `frontend_probe` proves the build RUNS. It watches load status, the DOM, the
+# console and pageerrors, so a stylesheet that is served with a 200 and whose rule
+# no longer matches the node it used to style passes it cleanly — the canary's own
+# artifact records that seed as `blind` with `"checks": []`. The layout leg is the
+# channel for that class, and it inherits the rung's contract in full. What these
+# nodes stub is the two heavy modules (`frontend_probe.run`, `frontend_layout.run`)
+# around the rung's REAL `_frontend_probe`, because the property under test is what
+# the rung does with a verdict, not how a browser measures a box.
+
+def _layout_report(*, checks=(), captured=True, baseline="absent",
+                 round_id="SM_T", **extra):
+    """A `frontend_layout.run` report: enough shape for the rung's own logic.
+
+    Built through `FL.fingerprint`/`fingerprint_of` rather than written as a dict
+    literal, because the rung reads keys off it (`fingerprint`, `checks`,
+    `skipped`): a literal that drifted from the real return shape would let the
+    rung's baseline call pass on a document the leg never produces.
+    """
+    view = FL.fingerprint_of(
+        {"width": 1280, "sections": [{"head": h, "cw": 728, "sw": 728,
+                                      "overflow": 0, "tag": "panel",
+                                      "tags": ["panel"], "kidsTotal": 2,
+                                      "panels": [["p", 340, 340]], "pills": [],
+                                      "clipped": []}
+                                     for h in ("System", "Services", "Tokens",
+                                               "vLLM engines", "Lloyd agent",
+                                               "Subagents & background tasks",
+                                               "Automation & work")]},
+        width=1280)
+    report = {"captured": captured, "widths": [1280], "sections_compared": 7,
+              "baseline": baseline, "checks": list(checks), "skipped": "",
+              "no_verdict": [], "fingerprint": None if not captured else
+              FL.fingerprint({"1280": view}, round_id=round_id)}
+    report.update(extra)
+    return report
+
+
+def _layout_check(section="Tokens", attribution="UNTOUCHED"):
+    return {"check": f"layout-changed:{section}", "ok": False,
+            "section": section, "attribution": attribution,
+            "detail": f"layout-changed:{section}: MOVED at 1280px "
+                      f"(fields: cw) — section NOT in the round's diff",
+            "delta": {"1280": {"cw": {"was": 728, "now": 700}}}}
+
+
+def _layout_rung(live_repo, tmp_path, monkeypatch, *, probe_verdict, layout):
+    """A frontend rung over a fake build, with the two browsers stubbed out and the
+    state dir redirected so the leg's artifacts land somewhere throwaway."""
+    g, wt = _frontend_gate(live_repo, tmp_path, monkeypatch,
+                           changed=["web/src/App.tsx"], head={}, base={})
+    monkeypatch.setattr(G, "_vite_build", _fake_build())
+    monkeypatch.setattr(G.S, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(G._fe_probe, "run", lambda *a, **k: probe_verdict)
+    monkeypatch.setattr(G._fe_layout, "run", lambda *a, **k: layout)
+    return g, wt
+
+
+def test_a_failing_layout_check_is_reported_in_the_detail_and_never_refuses_the_rung(
+        live_repo, tmp_path, monkeypatch):
+    """Clause 5 of #2130, in both directions it has to hold.
+
+    A layout check that fires is *reported* — named, with its section and its
+    attribution, in the rung's own detail line and in the verdict the ledger row
+    carries — and the rung stays green. "Whatever the diff" is the half that is easy
+    to get wrong by accident: an exception escaping the leg would land in the
+    rung-level `except`, which returns `False`, so a broken layout TOOL would block
+    a landing on layout through the back door while the checks themselves were
+    correctly advisory. That is a separate node below.
+    """
+    layout = _layout_report(checks=[_layout_check("Tokens")], baseline="compared")
+    g, wt = _layout_rung(live_repo, tmp_path, monkeypatch,
+                         probe_verdict=_probe_verdict(), layout=layout)
+    ok, detail, res = g.rung_frontend()
+    assert ok, "record-only: a moved section is a finding, not a refusal"
+    assert "LAYOUT MOVED 1 section(s) [Tokens UNTOUCHED" in detail, detail
+    assert "1 UNTOUCHED" in detail, "the ripple count is the line's point\n" + detail
+    laid = res["probe"]["layout"]["checks"][0]
+    assert laid["attribution"] == "UNTOUCHED" and laid["section"] == "Tokens", laid
+    assert "probe ok" in detail, "the load probe's own line is not displaced"
+
+
+def test_a_layout_leg_that_raises_is_a_named_no_capture_and_never_refuses_the_rung(
+        live_repo, tmp_path, monkeypatch):
+    """The leg crashing is an OBSERVATION that did not happen, named as such.
+
+    The rung's outer `except` returns False, so without the leg's own guard a
+    playwright bug, a font that failed to load, or a bad baseline file would fail a
+    landing whose diff is fine — an instrument blocking on its own health. And the
+    skip has to be *in the detail*: a rung that says "frontend ok" over a leg that
+    never ran is the silence #1028's ledger is full of.
+    """
+    g, wt = _frontend_gate(live_repo, tmp_path, monkeypatch,
+                           changed=["web/src/App.tsx"], head={}, base={})
+    monkeypatch.setattr(G, "_vite_build", _fake_build())
+    monkeypatch.setattr(G.S, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(G._fe_probe, "run", lambda *a, **k: _probe_verdict())
+
+    def explode(*a, **k):
+        raise RuntimeError("chromium vanished")
+    monkeypatch.setattr(G._fe_layout, "run", explode)
+    ok, detail, res = g.rung_frontend()
+    assert ok, "a broken instrument is not a broken frontend"
+    assert "LAYOUT SKIPPED" in detail, detail
+    assert "chromium vanished" in detail, "the reason belongs in the line"
+    assert res["probe"]["layout"]["captured"] is False
+    assert res["probe"]["layout"]["checks"] == [], (
+        "a leg that did not run reports no verdicts, neither good nor bad")
+
+
+def test_a_clean_landing_blesses_the_fingerprint_it_just_measured(
+        live_repo, tmp_path, monkeypatch):
+    """The pass edge of the bless rule, taken from the rung rather than from
+    `maybe_advance` in isolation.
+
+    This is the seam the whole design turns on: `maybe_advance` refuses on a failed
+    report on its own, but the authority to bless is the rung's, because the rung is
+    the only place that knows the load probe passed as well. Get that wiring backwards
+    and the first broken landing re-blesses the baseline to its own broken layout,
+    which erases the leg silently: every later round then compares against the break
+    and reports the page clean.
+    """
+    g, wt = _layout_rung(live_repo, tmp_path, monkeypatch,
+                         probe_verdict=_probe_verdict(), layout=_layout_report())
+    ok, detail, res = g.rung_frontend()
+    assert ok
+    assert res["probe"]["layout"]["baseline_held"] == "", (
+        "an empty hold reason is the one outcome that means it stored", res)
+    stored = tmp_path / "state" / "frontend_layout" / "baseline.json"
+    assert stored.exists(), "a clean landing blesses the baseline it just measured"
+    assert json.loads(stored.read_text())["round_id"] == "SM_T"
+    assert (tmp_path / "state" / "frontend_layout" / "SM_T.json").exists(), (
+        "and the verdict itself is in the state dir, beside the probe's own records")
+    assert not list(wt.rglob("*.layout.json")) and not list(wt.rglob("baseline.json")), (
+        "no artifact of the leg lands in the tree under review")
+
+
+def test_a_landing_whose_load_probe_failed_holds_the_baseline_and_says_so(
+        live_repo, tmp_path, monkeypatch):
+    """The fail edge, and the reason the rung's own green is not the trigger.
+
+    The load probe is observe-only, so this rung PASSES while its probe reports a
+    console error — which is precisely why the bless cannot key off the rung's `ok`.
+    A landing that failed a frontend check must not advance the truth the next round
+    is compared against, and the hold has to be a stated reason in the ledger row: an
+    absent file proves nothing about intent.
+    """
+    g, wt = _layout_rung(live_repo, tmp_path, monkeypatch,
+                         probe_verdict=_probe_verdict(ok=False, checks=[
+                             {"check": "console-error",
+                              "problem": "a console error was logged: boom"}]),
+                         layout=_layout_report())
+    ok, detail, res = g.rung_frontend()
+    assert ok, "observe-only all the way down: a failing probe is not a refusal"
+    assert "probe FAILED: 1 check(s)" in detail, detail
+    assert res["probe"]["layout"]["baseline_held"].startswith("held:"), res
+    assert "other checks did not pass" in res["probe"]["layout"]["baseline_held"]
+    assert not (tmp_path / "state" / "frontend_layout" / "baseline.json").exists(), (
+        "the failed landing stored nothing, so the previous baseline still stands")
+
+
 def test_the_rung_records_a_healthy_probe_verdict_in_the_detail(live_repo, tmp_path, monkeypatch):
     """The same path with a clean verdict: `probe ok` and the metrics, so a green
     line says what was checked rather than being indistinguishable from a probe
@@ -545,7 +709,8 @@ def test_the_rung_records_a_healthy_probe_verdict_in_the_detail(live_repo, tmp_p
     g, wt = _frontend_gate(live_repo, tmp_path, monkeypatch, changed=["web/src/App.tsx"],
                            head={}, base={})
     monkeypatch.setattr(G, "_vite_build", _fake_build())
-    monkeypatch.setattr(g, "_frontend_probe", lambda d: _probe_verdict())
+    monkeypatch.setattr(g, "_frontend_probe",
+                        lambda d, changed_web=None: _probe_verdict())
     ok, detail, res = g.rung_frontend()
     assert ok and "probe ok (2 root children, 412 chars of text" in detail, detail
     assert res["probe"]["ok"] is True and res["probe"]["checks"] == []

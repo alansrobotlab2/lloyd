@@ -35,6 +35,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts.automod import frontend_layout as FL
 from scripts.automod import frontend_probe as FP
 from scripts.automod import frontend_probe_canary as FC
 from scripts.automod import state as S
@@ -62,18 +63,30 @@ def _seed(name: str) -> FC.Seed:
 
 # ── clause 2: the table, pinned as data ─────────────────────────────────────
 
-def test_the_seed_table_is_twelve_must_detect_seeds_one_control_and_two_blind():
+def test_the_seed_table_is_sixteen_must_detect_seeds_one_control_and_one_blind():
     """Clause 2's arithmetic, and the reason the counts are exact: `m` in the printed
     `detected n/m` is the must-detect count, the bar is `m >= 10` at `>= 90%`, and a
     table that quietly lost a seed would still print a passing-looking fraction.
+
+    Sixteen, not the twelve #1872 shipped: four layout seeds joined the table on
+    #2130, and the count of declared-blind dropped from two to one because
+    `stylesheet_loads_but_matches_no_rule` moved channels. That move is the whole
+    point of pinning the numbers here — the blind declaration is not a free win, it
+    is one fewer exemption and four more seeds that must be caught.
     """
     must = FC.must_detect_seeds()
-    assert len(must) == 12, [s.name for s in must]
+    assert len(must) == 16, [s.name for s in must]
     assert len(must) >= 10, "the contract's floor: a rate over fewer is not this number"
     controls = FC.control_seeds()
     assert len(controls) == 1, [s.name for s in controls]
     assert controls[0].name == "healthy_build_that_warns", controls[0].name
-    assert len(FC.blind_seeds()) == 2, [s.name for s in FC.blind_seeds()]
+    assert len(FC.blind_seeds()) == 1, [s.name for s in FC.blind_seeds()]
+    assert FC.blind_seeds()[0].name == "throw_long_after_the_settle_window"
+    # Twelve over the load channel, four over the layout channel, and no seed is in
+    # both: the rate stays one number over one instrument per row.
+    assert len([s for s in must if s.channel == "load"]) == 12
+    assert len([s for s in must if s.channel == "layout"]) == 4
+    assert {s.channel for s in FC.SEEDS} == {"load", "layout"}
     # The four shapes the item names are must-detect entries, not blind escapes.
     for name in FC.REQUIRED_SHAPES:
         seed = _seed(name)
@@ -169,7 +182,7 @@ def test_the_control_is_scored_control_and_a_declared_blind_seed_loses_its_exemp
     assert blocked["note"].startswith("the probe FAILED a healthy build"), blocked
     assert blocked["checks"] == ["console-error"], blocked
 
-    blind = _seed("stylesheet_loads_but_matches_no_rule")
+    blind = _seed("throw_long_after_the_settle_window")
     unseen = FC.score_seed(blind, {"ok": True, "checks": []})
     assert unseen["score"] == "blind", unseen
     assert unseen["declared_blind"] is True and unseen["blind_reason"], unseen
@@ -179,6 +192,16 @@ def test_the_control_is_scored_control_and_a_declared_blind_seed_loses_its_exemp
                                                "problem": "404"}]})
     assert caught["score"] == "detected", (
         "the probe saw it, so the blind declaration was wrong and the seed counts")
+
+    # The table shipped with TWO exemptions; #2130's layout leg took one away. A
+    # declaration is not a permanent classification, it is a claim about the
+    # instrument standing in front of it — and `stylesheet_loads_but_matches_no_rule`
+    # is the row that moved channels rather than the row that got a better score, so
+    # the seed is pinned here as no-longer-declared and the node that measures it
+    # lives beside the four new layout seeds below.
+    moved = _seed("stylesheet_loads_but_matches_no_rule")
+    assert moved.channel == "layout" and not moved.blind_reason, moved
+    assert FC.blind_seeds() == [blind], [x.name for x in FC.blind_seeds()]
 
 
 def test_a_skipped_probe_is_scored_blind_and_never_as_a_miss():
@@ -197,7 +220,12 @@ def test_a_skipped_probe_is_scored_blind_and_never_as_a_miss():
 def test_blind_and_control_seeds_leave_both_n_and_m():
     """Clause 3's denominator, computed over synthetic scores so the arithmetic is
     pinned at numbers a browser never had to produce: 3 detected + 1 missed gives
-    n=3, m=4 — six seeds in the table, four in the rate.
+    n=3, m=4 — five seeds here, four in the rate, the fifth exempt.
+
+    Six seeds as shipped, before #2130 moved a second exemption out of the table:
+    the pessimistic fraction below divides by `m + 1` because exactly ONE seed is
+    left that the instrument cannot see, and that count going down is the point of
+    the leg rather than a detail of this arithmetic.
     """
     records = [
         FC.score_seed(_seed("uncaught_error_at_module_top_level"),
@@ -209,19 +237,16 @@ def test_blind_and_control_seeds_leave_both_n_and_m():
         FC.score_seed(_seed("mounted_into_a_detached_node"), {"ok": True, "checks": []}),
         FC.score_seed(_seed("throw_long_after_the_settle_window"),
                       {"ok": True, "checks": []}),
-        FC.score_seed(_seed("stylesheet_loads_but_matches_no_rule"),
-                      {"ok": True, "checks": []}),
         FC.score_seed(_seed("healthy_build_that_warns"), {"ok": True, "checks": []}),
     ]
     summary = FC.summarise(records, min_seeds=10, min_rate=0.90)
     assert (summary["detected"], summary["seeds_measured"]) == (3, 4), summary
     assert summary["rate"] == 0.75, summary
-    assert summary["blind"] == ["throw_long_after_the_settle_window",
-                                "stylesheet_loads_but_matches_no_rule"], summary["blind"]
+    assert summary["blind"] == ["throw_long_after_the_settle_window"], summary["blind"]
     assert summary["control"] == ["healthy_build_that_warns"], summary["control"]
-    assert summary["blind_as_misses"] == 2, summary
-    assert summary["rate_counting_blind_as_misses"] == 0.5, (
-        "the pessimistic number charges both blind seeds as misses: 3/6")
+    assert summary["blind_as_misses"] == 1, summary
+    assert summary["rate_counting_blind_as_misses"] == 0.6, (
+        "the pessimistic number charges the one remaining blind seed as a miss: 3/5")
     assert summary["passes"] is False, "0.75 is under the 0.90 bar"
 
 
@@ -252,11 +277,12 @@ def test_the_shipped_cli_measures_the_table_and_prints_the_artifact_it_wrote(tmp
     this node's own directory so the artifact is pinned where clause 4 says it must
     go without writing a single byte into `~/.local/state/lloyd-automod/`.
 
-    Measured as written on 2026-09-30: all 12 must-detect seeds detected, both blind
-    seeds invisible to the shipped probe, the control clean. The assertion below is
-    the contract's bar (m >= 10 at >= 90%), not that number — a canary that pinned
-    12/12 would fail the day one shape legitimately moves, and a canary that only
-    pinned the bar would not notice the table emptying.
+    Measured as written on 2026-10-03: all 16 must-detect seeds detected — 12 over
+    the load channel and 4 over the layout leg — the one remaining declared-blind
+    seed invisible to the load probe, the control clean. The assertion below is the
+    contract's bar (m >= 10 at >= 90%), not that number — a canary that pinned 16/16
+    would fail the day one shape legitimately moves, and a canary that only pinned
+    the bar would not notice the table emptying.
     """
     _require_browser()
     state = tmp_path / "state"
@@ -373,6 +399,12 @@ def test_a_run_in_which_the_probe_could_not_run_reports_no_rate(tmp_path, monkey
     monkeypatch.setattr(S, "STATE_DIR", tmp_path / "state")
     monkeypatch.setattr(FP, "run", lambda *a, **kw: {"skipped": "no chromium at /x"})
     monkeypatch.setattr(FP, "tmp_build_dir", lambda: tmp_path / "scratch")
+    # Both instruments, because the table now holds two of them: stub only the load
+    # probe and the four layout seeds run for real against a chromium that this node
+    # just declared missing, so the "rate for a run that probed nothing" it is
+    # pinning would be a rate for a run that measured four seeds.
+    monkeypatch.setattr(FL, "capture_build",
+                        lambda *a, **kw: {"skipped": "no chromium at /x"})
 
     rc = FC.main(["--seeds", "10"])
     out = capsys.readouterr().out
@@ -431,3 +463,132 @@ def _code_only(src: str) -> str:
             continue
         out.append(tok.string)
     return "".join(out)
+
+
+# ── clause 4 of #2130: the layout channel's four seeds ──────────────────────
+
+def _layout_seeds() -> list[FC.Seed]:
+    return [seed for seed in FC.SEEDS if seed.channel == "layout"]
+
+
+def test_the_layout_seeds_are_four_and_each_breaks_css_without_touching_the_dom(
+        tmp_path):
+    """The table's layout rows, pinned as data before any browser grades them.
+
+    Three claims, none of which needs chromium and all of which a browser could not
+    tell you:
+
+    * four seeds, one per mechanism #2130's clause 4 names — a stylesheet whose rule
+      matches nothing, a shared-variable shift, a hidden panel, an overflowing panel
+      — and none of them is the `control` row, which is not a break;
+    * each names the sections its injection is allowed to move, from the seven
+      headings the leg's own denominator counts, so a seed cannot be scored against
+      a section the fixture does not have;
+    * the injection is a STYLESHEET edit and nothing else. `index.html` comes out
+      byte-identical to the healthy build while `styles.css` differs: a seed that
+      reached for the DOM would be grading the collector's ability to see HTML
+      changes, not the thing a CSS ripple is.
+    """
+    seeds = _layout_seeds()
+    assert len(seeds) == 4, [seed.name for seed in seeds]
+    assert len({seed.layout_kind for seed in seeds}) == 4, "one mechanism each"
+    whole = FC.layout_app(tmp_path / "control", "control")
+    for seed in seeds:
+        assert seed.layout_kind in FC.LAYOUT_BREAKS, seed.layout_kind
+        assert seed.layout_kind != "control", seed.name
+        assert seed.expect == "broken", seed.name
+        assert not seed.blind_reason, (
+            f"{seed.name} cannot be declared blind: the channel exists to carry it")
+        spec = FC.LAYOUT_BREAKS[seed.layout_kind]
+        assert spec["affected"], f"{seed.name} names no section, so nothing is caught"
+        assert set(spec["affected"]) <= set(FC.LAYOUT_HEADS), spec["affected"]
+        broken = FC.layout_app(tmp_path / seed.name, seed.layout_kind)
+        assert (broken / "index.html").read_bytes() == (whole / "index.html").read_bytes(), (
+            f"{seed.layout_kind} changed the markup; a layout seed breaks the sheet")
+        assert (broken / "styles.css").read_bytes() != (whole / "styles.css").read_bytes(), (
+            f"{seed.layout_kind} changed nothing, so a miss would be about the seed")
+    # Both attribution tags have to be reachable in one artifact, or the leg can
+    # only ever demonstrate the case it does not exist for.
+    untouched = [seed.name for seed in seeds
+                 if FC.LAYOUT_BREAKS[seed.layout_kind]["changed_paths"]
+                 and not set(FC.LAYOUT_BREAKS[seed.layout_kind]["changed_paths"])
+                 & {o for owners in FC.LAYOUT_BREAKS[seed.layout_kind]["owners"].values()
+                    for o in owners}]
+    assert len(untouched) == 3, untouched
+    assert len(seeds) - len(untouched) == 1, "one seed is the in-diff case"
+
+
+def test_every_layout_seed_yields_a_failing_check_naming_its_section_and_the_healthy_app_yields_none(
+        tmp_path):
+    """Clause 4 as the browser measures it: four breaks, four named sections, and the
+    unchanged build still clean in the same run.
+
+    This is the node the item's acceptance check is written against. The control half
+    is not a courtesy: a leg that fired on every section would pass the first
+    assertion by accident, and the false-positive floor the owed 10-landing
+    measurement is supposed to establish starts here, with zero on a build that
+    changed nothing.
+
+    `attribution` is asserted alongside the score because the two together are the
+    leg's whole output — `detected` with the wrong tag would still leave a reviewer
+    unable to tell a ripple from a change the author made on purpose.
+    """
+    _require_browser()
+    caught = {}
+    for seed in _layout_seeds():
+        verdict = FC.measure_layout_seed(seed, tmp_path / seed.name)
+        scored = FC.score_seed(seed, verdict)
+        checks = verdict.get("checks") or []
+        assert scored["score"] == "detected", (
+            f"{seed.name}: {scored['score']} — {scored.get('note') or verdict}")
+        assert checks, f"{seed.name}: detected with no failing check to show"
+        affected = FC.LAYOUT_BREAKS[seed.layout_kind]["affected"]
+        named = [c for c in checks
+                 if any(head in str(c.get("section")) for head in affected)]
+        assert named, f"{seed.name} fired on {[c['section'] for c in checks]}, " \
+                      f"not on {list(affected)}"
+        assert all(c["check"] == f"layout-changed:{c['section']}" for c in checks), checks
+        caught[seed.name] = (named[0]["attribution"],
+                             {f: sorted(d) for f, d in
+                              list(named[0]["delta"].values())[0].items()})
+    assert sorted(caught) == sorted(seed.name for seed in _layout_seeds())
+    assert sorted(a for a, _ in caught.values()) == ["UNTOUCHED", "UNTOUCHED",
+                                                     "UNTOUCHED", "in-diff"], caught
+
+    control = FC.layout_app(tmp_path / "healthy", "control")
+    first = FL.capture_build(control, widths=FC.LAYOUT_WIDTHS, chromium=FP.CHROMIUM)
+    second = FC.layout_app(tmp_path / "healthy2", "control")
+    again = FL.capture_build(second, widths=FC.LAYOUT_WIDTHS, chromium=FP.CHROMIUM)
+    assert not first.get("skipped"), first
+    assert not again.get("skipped"), again
+    fresh = FL.diff(FL.fingerprint(first["views"], round_id="a"),
+                    FL.fingerprint(again["views"], round_id="b"))
+    assert fresh == [], f"the healthy fixture diffed against itself: {fresh}"
+
+
+def test_the_load_channel_is_blind_to_the_stylesheet_seed_and_the_layout_channel_is_not(
+        tmp_path):
+    """The seam this increment is actually about, measured across both instruments.
+
+    `frontend_probe_canary/latest.json` shipped with
+    `stylesheet_loads_but_matches_no_rule` scored `blind` and `"checks": []`: no
+    channel the probe watches can carry a stylesheet that loads with a 200 while the
+    rule the page needed no longer applies. So the same served directory is run
+    through both instruments here. The load probe must still see nothing — that is
+    the recorded blind spot, and if it started catching this on its own the layout
+    leg would be redundant — and the layout leg must produce the named, section-
+    carrying check the blind row could not.
+    """
+    _require_browser()
+    seed = _seed("stylesheet_loads_but_matches_no_rule")
+    build = FC.layout_app(tmp_path / seed.name / "broken", seed.layout_kind)
+    load = FP.run(build, shots_dir=tmp_path / "shots")
+    assert not load.get("skipped"), load
+    assert load["checks"] == [], (
+        f"the load channel caught it, so this node's premise rotted: {load['checks']}")
+    assert load["ok"] is True, "the shipped probe calls this healthy build ok"
+
+    verdict = FC.measure_layout_seed(seed, tmp_path / "onward")
+    checks = verdict.get("checks") or []
+    assert [c["check"] for c in checks] == ["layout-changed:Tokens"], checks
+    assert FC.score_seed(seed, verdict)["score"] == "detected", verdict

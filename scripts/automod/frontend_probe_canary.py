@@ -60,6 +60,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from scripts.automod import frontend_layout as FL
 from scripts.automod import frontend_probe as FP
 from scripts.automod import state as S
 
@@ -220,6 +221,21 @@ class Seed:
     throws_after_ms: int | None = None
     wedged_load: bool = False
     load_budget_s: float | None = None
+    #: Which instrument the seed grades. `load` (every seed as shipped) is
+    #: `frontend_probe`: mount, console, pageerror, error boundary. `layout` is
+    #: #2130's fingerprint leg — `frontend_layout.capture_build` + `diff` — over a
+    #: fixture app built by `layout_app`, because a layout seed has to control a
+    #: stylesheet and a set of sections, not a mount script. The channel is a field
+    #: rather than two tables so the artifact stays ONE table:
+    #: `stylesheet_loads_but_matches_no_rule` has to be the same row before and
+    #: after the leg landed, or the number moves and nobody can tell whether the
+    #: instrument improved or the denominator did.
+    channel: str = "load"
+    #: For `channel="layout"`: which `LAYOUT_BREAKS` injection to apply. The seed
+    #: names the mechanism; `LAYOUT_BREAKS` carries what it is supposed to move, so
+    #: a seed cannot be scored against an expectation its own injection does not
+    #: create.
+    layout_kind: str = ""
 
 
 #: The shipped seed table: 12 seeds that must be detected, exactly one healthy
@@ -254,10 +270,24 @@ SEEDS: tuple[Seed, ...] = (
          blind_reason=f"throws 5000 ms after load, past the {FP.SETTLE_MS} ms settle "
                       f"window at which the probe reads the DOM",
          throws_after_ms=5000),
-    Seed("stylesheet_loads_but_matches_no_rule", MOUNTED, css_body=UNMATCHED_STYLESHEET,
-         blind_reason="the stylesheet is served with a 200 and matches no node, so no "
-                      "channel the probe watches (load status, DOM, console, "
-                      "pageerror) can carry it"),
+    # The blind spot the layout leg exists to close, and the row the item's
+    # acceptance check is written against. Read the mechanism before the name: the
+    # shape this seed shipped as — a rule that matches NOTHING — is not a break at
+    # all. A rule that matches nothing changed nothing, and no instrument can see a
+    # change that did not happen; that literal variant stays a no-fire control
+    # pinned in tests/test_frontend_layout_fingerprint.py. What ships here is the
+    # shape a CSS edit actually takes on the way to breaking a component: the
+    # stylesheet is still served with a 200, the selector no longer matches the node
+    # it used to style, the console says nothing, the mount is clean, and one
+    # section is laid out wrong. `dead_rule` renames the selector for exactly that.
+    Seed("stylesheet_loads_but_matches_no_rule", MOUNTED,
+         channel="layout", layout_kind="dead_rule"),
+    Seed("shared_variable_shifts_a_section_the_diff_never_named", MOUNTED,
+         channel="layout", layout_kind="shared_variable"),
+    Seed("panel_hidden_by_a_rule_that_matches_it", MOUNTED,
+         channel="layout", layout_kind="hidden_panel"),
+    Seed("panel_widened_past_the_section_that_holds_it", MOUNTED,
+         channel="layout", layout_kind="wide_panel"),
 )
 
 #: The four shapes the item requires, by the name of the seed that carries them.
@@ -332,6 +362,211 @@ def write_build(out: Path, seed: Seed, *, extra_html: str = "") -> Path:
     return out
 
 
+#: ---------------------------------------------------------------------------
+#: The layout channel's fixture app (#2130)
+#: ---------------------------------------------------------------------------
+#:
+#: A Mission Control-shaped page, not Mission Control. A layout seed has to control
+#: a stylesheet and a set of sections; standing up the real dashboard would put the
+#: round's own `web/` tree inside the measurement, and the canary's job is to grade
+#: the leg against a break it created, not against whatever the app happened to do
+#: today. The DOM is the dashboard's though, exactly: an `h2` per section (the
+#: collector takes `section > h2` and skips a section without one), a wrapper `div`,
+#: `.rounded-lg` panels carrying an `h3`, `.rounded-md` HealthPills — the selectors
+#: `scripts/maintenance/dashboard_mobile_probe.py` reads. A fixture built with
+#: invented class names collects an EMPTY panels list, which is the vacuous pass
+#: that probe's own comment was written to refuse.
+
+#: The seven headings the leg's `MIN_SECTIONS` denominator was measured off. Fewer
+#: and the fixture trips its own no-verdict guard instead of testing the diff.
+LAYOUT_HEADS = ("vLLM engines", "Lloyd agent", "Subagents & background tasks",
+                "System", "Services", "Automation & work", "Tokens")
+
+#: `<section class="sec sec-<slug>">`, so a seed can aim one rule at one section the
+#: way a real shared-variable edit misses exactly one section.
+LAYOUT_SLUGS = {"vLLM engines": "engines", "Lloyd agent": "agent",
+                "Subagents & background tasks": "subagents", "System": "system",
+                "Services": "services", "Automation & work": "automation",
+                "Tokens": "tokens"}
+
+#: The healthy sheet. `--side-pad` is consumed by TWO sections (`tokens` and
+#: `automation`) on purpose: a variable no section shares would make the
+#: shared-variable seed a single-section edit, which is not the ripple class.
+LAYOUT_CSS = """
+:root { --section-w: 700px; --panel-w: 340px; --side-pad: 200px; }
+.sec { width: var(--section-w); }
+.sec-tokens { width: calc(var(--section-w) - var(--side-pad)); }
+.sec-automation { width: calc(var(--section-w) - var(--side-pad)); }
+.sec > div > .rounded-lg { width: var(--panel-w); }
+.sec > div > .rounded-md { width: 120px; }
+"""
+
+#: Every layout injection: what it appends to the sheet, what it deletes from it,
+#: the sections it is SUPPOSED to move, and the path the round is assumed to have
+#: changed. `changed_paths` deliberately names a theme file that is NOT the affected
+#: section's owner for three of the four seeds: `UNTOUCHED` is the tag this leg
+#: exists to produce, and a canary that could only ever show `in-diff` would be
+#: grading an instrument that never reports the interesting case. `wide_panel` is
+#: the opposite pairing so both tags appear in one artifact.
+LAYOUT_BREAKS: dict[str, dict[str, Any]] = {
+    "control": {"add": "", "kill": (), "affected": (), "owners": {},
+                "changed_paths": ()},
+    # The rule that sized Tokens is renamed, so the sheet still loads with a 200 and
+    # its selector matches nothing: Tokens falls back to `.sec`'s width and grows by
+    # exactly the pad it used to subtract.
+    "dead_rule": {
+        "add": ".sec-tokenz { width: calc(var(--section-w) - var(--side-pad)); }\n",
+        "kill": (".sec-tokens { width: calc(var(--section-w) - var(--side-pad)); }",),
+        "affected": ("Tokens",),
+        "owners": {"Tokens": ["web/src/components/pages/TokensPage.tsx"]},
+        "changed_paths": ["web/src/theme.css"],
+    },
+    # One `:root` value, edited for a reason that names no section, takes two of them
+    # with it — the ripple class in its purest form, and the reason the leg grades
+    # sections the diff never mentions.
+    "shared_variable": {
+        "add": ":root { --side-pad: 420px; }\n",
+        "kill": (),
+        "affected": ("Tokens", "Automation & work"),
+        "owners": {"Tokens": ["web/src/components/pages/TokensPage.tsx"],
+                   "Automation & work": ["web/src/components/pages/AutomationPage.tsx"]},
+        "changed_paths": ["web/src/theme.css"],
+    },
+    # A panel that stops rendering. Kirschner's own example is an icon disappearing
+    # somewhere else; this is that bug, and a width-only check would miss it — the
+    # surviving panel is simply a different width and nothing looks missing.
+    "hidden_panel": {
+        # `:nth-child(2)`, NOT `:last-child`: Services' wrapper holds two pills
+        # after its panels, so `:last-child` selects a pill, matches no panel, and
+        # the seed would silently break nothing — a canary that breaks nothing and
+        # reports a miss is an instrument reporting about itself.
+        "add": ".sec-services > div > .rounded-lg:nth-child(2) {\n  display: none; }\n",
+        "kill": (),
+        "affected": ("Services",),
+        "owners": {"Services": ["web/src/components/pages/ServicesPage.tsx"]},
+        "changed_paths": ["web/src/theme.css"],
+    },
+    # A panel wider than the section holding it: the section's own scrollWidth grows
+    # past its client width, which is the ONLY way this field set sees an overflow
+    # that no other section notices. Aimed at the component that owns the section,
+    # so the artifact also carries an `in-diff` row.
+    "wide_panel": {
+        "add": ".sec-system > div > .rounded-lg { width: 900px; }\n",
+        "kill": (),
+        "affected": ("System",),
+        "owners": {"System": ["web/src/components/pages/SystemPage.tsx"]},
+        "changed_paths": ["web/src/components/pages/SystemPage.tsx"],
+    },
+}
+
+#: One viewport for the canary: the seeds aim at the leg's mechanisms, not at
+#: breakpoint coverage, which `tests/test_frontend_layout_fingerprint.py` pins by
+#: capturing one page at every configured width.
+LAYOUT_WIDTHS: tuple[int, ...] = (1280,)
+
+
+def layout_app(dest: Path, kind: str) -> Path:
+    """Write the fixture app — whole, or broken in one named way.
+
+    No vite: a *build* is just a directory the server can serve, and the layout
+    channel needs an `index.html` and a stylesheet, so these seeds run on a box with
+    no `node`. The load channel still builds through the real bundler because it
+    grades a channel that only exists once a bundler has decided what ships.
+    """
+    if kind not in LAYOUT_BREAKS:
+        raise ValueError(f"no such layout break: {kind!r} (of "
+                         f"{sorted(LAYOUT_BREAKS)})")
+    spec = LAYOUT_BREAKS[kind]
+    dest.mkdir(parents=True, exist_ok=True)
+    body = "\n".join(_layout_section(h) for h in LAYOUT_HEADS)
+    css = LAYOUT_CSS
+    for killed in spec["kill"]:
+        if killed not in css:
+            raise ValueError(f"layout break {kind!r} kills a rule the sheet "
+                             f"does not contain: {killed!r}")
+        css = css.replace(killed, "")
+    (dest / "index.html").write_text(
+        "<!doctype html><html><head><meta charset=utf-8>"
+        '<link rel="stylesheet" href="/styles.css"></head>'
+        f"<body><main><div id=\"root\">{body}</div></main></body></html>")
+    (dest / "styles.css").write_text(css + spec["add"])
+    return dest
+
+
+def measure_layout_seed(seed: Seed, dir: Path, *,
+                        shots_dir: Path | None = None) -> dict[str, Any]:
+    """One layout seed: the same app built whole AND broken, both fingerprinted.
+
+    The control is rebuilt per seed rather than measured once and shared, because a
+    fingerprint is a property of the page AND the browser: share one control across
+    four seeds and a browser that drifts mid-run — a font that lands late, a
+    scrollbar that appears — becomes three confident "detected" rows and a rate
+    nobody can read. Each seed pays for two loads and gets a control that saw the
+    same browser process.
+
+    Returns the same shape the load path returns (`checks`, `metrics`, or
+    `skipped`), so `score_seed` and `summarise` stay the single definition of the
+    rate across both channels.
+    """
+    if seed.channel != "layout":
+        raise ValueError(f"{seed.name}: channel is {seed.channel!r}, not layout")
+    spec = LAYOUT_BREAKS[seed.layout_kind]
+    # The layout channel takes no screenshot, so this is where its evidence goes
+    # instead: the two raw geometry captures the diff was computed from, which is
+    # what a reviewer of a layout finding actually needs to see. Under
+    # `--keep-shots`'s tree when one is passed, otherwise the seed's own scratch
+    # directory. The artifact's `shots_dir` must name a directory that exists and
+    # that this run owns — `Path("")` would be the CWD, which for this script is a
+    # checkout.
+    shots = Path(shots_dir or dir)
+    shots.mkdir(parents=True, exist_ok=True)
+    caps: dict[str, Any] = {}
+    for stage in ("control", "broken"):
+        layout_app(dir / stage, "control" if stage == "control" else seed.layout_kind)
+        cap = FL.capture_build(dir / stage, widths=LAYOUT_WIDTHS,
+                               chromium=FP.CHROMIUM)
+        if cap.get("skipped"):
+            return {"skipped": f"the layout leg could not run: {cap['skipped']}"}
+        caps[stage] = cap
+        (shots / f"{stage}-geometry.json").write_text(
+            json.dumps(cap, indent=1, default=str), encoding="utf-8")
+    unrendered = [f"{stage} at {v.get('width')}px ({v['no_verdict']})"
+                  for stage, cap in caps.items()
+                  for v in (cap["views"] or {}).values() if v.get("no_verdict")]
+    if unrendered:
+        # A no-verdict is not a miss: an app that never rendered says nothing about
+        # whether the diff works, and scoring it either way would be a number about
+        # the fixture rather than about the leg.
+        return {"skipped": "the fixture produced no layout verdict: "
+                           + ", ".join(unrendered)}
+    base = FL.fingerprint(caps["control"]["views"],
+                          round_id=f"canary-{seed.name}-control")
+    current = FL.fingerprint(caps["broken"]["views"], round_id=f"canary-{seed.name}")
+    checks = FL.diff(base, current,
+                     owners={k: list(v) for k, v in spec["owners"].items()},
+                     changed_paths=list(spec["changed_paths"]))
+    return {"checks": checks,
+            "expected_sections": list(spec["affected"]),
+            "metrics": {"layout_sections": {
+                w: len(v.get("sections") or {})
+                for w, v in (caps["broken"]["views"] or {}).items()}},
+            "layout": {"sections_per_width": {
+                           w: len(v.get("sections") or {})
+                           for w, v in (current["views"] or {}).items()},
+                       "attribution": {c["check"]: c["attribution"] for c in checks}},
+            "screenshot": "", "shots_dir": str(shots)}
+
+
+def _layout_section(head: str) -> str:
+    """One section of the fixture app, in the dashboard's shape. See `layout_app`."""
+    pills = ('<div class="rounded-md">pill a</div>'
+             '<div class="rounded-md">pill b</div>' if head == "Services" else "")
+    panels = "".join(f'<div class="rounded-lg"><h3>{head} panel {i}</h3></div>'
+                     for i in (1, 2))
+    return (f'<section class="sec sec-{LAYOUT_SLUGS[head]}"><h2>{head}</h2>'
+            f"<div>{panels}{pills}</div></section>")
+
+
 def score_seed(seed: Seed, verdict: dict[str, Any]) -> dict[str, Any]:
     """One seed's score, from the verdict alone — the scoring rule in one place so
     the rate has exactly one definition.
@@ -355,7 +590,16 @@ def score_seed(seed: Seed, verdict: dict[str, Any]) -> dict[str, Any]:
     base: dict[str, Any] = {"name": seed.name, "checks": named,
                             "expect": seed.expect, "declared_blind": bool(seed.blind_reason),
                             "blind_reason": seed.blind_reason,
-                            "throws_after_ms": seed.throws_after_ms}
+                            "throws_after_ms": seed.throws_after_ms,
+                            # The row says which instrument it grades, so a reader
+                            # comparing two increments is not comparing a load number
+                            # to a layout number by accident.
+                            "channel": seed.channel,
+                            # For a layout seed, the section each fired check names —
+                            # `checks` is names only, and the whole point of the leg is
+                            # WHICH section it blamed and on whose account.
+                            "attribution": (verdict.get("layout") or {}).get("attribution")
+                            or {}}
     if verdict.get("skipped"):
         return {**base, "score": "blind", "probe_skipped": True,
                 "note": f"the probe could not run: {verdict['skipped']}"}
@@ -363,6 +607,23 @@ def score_seed(seed: Seed, verdict: dict[str, Any]) -> dict[str, Any]:
         return {**base, "score": "control",
                 "note": ("" if not named else
                          f"the probe FAILED a healthy build: {', '.join(named)}")}
+    if seed.channel == "layout":
+        # Stricter than the load channel's bar, and it has to be. For a load seed a
+        # fired check IS the finding; here a leg that fired on every section would
+        # hit the right one by accident, and one that fired on the wrong section
+        # while the styled one sits untouched found something else entirely. So the
+        # check must carry the heading this seed's own injection moved — which is
+        # also the only property a reviewer can act on ("Tokens moved"), as against
+        # "the layout differs somewhere".
+        expected = [str(e) for e in (verdict.get("expected_sections") or [])]
+        hits = [c for c in named if any(e in c for e in expected)]
+        if hits:
+            return {**base, "score": "detected", "note": ""}
+        return {**base, "score": "missed",
+                "note": (f"{len(named)} layout check(s) fired but none named "
+                         f"{expected}: {named[:4]}" if named else
+                         "the fingerprint was identical, so the leg says ok over a "
+                         "build whose layout the seed broke")}
     if named:
         return {**base, "score": "detected", "note": ""}
     if seed.blind_reason:
@@ -405,8 +666,8 @@ def summarise(records: list[dict[str, Any]], *, min_seeds: int = MIN_SEEDS,
             "passes": bool(m >= min_seeds and rate >= min_rate and not dirty)}
 
 
-def run_canary(*, root: Path | None = None, seeds: Iterable[Seed] = SEEDS,
-               min_seeds: int = MIN_SEEDS,
+def run_canary(*, root: Path | None = None, shots_dir: Path | None = None,
+               seeds: Iterable[Seed] = SEEDS, min_seeds: int = MIN_SEEDS,
                min_rate: float = MIN_DETECTION_RATE) -> dict[str, Any]:
     """Seed every build, probe every seed, score every verdict, return the report.
 
@@ -416,9 +677,38 @@ def run_canary(*, root: Path | None = None, seeds: Iterable[Seed] = SEEDS,
     `frontend_probe.tmp_build_dir()`, which exists for exactly this purpose.
     """
     root = Path(root) if root else FP.tmp_build_dir()
+    # One evidence tree for the whole run, decided ONCE, so a record's `shots_dir`
+    # never has to name a directory that was not made. Default is the scratch root
+    # itself, not `root/shots`: the load channel's per-seed directory is already
+    # `root/<name>`, and putting this channel's captures in the same place keeps one
+    # directory per seed holding everything that seed produced.
+    shots_root = Path(root) if shots_dir is None else Path(shots_dir)
     seeds = list(seeds)
     records: list[dict[str, Any]] = []
     for seed in seeds:
+        if seed.channel == "layout":
+            # No vite and no bundler for these: the layout channel grades a served
+            # directory, and `layout_app` writes exactly the two files that makes
+            # (`index.html`, `styles.css`), so the seeds run on a box with no node.
+            try:
+                verdict = measure_layout_seed(
+                    seed, root / seed.name,
+                    shots_dir=(shots_root / seed.name) if shots_root else None)
+            except Exception as exc:                    # noqa: BLE001
+                # Same rule as `FP.run`'s guard on the other side of this loop: an
+                # instrument that explodes reports that it did not measure, and does
+                # not take the run — and therefore the artifact and the rate — down
+                # with it. A raise here would also lose the 13 rows already measured.
+                verdict = {"skipped": f"the layout leg raised "
+                                      f"{exc.__class__.__name__}: {str(exc)[:180]}"}
+            record = score_seed(seed, verdict)
+            record["build_dir"] = str(root / seed.name)
+            record["shots_dir"] = str(verdict.get("shots_dir") or (root / seed.name))
+            record["screenshot"] = str(verdict.get("screenshot") or "")
+            record["metrics"] = dict(verdict.get("metrics") or {})
+            record["layout"] = verdict.get("layout") or {}
+            records.append(record)
+            continue
         with contextlib.ExitStack() as stack:
             extra = ""
             if seed.wedged_load:
