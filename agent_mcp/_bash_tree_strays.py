@@ -110,12 +110,24 @@ def note(root: Path, paths: list[str]) -> str:
     )
 
 
-def _record(session_id: str | None, command: str, root: Path, paths: list[str]) -> None:
+def _record(session_id: str | None, command: str, root: Path, paths: list[str],
+            kind: str = "appeared") -> None:
+    """Append one fact to the durable journal; never raises.
+
+    `kind` is on BOTH row shapes rather than only the new one. `removed` rows are the
+    #2110 half: the note this module writes tells the session to delete the stray, so
+    until now the one action the instrument asked for was the one action that left no
+    trace — the tree's `workers.db` is gone with an empty journal beside it. A file that
+    mixes two event classes with no discriminator is a file a later reader guesses at,
+    and nothing read this one programmatically when the field was added: it had no rows
+    at all (`ls -1 ~/lloyd-data/safety/` → `denials.jsonl` only).
+    """
     try:
         target = _journal_path()
         target.parent.mkdir(parents=True, exist_ok=True)
         row = {
             "at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+            "kind": kind,
             "session": str(session_id) if session_id else None,
             "root": str(root),
             "paths": paths,
@@ -128,14 +140,46 @@ def _record(session_id: str | None, command: str, root: Path, paths: list[str]) 
                        type(exc).__name__, str(exc)[:160])
 
 
+def _removed(root: Path, seen: set[str], now: set[str]) -> list[str]:
+    """Paths this call was shown and which are now gone from disk.
+
+    `seen - now` alone is not the answer: a path leaves `ignored()` when it becomes
+    TRACKED (`git add`) or when the ignore rule changes, and it is still sitting in the
+    tree — journalling that as a deletion would put a file's removal on the record while
+    the file is right there, which is a worse instrument than the silence it replaces.
+    The fact a row may assert is only this one: it was visible to the before-snapshot,
+    and `Path.exists()` on the same root says it is not there now. That covers a failed
+    `rm` (still present, no row) as well as an untracked-file removal.
+
+    `app.live_strays` deliberately offers no `disappeared()` helper (#2110 triage),
+    because every other decision it makes is about not asserting a fact a measurement
+    did not supply; this is the same judgement, so it stays here at the one call site
+    that needs it rather than joining the module's API.
+    """
+    return sorted(p for p in set(seen) - set(now)
+                  if p != ".git" and not (root / p).exists())
+
+
 def _after_sync(text: str, snap: "tuple[Path, set[str]]", session_id: str | None,
                 command: str) -> str:
     from app import live_strays
     root, seen = snap
-    appeared = live_strays.appeared(seen, live_strays.ignored(root))
+    now = live_strays.ignored(root)
+    appeared = live_strays.appeared(seen, now)
+    gone = _removed(root, seen, now)
+    if appeared:
+        _record(session_id, command, root, appeared)
+    if gone:
+        # Journaled and silent on the result: the session deleted what the note told it
+        # to delete, and a second paragraph saying so would read as a new finding. The
+        # warning log is the counterparty's half of the fact. Ordered after the
+        # appearance row when a single call both deleted one stray and created another,
+        # so the file's row order is the shipped one plus an append.
+        _record(session_id, command, root, gone, kind="removed")
+        logger.warning("session %s: ignored path(s) removed from %s during a Bash call: %s",
+                       session_id, root, ", ".join(gone[:NOTE_PATHS]))
     if not appeared:
         return text
-    _record(session_id, command, root, appeared)
     logger.warning("session %s: ignored path(s) appeared in %s during a Bash call: %s",
                    session_id, root, ", ".join(appeared[:NOTE_PATHS]))
     return f"{text}\n\n{note(root, appeared)}"

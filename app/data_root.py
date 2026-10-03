@@ -55,6 +55,22 @@ VAULT_ROOT_ENV = "LLOYD_VAULT_ROOT"
 #: move away from biting (#1525).
 KG_DB_RELATIVE = Path("_pipeline") / "vault-derived" / "kg.sqlite"
 
+#: Where inert residue found inside the code tree is MOVED to, relative to the data
+#: root — the destination the guardian's `quarantine_inert` relocates a stray runtime
+#: store to, and the directory its `log.jsonl` witness lives in.
+#:
+#: Spelled here for the same reason as `KG_DB_RELATIVE`, and one root move later. Until
+#: #2110 the only spelling was `QUARANTINE_SUBDIR = os.path.join("quarantine",
+#: "tree-strays")` inside `agent-services/guardian/datawatch.py`, while `#2061`'s
+#: contract for the `~/lloyd/workers.db` stray told a human to look under
+#: `_quarantine/in-tree-strays` — two roots, one of them never written by any code, and
+#: nothing in the tree that both readers consult saying which was real. The VALUE is
+#: byte-identical to the shipped one (5b8d3e8d, 2026-10-02); what changed is that there
+#: is one place to read it from: `app.paths.QUARANTINE_DIR` for anything in the venv,
+#: and `policy.quarantine_dir()` — this file again, loaded by path — for the guardian,
+#: which cannot import `app.paths` and needs no venv to answer where residue goes.
+QUARANTINE_DIR_RELATIVE = Path("quarantine") / "tree-strays"
+
 try:
     import pwd as _pwd
 

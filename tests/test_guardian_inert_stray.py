@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import types
 from pathlib import Path
@@ -32,11 +33,25 @@ NOW = 1_800_000_000.0
 OLD = NOW - 2 * datawatch.INERT_MIN_AGE_SECONDS
 
 
+def _with_layout_module(tree: Path) -> Path:
+    """Put the repo-owned data-layout module where a real checkout has it.
+
+    Since #2110 the quarantine destination is read out of `app/data_root.py`'s layout
+    constant instead of being spelled inside the guardian, so a fixture tree that wants
+    its residue moved has to carry that file — the same copy a real tree resolves, taken
+    from the tree under test so the constant under test is the one that answers.
+    """
+    (tree / "app").mkdir(parents=True, exist_ok=True)
+    shutil.copy(ROOT / "app" / "data_root.py", tree / "app" / "data_root.py")
+    return tree
+
+
 @pytest.fixture
 def roots(tmp_path):
     """A tree holding an old, empty `workers.db` and a data root holding the real one."""
     tree, data = tmp_path / "lloyd", tmp_path / "lloyd-data"
     tree.mkdir()
+    _with_layout_module(tree)
     data.mkdir()
     (data / "workers.db").write_bytes(b"SQLite format 3\x00" + b"x" * 100)
     stray = tree / "workers.db"
@@ -59,7 +74,10 @@ def test_the_incident_file_is_inert_and_is_moved_not_deleted(roots):
     dest = Path(moved[0][1])
     assert not stray.exists()
     assert dest.is_file() and dest.stat().st_size == 0
-    assert dest.parent == data / datawatch.QUARANTINE_SUBDIR
+    # Spelled here and nowhere under `agent-services/guardian/` (#2110): a test that
+    # read the code's own constant could not catch that constant being moved, which is
+    # the divergence this item is about.
+    assert dest.parent == data / "quarantine" / "tree-strays"
     assert dest.stat().st_mtime == OLD, "the copy keeps the time the stray was written"
     rows = [json.loads(l) for l in (dest.parent / "log.jsonl").read_text().splitlines()]
     assert rows == [{**rows[0], "source": str(stray), "destination": str(dest), "size": 0}]
@@ -173,3 +191,170 @@ def test_a_disarmed_guardian_moves_nothing(roots, tmp_path, monkeypatch):
     g.data = types.SimpleNamespace(armed=False)
     g._runtime_data_incident(NOW)
     assert stray.exists() and news == [] and alerts == []
+
+
+# ── what the retraction may claim, and where residue is allowed to go (#2110) ──
+
+def _cleared(tmp_path, monkeypatch, tree, data, strays, armed=True):
+    """Run one hourly stray check and return everything it resolved.
+
+    `resolve` is captured rather than allowed to write, because the assertion is about
+    the sentence the guardian hands the human surface — which section is open on this
+    synthetic vault is `notify`'s own business, already pinned by
+    `tests/test_guardian_alert_retraction.py`.
+    """
+    gmod, g, news, alerts = _guardian(tmp_path, monkeypatch, tree, data, strays)
+    g.data = types.SimpleNamespace(armed=armed)
+    cleared: list[tuple[str, str]] = []
+
+    def _resolve(title: str, body: str = "") -> bool:
+        cleared.append((title, body))
+        return True          # the real method's answer: a section was closed
+
+    g.notifier.resolve = _resolve
+    g._runtime_data_incident(NOW)
+    return gmod, cleared, news, alerts
+
+
+def test_an_empty_tree_with_no_move_says_no_move_was_recorded(roots, tmp_path, monkeypatch):
+    """Clause 1: a clear may claim only what the check measured.
+
+    The shape that stranded `~/lloyd/workers.db` on 2026-10-03: the tree measured empty,
+    the guardian moved nothing, and the line written beside the four unretracted
+    `remove the in-tree copy` instructions in `memory/2026-10-02.md` was a plain
+    all-clear — `nothing further to move` — which is what a tree the guardian itself
+    emptied would also say. A reader cannot tell the two apart, so a vanished stray has
+    no cause on record either way.
+    """
+    import guardian as gmod
+
+    tree, data, stray = roots
+    stray.unlink()
+    _, cleared, news, alerts = _cleared(tmp_path, monkeypatch, tree, data, [])
+
+    assert [t for t, _ in cleared] == [gmod.RUNTIME_DATA_ALERT_TITLE]
+    body = cleared[0][1]
+    assert "no move recorded by the guardian" in body, body
+    assert "nothing further to move" not in body, (
+        f"the all-clear this clause replaces is still in the line: {body}")
+    assert str(tree) in body, "the line still names the root it measured (#2056)"
+    assert news == [] and alerts == [], "an empty tree is neither news nor an incident"
+
+
+def test_the_move_that_emptied_the_tree_names_the_move(roots, tmp_path, monkeypatch):
+    """Clause 2: the same call site, the opposite fact, on the same tick.
+
+    `moved` is bound only inside the alert branch and a move that empties the tree
+    falls through to the retraction on that SAME tick, so the two sentences hang off
+    one `resolve` call — the reason the old line could only ever say one thing. Here
+    the guardian really did move the last stray, so the line must name it and must not
+    claim nothing was recorded.
+    """
+    tree, data, stray = roots
+    import guardian as gmod
+    _, cleared, news, alerts = _cleared(tmp_path, monkeypatch, tree, data, ["workers.db"])
+
+    assert [t for t, _ in cleared] == [gmod.RUNTIME_DATA_ALERT_TITLE]
+    body = cleared[0][1]
+    assert "no move recorded" not in body, body
+    assert "moved 1 inert file" in body and "(workers.db)" in body, body
+    assert str(tree) in body, "the line still names the root it measured (#2056)"
+    assert not stray.exists()
+    assert len(news) == 1, "the move is still announced as news in its own right"
+    assert alerts == []
+
+
+def test_the_quarantine_destination_is_one_constant_from_the_data_layout(tmp_path):
+    """Clause 3: the destination is exported once and read, never re-spelled.
+
+    Two names for the same destination is what made a stray unfindable: shipped code
+    moved residue to `quarantine/tree-strays` while a route text told a person to look
+    in `_quarantine/in-tree-strays`, and nothing in `app/paths.py` — the module every
+    in-venv reader resolves paths from — said which was the real one. The stand-in
+    below answers with a path no restatement could produce, so the guardian's call can
+    only return it by reading the loaded module.
+    """
+    from app import paths as app_paths
+    import policy
+
+    repo = tmp_path / "repo"
+    (repo / "app").mkdir(parents=True)
+    (repo / "app" / "data_root.py").write_text(
+        'from pathlib import Path\n\n'
+        'QUARANTINE_DIR_RELATIVE = Path("quarantine") / "tree-strays-4242"\n',
+        encoding="utf-8")
+
+    got = policy.quarantine_dir(repo=str(repo), data_root=str(tmp_path / "data"))
+
+    assert got == str(tmp_path / "data" / "quarantine" / "tree-strays-4242"), got
+    assert policy.quarantine_dir(repo=str(tmp_path / "no-such-repo"),
+                                  data_root=str(tmp_path / "data")) is None, (
+        "a tree whose layout module cannot be loaded must answer 'no destination', "
+        "not a guessed one")
+    # The real tree, read the way both readers read it, lands on the exported constant.
+    live = policy.quarantine_dir(repo=str(ROOT), data_root=str(app_paths.DATA_ROOT))
+    assert live == str(app_paths.QUARANTINE_DIR), (
+        f"the guardian resolves {live} and `app.paths` exports "
+        f"{app_paths.QUARANTINE_DIR}: one destination, two spellings")
+
+
+def test_no_quarantine_path_is_spelled_inside_the_guardian():
+    """Clause 3, second half: the ban the constant exists to enforce.
+
+    Checked over the guardian's own files, including this round's edits, because a
+    comment naming a path is how the next divergence gets written by hand: prose in
+    that directory is as much a route as `os.path.join` is. `quarantine_inert` as a
+    function name is the function, not a destination, so only a quoted path segment
+    counts.
+    """
+    offenders = []
+    for path in sorted(GUARDIAN_DIR.glob("*.py")):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if "tree-strays" in text or "in-tree-strays" in text:
+            offenders.append(f"{path.name}: names a quarantine directory")
+        if "QUARANTINE_SUBDIR" in text:
+            offenders.append(f"{path.name}: still spells QUARANTINE_SUBDIR")
+    assert offenders == [], offenders
+
+
+def test_a_tree_with_no_layout_constant_moves_nothing_and_says_why(roots):
+    """Clause 3's failure shape: no destination is a refusal, not a guess.
+
+    The pinned snapshot the guardian runs from can fail to load the repo's layout
+    module (`policy._data_root_module` returns None for it), and moving an unseen file
+    to a directory this process invented is precisely the un-witnessed relocation this
+    item is about. `guardian.py` catches the exception, logs it, and lets the file
+    alert — the loud half of a refusal the old inline spelling could never express.
+    """
+    tree, data, stray = roots
+    shutil.rmtree(tree / "app")
+
+    with pytest.raises(RuntimeError, match="QUARANTINE_DIR_RELATIVE"):
+        datawatch.quarantine_inert(str(tree), ["workers.db"], str(data), NOW)
+
+    assert stray.exists(), "refusing to move means the file is still where it was"
+
+
+def test_a_tree_whose_layout_module_lacks_the_constant_also_refuses(roots):
+    """Clause 3's other None branch: the module LOADS and does not name the constant.
+
+    `policy.quarantine_dir` returns None on two different failures and the node above only
+    exercises one of them. This is the shape a real deployment produces — a pinned stage or
+    a one-commit-behind checkout whose `app/data_root.py` parses fine and predates
+    `QUARANTINE_DIR_RELATIVE` — and it is the more dangerous of the two, because nothing
+    about reading the file fails: the constant is simply not there, and code that treated
+    "loaded" as "answered" would move residue to a directory it had guessed.
+    """
+    import policy
+
+    tree, data, stray = roots
+    (tree / "app" / "data_root.py").write_text(
+        'from pathlib import Path\n\nKG_DB_RELATIVE = Path("_pipeline") / "kg.sqlite"\n',
+        encoding="utf-8")
+
+    assert policy.quarantine_dir(repo=str(tree), data_root=str(data)) is None, (
+        "a layout module that loads and omits the constant must answer 'no destination', "
+        "the same as a module that cannot be read at all")
+    with pytest.raises(RuntimeError, match="QUARANTINE_DIR_RELATIVE"):
+        datawatch.quarantine_inert(str(tree), ["workers.db"], str(data), NOW)
+    assert stray.exists(), "refusing to move means the file is still where it was"

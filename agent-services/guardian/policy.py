@@ -257,6 +257,33 @@ def kg_db_path(repo: str = REPO,
             KG_SOURCE_FALLBACK)
 
 
+def quarantine_dir(repo: str = REPO, data_root: str = DATA_ROOT):
+    """Where inert residue found inside the code tree is MOVED to, or None.
+
+    The guardian's `datawatch.quarantine_inert` asks this instead of spelling the
+    directory, so that the answer comes from the same place `app.paths.QUARANTINE_DIR`
+    builds its own: `QUARANTINE_DIR_RELATIVE` in the repo's `app/data_root.py`, read
+    through `_data_root_module` by path exactly as `kg_db_path` reads the store layout
+    — this file runs from a pinned snapshot under `/usr/bin/python3`, where `app.paths`
+    is not importable and the venv is not there.
+
+    None means THIS process cannot read the layout, and it is deliberately not a
+    guess. `kg_db_path` degrades to a literal on purpose because counting a missing
+    file is survivable; here the alternative to a real answer is moving a file nobody
+    can name a reason for — the exact un-witnessed relocation #2110 exists to instrument.
+    `datawatch` turns the None into a refusal that says which constant was unreadable,
+    and the file keeps alerting: a watchdog that will not move a stray on an
+    unverifiable layout is the loud half of the same fact.
+    """
+    resolver = _data_root_module(repo)
+    if resolver is None:
+        return None
+    relative = getattr(resolver, "QUARANTINE_DIR_RELATIVE", None)
+    if relative is None:
+        return None
+    return str(__import__("pathlib").Path(data_root) / relative)
+
+
 KG_DB, KG_DB_SOURCE = kg_db_path()
 VAULT_ROOT = "/home/alansrobotlab/obsidian"
 

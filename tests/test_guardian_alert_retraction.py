@@ -56,8 +56,21 @@ BODY = ("These exist inside the tree again:\n"
         "  /home/alansrobotlab/lloyd/.t\n"
         "\n"
         "Find the writer, move the data across, and remove the in-tree copy.")
-NOTE = ("no runtime stores inside the code tree on the latest check — the "
-        "instructions above are stale, nothing further to move")
+#: The retraction body, taken from the producer rather than invented. #2110 split the
+#: guardian's one all-clear into two sentences — "moved N inert files on this check"
+#: when the guardian relocated residue, and this one, the "absent with no move
+#: recorded by the guardian" form, when it measured an empty tree and did nothing —
+#: and this node exercises the second, which is the case that has no prior cause on
+#: record. `agent-services/guardian/guardian.py` builds both in
+#: `_runtime_data_incident`; `tests/test_guardian_inert_stray.py` pins each wording
+#: against the producer. What this node owns is the retraction MACHINERY — section
+#: closed, ALERT.md entry removed, ledger line — which is wording-independent, so a
+#: sentence change here must not silently leave a stale one behind: an earlier revision
+#: of this file carried a third variant ("on the latest check"), which no producer
+#: emitted and which no node would have noticed drifting further.
+NOTE = ("no runtime stores inside the code tree of /repo — absent with no move "
+        "recorded by the guardian, so the instructions above are stale and nothing "
+        "here accounts for a path that was named and is now gone")
 
 
 def _notifier(tmp_path: Path, *, external: bool = True) -> notify.Notifier:

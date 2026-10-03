@@ -32,8 +32,8 @@ IS_WORKTREE = (LLOYD_HOME / ".git").is_file()
 # `resolve_data_root` and `DataRootMissing` at the place it always did.
 from app.data_root import (
     ACCOUNT_HOME, DATA_ROOT_MARKER, DataRootMissing, KG_DB_RELATIVE,
-    PRODUCTION_DATA_ROOT, data_root_for_tree, production_data_root,
-    resolve_data_root)
+    PRODUCTION_DATA_ROOT, QUARANTINE_DIR_RELATIVE, data_root_for_tree,
+    production_data_root, resolve_data_root)
 
 #: The names re-exported through `app.paths`, listed so the import above reads as
 #: the API it is rather than as four unused imports a later tidy-up can delete —
@@ -41,8 +41,9 @@ from app.data_root import (
 #: one of these lines breaks `app.paths`, not `app.data_root`. This is the
 #: re-export list, not this module's whole surface: the constants below are its
 #: other half.
-__all__ = ["ACCOUNT_HOME", "DATA_ROOT_MARKER", "DataRootMissing", "KG_DB_RELATIVE",
-           "PRODUCTION_DATA_ROOT", "data_root_for_tree", "production_data_root",
+__all__ = ["ACCOUNT_HOME", "DATA_ROOT_MARKER", "DataRootMissing",
+           "KG_DB_RELATIVE", "PRODUCTION_DATA_ROOT", "data_root_for_tree",
+           "production_data_root",
            "resolve_data_root"]
 
 LIVE_CHECKOUT = ACCOUNT_HOME / "lloyd"
@@ -114,8 +115,19 @@ CODE_GRAPH_DIR = DATA_ROOT / "code-graph"
 SAFETY_DIR = DATA_ROOT / "safety"
 DENIAL_JOURNAL_PATH = SAFETY_DIR / "denials.jsonl"
 # One row per Bash call during which an ignored path appeared in the live checkout
-# (`agent_mcp/_bash_tree_strays.py`): the session and the command, at the time.
+# (`agent_mcp/_bash_tree_strays.py`): the session and the command, at the time. Since
+# #2110 the same file also carries the `removed` rows — a deletion inside a measured
+# call is the same event class, and the note that tells the session to delete must not
+# be the one action that leaves no trace.
 TREE_STRAY_JOURNAL_PATH = SAFETY_DIR / "tree-strays.jsonl"
+# Where inert residue found inside the code tree is MOVED to. Exported here, from the
+# repo's layout constant, because two readers need that one destination and only one of
+# them can import this module: the guardian resolves it through
+# `policy.quarantine_dir()` (stdlib-only, reads `app/data_root.py` off the live tree),
+# and anything in the venv reads this. `#2110` clause 3: it was spelled inline in
+# `datawatch.py` while a backlog contract named `_quarantine/in-tree-strays`, and a
+# reader trying to find a moved file had two candidate roots and no authority.
+QUARANTINE_DIR = DATA_ROOT / QUARANTINE_DIR_RELATIVE
 
 VAULT_ROOT = Path.home() / "obsidian"
 

@@ -45,6 +45,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import policy as P
 import vaultwatch as V
 
 DATA_ROOT = os.environ.get("LLOYD_DATA", "/home/alansrobotlab/lloyd-data")
@@ -181,9 +182,25 @@ def stray_in_tree(tree: str = TREE) -> list[str]:
 #: (`sqlite3` creates the file on connect and writes the header on first use), so it
 #: is left for the next check rather than moved from under a live handle.
 INERT_MIN_AGE_SECONDS = 600.0
-#: Where inert residue goes, under the data root. A move, so the hourly snapshots
-#: carry it and nothing is ever deleted on this check's say-so.
-QUARANTINE_SUBDIR = os.path.join("quarantine", "tree-strays")
+#: Where inert residue goes, under the data root — read from the repo's data-layout
+#: module, never spelled here. A move, so the hourly snapshots carry it and nothing is
+#: ever deleted on this check's say-so.
+#:
+#: Until #2110 this was a two-segment `os.path.join` spelled inline in this file, and a
+#: backlog contract of the same week named a different root for the same purpose, so a
+#: reader chasing a moved stray had two candidate directories, neither of which any code
+#: could be shown to have written. `policy.quarantine_dir` returns None when it cannot
+#: read the layout, and this module treats that as a REFUSAL to move rather than a
+#: default: relocating a file on an unverifiable path is the un-witnessed action the item
+#: is about, so `_quarantine_dir` below raises and the stray keeps alerting, loudly.
+def _quarantine_dir(tree: str, data_root: str) -> str:
+    dest = P.quarantine_dir(repo=tree, data_root=data_root)
+    if dest is None:
+        raise RuntimeError(
+            f"{tree}/app/data_root.py exposes no QUARANTINE_DIR_RELATIVE: refusing to "
+            f"move inert residue to a destination this process could not read from the "
+            "repo's own layout module — the file stays put and keeps alerting (#2110)")
+    return dest
 _SQLITE_SIDECARS = ("-wal", "-shm", "-journal")
 
 
@@ -247,11 +264,17 @@ def quarantine_inert(tree: str, names, data_root: str = DATA_ROOT,
     directory is its own audit and not just a pile of empty files."""
     now = time.time() if now is None else now
     moved: list[tuple[str, str]] = []
-    qdir = os.path.join(data_root, QUARANTINE_SUBDIR)
+    # Resolved lazily and deliberately: with nothing to move there is nothing to
+    # relocate, and a tick that finds the tree clean must not raise because this process
+    # cannot read a layout constant it does not currently need. The refusal fires on the
+    # tick that WOULD move something, which is the only tick that needs an address.
+    qdir: str | None = None
     for name in inert_residue(tree, names, data_root, now):
         src = os.path.join(tree, name)
         try:
             before = os.lstat(src)
+            if qdir is None:
+                qdir = _quarantine_dir(tree, data_root)
             os.makedirs(qdir, exist_ok=True)
             stamp = datetime.fromtimestamp(now, timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             dest = os.path.join(qdir, f"{stamp}-{name}")

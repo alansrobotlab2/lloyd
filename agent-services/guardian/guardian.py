@@ -1119,11 +1119,25 @@ class Guardian:
         also why `coalesce` left three sections for one incident: `_daily_open_at`
         returns an open section only while it still ends in the still-open marker, and
         a clear had already replaced it.
+
+        #2110 is the other half of the same sentence. A clear has always been allowed to
+        say only one thing — "nothing further to move" — which is what a tree the
+        guardian itself emptied would also say, and what the tree's `workers.db` was told
+        when it was found gone with nothing in any journal having moved it. The retraction
+        now carries the one fact this method actually holds: did THIS process move
+        anything, or not. `moved` is therefore bound above the branch that fills it — the
+        retraction is reachable on the SAME tick as a move that emptied the tree (the
+        `strays = [...]` filter below and the `elif not strays:` after it are one tick),
+        and a local read only in the retraction would be an unbound name on that path.
         """
         # `measured` is a flag rather than a sentinel value in `strays` because the
         # absence of a measurement must not be expressible as either a finding or an
         # all-clear. Set after the call, so an exception anywhere inside the detector
         # leaves it False.
+        # Bound here, not inside the branch that fills it, for the reason in the
+        # docstring: the retraction at the bottom has to say which of the two states it
+        # is in, and a move that empties the tree reaches that retraction on THIS tick.
+        moved: list[tuple[str, str]] = []
         measured = False
         try:
             strays = datawatch.stray_in_tree(policy.REPO)
@@ -1151,11 +1165,10 @@ class Guardian:
             # diff to land. Whatever is left alerts exactly as before, and a tree the
             # move emptied falls through to the retraction below.
             try:
-                moved = datawatch.quarantine_inert(policy.REPO, strays,
-                                                   policy.DATA_ROOT, now)
+                moved.extend(datawatch.quarantine_inert(policy.REPO, strays,
+                                                        policy.DATA_ROOT, now))
             except Exception as exc:  # noqa: BLE001
                 log(f"stray quarantine failed (continuing): {exc}")
-                moved = []
             if moved:
                 gone = {name for name, _ in moved}
                 strays = [s for s in strays if s not in gone]
@@ -1202,10 +1215,28 @@ class Guardian:
             # `memory/2026-10-02.md` each asserted an empty tree and neither said which
             # one, while the path the alert branch was naming an hour later was in the
             # tree both of them claimed to have walked.
-            self.notifier.resolve(
-                RUNTIME_DATA_ALERT_TITLE,
-                f"no runtime stores inside the code tree of {policy.REPO} — the "
-                "instructions above are stale, nothing further to move")
+            #
+            # And it now says which of the two kinds of empty this is (#2110). The
+            # sentence used to be a flat all-clear — "nothing further to move" — and that
+            # is exactly what a tree the guardian had just emptied also looks like, so the
+            # retraction could not distinguish "this loop moved it" from "it is not here
+            # and this loop did not do anything". The tree's `workers.db` was found gone with
+            # the shipped move path never having run, which is the case the old line
+            # described as a clean bill of health.
+            if moved:
+                cleared = (
+                    f"no runtime stores inside the code tree of {policy.REPO} — the "
+                    f"guardian moved {len(moved)} inert file"
+                    f"{'s' if len(moved) != 1 else ''} on this check "
+                    f"({', '.join(name for name, _ in moved)}); the instructions above "
+                    "are stale, nothing further to move")
+            else:
+                cleared = (
+                    f"no runtime stores inside the code tree of {policy.REPO} — absent "
+                    "with no move recorded by the guardian, so the instructions above "
+                    "are stale and nothing here accounts for a path that was named and "
+                    "is now gone")
+            self.notifier.resolve(RUNTIME_DATA_ALERT_TITLE, cleared)
 
     def check_data(self) -> None:
         """Trip on a wipe of `~/lloyd-data`: pause workers, halt promotions,
