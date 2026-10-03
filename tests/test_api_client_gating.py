@@ -72,6 +72,7 @@ sys.path.insert(0, str(ROOT))
 
 import server  # noqa: E402
 from app.routers import automod as automod_router  # noqa: E402
+from app.routers import health as health_router  # noqa: E402
 from app.routers import backlog as backlog_router  # noqa: E402
 from app.routers import services as services_router  # noqa: E402
 from app.routers import workers as workers_router  # noqa: E402
@@ -779,3 +780,264 @@ async def _ws_handshake_with_xff(app, path: str, peer: str, xff: str):
     with contextlib.suppress(asyncio.TimeoutError):
         await asyncio.wait_for(app(scope, receive, send), timeout=10)
     return [m["type"] for m in sent], sent
+
+
+# ── #2090: the docs surface is not part of the non-`/api/` pass-through ───────
+#
+# `app = FastAPI(title="Lloyd Mission Control")` passes no `docs_url`,
+# `redoc_url` or `openapi_url`, so FastAPI mounts its three docs routes at their
+# defaults. None of the three starts with `/api/`, so the pass-through handed them
+# to everyone: measured 2026-10-03 from the box's own LAN address 192.168.50.108,
+# `/openapi.json` answered 200 with 90,972 bytes — `"title": "Lloyd Mission
+# Control"` and 129 paths, the whole route map of Mission Control — on the same
+# connection on which `/api/sessions` was refused 403. `/docs` and `/redoc` are
+# the browsable renderings of that same document.
+#
+# The deny is in `ApiPeerGate` (`server.DOCS_PATHS`), not in the `FastAPI(...)`
+# kwargs, because `scripts/automod/canary.py:192` GETs `/openapi.json` over
+# loopback as its boot probe and `scripts/automod/gate.py:2958` fails the
+# canary rung on any error it reports: disabling the route would have refused
+# every later round. So the tests below are always a differential — the same path
+# refused from an untrusted peer and still 200 from loopback.
+
+DOCS = [pytest.param("/openapi.json", id="openapi"),
+        pytest.param("/docs", id="docs"),
+        pytest.param("/redoc", id="redoc")]
+
+#: A path with no route anywhere, so "what a refusal is supposed to look like" is
+#: measured against the app rather than asserted from a literal.
+NO_ROUTE = "/definitely-not-a-route"
+
+
+@pytest.fixture
+def serving(monkeypatch):
+    """Make `/health` answer 200 rather than 503.
+
+    No lifespan runs in this file, so `app.routers.health._startup_complete` is
+    still False and `_health_payload` reports `starting` with 503. The flag is a
+    module global that `server.py:480`'s startup hook flips in production;
+    flipping it here is the only way to assert the clause as written — "still
+    return 200" — instead of settling for "not 401/403", which a widened deny
+    returning 403 would still pass... and which is exactly why the assertion is
+    on 200 and on the health payload together.
+    """
+    monkeypatch.setattr(health_router, "_startup_complete", True)
+
+
+@pytest.mark.parametrize("path", DOCS)
+@pytest.mark.parametrize("peer", UNTRUSTED, ids=["lan", "public"])
+async def test_an_untrusted_peer_cannot_read_the_docs_surface(peer, path):
+    """#2090 clauses 1 and 2: no 200, and no route map, for an untrusted peer.
+
+    A non-200 alone would be a thin claim, so the body is asserted on both sides:
+    the denial must carry neither the OpenAPI `paths` object nor the app title
+    that all three served responses embed, and the *same* path from loopback in
+    the same client round must still embed that title — the positive control that
+    keeps the absence assertions from being vacuous. The denial is additionally
+    compared to the app's own 404 for `NO_ROUTE`, byte for byte with its status:
+    the docs surface disappears for this peer exactly like a path that does not
+    exist, so closing it does not hand over a better oracle than it already had.
+    `REFUSAL_DETAIL` is asserted *absent* on purpose — it names `/api/*`, and
+    quoting it here would tell a LAN peer that a gated docs route is behind the
+    denial, which is the thing being hidden.
+    """
+    async with _client(peer) as client:
+        refused = await client.get(path)
+        control = await client.get(NO_ROUTE)
+    async with _client(LOOPBACK) as client:
+        served = await client.get(path)
+
+    assert refused.status_code != 200, (
+        f"{path} from {peer} answered {refused.status_code}: the docs surface is "
+        "still being served to a peer the gate refuses on /api/*")
+    assert refused.status_code == 404, (
+        f"{path} from {peer}: {refused.status_code}, expected this gate's 404")
+    assert '"paths"' not in refused.text, (
+        f"{path} from {peer} returned an OpenAPI body anyway: {refused.text[:200]}")
+    assert server.app.title not in refused.text, (
+        f"{path} from {peer} leaked the app title: {refused.text[:200]}")
+    assert server.REFUSAL_DETAIL not in refused.text, refused.text[:200]
+    assert (refused.status_code, refused.text) == (control.status_code, control.text), (
+        f"{path} from {peer} said {refused.status_code} {refused.text[:120]!r} where "
+        f"a path with no route says {control.status_code} {control.text[:120]!r}; the "
+        "denial is meant to be indistinguishable from 'nothing here'")
+    # Deliberately no `reached == []` here, though the file's /api tests use it:
+    # every route that fixture records is an `/api` side-effecting route or the LSP
+    # spawn, so a docs path could never append to it and the assert could not fail.
+
+    assert served.status_code == 200, (
+        f"the {peer} assertions above prove nothing unless loopback still gets the "
+        f"page: {path} returned {served.status_code}")
+    assert server.app.title in served.text, (
+        f"{path} from loopback no longer embeds the app title, so the absence "
+        "assertions above are not detecting a leak, only an empty page")
+
+
+@pytest.mark.parametrize("path", DOCS)
+@pytest.mark.parametrize("peer", TRUSTED, ids=["loopback", "tailnet"])
+async def test_a_trusted_peer_still_reads_the_docs_surface(peer, path):
+    """#2090 clause 3: loopback keeps the route, because the loop probes it.
+
+    `scripts/automod/canary.py:192` GETs `/openapi.json` on the candidate backend
+    and records an error unless the status is 200, which `rung_canary_boot` turns
+    into a refused round — so a loopback 200 here is what keeps the self-mod loop
+    bootable, and the tailnet half is the browser that still wants the page.
+    """
+    async with _client(peer) as client:
+        r = await client.get(path)
+
+    assert r.status_code == 200, (
+        f"{path} from trusted peer {peer} got {r.status_code}: {r.text[:200]}")
+    assert server.app.title in r.text, f"{path} from {peer} served {r.text[:200]!r}"
+    if path == "/openapi.json":
+        assert isinstance(r.json().get("paths"), dict) and r.json()["paths"], (
+            "the boot probe's document no longer carries a paths object, so the "
+            "probe would be checking an empty route map")
+
+
+def _url_literal_paths(src: str) -> list[str]:
+    """The path of every quoted URL literal in `src`, f-string holes stripped.
+
+    `re.sub` replaces `{...}` with a placeholder because `urlsplit` does not care
+    what the host interpolates to, only where the path begins.
+    """
+    import re
+    from urllib.parse import urlsplit
+
+    paths = []
+    for literal in re.findall(r'"([^"\n]*)"', src):
+        if "://" not in literal:
+            continue
+        try:
+            paths.append(urlsplit(re.sub(r"\{[^{}]*\}", "host", literal)).path)
+        except ValueError:  # a URL so malformed urlsplit rejects it
+            continue
+    return paths
+
+
+def test_the_docs_deny_covers_the_path_the_canary_boot_probe_asks_for():
+    """The consumer clause 3 exists to protect, pinned rather than remembered.
+
+    The probe lives in a script the middleware cannot import, so the only check
+    that the deny and the probe still agree on a path is to read the probe's own
+    source and confirm it asks for one of `server.DOCS_PATHS`. If the probe is
+    ever repointed, this fails naming both sides, instead of the deny quietly
+    covering a path nobody reads while the probe quietly checks one that is
+    closed to the peer that runs it.
+    """
+    probe_src = (ROOT / "scripts" / "automod" / "canary.py").read_text(encoding="utf-8")
+
+    # The probe builds its URL as an f-string (`f"http://127.0.0.1:{port}/
+    # openapi.json"`), so its path is compared as a parsed path with the
+    # interpolations stripped — a substring test would also be satisfied by a probe
+    # moved under some longer path, which is a different route.
+    probed = sorted(p for p in server.DOCS_PATHS if p in _url_literal_paths(probe_src))
+    assert probed, (
+        "canary.py no longer probes any path in server.DOCS_PATHS, so the "
+        f"loopback half of the docs deny ({sorted(server.DOCS_PATHS)}) has no "
+        "consumer pinning it — repoint the probe and this test together")
+    assert "/openapi.json" in probed, (
+        f"canary.py's /openapi.json boot probe is not in the denied set, which "
+        f"means the kwargs route crept back in: {sorted(server.DOCS_PATHS)}")
+
+
+@pytest.mark.parametrize("path", ["/health", "/health/deep"], ids=["health", "health-deep"])
+@pytest.mark.parametrize("peer", UNTRUSTED, ids=["lan", "public"])
+async def test_the_docs_deny_does_not_sweep_in_the_health_probes(serving, path, peer):
+    """#2090 clause 4: the deny is three exact paths, and the watchdog survives.
+
+    200, not merely "not 403", and with the health payload in the body: the
+    guardian and the promoter's idle gate poll `/health` from this box and a
+    watchdog has to be able to ask from anywhere, so a widened rule that turned
+    the probes into denials would take the loop's own health signal down with the
+    docs surface. `serving` is what makes 200 assertable here — see its docstring.
+    """
+    async with _client(peer) as client:
+        r = await client.get(path)
+
+    assert r.status_code == 200, (
+        f"{path} from {peer} got {r.status_code} {r.text[:200]}; the pre-auth "
+        "probes must stay reachable from an untrusted peer")
+    assert "commit" in r.json(), f"{path} did not reach the health handler: {r.text[:200]}"
+    assert server.REFUSAL_DETAIL not in r.text
+
+
+@pytest.mark.parametrize("peer", UNTRUSTED + TRUSTED,
+                         ids=["lan", "public", "loopback", "tailnet"])
+async def test_the_docs_deny_leaves_api_gating_exactly_as_it_was(reached, peer):
+    """#2090 clause 5: one path set was changed, and `/api/*` did not move.
+
+    `GET /api/sessions` is the read route that leaked real session data at
+    #683's triage, so the same differential is asserted here after the docs
+    change: 403 carrying this gate's own detail from a peer outside loopback and
+    the trusted networks with the handler never entered, and 200 from a peer
+    inside them. The refusal detail is asserted *present* here and *absent* on
+    the docs denial, which is what keeps the two refusals from being conflated.
+    """
+    async with _client(peer) as client:
+        r = await client.get("/api/sessions")
+
+    if peer in UNTRUSTED:
+        assert r.status_code in (401, 403), f"/api/sessions from {peer}: {r.status_code}"
+        assert server.REFUSAL_DETAIL in _detail_is_the_gate(r), r.text[:200]
+        assert reached == [], f"/api/sessions executed for {peer}: {reached}"
+    else:
+        assert r.status_code == 200, (
+            f"/api/sessions from trusted peer {peer} got {r.status_code}: {r.text[:200]}")
+
+
+@pytest.mark.parametrize("path", DOCS)
+async def test_the_docs_deny_decides_on_the_peer_the_producer_rewrote(
+        serving, producer_stack, path):
+    """The seam the live deployment actually has, and the canary's real shape.
+
+    `ApiPeerGate` reads `scope["client"]`, and in production uvicorn's
+    `ProxyHeadersMiddleware` has already rewritten it from `X-Forwarded-For`
+    (`forwarded_allow_ips` is loopback only, so only Vite can rewrite it). Two
+    requests, one stack:
+    a LAN browser arriving through Vite is `127.0.0.1` on the socket and must be
+    refused the route map, which is the live Mission Control topology this hole was
+    actually exploited from; and a same-host client with no forwarding header —
+    exactly what `scripts/automod/canary.py:192` sends over a loopback socket —
+    must still get the page. The rewrite is also asserted *not* to reach the health
+    probe, which the guardian polls from this box with no forwarding header at all.
+    """
+    async with _client(LOOPBACK, producer_stack) as client:
+        via_vite = await client.get(path, headers={"X-Forwarded-For": LAN})
+        same_host = await client.get(path)
+        health = await client.get("/health", headers={"X-Forwarded-For": LAN})
+
+    assert via_vite.status_code == 404, (
+        f"{path} through the producer with XFF {LAN} returned "
+        f"{via_vite.status_code}: a LAN browser behind Vite still reads it")
+    assert server.app.title not in via_vite.text, via_vite.text[:200]
+    assert same_host.status_code == 200, (
+        f"{path} from a same-host client with no forwarding header got "
+        f"{same_host.status_code}: canary.py's boot probe would report an error")
+    assert server.app.title in same_host.text, same_host.text[:200]
+    assert health.status_code == 200, (
+        f"/health through the producer with XFF {LAN} got {health.status_code}: "
+        "the docs deny must not follow the rewrite onto the watchdog probe")
+
+
+async def test_a_websocket_scope_at_a_docs_path_is_never_accepted(reached):
+    """The other half of the scope-type seam this change touches.
+
+    The docs deny is deliberately `http`-only, and the claim that makes safe is
+    that no websocket handler lives at those paths — an `http.response.*` send
+    into a websocket scope would be a protocol violation, so the branch could not
+    simply reuse the HTTP denial. `/api/lsp/{language}` is the app's only
+    `@router.websocket` (asserted at `TestWebSocketScope`), and an upgrade to
+    `/openapi.json` from an untrusted peer is never accepted, so nothing is
+    reachable there to disclose either.
+    """
+    types, sent = await _ws_handshake(server.app, "/openapi.json", LAN)
+
+    assert "websocket.accept" not in types, (
+        f"an untrusted peer's upgrade to a docs path was accepted: {types} {sent[:2]}")
+    assert not any(t.startswith("websocket.http.response") for t in types), (
+        f"the docs deny answered a websocket handshake ({types}): the deny is "
+        "http-scope only, and an untrusted upgrade is refused by the gate's "
+        "`websocket.close` path or the router's own no-route close, never by an "
+        "OpenAPI-shaped body")
+    assert reached == []

@@ -87,6 +87,33 @@ DEFAULT_TRUSTED_NETWORKS = "100.64.0.0/10"
 # gated by construction, never by an exemption list nobody keeps current.
 PRE_AUTH_PATHS = frozenset({"/health", "/health/deep"})
 
+# The three routes FastAPI mounts at their default URLs when `app = FastAPI(...)`
+# passes no `docs_url`/`redoc_url`/`openapi_url` (#2090). They are not under
+# `/api/`, so the pass-through below handed them to anyone: measured from the
+# office-LAN address on 2026-10-03, `/openapi.json` answered 200 with 90,972 bytes
+# — the title "Lloyd Mission Control" and every one of the 129 paths the backend
+# serves, its route map, parameter shapes and response models — from the same
+# connection on which `/api/sessions` was refused 403. `/docs` and `/redoc` are the
+# browsable renderings of the same document.
+#
+# Exact paths, for the same reason `PRE_AUTH_PATHS` is: a looser rule sweeps in the
+# two monitoring probes. FastAPI mounts nothing else at a non-`/api` path, so these
+# three are the whole surface, and a path like `/docs/` is not one of them —
+# starlette matches `/docs` exactly and answers `/docs/` with its own redirect or
+# 404, never with the page.
+DOCS_PATHS = frozenset({"/openapi.json", "/docs", "/redoc"})
+
+#: The denial body: byte-identical to what an unmatched route already returns to
+#: every peer (`{"detail":"Not Found"}`), so refusing these paths from an untrusted
+#: address discloses no more than "no such route" and the fix does not add a new
+#: oracle for which surfaces exist. Deliberately not `REFUSAL_DETAIL`, which names
+#: `/api/*`: quoting it here would tell a LAN peer that a docs surface is being
+#: gated, which is the thing being hidden. The refusal is still logged server-side,
+#: so an operator can see it happened. `tests/test_api_client_gating.py` pins the
+#: byte-identity against a genuinely unmatched path, which is what fails this if
+#: starlette ever changes its 404 body.
+DOCS_REFUSAL_BODY = {"detail": "Not Found"}
+
 _trusted_nets_cache: list | None = None
 
 
@@ -163,6 +190,15 @@ def _is_trusted_peer(host: str) -> bool:
     return any(addr in net for net in _trusted_networks())
 
 
+# No `docs_url=None`/`redoc_url=None`/`openapi_url=None` here, though that is the
+# obvious way to close the docs surface and #2090 names it first. It would take the
+# loop's own boot probe down with it: `scripts/automod/canary.py:192` GETs
+# `/openapi.json` on the candidate and appends an error unless it is 200, and
+# `scripts/automod/gate.py:2958` fails `rung_canary_boot` on any such error — so
+# every later round would be refused by a green change. `ApiPeerGate` therefore
+# denies the three paths to untrusted peers instead (`DOCS_PATHS`), which keeps the
+# loopback probe working. Before anyone re-does it the other way: repoint or delete
+# that probe in the same diff, or the gate bites.
 app = FastAPI(title="Lloyd Mission Control")
 
 app.add_middleware(
@@ -247,15 +283,34 @@ class ApiPeerGate:
             return
 
         path = scope.get("path", "")
-        if path in PRE_AUTH_PATHS or not path.startswith("/api/"):
-            await self.app(scope, receive, send)
-            return
 
         # Peer address only — never a Host or forwarded header. Same-host
         # services (LiveKit worker, autonomy ticker) POST directly to
         # 127.0.0.1:8080 without Vite's TLS layer and are the loopback case.
+        # Read once, above both refusals, so the docs deny and the `/api/*`
+        # refusal can never end up deciding on two different readings of who is
+        # calling.
         client = scope.get("client")
         client_host = client[0] if client else ""
+
+        # The docs surface, for an untrusted peer only, and only over HTTP: these
+        # three are HTTP GET routes, and `app/routers/lsp.py:102` is the app's only
+        # websocket route, so a websocket scope at one of these paths reaches no
+        # docs handler to disclose (`test_a_websocket_scope_at_a_docs_path_is_never_
+        # accepted` pins that). Answering `http.response.*` into a websocket scope
+        # would be a protocol violation, which is why this branch does not reuse the
+        # websocket refusal below.
+        if (scope_type == "http" and path in DOCS_PATHS
+                and not _is_trusted_peer(client_host)):
+            logger.warning("api-gate: refused docs surface %s from peer %r",
+                           path, client_host or "<unknown>")
+            await JSONResponse(DOCS_REFUSAL_BODY, status_code=404)(scope, receive, send)
+            return
+
+        if path in PRE_AUTH_PATHS or not path.startswith("/api/"):
+            await self.app(scope, receive, send)
+            return
+
         if not _is_trusted_peer(client_host):
             logger.warning("api-gate: refused %s %s from peer %r",
                            scope_type, path, client_host or "<unknown>")
