@@ -307,8 +307,8 @@ MIN_LIVE_BENCH_TASKS = 11
 
 #: Every file in `~/obsidian/lloyd/bench/`, keyed by task id (the file stem, which
 #: each file also declares as `id:`), with the `category:` its own front matter
-#: carries. Measured against the files on disk on 2026-09-28: 21 entries — 6 replay,
-#: 12 synthetic, 2 adversarial, 1 safety. That count is a snapshot of a hand-kept
+#: carries. Measured against the files on disk on 2026-10-03: 24 entries — 7 replay,
+#: 14 synthetic, 2 adversarial, 1 safety. That count is a snapshot of a hand-kept
 #: table and no assertion here reads it; the count that IS asserted is the corpus
 #: floor in `MIN_LIVE_BENCH_TASKS` above, and every entry below is re-checked
 #: against disk by the node named next, so a stale number in this comment is
@@ -387,6 +387,21 @@ LIVE_BENCH_CATEGORIES = {
     # (`??`), so the `git clean -fd` caveat above is live for it as it was for
     # `bench_021` and `bench_022` before their authors committed theirs.
     "bench_023_skill_invocation_shadowed_import_chain": "synthetic",
+    # Keyed by stem with the `category:` its own front matter declares
+    # (`lloyd/bench/bench_024_recall_user_fact_incidental.md:4` = `replay`), the only
+    # authority this table may copy — and the first non-`synthetic` addition since
+    # bench_013, so copying the newest sibling's value instead of reading the file
+    # would have keyed it wrong. Its absence is what reds main at `b3b652b6` (#2114):
+    # `test_every_live_bench_file_is_named_in_the_census` names the id, and this line
+    # is the whole fix that assertion asks for. The file reached the directory at
+    # 2026-10-03T09:49:36Z (its own mtime), nine minutes after `b3b652b6` was
+    # committed at 09:40:36Z, which is why that sha is red with no code change
+    # involved. Still untracked in the vault as measured for this line: 24 `.md` on
+    # disk against `git -C ~/obsidian ls-files lloyd/bench | wc -l` = 23, and
+    # `git -C ~/obsidian status --porcelain -- lloyd/bench` names exactly this file
+    # (`??`), so the `git clean -fd` caveat above is live for it as it was for
+    # `bench_021`, `bench_022` and `bench_023` before their authors committed theirs.
+    "bench_024_recall_user_fact_incidental": "replay",
 }
 
 
@@ -445,6 +460,40 @@ def test_every_live_bench_file_is_named_in_the_census():
     assert not drift, (
         "census and front matter disagree, shown (census, loaded) — the split is "
         f"computed from the loaded category: {drift}")
+
+
+@requires_real_bench
+def test_the_newest_live_bench_file_is_keyed_with_its_declared_category():
+    """#2114: the entry a nightly bench addition touches, pinned by name.
+
+    The census node above fails when any id is unmapped, and its per-file category
+    check compares the whole map against what `load_bench_tasks` returns, so a new
+    task reaches it as a set difference and a wrong category as a dict of pairs.
+    This node asks the narrower question about one file — the newest by mtime, which
+    is the entry an addition actually touches — with that file's own bytes as the
+    only source, no loader in between.
+
+    Both halves are live and both are worth having on their own: at the item's base
+    `b3b652b6` the first assertion fails, because the map there holds no entry for
+    `bench_024_recall_user_fact_incidental` at all. The second is what stops the
+    keyed-but-copied entry, because that file declares `replay` while 10 of the 11
+    ids added after `bench_013` are `synthetic` — which is what makes inheriting the
+    neighbour's value the mistake a growing corpus invites.
+    """
+    newest = max(REAL_BENCH.glob("*.md"), key=lambda p: p.stat().st_mtime)
+    assert newest.stem in LIVE_BENCH_CATEGORIES, (
+        f"newest bench file {newest.stem} has no entry in LIVE_BENCH_CATEGORIES — "
+        f"this is what reds {CENSUS_NODE_1905}; key it with the `category:` its own "
+        f"front matter declares")
+    declared = re.search(r"^category:[ \t]*(\S+)[ \t]*$",
+                         newest.read_text(encoding="utf-8"), re.MULTILINE)
+    assert declared, (
+        f"{newest.name} declares no top-level `category:` line, so the census value "
+        f"for it has no authority to copy")
+    assert LIVE_BENCH_CATEGORIES[newest.stem] == declared.group(1), (
+        f"census categorises {newest.stem} as {LIVE_BENCH_CATEGORIES[newest.stem]!r} "
+        f"but its own front matter declares {declared.group(1)!r} — the file is the "
+        f"only authority this table may copy")
 
 
 #: The marks that take a node off the gate's `tests` rung while
