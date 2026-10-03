@@ -924,12 +924,144 @@ def test_the_skill_names_the_variance_source_it_must_not_cite(skill_text):
 
 def test_the_skill_does_not_send_the_nightly_job_to_the_pinned_corpus_arm(skill_text):
     """``PinnedCorpus`` VACUUM-copies the qmd index and starts a second qmd daemon
-    holding an embedding model on GPU 0 beside the primary engine. That is a
-    person's call, so the skill must say the drift arm is NOT run by this job.
+    holding an embedding model on GPU 0 beside the primary engine, so the skill must
+    say the drift arm is NOT run by this job.
+
+    This line used to end "…whether the 06:00 task may do that is a person's call",
+    and so did the page it grades. Both were wrong on the same fact: #608's owed
+    check ruled it on 2026-09-20 — clause 2, the pinned-corpus arm at 06:00, **NO**
+    — and the free ``corpus``-block drift term shipped in its place, which is the
+    term this file's own transition tests read. The decision is closed, so this
+    docstring records it rather than re-asking, and the deferring sentence is pinned
+    absent by ``test_the_skill_never_re_opens_the_two_closed_608_rulings``.
     """
     assert "evalpin" in skill_text
     assert "GPU 0" in skill_text
     assert "No pinned-corpus drift arm runs in this job" in skill_text
+
+
+# ── #2095: the two #608 rulings, stated as decided where the nightly reads them ──
+#
+# #608's third owed clause asked a person to decide two things. Both were decided on
+# 2026-09-20 — the pinned-corpus arm at 06:00 NO, the power-driven growth approved and
+# executed as #1319 on 2026-09-21 — and the script half of the surface was fixed then
+# (`scripts/eval_trend_stats.py` prints "The 80%-power decision that used to sit
+# behind this line is no longer open", pinned by the sizing-block node above). The
+# skill half was not, so the page the 06:00 run reads was still asking, which is the
+# #1319 defect one file over: a printed "a person's call" after a decision is an
+# instruction to do nothing.
+#
+# Every literal below is a WHOLE LINE of the page as vault `684b34c7` wrote it, or a
+# span inside one line, and each is matched against the raw text with a plain `in`.
+# No whitespace is normalised, so any of these sentences can be grepped straight out
+# of `git -C ~/obsidian show HEAD:skills/retrieval-eval/SKILL.md` and the three
+# rulings the nightly depends on are the page's single-line statements rather than
+# spans that only exist once the wrapping is flattened away. The cost is that
+# re-wrapping one of these lines breaks its node, which is the right trade for a
+# ruling: a paragraph that tells the 06:00 run what is decided is quoted, and quoting
+# is why the page also carries the dated `2026-09-14 -->` callouts two sections up.
+
+
+def test_the_skill_states_the_pinned_arm_ruling_with_both_of_its_reasons(skill_text):
+    """Clause 1: the pinned-arm paragraph must carry the decision *and* why, so an
+    editor tempted to switch the arm on reads the reasons instead of re-litigating a
+    ruling that closed on 2026-09-20.
+
+    Both reasons are the ones #608's owed check named. (1) The second qmd daemon
+    holds 4.4 GB on GPU 0 beside the primary engine — on the pin's own measured cost
+    note, against 3.6 GB in its earlier printing — and starting and stopping a
+    daemon is service control, which a background turn may not do at all
+    (``app/harness/service_control.py``); when that stop did not happen on
+    2026-09-18 an orphan held :8182 for 5 h 30 min and burned two CPU-hours, so the
+    risk is not theoretical. (2) A pinned arm would pair across a corpus the
+    contract two sections earlier declares unpaired, buying a precision the nightly
+    series does not have. The escape hatch is written down too, because it is real:
+    the gate's ``automod-check-*`` / ``selfmod-check-*`` arms run on a pinned corpus
+    by design, and a person triggering an eval script is that person deciding, then.
+    """
+    for required in (
+        "ruled 2026-09-20, permanently",
+        "The 06:00 task may not run it, for two reasons that each stand alone.",
+        "4.4 GB resident on GPU 0",
+        "app/harness/service_control.py",
+        "5 h 30 min",
+        "It would pair across a corpus this contract treats as unpaired",
+        "automod-check-*",
+        "selfmod-check-*",
+        "The `corpus`-block diff is the drift term this job can afford",
+        "doc_vectors",
+    ):
+        assert required in skill_text, (
+            f"the pinned-arm paragraph no longer states {required!r}, so it is back "
+            "to being a preference rather than a ruling with its reasons")
+
+
+def test_the_skill_never_re_opens_the_two_closed_608_rulings(skill_text):
+    """Clause 2: each deferring sentence is pinned absent by its exact text.
+
+    Exact text, not a whole-file grep for ``person's call``: one instance is still
+    standing at the seed re-base bullet, and it is #1547's clause about whether the
+    pre-re-base entity nights stay in the published window annotated. That ruling is
+    also already made (``scripts/eval_trend_stats.py`` records "#1663's owed-check
+    ruled that pre-re-base nights stay in the window annotated, not dropped"), but
+    rewriting it is #1547's owner's call, not this round's, and a file-wide absence
+    here would fail for a reason #2095 does not own. What this pins is that the two
+    sentences #608 closed cannot come back, and that the paragraphs that replaced
+    them still say what was decided — a removal with nothing in its place would pass
+    a pure absence check while leaving the next reader no answer at all.
+    """
+    for deferring in ("whether the 06:00 task may do that is a person's call",
+                      "do not grow it either without a person deciding"):
+        assert deferring not in skill_text, (
+            "#608 closed this on 2026-09-20 and the skill is asking again: "
+            f"{deferring!r}")
+    assert "The 06:00 task may not run it, for two reasons that each stand alone." in skill_text, (
+        "the pinned-arm sentence went without its replacement: the ruling must be "
+        "stated, not merely left unstated")
+    assert "approved by Alan on 2026-09-20" in skill_text, (
+        "the growth paragraph no longer says who decided and when, so the next "
+        "reader has no reason to treat it as closed")
+
+
+def test_the_skill_attributes_power_to_the_paired_n_and_dates_its_figures(skill_text):
+    """Clause 3: the growth paragraph quotes the script's own chronology and the
+    script's own denominator, because both were the bugs before they were the facts.
+
+    Evaluating power at the query-file size was #1319's defect — the line kept
+    printing ``at n=20: 0.011`` after the corpus had grown, so the check "power at
+    the current n is at or above 0.80" could not be satisfied by growing anything —
+    and ``required_n`` in `scripts/eval_trend_stats.py` says so in its own comment.
+    A skill sentence pairing ``0.832`` with the length of the query file would put
+    that bug back into the page that tells the nightly what to write, so what is
+    pinned here is the *attribution* plus the dated-quote marker, not the number:
+    power moves with the window's joined paired-query count on every run, and a
+    literal assertion on ``0.832`` would go red on a Tuesday for a reason that is
+    not a defect. The chain, though, is history and is pinned as written: 20 → 87
+    under #1319 with the original 20 ids first and byte-identical → 81 by the
+    same-day gold audit (38 labels re-pointed, 6 queries dropped) → 86 under #1354 →
+    81 again under #1662 (``e64ac4b3``). Today's 81 is #1662's, not the audit's, and
+    conflating them would date the first comparable score to the wrong night.
+    """
+    for required in (
+        "n there is the joined paired-query count of the window being audited, not "
+        "the size of the query file",
+        "alpha 0.05: n = 78",
+        "quoted as printed on 2026-10-03",
+        "20 → 87 under #1319",
+        "the original 20 ids first and byte-identical",
+        "86 under #1354",
+        "81 again under #1662",
+        "e64ac4b3",
+        "**coverage-only**",
+        "announced re-base point",
+    ):
+        assert required in skill_text, (
+            f"the growth paragraph lost {required!r}: either the denominator moved "
+            "back to the file size, or the chronology no longer matches the one "
+            "the script prints beside it")
+    assert "Growing the query set for POWER was decided and paid for" in skill_text, (
+        "the paragraph must say the power question is closed, not just recount "
+        "what was done about it")
 
 
 
