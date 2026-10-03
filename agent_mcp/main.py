@@ -52,6 +52,7 @@ from starlette.routing import Route
 from agent_mcp import (
     _change_ledger,
     _injection_probe,
+    _path_sandbox,
     _rpc,
     _subagent_registry,
     aggregator_auth,
@@ -904,6 +905,13 @@ async def state(request):
         # Read by the bench runner before it starts a trial: a runner that
         # cannot see the sandbox enforced refuses to run.
         "tool_sandbox": await asyncio.to_thread(_tool_sandbox.status),
+        # The OTHER Bash sandbox — the one every session that is not bench/eval
+        # gets, which binds the protected entries read-only instead of binding
+        # the whole root. `fallback: true` means Bash is running unsandboxed and
+        # the only thing standing between a turn and the identity file is the
+        # string guard: #2109 asks for this key precisely so that state is a
+        # reading, not an inference from a green `/health`.
+        "protected_path_sandbox": await asyncio.to_thread(_path_sandbox.status),
     })
 
 

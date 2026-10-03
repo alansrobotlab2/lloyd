@@ -190,6 +190,67 @@ def protected_write_roots() -> list[tuple[str, str]]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# The shell's read-only list — what a Bash child may not write, in the kernel
+# ---------------------------------------------------------------------------
+#
+# `PROTECTED_WRITE_ROOTS` answers "may this *tool call* write here", and its
+# answer is a string the model reads back. `agent_mcp/_path_sandbox.py` needs a
+# different thing: a list of paths to hand to `bwrap --ro-bind`, so that a write
+# fails in the kernel whatever the command looked like. Membership is the same
+# question — the same five surfaces — plus two files that are *not* in the
+# deny-set and must stay out of it:
+#
+#     ~/obsidian/lloyd/USER.md      ~/obsidian/lloyd/MEMORY.md
+#
+# Those two are the loaded-memory files the nightly reflection rewrites every
+# night, and its sanctioned route is the `Write`/`vault_write` lane: adding them
+# to `PROTECTED_WRITE_ROOTS` would refuse that route (`builtin_fs` and
+# `vault_write` both call `write_deny_reason`), which is a worse outage than the
+# hole. The shell has no sanctioned writer for them at all — the nightly never
+# reaches a shell to rewrite its own memory — so the read-only list can cover
+# them while the deny-set does not, and `git -C ~/obsidian checkout --
+# lloyd/USER.md`, the undo route #582 left to a person, stops working here
+# rather than somewhere else. That asymmetry is the whole reason this is a
+# second constant and not an alias of the first; `tests/test_protected_paths.py`
+# pins both halves.
+#:
+#: Entries are home-relative templates exactly like the deny-set's, so a
+#: relocated `HOME` — a test with a scratch home — moves the list with it, and
+#: `agent_mcp/_path_sandbox.py` imports THIS object rather than copying the
+#: paths.
+PROTECTED_SHELL_RO_ROOTS: tuple[str, ...] = (
+    *(template for template, _label in PROTECTED_WRITE_ROOTS),
+    "~/obsidian/lloyd/USER.md",
+    "~/obsidian/lloyd/MEMORY.md",
+)
+
+
+def protected_shell_ro_paths() -> list[str]:
+    """`PROTECTED_SHELL_RO_ROOTS` resolved to realpaths, existing entries only.
+
+    Computed per call like `protected_write_roots()`, and *skipped* rather than
+    emitted for an entry that is not on disk: `--ro-bind` needs a target, and one
+    un-bindable entry makes bwrap fail, which takes away every Bash call while
+    `/state` still reports the sandbox healthy — the failure
+    `_tool_sandbox._host_socket_paths` documents, and `~/.openclaw` here is a
+    live deny-set member that does not exist on this box. Deduplicated on the
+    realpath so a symlink and its target bind once.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for template in PROTECTED_SHELL_RO_ROOTS:
+        expanded = os.path.expanduser(template)
+        if not expanded or not os.path.exists(expanded):
+            continue
+        real = os.path.realpath(expanded)
+        if real in seen or not os.path.exists(real):
+            continue
+        seen.add(real)
+        out.append(real)
+    return out
+
+
 def _covers(root: str, real: str) -> bool:
     """Is `real` the root itself or something below it? Whole-component only."""
     return real == root or real.startswith(root.rstrip("/") + os.sep)

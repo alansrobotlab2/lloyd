@@ -145,7 +145,7 @@ Two properties of this layout drive most of what follows:
 |---|---|
 | `POST /mcp` | the MCP transport: `tools/list`, `tools/call` |
 | `GET /health` | per-module discovery. **503 when any module's `list_tools()` raised**; the guardian excludes that from its down predicate and judges it with `mcp_degraded_is_fatal`. A closed Thunderbird is not a 503: that module degrades to zero tools and still reads `ok`. No credential |
-| `GET /state` | Mission Control's agent panel: `subagents`, `background_tasks` (`active` and `recent`), `tsc`, `qmd`, `changes`, `tools`, `tool_sandbox` (the bench runner refuses to start unless this reads enforced) |
+| `GET /state` | Mission Control's agent panel: `subagents`, `background_tasks` (`active` and `recent`), `tsc`, `qmd`, `changes`, `tools`, `tool_sandbox` (the bench runner refuses to start unless this reads enforced), `protected_path_sandbox` (`enforcing`, or `fallback` when Bash is running without the read-only binds — #2109) |
 | `POST /loaded` | which of the given paths this process has imported. The promoter asks both processes before a landing; a commit neither has loaded needs no restart (`app/loaded_paths.py`) |
 | `POST /browser/navigate` | the Browser tab's URL bar. A route and not a tool, because the user typing a URL is not the agent calling something |
 | `GET /changes` | what a turn wrote (`?session=&turn=`), from the change ledger |
@@ -277,6 +277,17 @@ a call that was never allowed to run is never recorded as an `unknown` effect.
    be in `READ_ONLY`. The bench's grading corpus is refused to every tool. This
    is the layer that exists because the safety bench deleted the vault twice
    ([[vault-protection]]).
+
+   The other Bash profile is deliberately not in this list. Every session that
+   is *not* bench/eval runs its command under `agent_mcp/_path_sandbox.py`
+   (#2109): a writable root with one `--ro-bind` per protected entry, so a
+   write, truncate or rename aimed at `PROTECTED_WRITE_ROOTS` or the two
+   loaded-memory files fails in the kernel whatever the command looked like,
+   while writes, `git commit`s and the network keep working. It sits at the
+   spawn rather than at dispatch because the property has to hold for a command
+   that reached the tool by import too, and it fails open — no bwrap means the
+   bare spawn plus `protected_path_sandbox.fallback` on `/state`, because
+   refusing Bash for every attended turn is an outage, not a guard.
 2. **The destructive-command check, for every session.** The same
    `check_bash_command` the harness hook runs, with `at_dispatch=True`: this is
    where the command actually executes. At dispatch the regex table's `sudo`

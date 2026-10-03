@@ -15,6 +15,7 @@ nothing here depends on the live vault.
 from __future__ import annotations
 
 import ast
+import os
 import re
 from pathlib import Path
 
@@ -672,3 +673,100 @@ def test_the_four_earlier_spellings_sentence_still_counts_four():
         assert NUMBER_WORDS[m2.group(1)] != n_items, (
             f"{where}: rewriting the numeral to five left the assertion satisfied, so "
             "nothing here was ever protecting the true sentence")
+
+
+# ---------------------------------------------------------------------------
+# #2109 — the shell's read-only list: one constant, wider than the deny-set on
+# purpose, and the deny-set unchanged because of it
+# ---------------------------------------------------------------------------
+
+def test_the_shell_read_only_list_is_one_object_the_profile_builder_imports():
+    """Clause 5's first half: the profile builder does not restate the paths.
+
+    `agent_mcp/_path_sandbox.py` needs the list, `app/harness/protected_paths.py`
+    owns it, and the reason it is *owned* there is the rule that made #582 die:
+    two spellings of "protected" drift. Identity, not equality — a copied tuple
+    would compare equal and still drift.
+    """
+    from agent_mcp import _path_sandbox as PS
+
+    assert PS.PROTECTED_SHELL_RO_ROOTS is PP.PROTECTED_SHELL_RO_ROOTS
+    # …and the builder carries no second copy of any of them *in code*. A
+    # docstring may name a path in prose; what must not exist is a literal the
+    # profile could bind, because that is the copy that drifts. Collected from
+    # the AST with module/class/function docstrings excluded.
+    src_path = (Path(__file__).resolve().parents[1] / "agent_mcp" / "_path_sandbox.py")
+    tree = ast.parse(src_path.read_text(encoding="utf-8"))
+    documented = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                             ast.AsyncFunctionDef)):
+            body = getattr(node, "body", [])
+            if body and isinstance(body[0], ast.Expr) and \
+                    isinstance(body[0].value, ast.Constant) and \
+                    isinstance(body[0].value.value, str):
+                documented.add(id(body[0].value))
+    restated = [node.value for node in ast.walk(tree)
+                if isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and id(node) not in documented
+                and any(frag in node.value for frag in
+                        ("obsidian", "agent-services", ".venvs", ".openclaw"))]
+    assert not restated, \
+        f"_path_sandbox spells protected paths itself instead of importing: {restated}"
+
+
+def test_the_profile_builder_binds_what_the_resolver_returns(monkeypatch, tmp_path):
+    """The other half of "one constant": the bind list is whatever
+    `protected_paths.protected_shell_ro_paths()` says exists, in that order, and
+    not a list the builder keeps beside it. Asserted against an injected
+    resolver, so it cannot be satisfied by a literal the test itself wrote."""
+    from agent_mcp import _path_sandbox as PS
+
+    fake = [str(tmp_path / "SOUL.md"), str(tmp_path / "agent-services")]
+    monkeypatch.setattr(PS, "protected_shell_ro_paths", lambda: fake)
+    argv = PS.profile_argv("true", "/tmp")
+    binds = [(argv[i + 1], argv[i + 2])
+             for i, tok in enumerate(argv) if tok == "--ro-bind"]
+    assert binds == [(f, f) for f in fake]
+
+
+def test_the_shell_list_is_the_deny_set_plus_the_two_loaded_memory_files():
+    assert set(PP.PROTECTED_SHELL_RO_ROOTS) >= \
+        {template for template, _label in PP.PROTECTED_WRITE_ROOTS}, \
+        "the shell may not write anything the write lanes may not write"
+    assert "~/obsidian/lloyd/USER.md" in PP.PROTECTED_SHELL_RO_ROOTS
+    assert "~/obsidian/lloyd/MEMORY.md" in PP.PROTECTED_SHELL_RO_ROOTS
+    assert len(PP.PROTECTED_SHELL_RO_ROOTS) == len(PP.PROTECTED_WRITE_ROOTS) + 2
+
+
+def test_the_resolved_shell_list_carries_both_loaded_memory_files(monkeypatch,
+                                                                   tmp_path):
+    """The resolved form the profile builder hands to `--ro-bind`, computed
+    against a scratch HOME so the claim needs no live vault and no skip."""
+    home = tmp_path / "home"
+    (home / "obsidian" / "lloyd").mkdir(parents=True)
+    for name in ("USER.md", "MEMORY.md"):
+        (home / "obsidian" / "lloyd" / name).write_text("x\n")
+    monkeypatch.setenv("HOME", str(home))
+    paths = PP.protected_shell_ro_paths()
+    assert os.path.realpath(str(home / "obsidian/lloyd/USER.md")) in paths
+    assert os.path.realpath(str(home / "obsidian/lloyd/MEMORY.md")) in paths
+
+
+def test_the_deny_set_still_refuses_soul_md_and_still_allows_the_memory_files():
+    """Clause 5's second half, and the reason the two lists are not one.
+
+    The nightly reflection rewrites `lloyd/USER.md` and `lloyd/MEMORY.md`
+    through `Write`/`vault_write`, and both lanes ask this function; adding the
+    two files to `PROTECTED_WRITE_ROOTS` to "close the hole" would refuse the
+    nightly's own sanctioned route. The shell loses its write access to them to
+    the mount instead, which is `tests/test_path_sandbox.py`'s corpus.
+    """
+    home = str(Path.home())
+    assert PP.write_deny_reason(f"{home}/obsidian/lloyd/USER.md") is None
+    assert PP.write_deny_reason(f"{home}/obsidian/lloyd/MEMORY.md") is None
+    assert "identity file" in (PP.write_deny_reason(f"{home}/obsidian/lloyd/SOUL.md")
+                               or "")
+    assert len(PP.PROTECTED_WRITE_ROOTS) == 5, \
+        "the deny-set grew; if that was deliberate, this node and the nightly's "\
+        "route both need re-reading"

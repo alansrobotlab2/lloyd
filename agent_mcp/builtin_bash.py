@@ -12,7 +12,18 @@ two places: the harness's PreToolUse hook that
 `install_default_safety_hook` registers, and `agent_mcp/main.call_tool`
 at dispatch. If you invoke this module standalone — importing `_bash` or
 `call_tool` directly, outside the harness and outside the aggregator's
-dispatch — there is no gate at all.
+dispatch — there is no gate at all. The one thing enforced here rather than
+upstream is the substrate below, and it is here precisely because a string gate
+can be out-spelled: it holds for a command that reached this file by import too.
+
+Both non-bench spawn paths (foreground, and `run_in_background`) run the
+command under the protected-path bubblewrap profile in
+`agent_mcp/_path_sandbox.py`, so a write into a protected entry fails in the
+kernel rather than depending on a parser recognising the shape. A bench or eval
+session instead gets the read-only profile (`_tool_sandbox.bwrap_argv`). Both
+wrappers fail open — no bwrap means the bare spawn, with a WARNING and `/state`
+reading `protected_path_sandbox.fallback` — and neither one changes the shell,
+the cwd, the environment, the process-group semantics or the output contract.
 
 A foreground command that rewrites a `.py` inside a git work tree gets the
 same pyflakes delta block `Edit` does (`_bash_edit_diagnostics`, #695).
@@ -40,8 +51,8 @@ from typing import Any
 
 from mcp.types import Tool
 
-from agent_mcp import (_bash_edit_diagnostics, _bash_tree_strays, _rpc, _task_registry,
-                       _tool_sandbox)
+from agent_mcp import (_bash_edit_diagnostics, _bash_tree_strays, _path_sandbox,
+                       _rpc, _task_registry, _tool_sandbox)
 from agent_mcp._shared import get_bound_session, text_result
 
 logger = logging.getLogger("lloyd-builtin-bash")
@@ -255,8 +266,17 @@ async def _bash(args: dict[str, Any]) -> str:
             except Exception:
                 logger.warning("bash edit snapshot failed", exc_info=True)
                 snap = None
-            proc = await asyncio.create_subprocess_shell(
-                command,
+            # Every session that is allowed to change this machine still may
+            # not change these paths, and the guarantee is the kernel's, not
+            # the parser's: `_path_sandbox` hands the same command to bwrap
+            # with one read-only bind per protected entry (`/bin/sh -c`, the
+            # shell `create_subprocess_shell` was already running). Fail-open:
+            # `wrap` returns a bare spawn plus False when bwrap cannot build,
+            # and says so on the log and on `/state`.
+            sb_argv, _ = await asyncio.to_thread(_path_sandbox.wrap, command,
+                                                 cwd)
+            proc = await asyncio.create_subprocess_exec(
+                *sb_argv,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=cwd,
@@ -363,8 +383,14 @@ async def _spawn_background(command: str, description: str, cwd: str | None = No
         session_id=session_id, command=command, description=description,
     )
     try:
+        # Same substrate as a foreground command, minus `--die-with-parent`:
+        # this child is meant to outlive the call that returned its id, and it
+        # keeps `bash -c` because that is what this path already execs.
+        sb_argv, _ = await asyncio.to_thread(_path_sandbox.wrap, command,
+                                             cwd or os.getcwd(),
+                                             background=True)
         proc = await asyncio.create_subprocess_exec(
-            "bash", "-c", command,
+            *sb_argv,
             stdout=log_fd,
             stderr=asyncio.subprocess.STDOUT,
             cwd=cwd or os.getcwd(),
