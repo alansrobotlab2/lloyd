@@ -533,6 +533,112 @@ def _ruleless_footer_start(lines: list) -> Optional[int]:
     return None
 
 
+def _drop_url_blocks(lines: list) -> list:
+    """The lines with every set-off block that carries a URL taken out (#2143), or
+    `lines` itself when none does.
+
+    A block here is a maximal run of non-blank lines, and a run's own first line is always
+    set off from the line above by a blank or by the start of the text — which is why no
+    separate `_set_off` call is needed here: a run cannot begin anywhere else. So the rule
+    is **a block containing a URL goes, whole, whatever else it contains**, and the
+    discriminator is that a link is present, not what the words around it say.
+
+    That is a different question from the shape rules in `strip_link_footer` below, and it
+    is here because of what those cannot do. Each recognises a promo block by its SHAPE — a
+    rule line (`_RULE_LINE_RE`), a label from a closed list (`_FOOTER_LABEL_RE`,
+    `_RULELESS_FOOTER_ANCHOR_RE`), a colon-closed label of at most 40 characters
+    (`_RUN_LABEL_RE`), a signup verb (`_SIGNUP_CTA_RE`) — and the corpus is open-set, so each
+    is a hand-maintained list the next channel walks through. `youtube-digest.md:1663`
+    walked through all four at once: its CTA label is 79 characters (measured with `len()` on
+    the stored line), so `_RUN_LABEL_RE`'s cap declined the label and `_link_run_bounds`'
+    floor of two link lines declined the single bare UTM URL under it. The CodeRabbit sponsor
+    slot at `:1450` is a different failure again: its ad is the FIRST block of the
+    description, where no footer rule ever looks, and it carries no `utm_` at all, so a
+    tracking-parameter rule would miss it too. Presence is not a list.
+
+    Scope: this runs inside `strip_link_footer`, where channel-authored text is prepared.
+    `_entry_body` reaches that call behind an `!= "github"` test (`vault_writer.py:428`), so a
+    GitHub issue or PR body goes to `clean_body` and `clip_body` and never sees this rule;
+    clause 4 (#2143) holds because of that guard, not because this function discriminates.
+    The distinction matters at block granularity: an issue body that says `repro at
+    https://…` keeps its link inside the paragraph that explains it, and deleting the
+    paragraph that carries a link would take the sentence down with it.
+
+    Two costs, measured over the stored youtube rows rather than argued:
+
+    - **A link that IS the item's subject goes with the block.** Two rows point at
+      `github.com/jaz-lang/jaz` and a Videocardz leak report, and those are the story. Every
+      digest entry already carries the writer's own `[Link](https://www.youtube.com/watch?v=…)`,
+      so an entry loses the pointer, not the source.
+    - **A URL glued inside a line of prose takes that line's whole block.** 39 of the 55
+      URL-carrying youtube rows in `feeds/raw/2026-*.jsonl` write links that way
+      (`CPU: Ryzen 9800X3D https://amzn.to/40Nor9v`), and dropping a block rather than a
+      character span is what keeps this rule line-granular like the shape rules beside it.
+      12 of those 55 hold nothing but link blocks and end up publishing the scorer's `why`.
+
+    What is not a cost: a text with no URL in it comes back as the same list object, so no
+    kept line is re-joined, re-wrapped or re-indented. Removing a block also takes the blank
+    that separated it from the block before it, so `prose\\n\\nCTA\\n\\nmore prose` comes back
+    as `prose\\n\\nmore prose` with no doubled gap — the spacing rule
+    `_drop_signup_cta_lines` already applies to one line.
+    """
+    out: list = []
+    i, n, cut = 0, len(lines), False
+    while i < n:
+        if not lines[i].strip():
+            # A blank is kept only when something is already in `out` or nothing has been
+            # cut yet: dropping the block at the HEAD of a description would otherwise
+            # leave the result opening on a newline, an artifact none of the other strips
+            # here produces. When no block is cut at all the caller gets `lines` itself, so
+            # untouched text keeps whatever leading whitespace it had.
+            if out or not cut:
+                out.append(lines[i])
+            i += 1
+            continue
+        j = i
+        has_url = False
+        while j < n and lines[j].strip():
+            # A line counts as carrying a URL if the URL is glued to a label
+            # (`tall version- https://amzn.to/4cvsfk3`) or sits alone; `_URL_RE` is not
+            # anchored, so both answers come from the same test.
+            has_url = has_url or bool(_URL_RE.search(lines[j]))
+            j += 1
+        if has_url:
+            cut = True
+            while out and not out[-1].strip():
+                out.pop()
+        else:
+            out.extend(lines[i:j])
+        i = j
+    return out if cut else lines
+
+
+def _url_free_or(lines: list, unchanged: str) -> str:
+    """`lines` with #2143's block drop applied, or `unchanged` when it removes nothing.
+
+    `unchanged` is the string the caller was about to return before #2143 existed, and it
+    is not always the joined `lines`: the pre-existing abstentions return `text.rstrip()`,
+    and re-joining a `text.splitlines()` list drops a trailing newline the original text
+    had. Returning the caller's own value when no block carried a URL is what makes
+    clause 3 (#2143) — a URL-free feed body comes back exactly as the pre-#2143 function
+    returned it, with no whitespace moved — hold on every one of those abstention paths at
+    once, rather than only on the one the new rule reaches.
+
+    Called on EVERY return path of `strip_link_footer`, including the two early ones, and
+    that is the difference between the property and the next anchor. `strip_link_footer` can
+    leave a description with a URL in it by three routes — it abstains at the first rule
+    because the text under it is prose, it abstains because its tail is prose, or it strips a
+    footer and returns the rest — and only the last one reaches the end of the function. The
+    row at `youtube-digest.md:1450` went out through the FIRST of those three, at 500
+    characters unchanged (measured against the base commit's own function), so a drop that ran
+    only after the anchors would not have seen it.
+    """
+    kept = _drop_url_blocks(lines)
+    if kept is lines:
+        return unchanged
+    return "\n".join(kept).rstrip()
+
+
 def strip_link_footer(text: str) -> str:
     """Remove a trailing promotional footer from channel-authored text (#1561, #1819).
 
@@ -597,11 +703,15 @@ def strip_link_footer(text: str) -> str:
             continue
         tail = [ln for ln in lines[idx + 1:] if ln.strip()]
         if not tail or all(_is_link_block_line(ln) for ln in tail):
-            return "\n".join(lines[:idx]).rstrip()
+            kept = "\n".join(lines[:idx]).rstrip()
+            return _url_free_or(lines[:idx], kept)
         # A rule with prose under it is section furniture, not a footer. Anything
         # above that rule is the description too, so there is nothing to take off —
         # and no second anchor is tried, which is what keeps #1561's abstention whole.
-        return text.rstrip()
+        # #2143's drop still runs over that anything: the CodeRabbit row reached the
+        # digest through THIS return, because a description that rules its own sections
+        # is not a footer and its sponsor block is not at the end.
+        return _url_free_or(lines, text.rstrip())
     # No set-off rule anywhere in the text: the shape #1561's anchor cannot reach (#1819).
     #
     # A footer is not the only block that can sit where an anchor cannot reach it. The same
@@ -617,8 +727,16 @@ def strip_link_footer(text: str) -> str:
         lines = lines[:run[0]] + lines[run[1]:]
     start = _ruleless_footer_start(lines)
     if start is not None:
-        return "\n".join(lines[:start]).rstrip()
-    return "\n".join(lines).rstrip() if run is not None else text.rstrip()
+        kept = "\n".join(lines[:start]).rstrip()
+        return _url_free_or(lines[:start], kept)
+    # `_drop_url_blocks` is asked here LAST, after both anchors and the run cut, and the
+    # order matters in one direction only: a footer or run that those rules already removed
+    # is a block of link lines, so the drop finds nothing new and the pre-#2143 answer
+    # stands. What it does change, and why it is here at all, is the block none of them can
+    # see — a label too long for `_RUN_LABEL_RE` over one URL too few for
+    # `_link_run_bounds`, which is the shape that shipped (#2143).
+    untouched = "\n".join(lines).rstrip() if run is not None else text.rstrip()
+    return _url_free_or(lines, untouched)
 
 
 #: What marks a scorer's `why` as a rating against the reader's interest profile and

@@ -66,7 +66,33 @@ Two conditions stop a write, on both routes into the vault
   from 1007 raw against 9 from 49 normally. Restore the state from
   `~/.lloyd-data-snapshots` (`scripts/backup/restore-data.sh`) and re-run `--write`.
 
-## Configuration
+## Entry bodies (`body.py`)
+
+A feed description becomes a digest entry's body only after `strip_link_footer` has been
+through it, and since backlog #2143 that includes **removing every block that carries a
+URL** — a block being a run of non-blank lines, removed whole, including the sentence that
+introduced the link. Whatever is left is the body; if nothing is left, the entry carries the
+scorer's `why` instead.
+
+It keys on a URL being present, never on the wording around it, because the corpus is
+open-set: the four shape rules that came before it (a separator rule, a footer label from a
+closed list, an arrow prefix, a short colon label over two or more link lines) each
+recognised one measured channel's style, and each was walked through by the next one. The
+row that filed #2143 had a 79-character label over a single bare UTM link — too long for
+the label rule, too short for the run rule — and a second published row was an ad whose
+footer had already been stripped above it.
+
+Two consequences to know before wondering where a description went:
+
+- A URL glued into a line of prose takes that line's whole block with it — 39 of the 55
+  URL-carrying youtube rows in `feeds/raw/2026-*.jsonl` write their links that way
+  (`CPU: Ryzen 9800X3D https://amzn.to/40Nor9v` is the shape) — and a description that held
+  nothing but link blocks (12 of those 55) ends up carrying `why`.
+- GitHub is untouched: `_entry_body` only strips non-GitHub text, so an issue or PR body
+  keeps its links, which is what `clean_body`/`clip_body` exist to publish.
+
+The entry always carries its own `[Link](https://www.youtube.com/watch?v=…)` added by the
+writer, so an entry that loses a channel's link does not lose its source.
 
 Interest profile stored in `~/obsidian/interests.md` (markdown format):
 

@@ -902,10 +902,19 @@ def test_a_link_run_with_a_prose_line_inside_it_is_returned_byte_for_byte():
     #1561 and #1819 already pin. A set-off run with ONE prose line among its links is
     returned exactly as sent, and the earlier rulings hold — a rule over `My Links` plus
     `➡️ Twitter:` is stripped, a `____` with a prose paragraph under it keeps everything,
-    and a setext underline is not a promo rule."""
+    and a setext underline is not a promo rule.
+
+    Line 3 of the fixture was `👉🏻 Repo: https://github.com/example/rollout` until #2143
+    made the presence of a URL the discriminator for a WHOLE block — acceptance: "the strip
+    removes the set-off block that contains a URL whole, labelled or not" — so a URL cannot
+    sit inside the shape this node exists to pin, and line 3 is now a label with no link.
+    The abstention is reached the same way either way: the prose line under a link run
+    leaves the run unclosed, so `_link_run_bounds` returns no run. Those original bytes,
+    URL included, are pinned as REMOVED by
+    `test_the_url_block_rule_outranks_the_run_rule_s_own_prose_abstention`."""
     prose_in_run = ("The video explains the rollout in three parts.\n\n"
                     "My Links 🔗\n"
-                    "👉🏻 Repo: https://github.com/example/rollout\n"
+                    "Resources:\n"
                     "The benchmark section is the best part of it.\n\n"
                     "Closing thoughts here.")
     assert body_mod.strip_link_footer(prose_in_run) == prose_in_run, \
@@ -1129,11 +1138,31 @@ def test_a_set_off_signup_line_is_dropped_and_every_other_line_survives_byte_for
         assert body_mod.strip_link_footer("Real prose about the video.\n\n" + arrow_line) \
             == "Real prose about the video."
 
-    for abstention in (POINTER_NOT_A_SIGNUP, SIGNUP_WITHOUT_URL):
+    # `POINTER_NOT_A_SIGNUP` was the second element of this loop until #2143. The signup
+    # rule still declines it — the word after the arrow is not a signup verb, and that
+    # ruling stands — but the line no longer comes back, because #2143 removes a block that
+    # carries a URL whatever it is labelled. So its abstention is pinned here on the same
+    # arrow-and-colon shape with the link removed, and its exact bytes are pinned as
+    # REMOVED, through the writer, by
+    # `test_the_url_block_rule_removes_a_pointer_the_signup_rule_correctly_declined`.
+    for abstention in ("👉 My repo: the code is in the pinned comment", SIGNUP_WITHOUT_URL):
         text = CTA_HEADING + "\n\n" + abstention
         assert body_mod.strip_link_footer(text) == text, abstention
+    # A CTA line with no blank above it is inside someone's paragraph, and every rule that
+    # existed before #2143 declined to edit one — which is why these bytes used to come back
+    # unchanged. #2143 moved that boundary: no blank means no NEW block, so the CTA and the
+    # sentence above it are ONE block, that block carries a URL, and the acceptance says it
+    # goes "whole, labelled or not". This is the item's own measured cost for the 39 stored
+    # rows whose URL is glued into prose (`CPU: Ryzen 9800X3D https://amzn.to/40Nor9v`): the
+    # sentence goes with the link, and the entry falls through to `why` — clause 5, pinned
+    # through the writer by `test_a_body_that_is_only_a_url_block_publishes_the_scored_why`.
+    # What is unchanged is the signup rule's own no-blank-above floor, which now only ever
+    # runs on text with no link in it, and is pinned as byte-for-byte on that shape:
     welded = CTA_HEADING + "\n" + MANUS_CTA
-    assert body_mod.strip_link_footer(welded) == welded, \
+    assert body_mod.strip_link_footer(welded) == "", \
+        "a block carrying a URL survived when its first line had no blank above it"
+    welded_no_url = CTA_HEADING + "\n👉 Join the free GPT-6 Astra Crash Course here, link below"
+    assert body_mod.strip_link_footer(welded_no_url) == welded_no_url, \
         "a CTA line with no blank above it was dropped out of a paragraph"
 
     # A signup line that HEADS a link run is the interesting case, and the blank under it
@@ -1998,3 +2027,434 @@ def test_the_rubric_sentence_the_sweep_is_built_to_catch_is_one_the_old_grep_mis
         REPO_ROOT / "tests" / "test_corpus_shape.py").read_text(encoding="utf-8"), (
         "the sentence injected in tests/test_corpus_shape.py drifted from the one "
         "pinned here; the mechanism and the blind spot must be tested on one text")
+
+
+# ── #2143 — no URL-carrying block survives a YouTube entry body ──────────────
+#
+# Every rule above this line recognises a promo block by its SHAPE: a separator rule, a
+# footer label from a closed list, an arrow prefix, a colon-terminated label of at most 40
+# characters, two or more link lines. The corpus is open-set, so the next channel that
+# labels its affiliate link differently walks through all of them at once — which is what
+# `knowledge/ai-llms/youtube-digest.md:1663` did with a 79-character label, and
+# `:1450` did with a sponsor ad sitting at the HEAD of a description whose first `______`
+# rule has prose under it — a shape the strip abstains on entirely, returning all 500
+# stored characters unchanged. The property these nodes pin is `this block carries a URL`,
+# which needs no vocabulary and no position.
+#
+# The cost is in these tests too, not only in the code comment: a URL glued into a line of
+# prose now takes that line, and any line set off with it, down with it (39 of the 55
+# URL-carrying rows in `feeds/raw/2026-*.jsonl` write their links that way), and a body
+# that was nothing but a link block now publishes the scorer's `why`.
+
+# ── the two witness rows, committed as files ─────────────────────────────────
+# Clause 6 of #2143 asks that the witness bytes have no history in the repo. A literal in
+# THIS file has no history either, which is why the first review attempt refused: an
+# assertion that a literal's own sha256 equals a constant two lines below it can only fail
+# if someone edits the literal, so it proves the file is self-consistent and nothing about
+# the day it was measured on. The bytes are therefore committed as fixtures
+# (`tests/fixtures/intel_cta_witness_2143.jsonl`,
+# `tests/fixtures/intel_sponsor_witness_2143.jsonl`), each holding the extracted row itself
+# — the same idiom `test_kg_health_alias_collisions.py:334` already uses for its witness.
+# They can be diffed and blamed; the digest assertions below now guard a FILE.
+#
+# The figures an extract has to reproduce, named as the clause requires. Both measured on
+# the live day files with `wc -lc` and `grep -c` on 2026-10-03, the day the item was filed:
+#
+#   raw/2026-10-03.jsonl   91 lines / 75,444 bytes   `grep -c unlock-ai`      -> 1
+#   raw/2026-10-01.jsonl  113 lines / 90,419 bytes   `grep -c coderabbit.link` -> 1
+#
+# So an extract is exactly 1 line out of 91 (resp. 113), and each fixture is exactly 1 line.
+# `_fixture_witness_row` enforces that before any stripping assertion runs, so a fixture that
+# quietly grew a second row or lost its id reports itself as a bad witness.
+
+
+def _fixture_witness_row(name: str, want_id: str) -> dict:
+    """The one committed witness row, parsed from `tests/fixtures/<name>`.
+
+    Never read from `~/lloyd-data`: a test that needs the runtime tree to exist is a test
+    that passes only on days the scanner ran, and fails as "missing" on every other.
+    """
+    path = REPO_ROOT / "tests" / "fixtures" / name
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1, (
+        f"{name} must hold exactly the ONE extracted row ({want_id.split(':')[-1]} was the "
+        f"sole match in its day file), got {len(lines)} lines")
+    row = json.loads(lines[0])
+    assert row.get("id") == want_id, (
+        f"{name} is the witness for {want_id}, its row is {row.get('id')!r}")
+    return row
+
+
+#: `youtube:UC0C-17n9iuUQPylguM1d-lQ:lnB4Zckx_34`, the description that shipped the CTA this
+#: item was filed for: a 79-character prose label over one bare UTM link. Extracted from
+#: `raw/2026-10-03.jsonl` (91 lines, 1 match) into the fixture above.
+_DEVDAY_ROW = _fixture_witness_row(
+    "intel_cta_witness_2143.jsonl", "youtube:UC0C-17n9iuUQPylguM1d-lQ:lnB4Zckx_34")
+DEVDAY_WITNESS = _DEVDAY_ROW["summary"]
+# The digest of the fixture's bytes. Against a literal this was a self-check; against a
+# committed file it is what stops someone rewriting the witness and keeping the nodes green.
+DEVDAY_WITNESS_SHA256 = "a9087fcb455f80d85b0dfc1e409004d4c57c64ff8327280a0e75ebe919450075"
+
+#: `youtube:UCqcbQf6yw5KzRoDDcZ_wBSw:Sy1Fjf-H-Qg`, extracted from `raw/2026-10-01.jsonl`
+#: (113 lines, 90,419 bytes, 1 match for `coderabbit.link`) into
+#: `tests/fixtures/intel_sponsor_witness_2143.jsonl`. The third published instance, and the
+#: one `grep utm_source` cannot see.
+#:
+#: The item's triage says of this row that its `My Links` footer "did remove" and the ad
+#: survived above it. Measured against the BASE commit's own `strip_link_footer`, that is
+#: false: the row came back unchanged at its full 500 characters, because `Want to work with
+#: me?` is prose under the row's first `______` rule line, which is the shape the strip
+#: abstains on entirely, and `_entry_body`'s `stripped == summary` short-circuit then
+#: published the lot. The digest still shows `My Links 🔗` and both `➡️` lines under the ad.
+#: Stronger than the item's account, and pinned below over the committed bytes.
+CODERABBIT_WITNESS = _fixture_witness_row(
+    "intel_sponsor_witness_2143.jsonl",
+    "youtube:UCqcbQf6yw5KzRoDDcZ_wBSw:Sy1Fjf-H-Qg")["summary"]
+CODERABBIT_WITNESS_SHA256 = "8249fcfbfd81b60a0750c09a05c4aea2fa72668d7179819144b80f25ad10d0ff"
+
+# One assertion of the fixture's own shape, so a truncated commit cannot turn every witness
+# node below into a green test about a string nobody measured.
+assert len(CODERABBIT_WITNESS) == 500, (
+    "`tests/fixtures/intel_sponsor_witness_2143.jsonl` no longer holds the stored 500-char "
+    "summary of `youtube:UCqcbQf6yw5KzRoDDcZ_wBSw:Sy1Fjf-H-Qg`")
+assert len(DEVDAY_WITNESS) == 468, (
+    "`tests/fixtures/intel_cta_witness_2143.jsonl` no longer holds the stored 468-char "
+    "summary of `youtube:UC0C-17n9iuUQPylguM1d-lQ:lnB4Zckx_34`")
+
+
+
+
+#: The day files these two fixtures were extracted from, in the runtime data root.
+_RAW_FEEDS_DIR = Path.home() / "lloyd-data" / "_pipeline" / "vault-derived" / "memory" / "feeds" / "raw"
+
+
+@pytest.mark.skipif(
+    not (_RAW_FEEDS_DIR / "2026-10-03.jsonl").exists()
+    and not (_RAW_FEEDS_DIR / "2026-10-01.jsonl").exists(),
+    reason="neither witness day file is on this box, so the fixtures cannot be re-derived "
+           "here — the digest assertions still run and still pin the bytes")
+def test_the_witness_fixtures_are_still_the_rows_stored_under_those_ids():
+    """The fixtures are copies, so a copy needs checking against its source.
+
+    Clause 6 of #2143 is that the witness bytes have no history. Committing them gives them
+    a diff, and this node gives them a SOURCE: each fixture's row must still be byte-identical
+    to the row stored under that id in the day file it was cut from.
+
+    The extraction figures the constants name — 91 lines / 75,444 bytes for the CTA's day,
+    113 / 90,419 for the sponsor's, each with exactly one row carrying the needle — are the
+    file's state AT EXTRACTION, measured 2026-10-03. A day file only gains rows while its day
+    is being scanned, so the assertion here is the one that stays true after the next scan: at
+    least the extraction count. Asserting equality would make this node red at 21:00 for a
+    reason that is not a defect, which is the wrong thing to attach a fixture's provenance to.
+    A row whose SUMMARY changed under the same id is the failure that matters, and that is what
+    is asserted exactly.
+
+    It skips when both day files are gone rather than passing vacuously; the digest assertions
+    in the behaviour nodes are the part that runs everywhere.
+    """
+    for name, day, item_id, needle, lines_at_extraction in (
+        ("intel_cta_witness_2143.jsonl", "2026-10-03.jsonl",
+         "youtube:UC0C-17n9iuUQPylguM1d-lQ:lnB4Zckx_34", "unlock-ai", 91),
+        ("intel_sponsor_witness_2143.jsonl", "2026-10-01.jsonl",
+         "youtube:UCqcbQf6yw5KzRoDDcZ_wBSw:Sy1Fjf-H-Qg", "coderabbit.link", 113),
+    ):
+        source = _RAW_FEEDS_DIR / day
+        if not source.exists():
+            continue
+        raw_lines = source.read_text(encoding="utf-8").splitlines()
+        assert len(raw_lines) >= lines_at_extraction, (
+            f"{day} holds {len(raw_lines)} lines, fewer than the {lines_at_extraction} it "
+            "held when the fixture was cut — a day file does not shrink on its own, so it "
+            "was rewritten and the extract figure the constants name is no longer one an "
+            "extract reproduces")
+        hits = [json.loads(ln) for ln in raw_lines if needle in ln]
+        assert len(hits) == 1, (
+            f"{needle!r} matches {len(hits)} rows in {day}, not the one row the fixture is")
+        assert hits[0]["id"] == item_id
+        fixture = _fixture_witness_row(name, item_id)
+        assert hits[0]["summary"] == fixture["summary"], (
+            f"{name} has drifted from the row stored under {item_id}: the fixture is now a "
+            "lookalike, and the nodes that read it are testing bytes nobody measured")
+
+
+def test_the_stored_2026_10_03_row_loses_its_cta_and_keeps_its_opening_sentence(intel_state):
+    """Clause 1: the row the item names, through the real function and the real writer.
+
+    The witness is the stored 468-character summary, hashed against the file it was copied
+    from so a future edit of this literal fails here rather than quietly retargeting the
+    node. `strip_link_footer` already removed its `My Links 🔗` / `👉🏻 Newsletter:…` trailer
+    (468 → 440) and returned text containing the affiliate URL; after #2143 the same call
+    returns the 181-character opening paragraph and nothing else — `utm survives: False`,
+    which is the acceptance's own phrasing.
+
+    Why none of the shape rules could reach it, pinned rather than asserted in a comment:
+    the label over the link is 79 characters against `_RUN_LABEL_RE`'s `[^:\\n]{1,40}`, so
+    the label is not a label, and under it is ONE bare URL line against
+    `_link_run_bounds`' floor of two.
+    """
+    import hashlib
+
+    # The digest is of the fixture's summary field, so this fails if the committed witness
+    # is rewritten — which a digest of a literal in this same file could never do.
+    assert hashlib.sha256(DEVDAY_WITNESS.encode()).hexdigest() == DEVDAY_WITNESS_SHA256, (
+        "`tests/fixtures/intel_cta_witness_2143.jsonl` is no longer the bytes stored under "
+        "`youtube:UC0C-17n9iuUQPylguM1d-lQ:lnB4Zckx_34` in feeds/raw/2026-10-03.jsonl")
+
+    label, url = DEVDAY_WITNESS.splitlines()[2], DEVDAY_WITNESS.splitlines()[3]
+    assert len(label) == 79 and label.endswith(":"), f"measured label is {len(label)} chars"
+    assert body_mod._RUN_LABEL_RE.match(label) is None, \
+        "_RUN_LABEL_RE catches it now, so the shape rules are no longer what fails here"
+    assert body_mod._URL_RE.search(url) and "utm_source" in url
+    assert len(url) == 177, "the accepted clip-budget cost moved with this URL's length"
+
+    stripped = body_mod.strip_link_footer(DEVDAY_WITNESS)
+    assert "http" not in stripped and "www." not in stripped, repr(stripped)
+    assert "utm_source" not in stripped
+    opening = DEVDAY_WITNESS.split("\n\n")[0]
+    assert stripped == opening, repr(stripped)
+    assert len(stripped) == 181, "the video's own prose is not the length it was measured at"
+    assert stripped.splitlines()[0].startswith("OpenAI DevDay 2026 launched Dots")
+
+    written = _publish(intel_state, _yt(id="youtube:UC0C-17n9iuUQPylguM1d-lQ:lnB4Zckx_34",
+                                        summary=DEVDAY_WITNESS,
+                                        why="Breaks down what each new Dots tier costs."))
+    assert "unlock-ai.natebjones.com" not in written
+    assert "utm_source" not in written
+    assert "OpenAI DevDay 2026 launched Dots" in written
+    assert "My Links" not in written
+
+
+def test_a_sponsor_block_is_removed_whole_not_url_line_only():
+    """Clause 2: `sponsor sentence + bare URL + trailing ad sentences` is ONE block, and the
+    block is what goes.
+
+    Deleting only the URL line would leave `Try CodeRabbit’s Change Stack and start a free
+    14-day:` sitting on its own over the next paragraph — a dangling colon label is still an
+    ad, and it is the shape that would have shipped from the obvious one-line fix. The two
+    sentences below the link go too, which is the difference between removing a block and
+    removing a line: the acceptance names the unit as "the set-off block that contains a
+    URL whole".
+    """
+    ad = ("Try CodeRabbit’s Change Stack and start a free 14-day:\n"
+          "https://coderabbit.link/ad-wes-roth-001\n"
+          "No credit card, 2-click setup.\n"
+          "Sponsored by CodeRabbit.")
+    text = ("Gemini 4 Argon ships a 2M context window today.\n\n" + ad +
+            "\n\nThe eval section is the part worth watching.")
+    out = body_mod.strip_link_footer(text)
+    assert "http" not in out and "coderabbit" not in out.lower(), repr(out)
+    assert "start a free 14-day:" not in out, "the sentence introducing the link survived"
+    assert "No credit card" not in out and "Sponsored by CodeRabbit." not in out
+    assert not out.rstrip().endswith(":"), f"the body ends on a dangling label:\n{out!r}"
+    assert out == ("Gemini 4 Argon ships a 2M context window today.\n\n"
+                   "The eval section is the part worth watching.")
+
+
+def test_the_rule_keys_on_a_url_being_present_not_on_promotional_wording():
+    """Clause 3: the discriminator is a link, so a body with no URL in it is returned
+    byte-for-byte — including one whose prose is unmistakably an ad.
+
+    `Sponsored by CodeRabbit. No credit card, 2-click setup.` is the exact wording from the
+    published row, minus the link, and it is the case a promo-classifier would catch and
+    this rule must not: it would then be a second hand-maintained list, which is the failure
+    class this item exists to end. "Byte-for-byte" is about content, not whitespace:
+    `strip_link_footer` has always ended its abstention with `text.rstrip()`, so a trailing
+    newline leaves the same way it did before this rule existed, and the last two assertions
+    pin which half of that is pre-existing (the trim) and which half #2143 must not add (a
+    re-join that moves a leading blank, or rewrites a line the drop did not remove).
+
+    The two lookalikes that must also survive are here for the same reason: an email address
+    is not a URL (`wesroth@smoothmedia.co` is the contact block that outlived the ad in the
+    stored row), and a repo path written without a scheme is not one either.
+    """
+    ad_no_link = ("Gemini 4 Argon ships a 2M context window today.\n\n"
+                  "Sponsored by CodeRabbit. No credit card, 2-click setup.\n"
+                  "Start a free 14-day trial today.")
+    assert body_mod.strip_link_footer(ad_no_link) == ad_no_link
+    assert "Sponsored by" in ad_no_link      # the wording this rule must be blind to
+
+    contact = ("Want to work with me?\n"
+               "Brand, sponsorship & business inquiries: wesroth@smoothmedia.co")
+    assert body_mod.strip_link_footer(contact) == contact
+
+    assert body_mod.strip_link_footer(ad_no_link + "\n") == ad_no_link, \
+        "the pre-existing trailing trim moved, so this node is no longer testing only the new rule"
+    assert body_mod.strip_link_footer("\n" + ad_no_link) == "\n" + ad_no_link, \
+        "a URL-free body lost its leading blank: the new rule re-joined a body it never cut"
+
+
+def test_the_stored_coderabbit_row_loses_its_ad_and_keeps_its_url_free_contact_block(
+        intel_state):
+    """Clause 2 and 3 together on the row that proves the mechanism is wider than a
+    footer: `youtube:UCqcbQf6yw5KzRoDDcZ_wBSw:Sy1Fjf-H-Qg`, 500 stored characters.
+
+    This row contradicts the account it was filed with. The item says the footer under the ad
+    "was stripped" and the ad survived above it; measured against the base commit's own
+    `strip_link_footer` — the assertion below, run before the fix — this row came back
+    UNCHANGED at its full 500 characters, and the digest still shows `My Links 🔗` and both
+    `➡️` lines under the ad. The reason is the abstention: `______` is the row's first rule
+    line and `Want to work with me?` is prose underneath it, so the strip declined to cut
+    anything and `_entry_body`'s short-circuit published the lot. So the fix cannot key on
+    `utm_` (absent here), on `My Links` (untouched here), or on a footer POSITION (the ad is
+    the first block in the file). What it keys on is that the ad block carries a URL.
+
+    `wesroth@smoothmedia.co` and the Gemini sentence under the second rule are the control:
+    500 characters go in, the ad's four lines and the two `➡️` link lines leave, and the
+    text that has no link in it stays.
+    """
+    import hashlib
+
+    assert hashlib.sha256(CODERABBIT_WITNESS.encode()).hexdigest() == (
+        CODERABBIT_WITNESS_SHA256), (
+        "`tests/fixtures/intel_sponsor_witness_2143.jsonl` is no longer the bytes stored "
+        "under `youtube:UCqcbQf6yw5KzRoDDcZ_wBSw:Sy1Fjf-H-Qg` in feeds/raw/2026-10-01.jsonl")
+
+    stripped = body_mod.strip_link_footer(CODERABBIT_WITNESS)
+    assert "http" not in stripped and "www." not in stripped, repr(stripped)
+    assert "Change Stack" not in stripped and "Sponsored by CodeRabbit." not in stripped
+    assert "wesroth@smoothmedia.co" in stripped, "the URL-free contact block went too"
+    assert stripped.startswith("Want to work with me?")
+    assert stripped.rstrip().endswith("Gemini 4 Argon—but…")
+
+    written = _publish(intel_state, _yt(id="youtube:UCqcbQf6yw5KzRoDDcZ_wBSw:Sy1Fjf-H-Qg",
+                                        summary=CODERABBIT_WITNESS,
+                                        why="Covers the Gemini 4 Argon release.",
+                                        title="GEMINI 4 is nuts..."))
+    assert "coderabbit.link" not in written and "x.com/WesRothMoney" not in written
+    assert "wesroth@smoothmedia.co" in written
+
+
+def test_a_github_body_publishes_its_url_through_clean_body_and_clip_body(intel_state):
+    """Clause 4: the GitHub path is untouched, and the reason is structural rather than a
+    carve-out inside the new rule.
+
+    `_entry_body` reaches `strip_link_footer` only behind `(item.source or "").lower() !=
+    "github"` (`vault_writer.py:428`), so an issue or PR body never sees the block drop. It
+    matters that the unit here is a block: a GitHub body that says `repro at https://…`
+    holds its link INSIDE the paragraph that explains it, so a rule with block granularity
+    and no source guard would delete the sentence along with the link. A channel's link is a
+    CTA; an author's is content, and the two are separated by who wrote it, not by shape.
+
+    Both helpers are asserted on directly and then through the writer, because the guard
+    lives one function above the calls that do the work.
+    """
+    body = ("The runner skips the GPU suite on a machine with no device.\n\n"
+            "The repro and the failing trace are in this gist: "
+            "https://gist.github.com/example/8f2c1d\n"
+            "Setting `LLOYD_GPU=none` reproduces it in one command.")
+
+    cleaned, reason = body_mod.clean_body(body, "Runner skips GPU suite")
+    assert cleaned is not None and reason is None
+    assert "https://gist.github.com/example/8f2c1d" in cleaned
+    assert "The repro and the failing trace" in cleaned
+    assert body_mod.clip_body(body) == body, "a short GitHub body was clipped"
+
+    item = _item("Runner skips GPU suite", body, item_id="77")
+    rendered = vw_mod._entry_body(item)
+    assert "https://gist.github.com/example/8f2c1d" in rendered, repr(rendered)
+    written = _publish(intel_state, item)
+    assert "https://gist.github.com/example/8f2c1d" in written, repr(written[-400:])
+
+
+def test_a_body_that_is_only_a_url_block_publishes_the_scored_why(intel_state):
+    """Clause 5: through `_entry_body`, the three outcomes are prose, `why`, and the named
+    no-description reason — and none of them is a URL.
+
+    A description that is only a link block empties out, and the entry carries the scorer's
+    `why` (12 of the 55 URL-carrying stored rows land here). A `why` that rates the item
+    against the interest profile instead of describing it produces the named
+    `None — <reason>` form (#2011), which is the other half of this clause. A description
+    whose remaining prose ends a sentence is published as prose.
+
+    The last assertion is the property itself, checked on the published file rather than on
+    a return value: with four entries written, every line in it that carries a link is the
+    entry's own `[Link](https://www.youtube.com/watch?v=…)`.
+    """
+    only_links = "Watch here: https://unlock-ai.natebjones.com/guides/how-to-connect\n" \
+                 "➡️ Newsletter: https://example.com/newsletter"
+    prose_then_links = ("OpenAI DevDay 2026 launched Dots, ChatGPT Space, and GPT-6.1 Sol.\n"
+                        "Here is what each one costs.\n\n" + only_links)
+    why_sentence = "Breaks down what each new Dots tier costs."
+
+    assert vw_mod._entry_body(_yt(summary=prose_then_links, why=why_sentence)) \
+        == "OpenAI DevDay 2026 launched Dots, ChatGPT Space, and GPT-6.1 Sol.\n" \
+           "Here is what each one costs."
+    assert vw_mod._entry_body(_yt(summary=only_links, why=why_sentence)) == why_sentence
+
+    rated = vw_mod._entry_body(_yt(
+        summary=only_links,
+        why="Directly intersects the ai-llms interest, aligning with top-weighted interests."))
+    assert rated == NO_BODY, repr(rated)
+    assert NO_BODY.startswith("None — ") and "http" not in rated
+
+    # The third outcome clause 5 names. Asserted as its exact value rather than as "contains
+    # no http": an absence-only assert survives someone changing the placeholder, and this
+    # one is the last-resort marker at `vault_writer.py:467`, which is the ONLY body a
+    # description that emptied and a scorer with nothing to say can produce. It is the one
+    # body in this function with no named constant behind it, so the literal is duplicated
+    # here on purpose — a rename has to be done in both places or this goes red and says
+    # which file it was written in.
+    empty_why = vw_mod._entry_body(_yt(summary=only_links, why=""))
+    assert empty_why == "(No description)", repr(empty_why)
+    assert "http" not in empty_why and "www." not in empty_why
+
+    written = _publish(
+        intel_state,
+        _yt(id="youtube:UCa:one", summary=only_links, why=why_sentence),
+        _yt(id="youtube:UCa:two", summary=prose_then_links, why=why_sentence),
+        _yt(id="youtube:UCa:three", summary=only_links,
+            why="Directly intersects the ai-llms interest, aligning with top-weighted interests."),
+        _yt(id="youtube:UCa:four", summary=DEVDAY_WITNESS, why=why_sentence))
+    offending = [ln for ln in written.splitlines()
+                 if re.search(r"https?://|www\.", ln) and "[Link](" not in ln]
+    assert offending == [], f"an entry body carries a URL: {offending}"
+
+
+def test_the_url_block_rule_outranks_the_run_rule_s_own_prose_abstention():
+    """The renegotiation, pinned over the bytes it changes.
+
+    `test_a_link_run_with_a_prose_line_inside_it_is_returned_byte_for_byte` had to lose the
+    URL from its fixture, because #2143 and #1861 clause 3 cannot both hold on the same
+    text: #1861 refuses to remove a run with a prose line inside it so that prose is never
+    deleted, and #2143 removes a block that carries a URL whatever else it contains. The
+    acceptance settles it — "the set-off block that contains a URL whole, labelled or not" —
+    so the run rule's abstention survives only on a URL-free run, and these bytes, which
+    used to come back unchanged, now come back with their prose line gone too.
+
+    Losing `The benchmark section is the best part of it.` is the accepted cost, and naming
+    it here is the point: the run rule and the block rule disagree on exactly one shape, and
+    the file says which one wins.
+    """
+    prose_in_run = ("The video explains the rollout in three parts.\n\n"
+                    "My Links 🔗\n"
+                    "👉🏻 Repo: https://github.com/example/rollout\n"
+                    "The benchmark section is the best part of it.\n\n"
+                    "Closing thoughts here.")
+    assert body_mod.strip_link_footer(prose_in_run) == (
+        "The video explains the rollout in three parts.\n\n"
+        "Closing thoughts here.")
+    # And the URL-free run of the same shape still abstains, which is what the node named
+    # above now asserts.
+    no_url = prose_in_run.replace("👉🏻 Repo: https://github.com/example/rollout\n",
+                                  "Resources:\n")
+    assert body_mod.strip_link_footer(no_url) == no_url
+
+
+def test_the_url_block_rule_removes_a_pointer_the_signup_rule_correctly_declined():
+    """The second renegotiation, same shape: #1900's signup rule still declines a pointer
+    whose first word is not a signup verb, and that ruling is unchanged — but the line no
+    longer survives, because it carries a URL.
+
+    `POINTER_NOT_A_SIGNUP` was listed as an abstention in
+    `test_a_set_off_signup_line_is_dropped_and_every_other_line_survives_byte_for_byte`,
+    which asserted the whole text came back. The acceptance ("labelled or not") puts a
+    URL-carrying block inside the drop regardless of what the word before the colon is, so
+    the pointer's block goes and only the heading above it remains. That the two rules are
+    separate claims is shown by the URL-free twin, which still comes back whole: the signup
+    rule is not firing here either, it is simply no longer the last word.
+    """
+    text = CTA_HEADING + "\n\n" + POINTER_NOT_A_SIGNUP
+    assert body_mod.strip_link_footer(text) == CTA_HEADING, repr(text)
+    no_url = CTA_HEADING + "\n\n👉 My repo: the code is in the pinned comment"
+    assert body_mod.strip_link_footer(no_url) == no_url
+    assert "http" not in body_mod.strip_link_footer(text)

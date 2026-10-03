@@ -413,6 +413,13 @@ def _entry_body(item: ScoredItem) -> str:
     summary; a link block is not a summary, and publishing one as knowledge prose is
     what this is here to stop.
 
+    Since #2143 the same strip also removes every block of that description that carries
+    a URL, wherever it sits and whatever it is labelled, so an entry body holds no link
+    but the `[Link]` this module adds. Nothing here changed to get that: the drop is
+    inside `strip_link_footer`, which is why the `stripped == summary` short-circuit below
+    cannot let a CTA through unexamined. A GitHub body is unaffected, because it never
+    enters this branch — `!= "github"` is what clause 4 (#2143) rests on.
+
     The `why` fallback is for a `why` that describes the item. One that rates it
     against the reader's interest profile (`body.is_interest_profile_prose`, #2011) is
     not published: the entry carries `None — <reason>` instead.
@@ -428,8 +435,16 @@ def _entry_body(item: ScoredItem) -> str:
         # footer under its rule is returned exactly as it stands: this judges the
         # strip's remainder, it is not a licence to prefer `why` over every feed
         # description, which is what a general promo-classifier here would become.
+        # #2143's URL-block drop lives INSIDE `strip_link_footer` rather than as a second
+        # call on this line, and the reason is the line below it: this returns `summary`
+        # verbatim whenever the strip changed nothing, so a drop that ran after this
+        # comparison would never have run on the row that filed the item — the 2026-10-03
+        # CTA has no rule line and no footer label, so as far as the footer anchors are
+        # concerned that description is untouched. Asking the URL question inside the strip
+        # is what makes `stripped == summary` mean "no footer AND no link block", which is
+        # the only claim this short-circuit is entitled to make.
         stripped = strip_link_footer(summary)
-        if stripped == summary:                      # no footer: today's behaviour
+        if stripped == summary:              # no footer and no link block: as-is
             return summary
         if ends_a_sentence(stripped):
             return stripped
