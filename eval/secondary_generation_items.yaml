@@ -16,235 +16,239 @@ title:
   items:
   - id: title-1
     job: title
-    source_session: 20260909_022107_iv0ffa
-    input_sha256: a91462adebc82b39
-    input_chars: 1701
+    source_session: 20260928_195400_ivcfc5
+    input_sha256: 4344dad36ea1f0b8
+    input_chars: 1283
     anchors:
-    - lloyd
     - user
-    - completed
-    - elapsed_seconds
-    - exit_code
-    - output_file
+    - cause
+    - defect
+    - self
+    - back
+    - confirmed
   - id: title-2
     job: title
-    source_session: 20260909_020810_iv6514
-    input_sha256: 5c2110ad3f797dc3
-    input_chars: 1999
+    source_session: 20260928_130738_ivb880
+    input_sha256: 373286ad3836c867
+    input_chars: 1907
     anchors:
-    - poisoned
     - lloyd
-    - skill
-    - error
-    - max_attempts
+    - sync
+    - fact
+    - table
     - user
+    - calls
   - id: title-3
     job: title
-    source_session: 20260909_014756_ivcbb7
-    input_sha256: b50e64d2810e5838
-    input_chars: 1305
+    source_session: 20260927_210557_iv29a1
+    input_sha256: e379e2c21007ec5c
+    input_chars: 1825
     anchors:
-    - deepseek
-    - check
-    - checked
-    - flash
     - user
-    - answer
+    - thinking
+    - check
+    - kahneman
+    - lloyd
+    - system
   - id: title-4
     job: title
-    source_session: 20260908_175625_iv4b8e
-    input_sha256: c6c60014f94ac264
-    input_chars: 1807
+    source_session: 20260927_194128_iv341a
+    input_sha256: 7d5691773ff2d2c9
+    input_chars: 2000
     anchors:
     - lloyd
-    - already
-    - backlog
-    - user
-    - against
-    - caption
+    - review
+    - docs
+    - write
+    - architecture
+    - check
 capture:
   label: post-session capture
   items:
   - id: capture-1
     job: capture
-    source_session: 20260909_022107_iv0ffa
-    input_sha256: 287f4bb452efa9e5
-    input_chars: 2070
+    source_session: 20260928_195400_ivcfc5
+    input_sha256: 13317b07ceb9a181
+    input_chars: 1725
     anchors:
     - user
-    - check
-    - completed
-    - elapsed_seconds
-    - exit_code
-    - lloyd
+    - cause
+    - defect
+    - guardian
+    - self
+    - voice
   - id: capture-2
     job: capture
-    source_session: 20260909_020810_iv6514
-    input_sha256: 28f960d041f3cb71
-    input_chars: 3372
+    source_session: 20260928_130738_ivb880
+    input_sha256: 914c559eab24ac6b
+    input_chars: 3379
     anchors:
-    - poisoned
-    - skill
+    - sync
     - assistant
-    - max_attempts
-    - user
-    - clear
-  - id: capture-3
-    job: capture
-    source_session: 20260909_014756_ivcbb7
-    input_sha256: 62a360cc0749f961
-    input_chars: 1859
-    anchors:
-    - deepseek
-    - flash
-    - still
+    - obsidian
+    - fact
     - user
     - check
-    - checked
+  - id: capture-3
+    job: capture
+    source_session: 20260927_210557_iv29a1
+    input_sha256: db57e8ef837949a3
+    input_chars: 3228
+    anchors:
+    - user
+    - kahneman
+    - assistant
+    - fast
+    - message
+    - system
   - id: capture-4
     job: capture
-    source_session: 20260908_175625_iv4b8e
-    input_sha256: 4f69bbb2236206e7
-    input_chars: 3347
+    source_session: 20260927_194128_iv341a
+    input_sha256: b1ad32f2a7eaa8ad
+    input_chars: 4019
     anchors:
-    - already
     - assistant
-    - backlog
+    - review
+    - docs
+    - architecture
     - item
-    - lloyd
-    - user
+    - before
 facts:
   label: durable fact extraction
   items:
   - id: facts-1
     job: facts
-    source_session: 20260909_022107_iv0ffa
-    input_sha256: 287f4bb452efa9e5
-    input_chars: 2070
+    source_session: 20260928_195400_ivcfc5
+    input_sha256: 13317b07ceb9a181
+    input_chars: 1725
     anchors:
     - user
-    - check
-    - completed
-    - elapsed_seconds
-    - exit_code
-    - lloyd
+    - cause
+    - defect
+    - guardian
+    - self
+    - voice
   - id: facts-2
     job: facts
-    source_session: 20260909_020810_iv6514
-    input_sha256: 28f960d041f3cb71
-    input_chars: 3372
+    source_session: 20260928_130738_ivb880
+    input_sha256: 914c559eab24ac6b
+    input_chars: 3379
     anchors:
-    - poisoned
-    - skill
+    - sync
     - assistant
-    - max_attempts
-    - user
-    - clear
-  - id: facts-3
-    job: facts
-    source_session: 20260909_014756_ivcbb7
-    input_sha256: 62a360cc0749f961
-    input_chars: 1859
-    anchors:
-    - deepseek
-    - flash
-    - still
+    - obsidian
+    - fact
     - user
     - check
-    - checked
+  - id: facts-3
+    job: facts
+    source_session: 20260927_210557_iv29a1
+    input_sha256: db57e8ef837949a3
+    input_chars: 3228
+    anchors:
+    - user
+    - kahneman
+    - assistant
+    - fast
+    - message
+    - system
   - id: facts-4
     job: facts
-    source_session: 20260908_175625_iv4b8e
-    input_sha256: 4f69bbb2236206e7
-    input_chars: 3347
+    source_session: 20260927_194128_iv341a
+    input_sha256: b1ad32f2a7eaa8ad
+    input_chars: 4019
     anchors:
-    - already
     - assistant
-    - backlog
+    - review
+    - docs
+    - architecture
     - item
-    - lloyd
-    - user
+    - before
 focus:
   label: focus/topic extraction
   items:
   - id: focus-1
     job: focus
-    source_session: 20260909_022107_iv0ffa
-    input_sha256: 8ae5bd2ba460c364
-    input_chars: 282
+    source_session: 20260928_130738_ivb880
+    input_sha256: 9c8d34cc004723a8
+    input_chars: 423
     anchors:
-    - commits
-    - last
+    - sync
+    - assistant
+    - obsidian
   - id: focus-2
     job: focus
-    source_session: 20260908_175625_iv4b8e
-    input_sha256: e2e19f83ee51c27f
-    input_chars: 418
+    source_session: 20260927_194128_iv341a
+    input_sha256: da7720bbe9062441
+    input_chars: 344
     anchors:
-    - asked
-    - brief
-    - triage
+    - abort
+    - assistant
   - id: focus-3
     job: focus
-    source_session: 20260908_045305_iv0938
-    input_sha256: 59a87b84fec06086
-    input_chars: 418
+    source_session: 20260927_144519_iv13dc
+    input_sha256: d9eac01f83d03e4f
+    input_chars: 551
     anchors:
-    - brief
-    - triage
+    - assistant
+    - dashboard
+    - done
+    - gate
+    - landed
+    - round
   - id: focus-4
     job: focus
-    source_session: 20260908_000607_ivd02f
-    input_sha256: 695a0182e6a01b51
-    input_chars: 206
+    source_session: 20260926_094011_ivb917
+    input_sha256: 47ddf7381e9c85dd
+    input_chars: 340
     anchors:
-    - meeting
-    - tonight
+    - assistant
+    - draft
+    - hits
+    - similar
 voice:
   label: voice summary
   items:
   - id: voice-1
     job: voice
-    source_session: 20260908_045305_iv0938
-    input_sha256: cd93f181175fe22b
-    input_chars: 1041
+    source_session: 20260928_130738_ivb880
+    input_sha256: a8f036fb33000970
+    input_chars: 291
     anchors:
-    - discussion
-    - group
-    - brief
-    - calendar
-    - meeting
-    - nothing
+    - durable
+    - sync
   - id: voice-2
     job: voice
-    source_session: 20260908_000607_ivd02f
-    input_sha256: fc9ea1c0426cf29e
-    input_chars: 939
+    source_session: 20260927_144519_iv13dc
+    input_sha256: 7012f49ac5723d2e
+    input_chars: 1170
     anchors:
-    - meeting
-    - rssc
-    - contact
-    - form
-    - join
-    - october
+    - read
+    - automod_status
+    - clauses
+    - dashboard
+    - land
+    - landed
   - id: voice-3
     job: voice
-    source_session: 20260907_161840_iv4b74
-    input_sha256: 2f28119094b6dae7
-    input_chars: 615
+    source_session: 20260925_082940_iv30d7
+    input_sha256: 7a8bf24fe51aaec9
+    input_chars: 405
     anchors:
-    - birthday
-    - brief
-    - newsletter
-    - worth
+    - asyncio
+    - cancel_wait
+    - future
+    - lines
+    - next_line
   - id: voice-4
     job: voice
-    source_session: e2e_selfmod363_1788758995
-    input_sha256: 0330b1a58b94185f
-    input_chars: 528
+    source_session: 20260925_001902_iv029b
+    input_sha256: 63d4b352b1d1cb1a
+    input_chars: 554
     anchors:
-    - today
-    - already
-    - brief
-    - eric
-    - nothing
+    - cancel_wait
+    - lines
+    - read
+    - asyncio
+    - cancelled
+    - next_line

@@ -136,16 +136,48 @@ Transcript:
 """
 
 
-def _sync_secondary_capture_call(transcript: str) -> Optional[str]:
-    """Call secondary model synchronously for post-session summary extraction."""
-    prompt = (
+def _capture_prompt(transcript: str) -> str:
+    """The prompt text the capture call posts, including the window it quotes.
+
+    The three numbers and the marker come out of the builder that produced the
+    transcript (`app.post_capture`) instead of being restated here. #1248 is the
+    case for that: the summarizer was handed a per-message-capped, whole-transcript-
+    capped window with nothing saying so, and wrote "the answer was cut off" into a
+    daily note — four times in 09-10..09-16, plus one wrong skill edit telling the
+    nightly never to call an answer partial. A prompt that restates the window can
+    agree with the builder on the day it is written and disagree after a cap change;
+    a prompt that reads the window off the builder cannot, and
+    `tests/test_secondary_routing_eval.py::test_capture_prompt_describes_the_window_the_builder_actually_builds`
+    fails the moment the two do part.
+
+    The import is inside the function because `app.post_capture` imports this
+    module at its top, so a module-level import here would be a cycle.
+    """
+    from app.post_capture import (CAPTURE_CUT_MARKER, CAPTURE_MESSAGE_CHAR_CAP,
+                                  CAPTURE_TRANSCRIPT_BUDGET)
+
+    return (
         "Analyze this conversation transcript and produce a concise summary "
         "(2-4 sentences) of what was discussed, decided, or accomplished. "
         "Focus on outcomes: decisions made, problems solved, preferences expressed, "
         "system changes, and action items. If the conversation is trivial "
         "(greetings, small talk, no substantive content), return exactly: TRIVIAL\n\n"
+        "The transcript below is a partial per-message window, not the whole "
+        "conversation: each message is capped at "
+        f"{CAPTURE_MESSAGE_CHAR_CAP} characters, and a message that ran past the cap "
+        f"ends {CAPTURE_CUT_MARKER}; the whole transcript is capped at "
+        f"{CAPTURE_TRANSCRIPT_BUDGET} characters, keeping its opening and its latest "
+        "turns with a [...truncated...] seam where the middle was dropped. Text that "
+        "ends mid-sentence or mid-table inside this window is the edge of the window, "
+        "not evidence that the delivered answer was incomplete or cut off. Never "
+        "report an answer as cut off on this evidence.\n\n"
         f"Transcript:\n{transcript}"
     )
+
+
+def _sync_secondary_capture_call(transcript: str) -> Optional[str]:
+    """Call secondary model synchronously for post-session summary extraction."""
+    prompt = _capture_prompt(transcript)
 
     url, model_name = _endpoint("capture")
     payload = {

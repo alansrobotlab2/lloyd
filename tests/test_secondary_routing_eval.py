@@ -353,6 +353,150 @@ def test_a_moved_input_is_refused_rather_than_rerun(monkeypatch, tmp_path):
     assert "pinned" in str(raised.value)
 
 
+def test_capture_prompt_tells_the_model_the_window_is_partial(monkeypatch):
+    """#2086 clause 3: the prompt the capture call posts says the window is partial.
+
+    Asserted on the body that actually crosses the process boundary into the
+    engine — not on a string this test rebuilt — because the defect lived in what
+    the model reads. #1248 measured four daily notes (09-10..09-16) that reported
+    a delivered answer as "cut off", plus a wrong skill edit telling the nightly
+    never to call an answer partial: the summarizer was handed a per-message-
+    capped window with nothing saying so, and inferred an incomplete answer.
+    """
+    seen = _fake_transport(monkeypatch, content="TRIVIAL")
+
+    assert sm._sync_secondary_capture_call("USER: hello\nASSISTANT: done") == "TRIVIAL"
+
+    posted = json.loads(seen[0].data.decode("utf-8"))
+    prompt = posted["messages"][1]["content"]
+    assert prompt.endswith("Transcript:\nUSER: hello\nASSISTANT: done"), (
+        "the transcript is no longer appended after the window note, so the note "
+        "being checked here may not be the one the model reads"
+    )
+    low = prompt.lower()
+    assert "partial" in low, "the prompt never says the transcript is a partial window"
+    assert "each message is capped" in low, "the prompt does not say the cap is per message"
+    assert "mid-sentence" in low and "mid-table" in low, (
+        "the prompt does not name the two endings a reader misreads as a cut answer"
+    )
+    assert "not evidence that the delivered answer was incomplete" in low, (
+        "the prompt leaves the model to draw its own conclusion from a mid-row ending"
+    )
+    assert "never report an answer as cut off" in low, (
+        "the instruction the #1248 retirement removed from the skills is not stated here"
+    )
+
+
+def test_capture_prompt_describes_the_window_the_builder_actually_builds():
+    """#2086 clause 4: the window in the sentence is the builder's, read from the builder.
+
+    Every number and the marker come off `app.post_capture` — the cap from the
+    module constant, the budget from `_build_capture_transcript`'s own default —
+    so a prompt that restates a literal and then survives a cap change goes red
+    here rather than quietly summarising a different window than it describes.
+    """
+    budget = inspect.signature(
+        post_capture._build_capture_transcript
+    ).parameters["max_chars"].default
+    cap = post_capture.CAPTURE_MESSAGE_CHAR_CAP
+    prompt = sm._capture_prompt("USER: hi")
+
+    assert cap < budget, "a per-message cap at or above the whole window is not a window"
+    assert f"each message is capped at {cap} characters" in prompt, (
+        f"the prompt does not state the builder's per-message cap ({cap}); "
+        "it is restating it, which is how #1248's prompt and window parted"
+    )
+    assert f"the whole transcript is capped at {budget} characters" in prompt, (
+        f"the prompt does not state the builder's whole-transcript budget ({budget})"
+    )
+    assert post_capture.CAPTURE_CUT_MARKER in prompt, (
+        "the prompt describes a cut in words the builder does not render"
+    )
+
+    built = post_capture._build_capture_transcript(
+        [{"role": "user", "content": "q" * (cap + 50)}])
+    assert built.endswith(" " + post_capture.CAPTURE_CUT_MARKER), (
+        "the builder stopped cutting a message at the cap the prompt describes"
+    )
+
+
+def _live_session_store() -> Path:
+    """The real session store, resolved on the anchor `conftest` cannot move.
+
+    Every pytest run gets `LLOYD_DATA` pointed at a scratch root, and the automod
+    gate sets `$HOME` to the round's own home, so neither `app.paths` nor
+    `Path.home()` names the store these pins were built against. The passwd entry
+    is the anchor both of those can be moved out from under — the same one
+    `tests/conftest.py::_production_tree` is anchored on for the same reason.
+    Read-only: this resolves a pinned input and writes nothing.
+    """
+    import os
+    import pwd
+
+    return Path(pwd.getpwuid(os.getuid()).pw_dir) / "lloyd-data" / "sessions"
+
+
+def test_capture_and_facts_pins_match_the_rebuilt_item_set():
+    """#2086 clause 5: every capture/facts pin rebuilds, or the store says it cannot.
+
+    `test_item_set_covers_every_routed_job_with_provenance` loads the item file
+    and checks its shape, and nothing in the suite called `resolve_input` — so on
+    2026-10-03 the suite was green over a pin set the eval itself refused to run,
+    with all four source sessions gone from the store. This node calls the one
+    function that turns a pin back into text for all eight capture/facts pins.
+
+    A digest that differs fails and names the item: that is a transcript builder
+    moving under a pin, which is exactly what the hash exists to catch. A session
+    the store no longer holds is reported and not failed — the store is
+    retention-managed, `--build-items` is the fix, and the rule on the rotation is
+    owed elsewhere (it is recorded under #2086's `## Findings`, not decided here).
+    """
+    import warnings
+
+    pins = [item for job in ("capture", "facts")
+            for item in ev.load_items(ev.ITEMS_PATH)[job]]
+    assert len(pins) == 8, f"expected 4 capture + 4 facts pins, got {len(pins)}"
+
+    store = _live_session_store()
+    resolved: list[str] = []
+    absent: list[str] = []
+    moved: list[str] = []
+    for item in pins:
+        if not (store / f"{item['source_session']}.json").exists():
+            absent.append(item["id"])
+            continue
+        try:
+            ev.resolve_input(item, store)
+        except SystemExit as exc:
+            moved.append(f"{item['id']}: {exc}")
+        else:
+            resolved.append(item["id"])
+
+    for item_id in absent:
+        warnings.warn(
+            f"pin {item_id}: its source session is not in {store}, so its digest "
+            "could not be rechecked — re-pin with `--build-items` (rule on the "
+            "rotation itself is owed on backlog #2086)", stacklevel=1)
+
+    assert not moved, (
+        "pinned capture/facts inputs no longer rebuild to their pinned digest, so "
+        "the eval would refuse to run:\n" + "\n".join(moved)
+    )
+    assert len(resolved) + len(absent) == len(pins), (
+        "a capture/facts pin was neither resolved nor reported store-absent"
+    )
+
+    if resolved:
+        tampered = dict(next(item for item in pins if item["id"] == resolved[0]))
+        tampered["input_sha256"] = "0" * 16
+        with pytest.raises(SystemExit) as raised:
+            ev.resolve_input(tampered, store)
+        assert "rebuilt input" in str(raised.value), (
+            "resolve_input did not catch a moved digest, so passing the loop above "
+            "would prove nothing"
+        )
+
+
 def test_focus_replica_keeps_production_transcript_shape():
     """`_maybe_extract_focus` builds its transcript inline, so the eval's
     replica is only faithful while it matches those literals. Read them out

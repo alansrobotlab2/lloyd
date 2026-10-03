@@ -420,9 +420,126 @@ def test_the_summary_builder_still_returns_the_bytes_the_eval_hash_is_built_from
     )
 
     assert _build_capture_transcript([]) == ""
-    assert _build_capture_transcript([{"role": "user", "content": "x" * 5000}]) == (
+    # #2086 moved the fixture in this assertion, and the reason is the item's own
+    # acceptance: it used to render `"x" * 5000` — a message OVER the cap — as
+    # `"USER: " + "x" * 600`, i.e. it pinned the silent slice the clause calls the
+    # defect ("A message over the 600-char per-message limit renders with an
+    # explicit in-line cut marker"). What the assertion exists to pin is that the
+    # cap is still 600, and at the cap byte-identity still holds, so the fixture is
+    # now exactly at it. The over-cap half is pinned by
+    # `test_capture_transcript_marks_an_over_long_message_at_the_cut` below.
+    assert _build_capture_transcript([{"role": "user", "content": "x" * 600}]) == (
         "USER: " + "x" * 600
     ), "the 600-char per-line cap moved, which re-bases every rendered transcript"
+
+
+def test_capture_transcript_marks_an_over_long_message_at_the_cut():
+    """#2086 clause 1: an over-cap message says it was cut; an at-cap one is untouched.
+
+    The defect #1248 measured and #2086 re-lands: `_transcript_line` returned
+    `text[:600]` and nothing else, so the summarizer saw text stop and reported
+    the *answer* as cut off — four daily notes in 09-10..09-16, plus a wrong skill
+    edit telling the nightly never to call an answer partial.
+
+    The clause has two halves, and both are pinned here: the marker on a cut
+    message, and byte-identity for a message that fits. The second half is what
+    keeps this file's byte-for-byte assertions and the routing eval's pinned
+    hashes over sessions whose turns all fit inside the cap honest.
+    """
+    from app.post_capture import (CAPTURE_CUT_MARKER, CAPTURE_MESSAGE_CHAR_CAP,
+                                  _build_capture_transcript)
+
+    cap = CAPTURE_MESSAGE_CHAR_CAP
+    over = "a" * cap + "THE-REST-OF-THE-ANSWER"
+    cut = _build_capture_transcript([{"role": "assistant", "content": over}])
+
+    assert CAPTURE_CUT_MARKER in cut, (
+        "an over-cap message was sliced with nothing in the text saying so, which "
+        "is the silent slice that produced the four false 'cut off' reports"
+    )
+    assert str(cap) in CAPTURE_CUT_MARKER, "the marker does not name the cap it cut at"
+    assert "THE-REST-OF-THE-ANSWER" not in cut, "the marker fired but nothing was cut"
+    assert cut.startswith("ASSISTANT: " + "a" * cap), (
+        "the visible part of a cut message is no longer exactly the cap's worth of text"
+    )
+
+    at_or_under = [
+        ("exactly at the cap", "b" * cap),
+        ("one char under the cap", "c" * (cap - 1)),
+    ]
+    for label, fits in at_or_under:
+        assert _build_capture_transcript([{"role": "user", "content": fits}]) == (
+            "USER: " + fits
+        ), f"a message {label} picked up bytes the marker did not have to add"
+
+    mixed = _build_capture_transcript([
+        {"role": "user", "content": "short question"},
+        {"role": "assistant", "content": over},
+    ])
+    assert mixed == ("USER: short question\nASSISTANT: " + "a" * cap + " "
+                     + CAPTURE_CUT_MARKER), (
+        "the marker spread past the one message that ran over the cap"
+    )
+
+
+def _table_answer_across_the_cap() -> str:
+    """A Markdown answer whose per-message cut lands inside a table row.
+
+    Sized off `CAPTURE_MESSAGE_CHAR_CAP` so the boundary falls mid-row: that is
+    the shape that made the false reports real. The visible text ended
+    `| vllm | serving serving se`, which reads exactly like a reply that stopped
+    mid-table, because nothing in it said the window had an edge.
+    """
+    from app.post_capture import CAPTURE_MESSAGE_CHAR_CAP
+
+    head = ("Here is the component table:\n\n"
+            "| component | state |\n"
+            "| --- | --- |\n"
+            "| qmd | indexed |\n")
+    lead = "| vllm | "
+    cell = "serving " * 120
+    room = CAPTURE_MESSAGE_CHAR_CAP - len(head) - len(lead)
+    assert 0 < room < len(cell), (
+        f"the cap no longer falls inside the row ({room} chars of the cell are "
+        "visible), so this fixture would be testing a cut between rows"
+    )
+    return head + lead + cell + "| MID_ROW_CELL | done |\n| nightly | ok |\n"
+
+
+def test_a_table_row_cut_says_so_in_the_text_the_summarizer_reads():
+    """#2086 clause 2: text ending inside a table row announces itself as a cut.
+
+    Not a second assertion about the marker — a fixture whose boundary lands mid-
+    row, because that is the shape a human misreads as a truncated answer. The
+    summarizer-visible text has to carry the marker *after* the unterminated row,
+    so an answer that was in fact delivered whole cannot be reported as
+    incomplete on the strength of where the window happened to end.
+    """
+    from app.post_capture import (CAPTURE_CUT_MARKER, CAPTURE_MESSAGE_CHAR_CAP,
+                                  _build_capture_transcript)
+
+    built = _build_capture_transcript(
+        [{"role": "assistant", "content": _table_answer_across_the_cap()}])
+
+    assert built.endswith(" " + CAPTURE_CUT_MARKER), (
+        "the transcript ends inside a table row with no marker naming the cut"
+    )
+    visible = built[: -(len(CAPTURE_CUT_MARKER) + 1)]
+    assert len(visible) == len("ASSISTANT: ") + CAPTURE_MESSAGE_CHAR_CAP, (
+        "the row was cut by something other than the per-message cap"
+    )
+    assert not visible.rstrip().endswith("|"), (
+        "this fixture's cut landed between rows, so it is no longer a row cut"
+    )
+    assert "| MID_ROW_CELL |" not in built and "| nightly | ok |" not in built, (
+        "the rest of the table is visible, so the cut this test is about did not happen"
+    )
+    assert built.index("| vllm |") < built.index(CAPTURE_CUT_MARKER), (
+        "the marker is not in the position the cut is in"
+    )
+    assert "[...truncated...]" not in built, (
+        "the whole-transcript seam fired as well, which is a different window"
+    )
 
 
 # ------------------------------------------------------- #1647: the screen is fact-path only

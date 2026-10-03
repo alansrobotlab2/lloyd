@@ -107,6 +107,27 @@ def _human_user_messages(messages: list) -> list[dict]:
             if m.get("role") == "user" and not _machine_user_row(m)]
 
 
+#: Characters one transcript line may hold. A longer message is cut here, and the
+#: cut is marked (`CAPTURE_CUT_MARKER`). The silence is the defect this names:
+#: #1248 measured four daily notes (09-10..09-16) that reported a delivered answer
+#: as "cut off", because the summarizer was shown text stopping mid-table with
+#: nothing in it saying where the window ended rather than the answer ending.
+CAPTURE_MESSAGE_CHAR_CAP = 600
+
+#: Characters the whole capture transcript may hold. Named so the capture prompt
+#: can quote the number it is describing and a test can read both back — see
+#: `_capture_prompt` and `tests/test_secondary_routing_eval.py`.
+CAPTURE_TRANSCRIPT_BUDGET = 4000
+
+#: Rendered in-line after a cut message. Stated as the window's own edge, and
+#: named by the capture prompt, so a reader of the transcript — model or human —
+#: can tell "this message ran past the cap" from "the reply stopped there".
+CAPTURE_CUT_MARKER = (
+    f"[...message cut at the {CAPTURE_MESSAGE_CHAR_CAP}-char cap;"
+    " the rest of it is not shown in this window]"
+)
+
+
 def _transcript_line(msg: dict) -> Optional[str]:
     """The transcript line for one message, or None if it is not transcript content.
 
@@ -117,6 +138,10 @@ def _transcript_line(msg: dict) -> Optional[str]:
     `eval/secondary_routing_eval.py` pins a hash over one of them. That is why
     the #1647 machine-row screen is NOT applied here: it belongs to the fact
     path only, and the capture summary's bytes are pinned by that eval.
+
+    A message over `CAPTURE_MESSAGE_CHAR_CAP` is cut and the cut is marked; a
+    message at or under the cap renders exactly as it did before the marker
+    existed, which is what keeps #1647's byte-for-byte assertions honest.
     """
     role = msg.get("role", "")
     if role not in ("user", "assistant"):
@@ -130,10 +155,14 @@ def _transcript_line(msg: dict) -> Optional[str]:
         "[cron:", "[System Message]", "[autonomy:",
     )):
         return None
-    return f"{'USER' if role == 'user' else 'ASSISTANT'}: {text[:600]}"
+    label = "USER" if role == "user" else "ASSISTANT"
+    if len(text) > CAPTURE_MESSAGE_CHAR_CAP:
+        return f"{label}: {text[:CAPTURE_MESSAGE_CHAR_CAP]} {CAPTURE_CUT_MARKER}"
+    return f"{label}: {text}"
 
 
-def _build_capture_transcript(messages: list, max_chars: int = 4000) -> str:
+def _build_capture_transcript(messages: list,
+                             max_chars: int = CAPTURE_TRANSCRIPT_BUDGET) -> str:
     """Extract user/assistant text from messages, truncated to max_chars.
 
     Whole-session shape, spent head-and-tail: the first `max_chars/2` and last
