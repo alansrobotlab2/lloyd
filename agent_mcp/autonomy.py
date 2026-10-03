@@ -312,6 +312,30 @@ def _read_config() -> dict:
 #: both names it here and reads it there; until then a write is a note in a
 #: markdown file. It is a set and not a comment so the reply can say which of the
 #: two a given key is, instead of leaving the caller to infer an effect.
+#:
+#: #2096 — and this is the part the empty value above was hiding. This set is the
+#: only thing that decides whether `autonomy_config_set` is a scheduler-authority
+#: write or a note in a markdown file, and the authority answer is on the other
+#: side of a process boundary, in `app/harness/policy.py`, which never reads this
+#: name: `autonomy_config_set` is in neither `TIER2_TOOLS` nor `TIER3_TOOLS`, the
+#: tier-2→1 demotion branch is hardcoded to `SCHEDULE_STATE_TOOL =
+#: "autonomy_write_task"` (policy.py:306, :432-435), so no call shape of this tool
+#: raises it, and `effective_tier` answers 1 for it — measured, not assumed:
+#: `effective_tier("autonomy_config_set", {"key": "max_parallel", "value": "3"})
+#: == 1`. At tier 1 `check_grants` returns its allow before the grant store is
+#: opened (policy.py:1112-1113) and the pre-tool callback short-circuits the same
+#: way (:1295-1296), so an unattended scope — `autonomy-task:40`,
+#: `worker:autotriage` — writes `_config.md` with no grant consulted and no deny
+#: row. Tier 1 is the right answer here, and it is right for exactly one reason:
+#: every key of this file is documentary, which is the same class the traffic
+#: census deliberately puts vault writers at (see
+#: `tests/test_side_effect_traffic_census.py`). A non-empty set makes that false —
+#: an unattended turn would then be rewriting what the fleet runs, at tier 1,
+#: ungated — so adding a key here RE-OPENS a tier decision (#2094 asked it and was
+#: closed with the set empty, so nobody owes this round an answer). Do not inherit
+#: tier 1 past that change: make it again. The pairing is enforced, not hoped for —
+#: `tests/test_autonomy_config_write.py::test_the_empty_applied_key_set_is_the_only_thing_keeping_the_writer_at_tier_1`
+#: goes red the day the set and the tier disagree.
 _CONFIG_KEYS_APPLIED_BY_CODE: frozenset[str] = frozenset()
 
 #: The claim both halves of the tool pair carry about this file. It appears in

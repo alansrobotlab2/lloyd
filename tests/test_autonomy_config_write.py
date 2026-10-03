@@ -376,3 +376,195 @@ def test_the_read_write_split_and_the_clobber_safe_round_trip_are_intact(cfg_fil
     assert refused.get("yaml_broken") is True, refused
     assert cfg_file.read_bytes() == before, "an unparseable front matter was rewritten"
 
+
+# ── #2096: the empty set is load-bearing, and the tier now says what it assumes ─
+#
+# `_CONFIG_KEYS_APPLIED_BY_CODE` is the single input that decides whether
+# `autonomy_config_set` is a scheduler-authority write or a note in a markdown
+# file. The answer on the other side of that decision is a different module:
+# `app/harness/policy.py` never reads the name (`git grep
+# "_CONFIG_KEYS_APPLIED_BY_CODE" app/harness/policy.py` → 0 hits), so nothing at
+# either site connects them, and the tier the writer sits at was chosen while the
+# set was empty. #2096 leaves the tier exactly where it is — a pointer, not a gate,
+# because #2094 was closed with the set empty and no round may pre-make its answer —
+# and makes the silence self-enforcing instead.
+#
+# Not a duplicate of `test_the_key_schema_names_no_key_that_no_code_reads` above,
+# which asserts this same set is empty for its own reason (an `inputSchema`
+# example may not quote a key no code reads). That node goes red on a key because
+# the surface claim it pins changes; these two go red on the set/tier PAIRING,
+# which is the claim nothing else holds. Both are supposed to fail on that day, for
+# different reasons, and neither is a grep of the comment block: #2096's own ruling
+# is that prose is not a test's job, so no node here reads autonomy.py's bytes.
+
+
+def test_the_empty_applied_key_set_is_the_only_thing_keeping_the_writer_at_tier_1():
+    """Clause 2: the pairing, asserted before either side hardens into habit.
+
+    The biconditional is the whole node: `autonomy_config_set` may sit at tier 1
+    exactly while no key of `_config.md` is applied by code. Today both sides hold
+    and the node is quiet. The day a key joins the set, the writer is an unattended
+    turn rewriting what the fleet runs while `effective_tier` still answers the
+    tier a documentary note belongs at — tier 1 is where `check_grants` returns its
+    allow before opening the grant store (`policy.py:1112-1113`) and the pre-tool
+    callback short-circuits identically (`:1295-1296`), so nothing is consulted and
+    no deny row is written — and that is the choice #2094 was closed for not
+    making, which is why it must be red and must say so. The opposite drift is red
+    too: a tier above 1 while every key is still documentary would gate a
+    documentary markdown write, the class the traffic census puts vault writers in
+    on purpose.
+
+    Nothing here reads the comment block #2096 also landed. Pinning prose would
+    make a rewording a regression and a deletion free; the pairing is the
+    instrument.
+    """
+    from app.harness.policy import effective_tier
+
+    applied = autonomy._CONFIG_KEYS_APPLIED_BY_CODE
+    tier = effective_tier("autonomy_config_set",
+                          {"key": "max_parallel", "value": "3"})
+
+    assert bool(applied) == (tier != 1), (
+        f"#2096's tripwire: `_CONFIG_KEYS_APPLIED_BY_CODE` holds {sorted(applied)} "
+        f"and `effective_tier` answers {tier}, and those two answers have to be "
+        "made together. If the set is no longer empty then a write to "
+        "`_config.md` changes dispatch behaviour for the fleet, which is a "
+        "scheduler-authority write and can no longer sit at tier 1 — the tier "
+        "`check_grants` allows with the grant store still closed "
+        "(`app/harness/policy.py:1112-1113`), so an unattended scope needs no "
+        "grant and leaves no deny row. Raise the tool's tier (or take the key "
+        "out of the set); do not inherit tier 1 past the change that made it "
+        f"live. If you DID raise it and {tier} is your deliberate answer, this "
+        "node is the one that has to be updated to pin the new pairing — #2094 is "
+        "the item that question belongs on.")
+
+    # Today's two halves, each read live from its own module, so a passing
+    # biconditional above can only be the pair #2096 left behind and never a
+    # coincidence of two values that both moved.
+    assert applied == frozenset(), (
+        "the pairing passed only because the tier moved as well; that is the "
+        f"decision the node above demands be written down: {sorted(applied)}")
+    assert tier == 1, (
+        "the pairing passed only because a key joined the set, which is the same "
+        f"decision: effective_tier answered {tier}")
+
+
+def test_the_pointer_took_no_authority_scope(tmp_path):
+    """Clause 3: #2096 names a consequence and changes no authority.
+
+    Every claim here was true the moment before the comment landed, and has to
+    stay true or this round quietly answered #2094: the writer is tier 1 by both
+    tier functions, its name is in neither tier table, the tier-2→1 demotion branch
+    still belongs to `autonomy_write_task` alone — so no argument shape of this
+    tool, however scheduler-shaped, raises it — and the tier-1 path really does
+    answer across the process boundary without opening the grant store, which is
+    what makes "no grant consulted and no deny row" a fact rather than an
+    assumption.
+
+    The control at the end is why the allow means anything: from the same
+    unattended scope, on the same tmp store, the schedule-changing
+    `autonomy_write_task` call #2093 removed a grant for IS denied and leaves its
+    deny row. A probe that cannot deny would call this whole node a pass on a
+    broken harness.
+    """
+    from app.harness.policy import (TIER2_TOOLS, TIER3_TOOLS, GrantStore,
+                                    SCHEDULE_STATE_TOOL, check_grants,
+                                    effective_tier, tool_tier)
+
+    cfg_call = {"key": "max_parallel", "value": "3"}
+    assert tool_tier("autonomy_config_set", {}) == 1
+    assert effective_tier("autonomy_config_set", cfg_call) == 1
+    assert effective_tier("autonomy_config_set",
+                          {"id": 40, "status": "up_next"}) == 1, (
+        "a scheduler-shaped argument now raises this tool's tier, so #2094's gate "
+        "question was answered by a round whose contract was a comment")
+    assert "autonomy_config_set" not in TIER2_TOOLS
+    assert "autonomy_config_set" not in TIER3_TOOLS
+    assert SCHEDULE_STATE_TOOL == "autonomy_write_task", (
+        "the demotion branch is no longer the only reason the tool stays at 1, so "
+        f"check what moved: {SCHEDULE_STATE_TOOL!r}")
+
+    store = GrantStore(tmp_path / "workers.db")
+    store.ensure_schema()
+    d = check_grants(store, scope="worker:autotriage",
+                     tool_name="autonomy_config_set", tool_input=cfg_call)
+    assert (d.allowed, d.grant_id, d.reason) == (True, None, ""), (
+        f"the config write is no longer the tier-1 pass-through: {d}")
+    assert store.dispatch_rows() == [], (
+        "a tier-1 documentary write now consults the grant store, which is "
+        f"#2094's gate — decided somewhere it should have been decided loudly: "
+        f"{store.dispatch_rows()}")
+
+    sched = check_grants(store, scope="worker:autotriage",
+                         tool_name="autonomy_write_task",
+                         tool_input={"id": 68, "status": "up_next"})
+    assert sched.allowed is False, (
+        "positive control broken: the grant gate denies nothing, so the allow "
+        f"above proves nothing either: {sched}")
+    assert "#68" in sched.reason, sched.reason
+    assert [r["decision"] for r in store.dispatch_rows()] == ["deny"], (
+        "the deny is not on the decision surface, so the asymmetry this node "
+        "pins is invisible to whoever reads the store later")
+
+def test_the_installed_hook_and_the_qualified_name_leave_the_writer_ungated(tmp_path):
+    """Clause 3 again from the two boundaries the node above stops at.
+
+    `test_the_pointer_took_no_authority_scope` calls `check_grants` directly, which
+    is not how a turn reaches the gate. The dispatch path installs a callback whose
+    FIRST act is its own `effective_tier(...) == 1` early return
+    (`app/harness/policy.py:1285-1297`) — the half of the hazard the new comment
+    cites that lives in the callback and not in `check_grants`, and the reason a
+    direct call leaves it unmeasured. So this node drives the real
+    `install_policy_hook` over a real `HookRegistry`.
+
+    It also arrives under the name the MCP registry actually carries. A tool call
+    reaches the harness as `mcp__<server>__<tool>` and `normalize_tool_name`
+    (`policy.py:264-270`) unwraps it, while `_config.md` is written in the aggregator
+    process; a tier pinned only on the bare name in one process would miss the same
+    call moving under qualification, which is why the node reads both spellings
+    through the tier function AND through the installed hook.
+
+    Same asymmetry as the comment claims, same scratch store: the config write
+    passes under either spelling and leaves no row at all, and the
+    schedule-changing `autonomy_write_task` call that store and scope do deny.
+    """
+    from app.harness import HookRegistry
+    from app.harness.policy import (GrantStore, effective_tier,
+                                    install_policy_hook, normalize_tool_name)
+
+    cfg_call = {"key": "max_parallel", "value": "3"}
+    spellings = ("autonomy_config_set", "mcp__agent__autonomy_config_set")
+    for name in spellings:
+        assert normalize_tool_name(name) == "autonomy_config_set", (
+            f"the unwrapping this node depends on is not what it was: {name} → "
+            f"{normalize_tool_name(name)!r}")
+        assert effective_tier(name, cfg_call) == 1, (
+            f"qualification moved the tier: {name} answers "
+            f"{effective_tier(name, cfg_call)}")
+
+    hooks = HookRegistry()
+    store = GrantStore(tmp_path / "grants.sqlite")
+    store.ensure_schema()
+    install_policy_hook(hooks, store=store, scope="worker:autotriage")
+
+    for name in spellings:
+        passed = asyncio.run(hooks.fire_pre_tool_use(
+            session_id="s2096", tool_name=name, tool_input=cfg_call))
+        assert passed == {}, (
+            f"the installed hook no longer lets the documentary write through "
+            f"under {name}: {passed}")
+    assert store.dispatch_rows() == [], (
+        "the callback consulted the grant store for a tier-1 documentary write, "
+        f"which is #2094's gate arriving quietly: {store.dispatch_rows()}")
+
+    denied = asyncio.run(hooks.fire_pre_tool_use(
+        session_id="s2096", tool_name="autonomy_write_task",
+        tool_input={"id": 68, "status": "up_next"}))
+    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny", (
+        "the control is broken — the same hook denies nothing, so the two passes "
+        f"above prove nothing either: {denied}")
+    assert "#68" in str(denied), (
+        f"the deny does not name the task it protected: {denied}")
+    assert [r["decision"] for r in store.dispatch_rows()] == ["deny"], (
+        "the asymmetry is not on the decision surface for whoever reads the store "
+        f"next: {store.dispatch_rows()}")
