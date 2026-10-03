@@ -79,6 +79,24 @@ the transcript scratch home from backlog #566:
     indistinguishable from a round whose row was lost — and its count is reported as its
     own named number, never folded into the reclaimed count or hidden behind a `0`.
 
+11b. The same directory's NON-round entries (#2099) — the gate's candidate copies and a
+    session's ad-hoc `cp -a` of the tree, which is what was actually consuming the store:
+    18,287 of the 18,320 MiB at triage, the three 6 GiB ones with no `.git` entry at all so
+    `git worktree prune` cannot reach them either, against 33 MiB under `SM_*/`. The round
+    rule above reached none of it: any name not starting `SM_` was counted `not a round id`
+    and kept with NO window, which is translucent rather than bounded. Reclaim one
+    SCRATCH_DIR_MAX_AGE_DAYS (7) after the entry's own mtime — the only age an entry with no
+    ledger row has — and never while `git worktree list` names a path at or under it or
+    while `current.json` names it: both rails are now asked of EVERY name, which they were
+    not before, because the prefix test short-circuited ahead of them and the live box's one
+    registered worktree, `base1961`, was itself being reported as `0 registered`. A scratch
+    window keyed on names (`cand-*`, `review-*`, `check-*`) was rejected: no code creates the
+    three measured dirs, so no list enumerates the next spelling. The kept count is its own
+    bucket (`N scratch <7d`), the reclaimed total says on the line which window sent each
+    directory, and an `SM_`-prefixed dir with no ledger row stays under clause 3 forever —
+    including `rehearse.py:133`'s `<round_id>-drill` homes, whose fate is a ruling, not this
+    window.
+
 12. refs/heads/automod/<round_id> — the round branches, 226 of them at triage against
     82 at filing. DELETE a branch BRANCH_MAX_AGE_DAYS (30) after the round settled, and
     only when `git merge-base --is-ancestor <tip> main` holds: that is the state that
@@ -827,6 +845,32 @@ def sweep_groundskeeper_queue(apply: bool, now: float) -> tuple[int, int]:
 #: Reclaim a settled round's `~/lloyd-work/<round_id>/` directory this many days after
 #: that round's newest ledger event (#1037's ruling, as recorded on #1644).
 WORKTREE_DIR_MAX_AGE_DAYS = 7
+#: Reclaim a `~/lloyd-work/` entry that is NOT a round home this many days after its own
+#: mtime (#2099). Measured at triage: 18,287 MiB of the store sat in entries the round rule
+#: never reached — `cand-1914` 6074 MiB, `cand2-1914` 6074, `review-1914-clean` 5980, none
+#: of them a git worktree at all — against 33 MiB under `SM_*/`, and the report line named
+#: them only as `12 not a round id`, which is translucent forever rather than bounded.
+#:
+#: The horizon is deliberately the SAME as a settled round's, and the argument for that is
+#: an ordering one: a round home carries a ledger row dating it and is still kept only 7
+#: days as forensics, so an entry with no row, no registration and no live round has a
+#: strictly weaker claim to be wanted, and cannot deserve the longer window.
+#:
+#: Nothing here keys on a scratch SPELLING. `git grep` at triage found no code that creates
+#: `cand-1914`, `cand2-1914` or `review-1914-clean` — they are ad-hoc `cp -a` copies of the
+#: tree — so a pattern list (`cand-*`, `review-*`, `check-*`) could not cover future
+#: spellings, and `review_tools.py:136` writes `review_<label>` while the residue on disk
+#: is `review-<label>`, so even the spellings that exist disagree. What bounds an entry is
+#: the complement: not the live round, not a registered worktree, no ledger row that could
+#: date it, and past this window.
+#:
+#: Aged on the entry's OWN mtime — the only age a dir with no ledger row has, the same
+#: clock the file stores above use — which every create or remove directly inside it
+#: refreshes. `tests/conftest.py:223` and `architecture/testing.md:30-31` tell every human
+#: and agent to make `~/lloyd-work/check-$$` for test runs, so the store has a permanently
+#: self-renewing producer; a `check-$$` cut by `git worktree add` is held by the registered
+#: rail whatever its age, and the window reaches only the abandoned ones.
+SCRATCH_DIR_MAX_AGE_DAYS = 7
 #: Delete an `automod/<round_id>` branch this many days after the round settled — but
 #: only once its tip is an ancestor of `main`, which is the state that says the work is
 #: in the tree and is what makes an irreversible delete forensic-safe.
@@ -1083,26 +1127,45 @@ def sweep_automod_worktrees(apply: bool, now: float, *, work_root: Path | None =
                             ledger: Path | None = None, current: Path | None = None,
                             repo: Path | None = None,
                             registered: list[str] | None = None) -> dict:
-    """Reclaim `~/lloyd-work/<round_id>/` past WORKTREE_DIR_MAX_AGE_DAYS.
+    """Reclaim `~/lloyd-work/` entries: a round home past its settle time, scratch past mtime.
+
+    Two windows, one store. A name matching `ROUND_ID_PREFIX` is a round the ledger should
+    be able to date, so it is aged on its newest `promotions.jsonl` event and kept at any
+    age when no row exists (#1644's clause 3). Every other entry — the `cp -a` copies, the
+    probe dirs, the pruned `check-$$` worktrees — has no row to date it by and is aged on
+    its own mtime past SCRATCH_DIR_MAX_AGE_DAYS (#2099). Before either window is consulted,
+    the same two rails are asked of EVERY name, round-spelled or not: the round
+    `current.json` names and any directory `git worktree list` names at or under the entry
+    are kept whatever their age.
+
+    The rails come first, and in that order, because the failure they each prevent is
+    different: reclaiming the in-flight round's home destroys a gate mid-run, and reclaiming
+    a registered worktree deletes a checkout `git` still believes in — `base1961` is exactly
+    that case on the live box and is not `SM_`-prefixed, which is the bug in the old prefix
+    test that short-circuited both rails for it before either was consulted.
 
     Returns the counts the report line prints, with `skip` non-empty when the store
     could not be read at all. The keys are each a NAMED outcome, because the failure
     this rung has to avoid is a `0 reclaimed` that means four different things:
 
-      reclaimed   directories removed (under `--apply`) or due for removal (dry run)
-      bytes       their total file size
-      young       settled inside the horizon — kept, still recent forensics
-      untracked   NO ledger row, so no settle time — never deleted (clause 3)
-      registered  `git worktree list` names a path under it — never deleted, any age
-      live        the round `current.json` names — never deleted, any age
-      not_a_round an entry whose name is not a round id, or a symlink — never touched
-      failed      `rmtree` refused (permissions, a busy mount) — reported, not swallowed
+      reclaimed        directories removed (under `--apply`) or due for removal (dry run)
+      reclaimed_rounds   ... of those, the ones dated by a ledger row
+      reclaimed_scratch  ... of those, the non-round entries aged on mtime (#2099)
+      bytes            their total file size
+      young          a round settled inside the horizon — kept, still recent forensics
+      untracked      NO ledger row, so no settle time — never deleted (clause 3)
+      scratch_kept   a non-round entry inside the window — kept, its mtime says used
+      registered     `git worktree list` names a path under it — never deleted, any age
+      live           the round `current.json` names — never deleted, any age
+      not_a_dir      a symlink or a plain file — never touched by this rung
+      failed         `rmtree` or the age read refused (permissions, a busy mount)
     """
     root = Path(work_root if work_root is not None else AUTOMOD_WORK_ROOT)
     times = _settle_times(Path(ledger if ledger is not None else AUTOMOD_LEDGER))
     live = _current_round(Path(current if current is not None else AUTOMOD_CURRENT))
-    out = {"reclaimed": 0, "bytes": 0, "young": 0, "untracked": 0, "registered": 0,
-           "live": 0, "not_a_round": 0, "failed": 0, "skip": ""}
+    out = {"reclaimed": 0, "reclaimed_rounds": 0, "reclaimed_scratch": 0, "bytes": 0,
+           "young": 0, "untracked": 0, "scratch_kept": 0, "registered": 0, "live": 0,
+           "not_a_dir": 0, "failed": 0, "skip": ""}
     if not root.is_dir():
         return out
     if registered is None:
@@ -1112,6 +1175,7 @@ def sweep_automod_worktrees(apply: bool, now: float, *, work_root: Path | None =
             out["skip"] = f"SKIPPED (registered worktrees unreadable: {exc})"
             return out
     cutoff = now - WORKTREE_DIR_MAX_AGE_DAYS * 86400
+    scratch_cutoff = now - SCRATCH_DIR_MAX_AGE_DAYS * 86400
     try:
         entries = sorted(root.iterdir(), key=lambda p: p.name)
     except OSError as exc:
@@ -1119,8 +1183,8 @@ def sweep_automod_worktrees(apply: bool, now: float, *, work_root: Path | None =
         return out
     for dir in entries:
         try:
-            if dir.is_symlink() or not dir.is_dir() or not dir.name.startswith(ROUND_ID_PREFIX):
-                out["not_a_round"] += 1
+            if dir.is_symlink() or not dir.is_dir():
+                out["not_a_dir"] += 1
                 continue
             if live is not None and dir.name == live:
                 out["live"] += 1
@@ -1128,13 +1192,25 @@ def sweep_automod_worktrees(apply: bool, now: float, *, work_root: Path | None =
             if _names_registered(dir, registered):
                 out["registered"] += 1
                 continue
-            settled = times.get(dir.name)
-            if settled is None:
-                out["untracked"] += 1
+            # Both rails have now been answered for this name, whatever it is spelled
+            # like. What the name still decides below is only WHICH age can date it: a
+            # round id has a ledger row to be dated by, and nothing else does.
+            due_round = False
+            due_scratch = False
+            if dir.name.startswith(ROUND_ID_PREFIX):
+                settled = times.get(dir.name)
+                if settled is None:
+                    out["untracked"] += 1
+                    continue
+                if settled > cutoff:
+                    out["young"] += 1
+                    continue
+                due_round = True
+            elif dir.stat().st_mtime > scratch_cutoff:
+                out["scratch_kept"] += 1
                 continue
-            if settled > cutoff:
-                out["young"] += 1
-                continue
+            else:
+                due_scratch = True
             size = _bytes_under(dir)
             if apply:
                 try:
@@ -1144,6 +1220,8 @@ def sweep_automod_worktrees(apply: bool, now: float, *, work_root: Path | None =
                     out["failed"] += 1
                     continue
             out["reclaimed"] += 1
+            out["reclaimed_rounds"] += 1 if due_round else 0
+            out["reclaimed_scratch"] += 1 if due_scratch else 0
             out["bytes"] += size
         except OSError as exc:
             print(f"  ! skip {dir.name}: {exc}", file=sys.stderr)
@@ -1411,26 +1489,39 @@ def _prune_db_rows(apply: bool, now: float, *, db: Path | None, busy_timeout_ms:
 
 
 def _worktree_line(w: dict) -> str:
-    """One report line for the round-directory store, identical in both modes.
+    """One report line for the `~/lloyd-work` store, identical in both modes.
 
     Every kept count is named, because a bare `0 reclaimed` is the number four
     different states produce: the horizon held nothing, no directory has a ledger row,
     every worktree is registered, or the directory list could not be read. Only the
-    first of those is a clean bill.
+    first of those is a clean bill. #2099 added a fifth and a sixth — the entry was a
+    non-round dir inside the scratch window, or it was a symlink or a plain file — and
+    each gets its own words here for the same reason the others do: the store that was
+    unbounded was invisible precisely because the line had no bucket for it, only the
+    `not a round id` catch-all that reported it as kept forever.
+
+    The reclaimed total is split into its two windows on the line, because "3 reclaimed"
+    does not say whether the sweep removed a settled round's forensics or a 6 GiB
+    candidate copy, and those are different decisions an operator approves. The store
+    label itself keeps the wording #1644 shipped — `autonomy/79-retention-sweep.md`
+    quotes this line in those words — and the scratch half spells its own window inside
+    its own bucket.
     """
     if w["skip"]:
         return f"  ~/lloyd-work round dirs >{WORKTREE_DIR_MAX_AGE_DAYS}d: " \
                f"{w['skip']} — nothing reclaimed"
     kept = [f"{w['young']} <{WORKTREE_DIR_MAX_AGE_DAYS}d",
             f"{w['untracked']} no ledger row",
+            f"{w['scratch_kept']} scratch <{SCRATCH_DIR_MAX_AGE_DAYS}d",
             f"{w['registered']} registered", f"{w['live']} live round"]
-    if w["not_a_round"]:
-        kept.append(f"{w['not_a_round']} not a round id")
+    if w["not_a_dir"]:
+        kept.append(f"{w['not_a_dir']} not a directory")
     if w["failed"]:
         kept.append(f"{w['failed']} FAILED to remove")
     return (f"  ~/lloyd-work round dirs >{WORKTREE_DIR_MAX_AGE_DAYS}d: "
-            f"{w['reclaimed']} reclaimed, {w['bytes'] / 1024 / 1024:.1f} MiB freed "
-            f"(kept: {', '.join(kept)})")
+            f"{w['reclaimed']} reclaimed "
+            f"({w['reclaimed_rounds']} round home, {w['reclaimed_scratch']} scratch), "
+            f"{w['bytes'] / 1024 / 1024:.1f} MiB freed (kept: {', '.join(kept)})")
 
 
 def _branch_line(b: dict) -> str:

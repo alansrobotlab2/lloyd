@@ -2694,6 +2694,256 @@ def test_a_round_dir_with_no_ledger_row_is_never_deleted_and_is_named(rs, capsys
     assert not (rs.AUTOMOD_WORK_ROOT / "SM_DATED").exists()
 
 
+# --------------------------------------------------------------------------------------
+# #2099: the NON-round half of `~/lloyd-work`, which had no window at all.
+#
+# `_workdir` above builds the round layout (`<rid>/home/lloyd/`) because that is the path
+# `git worktree list` prints for a round. The residue this store is actually made of is not
+# that shape, so the nodes below seed it with `_scratchdir` instead: a flat directory with a
+# payload, aged by its own mtime, registered only when the node says so.
+# --------------------------------------------------------------------------------------
+
+
+def _scratchdir(rs, name: str, *, size: int = 100, days: float | None = None,
+                registered_at: Path | None = None) -> Path:
+    """A non-round `~/lloyd-work/<name>` entry, as #2099 measured it.
+
+    Flat on purpose: `cand-1914`, `cand2-1914` and `review-1914-clean` are `cp -a` copies of
+    the tree with no `.git` entry at all, which is why `git worktree prune` cannot reach them
+    and why reusing `_workdir` here would seed a round home dressed up as scratch. Pass
+    `registered_at` to seed the one exception on the live box — `base1961`, a plainly-named
+    directory that IS a registered detached worktree — and the directory is created BY
+    `git worktree add`, the only way that fact becomes something the rung can read.
+
+    `days` ages the entry's OWN mtime, which is the clock
+    `sweep_automod_worktrees` reads for a name with no ledger row.
+    """
+    entry = rs.AUTOMOD_WORK_ROOT / name
+    if registered_at is not None:
+        _git_ok(registered_at, "worktree", "add", "-q", "--detach", str(entry), "main")
+    else:
+        entry.mkdir(parents=True)
+        (entry / "payload.txt").write_text("x" * size)
+    if days is not None:
+        _backdate(entry, days)
+    return entry
+
+
+def test_a_non_round_dir_is_reclaimed_at_the_scratch_horizon_and_kept_inside_it(rs,
+                                                                               automod):
+    """Clause 1: an entry with no ledger row, no registration and no live round is bounded
+    by an mtime window, and the SAME entry inside the window is kept.
+
+    Two directories, identical but for their age — 8 days against 6, around the horizon the
+    constant names — because the failure this node is about is one-sided: a window that only
+    ever keeps makes the store unbounded again (the state at triage: 18,287 MiB counted
+    `not a round id` and kept with no window at all), and a window that only ever deletes
+    takes a copy somebody made yesterday. Both halves are asserted on the same state, and
+    the dry run is asserted first so the apply below cannot be graded off a filesystem the
+    dry run already changed.
+
+    The horizon is asserted equal to the round one, not merely close: the ordering argument
+    for that number is that a settled round home carries a ledger row dating it and is still
+    kept only 7 days as forensics, so an entry with no row has a weaker claim, never a
+    stronger one.
+    """
+    assert rs.SCRATCH_DIR_MAX_AGE_DAYS == rs.WORKTREE_DIR_MAX_AGE_DAYS == 7, (
+        "#2099's window is the same order as #1037's round horizon, on the argument in "
+        "the constant's own comment")
+    now = time.time()
+    over = _scratchdir(rs, "cand-1914", days=8)
+    under = _scratchdir(rs, "review-1914-clean", days=6)
+
+    counted = rs.sweep_automod_worktrees(apply=False, now=now, repo=automod)
+    assert counted["reclaimed"] == 1 and counted["reclaimed_scratch"] == 1, counted
+    assert counted["reclaimed_rounds"] == 0, (
+        f"nothing here is a round, so the round window must report nothing: {counted}")
+    assert counted["scratch_kept"] == 1, counted
+    assert counted["bytes"] == 100, (
+        "only the due entry's bytes count as freed, or the report overstates what "
+        "`--apply` gives back")
+    assert over.is_dir(), "a dry run deleted a scratch directory"
+
+    out = rs.sweep_automod_worktrees(apply=True, now=now, repo=automod)
+    assert out["reclaimed"] == 1 and out["failed"] == 0, out
+    assert not over.exists(), (
+        "an 8-day-old entry with no ledger row, no registration and no live round was kept "
+        "— which is the unbounded store #2099 was filed against")
+    assert under.is_dir(), (
+        "a 6-day-old entry, inside the window, was deleted")
+
+
+def test_the_liveness_rails_are_asked_of_a_non_round_name_too(rs, automod, capsys,
+                                                             monkeypatch):
+    """Clause 2: `git worktree list` and `current.json` are consulted for EVERY name.
+
+    This is the half the old code got wrong in the dangerous direction. `base1961` is a
+    registered detached worktree on the live box and is not `SM_`-prefixed, so the prefix
+    test counted it `not a round id` and never reached the registration rail — the report
+    line's `0 registered` was false as a statement about the root. Once a window exists on
+    that path, the same short-circuit stops being merely misleading and becomes a `rmtree`
+    over a checkout git still believes in.
+
+    Both entries are seeded 400 days old, far outside the window, so the ONLY thing that can
+    keep them is the rail each is named for: age says delete here, and a node that passes on
+    a young fixture would prove nothing. The `not_a_dir` count is asserted zero as well —
+    that bucket is where the prefix test used to put them, and a non-zero count is the
+    short-circuit still being there.
+    """
+    _say_this_tree_is_production(rs, monkeypatch, rs._TREE)
+    now = time.time()
+    registered = _scratchdir(rs, "base1961", registered_at=automod, days=400)
+    rs.AUTOMOD_CURRENT.write_text(json.dumps({"round_id": "cand-in-flight",
+                                              "branch": "automod/cand-in-flight"}))
+    in_flight = _scratchdir(rs, "cand-in-flight", days=400)
+
+    # The buckets on the report line first, from a dry run, then the rails from `--apply`.
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py"])
+    assert rs.main() == 0
+    line = _store_line(capsys.readouterr().out, "lloyd-work round dirs")
+    assert "1 registered" in line and "1 live round" in line, line
+
+    out = rs.sweep_automod_worktrees(apply=True, now=now, repo=automod)
+    assert out["registered"] == 1 and out["live"] == 1, out
+    assert out["reclaimed"] == 0 and out["reclaimed_scratch"] == 0, out
+    assert out["not_a_dir"] == 0, (
+        f"a non-round directory landed in the bucket the prefix test used to short-circuit "
+        f"into, before either rail was consulted: {out}")
+    assert registered.is_dir(), (
+        "`git worktree list` names this directory and the sweep removed it anyway")
+    assert in_flight.is_dir(), (
+        "`current.json` names this round and the sweep removed its home anyway")
+    assert "base1961" in _git(automod, "worktree", "list").stdout, (
+        "the fixture did not actually register the directory this node says is "
+        "registered, so the rail above was never being asked of anything")
+
+
+def test_the_unrowed_round_rail_outranks_the_scratch_window_at_any_age(rs, automod,
+                                                                      capsys, monkeypatch):
+    """Clause 3: #1644's clause-3 rail is UNCHANGED, and the new window does not reach it.
+
+    The risk #2099 introduces is exactly this: a window on the path that used to say
+    "not a round, keep forever" is one `elif` away from also applying to `SM_`-prefixed
+    directories the ledger cannot date. So the two entries that must survive are seeded at
+    400 days, 57x the window, and the third entry — a non-round dir of the SAME age, which
+    has no row by construction rather than by accident — is reclaimed on the same call. One
+    state, three entries, opposite outcomes: that is what makes a node that cannot fail
+    impossible here.
+
+    `SM_20260920_105946` is the measured case (27 MB, zero ledger rows). `-drill` is
+    `rehearse.py:133`'s spelling, which is `SM_`-prefixed with no row of its own and so
+    falls under this rail today; whether it should join the window is the ruling #2099 owes,
+    and this node pins the current ruling rather than choosing a new one.
+    """
+    _say_this_tree_is_production(rs, monkeypatch, rs._TREE)
+    now = time.time()
+    unrowed = _workdir(rs, "SM_20260920_105946")
+    drill = _workdir(rs, "SM_20260920_105946-drill")
+    scratch = _scratchdir(rs, "whatever-42", days=400)
+    _backdate(unrowed, 400)
+    _backdate(drill, 400)
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py"])
+    assert rs.main() == 0
+    line = _store_line(capsys.readouterr().out, "lloyd-work round dirs")
+    assert "2 no ledger row" in line, (
+        f"the `no ledger row` count is the words #1644 clause 3 reports in, and they are "
+        f"gone from the line: {line}")
+    assert "1 reclaimed" in line and "1 scratch" in line, line
+
+    out = rs.sweep_automod_worktrees(apply=True, now=now, repo=automod)
+    assert out["untracked"] == 2, out
+    assert out["reclaimed"] == 1 and out["reclaimed_scratch"] == 1, out
+    assert out["reclaimed_rounds"] == 0, out
+    assert unrowed.is_dir() and drill.is_dir(), (
+        "an SM_-prefixed directory with no promotion-ledger row was deleted at 400 days — "
+        "clause 3 of #1644 says its age is unknowable, so it is never a candidate")
+    assert not scratch.exists(), (
+        "the same rung kept a non-round entry of the same age, so the two rails have been "
+        "merged into one and #1644's ruling is now deciding #2099's store too")
+
+
+def test_the_scratch_window_cares_what_an_entry_is_not_what_it_is_called(rs, automod):
+    """Clause 4: no hand-written spelling list is part of the decision.
+
+    Four entries, all 8 days old, none of which any pattern list would have covered in
+    advance: `cand-1914` and `review-1914-clean` are the spellings the item suggested
+    allowlisting, `review_1914` is the underscore `review_tools.py:136` actually writes, and
+    `whatever-42` is the one that defeats an allowlist outright — no code in the tree creates
+    the three 6 GiB dirs found at triage (they are ad-hoc `cp -a` copies), so no list
+    enumerates the next spelling. All four go. Add a name filter to the rung and
+    `whatever-42` survives this node red, which is why the assertion is on the count and on
+    each directory, not on the source text.
+    """
+    now = time.time()
+    entries = [_scratchdir(rs, name, days=8) for name in
+               ("cand-1914", "cand2-1914", "review-1914-clean", "review_1914",
+                "whatever-42")]
+
+    out = rs.sweep_automod_worktrees(apply=True, now=now, repo=automod)
+    assert out["reclaimed"] == len(entries), out
+    assert out["reclaimed_scratch"] == len(entries), out
+    assert out["reclaimed_rounds"] == 0 and out["scratch_kept"] == 0, out
+    assert out["bytes"] == 100 * len(entries), (
+        f"every seeded entry holds 100 bytes, so the freed total is the entry count times "
+        f"that: {out}")
+    for entry in entries:
+        assert not entry.exists(), (
+            f"{entry.name} was kept, which is what a name filter looks like from here")
+
+
+def test_the_scratch_outcome_is_its_own_count_and_a_dry_run_deletes_nothing(rs, automod,
+                                                                           capsys,
+                                                                           monkeypatch):
+    """Clause 5: the line names aged scratch as its own number, and one state prints one
+    line whatever mode asked for it.
+
+    Three counts have to stay distinguishable on one line, because the whole reason the
+    store read as bounded while it was not is that one bucket covered all three: two aged
+    scratch dirs (`2 scratch` inside the reclaimed split), one young scratch dir
+    (`1 scratch <7d` among the kept), and two entries this rung never touches — a plain file
+    and a symlink — which are the only things `not a directory` is now about. The retired
+    wording `not a round id` is asserted GONE: it was the catch-all that reported 18 GiB as
+    kept-forever residue, and a line that still carries it has folded scratch back into it.
+
+    The dry run asserts the directory list is byte-for-byte unchanged, and then the SAME
+    state goes through `--apply` and must print the identical line — the equality is only
+    meaningful because the dry run provably moved nothing.
+    """
+    _say_this_tree_is_production(rs, monkeypatch, rs._TREE)
+    aged_a = _scratchdir(rs, "cand-1914", days=8)
+    aged_b = _scratchdir(rs, "mut-review-1879", days=9)
+    young = _scratchdir(rs, "restore-tmp", days=1)
+    (rs.AUTOMOD_WORK_ROOT / "c3_probe.py").write_text("pass\n")
+    (rs.AUTOMOD_WORK_ROOT / "restore-hf").symlink_to(aged_a)
+    before = sorted(p.name for p in rs.AUTOMOD_WORK_ROOT.iterdir())
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py"])
+    assert rs.main() == 0, "a dry run must exit 0"
+    dry_line = _store_line(capsys.readouterr().out, "lloyd-work round dirs")
+    assert "2 reclaimed (0 round home, 2 scratch)" in dry_line, dry_line
+    assert "1 scratch <7d" in dry_line, dry_line
+    assert "2 not a directory" in dry_line, dry_line
+    assert "not a round id" not in dry_line, (
+        f"aged scratch is once again inside the catch-all that made this store read as "
+        f"bounded: {dry_line}")
+    assert sorted(p.name for p in rs.AUTOMOD_WORK_ROOT.iterdir()) == before, (
+        "a dry run deleted something")
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py", "--apply"])
+    assert rs.main() == 0
+    applied = capsys.readouterr().out
+    assert _store_line(applied, "lloyd-work round dirs") == dry_line, (
+        "the dry-run line the operator approved and the apply line that acted on it are "
+        "different numbers")
+    assert not aged_a.exists() and not aged_b.exists(), applied
+    assert young.is_dir(), applied
+    assert (rs.AUTOMOD_WORK_ROOT / "c3_probe.py").is_file(), applied
+    assert (rs.AUTOMOD_WORK_ROOT / "restore-hf").is_symlink(), (
+        "a symlink is not a directory and this rung never touches it, even when its target "
+        "has just been reclaimed")
+
+
 def test_a_branch_goes_only_at_thirty_days_and_only_when_its_tip_is_in_main(rs,
                                                                            automod):
     """Clause 4: the 30-day arm requires `git merge-base --is-ancestor <tip> main`; an
