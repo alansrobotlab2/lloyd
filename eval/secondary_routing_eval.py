@@ -947,9 +947,13 @@ MIN_DOWNSTREAM_ENTRIES = 42
 #: the same window; only the population the daily note counts changed. So any
 #: before-window containing a date before the split counts background runs while
 #: the after arm counts user sessions — two different populations, which no
-#: sample size and no floor value makes comparable. Choosing what this arm should
-#: measure post-split (retire it, or point it at the export trees) is a person's
-#: call: backlog #1262 leaves it open deliberately.
+#: sample size and no floor value makes comparable. What to do about that is
+#: SETTLED, not open: the arm stays the pre-split comparison it already is, and
+#: it is not a route to verify a flip after the split. A flip is confirmed with
+#: `--confirm` on the pinned items, which need no before-window at all. And do
+#: not re-point it at the `sessions`/`sessions-background` export trees to make
+#: it one — that trades a refusal which says so for a verdict comparing two
+#: populations that were never the same.
 DOWNSTREAM_SPLIT_CAUSE = (
     "cause: the daily note counts user sessions only from 2026-09-10 (commit "
     "410e203), which moved background runs to "
@@ -1070,8 +1074,9 @@ def downstream_verdict_blocker(result: dict[str, Any],
         "consequence: a before-window holding a date before that split counts background "
         "runs while the after arm counts user sessions, so the two arms are different "
         "populations at any sample size — do not 'fix' the split, and do not read this "
-        "as a capture outage. What this arm should measure post-split is open on "
-        "backlog #1262.",
+        "as a capture outage. And this arm is not the route to verify a flip post-split: "
+        "confirm a flip with --confirm on the pinned items, and do not re-point the arm "
+        "at the sessions/sessions-background export trees to make it one.",
     ]
 
 

@@ -1429,6 +1429,74 @@ def test_the_refusal_names_the_user_session_split_so_nobody_re_diagnoses_the_dro
     assert "not a reader break" in out, out
 
 
+def test_the_refusal_states_the_settled_answer_and_names_no_closed_item(tmp_path, capsys):
+    """The refusal has to be self-contained, because the item it used to cite is
+    closed and says nothing further.
+
+    Until #2113 the third refusal line ended by handing the operator a backlog
+    item for what this arm should measure post-split. #1262 has since been ruled:
+    the refusal IS the standing answer, a flip is verified with `--confirm` on the
+    pinned items, and the arm is not to be re-pointed anywhere. Citing the closed
+    item was worse than useless — following it lands on a `status: done` page with
+    no next step — so the sentence now states the ruling instead of the referral:
+    no item number, no `backlog`, and both halves of the answer in the text a
+    failing run prints.
+    """
+    mem = _downstream_2026_09_19(tmp_path)
+
+    assert ev.main(_downstream_args(mem)) == 5
+    out = capsys.readouterr().out
+    assert "1262" not in out, out
+    assert "backlog" not in out.lower(), out
+    assert "not the route to verify a flip post-split" in out, out
+    assert "confirm a flip with --confirm on the pinned items" in out, out
+
+
+def test_the_refusal_forecloses_re_pointing_the_arm_at_the_export_trees(tmp_path, capsys):
+    """The one option the ruling closed is the one the text kept offering as open.
+
+    Re-pointing the arm at the `sessions` / `sessions-background` export trees was
+    considered and refused: it would print one label over a background-run
+    population and a user-session population, which is precisely the mismatch the
+    refusal exists to name. So the refusal says no to it in as many words, and the
+    comment above `DOWNSTREAM_SPLIT_CAUSE` no longer leaves the choice to a person.
+    The single surviving mention of the old item in this file is the exit-code
+    provenance comment — the citation that explains why exit 5 reuses the
+    empty-window code, which should outlive all the others.
+    """
+    mem = _downstream_2026_09_19(tmp_path)
+
+    assert ev.main(_downstream_args(mem)) == 5
+    out = capsys.readouterr().out
+    assert ("do not re-point the arm at the sessions/sessions-background export trees"
+            in out), out
+
+    lines = (ROOT / "eval" / "secondary_routing_eval.py").read_text(
+        encoding="utf-8").splitlines()
+    at = [i for i, ln in enumerate(lines) if "1262" in ln]
+    assert len(at) == 1, [lines[i] for i in at]
+    assert lines[at[0] + 1].strip() == "EXIT_NO_DOWNSTREAM = 5", lines[at[0]:at[0] + 2]
+
+
+def test_the_skill_page_calls_exit_5_expected_and_names_the_floor():
+    """The page an operator reads after a non-zero exit, pinned as a doc pin:
+    there is no call to wrap, because the command is run by hand.
+
+    The exit-code list used to read "`5` no downstream denominator" and nothing
+    else, so the ordinary outcome of an ordinary week looked like a regression and
+    sent people looking for a broken capture pipeline. Measured 2026-10-03: the
+    trailing windows hold 14 entries over 6/7 notes and 24 over 7/7, both far
+    under the 42-entry floor, so exit 5 is what a normal week does. The page names
+    the floor and the expectation now.
+    """
+    page = (Path.home() / "obsidian" / "skills" / "secondary-routing-eval"
+            / "SKILL.md").read_text(encoding="utf-8")
+
+    assert "MIN_DOWNSTREAM_ENTRIES = 42" in page, "the page still hides the floor"
+    assert "expected result on a normal week" in page, page
+    assert "not a regression" in page, page
+
+
 def test_an_empty_window_is_refused_by_the_same_floor_and_names_the_same_cause(tmp_path, capsys):
     """The guard this replaces fired only at zero. Zero still fires — and now
     says why, instead of printing "a window has 0 captured entries" for a run to
