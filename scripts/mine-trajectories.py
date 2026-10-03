@@ -1155,17 +1155,26 @@ def _suffix_sessions(ngram: tuple[str, ...],
                      pattern_data: dict[tuple[str, ...], dict]) -> set[str]:
     """Sessions a strictly shorter *suffix* of this n-gram already counted.
 
-    `mine_sequence_patterns` walks `for n in (2, 3)` over one collapsed label
-    stream per session, so a 3-gram at position *i* always feeds its suffix
-    bigram at *i+1* in the same session: a `seq-3` key's session set is a subset
-    of its suffix bigram's by construction, and its sessions are the same events
-    counted at a second window size. `seq-3-bash-fs-bash-fs-err-bash-other`
-    shared all 17 of its sessions with the 20 that
-    `seq-2-bash-fs-err-bash-other` reported. Measured over
-    `_pipeline/skills/candidates/` on 2026-09-21: 626 `seq-3` keys, 594 with a
-    `seq-2` suffix sibling, 570 of those pairs fully contained. Borrowed here, so
-    a windowed key cannot clear the emission gate on a session its own suffix
-    already billed.
+    `mine_sequence_patterns` collapses each session's tool calls into one label
+    stream, so a 3-gram at position *i* always feeds its suffix bigram at *i+1*
+    in the same session: a `seq-3` key's session set is a subset of its suffix
+    bigram's by construction, and its sessions are the same events counted at a
+    second window size. `seq-3-bash-fs-bash-fs-err-bash-other` shared all 17 of
+    its sessions with the 20 that `seq-2-bash-fs-err-bash-other` reported.
+    Measured over `_pipeline/skills/candidates/` on 2026-09-21: 626 `seq-3` keys,
+    594 with a `seq-2` suffix sibling, 570 of those pairs fully contained.
+    Borrowed here, so a windowed key cannot clear the emission gate on a session
+    its own suffix already billed.
+
+    Since #2102 the miner walks bigrams only (see the enumeration in
+    `mine_sequence_patterns`), because that arithmetic is what made every 3-gram
+    it built unemittable — so over the keys the miner actually builds this
+    returns the empty set for each of them.
+
+    The walk is left general on purpose (`range(2, len(ngram))`, not one fixed
+    suffix size): a future rule that lets a longer n-gram ADD a session of its
+    own revives the class, and on that day the deduction that bills it has to
+    still be here.
     """
     borrowed: set[str] = set()
     for size in range(2, len(ngram)):
@@ -1177,10 +1186,12 @@ def _suffix_sessions(ngram: tuple[str, ...],
 
 
 def mine_sequence_patterns(trajectories: list[dict], threshold: int = 2) -> list[dict]:
-    """
-    Mine repeating tool-call sequences (bigrams and trigrams) across sessions.
-    Normalizes tool names, collapses consecutive duplicates, then extracts
-    n-grams. Returns patterns appearing in >= threshold distinct sessions.
+    """Mine repeating tool-call sequences (bigrams) across sessions.
+
+    Normalizes tool names, collapses consecutive duplicates, then extracts the
+    n-grams of the window sizes the loop below walks — bigrams only, for the
+    reason written at that loop. Returns patterns appearing in >= threshold
+    distinct sessions.
 
     Two rules decide what survives the threshold, both from backlog #1327:
 
@@ -1192,6 +1203,14 @@ def mine_sequence_patterns(trajectories: list[dict], threshold: int = 2) -> list
       strictly shorter suffix key (`_suffix_sessions`). A windowed n-gram reports
       `sessions` as that own count, with the full observed total in
       `total_sessions` and what the suffix already billed in `borrowed_sessions`.
+
+    Only bigrams are mined, because of how those two rules meet: a 3-gram in a
+    collapsed stream always rides with its suffix bigram in the same sessions, so
+    a seq-3 key's session set is always a subset of its suffix bigram's (the pair
+    #1327 measured was 17 of 20), which leaves it with no session of its own and
+    no own-sessions threshold to clear — at any value of `threshold`. #1327's rule
+    is what made that true, and it is kept: the arm that built the 3-gram is gone,
+    not the arithmetic that made it unemittable (#2102).
     """
     # {ngram_tuple: {sessions, examples, dates}}
     pattern_data: dict[tuple[str, ...], dict] = defaultdict(lambda: {
@@ -1234,7 +1253,22 @@ def mine_sequence_patterns(trajectories: list[dict], threshold: int = 2) -> list
         # Track which ngrams we've already counted for this session (dedup within session)
         seen_in_session: set[tuple[str, ...]] = set()
 
-        for n in (2, 3):
+        # Bigrams only, and the reason is the billing rule below, not the window.
+        # A 3-gram at position *i* of this one collapsed label stream always feeds
+        # its suffix bigram at *i+1* in the SAME session, so a seq-3 key's session
+        # set is a subset of its suffix bigram's by construction: subtract
+        # `_suffix_sessions` and every 3-gram is left with no session of its own,
+        # which clears no threshold this function can be handed — neither `main()`'s
+        # `max(3, args.threshold)` nor 1. Measured over the live 7-day window on
+        # 2026-10-03: 216 keys emitted at threshold 1, none of them `ngram_size > 2`,
+        # and the same zero at thresholds 2 and 3. That is #1327's own-sessions rule
+        # doing its job (its ruling of 2026-10-03 accepted the consequence and
+        # refused a separate `new_sessions` metric); what the 3-gram arm was doing,
+        # on every run since `33284a6b`, was building keys for this same loop to
+        # throw away. Bringing a wider window back means changing that rule so a
+        # longer n-gram can ADD a session of its own — and `_suffix_sessions` is
+        # left general for exactly that day (#2102).
+        for n in (2,):
             for i in range(len(collapsed_labels) - n + 1):
                 ngram = tuple(collapsed_labels[i : i + n])
                 if ngram in seen_in_session:

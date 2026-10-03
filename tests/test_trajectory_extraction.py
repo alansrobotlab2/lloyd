@@ -1669,6 +1669,116 @@ def test_the_window_dedup_subtracts_only_the_suffix_key_set():
         "a 2-gram has no strictly shorter suffix and must never be subtracted")
 
 
+def test_the_miner_walks_bigrams_only_and_says_why_at_the_site():
+    """Clause 1 (#2102). The 3-gram arm is gone from the enumeration, and the reason
+    is written where the enumeration lives rather than in a follow-up.
+
+    #1327 left `for n in (2, 3)` walking one collapsed label stream while emission
+    stayed on own sessions, which makes every seq-3 key unemittable: a 3-gram at
+    position *i* always rides with its suffix bigram at *i+1* in the same sessions,
+    so its own-session count is empty and no value of `threshold` can be reached.
+    Seven nightly runs after `33284a6b` emitted 0 seq-3 keys where the store holds
+    13 seq-2 files, and a probe over the 7-day window on 2026-10-03 emitted 216 keys
+    at threshold 1, 56 at 2 and 26 at 3 with 0 of them `ngram_size > 2` at each —
+    the arm was dead code, not a starved one. So the check is on the text that
+    decides the window sizes: the tuple, the comment beside it, and the docstring
+    that used to advertise "bigrams and trigrams".
+    """
+    src = inspect.getsource(mt.mine_sequence_patterns)
+    doc = mt.mine_sequence_patterns.__doc__ or ""
+
+    assert "for n in (2, 3)" not in src, (
+        "the enumeration is walking a 3-gram again; under #1327's own-sessions rule "
+        "it builds keys this same function then throws away")
+    assert "for n in (2,):" in src, "the window sizes are no longer an explicit tuple"
+    loop_line = src.index("for n in (2,)")
+    site = src[max(0, loop_line - 1600):loop_line]
+    assert "#1327" in site, (
+        "the unreachability has to be named at the enumeration, not only in prose "
+        "a future reader has to find")
+    assert "own-sessions" in site or "own sessions" in site, (
+        "the site comment has to say which rule makes a wider window unemittable")
+    assert "#2102" in site, "the site comment names the item that dropped the arm"
+
+    assert "#1327" in doc, "the docstring no longer names the rule it obeys"
+    assert "#2102" in doc
+    assert "trigram" not in doc.lower(), (
+        "the docstring is advertising a window size the miner no longer builds")
+
+
+def test_a_three_step_corpus_builds_no_wider_window_than_a_bigram():
+    """Clause 2 (#2102). Mining a corpus of three-step error-recovery sequences
+    builds no key wider than a bigram, and its suffix bigram keeps every session.
+
+    Checked at `threshold=0` as well as at the values `main()` can pass, because
+    threshold 0 is the only setting that separates the two reasons a seq-3 key is
+    absent: with the own-sessions subtraction the key is filtered out of the
+    *result* while still being built, so re-adding 3 to the enumeration would leave
+    a threshold>=1 assertion like this one green. At threshold 0 the subtraction
+    cannot drop it (`0 < 0` is false for every key), so the only thing keeping the
+    3-gram out is that nothing builds it — which is what #2102 changed. The counts
+    are `windowed_traj(with_prefix=True)`'s shape: 5 sessions of
+    `bash:fs → bash:fs:ERR → bash:fs`, whose suffix bigram is the 5-session key the
+    run still reports.
+    """
+    rows = [windowed_traj(f"step-{i}", with_prefix=True) for i in range(5)]
+    suffix_bigram = "bash:fs:ERR → bash:fs"
+
+    built = mt.mine_sequence_patterns(rows, threshold=0)
+    wide = [p for p in built if p["ngram_size"] > 2]
+    assert wide == [], (
+        f"a window wider than a bigram was built: "
+        f"{[(p['sequence_str'], p['ngram_size'], len(p['sessions'])) for p in wide]}")
+
+    for threshold in (1, 3):
+        seqs = mt.mine_sequence_patterns(rows, threshold=threshold)
+        by_seq = {p["sequence_str"]: p for p in seqs}
+        assert suffix_bigram in by_seq, (
+            f"threshold {threshold}: the suffix bigram of a 3-step recovery is "
+            f"missing: {sorted(by_seq)}")
+        bigram = by_seq[suffix_bigram]
+        assert bigram["ngram_size"] == 2
+        assert len(bigram["sessions"]) == bigram["total_sessions"] == 5, (
+            f"threshold {threshold}: the surviving key lost a session: "
+            f"{len(bigram['sessions'])} of {bigram['total_sessions']}")
+        assert bigram["borrowed_sessions"] == 0, (
+            "a bigram has no strictly shorter suffix, so it can owe nothing")
+        assert all(p["ngram_size"] == 2 for p in seqs), (
+            f"threshold {threshold}: keys wider than a bigram reached the report")
+
+
+def test_the_suffix_deduction_still_spans_every_shorter_suffix():
+    """Clause 3 (#2102). `_suffix_sessions` stays general even though nothing hands
+    it a longer key now, because that generality is what makes the class revivable.
+
+    Dropping the arm is a decision about the enumeration, not about the arithmetic:
+    if some later rule lets a longer n-gram add a session of its own, the walk that
+    bills it has to still be there, spanning every strictly shorter suffix rather
+    than one fixed suffix size. A hand-built dict is the only way to show that, and
+    a 4-gram is the case that a walk narrowed to a single suffix size would pass
+    today's miner with and still get wrong: its `size 2` and `size 3` suffixes hold
+    disjoint sessions here, so both have to be summed.
+    """
+    data = {
+        ("c", "d"): {"sessions": {"x1"}},
+        ("b", "c", "d"): {"sessions": {"x2", "x3"}},
+        ("a", "b", "c", "d"): {"sessions": {"y1"}},
+        ("b", "c"): {"sessions": {"s1", "s2", "s3", "s4"}},
+        ("a", "b", "c"): {"sessions": {"s1", "s2", "s5"}},
+    }
+    assert mt._suffix_sessions(("a", "b", "c", "d"), data) == {"x1", "x2", "x3"}, (
+        "the walk stopped at one suffix size and stopped spanning every shorter one")
+    assert data[("a", "b", "c", "d")]["sessions"] - mt._suffix_sessions(
+        ("a", "b", "c", "d"), data) == {"y1"}
+    assert mt._suffix_sessions(("a", "b", "c"), data) == {"s1", "s2", "s3", "s4"}, (
+        "a 3-gram whose suffix holds more sessions than it does must return "
+        "the suffix's set, which is the arithmetic #1327 billed on")
+    assert data[("a", "b", "c")]["sessions"] - mt._suffix_sessions(
+        ("a", "b", "c"), data) == {"s5"}
+    assert "range(2, len(ngram))" in inspect.getsource(mt._suffix_sessions), (
+        "the walk is no longer bounded by the n-gram's own length")
+
+
 def test_the_candidate_file_separates_own_sessions_from_the_observed_total(tmp_path):
     """A windowed key that *did* have its own sessions must say so, or its
     `sessions:` count and its `## Sessions Affected` list disagree with the corpus
