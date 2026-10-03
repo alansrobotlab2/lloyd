@@ -31,7 +31,9 @@ import json
 import os
 import re
 import subprocess
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -148,6 +150,31 @@ def asks_for_a_human(title: str, body: str) -> bool:
     matching alone covers two of three members and breaks on every reword.
     """
     return NEEDS_HUMAN_MARKER in f"{title}\n{body}".lower()
+
+
+# ── the backlog channel's duplicate guard (#2080) ─────────────────────────────
+#: The board's own list route, read before `task-create` is POSTed. The board is
+#: the thing that knows whether an item of this title is already open, which is
+#: why the question is asked over HTTP rather than answered by re-reading the
+#: backlog directory from this process — the same reasoning `voiceloss.py`'s `_rows`
+#: gives for its own read of this same route.
+BACKLOG_LIST_PATH = "/api/backlog/tasks"
+#: The board `_backlog_task` files on. Named in its payload since #1990, and the
+#: duplicate read is scoped to the same board, so an item on `personal` that
+#: happens to carry a guardian's title can never silence that guardian alert.
+BACKLOG_ITEM_BOARD = "lloyd"
+#: Where a suppressed filing is recorded, in the guardian's own state dir: one
+#: small JSON written by `gstate.write_json_atomic`, the shape `poolwatch.py`'s
+#: `pool-silence.json` and `voiceloss.py`'s `voice_loss_cursor.json` are. On disk
+#: rather than in a `Notifier` attribute for the reason those two give: the skip
+#: has to outlive the process that made it, and be countable by something other
+#: than a log line. It records what was skipped and never decides the next one —
+#: see `_open_duplicate_on_board`, which is the only suppression input.
+BACKLOG_SKIP_STATE_NAME = "backlog-skipped.json"
+#: Same loopback bound as the POST it precedes. `voiceloss.py` sets its own timeout
+#: off that same number, for the same reason: a loopback that is not answering is
+#: the failure mode shared by the alert and the read that precedes it.
+BACKLOG_READ_TIMEOUT_SECONDS = 5.0
 
 
 class Notifier:
@@ -676,7 +703,36 @@ class Notifier:
         return None
 
     def _backlog_task(self, title: str, text: str, commit: str, tag: str) -> bool:
-        """File a backlog item so the revert becomes work, not a mystery."""
+        """File a backlog item so the revert becomes work, not a mystery.
+
+        The board is asked before it is written to (#2080). Three items share the
+        H1 `[guardian] Guardian self-test failed` (#1279, #1280, #1398) and two
+        share the automod-skill rollback title (#1346, #1350), every one of them
+        filed while an earlier copy of itself was still open, because neither side
+        of this seam looked: this method POSTed unconditionally and
+        `app/routers/backlog.py::backlog_task_create` computes `max_id + 1` and
+        writes. So while an OPEN item on `BACKLOG_ITEM_BOARD` carries the exact
+        name this would post, the filing is skipped and recorded under
+        `BACKLOG_SKIP_STATE_NAME`; close that item and the next firing files again,
+        which is what makes this suppression rather than a mute.
+
+        A read that fails, or answers anything but a list, does NOT suppress — it
+        files. That is a deliberate difference from `voiceloss.py`'s `_rows`, which
+        files nothing on a failed read: its filing is retried until it lands, and
+        this one is not, so a backend outage — precisely when several filing-path
+        alerts fire — would take #775's whole channel mute.
+
+        Returns True only when the board accepted a filing. A skip returns False
+        for the reason a failed POST does: no task file exists, and
+        `results["backlog"]` reports what happened to this alert rather than what
+        would have happened had the board been empty. Nothing reads that value
+        today (`guardian.py` drops it), which is why the skip is recorded on disk
+        instead of in the return.
+        """
+        item_name = f"[guardian] {title}"[:120]
+        if self._open_duplicate_on_board(item_name):
+            self._note_backlog_skip(item_name)
+            return False
         body = text
         if commit:
             body += (f"\n\nYour work is preserved. To re-apply and investigate:\n"
@@ -756,3 +812,118 @@ class Notifier:
                         and row_id > 0)
         except (urllib.error.URLError, OSError, ValueError):
             return False
+
+    # ── the duplicate guard (#2080) ─────────────────────────────────────────
+    def _board_rows(self, name: str):
+        """Every board row whose text carries `name`, or None when it is unreadable.
+
+        Asked of the board's own list route over the same loopback bound as the
+        POST, with `?q=` as a pre-filter and nothing more: the route matches the
+        needle against name, body, tags and board, so what comes back may include an
+        item that merely QUOTES a guardian alert, and `_open_duplicate_on_board` is
+        where the exact-name test happens. The needle is the name this file would
+        have posted and nothing looser, because a row whose name equals it can never
+        be filtered out by that needle, while a looser one only widens the scan.
+
+        `None` — never an empty list — is the answer for a refused connection, a
+        non-2xx, an unparseable body, or a body that is not a list. The two are
+        different facts and must not be conflated: an empty list is a readable board
+        with nothing open on it, and `None` is a board nobody can ask. Only `None`
+        makes the caller file anyway.
+        """
+        query = urllib.parse.urlencode({"board_id": BACKLOG_ITEM_BOARD, "q": name})
+        req = urllib.request.Request(
+            f"{self.backend_url}{BACKLOG_LIST_PATH}?{query}", method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=BACKLOG_READ_TIMEOUT_SECONDS) as resp:
+                if not (200 <= resp.status < 300):
+                    return None
+                rows = json.loads(resp.read().decode("utf-8", "replace") or "null")
+        except (urllib.error.URLError, OSError, ValueError):
+            return None
+        return rows if isinstance(rows, list) else None
+
+    def _open_duplicate_on_board(self, name: str) -> bool:
+        """True only when the board says an OPEN item already carries this name.
+
+        Exact equality on the row's `name`, not a prefix and no new matcher: the
+        route derives that field from the file's H1 (`_row_from` over `_split_body`),
+        so the string compared here is the string `backlog_task_create` wrote into
+        that H1, which is the string this call would have posted.
+
+        Open-ness is `voiceloss.canonical_status` against `voiceloss.OPEN_STATUSES`,
+        the guardian's single copy of the board's status vocabulary — re-implemented
+        there from `app/backlog_status.py` because a staged guardian module may not
+        import `app.*`, and pinned equal to it by
+        `tests/test_guardian_voice_loss_escalation.py::
+        test_the_guardian_and_the_backend_copy_of_the_status_vocabulary_agree`.
+        Importing it beats writing a second copy under `agent-services/guardian/`,
+        and the import failing answers False for the same reason everything else
+        undecided does.
+
+        Every inability to decide answers False, and False means the alert files.
+        That is the point: the only failure this guard can produce is a duplicate,
+        and the only failure it must never produce is silence.
+        """
+        rows = self._board_rows(name)
+        if rows is None:
+            return False
+        try:
+            import voiceloss
+        except Exception:
+            return False
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("name") or "") != name:
+                continue
+            if voiceloss.canonical_status(row.get("status")) in voiceloss.OPEN_STATUSES:
+                return True
+        return False
+
+    def _note_backlog_skip(self, name: str) -> None:
+        """Record that a filing for `name` was suppressed, in the guardian's state dir.
+
+        Keyed by the exact item name, so the record answers "how many times has this
+        signature been silenced, and when last" without a log grep, and a second
+        `Notifier` over the same `state_dir` shows the same count — the property the
+        poolwatch watermark buys for the pool-silence alarm and this one buys for a
+        repeat that arrives after a restart.
+
+        It is a RECORD and never an input: reading it back here would let a skip
+        outlive the item that justified it, and #2080's clause 5 is that closing the
+        item must file again. The board is re-read on every filing, which is what
+        makes the restart case correct rather than this file.
+
+        Never raises. The skip already happened by the time this runs, and a state
+        dir that cannot be written must not cost the ledger row, ALERT.md or the
+        daily note that `alert()` fans out around this channel.
+        """
+        try:
+            import gstate
+            path = self.state_dir / BACKLOG_SKIP_STATE_NAME
+            data = gstate.read_json(path) or {}
+            entry = data.get("suppressed")
+            entry = entry if isinstance(entry, dict) else {}
+            prior = entry.get(name)
+            prior = prior if isinstance(prior, dict) else {}
+            try:
+                count = int(prior.get("count") or 0)
+            except (TypeError, ValueError):
+                count = 0
+            entry[name] = {
+                "count": count + 1,
+                "first_seen": prior.get("first_seen") or gstate.now_iso(),
+                "last_seen": gstate.now_iso(),
+                "last_seen_ts": time.time(),
+            }
+            data.update({
+                "schema": 1,
+                "suppressed": entry,
+                "last_suppressed": name,
+                "board": BACKLOG_ITEM_BOARD,
+                "list_url": f"{self.backend_url}{BACKLOG_LIST_PATH}",
+            })
+            gstate.write_json_atomic(path, data)
+        except Exception:
+            return

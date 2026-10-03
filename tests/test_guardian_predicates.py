@@ -1199,33 +1199,96 @@ def test_the_needs_human_route_is_covered_by_repeat_suppression(tmp_path, monkey
 
 
 @contextlib.contextmanager
-def _stub_board(tmp_path, reply: dict):
-    """A loopback stand-in for the backend's task-create endpoint, yielding the
-    server and a `seen` dict holding the path and the decoded JSON body — the
-    bytes `backlog_task_create` would have written a task file from.
+def _stub_board(tmp_path, reply: dict | None = None, *, board_dir=None,
+                board_read: str = "ok"):
+    """A loopback stand-in for the backend's backlog routes, yielding the server and
+    a `seen` dict recording what arrived: `path` and `body` for the last POST, every
+    POST body in `posts`, and the list reads in `gets`.
 
-    `reply` is what the caller says the backend answers, and the caller passes
-    the shape `app/routers/backlog.py::backlog_task_create` really returns,
-    `{"success": true, "id": N}`. It does **not** echo the request's `name`, and
-    no branch of `_backlog_task` reads a name any more, so every reply shape the
-    tests below pass is one the real endpoint can actually send."""
+    Two modes, and what differs between them is which half of the seam is real.
+
+    * `board_dir=None` — POST answers the caller's hand-written `reply` and writes
+      nothing. That has to stay: the shapes #1612 pins (`{"success": false}`, an id
+      of `true`, no id at all) are ones the endpoint cannot send, and the whole point
+      of those tests is a reply that lies about the file. The read is answered with an
+      empty list — a readable board carrying nothing — so a filing test in this mode
+      is not accidentally suppressed by #2080's guard.
+    * `board_dir` given — **both** routes are the real ones. `backlog_task_create`
+      writes a task file into that directory and its own reply goes back over the
+      socket; `backlog_tasks` serialises whatever is in it. A file on that board is
+      then evidence the guardian filed, and the absence of one evidence it did not,
+      which is the only evidence #2080's clauses can use: `{"success": true, "id": N}`
+      is the same process vouching for itself. `app.routers.backlog._BACKLOG_DIR` is
+      redirected for the duration of the block and restored after it.
+
+    `board_read` means something only with `board_dir`: `fail` answers the list read
+    with a 500 while POST still works — the shape of a read that cannot be trusted,
+    which is what clause 3 is about, and the seeded item stays on disk throughout so
+    a working read WOULD have suppressed — `not-a-list` answers a JSON object, and
+    `ok` runs the route.
+
+    The read never writes `seen["path"]`, because #1612's tests read that key as
+    "the filing request landed" and a GET that set it would make a guardian that only
+    ever reads look like one that files."""
+    import asyncio
     import json
     import threading
+    import urllib.parse
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-    seen: dict = {}
+    import app.routers.backlog as BR
+
+    seen: dict = {"posts": [], "gets": []}
+    board = None if board_dir is None else Path(board_dir)
+    saved_dir = BR._BACKLOG_DIR
+    saved_boards = BR._backlog_board_map
+    if board is not None:
+        # Both halves of the real route run in here, so both of the corpus reads the
+        # real route does have to be redirected — not just `_BACKLOG_DIR`. The create
+        # consults `_backlog_board_map()` for the board name, and left alone that is a
+        # scan of the whole live vault inside every node that files, which makes a test
+        # about a temp directory answer differently depending on what is on the board
+        # that day. Patched to empty the same way
+        # `tests/test_backlog_okf_frontmatter.py::http_board` does it; the READ route
+        # resolves the board by NAME from `fm["board"]`, so an empty id map costs it
+        # nothing and it still answers from `board_dir`.
+        BR._BACKLOG_DIR = board
+        BR._backlog_board_map = lambda: {}
 
     class Handler(BaseHTTPRequestHandler):
-        def do_POST(self):  # noqa: N802
-            seen["path"] = self.path
-            seen["body"] = json.loads(
-                self.rfile.read(int(self.headers["Content-Length"])).decode())
-            payload = json.dumps(reply).encode()
-            self.send_response(200)
+        def _send(self, status: int, payload: bytes) -> None:
+            self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
+
+        def do_POST(self):  # noqa: N802
+            body = json.loads(
+                self.rfile.read(int(self.headers["Content-Length"])).decode())
+            seen["path"] = self.path
+            seen["body"] = body
+            seen["posts"].append(body)
+            if board is None:
+                self._send(200, json.dumps(reply).encode())
+                return
+            response = asyncio.run(BR.backlog_task_create(_CapturedRequest(body)))
+            self._send(response.status_code, response.body)
+
+        def do_GET(self):  # noqa: N802
+            seen["gets"].append(self.path)
+            if board is None:
+                self._send(200, b"[]")
+            elif board_read == "fail":
+                self._send(500, b'{"detail": "board unavailable"}')
+            elif board_read == "not-a-list":
+                self._send(200, b'{"detail": "board unavailable"}')
+            else:
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                args = {key: (query.get(key) or [""])[0]
+                        for key in ("board_id", "status", "q", "done_since")}
+                response = BR.backlog_tasks(**args)
+                self._send(response.status_code, response.body)
 
         def log_message(self, *a):
             pass
@@ -1233,11 +1296,19 @@ def _stub_board(tmp_path, reply: dict):
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
-        (tmp_path / "obsidian" / "memory").mkdir(parents=True)
+        (tmp_path / "obsidian" / "memory").mkdir(parents=True, exist_ok=True)
         yield server, seen
     finally:
         server.shutdown()
         server.server_close()
+        BR._BACKLOG_DIR = saved_dir
+        BR._backlog_board_map = saved_boards
+
+
+#: The signature every #2080 test repeats. `Guardian self-test failed` is the alert
+#: whose three copies (#1279, #1280, #1398) the item names, so the fixture is the
+#: title the fix was written for rather than a made-up one.
+DUPLICATE_TITLE = "Guardian self-test failed"
 
 
 def _board_notifier(server, tmp_path):
@@ -2875,3 +2946,324 @@ def test_the_committed_alert_witness_carries_the_defect_and_the_new_body_carries
                    "still resolves a data path off the code"):
         assert phrase not in body, f"{phrase} survived into the new body:\n{body}"
     assert "does not identify a writer" in body, body
+
+
+# ── the guardian asks the board before it files (#2080) ────────────────────────
+#
+# `_backlog_task` POSTed unconditionally and `backlog_task_create` computed
+# `max_id + 1` and wrote, so a signature that fired twice while its first item was
+# still open left two items on the board. The five the item names are the evidence:
+# #1279, #1280 and #1398 all carry the H1 `# [guardian] Guardian self-test failed`
+# and all three stayed `draft` until 2026-09-24, and #1346/#1350 are the same story
+# 70 minutes apart. These tests drive the filing path against a board made of the
+# real routes over a temp directory — the create that seeds it and the list the
+# guardian reads are both `app/routers/backlog.py` — because every clause's
+# observable is a task FILE, and `{"success": true, "id": N}` is only the backend
+# vouching for itself.
+#
+# Re-counting the live board proves nothing here and is deliberately not done: all
+# five duplicates are `done` today, so the open-duplicate count that was supposed to
+# demonstrate the fix is zero whether or not the fix exists.
+
+#: The second filing-path signature, used by the positive control so that BOTH of
+#: its firings satisfy that clause's precondition ("no open item of THAT name") while
+#: still writing two files. Two firings of ONE title against a live board is not a
+#: control, it is clause 1's suppression.
+SECOND_TITLE = "Service down, but no promotion to revert"
+
+
+def _board_files(board_dir) -> list:
+    """The task files on the stub board, sorted. The observable every clause names
+    ("writes no task file", "exactly two") is this list, not the HTTP reply."""
+    return sorted(Path(board_dir).glob("*.md"))
+
+
+def _seed_open_item(board_dir, title: str, monkeypatch):
+    """Put an OPEN `[guardian] <title>` item on the board and return its path.
+
+    Filed by `backlog_task_create` from the payload `notify.py::_backlog_task` builds
+    rather than written by hand, so the seeded row's `name`, `board` and `status` are
+    the real route's output and the read under test answers from the same store the
+    create writes — which is how it is in production.
+    """
+    _replay_on_the_route({
+        "name": f"[guardian] {title}"[:120],
+        "description": NEEDS_HUMAN_BODY,
+        "board": "lloyd",
+        "status": "draft",
+        "priority": "high",
+    }, board_dir, monkeypatch)
+    written = _board_files(board_dir)
+    assert len(written) == 1, f"the seed filing wrote {written}"
+    return written[0]
+
+
+def _close_item_on_board(path) -> None:
+    """Close one board file the way a person closing an item does: its `status`."""
+    text = path.read_text(encoding="utf-8")
+    assert "\nstatus: draft\n" in text, f"{path.name} has no `status: draft` to close"
+    path.write_text(text.replace("\nstatus: draft\n", "\nstatus: done\n", 1),
+                    encoding="utf-8")
+
+
+def _skip_record(tmp_path) -> dict:
+    """The guardian's on-disk record of what it suppressed, read back.
+
+    The state-dir file name comes from `notify.BACKLOG_SKIP_STATE_NAME` rather than
+    being re-typed here, so renaming it moves this read instead of leaving it
+    asserting a path nothing writes.
+    """
+    import json
+
+    import notify
+
+    path = Path(tmp_path) / notify.BACKLOG_SKIP_STATE_NAME
+    assert path.exists(), (
+        f"{path} does not exist: a suppressed filing left nothing countable behind")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_an_open_copy_of_the_title_stops_the_next_filing(tmp_path, monkeypatch):
+    """Clause 1, across the seam: the guardian GETs the board's own list route and,
+    finding its own title open, issues no POST and writes no file.
+
+    The seed is a real create, so this is the production sequence — the alert that
+    filed #1279 firing again the next day — and not a stub told what to say.
+    `seen["posts"]` is the whole of the assertion: a POST is the only way a task file
+    appears, and the list read in `seen["gets"]` is what makes the silence a decision
+    rather than a broken client."""
+    board = tmp_path / "board"
+    seeded = _seed_open_item(board, DUPLICATE_TITLE, monkeypatch)
+
+    with _stub_board(tmp_path, board_dir=board) as (server, seen):
+        res = _board_notifier(server, tmp_path).alert(
+            "error", DUPLICATE_TITLE, NEEDS_HUMAN_BODY, needs_human=True)
+
+    assert seen["gets"], "no board read was made, so nothing was consulted"
+    assert seen["gets"][0].startswith("/api/backlog/tasks?"), seen["gets"]
+    assert "board_id=lloyd" in seen["gets"][0], (
+        f"the read is not scoped to the board the item files on: {seen['gets'][0]}")
+    assert seen["posts"] == [], (
+        f"an open copy of the title did not stop the POST: {seen['posts']}")
+    assert _board_files(board) == [seeded], (
+        f"a second task file appeared beside the open seed: {_board_files(board)}")
+    assert res["backlog"] is False, (
+        f"a suppressed filing reported itself as delivered: {res}")
+
+
+def test_with_neither_title_open_two_firings_write_two_task_files(tmp_path):
+    """Clause 2, and the reason clause 1 is not simply a POST that stopped working.
+
+    Two DIFFERENT titles, because the clause's precondition is per-firing — no open
+    item of THAT name — and a file only appears if the real route ran and wrote it. A
+    second firing of the SAME title is not this node's case: its first filing is open
+    on the board by then, which is clause 1; `test_closing_the_open_copy_lets_the_next_filing_through`
+    is where one title fires twice and both files are expected.
+    `res["backlog"] is True` on its own would be satisfied by a stub; the H1, board,
+    status and priority read off the two files are what show a filing-path alert
+    still reaching the board intact, which is everything the suppression below is not
+    allowed to break."""
+    board = tmp_path / "board"
+
+    with _stub_board(tmp_path, board_dir=board) as (server, seen):
+        notifier = _board_notifier(server, tmp_path)
+        first = notifier.alert("error", DUPLICATE_TITLE, NEEDS_HUMAN_BODY,
+                               needs_human=True)
+        second = notifier.alert("error", SECOND_TITLE, NEEDS_HUMAN_BODY,
+                                needs_human=True)
+
+    assert (first["backlog"], second["backlog"]) == (True, True), (first, second)
+    assert len(seen["posts"]) == 2, seen["posts"]
+    files = _board_files(board)
+    assert len(files) == 2, f"the board holds {len(files)} files, expected two: {files}"
+    written = {}
+    for path in files:
+        fm, h1 = _filed_task(path)
+        written[h1] = fm
+    assert set(written) == {f"# [guardian] {DUPLICATE_TITLE}",
+                            f"# [guardian] {SECOND_TITLE}"}, written
+    for fm in written.values():
+        assert (fm["board"], fm["status"], fm["priority"]) == ("lloyd", "draft", "high"), fm
+
+
+@pytest.mark.parametrize("board_read", ["fail", "not-a-list"],
+                         ids=["list-read-answers-500", "list-read-answers-an-object"])
+def test_a_board_that_cannot_be_read_still_gets_the_filing(tmp_path, monkeypatch,
+                                                           board_read):
+    """Clause 3: an unreadable board fails OPEN, so a backend outage cannot mute the
+    channel #775 exists to keep alive.
+
+    An open copy of the title is on disk for both cases, which is what makes this a
+    test of the read rather than of an empty board: with the read working, each of
+    these firings is clause 1 and files nothing. What differs is only the answer the
+    read gets — a 500, or a JSON object where the route sends a list — and in both
+    the POST goes out exactly once and a task file appears.
+    """
+    board = tmp_path / "board"
+    _seed_open_item(board, DUPLICATE_TITLE, monkeypatch)
+
+    with _stub_board(tmp_path, board_dir=board, board_read=board_read) as (server, seen):
+        res = _board_notifier(server, tmp_path).alert(
+            "error", DUPLICATE_TITLE, NEEDS_HUMAN_BODY, needs_human=True)
+
+    assert len(seen["gets"]) == 1, seen["gets"]
+    assert len(seen["posts"]) == 1, (
+        f"a board read that failed suppressed a filing ({board_read}): {seen['posts']}")
+    assert len(_board_files(board)) == 2, (
+        f"a failed board read left the alert with no task file: {_board_files(board)}")
+    assert res["backlog"] is True, res
+
+
+def test_a_suppressed_filing_is_recorded_and_survives_a_restart(tmp_path, monkeypatch):
+    """Clause 4: the skip leaves a record naming the signature, and a second
+    `Notifier` over the same state dir — a guardian that restarted mid-incident —
+    files zero for the title that is still open.
+
+    The record is checked twice, and the second read is the one that makes it
+    countable rather than write-only: two suppressed firings from two different
+    `Notifier` objects advance the same count, which an in-memory set could not.
+    The filing count stays at zero across both, which is the property a restart is
+    supposed to preserve.
+    """
+    board = tmp_path / "board"
+    seeded = _seed_open_item(board, DUPLICATE_TITLE, monkeypatch)
+    name = f"[guardian] {DUPLICATE_TITLE}"
+
+    with _stub_board(tmp_path, board_dir=board) as (server, seen):
+        _board_notifier(server, tmp_path).alert(
+            "error", DUPLICATE_TITLE, NEEDS_HUMAN_BODY, needs_human=True)
+        record = _skip_record(tmp_path)
+        assert name in record["suppressed"], (
+            f"the skip record does not name the signature: {record}")
+        assert record["suppressed"][name]["count"] == 1, record
+
+        _board_notifier(server, tmp_path).alert(
+            "error", DUPLICATE_TITLE, NEEDS_HUMAN_BODY, needs_human=True)
+
+    assert seen["posts"] == [], f"a restarted guardian filed anyway: {seen['posts']}"
+    assert _board_files(board) == [seeded], _board_files(board)
+    assert _skip_record(tmp_path)["suppressed"][name]["count"] == 2, (
+        "two suppressed firings across a restart did not both reach the record")
+
+
+def test_closing_the_open_copy_lets_the_next_filing_through(tmp_path, monkeypatch):
+    """Clause 5: this is suppression and not a mute, which is the half of the design
+    a watermark-shaped record is most likely to get wrong.
+
+    One title, three firings, one board: the first files, the second is silenced
+    because its own item is open, and the third files again once that item is closed.
+    The closed file and the new one are told apart by their own `status`, so the
+    assertion cannot be satisfied by the second filing having happened earlier, nor
+    by a third file nobody filed.
+    """
+    board = tmp_path / "board"
+
+    with _stub_board(tmp_path, board_dir=board) as (server, seen):
+        notifier = _board_notifier(server, tmp_path)
+        notifier.alert("error", DUPLICATE_TITLE, NEEDS_HUMAN_BODY, needs_human=True)
+        assert len(_board_files(board)) == 1, "the first firing filed nothing"
+
+        notifier.alert("error", DUPLICATE_TITLE, NEEDS_HUMAN_BODY, needs_human=True)
+        assert len(_board_files(board)) == 1, (
+            "the second firing filed a duplicate while the first item was open")
+
+        _close_item_on_board(_board_files(board)[0])
+        notifier.alert("error", DUPLICATE_TITLE, NEEDS_HUMAN_BODY, needs_human=True)
+
+    files = _board_files(board)
+    assert len(files) == 2, (
+        f"closing the open copy must let exactly one filing through, got {files}")
+    assert len(seen["posts"]) == 2, seen["posts"]
+    by_status = {}
+    for path in files:
+        fm, h1 = _filed_task(path)
+        assert h1 == f"# [guardian] {DUPLICATE_TITLE}", h1
+        by_status.setdefault(fm["status"], []).append(path.name)
+    assert sorted(by_status) == ["done", "draft"], by_status
+    assert len(by_status["draft"]) == 1, by_status
+
+
+#: The vault commit the alert witness landed on, and the dated path it landed at. The
+#: item's clause names the promotions ledger's retired working-tree location, which
+#: #2050 owed-5, #2054 and #2064 ruled must not hold a copy again; the extract went to
+#: the dated-witness path this box uses for exactly that purpose instead, and the
+#: figures below are unchanged by the move because the bytes are the same rows.
+#: Read from the object store at a pinned commit rather than from the tree: a tree
+#: under `backlog/data/` is the retention sweep's to prune, and history is the copy
+#: that cannot be rewritten under a reader's feet.
+ALERT_WITNESS_COMMIT = "d3c3bae3"
+ALERT_WITNESS_PATH = "backlog/data/2026-10-02.2080-alert-witness.jsonl"
+#: Every `"event": "alert"` row of the promotion ledger, verbatim. `wc -l` on these
+#: bytes is the 57, and the per-title counts inside them are the figures #2080's
+#: argument rests on: the signature that fires 46 times and files nothing, the
+#: self-test title whose three open copies are the item's premise, and the
+#: needs-human title whose two firings produced no item at all.
+WITNESS_ALERT_ROWS = 57
+WITNESS_STRAY_FIRINGS = 46
+WITNESS_SELF_TEST_FIRINGS = 3
+WITNESS_SERVICE_DOWN_FIRINGS = 2
+
+
+def test_the_committed_alert_witness_is_the_rows_the_item_counts():
+    """Clause 6: the alert-frequency figures this item quotes now have committed bytes
+    behind them, and this node recomputes every one of them from those bytes.
+
+    Before this, each number was a sentence about a runtime file —
+    `~/.local/state/lloyd-automod/promotions.jsonl` — that grows ~2 MB a day and whose
+    rows a reader cannot hold, so the claim "the noisiest signature fires constantly
+    and files nothing" could not be checked by anyone but a process on this box. The
+    witness is the ledger's alert rows copied verbatim and unfiltered within that one
+    event, which is the population every quoted figure is a count over.
+
+    The row set and the counts come from ONE read of ONE commit, so they cannot
+    describe two ledgers. And the counts are the interesting half: 46 of the 57 rows
+    are the stray-data signature, and zero items were ever filed for it — which is
+    why suppression here acts only on repeat rollback-trigger and needs-human
+    signatures, and why the live board could not have demonstrated this fix.
+    """
+    import collections
+    import json
+    import subprocess
+
+    from app import paths
+
+    shown = subprocess.run(
+        ["git", "-C", str(paths.VAULT_ROOT), "show",
+         f"{ALERT_WITNESS_COMMIT}:{ALERT_WITNESS_PATH}"],
+        capture_output=True, text=True)
+    assert shown.returncode == 0, (
+        f"`git show {ALERT_WITNESS_COMMIT}:{ALERT_WITNESS_PATH}` failed: "
+        f"{shown.stderr.strip()}")
+    # The figures come from the PINNED COMMIT, never from the working tree: a file
+    # under `backlog/data/` is the retention sweep's to prune, exactly as the
+    # promotions mirror this extract replaces was, and a node that read the tree would
+    # go red on the day a housekeeping round tidies it. If the copy IS on disk it must
+    # agree with the commit, so a dirty or edited working copy cannot drift unnoticed;
+    # if it has been pruned, history is still the witness and the node stays green.
+    on_disk = Path(paths.VAULT_ROOT) / ALERT_WITNESS_PATH
+    if on_disk.exists():
+        checked = subprocess.run(
+            ["git", "-C", str(paths.VAULT_ROOT), "status", "--porcelain", "--",
+             ALERT_WITNESS_PATH],
+            capture_output=True, text=True)
+        assert checked.stdout.strip() == "", (
+            f"the witness on disk differs from the committed bytes: {checked.stdout!r}")
+        assert on_disk.read_bytes().decode() == shown.stdout, (
+            "the working copy and the commit disagree")
+
+    lines = [l for l in shown.stdout.splitlines() if l.strip()]
+    assert len(lines) == WITNESS_ALERT_ROWS, (
+        f"{len(lines)} witness rows, not the {WITNESS_ALERT_ROWS} `wc -l` reports")
+    rows = [json.loads(l) for l in lines]
+    assert all(r.get("event") == "alert" for r in rows), (
+        "the witness holds a non-alert row, so it is not the population the "
+        f"figures were counted over: {sorted({r.get('event') for r in rows})}")
+
+    titles = collections.Counter(r.get("title") for r in rows)
+    assert titles[DUPLICATE_TITLE] == WITNESS_SELF_TEST_FIRINGS, titles
+    assert titles[SECOND_TITLE] == WITNESS_SERVICE_DOWN_FIRINGS, titles
+    assert titles["Runtime data is being written into the code tree"] \
+        == WITNESS_STRAY_FIRINGS, titles
+    assert sum(titles.values()) == WITNESS_ALERT_ROWS, (
+        f"{sum(titles.values())} titled rows out of {WITNESS_ALERT_ROWS}: a row "
+        "without a title would make the counts above a partial sum")
