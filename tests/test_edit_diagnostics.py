@@ -736,3 +736,18 @@ async def test_the_rail_costs_under_150ms_per_edit(bound, repo):
         assert res.is_error is False, _text(res)
         assert "pkg/api.py:19" in _text(res)   # the rail is on the fast path too
     assert worst < 0.15, f"slowest edit took {worst * 1000:.0f} ms"
+
+
+def test_the_shipped_config_names_the_blast_radius_switch():
+    """#2141: the switch existed only as a code default, so the one way to turn
+    the cross-file block off was to know the key's name. The shipped file must
+    carry it (read from the file — `D.config()` returns True with no key at all),
+    and the docstring must stop saying no key exists."""
+    from pathlib import Path
+    import yaml
+    root = Path(__file__).resolve().parents[1]
+    section = yaml.safe_load((root / "config.yaml").read_text())["harness"]["edit_diagnostics"]
+    assert section.get("blast_radius") is True
+    doc = D.config.__doc__
+    assert "no `config.yaml` key" not in doc and "human-only" not in doc
+    assert "cross-file rail's own switch" in doc

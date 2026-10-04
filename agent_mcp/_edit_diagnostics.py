@@ -710,8 +710,7 @@ def config() -> dict:
     `blast_radius` is the cross-file rail's own switch, separate from
     `python` because the two read different stores: pyflakes on the two
     images, and the code graph. Turning one off should not silently turn off
-    the other. There is no `config.yaml` key for it yet — adding one is a
-    human-only edit.
+    the other.
     """
     defaults = {"python": True, "typescript": True, "blast_radius": True,
                 "max_lines": DEFAULT_MAX_LINES}

@@ -700,6 +700,10 @@ harness:
   edit_diagnostics:
     python: true
     typescript: true
+    # The cross-file `<blast_radius>` block: who calls what this edit touched,
+    # read from the code graph. Its own switch, independent of `python` — that
+    # one is the pyflakes delta and reads a different store.
+    blast_radius: true
     max_lines: 30
   # Structured final answer. When a caller passes RunOptions.final_schema
   # (today: the backlog triage worker), the loop runs one extra completion
