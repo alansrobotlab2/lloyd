@@ -11,7 +11,10 @@ djev is stubbed at `app.djev.ask_sync` with a real server-shaped payload, so
 
 Run: .venvs/lloyd/bin/python -m pytest tests/test_fact_write_gate.py
 """
+import datetime
+import inspect
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -23,6 +26,9 @@ sys.path.insert(0, str(ROOT))
 
 from agent_mcp import _shared, fact_write_gate as gate, facts, retrieval  # noqa: E402
 from app import djev, kg_store, paths  # noqa: E402
+from app.data_root import production_data_root  # noqa: E402
+from tests._live_data import require_live_data  # noqa: E402
+from tests.board_presence import vault_root  # noqa: E402
 
 ENTITY, CAT = "Zedlink", "state"
 OLD = "stream_chat races SSE line reads against cancel_event to allow Stop during prefill"
@@ -284,3 +290,195 @@ def test_the_extractor_holds_back_a_restatement_and_supersedes_in_place(tmp_path
         assert PARAPHRASE in [x["fact"] for x in yaml.safe_load(path.read_text().split("---")[1])["facts"]]
     finally:
         kg_store.reset()
+
+
+# ── #2167: the shipped prose reserves UPDATE; the sample it cites does not ───
+#
+# Two sentences used to leave the question open for a count to answer.
+# `config.yaml`'s write_gate comment said `on` "stays off until `shadow`-style
+# data shows supersedes are safe at n > 3", and this module's docstring asked
+# whether a djev label may expire a fact at all as a question still on the
+# table. Both invited a round to arm a fact-expiring capability on a log count,
+# so both are replaced by a reservation with an owner (Alan) and a prerequisite
+# (a measured LloydMemEval `knowledge_update` gain). The numbers the new prose
+# quotes are checked against the log they cite and against the copy of that log
+# committed to the vault at backlog/data/fact-write-gate.jsonl, so a pinned
+# figure that outgrows its evidence is a red node, not a stale sentence.
+
+#: config.yaml's replaced comment lines, verbatim, and the sentence they carry.
+#: The fold below must FIND this sentence in the held bytes: an assertion that
+#: the shipped file lacks it is worth nothing until the scan has hit it once.
+PRE_FIX_CONFIG_BLOCK = (
+    "  # writes) and never expires a fact. `on` stays off until `shadow`-style "
+    "data\n  # shows supersedes are safe at n > 3. Cost: ~340 ms p50 djev per "
+    "asked write,")
+PRE_FIX_CONFIG_SENTENCE = ("`on` stays off until `shadow`-style data shows supersedes "
+                           "are safe at n > 3")
+#: The same for the docstring: the pre-fix wording, and the question it posed.
+PRE_FIX_DOCSTRING_BLOCK = (
+    "* ``noop`` — apply NOOP (nothing written), record UPDATE as ADD. The scope\n"
+    "  call the item left to a person is whether a djev label may expire a fact at\n"
+    "  all (#499 recorded `fact_entity_recall` 0.35 → 0.30 from retiring the wrong\n"
+    "  copy), so NOOP — which destroys nothing — is its own step.")
+PRE_FIX_DOCSTRING_SENTENCE = ("The scope call the item left to a person is whether a djev "
+                              "label may expire a fact at all")
+
+#: The log the prose cites, spelled as the clause spells it; where that log
+#: lives on a running box; and the copy of its would-be-supersede rows
+#: committed to the vault, which is what the quoted figure is re-derived from
+#: (#2167 clause 6).
+CITED_LOG_PATH = "_pipeline/vault-derived/fact-write-gate.jsonl"
+LIVE_LOG = production_data_root() / "_pipeline" / "vault-derived" / "fact-write-gate.jsonl"
+WITNESS = Path("backlog") / "data" / "fact-write-gate.jsonl"
+#: What counts as a verdict's outcome being recorded: absent here, which is
+#: precisely why no logged row can say whether expiring its fact was safe.
+GROUND_TRUTH_KEYS = {"ground_truth", "label", "labels", "outcome", "expected",
+                     "correct", "verdict_correct", "human_label", "reviewed"}
+
+
+def _fold(lines) -> str:
+    """Comment markers off, one space between the wrapped lines, one string.
+
+    Both shipped sites wrap mid-sentence, so a line-by-line scan sees
+    ``…stays off until `shadow`-style data`` on one line and ``shows supersedes
+    are safe at n > 3.`` on the next and matches neither. Folding is what makes
+    the absence assertions below assertions about sentences.
+    """
+    out = []
+    for line in lines:
+        text = line.strip()
+        out.append(text[1:].strip() if text.startswith("#") else text)
+    return " ".join(part for part in out if part)
+
+
+def _write_gate_comment() -> str:
+    """The comment block sitting directly above the `write_gate:` key, folded."""
+    lines = (ROOT / "config.yaml").read_text(encoding="utf-8").splitlines()
+    at = next(i for i, line in enumerate(lines) if line == "  write_gate:")
+    start = at
+    while start and lines[start - 1].lstrip().startswith("#"):
+        start -= 1
+    assert start < at, "no comment block above `write_gate:` to grade"
+    return _fold(lines[start:at])
+
+
+def _config():
+    return yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
+
+
+def _pinned_citation(block: str) -> tuple[int, datetime.date]:
+    """The (count, as-of date) the comment block names for its cited log."""
+    found = re.search(r"(\d[\d,]*)\s+`\"verdict\": \"update\"` rows in `"
+                      + re.escape(CITED_LOG_PATH)
+                      + r"` as of (\d{4}-\d{2}-\d{2})", block)
+    assert found, f"the block cites no pinned count, path and as-of date:\n{block}"
+    return int(found.group(1).replace(",", "")), datetime.date.fromisoformat(found.group(2))
+
+
+def _witness_rows() -> list[dict]:
+    """The committed witness rows, skipping by name if this box has no vault."""
+    path = vault_root() / WITNESS
+    require_live_data(path, "the committed write-gate witness", kind="file")
+    return [json.loads(line) for line in
+            path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+# ── clauses 1 and 2: the count is gone, the reservation is stated ───────────
+
+def test_no_line_of_config_leaves_update_arming_to_a_count():
+    cfg = (ROOT / "config.yaml").read_text(encoding="utf-8")
+    assert [ln for ln in cfg.splitlines() if "n > 3" in ln] == []
+    assert PRE_FIX_CONFIG_SENTENCE not in _write_gate_comment()
+    # The control, so the two lines above cannot be a scan that matched nothing:
+    # the same fold over the bytes that used to be shipped finds the sentence.
+    pre_fix = _fold(PRE_FIX_CONFIG_BLOCK.splitlines())
+    assert PRE_FIX_CONFIG_SENTENCE in pre_fix
+    assert "n > 3" in pre_fix
+
+
+def test_the_write_gate_comment_reserves_on_for_alan_and_for_a_measured_gain():
+    block = _write_gate_comment()
+    for words in ("UPDATE is never armed under #1487",
+                  "`on` is RESERVED",
+                  "explicit decision from Alan",
+                  "LloydMemEval `knowledge_update` gain"):
+        assert words in block, words
+    # And who is actually standing between `mode: "noop"` and an expiring
+    # write: the comment, because nothing else does (the next node checks).
+    assert "no code guard" in block
+
+
+# ── clause 3: the quoted count cannot rot ───────────────────────────────────
+
+def test_the_quoted_supersede_count_is_at_most_what_the_live_log_holds():
+    pinned, as_of = _pinned_citation(_write_gate_comment())
+    require_live_data(LIVE_LOG, "the fact write gate's decision log", kind="file")
+    logged = sum(1 for line in LIVE_LOG.read_text(encoding="utf-8").splitlines()
+                 if '"verdict": "update"' in line)
+    assert pinned <= logged, (
+        f"config.yaml quotes {pinned} would-be supersedes but "
+        f"{LIVE_LOG} holds {logged}: the prose number has outgrown its evidence")
+    assert as_of <= datetime.date.today(), as_of
+
+
+def test_the_quoted_count_is_re_derivable_from_the_committed_witness():
+    pinned, as_of = _pinned_citation(_write_gate_comment())
+    rows = _witness_rows()
+    assert len(rows) == pinned, (
+        f"`wc -l < {WITNESS}` is {len(rows)}, config.yaml quotes {pinned}")
+    assert all(r["verdict"] == "update" for r in rows)
+    assert all(r["ts"][:10] <= as_of.isoformat() for r in rows)
+    # The three claims the new sentence makes about that sample, checked in it:
+    # every row is a `noop` row, `noop` applied each one as ADD, and no row
+    # records an outcome — which is the whole reason the count is not
+    # authorizing. `applied` is the field an expiry would have landed in.
+    assert all(r["mode"] == "noop" for r in rows)
+    assert all(r["applied"] == "add" for r in rows)
+    keys = set().union(*(set(r) for r in rows))
+    assert not (keys & GROUND_TRUTH_KEYS), sorted(keys & GROUND_TRUTH_KEYS)
+
+
+def test_the_witness_guard_skips_by_name_rather_than_failing_on_a_missing_vault(tmp_path,
+                                                                                 monkeypatch):
+    # `tests/_live_data.py`: an absent live root is a property of the machine,
+    # so the skip names it; a present-but-wrong thing still fails. Proved by
+    # moving the vault elsewhere, not by asserting an absence.
+    monkeypatch.setenv("LLOYD_OBSIDIAN_VAULT", str(tmp_path))
+    with pytest.raises(pytest.skip.Exception, match="committed write-gate witness"):
+        _witness_rows()
+
+
+# ── clause 4: the docstring reserves it too, instead of asking ──────────────
+
+def test_the_module_docstring_records_the_scope_call_as_reserved_not_open():
+    doc = _fold((gate.__doc__ or "").splitlines())
+    assert PRE_FIX_DOCSTRING_SENTENCE not in doc
+    assert PRE_FIX_DOCSTRING_SENTENCE in _fold(PRE_FIX_DOCSTRING_BLOCK.splitlines())
+    for words in ("RESERVED, not open",
+                  "explicit decision from Alan",
+                  "LloydMemEval `knowledge_update` gain",
+                  "no ground-truth field"):
+        assert words in doc, words
+
+
+# ── clause 5: prose only — no mode, no threshold, no branch moved ───────────
+
+def test_the_change_moved_no_mode_no_threshold_and_no_branch():
+    assert _config()["knowledge_graph"]["write_gate"]["mode"] == "noop"
+    assert gate.MODES == ("off", "shadow", "noop", "on")
+    assert (gate.SHORTLIST_FLOOR, gate.SHORTLIST_K) == (0.30, 1)
+    assert (gate.NOOP_THRESHOLD, gate.UPDATE_THRESHOLD, gate.LABEL_MASS_FLOOR) == \
+        (0.8, 0.3, 0.3)
+    assert (gate.FACT_CHARS, gate.TIMEOUT_S) == (400, 3.0)
+    gate_write = inspect.getsource(gate.gate_write)
+    assert 'if m == "shadow" or (m == "noop" and took == "update"):' in gate_write
+    assert 'target["expired_at"]' in gate_write
+    assert 'raw if raw in MODES else "off"' in inspect.getsource(gate.mode)
+
+
+def test_no_code_refuses_on_so_the_reservation_really_is_prose(monkeypatch):
+    # The comment's sharpest claim is behavioural: mode() would arm `on` today
+    # if the env said so. If a later round adds a guard, this node is the one
+    # that says the prose may now say something weaker.
+    monkeypatch.setenv(gate.MODE_ENV, "on")
+    assert gate.mode() == "on"

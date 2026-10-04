@@ -27,13 +27,21 @@ What the result may do is bounded by `mode()`:
 
 * ``off`` (the default) — nothing here runs.
 * ``shadow`` — decide and log, write as today.
-* ``noop`` — apply NOOP (nothing written), record UPDATE as ADD. The scope
-  call the item left to a person is whether a djev label may expire a fact at
-  all (#499 recorded `fact_entity_recall` 0.35 → 0.30 from retiring the wrong
-  copy), so NOOP — which destroys nothing — is its own step.
-* ``on`` — NOOP and UPDATE both apply. UPDATE supersedes: the new fact is
-  appended and the ONE prior fact the decision named is stamped `expired_at`.
-  Never a delete.
+* ``noop`` — apply NOOP (nothing written), record UPDATE as ADD. Whether a djev
+  label may expire a fact at all is RESERVED, not open: #1487 never arms
+  UPDATE. Arming it takes an explicit decision from Alan plus a measured
+  LloydMemEval `knowledge_update` gain, and the reason to be slow about both is
+  on the record — #499 measured `fact_entity_recall` 0.35 → 0.30 from retiring
+  the wrong copy of a pair — so NOOP, which destroys nothing, is its own step.
+  And no size of log settles it: an ``update`` row logged while UPDATE is not
+  armed records the UPDATE as an ADD and expires nothing, and carries no
+  ground-truth field, so it cannot say whether expiring the fact it named would
+  have been safe.
+* ``on`` — RESERVED, and not by this module: mode() takes
+  `LLOYD_FACT_WRITE_GATE=on` with no guard behind it, so the reservation lives
+  in `knowledge_graph.write_gate` in `config.yaml`. NOOP and UPDATE both apply.
+  UPDATE supersedes: the new fact is appended and the ONE prior fact the
+  decision named is stamped `expired_at`. Never a delete.
 
 **Every failure is ADD.** djev unreachable, timing out, answering malformed,
 switched off, splitting the canvas, or `low_trust` on the answer that would
