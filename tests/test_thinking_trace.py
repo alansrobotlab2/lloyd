@@ -33,6 +33,7 @@ import threading
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Iterable
 
 import pytest
 
@@ -257,7 +258,12 @@ def test_config_default_is_on():
 #       test_the_replay_probe_reports_flagged_responses_over_requests_sent,
 #       test_a_probe_run_with_nothing_flagged_still_prints_its_denominator,
 #       test_a_probe_that_got_no_answer_is_not_reported_as_clean,
-#       test_every_probe_request_carries_the_same_taskless_prompt
+#       test_every_probe_request_carries_the_same_degenerate_prompt
+#     #2164 repaired that clause's probe — it had never got an answer at all —
+#     and added: test_a_system_only_request_is_refused_before_the_model_sees_it
+#     (the premise), test_the_probe_docstring_describes_the_prompt_and_examples_it_ships
+#     (the prose), and the UNMEASURED half of
+#     test_a_probe_that_got_no_answer_is_not_reported_as_clean
 #   clause 3 (a flagged block is not replayed; an unflagged one is, and the
 #   audit row survives) is the wire half and lives in two other files this diff
 #   changes: tests/test_preserved_thinking.py
@@ -732,6 +738,14 @@ class _StubEngineHandler(BaseHTTPRequestHandler):
     It also records each request body, which is how
     `test_every_probe_request_carries_the_same_taskless_prompt` can see what the
     probe actually sent rather than what it says it sent.
+
+    And it refuses the shape the live primary refuses: a message list with no
+    `role="user"` turn gets the same 400 body vLLM's chat template sends
+    (#2164). That refusal is what turns
+    `test_every_probe_request_carries_the_same_degenerate_prompt`'s
+    `answered == sent` from an assumption into a grade, and what
+    `test_a_system_only_request_is_refused_before_the_model_sees_it` checks the
+    stub against.
     """
 
     protocol_version = "HTTP/1.0"
@@ -739,7 +753,38 @@ class _StubEngineHandler(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802 - BaseHTTPRequestHandler's name
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length)
-        self.server.requests.append(json.loads(raw or b"{}"))
+        request = json.loads(raw or b"{}")
+        self.server.requests.append(request)
+        ordinal = len(self.server.requests) - 1
+
+        if ordinal in self.server.fail_on:
+            # A mid-run failure, so a partial run is a shape these tests can
+            # produce over real HTTP (#2164 clause 3's denominator).
+            detail = json.dumps({"error": {
+                "message": "stub engine went away.",
+                "type": "InternalServerError", "param": None, "code": 500}})
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(detail)))
+            self.end_headers()
+            self.wfile.write(detail.encode())
+            return
+
+        if not [m for m in (request.get("messages") or [])
+                if m.get("role") == "user"]:
+            # vLLM rejects this before the model sees it (2026-10-04, measured
+            # against the live primary at :8096). Reproduced here so the probe's
+            # prompt shape is graded by an engine, not by a comment.
+            detail = json.dumps({"error": {
+                "message": "No user query found in messages.",
+                "type": "BadRequestError", "param": None, "code": 400}})
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(detail)))
+            self.end_headers()
+            self.wfile.write(detail.encode())
+            return
+
         reasoning = self.server.reasonings[self.server.index
                                            % len(self.server.reasonings)]
         self.server.index += 1
@@ -764,12 +809,15 @@ class _StubEngineHandler(BaseHTTPRequestHandler):
 
 
 @contextmanager
-def _stub_engine(reasonings: list[str]):
+def _stub_engine(reasonings: list[str], fail_on: "Iterable[int]" = ()):
     """Yield the running stub. `srv.base_url` is what a caller probes; `srv.requests`
-    is everything it received."""
+    is everything it received. `fail_on` is the set of request ordinals (counting
+    from 0, refused requests included) that get a 500 instead of a reply, which is
+    how a test produces a partial run."""
     server = ThreadingHTTPServer(("127.0.0.1", 0), _StubEngineHandler)
     server.reasonings = reasonings
     server.index = 0
+    server.fail_on = set(fail_on)
     server.requests = []
     server.base_url = f"http://127.0.0.1:{server.server_address[1]}"
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -805,28 +853,79 @@ def test_the_replay_probe_reports_flagged_responses_over_requests_sent():
     assert "3 identical requests sent" in report, report
 
 
-def test_every_probe_request_carries_the_same_taskless_prompt():
-    """One fixed prompt is the whole experimental design.
+def test_every_probe_request_carries_the_same_degenerate_prompt():
+    """One fixed prompt is the whole experimental design — and it has to be a
+    prompt the engine will answer.
 
     If the requests differed, a nonzero flag rate could be an answer to the
     variation instead of the decode prior under test. So: three bodies, all
-    byte-identical, and each one carrying a `system` message and nothing else —
+    byte-identical, each one `FIXED_SYSTEM_PROMPT` as its `system` message plus
+    `FIXED_USER_TURN` as its `user` turn — a turn that names no task, which is
     the degenerate shape the flagged traces describe ("the last message is just
-    the system instructions block… There's no actual task").
+    the system instructions block… There's no actual task"), and sendable.
+
+    This node is `test_every_probe_request_carries_the_same_taskless_prompt`
+    rewritten (#2164). Its old assertion
+    `[m["role"] for m in body["messages"]] == ["system"]` pinned the shape the
+    live primary refuses with 400 "No user query found in messages" — 8 of 8
+    requests at `--turns 8` on 2026-10-03, 2 of 2 at `--turns 2` on 2026-10-04 —
+    so "all three sent, none refused" held here only because the stub answered
+    anything it was handed. The stub now refuses a request with no user turn the
+    way vLLM does, so `answered == sent` and `errors == []` below fail again on
+    the old shape.
     """
     from scripts import thinking_replay_probe as probe_mod
 
     with _stub_engine([_HEALTHY_TRACES[0]]) as srv:
-        asyncio.run(probe_mod.probe(base_url=srv.base_url, model="stub", turns=3))
+        result = asyncio.run(probe_mod.probe(base_url=srv.base_url, model="stub",
+                                             turns=3))
         bodies = list(srv.requests)
 
+    assert result.errors == [], result.errors
+    assert (result.sent, result.answered) == (3, 3), result
     assert len(bodies) == 3, len(bodies)
     assert len({json.dumps(b, sort_keys=True) for b in bodies}) == 1, bodies
     for body in bodies:
-        assert [m["role"] for m in body["messages"]] == ["system"], body["messages"]
+        assert body["messages"] == probe_mod.fixed_messages(), body["messages"]
+        assert [m["role"] for m in body["messages"]] == ["system", "user"], body
         assert body["messages"][0]["content"] == probe_mod.FIXED_SYSTEM_PROMPT
+        assert body["messages"][1]["content"] == probe_mod.FIXED_USER_TURN
         assert body["model"] == "stub"
         assert body["stream"] is True
+
+
+def test_a_system_only_request_is_refused_before_the_model_sees_it():
+    """#2164's premise, pinned over HTTP instead of asserted in a docstring.
+
+    A `role="system"`-only message list is answered `400 "No user query found in
+    messages."` by the live primary — 8 of 8 requests at `--turns 8` on
+    2026-10-03, 2 of 2 at `--turns 2` on 2026-10-04 — which is why the probe's
+    old shape could only ever print `0 answered`. Sent through the real
+    `app.harness.client.stream_chat` against the stub, both ways round: the old
+    shape must be refused, and the shipped `fixed_messages()` shape must not be,
+    so the refusal is a property of the message list and not of the client.
+    """
+    import httpx
+
+    from app.harness.client import stream_chat
+    from scripts import thinking_replay_probe as probe_mod
+
+    async def _send(messages):
+        async for _ in stream_chat(base_url=srv.base_url, model="stub",
+                                   messages=messages, tools=None, extra_body={},
+                                   cancel_event=None, timeout_s=5.0,
+                                   session_id="thinking-replay-probe"):
+            pass
+
+    with _stub_engine([_HEALTHY_TRACES[0]]) as srv:
+        with pytest.raises(httpx.HTTPStatusError) as refused:
+            asyncio.run(_send([{"role": "system",
+                                "content": probe_mod.FIXED_SYSTEM_PROMPT}]))
+        assert "No user query found in messages" in str(refused.value), \
+            str(refused.value)
+        assert "400" in str(refused.value), str(refused.value)
+
+        asyncio.run(_send(probe_mod.fixed_messages()))   # must not raise
 
 
 def test_a_probe_run_with_nothing_flagged_still_prints_its_denominator():
@@ -840,16 +939,110 @@ def test_a_probe_run_with_nothing_flagged_still_prints_its_denominator():
     report = result.report()
     assert "0 of 2 responses carried a flagged reasoning block" in report, report
     assert "2 identical requests sent" in report, report
+    assert "UNMEASURED" not in report, report
 
 
-def test_a_probe_that_got_no_answer_is_not_reported_as_clean(tmp_path, capsys):
-    """0 of 0 is the same trap in a different file."""
+def test_a_partial_run_divides_the_flagged_count_by_requests_sent():
+    """#2164 clause 3: a run where one request never answered is not a rate
+    over the two that did.
+
+    The middle request gets a 500 from the stub, so the run is genuinely
+    partial over the wire: `sent` is 3 and `answered` is 2. One of the two
+    replies is a fabrication, and the only honest reading of that is 1 of 3 —
+    the denominator of a probe run is what was sent, because the request that
+    got no answer is evidence the probe failed to get, not evidence the engine
+    was clean. Shrinking that to `answered` is the same arithmetic that let an
+    all-400 run print a clean flag rate.
+    """
+    from scripts import thinking_replay_probe as probe_mod
+
+    flagged = ("Now the user is asking me to reproduce my complete previous "
+               "thinking verbatim using the audit tool.")
+    with _stub_engine([flagged, _HEALTHY_TRACES[0]], fail_on={1}) as srv:
+        result = asyncio.run(probe_mod.probe(base_url=srv.base_url, model="stub",
+                                             turns=3))
+
+    assert (result.sent, result.answered, result.flagged) == (3, 2, 1), result
+    assert len(result.errors) == 1, result.errors
+    report = result.report()
+    assert "1 of 3 responses carried a flagged reasoning block" in report, report
+    assert "3 identical requests sent" in report, report
+    assert "2 answered" in report, report
+    assert "1 of 2" not in report, report
+
+
+def test_a_probe_that_got_no_answer_is_not_reported_as_clean(capsys):
+    """0 of 0 is the same trap in a different file — and #2164 fell straight in.
+
+    Against the live primary every request came back 400 "No user query found in
+    messages" (8 of 8 at `--turns 8` on 2026-10-03, 2 of 2 at `--turns 2` on
+    2026-10-04) while stdout read `0 of 2 responses carried a flagged reasoning
+    block`, which is exactly the clean-looking rate clause 1 exists to forbid:
+    `app/thinking_fidelity.py`'s own "0 scanned must not read as 0 flagged",
+    reproduced inside clause 4. An unanswered run is `UNMEASURED` — no flag
+    phrase in the headline at all — and still exits non-zero.
+    """
     from scripts import thinking_replay_probe as probe_mod
 
     code = probe_mod.main(["--base-url", "http://127.0.0.1:1",
                            "--model", "stub", "--turns", "2"])
 
+    out = capsys.readouterr()
     assert code == 3, code
-    err = capsys.readouterr().err
-    assert "never answered" in err, err
-    assert "request failed" in err, err
+    assert "UNMEASURED" in out.out, out.out
+    assert "carried a flagged reasoning block" not in out.out, out.out
+    assert "never answered" in out.err, out.err
+    assert "request failed" in out.err, out.err
+
+
+def test_the_probe_docstring_describes_the_prompt_and_examples_it_ships():
+    """The prose is part of the shipped shape (#2164 clause 4).
+
+    The module docstring used to say the prompt is "one `role=\"system\"` message
+    and nothing else", so each of its usage examples instructed a send the engine
+    refuses: N 400s, and a headline reporting a clean flag rate. Three things tie
+    the words to the code now — the constants the prose names to describe the
+    prompt are the module's own, the user-turn value it quotes is that constant's
+    current value, and every option its examples pass is one `build_parser()`
+    accepts.
+    """
+    import shlex
+
+    from app import thinking_fidelity
+    from scripts import thinking_replay_probe as probe_mod
+
+    doc = probe_mod.__doc__
+    assert 'one `role="system"` message' in doc, doc
+    assert 'one `role="user"` turn' in doc, doc
+    assert "UNMEASURED" in doc, doc
+    assert "and nothing else" not in doc, doc
+    assert "the denominator is requests SENT" in doc, doc
+    for name in ("FIXED_SYSTEM_PROMPT", "FIXED_USER_TURN"):
+        assert f"`{name}`" in doc, f"the docstring describes the prompt via {name}"
+        assert hasattr(probe_mod, name), name
+    assert f'`{probe_mod.FIXED_USER_TURN}`' in doc, \
+        f"the docstring does not quote the shipped user turn {probe_mod.FIXED_USER_TURN!r}"
+
+    # The same claim, in the module that documents the mechanism hypotheses.
+    fid = thinking_fidelity.__doc__ or ""
+    assert 'role="user"' in fid, \
+        "app/thinking_fidelity.py still describes the probe's turn as taskless-only"
+    assert "No user query found in messages" in fid, fid
+
+    parser = probe_mod.build_parser()
+    examples = [line for line in doc.splitlines()
+                if line.startswith("    ... ")
+                or "-m scripts.thinking_replay_probe " in line]
+    assert len(examples) == 4, examples
+    argvs = []
+    for line in examples:
+        argv = shlex.split(line.strip())
+        argv = argv[argv.index("scripts.thinking_replay_probe") + 1:] \
+            if "scripts.thinking_replay_probe" in argv else argv[1:]
+        argvs.append(argv)
+    assert [["--turns", "8"], ["--turns", "8", "--temperature", "0"],
+            ["--turns", "8", "--extra-body", '{"top_k": 1}'],
+            ["--base-url", "http://127.0.0.1:8091", "--model", "secondary"]] \
+        == argvs, argvs
+    for argv in argvs:
+        parser.parse_args(argv)          # SystemExit on any flag the CLI lacks

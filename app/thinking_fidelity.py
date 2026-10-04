@@ -27,12 +27,17 @@ candidates in the item are engine-side state (MTP speculative decoding) and
 decode-side prior. The evidence gathered in the item weighs against
 cross-request bleed — the flagged traces are textually distinct from each other
 and carry no content token from any other session — and for a decode-side prior
-fired on a degenerate, taskless turn, reinforced by `preserve_thinking`
+fired on a turn that names no task, reinforced by `preserve_thinking`
 replaying a fabricated trace back as the model's own prior thought
 (`app/harness/loop.py::_assistant_message_for_history`). Separating those two
 is the engine-side A/B (`MTP_ENABLED=0`) and the operator's to run;
 ``scripts/thinking_replay_probe.py`` is the version that needs no engine
-restart.
+restart. The turn it replays names no task, but it is not a system-block-only
+request: it is the system prompt plus a one-word ``role="user"`` turn
+(``FIXED_USER_TURN``), because vLLM answers a message list with no user turn
+with ``400 "No user query found in messages"`` and never consults the model —
+a probe shaped that way scores nothing and used to report that as a clean rate
+(#2164).
 
 Two decisions in here are load-bearing and are the reason this file exists
 rather than a grep in a test:
