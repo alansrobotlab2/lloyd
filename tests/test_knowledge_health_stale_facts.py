@@ -7,6 +7,14 @@ facts and the oldest usable one is younger than the 60-day threshold, so
 verdict while 140,179 of 315,784 active facts carried no date at all. Every
 node below pins one of those three failure modes: the missing second date
 source, the `valid_at` amnesty, and the clean verdict over an undatable store.
+
+A fourth mode arrived with the rebuild that followed (#2179, the nodes under the
+stamp-cohort heading): `created_at` present on ~100% of records and meaning the
+re-derivation date rather than the recording date. That is the opposite input fault —
+a date on everything, on no fact informative — and it makes the store read fresh for
+as long as the stamp is younger than the threshold, then stale in one day. The cohort
+nodes pin the guard that reads such a date as undated, and they hold #841's own aging
+path intact on the way, because a fact that carries an `event_date` still ages from it.
 """
 import importlib.util
 import inspect
@@ -539,6 +547,348 @@ def test_main_prints_the_line_and_exits_zero(tmp_path, monkeypatch):
     assert UNEVALUABLE_RE.search(_stale_section(text)) is not None
     assert "old claim" in text
     assert "No stale facts found" not in text
+
+
+# ── #2179: the stamp cohort — a created_at the bulk of the store shares ───────
+#
+# Measured live 2026-10-04 over the 130,115 active fact records: 99,707 (76.6%) carry
+# `created_at: 2026-09-23` and the whole `created_at` field spans 11 days, because
+# `clean_facts_directory()` (`scripts/memory/next-gen-memory/nightly_extraction.py:185`)
+# wipes the entity tree and `fact_extractor.py:551` restamps every re-derived row with
+# the run's date. 80,673 of those records carry no `event_date` at all, so the stamp is
+# their only date and every one of them crossed the 60-day threshold on 2026-11-22
+# together. The shipped rule aged them as fresh until that day and counted 2 facts
+# unevaluable (`stale_coverage` returned `(2, 130115)`). These nodes pin the guard that
+# reads such a date as provenance loss instead of freshness.
+
+#: The guard's absolute floor, read from the shipped constant so a fixture is exactly at
+#: the threshold the code names and one record under it is one `range()` away, not a copy
+#: of a magic number.
+COHORT = khr.STALE_DOMINANT_DATE_FLOOR
+
+#: A `created_at` far enough back to be stale on the fixed clock. Every cohort fixture
+#: uses it so that a guard which failed to arm is caught: the same facts, unguarded, are
+#: unambiguously stale, which each node asserts before it asserts the guard held.
+COHORT_AGE = 200
+
+#: The cohort line, in the section's own words: its count, its percent of the active
+#: records, the stamp date, and the ISO day the whole cohort crosses the threshold.
+STAMP_RE = re.compile(
+    r"STALE_STAMP_COHORT: ([\d,]+) facts \((\d+(?:\.\d+)?)% of ([\d,]+) active\) "
+    r"carry no date but `created_at: (\d{4}-\d{2}-\d{2})`, a calendar date "
+    r"([\d,]+) of them share.*?threshold on (\d{4}-\d{2}-\d{2})",
+    re.S)
+
+
+def _stamp_report(entities: dict, now: datetime = NOW) -> str:
+    """`_report` plus the cohort measurement, which is what `main()` now passes."""
+    return khr.generate_report(
+        khr.compute_entity_stats(entities),
+        khr.compute_relationship_stats([], entities),
+        [],
+        khr.find_stale_facts(entities, now, THRESH),
+        now,
+        stale_unevaluable=khr.stale_coverage(entities),
+        stamp_cohort=khr.stale_stamp_cohort(entities),
+    )
+
+
+def test_a_dominant_created_at_cohort_is_undated_rather_than_stale(tmp_path):
+    """Clause 1: an active fact with no `event_date` whose `created_at` date is carried
+    by more than 25% of the store AND by at least `COHORT` records is not returned by
+    `find_stale_facts` once older than the threshold, and `stale_coverage` counts it as
+    unevaluable. The fixture plants exactly `COHORT` same-day records so the floor arms.
+    """
+    root = tmp_path / "facts"
+    _write(root, "Rebuilt", "state",
+           [{"fact": f"stamp claim {i}", "created_at": _iso(COHORT_AGE)}
+            for i in range(COHORT)])
+    _write(root, "Fresh", "state", [{"fact": "dated elsewhere", "event_date": _iso(5)}])
+    # One record on the stamp day that owns dates of its own and was re-affirmed 3 days
+    # ago: in the stamp date's record count, out of the cohort, and fresh under the
+    # #841 rule. It is what keeps `date_records` and `cohort` from being the same number
+    # in the dict below, so an implementation that reports one as the other is caught.
+    _write(root, "Reaffirmed", "state",
+           [{"fact": "restamped, but re-affirmed this week",
+             "created_at": _iso(COHORT_AGE), "event_date": _iso(5), "valid_at": _iso(3)}])
+    entities = khr.load_entities(root)
+
+    # Not vacuous: on the shipped age rule every one of those records IS past the
+    # threshold, so an absent guard would return COHORT stale facts rather than zero.
+    past_threshold = [f for _name, entries in entities.items() for entry in entries
+                      for f in entry["facts"]
+                      if khr.stale_age_reference(f)
+                      and (NOW - khr.stale_age_reference(f)).days >= THRESH]
+    assert len(past_threshold) == COHORT, "the fixture must be stale without the guard"
+
+    assert khr.find_stale_facts(entities, NOW, THRESH) == []
+    # The cohort alone: both controls keep their own dates and stay evaluable, so the
+    # guard sweeps up nothing it has no reason to doubt.
+    assert khr.stale_coverage(entities) == (COHORT, COHORT + 2)
+
+    cohort = khr.stale_stamp_cohort(entities)
+    stamp = (NOW - timedelta(days=COHORT_AGE)).date()
+    assert cohort == {"date": stamp.isoformat(), "date_records": COHORT + 1,
+                      "active_total": COHORT + 2, "cohort": COHORT,
+                      "flip_date": (stamp + timedelta(days=THRESH)).isoformat()}
+
+
+def test_an_event_date_still_ages_a_fact_recorded_on_the_stamp_day(tmp_path):
+    """Clause 2: the #841 aging path is not weakened. A fact carrying an `event_date`
+    older than the threshold stays stale even when its `created_at` sits on the dominant
+    date — excluding it would retire the very detection #841 shipped, and the 20,8xx
+    stale total the live report prints is entirely `event_date`-driven (measured 0 of
+    20,825 carry a null `event_date`).
+    """
+    root = tmp_path / "facts"
+    _write(root, "Rebuilt", "state",
+           [{"fact": f"stamp claim {i}", "created_at": _iso(COHORT_AGE)}
+            for i in range(COHORT)])
+    _write(root, "OldEvent", "state",
+           [{"fact": "restamped on the rebuild, but about a 400-day-old event",
+             "created_at": _iso(COHORT_AGE), "event_date": _iso(400)}])
+    entities = khr.load_entities(root)
+
+    cohort = khr.stale_stamp_cohort(entities)
+    # The OldEvent row shares the stamp date, so it is in the date's record count and NOT
+    # in the cohort: it owns a date of its own, which is the whole distinction.
+    assert cohort["date_records"] == COHORT + 1
+    assert cohort["cohort"] == COHORT
+
+    stale = khr.find_stale_facts(entities, NOW, THRESH)
+    assert [(s["entity"], s["age_days"]) for s in stale] == [("OldEvent", 400)]
+    assert khr.stale_coverage(entities) == (COHORT, COHORT + 1)
+
+
+def test_a_cohort_one_record_under_the_floor_still_ages_at_the_threshold(tmp_path):
+    """Clause 3: under the absolute floor the guard stays silent, so a same-day corpus
+    ages at exactly `STALE_DAYS_THRESHOLD` as it does today — the boundary the live store
+    crosses by 99x and a hand-written fixture does not.
+    """
+    root = tmp_path / "facts"
+    _write(root, "Rebuilt", "state",
+           [{"fact": f"same-day claim {i}", "created_at": _iso(THRESH)}
+            for i in range(COHORT - 1)])
+    _write(root, "Fresh", "state", [{"fact": "recent", "event_date": _iso(3)}])
+    entities = khr.load_entities(root)
+
+    # One record short of the floor on 1,000 active records: 99.9% share, so the share
+    # half of the guard is satisfied and the floor alone is what keeps it quiet.
+    assert khr.stale_stamp_cohort(entities) is None
+    stale = khr.find_stale_facts(entities, NOW, THRESH)
+    assert len(stale) == COHORT - 1
+    assert sorted({s["age_days"] for s in stale}) == [THRESH], \
+        "facts must go stale at exactly the threshold, not a day past it"
+    assert khr.stale_coverage(entities) == (0, COHORT)
+
+
+def test_a_cohort_at_exactly_the_share_still_ages(tmp_path):
+    """Clause 3's other half: at exactly 25.0% the share test does not fire either — the
+    guard is `> STALE_DOMINANT_DATE_SHARE`, and the live cohort is at 76.6%, four times
+    the line, so nothing is lost by keeping the comparison strict.
+    """
+    root = tmp_path / "facts"
+    _write(root, "Rebuilt", "state",
+           [{"fact": f"same-day claim {i}", "created_at": _iso(COHORT_AGE)}
+            for i in range(COHORT)])
+    _write(root, "MostlyFresh", "state",
+           [{"fact": f"fresh {i}", "event_date": _iso(3)} for i in range(3 * COHORT)])
+    entities = khr.load_entities(root)
+
+    # 1,000 of 4,000 active records carry the date: above the floor, at the share.
+    assert khr.stale_stamp_cohort(entities) is None
+    stale = khr.find_stale_facts(entities, NOW, THRESH)
+    assert len(stale) == COHORT
+    assert khr.stale_coverage(entities) == (0, 4 * COHORT)
+
+
+def test_the_section_names_the_cohort_and_the_day_it_flips(tmp_path):
+    """Clause 4: the Stale Facts section prints the cohort on its own line — stamp date,
+    count, percent of active records, and the ISO day it crosses the threshold — while
+    the `STALE_UNEVALUABLE` line keeps its format and its `n`, and the stale total moves
+    only by the fact that carries a real `event_date`.
+    """
+    root = tmp_path / "facts"
+    _write(root, "Rebuilt", "state",
+           [{"fact": f"stamp claim {i}", "created_at": _iso(COHORT_AGE)}
+            for i in range(COHORT)])
+    _write(root, "Blind", "state", [{"fact": "no date at all"}])
+    _write(root, "OldEvent", "state",
+           [{"fact": "old event", "created_at": _iso(COHORT_AGE), "event_date": _iso(400)}])
+    entities = khr.load_entities(root)
+
+    section = _stale_section(_stamp_report(entities))
+    match = STAMP_RE.search(section)
+    assert match is not None, section
+    stamp = (NOW - timedelta(days=COHORT_AGE)).date()
+    assert match.groups() == ("1,000", "99.8", "1,002", stamp.isoformat(), "1,001",
+                              (stamp + timedelta(days=THRESH)).isoformat())
+
+    # `n` keeps counting the facts the check cannot age, and the two populations stay
+    # separable: 1,001 = the 1,000-record cohort + the one record with no date at all.
+    unevaluable = UNEVALUABLE_RE.search(section)
+    assert unevaluable is not None, section
+    assert unevaluable.groups() == ("1,001", "1,002", "99.9")
+    assert int(unevaluable.group(1).replace(",", "")) - COHORT == 1
+
+    # The stale total is the `event_date`-driven fact alone. Had the guard swept facts
+    # with real event dates in, this is the number the owed check says must not move.
+    assert "**1** in total" in section, section
+
+
+def test_a_stamp_day_whose_records_all_own_an_event_date_yields_no_cohort(tmp_path):
+    """The empty end of the cohort: 1,000 records share one `created_at`, so a date does
+    dominate the store, but every one of them carries an `event_date` of its own — so
+    there is nothing undated to name, no cohort line prints, and all 1,000 age stale from
+    those dates. This is the shape of the 2,533 live records that owe ruling #2, pinned as
+    today's behaviour: they keep aging off the stamp and are NOT swept into the cohort.
+    """
+    root = tmp_path / "facts"
+    _write(root, "Restamped", "state",
+           [{"fact": f"restamped old event {i}", "created_at": _iso(COHORT_AGE),
+             "event_date": _iso(400)} for i in range(COHORT)])
+    entities = khr.load_entities(root)
+
+    cohort = khr.stale_stamp_cohort(entities)
+    assert cohort["date_records"] == COHORT and cohort["cohort"] == 0
+    stale = khr.find_stale_facts(entities, NOW, THRESH)
+    assert len(stale) == COHORT
+    assert sorted({s["age_days"] for s in stale}) == [400]
+    assert khr.stale_coverage(entities) == (0, COHORT)
+
+    section = _stale_section(_stamp_report(entities))
+    assert STAMP_RE.search(section) is None, "an empty cohort has nothing to name"
+    assert f"**{COHORT:,}** in total" in section, section
+
+
+def test_a_measured_cohort_suppresses_the_clean_verdict_on_its_own(tmp_path):
+    """Clause 5's second half: the suppression is carried by the cohort measurement
+    itself, not only by the coverage pair that counts it. Here the section is handed the
+    pair every pre-#2179 caller computed — `(0, 1,000)`, the cohort still inside the
+    fresh population as far as that pair knows — together with the cohort, and the clean
+    verdict is still refused. Without this the verdict would hinge on one caller
+    remembering to count the cohort a second time, in another function.
+    """
+    root = tmp_path / "facts"
+    _write(root, "Rebuilt", "state",
+           [{"fact": f"stamp claim {i}", "created_at": _iso(COHORT_AGE)}
+            for i in range(COHORT)])
+    entities = khr.load_entities(root)
+
+    report = khr.generate_report(khr.compute_entity_stats(entities),
+                                 khr.compute_relationship_stats([], entities),
+                                 [], [], NOW,
+                                 stale_unevaluable=(0, COHORT),
+                                 stamp_cohort=khr.stale_stamp_cohort(entities))
+
+    assert "*No stale facts found.*" not in report
+    assert "No stale facts found" not in report
+    assert STAMP_RE.search(_stale_section(report)) is not None
+
+
+def test_the_unevaluable_line_keeps_its_n_when_no_date_dominates(tmp_path):
+    """Clause 4's second half, on a corpus the guard must not touch: the shipped shape
+    from `test_unevaluable_line_names_n_and_m_over_active_facts` — 2 dateless of 3 active
+    — keeps the line's format, its `n` and its percent, and gains no cohort line, because
+    nothing on that tree shares a date at the floor the guard names.
+    """
+    root = tmp_path / "facts"
+    _write(root, "Blind", "state", [
+        {"fact": "no date"},
+        {"fact": "also no date", "valid_at": _iso(3)},
+        {"fact": "dated and fresh", "event_date": _iso(3)},
+    ])
+    entities = khr.load_entities(root)
+
+    assert khr.stale_stamp_cohort(entities) is None
+    section = _stale_section(_stamp_report(entities))
+    match = UNEVALUABLE_RE.search(section)
+
+    assert match is not None, section
+    assert match.groups() == ("2", "3", "66.7")
+    assert STAMP_RE.search(section) is None, "no cohort measured, so no cohort line"
+
+
+def test_a_stamp_only_corpus_cannot_print_the_clean_verdict(tmp_path):
+    """Clause 5: a corpus whose only dated facts are dominant-cohort facts gets no clean
+    verdict, the same way `test_undatable_fixture_cannot_print_the_clean_verdict` denies
+    one to a dateless store — `find_stale_facts` returns nothing, so before #2179 this
+    printed "*No stale facts found.*" over a quarter-million facts that had merely not
+    reached 2026-11-22 yet.
+    """
+    root = tmp_path / "facts"
+    _write(root, "Rebuilt", "state",
+           [{"fact": f"stamp claim {i}", "created_at": _iso(COHORT_AGE)}
+            for i in range(COHORT)])
+    entities = khr.load_entities(root)
+
+    assert khr.find_stale_facts(entities, NOW, THRESH) == []
+    report = _stamp_report(entities)
+    section = _stale_section(report)
+
+    assert "No stale facts found" not in report
+    assert STAMP_RE.search(section) is not None
+
+    # The control that keeps this from being a size effect: the same 1,000 records, dated
+    # on spread-out days instead of one stamp, is a corpus the section may call clean.
+    spread = tmp_path / "spread"
+    _write(spread, "Spread", "state",
+           [{"fact": f"dated {i}", "created_at": _iso(1 + (i % 10))}
+            for i in range(COHORT)])
+    spread_entities = khr.load_entities(spread)
+
+    assert khr.stale_stamp_cohort(spread_entities) is None
+    assert khr.stale_coverage(spread_entities) == (0, COHORT)
+    assert "*No stale facts found.*" in _stamp_report(spread_entities)
+
+
+def test_the_nightly_run_prints_the_cohort_line_and_exits_zero(tmp_path, monkeypatch):
+    """The wiring, across the process boundary the nightly job actually crosses: `main()`
+    measures the cohort off the parsed tree and the dated report it writes carries the
+    line — a guard only reachable from the test helper would be a guard the monitor never
+    runs. Staleness still cannot reach the alarm channel or the exit code (#841 clause 6,
+    which this change must not move).
+    """
+    root = tmp_path / "facts"
+    out = tmp_path / "out"
+    _write(root, "Rebuilt", "state",
+           [{"fact": f"stamp claim {i}", "created_at": _iso(COHORT_AGE)}
+            for i in range(COHORT)])
+    _write(root, "Pile", "state", [
+        {"fact": "old claim", "event_date": _iso(200)},
+        {"fact": "undatable claim"},
+    ])
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(khr, "_kg_store",
+                        lambda: _FakeStore([{"source": "Rebuilt", "target": "Other", "type": "uses"}],
+                                           {"edges_active": 53416, "edges_total": 53416}))
+    monkeypatch.setattr(khr, "fact_duplicate_stats",
+                        lambda: {"unavailable": True, "reason": "store faked in test"})
+    alerts: list = []
+    monkeypatch.setattr(khr, "_alert", lambda alarms, path: alerts.append(alarms))
+    monkeypatch.setattr(sys, "argv", ["knowledge-health-report.py",
+                                      "--facts-dir", str(root),
+                                      "--output-dir", str(out)])
+
+    rc = khr.main()
+
+    assert rc == khr.EXIT_OK
+    assert alerts == []
+    reports = list(out.glob("knowledge-health-*.md"))
+    assert len(reports) == 1
+    section = _stale_section(reports[0].read_text())
+
+    match = STAMP_RE.search(section)
+    assert match is not None, section
+    stamp = (NOW - timedelta(days=COHORT_AGE)).date()
+    # 1,000 of the 1,002 active records: the cohort, the `event_date` row and the one
+    # record with no date at all.
+    assert match.groups()[:2] == ("1,000", "99.8")
+    assert match.group(4) == stamp.isoformat()
+    assert match.group(6) == (stamp + timedelta(days=THRESH)).isoformat()
+    # Only the `event_date` fact is stale; the 1,000-record cohort is not in that count.
+    assert "**1** in total" in section, section
+    assert UNEVALUABLE_RE.search(section).groups() == ("1,001", "1,002", "99.9")
 
 
 # ── edge-type cardinality (#546) ─────────────────────────────────────────────

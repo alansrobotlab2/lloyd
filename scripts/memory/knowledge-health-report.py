@@ -19,7 +19,7 @@ import re
 import statistics
 import sys
 from collections import defaultdict, Counter
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import yaml
@@ -40,6 +40,27 @@ SECTION_ROW_CAP = 50
 GOD_ENTITY_THRESHOLD = 20
 THIN_ENTITY_MAX_FACTS = 2
 STALE_DAYS_THRESHOLD = 60
+#: Share of ACTIVE records that have to carry one `created_at` calendar date before
+#: that date stops being a recording date and is a re-derivation stamp (#2179).
+#:
+#: Measured live 2026-10-04 over the 130,115 active fact records: 99,707 of them
+#: (76.6%) carry `created_at: 2026-09-23`, one day, and the whole field spans 11 days
+#: (`2026-09-23 .. 2026-10-04`) — `clean_facts_directory()`
+#: (`scripts/memory/next-gen-memory/nightly_extraction.py:185`) wipes the entity tree
+#: and `fact_extractor.py:551` restamps every re-derived row with the run's date. A
+#: date two thirds of the store shares says when the store was rebuilt, not when the
+#: claim was recorded, so a fact whose ONLY date is that stamp has no age signal.
+STALE_DOMINANT_DATE_SHARE = 0.25
+#: How many records must share that date before the guard arms, beside the share.
+#:
+#: The share alone cannot carry it: every fixture in
+#: `tests/test_knowledge_health_stale_facts.py` is 1-3 facts, where the single
+#: `created_at` present is trivially 100% of the store, and a share-only guard would
+#: file those fixtures' facts as undated — `test_old_valid_at_is_still_reported`
+#: (one record, `created_at` 250 days old) among them. The live cohort is 99,707
+#: records, so a floor two orders of magnitude below that arms on the real store and
+#: stays silent on a hand-written corpus.
+STALE_DOMINANT_DATE_FLOOR = 1_000
 #: Past how many days a stale fact stops being a review candidate.
 #:
 #: `STALE_DAYS_THRESHOLD` decides *whether* a fact is stale; this decides whether a
@@ -415,19 +436,113 @@ def stale_age_reference(fact: dict) -> datetime | None:
     return reference
 
 
+def _created_at_day(fact: dict) -> str | None:
+    """The `created_at` calendar date as `YYYY-MM-DD`, or None when there is none."""
+    recorded = parse_date(fact.get("created_at"))
+    return recorded.date().isoformat() if recorded else None
+
+
+def _has_event_date(fact: dict) -> bool:
+    """True when `event_date` gives the fact an age of its own.
+
+    `parse_date` rather than `is not None`, so an `event_date` that will not parse
+    (absent, `""`, the literal string `"null"`) counts as ABSENT: it carries no age
+    signal either, and letting such a value disqualify a fact from the stamp cohort
+    would leave that fact aging off the stamp and flipping on the cohort's day
+    anyway — the blindness this guard exists to name.
+    """
+    return parse_date(fact.get("event_date")) is not None
+
+
+def stale_stamp_cohort(entities: dict) -> dict | None:
+    """The facts dated by nothing but a `created_at` the bulk of the store shares.
+
+    Returns `{date, date_records, cohort, active_total, flip_date}`, or None when no
+    `created_at` date clears both `STALE_DOMINANT_DATE_SHARE` and
+    `STALE_DOMINANT_DATE_FLOOR` — which is every hand-written corpus, and was every
+    corpus before a rebuild. `cohort` counts ACTIVE records with no `event_date` whose
+    `created_at` falls on `date`, the dominant date: the most-carried one, earliest on
+    a tie. `flip_date` is `date` + `STALE_DAYS_THRESHOLD`.
+
+    This is the #841 survivor condition, and the opposite case. #841 fixed aging on a
+    MISSING `created_at`; here the field is present on effectively every record and
+    means the re-derivation date. Measured live 2026-10-04: the oldest `created_at` in
+    the whole active store is 11 days old, so `min(created_at, event_date)` can only
+    cross 60 days through `event_date` — of the 20,825 facts the section reports, 0
+    have a null `event_date`, and 80,673 active facts have no age signal but the stamp.
+    `stale_coverage` reported `(2, 130115)` over them, because the stamp parses as a
+    perfectly usable date. Those 80,673 do not become reviewable one by one; they
+    become stale together on 2026-11-22, and no nightly pass will ever watch them age,
+    because the next full re-derivation resets the field to that run's date.
+
+    A date the store shares is provenance loss, not freshness, so the cohort is
+    reported as undated and given the day it would flip. Which facts are NOT in it:
+    anything carrying a real `event_date`, which keeps aging from that date exactly as
+    #841 established, and every fact on a date below either gate.
+    """
+    day_counts: dict[str, int] = {}
+    undated_counts: dict[str, int] = {}
+    active_total = 0
+    for _entity_name, category_entries in entities.items():
+        for entry in category_entries:
+            for fact in entry["facts"]:
+                if not is_fact_active(fact):
+                    continue
+                active_total += 1
+                day = _created_at_day(fact)
+                if day is None:
+                    continue
+                day_counts[day] = day_counts.get(day, 0) + 1
+                if not _has_event_date(fact):
+                    undated_counts[day] = undated_counts.get(day, 0) + 1
+    if not day_counts or not active_total:
+        return None
+    # Most-carried date wins; a tie goes to the earlier date, since the older stamp is
+    # the one whose cohort has been aging (unseen) longest.
+    stamp = min(day_counts, key=lambda d: (-day_counts[d], d))
+    carried = day_counts[stamp]
+    if carried < STALE_DOMINANT_DATE_FLOOR:
+        return None
+    if carried / active_total <= STALE_DOMINANT_DATE_SHARE:
+        return None
+    return {
+        "date": stamp,
+        "date_records": carried,
+        "cohort": undated_counts.get(stamp, 0),
+        "active_total": active_total,
+        "flip_date": (date.fromisoformat(stamp)
+                      + timedelta(days=STALE_DAYS_THRESHOLD)).isoformat(),
+    }
+
+
+def _in_stamp_cohort(fact: dict, cohort: dict | None) -> bool:
+    """Whether `fact` is one of `cohort`'s stamp-dated, event-date-less records."""
+    return (cohort is not None and not _has_event_date(fact)
+            and _created_at_day(fact) == cohort["date"])
+
+
 def find_stale_facts(entities: dict, now: datetime, threshold_days: int) -> list[dict]:
     """Active facts whose oldest usable date is older than threshold_days.
 
     A fact carrying no usable date is NOT returned: it is not fresh, it is
     unmeasured. `stale_coverage` counts those so the report can name them
     instead of printing a clean verdict over an unseen share of the store.
+
+    Neither is a fact in the stamp cohort (#2179): its only date is a `created_at`
+    `STALE_DOMINANT_DATE_SHARE` of the store shares, which measures the rebuild, not
+    the claim. Returning it would dress provenance loss up as a review backlog of
+    80,673 rows appearing in one night; the cohort is reported on its own line with
+    the day it flips, and counted unevaluable by `stale_coverage`.
     """
+    cohort = stale_stamp_cohort(entities)
     stale = []
     for entity_name, category_entries in entities.items():
         for entry in category_entries:
             category = entry["category"]
             for fact in entry["facts"]:
                 if not is_fact_active(fact):
+                    continue
+                if _in_stamp_cohort(fact, cohort):
                     continue
 
                 reference = stale_age_reference(fact)
@@ -491,7 +606,17 @@ def stale_coverage(entities: dict) -> tuple[int, int]:
     verdict on an input it could not read, which is the #841 defect class; this
     is the number that makes that state visible instead of clean. Counted over
     active facts, the same population `find_stale_facts` walks.
+
+    Two populations land in `n`, and both are facts this check cannot age: the ones
+    with no date at all, and the stamp cohort (`stale_stamp_cohort`, #2179) whose only
+    date is a `created_at` the bulk of the store shares. The second is why the live
+    store no longer returns `(2, 130115)`: it returns the 80,673 stamp-dated facts as
+    well, because a date two thirds of the corpus shares measures the rebuild and tells
+    nothing about the claim. `stale_stamp_cohort`'s own count is the difference, so the
+    two are separable by a reader — and the section prints it, so they are separated
+    before anyone has to subtract.
     """
+    cohort = stale_stamp_cohort(entities)
     unevaluable = 0
     active_total = 0
     for _entity_name, category_entries in entities.items():
@@ -500,7 +625,7 @@ def stale_coverage(entities: dict) -> tuple[int, int]:
                 if not is_fact_active(fact):
                     continue
                 active_total += 1
-                if stale_age_reference(fact) is None:
+                if stale_age_reference(fact) is None or _in_stamp_cohort(fact, cohort):
                     unevaluable += 1
     return unevaluable, active_total
 
@@ -700,6 +825,7 @@ def generate_report(
     duplicate_id_files: int | None = None,
     copy_gaps: list | None = None,
     trace_coverage: tuple[int, int] | None = None,
+    stamp_cohort: dict | None = None,
 ) -> str:
     """Generate the markdown health report.
 
@@ -711,7 +837,20 @@ def generate_report(
     `stale_unevaluable` is the `(n, m)` pair from `stale_coverage`: how many of
     the m active facts carry no date the stale check can age them from. Omitting
     it means the caller did not measure it, and the section says so rather than
-    claiming the store is clean.
+    claiming the store is clean. Since #2179 its `n` holds the stamp cohort as well
+    as the dateless facts, which is why the pair and `stamp_cohort` are passed
+    together: the cohort's own count is printed beside them, so the two are never
+    read as two separate losses.
+
+    `stamp_cohort` is `stale_stamp_cohort`'s dict (#2179): the facts whose only date
+    is a `created_at` more than `STALE_DOMINANT_DATE_SHARE` of the store shares. The
+    section names them on their own line — stamp date, count, share of active records,
+    and the day they all cross the threshold at once — because a store where two thirds
+    of the corpus shares one `created_at` has lost those facts' age signal, and neither
+    "fresh" nor a 80,673-row stale backlog is a true report of that. None means the
+    caller did not measure it. No line prints when no date dominated the corpus, and
+    none when a dominated date's records all carry an `event_date` of their own: an
+    empty cohort has nothing to name.
 
     `copy_gaps` is `reflection_archive.copy_gaps` over the reflection directory:
     a report naming an archive copy the directory lacks is a lost cycle (#1227).
@@ -871,6 +1010,22 @@ def generate_report(
                  f"re-based by `valid_at` — is older than {STALE_DAYS_THRESHOLD} days.")
     lines.append("")
 
+    # The stamp cohort first, because it is the reason the two numbers under it are not
+    # the whole store (#2179). Printed above the unevaluable line, which now counts these
+    # facts too, so the reader sees which part of that n is a rebuild's date.
+    if stamp_cohort and stamp_cohort["cohort"]:
+        cohort_pct = (round(100.0 * stamp_cohort["cohort"] / stamp_cohort["active_total"], 1)
+                      if stamp_cohort["active_total"] else 100.0)
+        lines.append(
+            f"STALE_STAMP_COHORT: {stamp_cohort['cohort']:,} facts ({cohort_pct}% of "
+            f"{stamp_cohort['active_total']:,} active) carry no date but "
+            f"`created_at: {stamp_cohort['date']}`, a calendar date "
+            f"{stamp_cohort['date_records']:,} of them share — a re-derivation stamp, "
+            "not a recording date. Undated, not fresh: counted in the unevaluable line "
+            f"below, and every one crosses the {STALE_DAYS_THRESHOLD}-day threshold on "
+            f"{stamp_cohort['flip_date']}.")
+        lines.append("")
+
     # The clean verdict is earned only when both numbers are zero. An unmeasured
     # or undatable share is a finding in its own right, not a pass (#841).
     if stale_unevaluable is None:
@@ -920,10 +1075,15 @@ def generate_report(
             lines.append(f"| {sf['entity']} | {sf['category']} | {preview} | {sf['age_days']} |")
         if len(stale_sorted) > SECTION_ROW_CAP:
             lines.append(f"| … | | *{len(stale_sorted) - SECTION_ROW_CAP:,} more* | |")
-    elif stale_unevaluable is not None and stale_unevaluable[0] == 0:
+    elif (stale_unevaluable is not None and stale_unevaluable[0] == 0
+          and not (stamp_cohort and stamp_cohort["cohort"])):
         # Reached only with no stale facts AND nothing left unevaluable: every
         # active fact was aged and none crossed the threshold. That is the whole
-        # of what this verdict is allowed to claim.
+        # of what this verdict is allowed to claim. The cohort is tested here as
+        # well as through `stale_unevaluable`, which already counts it (#2179), so a
+        # caller that measured the cohort but passed a dateless-only coverage pair —
+        # or no pair at all, which takes the branch above — still cannot call a store
+        # whose dates are all one rebuild stamp clean.
         lines.append("*No stale facts found.*")
     lines.append("")
 
@@ -1284,6 +1444,11 @@ def main():
     rel_stats = compute_relationship_stats(edges, entities)
     stale_facts = find_stale_facts(entities, now, STALE_DAYS_THRESHOLD)
     stale_unevaluable = stale_coverage(entities)
+    # Named again for the section's own line: `stale_unevaluable`'s n already carries
+    # these facts (#2179), and printing the count that makes up the difference is what
+    # keeps the two from being read as two separate losses. Like the two calls above,
+    # this walks the parsed dict, not the tree.
+    stamp_cohort = stale_stamp_cohort(entities)
 
     hygiene = compute_hygiene(entities, now)
     fact_dups = fact_duplicate_stats()
@@ -1297,7 +1462,8 @@ def main():
     report = generate_report(entity_stats, rel_stats, edges, stale_facts, now, hygiene,
                              fact_dups=fact_dups, stale_unevaluable=stale_unevaluable,
                              duplicate_id_files=dup_id_files, copy_gaps=gaps,
-                             trace_coverage=trace_coverage)
+                             trace_coverage=trace_coverage,
+                             stamp_cohort=stamp_cohort)
 
     # Write output
     output_dir = args.output_dir
