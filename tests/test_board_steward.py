@@ -9,7 +9,9 @@ never the steward's: it cannot set `done`.
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -577,3 +579,334 @@ def test_a_tick_that_judged_something_still_prints_the_percentage(board, monkeyp
     assert out["meta"]["agreement"]["rate"] == pytest.approx(0.5)
     assert row["agreement"]["judged"] == 2
     assert row["agreement"]["rate"] == pytest.approx(0.5)
+
+
+# ── #2197: the grammar has a ceiling, so a truncated tick is not a budget ─────
+#
+# 18 board-steward runs between 2026-10-01 and 2026-10-04 failed with
+# `output truncated at 8192 tokens — raise harness.finalizer.max_tokens` (20
+# failed vs 134 success over the window; `backlog/data/workers-runs-2197.db` in the
+# vault is the extracted witness — 176 board-steward runs since 10-01, 18 of them
+# naming that message and none naming the other one, and `backlog/data/workers.db`
+# is another item's witness whose `runs` table must stay empty, which is why
+# this extract has its own file: see `backlog/data/workers-runs-2197.witness.md`,
+# amended clause 5, and vault `d9c3b5b0` for the same collision on #2087).
+# What those 18 got before they stopped, counted off the witness bytes: 17 emitted
+# an empty moves list and stopped their opener at `"next_pick":`, 1 reached one real
+# move, and of the 200-character excerpts the finalizer stores, 11 are whitespace
+# after that opener while 7 go on to spit stray digits and text (`2026`, `185`,
+# `20261009`). No shape is a long legitimate answer, and `max_tokens` was already
+# 8192 and was never the cause: an uncapped node is read as "this could go on
+# forever", so the finalizer could not rule the budget out and blamed it (#1706
+# found exactly this for deep-research; this is the same source's turn). The caps
+# below make the object ungrammatical past the answer, and — the part the 18
+# failures could not get — make the message describe the failure.
+
+#: One of the 18 failures, replayed as a SHAPE rather than as stored bytes, because
+#: the store cannot give the bytes back: `app/harness/finalizer.py:279-285` files the
+#: failure with `content[:200]!r`, so 200 characters is all a run ever records and
+#: what survives is an excerpt, not a completion.
+#:
+#: How much of this fixture is captured bytes, measured against the stored excerpts
+#: in the witness (the longest common prefix, character by character, over all 18):
+#: 30 for the 2026-10-04T08:00 run, which this fixture opens like
+#: (`{"moves":[],"next_pick":` then six whitespace characters); 24 or more for 10 of
+#: the 18; one at 10, which is the row that gets a real move into `moves`; and 9 for
+#: the 7 that write the empty list SPACED — `{"moves": [], "next_pick":` — and so
+#: part company at `{"moves":`. Everything past the prefix is the shape EXTENDED: the
+#: same 11-character whitespace block repeated out to ~8.8 KB, where the real
+#: excerpts' whitespace is irregular and ends where the store cuts it.
+#:
+#: That substitution is the right one because the finalizer's branch reads the shape
+#: (content that cannot close an open object, `finish_reason: length`) and
+#: `_schema_is_bounded(schema)`, never a character count — and the token count its
+#: message quotes comes from the faked `usage`, not from this string's length.
+_CAPTURED_TRAILING_WHITESPACE = ('{"moves":[],"next_pick":'
+                                 + "\n\n\t\n\n\n \n  \n" * 800)
+
+
+def _unbound(node):
+    """A copy of a schema with every cap stripped — the schema as it was before
+    #2197, used as the control beside the replay."""
+    if isinstance(node, dict):
+        return {k: _unbound(v) for k, v in node.items()
+                if k not in ("maxLength", "maxItems", "minItems")}
+    if isinstance(node, list):
+        return [_unbound(v) for v in node]
+    return node
+
+
+def _normalised(length: int) -> str:
+    """A whitespace-normal string of exactly `length` characters."""
+    s = " ".join(["word"] * (length // 5))
+    return s + "x" * (length - len(s))
+
+
+#: The five caps `app.harness.finalizer._node_is_bounded` actually consults. It
+#: asks a string for `maxLength` and asks an array only whether its ITEMS are
+#: bounded, so it never reads `maxItems` at all — which is why `tags_add` needed
+#: a `maxLength` on the tag string as well as a count cap: with the count capped
+#: and the item open, the helper still called the whole schema open-ended.
+_STRING_CAP_SITES = (
+    ("properties", "moves", "items", "properties", "note"),
+    ("properties", "moves", "items", "properties", "tags_add", "items"),
+    ("properties", "moves", "items", "properties", "tags_remove", "items"),
+    ("properties", "next_pick_reason"),
+    ("properties", "summary"),
+)
+
+
+def _descend(node, path):
+    for key in path:
+        node = node[key]
+    return node
+
+
+def test_every_node_of_the_steward_schema_is_bounded():
+    """Clause 1: the helper the finalizer itself consults says this schema has a
+    ceiling, every node the item names carries a positive cap, and re-opening any
+    one of them in a copy turns the helper red.
+
+    The mutation loop is the half that keeps the pin honest — the drift it exists
+    for is one field quietly losing its cap while the rest still reads as bounded.
+    It runs over the five `maxLength` sites, because `_node_is_bounded` ignores
+    `maxItems` entirely; the three count caps are pinned by the value assertions
+    and by the parse clamp, and the two tag arrays are bounded for the helper only
+    because their ITEM string is capped."""
+    import copy
+
+    from app.harness import finalizer as F
+
+    props = W.STEWARD_SCHEMA["properties"]
+    move_props = props["moves"]["items"]["properties"]
+    assert F._schema_is_bounded(W.STEWARD_SCHEMA), (
+        "the finalizer still reads this schema as open-ended, so a truncated "
+        "tick is blamed on harness.finalizer.max_tokens")
+    assert props["moves"]["maxItems"] == W.MOVES_MAX > 0
+    for name in ("tags_add", "tags_remove"):
+        assert move_props[name]["maxItems"] == W.TAGS_MAX > 0, name
+        assert move_props[name]["items"]["maxLength"] == W.TAG_MAX > 0, name
+    assert move_props["note"]["maxLength"] == W.NOTE_MAX > 0
+    assert props["next_pick_reason"]["maxLength"] == W.REASON_MAX > 0
+    assert props["summary"]["maxLength"] == W.SUMMARY_MAX > 0
+
+    for path in _STRING_CAP_SITES:
+        probe = copy.deepcopy(W.STEWARD_SCHEMA)
+        _descend(probe, path).pop("maxLength")
+        assert not F._schema_is_bounded(probe), (
+            f"re-opening {'.'.join(path)} left the helper saying bounded, so "
+            "this test is not reading the caps")
+
+
+def test_the_caps_sit_above_the_largest_reply_a_real_tick_ever_sent():
+    """Clause 2: the caps are not tight, and a reply AT them survives the parse
+    path unchanged.
+
+    Two populations, both named. The run population the caps must fit inside — 176
+    board-steward runs since 2026-10-01, 20 failed / 134 success / 22 skipped, 18 of
+    them naming the budget message and 0 the divergence one — is the extracted
+    witness `backlog/data/workers-runs-2197.db`, whose marker
+    `backlog/data/workers-runs-2197.witness.md` carries the re-derive commands. The
+    shape population is the 378 `board_steward` rows in the promotion ledger
+    (`~/.local/state/lloyd-automod/promotions.jsonl`, measured 2026-10-04 — the run
+    store cannot supply this population because it never keeps the reply: `
+    response_json` is empty in all 176 witness rows): the largest legitimate reply is
+    27 moves, the longest `note` and the longest
+    `next_pick_reason` are 300 characters each and the longest `summary` is 400 —
+    all three sit AT `parse_steward`'s ceilings because that function has been
+    cutting them there all along. The most tags ever carried in one direction in
+    one move is 2, across 12 distinct tag names whose longest is
+    `review-disagreement` at 19 characters. So `MOVES_MAX` 40 is above the
+    observed 27, `TAGS_MAX` 6 above the observed 2 and `TAG_MAX` 40 above the
+    observed 19, while the three prose caps are the parse ceilings themselves: a
+    cap ABOVE a parse ceiling would let the grammar admit text the parser then
+    throws away, and the record of the steward's decision would stop being the
+    answer it gave."""
+    for length in (300, 400, W.NOTE_MAX, W.REASON_MAX, W.SUMMARY_MAX):
+        built = _normalised(length)
+        assert len(built) == length and built == " ".join(built.split()), (
+            f"{length} is not buildable whitespace-normal")
+    moves = [{"item_id": 1000 + i, "status": "up_next",
+              "tags_add": [f"tag-{i}"] * 1 if i % 2 else [],
+              "tags_remove": ["needs-human", "confirmed-held"] if i % 3 else [],
+              "note": _normalised(W.NOTE_MAX)} for i in range(W.MOVES_MAX)]
+    reply = {"moves": moves, "next_pick": 2197,
+             "next_pick_reason": _normalised(W.REASON_MAX),
+             "summary": _normalised(W.SUMMARY_MAX)}
+    assert len(reply["moves"]) == W.MOVES_MAX > 27, (
+        "the cap is not above the observed maximum")
+    parsed = W.parse_steward(reply)
+    assert parsed == reply, "the parse path altered an answer that is legal at the caps"
+    # And the largest reply a real tick has ever sent — 27 moves, 13 under the cap —
+    # has to survive the parse path whole as well, not just a reply at the cap.
+    assert W.parse_steward({**reply, "moves": moves[:27]})["moves"] == moves[:27]
+
+
+def test_a_reply_past_the_caps_is_still_clamped_by_the_parser():
+    """The clamp side of the same number, so the caps are not only a request to
+    the decoder: guided decoding is asked to stop at 40 moves and 300 characters,
+    and if it does not, the parse path still does."""
+    reply = {"moves": [{"item_id": i, "status": "draft", "tags_add": ["t"] * 9,
+                        "tags_remove": [], "note": "n" * 400} for i in range(1, 42)],
+             "next_pick": 5, "next_pick_reason": "r" * 500, "summary": "s" * 500}
+    parsed = W.parse_steward(reply)
+    assert len(parsed["moves"]) == W.MOVES_MAX == 40, len(parsed["moves"])
+    assert len(parsed["moves"][0]["note"]) == W.NOTE_MAX
+    assert len(parsed["moves"][0]["tags_add"]) == W.TAGS_MAX
+    assert len(parsed["next_pick_reason"]) == W.REASON_MAX
+    assert len(parsed["summary"]) == W.SUMMARY_MAX
+
+
+async def test_a_truncated_tick_is_blamed_on_divergence_and_not_on_the_budget(
+        monkeypatch):
+    """Clause 3: the captured completion, replayed through the real finalizer
+    against the real schema, with only the HTTP leg faked.
+
+    Two assertions, and the second is the one that proves the diff did it: the
+    same bytes against the same schema with its caps stripped must STILL say
+    `raise harness.finalizer.max_tokens`. Content did not change between the 18
+    failures and this replay; the schema did, and the branch follows the schema."""
+    from app.harness import finalizer as F
+
+    assert _CAPTURED_TRAILING_WHITESPACE.startswith('{"moves":[],"next_pick":')
+    assert _CAPTURED_TRAILING_WHITESPACE[24:].strip() == "", (
+        "the fixture must be the captured shape: an opener that never closes and "
+        "nothing but whitespace after it, which is what the 18 stored excerpts hold")
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(_CAPTURED_TRAILING_WHITESPACE)
+    monkeypatch.setattr(F.httpx, "AsyncClient", _fake_engine(
+        _CAPTURED_TRAILING_WHITESPACE, finish_reason="length", completion_tokens=8192))
+    kwargs = dict(base_url="http://engine:8097", model="primary",
+                  chat_messages=[{"role": "user", "content": "Restate it."}],
+                  tools=None, max_tokens=8192)
+
+    obj, err, usage = await F.run_finalizer(schema=W.STEWARD_SCHEMA, **kwargs)
+    assert obj is None and usage["output_tokens"] == 8192, usage
+    assert "diverged" in err, err
+    assert "not a budget" in err, err
+    assert "raise harness.finalizer.max_tokens" not in err, err
+
+    obj2, err2, _ = await F.run_finalizer(schema=_unbound(W.STEWARD_SCHEMA), **kwargs)
+    assert obj2 is None
+    assert "raise harness.finalizer.max_tokens" in err2, (
+        "the control no longer reproduces the 18 failures, so this test would "
+        "pass even if the caps were removed")
+
+
+class _Resp:
+    def __init__(self, content, finish_reason, completion_tokens):
+        self.status_code = 200
+        self.text = ""
+        self._c, self._f, self._t = content, finish_reason, completion_tokens
+
+    def json(self):
+        return {"choices": [{"message": {"content": self._c},
+                             "finish_reason": self._f}],
+                "usage": {"completion_tokens": self._t}}
+
+
+def _fake_engine(content, *, finish_reason="stop", completion_tokens=180):
+    """The engine minus the network, same shape as
+    `tests/test_deep_research_source.py::_fake_engine`."""
+    resp = _Resp(content, finish_reason, completion_tokens)
+
+    class _Cli:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            return resp
+
+    return _Cli
+
+
+def test_the_finalizer_budget_stays_8192_on_both_sides_of_the_reader():
+    """Clause 4: 8192 in the code default and in `config.yaml`, checked through
+    the reader production uses (`app.mcp_discovery._get_harness_kwargs`).
+
+    The two sides are `app/harness/options.py:374` (`finalizer_max_tokens: int =
+    8192`) and `config.yaml:744` (`max_tokens: 8192`).
+
+    This is not the pin at `app/harness/tests/test_finalizer.py::
+    test_the_default_budget_is_8192_and_config_agrees` repeated: that node asserts
+    both NUMBERS — the `RunOptions` default, and a regex over the `harness.finalizer`
+    block of the config TEXT — but never the leg between them, which is what this
+    adds: the config side is read back through the code that consumes it. The failure
+    mode a regex cannot see is a config whose value sits under a key the reader
+    ignores — that node stays green and the loop silently runs on the code default.
+    It matters to THIS diff because 8192 is the budget the caps are sized to fit
+    inside: the loop-forbidden fix for a truncated tick is to raise it, and the caps
+    are the reason that is not the fix.
+    """
+    from app.harness.options import RunOptions
+    from app.mcp_discovery import _get_harness_kwargs
+
+    assert RunOptions(model="primary").finalizer_max_tokens == 8192
+    assert _get_harness_kwargs()["finalizer_max_tokens"] == 8192, (
+        "config.yaml no longer reaches the option the loop reads")
+
+
+# ── #2197 clause 5: the failure counts have committed bytes behind them ──────
+
+#: The extract of the queue store's `runs` rows for board-steward since 2026-10-01,
+#: and the marker beside it. Item-scoped paths on purpose: `backlog/data/workers.db`
+#: is #1946's and #1949's witness and two other tests assert its `runs` table holds
+#: ZERO rows, so a runs extract written there breaks them — the same collision #2087
+#: hit (`0f8e6a3d`), which `d9c3b5b0` fixed by giving the extract its own file.
+WITNESS = Path.home() / "obsidian" / "backlog" / "data" / "workers-runs-2197.db"
+MARKER = WITNESS.with_suffix(".witness.md")
+
+
+def test_the_committed_witness_bytes_reproduce_the_failure_counts():
+    """Clause 5: the 18, the 176 and the 0 are re-derived from committed rows.
+
+    `~/lloyd-data/workers.db` has no history — one mutable file the running queue
+    writes to and a retention sweep prunes — so a count quoted from it is
+    unreproducible the week it is written. `backlog/data/workers-runs-2197.db` is the
+    read-only extract those figures were read from, whole rows, `summary` included,
+    because the figure being witnessed is a count over `status` and `summary` and the
+    `summary` has to be the bytes that produced it.
+
+    What the run store cannot supply is the reply SHAPE — `response_json` is empty in
+    all 176 rows — which is why the caps are sized off the promotion ledger instead
+    (see `test_the_caps_sit_above_the_largest_reply_a_real_tick_ever_sent`).
+
+    It also asserts the divergence message is absent from these bytes. That absence
+    is the premise: with an uncapped node the finalizer could not rule the budget
+    out, so all 18 landed on the budget branch and none on the one this diff turns on.
+    """
+    for path in (WITNESS, MARKER):
+        assert path.is_file(), f"missing witness artifact {path}"
+    meta = json.loads(MARKER.read_text(encoding="utf-8").split("```json")[1]
+                      .split("```")[0])
+
+    with sqlite3.connect(f"file:{WITNESS}?mode=ro", uri=True) as db:
+        def one(sql):
+            return db.execute(sql).fetchone()[0]
+
+        rows = one("SELECT count(*) FROM runs")
+        by_status = dict(db.execute(
+            "SELECT status, count(*) FROM runs GROUP BY status"))
+        truncated = one(
+            "SELECT count(*) FROM runs WHERE status='failed'"
+            " AND summary LIKE '%truncated at 8192%'")
+        diverged = one("SELECT count(*) FROM runs WHERE summary LIKE"
+                       " '%not a budget%'")
+        objects = one("SELECT count(*) FROM sqlite_master")
+
+    assert rows == 176 == meta["rows"]["runs"], rows
+    assert by_status == {"failed": 20, "success": 134, "skipped": 22}, by_status
+    assert truncated == 18 == meta["figures"]["failed_naming_truncated_at_8192"]
+    assert diverged == 0 == meta["figures"]["failed_naming_not_a_budget"], diverged
+    # The clause's re-derive command: the object count of the committed file.
+    assert objects == 3 == meta["figures"]["sqlite_master_objects"], objects
+    assert meta["rows"]["by_status"] == by_status, meta["rows"]["by_status"]
+    assert (meta["figures"]["truncated_by_day"]
+            == {"2026-10-02": 6, "2026-10-03": 5, "2026-10-04": 7}), (
+        meta["figures"]["truncated_by_day"])

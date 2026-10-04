@@ -77,11 +77,56 @@ _SHOWN_EVENTS = {
     "amend_clause", "reopen", "backlog_confirm_released",
 }
 
+#: The ceilings one tick's answer may carry, read ONCE by both the grammar and
+#: the parser. `parse_steward` cut notes to 300 characters and summaries to 400
+#: long before the schema said anything about length, so these are not new
+#: limits: they name the limits the source already had, in one place, so the two
+#: surfaces cannot drift (#2197). A grammar cap ABOVE a parse ceiling would be a
+#: cap the parser silently contradicts — the model writes 450 characters, the
+#: grammar permits it and `parse_steward` throws 50 away — so every string cap
+#: here is exactly the ceiling the parse path imposes, and a reply at the caps
+#: survives it unchanged.
+#:
+#: The numbers, from the 378 `board_steward` rows in the promotion ledger: the
+#: largest legitimate reply anyone has produced is 27 moves, notes and reasons
+#: saturating at 300 characters, summaries at 400, and at most 2 tags in one
+#: direction in one move. `MOVES_MAX` is the one cap above a saturating
+#: observation rather than at it: 40 is 13 moves over the largest real tick and
+#: half the 80 items a tick is shown, and at ~350 bytes a move the worst case it
+#: admits is ~14 KB — inside the 8192 tokens these caps exist to stay inside.
+#: `TAG_MAX` is the one cap the item did not ask for, and it is load-bearing:
+#: `_node_is_bounded` asks an array only whether its ITEMS are bounded and never
+#: consults `maxItems`, so `tags_add` with an uncapped tag string left the schema
+#: open-ended with its count capped (its docstring names that case:
+#: `TRIAGE_VERDICT_SCHEMA`'s `acceptance_clauses`). 40 is above the longest tag
+#: any steward move has ever carried — 19 characters, `review-disagreement`, over
+#: the 12 distinct tags in the ledger's 378 rows.
+MOVES_MAX = 40
+TAGS_MAX = 6
+TAG_MAX = 40
+NOTE_MAX = 300
+REASON_MAX = 300
+SUMMARY_MAX = 400
+
+# Every node in this schema now carries a finite cap (#2197), which is the whole
+# reason for the change and not a style rule. `app.harness.finalizer` reads an
+# open string or an open array as "this completion could go on forever", and so
+# blames a truncated one on the budget: 18 board-steward runs between 10-01 and
+# 10-04 failed with `output truncated at 8192 tokens — raise
+# harness.finalizer.max_tokens` (20 failed vs 134 success over the window), and
+# every one of those partial outputs is `{"moves":[],"next_pick":` followed by
+# whitespace — the generation diverged inside the grammar, which no budget knob
+# touches. With every node capped, `_schema_is_bounded` is True and the same
+# completion is reported for what it is: `…not a budget`. This is the shape
+# #1706 shipped for deep-research (`workers/sources/deep_research.py`,
+# `RESULT_SCHEMA`), whose comment already records that a capped schema can still
+# run to 8192 — capping makes the runaway UNGRAMMATICAL and makes the failure
+# honest; it does not promise the runaway stops. That is the owed check's job.
 STEWARD_SCHEMA: dict = {
     "type": "object",
     "title": "board_steward",
     "properties": {
-        "moves": {"type": "array", "items": {
+        "moves": {"type": "array", "maxItems": MOVES_MAX, "items": {
             "type": "object",
             "properties": {
                 "item_id": {"type": "integer"},
@@ -89,20 +134,24 @@ STEWARD_SCHEMA: dict = {
                            "description": ("draft: triaged and not for the loop, or not yet "
                                            "triaged. up_next: confirmed and the loop may take "
                                            "it. in_progress: a round is running on it now.")},
-                "tags_add": {"type": "array", "items": {"type": "string"}},
-                "tags_remove": {"type": "array", "items": {"type": "string"}},
-                "note": {"type": "string", "description": "One sentence, for the item's activity log."},
+                "tags_add": {"type": "array", "maxItems": TAGS_MAX,
+                             "items": {"type": "string", "maxLength": TAG_MAX}},
+                "tags_remove": {"type": "array", "maxItems": TAGS_MAX,
+                                "items": {"type": "string", "maxLength": TAG_MAX}},
+                "note": {"type": "string", "maxLength": NOTE_MAX,
+                         "description": "One sentence, for the item's activity log."},
             },
             "required": ["item_id", "status", "tags_add", "tags_remove", "note"],
             "additionalProperties": False,
-        }, "description": ("Only items whose status or tags should CHANGE. An item already "
-                           "where it belongs is not listed.")},
+        }, "description": (f"Only items whose status or tags should CHANGE. An item already "
+                           f"where it belongs is not listed. At most {MOVES_MAX} moves.")},
         "next_pick": {"type": "integer",
                       "description": ("The up_next item autocode should implement next, or 0 "
                                       "when none is ready. Prefer a first re-offer whose branch "
                                       "still holds the work, then the oldest confirmed item.")},
-        "next_pick_reason": {"type": "string"},
-        "summary": {"type": "string", "description": "One sentence on the board's state."},
+        "next_pick_reason": {"type": "string", "maxLength": REASON_MAX},
+        "summary": {"type": "string", "maxLength": SUMMARY_MAX,
+                    "description": "One sentence on the board's state."},
     },
     "required": ["moves", "next_pick", "next_pick_reason", "summary"],
     "additionalProperties": False,
@@ -384,11 +433,19 @@ def build_prompt(*, events: list[dict], items: list[Any], n_open: int, since_ts:
 # ── output ───────────────────────────────────────────────────────────────
 
 def parse_steward(structured: Any) -> dict | None:
-    """Validated and clamped, or None. `done` can never come out of here."""
+    """Validated and clamped, or None. `done` can never come out of here.
+
+    Every clamp is one of `STEWARD_SCHEMA`'s caps (#2197): the grammar stops a
+    field at the number and so makes a truncation here something the model was
+    never asked to produce, and the clamp stays because guided decoding is a
+    request, not a guarantee. The two have to be one number: an answer that is
+    legal at the caps has to come out of here unchanged, or the record of what
+    the steward decided is not the answer it gave.
+    """
     if not isinstance(structured, dict):
         return None
     moves: list[dict] = []
-    for raw in (structured.get("moves") or []):
+    for raw in (structured.get("moves") or [])[:MOVES_MAX]:
         if not isinstance(raw, dict):
             continue
         try:
@@ -400,17 +457,19 @@ def parse_steward(structured: Any) -> dict | None:
             continue
         moves.append({
             "item_id": iid, "status": status,
-            "tags_add": [str(x) for x in (raw.get("tags_add") or []) if x][:6],
-            "tags_remove": [str(x) for x in (raw.get("tags_remove") or []) if x][:6],
-            "note": " ".join(str(raw.get("note") or "").split())[:300],
+            "tags_add": [str(x)[:TAG_MAX] for x in (raw.get("tags_add") or []) if x][:TAGS_MAX],
+            "tags_remove": [str(x)[:TAG_MAX] for x in (raw.get("tags_remove") or [])
+                            if x][:TAGS_MAX],
+            "note": " ".join(str(raw.get("note") or "").split())[:NOTE_MAX],
         })
     try:
         pick = int(structured.get("next_pick") or 0)
     except (TypeError, ValueError):
         pick = 0
     return {"moves": moves, "next_pick": max(0, pick),
-            "next_pick_reason": " ".join(str(structured.get("next_pick_reason") or "").split())[:300],
-            "summary": " ".join(str(structured.get("summary") or "").split())[:400]}
+            "next_pick_reason": " ".join(
+                str(structured.get("next_pick_reason") or "").split())[:REASON_MAX],
+            "summary": " ".join(str(structured.get("summary") or "").split())[:SUMMARY_MAX]}
 
 
 def agreement(moves: list[dict], expected: dict[int, tuple], current: dict[int, str]) -> dict:
