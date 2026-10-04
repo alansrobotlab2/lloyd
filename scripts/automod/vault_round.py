@@ -759,6 +759,67 @@ def _guards_row(guards: dict) -> dict:
     return out
 
 
+#: The head substring of every "staged nothing" refusal, and the reason the phrases
+#: appended below are additions and never a replacement: `scripts/autoresearch/
+#: promote.py` classifies a repeated rollback as `no_change: true` by matching this
+#: text in the exception (`promote.py`'s `if "nothing to commit" in str(exc)`), so a
+#: refusal that stopped carrying it would answer a re-requested undo as a failed one.
+NOTHING_TO_COMMIT = "nothing to commit on those paths"
+
+
+def _held_by_head(paths: list[str]) -> dict[str, str]:
+    """`path -> short sha`, for the named paths HEAD's history already holds, where the
+    sha is the commit that last committed that path: `git log -1 --format=%h -- <path>`.
+
+    A land that stages nothing is not always a land that changed nothing. A concurrent
+    job's pre-flight snapshot commits whatever is dirty at its instant — `vault-commit.sh
+    ` with no pathspec, its documented whole-tree snapshot mode — and takes another
+    job's in-flight file with it, under the OTHER job's `--author` and `Job:` trailer.
+    The author's own land then answers "nothing to commit on those paths", which is true
+    of the index and silent about who took the file. This is the lookup that makes that
+    answer point at a sha a reader can go and read: since #1070/#1867 a swept commit
+    discloses the paths it took in its own body, so the sha is the pointer to the
+    disclosure.
+
+    A path git has never committed yields NO entry — `git log` on it is empty — and
+    naming a sha for it would send the next reader to a commit that does not exist
+    (#2175 clause 4). A git error or a timeout is absence too, never a guess.
+    """
+    held: dict[str, str] = {}
+    for rel in paths:
+        try:
+            r = _git("log", "-1", "--format=%h", "--", rel)
+        except Exception:
+            continue
+        out = (r.stdout or "").strip()
+        if r.returncode == 0 and out:
+            held[rel] = out.splitlines()[0].strip()
+    return held
+
+
+def _no_change_refusal(norm: list[str], held: dict[str, str]) -> str:
+    """The refusal text for "staged nothing", extended with the commits that already
+    hold these paths. Says what the shas ARE and not which of the two readings applies:
+    either this job wrote the content and somebody else's snapshot committed it, or
+    there was no change to make, and the tree looks identical either way.
+    """
+    lacking = sorted(set(norm) - set(held))
+    if not held:
+        return (f"{NOTHING_TO_COMMIT}: the working tree matches HEAD for every named "
+                f"path, and none of them has a commit in HEAD's history — {norm[:5]}. "
+                "A path git has never committed is not someone else's taking; this "
+                "land had nothing to write.")
+    named = ", ".join(f"{rel} -> {held[rel]}" if rel in held else f"{rel} -> (none)"
+                      for rel in sorted(norm))
+    return (f"{NOTHING_TO_COMMIT}: the working tree matches HEAD for every named path, "
+            f"and HEAD already holds them from these commits — {named[:600]}. If this "
+            "job authored that content, a commit not its own took it: read that sha's "
+            "body for its `unattributed dirty state` / LLOYD_JOB_WRITES disclosure "
+            "(#2175)."
+            + (f" With no commit named for it, and none invented: {lacking[:5]}."
+               if lacking else ""))
+
+
 def land(paths: list[str], message: str, *, item_id: int | None = None,
          session_id: str | None = None, ack: list[str] | None = None) -> dict:
     """Validate these paths, commit exactly them on the vault's main, ledger it.
@@ -957,7 +1018,26 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
         if add.returncode != 0:
             raise VaultRoundError(f"git add failed: {add.stderr.strip()[:300]}")
     if _git("diff", "--cached", "--quiet").returncode == 0:
-        raise VaultRoundError("nothing to commit on those paths")
+        # Every other refusal on this path — validation, code agreement — writes an
+        # `ok: False` row before it raises, and this one wrote nothing at all: the
+        # three refusals task-83 hit on 2026-10-04 survive only in its run record, and
+        # of the twelve `vault_land` rows dated that day in promotions.jsonl every one
+        # is `ok: true`. A land that committed nothing is now findable in the ledger
+        # like any other, naming the paths, the refusal and the sha(s) it resolved to
+        # (#2175 clause 3).
+        held = _held_by_head(norm)
+        text = _no_change_refusal(norm, held)
+        S.append_event({"event": "vault_land", "ok": False, "item_id": item_id,
+                        "paths": norm, "errors": [text],
+                        # `commit` stays absent: this land made no commit. What HEAD
+                        # holds is in `held_by`, keyed path -> sha, so a reader cannot
+                        # mistake someone else's sha for this land's output.
+                        "held_by": held,
+                        "review": "skipped",
+                        "review_reason": "nothing staged: HEAD already holds the "
+                                         "named paths, or they were never changed",
+                        **({"session_id": session_id} if session_id else {})})
+        raise VaultRoundError(text)
     commit = _git("commit", "-q", "-m", message.strip())
     if commit.returncode != 0:
         _git("reset", "-q", "--", *norm)

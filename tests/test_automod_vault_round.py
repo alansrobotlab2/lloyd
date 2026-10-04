@@ -143,6 +143,253 @@ def test_nothing_to_commit_is_an_error_not_a_silent_success(vault):
         V.land(["backlog/9-item.md"], "no-op")
 
 
+# ── #2175: a refusal that says WHO ALREADY TOOK THE FILE, and leaves a row ───
+#
+# A concurrent job's pre-flight snapshot (`vault-commit.sh` with no pathspec, its
+# documented whole-tree mode) commits whatever is dirty at its instant, including
+# another job's in-flight file, under the OTHER job's --author and Job: trailer. The
+# author's own `automod_vault_land` then said only "nothing to commit on those paths"
+# — true of the index, silent about the sha, and it wrote no ledger row at all, so of
+# the 390 `vault_land` rows in promotions.jsonl none records a refusal of this kind.
+# The fix is a pointer, not a claim about which of the two readings applies.
+
+def _sweep_commit(vault, rel: str, text: str, author: str) -> str:
+    """Simulate the sweep: a second job's commit takes this job's in-flight file."""
+    (vault / rel).write_text(text)
+    git(vault, "add", "-A", "--", rel)
+    git(vault, "commit", "-q", "--author", author, "-m",
+        "autonomy-data-pipeline: pre-flight 2026-10-04 (unattributed dirty state)")
+    return git(vault, "rev-parse", "HEAD").stdout.strip()
+
+
+def test_the_refusal_names_the_commit_that_took_the_path(vault):
+    """Clause 1, in the shape the item was filed for: the job writes a skill, a
+    concurrent snapshot commits it, and the job's own land must answer with a sha a
+    reader can go and read, not with a bare "nothing to commit"."""
+    rel = "skills/runtime-store-schema-probe/SKILL.md"
+    (vault / "skills" / "runtime-store-schema-probe").mkdir(parents=True)
+    (vault / rel).write_text("---\nname: runtime-store-schema-probe\n---\n# probe\n")
+    swept = _sweep_commit(vault, rel, "---\nname: runtime-store-schema-probe\n---\n"
+                                   "# probe\n",
+                          "lloyd-autonomy-data-pipeline <adb@jobs.lloyd.local>")
+    with pytest.raises(V.VaultRoundError) as got:
+        V.land([rel], "consolidation: runtime-store-schema-probe")
+    text = str(got.value)
+    short = swept[:7]
+    assert short in text, (short, text)
+    assert rel in text, text
+    # The named sha is the commit that last committed THIS path, from the same
+    # command the docstring names — not the vault's first commit, not HEAD by luck.
+    assert git(vault, "log", "-1", "--format=%h", "--", rel).stdout.strip() == short
+    assert git(vault, "cat-file", "-e", swept).returncode == 0
+    # And the sentence says what the sha IS without asserting which reading applies:
+    # either somebody else's snapshot took this job's content, or there was no change.
+    assert "a commit not its own took it" in text, text
+    assert "unattributed dirty state" in text, text
+
+
+def test_the_refusal_names_each_path_with_its_own_commit(vault):
+    """Two named paths, two different taking commits: the answer pairs them, so a
+    reader can tell which file went into which sweep."""
+    git(vault, "add", "-A", "--", "backlog/9-item.md")
+    git(vault, "commit", "-q", "--author", "job-a <a@jobs.lloyd.local>",
+        "-m", "job a took the item")
+    idx = "memory/learnings/skills-index.md"
+    (vault / "memory" / "learnings").mkdir(parents=True, exist_ok=True)
+    (vault / idx).write_text("# index\n")
+    item_sha = git(vault, "log", "-1", "--format=%h", "--", "backlog/9-item.md").stdout.strip()
+    _sweep_commit(vault, idx, "# index\n", "job b <b@jobs.lloyd.local>")
+    idx_sha = git(vault, "log", "-1", "--format=%h", "--", idx).stdout.strip()
+    with pytest.raises(V.VaultRoundError) as got:
+        V.land(["backlog/9-item.md", idx], "two paths")
+    text = str(got.value)
+    assert f"backlog/9-item.md -> {item_sha}" in text, text
+    assert f"{idx} -> {idx_sha}" in text, text
+
+
+def test_the_refusal_still_carries_the_head_substring_the_promoter_matches(vault):
+    """Clause 1's other half: the phrases below are additions. `promote.py` classifies
+    a repeated rollback as `no_change` by `"nothing to commit" in str(exc)`, so the
+    extended text has to still open with what it matched before."""
+    rel = "skills/foo/SKILL.md"
+    swept = _sweep_commit(vault, rel, "---\nname: foo\n---\n# foo changed\n",
+                          "lloyd-autonomy-data-pipeline <adb@jobs.lloyd.local>")
+    with pytest.raises(V.VaultRoundError, match="nothing to commit") as got:
+        V.land([rel], "no-op again")
+    assert str(got.value).startswith(V.NOTHING_TO_COMMIT), str(got.value)
+    assert swept[:7] in str(got.value)
+
+
+def test_a_refused_land_writes_exactly_one_ok_false_row_with_the_shas(vault):
+    """Clause 3: every other refusal on this path already wrote a row; this one wrote
+    nothing. Now the ledger can answer "did a land commit nothing today, and what took
+    its content?" without the caller's run record."""
+    before = len(_events("vault_land"))
+    rel = "memory/learnings/skills-usage.jsonl"
+    (vault / "memory" / "learnings").mkdir(parents=True, exist_ok=True)
+    (vault / rel).write_text('{"skill": "x"}\n')
+    swept = _sweep_commit(vault, rel, '{"skill": "x"}\n',
+                          "lloyd-autonomy-data-pipeline <adb@jobs.lloyd.local>")
+    with pytest.raises(V.VaultRoundError):
+        V.land([rel], "usage row", session_id="sess-83")
+    rows = _events("vault_land")
+    assert len(rows) == before + 1, f"wrote {len(rows) - before} rows, expected exactly one"
+    row = rows[-1]
+    assert row["ok"] is False, row
+    assert row["paths"] == [rel], row
+    assert "nothing to commit on those paths" in row["errors"][0], row
+    short = git(vault, "log", "-1", "--format=%h", "--", rel).stdout.strip()
+    assert row["held_by"] == {rel: short}, row
+    assert short in row["errors"][0], row
+    assert row["session_id"] == "sess-83", row
+    # A land that made no commit must not appear to have made one: the passing row's
+    # `commit` key is absent here, so no reader mistakes the sweep's sha for this land.
+    assert "commit" not in row, row
+    # The row points at a commit whose author is the OTHER job — which is the whole
+    # defect this refusal now makes legible from the ledger alone.
+    assert git(vault, "log", "-1", "--format=%an", swept).stdout.strip() == \
+        "lloyd-autonomy-data-pipeline", row
+
+
+def test_a_path_with_no_commit_in_history_is_named_without_a_sha(vault):
+    """Clause 4: git has never seen this path, so there is no sha to name and none is
+    invented. The call still refuses — an unlandable path is not a success."""
+    ghost = "backlog/never-committed-item.md"
+    with pytest.raises(V.VaultRoundError) as got:
+        V.land([ghost], "land a path git has never seen")
+    text = str(got.value)
+    assert text.startswith(V.NOTHING_TO_COMMIT), text
+    assert ghost in text, text
+    assert "none of them has a commit in HEAD's history" in text, text
+    # No fabricated pointer: every hex token of sha length in the message must be a
+    # real object in this repo. An empty answer names none, and none may appear.
+    for tok in _hex_tokens(text):
+        assert git(vault, "cat-file", "-e", tok).returncode == 0, tok
+
+
+def test_a_git_error_is_absence_and_never_a_guess(vault, monkeypatch):
+    """The one survivor of a mutant sweep: swap the lookup's `continue` for a placeholder
+    and every other node stays green, because on a real tree `_git` never raises. So the
+    docstring's claim that a git error is absence too is graded here — git answers a
+    `log` query with an exception, and the refusal must name NO sha for that path, name
+    the path in its no-sha set, and still refuse."""
+    rel = "backlog/9-item.md"
+    real = V._git
+
+    def die_on_log(*args):
+        if args and args[0] == "log":
+            raise RuntimeError("git: unable to read commit graph")
+        return real(*args)
+
+    monkeypatch.setattr(V, "_git", die_on_log)
+    with pytest.raises(V.VaultRoundError) as got:
+        V.land([rel], "lookup cannot run")
+    text = str(got.value)
+    assert text.startswith(V.NOTHING_TO_COMMIT), text
+    assert not _hex_tokens(text), f"a sha was named from a failed lookup: {text}"
+    assert f"{rel} -> (none)" not in text, text
+    assert "none of them has a commit in HEAD's history" in text, text
+    assert _events("vault_land")[-1]["held_by"] == {}, _events("vault_land")[-1]
+
+
+# ── #2175 clause 5: the bytes behind "the ledger has no refusal of this kind" ──
+#
+# The report this item quotes — every `vault_land` row of 2026-10-04 is `ok: true`, so
+# task-83's three refusals are nowhere in the ledger — was read out of the LIVE ledger,
+# which another job appends to between one reading and the next. #2042's own finding is
+# why a dated copy sits in `backlog/data/`: the live file is not a witness. This extract
+# is every `vault_land` row dated 2026-10-04 whose `created_at` is at or before
+# 08:31:40Z — twelve rows, copied out byte for byte at 10:50Z.
+
+WITNESS_2175_VAULT_PATH = "backlog/data/promotions.jsonl"
+
+
+@pytest.mark.live_vault
+def test_the_vault_copy_shows_a_day_of_lands_with_no_refusal_of_this_kind():
+    """Re-derived from committed bytes, not from a live file that keeps growing.
+
+    `wc -l < backlog/data/promotions.jsonl` is 12 — the figure this item's triage
+    quotes — and it is the twelve `vault_land` rows the live ledger held for 2026-10-04
+    up to 08:31:40Z, when that count was taken. Every one is `ok: true` and none carries
+    a `held_by` key, which is the whole report in bytes: three task-83 lands refused with
+    "nothing to commit on those paths" and not one of them is in the ledger.
+
+    The cut at 08:31:40Z is the count's own timestamp, not a filter that flatters the
+    claim: the live file has gained three more rows since (items 2172, 2177, 2176, all
+    `ok: true`), and a copy that grew with it would stop being the twelve the triage
+    counted. What this extract is evidence of is the ABSENCE of an `ok: false` row, and
+    the node asserts exactly that, so the next reader re-derives the finding rather than
+    trusting a line count that a landing job moves every few minutes.
+
+    Read from disk if it is there, else from the last commit that touched the path: the
+    sweep this item describes deletes vault files and commits the deletion, and a check
+    that skipped once the file vanished would be a witness the defect could silence.
+    """
+    import json
+    text = _witness_2175_bytes()
+    if text is None:
+        pytest.skip(f"{WITNESS_2175_VAULT_PATH} is neither on disk nor in the vault's "
+                    "history, so the copy is unreadable here")
+    rows = [json.loads(l) for l in text.splitlines() if l.strip()]
+    assert len(text.splitlines()) == 12, "the file's line count is what wc -l reports"
+    assert len(rows) == 12, f"the extract holds {len(rows)} rows, not the 12 triage counted"
+    assert all(r.get("event") == "vault_land" for r in rows), "not the extract asked for"
+    dates = [str(r.get("created_at", "")) for r in rows]
+    assert all(d.startswith("2026-10-04") for d in dates), dates[0]
+    assert min(dates) == "2026-10-04T00:51:17Z" and max(dates) == "2026-10-04T08:31:40Z", \
+        "the extract is not the twelve rows up to the count's own timestamp"
+    assert all(r.get("ok") is True for r in rows), \
+        "a refusal is in the extract, so it no longer shows a day with none"
+    assert not [r for r in rows if "held_by" in r], \
+        "the extract postdates #2175 and cannot show the pre-fix absence"
+
+
+def _witness_2175_bytes() -> str | None:
+    """The committed extract, from disk or from the last sha that wrote the path."""
+    rel = WITNESS_2175_VAULT_PATH
+    root = V.VAULT
+    if not (root / ".git").exists():
+        return None
+    disk = root / rel
+    if disk.is_file():
+        return disk.read_text(encoding="utf-8", errors="replace")
+    seen = subprocess.run(["git", "-C", str(root), "log", "-1", "--format=%H",
+                           "--", rel], capture_output=True, text=True, check=False)
+    sha = (seen.stdout or "").strip()
+    if seen.returncode != 0 or not sha:
+        return None
+    got = subprocess.run(["git", "-C", str(root), "show", f"{sha}:{rel}"],
+                         capture_output=True, text=True, check=False)
+    return None if got.returncode != 0 else got.stdout
+
+
+
+def test_a_mixed_batch_names_the_sha_it_has_and_none_for_the_path_it_lacks(vault):
+    """The same rule inside a batch: one path HEAD holds (named with its sha), one git
+    never committed (named with nothing after it), and the no-sha set is stated."""
+    git(vault, "add", "-A", "--", "backlog/9-item.md")
+    git(vault, "commit", "-q", "--author", "job-a <a@jobs.lloyd.local>",
+        "-m", "job a took the item")
+    item_sha = git(vault, "log", "-1", "--format=%h", "--", "backlog/9-item.md").stdout.strip()
+    (vault / "memory" / "learnings").mkdir(parents=True, exist_ok=True)
+    ghost = "memory/learnings/never-indexed.md"
+    with pytest.raises(V.VaultRoundError) as got:
+        V.land(["backlog/9-item.md", ghost], "mixed batch")
+    text = str(got.value)
+    assert f"backlog/9-item.md -> {item_sha}" in text, text
+    assert f"{ghost} -> (none)" in text, text
+    assert "With no commit named for it, and none invented" in text, text
+    for tok in _hex_tokens(text):
+        assert git(vault, "cat-file", "-e", tok).returncode == 0, tok
+
+def _hex_tokens(text: str) -> list[str]:
+    """Every run of 7+ hex characters in a refusal — the shape a named sha has, so the
+    no-fabrication check has something to check."""
+    import re
+    return [t for t in re.findall(r"\b[0-9a-f]{7,40}\b", text)]
+
+
+
 # ── #955: the landing clause, and what an abstention leaves behind ──────────
 
 

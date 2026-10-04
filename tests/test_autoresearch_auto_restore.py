@@ -656,6 +656,68 @@ def test_rolling_back_to_the_live_contract_reports_no_change_and_commits_nothing
     assert porcelain(env.vault) == ""
 
 
+def _hex_tokens(text: str) -> list[str]:
+    """Runs of 7 to 40 hex characters — the shape a named sha has, so the check that a
+    refusal invented no sha has something to check. Copied from the same helper in
+    tests/test_automod_vault_round.py rather than imported, so one test module does not
+    become the other's fixture."""
+    import re
+    return re.findall(r"\b[0-9a-f]{7,40}\b", text)
+
+
+def test_a_sweep_that_takes_the_rolled_back_file_between_compare_and_land_is_no_change(
+        env, monkeypatch):
+    """#2175 clause 2, on the classifier the item names: `promote.rollback` decides
+    "already applied" at its `except` by `"nothing to commit" in str(exc)`, and #2175
+    lengthens that message to name the commit HEAD already holds.
+
+    The path to that `except` is this item's defect exactly. `rollback` copies the
+    snapshot files into the tree, then asks `_differs_from_head`: a repeat rollback is
+    answered there and never reaches `land`. The `except` fires on the other reading —
+    the files DID differ at the compare, and before `land` ran, a concurrent job's
+    pre-flight snapshot committed them. So the wrapper below is that sweep: it runs the
+    real comparison, insists it came back differing (the fixture must reach `land`, not
+    the content check), then commits the working tree as the other job. Both halves are
+    asserted: the classification is unchanged (`no_change: True`, no `vault_commit`, and
+    HEAD left on the sweep's own sha rather than a commit of this rollback's), and the
+    refusal that produced it is no longer bare — it names a sha that exists in this
+    vault. Before #2175 the ledger held no trace of the call at all.
+    """
+    snap_ts = promote_a_bad_variant(env)
+    real = promote._differs_from_head
+    swept: list[str] = []
+
+    def sweep_after_the_compare(vault_root, rels):
+        differs = real(vault_root, rels)
+        assert differs, "the fixture must reach `land`, not the content check"
+        git(env.vault, "add", "-A", "--", *rels)
+        git(env.vault, "commit", "-q",
+            "--author", "lloyd-autonomy-data-pipeline <adb@jobs.lloyd.local>",
+            "-m", "autonomy-data-pipeline: pre-flight (unattributed dirty state)")
+        swept.append(head(env.vault))
+        return differs
+
+    monkeypatch.setattr(promote, "_differs_from_head", sweep_after_the_compare)
+    ledger = env.cfg.paths.ledger_path.parent / "ledger-swept.jsonl"
+    monkeypatch.setattr(automod_state, "LEDGER_PATH", ledger)
+
+    out = promote.rollback(env.cfg, snap_ts)
+
+    assert out["no_change"] is True and not out.get("vault_commit"), out
+    assert len(swept) == 1, swept
+    assert head(env.vault) == swept[0], "the land committed over the sweep it was told of"
+    rows = [json.loads(l) for l in ledger.read_text().splitlines() if l.strip()]
+    lands = [r for r in rows if r.get("event") == "vault_land"]
+    assert len(lands) == 1, f"exactly one vault_land row, got {len(lands)}"
+    row = lands[-1]
+    assert row["ok"] is False, row
+    assert len(row["errors"]) == 1 and "nothing to commit" in row["errors"][0], row
+    named = _hex_tokens(row["errors"][0])
+    assert named, f"the refusal named no sha at all: {row['errors'][0]}"
+    for tok in named:
+        assert git_ok(env.vault, "cat-file", "-e", tok) is not None, tok
+
+
 def test_no_restore_path_writes_a_prompt_file_without_a_commit(env):
     """The failure this item exists to close: bytes moving onto the contract while
     HEAD keeps pointing at the promotion and nothing records the change. The tree
