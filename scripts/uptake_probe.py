@@ -280,11 +280,18 @@ def attach_retrieval_gate(classifier_block: dict[str, Any],
 def engine_provenance() -> dict[str, Any]:
     """Which engine actually answered the classifier, resolved, not named (#1310).
 
-    `uptake.SECONDARY_MODEL` is the alias the classifier asks for. With
-    `secondary_enabled: false` the tree's resolver rewrites that alias to the
-    primary, so a table stamped from the constant says `secondary` over numbers
-    the primary produced. This records the endpoint and model the request is
-    really sent to, and `rerouted` says the two came apart.
+    `rerouted` is `resolved != uptake.EXPECTED_SCORING_ENGINE` — the engine that
+    answered against the one this instrument NAMES on purpose, dated and reasoned
+    in that constant (#1850, Alan's ruling of 2026-10-01). Before it the
+    comparison was against `uptake.SECONDARY_MODEL`, the alias the payload asks
+    for, a slot retired on 2026-09-20: with `secondary_enabled: false` the answer
+    was yes on every run, `stamp_engine` cleared `measured` on all three blocks,
+    and no table its only consumer could cite ever existed.
+
+    `engine_alias` is still reported, because the payload still carries it and a
+    reader is owed the difference between what was asked for and what answered;
+    `expected_engine` and `expected_engine_reason` travel with the verdict, so the
+    reason is in the artifact and not only here.
     """
     alias = uptake.SECONDARY_MODEL
     try:
@@ -292,8 +299,14 @@ def engine_provenance() -> dict[str, Any]:
         url, resolved = _endpoint("uptake")
     except Exception as exc:            # noqa: BLE001 - describe, never propagate
         url, resolved = f"<unresolved: {type(exc).__name__}: {exc}>", ""
+    # #1850: the comparison is against the NAMED engine, not `alias`. `alias` is
+    # still reported — the payload carries it, and a reader is owed the
+    # difference between what was asked for and what answered.
+    expected = uptake.EXPECTED_SCORING_ENGINE
     return {"alias": alias, "endpoint": url, "resolved_model": resolved,
-            "rerouted": resolved != alias}
+            "expected_engine": expected,
+            "expected_engine_reason": uptake.EXPECTED_SCORING_ENGINE_REASON,
+            "rerouted": resolved != expected}
 
 
 def stamp_engine(result: dict[str, Any],
@@ -313,9 +326,11 @@ def stamp_engine(result: dict[str, Any],
     result["engine_endpoint"] = prov["endpoint"]
     result["engine_rerouted"] = bool(prov["rerouted"])
     if prov["rerouted"]:
-        reason = (f"alias {prov['alias']!r} resolved to "
-                  f"{prov['resolved_model'] or 'nothing'!r} at {prov['endpoint']} "
-                  "(secondary_enabled is false?); not a measurement of the secondary")
+        reason = (f"scorer resolved to {prov['resolved_model'] or 'nothing'!r} at "
+                  f"{prov['endpoint']}, not the engine this instrument names "
+                  f"({uptake.EXPECTED_SCORING_ENGINE!r}, "
+                  f"{uptake.EXPECTED_SCORING_ENGINE_REASON}); "
+                  "not a measurement by the named scorer")
         for key in ("metrics", "holdout", "zero_shot"):
             block = result.get(key)
             if isinstance(block, dict):

@@ -4108,3 +4108,132 @@ def test_the_guard_holds_only_task_files_and_leaves_other_vault_paths_alone(arme
         "---\nstatus: up_next\nfrequency: daily\n---\n# item\n")
     errors, _buckets = V.validate(["backlog/9-item.md"])
     assert errors == [], errors
+
+
+# ── #1850: a skill that reads the uptake verdict cannot drop a citability rule ──
+#
+# `nightly-reflection-knowledge-write` §2a is the only consumer of the uptake
+# instrument's verdict, and its rules are what keep a nightly from citing a table
+# that was never a measurement. The prose lives in the vault, so the gate's
+# `tests` rung cannot read it (`live_vault` is excluded, `pytest.ini:6-12`) and a
+# dropped sentence would land silently. Enforcement therefore sits on this route,
+# beside `reflection_archive_errors` and `skill_timezone_errors`, and the rule is
+# one definition in `scripts/uptake_citability.py` shared with the `live_vault`
+# reporting node in `tests/test_uptake.py`.
+
+#: Compliant: names the reroute key (the trigger), states a citability verdict
+#: beside each of the three keys, and states the re-base facts (#1850: primary,
+#: decided 2026-10-04, slot retired 2026-09-20).
+UPTAKE_SKILL_COMPLIANT = """---
+name: foo
+---
+# foo
+
+1. Read the newest uptake table. **The scoring engine is the primary, by deliberate
+   decision since 2026-10-04**; the secondary slot has been retired since 2026-09-20
+   and is not coming back. A table with `engine_rerouted: true` is not a measurement,
+   because its `measured` is forced false: its numbers are not citable, and it is not
+   a comparable of later tables. A table carrying `audit_only: true` is not citable
+   either, whatever its `measured` says: cite nothing, never archive on it.
+"""
+
+#: Only the `audit_only` verdict removed — the key is still named, so a reader is
+#: told the marker exists and not what it forbids. This is the exact drift #1850's
+#: clause 5 must not permit, because the nightly then archives on a stamped table.
+UPTAKE_SKILL_AUDIT_RULE_DROPPED = UPTAKE_SKILL_COMPLIANT.replace(
+    "`audit_only: true` is not citable\n   either, whatever its `measured` says: "
+    "cite nothing, never archive on it.",
+    "`audit_only: true` is written past a floor.")
+
+#: Only the dated re-base removed: the rules survive, the decision that re-based
+#: them does not, and gen-1 tables start being read as comparables again.
+UPTAKE_SKILL_REBASE_UNDATED = UPTAKE_SKILL_COMPLIANT.replace(
+    "since 2026-10-04", "by decision").replace(
+    "since 2026-09-20", "long ago")
+
+
+def test_the_vault_writer_refuses_a_skill_that_drops_an_uptake_citability_rule(vault):
+    """The route refuses a §2a rewrite that removes a citability rule, and accepts
+    the rule as written. #1850 clause 5's enforcement half.
+
+    Driven through `validate` — what `land` calls before it commits — so this pins
+    the wiring, not just the predicate. Three things have to be true for that to
+    mean anything: the compliant text passes (the guard is not a ban on the skill),
+    each of the two mutations is refused naming what went, and a skill that never
+    names the reroute key is never asked at all. That last control is why the rule
+    can be always-on across 202 live skills: obligations are discovered from the
+    candidate's own bytes, not from a list of slugs.
+    """
+    skill = vault / "skills" / "foo" / "SKILL.md"
+    path = "skills/foo/SKILL.md"
+    assert UPTAKE_SKILL_AUDIT_RULE_DROPPED != UPTAKE_SKILL_COMPLIANT, \
+        "the audit_only fixture's replace is a no-op — its anchor drifted"
+    assert UPTAKE_SKILL_REBASE_UNDATED != UPTAKE_SKILL_COMPLIANT, \
+        "the re-base fixture's replace is a no-op — its anchor drifted"
+
+    skill.write_text(UPTAKE_SKILL_COMPLIANT, encoding="utf-8")
+    assert V.uptake_citability_errors([path]) == [], "the shipped rule was refused"
+    errors, _buckets = V.validate([path])
+    assert not [e for e in errors if "citability" in e], errors
+
+    skill.write_text(UPTAKE_SKILL_AUDIT_RULE_DROPPED, encoding="utf-8")
+    errs = V.uptake_citability_errors([path])
+    assert any("audit_only" in e for e in errs), errs
+    errors, _buckets = V.validate([path])
+    assert any("uptake citability rule" in e and "audit_only" in e for e in errors), errors
+
+    skill.write_text(UPTAKE_SKILL_REBASE_UNDATED, encoding="utf-8")
+    errs = V.uptake_citability_errors([path])
+    assert any("re-base" in e for e in errs), errs
+
+    skill.write_text("---\nname: foo\n---\n# foo\n\nSay the thing.\n", encoding="utf-8")
+    assert V.uptake_citability_errors([path]) == [], \
+        "a skill that never names the reroute key must not be asked"
+
+
+def test_the_uptake_citability_guard_survives_a_skill_that_moves_its_detail(vault):
+    """A rule spilled into a sibling counts, and the trigger stays in the body.
+
+    #624's spill route is the tree's sanctioned way to shorten a skill body, so a
+    guard that read only `SKILL.md` would refuse a compliant skill and push its
+    author to duplicate prose — and the reverse matters too: the body must still
+    name the trigger key, or discovery would silently stop asking of a skill that
+    kept reading the verdict. Both halves are pinned here.
+    """
+    from scripts import uptake_citability
+
+    slug_dir = vault / "skills" / "foo"
+    skill = slug_dir / "SKILL.md"
+    sibling = slug_dir / "steps-citability.md"
+    # The body keeps the trigger key (so the skill is still asked) and every key
+    # name, and carries NO verdict sentence: discovery is the body, the content may
+    # live in the sibling the body points at.
+    body_only_names = """---
+name: foo
+---
+# foo
+
+1. Read the newest uptake table; `engine_rerouted`, `measured` and `audit_only`
+   are explained in `steps-citability.md`.
+"""
+    skill.write_text(body_only_names, encoding="utf-8")
+    sibling.write_text(
+        "`engine_rerouted: true` is not a measurement and not citable; `audit_only: "
+        "true` is not citable; `measured: false` means cite nothing. Decided "
+        "2026-10-04: the scorer is the primary, the slot was retired 2026-09-20.\n",
+        encoding="utf-8")
+    assert uptake_citability.skill_rule_violations(
+        "foo", body_only_names, detail=sibling.read_text()) == [], \
+        "the rule lives in the sibling the body points at, and that is allowed"
+    # The sibling is what saves it, not concatenation: with the sibling gone the
+    # same body is refused, and a sibling that names the keys without a verdict
+    # saves nothing either.
+    assert uptake_citability.skill_rule_violations("foo", body_only_names) != [], (
+        "the body alone passes, so the sibling was never what this node measured")
+    assert uptake_citability.skill_rule_violations(
+        "foo", body_only_names,
+        detail="`engine_rerouted`, `measured` and `audit_only` are keys.\n") != [], (
+        "a sibling that names the keys without saying what they permit must not "
+        "clear the rule")
+    assert V.uptake_citability_errors(["skills/foo/SKILL.md"]) == [], (
+        "the landing route must agree with the rule about a spilled skill")

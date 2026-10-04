@@ -6,7 +6,8 @@ followed, or disputed afterward. So these tests are all about the measurement
 existing, being computed from real logged evidence rather than assertion, and
 being honest about the half it cannot compute.
 
-**Exactly one test POSTs to the secondary engine**: the step-2 acceptance
+**Exactly one test POSTs to the scoring engine** (`EXPECTED_SCORING_ENGINE`, the
+primary on this box since #1850): the step-2 acceptance
 measurement, `test_live_engine_scores_the_corpus_and_reports_every_way_precision_was_measured`.
 It carries no mark on purpose — it is the number the item is accepted on, so it
 runs on the gate, and if the engine is asleep it **fails, naming the engine**.
@@ -25,13 +26,22 @@ check is a probe step (`uptake_probe.verify_replay`, recorded in every emitted
 table as `classifier.replay`) and not a test: asking a live model whether it
 still agrees with its own recorded answer is a property of the measurement run,
 and inside the suite it would make a hermetic replay claim depend on which GGUF
-happens to be loaded. Two further tests read the live `~/obsidian` vault and
+happens to be loaded. Some further tests read the live `~/obsidian` vault and
 carry the tree's existing `live_vault` mark, which the automod gate excludes.
 Other tests read live session and baseline *data*; none of those is the engine.
 
-Nothing in this file skips, xfails, or asserts `True`; the loopback HTTP seam is
-crossed by a test that runs whether or not a model is loaded, and the precision
-claim is replayable from recorded replies.
+No test here xfails or asserts `True`, and the loopback HTTP seam is crossed by a
+test that runs whether or not a model is loaded; the precision claim is replayable
+from recorded replies. The `pytest.skip` calls in this file are guards that a vault
+skill file is present, plus one stand-down read from tracked config: the
+live-engine node steps aside while `secondary_enabled` is false, because the slot
+Step 2 measured is out of service. Flipping that switch does NOT re-take the node,
+and that is the half #1850 inverted. What that node asserts is a measurement OF the
+secondary, while the expectation `stamp_engine` now compares against is
+`EXPECTED_SCORING_ENGINE`, the primary, named on 2026-10-04: a re-enabled alias is
+therefore the reroute that guard refuses, so the node would return failing, not
+measuring. Re-taking Step 2 needs a ruling on which engine the acceptance is
+claimed on — #1850's owed entry — not a config edit.
 """
 
 from __future__ import annotations
@@ -1214,7 +1224,7 @@ def test_live_uptake_table_exists_and_carries_per_entry_keys():
 
     This asserts the *measured step-1/step-2 outcomes* off committed evidence, so
     the acceptance clauses are pinned by a test that can fail on any machine and
-    does not need the secondary engine awake — the live-engine test next to it is
+    does not need the scoring engine awake — the live-engine test next to it is
     the cross-check, not the pin.
     """
     files = sorted((REPO / "eval" / "uptake").glob("uptake-*.json"))
@@ -1360,9 +1370,11 @@ def _audit_env(monkeypatch, *, labels_resolve: bool) -> None:
     `engine_provenance` is pinned non-rerouted on purpose: the committed
     `config.yaml` ships `secondary_enabled: false`, so on any worktree the real
     provenance marks the run rerouted and `stamp_engine` forces `measured: False` —
-    the refusal would then be about the retired engine slot, not about the
-    precision floor clause 1 is about. Restoring that slot is a human path owed on
-    #1676, so the slot's state must not decide what this test measures.
+    the refusal would then be about whichever engine happens to answer, not about
+    the precision floor clause 1 is about. So the stub pins the engine here for a
+    reason that survives #1850: since 2026-10-04 the scorer is a named constant
+    (`EXPECTED_SCORING_ENGINE`), and this suite still must not be decided by
+    whichever endpoint the box happens to resolve that name to today.
 
     The attribution half of the run reads live stores (memory docs, skill event
     logs, the kg db); those are pinned empty here, so the emitted table is a
@@ -1380,9 +1392,15 @@ def _audit_env(monkeypatch, *, labels_resolve: bool) -> None:
     monkeypatch.setattr(probe, "_corpus_index", lambda days=900: dict(index))
     monkeypatch.setattr(probe, "collect_turns", lambda days=30: list(turns))
     monkeypatch.setattr(uptake, "load_labels", lambda *a, **kw: list(labels))
+    # Coherent with what `engine_provenance` can return after #1850: the named
+    # engine answered, so nothing was rerouted. The alias is still the retired one
+    # the payload carries, and these fixtures say so beside the resolution.
     monkeypatch.setattr(probe, "engine_provenance", lambda: {
         "alias": uptake.SECONDARY_MODEL, "endpoint": "http://127.0.0.1:9/v1",
-        "resolved_model": uptake.SECONDARY_MODEL, "rerouted": False})
+        "resolved_model": uptake.EXPECTED_SCORING_ENGINE,
+        "expected_engine": uptake.EXPECTED_SCORING_ENGINE,
+        "expected_engine_reason": uptake.EXPECTED_SCORING_ENGINE_REASON,
+        "rerouted": False})
 
     def fake(prev_assistant, user_text, *, transport=None, examples=True):
         return _AUDIT_MARK in user_text
@@ -4054,10 +4072,15 @@ def test_the_knowledge_write_skill_reads_a_null_as_no_signal_not_zero(tmp_path):
 
 def test_the_probe_stamps_the_engine_that_answered_and_refuses_a_rerouted_measurement(
         monkeypatch):
-    """#1310: `engine` came from the `secondary` constant, so with the slot
-    retired every table said `secondary` over numbers the primary produced.
-    The resolved endpoint and model are recorded, and a reroute cannot be
-    `measured: true` or pass."""
+    """#1310 as re-based by #1850: `engine`/`engine_alias` still report the alias
+    the payload asked for, and `engine`/`engine_endpoint`/`resolved_model` still
+    record what actually answered — that half of the incident is unchanged.
+
+    What flipped is which resolution counts as a reroute. The yardstick is now
+    `uptake.EXPECTED_SCORING_ENGINE` (the primary, named deliberately on
+    2026-10-04), so the committed config's own resolution is a measurement, and an
+    endpoint answering to the retired alias is the reroute. Either way a reroute
+    cannot be `measured: true` or pass."""
     import scripts.uptake_probe as probe
     from app import secondary_models
 
@@ -4071,32 +4094,41 @@ def test_the_probe_stamps_the_engine_that_answered_and_refuses_a_rerouted_measur
     out = probe.stamp_engine(_block())
     assert out["engine"] == "primary" and out["engine_alias"] == "secondary"
     assert out["engine_endpoint"].startswith("http://127.0.0.1:8096")
-    assert out["engine_rerouted"] is True and out["passed"] is False
+    assert out["engine_rerouted"] is False and out["passed"] is True
     for key in ("metrics", "holdout", "zero_shot"):
-        assert out[key]["measured"] is False, key
-        assert "not a measurement of the secondary" in out[key]["unmeasured_reason"]
-    assert out["metrics"]["precision"] == 1.0, "the number is kept, only disowned"
+        assert out[key]["measured"] is True, key
+        # The disowning reason is written into exactly these blocks, so its
+        # absence here is the measured verdict — and it goes red the moment the
+        # reroute branch runs on a resolution that IS the named engine.
+        assert "unmeasured_reason" not in out[key], (key, out[key])
+    assert out["metrics"]["precision"] == 1.0, "the number stands, and is cited"
 
     monkeypatch.setattr(secondary_models, "_endpoint", lambda job: (
         "http://127.0.0.1:8091/v1/chat/completions", "secondary"))
     out = probe.stamp_engine(_block())
-    assert out["engine"] == "secondary" and out["engine_rerouted"] is False
-    assert out["passed"] is True and out["metrics"]["measured"] is True
+    # The retired alias answering is now the reroute: it is not the engine named.
+    assert out["engine"] == "secondary" and out["engine_rerouted"] is True
+    assert out["passed"] is False and out["metrics"]["measured"] is False
+    assert uptake.EXPECTED_SCORING_ENGINE in out["metrics"]["unmeasured_reason"]
 
 
 def _rerouted_provenance(monkeypatch) -> None:
     """Force the incident's own cause: the secondary alias resolves to something
     else, so `stamp_engine` marks every block the floor reads `measured: False`.
 
-    The committed `config.yaml` ships `secondary_enabled: false`, which is what made
-    the nightly run unmeasured on 2026-09-30 — so this pin is the live condition, not
-    a hypothetical. (`_audit_env` pins the OPPOSITE, because that suite is about the
-    precision floor and must not be decided by the retired engine slot.)
+    The reroute is FORCED here rather than derived from the box: since #1850 the
+    committed config's own resolution is a measurement, so only a stub can show
+    what a reroute does to the blocks the floor reads. (`_audit_env` pins the
+    OPPOSITE for the same reason #1310 does — a reroute must stay a reroute when
+    it happens, and this suite must not be decided by whichever endpoint answers.)
     """
     import scripts.uptake_probe as probe
     monkeypatch.setattr(probe, "engine_provenance", lambda: {
         "alias": uptake.SECONDARY_MODEL, "endpoint": "http://127.0.0.1:9/v1",
-        "resolved_model": "agent-llm-primary", "rerouted": True})
+        "resolved_model": "agent-llm-some-other-name",
+        "expected_engine": uptake.EXPECTED_SCORING_ENGINE,
+        "expected_engine_reason": uptake.EXPECTED_SCORING_ENGINE_REASON,
+        "rerouted": True})
 
 
 def test_an_unmeasured_classifier_report_is_not_published_into_the_tracked_eval_dir(
@@ -4216,3 +4248,451 @@ def test_the_moved_procedure_survives_the_trim_that_moved_it():
     # And the body still carries its own half of the contract — the floor above is not
     # the only thing keeping the pointer honest.
     assert "steps-2b-2f.md" in body, "the body no longer names where the detail went"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# #1850 — the scoring engine is named, not inherited from a retired alias.
+#
+# Until 2026-10-04 the expectation `engine_provenance` compared against was
+# `uptake.SECONDARY_MODEL`: an alias for a slot retired on 2026-09-20, so with
+# `secondary_enabled: false` (committed config) the verdict was `rerouted: true`
+# on every run, `stamp_engine` cleared `measured` on all three blocks the stop
+# condition reads, `passed` went false, and the one consumer that reads those
+# keys could never cite a table. Alan's ruling of 2026-10-01: a table scored by
+# the primary IS a measurement once the scorer is named deliberately. The nodes
+# below pin the re-base AND the guard it must not cost: an engine that resolves
+# to anything other than the named one still fails closed (#1310).
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _floors_clearing_block() -> dict:
+    """A classifier block that clears every floor WHILE measured.
+
+    So the only thing that can make the consumer refuse the table is the engine
+    verdict — which is the pair the two #1850 nodes assert in opposite
+    directions.
+    """
+    return {"passed": True,
+            "metrics": {"measured": True, "precision": 0.9, "recall": 0.8, "n": 40},
+            "holdout": {"measured": True, "precision": 0.9, "n": 10},
+            "zero_shot": {"measured": True, "precision": 0.9, "n": 10}}
+
+
+def _consumer_report(block: dict) -> dict:
+    """The report shape `measurement_clears_floors` is actually called with.
+
+    `floor_failures` reads `report["classifier"]` (the metrics), and `holdout` /
+    `zero_shot` at top level, and `measurement_clears_floors` refuses first on
+    `labels_ok` — so handing it the stamped block alone returns False for reasons
+    that have nothing to do with the engine, which is the mistake this helper
+    exists to prevent.
+    """
+    return {"classifier": block["metrics"], "holdout": block["holdout"],
+            "zero_shot": block["zero_shot"], "labels_ok": True}
+
+
+def _named_engine(monkeypatch, name: str):
+    """Force what the endpoint resolves to, and return the provenance under test."""
+    import scripts.uptake_probe as probe
+    monkeypatch.setattr("app.secondary_models._endpoint",
+                        lambda job: ("http://127.0.0.1:9/v1/chat/completions", name),
+                        raising=True)
+    return probe
+
+
+def test_the_rerouted_verdict_is_the_named_engine_and_never_the_retired_alias(
+        monkeypatch):
+    """Clause 1: `rerouted` compares resolution to the NAMED engine.
+
+    Two halves, both driven: resolution landing on `EXPECTED_SCORING_ENGINE` is
+    not a reroute even though the payload asks for the retired alias, and
+    resolution landing anywhere else is. The alias half still reports
+    `engine_alias`, because what was asked for is a fact a reader is owed; it is
+    simply no longer the yardstick. If this ever compares against the alias
+    again the verdict is true on every run and the instrument goes dark.
+    """
+    import scripts.uptake_probe as probe
+
+    named = uptake.EXPECTED_SCORING_ENGINE
+    assert named != uptake.SECONDARY_MODEL, (
+        "the whole point is that the named engine is not the retired alias")
+
+    _named_engine(monkeypatch, named)
+    prov = probe.engine_provenance()
+    assert prov["rerouted"] is False, prov
+    assert prov["alias"] == uptake.SECONDARY_MODEL, prov
+    assert prov["expected_engine"] == named, prov
+    assert "2026-09-20" in prov["expected_engine_reason"], prov
+
+    other = _named_engine(monkeypatch, "agent-llm-something-else")
+    prov2 = other.engine_provenance()
+    assert prov2["rerouted"] is True, prov2
+    assert prov2["expected_engine"] == named, prov2
+
+
+def test_the_committed_config_scores_under_the_named_engine_so_a_run_is_measured(
+        tmp_path, monkeypatch):
+    """Clause 2: with the named scorer answering, the floors stay measured.
+
+    The three blocks the stop condition reads keep `measured: true`, `passed` is
+    not forced false, and the classifier block written into the table's own bytes
+    says `engine_rerouted: false` — which is what the nightly consumer reads to
+    decide whether the table is citable. Before #1850 this same call came back
+    `measured: false` on all three, because the yardstick was the retired alias.
+    """
+    import scripts.uptake_probe as probe
+
+    prov = _named_engine(monkeypatch, uptake.EXPECTED_SCORING_ENGINE).engine_provenance()
+    assert prov["rerouted"] is False, prov
+
+    block = probe.stamp_engine(_floors_clearing_block(), prov)
+    assert block["engine_rerouted"] is False, block
+    assert uptake.measurement_clears_floors(_consumer_report(block)) is True, (
+        uptake.floor_failures(_consumer_report(block)))
+    assert block["passed"] is True, block
+    for key in ("metrics", "holdout", "zero_shot"):
+        assert block[key]["measured"] is True, (key, block[key])
+        assert "unmeasured_reason" not in block[key], block[key]
+
+    path = uptake.write_table(_three_channel_table(), out_dir=tmp_path,
+                              date="2026-10-04", classifier=block)
+    j = json.loads(path.read_text())
+    assert j["classifier"]["engine_rerouted"] is False, j["classifier"]
+    assert j["classifier"]["engine"] == uptake.EXPECTED_SCORING_ENGINE, j["classifier"]
+
+
+def test_an_engine_nobody_chose_still_fails_closed_and_names_the_expectation(
+        tmp_path, monkeypatch):
+    """Clause 3: the re-base costs #1310 nothing.
+
+    Resolution forced to a third engine: `engine_rerouted` true, `measured` false
+    on all three blocks, `passed` false, and the reason names the expectation and
+    why it was chosen — so a reader can tell "the scorer moved" from "the scorer
+    was always the primary". An unchosen engine must never be able to produce a
+    citable table, and this is the only thing standing between a silent endpoint
+    change and a nightly job archiving memory entries on a number nobody scored.
+    """
+    import scripts.uptake_probe as probe
+
+    prov = _named_engine(monkeypatch, "agent-llm-unexpected").engine_provenance()
+    assert prov["rerouted"] is True, prov
+
+    # Same report shape, and it DOES clear before the stamp — that is what makes
+    # the refusal below a verdict about the engine and not about the call.
+    assert uptake.measurement_clears_floors(
+        _consumer_report(_floors_clearing_block())) is True
+
+    block = probe.stamp_engine(_floors_clearing_block(), prov)
+    assert block["engine_rerouted"] is True, block
+    assert block["passed"] is False, block
+    reason = ""
+    for key in ("metrics", "holdout", "zero_shot"):
+        assert block[key]["measured"] is False, (key, block[key])
+        reason = block[key]["unmeasured_reason"]
+        assert reason, block[key]
+    assert uptake.EXPECTED_SCORING_ENGINE in reason, reason
+    assert "agent-llm-unexpected" in reason, reason
+    assert "2026-09-20" in reason, reason
+
+    path = uptake.write_table(_three_channel_table(), out_dir=tmp_path,
+                              date="2026-10-04", classifier=block)
+    j = json.loads(path.read_text())
+    assert j["classifier"]["engine_rerouted"] is True, j["classifier"]
+    for key in ("metrics", "holdout", "zero_shot"):
+        assert j["classifier"][key]["measured"] is False, j["classifier"][key]
+    report = _consumer_report(j["classifier"])
+    assert uptake.measurement_clears_floors(report) is False, report
+    fails = " ".join(uptake.floor_failures(report))
+    assert uptake.EXPECTED_SCORING_ENGINE in fails, (
+        f"the refusal the consumer reads must name the expectation: {fails}")
+
+
+#: The reason this round retires, kept as the node's positive control. Quoted from
+#: `_audit_env`'s rationale as it stood on `automod/SM_20261004_193803` before
+#: commit `6b0c3d02` removed it, so the ban below is never asserted over an empty
+#: selection: whatever the current rationale is, this text must be caught by the
+#: same predicate that the current one passes.
+RETIRED_SLOT_RESTORATION_REASON = (
+    "The stub exists because the precision-floor clause is decided by whichever "
+    "engine answers, and the secondary is out of service until its restoration is "
+    "owed on #1676.")
+
+
+def _rationale_defects(text: str) -> list[str]:
+    """What makes an `_audit_env` rationale wrong: it cites the retired route out.
+
+    A substring ban, stated as such: a paraphrase in other words still slips past
+    it. What keeps it from being a ban over nothing is the positive assertion
+    beside it in the node — the rationale must NAME the constant that replaced the
+    retired alias — plus this text being fed through the same predicate.
+    """
+    low = text.lower()
+    defects = []
+    if "restor" in low:
+        defects.append("cites restoring the secondary slot as the way out")
+    if "owed on #1676" in text:
+        defects.append("names #1676 as the ticket the stub waits on")
+    return defects
+
+
+def test_the_audit_env_rationale_no_longer_owes_the_fix_to_slot_restoration():
+    """Clause 3's second half, pinned in the same diff it retires.
+
+    The rationale beside `_audit_env`'s provenance stub used to say the slot's
+    restoration was owed on #1676 — which read as "this stub goes away when the
+    secondary comes back". It does not: the stub exists so the precision-floor
+    clause is not decided by whichever engine happens to answer, and the
+    expectation is now a named constant either way. Pinned as prose because the
+    thing being retired is a stated reason, and a retired reason left in place is
+    the recommendation that outlives its refutation.
+
+    Three assertions, because the first one alone is satisfiable by deleting the
+    rationale (the review rung named that): the retired route is absent, the
+    surviving reason is NAMED (`EXPECTED_SCORING_ENGINE` appears in the stub's
+    comment), and the retired sentence itself trips the same predicate, so the
+    absence is a verdict on the bytes rather than on a slice that came out empty.
+    """
+    here = Path(__file__).read_text()
+    start = here.index("def _audit_env(")
+    body = here[start:here.index("def test_ignore_precision", start)]
+    assert _rationale_defects(body) == [], body[-700:]
+    assert "EXPECTED_SCORING_ENGINE" in body, (
+        "the stub's rationale must name the constant that replaced the retired "
+        f"alias, or there is no surviving reason here at all: {body[:400]}")
+    assert _rationale_defects(RETIRED_SLOT_RESTORATION_REASON), (
+        "the positive control must be caught by the predicate, or the two bans "
+        "above are checking nothing")
+    low = body.lower()
+    assert "engine" in low and "stub" in low, body
+
+
+def test_the_table_carries_the_re_base_in_its_own_bytes(tmp_path, monkeypatch):
+    """Clause 4: the re-base travels in the artifact, not only in code.
+
+    `GLOSSARY["engine_rerouted"]` explains what true and false mean for
+    `measured`, states that the named scorer is the primary by decision since
+    2026-10-04, and warns that tables whose alias is `secondary` and whose
+    `engine_rerouted` is true are NOT comparables. The shipped table's `glossary`
+    must equal the module constant, so the entry is in the file a consumer reads
+    rather than only in the module that wrote it.
+
+    The last block is the seam the review rung found open on the first attempt:
+    the entry explained a key as "`engine` names the slot, `resolved_model` names
+    what answered", and `stamp_engine` writes neither of those — `engine_alias` is
+    the slot, `engine` is the resolved model, and no emitted table has a
+    `resolved_model` key. So every key the entry points a reader at is now checked
+    against the classifier block the file actually ships, and the key it says is
+    ABSENT is checked absent. A glossary sentence that drifts from the writer is
+    exactly how the artifact ends up explaining keys that are not in it.
+    """
+    text = uptake.GLOSSARY["engine_rerouted"]
+    assert "measured" in text and "engine_rerouted" in text, text
+    assert "2026-10-04" in text and "2026-09-20" in text, text
+    assert "not comparables" in text, text
+    assert "secondary" in text, text
+
+    # Real bytes from the real writer, not a hand-typed block: the keys this node
+    # is about are the ones `stamp_engine` emits.
+    block = _named_engine(monkeypatch, uptake.EXPECTED_SCORING_ENGINE).stamp_engine(
+        {"passed": True, "metrics": {"measured": True}, "holdout": {"measured": True},
+         "zero_shot": {"measured": True}})
+    path = uptake.write_table(_three_channel_table(), out_dir=tmp_path,
+                              date="2026-10-04", classifier=block)
+    j = json.loads(path.read_text())
+    assert j["glossary"] == uptake.GLOSSARY, sorted(j.get("glossary") or {})
+    assert "engine_rerouted" in j["glossary"], sorted(j["glossary"])
+    assert "2026-10-04" in path.read_text(), "the dated reason must be in the bytes"
+
+    named = set(re.findall(r"`([a-z][a-z_]*)`", text))   # every key the entry cites
+    engine_keys = {k for k in named if k.startswith("engine")}
+    assert {"engine", "engine_alias", "engine_endpoint", "engine_rerouted"} \
+        <= engine_keys, sorted(engine_keys)
+    assert "resolved_model" in named, \
+        "the entry no longer tells the reader that key is absent from a table"
+    assert "`engine` names the slot" not in text, \
+        "the entry is back to calling `engine` the slot, which it is not"
+    emitted = set(j["classifier"])
+    assert "resolved_model" not in emitted, sorted(emitted)
+    assert engine_keys - {"resolved_model"} <= emitted, sorted(engine_keys - emitted)
+    assert {"metrics", "holdout", "zero_shot", "passed"} <= emitted, sorted(emitted)
+
+
+def test_the_wire_model_and_the_stamped_verdict_come_from_one_resolution():
+    """The one process boundary this instrument crosses, closed at both ends.
+
+    `app/uptake.py::_post_secondary` resolves `_endpoint("uptake")` and rewrites
+    the request body's `model` to the resolved name, while the payload it was
+    handed still asks for `uptake.SECONDARY_MODEL`; `scripts/uptake_probe.py::
+    engine_provenance` then resolves the SAME call and #1850 made it decide
+    `engine_rerouted` against `EXPECTED_SCORING_ENGINE`. Those two halves read one
+    function, so they cannot drift — but only a request that actually goes out
+    over a socket proves it. The prior round's node
+    `test_the_secondary_engine_http_seam_is_crossed_by_a_request_that_always_runs`
+    pins the wire alone; monkeypatched resolvers pinned the stamp alone; nothing
+    tied the model that answers to the verdict written beside the numbers.
+
+    So: a real loopback server, a real `urllib` POST through the real
+    `_post_secondary`, and the stamp applied to the block that run produced. The
+    resolver is patched only to point at this server's port — the model name it
+    returns is the variable, and the two cases are the two sides of #1850:
+
+    * a served name that is NOT the named scorer is the reroute that fails closed;
+    * a served name that IS it — what this box resolves to on the committed
+      config — leaves every stop block `measured: true` and `passed` alone.
+    """
+    import http.server
+    import threading
+    import app.secondary_models as sm
+    import scripts.uptake_probe as probe
+
+    seen: dict = {}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            seen["body"] = json.loads(raw)
+            payload = json.dumps({"choices": [{"message": {
+                "role": "assistant", "content": "DISPUTE"}}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args):  # silence
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_address[1]}/v1/chat/completions"
+
+    def scored(model_name):
+        """One real request + one real stamp, under a resolution that yields `model_name`."""
+        undo = _patch_endpoint(sm, url, model_name)
+        try:
+            verdict, _ = uptake.classify_dispute_raw("Deployed it.", "no, login broke")
+            prov = probe.engine_provenance()
+            block = probe.stamp_engine({"passed": True,
+                                        "metrics": {"measured": True},
+                                        "holdout": {"measured": True},
+                                        "zero_shot": {"measured": True}}, prov)
+            return verdict, seen["body"], prov, block
+        finally:
+            undo.undo()
+
+    try:
+        # A server that answers under some other name: the guard must fire on the
+        # answer, not on the alias the payload asked for.
+        verdict, body, prov, block = scored("served-model-name")
+        assert verdict is True, seen
+        assert body["model"] == "served-model-name", body
+        assert body["model"] != uptake.SECONDARY_MODEL, (
+            "the wire must carry the resolved model, not the payload's retired alias")
+        assert prov["alias"] == uptake.SECONDARY_MODEL and prov["rerouted"] is True, prov
+        assert prov["resolved_model"] == body["model"], (
+            "the stamp must be decided by the resolution that answered the request")
+        assert block["engine_rerouted"] is True and block["passed"] is False, block
+        for key in ("metrics", "holdout", "zero_shot"):
+            assert block[key]["measured"] is False, block[key]
+
+        # The same request answered by the named scorer: nothing is withheld.
+        verdict, body, prov, block = scored(uptake.EXPECTED_SCORING_ENGINE)
+        assert verdict is True, seen
+        assert body["model"] == uptake.EXPECTED_SCORING_ENGINE, body
+        assert prov["rerouted"] is False, prov
+        assert block["engine_rerouted"] is False and block["passed"] is True, block
+        for key in ("metrics", "holdout", "zero_shot"):
+            assert block[key].get("measured") is True, block[key]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_the_citability_rule_asks_about_the_keys_uptake_emits(tmp_path, monkeypatch):
+    """The seam under the skill-side guard: `uptake_citability` may only ask a
+    skill about keys the instrument actually writes, and the entry that explains
+    each one has to ship in the file.
+
+    `scripts/uptake_citability.py` is what refuses a vault edit that drops a
+    citability rule (called by `scripts/automod/vault_round.py::
+    uptake_citability_errors`). If its key tuple ever named something
+    `write_table`/`stamp_engine` no longer emit, the guard would grade prose about
+    a key no table has — the exact failure #1850's clause 4 is about, moved onto
+    the guard itself. So the tuple is checked against real emitted bytes (keys live
+    at different depths: `engine_rerouted` in the classifier block, `measured`
+    inside its sub-blocks, `audit_only` at table level), the membership test is
+    shown to discriminate against a key that is not emitted, and the shipped
+    glossary is checked to carry the citability wording for the keys it explains.
+    """
+    from scripts import uptake_citability
+
+    block = _named_engine(monkeypatch, uptake.EXPECTED_SCORING_ENGINE).stamp_engine(
+        {"passed": True, "metrics": {"measured": True}, "holdout": {"measured": True},
+         "zero_shot": {"measured": True}})
+    j = json.loads(uptake.write_table(
+        _three_channel_table(), out_dir=tmp_path, date="2026-10-04", classifier=block,
+        extra={"audit_only": True,
+               "audit_only_reason": "precision 0.41 below the 0.50 floor"}).read_text())
+    classifier = j["classifier"]
+
+    def instrument_writes(key: str) -> bool:
+        if key in j or key in classifier:
+            return True
+        return any(isinstance(classifier.get(b), dict) and key in classifier[b]
+                   for b in ("metrics", "holdout", "zero_shot"))
+
+    assert instrument_writes("audit_only") and instrument_writes("engine_rerouted")
+    assert j["classifier"]["metrics"]["measured"] is True, classifier["metrics"]
+    assert not instrument_writes("engine_rerouted_but_spelled_differently"), (
+        "the membership test accepts everything, so it proves nothing")
+    for key in uptake_citability.CITABILITY_KEYS:
+        assert instrument_writes(key), (
+            f"the guard asks a skill about `{key}`, which this instrument never "
+            "emits — move the tuple with the writer, not the prose alone")
+
+    for key in ("engine_rerouted", "audit_only"):
+        assert key in uptake.GLOSSARY, key
+        assert "citable" in uptake.GLOSSARY[key].lower(), uptake.GLOSSARY[key]
+    assert "measured" in uptake.GLOSSARY["engine_rerouted"], \
+        "the reroute entry is what tells a reader what happens to `measured`"
+    assert {"engine_rerouted", "audit_only"} <= set(j["glossary"]), sorted(j["glossary"])
+
+
+@pytest.mark.live_vault
+def test_every_uptake_consumer_in_the_live_vault_states_every_citability_key():
+    """Clause 5's reporting copy: the same rule, run over the live vault.
+
+    The gate runs the enforcement (`scripts/automod/vault_round.py::
+    uptake_citability_errors` refuses a landing that drops a rule); this node is
+    the half that reports, over the tree the gate's `-m "not live_vault"` steps
+    around because a round cannot change the vault — the division
+    `tests/test_skill_reflection_archive.py` spells out for exactly this kind of
+    invariant. Two things are asserted, and only the first is the rule:
+
+    * every skill the rule's own trigger calls a consumer satisfies it, over the
+      whole live skill tree — discovery, not an allowlist, so a second reader of
+      the verdict has to satisfy the rule too instead of being named here;
+    * the pre-#1850 mechanism claim stays out of the one skill that reads the
+      instrument. It used to say the alias resolves to the primary and the probe
+      therefore stamps `engine_rerouted: true`, and told the nightly to write
+      `uptake: secondary retired, table not refreshed` — a completion note for a
+      condition the named expectation removed, sitting in the same item as the
+      dated sentence that replaced it. A stale mechanism beside a correct rule is
+      how a run ends up reporting the instrument as retired.
+    """
+    from scripts import uptake_citability
+
+    skills = Path.home() / "obsidian" / "skills"
+    consumers = [(p.parent.name, p) for p in sorted(skills.glob("*/SKILL.md"))
+                 if uptake_citability.is_uptake_consumer(p.read_text(encoding="utf-8"))]
+    assert [name for name, _ in consumers] == ["nightly-reflection-knowledge-write"], \
+        [name for name, _ in consumers]
+    for name, path in consumers:
+        body = path.read_text(encoding="utf-8")
+        assert uptake_citability.skill_rule_violations(
+            name, body, detail=uptake_citability.detail_text(path.parent)) == [], \
+            f"{path} dropped a citability rule or the re-base dates"
+
+    body = (skills / "nightly-reflection-knowledge-write" / "SKILL.md").read_text()
+    assert "EXPECTED_SCORING_ENGINE" in body, "the skill must name where the expectation lives"
+    for gone in ("the alias resolves to the primary", "uptake: secondary retired"):
+        assert gone not in body, f"the retired mechanism {gone!r} is back in the skill"

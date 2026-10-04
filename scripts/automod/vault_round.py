@@ -335,6 +335,51 @@ def skill_timezone_errors(paths: list[str]) -> list[str]:
     return errs
 
 
+def uptake_citability_errors(paths: list[str]) -> list[str]:
+    """#1850: a touched skill that reads the uptake verdict must still state it.
+
+    Third instance of the shape `reflection_archive_errors` and
+    `skill_timezone_errors` argue for: skill prose is state no round under test
+    controls, so the invariant that must *stop* a bad edit belongs on the landing
+    path and the `live_vault` scan in `tests/test_uptake.py` is the reporting
+    copy. What this one refuses is a rewrite of
+    `nightly-reflection-knowledge-write` §2a that drops one citability rule while
+    leaving the sentence that names the key: the nightly then archives
+    loaded-memory entries on a table `stamp_engine` marked `measured: false`, the
+    exact failure #1850 (and #1310 behind it) exists to close, and no code-side
+    test can see it — the table's bytes stay correct, only the reader's
+    instruction went. That is why clause 5 of #1850 is pinned here and not only
+    in prose: the gate excludes `live_vault` nodes, so a vault sentence with no
+    writer-side check is a sentence with no enforcement.
+
+    The rule itself is `scripts/uptake_citability.py` — one definition, shared by
+    this call site and that scan. Obligations are discovered from the candidate's
+    own bytes, so a skill that never names the reroute key is never asked, and a
+    requirement met in a #624 spill sibling counts. Measured on 2026-10-04 over
+    the live vault: exactly 1 of its 202 `SKILL.md` files names `engine_rerouted`
+    (`nightly-reflection-knowledge-write`), and it satisfies the rule — so this
+    refuses nothing that lands today.
+    """
+    skills = sorted({
+        p for p in paths
+        if p.startswith("skills/") and p.endswith("/SKILL.md") and (VAULT / p).exists()
+    })
+    if not skills:
+        return []
+    try:
+        from scripts import uptake_citability
+    except ImportError as exc:  # pragma: no cover - repo is always importable
+        return [f"uptake_citability unavailable, cannot check citability prose: {exc}"]
+    errs: list[str] = []
+    for p in skills:
+        slug = p.split("/")[1]
+        body = (VAULT / p).read_text(encoding="utf-8", errors="replace")
+        detail = uptake_citability.detail_text(VAULT / "skills" / slug)
+        for e in uptake_citability.skill_rule_violations(slug, body, detail=detail):
+            errs.append(f"{p}: uptake citability rule: {e}")
+    return errs
+
+
 # Enforcing since #2148 (ruled 2026-10-04). What #711's human clause asked for
 # before a flip — real consolidation runs showing what this would have refused —
 # is the ledger's own `skill_gate` block: 137 rows from 2026-09-25T01:22:44Z to
@@ -609,7 +654,8 @@ def validate(paths: list[str]) -> tuple[list[str], dict[str, list[str]]]:
         errors.extend(schedule_state_errors(paths))
     if not errors:
         errors.extend(contract_errors(paths) + reflection_archive_errors(paths)
-                      + skill_timezone_errors(paths))
+                      + skill_timezone_errors(paths)
+                      + uptake_citability_errors(paths))
     if not errors and buckets["validated"]:
         errors.extend(loader_errors(buckets["validated"]))
     if not errors and SKILL_ACTIVATION_ENFORCE:

@@ -168,6 +168,27 @@ GLOSSARY = {
                   "`audit_only_reason` for which figures were weak. Every dispute "
                   "count in it is an unvalidated classifier's guess: read the shape "
                   "of the window, cite nothing, and never archive an entry on it.",
+    # #1850: which engine scored these numbers, and since when that is a decision.
+    # The key explains its own history because the tables under `eval/uptake/` are
+    # read months later by a nightly job that does not open this file.
+    "engine_rerouted": "`true` means the engine that answered is not the one this "
+                       "instrument NAMES, so `measured` is forced false on "
+                       "`metrics`, `holdout` and `zero_shot` and `passed` is false: "
+                       "the floors are unmeasured and nothing in the table is "
+                       "citable. `false` means the named scorer answered. **The "
+                       "named scorer is the primary, by decision, since 2026-10-04** "
+                       "(`EXPECTED_SCORING_ENGINE`): the secondary slot was retired "
+                       "on 2026-09-20 and is not coming back, and before the "
+                       "re-base the expectation was that retired alias — so every "
+                       "run read `engine_rerouted: true` / `measured: false` and the "
+                       "instrument looked permanently dark. Tables whose "
+                       "`engine_alias` is `secondary` and whose `engine_rerouted` is "
+                       "true predate that naming and are **not comparables** of "
+                       "tables scored under it. To read either: `engine_alias` is "
+                       "the slot the request asked for, `engine` and "
+                       "`engine_endpoint` are what actually answered, and only the "
+                       "second pair is a fact — there is no `resolved_model` key "
+                       "in a table.",
 }
 #: How tightly a skill row's presence is bounded, tightest last. A row must name
 #: one: "this skill was injected into that very turn" and "some turn of that
@@ -270,6 +291,35 @@ NOTE_PRESENCE_NOTE = (
 )
 
 SECONDARY_MODEL = "secondary"
+
+#: The scoring engine this instrument scores **with**, named on purpose (#1850).
+#:
+#: Until 2026-10-04 the expectation was `SECONDARY_MODEL` — an alias for a slot
+#: retired on 2026-09-20 (`secondary_enabled: false`; the GPU it held is djev's),
+#: and not coming back. So `scripts/uptake_probe.engine_provenance` reported
+#: `rerouted: true` on every run, `stamp_engine` forced `measured: false` /
+#: `passed: false`, and the one consumer that reads those keys
+#: (`skills/nightly-reflection-knowledge-write` §2a item 1) had to treat the
+#: instrument as permanently dark. Alan's ruling of 2026-10-01: a table scored by
+#: the primary **is** a measurement once the scorer is named deliberately, and a
+#: stamp that can never read `measured: true` protects nothing.
+#:
+#: This is the expectation #1310 guards, not its escape hatch: an engine that
+#: resolves to anything OTHER than this name still stamps `measured: false` /
+#: `passed: false`. `SECONDARY_MODEL` stays what the payload asks for — the wire
+#: was already honest (`_post_secondary` sends the resolved model), so what moved
+#: is the expectation the stamp compares against.
+EXPECTED_SCORING_ENGINE = "primary"
+#: When the re-base was decided, and why. Written into the table's own bytes via
+#: `GLOSSARY["engine_rerouted"]`, so a reader of `eval/uptake/*.json` three months
+#: out does not have to open this file to learn why pre-2026-10 tables name
+#: `secondary` and are not comparables.
+EXPECTED_SCORING_ENGINE_SINCE = "2026-10-04"
+EXPECTED_SCORING_ENGINE_REASON = (
+    "named deliberately on 2026-10-04; the secondary slot has been retired since "
+    "2026-09-20 (secondary_enabled: false) and is not coming back"
+)
+
 _EVENT_GLOB = "event_logs/*.events.jsonl"
 
 # User-role messages that are not a human speaking. Both shapes were present in
