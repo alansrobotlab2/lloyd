@@ -286,6 +286,17 @@ def memory_write_error(path: str | os.PathLike[str], prospective: str) -> str | 
     `INDEX_MEMORY_FILE` — and both sit under the shrink escape, so the curator's
     trim is still writable while the index is over the line.
 
+    A fourth bound, on a topic file's NAME rather than its bytes (#2173): a
+    non-shrinking write whose stem is outside `TOPIC_SLUG_RE` is refused by
+    `topic_slug_error`, which quotes `TOPIC_SLUG_MAX_CHARS`. The memory tools
+    already refused such a name through their `file=` JSON-schema pattern, so the
+    only writers that ever saw one were `Write`, `Edit` and `vault_write` — the
+    three that take an absolute path — and those are exactly the lanes the
+    knowledge-write skill sends `lloyd/memory/<slug>.md` down. The condition is the
+    one `scripts/memory/validate_memory_index.py` reports ("slug is not
+    `[a-z0-9-]{1,48}`"), which this module's docstring and that script's header have
+    both said belongs here since the day they were written.
+
     (The unlanded draft this replaces documented that shrink rule and did not
     implement it — it returned the refusal whenever the prospective text was over
     the ceiling, whatever the file held. A docstring promise the code does not keep
@@ -295,14 +306,26 @@ def memory_write_error(path: str | os.PathLike[str], prospective: str) -> str | 
     if filename is None:
         # A topic file is not loaded, but it is a memory file with a bound, and it
         # gets the same shrink rule: every writer that can reach it (the memory
-        # tools, Write/Edit, vault_write) is refused the same growth.
-        topic = _topic_file_name(path)
-        if topic is None:
+        # tools, Write/Edit, vault_write) is refused the same growth. The escape is
+        # measured first so it covers BOTH bounds below — the byte ceiling and,
+        # since #2173, the name — or the guard would refuse the only write that can
+        # shorten a file whose name it also refuses, and the bad name would stand
+        # for good because the lane able to trim it is the lane that said no.
+        stem = _topics_dir_stem(path)
+        if stem is None:
             return None
         size = len(prospective.encode("utf-8"))
-        if size <= TOPIC_FILE_CEILING_BYTES or size < _on_disk_bytes(Path(path)):
+        if size < _on_disk_bytes(Path(path)):
             return None
-        return topic_size_error(topic, prospective)
+        # `_topic_file_name` is the name half of that split: it answers None exactly
+        # when the stem is outside the grammar, which is the refusal below, and
+        # otherwise gives the `topics/<slug>` the byte refusal has always quoted.
+        topic = _topic_file_name(path)
+        if topic is None:
+            return topic_slug_error(stem)
+        if size > TOPIC_FILE_CEILING_BYTES:
+            return topic_size_error(topic, prospective)
+        return None
     ceiling = memory_ceiling(filename) or 0
     size = len(prospective.encode("utf-8"))
     if size < _on_disk_bytes(Path(path)):
@@ -320,3 +343,79 @@ def memory_write_error(path: str | os.PathLike[str], prospective: str) -> str | 
         return (index_line_length_error(filename, prospective)
                 or index_tight_limit_error(filename, prospective))
     return None
+
+
+# ── the topic-file NAME bound (#2173) ───────────────────────────────────────────
+# These three definitions sit BELOW their only caller on purpose. Every line above
+# `memory_write_error` is cited by line number in
+# `lloyd/reviews/2026-09-14-user-md-audit.md` — `app/memory_ceiling.py:114`, `:162`
+# and `:262` — and
+# `tests/test_prompt_surface_budget.py::test_every_code_line_the_audit_cites_is_the_line_it_claims`
+# reddens any edit that shifts them, which means the space this module can grow
+# into without editing a review note that is not the round's to edit is the space
+# under line 262. The next addition here has the same constraint.
+
+#: Longest legal topic slug, in characters. A constant rather than a literal inside
+#: `TOPIC_SLUG_RE` so the refusal quotes the same number the pattern enforces —
+#: #1010's rule for the ceilings, applied to the slug. Until #2173 the 48 existed
+#: only inside the regex and in the `file=` JSON-schema pattern on the memory tools,
+#: so the absolute-path lanes (`Write`, `Edit`, `vault_write`) were never asked and
+#: the nightly write of 2026-10-04 could create
+#: `a-done-closure-over-a-refuted-premise-is-refuted-not.md`, 52 characters, which
+#: only the next day's vault-reading test noticed.
+#: `tests/test_memory_index_cap.py::test_the_slug_cap_the_refusal_names_is_the_cap_the_regex_enforces`
+#: is what keeps this equal to the pattern's literal.
+TOPIC_SLUG_MAX_CHARS = 48
+
+
+def _topics_dir_stem(path: str | os.PathLike[str]) -> str | None:
+    """The stem of `path` when it is a `.md` directly under the topics directory.
+
+    Deliberately silent on whether that stem is a *legal* slug, which is the
+    distinction `memory_write_error` needs: "not a topic file at all" is nobody's
+    business and answers None, while "a topic file with an unusable name" is a
+    refusal. `_topic_file_name` answered None to both, and that conflation is
+    precisely how a 52-character stem got a clean bill from the one guard every
+    writer asks.
+    """
+    p = Path(path)
+    if p.suffix != ".md":
+        return None
+    try:
+        parent = os.path.realpath(str(p.parent))
+        root = os.path.realpath(str(MEMORIES_DIR / TOPICS_SUBDIR))
+    except OSError:
+        # Abstain rather than refuse: pricing a path this function could not
+        # resolve would be the missing-input verdict its neighbours catalogue.
+        return None
+    return p.stem if parent == root else None
+
+
+def topic_slug_error(stem: str) -> str:
+    """Why a topic file named `stem` cannot be created or grown (#2173).
+
+    Says which of the two ways of failing `TOPIC_SLUG_RE` it is, so a writer with a
+    nine-character `Voice_Mode.md` is not told its name is too long — and names the
+    cap either way, because a refusal that hides the bound gets the same name
+    written again. The condition mirrors what
+    `scripts/memory/validate_memory_index.py` reports for a topic file, and the
+    grammar is quoted because it is the whole traversal defence: a slug is a
+    single path segment with no `.`, so `memory_read` can never resolve out of
+    `memory/` through it.
+    """
+    over = len(stem) - TOPIC_SLUG_MAX_CHARS
+    why = (f"its {len(stem)} characters are {over} over the "
+           f"{TOPIC_SLUG_MAX_CHARS}-character topic-slug cap" if over > 0 else
+           f"only lowercase letters, digits and hyphens are allowed and this stem "
+           f"holds something else (its {len(stem)} characters are inside the "
+           f"{TOPIC_SLUG_MAX_CHARS}-character topic-slug cap)")
+    return (
+        f"{TOPIC_PREFIX}{stem}.md is not a writable topic file: {why}. "
+        f"`TOPIC_SLUG_RE` is `[a-z0-9-]{{1,{TOPIC_SLUG_MAX_CHARS}}}`, and that "
+        f"grammar is the traversal defence — `memory_read` cannot resolve a name "
+        f"outside it, and `validate_memory_index.py` reports the standing file as an "
+        f"error. Write the detail under a legal slug of at most "
+        f"{TOPIC_SLUG_MAX_CHARS} characters and point the index line at that; a file "
+        f"already standing under the bad name is still shrinkable, so write the new "
+        f"file first, then trim and retire the old one."
+    )

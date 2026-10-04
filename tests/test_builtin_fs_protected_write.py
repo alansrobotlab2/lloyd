@@ -607,3 +607,115 @@ def test_the_probe_from_the_triage_record_reproduces_only_the_refusal(home):
     assert _code(w) == "PROTECTED_PATH"
     assert _code(e) == "PROTECTED_PATH"
     assert target.read_text() == ORIGINAL
+
+
+# ── #2173 clause 2: the topic-slug bound reaches the generic writers ─────────
+# `app/memory_ceiling.py` is the one entry point every writer asks, and since #2173
+# it refuses a topic file whose stem is outside `TOPIC_SLUG_RE`. These nodes are the
+# seam test for that: the guard's own answer is pinned in
+# `tests/test_memory_index_cap.py`, and what is pinned *here* is that the refusal
+# survives the trip out through `Write`, `Edit` and `vault_write` as a refusal, and
+# that the two writes which must still land do land — a legal slug, and a shrinking
+# repair to a topic file that is already over a bound. Without the second half this
+# is a freeze with three doors.
+
+#: The incident's stem: 52 characters, four over `TOPIC_SLUG_MAX_CHARS`.
+SLUG_52 = "a-done-closure-over-a-refuted-premise-is-refuted-not"
+
+
+@pytest.fixture
+def topics_dir(home, monkeypatch):
+    """The scratch vault's topic directory, with the guard pointed at it.
+
+    `memory_ceiling.MEMORIES_DIR` is a module constant resolved at import from the
+    real `$HOME`, so it does NOT move with the `home` fixture the way the deny-set
+    does. Pointing it at the scratch vault is what lets these nodes exercise the
+    real lanes against a real path; without it every scratch path answers "not a
+    memory file" and the node passes for the wrong reason.
+    """
+    from app import memory_ceiling as MC
+    monkeypatch.setattr(MC, "MEMORIES_DIR", home / "obsidian" / "lloyd")
+    tdir = home / "obsidian" / "lloyd" / "memory"
+    tdir.mkdir(parents=True, exist_ok=True)
+    return tdir
+
+
+async def test_the_write_and_edit_lanes_refuse_an_over_long_topic_slug(topics_dir):
+    """`Write`/`Edit` are the lanes the knowledge-write skill routes a topic file
+    through, and they take the ceiling from `memory_write_error` verbatim — so the
+    slug bound arrives with no change to either handler."""
+    target = topics_dir / f"{SLUG_52}.md"
+    res = await FS.call_tool("Write", {"file_path": str(target),
+                                       "content": "# detail\n"})
+    assert res.is_error is True, _text(res)
+    err = _json(res)["error"]
+    assert "48-character topic-slug cap" in err, err
+    assert not target.exists(), "a refused create must leave no file behind"
+
+    target.write_text("- original detail, in full\n", encoding="utf-8")
+    await FS.call_tool("Read", {"file_path": str(target)})
+    res = await FS.call_tool("Edit", {"file_path": str(target),
+                                      "old_string": "original", "new_string": "GROWN" * 40})
+    assert res.is_error is True, _text(res)
+    assert "48-character topic-slug cap" in _json(res)["error"], _text(res)
+    assert target.read_text() == "- original detail, in full\n", \
+        "a refused Edit must leave the bytes exactly as they were"
+
+
+async def test_the_write_lane_still_lands_a_slug_at_the_cap_and_a_shrinking_repair(
+        topics_dir):
+    """The allow half, both shapes. A 48-character slug is legal and must land
+    (a guard that overshoots by one is a guard the next writer routes around);
+    a *shrinking* write to a file already over a bound — here the 32,768-byte
+    topic ceiling — is still the repair route, which is the rule that keeps a
+    ceiling from becoming a freeze, and it has to survive a name that is
+    simultaneously over the slug cap."""
+    ok = topics_dir / f"{'a' * 48}.md"
+    res = await FS.call_tool("Write", {"file_path": str(ok), "content": "# detail\n"})
+    assert res.is_error is False, _text(res)
+    assert ok.read_text() == "# detail\n"
+
+    big = topics_dir / "over-the-byte-ceiling.md"
+    big.write_text("x" * (32_768 + 4_000), encoding="utf-8")
+    await FS.call_tool("Read", {"file_path": str(big)})
+    res = await FS.call_tool("Write", {"file_path": str(big), "content": "- trimmed\n"})
+    assert res.is_error is False, _text(res)
+    assert big.read_text() == "- trimmed\n"
+
+    both = topics_dir / f"{SLUG_52}.md"
+    both.write_text("- detail " + "x" * 200 + "\n", encoding="utf-8")
+    await FS.call_tool("Read", {"file_path": str(both)})
+    res = await FS.call_tool("Write", {"file_path": str(both), "content": "- trimmed\n"})
+    assert res.is_error is False, _text(res)
+    assert both.read_text() == "- trimmed\n"
+
+
+async def test_the_vault_write_lane_refuses_the_same_slug_it_refuses_nothing_for(
+        home, monkeypatch, tmp_path, topics_dir):
+    """`vault_write(path="lloyd/memory/<slug>.md")` is the third lane onto the same
+    directory, and #2173 closes its gap the same way #1757 closed the deny-set one:
+    by asking the one predicate. A legal topic file still lands through it — the
+    nightly job writes topic files on this lane every run."""
+    V, vault_root = _vault_lane(home, monkeypatch, tmp_path)
+    res = V._vault_write({"path": f"lloyd/memory/{SLUG_52}.md", "content": "# detail\n"})
+    assert res.get("success") is not True, f"the vault lane landed it: {res}"
+    assert "48-character topic-slug cap" in res.get("error", ""), res
+    assert not (vault_root / "lloyd" / "memory" / f"{SLUG_52}.md").exists(), res
+
+    res = V._vault_write({"path": "lloyd/memory/voice-loop.md", "content": "# detail\n"})
+    assert res.get("success") is True, res
+    assert (vault_root / "lloyd" / "memory" / "voice-loop.md").read_text() == "# detail\n"
+
+
+async def test_the_slug_refusal_comes_back_over_the_aggregator_as_an_error(topics_dir):
+    """The seam every real caller crosses: `main.call_tool` dispatches `Write` and
+    `vault_write` by module table and wraps the handler's text, so the refusal has
+    to arrive as an error result there rather than as a success whose text happens
+    to be JSON — the failure shape that let #1049 and #1757 through."""
+    await M.list_tools()
+    target = topics_dir / f"{SLUG_52}.md"
+    res = await M.call_tool("Write", {"file_path": str(target), "content": "# detail\n"},
+                            {"lloyd/session_id": SID})
+    assert res.is_error is True, _text(res)
+    assert "48-character topic-slug cap" in _text(res), _text(res)
+    assert not target.exists()

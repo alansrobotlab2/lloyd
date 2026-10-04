@@ -471,3 +471,50 @@ def test_no_surface_still_defers_the_ceiling_flip_to_a_person():
         "architecture/skills.md no longer states the enforced scope")
     assert "person's call" in doc, (
         "the library-wide question must still read as a person's ruling")
+
+
+# ── #2173 clauses 3-5: the pre-flight the nightly knowledge-write job must follow ─
+#: The skill that writes `lloyd/MEMORY.md` and its topic files, then commits the
+#: vault itself — the writer whose unred-checked commit reddened `main` on
+#: 2026-10-04 by rewriting an index line a code test pins.
+KNOWLEDGE_WRITE = "skills/nightly-reflection-knowledge-write/SKILL.md"
+LIVE_VAULT = Path.home() / "obsidian"
+
+
+@pytest.mark.live_vault
+def test_the_knowledge_write_skill_carries_a_memory_index_pre_flight():
+    """Clauses 3, 4 and 5 read off the live skill the job actually follows.
+
+    Marked `live_vault` deliberately, which is the ruling this item exists to make:
+    the skill body is owned by the nightly skills pass, and a node that reads it
+    unmarked is the very failure mode #2173 is fixing — it reddens the next author's
+    gate for the previous writer's edit. So this is the reporting copy, run with
+    `-m live_vault`, while the *enforcement* of clause 5 is the landing rail above,
+    graded on fixtures and in the gate's own selection.
+
+    Run it with:
+        .venvs/lloyd/bin/python -m pytest -m live_vault \\
+            tests/test_vault_round_skill_gate.py -k pre_flight
+    """
+    text = (LIVE_VAULT / KNOWLEDGE_WRITE).read_text(encoding="utf-8")
+    body = SL.parse_frontmatter(text)[1].strip("\n")
+    assert len(body.splitlines()) <= SL.MAX_BODY_LINES, (
+        f"the pre-flight pushed the body to {len(body.splitlines())} lines; the "
+        f"vault-landing route refuses a SPILL_SAMPLE skill over "
+        f"{SL.MAX_BODY_LINES}, so this commit could not land")
+
+    pre = text.index("Memory-index pre-flight")
+    commit = text.index("## Step 3: Commit")
+    assert pre < commit, "the pre-flight sits after the commit step it must gate"
+    step = text[pre:commit]
+
+    # Clause 3: it runs the validator over the whole index, and the commit is
+    # forbidden on a report that is not ok — not "consider fixing".
+    assert "scripts/memory/validate_memory_index.py --mode full" in step, step
+    assert '"ok": false' in step and "FORBIDDEN" in step, step
+    assert "2026-10-04" in step, "the step must say which commit it exists for"
+
+    # Clause 4: a pinned index line is found before it is rewritten, and the fix
+    # goes to the detail file rather than into the line.
+    assert "~/lloyd/tests/" in step, step
+    assert "BYTE-IDENTICAL" in step and "lloyd/memory/<slug>.md" in step, step

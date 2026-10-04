@@ -678,3 +678,114 @@ def test_the_live_index_refuses_growth_and_the_live_user_md_does_not():
     if ceiling.memory_ceiling("USER.md") - user_bytes >= 2:
         assert ceiling.memory_write_error(mem / "USER.md", user + "#\n") is None, \
             "the index rules reached USER.md and froze the curator's own file"
+
+
+# ── the topic-slug cap on the WRITE guard (#2173) ───────────────────────────
+# `TOPIC_SLUG_RE`'s 48-character cap sat in two places and neither was the write
+# guard: the `file=` JSON-schema pattern on the memory tools, and
+# `validate_memory_index.py`, whose own header calls this module "the write guard
+# that has to refuse the same two conditions this script reports". `_topic_file_name`
+# answered None for a stem outside the grammar, so the guard had no opinion — and
+# the two lanes the knowledge-write skill routes a topic file through (`Write`,
+# `vault_write`, neither of which passes the `file=` pattern) reached neither place
+# that does have one. That is how vault commit `886f2d5b` (2026-10-04) left a
+# 52-character topic file (`a-done-closure-over-a-refuted-premise-is-refuted-not.md`)
+# standing: the validator's single reported error that night, found only by the
+# next day's test run. Every node here runs against the tmp `memories_root`
+# fixture, so it grades the guard and not a vault another job owns.
+
+#: The incident's own stem: 52 characters, four over the cap.
+INCIDENT_SLUG = "a-done-closure-over-a-refuted-premise-is-refuted-not"
+
+
+def test_the_slug_cap_the_refusal_names_is_the_cap_the_regex_enforces():
+    """One number, not two: the refusal quotes what `TOPIC_SLUG_RE` enforces.
+
+    #1010's rule for ceilings — the number a refusal quotes and the number an
+    auditor reports must be one constant — applied to the slug, which until now
+    had 48 only as a literal inside the regex.
+    """
+    assert ceiling.TOPIC_SLUG_MAX_CHARS == 48
+    assert ceiling.TOPIC_SLUG_RE.pattern == f"[a-z0-9-]{{1,{ceiling.TOPIC_SLUG_MAX_CHARS}}}"
+    assert ceiling.TOPIC_SLUG_RE.fullmatch("a" * 48)
+    assert not ceiling.TOPIC_SLUG_RE.fullmatch("a" * 49)
+    msg = ceiling.topic_slug_error("a" * 52)
+    assert "48-character topic-slug cap" in msg and "52" in msg, msg
+
+
+@pytest.mark.parametrize("stem", [INCIDENT_SLUG, "a" * 49, "a" * 60])
+def test_a_topic_stem_over_the_cap_is_refused_by_the_one_entry_point(memories_root, stem):
+    """Clause 1: `memory_write_error` itself refuses it, naming the cap.
+
+    This is the probe from the triage record — the call that returned `None` at
+    base. The content is one short line on purpose, far under
+    `TOPIC_FILE_CEILING_BYTES`, so the only rule that can fire is the slug one and
+    the node cannot pass by catching the byte ceiling by accident.
+    """
+    _, root = memories_root
+    assert len(stem) > ceiling.TOPIC_SLUG_MAX_CHARS, "probe setup"
+    target = root / ceiling.TOPICS_SUBDIR / f"{stem}.md"
+    msg = ceiling.memory_write_error(target, "- detail\n")
+    assert msg is not None, f"a {len(stem)}-character topic slug was accepted"
+    assert f"{ceiling.TOPIC_SLUG_MAX_CHARS}-character topic-slug cap" in msg, msg
+    assert str(len(stem)) in msg, msg
+    assert "topics/" in msg, msg
+
+
+def test_a_stem_at_the_cap_still_writes_and_an_illegal_one_only_refuses_growth(
+        memories_root):
+    """The other side of the bound. A guard that refused every write to a file it
+    cannot rename would leave the bad name standing forever, because the one lane
+    left would be the one it is refusing — so the slug bound sits under the same
+    shrink escape `MEMORY.md` gets, and a stem of exactly 48 stays writable.
+    """
+    _, root = memories_root
+    tdir = root / ceiling.TOPICS_SUBDIR
+    tdir.mkdir(parents=True, exist_ok=True)
+    assert ceiling.memory_write_error(tdir / f"{'a' * 48}.md", "- detail\n") is None, \
+        "a slug of exactly the cap is legal and must stay writable"
+    assert ceiling.memory_write_error(tdir / "voice-mode.md", "- detail\n") is None
+
+    over = tdir / f"{INCIDENT_SLUG}.md"
+    over.write_text("- the detail this file was created to hold, in full\n",
+                    encoding="utf-8")
+    assert ceiling.memory_write_error(over, "- trimmed\n") is None, \
+        "the shrinking repair write must stay possible after a refusal"
+    assert ceiling.memory_write_error(over, "- " + "x" * 200 + "\n") is not None, \
+        "growing the same file is what has to be refused"
+
+
+@pytest.mark.parametrize("stem", ["Voice_Mode", "with.dot", "UPPER",
+                                  "9" * 48 + "-x"])
+def test_a_stem_outside_the_grammar_is_refused_as_the_validator_reports(
+        memories_root, stem):
+    """The guard now refuses what `validate_memory_index.check` reports for a topic
+    file (`slug is not [a-z0-9-]{1,48}`), which is the condition that script's
+    header says this guard owns. A short stem outside the grammar is the case
+    clause 1's "at or under 48 characters" wording does not reach: it is not a
+    length problem, and the refusal says which of the two it is while still naming
+    the cap.
+    """
+    _, root = memories_root
+    assert not ceiling.TOPIC_SLUG_RE.fullmatch(stem), "probe setup"
+    msg = ceiling.memory_write_error(root / ceiling.TOPICS_SUBDIR / f"{stem}.md",
+                                     "- detail\n")
+    assert msg is not None, f"{stem}.md was accepted as a topic file"
+    assert "48-character topic-slug cap" in msg, msg
+
+
+def test_a_long_name_outside_the_topics_directory_is_still_nobody_s_business(
+        memories_root):
+    """The widening must not turn into a naming policy for the whole vault. A
+    60-character knowledge note and a lookalike `memory/<long>.md` in a sandbox are
+    two shapes a round and a research job write every day; both are writable today
+    and both must stay writable, or this is an outage with a test attached.
+    """
+    _, root = memories_root
+    long_note = root.parent / "knowledge" / "ai" / (f"{'a' * 60}.md")
+    long_note.parent.mkdir(parents=True, exist_ok=True)
+    assert ceiling.memory_write_error(long_note, "# note\n") is None
+    lookalike = root.parent / "sandbox" / "memory" / f"{'a' * 60}.md"
+    lookalike.parent.mkdir(parents=True, exist_ok=True)
+    assert ceiling.memory_write_error(lookalike, "- detail\n") is None
+    assert ceiling.memory_write_error(root / "MEMORY.md", "- [project] hook\n") is None
