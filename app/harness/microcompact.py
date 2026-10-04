@@ -298,6 +298,129 @@ def _pointer_path(text: str) -> str:
     return text[at + len(_SAVED_TO):].split("\n", 1)[0].strip()
 
 
+#: #2168: one file per session, beside that session's spill directory, listing
+#: the call_ids relief (rung 1) reduced during the turn that just ended.
+#: ``sessions/<session_id>.microcompact-reduced.json``.
+REDUCTION_SIDECAR_SUFFIX = ".microcompact-reduced.json"
+
+
+def reduction_sidecar_path(session_id: str):
+    """``sessions/<session_id>.microcompact-reduced.json``, or ``None``.
+
+    Keyed by the same id the spill directory is named after, and resolved
+    through `app.harness.tool_result_spill`'s own ``SESSIONS_DIR`` attribute on
+    every call rather than a local copy, so whoever redirects spills (a test's
+    scratch dir, in principle a different mount) redirects the sidecar with
+    them instead of writing the record next to live sessions.
+    """
+    if not session_id:
+        return None
+    from app.harness import tool_result_spill as _trs
+
+    return _trs.SESSIONS_DIR / f"{session_id}{REDUCTION_SIDECAR_SUFFIX}"
+
+
+def read_reduced_calls(session_id: str) -> tuple[str, ...]:
+    """The call_ids recorded for `session_id`, in the order they were written.
+
+    Anything unreadable or oddly shaped reads as *nothing recorded*. The sidecar
+    is an optimisation over today's behaviour, never a source of content, so the
+    cost of a corrupt one is a re-clear — not a lost row and not a failed turn.
+    """
+    path = reduction_sidecar_path(session_id)
+    if path is None:
+        return ()
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return ()
+    ids = data.get("reduced_call_ids") if isinstance(data, dict) else None
+    if not isinstance(ids, list):
+        return ()
+    return tuple(str(cid) for cid in ids if isinstance(cid, str) and cid)
+
+
+def record_reduced_calls(session_id: str, call_ids: Iterable[str]) -> int:
+    """Merge `call_ids` into the session's sidecar; return the new total.
+
+    Written by relief at the end of a pass that reduced something, read by the
+    turn-start pre-pass. Merging rather than overwriting because a turn can
+    relieve several times and a later pass that cleared nothing must not erase
+    what an earlier one recorded. A failed write is a lost optimisation, so it
+    is logged and swallowed rather than raised into a turn whose work is already
+    done.
+    """
+    path = reduction_sidecar_path(session_id)
+    new = [cid for cid in call_ids if cid]
+    if path is None or not new:
+        return 0
+    try:
+        merged = list(read_reduced_calls(session_id))
+        for cid in new:
+            if cid not in merged:
+                merged.append(cid)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"schema": 1, "reduced_call_ids": merged}))
+        return len(merged)
+    except OSError as exc:  # noqa: BLE001 — an unwritten sidecar costs a re-clear
+        logger.debug(
+            "microcompact: reduction sidecar not written for %s: %s", session_id, exc)
+        return len(read_reduced_calls(session_id))
+
+
+def apply_reduction_sidecar(
+    messages: list[dict], session_id: str,
+) -> tuple[list[dict], int]:
+    """Re-apply relief's reduction to the rows the sidecar names, at read time.
+
+    Returns ``(new_messages, applied_count)``; the input list is not mutated. A
+    row is reduced only when relief said it reduced that ``call_id`` AND the row
+    still holds an unreduced ``<persisted-output>`` block AND the file that block
+    names is still on disk. The disk check is the guard the spill-aware pass
+    below does not have: that pass has already spilled the content itself, so it
+    can promise a path it just wrote, while this one is acting on a claim from an
+    earlier turn's memory — a row whose spill file has since been swept must stay
+    inline rather than trade its content for a route that no longer opens.
+
+    The reduction is the same `_persisted_block_only` relief applied, so the row
+    the engine saw mid-turn is the row that goes out next turn: `_is_cleared_stub`
+    then refuses it to the pre-pass, which is the point — the alternative is
+    re-expanding the preview from the session row and clearing it again, paying
+    the whole prompt's re-prefill for a reduction that was already made.
+    """
+    reduced = read_reduced_calls(session_id)
+    if not reduced or not messages:
+        return list(messages), 0
+    wanted = set(reduced)
+    out = list(messages)
+    applied = 0
+    for i, msg in enumerate(out):
+        if msg.get("role") != "tool":
+            continue
+        cid = msg.get("tool_call_id") or msg.get("call_id") or ""
+        if cid not in wanted:
+            continue
+        text = _tool_result_text(msg)
+        if PERSISTED_OUTPUT_TAG not in text or _is_cleared_stub(text):
+            continue
+        pointer = _pointer_path(text)
+        if not pointer:
+            continue
+        from pathlib import Path
+
+        try:
+            if not Path(pointer).is_file():
+                continue
+        except OSError:
+            continue
+        new_text = _persisted_block_only(text)
+        if new_text == text:
+            continue
+        out[i] = _replace_tool_content(msg, new_text)
+        applied += 1
+    return out, applied
+
+
 def _pointer_size(text: str, pointer: str) -> int:
     """The original size a pointer block states (``…, 12,345 chars)``), else
     the file's size, else 0."""
@@ -419,6 +542,7 @@ def microcompact(
     observation_stubs: bool = False,
     observation_head_chars: int = DEFAULT_OBSERVATION_HEAD_CHARS,
     name_session_record: bool = False,
+    reduced_calls_out: list[str] | None = None,
 ) -> tuple[list[dict], int]:
     """Replace stale compactable tool results with a cleared marker.
 
@@ -619,15 +743,27 @@ def microcompact(
                         obs_id, tool_name, tc_id_to_args.get(cid),
                         _pointer_size(text, pointer), _pointer_preview(text),
                         observation_head_chars, route)
+            header_only = False
             if not new_text:
                 new_text = _persisted_block_only(text)
                 if route:
                     new_text = f"{new_text} {route}"
+                else:
+                    # #2168: this is the one reduction the next turn can redo
+                    # byte-for-byte from a call_id alone. An observation stub
+                    # carries a verbatim head cut from the preview, and a routed
+                    # block has a sentence `_persisted_block_only` never
+                    # reproduces, so neither is offered to the sidecar: the read
+                    # -time pass must emit what the engine already saw, or the
+                    # prefix cache is broken instead of spared.
+                    header_only = True
             if new_text == text:
                 out.append(msg)
                 continue
             out.append(_replace_tool_content(msg, new_text))
             cleared += 1
+            if header_only and cid and reduced_calls_out is not None:
+                reduced_calls_out.append(cid)
             continue
 
         path = None

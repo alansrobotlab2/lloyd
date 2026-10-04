@@ -71,3 +71,20 @@
 # re-derives them. Scoped to this name family so a transcript someone drops here by
 # accident stays ignored.
 !session_witness_*.json
+
+# The sixth family is a database, and it is here for the same reason as the other five:
+# #2168's premise is a measurement over `~/lloyd-data/usage.db`, a rolling store whose
+# quoted window (2026-09-27T00:00:26 → 2026-10-04T08:17:44) slides out from under a reader
+# within weeks, so the 271 clearing turns / 159 sessions / 112 repeat turns carrying
+# 37,512,065 of 84,856,726 reprefilled tokens are unverifiable unless the rows behind them
+# are committed. This copy is 4,852 rows over four columns (`ts`, `session_id`,
+# `reprefill_tokens`, `compaction`), 4,112,384 bytes, two objects in `sqlite_master`;
+# `test_the_witness_rows_behind_the_repeat_clear_measure_reproduce_the_quoted_report`
+# re-derives the item's five figures from it. A copy is committed in the vault's witness
+# store too, which is where clause 6 asked for it, under a name that does not collide with
+# #1918/#1919's frozen extract already living at `backlog/data/usage.db`; a test cannot
+# open either vault file, because the gate runs with HOME at the round home.
+# Scoped to `usage-*.db` and not to `*.db`: the tree's runtime stores (`usage.db`,
+# `workers.db`) are runtime data and stay ignored, and only a witness somebody chose to
+# name this way lands here.
+!usage-*.db

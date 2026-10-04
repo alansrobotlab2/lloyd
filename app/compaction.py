@@ -539,6 +539,7 @@ async def load_and_compact_session(
     *,
     mode_override: str | None = None,
     disallowed_tools: list[str] | None = None,
+    microcompact_sidecar: bool | None = None,
 ) -> dict[str, Any]:
     """Read a persisted session, apply the compaction stack, and return
     ready-to-send history plus metadata.
@@ -553,6 +554,15 @@ async def load_and_compact_session(
          that path`` to a turn whose policy refuses ``Read`` is an instruction
          the history itself is issuing (#1066). Unset reads as
          everything-allowed, which is the chat case and the safe direction.
+      ``microcompact_sidecar`` (#2168) re-applies, at read time, the reduction
+         the previous turn's relief made in memory and could not persist: the
+         call_ids it recorded in ``sessions/<sid>.microcompact-reduced.json``
+         have their inline previews dropped before layer 2 selects anything, so
+         the prompt starts in the shape the engine last saw instead of being
+         re-cleared from disk on every later turn. ``None`` reads the shipped
+         default off ``RunOptions`` (currently off). The session file itself is
+         never rewritten, and a row whose spill file has gone is left inline —
+         with no sidecar, or the knob off, this pass is exactly what it was.
       3. If still over threshold and ``mode == "summarize"``:
          try LLM summarization; on success, replace dropped block with
          the summary and re-inject recent files (Layer C).
@@ -643,8 +653,29 @@ async def load_and_compact_session(
         try:
             from app.harness.microcompact import (
                 DEFAULT_COMPACTABLE_TOOLS,
+                apply_reduction_sidecar,
                 microcompact,
             )
+            if microcompact_sidecar is None:
+                # The shipped default lives in RunOptions, which is where the
+                # harness's own relief knobs live, so turning the feature on is
+                # one default there and not a second switch to keep in step.
+                from app.harness.options import RunOptions as _RunOptions
+                microcompact_sidecar = bool(
+                    _RunOptions.__dataclass_fields__[
+                        "microcompact_reduction_sidecar"].default)
+            if microcompact_sidecar:
+                # #2168: relief reduced these rows during the turn that wrote
+                # them and the reduction died with `chat_messages`, so the row
+                # came off disk carrying a preview the pre-pass was about to
+                # drop again. Applying it here means the rebuilt prompt starts
+                # in the shape the engine last saw, and the pass below has
+                # nothing left to clear for those ids. `<sid>.json` is not
+                # rewritten — the row on disk keeps the full block the UI
+                # renders and `Read` can reopen. Keyed by this session's own
+                # id, so a sidecar belonging to another session is inert here.
+                convo, _sidecar_applied = apply_reduction_sidecar(
+                    convo, path.stem)
             mc_cfg = cfg["microcompact"]
             tools: Iterable[str] = (
                 mc_cfg.get("compactable_tools") or DEFAULT_COMPACTABLE_TOOLS

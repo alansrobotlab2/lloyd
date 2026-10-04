@@ -271,6 +271,20 @@ class RunOptions:
     # session's own record, `sessions/<sid>.json` + `<sid>.tool-results/`.
     # From `compaction.microcompact.name_session_record`.
     intra_turn_microcompact_name_session_record: bool = False
+    # #2168: rung 1's reduction of a spilled result lives only in
+    # `chat_messages`, so the next turn's rebuild re-expands the preview from
+    # `<sid>.json` and the turn-start pre-pass re-clears the same rows. The
+    # triage window (2026-09-27T00:00:26 → 2026-10-04T08:17:44, usage.db) held
+    # 271 clearing turns in 159 sessions, of which 112 were repeat clears
+    # carrying 37,512,065 of the 84,856,726 reprefilled tokens. With this on,
+    # rung 1 records the call_ids it reduced in
+    # `sessions/<sid>.microcompact-reduced.json` and the turn-start pre-pass
+    # applies that reduction while it rebuilds, so the prompt starts reduced
+    # and the first relief pass has nothing to re-do. The session rows are
+    # never rewritten, and with no sidecar file the pass is inert. Default off:
+    # the ship-on decision is owed a measured reprefill drop plus
+    # `eval/run_compaction_recall_eval.py` showing no recall drop (#2168).
+    microcompact_reduction_sidecar: bool = False
 
     # ---- context pressure -------------------------------------------------
     # Live view of how much of the window this turn has spent. Caller-owned

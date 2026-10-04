@@ -2059,6 +2059,15 @@ def _intra_turn_microcompact(
     def _estimate(msgs: list[dict]) -> int:
         return estimate_conversation_tokens(msgs, "")
 
+    # #2168: relief's reduction is otherwise in-memory only, so the next turn
+    # rebuilds the same rows from `<sid>.json` with their previews intact and the
+    # turn-start pre-pass clears them again — the repeat clears that bucket
+    # 37,512,065 reprefilled tokens in the triage window. Collect the ids this
+    # pass reduced and hand them to the session's sidecar; the pre-pass applies
+    # them while it rebuilds. Off unless the knob is on.
+    reduced_out: list[str] | None = [] if bool(getattr(
+        options, "microcompact_reduction_sidecar", False)) else None
+
     measured = bool(getattr(meter, "measured", False))
     if measured:
         # Idempotent: re-estimates the tail since the last report and
@@ -2099,6 +2108,7 @@ def _intra_turn_microcompact(
             options, "intra_turn_microcompact_observation_head_chars", 400)),
         name_session_record=bool(getattr(
             options, "intra_turn_microcompact_name_session_record", False)),
+        reduced_calls_out=reduced_out,
         **_rung_one_tool_selection(options),
     )
     if cleared:
@@ -2109,6 +2119,10 @@ def _intra_turn_microcompact(
             cleared, tool_count, keep_recent, current,
             _estimate(chat_messages) + offset, target, iteration,
         )
+    if reduced_out:
+        from app.harness.microcompact import record_reduced_calls
+        record_reduced_calls(
+            getattr(options, "session_id", "") or "", reduced_out)
     return int(cleared or 0)
 
 

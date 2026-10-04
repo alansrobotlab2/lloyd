@@ -552,8 +552,368 @@ def test_microcompact_legacy_count_rule_still_available():
 
 
 # ---------------------------------------------------------------------------
+# #2168: relief's reduction survives its turn as a read-time sidecar
+#
+# Every node below runs the REAL producer (`record_reduced_calls`, the file
+# relief's caller writes) and the REAL consumer (`load_and_compact_session`),
+# and reads the history the turn-start pre-pass was handed through a spy on
+# `microcompact` — so "before the first relief pass" is witnessed, not
+# asserted from the final history alone. The falsifier each node leans on is
+# the knob-off number for this fixture, pinned above at
+# `test_old_pointer_rows_shrink_to_their_header_and_recent_ones_keep_the_preview`:
+# 20 spilled rows, `keep_recent_tools` 15, so the pre-pass clears exactly 5
+# (`call_000` … `call_004`). A sidecar naming `call_000` and `call_001` must
+# turn that 5 into 3, and 5 back into 5 the moment the sidecar is foreign,
+# deleted, missing or the knob is off.
+# ---------------------------------------------------------------------------
+
+
+def _record_reduced(sid: str, ids: list[str]) -> None:
+    """Write the sidecar with the writer relief's caller uses, not a fixture
+    dict — the read-time pass must agree with the real file shape."""
+    from app.harness.microcompact import record_reduced_calls
+    record_reduced_calls(sid, ids)
+
+
+def _handed_to_the_pass(monkeypatch) -> list[dict]:
+    """Wrap the module attribute `app.compaction` imports at call time, so a
+    node can see the message list the pre-pass receives. Each entry is the
+    history as handed, one dict per `microcompact` call."""
+    import app.harness.microcompact as mc_mod
+    real = mc_mod.microcompact
+    seen: list[list[dict]] = []
+
+    def _spy(msgs, **kw):
+        seen.append({m.get("tool_call_id"): _marker_text(m)
+                     for m in msgs if m.get("role") == "tool"})
+        return real(msgs, **kw)
+
+    monkeypatch.setattr(mc_mod, "microcompact", _spy)
+    return seen
+
+
+def test_a_reduced_id_from_the_last_turn_arrives_reduced_and_the_pass_clears_it_again_no_more(
+        tmp_path, monkeypatch):
+    """#2168 clause 1: turn N reduced `call_000` and `call_001`; turn N+1's
+    rebuilt history must carry both in reduced shape when the pre-pass starts,
+    and that pass must book no clear for them."""
+    from app.harness.microcompact import PREVIEW_DROPPED
+    p, sid, _ = _pointer_session(tmp_path, monkeypatch, 20)
+    _record_reduced(sid, ["call_000", "call_001"])
+    handed = _handed_to_the_pass(monkeypatch)
+
+    out = _run(load_and_compact_session(
+        p, model="qwen", mode_override="truncate", microcompact_sidecar=True))
+
+    assert len(handed) == 1, "the pre-pass is one relief pass over the history"
+    for i, cid in enumerate(("call_000", "call_001")):
+        text = handed[0][cid]
+        assert PREVIEW_DROPPED in text, (
+            f"{cid} must already be reduced when the pass starts, got {text[:200]}")
+        assert f"file {i} line 0" not in text, (
+            f"{cid}'s preview is the bytes the sidecar was for")
+        assert f"{sid}.tool-results/{cid}.txt" in text, text
+    assert out["microcompacted"] == 3, (
+        "the pass must find nothing left to do to those two: 5 rows are stale, "
+        f"2 arrive reduced, so 3 clears — got {out['microcompacted']}")
+    # Byte-exact claim that the two recorded ids were not rewritten again: the
+    # rows that changed are exactly the three the pass had to reduce itself.
+    final = {m.get("tool_call_id"): _marker_text(m)
+             for m in out["history"] if m.get("role") == "tool"}
+    changed = {cid for cid in final if final[cid] != handed[0][cid]}
+    assert changed == {"call_002", "call_003", "call_004"}, sorted(changed)
+
+
+def test_the_sidecar_reduces_the_prompt_and_never_the_session_file(
+        tmp_path, monkeypatch):
+    """#2168 clause 2: for the same run, `<sid>.json` is byte-identical with the
+    knob on and off, because the reduction is a read-time act and the row on disk
+    keeps the whole pointer block the UI renders and `Read` reopens."""
+    p, sid, _ = _pointer_session(tmp_path, monkeypatch, 20)
+    _record_reduced(sid, ["call_000", "call_001"])
+    before = p.read_bytes()
+    assert b"file 0 line 0" in before, (
+        "the row on disk starts carrying its preview — the equality below is "
+        "worth nothing if it never had one")
+
+    on = _run(load_and_compact_session(
+        p, model="qwen", mode_override="truncate", microcompact_sidecar=True))
+    after_on = p.read_bytes()
+    off = _run(load_and_compact_session(
+        p, model="qwen", mode_override="truncate", microcompact_sidecar=False))
+
+    assert p.read_bytes() == before, "no writer may touch <sid>.json"
+    assert after_on == before, "the knob-on load wrote to the session file"
+    assert b"file 0 line 0" in after_on, (
+        "a single reduction pass that trimmed the row would still read back "
+        "unchanged on the second run only if it never wrote — check the first")
+    assert on["microcompacted"] == 3 and off["microcompacted"] == 5, (
+        "the two runs must differ in the prompt while not differing on disk")
+
+
+def test_a_read_time_reduction_keeps_the_saved_to_line_and_leaves_a_lost_file_inline(
+        tmp_path, monkeypatch):
+    """#2168 clause 3: what the read-time pass leaves behind must still name the
+    file, and it must never reduce a row whose spill file has gone. The second
+    half is asserted on the history the pass RECEIVED: the spill-aware pass may
+    still trim `call_001` itself (it does that today, file or no file), and this
+    clause is about the sidecar not trading a row's content for a dead path."""
+    from app.harness.microcompact import PREVIEW_DROPPED
+    p, sid, _ = _pointer_session(tmp_path, monkeypatch, 20)
+    gone = tmp_path / f"{sid}.tool-results" / "call_001.txt"
+    gone.unlink()
+    _record_reduced(sid, ["call_000", "call_001"])
+    handed = _handed_to_the_pass(monkeypatch)
+
+    _run(load_and_compact_session(
+        p, model="qwen", mode_override="truncate", microcompact_sidecar=True))
+
+    kept = handed[0]["call_000"]
+    assert PREVIEW_DROPPED in kept, kept[:200]
+    assert (
+        f"Full output saved to: {tmp_path}/{sid}.tool-results/call_000.txt" in kept
+    ), f"the reduced row lost its route back: {kept}"
+    skipped = handed[0]["call_001"]
+    assert PREVIEW_DROPPED not in skipped, (
+        "call_001's spill file was deleted, so the sidecar must not reduce it")
+    assert "file 1 line 0" in skipped, skipped[:200]
+
+
+def test_the_sidecar_is_keyed_by_session_id(tmp_path, monkeypatch):
+    """#2168 clause 4: another session's sidecar is inert here, and with this
+    session's own sidecar deleted the pass is byte-for-byte today's pass."""
+    from app.harness.microcompact import PREVIEW_DROPPED, reduction_sidecar_path
+    p, sid, _ = _pointer_session(tmp_path, monkeypatch, 20)
+    _record_reduced("20260101_000000_some_other_session",
+                    ["call_000", "call_001"])
+    handed = _handed_to_the_pass(monkeypatch)
+
+    foreign = _run(load_and_compact_session(
+        p, model="qwen", mode_override="truncate", microcompact_sidecar=True))
+    assert PREVIEW_DROPPED not in handed[0]["call_000"], (
+        "a sidecar named for another session id must not reach these rows")
+    assert foreign["microcompacted"] == 5, (
+        f"a foreign sidecar changed the clears: {foreign['microcompacted']}")
+
+    off = _run(load_and_compact_session(
+        p, model="qwen", mode_override="truncate", microcompact_sidecar=False))
+    _record_reduced(sid, ["call_000", "call_001"])
+    with_it = _run(load_and_compact_session(
+        p, model="qwen", mode_override="truncate", microcompact_sidecar=True))
+    assert with_it["microcompacted"] == 3, "the sidecar must take effect when present"
+    reduction_sidecar_path(sid).unlink()
+    deleted = _run(load_and_compact_session(
+        p, model="qwen", mode_override="truncate", microcompact_sidecar=True))
+
+    assert deleted["microcompacted"] == 5, (
+        "with the sidecar gone the previews are the pass's to drop, as today")
+    assert [_marker_text(m) for m in deleted["history"] if m["role"] == "tool"] \
+        == [_marker_text(m) for m in off["history"] if m["role"] == "tool"], (
+        "a deleted sidecar must reproduce the knob-off history byte for byte")
+
+
+def test_the_shipped_default_does_not_consult_the_sidecar_at_all(tmp_path, monkeypatch):
+    """#2168 clause 5: the knob ships off, and off means the pre-pass never reads
+    the sidecar — not that it reads it and applies nothing."""
+    from app.harness.options import RunOptions
+    import app.harness.microcompact as mc_mod
+
+    assert RunOptions.__dataclass_fields__[
+        "microcompact_reduction_sidecar"].default is False, (
+        "the shipped default is what clause 6 turns on after the deploy gate; "
+        "if this flips, the owed measurement has already been skipped")
+
+    calls: list[str] = []
+    real_apply = mc_mod.apply_reduction_sidecar
+
+    def _counting(msgs, session_id):
+        calls.append(session_id)
+        return real_apply(msgs, session_id)
+
+    monkeypatch.setattr(mc_mod, "apply_reduction_sidecar", _counting)
+    p, sid, _ = _pointer_session(tmp_path, monkeypatch, 20)
+    _record_reduced(sid, ["call_000", "call_001"])
+    handed = _handed_to_the_pass(monkeypatch)
+
+    out = _run(load_and_compact_session(p, model="qwen", mode_override="truncate"))
+
+    assert calls == [], "with the shipped default the sidecar is never opened"
+    # And the node is testing the shipped value, not a parameter fixture:
+    # `load_and_compact_session` carries no default of its own, so a turn that
+    # passes nothing reads `RunOptions` — which is where clause 6 flips it on.
+    import inspect
+    assert inspect.signature(load_and_compact_session).parameters[
+        "microcompact_sidecar"].default is None
+    assert out["microcompacted"] == 5, (
+        f"the pass changed with the knob untouched: {out['microcompacted']}")
+    assert "file 0 line 0" in handed[0]["call_000"], handed[0]["call_000"][:200]
+
+    # The ship-on lever, which the assertions above cannot supply on their own: every
+    # one of them still holds if the pre-pass's read of
+    # `options.microcompact_reduction_sidecar` is replaced by a literal False — the
+    # shortcut whoever reaches for after the owed deploy gate answers "stay off" — and
+    # the knob then survives as a comment nobody can turn back on. Same spy, same
+    # sidecar, one run with the knob True: the helper must be reached, and reached with
+    # the two ids it names actually reduced.
+    _on_handed = _handed_to_the_pass(monkeypatch)
+    out_on = _run(load_and_compact_session(
+        p, model="qwen", mode_override="truncate", microcompact_sidecar=True))
+    assert calls == [sid], (
+        "with the knob ON the sidecar is still never opened, so the read is not wired "
+        "to the knob and there is nothing for the deploy gate to turn on")
+    assert sum(1 for txt in _on_handed[0].values()
+               if "preview dropped" in txt) == 2, _on_handed[0]
+    assert out_on["microcompacted"] == 3, out_on
+
+
+def test_the_relief_pass_that_reduces_a_spill_records_what_it_reduced(
+        tmp_path, monkeypatch):
+    """#2168, the producer half across the loop seam: rung 1 reducing a spilled
+    row is what the sidecar exists to remember, so the ids must come out of
+    `_intra_turn_microcompact` with the knob on and not at all with it off."""
+    from app.harness.loop import _intra_turn_microcompact
+    from app.harness.microcompact import read_reduced_calls
+
+    class _Opts:
+        model = "primary"
+        session_id = "sidecar_probe"
+        intra_turn_microcompact_trigger_fraction = 0.01
+        intra_turn_microcompact_target_fraction = 0.01
+        intra_turn_microcompact_min_chars = 2_000
+        microcompact_reduction_sidecar = True
+
+    monkeypatch.setattr("app.harness.tool_result_spill.SESSIONS_DIR", tmp_path)
+    msgs = _pointer_messages("sidecar_probe", 20)
+    _intra_turn_microcompact(
+        msgs, options=_Opts(), meter=None, keep_recent=15,
+        tool_count=20, iteration=20)
+
+    recorded = read_reduced_calls("sidecar_probe")
+    assert recorded == tuple(f"call_{i:03d}" for i in range(5)), (
+        "rung 1 reduced the five stale pointer rows, so the sidecar holds "
+        f"exactly those ids, got {recorded}")
+    assert (tmp_path / "sidecar_probe.microcompact-reduced.json").is_file(), (
+        "the sidecar sits beside the session's own record, keyed by its id")
+
+    class _Off(_Opts):
+        microcompact_reduction_sidecar = False
+
+    (tmp_path / "sidecar_probe.microcompact-reduced.json").unlink()
+    msgs2 = _pointer_messages("sidecar_probe", 20)
+    _intra_turn_microcompact(
+        msgs2, options=_Off(), meter=None, keep_recent=15,
+        tool_count=20, iteration=20)
+    assert any(m.get("role") == "tool" and "preview dropped" in _marker_text(m)
+               for m in msgs2), "relief still relieves with the knob off"
+    assert read_reduced_calls("sidecar_probe") == (), (
+        "with the knob off nothing is recorded, so nothing can be replayed")
+
+
+def _pointer_messages(sid: str, n: int, chars: int = 5_000) -> list[dict]:
+    """The same 20 spilled Read results as `_pointer_session`, but as the live
+    `chat_messages` list rung 1 works on rather than as a session file: spilled
+    by the real shaping, so every row is a `<persisted-output>` pointer."""
+    from app import transcript_entries as te
+    msgs: list[dict] = [{"role": "user", "content": "read these"}]
+    for i in range(n):
+        cid = f"call_{i:03d}"
+        full = "".join(f"file {i} line {j}\n" for j in range(chars // 16))
+        tc = te.build_tool_call(cid, "Read", json.dumps({"file_path": f"/f{i}.py"}))
+        msgs.append({"role": "assistant", "content": "", "tool_calls": [tc]})
+        shaped = te.shape_tool_result_for_transcript(
+            full, call_id=cid, session_id=sid, tool_name="Read")
+        msgs.append({"role": "tool", "tool_call_id": cid, "content": shaped})
+    return msgs
+
+
+
+# ---------------------------------------------------------------------------
 # Threshold math
 # ---------------------------------------------------------------------------
+
+#: #2168 clause 6 — the rows behind the measurement this item's premise is made of,
+#: committed as bytes so a later reader can re-run the query. This file is the copy
+#: the node opens: the gate runs with HOME at the round home, where the vault tree
+#: does not exist, so a node reading a vault witness would skip — and a skipping
+#: node pins nothing. A byte-identical copy, 4,112,384 bytes, is committed in the vault's
+#: witness store as
+#: `backlog/data/usage-microcompact-2026-10-04.db`, with its provenance note beside it,
+#: and `sqlite3 -readonly` over that file answers the clause's own re-derive:
+#: `select count(*) from sqlite_master` -> 2. (That note records the copy's md5 as a
+#: content-identity pin. It is not a commit in either repository and no command here
+#: resolves it as one — a digest is how you say "these are the same bytes", which is
+#: exactly the claim a commit id cannot make across two repos.) The
+#: other frozen extract already on that store's `usage.db` path is #1918/#1919's:
+#: 3,787 rows spanning 2026-09-22 to 2026-09-30 with columns `ts`, `session_id`,
+#: `prefix_misses` and `reprefill_tokens` — no `compaction` column, so it cannot
+#: answer this query, and rewriting it would move every figure its own provenance
+#: note quotes.
+WITNESS_DB = Path(__file__).resolve().parent / "fixtures" / "usage-microcompact-2026-10-04.db"
+
+#: The item's own report, verbatim, and the window its rows are cut to.
+WITNESS_REPORT = {
+    "clearing_turns": 271,
+    "sessions": 159,
+    "repeat_clearing_turns": 112,
+    "repeat_reprefill": 37_512_065,
+    "total_reprefill": 84_856_726,
+    "rows": 4_852,
+    "objects": 2,
+    "window": ("2026-09-27T00:00:26", "2026-10-04T08:17:44"),
+}
+
+
+def test_the_witness_rows_behind_the_repeat_clear_measure_reproduce_the_quoted_report():
+    """#2168 clause 6: the premise's numbers come from bytes in this repo, because
+    `~/lloyd-data/usage.db` is a rolling store and the window they were measured
+    over slides out from under the next reader.
+
+    271 turns in 159 sessions carry `turn_start.microcompacted > 0` across
+    2026-09-27T00:00:26 → 2026-10-04T08:17:44; 112 of them are repeat clearing
+    turns (a session's second or later clearing turn) carrying 37,512,065 of the
+    84,856,726 reprefilled tokens — the re-clear this round's sidecar exists to
+    stop paying for.
+    """
+    import sqlite3
+
+    assert WITNESS_DB.is_file(), f"{WITNESS_DB.name} is the premise's witness"
+    db = sqlite3.connect(f"file:{WITNESS_DB}?mode=ro", uri=True)
+    try:
+        # `select count(*) from sqlite_master` over these bytes — the clause's own
+        # figure: the `usage` table and its `ts` index and nothing else, so no
+        # cost, model or prompt column was carried into the witness.
+        assert db.execute("select count(*) from sqlite_master").fetchone()[0] \
+            == WITNESS_REPORT["objects"]
+        rows, lo, hi = db.execute(
+            "select count(*), min(ts), max(ts) from usage").fetchone()
+        assert (rows, (lo, hi)) == (WITNESS_REPORT["rows"], WITNESS_REPORT["window"]), \
+            f"witness window moved: {rows}, {lo}, {hi}"
+        got = db.execute(
+            "WITH mc AS (SELECT session_id, ts, COALESCE(reprefill_tokens,0) rep, "
+            "json_extract(compaction,'$.turn_start.microcompacted') mcn "
+            "FROM usage WHERE ts>='2026-09-27' "
+            "AND json_extract(compaction,'$.turn_start.microcompacted')>0), "
+            "ranked AS (SELECT *, ROW_NUMBER() OVER (PARTITION BY session_id "
+            "ORDER BY ts) rn FROM mc) "
+            "SELECT COUNT(*), COUNT(DISTINCT session_id), "
+            "SUM(CASE WHEN rn>1 THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN rn>1 THEN rep ELSE 0 END), SUM(rep) FROM ranked;"
+        ).fetchone()
+    finally:
+        db.close()
+
+    assert got == (
+        WITNESS_REPORT["clearing_turns"], WITNESS_REPORT["sessions"],
+        WITNESS_REPORT["repeat_clearing_turns"], WITNESS_REPORT["repeat_reprefill"],
+        WITNESS_REPORT["total_reprefill"],
+    ), (
+        "the committed witness no longer answers the query the item quoted: "
+        f"turns={got[0]} sessions={got[1]} repeats={got[2]} "
+        f"repeat_reprefill={got[3]} total_reprefill={got[4]}")
+    share = got[3] / got[4]
+    assert 0.43 < share < 0.46, (
+        "the repeat clears are the avoidable part of the window: 37,512,065 of "
+        f"84,856,726 is 44.2%, this extract says {share:.1%}")
 
 
 def test_truncation_threshold_math():
@@ -1436,3 +1796,138 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+def test_turning_the_knob_on_is_what_the_shipped_default_is_not(tmp_path, monkeypatch):
+    """#2168, the seam the last review called unverified: the knob's ON resolution.
+
+    A default-off knob is only worth shipping if turning it on is a thing that
+    happens. The clause-5 node proves the off half (the pre-pass never opens the
+    sidecar); on its own that is satisfied by a read hard-wired to False — the shape
+    whoever arrives after the owed deploy gate says "stay off" would leave behind, and
+    it would keep every off-side assertion true while making the knob impossible to
+    turn back on. So this node runs the SAME session, the SAME sidecar and the SAME
+    counting spy twice, once per resolution, and requires the two to differ:
+
+      knob False -> the spy is never called, the two named rows arrive with their
+                    preview, the pass clears 5;
+      knob True  -> the spy is called once with this session id, both rows arrive
+                    reduced, the pass clears 3.
+
+    What makes the node worth its run is that the two halves are COMPARED, not
+    separately asserted: an implementation that behaves the same whatever the knob
+    says cannot pass it, and no node that only looks at the off side can tell that
+    implementation from a correct one. Measured, not argued — two mutations, run over
+    the whole file, each turning 7 nodes red and leaving 52 green against 59 green
+    clean:
+
+      * the pre-pass's knob read at `app/compaction.py:667` replaced by a literal
+        `False`, so both resolutions clear 5;
+      * `apply_reduction_sidecar` returning its input untouched, so the read happens
+        and changes nothing.
+
+    Both break this node and the other six sidecar nodes, which is the honest result:
+    they are two ways of producing the same broken behaviour, and a node that claimed
+    to tell them apart would be claiming more than a comparison of clear counts can
+    see. The one thing no off-only node could catch either way is here: the knob's
+    `True` resolution reached the helper and reduced the ids it names.
+    """
+    from app.harness.microcompact import read_reduced_calls
+    import app.harness.microcompact as mc_mod
+
+    calls: list[str] = []
+    real_apply = mc_mod.apply_reduction_sidecar
+
+    def _counting(msgs, session_id):
+        calls.append(session_id)
+        return real_apply(msgs, session_id)
+
+    monkeypatch.setattr(mc_mod, "apply_reduction_sidecar", _counting)
+    p, sid, _ = _pointer_session(tmp_path, monkeypatch, 20)
+    _record_reduced(sid, ["call_000", "call_001"])
+    handed = _handed_to_the_pass(monkeypatch)
+
+    off = _run(load_and_compact_session(p, model="qwen", mode_override="truncate",
+                                        microcompact_sidecar=False))
+    assert calls == [], "the off resolution opened the sidecar"
+    assert off["microcompacted"] == 5, off
+    assert "file 0 line 0" in handed[0]["call_000"], handed[0]["call_000"][:200]
+
+    on = _run(load_and_compact_session(p, model="qwen", mode_override="truncate",
+                                       microcompact_sidecar=True))
+    assert calls == [sid], (
+        "the on resolution never reached the sidecar, so the deploy gate has nothing "
+        "to measure and the knob is a comment")
+    assert on["microcompacted"] == 3, on
+    assert on["microcompacted"] < off["microcompacted"], (
+        "the two resolutions cleared the same number of rows: the knob changes nothing")
+    assert "file 0 line 0" not in handed[-1]["call_000"], handed[-1]["call_000"][:200]
+    assert read_reduced_calls(sid) == ("call_000", "call_001"), (
+        "reading through the knob must not consume what it read")
+
+
+def test_a_second_turn_start_pass_books_no_re_clear_for_the_ids_the_sidecar_named(
+        tmp_path, monkeypatch):
+    """#2168, the seam the last review asked to see run twice: load → pass → load →
+    pass over ONE persisted session, with the knob on.
+
+    The item's harm is a repeat, so the witness has to be a repeat too. Clause 1 pins
+    that a sidecar named by the previous turn arrives pre-reduced; that is one round
+    trip. What the pass does on its SECOND read of the same file is what a session
+    actually lives in, and it has to answer three things at once:
+
+      * the second load still hands both named rows in reduced shape — the sidecar was
+        not consumed by being read;
+      * the second pass books the same 3 clears, none of them for `call_000`/`call_001`
+        — no re-clear, which is the whole point of the sidecar;
+      * the sidecar's own bytes are unchanged across both runs, so a read-time
+        instrument cannot quietly become a writer and start owning state relief did
+        not ask it to own.
+
+    The falsifier is the same session and the same sidecar read with the knob off:
+    5 clears, because the read that would have spared two of them never happened. Two
+    mutations, each run over the whole file, turn this node red along with the other
+    six sidecar nodes: the pre-pass's knob read at `app/compaction.py:667` replaced by
+    a literal `False`, and `apply_reduction_sidecar` returning its input untouched.
+    """
+    from app.harness.microcompact import (
+        read_reduced_calls, reduction_sidecar_path)
+    import app.harness.microcompact as mc_mod
+
+    p, sid, _ = _pointer_session(tmp_path, monkeypatch, 20)
+    _record_reduced(sid, ["call_000", "call_001"])
+    sidecar = reduction_sidecar_path(sid)
+    before = sidecar.read_bytes()
+    real_apply = mc_mod.apply_reduction_sidecar
+    calls: list[str] = []
+
+    def _counting(msgs, session_id):
+        calls.append(session_id)
+        return real_apply(msgs, session_id)
+
+    monkeypatch.setattr(mc_mod, "apply_reduction_sidecar", _counting)
+    handed = _handed_to_the_pass(monkeypatch)
+
+    first = _run(load_and_compact_session(p, model="qwen", mode_override="truncate",
+                                         microcompact_sidecar=True))
+    second = _run(load_and_compact_session(p, model="qwen", mode_override="truncate",
+                                          microcompact_sidecar=True))
+
+    assert calls == [sid, sid], calls
+    assert first["microcompacted"] == second["microcompacted"] == 3, (first, second)
+    for run in (0, 1):
+        both_reduced = all("preview dropped" in text
+                           for text in (handed[run]["call_000"],
+                                        handed[run]["call_001"]))
+        assert both_reduced, (
+            f"run {run + 1} did not receive the two named rows pre-reduced")
+    assert sidecar.read_bytes() == before, (
+        "the read-time pass rewrote the sidecar: an instrument that only reads has no "
+        "business becoming this session's writer of reduction state")
+    assert read_reduced_calls(sid) == ("call_000", "call_001")
+
+    off = _run(load_and_compact_session(p, model="qwen", mode_override="truncate",
+                                        microcompact_sidecar=False))
+    assert off["microcompacted"] == 5, (
+        "with nothing recorded the same session clears all five again, which is the "
+        "number the sidecar exists to take off the next turn")
