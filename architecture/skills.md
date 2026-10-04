@@ -388,6 +388,17 @@ one job's sentence block every later job's snapshot. The fix for a finding is
 always the prose (name the removed thing without a repo-rooted path), never
 `PATH_KNOWN_UNFIXED` or the bench gold set.
 
+Absence alone cannot tell a second pair of things apart either: a path a document
+**reads** from a path it **creates**. A job that writes a report has to name the
+path before the report exists, so on the night the job is filed its own output is
+missing by definition — which is how `referential-integrity-ledger` reddened
+three nodes at base over its `--report` file and its `mkdir -p` copy directory
+(#2157). `_declared_outputs` answers that as a rule rather than a ledger: a path
+the **same document** puts at a write site (`--report`, `--out`, `-o`, `>`, or
+`mkdir -p`) is an output, and it is exempt only at that exact path and only when
+the write site is checkout- or vault-rooted, so a placeholder, `$HOME/…` or a
+parent directory exempts nothing.
+
 `terminal` — the OpenClaw name for Bash, found as a call in 69 places — is
 matched only as `` `terminal` `` or `terminal(`, because it is also an ordinary
 English word. `read_text`/`write_text` were deliberately **not** rewritten:

@@ -45,7 +45,10 @@ therefore empty and, unlike the path ledger below, nothing in this file reads
 it: a phantom name is banned outright and a new one fails immediately. Treat an
 entry added here as a regression, not a grandfathering — and if you are looking
 for the ledgers that actually exempt something, they are `PATH_KNOWN_UNFIXED`
-and `AGENT_MENTION_EXEMPT`, both of which the tests below do consult.
+and `AGENT_MENTION_EXEMPT`, both of which the tests below do consult. The path
+half also exempts by *rule* where it can, so that no entry has to be maintained:
+an ignored path (`_tree_ignores`), a path the document creates itself
+(`_declared_outputs`, #2157), a template, a clipped quotation.
 """
 
 from __future__ import annotations
@@ -421,6 +424,14 @@ BACKTICKED = re.compile(r"`([^`\n]+)`")
 # command block that names a script means "run this script".
 _PY_IN_COMMAND = re.compile(r"(?:^|[\s/])((?:eval|app|tests|scripts)/[A-Za-z0-9_./-]+\.py)")
 
+#: Where a document says it WRITES a path: a shell redirection, an output flag, or
+#: an explicit `mkdir`. Read by `_declared_outputs`, which is what tells a path a
+#: job creates apart from a path a job must open (#2157). `<` and a backtick are
+#: out of the captured class, so a placeholder (`--report <path>`) yields nothing
+#: usable rather than a shape that reads like a claim.
+_OUTPUT_TARGET = re.compile(r"(?:>>?|--report|--output|--out|-o)\s+([^\s;|&)<`]+)")
+_MKDIR_TARGET = re.compile(r"\bmkdir\s+(?:-{1,2}\w+\s+)*([^\s;|&)<`]+)")
+
 #: The marker left where something was cut short. `clip_skill_description` says so
 #: of itself — "cut to at most `max_chars` characters, the cut marked with `…`"
 #: (`app/prompt_builder.py:992-996`) — and `scripts/skill_lint.py:822` puts that clipped
@@ -743,6 +754,44 @@ def _row_parts(row: str) -> tuple[str, str]:
     return tree, rel
 
 
+def _declared_outputs(body: str) -> set[tuple[str, str]]:
+    """(tree, rel) for each path the document says it CREATES in its own text.
+
+    #85's defect was a run that could not open a file its instructions named, so
+    this fence asks one question of a named path: is it on disk. That question is
+    only well-posed of a path the doc *reads*. A job that writes a report has to
+    name the path it writes before the report exists — that is what a `--report`
+    argument and a `mkdir -p` are for — and on the night such a job is filed its
+    output is by definition absent, which is the red node that went out over
+    `referential-integrity-ledger` (#2157): two committed docs, three nights of
+    rounds refused by their own not-yet-run outputs.
+
+    So an absent path is not drift when the same document puts it at a write
+    site. Deliberately narrow:
+
+      * the creation site must be in the **same document** — a `mkdir` anywhere
+        else in the corpus exempts nothing, so this cannot become a corpus-wide
+        list of paths nobody has to maintain;
+      * the path must be checkout- or vault-rooted (`~/lloyd/…`, `~/obsidian/…`),
+        which is the same root claim `_named_paths` requires; `$HOME/…`, `./out`
+        and a bare word normalize to nothing and stay drift;
+      * it is an **exact** path, not a prefix: `mkdir -p ~/obsidian/autonomy`
+        would otherwise exempt every report anyone files under `autonomy/`.
+
+    Fail-closed on anything odd: an unparseable token, a placeholder (`<path>`,
+    `$(date)`) and a clipped quote all yield no entry, so the worst a malformed
+    creation statement can do is leave the row it would have left.
+    """
+    out: set[tuple[str, str]] = set()
+    for pat in (_OUTPUT_TARGET, _MKDIR_TARGET):
+        for tok in pat.findall(body):
+            for rx, tree in ((_LLOYD_PATH, "repo"), (_OBSIDIAN_PATH, "vault")):
+                m = rx.fullmatch(tok)
+                if m is not None and not _truncated(m.group(1)):
+                    out.add((tree, m.group(1)))
+    return out
+
+
 def _absent_refs(label: str, body: str, skill_dir: Path | None) -> set[str]:
     """`<label>::<tree>:<path>` for each path `body` names that is not on disk.
 
@@ -755,6 +804,7 @@ def _absent_refs(label: str, body: str, skill_dir: Path | None) -> set[str]:
     (#1969). One rule, two callers — a second copy of it there would drift.
     """
     out: set[str] = set()
+    outputs: set[tuple[str, str]] | None = None
     for tree, rel in _named_paths(body, skill_dir):
         if _is_template(rel) or "/" not in rel or rel.endswith(RUNTIME_SUFFIXES):
             continue
@@ -765,6 +815,12 @@ def _absent_refs(label: str, body: str, skill_dir: Path | None) -> set[str]:
             if skill_dir is not None:
                 roots.append(skill_dir / rel)
         if any(r.exists() for r in roots):
+            continue
+        # Only an absent path is asked whether the doc creates it, so the green
+        # path stays free of this scan — the rule `_DIRTY_CACHE` follows.
+        if outputs is None:
+            outputs = _declared_outputs(body)
+        if (tree, rel) in outputs:
             continue
         if tree == "repo" and _dotted_module_ref(rel, roots):
             continue
@@ -1729,3 +1785,133 @@ def test_a_clipped_path_quotation_is_not_read_as_a_phantom(tmp_path, monkeypatch
         f"went unseen: {sorted(rows)}")
     assert _truncated("agent-services/su", "… |") and _truncated("app/x…"), (
         "_truncated stopped covering one of the two arrival shapes")
+
+
+# ---------------------------------------------------------------------------
+# #2157: a path the document says it CREATES is an output, not a citation
+# ---------------------------------------------------------------------------
+
+# Three vault paths, none of which exists on this machine (`~/obsidian/reports`
+# is not a directory), so every row below is a row about absence and not about
+# whatever a previous run left behind.
+_WRITTEN = "~/obsidian/reports/a_ledger_report_the_job_writes_2157.md"
+_MKDIRS = "~/obsidian/reports/a_copy_dir_the_job_mkdirs_2157"
+_READS = "~/obsidian/reports/an_input_the_job_only_reads_2157.md"
+_WRITTEN_ROW = "skills/2157-writer/SKILL.md::vault:reports/a_ledger_report_the_job_writes_2157.md"
+_MKDIRS_ROW = "skills/2157-writer/SKILL.md::vault:reports/a_copy_dir_the_job_mkdirs_2157"
+_READS_ROW = "skills/2157-writer/SKILL.md::vault:reports/an_input_the_job_only_reads_2157.md"
+
+
+def _writer_body(report: str = _WRITTEN, target: str = _MKDIRS,
+                 reads: tuple[str, ...] = ()) -> str:
+    """A job instruction in the shape `referential-integrity-ledger` actually has.
+
+    One command whose script takes `--report <path>`, one `mkdir -p` of the
+    directory the dated copy goes in, and any file the job is told to read. Both
+    write sites are the ones that went out in the real skill, verbatim in shape:
+    `#2157`'s rows came from exactly these two commands naming files the job had
+    not yet had a night to produce.
+    """
+    lines = [
+        "# Ledger job",
+        "",
+        "1. `cd ~/lloyd && python3 -m scripts.maintenance.referential_integrity"
+        f" --report {report}; echo EXIT=$?`",
+        f"2. `mkdir -p {target} && cp {report} {target}/$(date -u +%F).md`",
+    ]
+    lines += [f"{i}. Read {p} first." for i, p in enumerate(reads, start=3)]
+    return "\n".join(lines) + "\n"
+
+
+def test_a_path_the_document_creates_is_not_drift_and_one_it_reads_is():
+    """Both directions of the exemption in one assertion, because the half that
+    must keep biting is the read path.
+
+    `_WRITTEN` is named at a `--report` site and `_MKDIRS` at a `mkdir -p`, so
+    neither is drift; `_READS` is named only as something to open, which is #85's
+    defect and still exactly one row. The whole body is one doc, so a rule that
+    exempted too much would show up here as an empty set.
+    """
+    rows = _absent_refs("skills/2157-writer/SKILL.md",
+                        _writer_body(reads=(_READS,)), None)
+    assert rows == {_READS_ROW}, (
+        f"a job's own outputs were read as drift, or a path it only reads went "
+        f"unseen: {sorted(rows)}")
+
+
+def test_the_creation_must_be_in_the_same_document_and_at_that_exact_path():
+    """The two ways this exemption could quietly rot into a list nobody maintains.
+
+    Naming the same path without creating it is drift again — `_writer_body` puts
+    a `mkdir` and a `--report` in one document, and that document's declaration
+    exempts nothing for any other document, so there is no corpus-wide set of
+    outputs to keep current. And `mkdir -p ~/obsidian/reports` does not exempt a
+    file under `reports/`: the exemption is an exact path, because a parent
+    directory named once would otherwise cover every report anyone files there.
+    """
+    named_only = _absent_refs("autonomy/9157-reader.md",
+                              f"The report lives at {_WRITTEN}\n", None)
+    assert named_only == {
+        "autonomy/9157-reader.md::vault:reports/a_ledger_report_the_job_writes_2157.md"}, (
+        f"a document that only names a path stopped being asked about it: "
+        f"{sorted(named_only)}")
+
+    parent_mkdir = _absent_refs(
+        "skills/2157-writer/SKILL.md",
+        f"1. `mkdir -p ~/obsidian/reports`\n2. The report is {_WRITTEN}\n", None)
+    assert parent_mkdir == {_WRITTEN_ROW}, (
+        f"a mkdir of the parent directory exempted a file inside it: "
+        f"{sorted(parent_mkdir)}")
+
+
+@pytest.mark.parametrize("site", [
+    "<path>",                                     # a placeholder, not a claim
+    "$(date -u +%F).md",                          # a shell substitution
+    "$HOME/obsidian/reports/a_ledger_report_the_job_writes_2157.md",
+    "./reports/a_ledger_report_the_job_writes_2157.md",
+])
+def test_a_write_site_that_is_not_a_rooted_path_exempts_nothing(site):
+    """Fail-closed: the write site counts only when it names a checkout- or
+    vault-rooted path, which is the same root claim `_named_paths` requires.
+
+    `$HOME/obsidian/…` is the interesting row: the *scanner* does read it as a
+    vault path (its lookbehind does not exclude `$`), so a rule keyed on the
+    string rather than on a resolved `(tree, rel)` would exempt it and lose a
+    real drift row. `$HOME/…` and `./…` normalize to nothing and the row stands,
+    which is why `_declared_outputs` runs its tokens through the two anchored
+    matchers instead of comparing text.
+    """
+    body = f"1. `mkdir -p {site}`\n2. The report is {_WRITTEN}\n"
+    rows = _absent_refs("skills/2157-writer/SKILL.md", body, None)
+    assert rows == {_WRITTEN_ROW}, (
+        f"a write site that is not a rooted path ({site!r}) exempted an absent "
+        f"file: {sorted(rows)}")
+
+
+def test_the_ledger_job_that_made_main_red_is_exempt_by_its_own_write_sites():
+    """The corpus that made three nodes red at `4f015e9f`, checked in the tree.
+
+    `skills/referential-integrity-ledger/SKILL.md` and
+    `autonomy/94-referential-integrity-ledger.md` — both committed to the vault,
+    both filed 2026-10-03 — name `autonomy/referential-integrity-latest.md` and
+    `autonomy/referential-integrity/`, which the job writes with `--report` and
+    creates with `mkdir -p` on its first night. The first assertion is the one
+    that was red: no `referential-integrity` row survives in the live corpus. The
+    second credits the exemption to those documents' own write sites rather than
+    to a new entry in any ledger, and asks only files that are still in the
+    corpus, so a later rewrite of the job cannot break it by deleting something.
+    """
+    drift = {r for r in _unresolved() if "referential-integrity" in r}
+    assert drift == set(), (
+        f"a job's not-yet-written outputs are being counted as drift again: "
+        f"{sorted(drift)}")
+
+    for name in ("skills/referential-integrity-ledger/SKILL.md",
+                 "autonomy/94-referential-integrity-ledger.md"):
+        doc = VAULT / name
+        if not doc.exists():
+            continue
+        declared = _declared_outputs(doc.read_text(encoding="utf-8",
+                                                    errors="replace"))
+        assert ("vault", "autonomy/referential-integrity-latest.md") in declared, name
+        assert ("vault", "autonomy/referential-integrity") in declared, name
