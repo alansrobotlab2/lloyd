@@ -2131,8 +2131,11 @@ def test_audit_tally_is_its_final_line(tmp_path):
     # so any new tally has to arrive above it. Nothing in this ledger is case-stranded, which
     # is why the line reads 0 rather than being absent: a tally that only appears with
     # findings cannot tell a clean night from a check nobody ran.
-    assert len(out.splitlines()) == len(AUDIT_DEAD) + 3, (
-        f"tally must be the {len(AUDIT_DEAD) + 3}th and last line of its own output: {out}")
+    # +4 as of #2166, which added a third tally (`candidate_body_scoping: …`) above `stranded:`
+    # for the same reason the other two are there: a clean night has to print a zero. Only this
+    # arithmetic moves — `keys:` stays last, `denominators:` -2 and `stranded:` -3 below it.
+    assert len(out.splitlines()) == len(AUDIT_DEAD) + 4, (
+        f"tally must be the {len(AUDIT_DEAD) + 4}th and last line of its own output: {out}")
     assert out.splitlines()[-2] == "denominators: empty_input 0 undeclared 7", out
     assert out.splitlines()[-3] == "stranded: case_sensitive_grep 0", out
     assert out.count("UNRUNNABLE ") == len(AUDIT_DEAD), out
@@ -4467,3 +4470,265 @@ def test_the_committed_witness_carries_the_rows_with_a_field_and_no_value():
         "newest_bucket", "newest_rows", "prev_rows"]
     assert not sv.empty_valued_fields(run_row[1].get("evidence_observed") or ""), (
         "the correcting line is itself half-empty, so the mint that clears the rail is wrong")
+
+
+# ---------------------------------------------------------------------------
+# #2166 — a falsifier that counts a candidate file whole counts the ledger's own prose
+#
+# `mine-trajectories.status_block()` (scripts/mine-trajectories.py:1658-1677) writes the
+# decision's own `verdict_reason:` into the FRONT MATTER of every superseded snapshot for
+# that key. A `grep -c` over the whole file therefore counts the verdict re-injecting
+# itself, and the count can only inflate: a reason that mentions the very path or phrase
+# the literal searches for keeps a dead key looking alive. Measured on
+# `candidate-edit-logic-20261004.md` the night this was filed: whole=3, body=2, with the
+# surplus match at line 17, `verdict_reason:`. Body-scoping — strip the front matter with
+# awk and count the rest — is the fix, and it is what four keys re-minted themselves to.
+# ---------------------------------------------------------------------------
+
+#: The path shape `Edit/logic`'s falsifier counts, and the one its own verdict_reason names.
+WORKTREE_PATH_MARK = "lloyd-work/SM_20261003_042353/home/lloyd/"
+#: How many times that path appears in the fixture's front matter and in its examples.
+#: 1 + 2 = the whole-file read, 2 = the body read: the item's own whole=3 body=2.
+FM_MENTIONS, BODY_MENTIONS = 1, 2
+
+
+def candidate_2166(tmp_path: Path) -> Path:
+    """A dated candidate snapshot in the shape the miners write, with a `verdict_reason`.
+
+    One mention of `WORKTREE_PATH_MARK` in the front matter (the re-injected verdict) and two
+    in the example lines below the closing `---` — the exact 3-versus-2 shape the filing
+    measured. Returns the candidates DIRECTORY, because the stored falsifiers glob it.
+    """
+    cand = tmp_path / "candidates"
+    cand.mkdir(parents=True, exist_ok=True)
+    (cand / "candidate-edit-logic-20261004.md").write_text(
+        "---\n"
+        "pattern_key: Edit/logic\n"
+        "occurrences: 3\n"
+        "sessions: 2\n"
+        f"verdict_reason: the count is fine, it just moved — see {WORKTREE_PATH_MARK}tests/x.py\n"
+        "---\n"
+        "\n"
+        "## Example 1  (session s1, 2026-10-03)\n"
+        f"- **Input:** `{{'file_path': '{WORKTREE_PATH_MARK}tests/x.py'}}`\n"
+        "- **Error:** `Edit refused: old_string not found in file`\n"
+        "\n"
+        "## Example 2  (session s2, 2026-10-03)\n"
+        f"- **Input:** `{{'file_path': '{WORKTREE_PATH_MARK}tests/y.py'}}`\n"
+        "- **Error:** `Edit refused: old_string not found in file`\n",
+        encoding="utf-8")
+    return cand
+
+
+def counting_cmd(cand: Path, scope: str) -> str:
+    """The `Edit/logic` falsifier in one of its two historical scopes.
+
+    `whole` is the shape the key stored until 2026-10-04: a `grep -c` whose operand is the
+    candidate file itself. `body` is the shape it stores now, and the shape #2166 makes the
+    only acceptable one — an awk pass that drops everything up to and including the second
+    `---`, then a count of that copy. Both keep `input_rows` as a count of files, which is
+    the honest denominator either way, and both are runnable, so a node can watch the two
+    scopes DISAGREE on the same file rather than only read about it.
+    """
+    glob = f"{cand}/candidate-edit-logic-*.md"
+    strip = "b=$(awk '/^---/{n++; next} n>=2' $f); " if scope == "body" else ""
+    read = (f"printf '%s\\n' \"$b\" | grep -c '{WORKTREE_PATH_MARK}'" if scope == "body"
+            else f"grep -c '{WORKTREE_PATH_MARK}' $f")
+    field = "body_worktree_shape" if scope == "body" else "worktree_shape"
+    return (f"f=$(ls -t {glob} | head -1); {strip}"
+            f"echo \"input_rows=$(ls -1 {glob} | wc -l) {field}=$({read})\"")
+
+
+def test_the_whole_file_candidate_count_measures_the_verdict_it_decided(tmp_path):
+    """The premise, measured rather than quoted: whole 3, body 2, on one file.
+
+    Both commands run against the same snapshot. The difference is the front matter, and the
+    front matter is `mine-trajectories.status_block()`'s re-injected `verdict_reason` — the
+    decision counting its own sentence as traffic and so keeping its own key alive. This is
+    the 2026-09-21 class rule, "bind a count to the record set, never to narrative prose",
+    caught in the act of failing toward the tool's own liveness."""
+    cand = candidate_2166(tmp_path)
+    rc, whole = sv.run_evidence(counting_cmd(cand, "whole"))
+    assert rc == 0, whole
+    rc2, body = sv.run_evidence(counting_cmd(cand, "body"))
+    assert rc2 == 0, body
+    assert f"worktree_shape={FM_MENTIONS + BODY_MENTIONS}" in whole, whole
+    assert f"body_worktree_shape={BODY_MENTIONS}" in body, body
+    assert sv.candidate_body_defect(counting_cmd(cand, "whole")) == (
+        "whole_file", f"grep -c '{WORKTREE_PATH_MARK}' $f"), (
+        "the shape that produced the number above must be the shape the rule names")
+    assert sv.candidate_body_defect(counting_cmd(cand, "body")) is None, (
+        "the shape that produced the honest number above must be the shape the rule accepts")
+
+
+def test_record_refuses_a_candidate_count_that_greps_the_whole_file(store, tmp_path):
+    """Clause 1: the mint refuses both spellings of the operand and names body-scoping.
+
+    One via the `f=$(ls -t …)` the minter writes, one via the inline `$(ls -t … | head -1)`
+    substitution — the two ways tonight's ledger reaches a candidate file. The message has to
+    carry the remedy, because the run that hits it is a nightly with nobody reading: `#750`
+    minted this key, `#2103`'s rail is the precedent for refusing at the mint rather than
+    logging a complaint nobody executes."""
+    cand = candidate_2166(tmp_path)
+    skill = skill_fixture(tmp_path)
+    with pytest.raises(ValueError) as raised:
+        sv.record_verdict(store, "Edit/logic", "reviewed_no_skill", "stored",
+                          counting_cmd(cand, "whole") + f"; {grep_owner(skill, 'old string', '-ci')}")
+    msg = str(raised.value)
+    assert "front matter" in msg and "verdict_reason" in msg, msg
+    assert "body-scope" in msg.lower() and "n>=2" in msg, (
+        f"the refusal must name the fix, not just the fault: {msg}")
+
+    inline = (f"echo \"errlegs=$(grep -c ':ERR.*\\[ERROR\\]' "
+              f"'{cand}/candidate-edit-logic-20261004.md')\"; echo '{sv.INPUT_ROWS_FIELD}=1'")
+    assert sv.candidate_body_defect(inline) == (
+        "whole_file", f"grep -c ':ERR.*\\[ERROR\\]' '{cand}/candidate-edit-logic-20261004.md'"), (
+        "an inline candidate path is the same read spelled without a variable")
+    with pytest.raises(ValueError) as raised2:
+        sv.record_verdict(store, "Bash/fs", "reviewed_no_skill", "stored", inline)
+    assert "body-scope" in str(raised2.value).lower(), str(raised2.value)
+    assert not store.exists() or sv.load_verdicts(store) == {}, "a refused mint writes nothing"
+
+
+def test_the_body_scoped_falsifier_records_unchanged(store, tmp_path):
+    """Clause 2: the shape the two repaired keys store today still mints, byte for byte.
+
+    `Edit/logic` and `Bash/logic` re-minted themselves to this on 2026-10-04 and their counts
+    then equalled a hand count of the example lines. A rail that refused this shape would be
+    worse than no rail: the nightly's only compliant spelling would be undepressable, and the
+    run that noticed would conclude the rule is wrong and drop the scoping too."""
+    cand = candidate_2166(tmp_path)
+    row = sv.record_verdict(store, "Edit/logic", "reviewed_no_skill",
+                            "the body count is the traffic count",
+                            counting_cmd(cand, "body"))
+    assert f"body_worktree_shape={BODY_MENTIONS}" in row["evidence_observed"], row
+    assert sv.load_verdicts(store)["Edit/logic"]["evidence_cmd"] == counting_cmd(cand, "body"), (
+        "the stored command is the accepted one, not a rewritten copy of it")
+
+
+def test_the_rule_leaves_front_matter_reads_and_owner_greps_alone(store, tmp_path):
+    """Clause 3: the deliberate reads still mint, so the rule costs the nightly nothing.
+
+    `grep -m1 '^occurrences:' $f` and `grep -m1 '^sessions:' $f` target the front matter ON
+    PURPOSE: they are reading the metadata, which is exactly where a `^`-anchored pattern
+    lives. Refusing them would refuse the ledger's own most common read. The owner SKILL.md
+    grep is exempt for the simpler reason that its operand is not a candidate file — the same
+    file `seed` writes and `repair` writes into every tombstone."""
+    cand = candidate_2166(tmp_path)
+    skill = skill_fixture(tmp_path)
+    front_matter = (f"f=$(ls -t {cand}/candidate-edit-logic-*.md | head -1); "
+                    f"echo occ=$(grep -m1 -i '^occurrences:' $f | tr -dc '0-9') "
+                    f"sessions=$(grep -m1 '^sessions:' $f) "
+                    f"{grep_owner(skill, 'old string', '-ci')}")
+    assert sv.candidate_body_defect(front_matter) is None, (
+        "a `^`-anchored read has already scoped itself away from the examples")
+    row = sv.record_verdict(store, "Edit/logic", "reviewed_no_skill", "front matter only",
+                            front_matter)
+    assert "occ=3" in row["evidence_observed"], row["evidence_observed"]
+
+    tombstone = sv.TOMBSTONE_TEMPLATE.format(input=f"{cand}/candidate-edit-logic-*.md")
+    assert sv.candidate_body_defect(tombstone) is None, (
+        "#1588's disposal check counts PATHNAMES under a candidate glob; refusing it would "
+        "make every future disposal unrecordable")
+
+    # The anchor, isolated from `-m1`. `cmd_repair` re-mints `grep -c '^status:' <snapshot>`
+    # when the data move strands a falsifier's root, and that read COUNTS — so `not counting`
+    # does not exempt it and only the `^` can. Its unanchored twin counts the same word in the
+    # example lines, which is the leak, so the two have to land on opposite sides here.
+    anchored = f"echo snap_status=$(grep -c '^status:' {cand}/candidate-edit-logic-20261004.md)"
+    assert sv.candidate_body_defect(anchored) is None, (
+        "the shape `repair` mints must be acceptable, or a stranded falsifier cannot be "
+        "repaired at all")
+    unanchored = anchored.replace("^status:", "status:")
+    assert sv.candidate_body_defect(unanchored) is not None, (
+        "dropping the anchor is what makes the count a prose count: this file's body has no "
+        "`status:` at column 0, so an unanchored read counting it is counting something else")
+
+
+def test_audit_names_the_keys_whose_falsifier_counts_a_candidate_whole(store, tmp_path):
+    """Clause 4: `audit` counts the stored rows that read prose, and names them.
+
+    Against a fixture ledger holding one offender in tonight's real shape — `seq-2-bash-fs-err-bash-fs`
+    with its `errlegs=$(grep -c ':ERR.*\\[ERROR\\]' $f)` — and one compliant key. The count is
+    the point: `audit`'s published numbers are what the nightly reads, and a key that has been
+    inflating all along reports rc 0 doing it, so no execution-based tally can ever reach it.
+    The exit code goes 1 for the same reason the UNRUNNABLE list does: this is a finding with a
+    fix, not a caption."""
+    cand = candidate_2166(tmp_path)
+    offender = (f"f=$(ls -t {cand}/candidate-seq-2-bash-fs-err-bash-fs-*.md | head -1); "
+                f"echo errlegs=$(grep -c ':ERR.*\\[ERROR\\]' $f); echo '{sv.INPUT_ROWS_FIELD}=1'")
+    (cand / "candidate-seq-2-bash-fs-err-bash-fs-20261004.md").write_text(
+        "---\nverdict_reason: the :ERR leg [ERROR] is what grew here\n---\n"
+        "- step 2 :ERR [ERROR] no such file\n", encoding="utf-8")
+    stored_row(store, "seq-2-bash-fs-err-bash-fs", offender)
+    stored_row(store, "Edit/logic", counting_cmd(cand, "body"))
+    rc, out = run_audit(store)
+    assert rc == 1, out
+    assert "candidate_body_scoping: whole_file 1 dead_strip 0" in out, out
+    assert any(line.startswith("WHOLE_CANDIDATE_COUNT seq-2-bash-fs-err-bash-fs")
+               for line in out.splitlines()), out
+    assert not any("Edit/logic" in line for line in out.splitlines()
+                   if "CANDIDATE" in line or "STRIP" in line), out
+
+
+def test_a_dead_front_matter_strip_is_refused_at_the_mint_and_named_by_audit(store, tmp_path):
+    """Clause 5: half the applied fix was a strip nobody reads, and that is a defect, not a fix.
+
+    `Bash/timeout` stores `b=$(awk '/^---/{n++; next} n>=2' $f)` and then emits only `owner_*`
+    greps, so running it verbatim yields no `body_*` field at all: the key looks repaired, and
+    its candidate traffic is now measured by nobody. Refusing the shape at the mint is the
+    cheap half; `audit` naming the already-stored row is the half that reaches the ledger
+    without waiting for a re-mint that may never come."""
+    cand = candidate_2166(tmp_path)
+    skill = skill_fixture(tmp_path)
+    dead = (f"f=$(ls -t {cand}/candidate-edit-logic-*.md | head -1); "
+            f"b=$(awk '/^---/{{n++; next}} n>=2' $f); "
+            f"echo occ=$(grep -m1 '^occurrences:' $f) {grep_owner(skill, 'old string', '-ci')}")
+    assert sv.candidate_body_defect(dead) == (
+        "dead_strip", "b=$(awk '/^---/…' …) defined and never read"), dead
+    with pytest.raises(ValueError) as raised:
+        sv.record_verdict(store, "Bash/timeout", "reviewed_no_skill", "looks scoped", dead)
+    assert "never read" in str(raised.value), str(raised.value)
+
+    stored_row(store, "Bash/timeout", dead + f"; echo '{sv.INPUT_ROWS_FIELD}=1'")
+    stored_row(store, "Edit/logic", counting_cmd(cand, "body"))
+    rc, out = run_audit(store)
+    assert rc == 1, out
+    assert "candidate_body_scoping: whole_file 0 dead_strip 1" in out, out
+    assert any(line.startswith("DEAD_FRONT_MATTER_STRIP Bash/timeout")
+               for line in out.splitlines()), out
+
+
+def test_a_strip_that_is_read_is_not_reported_as_dead(tmp_path):
+    """The dead-strip rule's own falsifier: consume the copy and the finding is gone.
+
+    Without this node the predicate could be satisfied only by deleting the strip, which is
+    the wrong fix and would leave the whole-file read standing. The one line that changes is
+    `echo occ=` reading `"$b"` instead of `$f` — the same edit the nightly has to make."""
+    cand = candidate_2166(tmp_path)
+    skill = skill_fixture(tmp_path)
+    dead = (f"f=$(ls -t {cand}/candidate-edit-logic-*.md | head -1); "
+            f"b=$(awk '/^---/{{n++; next}} n>=2' $f); echo ex=$(printf '%s\\n' \"$b\" | "
+            f"grep -c 'Error:') {grep_owner(skill, 'old string', '-ci')}")
+    assert sv.candidate_body_defect(dead) is None, dead
+    rc, out = sv.run_evidence(dead)
+    assert rc == 0 and "ex=2" in out, out      # two example lines, zero front-matter matches
+
+
+def test_a_double_quoted_candidate_substitution_is_not_read_as_inert(tmp_path):
+    """The one spelling of the inline substitution that is NOT the same as the other two.
+
+    `'$(ls -t …/candidate-x-*.md | head -1)'` hands `grep` a file literally named that, which is
+    why the rule calls it inert and lets `audit`'s UNRUNNABLE list handle it; `"$( … )"` is
+    expanded by bash and opens the snapshot. A rule that treated every quoted word containing
+    `$( ` as inert would call the second shape clean — the clause-1 inline form, passing.
+    """
+    cand = candidate_2166(tmp_path)
+    glob = f"ls -t {cand}/candidate-edit-logic-*.md | head -1"
+    expanded = f"echo errlegs=$(grep -c 'Error' \"$({glob})\"); echo '{sv.INPUT_ROWS_FIELD}=1'"
+    assert sv.candidate_body_defect(expanded) is not None, (
+        "a double-quoted substitution expands, so the read is of the candidate file")
+    inert = f"echo errlegs=$(grep -c 'Error' '$({glob})'); echo '{sv.INPUT_ROWS_FIELD}=1'"
+    assert sv.candidate_body_defect(inert) is None, (
+        "a single-quoted substitution is never expanded, so `grep` opens a file literally named "
+        "that and finds none: UNRUNNABLE's class, decided by running it, not this rule's")

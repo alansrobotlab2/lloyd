@@ -689,6 +689,7 @@ def record_verdict(
     decided_at: str | None = None,
     *,
     require_input_rows: bool = True,
+    require_body_scope: bool = True,
 ) -> dict:
     """Append one decision. Never mutates an earlier line.
 
@@ -784,6 +785,37 @@ def record_verdict(
             "case-sensitive grep is named by `audit` and `check` the night its own re-read "
             "comes back absent while `-i` matches (#2103)"
         )
+    if require_body_scope and (leaking := candidate_body_defect(evidence_cmd)) is not None:
+        # The other half of #2103's lesson, on the other file of the pair. A stored falsifier's
+        # operand is a LIVE file that outlives its snapshot, and a candidate snapshot's front
+        # matter is written by the ledger rather than by the traffic: the mint re-injects the
+        # previous decision's own `verdict_reason` into every later dated snapshot for that key
+        # (`status_block` in `mine-trajectories.py`). A count over the whole file therefore
+        # counts the prose that justified the last verdict, and can only rise — #2166 measured
+        # whole=3 body=2 on `candidate-edit-logic-20261004.md`, the third match that night's own
+        # reason, at line 17. Refusing the shape here is the point rather than a courtesy: four
+        # keys were hand-repaired in the ledger tonight, which proves a run CAN write the scoped
+        # form, and a convention for doing it is re-made every night by whichever run notices.
+        if leaking[0] == "whole_file":
+            raise ValueError(
+                f"evidence_cmd counts a candidate file with a whole-file grep: `{leaking[1]}`. "
+                "A candidate snapshot's front matter is written by the ledger, not by the "
+                "traffic — the mint re-injects the previous decision's own `verdict_reason` into "
+                "it — so this count includes the prose that justified the last verdict and rises "
+                "every time the key is re-recorded over itself. Body-scope it: strip the front "
+                "matter once (`b=$(awk '/^---/{n++; next} n>=2' \"$f\")`) and count that "
+                "(`printf '%s\\n' \"$b\" | grep -ci '<pattern>'`), or keep the read inside a "
+                "front-matter field with `-m1` and an anchored pattern like `^sessions:`. A "
+                "count is taken over the record set, never over narrative prose.")
+        raise ValueError(
+            f"evidence_cmd defines a front-matter strip and never reads it: {leaking[1]}. Every "
+            "field it then emits is a front-matter field or an owner-skill grep, so the key ends "
+            "up with no candidate-body falsifier at all while its own first clause tells the "
+            "next reader its counts are body-scoped — `Bash/timeout` in tonight's ledger is that "
+            "key, and its verbatim run still prints only `owner_pattern3=… owner_timeout_words=… "
+            "owner_literal_phrase=…`, no `body_*` field. Either consume the stripped copy "
+            "(`body_<field>=$(printf '%s\\n' \"$b\" | grep -ci '<pattern>')`) or drop the strip "
+            "and stop claiming the scoping.")
     rc, observed = run_evidence(evidence_cmd)
     if not observed:
         raise ValueError(
@@ -1291,6 +1323,384 @@ def case_sensitive_skill_md_grep(evidence_cmd: str) -> str | None:
     return path.group(0)
 
 
+_CANDIDATE_PATH_RE = re.compile(r"candidate-[^\s'\"]*\.md")
+# A read aimed at the candidates *directory* is a read of a candidate file as surely as one
+# naming it: the ledger's `seq-*` keys reach their snapshot through `$C/$N`, a directory
+# variable and a filename variable, and a rule keyed on the word `candidate-…md` reads that
+# operand as pointing nowhere. It is the same prose leak arriving by a longer path.
+_CANDIDATE_DIR_RE = re.compile(r"skills/candidates(?![A-Za-z0-9_-])")
+# A pipeline whose first stage emits *pathnames* — `ls $C | grep -cE "^candidate-x-[0-9]{8}\.md$"`,
+# which is how four `seq-*` keys count their own dated snapshots — is a file count with a grep
+# instead of a `wc -l`. No file's contents pass through it, so no verdict_reason can inflate it,
+# and refusing it would refuse `dated_corpus_files=` itself, the shape `repair` writes into every
+# tombstone. `cat`, `printf`, `head`, `tail`, `sed`, `awk` and `tr` all move file contents and are
+# deliberately absent from this list.
+_PATH_STREAM_CMDS = frozenset({"ls", "find", "basename", "dirname", "realpath"})
+# The strip the ledger's repaired keys use: an `awk` program that counts `---` fences and
+# emits only what comes after the second one. All three tokens are required — `^---` alone
+# is any rule about a horizontal rule, and `n>=2` is what makes it a front-matter skip.
+_FM_STRIP_RE = re.compile(r"\bawk\b[^\n]*\^---[^\n]*n\s*>=\s*2")
+_ASSIGN_START_RE = re.compile(r"(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)=")
+
+
+def _skip_quoted(cmd: str, i: int) -> int:
+    """Index just past the quote opening at `i`, or the end of the string if unclosed."""
+    quote = cmd[i]
+    j = i + 1
+    while j < len(cmd):
+        if cmd[j] == "\\" and quote == '"':
+            j += 2
+            continue
+        if cmd[j] == quote:
+            return j + 1
+        j += 1
+    return len(cmd)
+
+
+def _shell_boundaries(cmd: str) -> list[tuple[int, str, int]]:
+    """The `(position, kind, paren-depth)` of every separator and closing paren in `cmd`.
+
+    Recorded at every depth rather than only at depth 0, because the reads this module
+    decides over live inside command substitutions: `body_x=$(printf '%s\\n' "$b" | grep -ci
+    lit)` is one assignment whose whole point is the pipe one level in, and a scanner that
+    saw only depth-0 separators could not tell that grep's stdin from its file operand.
+    A `$(` counts as an opening paren, and quotes are skipped whole, so neither a `;` inside
+    a quoted pattern nor a `|` inside `$(ls -t … | head -1)` is mistaken for a boundary.
+    """
+    out: list[tuple[int, str, int]] = []
+    depth, i, n = 0, 0, len(cmd)
+    while i < n:
+        ch = cmd[i]
+        if ch in "'\"":
+            i = _skip_quoted(cmd, i)
+            continue
+        if ch == "$" and cmd.startswith("$(", i):
+            depth += 1
+            i += 2
+            continue
+        if ch == "(":
+            depth += 1
+            i += 1
+            continue
+        if ch == ")":
+            out.append((i, ")", max(0, depth - 1)))
+            depth = max(0, depth - 1)
+            i += 1
+            continue
+        if ch == "|":
+            if cmd.startswith("||", i):
+                out.append((i, "||", depth))
+                i += 2
+            else:
+                out.append((i, "|", depth))
+                i += 1
+            continue
+        if cmd.startswith("&&", i):
+            out.append((i, "&&", depth))
+            i += 2
+            continue
+        if depth == 0 and ch in ";\n":
+            out.append((i, ";", 0))
+        i += 1
+    return out
+
+
+def _paren_depth(cmd: str, pos: int) -> int:
+    """The parenthesis depth at `pos` — the nesting level of the pipeline it sits in."""
+    depth, i, n = 0, 0, min(pos, len(cmd))
+    while i < n:
+        ch = cmd[i]
+        if ch in "'\"":
+            i = _skip_quoted(cmd, i)
+            continue
+        if ch == "$" and cmd.startswith("$(", i):
+            depth += 1
+            i += 2
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+        i += 1
+    return depth
+
+
+def _shell_tokens(text: str) -> list[tuple[str, int, int]]:
+    """`(word, start, end)` for each word of `text`, quotes stripped, `$`-substitutions whole."""
+    out: list[tuple[str, int, int]] = []
+    i, n = 0, len(text)
+    while i < n:
+        if text[i] in " \t\n":
+            i += 1
+            continue
+        start = i
+        while i < n and text[i] not in " \t\n":
+            ch = text[i]
+            if ch in "'\"":
+                i = _skip_quoted(text, i)
+                continue
+            if ch == "$" and text.startswith("$(", i):
+                depth = 0
+                while i < n:
+                    if text[i] in "'\"":
+                        i = _skip_quoted(text, i)
+                        continue
+                    if text[i] == "(":
+                        depth += 1
+                    elif text[i] == ")":
+                        depth -= 1
+                        if depth == 0:
+                            i += 1
+                            break
+                    i += 1
+                continue
+            i += 1
+        out.append((text[start:i], start, i))
+    return out
+
+
+def _shell_assignments(cmd: str) -> dict[str, tuple[int, int]]:
+    """Every `NAME=` assignment, mapped to the `(start, end)` of its value.
+
+    The value runs to the next depth-0 separator, so `f=$(ls -t …/candidate-*.md | head -1)`
+    is read as one binding despite the pipe inside its substitution — that shape is how every
+    candidate file in the ledger gets named, and a scanner that stopped at the inner pipe would
+    bind `f` to the word `$(ls`.
+    """
+    bounds = _shell_boundaries(cmd)
+    found: dict[str, tuple[int, int]] = {}
+    for m in _ASSIGN_START_RE.finditer(cmd):
+        start = m.end()
+        later = [pos for pos, kind, depth in bounds
+                 if pos > start and depth == 0 and kind in (";", "|", "||", "&&")]
+        found.setdefault(m.group(1), (start, later[0] if later else len(cmd)))
+    return found
+
+
+def _grep_reads(cmd: str, _depth: int = 0) -> list[tuple[str, bool, str, str, str]]:
+    """Every `grep` in `cmd` as `(invocation text, counts?, operand text, stdin source text)`.
+
+    Each invocation's own region runs from the word `grep` to the first separator at its own
+    nesting level or shallower — so the operands of a grep inside `$( … )` stop at that
+    substitution's closing paren and do not swallow the assignment that follows. A grep with
+    no operand tokens reads its pipeline's stdout, and for those the source stage is returned
+    as well: `printf '%s\\n' "$f" | grep -ci lit` believes it is scoping a read and is not,
+    which is the false repair this has to catch as surely as the whole-file one.
+    """
+    bounds = _shell_boundaries(cmd)
+    reads: list[tuple[str, bool, str, str, str]] = []
+    for m in _GREP_MENTION_RE.finditer(cmd):
+        start, depth = m.start(), _paren_depth(cmd, m.start())
+        stops = [pos for pos, _kind, bd in bounds if pos > start and bd <= depth]
+        # A `)` that takes the depth back below this grep's is the `$( … )` it lives in
+        # closing, and the invocation cannot reach past it. `_split_shell` records only
+        # `;`, `|`, `&&` and newline as boundaries, so without this the operands of
+        # `snap=$(grep -cE '^p$') err=$(grep -c lit $f)` run on through the paren and swallow
+        # the NEXT substitution — the first candidate read in the command then reports as
+        # reading the last one's file, and every read before it is invisible to the rule.
+        stops += [pos for pos in range(start, len(cmd))
+                  if cmd[pos] == ")" and _paren_depth(cmd, pos) <= depth]
+        end = min(stops) if stops else len(cmd)
+        region = cmd[start:end]
+        toks = _shell_tokens(region)
+        if not toks or toks[0][0] != "grep":
+            continue  # the word appears inside a pattern or an argument, not as a command
+        idx = 1
+        flags = []
+        while idx < len(toks) and toks[idx][0].startswith("-") and not toks[idx][0].startswith("$"):
+            flags.append(toks[idx][0])
+            idx += 1
+        if idx >= len(toks):
+            reads.append((region, False, "", "", ""))
+            continue
+        # The pattern is an argument, never a target, and it is what this rule reads NEXT:
+        # an anchored `^key:` pattern can only match a metadata line at column 0, which is the
+        # scoping clause 3 exempts, and telling it from `grep -c lit $f` needs the pattern
+        # itself rather than the invocation's text.
+        pattern = _unquote(toks[idx][0]) if idx < len(toks) else ""
+        idx += 1
+        counting = any(tok.startswith("-") and "c" in tok for tok in flags)
+        # Token offsets are relative to `region`, not to `cmd`: slicing `cmd` at one of them
+        # would start mid-path and hand back a fragment of the pattern's tail.
+        reading = region[toks[idx][1]:] if idx < len(toks) else ""
+        # The stage piped into this grep, if any. Judged whether or not the grep also names a
+        # file, because the ledger greps streams both ways: `ls $C | grep -cE '^x\.md$'` counts
+        # pathnames with a pattern that is not a file, and `grep -c lit $f | wc -l` would read
+        # the file whatever the pipe says.
+        source = ""
+        prior = [p for p, kind, bd in bounds if p < start and bd == depth and kind == "|"]
+        if prior:
+            pipe_at = prior[-1]
+            before = [p for p, _kind, bd in bounds if p < pipe_at and bd <= depth]
+            source = cmd[(max(before) + 1) if before else 0:pipe_at]
+            stage = _shell_tokens(source)
+            if stage and stage[0][0] in _PATH_STREAM_CMDS:
+                source = ""            # the stream carries pathnames, not any file's contents
+        reads.append((region, counting, reading, source, pattern))
+    if _depth < 4:
+        # `echo "x=$(grep -c lit $f)"` is one opaque quoted word to a region split, and bash
+        # runs the substitution anyway. Every `seq-*` row in tonight's ledger hides its
+        # candidate reads inside exactly that, so a reader that stops at the outer region finds
+        # a falsifier that greps nothing. A grep assembled into a variable and `eval`ed is
+        # unseen by this and by every other rail in the file; that mint has left all of them.
+        # `$( … )` anywhere in the text, including inside a double-quoted word — which is
+        # where every candidate read in tonight's `seq-*` rows sits: `echo "err=$(grep -c lit
+        # $C/$N)"` is one opaque token to a word splitter, and a reader that stops at the
+        # token finds a falsifier that greps nothing at all.
+        covered = [(cmd.index(r), cmd.index(r) + len(r)) for r, *_x in reads]
+        for open_at in (i for i, ch in enumerate(cmd) if cmd.startswith("$(", i)):
+            if any(lo <= open_at < hi for lo, hi in covered):
+                continue      # this level already reported the greps inside it
+            stop = _matching_paren(cmd, open_at + 1)
+            if stop > open_at:
+                reads += _grep_reads(cmd[open_at + 2:stop], _depth + 1)
+    return reads
+
+
+def _matching_paren(cmd: str, open_at: int) -> int:
+    """Index of the `)` closing the `(` at `open_at`, or -1 when it is never closed.
+
+    Nesting-aware and quote-aware, so `$(echo "x=$(date)")` closes at the OUTER paren and the
+    inner substitution is left to the recursive call that opens it in turn.
+    """
+    depth = 0
+    i = open_at
+    while i < len(cmd):
+        ch = cmd[i]
+        if ch in "'\"":
+            i = _skip_quoted(cmd, i)
+            continue
+        if ch == "$" and cmd[i + 1:i + 2] == "(":
+            depth += 1
+            i += 2
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+
+def _names_a_variable(text: str, names: set[str]) -> bool:
+    """True when `$NAME` or `${NAME}` for some NAME in `names` appears in `text`."""
+    return any(re.search(rf"\$\{{?{re.escape(name)}\}}?(?![A-Za-z0-9_])", text)
+               for name in names)
+
+
+#: An anchored `^<key>:` pattern: a read for one of a file's metadata fields. It can only
+#: match at column 0, and `mine-trajectories.status_block()` writes the verdict's prose onto
+#: the `verdict_reason:` line, so no anchored read of a DIFFERENT key can reach that prose.
+#: The one shape that would defeat it is a folded multi-line YAML value whose continuation
+#: lines begin at column 0 with another key's name — `status_block` writes single-line values
+#: (`f"verdict_reason: {reason}"`), and an author who changes that must revisit this line.
+_FRONT_MATTER_KEY_RE = re.compile(r"\^[A-Za-z_][A-Za-z0-9_]*:")
+
+
+def _unquote(token: str) -> str:
+    """A shell word with its own surrounding quotes removed, if it had a matched pair.
+
+    `_shell_tokens` keeps the quoting bytes, because the operand text has to stay verbatim
+    for the tilde-spelling and path-shape tests to read it as the ledger wrote it. A PATTERN
+    is the opposite case: the question asked of it is whether it begins with `^`, and
+    `'^sessions:'` begins with a quote character.
+    """
+    if len(token) >= 2 and token[0] in "'\"" and token[-1] == token[0]:
+        return token[1:-1]
+    return token
+
+
+def _targets_front_matter(pattern: str) -> bool:
+    """True when the grep is asking for a metadata FIELD rather than counting prose.
+
+    Clause 3's exemption, decided on the pattern alone: `grep -m1 '^occurrences:' $f` and
+    `grep -m1 '^sessions:' $f` name the front matter deliberately, and `cmd_seed` and
+    `cmd_repair` both mint `grep -m1 '^status:'` as their own template. A rule that refused
+    those would refuse the ledger's two most common reads and the module's own mint paths.
+    The anchor is doing the work, not `-m1`: an unanchored `grep -c 'sessions' $f` counts the
+    word wherever the examples mention it, which is exactly the leak.
+    """
+    return bool(_FRONT_MATTER_KEY_RE.match(pattern))
+
+
+def _reads_a_candidate(text: str, cand_vars: set[str]) -> bool:
+    """True when `text` names something that actually resolves to a candidate file.
+
+    A SINGLE-quoted substitution is skipped as inert, for the reason `_tilde_spelled_operands`
+    already gives: bash does not expand `'$(ls -t …/candidate-x-*.md | head -1)'`, it hands
+    `grep` a file literally named that, so such a read never opens a candidate file at all and
+    the whole-file rule has nothing to say about it. `audit` reports those under UNRUNNABLE and
+    the #2103 re-anchor rewrites them; refusing them here would be a second verdict on a shape
+    the mint rail cannot fix, and the nightly minter emits it. A DOUBLE-quoted one is the
+    opposite case and is not skipped: bash expands `"$( … )"`, so that read reaches the file.
+    """
+    for word, _start, _end in _shell_tokens(text):
+        if word[:1] == "'" and "$(" in word:
+            continue
+        if (_CANDIDATE_PATH_RE.search(word) or _CANDIDATE_DIR_RE.search(word)
+                or _names_a_variable(word, cand_vars)):
+            return True
+    return False
+
+
+def candidate_body_defect(evidence_cmd: str) -> tuple[str, str] | None:
+    """`(kind, detail)` for a falsifier whose candidate-file counts are not body-scoped, or None.
+
+    A candidate snapshot's front matter is written by the ledger, not by the traffic: `status_block`
+    in `mine-trajectories.py` re-injects the decision's own `verdict_reason` (and its
+    `evidence_cmd`) into the front matter of every later dated snapshot for that key, so a `grep -c`
+    over the whole file counts the decision's prose among the examples that justified it. #2166
+    measured it on `candidate-edit-logic-20261004.md`: `whole=3 body=2` for the worktree-path
+    pattern, the surplus match the stored reason at line 17. It fails in only one direction — the
+    prose can add matches and never remove one — so a key whose falsifier greps the whole file
+    looks more alive every time a verdict is re-recorded over it, which is the 2026-09-21 class
+    rule "bind a count to the record set, never to narrative prose" arriving on the write side.
+
+    `whole_file` is that leak: a `grep` carrying `-c` whose read target is a candidate file, either
+    a variable bound to one (`f=$(ls -t …/candidate-*.md | head -1)`) or a literal candidate path,
+    without a front-matter-stripped copy in between. Only a *count* is refused: a read that
+    deliberately targets front matter — `grep -m1 -i '^occurrences:' $f`, `grep -m1 '^sessions:'` —
+    asks that file a front-matter question on purpose, prints no count, and stays the ledger's
+    normal way of reading `occurrences` and `sessions`. The same rule catches the false repair
+    `printf '%s\\n' "$f" | grep -ci lit`, where the pipe is real but its source is the unstripped
+    file: what is decided is the target of the read, not the presence of an awk near the grep.
+
+    `dead_strip` is its mirror and the reason a per-invocation rule is not enough: the command
+    defines the strip (`b=$(awk '/^---/{n++; next} n>=2' $f)`) and then never reads `$b`, so every
+    field it emits is a front-matter field or an owner-skill grep. `Bash/timeout` in tonight's
+    ledger is exactly that — its verbatim run emits `owner_pattern3`, `owner_timeout_words`,
+    `owner_literal_phrase` and nothing else — which leaves the key with no candidate-body falsifier
+    while its first clause tells the next reader that its counts are body-scoped. Looking repaired
+    is the failure, not a loud one.
+
+    Returns the first defect found, whole-file first: a command with both problems is refusing
+    evidence before it is wasting one.
+    """
+    assigns = _shell_assignments(evidence_cmd)
+    cand_vars = {name for name, (a, b) in assigns.items()
+                 if _CANDIDATE_PATH_RE.search(evidence_cmd[a:b])
+                 or _CANDIDATE_DIR_RE.search(evidence_cmd[a:b])}
+    body_vars = {name for name, (a, b) in assigns.items()
+                 if _FM_STRIP_RE.search(evidence_cmd[a:b])}
+    for region, counting, reading, _source, pattern in _grep_reads(evidence_cmd):
+        if not counting or not _reads_a_candidate(reading, cand_vars):
+            continue
+        if _targets_front_matter(pattern):
+            continue
+        if _names_a_variable(reading, body_vars):
+            continue
+        return "whole_file", region.strip()
+    for name, (a, b) in assigns.items():
+        if name not in body_vars:
+            continue
+        rest = evidence_cmd[:a] + evidence_cmd[b:]
+        if not _names_a_variable(rest, {name}):
+            return "dead_strip", f"{name}=$(awk '/^---/…' …) defined and never read"
+    return None
+
+
 def empty_valued_fields(observed: str) -> list[str]:
     """The `name=` fields in one recorded evidence line that carry no value, in order.
 
@@ -1748,7 +2158,7 @@ def repair_verdicts(store: str | Path | None = None, *, dry_run: bool = False,
                                reason=row["reason"], evidence_cmd=new_cmd,
                                occurrences=None, decided_by=REPAIR_DECIDED_BY,
                                source_candidate=row.get("source_candidate") or "",
-                               require_input_rows=False)
+                               require_input_rows=False, require_body_scope=False)
                 out["repaired"].append(key)
             except ValueError as exc:
                 out["refused"].append(f"{key} :: {exc}")
@@ -1791,7 +2201,7 @@ def repair_verdicts(store: str | Path | None = None, *, dry_run: bool = False,
                        evidence_cmd=TOMBSTONE_TEMPLATE.format(input=pinned),
                        occurrences=None, decided_by=DISPOSE_DECIDED_BY,
                        source_candidate=row.get("source_candidate") or "",
-                       require_input_rows=False)
+                       require_input_rows=False, require_body_scope=False)
     # Carried in the returned tally, not only on `record_verdict`'s stderr, because this
     # pass is the writer that produced #1717: 79 appends, one tree, no line anywhere that a
     # nightly could have grepped. `single_tree_rows` is the count of rows this pass wrote
@@ -2095,6 +2505,11 @@ def cmd_audit(args: argparse.Namespace) -> int:
     """
     table = load_verdicts(store_path(args.store))      # latest-wins, the table check reads
     dead, empty_input, stranded, undeclared = [], [], [], 0
+    # #2166's two shapes, decided on the stored text alone: neither needs the command to run,
+    # because the defect is what the command reads rather than what it answers. A key whose
+    # falsifier counts a candidate file whole has been inflating all along and reported rc 0
+    # doing it, so no execution-based tally in this function can ever reach it.
+    whole, dead_strip = [], []
     for key in sorted(table):
         # The three-value form, so one audit still runs each stored command once: the
         # denominator comes off the same execution that decided runnability, never from a
@@ -2113,10 +2528,21 @@ def cmd_audit(args: argparse.Namespace) -> int:
         elif state == STRANDED_CASE:
             stranded.append(key)
             print(f"STRANDED_CASE {key} :: {detail}")
+        # Named from the row text, before the `if state` chain and independent of it: a key can
+        # be unrunnable AND leak prose, and the two facts need different fixes.
+        leak = candidate_body_defect(table[key].get("evidence_cmd") or "")
+        if leak is not None:
+            (whole if leak[0] == "whole_file" else dead_strip).append(key)
+            print(f"{'WHOLE_CANDIDATE_COUNT' if leak[0] == 'whole_file' else 'DEAD_FRONT_MATTER_STRIP'}"
+                  f" {key} :: {leak[1]}")
+    # ABOVE `stranded:`, not below it: #2103's test pins `splitlines()[-3]` to that line, and
+    # the rule that lands in #2166's own test is that a new tally arrives above the published
+    # figure without moving any of the ones below it.
+    print(f"candidate_body_scoping: whole_file {len(whole)} dead_strip {len(dead_strip)}")
     print(f"stranded: case_sensitive_grep {len(stranded)}")
     print(f"denominators: empty_input {len(empty_input)} undeclared {undeclared}")
     print(f"keys: {len(table)} unrunnable: {len(dead)}")
-    return 1 if (dead or empty_input or stranded) else 0
+    return 1 if (dead or empty_input or stranded or whole or dead_strip) else 0
 
 
 def _read_reanchors(path: str | None) -> dict[str, str]:
@@ -2354,6 +2780,7 @@ def cmd_seed(args: argparse.Namespace) -> int:
             decided_by="seed-from-candidates",
             source_candidate=file.name,
             require_input_rows=False,
+            require_body_scope=False,
         )
         seeded += 1
         print(f"  seed: {key} -> {status}")
