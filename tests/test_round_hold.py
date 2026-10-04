@@ -54,8 +54,16 @@ def pool(monkeypatch):
     monkeypatch.setattr(P, "primary_hold_config", lambda: {"enabled": False})
     # The exempt list is pinned, not read from config.yaml: on 2026-09-15
     # `autotriage` joined it there and two of these tests went red on main.
+    # No `exempt_bound` key, which since #2152 means the code default is in
+    # force — so the KV reading is pinned too, one line below.
     monkeypatch.setattr(P, "round_hold_config",
                         lambda: {"enabled": True, "exempt": ["scheduled-task"]})
+    # A test process samples no engine, so `_gate_reading` would answer from
+    # whatever the surrounding suite left in `engine_pressure`'s deque. Pinning
+    # it to None makes every assertion below mean what it says: with no reading
+    # the bound fails open, and a test that wants pressure calls `_kv`.
+    monkeypatch.setattr(P.WorkerPool, "_gate_reading",
+                        staticmethod(lambda window: None))
     return p
 
 
@@ -84,6 +92,12 @@ def test_the_round_never_holds_itself(pool):
 def test_scheduled_task_is_exempt(pool):
     """Short, time-sensitive, and a user-visible schedule slipping by an hour
     is its own failure.
+
+    The exemption is unbounded only while the engine gives no reading: #2152
+    armed `DEFAULT_ROUND_HOLD_EXEMPT_BOUND`, so above a 0.60 KV median the
+    source is bound-held instead — see
+    `test_no_key_arms_the_default_bound_above_the_reading`. The fixture pins
+    `_gate_reading` to None, which is the fail-open case pinned here.
     """
     _run_round(pool)
     assert "scheduled-task" not in pool._round_hold_held(REGISTRY)
@@ -159,9 +173,17 @@ async def test_claim_holds_is_the_union_of_all_three_gates(pool, monkeypatch):
     # ...and the round hold contributes the short ones the KV gate ignores.
     assert "session-distill" in held
     assert "youtube-digest" in held
-    # `scheduled-task` is exempt from the round hold, not long-lived, and not a
-    # source the primary hold names — which is the point of exempting it.
-    assert "scheduled-task" not in held
+    # `scheduled-task` IS held here, and the round hold's default bound is what
+    # holds it (#2152): the fixture's `round_hold` config has no `exempt_bound`
+    # key, the reading is forced to 0.99, and 0.99 > 0.60. This is the seam the
+    # default has to reach — `_claim_holds` is the single call site that unions
+    # the three gates into the claim query's `NOT IN`, so a bound that only
+    # `round_hold_status` could see would change nothing.
+    assert "scheduled-task" in held
+    # And it is the exemption this assertion used to pin, now the bound's lower
+    # half: below 0.60 the source claims beside the round as before.
+    _kv(monkeypatch, 0.30)
+    assert "scheduled-task" not in set(await pool._claim_holds(REGISTRY))
     # `autocode` IS held here, by the KV gate as well as by reachability, and
     # that is correct and pre-existing: the gates decide what may be CLAIMED, and
     # starting a second round under KV pressure is exactly what should not
@@ -212,12 +234,20 @@ def _kv(monkeypatch, value):
                         staticmethod(lambda window: value))
 
 
-def test_no_bound_key_never_holds_an_exempt_source(pool, monkeypatch):
-    """Clause 2: today's config has no `exempt_bound`, and then nothing in the
-    exempt list is ever held — however many exempt jobs are in flight and
-    however full the engine reads."""
+@pytest.mark.parametrize("bound", [{}, {"sources": []}])
+def test_an_empty_bound_in_config_never_holds_an_exempt_source(pool, monkeypatch,
+                                                               bound):
+    """Clause 2: disarming the bound is a config edit, never a code change.
+
+    This is the assertion `test_no_bound_key_never_holds_an_exempt_source` made
+    of an *absent* key until #2152 armed a default; absence now means the
+    default, so "off" has to be said by the key being present and empty. The
+    engine reads 0.99 and two exempt jobs are already in flight beside the
+    round, so only a disarmed bound can keep these sources claimable.
+    """
     monkeypatch.setattr(P, "round_hold_config",
-                        lambda: {"enabled": True, "exempt": EXEMPT})
+                        lambda: {"enabled": True, "exempt": EXEMPT,
+                                 "exempt_bound": bound})
     _kv(monkeypatch, 0.99)
     _run_round(pool)
     pool._in_flight[2] = {"source": "scheduled-task", "kind": "run"}
@@ -225,8 +255,12 @@ def test_no_bound_key_never_holds_an_exempt_source(pool, monkeypatch):
     held = pool._round_hold_held(REGISTRY)
     assert not set(held) & set(EXEMPT)
     st = pool.round_hold_status()
-    assert st["exempt_bound"] is None
     assert st["exempt_refused"] == {}
+    assert st["bound_held"] == []
+    if bound == {}:
+        assert st["exempt_bound"] is None      # no bound named at all
+    else:
+        assert st["exempt_bound"] == {"sources": []}   # a bound covering nobody
 
 
 def test_inflight_bound_holds_a_covered_exempt_source(pool, monkeypatch):
@@ -308,6 +342,162 @@ def test_the_bound_is_idle_without_a_round(pool, monkeypatch):
     _kv(monkeypatch, 0.9)
     assert pool._round_hold_held(REGISTRY) == []
     assert pool.round_hold_status()["exempt_refused"] == {}
+
+
+# ---------------------------------------------------------------------------
+# #2152: the bound is armed by default — the key that armed it was in a file the
+# loop that shipped it is not allowed to write, so it shipped inert
+# ---------------------------------------------------------------------------
+
+# `workers.round_hold.exempt` as config.yaml carries it on 2026-10-04. The
+# default reaches only the first: the other three joined on 09-15, 09-16 and
+# 09-18 for reasons of their own, and #1101 named only `scheduled-task`.
+PRODUCTION_EXEMPT = ["scheduled-task", "autotriage", "autoresearch",
+                     "automod-regression"]
+
+# The same four as claimable sources, so "the default does not cover this one"
+# is a thing that could have failed rather than a name absent from the registry.
+FULL_EXEMPT_REGISTRY = dict(REGISTRY, autoresearch=_Src(),
+                            **{"automod-regression": _Src()})
+
+
+def _no_bound_key(monkeypatch, exempt=("scheduled-task",)):
+    """Config as config.yaml has it: a `round_hold` block with no
+    `exempt_bound` key. That absence is the state #2152 is about."""
+    monkeypatch.setattr(P, "round_hold_config",
+                        lambda: {"enabled": True, "exempt": list(exempt)})
+
+
+def test_no_key_arms_the_default_bound_above_the_reading(pool, monkeypatch):
+    """Clause 1: with no key and a round in flight, a KV median over 0.60 holds
+    `scheduled-task`; at or under the reading it claims as before.
+
+    Before #2152 this returned nothing held at 0.61 — the inert state the item
+    is about — so the first assertion is the one that proves the default is
+    live, and the 0.60 one proves the bound reads `above`, not `at least`.
+    """
+    _no_bound_key(monkeypatch)
+    _run_round(pool)
+    _kv(monkeypatch, 0.61)
+    assert "scheduled-task" in pool._round_hold_held(REGISTRY)
+    _kv(monkeypatch, 0.60)
+    assert "scheduled-task" not in pool._round_hold_held(REGISTRY)
+    _kv(monkeypatch, 0.61)
+    assert "scheduled-task" in pool._round_hold_held(REGISTRY)
+    _kv(monkeypatch, 0.20)
+    assert "scheduled-task" not in pool._round_hold_held(REGISTRY)
+
+
+def test_the_default_bound_values_are_the_engine_s_own_thresholds():
+    """The default's numbers, pinned so that changing one is a decision someone
+    made: 0.60 is `DEFAULT_KV_GATE_MAX` and `scripts/vllm_prefix_miss_window.py`'s
+    `--gate` default — the reading that report already calls a round-losing
+    engine — and the covered source is the single one #1101 named.
+    """
+    assert P.DEFAULT_ROUND_HOLD_EXEMPT_BOUND == {
+        "sources": ("scheduled-task",), "kv_median_above": 0.60}
+    assert P.DEFAULT_KV_GATE_MAX == 0.60
+
+
+def test_the_default_covers_only_scheduled_task(pool, monkeypatch):
+    """Clause 4: on config.yaml's four-source exempt list, a full engine takes
+    back `scheduled-task` and nobody else.
+
+    Binding all four would be a scope change no clause asked for, and it would
+    starve `autoresearch` and `automod-regression`, exempted because a round is
+    in flight nearly 100% of the time and a held source then never runs.
+    """
+    _no_bound_key(monkeypatch, PRODUCTION_EXEMPT)
+    _run_round(pool)
+    _kv(monkeypatch, 0.99)
+    held = pool._round_hold_held(FULL_EXEMPT_REGISTRY)
+    assert "scheduled-task" in held
+    for name in ("autotriage", "autoresearch", "automod-regression"):
+        assert name not in held, name
+    assert pool.round_hold_status()["bound_held"] == ["scheduled-task"]
+
+
+def test_a_missing_reading_holds_nothing_under_the_default(pool, monkeypatch):
+    """Clause 4's fail-open half: no sample is not pressure.
+
+    The rule the KV gate already runs on — a pressure signal that failed closed
+    turns a stopped sampler into a stopped pool — now applies to a bound that
+    nobody switched on, so it has to be read from status rather than assumed.
+    """
+    _no_bound_key(monkeypatch)
+    _run_round(pool)
+    _kv(monkeypatch, None)
+    held = pool._round_hold_held(REGISTRY)
+    assert "scheduled-task" not in held
+    assert "arch-review" in held          # the membership hold is untouched
+    st = pool.round_hold_status()
+    assert st["bound_held"] == []
+    assert st["exempt_refused"] == {}
+    assert st["exempt_bound"] == {"sources": ("scheduled-task",),
+                                  "kv_median_above": 0.60}
+
+
+def test_an_explicit_bound_replaces_the_default(pool, monkeypatch):
+    """Clause 3: a config value wins outright, in behaviour and in status.
+
+    This bound covers `autotriage` only and at 0.90, so the default's numbers
+    show in the difference: `scheduled-task` stays claimable at 0.95, where the
+    default would have held it at 0.60, and `autotriage` is held, which the
+    default never does.
+    """
+    _bound(monkeypatch, sources=["autotriage"], kv_median_above=0.9)
+    _run_round(pool)
+    _kv(monkeypatch, 0.95)
+    held = pool._round_hold_held(REGISTRY)
+    assert "scheduled-task" not in held
+    assert "autotriage" in held
+    st = pool.round_hold_status()
+    assert st["exempt_bound"] == {"sources": ["autotriage"],
+                                  "kv_median_above": 0.9}
+    assert st["bound_held"] == ["autotriage"]
+
+
+def test_the_default_bound_engages_only_for_a_round_or_landing(pool, monkeypatch):
+    """Clause 5: the bound rides the hold's own engagement, which is what keeps
+    it idle most of the day.
+
+    Round leg: nothing in flight and no landing ⇒ nothing held and nothing
+    counted, however full the engine reads. Landing leg: the hold outlives the
+    last round's turn to cover the landing it was waiting behind, and the bound
+    applies across that window too.
+    """
+    _no_bound_key(monkeypatch)
+    _kv(monkeypatch, 0.99)
+    monkeypatch.setattr(P.WorkerPool, "_landing_in_flight", lambda self: False)
+    assert pool._round_hold_held(REGISTRY) == []
+    assert pool.round_hold_status()["exempt_refused"] == {}
+
+    monkeypatch.setattr(P.WorkerPool, "_landing_in_flight", lambda self: True)
+    assert "scheduled-task" in pool._round_hold_held(REGISTRY)
+    assert pool.round_hold_status()["bound_held"] == ["scheduled-task"]
+
+
+def test_the_default_bound_counts_one_refusal_per_turn(pool, monkeypatch):
+    """Clause 5's flip/clear half under the default: five polls of one held
+    turn are one refusal, and held → claimable → held is two.
+
+    `exempt_refused` is the effect counter the item reads after landing, so it
+    has to count under the default exactly as it did under a config bound.
+    """
+    _no_bound_key(monkeypatch)
+    _run_round(pool)
+    _kv(monkeypatch, 0.95)
+    for _ in range(5):
+        pool._round_hold_held(REGISTRY)
+    st = pool.round_hold_status()
+    assert st["exempt_refused"] == {"scheduled-task": 1}
+    assert st["bound_held"] == ["scheduled-task"]
+
+    _kv(monkeypatch, 0.10)
+    pool._round_hold_held(REGISTRY)
+    _kv(monkeypatch, 0.95)
+    pool._round_hold_held(REGISTRY)
+    assert pool.round_hold_status()["exempt_refused"] == {"scheduled-task": 2}
 
 
 # ---------------------------------------------------------------------------

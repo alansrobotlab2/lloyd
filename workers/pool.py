@@ -99,6 +99,32 @@ ROUND_SOURCE = "autocode"
 _LANDING_PROBE_SECONDS = 5.0
 DEFAULT_ROUND_HOLD_EXEMPT: tuple[str, ...] = ("scheduled-task",)
 
+# The bound on that exemption, armed by default (#2152).
+#
+# #1101 shipped the mechanism in 52417d16 but read its value only from
+# `workers.round_hold.exempt_bound`, and no such key was ever added —
+# config.yaml is a path the loop may never write, and the owed entry left the
+# number to a human who has not ruled. Since 52417d16 shipped, on 2026-09-24,
+# every round has therefore run with the exemption as a bare membership test —
+# the exact state #1101 was written about: exempt co-tenants measured at 32% of
+# a round's cold re-prefill, because a round re-submits its whole
+# 100-200k-token context every iteration and anything else claiming a slot
+# evicts it.
+#
+# 0.60 is not a new number: `DEFAULT_KV_GATE_MAX` above is 0.60, and
+# `scripts/vllm_prefix_miss_window.py`'s own `--gate` defaults to 0.60. The
+# bound covers only `scheduled-task` — the single source #1101 named — so
+# `autotriage`, `autoresearch` and `automod-regression`, exempted later and for
+# their own reasons (config.yaml's 09-15/09-16/09-18 comments), stay unbound.
+#
+# A person disarms it with no code change: `exempt_bound: {}` or
+# `exempt_bound: {sources: []}` under `workers.round_hold` restores the bare
+# membership test, and any non-empty bound there replaces this one outright.
+DEFAULT_ROUND_HOLD_EXEMPT_BOUND: dict[str, Any] = {
+    "sources": ("scheduled-task",),
+    "kv_median_above": 0.60,
+}
+
 
 def round_hold_config() -> dict[str, Any]:
     try:
@@ -106,6 +132,28 @@ def round_hold_config() -> dict[str, Any]:
         return dict((CONFIG.get("workers") or {}).get("round_hold") or {})
     except Exception:
         return {}
+
+
+def round_hold_exempt_bound(cfg: dict[str, Any]) -> dict[str, Any] | None:
+    """The `exempt_bound` in force: config's when it names one, else the default.
+
+    Three readings, and the empty one is the disarming one:
+
+    - no `exempt_bound` key at all → `DEFAULT_ROUND_HOLD_EXEMPT_BOUND`. Absence
+      used to mean "off", and that is what made #1101's bound inert; it cannot
+      mean that any more.
+    - `exempt_bound: {}`, or any non-dict/falsey value → None. The key is there
+      and names no bound: an operator disarmed it, and that has to survive the
+      default existing.
+    - a non-empty dict → that dict, used as written. `{sources: []}` is legal
+      and covers nobody, which is the same disarmed end by another route.
+    """
+    if "exempt_bound" not in cfg:
+        return dict(DEFAULT_ROUND_HOLD_EXEMPT_BOUND)
+    bound = cfg.get("exempt_bound")
+    if isinstance(bound, dict) and bound:
+        return bound
+    return None
 
 
 # Primary reachability hold — see `WorkerPool._primary_hold_held`.
@@ -773,7 +821,11 @@ class WorkerPool:
         return {
             "enabled": bool(cfg.get("enabled", True)),
             "exempt": list(cfg.get("exempt", DEFAULT_ROUND_HOLD_EXEMPT)),
-            "exempt_bound": cfg.get("exempt_bound") or None,
+            # The bound in force, not the key: with no key in config.yaml this
+            # now reports #2152's default rather than `None`, which is what
+            # makes the armed-by-default state readable from
+            # `/api/workers/status` without editing the file that arms it.
+            "exempt_bound": round_hold_exempt_bound(cfg),
             **self._round_hold,
             "held_sources": list(self._round_hold["held_sources"]),
             "exempt_refused": dict(self._round_hold.get("exempt_refused") or {}),
@@ -832,7 +884,9 @@ class WorkerPool:
         `autocode._loop_is_free` already guarantees at most one round.
 
         `scheduled-task` is exempt by default: those are time-sensitive, short,
-        and a user-visible schedule slipping by an hour is its own failure.
+        and a user-visible schedule slipping by an hour is its own failure. The
+        exemption is bounded, not absolute — see `_exempt_bound_held` — so above
+        a 0.60 KV median the round still gets the slot first (#2152).
         """
         cfg = round_hold_config()
         if not bool(cfg.get("enabled", True)):
@@ -865,7 +919,7 @@ class WorkerPool:
 
     def _exempt_bound_held(self, cfg: dict[str, Any], exempt: set[str],
                            registry: dict[str, Any]) -> list[str]:
-        """Exempt sources the optional `exempt_bound` takes back while a round runs.
+        """Exempt sources the `exempt_bound` takes back while a round runs.
 
         The exemption is a set-membership test, so an exempt source claims
         beside a round however long it runs or however full the engine is
@@ -879,27 +933,32 @@ class WorkerPool:
           (`_gate_reading`, the median over its window) is above F. A missing
           reading does not trip it: fail open, like the KV gate.
 
-        Either condition holds the covered sources (`sources`, default every
-        exempt source). Admission only — nothing already running is touched.
-        **No key, no bound**: without `exempt_bound` this returns [] and the
-        hold is exactly the membership test it was. Its value is a human's
-        call (config.yaml is not the loop's to edit).
+        Either condition holds the covered sources: every exempt source when
+        `sources` is absent, exactly the named ones when it is a list, and
+        nobody when it is `[]`. Admission only — nothing already running is
+        touched. **The bound is armed by default** (#2152): with no
+        `exempt_bound` key the value in force is
+        `DEFAULT_ROUND_HOLD_EXEMPT_BOUND`, and `round_hold_exempt_bound` is the
+        single place that decides. `{}` or `{sources: []}` in config is how a
+        person disarms it without touching code.
         """
         hold = self._round_hold
-        bound = cfg.get("exempt_bound")
+        bound = round_hold_exempt_bound(cfg)
         tripped: list[str] = []
-        if isinstance(bound, dict) and bound:
-            covered = set(bound.get("sources") or exempt) & exempt
+        if bound:
+            sources = bound.get("sources")
+            covered = (set(exempt) if sources is None
+                       else set(sources) & exempt)
             covered.discard(ROUND_SOURCE)
             over = False
             cap = bound.get("max_exempt_inflight")
-            if cap is not None:
+            if covered and cap is not None:
                 n = sum(1 for v in self._in_flight.values()
                         if (s := str(v.get("source") or "")) in exempt
                         and s != ROUND_SOURCE)
                 over = n >= int(cap)
             limit = bound.get("kv_median_above")
-            if not over and limit is not None:
+            if covered and not over and limit is not None:
                 window = float(kv_gate_config().get(
                     "window_seconds", DEFAULT_KV_GATE_WINDOW_S))
                 kv = self._gate_reading(window)

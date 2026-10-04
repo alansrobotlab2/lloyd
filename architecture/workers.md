@@ -118,7 +118,11 @@ reason, and a held item keeps its place and its attempt.
 
 The KV gate is one of **three** holds applied there. **`round_hold`**
 (`workers.round_hold`, #1101's `exempt_bound`) keeps everything off its
-exempt list unclaimed while an automod round is in flight;
+exempt list unclaimed while an automod round is in flight, and since #2152 it
+takes a covered exempt source back while the bound reads pressure: with no
+`workers.round_hold.exempt_bound` key in config the value in force is
+`workers.pool.DEFAULT_ROUND_HOLD_EXEMPT_BOUND` — `scheduled-task` above a 0.60
+KV median — and `exempt_bound: {}` disarms it.
 `architecture/automod.md` owns its semantics. **`primary_hold`** probes
 whether the primary engine is answering *at all* and holds the sources it
 names (default `autocode`) while it is not — the backend coming back before
