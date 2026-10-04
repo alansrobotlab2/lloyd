@@ -32,8 +32,9 @@ failure:
      block every round, the same delta principle as pyflakes and tsc in the
      code gate.
      A rewritten `skills/<slug>/SKILL.md` is also scored for activation
-     against the labelled corpus (#711) — recorded on every landing, refused
-     only while `SKILL_ACTIVATION_ENFORCE` is on, which it ships off.
+     against the labelled corpus (#711) — recorded on every landing, and a
+     refusal on the skills that corpus covers since #2148 turned
+     `SKILL_ACTIVATION_ENFORCE` on.
   4. **A failure reverts the round's paths** — tracked ones back to HEAD, new
      ones deleted. The vault is live, so "nothing lands" has to mean "nothing
      stays".
@@ -334,22 +335,32 @@ def skill_timezone_errors(paths: list[str]) -> list[str]:
     return errs
 
 
-# Log-only until ~two weeks of real consolidation runs have shown what it would
-# have refused (#711's human clause). Flipping it is a human's change.
-SKILL_ACTIVATION_ENFORCE = False
+# Enforcing since #2148 (ruled 2026-10-04). What #711's human clause asked for
+# before a flip — real consolidation runs showing what this would have refused —
+# is the ledger's own `skill_gate` block: 137 rows from 2026-09-25T01:22:44Z to
+# 2026-10-03T23:26:57Z, 0 of them would-refusals, committed as witness bytes at
+# vault bb3ed6f0. Nine days of landings, nothing it would have blocked.
+# Enforcement still reaches only what the corpus can measure — the five slugs
+# carrying a `recall_floor` in `eval/skill_activation_cases.yaml`. An uncovered
+# skill, an unchanged body, an improved body and a gate that cannot run each
+# still land. A refusal names every offending skill and reverts the whole batch:
+# #2148 rules that house behaviour, not a stall.
+SKILL_ACTIVATION_ENFORCE = True
 
 
 def skill_activation_findings(paths: list[str]) -> list[dict]:
     """#711: one row per touched `skills/<slug>/SKILL.md` — does the rewrite
     trigger falsely more often, or push recall under the skill's floor?
 
-    The third per-skill check on the landing path after the two above, and
-    the only one that is advisory: its rule (`scripts/skill_activation.py`)
-    compares the text on disk against the vault's HEAD through the production
-    matcher over the labelled corpus, and a skill without an entry in
-    `eval/skill_activation_cases.yaml` has nothing to compare, so it is never
-    blockable. `land()` records every row; `validate()` refuses on one only
-    while `SKILL_ACTIVATION_ENFORCE` is on. Never raises.
+    The third per-skill check on the landing path after the two above. Its rule
+    (`scripts/skill_activation.py`) compares the text on disk against the vault's
+    HEAD through the production matcher over the labelled corpus, and a skill
+    without an entry in `eval/skill_activation_cases.yaml` has nothing to
+    compare, so it is never blockable however the flag is set — enforcement is
+    bounded by the corpus, not by a list here. `validate()` refuses on a
+    would-refuse row since #2148; `land()` records every row on the passing row
+    and on the refusal row alike, so the rail is legible from the ledger either
+    way. Never raises.
     """
     slugs = sorted({p.split("/")[1] for p in paths
                     if p.startswith("skills/") and p.endswith("/SKILL.md")
@@ -752,15 +763,34 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
 
     errors, buckets = validate(norm)
     if errors:
+        # The rail that refused a landing has to be named on the row that records
+        # the refusal (#2148). Until now the activation gate ran only *after*
+        # validation passed, so a refusal of a rewritten skill named itself in
+        # prose `errors` alone while the passing row carried the whole
+        # `skill_gate` block — the ledger could not answer "which skill, on what",
+        # which is precisely the question a refusal exists to answer. Computed
+        # BEFORE `revert_paths`, and that order is the change: once the tree is
+        # back at HEAD the same call reports "no regression", so a refusal row
+        # written afterwards would state the absence of the thing it is refusing.
+        # Recomputed here rather than threaded out of `validate()`, which keeps
+        # the `(errors, buckets)` shape its other callers — this module's CLI and
+        # the five test nodes in three other files — depend on.
+        refused_skill_gate = skill_activation_findings(norm)
         undone = revert_paths(norm) if not buckets["denied"] else []
         S.append_event({"event": "vault_land", "ok": False, "item_id": item_id,
                         "paths": norm, "errors": errors[:10], "reverted": undone,
+                        # The same rows, in the same shape, as the passing row
+                        # below. No key at all when no touched path is a
+                        # `skills/<slug>/SKILL.md`, so an absent key still means
+                        # "no skill was in this batch" and never "nothing to see".
+                        **({"skill_gate": refused_skill_gate} if refused_skill_gate else {}),
                         **({"session_id": session_id} if session_id else {})})
         raise VaultRoundError("validation failed; the change was reverted: "
                               + "; ".join(errors[:5]))
 
-    # Recorded on every landing whatever the enforcement: the log-only phase
-    # exists to show what an enforcing gate would have refused.
+    # Recorded on every landing, and now on a refusal too. These are the rows the
+    # flip was ruled on — 137 of them, 0 would-refusals, over the nine days the
+    # rail logged (#2148) — and the first thing to read when a real refusal comes.
     skill_gate = skill_activation_findings(norm)
     skill_body = skill_body_findings(norm)
 
