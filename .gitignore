@@ -47,6 +47,13 @@ __pycache__/
 !web/tsconfig.json
 !web/tsconfig.node.json
 !web/components.json
+# …and hand-authored JSON in the two source trees (#2115): a schema or fixture
+# written under scripts/ or app/ is source, and `git add -A` skipped it
+# silently, so a round could land code that reads a file that was never
+# committed. Runtime JSON does not belong in either tree (it lives in
+# ~/lloyd-data), so nothing these re-include should exist untracked.
+!scripts/**/*.json
+!app/**/*.json
 # …and the uptake probe's dated tables (#552): the one durable record of
 # whether durable memory entries were honoured, committed by the nightly job.
 !eval/uptake/*.json

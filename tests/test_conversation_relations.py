@@ -2000,15 +2000,18 @@ def test_the_cli_passes_the_band_flag_into_the_approve_run(cr, monkeypatch):
                     {"band": True, "band_cap": 3}], seen
 
 
-def test_cmd_approve_announces_which_gate_ran(cr, store, monkeypatch, capsys):
+def test_cmd_approve_announces_which_gate_ran(cr, store, monkeypatch, capsys, tmp_path):
     """Clause 5's report half: the run prints its own admission mode, because
     task #51 reports what this command printed and a band-enabled night must be
     distinguishable in the report, not only in the command line. With the band
     off the report line is the #1364/#1584 sentence unchanged."""
-    monkeypatch.setattr(cr, "PROPOSALS_FILE", cr.Path(cr.__file__).parent / "p.json")
-    monkeypatch.setattr(cr, "RELATIONS_INDEX", cr.Path(cr.__file__).parent / "i.json")
+    # Under tmp_path, never beside the module: this wrote `scripts/memory/p.json`
+    # into the tree on every run, hidden by the repo-wide `*.json` ignore until
+    # #2115 re-included source JSON — where it would dirty a round's worktree.
+    monkeypatch.setattr(cr, "PROPOSALS_FILE", tmp_path / "p.json")
+    monkeypatch.setattr(cr, "RELATIONS_INDEX", tmp_path / "i.json")
     pool = _band_pool(cr, [0.80])
-    (cr.Path(cr.__file__).parent / "p.json").write_text(
+    (tmp_path / "p.json").write_text(
         json.dumps({"watermark": {}, "proposals": pool, "stats": {}}), encoding="utf-8")
 
     cr.cmd_approve()
