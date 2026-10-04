@@ -14,6 +14,7 @@ The boot lines below are the real ones from
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -614,8 +615,40 @@ def _canary_block() -> str:
     return text[start:end]
 
 
+#: What `compare --json-out` writes for a DIVERGING arm: `compare_records` sorts
+#: rows worst first (its own docstring), so rows[0] is the exceeder, and its rc is
+#: 1. The clean payload has diverged 0 because `main` returns
+#: `1 if result["diverged"] else 0` — a payload that contradicted the status the
+#: stub exits with would let the block be tested against an impossible probe.
+CANARY_PAYLOAD_DIVERGED = {
+    "reference": "20260924T211316Z_idle-5", "current": "arm-fp8kv",
+    "reference_engine": {"venv": "/x/.venvs/lloyd", "vllm_version": "0.11.2",
+                         "kv_cache_dtype": "fp8", "kv_cache_size_tokens": 555776},
+    "current_engine": {"venv": "/x/.venvs/lloyd", "vllm_version": "0.11.2",
+                       "kv_cache_dtype": "bf16", "kv_cache_size_tokens": 555776},
+    "diverged": 3,
+    "rows": [
+        {"id": "sys_summary", "agreement": 0.412, "first_divergence": 7,
+         "median_lp_delta": 0.031, "token_lp_delta": 0.44, "ref_tokens": 64,
+         "cur_tokens": 71, "tier": "exact", "exceeds": True,
+         "reasons": ["agreement 0.412 < floor 0.950",
+                     "token logprob delta 0.44 > floor 0.1"]},
+        {"id": "count_up", "agreement": 1.0, "first_divergence": None,
+         "median_lp_delta": 0.0, "token_lp_delta": 0.0, "ref_tokens": 40,
+         "cur_tokens": 40, "tier": "exact", "exceeds": False, "reasons": []},
+    ],
+}
+CANARY_PAYLOAD_CLEAN = {
+    **CANARY_PAYLOAD_DIVERGED,
+    "diverged": 0,
+    "rows": [{**r, "exceeds": False, "reasons": []} for r in CANARY_PAYLOAD_DIVERGED["rows"]],
+}
+
+
 def _canary_run(tmp_path: Path, *, run_rc: int, cmp_rc: int,
-                emit_record: bool = True) -> "subprocess.CompletedProcess":
+                emit_record: bool = True, skip_bench: bool = False,
+                cmp_payload: dict | None = CANARY_PAYLOAD_DIVERGED,
+                ) -> "subprocess.CompletedProcess":
     """Run the extracted canary block under `set -euo pipefail` — STRICTER than
     the arm script's own `set -uo pipefail` — against a fake root whose python is
     a stub returning the given statuses.
@@ -625,17 +658,37 @@ def _canary_run(tmp_path: Path, *, run_rc: int, cmp_rc: int,
     block fails to swallow kills the harness before the tail echo. The harness
     ends with the arm script's literal tail line so `reaches done` is measured,
     not inferred.
+
+    Two things stand in for the runtime the block really runs in. `LLOYD_DATA` is
+    the directory the arm's bench results and engine log already come from
+    (`${LLOYD_DATA:-$HOME/lloyd-data}/logs/services/`), so the persisted verdict
+    lands where a sweep's throughput already lands. The stub serves `--json-out`
+    with `cmp_payload`, which is what the real `compare` writes there; for a
+    refused compare (rc>=2) it writes nothing, because `main` raises
+    `ProbeRefused` before it reaches the write — the block must therefore tolerate
+    an absent payload, which is pinned in tests/test_engine_output_probe.py.
+
+    `skip_bench=True` appends the arm script's OWN `SKIP_BENCH` block, so the run
+    really does exit there: a verdict written after it is then not on disk.
     """
     root = tmp_path / "fakeroot"
     (root / ".venvs/lloyd/bin").mkdir(parents=True)
     (root / "eval/engine_output/idle").mkdir(parents=True)
     (root / "eval/engine_output/idle/20260924T211316Z_idle-5.json").write_text("{}\n")
+    payload = tmp_path / "cmp-payload.json"
+    if cmp_payload is None:
+        payload.write_text("not json at all\n", encoding="utf-8")
+    else:
+        payload.write_text(json.dumps(cmp_payload), encoding="utf-8")
     stub = root / ".venvs/lloyd/bin/python"
     stub.write_text("""#!/usr/bin/env bash
 set -uo pipefail
 case "$2" in
   run)
-    if [[ "$STUB_EMIT_RECORD" == "1" ]]; then
+    # A real `run` that refuses writes NOTHING: main() raises ProbeRefused before
+    # write_record, so it prints no `wrote` line. Emitting one while exiting 2
+    # would hand the block a record for an arm that has none.
+    if [[ "$STUB_EMIT_RECORD" == "1" && "$STUB_RUN_RC" == "0" ]]; then
       echo "wrote /tmp/arm-record.json  (21 prompts, engine stub)"
     fi
     echo "engine_output_probe: cannot decide — the engine refused the corpus"
@@ -645,24 +698,53 @@ case "$2" in
     echo "reference $4: stub vllm 0.11.2 kv fp8 pool 555776"
     echo "current   /tmp/arm-record.json: stub vllm 0.11.2 kv fp8 pool 555776"
     echo "3 of 21 prompts past their idle floor"
+    # --json-out is served only when the comparison decided: `main` raises
+    # ProbeRefused before writing anything, so rc>=2 leaves no payload file.
+    prev=""
+    for a in "$@"; do
+      if [[ "$prev" == "--json-out" && "$STUB_CMP_RC" -lt 2 ]]; then
+        cp "$STUB_CMP_PAYLOAD" "$a"
+      fi
+      prev="$a"
+    done
     exit "$STUB_CMP_RC"
     ;;
 esac
 exit 9
 """, encoding="utf-8")
     stub.chmod(0o755)
+    body = _canary_block()
+    if skip_bench:
+        # To the END of the arm script, bench call included: with SKIP_BENCH=1 the
+        # run has to stop at the exit, and the bench's own line is how this test
+        # knows it did. Slicing before the bench would make the absence of that
+        # line unfalsifiable — it was never in the script.
+        arm_text = ARM.read_text()
+        body += arm_text[arm_text.index(CANARY_END):]
     script = tmp_path / "canary-under-test.sh"
     script.write_text(
         "set -euo pipefail\n"
         f'ROOT="{root}"\n'
         'LABEL=fp8kv\n'
-        + _canary_block() + '\necho "=== arm $LABEL done ==="\n',
+        + body + '\necho "=== arm $LABEL done ==="\n',
         encoding="utf-8")
     return subprocess.run(
         ["bash", str(script)], capture_output=True, text=True, timeout=60,
         env={"PATH": "/usr/bin:/bin", "STUB_RUN_RC": str(run_rc),
-             "STUB_CMP_RC": str(cmp_rc),
+             "STUB_CMP_RC": str(cmp_rc), "STUB_CMP_PAYLOAD": str(payload),
+             "LLOYD_DATA": str(tmp_path / "lloyd-data"),
+             "SKIP_BENCH": "1" if skip_bench else "0",
              "STUB_EMIT_RECORD": "1" if emit_record else "0"})
+
+
+def _canary_verdicts(tmp_path: Path) -> list[dict]:
+    """The persisted canary verdicts, read back from the JSONL the block appends
+    to — the file, not the echo. The point of #2163 is that the decision survives
+    the restart window, and a verdict that exists only in stdout does not."""
+    log = tmp_path / "lloyd-data/logs/services/flash-next-canary.jsonl"
+    assert log.is_file(), (
+        f"no canary verdict was persisted; expected one JSON line at {log}")
+    return [json.loads(ln) for ln in log.read_text().splitlines() if ln.strip()]
 
 
 def test_the_output_canary_sits_below_the_boot_guard_and_above_the_bench():
@@ -770,3 +852,131 @@ def test_the_canary_status_capture_survives_a_header_that_gains_set_e():
         "a pipe into head can return 141 under pipefail")
     assert "awk" in _statement(r"CANARY_RECORD="), (
         "the record path must be pulled out in one process, not a pipeline")
+
+
+# ---------------------------------------------------------------------------
+# #2163 — the verdict has to survive the window it was measured in
+#
+# Everything above prints a verdict. An A/B arm runs inside a primary restart
+# window, and the window is exactly what goes away: `SKIP_BENCH=1` — how an
+# admission sweep runs, since bench-flash-next.py measures decode and defeats the
+# prefix cache — exits this script before the bench's `--out` write, so a
+# canary-only arm persisted NOTHING AT ALL. Three absent bytes proved it: no
+# ~/lloyd-data/eval/baselines/engine_output/, no flash-next-arms.jsonl, no
+# flash-next-arm.env, and no `engine-output canary:` line anywhere under
+# ~/lloyd-data/logs/, since the canary wired in in dfb18646 (2026-09-28).
+# ---------------------------------------------------------------------------
+
+
+def test_the_canary_persists_one_verdict_line_naming_the_worst_prompt(tmp_path):
+    """Clause 1: the line is the arm's decision, not a breadcrumb.
+
+    Read back from the file, so every field is the block's, not an echo. The
+    reference and the arm's own record are named by path because the next reader
+    has to be able to re-run the comparison; the diverged count and the worst row
+    because "DIVERGED" without the prompt id and the first_divergence index is an
+    alarm with nothing to act on. The row is `rows[0]`: compare_records sorts
+    worst first, so the persisted line points at the prompt the comparator itself
+    put on top of its own table."""
+    root = tmp_path / "fakeroot"
+    assert _canary_run(tmp_path, run_rc=0, cmp_rc=1).returncode == 0
+
+    lines = _canary_verdicts(tmp_path)
+    assert len(lines) == 1, f"one arm must append exactly one line, got {lines}"
+    v = lines[0]
+    assert v["arm"] == "fp8kv", v
+    assert (v["run_rc"], v["compare_rc"]) == (0, 1), v
+    assert v["decision"] == "past-floor", v
+    assert v["reference"] == str(root / "eval/engine_output/idle/20260924T211316Z_idle-5.json"), v
+    assert v["record"] == "/tmp/arm-record.json", v
+    assert v["diverged"] == CANARY_PAYLOAD_DIVERGED["diverged"], v
+
+    worst, row = v["worst_prompt"], CANARY_PAYLOAD_DIVERGED["rows"][0]
+    assert worst is not None, v
+    assert worst["prompt"] == row["id"], worst
+    assert worst["agreement"] == row["agreement"], worst
+    assert worst["first_divergence"] == row["first_divergence"], worst
+    assert worst["token_lp_delta"] == row["token_lp_delta"], worst
+    assert worst["reasons"] == row["reasons"], (
+        f"the reasons are the actionable half of a divergence: {worst}")
+
+
+def test_the_canary_persists_a_line_for_every_outcome_including_its_own_failure(tmp_path):
+    """Clause 2: three decisions, and the third one is the one that gets lost.
+
+    An instrument failure that only prints is indistinguishable, a day later,
+    from an arm that was never run — which is the state this item was filed from.
+    So could-not-decide must carry the status that produced it and the last line
+    the instrument said, and it must be written whether the engine refused the
+    corpus (run rc 2, no record, compare never reached) or the comparator refused
+    to decide (compare rc 2, no payload file at all)."""
+    refused_run = "engine_output_probe: cannot decide — the engine refused the corpus"
+    cases = [
+        (dict(run_rc=0, cmp_rc=0, cmp_payload=CANARY_PAYLOAD_CLEAN),
+         dict(decision="within-floor", run_rc=0, compare_rc=0, diverged=0,
+              record="/tmp/arm-record.json")),
+        (dict(run_rc=0, cmp_rc=1),
+         dict(decision="past-floor", run_rc=0, compare_rc=1, diverged=3,
+              record="/tmp/arm-record.json")),
+        (dict(run_rc=0, cmp_rc=2),
+         dict(decision="could-not-decide", run_rc=0, compare_rc=2, diverged=None,
+              record="/tmp/arm-record.json",
+              last_output="3 of 21 prompts past their idle floor")),
+        (dict(run_rc=2, cmp_rc=0),
+         dict(decision="could-not-decide", run_rc=2, compare_rc=None, diverged=None,
+              record=None, last_output=refused_run)),
+        (dict(run_rc=0, cmp_rc=0, emit_record=False),
+         dict(decision="could-not-decide", run_rc=0, compare_rc=None, diverged=None,
+              record=None, last_output=refused_run)),
+    ]
+    for i, (run_kwargs, want) in enumerate(cases):
+        here = tmp_path / f"case-{i}"
+        r = _canary_run(here, **run_kwargs)
+        assert r.returncode == 0, f"{run_kwargs}: the canary aborted the arm\n{r.stderr}"
+        assert "=== arm fp8kv done ===" in r.stdout, f"{run_kwargs}: {r.stdout}"
+        lines = _canary_verdicts(here)
+        assert len(lines) == 1, f"{run_kwargs}: expected one persisted line, got {lines}"
+        v = lines[0]
+        for key, value in want.items():
+            assert v[key] == value, f"{run_kwargs}: {key} wanted {value!r}, got {v.get(key)!r}"
+        if want["decision"] == "could-not-decide":
+            assert v["worst_prompt"] is None, f"{run_kwargs}: {v}"
+            assert v["last_output"], f"{run_kwargs}: an instrument failure with no " \
+                                     f"last line leaves nothing to read: {v}"
+
+
+def test_the_canary_verdict_is_on_disk_when_skip_bench_exits_the_arm(tmp_path):
+    """Clause 3, pinned as a real exit rather than an index comparison.
+
+    The arm script's own SKIP_BENCH block and everything below it — the bench call
+    included — are appended to the lifted canary block, so this run really does
+    stop at that `exit 0`: the bench's own line is absent, which is how the test
+    knows the exit fired rather than the script running on. A verdict written below
+    the exit, where the bench's `--out` write is, is not on disk in that run."""
+    r = _canary_run(tmp_path, run_rc=0, cmp_rc=1, skip_bench=True)
+    assert r.returncode == 0, r.stderr
+    assert "SKIP_BENCH=1 — arm fp8kv is serving; not benchmarking" in r.stdout, r.stdout
+    assert "--- benchmarking ---" not in r.stdout, (
+        "the run reached the bench, so it never exercised the SKIP_BENCH exit and "
+        "proved nothing about ordering: " + r.stdout)
+
+    lines = _canary_verdicts(tmp_path)
+    assert len(lines) == 1, f"a canary-only arm must persist exactly one line, got {lines}"
+    assert lines[0]["decision"] == "past-floor", lines[0]
+    assert lines[0]["diverged"] == 3, lines[0]
+
+
+def test_the_canary_verdict_not_being_written_never_aborts_the_arm(tmp_path):
+    """The block's whole standing principle: non-fatal by design.
+
+    A persistence failure must not cost the sweep its measurement — the engine is
+    already booted and the bench has not run yet. Here the runtime directory is
+    not a directory at all, so neither the mkdir nor the append can succeed."""
+    (tmp_path / "lloyd-data").write_text("not a directory\n", encoding="utf-8")
+    r = _canary_run(tmp_path, run_rc=0, cmp_rc=1)
+    assert r.returncode == 0, f"a verdict that cannot be written killed the arm\n{r.stderr}"
+    assert "=== arm fp8kv done ===" in r.stdout, r.stdout
+    assert "verdict NOT persisted" in r.stdout, (
+        "an unpersisted verdict that is not reported is the silent-blind state "
+        "this item exists to close: " + r.stdout)
+    assert not (tmp_path / "lloyd-data/logs").exists()

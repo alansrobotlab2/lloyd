@@ -362,3 +362,70 @@ def test_committed_floor_matches_the_committed_corpus(corpus):
     assert floor["n_runs"] >= 5
     assert floor["corpus_sha256"] == corpus["sha256"]
     assert set(floor["prompts"]) == {p["id"] for p in corpus["prompts"]}
+
+
+def test_the_committed_idle_repeats_stay_within_the_committed_floor():
+    """#2163 clause 4: the floor's own cleanliness is an invariant, not a comment.
+
+    The arm route grades a perturbation against one of these five repeats, and its
+    reference is named precisely because the tiered floor is leave-one-out clean on
+    exactly these records. That fact is what makes a DIVERGED verdict actionable, so
+    it has to fail loudly if one of these records is ever replaced by one that
+    trips the floor — otherwise the first bf16 arm that diverges can be argued down
+    to "the floor is too tight", and the floor gets widened on the strength of the
+    very signal it exists to catch.
+
+    Ten pairs from five records, both directions of every pair, each decided
+    against the committed floor: 0 of 21 prompts past floor on all ten."""
+    runs = sorted((probe.HERE / "idle").glob("*.json"))
+    assert len(runs) == 5, f"expected the five committed idle repeats, got {[r.name for r in runs]}"
+    floor = json.loads(probe.DEFAULT_FLOOR.read_text())
+    assert len(json.loads(runs[0].read_text())["prompts"]) == 21, (
+        "the committed corpus is 21 prompts; the clause's count is that number")
+
+    pairs = [(a, b) for i, a in enumerate(runs) for b in runs[i + 1:]]
+    assert len(pairs) == 10, pairs
+    for a, b in pairs:
+        result = probe.compare_records(json.loads(a.read_text()),
+                                       json.loads(b.read_text()), floor)
+        assert result["diverged"] == 0, (
+            f"{a.name} vs {b.name}: {result['diverged']} of {len(result['rows'])} prompts "
+            f"past floor — {[r['id'] for r in result['rows'] if r['exceeds']]}. "
+            f"Re-measure the floor with `floor` over these five; do not widen it.")
+
+
+def test_compare_json_out_writes_the_rows_the_arm_persists(tmp_path, capsys):
+    """#2163 clause 1's other half: what `--json-out` puts on disk is what the
+    arm's verdict line reads.
+
+    The block reads it with real code (`python3 -`) in real bash, so the contract
+    between the two processes is pinned here, against the committed records rather
+    than a fixture: the four fields the persisted line names must be in the file,
+    stdout must still be the rendered table the operator reads, and a refused
+    compare must leave NO payload behind — the arm has to distinguish "the
+    comparator decided there were 0 diverged" from "the comparator never decided",
+    and an empty or stale file would read as the former."""
+    runs = sorted((probe.HERE / "idle").glob("*.json"))
+    out = tmp_path / "cmp.json"
+
+    rc = probe.main(["compare", "--current", str(runs[4]), "--reference", str(runs[3]),
+                     "--json-out", str(out)])
+    assert rc == 0, "the committed idle repeats compare clean"
+    payload = json.loads(out.read_text())
+    assert payload["diverged"] == 0
+    assert {"reference", "current", "reference_engine", "current_engine",
+            "diverged", "rows"} <= set(payload), payload.keys()
+    for key in ("id", "agreement", "first_divergence", "token_lp_delta", "reasons"):
+        assert key in payload["rows"][0], f"the arm persists {key}; the payload has no such field"
+    rendered = capsys.readouterr().out
+    assert rendered.startswith("reference "), f"--json-out must not swallow the table: {rendered}"
+    assert "0 of 21 prompts past their idle floor" in rendered, rendered
+
+    missing = tmp_path / "no-floor.json"
+    refused = tmp_path / "refused.json"
+    rc = probe.main(["compare", "--current", str(runs[4]), "--reference", str(runs[3]),
+                     "--floor", str(missing), "--json-out", str(refused)])
+    assert rc == 2, "a missing floor is the instrument refusing, which is exit 2"
+    assert not refused.exists(), (
+        "a refused compare that left a payload behind would be persisted as a "
+        "decision the comparator never made")

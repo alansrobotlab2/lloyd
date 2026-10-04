@@ -135,7 +135,7 @@ if grep -qa -E "EngineCore failed to start|Worker failed with error" /tmp/arm-bo
 fi
 echo "boot guard: 1 engine init, no startup failures — this arm is what is serving."
 
-# --- engine-output integrity canary (#1268 owed → #1625) --------------------
+# --- engine-output integrity canary (#1268 owed → #1625; persisted by #2163) -
 # Everything above reads CONFIG: bootfacts greps the KV dtype and the pool size
 # off the boot log, the boot guard counts engine inits. Neither one reads a
 # token. AI21's two vLLM bugs — both in the Mamba state cache this hybrid runs on
@@ -162,6 +162,23 @@ echo "boot guard: 1 engine init, no startup failures — this arm is what is ser
 # records. Override ENGINE_OUTPUT_REF after a rebaseline.
 ENGINE_OUTPUT_PROBE="${ENGINE_OUTPUT_PROBE:-$ROOT/eval/engine_output_probe.py}"
 ENGINE_OUTPUT_REF="${ENGINE_OUTPUT_REF:-$ROOT/eval/engine_output/idle/20260924T211316Z_idle-5.json}"
+# THE VERDICT IS PERSISTED, not just echoed (#2163). What leaves this window has
+# to be decided before the window closes, and the window is what goes away: an arm
+# runs inside a primary restart, and `SKIP_BENCH=1` — how an admission sweep runs,
+# since bench-flash-next.py measures decode and defeats the prefix cache — exits
+# below, before the bench's `--out` write. So every canary decision this script
+# ever printed went into scrollback and nothing else: no
+# `~/lloyd-data/eval/baselines/engine_output/`, no `flash-next-arms.jsonl`, no
+# `flash-next-arm.env`, and no `engine-output canary:` line anywhere under
+# ~/lloyd-data/logs/, since the canary was wired in in dfb18646 (#1625, 2026-09-28).
+# One JSONL line per arm, in the SAME runtime directory the bench results already
+# use above ($RESULTS), so one `tail` shows a sweep's throughput and its integrity
+# decisions side by side.
+CANARY_LOG="${LLOYD_DATA:-$HOME/lloyd-data}/logs/services/flash-next-canary.jsonl"
+# Per-process payload file, like the boot slices above. `compare` writes it only
+# when it decides, so the file being ABSENT is itself the could-not-decide signal
+# — a stale or empty one would read as a comparator that said 0 diverged.
+CANARY_CMP_JSON="${TMPDIR:-/tmp}/flash-next-canary-$$.json"
 # Each status is captured on the call itself (`|| RC=$?`) rather than by reading
 # `$?` on the next line: that form aborts under `set -e`, and this script's header
 # could gain the flag one day the way every other script's did. Same reason the
@@ -171,22 +188,102 @@ CANARY_RUN_RC=0
 CANARY_RUN_OUT=$("$ROOT/.venvs/lloyd/bin/python" "$ENGINE_OUTPUT_PROBE" run \
                    --label "arm-$LABEL" 2>&1) || CANARY_RUN_RC=$?
 CANARY_RECORD=$(printf '%s\n' "$CANARY_RUN_OUT" | awk '/^wrote /{print $2; exit}')
+# Decision, stage and the instrument's last line are recorded, not just printed,
+# because the line below has to say WHICH of the three outcomes happened and why.
+# `CANARY_CMP_RC` stays empty when compare was never reached: an arm whose engine
+# refused the corpus has no comparator decision, and writing 0 there would be the
+# false clean pass this canary exists to prevent.
+CANARY_DECISION=
+CANARY_STAGE=
+CANARY_LAST_OUTPUT=
+CANARY_CMP_RC=
 if [ "$CANARY_RUN_RC" -ne 0 ] || [ -z "$CANARY_RECORD" ]; then
   # `run` exits 2 when the engine refused the corpus, and prints no `wrote` line
   # when it wrote nothing. Neither is a verdict about the engine's output, so it
   # reports as the instrument not deciding rather than as a clean pass.
-  echo "engine-output canary: arm $LABEL could-not-decide (run rc=$CANARY_RUN_RC, $(printf '%s\n' "$CANARY_RUN_OUT" | tail -1))"
+  CANARY_DECISION=could-not-decide
+  CANARY_STAGE=run
+  CANARY_LAST_OUTPUT=$(printf '%s\n' "$CANARY_RUN_OUT" | tail -1)
+  echo "engine-output canary: arm $LABEL could-not-decide (run rc=$CANARY_RUN_RC, $CANARY_LAST_OUTPUT)"
 else
   CANARY_CMP_RC=0
   CANARY_CMP_OUT=$("$ROOT/.venvs/lloyd/bin/python" "$ENGINE_OUTPUT_PROBE" compare \
-                     --current "$CANARY_RECORD" --reference "$ENGINE_OUTPUT_REF" 2>&1) \
+                     --current "$CANARY_RECORD" --reference "$ENGINE_OUTPUT_REF" \
+                     --json-out "$CANARY_CMP_JSON" 2>&1) \
     || CANARY_CMP_RC=$?
+  CANARY_STAGE=compare
+  CANARY_LAST_OUTPUT=$(printf '%s\n' "$CANARY_CMP_OUT" | tail -1)
   case "$CANARY_CMP_RC" in
-    0) echo "engine-output canary: arm $LABEL within-floor ($CANARY_RECORD vs $ENGINE_OUTPUT_REF)" ;;
-    1) echo "engine-output canary: arm $LABEL DIVERGED from $ENGINE_OUTPUT_REF: $(printf '%s\n' "$CANARY_CMP_OUT" | grep -m1 'past their .* floor')"
+    0) CANARY_DECISION=within-floor
+       echo "engine-output canary: arm $LABEL within-floor ($CANARY_RECORD vs $ENGINE_OUTPUT_REF)" ;;
+    1) CANARY_DECISION=past-floor
+       echo "engine-output canary: arm $LABEL DIVERGED from $ENGINE_OUTPUT_REF: $(printf '%s\n' "$CANARY_CMP_OUT" | grep -m1 'past their .* floor')"
        printf '%s\n' "$CANARY_CMP_OUT" | sed 's/^/  canary: /' ;;
-    *) echo "engine-output canary: arm $LABEL could-not-decide (compare rc=$CANARY_CMP_RC, $(printf '%s\n' "$CANARY_CMP_OUT" | tail -1))" ;;
+    *) CANARY_DECISION=could-not-decide
+       echo "engine-output canary: arm $LABEL could-not-decide (compare rc=$CANARY_CMP_RC, $CANARY_LAST_OUTPUT)" ;;
   esac
+fi
+
+# The verdict is appended HERE, above the SKIP_BENCH exit, by the same rule that
+# keeps the echoes non-fatal: an arm may not be lost to its own instrument. Here
+# that rule has a second reason — this is the LAST point in the arm where a
+# verdict can still be written on the canary-only route, so writing it after the
+# bench (or after the exit) is what loses a sweep's integrity record today. A
+# persistence failure is reported on stdout and swallowed: the engine is already
+# booted, the bench has not run, and a lost line is worth less than a lost arm.
+export CANARY_LABEL="$LABEL" CANARY_LOG CANARY_CMP_JSON CANARY_REF="$ENGINE_OUTPUT_REF" \
+       CANARY_DECISION CANARY_STAGE CANARY_RUN_RC CANARY_CMP_RC CANARY_RECORD \
+       CANARY_LAST_OUTPUT
+CANARY_PERSIST_RC=0
+python3 - <<'PY' || CANARY_PERSIST_RC=$?
+import datetime, json, os
+
+
+def _rc(value):
+    """Empty means the call was never reached, which is not the same number as 0."""
+    return int(value) if value else None
+
+
+def _worst(rows):
+    """compare_records returns its rows sorted worst first, so rows[0] is the
+    prompt the comparator itself put on top of the table the operator just read.
+    Carried with its reasons: a count without a prompt id and a first_divergence
+    index is an alarm with nothing to act on."""
+    if not rows:
+        return None
+    r = rows[0]
+    return {"prompt": r.get("id"), "agreement": r.get("agreement"),
+            "first_divergence": r.get("first_divergence"),
+            "token_lp_delta": r.get("token_lp_delta"), "reasons": r.get("reasons")}
+
+
+payload = None
+try:
+    # Only `compare` on a decision it made writes this file, so an absent or
+    # unreadable one means the comparator never decided — never a clean 0.
+    with open(os.environ["CANARY_CMP_JSON"], encoding="utf-8") as fh:
+        payload = json.load(fh)
+except (OSError, ValueError):
+    pass
+payload = payload or {}
+os.makedirs(os.path.dirname(os.environ["CANARY_LOG"]), exist_ok=True)
+with open(os.environ["CANARY_LOG"], "a", encoding="utf-8") as fh:
+    fh.write(json.dumps({
+        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+        "arm": os.environ.get("CANARY_LABEL", ""),
+        "decision": os.environ.get("CANARY_DECISION", ""),
+        "stage": os.environ.get("CANARY_STAGE", ""),
+        "run_rc": _rc(os.environ.get("CANARY_RUN_RC", "")),
+        "compare_rc": _rc(os.environ.get("CANARY_CMP_RC", "")),
+        "reference": os.environ.get("CANARY_REF", ""),
+        "record": os.environ.get("CANARY_RECORD") or None,
+        "diverged": payload.get("diverged"),
+        "worst_prompt": _worst(payload.get("rows")),
+        "last_output": os.environ.get("CANARY_LAST_OUTPUT", ""),
+    }) + "\n")
+PY
+if [ "$CANARY_PERSIST_RC" -ne 0 ]; then
+  echo "engine-output canary: arm $LABEL verdict NOT persisted to $CANARY_LOG (rc=$CANARY_PERSIST_RC)"
 fi
 
 # SKIP_BENCH=1 stops here with the arm serving. bench-flash-next.py measures

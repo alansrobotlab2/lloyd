@@ -745,6 +745,14 @@ def main(argv: list[str] | None = None, *, client_factory: Callable[[str], Any] 
                        help="default: the newest other record in the current's directory")
     p_cmp.add_argument("--floor", type=Path, default=DEFAULT_FLOOR)
     p_cmp.add_argument("--json", action="store_true")
+    # The arm route (`agent-services/bin/flash-next-run-arm.sh`) persists one
+    # machine-readable verdict per arm, and it must not have to re-derive the
+    # decision from the rendered table or re-run the comparison a second time for
+    # a second format: one call, one decision, one rc, and the same rows on both
+    # surfaces. Written only on success — a refused compare writes nothing, so an
+    # absent file is the comparator not having decided, never a clean 0.
+    p_cmp.add_argument("--json-out", type=Path,
+                       help="also write the comparison dict here (after the decision succeeds)")
 
     p_pre = sub.add_parser("preempt", help="load driver + corpus under load, preemptions recorded")
     _common(p_pre)
@@ -782,6 +790,12 @@ def main(argv: list[str] | None = None, *, client_factory: Callable[[str], Any] 
             if ref_path is None or not ref_path.exists():
                 raise ProbeRefused("no reference record to compare against")
             result = compare_records(_load_json(ref_path), _load_json(args.current), _load_json(args.floor))
+            if args.json_out is not None:
+                # After the decision, never before it: every ProbeRefused above
+                # exits 2 without touching this path, so the arm route can read an
+                # absent file as "the comparator did not decide".
+                args.json_out.parent.mkdir(parents=True, exist_ok=True)
+                args.json_out.write_text(json.dumps(result, indent=1) + "\n")
             print(json.dumps(result, indent=1) if args.json else render_comparison(result))
             return 1 if result["diverged"] else 0
         if args.cmd == "preempt":
