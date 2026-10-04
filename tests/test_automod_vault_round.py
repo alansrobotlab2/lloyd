@@ -300,16 +300,26 @@ def test_a_git_error_is_absence_and_never_a_guess(vault, monkeypatch):
 # why a dated copy sits in `backlog/data/`: the live file is not a witness. This extract
 # is every `vault_land` row dated 2026-10-04 whose `created_at` is at or before
 # 08:31:40Z — twelve rows, copied out byte for byte at 10:50Z.
+#
+# The path is dated (#2178). #2175's clause 5 named `backlog/data/promotions.jsonl`, which
+# is the path the retention sweep retired: #2054's para records that "the promotions ledger
+# is no longer mirrored into the vault", and #2064 deleted the 33,113,707-byte copy at
+# vault `ffc04ce5`. `tests/test_failure_ledger_witness.py` fails its first node while ANY
+# file stands on that path, so the land that followed clause 5 literally is what left main
+# red at `4e6bae21` — the witness and the retire were written by two items that never read
+# each other. Same twelve bytes, at a name in the shape every other witness in that
+# directory has, and no retired path touched.
 
-WITNESS_2175_VAULT_PATH = "backlog/data/promotions.jsonl"
+WITNESS_2175_VAULT_PATH = "backlog/data/2026-10-04.2175-vault-land-witness.jsonl"
 
 
 @pytest.mark.live_vault
 def test_the_vault_copy_shows_a_day_of_lands_with_no_refusal_of_this_kind():
     """Re-derived from committed bytes, not from a live file that keeps growing.
 
-    `wc -l < backlog/data/promotions.jsonl` is 12 — the figure this item's triage
-    quotes — and it is the twelve `vault_land` rows the live ledger held for 2026-10-04
+    `wc -l < backlog/data/2026-10-04.2175-vault-land-witness.jsonl` is 12 — the figure
+    this item's triage quotes — and it is the twelve `vault_land` rows the live ledger held
+    for 2026-10-04
     up to 08:31:40Z, when that count was taken. Every one is `ok: true` and none carries
     a `held_by` key, which is the whole report in bytes: three task-83 lands refused with
     "nothing to commit on those paths" and not one of them is in the ledger.
@@ -2512,6 +2522,10 @@ _MIRROR_MENTION_FILES = {
     "tests/fixtures/promotions_vault_land_rows_2026-10-01-item1975.jsonl":
         "a `vault_land` row recording the land that wrote the copy: the ledger's own history, "
         "which is the reason the path cannot be erased from the repository",
+    "tests/test_failure_ledger_witness.py":
+        "prose in #2178's node naming the path #2175 clause 5 sent its extract to, which is "
+        "the fact the node is about. No reader: the file's first node is the one that keeps "
+        "the working-tree path empty, and the bytes it checks are at a dated name",
     "tests/test_automod_hardening.py":
         "ACK_MIRROR, a string the ack-rail nodes pass to a lander they have all replaced",
     "tests/test_automod_vault_round.py":

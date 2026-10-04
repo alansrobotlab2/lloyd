@@ -1,4 +1,12 @@
-"""The vault witness behind #2079's clause-6 figures, checked for real.
+"""The vault witnesses in `backlog/data/`, checked for real.
+
+Two witnesses and one retired path. #2079 clause 6 quotes figures whose bytes are
+tracked here as 2 dated rows; #2175 clause 5 asks that the twelve `vault_land` rows
+behind its count stay re-derivable from committed bytes rather than out of a ledger
+another job appends to. Both are checked here against the file on disk, not a fixture
+built here. The retired path is the promotions-ledger mirror the retention sweep took
+out of the vault — #2054's para, #2064's `ffc04ce5` — and no witness may stand on it;
+#2178 was filed for the moment a second witness did exactly that and left main red.
 
 A separate file, and deliberately NOT inside `tests/test_failure_ledger.py`: that
 module has no collection-time skip, and neither does this one, so every node here
@@ -6,11 +14,12 @@ runs in the default `pytest tests/` the gate's `tests` rung executes. A node beh
 a module-level skip would be a claim with no witness — which is the exact thing
 clause 6 is about.
 
-It ships five nodes: four over the vault bytes —
+It ships six nodes: five over the vault bytes —
 `test_the_witness_is_a_dated_file_not_the_retired_mirror_path`,
 `test_the_witness_holds_the_two_live_rows_the_clause_quotes`,
 `test_every_witness_row_is_an_error_alert_of_the_quoted_family`,
-`test_the_sibling_note_names_the_mirror_it_is_not` — plus
+`test_the_sibling_note_names_the_mirror_it_is_not`,
+`test_the_2175_vault_land_extract_is_a_dated_file_too` — plus
 `test_the_docstring_names_every_node_this_file_ships`, the rail that re-checks this
 paragraph against the module's own bytes on every run.
 
@@ -40,6 +49,9 @@ from app import paths
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "failure_ledger"
 WITNESS_NAME = "2026-10-02.2079-promotions-witness.jsonl"
 NOTE_NAME = "2026-10-02.2079-promotions-witness.md"
+#: #2175 clause 5's extract, re-homed off the retired mirror path by #2178. The bytes
+#: are the ones that landed at vault `87a7a104`; only the name moved.
+WITNESS_2175_NAME = "2026-10-04.2175-vault-land-witness.jsonl"
 
 
 def witness_rows():
@@ -119,6 +131,47 @@ def test_the_sibling_note_names_the_mirror_it_is_not():
             encoding="utf-8").count(f"def {node}(") == 1, f"{node} is not defined once"
 
 
+def test_the_2175_vault_land_extract_is_a_dated_file_too():
+    """#2178: the first node proves the retired path is empty; it cannot prove a
+    witness exists, and a red tree was built exactly in that gap.
+
+    #2175 clause 5 told its round to put twelve `vault_land` rows at
+    `backlog/data/promotions.jsonl` — a path #2054 had already retired and #2064 had
+    emptied at vault `ffc04ce5` — and the round obeyed, so at `4e6bae21` the vault
+    held a committed witness and the suite held a failing node at the same time. The
+    two items each wrote a clause about the same directory and neither read the
+    other's. The bytes now sit at a dated name; this node reads them THERE, which is
+    what makes it more than a restatement of the node above: that one passes happily
+    on a vault where the extract was deleted outright, and this one does not.
+
+    The figures are re-derived from the committed bytes rather than quoted back at
+    the item that landed them: 12 lines, 12 rows, every one a `vault_land` with
+    `ok: true` and no `held_by` key — the absence #2175's report is about — and the
+    span 2026-10-04T00:51:17Z to 2026-10-04T08:31:40Z, which is the count's own
+    timestamp and the reason the extract is cut there instead of at the end of day.
+    """
+    data = paths.VAULT_ROOT / "backlog" / "data"
+    witness = data / WITNESS_2175_NAME
+    assert witness.is_file(), (
+        f"{WITNESS_2175_NAME} must be committed: #2175 clause 5 asks that the twelve "
+        "rows be re-derivable from bytes, and no dated witness was found")
+    text = witness.read_text(encoding="utf-8")
+    rows = list(fl.iter_jsonl(witness))
+    assert len(text.splitlines()) == 12, "wc -l on the extract is the 12 the report quotes"
+    assert len(rows) == 12, f"the extract holds {len(rows)} rows, not the 12 counted"
+    assert all(r["event"] == "vault_land" for r in rows), \
+        "rows that are not vault_land are not the extract #2175 asked for"
+    assert all(r["ok"] is True for r in rows), \
+        "a refusal is in the extract, so it no longer shows a day with none"
+    assert not [r for r in rows if "held_by" in r], \
+        "the extract postdates #2175 and cannot show the pre-fix absence"
+    stamps = [str(r["created_at"]) for r in rows]
+    assert all(s.startswith("2026-10-04") for s in stamps), stamps[0]
+    assert min(stamps) == "2026-10-04T00:51:17Z" and \
+        max(stamps) == "2026-10-04T08:31:40Z", \
+        "the extract is not the twelve rows up to the count's own timestamp"
+
+
 def test_the_docstring_names_every_node_this_file_ships():
     """A docstring that counts its own nodes has to be checked against the file.
 
@@ -143,7 +196,7 @@ def test_the_docstring_names_every_node_this_file_ships():
         f"the module docstring advertises {sorted(advertised - shipped)} that this "
         f"file does not ship; this file ships {sorted(shipped - advertised)} the "
         "docstring never names")
-    assert len(shipped) == 5, (
-        "four witness nodes over the vault bytes plus this rail. The count is spelled "
-        "out so that adding a fifth witness node has to come back here and re-read the "
+    assert len(shipped) == 6, (
+        "five witness nodes over the vault bytes plus this rail. The count is spelled "
+        "out so that adding a sixth node has to come back here and re-read the "
         "paragraph, instead of leaving it a sentence behind")

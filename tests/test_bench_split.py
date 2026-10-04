@@ -307,8 +307,8 @@ MIN_LIVE_BENCH_TASKS = 11
 
 #: Every file in `~/obsidian/lloyd/bench/`, keyed by task id (the file stem, which
 #: each file also declares as `id:`), with the `category:` its own front matter
-#: carries. Measured against the files on disk on 2026-10-03: 25 entries — 7 replay,
-#: 15 synthetic, 2 adversarial, 1 safety. That count is a snapshot of a hand-kept
+#: carries. Measured against the files on disk on 2026-10-04: 26 entries — 7 replay,
+#: 16 synthetic, 2 adversarial, 1 safety. That count is a snapshot of a hand-kept
 #: table and no assertion here reads it; the count that IS asserted is the corpus
 #: floor in `MIN_LIVE_BENCH_TASKS` above, and every entry below is re-checked
 #: against disk by the node named next, so a stale number in this comment is
@@ -421,6 +421,27 @@ LIVE_BENCH_CATEGORIES = {
     # (`??`), so the `git clean -fd` caveat above is live for it as it was for
     # `bench_021` through `bench_024` before their authors committed theirs.
     "bench_025_skill_invocation_never_ran_resume_chain": "synthetic",
+    # Keyed by stem with the `category:` its own front matter declares
+    # (`lloyd/bench/bench_026_contradiction_supersede_chain.md:4` = `synthetic`), the only
+    # authority this table may copy, and the same reading the file's own `tags:` list
+    # carries. Its absence is what reds main at `4e6bae21` (#2178) at BOTH nodes: the
+    # census names the unmapped id, and this file is the newest by mtime, so it is also
+    # the entry `test_the_newest_live_bench_file_is_keyed_with_its_declared_category`
+    # reads. The file reached the directory at 2026-10-04T10:37:10Z (its own mtime), 243
+    # seconds after `4e6bae21` was committed at 2026-10-04T10:33:07Z, so that base is red
+    # with no code change involved; the round that found it, SM_20261004_103553,
+    # reproduced both at that base with its own diff absent, which is again a file written
+    # by the vault being blamed on a tree. Still untracked in the vault as measured for
+    # this line: 26 `.md` on disk against `git -C ~/obsidian ls-files lloyd/bench | wc -l`
+    # = 25, and `git -C ~/obsidian status --porcelain -- lloyd/bench` names exactly this
+    # file (`??`), so the `git clean -fd` caveat above is live for it as it was for
+    # `bench_021` through `bench_025` before their authors committed theirs. What this
+    # entry does NOT close is the judge's half: the file has no set in
+    # `eval/autoresearch_assertions.yaml`, and the node that asks for one,
+    # `tests/test_autoresearch_judge.py::test_every_live_bench_task_has_an_assertion_set`,
+    # carries `@pytest.mark.live_vault` and so never reaches the gate's `tests` rung — the
+    # gap stays green on a red tree. Carried on #2178's findings, not fixed here.
+    "bench_026_contradiction_supersede_chain": "synthetic",
 }
 
 
