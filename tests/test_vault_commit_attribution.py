@@ -56,6 +56,7 @@ round controls, so those tests carry `live_vault` like the #668 tests next door.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import time
@@ -767,3 +768,367 @@ def test_the_signals_skill_tells_the_job_to_copy_the_list_into_its_run_record():
     # The old form described the behaviour passively; the instruction is the fix,
     # so the imperative verb is asserted rather than the topic.
     assert "Copy" in section, section
+
+
+# ---------------------------------------------------------------------------
+# #2184 clauses 3 and 4: the run record's own precedent lines, corrected.
+# ---------------------------------------------------------------------------
+
+VAULT = Path.home() / "obsidian"
+_VAULT = str(VAULT)
+def _section(text: str, when: str) -> str:
+    """One `## Run <when> (task #24, data pipeline)` section of the run record."""
+    head = f"## Run {when} (task #24, data pipeline)"
+    parts = text.split(head, 1)
+    assert len(parts) == 2, f"the {when} run section is gone"
+    rest = parts[1]
+    nxt = rest.find("\n## Run ")
+    return rest if nxt < 0 else rest[:nxt]
+
+
+VAULT_RECORD_2026_10_04 = Path.home() / "obsidian" / "memory" / "vault-maintenance" / \
+    "2026-10-04.md"
+#: The form three of the four 2026-10-04 run records used: whole commit object
+#: (message included) grepped with a bare word list.
+FLAWED_FORM = "git show --name-only | grep -iE 'MEMORY|USER|SOUL'"
+#: The form #2184 puts in the wrapper: message suppressed, pattern anchored to the
+#: curated filenames `app/harness/protected_paths.py` protects.
+FIXED_PATTERN = r"'(^|/)lloyd/(MEMORY|USER|SOUL)\.md'"
+
+
+def _no_word_list_grep(section: str, label: str) -> None:
+    """Assert the section cites no message-inclusive word-list grep, however the
+    line is wrapped. Comparing on collapsed whitespace is the point: the shape that
+    fooled three 2026-10-04 run records is `git show --name-only | grep -iE
+    'MEMORY|USER|SOUL'`, and a note may legitimately break it across two lines, which
+    is exactly how a one-line substring check misses it and calls the clause green."""
+    flat = " ".join(section.split())
+    flawed = " ".join(FLAWED_FORM.split())
+    assert flawed not in flat, f"{label}: the message-inclusive word-list grep is still cited"
+    # and any *unanchored* pattern that is not accompanied by its own measured count
+    for line in section.splitlines():
+        if "grep -icE" in line and FIXED_PATTERN not in line:
+            assert "→" in line, (
+                f"{label}: an unanchored pattern is quoted without its measured count, "
+                f"so a reader cannot see it is not the deciding form: {line}")
+
+
+def _figure(measurements: dict[str, int], sha: str, *, pretty: bool | None = None,
+            anchored: bool | None = None) -> int:
+    """The stated count for the one quoted command that reads `sha`, optionally
+    filtered by whether it suppresses the commit message and whether its pattern is
+    path-anchored. Looking the line up by its properties rather than rebuilding its
+    text is what keeps this node from failing on the note's own formatting."""
+    hits = []
+    for cmd, stated in measurements.items():
+        if sha not in cmd:
+            continue
+        if pretty is not None and ("--pretty=format:" in cmd) != pretty:
+            continue
+        if anchored is not None and (FIXED_PATTERN in cmd) != anchored:
+            continue
+        hits.append((cmd, stated))
+    assert len(hits) == 1, f"expected exactly one quoted command for {sha} " \
+                           f"(pretty={pretty}, anchored={anchored}), got {hits}"
+    return hits[0][1]
+
+
+def _stated_measurements(section: str) -> list[tuple[str, int]]:
+    """Every `git … | grep … → N` line a section quotes, as (command, stated count).
+
+    The run records carry their evidence as copy-pasteable shell with the figure the
+    run saw beside it. Reading the figure out of the note and re-running the command
+    on the other side is the whole point of #2184: the note's numbers become
+    executable, so a quoted count cannot outlive the git state that produced it."""
+    out = []
+    for line in section.splitlines():
+        line = line.strip()
+        if "→" not in line or not line.startswith("git -C"):
+            continue
+        cmd, _, figure = line.rpartition("→")
+        out.append((cmd.strip(), int(figure.strip())))
+    assert out, "the section quotes no `git … → N` measurement line"
+    return out
+
+
+def _run_measurements(section: str, label: str) -> None:
+    """Re-run each stated measurement and fail naming the one that moved."""
+    for cmd, stated in _stated_measurements(section):
+        proc = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True,
+                              timeout=120)
+        # `grep -c` exits 1 when it prints 0, which is this check's passing answer.
+        assert proc.returncode in (0, 1), f"{label}: {cmd} → rc={proc.returncode}"
+        got = int(proc.stdout.strip() or 0)
+        assert got == stated, f"{label}: {cmd} → the note says {stated}, git says {got}"
+
+
+@pytest.mark.live_vault
+def test_the_08_56Z_record_states_the_anchored_command_and_not_the_returned_nothing_claim():
+    """Clause 3. That section certified `a49a256d` with the flawed grep and described
+    it as coming back empty; the same command returns 7 lines on that commit. The
+    section now quotes the message-suppressed, path-anchored command, and every figure
+    it quotes in that block is re-run here against the real vault repository."""
+    text = VAULT_RECORD_2026_10_04.read_text(encoding="utf-8")
+    section = _section(text, "08:56Z")
+    assert FLAWED_FORM not in section, "the flawed grep is still the cited evidence"
+    _no_word_list_grep(section, "08:56Z")
+    assert "--pretty=format:" in section and FIXED_PATTERN in section, section
+    _run_measurements(section, "08:56Z")
+    # The block has to contain the deciding figure (0 on a49a256d) AND the positive
+    # control, or the anchored pattern could be inert and the section still green.
+    stated = dict(_stated_measurements(section))
+    assert _figure(stated, "a49a256d", pretty=True, anchored=True) == 0, \
+        "the deciding figure: the anchored, message-supplied check reports 0"
+    assert _figure(stated, "a49a256d", pretty=False, anchored=False) == 7, \
+        "the flawed form's own count is stated, not hidden"
+    assert _figure(stated, "30dae7c6", pretty=True, anchored=True) == 1, \
+        "positive control: a commit that really did edit lloyd/MEMORY.md registers 1, " \
+        "so the anchored pattern is not simply inert"
+    for cmd, _ in _stated_measurements(section):
+        assert "a49a256d" in cmd or "30dae7c6" in cmd, \
+            f"08:56Z: a quoted figure does not name the commit it measures: {cmd}"
+
+
+
+@pytest.mark.live_vault
+def test_the_13_15Z_record_states_the_measured_split_of_the_flawed_form():
+    """Clause 4. Its first correction reported the flawed form's 3 lines on
+    `ca546bac` as prose from the message, and that suppression alone would leave 0.
+    Measured: 3 = 1 message line + 2 filenames, message-suppressed-unanchored is 2,
+    anchored is 0. The section states that split and the three figures in its block
+    are re-run here."""
+    text = VAULT_RECORD_2026_10_04.read_text(encoding="utf-8")
+    section = _section(text, "13:15Z")
+    _no_word_list_grep(section, "13:15Z")
+    _run_measurements(section, "13:15Z")
+    stated = dict(_stated_measurements(section))
+    assert _figure(stated, "ca546bac", pretty=False, anchored=False) == 3
+    assert _figure(stated, "ca546bac", pretty=True, anchored=False) == 2, \
+        "message suppression alone leaves 2: the anchor is load-bearing"
+    assert _figure(stated, "ca546bac", pretty=True, anchored=True) == 0
+    for cmd, _ in _stated_measurements(section):
+        assert "ca546bac" in cmd, \
+            f"13:15Z: a quoted figure does not name the commit it measures, which is " \
+            f"how one section's numbers get read as another's: {cmd}"
+
+    # The split's substance is which lines they were, so the section is pinned on the
+    # filenames it enumerates (and on the three figures above), not on how it phrases
+    # them: a rewording that keeps both names and all three counts is still correct.
+    attribution = [f for f in ("memory/audit/writes.jsonl",
+                               "memory/vault-maintenance/2026-10-04.md")
+                   if f in section]
+    assert len(attribution) == 2, \
+        f"the 2-filename half of the split has to name them; found {attribution}"
+    assert re.search(r"1 message line", section), \
+        "the 1-message-line half of the split is no longer attributed to the message"
+
+WITNESS_COPY = REPO_ROOT / "tests" / "data" / "loaded-memory-proof-2026-10-04.md"
+
+
+def _corrected_proof_text() -> str:
+    """The graded text #2184 clauses 3 and 4 are about, in the copy committed to THIS
+    repository. The run record itself lives in the vault repository, so a reviewer
+    standing in `~/lloyd` cannot read it — and the last review of this item reached
+    for a `git show` of a vault file, read the commit *message* instead, and reported
+    the live file as still carrying the flawed grep. These bytes exist so that
+    judgment can be made on the file it names;
+    `test_the_witness_copy_matches_the_vault_record` is what stops it drifting."""
+    return WITNESS_COPY.read_text(encoding="utf-8")
+
+
+def test_the_in_repo_witness_of_the_proof_carries_the_corrected_form_only():
+    """Clauses 3 and 4, on bytes a reader of this repository actually holds.
+
+    Every check here is textual on purpose: no vault commit is needed, so this node
+    runs in the suite with no live-vault marker, and it fails if either passage ever
+    cites the message-inclusive word-list grep (in any line wrapping), quotes an
+    unanchored pattern without its measured count, or drops the measured split."""
+    text = _corrected_proof_text()
+    flat = " ".join(text.split())
+    assert " ".join(FLAWED_FORM.split()) not in flat, \
+        "the flawed grep is cited again, even in a note describing it"
+    assert "--pretty=format:" in text and FIXED_PATTERN in text, text[:200]
+    assert "1 message line" in flat and "2 of the" in flat, \
+        "the 1-message-line + 2-filename split of the flawed form's 3 lines is gone"
+    assert "suppressing the message would leave 0" in flat, \
+        "the correction's own miscount has to stay named, or the anchor's role is lost"
+    anchored = [ln for ln in text.splitlines() if "→" in ln and FIXED_PATTERN in ln]
+    assert len(anchored) == 3, \
+        f"want the anchored figures for a49a256d, ca546bac and the 30dae7c6 control: {anchored}"
+    for line in text.splitlines():
+        if "grep -icE" in line and FIXED_PATTERN not in line:
+            assert "→" in line, f"unanchored form quoted without its count: {line}"
+
+
+@pytest.mark.live_vault
+def test_the_witness_copy_matches_the_vault_record():
+    """The witness is a copy, so it is only evidence while it agrees with the record.
+    Comparing the passages as text (not a hash) means a later edit to the run record
+    that leaves the proof intact still fails this node, and says why: the copy is
+    stale, and the numbers in `~/lloyd` are no longer the ones in `~/obsidian`."""
+    live = VAULT_RECORD_2026_10_04.read_text(encoding="utf-8")
+    witness = _corrected_proof_text()
+    body = witness.split("-->\n", 1)[1]
+    for when in ("08:56Z", "13:15Z"):
+        start = body.index(f"### {when} run")
+        stop = body.find("\n### ", start + 5)
+        passage = body[body.index("\n\n", start) + 2:
+                       len(body) if stop < 0 else stop].rstrip()
+        section = _section(live, when)
+        assert passage in section, (
+            f"the {when} witness no longer appears verbatim in the run record; "
+            f"re-cut {WITNESS_COPY.relative_to(REPO_ROOT)} from the vault file")
+
+
+# ---------------------------------------------------------------------------
+# #2184 clauses 1 and 2: the wrapper emits the check, and the check decides.
+# ---------------------------------------------------------------------------
+
+#: What the emitted line has to be: the commit's file list only (message
+#: suppressed), anchored to the curated loaded-memory filenames, and safe to paste.
+EMITTED_FLAGS = ("--name-only", "--pretty=format:", r"'(^|/)lloyd/(MEMORY|USER|SOUL)\.md'",
+                 "|| true")
+
+
+def _emitted_check(stderr: str) -> str:
+    """The one command line the wrapper emitted on stderr, or a failure naming what
+    it saw. Deliberately strict on count: two emitted checks would mean two forms in
+    circulation, which is how three run records on 2026-10-04 each picked their own."""
+    lines = [ln for ln in stderr.splitlines()
+             if ln.startswith("git ") and "grep" in ln]
+    assert len(lines) == 1, (
+        f"expected exactly one emitted check line at column 0, got {lines}\n"
+        f"in stderr:\n{stderr}")
+    return lines[0]
+
+
+def test_the_wrapper_emits_one_copyable_loaded_memory_check_beside_the_unattributed_list(
+        vault_repo):
+    """Clause 1. #1070 makes an unattributed commit a thing a job has to explain, and
+    the run records then proved the obvious follow-on question ("is a curated
+    loaded-memory file in it?") with a grep over `git show` output — whose input,
+    because the wrapper deliberately writes the same path list into the commit
+    message, contains the claim. The wrapper now has to supply the command that
+    actually answers it, and supplying it must not disturb the block above it."""
+    _write(vault_repo, "memory/audit/writes.jsonl")
+    proc = _run_wrapper(vault_repo, "pipeline: snapshot", paths=None, job=JOB,
+                        writes="knowledge/somebody-elses.md")
+    assert proc.returncode == 0, proc.stderr
+    cmd = _emitted_check(proc.stderr)
+    for flag in EMITTED_FLAGS:
+        assert flag in cmd, f"the emitted check is missing {flag}: {cmd}"
+    # Column 0, because an indented line under the header reads as one of its path
+    # entries — to `_paths_in` below, and to the run record that copies the block.
+    assert cmd.startswith("git "), cmd
+    assert f'git -C "{vault_repo}"' in cmd, f"the check must name this repo: {cmd}"
+    # The emitted check comes BEFORE the list: #1070 makes the list stderr's tail so
+    # a job can copy it verbatim, and the tail is what this file's other nodes pin.
+    stderr = proc.stderr
+    assert stderr.index(cmd) < stderr.index(UNATTRIBUTED), \
+        "the check is printed after the list, so it is the tail a job copies instead"
+    # and it does not contaminate the list it sits beside
+    listed = _paths_in(stderr[stderr.index(UNATTRIBUTED):])
+    assert listed == ["memory/audit/writes.jsonl"], listed
+    # The line is copy-pasteable in the literal sense: it runs, under a caller's
+    # `set -e`, and prints 0 here — `grep -c` exits 1 on the zero it is asked for.
+    run = subprocess.run(["bash", "-c", f"set -e\n{cmd}"], capture_output=True,
+                         text=True, cwd=str(vault_repo), timeout=120)
+    assert run.returncode == 0, f"pasting the emitted line under `set -e` failed: {run.stderr}"
+    assert run.stdout.strip() == "0", run.stdout
+
+
+def test_the_emitted_check_reads_only_the_commit_file_list_the_grepped_form_cannot(
+        vault_repo):
+    """Clause 2, on the item's own fixture: a commit whose MESSAGE BODY names
+    `lloyd/MEMORY.md` and whose DIFF carries only `memory/audit/writes.jsonl`. The
+    emitted check must report 0 there (no loaded-memory path is in the commit), while
+    each half of the flawed form reports at least 1 — the message because the body
+    names the file, the pattern because `memory/...` contains the word `MEMORY`
+    case-insensitively. Asserting the pair is the point: a check that merely never
+    matches anything would pass the first half and be useless."""
+    sha = "HEAD"
+    _write(vault_repo, "memory/audit/writes.jsonl")
+    # The body cites the curated file by its full vault-relative path, the way a real
+    # run record does. That matters: `git show` indents the message body by four
+    # spaces, so a bare `lloyd/MEMORY.md` in prose matches neither `^lloyd/` nor
+    # `/lloyd/` and the fixture would leave the message in the input without ever
+    # proving that its being there is the defect.
+    proc = _run_wrapper(vault_repo,
+                        "pipeline: snapshot — no curated file is in this commit; "
+                        "~/obsidian/lloyd/MEMORY.md, lloyd/USER.md and lloyd/SOUL.md "
+                        "are untouched by this run",
+                        paths=None, job=JOB, writes="knowledge/somebody-elses.md")
+    assert proc.returncode == 0, proc.stderr
+    cmd = _emitted_check(proc.stderr).replace("HEAD", sha)
+    repo = str(vault_repo)
+
+    def count(*, pretty: bool, anchored: bool) -> int:
+        pattern = EMITTED_FLAGS[2] if anchored else "'MEMORY|USER|SOUL'"
+        line = (f"git -C '{repo}' show --name-only"
+                + (" --pretty=format:" if pretty else "")
+                + f" {sha} | grep -icE {pattern}")
+        out = subprocess.run(["bash", "-c", line], capture_output=True, text=True,
+                             timeout=120)
+        assert out.returncode in (0, 1), out.stderr
+        return int(out.stdout.strip() or 0)
+
+    # the fixture is the fixture only if the body really names the file and the diff
+    # really carries only the audit log
+    assert "lloyd/MEMORY.md" in _body(vault_repo), "the message must name the file"
+    assert _commit_paths(vault_repo, sha) == ["memory/audit/writes.jsonl"], \
+        _commit_paths(vault_repo, sha)
+    emitted = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True,
+                             timeout=120)
+    assert emitted.returncode in (0, 1), emitted.stderr
+    assert emitted.stdout.strip() == "0", (
+        f"the emitted check reports a loaded-memory path in a commit that has none: "
+        f"{emitted.stdout!r}")
+    # each flawed half on its own still fires on this commit
+    assert count(pretty=False, anchored=False) >= 1, (
+        "the message-inclusive form was expected to fire on a body naming "
+        "lloyd/MEMORY.md; if it does not, the fixture stopped exercising the defect")
+    assert count(pretty=True, anchored=False) >= 1, (
+        "the message-suppressed unanchored form was expected to fire on the "
+        "memory/audit/writes.jsonl filename; if it does not, the fixture is inert")
+    # Suppressing the message is load-bearing even with the anchor in place: the body
+    # cites `~/obsidian/lloyd/MEMORY.md`, and `/lloyd/MEMORY.md` satisfies the anchor.
+    assert count(pretty=False, anchored=True) >= 1, (
+        "the anchor alone was expected to be defeated by a body that cites the path "
+        "with any leading directory; it is not, so message suppression is decorative")
+    # ...and the emitted line agrees with the anchored form it spells
+    assert int(emitted.stdout.strip() or 0) == count(pretty=True, anchored=True)
+
+
+def test_the_pattern_is_keyed_to_the_curated_set_and_not_to_the_bare_filenames(
+        vault_repo):
+    """The other half of the emitted pattern's job. `app/harness/protected_paths.py`
+    guards `~/obsidian/lloyd/{SOUL,USER,MEMORY}.md` specifically, and a note named
+    `MEMORY.md` anywhere else in the vault is ordinary content the pipeline is
+    expected to commit. An anchored-but-unqualified pattern would report those as the
+    incident, which is the failure mode that gets a guard switched off: this fixture
+    commit carries one such file, and the check the wrapper emits has to walk past it."""
+    # The real shape: a sweep commit that carries the file without the job having
+    # declared it, which is what makes the wrapper print the list and, with it, the
+    # check (clause 1 emits the check beside the list — with nothing unattributed
+    # there is nothing to explain and nothing is emitted).
+    _write(vault_repo, "memory/MEMORY.md", "a daily-note file that happens to be named MEMORY.md\n")
+    proc = _run_wrapper(vault_repo, "pipeline: snapshot of a note",
+                        paths=["memory/MEMORY.md"], job=JOB,
+                        writes="knowledge/somebody-elses.md")
+    assert proc.returncode == 0, proc.stderr
+    cmd = _emitted_check(proc.stderr)
+    assert _commit_paths(vault_repo) == ["memory/MEMORY.md"], _commit_paths(vault_repo)
+    out = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=120)
+    assert out.returncode in (0, 1), out.stderr
+    assert out.stdout.strip() == "0", (
+        f"a note called memory/MEMORY.md is not a curated loaded-memory file, and the "
+        f"emitted check reported otherwise: {out.stdout!r}")
+    # positive control that the emitted pattern is not simply inert: the curated file
+    # itself, in the same repository, does register
+    _write(vault_repo, "lloyd/MEMORY.md", "the curated loaded-memory file\n")
+    _git(vault_repo, "add", "lloyd/MEMORY.md")
+    _git(vault_repo, "commit", "-qm", "a writer that edits the curated file")
+    out = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=120)
+    assert out.stdout.strip() == "1", (
+        f"the emitted check missed a commit that really does carry lloyd/MEMORY.md: "
+        f"{out.stdout!r}")

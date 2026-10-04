@@ -352,6 +352,47 @@ if [ ${#UNATTRIBUTED[@]} -gt 0 ]; then
         REPORT+=$'\n    '"$path"
     done
     MSG_ARGS+=(-m "$BLOCK")
+    # ── the loaded-memory post-flight check, as a command (#2184) ──────────────
+    #
+    # Emitted BEFORE the list and unindented: #1070 makes the list the last thing on
+    # stderr so a job can copy its tail verbatim (this file's tests pin that), and an
+    # indented line under that header would parse as one of its path lines — to the
+    # parser here and to the run record that copies it.
+    #
+    # #1070 makes the job copy the list below into its run record, and #2184 found
+    # what the run records then did with it: they proved "no MEMORY.md, USER.md or
+    # SOUL.md path is in this commit" with
+    #     git show --name-only <sha> | grep -iE 'MEMORY|USER|SOUL'
+    # That input is the whole commit object — message included — and the message
+    # body carries the unattributed list just printed plus, almost always, the
+    # sentence naming those very filenames. The grep was handed the claim it was
+    # being used to prove. Measured on the vault: a49a256d returns 7 lines, 3 of
+    # them message; ca546bac returns 3, 1 of them message. Both verdicts were true;
+    # the quoted evidence was not reproducible. And suppressing the message fixes
+    # neither half on its own — with the word pattern kept and the message
+    # suppressed, memory/audit/writes.jsonl and memory/skills-index.md still match on
+    # their directory word: ca546bac → 2 lines, a49a256d → 4. So emit the reproducible
+    # form: message
+    # suppressed, and the pattern anchored to the three filenames the runtime write
+    # guard protects (app/harness/protected_paths.py:157,224-225), so no path that
+    # merely contains one of those words can satisfy it either. Two formatting rules
+    # this line has to obey, both because #1070 makes the list above copyable: an
+    # INDENTED stderr line under that header reads as a path line to anything that
+    # parses the block (tests/test_vault_commit_attribution.py's `_paths_in` is one,
+    # a job's run record is the other), so the command starts at column 0; and
+    # `|| true` is appended because `grep -c` exits 1 on the zero this check is
+    # looking for, and the line exists to be pasted under a caller's `set -e`.
+    printf '%s\n' \
+        "vault-commit.sh: loaded-memory post-flight check (#2184) — run this once the" \
+        " commit is HEAD and record its output. It reads only that commit's file" \
+        " list, never the message body that names this check, and its pattern is" \
+        " anchored to the curated filenames, so a path merely containing the word" \
+        " memory does not satisfy it. 0 means clear:" >&2
+    printf 'git -C "%s" show --name-only --pretty=format: HEAD | grep -icE %s || true\n' \
+        "$VAULT" "'(^|/)lloyd/(MEMORY|USER|SOUL)\.md'" >&2
+
+    # the list goes last, so its tail is what a job copies (#1070, and the nodes
+    # here that assert stderr's tail is the path list and nothing else)
     echo "$REPORT" >&2
 fi
 
