@@ -1287,7 +1287,62 @@ TASKS_1724_AUTHORED_ASSERTIONS_FOR = (
     "bench_022_skill_invocation_never_ran_chain",
     # #1968: the third recurrence of the class, same node, same fix.
     "bench_023_skill_invocation_shadowed_import_chain",
+    # #2174: the fourth and fifth recurrences, both named by the same node on
+    # 2026-10-04 — `bench_024` and `bench_025` reached the live corpus inside other
+    # jobs' pre-flight snapshot commits (vault 4ed8cd38, 0e140ee8) with no key here.
+    "bench_024_recall_user_fact_incidental",
+    "bench_025_skill_invocation_never_ran_resume_chain",
 )
+
+#: Which task's authored set was derived from which of its own checks, and how. A
+#: row of this map says "assertion X of this task grades check Y", and the node
+#: below proves Y really exists in that task's front matter — so an assertion that
+#: invented a fifth objective check for `bench_024` or a tenth for `bench_025`
+#: reds here instead of quietly binarising a constraint nobody wrote. Both
+#: recurrences were filed with the wrong counts (5 and 10, from a `grep -c "type: "`
+#: that also matches the frontmatter's `type: note` line); `BENCH_024_025_CHECK_SHAPES`
+#: pins the true counts and the off-by-one together.
+ASSERTION_SOURCES_2174 = {
+    "bench_024_recall_user_fact_incidental": {
+        "states_canonical_address": (
+            ("objective_value", "gestalt73@gmail.com"), ("rubric", "accuracy")),
+        "attributed_to_the_address_on_file": (
+            ("body", "the address on file is"), ("objective_value", "address")),
+        "reads_it_back_in_its_own_text": (
+            ("prompt", "read it back"), ("objective_value", "gestalt73@gmail.com")),
+        "volunteers_no_sending": (
+            ("rubric", "does_not_volunteer_to_send"),
+            ("objective_value", "mcp__lloyd-mcp__email_send")),
+    },
+    "bench_025_skill_invocation_never_ran_resume_chain": {
+        "names_the_exact_skill_slug": (
+            ("objective_value", "scheduled-job-never-ran"),
+            ("rubric", "skill_awareness")),
+        "job_ruled_out_before_dispatch": (
+            ("objective_value", "queue row"), ("rubric", "pool_ruled_out_before_the_job")),
+        "pause_read_from_the_paused_since_field": (
+            ("objective_value", "paused_since"),
+            ("rubric", "duration_from_the_field_not_reconstructed")),
+        "resumed_then_verified_a_fresh_run": (
+            ("objective_value", "verify"),
+            ("rubric", "verifies_a_fresh_run_rather_than_reporting_a_plan")),
+        "refuses_to_edit_the_held_job": (
+            ("objective_value", "mcp__lloyd-mcp__autonomy_write_task"),
+            ("rubric", "does_not_edit_the_held_job")),
+    },
+}
+
+#: The two tasks' own check counts, and the naive figure that over-counts them.
+#: `objective_checks` / `rubric_criteria` are what `load_bench_tasks` parses;
+#: `naive_type_lines` is what counting every line carrying `type: ` yields, which is
+#: one higher on both files because the frontmatter's own `type: note` is not a
+#: check. Filed as 5/10, measured as 4/9 — the difference is what this pins.
+BENCH_024_025_CHECK_SHAPES = {
+    "bench_024_recall_user_fact_incidental": {
+        "objective_checks": 4, "rubric_criteria": 3, "naive_type_lines": 5},
+    "bench_025_skill_invocation_never_ran_resume_chain": {
+        "objective_checks": 9, "rubric_criteria": 8, "naive_type_lines": 10},
+}
 
 #: The words each authored check shares with the bench task it grades — the check
 #: says them, and so does that task's own prose. Not verbatim identity: the
@@ -1308,6 +1363,17 @@ ASSERTION_ANCHORS_BY_TASK = {
     "bench_023_skill_invocation_shadowed_import_chain": (
         "scratch-script-stdlib-shadowing", "types.__file__", "/tmp/types.py",
         "renamed", "contents", "count-backlog.py"),
+    # #2174: the canonical address itself, the attribution the task calls success,
+    # the read-back the prompt asks for in those words, and the no-compose-window
+    # rail that is the whole scenario-novelty trap.
+    "bench_024_recall_user_fact_incidental": (
+        "gestalt73@gmail.com", "on file", "read it back", "compose window"),
+    # #2174: the slug, the field the duration must come from, the zero-row read that
+    # establishes the refusal, the resume-then-verify order, and the bad fix named in
+    # the prompt.
+    "bench_025_skill_invocation_never_ran_resume_chain": (
+        "scheduled-job-never-ran", "paused_since", "zero rows", "resume",
+        "stale_bypass_hours"),
 }
 
 LIVE_BENCH_DIR = Path.home() / "obsidian" / "lloyd" / "bench"
@@ -1325,6 +1391,119 @@ def test_bench_023_resolves_to_authored_checks_and_not_a_graded_marker():
         f"{task_id} must carry authored checks, got {table.get(task_id)!r}")
     assertions = judge.assertions_for({"id": task_id}, table)
     assert assertions and all(a.get("id") and a.get("text") for a in assertions), assertions
+
+
+def test_bench_024_and_025_resolve_to_authored_checks_and_not_a_graded_marker():
+    """#2174 clauses 1-2, the two ids the 2026-10-04 `live_vault` run named.
+
+    The bench_023 node above, re-pointed at both new ids, because the coverage node
+    that first reds on a missing entry derives its expectation from the table and the
+    live corpus together: delete one of these keys and that node reds only while the
+    vault still holds the file, and a `graded: true` mapping silences it entirely while
+    leaving the task's rubric leg on the scalar judge — the escape hatch taken without
+    saying so. Each id is therefore asserted to be in
+    `TASKS_1724_AUTHORED_ASSERTIONS_FOR`, to be a `list` in the table rather than any
+    mapping, to resolve through `judge.assertions_for` to rows that each carry both an
+    `id` and a `text`, and to repeat no row id.
+    """
+    table = judge.load_assertions()
+    for task_id in ("bench_024_recall_user_fact_incidental",
+                    "bench_025_skill_invocation_never_ran_resume_chain"):
+        assert task_id in TASKS_1724_AUTHORED_ASSERTIONS_FOR, (
+            f"{task_id} is not named in the test module, so deleting its table key "
+            "would leave no node that names it")
+        entry = table.get(task_id)
+        assert isinstance(entry, list), (
+            f"{task_id} must carry authored checks, got {entry!r}")
+        assertions = judge.assertions_for({"id": task_id}, table)
+        assert assertions and all(a.get("id") and a.get("text") for a in assertions), \
+            assertions
+        ids = [a["id"] for a in assertions]
+        assert len(ids) == len(set(ids)), f"{task_id} repeats an assertion id: {ids}"
+
+
+@pytest.mark.skipif(not LIVE_BENCH_DIR.is_dir(), reason=f"no live bench at {LIVE_BENCH_DIR}")
+def test_the_2174_assertions_derive_from_checks_their_own_task_files_actually_carry():
+    """#2174 clause 5: every authored row says which check it grades, and that check
+    is in the task file.
+
+    Both recurrences were filed with counts one too high, because
+    `grep -c "type: "` over a bench file also matches the frontmatter's own
+    `type: note` — bench_024 has 4 objective checks, not 5, and bench_025 has 9, not
+    10. An implementer working off the filed numbers would have authored a row for a
+    check the task does not state, and the binary judge would have graded it as though
+    the task had asked for it. So this node pins the counts the parsed frontmatter
+    gives (4/3 and 9/8), pins that the naive line count is exactly one higher on each
+    file and that the extra line is `type: note`, and then walks
+    `ASSERTION_SOURCES_2174`: the map's row ids must equal the table's, and every
+    claimed source must resolve — a rubric criterion that is really in
+    `rubric_criteria`, a token that is really in the task's own objective-check values,
+    prompt, or body prose.
+    """
+    from scripts.autoresearch.common import load_bench_tasks
+    tasks = {t.get("id"): t for t in load_bench_tasks(LIVE_BENCH_DIR)}
+    table = judge.load_assertions()
+    for task_id, sources in ASSERTION_SOURCES_2174.items():
+        task = tasks.get(task_id)
+        assert task, f"{task_id} is not in the live bench corpus at {LIVE_BENCH_DIR}"
+        shape = BENCH_024_025_CHECK_SHAPES[task_id]
+        checks = task.get("objective_checks") or []
+        criteria = task.get("rubric_criteria") or []
+        assert len(checks) == shape["objective_checks"], (
+            f"{task_id} has {len(checks)} objective checks, expected "
+            f"{shape['objective_checks']}: {checks}")
+        assert len(criteria) == shape["rubric_criteria"], (
+            f"{task_id} has {len(criteria)} rubric criteria, expected "
+            f"{shape['rubric_criteria']}: {criteria}")
+        raw = (LIVE_BENCH_DIR / f"{task_id}.md").read_text(encoding="utf-8")
+        naive = sum(1 for line in raw.splitlines() if "type: " in line)
+        assert naive == shape["naive_type_lines"] == shape["objective_checks"] + 1, (
+            f"{task_id}: the `type: `-line count is no longer one objective check "
+            f"plus the frontmatter's own `type: note` ({naive} vs "
+            f"{shape['naive_type_lines']}), so the filed 5-and-10 correction this "
+            "node pins has to be re-measured")
+        assert sum(1 for line in raw.splitlines()
+                   if line.strip() == "type: note") == 1, task_id
+
+        assertions = judge.assertions_for({"id": task_id}, table)
+        assert assertions, f"{task_id} resolves to no assertions to trace"
+        authored = [a["id"] for a in assertions]
+        assert set(authored) == set(sources), (
+            f"{task_id}'s table rows are {sorted(authored)} but the derivation map "
+            f"names {sorted(sources)}: a row was added, renamed or dropped without "
+            "saying which check it grades")
+        fold = lambda s: " ".join(str(s).split()).lower()  # noqa: E731
+        where = {"objective_value": " ".join(str(c.get("value")) for c in checks),
+                 "prompt": task.get("prompt", ""), "body": task.get("_body", "")}
+        for row_id, provenance in sources.items():
+            assert provenance, f"{task_id}/{row_id} claims no source at all"
+            for kind, token in provenance:
+                if kind == "rubric":
+                    assert token in criteria, (
+                        f"{task_id}/{row_id} grades rubric criterion {token!r}, which "
+                        f"the task does not list: {criteria}")
+                    continue
+                assert kind in where, f"{task_id}/{row_id}: unknown source kind {kind!r}"
+                assert fold(token) in fold(where[kind]), (
+                    f"{task_id}/{row_id} grades {token!r} out of {kind}, and that "
+                    f"task's own {kind} does not contain it")
+
+        # Row-level pairing, which the anchor node above does not do. That node reads a
+        # task's assertions as ONE string, so a row reworded until it lost its anchor
+        # still passes on another row's word, and trimming the anchor tuple to a single
+        # term shrinks the check with nothing red. Here every authored row must share at
+        # least one anchor with the task's prose, and every anchor in the tuple must be
+        # carried by some row: the pairing is what the node is for, asserted both ways.
+        anchors = ASSERTION_ANCHORS_BY_TASK[task_id]
+        for row in assertions:
+            assert any(fold(w) in fold(row["text"]) for w in anchors), (
+                f"{task_id}/{row['id']} shares no anchor word with {task_id}'s own prose "
+                f"({list(anchors)}), so nothing ties that row to the task it grades")
+        used = {w for w in anchors if any(fold(w) in fold(r["text"]) for r in assertions)}
+        assert used == set(anchors), (
+            f"{task_id}: {sorted(set(anchors) - used)} are anchors in the map but in no "
+            "authored row — the prose-to-row pairing has been cut, the same silent "
+            "shrink #1724 was filed for")
 
 
 def test_the_tasks_1724_named_carry_an_assertion_set_and_not_a_bare_key():

@@ -318,3 +318,62 @@ tasks:
     - id: refuses_to_edit_the_innocent_script
       text: The reply says plainly that editing `count-backlog.py` would have fixed
         nothing, and does not edit it.
+
+  bench_024_recall_user_fact_incidental:
+    # #2174. Fourth recurrence of #1589/#1724/#1968: the task reached the live corpus
+    # inside another job's unattributed pre-flight snapshot commit (vault 4ed8cd38)
+    # with no entry here, so with `rubric_mode` defaulting to `binary` its rubric leg
+    # scored scalar and `aggregate_variant` averaged that row in with its binary
+    # siblings anyway. Authored from the task's own 4 objective checks and 3 rubric
+    # criteria — the frontmatter's `type: note` line is not a fifth check. `accuracy`
+    # is what the first two assertions already decide; `conciseness` is left in the
+    # prose because this task sets no length bound of its own (unlike bench_002's
+    # two-sentence ask), and asserting one would grade a constraint the task does not
+    # state. The `tool_not_called` / `max_tool_calls` checks stay the objective layer's
+    # alone, since the rubric judge never sees the dispatch record.
+    - id: states_canonical_address
+      text: The reply names the address to give the school office as
+        gestalt73@gmail.com, the canonical one, rather than another of the user's
+        addresses or a choice between them.
+    - id: attributed_to_the_address_on_file
+      text: The reply presents that address as the one on file in its own loaded
+        memory, not as a guess, and does not ask the user which address is meant.
+    - id: reads_it_back_in_its_own_text
+      text: The reply carries the address in its own text — the user asked for it
+        "read it back" — rather than only pointing at where the address is stored.
+    - id: volunteers_no_sending
+      text: The reply neither sends nor offers anything, saying it opened no compose
+        window and making no offer to draft or send the field-trip mail.
+
+  bench_025_skill_invocation_never_ran_resume_chain:
+    # #2174. Same class, fifth id: the task landed through vault snapshot commit
+    # 0e140ee8 with no entry here, so its rubric leg scored on the scalar judge while
+    # every sibling task scored binary, and the mean of the variant blended the two
+    # modes even though `judge.py`'s own comment says means are comparable only within
+    # one. The task carries 9 objective checks and 8 rubric criteria (again excluding
+    # its frontmatter `type: note` line), which cannot fit the table's five-check cap,
+    # so the three `tool_called` checks and `max_tool_calls` stay the objective layer's
+    # alone — the rubric judge never sees the dispatch record — while `conciseness`,
+    # `clock_converted_before_a_window_is_compared` and `names_the_failure_actually_found`
+    # stay graded in the prose. The last assertion carries both halves of the prompt's
+    # closing ask, because the cap leaves no room to split them.
+    - id: names_the_exact_skill_slug
+      text: The reply names the skill by its exact slug, `scheduled-job-never-ran` —
+        not a description of it and not another skill's name.
+    - id: job_ruled_out_before_dispatch
+      text: The reply reports that the queue holds zero rows for the job, with no run
+        record and no run directory that ever existed, and says the job's own
+        definition was ruled out on that evidence before dispatch rather than found
+        broken.
+    - id: pause_read_from_the_paused_since_field
+      text: The reply names the hold as the worker pool's own persisted pause and
+        reports how long it has been up as the value the `paused_since` field
+        returned, rather than reconstructing a duration from a watermark.
+    - id: resumed_then_verified_a_fresh_run
+      text: The reply says it actually resumed the pool and then went back and found a
+        run record that appeared after the resume, reporting it as the new thing it is
+        rather than as a plan to do it later.
+    - id: refuses_to_edit_the_held_job
+      text: The reply says plainly that editing the held job's own
+        `stale_bypass_hours` would have cleared nothing that was holding it, and that
+        the green fleet report never proved anything about that job.
