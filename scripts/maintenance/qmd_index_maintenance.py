@@ -85,6 +85,17 @@ SAFETY CONTRACT — this runs unattended:
     the daemon actually reads, and records it as `config_drift` in the dated
     report (#1298). Drift is a report entry and never an exit code: the job that
     fixes embeddings must not start failing over a stale tracked copy.
+  * Every run also measures whether one configured collection's root contains
+    another's, as `collection_overlap` (#2180). Two files agreeing is not the same
+    property as one collection swallowing the others' directories: `subliminal` is
+    rooted at the vault itself while all eleven other vault collections are
+    subdirectories of it, so every one of those files is indexed a second time, and
+    the run printed "template and live collections agree" over 6,423 redundant
+    `documents` rows (13,328 active rows over 6,905 distinct hashes, measured
+    read-only 2026-10-04). Report-only like drift, and for the same reason: the fix
+    is a scope decision plus a config edit plus a re-index of what the serving
+    daemon retrieves, which is a person's call (#844:141-142). It never changes the
+    exit code and this job never narrows a collection.
   * Every run measures the files beside the live index and reports them as `stray`
     plus `stray_bytes` (#1598), and an acting run keeps exactly the newest
     `index.sqlite.bak*` copy — never one it cannot fall back on, and never one a
@@ -949,6 +960,196 @@ def config_drift(template: Path = TEMPLATE_CONFIG, live: Path = LIVE_CONFIG) -> 
     return out
 
 
+# ---- #2180: one collection's root swallowing another collection's root -------
+#
+# `config_drift` answers "do the two files agree?", and on the live box they do —
+# while one of the collections they both agree on, `subliminal`, is rooted at the
+# vault itself (`path: /home/alansrobotlab/obsidian`, `pattern: "**/*.md"`,
+# `ignore:` two entries) and every other vault collection is a subdirectory of it.
+# So each of those files is indexed twice, once per collection, and the nightly has
+# printed "template and live collections agree" over 6,423 redundant `documents`
+# rows — 13,328 active rows over 6,905 distinct hashes, measured read-only on
+# 2026-10-04. Containment *within* one config is a different property from
+# agreement *between* two configs, and nothing read it: `git grep -n containment`
+# over this file returns nothing before #2180.
+#
+# What the duplication costs is the `documents` table and `documents_fts` (the
+# `documents_ai` trigger inserts one FTS row per active document row), the 934 MB
+# of index around them, and the duplicate candidates the merge step then folds —
+# not the vector store: `content_vectors` is keyed `(hash, seq)` and `vectors_vec`
+# `hash_seq`, so a file's embeddings exist once however many collections index it.
+
+
+def _root_of(spec: dict) -> str | None:
+    """A collection's root as containment judges it, or None when it has none.
+
+    `None` is the shape `_qmd_collections` already hands back for a collection whose
+    body is not a mapping (`vault: qmd`, one mistyped line), so a broken definition
+    costs that collection its pairs instead of taking the run down with a KeyError.
+    Expanding `~` and normalising means `/a/b/`, `~me/a/b` and `/a/./a/b` all compare
+    as the root they name.
+    """
+    raw = spec.get("path")
+    if not raw:
+        return None
+    return os.path.normpath(os.path.expanduser(str(raw)))
+
+
+def _contains(outer: str, inner: str) -> bool:
+    """True when `outer` is a strict directory prefix of `inner`.
+
+    Prefix-matched on normalised paths with the separator required: `/a/obsidian`
+    contains `/a/obsidian/memory`, but not `/a/obsidianary`, and never itself — two
+    collections pointed at one directory is a name-level question, not containment,
+    and reporting it as containment would bury the real pairs under every alias of
+    the same root.
+    """
+    return inner.startswith(outer + os.sep)
+
+
+def collection_overlap(index: Path | None = None,
+                       live: Path = LIVE_CONFIG) -> dict:
+    """Measure collections whose roots contain other collections' roots (#2180).
+
+    Every pair of *configured* collections where one root is a strict path prefix of
+    the other is listed in `pairs` naming `containing` and `contained`, and carrying
+    `shared_documents`: how many of the containing collection's active `documents`
+    rows have a hash that also appears in the contained one. On the live config that
+    is eleven pairs, all `subliminal` over one of the eleven vault subdirectories,
+    and their counts sum to the 6,390 that `subliminal` measures on 2026-10-04 —
+    2,824 knowledge, 2,138 backlog, 682 memory, 273 skills, 196 projects, 80 lloyd,
+    57 work, 42 autonomy, 36 architecture, 31 personal, 31 people. The same figure
+    per containing collection is in `by_containing`, which counts each document once
+    however many collections nested inside it hold it.
+
+    `documents`, `distinct_hashes`, `redundant_rows` and `duplication_ratio` measure
+    the whole index the way the item's verification command does — `select count(*),
+    count(distinct hash), count(*) - count(distinct hash) from documents where
+    active = 1` — so this block alone shows a fix working: 13,328 rows / 6,905 hashes
+    / 6,423 redundant at ratio 1.93 today, and 0 redundant at 1.0 once every file is
+    indexed once.
+
+    Two properties of the counts are stated rather than smoothed over: a pair counts
+    *rows* of the containing side, so two documents holding one identical file under
+    the containing root count twice — which is the duplication being reported, not an
+    error in it — and in a chain (A contains B contains C) the (A,C) documents sit
+    inside the (A,B) pair too, so pair counts sum to at least the `by_containing`
+    aggregate rather than exactly to it.
+
+    Read-only, and never an action: the index opens `mode=ro`, nothing here edits a
+    config, narrows a collection or rebuilds an index, and the caller's exit code
+    does not read this block. Narrowing or dropping a live collection changes what
+    the serving daemon retrieves and costs a re-index of a 934 MB index, which is a
+    person's decision and their command (#844:141-142 rules a deletion out on the
+    same ground), and `config_drift` is the precedent for reporting a finding of this
+    kind without acting on it.
+
+    Nothing raises. An unreadable index reports `note` with the reason and keeps the
+    pairs it could read off the config, with their counts `None` — a check that takes
+    the nightly down when a file is missing is a check that stops being read, and a 0
+    there would read as "nothing shared" on the one run that could not look. A config
+    whose collections have no readable paths (every body malformed) yields
+    `overlap_count: 0` with no note: that is the measured answer, and `config_drift`
+    names those collections separately as `malformed`.
+    """
+    index = INDEX if index is None else index
+    out: dict = {
+        "live_config": str(live),
+        "index": str(index),
+        "pairs": [],
+        "overlap_count": 0,
+        "by_containing": {},
+        "shared_documents": 0,
+        "documents": None,
+        "distinct_hashes": None,
+        "redundant_rows": None,
+        "duplication_ratio": None,
+    }
+    colls, note, _malformed = _qmd_collections(live)
+    if note:
+        out["note"] = note
+        return out
+    roots = {n: _root_of(spec) for n, spec in colls.items()}
+    named = sorted(n for n, r in roots.items() if r)
+    # The pairs are a fact about the CONFIG, so they are listed before the index is
+    # opened and stay listed when that open fails: what this rung exists to catch is
+    # a root that swallows its siblings, and a missing index does not make that true.
+    out["pairs"] = [{"containing": c, "contained": o,
+                     "containing_root": roots[c], "contained_root": roots[o],
+                     "shared_documents": None}
+                    for c, o in ((c, o) for c in named for o in named
+                                 if c != o and _contains(roots[c], roots[o]))]
+    out["overlap_count"] = len(out["pairs"])
+    try:
+        con = sqlite3.connect(f"file:{index}?mode=ro", uri=True, timeout=30)
+    except sqlite3.Error as e:
+        out["note"] = (f"index unreadable at {index}: {e!r} — the containment pairs "
+                       "above are read off the config, but no shared-hash or "
+                       "duplication figure was measured")
+        return out
+    try:
+        for p in out["pairs"]:
+            p["shared_documents"] = _shared_docs(con, p["containing"],
+                                                 [p["contained"]], out)
+        for containing in sorted({p["containing"] for p in out["pairs"]}):
+            nested = sorted({p["contained"] for p in out["pairs"]
+                             if p["containing"] == containing})
+            out["by_containing"][containing] = _shared_docs(con, containing, nested,
+                                                            out)
+        out["shared_documents"] = sum(out["by_containing"].values())
+        try:
+            rows, hashes = con.execute(
+                "select count(*), count(distinct hash) from documents"
+                " where active = 1").fetchone()
+            out["documents"] = int(rows)
+            out["distinct_hashes"] = int(hashes)
+            # `redundant_rows` is the rows above 1:1, so the ratio and it are the
+            # same finding in two units: 1.0 exactly when no two collections hold the
+            # same content, and then 0 rows. A zero-row index has no hash to divide
+            # by and reports 1.0 — the no-duplication answer, not a ZeroDivisionError.
+            out["redundant_rows"] = int(rows) - int(hashes)
+            out["duplication_ratio"] = round(rows / hashes, 4) if hashes else 1.0
+        except sqlite3.Error as e:
+            out.setdefault("errors", []).append(f"duplicate-row count: {e!r}")
+    finally:
+        con.close()
+    return out
+
+
+def _shared_docs(con: sqlite3.Connection, containing: str,
+                 contained: list[str], out: dict) -> int:
+    """Active docs of `containing` whose hash also sits in one of `contained`.
+
+    The item's own verification query, parameterised, and run once per pair (then
+    once per containing collection across all of its contained ones) so every figure
+    in the report is the figure that query prints by hand against the same file:
+
+        select count(*) from documents s
+         where s.active = 1 and s.collection = 'subliminal'
+           and exists (select 1 from documents o
+                        where o.active = 1 and o.hash = s.hash
+                          and o.collection != 'subliminal')
+
+    A sqlite error — an index with no `documents` table, say — lands in `errors` and
+    reads as 0 for that figure rather than raising: a nightly that dies on a missing
+    table reports nothing at all, which is the failure this rung exists to close.
+    """
+    sql = (
+        "select count(*) from documents s"
+        " where s.active = 1 and s.collection = ?"
+        "   and exists (select 1 from documents o"
+        "               where o.active = 1 and o.hash = s.hash"
+        f"                 and o.collection in ({', '.join('?' * len(contained))}))"
+    )
+    try:
+        n = con.execute(sql, [containing, *contained]).fetchone()[0]
+    except sqlite3.Error as e:
+        out.setdefault("errors", []).append(
+            f"{containing} -> {'/'.join(contained)}: {e!r}")
+        return 0
+    return int(n)
+
+
 # ---- #1992: the side-copy rebuild, as a route a person invokes ----------------
 #
 # VEC0_REBUILD_RULED_OUT rules the rebuild out as an action of the nightly job and
@@ -1370,6 +1571,14 @@ def main() -> int:
     # Read the two collection definitions fresh, from the module-level paths, so
     # a caller (or a test) that moves those moves this check with them.
     report["config_drift"] = config_drift(TEMPLATE_CONFIG, LIVE_CONFIG)
+    # #2180, read the same way and for the reason right above: drift compares the
+    # two files with each other, so it prints "template and live collections agree"
+    # about a config in which one collection's root contains every other vault
+    # collection's. Containment within one file is a separate measurement, and
+    # report-only for the same reason drift is — narrowing a live collection changes
+    # what the daemon retrieves and costs a re-index, which is a person's decision
+    # and not this job's (#844:141-142).
+    report["collection_overlap"] = collection_overlap(INDEX, LIVE_CONFIG)
 
     need_prune = args.force or (
         before.get("orphan_ratio", 0) >= ORPHAN_RATIO_TRIGGER
@@ -1626,6 +1835,34 @@ def _emit(r: dict, as_json: bool) -> None:
             print(f"      {cd.get('resync_command')}")
         else:
             print("  qmd config        template and live collections agree")
+    # Printed on every run that measured it, agreement or no agreement (#2180): the
+    # sentence above is what the finding hid behind, so the two belong on one screen.
+    # A run with nothing to report still prints the row — a line that appears only
+    # when something is wrong cannot be told apart from a check that never ran, the
+    # reasoning #1598 already applied to strays.
+    co = r.get("collection_overlap")
+    if co:
+        if co.get("note"):
+            print(f"  collection overlap  not measured: {co['note']}")
+        if co["pairs"]:
+            by_cont: dict[str, list[str]] = {}
+            for p in co["pairs"]:
+                by_cont.setdefault(p["containing"], []).append(p["contained"])
+            print(f"  collection overlap  {co['overlap_count']} containment pair(s):")
+            for name in sorted(by_cont):
+                print(f"                    {name} contains {', '.join(by_cont[name])}")
+            for name, shared in co["by_containing"].items():
+                print(f"                    {name}: {shared:,} of its active docs"
+                      f" shared with a collection nested inside it")
+        else:
+            print("  collection overlap  0 containment pairs — no collection root"
+                  " holds another")
+        if co.get("documents") is not None:
+            print(f"  duplicate rows      {co['documents']:,} active docs / "
+                  f"{co['distinct_hashes']:,} hashes = {co['redundant_rows']:,}"
+                  f" redundant (ratio {co['duplication_ratio']})")
+        for err in co.get("errors", []):
+            print(f"                    not measured: {err}")
     for act in r["actions"]:
         print(f"    · {act}")
     if "daemon_healthy" in r:

@@ -1106,6 +1106,21 @@ def _retention_run(monkeypatch, tmp_path, index_dir: Path, repo_root: Path, *,
     monkeypatch.setattr(m, "REPO_ROOT", repo_root)
     monkeypatch.setattr(m, "inspect_index", lambda: {
         "orphan_ratio": 0.0, "vectors_orphaned": 0})
+    # #2180 adds a second reader of the index, and it has to be stubbed beside
+    # `inspect_index` for the same reason that one is. The trio beside these fixtures
+    # is `b"\0" * n`, not a database, and sqlite opens a WAL-mode file by writing its
+    # wal-index into the `-shm` — so an unstubbed #2180 open grew the fixture's
+    # 200-byte `-shm` to 32,768 and the `--dry-run` byte-identity case below read it
+    # as the run changing the directory. That is sqlite's behaviour on any read of a
+    # WAL database, `inspect_index` included, so on a real box this adds no new kind
+    # of write to a run that already opens `~/.cache/qmd/index.sqlite?mode=ro` first;
+    # here the helper's contract is "the only thing this run can do is the retention
+    # pass", and the block's own figures are pinned by the #2180 cases at the end of
+    # this file, over a fixture that really is a database.
+    monkeypatch.setattr(m, "collection_overlap", lambda *a, **k: {
+        "pairs": [], "overlap_count": 0, "by_containing": {}, "shared_documents": 0,
+        "documents": 4000, "distinct_hashes": 4000, "redundant_rows": 0,
+        "duplication_ratio": 1.0, "note": "stubbed index reader (#2180)"})
     monkeypatch.setattr(m, "pending_embeddings", lambda: 0)
     monkeypatch.setattr(m, "daemon_healthy", lambda retries=10: True)
     argv = ["qmd_index_maintenance.py"]
@@ -2323,3 +2338,389 @@ def test_dry_run_of_the_route_prints_its_commands_and_touches_nothing(monkeypatc
     assert _stat_listing(d) == before
     assert not m.side_config_path(SIDE).exists()
     assert not (tmp_path / "reflection").exists()
+
+
+# --- #2180: one configured collection's root swallowing another collection's ---
+#
+# `config_drift` compares the two collection files with each other, and on the live
+# box they agree (`{"drift_count": 0, "in_sync": true}`, run read-only on
+# 2026-10-04) while the live file roots `subliminal` at the vault itself —
+# `path: /home/alansrobotlab/obsidian`, `pattern: "**/*.md"`, `ignore:` two entries
+# — and all eleven other vault collections are subdirectories of it. Every one of
+# those files is therefore indexed twice, once per collection. Measured the same
+# day, read-only: 13,328 active `documents` rows over 6,905 distinct hashes (6,423
+# rows above 1:1, ratio 1.93), and 6,390 of subliminal's active documents share a
+# hash with a collection nested inside it, across 11 containment pairs. The nightly
+# printed "template and live collections agree" over all of it, because path
+# containment *within* one config is a different property from agreement *between*
+# two configs and nothing read it.
+#
+# Fixtures here are a tmp_path config and a tmp_path sqlite file in the same shapes
+# at 1/1300th the size: no case below opens ~/.config/qmd/index.yml or
+# ~/.cache/qmd/index.sqlite.
+
+NESTED = """\
+collections:
+  vault:
+    path: /home/me/obsidian
+    pattern: "**/*.md"
+    ignore:
+      - agents/**
+  memory:
+    path: /home/me/obsidian/memory
+    pattern: "**/*.md"
+  knowledge:
+    path: /home/me/obsidian/knowledge
+    pattern: "**/*.md"
+  notes:
+    path: /home/me/obsidian/notes/2026
+    pattern: "**/*.md"
+  runs:
+    path: /home/me/lloyd-data/autonomy-runs
+    pattern: "*/run_*.md"
+"""
+
+#: (collection, path, hash, active) — the same content indexed under both the
+#: containing `vault` root and its own collection, plus `runs` outside the vault
+#: and `loose.md` held by the containing root alone. `gone.md`/h7 exists on both
+#: sides as an INACTIVE pair, so a figure that ignored `active` cannot match.
+NESTED_ROWS = [
+    # One file, indexed twice: once by the collection that owns its directory, once
+    # by the containing `vault` root reaching over it.
+    ("memory", "a.md", "h1", 1),
+    ("memory", "b.md", "h2", 1),
+    ("knowledge", "c.md", "h3", 1),
+    ("notes", "d.md", "h4", 1),
+    ("vault", "memory/a.md", "h1", 1),
+    ("vault", "memory/b.md", "h2", 1),
+    ("vault", "knowledge/c.md", "h3", 1),
+    ("vault", "notes/2026/d.md", "h4", 1),
+    # Held by the containing root alone: counts toward the index-wide ratio and
+    # toward no pair, which is why vault's aggregate is 4 and not 5.
+    ("vault", "loose.md", "h5", 1),
+    # Rooted outside the vault: in neither half of any pair, in no figure.
+    ("runs", "r1/run_1.md", "h9", 1),
+    # Deactivated on both sides, and the two rows underneath are the one-sided
+    # cases: h8 active only under the containing root, h6 active only inside the
+    # contained collection. Each kills exactly one dropped `active = 1`.
+    ("memory", "gone.md", "h7", 0),
+    ("vault", "memory/gone.md", "h7", 0),
+    ("memory", "old.md", "h8", 1),
+    ("vault", "memory/old.md", "h8", 0),
+    ("vault", "notes/2026/kept.md", "h6", 1),
+    ("notes", "2026/kept.md", "h6", 0),
+]
+
+
+def _overlap_index(path: Path, rows: list[tuple[str, str, str, int]]) -> Path:
+    """A `documents` table in qmd's shape (collection, path, hash, active)."""
+    import sqlite3
+    con = sqlite3.connect(path)
+    con.execute("create table documents(id integer primary key, collection text not null,"
+                " path text not null, hash text not null, active integer not null default 1)")
+    con.executemany("insert into documents(collection, path, hash, active) values (?,?,?,?)",
+                    rows)
+    con.commit()
+    con.close()
+    return path
+
+
+def _overlap_env(tmp_path: Path, rows: list[tuple[str, str, str, int]],
+                 config: str = NESTED) -> tuple[Path, Path]:
+    """(config, index) both under tmp_path: the config to read, the index to measure.
+
+    The index sits alone in its own `qmd/` directory, so a run through main() scans
+    a stray-file pile of exactly one file — the live index itself — which is what
+    makes the assertion that nothing new appeared beside it mean something.
+    """
+    cfg = tmp_path / "index.yml"
+    cfg.write_text(config)
+    idx = tmp_path / "qmd" / "index.sqlite"
+    idx.parent.mkdir(parents=True, exist_ok=True)
+    return cfg, _overlap_index(idx, rows)
+
+
+def _pairs(overlap: dict) -> set[tuple[str, str]]:
+    return {(p["containing"], p["contained"]) for p in overlap["pairs"]}
+
+
+# --- clause 1: every containment pair, named on both sides --------------------
+
+def test_a_collection_root_that_holds_another_collections_root_is_listed_by_both_names(
+        tmp_path):
+    """`vault` is rooted at /home/me/obsidian and three collections sit inside it,
+    so all three pairs are listed naming the containing and the contained one;
+    `runs`, rooted outside, is in neither half of any pair."""
+    cfg, idx = _overlap_env(tmp_path, NESTED_ROWS)
+    ov = m.collection_overlap(index=idx, live=cfg)
+    assert ov["overlap_count"] == len(ov["pairs"]) == 3, ov["pairs"]
+    assert _pairs(ov) == {("vault", "memory"), ("vault", "knowledge"),
+                          ("vault", "notes")}
+    assert {p["containing_root"] for p in ov["pairs"]} == {"/home/me/obsidian"}
+    assert {p["contained_root"] for p in ov["pairs"]} == {
+        "/home/me/obsidian/memory", "/home/me/obsidian/knowledge",
+        "/home/me/obsidian/notes/2026"}
+
+
+def test_a_chain_of_nested_roots_lists_every_containing_pair_not_only_the_innermost(
+        tmp_path):
+    """A ⊃ B ⊃ C is three pairs, not one: the live config is a one-level fan-out, so
+    a rung that reported only the tightest holder would report nothing wrong with a
+    root that swallows a whole tree two levels down."""
+    cfg, idx = _overlap_env(tmp_path, NESTED_ROWS, config="""\
+collections:
+  vault:
+    path: /home/me/obsidian
+  area:
+    path: /home/me/obsidian/memory
+  deep:
+    path: /home/me/obsidian/memory/learnings
+""")
+    ov = m.collection_overlap(index=idx, live=cfg)
+    assert _pairs(ov) == {("vault", "area"), ("vault", "deep"), ("area", "deep")}, ov
+    assert ov["overlap_count"] == 3
+
+
+def test_two_collections_sharing_one_root_are_not_reported_as_containing_each_other(
+        tmp_path):
+    """Equal roots are a name-level question, not containment: `/a/obsidian` and
+    `/a/obsidianary` do not contain one another either, so the separator has to be
+    required rather than the prefix alone."""
+    cfg, idx = _overlap_env(tmp_path, NESTED_ROWS, config="""\
+collections:
+  one:
+    path: /home/me/obsidian/memory
+  two:
+    path: /home/me/obsidian/memory
+  near:
+    path: /home/me/obsidianary
+""")
+    ov = m.collection_overlap(index=idx, live=cfg)
+    assert ov["pairs"] == [] and ov["overlap_count"] == 0, ov
+
+
+def test_a_collection_body_that_is_not_a_mapping_contributes_no_root_and_no_pair(
+        tmp_path):
+    """The shape `config_drift` already survives (`vault: qmd` where a `path:` block
+    belongs): one mistyped line has to cost that collection's pairs, not the run."""
+    cfg, idx = _overlap_env(tmp_path, NESTED_ROWS, config="""\
+collections:
+  vault: qmd
+  memory:
+    path: /home/me/obsidian/memory
+""")
+    ov = m.collection_overlap(index=idx, live=cfg)
+    assert ov["pairs"] == [] and ov["overlap_count"] == 0, ov
+
+
+# --- clause 2: each pair carries the containing side's shared-hash doc count ---
+
+def test_each_containment_pair_carries_the_containing_collections_shared_hash_count(
+        tmp_path):
+    """How many of the CONTAINING collection's active documents have a hash that
+    also appears in the contained one. The live config's eleven pairs sum to the
+    6,390 measured against `subliminal` on 2026-10-04; here the three pairs are
+    2 (memory), 1 (knowledge) and 1 (notes), and `vault`'s own aggregate is 4,
+    because `loose.md` is held by the containing root alone. h6 and h8 are the two
+    one-sided `active` cases — h6 active under `vault` and inactive in `notes`, h8
+    the other way — so a query that drops either side's `active = 1` lifts notes to
+    2 or memory to 3, and this node says so."""
+    cfg, idx = _overlap_env(tmp_path, NESTED_ROWS)
+    ov = m.collection_overlap(index=idx, live=cfg)
+    per_pair = {(p["containing"], p["contained"]): p["shared_documents"]
+                for p in ov["pairs"]}
+    assert per_pair == {("vault", "memory"): 2, ("vault", "knowledge"): 1,
+                        ("vault", "notes"): 1}, per_pair
+    assert ov["by_containing"] == {"vault": 4}
+    assert ov["shared_documents"] == 4
+
+
+def test_only_active_documents_count_toward_a_pairs_shared_hash_figure(tmp_path):
+    """Three rows are deactivated, each killing a different one-sided reading:
+    `gone.md` (h7) under both roots, `old.md` (h8) only under the containing `vault`
+    root, and `kept.md` (h6) only inside the contained `notes`. Read every row and
+    memory says 3, notes says 2 and vault says 6 — the clause's figures are the
+    ACTIVE documents, which are 2, 1 and 4."""
+    cfg, idx = _overlap_env(tmp_path, NESTED_ROWS)
+    ov = m.collection_overlap(index=idx, live=cfg)
+    per_pair = {(p["containing"], p["contained"]): p["shared_documents"]
+                for p in ov["pairs"]}
+    assert per_pair[("vault", "memory")] == 2, "an inactive containing row was counted"
+    assert per_pair[("vault", "notes")] == 1, "an inactive contained row was matched"
+    assert ov["by_containing"]["vault"] == 4
+
+
+# --- clause 3: the index-wide duplication ratio, measured read-only -----------
+
+def test_the_block_carries_the_active_document_duplication_ratio_of_the_whole_index(
+        tmp_path):
+    """count(*) / count(distinct hash) over active documents, the item's own
+    verification command: 12 active rows over 8 distinct hashes here is 4 redundant
+    rows at a ratio of 1.5, where the 2026-10-04 live index reported 13,328 rows over
+    6,905 hashes — 6,423 redundant at 1.93 — and a de-duplicated index is 1.0 with
+    0 redundant."""
+    cfg, idx = _overlap_env(tmp_path, NESTED_ROWS)
+    ov = m.collection_overlap(index=idx, live=cfg)
+    assert ov["documents"] == 12 and ov["distinct_hashes"] == 8
+    assert ov["redundant_rows"] == 4
+    assert ov["duplication_ratio"] == round(12 / 8, 4) == 1.5
+
+
+def test_an_index_with_no_rows_reports_the_no_duplication_answer_not_a_division_error(
+        tmp_path):
+    """Zero active rows means no distinct hash to divide by: the answer is 1.0 with
+    0 redundant, and the containment pairs are still listed from the config."""
+    cfg, idx = _overlap_env(tmp_path, [])
+    ov = m.collection_overlap(index=idx, live=cfg)
+    assert ov["documents"] == 0 and ov["distinct_hashes"] == 0
+    assert ov["redundant_rows"] == 0 and ov["duplication_ratio"] == 1.0
+    assert ov["overlap_count"] == 3, "containment is a config fact, not a row count"
+    assert all(p["shared_documents"] == 0 for p in ov["pairs"])
+
+
+def test_the_overlap_check_never_writes_the_index_and_only_ever_opens_it_read_only(
+        tmp_path, monkeypatch):
+    """The run that reports someone else's index must not be the run that changes
+    it: every sqlite open of the fixture is `file:...?mode=ro` with `uri=True`, and
+    the bytes beside it are identical afterwards."""
+    cfg, idx = _overlap_env(tmp_path, NESTED_ROWS)
+    before = idx.read_bytes()
+    import sqlite3
+    real_connect, opened = sqlite3.connect, []
+
+    def recording_connect(database, *a, **k):
+        opened.append((str(database), dict(k)))
+        return real_connect(database, *a, **k)
+
+    monkeypatch.setattr(m.sqlite3, "connect", recording_connect)
+    ov = m.collection_overlap(index=idx, live=cfg)
+    monkeypatch.setattr(m.sqlite3, "connect", real_connect)
+    assert ov["documents"] == 12 and ov["overlap_count"] == 3
+    idx_opens = [(db, k) for db, k in opened if "index.sqlite" in db]
+    assert idx_opens, "the check never opened the index it reports figures for"
+    for db, k in idx_opens:
+        assert db.startswith("file:") and db.endswith("?mode=ro") and k.get("uri") is True, db
+    assert idx.read_bytes() == before
+
+
+# --- clause 4: report-only — no containment means an empty list, and nothing ---
+# --- the finding is allowed to change: not the exit code, not a config, not    ---
+# --- a collection.                                                             ---
+
+DISJOINT = """\
+collections:
+  memory:
+    path: /home/me/obsidian/memory
+    pattern: "**/*.md"
+  knowledge:
+    path: /home/me/obsidian/knowledge
+    pattern: "**/*.md"
+  runs:
+    path: /home/me/lloyd-data/autonomy-runs
+    pattern: "*/run_*.md"
+"""
+
+
+def test_a_config_where_no_root_contains_another_yields_an_empty_overlap_list(tmp_path):
+    """Two disjoint collections holding ONE identical file: the index is still
+    duplicated (3 rows over 2 hashes, 1 redundant), and `overlap_count` is still 0
+    with no pairs — the list is keyed on configured roots, not on shared hashes, so
+    a fix that narrows `subliminal` makes this line green without touching the
+    ratio's own numbers."""
+    cfg, idx = _overlap_env(
+        tmp_path,
+        [("memory", "a.md", "h1", 1), ("knowledge", "c.md", "h1", 1),
+         ("runs", "r1/run_1.md", "h9", 1)],
+        config=DISJOINT)
+    ov = m.collection_overlap(index=idx, live=cfg)
+    assert ov["pairs"] == [] and ov["overlap_count"] == 0, ov
+    assert ov["by_containing"] == {} and ov["shared_documents"] == 0
+    assert ov["documents"] == 3 and ov["distinct_hashes"] == 2
+    assert ov["redundant_rows"] == 1
+
+
+def _overlap_run(monkeypatch, tmp_path, config: str,
+                 rows: list[tuple[str, str, str, int]]) -> dict:
+    """Run main() over a fixture config pair and a fixture index, and return the
+    report plus the bytes the run was not allowed to change.
+
+    `inspect_index`, `pending_embeddings` and `daemon_healthy` are the unrelated
+    collaborators stubbed for the same reasons `_run_main` gives: this case is
+    about the containment block reaching the dated report with the exit code and
+    the operator's files untouched.
+    """
+    cfg, idx = _overlap_env(tmp_path, rows, config=config)
+    tmpl = tmp_path / "qmd-index.yml"
+    tmpl.write_text(config)
+    idx_dir = idx.parent
+    idx_before, cfg_before = idx.read_bytes(), cfg.read_bytes()
+    monkeypatch.setattr(m, "TEMPLATE_CONFIG", tmpl)
+    monkeypatch.setattr(m, "LIVE_CONFIG", cfg)
+    monkeypatch.setattr(m, "REPORT_DIR", tmp_path / "reflection")
+    monkeypatch.setattr(m, "INDEX", idx)
+    monkeypatch.setattr(m, "inspect_index",
+                        lambda: {"orphan_ratio": 0.0, "vectors_orphaned": 0})
+    monkeypatch.setattr(m, "pending_embeddings", lambda: 0)
+    monkeypatch.setattr(m, "daemon_healthy", lambda retries=10: True)
+    monkeypatch.setattr(sys, "argv", ["qmd_index_maintenance.py"])
+    rc = m.main()
+    reports = sorted((tmp_path / "reflection").glob("qmd-index-maintenance-*.json"))
+    assert len(reports) == 1, reports
+    return {"rc": rc, "report": json.loads(reports[0].read_text()),
+            "idx_after": idx.read_bytes(), "idx_before": idx_before,
+            "cfg_after": cfg.read_bytes(), "cfg_before": cfg_before,
+            "dir_after": sorted(p.name for p in idx_dir.iterdir())}
+
+
+def test_finding_overlap_changes_no_exit_code_no_config_and_no_collection(
+        monkeypatch, tmp_path):
+    """The live config yields drift_count 0 — the two files agree — and 3 overlap
+    pairs at once, which is the whole acceptance for #2180: the nightly can no
+    longer print "template and live collections agree" with a vault-wide collection
+    swallowing the others behind it. Report-only means the run still exits 0, the
+    operator's config and the index it measured are byte-identical afterwards, and
+    the index directory has gained no file."""
+    r = _overlap_run(monkeypatch, tmp_path, NESTED, NESTED_ROWS)
+    rep = r["report"]
+    assert r["rc"] == 0, "finding overlap moved the job's exit code"
+    assert rep["config_drift"]["in_sync"] is True and rep["config_drift"]["drift_count"] == 0
+    ov = rep["collection_overlap"]
+    assert ov["overlap_count"] == 3 and ov["by_containing"] == {"vault": 4}
+    assert ov["duplication_ratio"] == 1.5
+    assert rep["need_prune"] is False and rep["need_embed"] is False
+    assert r["cfg_after"] == r["cfg_before"], "the check narrowed someone's collection"
+    assert r["idx_after"] == r["idx_before"], "the check wrote the index it reports"
+    assert r["dir_after"] == ["index.sqlite"], r["dir_after"]
+
+
+def test_the_nightly_output_says_what_agreement_between_the_files_did_not(
+        monkeypatch, tmp_path, capsys):
+    """The printed run, not just the JSON: the agreement line and the containment
+    line have to be on the same screen, since the first is what the finding hid
+    behind."""
+    _overlap_run(monkeypatch, tmp_path, NESTED, NESTED_ROWS)
+    printed = capsys.readouterr().out
+    assert "template and live collections agree" in printed, printed
+    assert "3 containment pair(s)" in printed, printed
+    assert "vault contains knowledge, memory, notes" in printed, printed
+    assert "vault: 4 of its active docs" in printed, printed
+    assert "12 active docs / 8 hashes = 4 redundant (ratio 1.5)" in printed, printed
+
+
+def test_a_missing_index_is_reported_as_not_measured_rather_than_raising(tmp_path):
+    """The nightly runs beside whatever state the index happens to be in; a check
+    that raises when the file is absent is a check that stops the report.
+
+    The containment pairs still come through, because they are a fact about the
+    config, and their counts stay `None` — a 0 there would read as "nothing is
+    shared" on the one run that could not look.
+    """
+    cfg = tmp_path / "index.yml"
+    cfg.write_text(NESTED)
+    ov = m.collection_overlap(index=tmp_path / "nope" / "index.sqlite", live=cfg)
+    assert "unreadable" in ov["note"], ov
+    assert ov["overlap_count"] == 3 and _pairs(ov) == {
+        ("vault", "memory"), ("vault", "knowledge"), ("vault", "notes")}, ov
+    assert all(p["shared_documents"] is None for p in ov["pairs"]), ov
+    assert ov["documents"] is None and ov["duplication_ratio"] is None
+    assert ov["by_containing"] == {} and ov["shared_documents"] == 0
