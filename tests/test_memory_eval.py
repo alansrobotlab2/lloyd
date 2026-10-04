@@ -1212,3 +1212,228 @@ def test_the_vault_witness_of_the_unbounded_baseline_reproduces_its_quoted_numbe
         "the copy asserts the original carried no label field; check it still holds"
     assert str(witness["source_file"]).endswith(
         "lloyd-data/eval/1480/runs/lloydmemeval-baseline-2026-09-25.json")
+# ── #2201: `--char-budget`, and the rawspan result priced at two budgets ────
+
+#: The measurement doc this round adds, and the two committed artifacts it is
+#: ported from. The vault carries the bytes because `~/lloyd-data/eval/1480/runs/`
+#: is a mutable directory the eval commands rewrite on every run — a rate quoted
+#: from it is unreproducible the week it is written.
+DOC = Path(__file__).resolve().parents[1] / "eval" / "measurements" / \
+    "prefetch-rawspan-2026-09-27.md"
+WITNESS_DIR = Path.home() / "obsidian" / "backlog" / "data"
+ART_1200 = "prefetch-retrieval-prefetch_rel-prefetch_rawspan.json"
+ART_2400 = "prefetch-retrieval-prefetch_rel-prefetch_rawspan-budget2400.json"
+
+
+def _budget_spy(monkeypatch):
+    """Record the budget each render call was handed, then call through.
+
+    The arms differ only in how they render one selection, so what a 300-char run
+    has to guarantee is that all three renders were ASKED FOR at 300. A call that
+    quietly falls back on the module default is recorded at 1200 and turns this
+    red — which is the failure mode a flag wired only into the parser produces:
+    the artifact says 300 while one arm still rendered at 1200, and the "budget"
+    being compared is two different experiments.
+    """
+    seen: list[tuple[str, int]] = []
+    real_apply, real_span = M.apply_char_budget, M.render_rawspan_lines
+
+    def apply_(lines, *a, **kw):
+        b = a[0] if a else kw.get("budget", M.FACTS_RENDER_CHAR_BUDGET)
+        kept, cut = real_apply(lines, *a, **kw)
+        seen.append(("apply_char_budget", b, len(lines), len(kept), cut))
+        return kept, cut
+
+    def span_(records, *a, **kw):
+        seen.append(("render_rawspan_lines",
+                     kw.get("budget", M.FACTS_RENDER_CHAR_BUDGET), 0, 0, 0))
+        return real_span(records, *a, **kw)
+
+    monkeypatch.setattr(M, "apply_char_budget", apply_)
+    monkeypatch.setattr(M, "render_rawspan_lines", span_)
+    return seen
+
+
+def _budget_run(tmp_path, monkeypatch, extra_argv):
+    """One question, one selection of four facts, the three prefetch arms, and the
+    flag passed straight through to `prefetch_retrieval`.
+
+    Four records rather than the two `_rawspan_records` returns because the point
+    being measured is a ceiling biting: two distilled lines total 225 characters and
+    fit inside 300, so a smaller selection would let a flag that was parsed and then
+    dropped pass a bite check.
+    """
+    _plant_sources(tmp_path, monkeypatch)
+    seen = _budget_spy(monkeypatch)
+
+    def select(query, rank):
+        recs = _rawspan_records()
+        return recs + [_record("Acme Freight", "Acme Freight quotes 12 euros per crate",
+                               "notes/bilbao.md", conf=0.8),
+                       _record("Northwind Traders", "Northwind Traders ships from two docks",
+                               "notes/northwind.md", conf=0.6)]
+
+    out = M.prefetch_retrieval(
+        ["--set", str(make_set(tmp_path, {"knowledge_update": 1})),
+         "--corpus", str(tmp_path / "corpus"),
+         "--out-dir", str(tmp_path / "runs"),
+         "--arms", "prefetch,prefetch_rel,prefetch_rawspan"] + list(extra_argv),
+        select=select)
+    return out, seen
+
+
+def test_char_budget_defaults_to_the_shipped_render_budget(tmp_path, monkeypatch):
+    """Clause 1: no flag means 1200 — the constant, in the artifact and on disk.
+
+    Both the artifact body and its NAME are checked: at the shipped default the
+    name is the one every existing reference points at, and only off the default
+    does the budget go into it. That is what keeps a second-budget run from
+    silently overwriting the 2026-09-27 artifact that sits beside it.
+    """
+    out, seen = _budget_run(tmp_path, monkeypatch, [])
+    assert out["char_budget"] == 1200 == M.FACTS_RENDER_CHAR_BUDGET
+    assert out["window_chars"] == 200 == M.rawspan_window_chars(1200)
+    assert {row[1] for row in seen} == {1200}, seen
+    runs = tmp_path / "runs"
+    # Three arms were asked for, so the default label is all three names.
+    assert out["_path"] == str(runs / "prefetch-retrieval-"
+                               "prefetch-prefetch_rel-prefetch_rawspan.json")
+    assert (tmp_path / "runs" / "prefetch-retrieval-"
+            "prefetch-prefetch_rel-prefetch_rawspan.json").is_file()
+    assert not list(runs.glob("*budget*.json")), \
+        "an unflagged run must not acquire a budget-suffixed name"
+
+    # Passing the default explicitly is the same run: the flag adds a number, it
+    # does not change what the number means.
+    second = tmp_path / "second"
+    second.mkdir()
+    again, _ = _budget_run(second, monkeypatch, ["--char-budget", "1200"])
+    # Everything the artifact reports except the wall-clock timings, which cannot
+    # be equal between two runs of the same thing and are not part of the result.
+    keys = ("n", "leg", "char_budget", "window_chars", "by_category", "rawspan_counts",
+            "comparison", "arms")
+    assert {k: again[k] for k in keys} == {k: out[k] for k in keys}
+
+
+def test_char_budget_reaches_all_three_arms_through_one_helper(tmp_path, monkeypatch):
+    """Clause 2: `--char-budget 300` renders `prefetch`, `prefetch_rel` and
+    `prefetch_rawspan` at 300, and the artifact reports 300 rather than 1200.
+
+    The bite is asserted too: four 144-character lines are 576 characters, so at a
+    300 ceiling `n_budget_cut` is non-zero and `n_rendered` is below `n_selected`.
+    An artifact that recorded the flag without rendering to it would show 0 cuts.
+    """
+    out, seen = _budget_run(tmp_path, monkeypatch, ["--char-budget", "300"])
+    assert out["n"] == 1
+    assert seen and {row[1] for row in seen} == {300}, seen
+    assert {row[0] for row in seen} == {"apply_char_budget", "render_rawspan_lines"}, \
+        "both render paths must go through the one budget-capped helper"
+    assert out["char_budget"] == 300
+    assert out["window_chars"] == M.rawspan_window_chars(300) == 50
+    art = json.loads(Path(out["_path"]).read_text(encoding="utf-8"))
+    assert art["window_chars"] == 50
+    assert art["char_budget"] == 300 and art["argv"][-2:] == ["--char-budget", "300"]
+    # The cap actually bit rather than being recorded and ignored: at least one
+    # render call was handed more lines than it returned. Whether a GIVEN arm bites
+    # at 300 depends on how long its lines are — the rawspan arm renders a 50-char
+    # window there and may fit — so the bite is asserted at the helper that owns
+    # the ceiling, over the four-record selection this run selects.
+    assert any(row[4] >= 1 for row in seen), \
+        f"nothing was cut at 300 characters, so the flag was recorded, not applied: {seen}"
+    cell = art["by_category"]["all"]["rawspan_counts"]
+    # All four facts resolve (both source docs are planted), so the span rule ran on
+    # every one of them at a 50-character window — 3 rendered, 1 could not find a
+    # span, which is the arm's own rule and not a budget effect.
+    assert cell["n_selected"] == 4 and cell["n_unresolved_source"] == 0, cell
+
+
+def test_an_unflagged_run_and_the_shipped_prefetch_defaults_are_unchanged(
+        tmp_path, monkeypatch):
+    """Clause 3's other half: the flag is a CLI default, not a moved constant.
+
+    Production imports `app/prefetch.py`; this round changes neither that module
+    nor the eval's shipped budget, so the pin is the number the flag defaults TO
+    (1200, with its 200-character window) and the fact that no budget knob was
+    added to the shipped path for the eval to have moved.
+    """
+    import app.prefetch as P
+
+    assert M.FACTS_RENDER_CHAR_BUDGET == 1200
+    assert M.rawspan_window_chars() == 200
+    assert not [n for n in dir(P) if "CHAR_BUDGET" in n.upper()], \
+        "app/prefetch.py gained a char-budget knob; the shipped default is not this " \
+        "round's to move"
+    out, _ = _budget_run(tmp_path, monkeypatch, [])
+    assert (out["char_budget"], out["window_chars"]) == (1200, 200)
+
+
+def test_the_measurement_doc_exists_and_carries_the_1200_result():
+    """Clause 4: the write-up exists and is the shape the item asked for.
+
+    Every number below is read out of the committed 1200-char artifact in the same
+    test, so the doc and its witness are pinned against each other: a figure edited
+    in one and not the other goes red here rather than in someone's quotation of it.
+    """
+    assert DOC.is_file(), f"missing {DOC}"
+    text = DOC.read_text(encoding="utf-8")
+    art = json.loads((WITNESS_DIR / ART_1200).read_text(encoding="utf-8"))
+
+    # The all-row, and each category's diff with its 95% paired interval.
+    allc = art["comparison"]["by_category"]["all"]
+    assert allc["n"] == art["n"] == 267
+    assert allc["a"] == 0.5169 and allc["b"] == 0.221
+    assert text.count("0.5169") >= 2 and "0.2210" in text
+    assert "-0.296" in text and "[-0.360, -0.236]" in text, "the all-row is not quoted"
+    for cat, cell in art["comparison"]["by_category"].items():
+        if cat == "all":
+            continue                                  # the all-row, asserted above
+        assert f"`{cat}`" in text, f"{cat} missing from the doc"
+        assert f"{cell['diff']:+.4f}".lstrip("+") in text, f"{cat} diff missing: {cell}"
+        assert f"{cell['ci'][0]:.4f}".lstrip("-") in text and \
+            f"{cell['ci'][1]:.4f}".lstrip("-") in text, f"{cat} CI missing: {cell}"
+
+    # All five counters, in the doc's own table, at both budgets. The row form is
+    # asserted rather than the bare number so a figure can only pass by sitting in
+    # the counter row it belongs to.
+    art24 = json.loads((WITNESS_DIR / ART_2400).read_text(encoding="utf-8"))
+    assert art["rawspan_counts"] == {"n_selected": 1421, "n_unresolved_source": 18,
+                                     "n_no_span": 0, "n_budget_cut": 452,
+                                     "n_rendered": 951}
+    assert set(art["rawspan_counts"]) == set(M.RAWSPAN_COUNT_KEYS)
+    for key in M.RAWSPAN_COUNT_KEYS:
+        row = f"| `{key}` | {art['rawspan_counts'][key]} | {art24['rawspan_counts'][key]} |"
+        assert row in text, f"counter row missing or wrong: {row}"
+
+    # Both artifact paths, and where the committed copy lives.
+    assert ART_1200 in text and ART_2400 in text
+    assert str(WITNESS_DIR.relative_to(WITNESS_DIR.parent.parent)) in text
+
+
+def test_the_measurement_doc_prices_the_budget_and_retires_the_gpu_leg():
+    """Clause 5: the same doc carries the 2400-char repeat, the retirement, and
+    the condition that would reopen it.
+
+    The sign did NOT flip at 2400 — `prefetch_rawspan` rose 0.2210 → 0.3184 and the
+    interval still excludes 0 — so what the doc must state is the condition under
+    which the "distilled >= raw" claim could not be quoted, not a claim about a run
+    that did not happen.
+    """
+    text = DOC.read_text(encoding="utf-8")
+    art = json.loads((WITNESS_DIR / ART_2400).read_text(encoding="utf-8"))
+
+    assert art["n"] == 267 and art["char_budget"] == 2400 and art["window_chars"] == 400
+    assert art["rawspan_counts"]["n_selected"] == 1421
+    allc = art["comparison"]["by_category"]["all"]
+    assert allc["a"] == 0.5169 and allc["b"] == 0.3184
+    assert allc["diff"] == -0.1985 and allc["ci"] == [-0.2584, -0.1386]
+    for token in ("0.3184", "-0.1985", "-0.2584", "-0.1386", "n_budget_cut"):
+        assert token in text, f"{token} missing from the 2400 section"
+
+    # The ruling that retired the GPU leg, named by its ledger id, and the
+    # condition that would bring it back.
+    assert "20261004_141754_owedcheck_07e8" in text
+    assert "retired" in text and "GPU" in text
+    assert "distilled >= raw" in text or "distilled \u2265 raw" in text
+    assert "flip" in text and "must not be quoted" in text
+    assert "no model call" in text or "without a model call" in text or \
+        "modelled leg" in text, "the doc must say the run touched no engine"

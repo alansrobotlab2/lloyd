@@ -1581,6 +1581,14 @@ def prefetch_retrieval(argv: list[str] | None = None, *, select=None) -> dict:
     the char budget cut travel beside the rates, so a low rawspan number can be
     read as a rendering result rather than mistaken for a provenance gap.
 
+    `--char-budget` (#2201) re-renders all three arms at another budget with the
+    SELECTION held fixed — which is the only way to ask whether a rawspan shortfall
+    at 1200 characters is a property of its span rule or of the ceiling it is
+    squeezed by, since that run cut 452 of the 1,421 records it had selected. The
+    shipped default stays 1200 and an unflagged run is byte-comparable with the
+    artifacts written since 2026-09-27; a run at another budget is a different
+    experiment, so its budget goes in its artifact name as well as its body.
+
     `select` is the selection call, injectable for tests; by default it is
     `app.prefetch._search_fact_records` — the same function the modelled arms
     render from, so the two arms in this comparison are sharing a selection here
@@ -1596,7 +1604,24 @@ def prefetch_retrieval(argv: list[str] | None = None, *, select=None) -> dict:
     ap.add_argument("--label", default=None,
                     help="artifact suffix; the arm pair by default, so a run of the pair "
                          "lands beside the modelled run's artifact and is found by name")
+    ap.add_argument("--char-budget", type=int, default=FACTS_RENDER_CHAR_BUDGET,
+                    help=f"per-arm render budget in characters (#2201). {FACTS_RENDER_CHAR_BUDGET} "
+                         f"is what ships and what every artifact predating this flag was "
+                         f"written at, and it is the default here so an unflagged rerun is "
+                         f"byte-comparable with them. It moves all three prefetch arms — each "
+                         f"reaches it through the one apply_char_budget — and the rawspan "
+                         f"window follows it as rawspan_window_chars(budget).")
     args = ap.parse_args(argv)
+    # A budget below 1 is not "unlimited", it is the empty render all three arms
+    # agree on, and the disagreement this command exists to measure would read as
+    # agreement. Refuse it at the parser rather than publish that as a rate.
+    if args.char_budget < 1:
+        ap.error(f"--char-budget must be at least 1, got {args.char_budget}")
+    budget = args.char_budget
+    # The budget belongs in the artifact's NAME as well as its body: a second
+    # artifact written beside the 1200 one under the same name would overwrite the
+    # 2026-09-27 witness, and the two would be indistinguishable until opened.
+    budget_suffix = "" if budget == FACTS_RENDER_CHAR_BUDGET else f"-budget{budget}"
     arms = parse_arms(args.arms)
     label = args.label or "-".join(arms)
     os.environ.setdefault("LLOYD_FACTS_ROOT", str(Path(args.corpus) / "facts"))
@@ -1620,9 +1645,13 @@ def prefetch_retrieval(argv: list[str] | None = None, *, select=None) -> dict:
         if want_rel:
             rel_records = select(q.prompt, "relevance")
         t2 = time.perf_counter()
-        conf_lines, _ = apply_char_budget([r["line"] for r in (conf_records or [])])
-        rel_lines, rel_cut = apply_char_budget([r["line"] for r in (rel_records or [])])
-        span_lines, span_counts = render_rawspan_lines(rel_records or [])
+        # All three arms, one number (#2201): each call passes `budget` explicitly
+        # instead of falling back on the module default, so a --char-budget 300 run
+        # cannot leave one arm rendering at 1200 and turn the comparison into a
+        # budget mismatch rather than the representation one it claims to be.
+        conf_lines, _ = apply_char_budget([r["line"] for r in (conf_records or [])], budget)
+        rel_lines, rel_cut = apply_char_budget([r["line"] for r in (rel_records or [])], budget)
+        span_lines, span_counts = render_rawspan_lines(rel_records or [], budget=budget)
         row = {"id": q.id, "category": q.category,
                "ms_conf": (t1 - t0) * 1e3, "ms_rel": (t2 - t1) * 1e3,
                "conf": gold_in(q, "\n".join(conf_lines)) if want_conf else None,
@@ -1641,7 +1670,10 @@ def prefetch_retrieval(argv: list[str] | None = None, *, select=None) -> dict:
                  "set": {"version": ms.version, "set_sha": ms.set_sha,
                          "label_status": ms.label_status},
                  "label_quality": label_quality(ms),
-                 "char_budget": FACTS_RENDER_CHAR_BUDGET, "by_category": {}}
+                 # The number the run actually rendered at, not the constant: an
+                 # artifact of a 2400 run that said 1200 would make the two budgets
+                 # indistinguishable to anyone who did not have the command line.
+                 "char_budget": budget, "by_category": {}}
     for cat in CATEGORIES + ("all",):
         rs = [r for r in rows if cat == "all" or r["category"] == cat]
         if not rs:
@@ -1669,7 +1701,7 @@ def prefetch_retrieval(argv: list[str] | None = None, *, select=None) -> dict:
         # absent block would read as "the arm did not run".
         out["rawspan_counts"] = {k: sum(r["rawspan_counts"][k] for r in rows)
                                  for k in RAWSPAN_COUNT_KEYS}
-        out["window_chars"] = rawspan_window_chars()
+        out["window_chars"] = rawspan_window_chars(budget)
     a_arm, b_arm = RENDER_PAIR
     if a_arm in arms and b_arm in arms:
         comp: dict = {"a": a_arm, "b": b_arm, "metric": "gold_in_block",
@@ -1701,13 +1733,20 @@ def prefetch_retrieval(argv: list[str] | None = None, *, select=None) -> dict:
     # reading and its modelled counterpart sit side by side.
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"prefetch-retrieval-{label}.json"
+    # The budget belongs in the artifact's NAME as well as its body (#2201): a run at
+    # another budget under the pair's default label would otherwise overwrite the
+    # 2026-09-27 1200-char witness sitting beside it, and the two files would be
+    # indistinguishable until opened. At the shipped default the suffix is empty, so
+    # an unflagged run still writes the file every existing reference names.
+    path = out_dir / f"prefetch-retrieval-{label}{budget_suffix}.json"
     written = {"argv": list(argv), "generated_at": _dt.datetime.now().isoformat(timespec="seconds"),
                "arms": arms, "facts_root": os.environ.get("LLOYD_FACTS_ROOT"), **out}
     path.write_text(json.dumps(written, indent=1, default=str) + "\n")
     out["_path"] = str(path)
     print(json.dumps(out, indent=1))
-    print(f"wrote {path}", file=sys.stderr)
+    print(f"prefetch-retrieval n={out['n']} leg={out['leg']} "
+          f"char_budget={out['char_budget']} "
+          f"window_chars={out.get('window_chars', '-')} -> {path}", file=sys.stderr)
     return out
 
 
