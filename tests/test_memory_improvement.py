@@ -1294,6 +1294,211 @@ def test_a_kit_flag_and_an_isaac_lab_property_are_not_one_predicate():
         "See https://github.com/isaac-sim/IsaacLab/pull/5941.") == set()
 
 
+# ── #2199: the entity's own identifier is not a shared predicate ─────────────
+#
+# #2078 requires one identifier-shaped token BOTH facts name before an equal-
+# confidence pair may be expired as `superseded`. Measured on the live corpus,
+# that bar was free to clear for an entity written by a dotted, hyphenated id:
+# `_PREDICATE_TOKEN_RE` cuts `anthropic.claude-code` at the hyphen and returns
+# `anthropic.claude`, a FRAGMENT of the entity's own identifier, so every fact
+# about that extension co-named every other one. The witness then named the
+# alphabetically-first shared token, which is how the vacuous one displaced the
+# real field `metadata.pinned` in the `reason` a reviewer reads
+# (`backlog/data/20261004-210010-dryrun.json`, 1052 lines).
+#
+# The fix is name-based, not length-based: `_MIN_PREDICATE_TOKEN_LEN` stays 4,
+# because `metadata.pinned` (15) and `anthropic.claude` (16) both clear it today.
+
+#: The item's probe: two facts whose only co-naming is the entity's own dotted,
+#: hyphenated identifier. Before #2199 this pair shared `anthropic.claude`.
+_PROBE_OLDER = "anthropic.claude-code ships a TUI affordance"
+_PROBE_NEWER = "anthropic.claude-code supports a planning mode"
+
+
+def test_an_identifier_cut_at_its_hyphen_is_not_a_shared_predicate():
+    """Clause 1: the item's probe returns None, and the reason is the cut.
+
+    The guard is the truncation, not the dot: a dotted identifier the text
+    actually writes that way is still a predicate, and a real predicate in the
+    same sentence as a cut identifier survives with it."""
+    from agent_mcp.fact_improvement import (
+        _MIN_PREDICATE_TOKEN_LEN, _predicate_tokens, _shared_predicate)
+
+    assert _shared_predicate(_PROBE_OLDER, _PROBE_NEWER) is None
+    assert _predicate_tokens(_PROBE_OLDER) == set(), (
+        "the extension id is still yielding its pre-hyphen fragment")
+    # Not a length rule: `metadata.pinned` is longer than the fragment, so a
+    # raised floor would have removed neither. The floor is untouched.
+    assert _MIN_PREDICATE_TOKEN_LEN == 4
+    assert "metadata.pinned" in _predicate_tokens("metadata.pinned was set")
+    # A whole token beside a cut one is kept — the cut, not the dot, is excluded.
+    assert _predicate_tokens("sim.has_gui is set by anthropic.claude-code only") == {
+        "sim.has_gui"}
+    # And an identifier the corpus really does write this way is still a token.
+    assert _predicate_tokens("The split is documented in agent_mcp/facts.py.") == {
+        "agent_mcp/facts.py"}
+
+
+def test_the_pair_s_own_entity_name_and_its_aliases_are_not_predicates():
+    """Clause 2: the exclusion narrows the basis without silencing it.
+
+    A token that IS the subject — the entity's own name, a prefix of it, or a
+    known alias — answers a different question than #2078 asked: this scan is
+    already entity-scoped, so every pair in the entity's file co-names it. What
+    the bar is for, a predicate both facts name ABOUT that entity, still counts,
+    and so does a token LONGER than the name, which is a field of the subject."""
+    from agent_mcp.fact_improvement import _shared_predicate
+
+    # The entity's own dotted name, written whole in both rows.
+    assert _shared_predicate("claude.code skipped the 09-30 sweep",
+                             "claude.code installed nothing on 10-01",
+                             entity="claude.code") is None
+    # A PREFIX of it: the entity is `claude.code.extensions`, the rows co-name
+    # the shorter spelling. Equality alone would have let this through.
+    assert _shared_predicate("claude.code is pinned", "claude.code is unpinned",
+                             entity="claude.code.extensions") is None
+    # A KNOWN ALIAS the caller names, over an entity whose display name is prose.
+    assert _shared_predicate("claude.code is pinned", "claude.code is unpinned",
+                             entity="Claude Code", aliases=["claude.code"]) is None
+    # A genuine predicate about that same entity still stands …
+    assert _shared_predicate("claude.code reads metadata.pinned as true",
+                             "claude.code reads metadata.pinned as false",
+                             entity="Claude Code",
+                             aliases=["claude.code"]) == "metadata.pinned"
+    # … and so does a deeper field: longer than the name, so not the name.
+    assert _shared_predicate("claude.code.enabled is true",
+                             "claude.code.enabled is false",
+                             entity="claude.code") == "claude.code.enabled"
+
+
+def test_the_alias_look_up_in_the_store_and_a_missing_store_is_not_a_crash(world,
+                                                                           monkeypatch):
+    """The alias half crosses into `app.kg_store`, so it is tested across that.
+
+    `aliases=` is the caller's own knowledge; the store's alias table is what
+    says two spellings are one entity for a caller that did not pass anything.
+    And `StoreUnavailable` is a real state on this box (#1236): the guard loses
+    its alias half there and keeps the half read off the entity name — a missing
+    store must not raise inside a nightly scan, and must not silently disable
+    the exclusion the caller handed it either.
+    """
+    facts_root, st, _ = world
+    st.aliases.set("claude.code", "Claude Code", kind="punct", origin="test")
+    st.aliases.set("claude.code.plugin", "Claude Code", kind="semantic", origin="test")
+    assert {r["surface"] for r in st.aliases.for_canonical("Claude Code")} == {
+        "claude.code", "claude.code.plugin"}, "the alias rows did not land"
+    # Both rows name the alias AND a real field: only the field may count.
+    assert fi._shared_predicate("claude.code.plugin reads metadata.pinned",
+                                "metadata.pinned says claude.code.plugin is set",
+                                entity="Claude Code") == "metadata.pinned"
+    # Both rows name ONLY the alias: nothing is predicated in common.
+    assert fi._shared_predicate("claude.code.plugin skipped the sweep",
+                                "claude.code.plugin installed nothing",
+                                entity="Claude Code") is None
+
+    monkeypatch.setattr(fi, "_store",
+                        lambda: (_ for _ in ()).throw(fi._StoreUnavailable("no db")))
+    # With no store that alias is unreadable, so the pair is admitted on it again
+    # — the loss is real and bounded to the alias half.
+    assert fi._shared_predicate("claude.code.plugin is pinned",
+                                "claude.code.plugin is unpinned",
+                                entity="Claude Code") == "claude.code.plugin"
+    # A caller that handed its own alias in is not affected by the missing store.
+    assert fi._shared_predicate("claude.code.plugin is pinned",
+                                "claude.code.plugin is unpinned",
+                                entity="Claude Code",
+                                aliases=["claude.code.plugin"]) is None
+    # The name half needed no store: `claude.code` and `Claude Code` are one name
+    # written two ways, and `_name_form` says so without asking the database.
+    assert fi._shared_predicate("claude.code is pinned", "claude.code is unpinned",
+                                entity="Claude Code") is None
+
+
+def test_the_witness_names_every_shared_token_not_the_alphabetically_first():
+    """Clause 3: `sorted(shared)[0]` reported the weak token and hid the real
+    field, so a reviewer reading `reason` could not tell a vacuous co-naming
+    from a genuine one — #701's "name what admitted it" implemented as "name one
+    thing that admitted it", with the alphabet choosing."""
+    from agent_mcp.fact_improvement import _shared_predicate
+
+    older = "The pin on claude.code held: metadata.pinned was true in extensions.json."
+    newer = "The sweep skipped claude.code because metadata.pinned was set in extensions.json."
+    witness = _shared_predicate(older, newer, entity="Claude Code",
+                                aliases=["claude.code"])
+    assert witness == "extensions.json, metadata.pinned", witness
+    assert "metadata.pinned" in witness, "the real field was displaced again"
+    assert "claude.code" not in witness, "the subject is still in its own witness"
+    # One token, one name: the single-token string is that token, unchanged.
+    assert _shared_predicate("metadata.pinned is true", "metadata.pinned is false",
+                             entity="Claude Code") == "metadata.pinned"
+
+
+def test_planning_and_the_write_seam_refuse_the_entity_name_pair_alike(world):
+    """Clause 4: one pair, one verdict, at both seams.
+
+    Before the entity was threaded through, the two could disagree by
+    construction: `_shared_predicate(t1, t2)` took only the two texts, so the
+    write seam in `apply_action` asked a strictly weaker question than the
+    planner. A pair whose only co-naming is the entity's own alias is keyword-
+    only at plan time and refused at write time, and the alias it declines on
+    comes from the store both seams read."""
+    facts_root, st, _ = world
+    st.aliases.set("claude.code", "Claude Code", kind="punct", origin="test")
+    _write_facts(facts_root, "Claude Code", "update", [
+        {"fact": "The claude.code auto-update gate is disabled.",
+         "created_at": _days_ago(30), "confidence": 0.95},
+        {"fact": "The claude.code auto-update gate is enabled.",
+         "created_at": _days_ago(0), "confidence": 0.95},
+    ])
+    _reindex(st, facts_root)
+    plan = fi.plan_entity("Claude Code")
+    assert plan["pairs_before"] == 1, plan
+    assert plan["actions"] == [], plan
+    assert len(plan["keyword_only_flags"]) == 1, plan
+    assert plan["keyword_only_flags"][0]["trigger"] == "opposing_terms:enabled/disabled"
+    hand_built = {
+        "entity": "Claude Code", "category": "update", "kind": "superseded",
+        "loser_fact": "The claude.code auto-update gate is disabled.",
+        "loser_id": "upda-001", "loser_confidence": 0.95, "winner_confidence": 0.95,
+        "winner_fact": "The claude.code auto-update gate is enabled.",
+        "winner_id": "upda-002",
+        "loser_source_file": "Claude Code/Claude Code-update.md",
+        "winner_source_file": "Claude Code/Claude Code-update.md",
+        "reason": "opposing_terms:enabled/disabled; written 30.0 days later",
+    }
+    result = fi.apply_action(hand_built, _days_ago(0))
+    assert result["expired_count"] == 0, result
+    assert "keyword opposition" in result["skipped"], result
+    assert _active(st, "Claude Code") == 2, "the write seam expired a keyword-only pair"
+
+
+def test_a_genuine_predicate_admits_the_pair_at_both_seams(world):
+    """The other direction of clause 4, so the agreement above is not two refusals:
+    a pair that names a real predicate about the entity is planned AND written,
+    and the `reason` names every token that survives the exclusion."""
+    facts_root, st, _ = world
+    st.aliases.set("claude.code", "Claude Code", kind="punct", origin="test")
+    _write_facts(facts_root, "Claude Code", "update", [
+        {"fact": "The claude.code auto_update.gate is disabled in extensions.json.",
+         "created_at": _days_ago(30), "confidence": 0.95},
+        {"fact": "The claude.code auto_update.gate is enabled in extensions.json.",
+         "created_at": _days_ago(0), "confidence": 0.95},
+    ])
+    _reindex(st, facts_root)
+    plan = fi.plan_entity("Claude Code")
+    assert plan["keyword_only_flags"] == [], plan
+    assert len(plan["actions"]) == 1, plan
+    action = plan["actions"][0]
+    assert action["kind"] == "superseded", action
+    reason = action["reason"]
+    assert ("both facts name `auto_update.gate`, `extensions.json`, so the later "
+            "write is about 2 predicates both facts name") in reason, reason
+    assert "`claude.code`" not in reason, reason
+    result = fi.apply_action(action, _days_ago(0))
+    assert result["expired_count"] == 1, result
+    assert _active(st, "Claude Code") == 1, result
+
+
 def test_the_live_tts_pair_plans_nothing_and_is_flagged(world):
     """Clause 1 and 2, on the witness the record calls
     `opposing_terms:success/failure`, written 3.4 days later."""

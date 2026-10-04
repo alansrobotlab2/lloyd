@@ -49,6 +49,12 @@ detector's pairing:
                 is #701's screen being read as an authority. A pair that clears
                 the age test and fails the predicate test is reported in the
                 plan's and the record's `keyword_only_flags`, never acted on.
+                *And the shared token has to be a predicate, not the SUBJECT*
+                (#2199): a fragment cut out of a longer identifier names nothing,
+                and a token that is the entity's own name — or a prefix of it, or
+                of a known alias for it — is what every pair in that entity's
+                file shares anyway. The `reason` then names EVERY token that
+                survives, not the alphabetically-first one.
   same day, same confidence → no basis. Reported, never acted on.
 
 Each admitted action also names the detector's own trigger — the
@@ -75,6 +81,8 @@ import datetime
 import json
 import logging
 import re
+import sqlite3
+from collections.abc import Iterable
 from pathlib import Path
 
 from app import paths as _paths
@@ -88,7 +96,7 @@ from agent_mcp.facts import (
     _detect_contradictions_sync,
 )
 from agent_mcp.retrieval import get_facts_sync as _get_facts_sync
-from app.kg_store import store as _store
+from app.kg_store import StoreUnavailable as _StoreUnavailable, store as _store
 
 logger = logging.getLogger("lloyd.improvement")
 
@@ -193,6 +201,11 @@ _GAP_TOLERANCE = 1e-9
 # have paired them again. URLs are stripped before the read, so a shared
 # citation cannot become a basis either — co-naming one source document is
 # #1941's ONE reason, not a predicate.
+#
+# But "not a joiner" is not the same as "not a cut", and the difference was the
+# hole (#2199): the pattern matches the part of `anthropic.claude-code` BEFORE
+# the hyphen and returns it as if it were a whole identifier. `_predicate_tokens`
+# drops such a truncated match — a fragment of one identifier names no predicate.
 _URL_RE = re.compile(r"""\b(?:https?|ftp)://\S+""", re.I)
 _PREDICATE_TOKEN_RE = re.compile(
     r"[A-Za-z_][A-Za-z0-9_]*(?:(?:/|\.)[A-Za-z0-9_]+)+")
@@ -854,24 +867,143 @@ def _predicate_tokens(text: str) -> set[str]:
     one note and `responsiveDenoising` in another, and the basis has to survive
     the casing. URLs go first: two facts citing one page share
     `github.com/isaac-sim/…`, which is a shared source, not a shared predicate.
+
+    A match that STOPS inside a longer identifier is not a token (#2199).
+    Hyphens are not joiners on purpose, but that also cuts `anthropic.claude-code`
+    at its hyphen and hands back `anthropic.claude` — a FRAGMENT of one
+    identifier, which names no predicate. On the live corpus the fragment named
+    everything: it is a prefix of the extension id the pair's entity is written
+    by, so any two facts about that extension co-named it and cleared #2078's bar
+    for free. The character the match ends on tells a fragment from a token —
+    prose (a space, a comma, a sentence period, a backtick) follows a token, and
+    the hyphen it was cut at follows a fragment.
     """
     stripped = _URL_RE.sub(" ", text or "")
-    return {m.group(0).lower()
-            for m in _PREDICATE_TOKEN_RE.finditer(stripped)
-            if len(m.group(0)) >= _MIN_PREDICATE_TOKEN_LEN}
+    out: set[str] = set()
+    for m in _PREDICATE_TOKEN_RE.finditer(stripped):
+        tok = m.group(0)
+        if len(tok) < _MIN_PREDICATE_TOKEN_LEN:
+            continue
+        if m.end() < len(stripped) and stripped[m.end()] == "-":
+            continue                        # truncated mid-identifier (#2199)
+        out.add(tok.lower())
+    return out
 
 
-def _shared_predicate(t1: str, t2: str) -> str | None:
-    """One identifier-shaped predicate token BOTH texts name, else None.
+def _name_form(name: str) -> str:
+    """A name reduced to the characters a token can carry: `[a-z0-9]` only.
+
+    `anthropic.claude` vs `anthropic.claude-code` vs `Claude Code` differ only in
+    punctuation and case, and a prefix test on the raw strings would compare
+    spellings that are the same name.
+    """
+    return re.sub(r"[^a-z0-9]+", "", (name or "").lower())
+
+
+def _store_alias_surfaces(entity: str) -> list[str]:
+    """Every alias surface the store routes to `entity`; [] when there is no store.
+
+    The alias table is what says `claude.code` and `anthropic.claude-code` are one
+    entity written two ways, so it is the only place "a known alias for it" has a
+    definition. `StoreUnavailable` is a real state on this box (#1236), and the
+    answer there is no aliases rather than a crash: the guard loses its alias half
+    and keeps the half it can read off the entity name it was handed.
+    """
+    try:
+        return [r["surface"] for r in _store().aliases.for_canonical(entity)]
+    except (_StoreUnavailable, OSError, sqlite3.Error):
+        return []
+
+
+def _entity_name_forms(entity: str | None,
+                       aliases: Iterable[str] = ()) -> set[str]:
+    """Every spelling of the pair's OWN subject, as `_name_form`s.
+
+    Three sources: the entity name the caller is holding, the aliases the caller
+    supplies, and every alias surface the store routes to that entity. The entity
+    itself is in here because it is the case that matters: #2078's bar asks
+    whether the two rows name one thing PREDICATED of a subject, and a token that
+    IS the subject answers a different question — a fact in an entity's own file
+    naming that entity's identifier is what every pair in that file does.
+    """
+    forms: set[str] = set()
+    for name in (entity, *aliases):
+        form = _name_form(name or "")
+        if form:
+            forms.add(form)
+    if entity:
+        for surface in _store_alias_surfaces(entity):
+            form = _name_form(surface)
+            if form:
+                forms.add(form)
+    return forms
+
+
+def _names_the_entity(token: str, forms: set[str]) -> bool:
+    """True when `token` is the pair's subject, not something predicated of it.
+
+    Prefix, not equality, because the whole defect is a truncated name: a guard
+    matching only the WHOLE alias would still let `anthropic.claude` through as a
+    prefix of `anthropic.claude-code`. What it deliberately does not match is a
+    token LONGER than the name — under an entity named `sim.has_gui`,
+    `sim.has_gui.enabled` is a field of the subject, which is exactly the
+    predicate the bar is asking for.
+    """
+    if not forms:
+        return False
+    form = _name_form(token)
+    return bool(form) and any(form == f or f.startswith(form) for f in forms)
+
+
+def _shared_predicate_reason(shared: str) -> str:
+    """The witness half of an admitted action's `reason`, plural-safe.
+
+    Single token: byte-identical to the sentence #2078 shipped. Several: every
+    one is named, because the point of #2199's change is that the reviewer sees
+    the whole shared set, not one member of it.
+    """
+    tokens = shared.split(", ")
+    if len(tokens) == 1:
+        return f"both facts name `{tokens[0]}`, so the later write is about that predicate"
+    quoted = ", ".join(f"`{t}`" for t in tokens)
+    return (f"both facts name {quoted}, so the later write is about "
+            f"{len(tokens)} predicates both facts name")
+
+
+def _shared_predicate(t1: str, t2: str, entity: str | None = None,
+                      aliases: Iterable[str] = ()) -> str | None:
+    """Every identifier-shaped predicate token BOTH texts name, else None.
 
     A property of the PAIR, which is the whole point (#2078). A basis keyed on
     ONE side's wording is unsafe: the live false witness's own loser reads
     "flipped `/rtx/dldenoiser/responsiveDenoising` from false to true", so it
     contains an explicit supersession statement and would authorise its own
     expiry. Two texts agreeing on one name cannot do that to each other.
+
+    Two exclusions decide what the intersection counts (#2199), and both are
+    about what a shared token is a NAME of. A fragment cut out of a longer
+    identifier never enters the intersection (`_predicate_tokens`). And a token
+    that is, or is a prefix of, the entity's own name or one of its known aliases
+    is the SUBJECT the two facts share rather than a predicate about it: this
+    scan is already entity-scoped, so co-naming the subject proves nothing the
+    caller did not know, and on `Claude Code` it proved everything — the
+    truncated extension id let the pair planned in
+    `backlog/data/20261004-210010-dryrun.json` clear the bar on a token that was
+    part of the entity's own identifier. Excluding it narrows the basis without
+    silencing it: a genuine predicate both facts name about that same entity
+    still stands, and is reported beside whatever else they share.
+
+    ALL surviving tokens are named, sorted and comma-joined. `sorted(shared)[0]`
+    reported `anthropic.claude` for a pair that also shared the real field
+    `metadata.pinned`, so the witness a reviewer reads in `reason` was always the
+    weakest candidate on the pair — #701's "name what admitted it" was implemented
+    as "name one thing that admitted it", and the alphabet chose it. With exactly
+    one token the returned string is that token, unchanged.
     """
     shared = _predicate_tokens(t1) & _predicate_tokens(t2)
-    return sorted(shared)[0] if shared else None
+    forms = _entity_name_forms(entity, aliases)
+    shared = {t for t in shared if not _names_the_entity(t, forms)}
+    return ", ".join(sorted(shared)) if shared else None
 
 
 def _keyword_only_age_flags(entity: str, pairs: list[dict]) -> list[dict]:
@@ -904,7 +1036,12 @@ def _keyword_only_age_flags(entity: str, pairs: list[dict]) -> list[dict]:
         if ordered is None:
             continue
         loser, winner, _ = ordered
-        if _shared_predicate(str(loser.get("fact") or ""), str(winner.get("fact") or "")):
+        # `entity` so a token that is the subject itself cannot count as the
+        # predicate (#2199). Same argument, same entity, as the planning site
+        # below — the two must decline the SAME pairs or the flag list reports a
+        # withheld expiry that the planner was about to take.
+        if _shared_predicate(str(loser.get("fact") or ""),
+                             str(winner.get("fact") or ""), entity):
             continue
         flags.append({
             "entity": entity,
@@ -1183,8 +1320,13 @@ def plan_entity(entity: str, max_actions: int = MAX_ACTIONS_PER_ENTITY) -> dict:
             # both facts name. Absent it, no action — and the pair is reported
             # in `keyword_only_flags`, where `_keyword_only_age_flags` counts
             # exactly the pairs declining here.
+            #
+            # `entity` is what makes the token a PREDICATE rather than the
+            # subject re-named (#2199): a shared token that is the entity's own
+            # name, or a prefix of it or of a known alias, proves only that both
+            # rows live in that entity's file.
             shared = _shared_predicate(str(loser.get("fact") or ""),
-                                       str(winner.get("fact") or ""))
+                                       str(winner.get("fact") or ""), entity)
             if shared is None:
                 continue
             kind = "superseded"
@@ -1195,8 +1337,10 @@ def plan_entity(entity: str, max_actions: int = MAX_ACTIONS_PER_ENTITY) -> dict:
             # beside it (#701's rule that an admitted action says what admitted
             # it, now applied to the non-lexical half of the basis too), so a
             # reviewer can reject the co-naming without re-reading both files.
-            reason = (f"{trigger}; {age_reason}; both facts name `{shared}`, so "
-                      f"the later write is about that predicate")
+            # EVERY token that survives the entity-name exclusion is named, not
+            # one of them: a witness that quietly reported the alphabetically-
+            # first member hid the real field behind the entity fragment (#2199).
+            reason = f"{trigger}; {age_reason}; {_shared_predicate_reason(shared)}"
         action = {"kind": kind, "entity": entity,
                   "category": loser.get("category"),
                   "loser_fact": loser.get("fact", ""), "loser_id": loser.get("id"),
@@ -1379,8 +1523,15 @@ def apply_action(action: dict, now_iso: str) -> dict:
         field, reason_field = "invalid_at", "invalid_reason"
     else:
         field, reason_field = "expired_at", "expire_reason"
-    if not is_confidence and not _shared_predicate(str(action.get("loser_fact") or ""),
-                                                   str(action.get("winner_fact") or "")):
+    # The entity travels with the action, so this seam asks the SAME question the
+    # planner asked (#2199). Without it the two could disagree on one pair: the
+    # plan declines a supersession whose only co-naming is the entity's own name
+    # or an alias for it, and a record carrying that same pair would be written
+    # here on the strength of the token the plan had just excluded.
+    if not is_confidence and not _shared_predicate(
+            str(action.get("loser_fact") or ""),
+            str(action.get("winner_fact") or ""),
+            str(action.get("entity") or "") or None):
         # #2078 at the write seam, not only the plan seam. `plan_entity` cannot
         # produce such an action any more, so this refuses the shapes that reach
         # a writer without one: a record written by an older revision and
