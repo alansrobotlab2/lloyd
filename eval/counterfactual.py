@@ -84,12 +84,18 @@ PLAN: dict[str, tuple[str, str, str, list[str], list[str]]] = {
     # contain "backlogitem", so `score_pair` would have read
     # `Backlog Item: present=False->True` on a retriever that behaved (the
     # clause-2 defect, imported rather than removed). "Backlog" is the nearest
-    # string that both survives into "tell me about Backlog Item #313" and is
-    # attributed by BOTH arms — `backlogtask363` original, `backlogitem313`
+    # string that survives the swap into the variant text and is attributed by
+    # BOTH arms of a nightly — `backlogtask363` original, a backlog-item row
     # variant, same attributed text — scored live 2026-09-22 through
-    # `run_eval._vault_recall`, pinned=True, moved=True.
-    "backlog-363": ("entity", "backlog item 363", "Backlog Item #313",
-                    ["Backlog Item #313"], ["Backlog"]),
+    # `run_eval._vault_recall`, pinned=True, moved=True. That scoring is of the
+    # pair as it stood then; the swapped-in half moved afterwards (next line),
+    # and what the pin still has to survive mechanically is checked by
+    # `pins_absent_from_their_own_swap`.
+    # backlog-363: swapped-in "Backlog Item #313" pruned by the 2026-09-23 kg
+    # rebuild; re-pointed 2026-10-04 to a backlog item the store holds today.
+    "backlog-363": ("entity", "backlog item 363",
+                    "Backlog item regarding GPU OOM monitoring",
+                    ["Backlog item regarding GPU OOM monitoring"], ["Backlog"]),
     # Same shape: "Entity Resolution" is the shared stem of the sweep and its
     # sibling, it survives into "what does the Semantic Entity Resolution skill
     # do?", and the row `entityresolution` is attributed by BOTH arms of
@@ -111,12 +117,18 @@ PLAN: dict[str, tuple[str, str, str, list[str], list[str]]] = {
     # query in `eval/vault_recall_queries.yaml` to name a second constraint, and
     # #541 reserved that ground-truth file against perturbation work.
     "inner-voice": ("entity", "inner voice", "Voice Mode", ["Voice Mode"], []),
-    "vault-recall": ("entity", "vault_recall", "Vault Index", ["Vault Index"], []),
-    # "QMD" is the shared stem of `QMD` and `QMD Search`, so it survives the
-    # swap into "what is QMD Search?", and the row `qmd` is attributed by both
+    # vault-recall: swapped-in "Vault Index" pruned by the 2026-09-23 kg rebuild;
+    # re-pointed 2026-10-04 to the vault retrieval layer the store holds today.
+    "vault-recall": ("entity", "vault_recall", "Vault Search Layer",
+                     ["Vault Search Layer"], []),
+    # "QMD" is the shared stem of `QMD` and its subsystems, so it survives the
+    # swap into "what is qmd indexing?", and the row `qmd` is attributed by both
     # arms of nightly-20260919/20/21 — the pin asks that naming one QMD
-    # subsystem not drop the others (#763 option 1).
-    "qmd": ("entity", "QMD", "QMD Search", ["QMD Search"], ["QMD"]),
+    # subsystem not drop the others (#763 option 1). Those nightly rows were
+    # measured against the sibling that stood here then.
+    # qmd: swapped-in "QMD Search" pruned by the 2026-09-23 kg rebuild;
+    # re-pointed 2026-10-04 to a qmd subsystem the store holds today.
+    "qmd": ("entity", "QMD", "qmd indexing", ["qmd indexing"], ["QMD"]),
     "kg-maintenance-tasks": ("entity", "knowledge graph", "Entity Graph",
                             ["Entity Graph"], ["autonomy"]),
     "lloyd-vllm-rel": ("entity", "vLLM", "TensorRT-LLM",
@@ -169,25 +181,59 @@ PLAN: dict[str, tuple[str, str, str, list[str], list[str]]] = {
     # the swap that tests it.
     # an entity that is a real, DISTINCT canonical in the live alias table, so
     # `--verify` can audit the chosen sibling (#537's risk-1 rule applies).
+    #
+    # The table is live data and the records are frozen, so the table can move
+    # under them: the 2026-09-23 kg rebuild pruned thirteen distinct canonicals,
+    # the swapped-in values of fourteen entries here (`Lloyd Memory Graph` was used
+    # twice), and `--verify` reported all fourteen pairs on 2026-10-04 as
+    # `14 of 39 entity-axis pairs unverified`. Each was re-pointed to a
+    # canonical `aliases.all_lower()` resolves today, and the comment naming the
+    # pruned one stays — one line, containing the query id and the deleted
+    # canonical — because the silent version of this defect is a swap that stops
+    # being a controlled perturbation while every count still looks self-consistent
+    # (`tests/test_counterfactual_eval.py::
+    # test_entity_axis_is_still_populated_and_names_every_pruned_swap` holds the
+    # naming, `test_no_pruned_canonical_survives_as_a_swapped_in_value` the repair
+    # itself, both reading the fourteen names out of `PRUNED_2026_09_23`).
+    # Re-axing an entry off `entity` is the other permitted answer and takes the
+    # same comment line; deleting it is not permitted at all, since
+    # `build_perturbations` refuses to build a record for a gold query with no
+    # plan entry, which would shrink the scored corpus under the trend line.
     "tts-voice-cloning": ("entity", "TTS", "Piper TTS", ["Piper TTS"], []),
     "wake-word-models": ("entity", "wake phrases", "OpenWakeWord", ["OpenWakeWord"], []),
+    # thunderbird-mcp-toolset: swapped-in "Thunderbird Service" pruned by the
+    # 2026-09-23 kg rebuild; re-pointed 2026-10-04 to a live Thunderbird canonical
+    # that is not the query's own gold surface.
     "thunderbird-mcp-toolset": ("entity", "Thunderbird MCP",
-                                "Thunderbird Service", ["Thunderbird Service"], []),
-    "browser-tool-validation": ("entity", "browser tool",
-                                "Browser Extraction", ["Browser Extraction"], []),
+                                "Thunderbird MCP Integration",
+                                ["Thunderbird MCP Integration"], []),
+    # browser-tool-validation: swapped-in "Browser Extraction" pruned by the
+    # 2026-09-23 kg rebuild; re-pointed 2026-10-04 to the live canonical that
+    # carries the same name.
+    "browser-tool-validation": ("entity", "browser tool", "Browser-Based Extraction",
+                                ["Browser-Based Extraction"], []),
+    # youtube-transcript-workflow: swapped-in "Transcript Extraction" pruned by
+    # the 2026-09-23 kg rebuild; re-pointed 2026-10-04 to a live transcript
+    # canonical, deliberately NOT the gold `YouTube Transcript Extraction`.
     "youtube-transcript-workflow": ("entity", "YouTube transcript",
-                                    "Transcript Extraction", ["Transcript Extraction"], []),
+                                    "YouTube Transcript Workflow",
+                                    ["YouTube Transcript Workflow"], []),
     "mcp-transport-error-recovery": ("entity", "MCP server",
                                      "GitHub MCP Server", ["GitHub MCP Server"], []),
     "kg-rebuild-abandoned": ("entity", "knowledge graph", "Entity Graph", ["Entity Graph"], []),
-    "kg-dedup-key": ("entity", "knowledge graph",
-                     "Lloyd Memory Graph", ["Lloyd Memory Graph"], []),
+    # kg-dedup-key: swapped-in "Lloyd Memory Graph" pruned by the 2026-09-23 kg
+    # rebuild; re-pointed 2026-10-04 to the store file the same query is about,
+    # which is a live canonical and not the gold `Fact Store`.
+    "kg-dedup-key": ("entity", "knowledge graph", "kg.sqlite", ["kg.sqlite"], []),
     "guardian-to-backlog": ("entity", "guardian",
                             "Self-mod guardian", ["Self-mod guardian"], []),
     "dream-to-skill-edit": ("entity", "dream consolidation",
                             "Nightly Skills Management", ["Nightly Skills Management"], []),
-    "automod-to-entity-guard": ("entity", "self-modification round",
-                                "Lloyd automod", ["Lloyd automod"], []),
+    # automod-to-entity-guard: swapped-in "Lloyd automod" pruned by the 2026-09-23
+    # kg rebuild; re-pointed 2026-10-04 to the live hyphenated canonical of the
+    # same system, and still not the gold `automod` / `promotion gate`.
+    "automod-to-entity-guard": ("entity", "self-modification round", "lloyd-automod",
+                                ["lloyd-automod"], []),
     "memory-capture-to-kg": ("entity", "knowledge graph", "Memory Graph", ["Memory Graph"], []),
     "research-queue-to-vault-note": ("entity", "research queue",
                                      "Groundskeeper Research", ["Groundskeeper Research"], []),
@@ -200,8 +246,17 @@ PLAN: dict[str, tuple[str, str, str, list[str], list[str]]] = {
                                       ["Knowledge Health Report"], []),
     "autonomy-task-to-skill": ("entity", "autonomy task",
                                "Autonomy Scheduler", ["Autonomy Scheduler"], []),
-    "inner-voice-to-surface": ("entity", "inner voice",
-                               "Inner Voice Observer", ["Inner Voice Observer"], []),
+    # inner-voice-to-surface: swapped-in "Inner Voice Observer" pruned by the
+    # 2026-09-23 kg rebuild. The rebuilt table leaves exactly two canonicals the
+    # query's phrase reaches for — `Inner Voice`, which is what `old_value` already
+    # resolves to, so swapping to it is the same-canonical collapse `--verify`
+    # refuses, and the panel, registered under its unspaced name — so the panel is
+    # the only live DISTINCT sibling left in the family. It is also one of this
+    # query's two gold labels, which `counterfactual-to-trend-audit` above warns
+    # about; the warning is honoured where a non-gold sibling exists, and here none
+    # does, so the alternative to a gold twin is re-axing the entry off `entity`.
+    "inner-voice-to-surface": ("entity", "inner voice", "InnerVoiceObservationPanel",
+                               ["InnerVoiceObservationPanel"], []),
     "entity-guard-to-alias-table": ("entity", "knowledge graph",
                                     "Memory Graph", ["Memory Graph"], []),
     "email-pipeline-to-daily-note": ("entity", "morning briefing",
@@ -211,23 +266,41 @@ PLAN: dict[str, tuple[str, str, str, list[str], list[str]]] = {
     "voice-session-to-room": ("entity", "voice", "Voice Mode", ["Voice Mode"], []),
     "memory-md-clobber-to-guard": ("entity", "loaded memory file",
                                    "MEMORY.md", ["MEMORY.md"], []),
-    "gpu-daemon-ipc-timeout": ("entity", "GPU daemon",
-                               "LiveKit Agents", ["LiveKit Agents"], []),
+    # gpu-daemon-ipc-timeout: swapped-in "LiveKit Agents" pruned by the 2026-09-23
+    # kg rebuild; re-pointed 2026-10-04 to the live spaced canonical of the same
+    # framework, and still not the query's own gold surfaces.
+    "gpu-daemon-ipc-timeout": ("entity", "GPU daemon", "LiveKit Agents Framework",
+                               ["LiveKit Agents Framework"], []),
     "stop-auto-merging-entities": ("entity", "automatically merging",
                                    "Semantic Entity Resolution", ["Semantic Entity Resolution"], []),
     "write-that-ate-the-memory-file": ("entity", "memory file", "MEMORY.md", ["MEMORY.md"], []),
     "nightly-cannot-tell": ("entity", "nightly retrieval run",
                             "Groundskeeper Survey", ["Groundskeeper Survey"], []),
     "facts-that-contradict": ("entity", "memory", "Fact Store", ["Fact Store"], []),
-    "skill-that-never-improves": ("entity", "reflection loop",
-                                  "Nightly Skill Consolidation", ["Nightly Skill Consolidation"], []),
-    "numbers-differ-after-rebuild": ("entity", "graph",
-                                     "Lloyd Memory Graph", ["Lloyd Memory Graph"], []),
+    # skill-that-never-improves: swapped-in "Nightly Skill Consolidation" pruned
+    # by the 2026-09-23 kg rebuild; re-pointed 2026-10-04 to the live canonical for
+    # the same consolidation step, and not the gold `Nightly Skills Management`.
+    "skill-that-never-improves": ("entity", "reflection loop", "Skill Consolidation",
+                                  ["Skill Consolidation"], []),
+    # numbers-differ-after-rebuild: swapped-in "Lloyd Memory Graph" pruned by the
+    # 2026-09-23 kg rebuild (the same deleted canonical `kg-dedup-key` lost);
+    # re-pointed 2026-10-04 to the graph the query counts, and not the gold
+    # `Knowledge Graph` or `knowledge_graph_edges`.
+    "numbers-differ-after-rebuild": ("entity", "graph", "KG architecture",
+                                     ["KG architecture"], []),
     "memory-line-contradicts-vault": ("entity", "memory", "MEMORY.md", ["MEMORY.md"], []),
+    # ambient-prefetch-ttl-reclaim: swapped-in "Ambient Turns" pruned by the
+    # 2026-09-23 kg rebuild. `Ambient Turn System` is not in the rebuilt table
+    # either — only `#295 Ambient Turn System` is, and a tracker id in the variant
+    # text is a different hazard — so this is the live canonical for the thing that
+    # actually ages out, and not the gold `ambient-prefetch`.
     "ambient-prefetch-ttl-reclaim": ("entity", "background context",
-                                     "Ambient Turns", ["Ambient Turns"], []),
-    "retrieval-seed-anchoring-contract": ("entity", "seed extractor",
-                                          "skills_search", ["skills_search"], []),
+                                     "AmbientPrefetchEntry", ["AmbientPrefetchEntry"], []),
+    # retrieval-seed-anchoring-contract: swapped-in "skills_search" pruned by the
+    # 2026-09-23 kg rebuild; re-pointed 2026-10-04 to `Skill Library`, the live
+    # surface that owns skill search, and not the gold `retrieval-seed-extraction`.
+    "retrieval-seed-anchoring-contract": ("entity", "seed extractor", "Skill Library",
+                                          ["Skill Library"], []),
     # the swap is one modifier that flips what the answer should say, and names no
     # sibling, so `--verify` owes nothing for them.
     "grafana-monitoring-stack": ("qualifier", "small", "large", [], ["Grafana"]),

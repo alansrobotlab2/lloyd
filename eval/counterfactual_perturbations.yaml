@@ -15,21 +15,21 @@ perturbations:
 - id: ambient-prefetch-ttl-reclaim
   axis_changed: entity
   old_value: background context
-  new_value: Ambient Turns
-  perturbed_query: what finally frees Ambient Turns queued for a session that never
-    takes another turn?
+  new_value: AmbientPrefetchEntry
+  perturbed_query: what finally frees AmbientPrefetchEntry queued for a session that
+    never takes another turn?
   expected_to_move:
-  - Ambient Turns
+  - AmbientPrefetchEntry
   expected_pinned: []
   sibling_source: kg_alias_table
 - id: automod-to-entity-guard
   axis_changed: entity
   old_value: self-modification round
-  new_value: Lloyd automod
-  perturbed_query: What does a Lloyd automod run before it can land, and how does
+  new_value: lloyd-automod
+  perturbed_query: What does a lloyd-automod run before it can land, and how does
     it know a memory change broke retrieval?
   expected_to_move:
-  - Lloyd automod
+  - lloyd-automod
   expected_pinned: []
   sibling_source: kg_alias_table
 - id: autonomy-pipeline
@@ -54,10 +54,10 @@ perturbations:
 - id: backlog-363
   axis_changed: entity
   old_value: backlog item 363
-  new_value: 'Backlog Item #313'
-  perturbed_query: 'tell me about Backlog Item #313'
+  new_value: Backlog item regarding GPU OOM monitoring
+  perturbed_query: tell me about Backlog item regarding GPU OOM monitoring
   expected_to_move:
-  - 'Backlog Item #313'
+  - Backlog item regarding GPU OOM monitoring
   expected_pinned:
   - Backlog
   sibling_source: kg_alias_table
@@ -90,11 +90,11 @@ perturbations:
 - id: browser-tool-validation
   axis_changed: entity
   old_value: browser tool
-  new_value: Browser Extraction
-  perturbed_query: How do I tell a Browser Extraction that is wired wrong from one
-    that is simply not configured?
+  new_value: Browser-Based Extraction
+  perturbed_query: How do I tell a Browser-Based Extraction that is wired wrong from
+    one that is simply not configured?
   expected_to_move:
-  - Browser Extraction
+  - Browser-Based Extraction
   expected_pinned: []
   sibling_source: kg_alias_table
 - id: cheaper-model-every-turn
@@ -255,11 +255,11 @@ perturbations:
 - id: gpu-daemon-ipc-timeout
   axis_changed: entity
   old_value: GPU daemon
-  new_value: LiveKit Agents
-  perturbed_query: Why does a LiveKit Agents report a monotonic timeout against a
-    process that is clearly alive?
+  new_value: LiveKit Agents Framework
+  perturbed_query: Why does a LiveKit Agents Framework report a monotonic timeout
+    against a process that is clearly alive?
   expected_to_move:
-  - LiveKit Agents
+  - LiveKit Agents Framework
   expected_pinned: []
   sibling_source: kg_alias_table
 - id: gpu-model-naming-collision
@@ -355,11 +355,11 @@ perturbations:
 - id: inner-voice-to-surface
   axis_changed: entity
   old_value: inner voice
-  new_value: Inner Voice Observer
-  perturbed_query: What does Inner Voice Observer decide about a turn, and where do
-    its signals end up on the UI?
+  new_value: InnerVoiceObservationPanel
+  perturbed_query: What does InnerVoiceObservationPanel decide about a turn, and where
+    do its signals end up on the UI?
   expected_to_move:
-  - Inner Voice Observer
+  - InnerVoiceObservationPanel
   expected_pinned: []
   sibling_source: kg_alias_table
 - id: isaac-gr00t-n17
@@ -391,11 +391,11 @@ perturbations:
 - id: kg-dedup-key
   axis_changed: entity
   old_value: knowledge graph
-  new_value: Lloyd Memory Graph
-  perturbed_query: Which field identifies one fact in the Lloyd Memory Graph store,
-    and why is fact_id not it?
+  new_value: kg.sqlite
+  perturbed_query: Which field identifies one fact in the kg.sqlite store, and why
+    is fact_id not it?
   expected_to_move:
-  - Lloyd Memory Graph
+  - kg.sqlite
   expected_pinned: []
   sibling_source: kg_alias_table
 - id: kg-maintenance-tasks
@@ -506,11 +506,11 @@ perturbations:
 - id: numbers-differ-after-rebuild
   axis_changed: entity
   old_value: graph
-  new_value: Lloyd Memory Graph
-  perturbed_query: why did the Lloyd Memory Graph's numbers change so much after a
-    rebuild and which note says the reference was the broken part
+  new_value: KG architecture
+  perturbed_query: why did the KG architecture's numbers change so much after a rebuild
+    and which note says the reference was the broken part
   expected_to_move:
-  - Lloyd Memory Graph
+  - KG architecture
   expected_pinned: []
   sibling_source: kg_alias_table
 - id: primary-ram-floor-changed
@@ -534,10 +534,10 @@ perturbations:
 - id: qmd
   axis_changed: entity
   old_value: QMD
-  new_value: QMD Search
-  perturbed_query: what is QMD Search?
+  new_value: qmd indexing
+  perturbed_query: what is qmd indexing?
   expected_to_move:
-  - QMD Search
+  - qmd indexing
   expected_pinned:
   - QMD
   sibling_source: kg_alias_table
@@ -579,11 +579,11 @@ perturbations:
 - id: retrieval-seed-anchoring-contract
   axis_changed: entity
   old_value: seed extractor
-  new_value: skills_search
-  perturbed_query: Which eval queries have no gold entity the skills_search can even
+  new_value: Skill Library
+  perturbed_query: Which eval queries have no gold entity the Skill Library can even
     reach?
   expected_to_move:
-  - skills_search
+  - Skill Library
   expected_pinned: []
   sibling_source: kg_alias_table
 - id: robotics-projects
@@ -615,11 +615,11 @@ perturbations:
 - id: skill-that-never-improves
   axis_changed: entity
   old_value: reflection loop
-  new_value: Nightly Skill Consolidation
-  perturbed_query: what makes a skill stop getting better even though the Nightly
-    Skill Consolidation keeps touching it
+  new_value: Skill Consolidation
+  perturbed_query: what makes a skill stop getting better even though the Skill Consolidation
+    keeps touching it
   expected_to_move:
-  - Nightly Skill Consolidation
+  - Skill Consolidation
   expected_pinned: []
   sibling_source: kg_alias_table
 - id: stop-auto-merging-entities
@@ -659,11 +659,11 @@ perturbations:
 - id: thunderbird-mcp-toolset
   axis_changed: entity
   old_value: Thunderbird MCP
-  new_value: Thunderbird Service
-  perturbed_query: Which tools does the Thunderbird Service server expose for mail,
-    calendar and contacts?
+  new_value: Thunderbird MCP Integration
+  perturbed_query: Which tools does the Thunderbird MCP Integration server expose
+    for mail, calendar and contacts?
   expected_to_move:
-  - Thunderbird Service
+  - Thunderbird MCP Integration
   expected_pinned: []
   sibling_source: kg_alias_table
 - id: tts-voice-cloning
@@ -679,10 +679,10 @@ perturbations:
 - id: vault-recall
   axis_changed: entity
   old_value: vault_recall
-  new_value: Vault Index
-  perturbed_query: what is Vault Index and how does it work?
+  new_value: Vault Search Layer
+  perturbed_query: what is Vault Search Layer and how does it work?
   expected_to_move:
-  - Vault Index
+  - Vault Search Layer
   expected_pinned: []
   sibling_source: kg_alias_table
 - id: voice-session-to-room
@@ -745,10 +745,10 @@ perturbations:
 - id: youtube-transcript-workflow
   axis_changed: entity
   old_value: YouTube transcript
-  new_value: Transcript Extraction
-  perturbed_query: Where does a Transcript Extraction go once it is extracted, and
-    what breaks extraction?
+  new_value: YouTube Transcript Workflow
+  perturbed_query: Where does a YouTube Transcript Workflow go once it is extracted,
+    and what breaks extraction?
   expected_to_move:
-  - Transcript Extraction
+  - YouTube Transcript Workflow
   expected_pinned: []
   sibling_source: kg_alias_table

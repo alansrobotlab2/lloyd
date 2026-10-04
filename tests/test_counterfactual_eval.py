@@ -17,6 +17,7 @@ never re-derived from live graph data at eval time so a nightly diff stays a
 diff) and the two metric definitions.
 """
 import os
+import ast
 import re
 import subprocess
 import sys
@@ -110,12 +111,21 @@ def test_cli_check_reports_no_drift():
     where that is proven at the CLI rather than only in-process: the exit code now
     fails on an id-keyed surface naming a query the gold set no longer carries, and
     the `dangling ids:` line is the evidence the audit ran instead of being skipped.
+
+    #2187 is why the printed lines are asserted and not the exit code alone:
+    re-pointing a swap means editing `PLAN` and re-running `--write`, and the two
+    failures that route makes easy are a hand-edited records file `--check` stamps
+    as drift, and a retirement done by deleting the generated record while its plan
+    entry stands — drift again, because the generator still builds that record. The
+    pin-audit line is asserted for the same reason it prints: unconditionally, so
+    its absence would mean the check died before reaching it.
     """
     out = subprocess.run([sys.executable, str(GENERATOR), "--check"],
                          capture_output=True, text=True, timeout=600)
     assert out.returncode == 0, out.stdout + out.stderr
     assert "records match the generator" in out.stdout, out.stdout
     assert "dangling ids: 0" in out.stdout, out.stdout
+    assert "0 of them outside PINS_ABSENT_BY_DESIGN" in out.stdout, out.stdout
 
 
 # ── the --verify audit, over a real store ────────────────────────────────────
@@ -203,9 +213,15 @@ def _run_verify_script(store):
 
 def _store_where_every_swap_resolves(tmp_path):
     """A store holding one entity per entity-axis `new_value`, so every
-    swapped-in value is a registered canonical and the audit has nothing to
-    flag — the shape the live store measures today (39 entity-axis pairs,
-    0 unverified, `all_lower()` 27,428 entries, read 2026-09-22)."""
+    swapped-in value is a registered canonical and the audit has nothing to flag.
+
+    Certified against THIS fixture and nothing else. The corpus's own size comes
+    from `_entity_axis_records()`; the live alias surface it stands in for is the
+    ~13k-entry `store().aliases.all_lower()` (13,315 surfaces read 2026-10-04) that
+    no worktree can open, which is exactly why this helper exists and why its
+    verdict is not the store's — see the note on
+    `test_verify_siblings_reaches_a_verdict_on_the_committed_corpus`.
+    """
     db = _verify_store(tmp_path, alias=None, entity=None)
     for rec in _entity_axis_records():
         db.entities.register(rec["new_value"])
@@ -285,16 +301,26 @@ def test_alias_resolver_resolves_a_surface_and_a_canonical_with_no_row(tmp_path)
 
 
 def test_verify_siblings_reaches_a_verdict_on_the_committed_corpus(tmp_path):
-    """The audit runs to a verdict of ZERO over the committed corpus.
+    """The audit reaches a verdict of ZERO over a store seeded FROM the corpus.
 
-    With one entity registered per entity-axis `new_value`, every swapped-in
-    value is a canonical and each resolves to one its `old_value` does not — the
-    risk-1 rule #537 spells out for exactly these labels, and the verdict the
-    live store returns today (39 entity-axis pairs, 0 unverified, read
-    2026-09-22). This test used to read `cf.kg_db_path()` and, when the derived
-    store was absent — always, inside a worktree — fall back to hand-writing a
-    one-table sqlite file; the audit now reads the store, so the store is what
-    the test seeds.
+    With one entity registered per entity-axis `new_value` — 39 entity-axis pairs
+    as `_entity_axis_records()` counts them, derived here rather than typed —
+    every swapped-in value is a canonical by construction, and each resolves to
+    one its `old_value` does not: the risk-1 rule #537 spells out for exactly
+    these labels. That is the verdict of THIS store and nothing more. It is not
+    the live store's number, which this file cannot read at all (a worktree has
+    no derived store, so `store()` raises `StoreUnavailable`), and until #2187
+    this docstring published the synthetic zero as what the live store returned
+    — read 2026-09-22 — while `--verify` against the real alias table had been
+    naming fourteen pruned swapped-in values since 2026-10-04. The live verdict
+    belongs to the owed check that runs `--verify` on the merged tree; what this
+    file can certify is the corpus's internal consistency, and the control that
+    makes that word mean something is
+    `test_verify_siblings_names_a_pruned_swap_and_the_repaired_corpus_is_clean`.
+    This test used to read `cf.kg_db_path()` and, when the derived store was
+    absent — always, inside a worktree — fall back to hand-writing a one-table
+    sqlite file; the audit now reads the store, so the store is what the test
+    seeds.
     """
     _store_where_every_swap_resolves(tmp_path)
     unverified = cf.verify_siblings(list(cf.load_records(RECORDS).values()),
@@ -430,6 +456,242 @@ def test_verify_cli_count_is_the_store_backed_audit_count(tmp_path, capsys):
     only_table = {r["id"] for r in cf.verify_siblings(
         recs, lambda name: table_only.get((name or "").strip().lower()))}
     assert only_table == direct | {SEEDED_VERIFIED[1]}, (direct, only_table)
+
+
+# ── #2187: the swap targets are live data, and the live data moved ───────────
+#
+# The 2026-09-23 kg rebuild pruned these fourteen swapped-in canonicals, and
+# `python eval/counterfactual.py --verify` reported all fourteen on 2026-10-04:
+# `14 of 39 entity-axis pairs unverified`. A pruned target does not make a pair
+# unscored — `score_pair` still books it, as `target: present=False->False` — so
+# the axis silently stops being a controlled entity perturbation while every
+# count stays self-consistent. Each id below was re-pointed in `PLAN` to a
+# canonical the alias table resolves today, or re-axed off `entity`; either way
+# the entry stays in `PLAN` (`build_perturbations` raises for a gold query with no
+# entry, so deletion would shrink the scored corpus under the trend line) and the
+# comment naming the deleted canonical stays with it.
+
+PLAN_SOURCE = ROOT / "eval" / "counterfactual.py"
+PRUNED_2026_09_23 = {
+    "ambient-prefetch-ttl-reclaim": "Ambient Turns",
+    "automod-to-entity-guard": "Lloyd automod",
+    "backlog-363": "Backlog Item #313",
+    "browser-tool-validation": "Browser Extraction",
+    "gpu-daemon-ipc-timeout": "LiveKit Agents",
+    "inner-voice-to-surface": "Inner Voice Observer",
+    "kg-dedup-key": "Lloyd Memory Graph",
+    "numbers-differ-after-rebuild": "Lloyd Memory Graph",
+    "qmd": "QMD Search",
+    "retrieval-seed-anchoring-contract": "skills_search",
+    "skill-that-never-improves": "Nightly Skill Consolidation",
+    "thunderbird-mcp-toolset": "Thunderbird Service",
+    "vault-recall": "Vault Index",
+    "youtube-transcript-workflow": "Transcript Extraction",
+}
+# The audit's own floor. Retiring every drifted pair would take the axis to 25
+# and pass `--verify` while emptying the measurement the axis exists for: a seed
+# set that stays put when the named entity changes.
+ENTITY_AXIS_FLOOR = 30
+
+
+def _entity_records():
+    """Committed entity-axis records, id-keyed."""
+    return {qid: r for qid, r in cf.load_records(RECORDS).items()
+            if r["axis_changed"] == cf.ENTITY_AXIS}
+
+
+def _comment_lines(source: str) -> list[str]:
+    return [ln.strip() for ln in source.splitlines() if ln.strip().startswith("#")]
+
+
+def test_no_pruned_canonical_survives_as_a_swapped_in_value():
+    """Clause 1: none of the thirteen pruned canonicals — the swapped-in values of
+    fourteen entries — survives in either committed surface, and a re-pointed pair
+    still moves to its OWN swapped-in value.
+
+    Both surfaces are graded because they are two files: the `PLAN` dict generates
+    the records file, and `--check` is what proves the file on disk is the
+    generator's output rather than a hand-edited survivor of it. A re-point that
+    updated only the YAML would read as drift here, and one that updated only
+    `PLAN` would be re-generated back.
+
+    The moved-leg half is the other silent failure: `expected_to_move` is the
+    label the pair is scored against, so a re-point that left it on the retired
+    canonical would book `present=False->False` forever and look like a retrieval
+    defect. Every entity-axis record holds the shape `[its own new_value]` today,
+    so the assertion is over the whole axis, not only the repaired ids.
+
+    The fourteen/thirteen counts are literals because everything else here derives
+    from `PRUNED_2026_09_23`: quietly deleting an entry from that dict would shrink
+    every other assertion instead of failing it, and the item's measured report —
+    fourteen pairs, thirteen distinct names, one name used by two entries — is the
+    number a future edit has to disagree with out loud.
+    """
+    assert len(PRUNED_2026_09_23) == 14, sorted(PRUNED_2026_09_23)
+    pruned = set(PRUNED_2026_09_23.values())
+    assert len(pruned) == 13, sorted(pruned)
+    planned = {qid: entry for qid, entry in cf.PLAN.items()
+               if entry[0] == cf.ENTITY_AXIS}
+    assert not (pruned & {entry[2] for entry in planned.values()}), \
+        "a pruned canonical is still swapped in by PLAN"
+    records = _entity_records()
+    assert not (pruned & {r["new_value"] for r in records.values()}), \
+        "a pruned canonical is still swapped in by the committed records file"
+
+    for qid, retired in PRUNED_2026_09_23.items():
+        entry = cf.PLAN[qid]
+        if entry[0] != cf.ENTITY_AXIS:          # re-axed: the name is history
+            continue
+        assert entry[2] != retired, (qid, entry)
+        assert entry[3] == [entry[2]], (qid, "moved leg is not its own new_value")
+        assert records[qid]["new_value"] == entry[2], qid
+        assert records[qid]["expected_to_move"] == [records[qid]["new_value"]], qid
+
+    for qid, r in records.items():
+        assert r["expected_to_move"] == [r["new_value"]], (qid, r["expected_to_move"])
+
+
+def test_entity_axis_is_still_populated_and_names_every_pruned_swap():
+    """Clause 2: the axis that catches a seed set staying put is still there, and
+    every id the prune touched is still traceable to what it lost.
+
+    The denominator is asserted against the floor rather than against the current
+    count on purpose: the count is allowed to fall as pairs are re-axed, and 25
+    would mean the audit had been satisfied by deleting the measurement.
+
+    The naming half is what keeps a future prune from being repaired by silently
+    dropping the swap: an id that left the entity axis has to leave a comment
+    behind that names BOTH the query id and the canonical the 2026-09-23 rebuild
+    deleted, on one line, with the rebuild date in the block under it. A comment
+    that names only the id says nothing about which name went away, which is the
+    exact knowledge the next rebuild's repair needs.
+    """
+    records = _entity_records()
+    assert len(records) >= ENTITY_AXIS_FLOOR, (
+        len(records), ENTITY_AXIS_FLOOR, "entity-axis pairs retired, axis emptied")
+    assert len(records) == sum(1 for e in cf.PLAN.values()
+                               if e[0] == cf.ENTITY_AXIS), \
+        "the committed axis and PLAN disagree about which entries are entity swaps"
+
+    source = PLAN_SOURCE.read_text(encoding="utf-8")
+    lines = PLAN_SOURCE.read_text(encoding="utf-8").splitlines()
+    comments = _comment_lines(source)
+    for qid, retired in PRUNED_2026_09_23.items():
+        named = [ln for ln in comments if qid in ln and retired in ln]
+        assert named, f"{qid}: no comment names the pruned canonical {retired!r}"
+        i = lines.index(next(ln for ln in lines if ln.strip() == named[0]))
+        window = "\n".join(lines[i:i + 4])
+        assert "2026-09-23" in window, (qid, "the comment does not date the rebuild")
+
+
+def test_repairing_the_drift_left_no_gold_query_without_its_record():
+    """Clause 3's other half: fourteen repairs, no query lost.
+
+    Deleting a drifted pair would please `--verify`, which audits only the pairs
+    that still exist, and the trend line would not notice a corpus that quietly
+    stopped asking one question. `build_perturbations` is the rail — it raises for a
+    gold query with no plan entry, and emits exactly one record per query it does
+    have one for — so the three surfaces have to stay one set: the gold queries, the
+    plan, and the committed records. Re-axing an entry off `entity` keeps all three
+    intact, which is why it is the permitted retirement and deletion is not.
+    """
+    spec_ids = {s["id"] for s in _specs()}
+    assert set(cf.PLAN) == spec_ids, (sorted(spec_ids - set(cf.PLAN)),
+                                      sorted(set(cf.PLAN) - spec_ids))
+    # The builder's own output, counted against the gold set — not against a
+    # constant this file also computes, which would hold even if the generator
+    # started emitting two records per query.
+    assert len(cf.build_perturbations(_specs())) == len(spec_ids)
+    assert len(cf.load_records(RECORDS)) == len(spec_ids)
+
+
+def test_verify_siblings_names_a_pruned_swap_and_the_repaired_corpus_is_clean(tmp_path):
+    """Clause 4's negative control: the audit CAN fail on this corpus, and the
+    replayed history is what proves it.
+
+    The pre-existing corpus node seeds one entity per swapped-in value and asserts
+    `[]`, which is a test that cannot fail on a drifted corpus — that is how the
+    2026-09-23 prune sat for eleven days while the suite stayed green. So this node
+    does not assert anything about the repaired corpus through a map assembled from
+    that same corpus: `verify_siblings` scoring a clean sheet there is arithmetic on
+    the fixture, and it is the FIRST assertion of the old node's shape, which is
+    precisely what this file is here to stop repeating. It asserts the two things
+    that can actually go red, both over the committed records file with no store:
+
+      * history replayed — the corpus with the 2026-09-23 swapped-in values put back
+        through a map of the values that replaced them: exactly the fourteen drifted
+        ids come back named, which is the `14 of 39` of 2026-10-04 reconstructed
+        from committed bytes. Red means the audit stopped seeing a drifted value, or
+        a repair is missing from `PRUNED_2026_09_23`;
+      * liveness — one swapped-in value dropped from the map: that one id alone, and
+        not its neighbours. Red means the audit passes a value it cannot resolve.
+
+    The second is the control the suite lacked: a value the audit is supposed to
+    resolve that is deliberately not seeded HAS to be reported, or a green audit
+    again means only that nothing was ever checked against a real surface.
+    """
+    records = list(cf.load_records(RECORDS).values())
+    drifted = {qid for qid, r in _entity_records().items() if qid in PRUNED_2026_09_23}
+    assert len(drifted) == len(PRUNED_2026_09_23), \
+        "an id in PRUNED_2026_09_23 is no longer an entity-axis record"
+    # Keyed the way `aliases.all_lower()` keys it: the lowercase SURFACE, the
+    # canonical as the value. A map keyed by the display name resolves nothing,
+    # because the resolver lowercases what it is handed before the lookup.
+    live = {r["new_value"].strip().lower(): r["new_value"] for r in records
+            if r["axis_changed"] == cf.ENTITY_AXIS}
+    resolver = cf._resolver_from_map(live)
+    # Case-matched, because `all_lower()` keys are lowercase and the retired names
+    # are display forms: intersecting them unnormalised fires only on an
+    # all-lowercase pruned name and would read as a guard while being near-dead.
+    assert not ({v.strip().lower() for v in PRUNED_2026_09_23.values()} & live.keys()), \
+        "a pruned canonical is still a map key"
+
+    replayed = []
+    for r in records:
+        retired = PRUNED_2026_09_23.get(r["id"])
+        if r["axis_changed"] == cf.ENTITY_AXIS and retired:
+            replayed.append({**r, "new_value": retired, "expected_to_move": [retired]})
+    assert {b["id"] for b in replayed} == drifted
+    assert {r["id"] for r in cf.verify_siblings(replayed, resolver)} == drifted, \
+        "the audit did not reproduce the 2026-10-04 verdict from the drifted values"
+
+    # The dropped value has to belong to one record alone: `MEMORY.md` and
+    # `Entity Graph` are swapped in by two and three entries, so dropping one of
+    # those keys would report a set of that size and prove nothing about which
+    # record the audit can see.
+    singleton = next(r for r in sorted(records, key=lambda r: r["id"])
+                     if r["axis_changed"] == cf.ENTITY_AXIS
+                     and sum(1 for x in records
+                             if x.get("new_value") == r["new_value"]) == 1)
+    key = singleton["new_value"].strip().lower()
+    one_short = cf._resolver_from_map({k: v for k, v in live.items() if k != key})
+    reported = {r["id"] for r in cf.verify_siblings(records, one_short)}
+    assert reported == {singleton["id"]}, (reported, singleton["new_value"])
+
+
+def test_corpus_audit_node_docstring_stops_stating_a_live_verdict():
+    """Clause 4's other half: the node that seeds the corpus must not publish the
+    live store's verdict as a fact it read.
+
+    Until this round that node's docstring said "39 entity-axis pairs, 0
+    unverified, read 2026-09-22" — the number the synthetic store manufactures,
+    presented as what the live store returns, and the sentence a future reader
+    would trust over a re-run. The live count is not observable from a worktree at
+    all (`app/paths.py` routes a non-production checkout to a tree-local data
+    root, so `store()` raises `StoreUnavailable`), so the only honest thing the
+    file may state about the corpus is the corpus's own size, which is what
+    `_entity_axis_records()` returns here rather than a typed count.
+    """
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    node = next(n for n in tree.body
+                if isinstance(n, ast.FunctionDef)
+                and n.name == "test_verify_siblings_reaches_a_verdict_on_the_committed_corpus")
+    doc = ast.get_docstring(node) or ""
+    assert "0 unverified" not in doc, doc
+    assert not re.search(r"unverified, read 2026-\d\d-\d\d", doc), doc
+    assert len(_entity_axis_records()) >= ENTITY_AXIS_FLOOR
+    assert f"{len(_entity_axis_records())} entity-axis pairs" in doc, (
+        "the node states a corpus size that is not the one it derives")
 
 
 def test_a_scored_run_reports_counterfactual_n_over_the_whole_corpus(monkeypatch):
