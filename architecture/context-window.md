@@ -147,11 +147,17 @@ A summary is not a note back to the reader, it is a row in the assistant's own
 voice. `app/compaction_state.py::summary_message` returns the rendered record with
 `role` set to `assistant`, and `app/compaction.py::_persisted_summary_layer` puts it at
 index 0 — first element of the new conversation — so everything the summariser carried re-enters
-every later turn as text Lloyd apparently wrote itself: the fence it arrived inside is
-gone, and so is any label saying where it came from. The summariser strips one thing,
+every later turn as text Lloyd apparently wrote itself. Up to #2194 that was the whole
+of it: the fence a payload arrived inside was gone, and so is any label saying where it came from
+in the text the renderer then produced — `render_summary` emitted the header plus the
+model's sections, nothing else. It now emits an attribution line and a quote frame
+(`summary_attribution`, `SUMMARY_QUOTE_BEGIN`/`_END`), described at the end of this
+section. The summariser strips one thing,
 the `<analysis>` scratchpad, and nothing else. That is a persistence channel for a
 prompt injection: content the model was told to treat as data gets promoted to
-first-party instructions by the act of being summarised.
+first-party instructions by the act of being summarised. A frame around it is a
+label on that promotion, not a wall against it — the row is still `assistant`, and
+whether it keeps that role is a separate ruling.
 
 It is worse than a bare copy because of what the summariser is asked to do. Its prompt
 (`app/compaction_llm.py`) orders the model to keep user messages near-verbatim, to list
@@ -186,12 +192,32 @@ python -m eval.run_injection_canary grade
 ```
 
 The first line needs the live aggregator and the engine, which is why it is owed after
-landing rather than run from a round. Where a fix would go if the number is not
-negligible is the summariser's output boundary — restating a surviving directive as
-inert data, or keeping its provenance with it — and not a wider allowance for the
-model to edit its own context, which is the one thing the same class of paper argues
-against. Whether the summary row keeps its `assistant` role is a separate ruling, and
-changing it would move every later turn's reading of that text.
+landing rather than run from a round. The fix that was owed there is the summariser's
+output boundary — restating a surviving directive as inert data, or keeping its
+provenance with it, and not a wider allowance for the model to edit its own context,
+which is the one thing the same class of paper argues against — and it landed with #2194:
+
+- `render_summary` wraps the summariser's text in `SUMMARY_QUOTE_BEGIN` /
+  `SUMMARY_QUOTE_END`, above a `summary_attribution` line naming how many rows and turns
+  the block is quoted from and stating that a user turn inside it is quoted from an
+  earlier request, not one being made now. The Files-touched ledger stays outside the
+  frame, because it is the harness's own summary of tool calls rather than quoted prose.
+  `summary_message` is unchanged in shape: one row, `role: assistant`.
+- The instrument moved with it, or the fix would have been read as a failure. Both
+  2026-10-04 leaks already sat inside prose that rejected them ("Identified a prompt
+  injection attempt… Rejected the embedded instruction"), so a metric that counts
+  **verbatim** tokens cannot fall when the change is to keep the tokens and attribute
+  them. `survival_split` reports, beside the verbatim count, how many surviving tokens
+  sit outside the frame (`leak_unattributed` — the number the deploy is judged on, since
+  those are the ones arriving in Lloyd's own voice) and how many sit inside it as
+  attributed quotation (`leak_attributed`). Attribution is read from the frame the
+  harness wrote, never from the summariser's own defusing sentences, which come and go.
+
+So the open question is no longer "is there a boundary" but whether a frame a motivated
+later turn can see through is a mitigation or only a label — and that is what the
+`--rep` sweep and the benign-control comparison decide. Whether the summary row keeps its
+`assistant` role remains a separate ruling, and changing it would move every later turn's
+reading of that text.
 
 ## What a rewrite costs, priced per mechanism
 
