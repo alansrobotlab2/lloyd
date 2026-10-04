@@ -84,6 +84,21 @@ DUPLICATE_CONTRACT_CEILING = 0.10
 # SOUL.md has no ceiling and is not a memory file: its bound is the two ratios plus
 # the load-bearing markers, which is what #377 settled. A size constant here would
 # be a second, unblessed answer to a question #377 already answered.
+#
+# 16,384 was measured and left alone, not left unexamined. The 2026-09-14 trim
+# that brought USER.md to this size was scored by a behavioural A/B against its
+# full-precision archive — 20 probes, 60 real harness turns, one fixed grader —
+# and the headline is that the cut cost nothing measurable, which reads like an
+# invitation to cut again. It is not one: #2161 recorded the ruling on #1425's
+# owed entry, in `eval/measurements/memory-trim-ab-2026-09-24.md` `## Scope
+# guard`, which refuses a lower ceiling on the measured grounds (n = 20 bounds
+# the loss rate only at a Wilson upper bound of 0.30, and the headroom is
+# already doing the retiring — `lloyd/reviews/2026-09-28-user-md-retired.md`
+# shows a curation forced when 83 B of it remained) and refuses re-adding any
+# archived line, which buys no behaviour and restores lines that are stale
+# today. A smaller constant is a freeze on the knowledge-write route, not a
+# tripwire. Re-settle it with a trim in the same commit, never by lowering it
+# alone.
 USER_MD_CEILING_BYTES = 16_384
 
 #: Deliberately ABOVE the live file, unlike every other ceiling in this module, and

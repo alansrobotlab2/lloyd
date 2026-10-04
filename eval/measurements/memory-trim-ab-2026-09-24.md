@@ -132,10 +132,31 @@ case where the restored line is wrong.
 
 ## Scope guard
 
-`~/obsidian/lloyd/USER.md` was 16,368 B before and after the run and was never
-written; arms were built from copies. No config change is recommended. What
-the result licenses (a lower ceiling, re-adding lines) is Alan's ruling. The
-data say re-adding is unwarranted.
+`~/obsidian/lloyd/USER.md` was 16,368 B on 2026-09-24 before and after the run
+and was never written; arms were built from copies. No config change came out
+of this run.
+
+**Ruling, issued 2026-10-04 (#1425 owed entry 2, recorded by #2161): license
+neither half.** The ceiling stays at `USER_MD_CEILING_BYTES` = 16,384 B and no
+archive line is re-added. Re-adding buys no behaviour — canonical 19/20 against
+restored 20/20 once p06 was overturned, a discordance of 2/20 that is exactly
+the A/A noise floor 2/20, sign test p = 0.50 — and at least four of the restored
+lines are stale today, so it would load false premises to buy ~3.7 tool calls on
+the one turn that needs a line. Lowering the ceiling is not licensed either:
+n = 20 bounds the loss rate only at a Wilson upper bound of 0.30, and the
+headroom is already doing the work a lower constant would stop —
+`lloyd/reviews/2026-09-28-user-md-retired.md` records USER.md at 16,301 B of
+16,384 (headroom 83) on 2026-09-28 with `memory_ledger.py status` printing
+`CURATE`, and the file measures 15,932 B on 2026-10-04. A lower constant is a
+freeze on the nightly knowledge-write route, not a tripwire, which is the
+failure mode `prompt_surface`'s own comment names ("never by lowering it
+alone"), and the constant now says so above itself.
+
+**`word overlap` is UNVALIDATED as a fidelity proxy, not refuted**: the condense
+arm could not be built, because the audit ledger maps no condensed row back to
+its originals, and nothing outside this run's own driver reads it. No
+recommendation stands or falls on it, and **no future compaction gate may be
+tuned on it**.
 
 ## Limits
 

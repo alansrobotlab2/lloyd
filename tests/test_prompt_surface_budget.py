@@ -1299,3 +1299,177 @@ def test_vault_write_still_writes_a_memory_file_under_its_ceiling(lane_roots):
 
     assert out.get("success") is True, out
     assert (mems / "USER.md").read_text(encoding="utf-8") == content
+
+
+# ── #2161: the #1425 ceiling ruling, recorded where a re-proposal would read it ───
+#
+# #1425 measured the 2026-09-14 USER.md trim against its full-precision archive and
+# its report ended "What the result licenses (a lower ceiling, re-adding lines) is
+# [a person's] ruling" — a sentence an owed-check pass re-reads and re-files, which is
+# how #2161 came to exist. The ruling came (#1425 `owed_settled` entry 2, 2026-10-04:
+# license neither), but it lived in the item's front matter, so every surface that
+# quotes the headline "the cut was free" still read as an open question, including the
+# comment above the constant itself. These nodes are the seam between prose and code:
+# the two notes' `## Scope guard` sections and the constant's own comment must agree
+# with the shipped value, and the figures they cite are formatted FROM that value so a
+# later re-settle fails here instead of leaving an essay that argues for a number the
+# code no longer holds. `lloyd/USER.md` is never opened by any of this: its size moves
+# with every retirement, so no node reads it and no figure in the notes is allowed to
+# be a live measurement — each must carry the date it was taken (clause 3).
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+TRIM_AB_REPORT = _REPO_ROOT / "eval" / "measurements" / "memory-trim-ab-2026-09-24.md"
+TRIM_AB_REVIEW = VAULT / "reviews" / "2026-09-24-user-md-trim-ab.md"
+
+#: The exact phrase the open sentence ended with, in both notes' history and in the
+#: item's own body. Its absence from the two notes IS the acceptance check, so it is
+#: spelled once here rather than inline in five asserts.
+_OPEN_CEILING_QUESTION = "Alan's ruling"
+
+#: A `16,384 B`-shaped on-disk figure. A number of this shape in a scope guard is a
+#: claim about a file at a moment, and moments expire.
+_MEASURED_BYTES = re.compile(r"\b(\d{1,3},\d{3}) B\b")
+_DATED = re.compile(r"20\d\d-\d\d-\d\d")
+
+
+def _flat(text: str) -> str:
+    """Prose with its markdown hard-wraps folded, so a phrase is matched as a phrase."""
+    return " ".join(text.split())
+
+
+def _trim_scope_guard(path: Path) -> str:
+    """The `## Scope guard` section of one #1425 note, and nothing else."""
+    text = path.read_text(encoding="utf-8")
+    assert "## Scope guard" in text, f"{path} lost its `## Scope guard` section"
+    return _flat(text.split("## Scope guard", 1)[1].split("\n## ")[0])
+
+
+def _assert_ruling_stated(guard: str, where: str) -> None:
+    """The two halves of the ruling, in the section that replaced the open question."""
+    assert "USER_MD_CEILING_BYTES" in guard, \
+        f"{where} states a ceiling without naming the constant it is talking about"
+    assert "license neither" in guard.lower(), \
+        f"{where} never says which half of #1425's question the ruling refuses"
+    assert "no archive line is re-added" in guard, \
+        f"{where} does not close the re-adding half of the question"
+
+
+def _assert_reason_constant_derived(guard: str, where: str) -> None:
+    """Clause 3: the reason, in figures that cannot rot — except dated ones."""
+    ceiling = f"{ps.USER_MD_CEILING_BYTES:,}"
+    assert f"{ceiling} B" in guard, \
+        f"{where} does not state the ceiling at the live {ceiling} B"
+    assert "n = 20" in guard and "Wilson" in guard and "0.30" in guard, \
+        f"{where} argues the ceiling down without the bound that stops it: " \
+        f"n = 20 leaves a Wilson upper bound of 0.30"
+    for size in _MEASURED_BYTES.finditer(guard):
+        if size.group(1) == ceiling:
+            continue
+        window = guard[max(0, size.start() - 110): size.end() + 110]
+        assert _DATED.search(window), (
+            f"{where} quotes {size.group(0)} in `## Scope guard` with no date within "
+            f"220 characters: USER.md moves with every retirement, so an undated size "
+            f"is a live claim this suite cannot check")
+
+
+def _assert_overlap_rule_stated(guard: str, where: str) -> None:
+    """Clause 4: the prohibition is the sentence that outlives the measurement."""
+    assert "word overlap" in guard, f"{where} never names the proxy #1425 step 4 used"
+    assert "UNVALIDATED" in guard, \
+        f"{where} does not say `word overlap` is UNVALIDATED — 'undetermined' is the " \
+        f"finding, and it is the sentence that gets quoted into a future gate"
+    assert "not refuted" in guard, \
+        f"{where} let the proxy read as disproved; nothing disproved it"
+    assert "no future compaction gate may be tuned on it" in guard, \
+        f"{where} records the proxy's status but not the prohibition that follows"
+
+
+def test_the_trim_ab_report_states_the_ruling_in_place_of_the_open_sentence():
+    """Clause 1: the repo report is the surface a re-proposal cites, so it decides.
+
+    The sentence that used to close `## Scope guard` handed the ceiling question to a
+    person who had already answered it in the ledger; a later pass reading only the
+    report could not tell a settled ruling from a pending one and filed #2161 to ask
+    again. The whole file is searched for the handed-off phrase, not just the section,
+    because the section is what was rewritten and the rest is what nobody re-reads.
+    """
+    report = TRIM_AB_REPORT.read_text(encoding="utf-8")
+    assert _OPEN_CEILING_QUESTION not in report, \
+        f"{TRIM_AB_REPORT.relative_to(_REPO_ROOT)} still hands the ceiling to a person"
+    _assert_ruling_stated(_trim_scope_guard(TRIM_AB_REPORT), "the A/B report")
+
+
+@vault_only
+def test_the_trim_review_note_states_the_same_ruling():
+    """Clause 2: the vault mirror agrees. It never carried the open sentence — #2161's
+    triage found the item's "both notes" overstated by one file, and `git log -S` on
+    this note is empty for that phrase — so this is an addition, and the pair now says
+    one thing. The vault half lives on the vault's main behind `automod_vault_land`,
+    which is a second writer with a second verdict, so the agreement is checked across
+    the boundary rather than assumed from the diff that made it.
+    """
+    review = TRIM_AB_REVIEW.read_text(encoding="utf-8")
+    assert _OPEN_CEILING_QUESTION not in review, \
+        "the review note gained the open sentence the report just lost"
+    _assert_ruling_stated(_trim_scope_guard(TRIM_AB_REVIEW), "the review note")
+
+
+def test_the_trim_ab_report_gives_the_reason_in_constant_terms():
+    """Clause 3 against the repo report."""
+    _assert_reason_constant_derived(_trim_scope_guard(TRIM_AB_REPORT), "the A/B report")
+
+
+@vault_only
+def test_the_trim_review_note_gives_the_reason_in_constant_terms():
+    """Clause 3 against the vault note, which quotes the same run for a human reader."""
+    _assert_reason_constant_derived(_trim_scope_guard(TRIM_AB_REVIEW), "the review note")
+
+
+def test_the_trim_ab_report_rules_word_overlap_out_as_a_tuning_input():
+    """Clause 4 against the repo report, where step 4's proxy was measured."""
+    _assert_overlap_rule_stated(_trim_scope_guard(TRIM_AB_REPORT), "the A/B report")
+
+
+@vault_only
+def test_the_trim_review_note_rules_word_overlap_out_as_a_tuning_input():
+    """Clause 4 against the vault note.
+
+    The notes already said, in their own words, that whether overlap orders
+    divergence "cannot be determined here". That is true and it is not the load-bearing
+    sentence: unvalidated is not refuted, and a later compaction gate can be tuned on a
+    proxy nobody validated as long as nothing says it may not be.
+    """
+    _assert_overlap_rule_stated(_trim_scope_guard(TRIM_AB_REVIEW), "the review note")
+
+
+def test_the_ceiling_comment_cites_the_ab_that_refused_a_lower_ceiling():
+    """Clause 5: the constant answers a re-proposal from its own text.
+
+    The comment block above `USER_MD_CEILING_BYTES` used to stop at the #1010/#507
+    origin story, so a round that read the report's headline — the trim cost nothing
+    measurable — found nothing in front of it arguing why the number stays. The block
+    is read back off the source rather than from `ps.__doc__` because a comment is not
+    in any runtime object, and the value is re-parsed beside it so the prose figure and
+    the shipped constant cannot drift apart.
+    """
+    src = (_REPO_ROOT / "app" / "prompt_surface.py").read_text(encoding="utf-8")
+    lines = src.splitlines()
+    at = [i for i, line in enumerate(lines)
+          if line.startswith("USER_MD_CEILING_BYTES = ")]
+    assert len(at) == 1, f"the ceiling is assigned {len(at)} times, expected once"
+    top = at[0]
+    while top > 0 and lines[top - 1].lstrip().startswith("#"):
+        top -= 1
+    block = _flat("\n".join(line.lstrip().lstrip("#") for line in lines[top:at[0]]))
+
+    assert "eval/measurements/memory-trim-ab-2026-09-24.md" in block, \
+        "the ceiling's comment names no measurement, so the headline can be re-cited"
+    assert "refuses a lower ceiling" in block, \
+        "the comment cites the A/B without saying what it ruled"
+    assert "n = 20" in block and "0.30" in block, \
+        "the comment drops the bound that is the actual reason"
+    assert "never by lowering it alone" in block, \
+        "the comment no longer carries the rule the MEMORY.md ceiling already states"
+    assert int(lines[at[0]].split("=")[1].strip().replace("_", "")) == ps.USER_MD_CEILING_BYTES
+    assert f"{ps.USER_MD_CEILING_BYTES:,}" in block, \
+        "the comment's figure is no longer the shipped constant's value"
