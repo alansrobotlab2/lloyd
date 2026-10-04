@@ -93,6 +93,102 @@ def log_prompt_size(
     return report
 
 
+# ---------------------------------------------------------------------------
+# Prompt-fix liveness witness (#2176).
+#
+# A prompt-side fix is SHIPPED when its commit is an ancestor of HEAD, and LIVE
+# only when the process now answering assembled a prompt that contains it. The
+# reflection chain needed the second answer for two cycles and could not get it:
+# was `_data_home_hint` in the live prompt when `~/lloyd/workers.db` was
+# re-created at 14:00 PDT 2026-10-03? Shipped is provable — `5b8d3e8d`, authored
+# 2026-10-02T09:10:54-07:00, is an ancestor of HEAD — and the backend restarted at
+# 20:59:09 PDT that evening, AFTER the creation. The one bit missing was content.
+#
+# Neither instrument that watches the assembly has it. `log_prompt_size` above
+# emits `name=<chars>c/<est>t` and nothing else, and `app/component_manifest.py`
+# keeps a `sha256:` plus `bytes` per component under a retention policy that says
+# in as many words that no content is retained and that a sentinel string placed
+# inside a component cannot be found in the store — the property
+# `tests/test_component_manifest.py::test_no_written_line_carries_component_text`
+# pins. A digest cannot be grepped for a paragraph. Nor can a session transcript:
+# in `~/lloyd-data/sessions/20261004_023513_autotriage_33f5.json` `messages[0]` is
+# the USER turn and does not carry the hint's paragraph — a worker's prompt is
+# greppable only because its dispatch prompt arrives as a user message, not
+# because an assembled system prompt is persisted anywhere.
+#
+# So this witnesses PRESENCE, which is one bit per marker and nothing else. A
+# marker is a declared name plus a literal substring; the record carries the name
+# and `present`/`absent`, so it keeps the property the manifest keeps: what lands
+# in the log is not the text it was computed from. The failure mode the witness
+# tests guard is it drifting into logging the prompt to be more useful.
+# ---------------------------------------------------------------------------
+
+#: The shipped prompt-fixes, as data: marker name -> the literal substring that
+#: only that fix's text contains. Registering a fix is one line here and no change
+#: to the builder, which `tests/test_prompt_marker_witness.py` keeps true by
+#: registering a marker of its own and reading it back in the next record.
+#:
+#: A literal has to be text the fix OWNS. "Something about data" is already in the
+#: prompt from three directions; the bit is only worth having if it names the one
+#: paragraph whose presence is in question, so every value is a clause copied out
+#: of the function that shipped it.
+PROMPT_MARKERS: dict[str, str] = {
+    # `5b8d3e8d` (2026-10-02): tells a turn where runtime data lives, so it stops
+    # opening a database in the checkout. The opening clause of `_data_home_hint`,
+    # which no other part of the prompt says — pinned against drift by
+    # `test_the_shipped_marker_names_the_data_home_paragraph`.
+    "data-home-hint": "Runtime data: everything Lloyd writes while running lives in",
+}
+
+#: The two words a marker is ever reported as. Constants, because the grep a person
+#: runs after an incident is the entire point of the line, and rewording one would
+#: silently break the report that greps for it.
+MARKER_PRESENT = "present"
+MARKER_ABSENT = "absent"
+
+
+def marker_liveness(prompt: str,
+                    markers: dict[str, str] | None = None) -> dict[str, str]:
+    """Each declared marker as `present` or `absent`, in declaration order.
+
+    `prompt` must be the string the builder RETURNS, not the component dict it was
+    assembled from: a fix whose text spans one of the `\\n\\n` joins is live, and a
+    witness that read the parts before the join would report `absent` while the
+    model is reading it. `test_presence_is_computed_on_the_string_that_is_returned`
+    probes exactly that seam with a needle sliced across a separator.
+    """
+    declared = PROMPT_MARKERS if markers is None else markers
+    return {
+        name: (MARKER_PRESENT if needle and needle in prompt else MARKER_ABSENT)
+        for name, needle in declared.items()
+    }
+
+
+def log_marker_liveness(prompt: str, *, session_id: str = "",
+                        platform: str = "") -> dict[str, str]:
+    """One INFO line per build: which shipped prompt-fixes this prompt contains.
+
+    `PROMPT_MARKERS session=… platform=… data-home-hint=present  chars=…`, beside
+    the `PROMPT_BUDGET` line it shares a call site with and living in the same
+    rotated file (`~/lloyd-data/logs/server.err`, `.8/.9/.10`), which is what makes
+    "is fix X live in process Y" a grep of the log instead of a reading of the code
+    plus a guess about which build was in memory at the time.
+
+    It carries no prompt text: names, the two words, the session, the platform and
+    a character count. A sentinel planted in any component appears nowhere in it —
+    the property `component_manifest` keeps for its store, kept here for the same
+    reason. Returns the flags, so a caller that wants them need not parse the line.
+    """
+    flags = marker_liveness(prompt)
+    logger.info(
+        "PROMPT_MARKERS session=%s platform=%s %s  chars=%d",
+        session_id or "-", platform or "user",
+        "  ".join(f"{name}={flag}" for name, flag in flags.items()) or "none",
+        len(prompt),
+    )
+    return flags
+
+
 # The anti-compliance rules used to be duplicated here as
 # ANTICOMPLIANCE_DIRECTIVE and injected ahead of SOUL.md while SOUL.md carried
 # its own near-verbatim copy — two wordings of the same six rules every turn,
@@ -393,9 +489,11 @@ def build_system_prompt(
     on the user's end condition. Pass `session.goal` straight from disk.
 
     `session_id` — when non-empty, emit one `PROMPT_BUDGET` INFO line holding
-    the per-component char/token breakdown for this build (#466). Pass the live
-    session id from the chat/ambient/sync handler so there is one line per turn.
-    Logging never changes the returned string.
+    the per-component char/token breakdown for this build (#466) and one
+    `PROMPT_MARKERS` line saying which shipped prompt-fixes the string being
+    returned contains (#2176). Pass the live session id from the chat/ambient/sync
+    handler so there is one of each per turn. Logging never changes the returned
+    string, and a witness that raises cannot either.
 
     `platform` — the session's own platform. For a non-user platform
     (`autonomy`, `worker`) the memory files named in
@@ -584,6 +682,11 @@ def build_system_prompt(
         if state_block:
             components["session_state"] = state_block
             parts.append(state_block)
+    # Joined ONCE, here, so the witness below and the `return` are the same object:
+    # a fix's presence in the prompt has to be a claim about the bytes that are
+    # returned, and joining twice would let the two disagree in exactly the direction
+    # that makes the log wrong. Nothing else in this function changes.
+    prompt = "\n\n".join(parts)
     if session_id:
         log_prompt_size(components, session_id=session_id, platform=platform)
         # #581: `log_prompt_size` reports each component's SIZE and then drops
@@ -597,7 +700,21 @@ def build_system_prompt(
         # CLI scripts that never bring up the app package. Never raises.
         from app.component_manifest import note_components
         note_components(session_id, components)
-    return "\n\n".join(parts)
+        # #2176: the third instrument on this assembly, and the only one of the three
+        # that needs the JOINED string rather than the component dict — presence in a
+        # prompt is a property of the bytes the model is handed, so the witness sits
+        # below the join and reports on `prompt` itself. Below the other two on purpose
+        # too: its failure is contained in the two lines below, and a witness that took
+        # the size line or the manifest note down with it would make the new instrument
+        # the reason an old one stopped working.
+        # `test_a_raising_witness_never_reaches_the_turn` is why this stays a
+        # try/except and not an assumption that string containment cannot raise.
+        try:
+            log_marker_liveness(prompt, session_id=session_id, platform=platform)
+        except Exception as exc:  # noqa: BLE001 — instrumentation never reaches the turn
+            logger.warning("PROMPT_MARKERS witness failed (%s: %s); the prompt stands",
+                           type(exc).__name__, str(exc)[:160])
+    return prompt
 
 
 def _load_soul(overlay: Path | None = None) -> str | None:

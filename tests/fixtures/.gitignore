@@ -54,3 +54,20 @@
 # live report of this name belongs to `~/lloyd-data/_pipeline/reflection/`, never here,
 # so the negation only ever reaches a witness somebody chose to commit.
 !qmd-index-maintenance-*.json
+
+# The fifth family is a session transcript's WITNESS — an extract, not the transcript.
+# #2176's premise is that no instrument can say whether a shipped prompt-fix was in the
+# prompt a live process assembled, and one of the three candidates for "there already is
+# one" was the transcript itself. It is not: in
+# `~/lloyd-data/sessions/20261004_023513_autotriage_33f5.json` (917 lines, 113,563 B, 39
+# messages, no `system` role anywhere) `messages[0]` is the USER turn, 16,926 chars, and
+# does not carry the paragraph `_data_home_hint` returns. `sessions/` is retention-swept
+# the way the two families above are, and the vault copy under `backlog/data/` (clause 6)
+# is unreadable from a node for the reason the paragraph above gives, so the extract lives
+# here too. An extract rather than the whole file because the whole file is a triage
+# session's prompt and reply text — the thing the manifest's retention policy exists not to
+# retain — while every figure #2176 quotes is about messages[0] and is carried here with
+# the source's digests beside it. `test_the_committed_witness_bytes_still_carry_the_measured_gap`
+# re-derives them. Scoped to this name family so a transcript someone drops here by
+# accident stays ignored.
+!session_witness_*.json
