@@ -4482,7 +4482,115 @@ def released_ids(ledger: Path) -> set[int]:
     judged `keep` by a group triage, ranked by a sweep, or re-triaged after a
     spent attempt."""
     return (expired_ids(ledger) | group_kept_ids(ledger) | swept_ids(ledger)
-            | set(retriage_marks(ledger)))
+            | set(retriage_marks(ledger)) | triage_requested_ids(ledger))
+
+
+# ── A promotion is a request, not a status ──────────────────────────────────
+#
+# `up_next` means "a round will take this", and only the ledger can make that
+# true: `desired_statuses` moves an item with no loopable contract back to
+# `draft` at the next reconcile. So a hand or a nightly pass writing
+# `status: up_next` on such an item changed nothing, and the reconciler's own
+# line ("never triaged; autotriage reads draft") read to the next night's pass
+# as a reason to promote again. Measured over the 7 days to 2026-10-04: 77 of
+# 168 `status_moved` rows were the reconciler undoing a promotion (53 never
+# triaged, 24 triaged-not-for-the-loop), and #2030 went round four nights
+# running while held in quarantine with no reader at all.
+#
+# The write is now answered from the same table the reconciler reads. Where
+# the ledger would keep the item in `up_next`, the status moves. Where it
+# would not, the status stays and the promotion becomes the thing that can
+# actually advance the item: a quarantined, never-triaged one is released to
+# single triage (`backlog_triage_requested`, read by `released_ids`); one that
+# was triaged out of the loop and has nothing owed gets a `decide` entry, so
+# owed-check owns it again.
+#
+# The release is the one new way out of quarantine, so an unattended caller is
+# capped (`TRIAGE_REQUEST_CAP` per 24 h across every non-chat session): the
+# edge `is_quarantined` cuts is triage feeding itself, and a worker that could
+# promote its own spawn without bound would restore it.
+TRIAGE_REQUEST_EVENT = "backlog_triage_requested"
+TRIAGE_REQUEST_CAP = 5
+TRIAGE_REQUEST_WINDOW_S = 86_400.0
+
+
+def triage_requested_ids(ledger: Path) -> set[int]:
+    """Self-filed items a promotion released to single triage."""
+    return {int(d["item_id"]) for d in _ledger_events(ledger, TRIAGE_REQUEST_EVENT)}
+
+
+def promotion_ruling(item_id: int, *, ledger: Path | None = None, session_class: str = "chat",
+                     now: float | None = None) -> dict:
+    """What a write of `status: up_next` on this item should do. Pure: it reads
+    the ledger and the board and writes neither (`apply_promotion_ruling` does).
+
+    `{"move": bool, "outcome": ..., "message": ...}`. `move` is True when the
+    reconciler would leave the item in `up_next`, and for anything this loop
+    holds no opinion about (an item on a board it does not read, an id that is
+    not open). Outcomes of a refusal: `ledger` (the ledger puts it elsewhere and
+    someone already owns the next step), `owe` (triaged out of the loop with
+    nothing owed), `pooled` (already a triage candidate), `request` (held in
+    quarantine: release it), `capped`, `grouped`.
+    """
+    ledger = ledger or LEDGER_DEFAULT()
+    iid = int(item_id)
+    item = next((i for i in open_items(None) if i.id == iid), None)
+    if item is None or (DEFAULT_BOARDS is not None and item.board not in DEFAULT_BOARDS):
+        return {"move": True, "outcome": "unmanaged", "message": ""}
+    want = desired_statuses(ledger).get(iid)
+    if want is not None:
+        if want[0] == IMPLEMENT_POOL_STATUS:
+            return {"move": True, "outcome": "allowed", "message": want[1]}
+        from scripts.automod import owed as O
+        fm, _ = _split_frontmatter(item.path.read_text(encoding="utf-8"))
+        owned = bool(fm.get(O.OWED_KEY) or fm.get(O.OUTSIDE_KEY))
+        orphan = iid in triaged_ids(ledger) and want[0] == TRIAGE_POOL_STATUS and not owned
+        return {"move": False, "outcome": "owe" if orphan else "ledger",
+                "message": f"#{iid} stays {want[0]}: {want[1]}"
+                           + ("; nothing was owed on it, so the decision is now owed to owed-check"
+                              if orphan else "")}
+    if is_grouped(item):
+        return {"move": False, "outcome": "grouped",
+                "message": f"#{iid} is folded under umbrella #{item.group}; its fate is the umbrella's"}
+    live = live_blockers(ledger, items=[item])
+    if not is_quarantined(item, released=released_ids(ledger), live=live):
+        return {"move": False, "outcome": "pooled",
+                "message": f"#{iid} stays draft: it has no triage verdict yet and is already "
+                           "a triage candidate; triage reads draft"}
+    if session_class != "chat":
+        now = time.time() if now is None else now
+        recent = sum(1 for d in _ledger_events(ledger, TRIAGE_REQUEST_EVENT)
+                     if str(d.get("by") or "") != "chat"
+                     and now - float(d.get("ts") or 0) < TRIAGE_REQUEST_WINDOW_S)
+        if recent >= TRIAGE_REQUEST_CAP:
+            return {"move": False, "outcome": "capped",
+                    "message": f"#{iid} stays draft: {recent} self-filed item(s) were already "
+                               f"released to triage in 24 h (cap {TRIAGE_REQUEST_CAP}); "
+                               "it clusters or expires as before"}
+    return {"move": False, "outcome": "request",
+            "message": f"#{iid} stays draft: it had no triage verdict and was held as "
+                       "self-filed; released to single triage, which gives it a contract or retires it"}
+
+
+def apply_promotion_ruling(item_id: int, ruling: dict, why: str, *, ledger: Path | None = None,
+                           session_class: str = "chat", session_id: str = "") -> None:
+    """The writes a refused promotion owes: the release row, or the owed entry.
+    Called after the caller's own write to the item file, never before — the
+    owed entry is a front-matter write a later whole-file save would lose."""
+    why = " ".join(str(why or "").split())[:300]
+    if ruling.get("outcome") == "request":
+        from scripts.automod import state as S
+        S.append_event({"event": TRIAGE_REQUEST_EVENT, "item_id": int(item_id),
+                        "by": session_class, "session_id": session_id, "reason": why},
+                       path=ledger or LEDGER_DEFAULT())
+    elif ruling.get("outcome") == "owe":
+        from scripts.automod import owed as O
+        item = next((i for i in open_items(None) if i.id == int(item_id)), None)
+        if item is not None:
+            O.add_owed(item.path, [("a promotion was asked for and the ledger holds it out of the "
+                                    f"loop: {why or 'no reason given'}")[:500]
+                                   + " — decide: close it, do it, or file the work"],
+                       kind="decide")
 
 
 # ── Blockers ────────────────────────────────────────────────────────────────

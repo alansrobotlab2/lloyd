@@ -122,7 +122,11 @@ gain. If the ruling leaves engineering work, add `follow_up`.
 `name` and a `body` that says what to change, why, and how to check it (at \
 most six checkable clauses). It is filed as a draft backlog item.
 - `reopen` — (open items only) the item deserves another implement attempt; \
-say why in `ruling`.
+say why in `ruling`. Only an item a round has already attempted, or whose \
+triage confirmed a contract a round can meet, can be reopened: for one triage \
+ruled `not_code` or `unverifiable` the answer is refused and the entry stays \
+owed. If what such an item still needs is a measurement or a run, do it now, \
+in this session, and rule on the result; if it needs a change, answer `work`.
 - `close` — (open items only) close the item: tried and not worth another \
 attempt, or not worth doing; say why in `ruling`.
 - `outside` — ONLY for something no software on this machine can do: sudo on \
@@ -154,6 +158,8 @@ def _entries_block(entries: list[dict], due: list[int]) -> str:
         from scripts.automod import owed as O
         if e.get("origin") == O.STRANDED_ORIGIN:
             extra += ", derived from human_clauses: never recorded as owed"
+        if e.get("note"):
+            extra += f"; last answer not applied: {e['note']}"
         rows.append(f"{i + 1}. [{e['kind']}, owed since {e.get('since') or '?'}{extra}] {e['what']}")
     return "\n".join(rows)
 

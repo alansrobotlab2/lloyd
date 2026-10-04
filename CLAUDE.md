@@ -288,6 +288,11 @@ bookkeeping (journal, toast, voice). Re-announcing a recorded state through
   `draft`, autocode reads `up_next`; `backlog.desired_statuses` +
   `reconcile_statuses` write it. Off-vocabulary statuses are rescued
   (§3.2a, `architecture/backlog.md`).
+- **A write of `up_next` is a request the ledger answers** (`backlog.promotion_ruling`):
+  it moves only where the reconciler would leave it; otherwise a held self-filed
+  item is released to triage (5 per 24 h unattended) or an unowned parked one
+  gets a `decide` entry. owed-check's `reopen` asks the same ruling
+  (`architecture/backlog.md` "A promotion is a request").
 - **An item closes only when its round said every clause was `met`** (or
   `unnecessary`/`rejected` with evidence). `rejected` is a clean close: every
   item is a proposal, deployed only on a measured gain (§3.2b).

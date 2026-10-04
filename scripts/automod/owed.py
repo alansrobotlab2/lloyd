@@ -117,7 +117,9 @@ def _recorded(fm: dict) -> list[dict]:
                         "kind": raw.get("kind") if raw.get("kind") in KINDS else "check",
                         "since": str(raw.get("since") or ""),
                         "recheck_after": str(raw.get("recheck_after") or ""),
-                        "rechecks": int(raw.get("rechecks") or 0)})
+                        "rechecks": int(raw.get("rechecks") or 0),
+                        # Why the last answer was not applied (a refused `reopen`).
+                        "note": _text(raw.get("note"), 300)})
         elif isinstance(raw, str) and _text(raw):
             out.append({"what": _text(raw), "kind": "check", "since": "",
                         "recheck_after": "", "rechecks": 0})
@@ -488,6 +490,28 @@ def cite_for_child(what: str, revision: str | None = None) -> str:
     return f"{reduced} [{'cited at ' + revision if revision else UNPINNED}]"
 
 
+def _reopen_refusal(item_id: int) -> str:
+    """Why a `reopen` cannot be granted, or "" when it can.
+
+    A reopen is another implement attempt, so it needs either an attempt on
+    record (`B.reopen_item`) or a ledger that would keep the item in `up_next`.
+    An item triage ruled out of the loop has neither, and a status written
+    against the ledger lasts until the next reconcile. Fail-open: a ledger that
+    cannot be read leaves the old behaviour."""
+    from scripts.automod import backlog as B
+    try:
+        ledger = B.LEDGER_DEFAULT()
+        if int(item_id) in {int(d["item_id"]) for d in B._ledger_events(ledger, "backlog_implement")}:
+            return ""
+        ruling = B.promotion_ruling(int(item_id), ledger=ledger)
+    except Exception:  # noqa: BLE001
+        return ""
+    if ruling["move"]:
+        return ""
+    return (f"no implement attempt on record and {ruling['message']} — a round cannot take it: "
+            "measure or run it in this session and rule, or file it as `work`")
+
+
 def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_id: int,
                   session_id: str = "", spawn_cap: int = 3, now: datetime | None = None,
                   revision: str | None = None) -> dict:
@@ -510,6 +534,7 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
     item_move = ""
     move_why = ""
     stamp = _stamp()
+    is_open = str(fm.get("status") or "") != "done"
     for n, e in enumerate(entries, 1):
         a = by_n.get(n)
         if a is None:
@@ -527,6 +552,23 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
             keep.append(_compact({**e, "recheck_after": when, "rechecks": e.get("rechecks", 0) + 1}))
             notes.append(f"#{n} recheck after {when[:10]}: {evidence}")
             continue
+        if out == "reopen" and is_open:
+            refusal = _reopen_refusal(item_id)
+            if refusal and e.get("rechecks", 0) >= MAX_RECHECKS:
+                out = "ruling"
+                a = {**a, "ruling": f"a reopen was asked for {MAX_RECHECKS} times and the ledger "
+                                    f"cannot grant it ({refusal}); closed as not reopenable: "
+                                    f"{a.get('ruling') or evidence or 'no reason given'}"}
+            elif refusal:
+                # The entry stays owed. Settling it and writing `up_next` left
+                # #2041 with nothing owed and a status the reconciler undid two
+                # minutes later (2026-10-02): no owner at all. Counted as a
+                # recheck, so `MAX_RECHECKS` bounds a pass that keeps asking.
+                keep.append(_compact({**e, "recheck_after": recheck_date("", now),
+                                      "rechecks": e.get("rechecks", 0) + 1,
+                                      "note": _text(refusal, 300)}))
+                notes.append(f"#{n} reopen refused, still owed: {refusal}"[:300])
+                continue
         if out == "outside":
             # One entry per clause: a second `outside` ruling on the same clause
             # restates the ask in place and keeps the date it has waited since.
@@ -585,13 +627,13 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
                          # nothing to remove would write `tags: []`.
                          remove_tags=(B.NEEDS_HUMAN_TAG,) if legacy else ())
     moved = ""
-    is_open = str(fm.get("status") or "") != "done"
     if item_move == "reopen" and is_open:
         try:
             B.reopen_item(item_id, f"owed-check: {move_why or 'another attempt granted'}"[:400])
             moved = "reopened"
         except ValueError as exc:
-            # Never attempted: nothing to reopen. Back into the implement pool instead.
+            # Never attempted: nothing to reopen. Back into the implement pool
+            # instead — `_reopen_refusal` already established the ledger keeps it there.
             moved = "up_next" if B.set_status(item_id, "up_next", f"owed-check: {move_why}"[:300]) \
                 else f"reopen refused: {exc}"[:200]
     elif item_move == "close" and is_open:

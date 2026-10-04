@@ -129,6 +129,50 @@ only a status it has a ledger opinion about. The one exception is an untriaged
 item parked in `up_next`, where nothing can pull it from — that goes back to
 `draft`, where triage looks.
 
+### A promotion is a request the ledger answers
+
+That exception was a loop for anyone who wrote `up_next` by hand. Autonomy task
+35 (the vault skill `backlog-triage`) promoted two to four drafts a night with a
+status write and no ledger row; the reconciler moved each back within minutes;
+and its line — "never triaged; autotriage reads draft" — read to the next
+night's run as "still actionable". Measured 2026-10-04 over seven days: 77 of
+168 `status_moved` rows were the reconciler undoing a promotion (53 never
+triaged, 24 "not for the unattended loop"). #2030 went round four nights
+running while quarantine kept triage from ever reading it.
+
+`backlog_write_task(status="up_next")` is now ruled on at the write, from the
+same table (`backlog.promotion_ruling`, applied by `apply_promotion_ruling`).
+The answer comes back in the tool result as `promotion` and `message`, with the
+`status` the item actually has, and the rest of the write (priority, activity,
+description) is kept:
+
+| The item | What the write does | `promotion` |
+|---|---|---|
+| The ledger would keep it in `up_next` (a confirmed, loopable, unheld contract; a re-offer) | the status moves | — |
+| Never triaged, held as self-filed | stays `draft`; a `backlog_triage_requested` ledger row releases it to single triage (`released_ids`) | `request` |
+| Never triaged, already a triage candidate | stays `draft`; nothing to do | `pooled` |
+| Triaged out of the loop (`not_code`, `unverifiable`, human-only), nothing owed | stays `draft`; a `decide` entry is added, so owed-check owns it | `owe` |
+| The ledger puts it elsewhere and something is already owed, held, in flight or spent | stays where it is, with the reconciler's reason | `ledger` |
+| Folded under an umbrella | stays; its fate is the umbrella's | `grouped` |
+| A create at `up_next` on a board the loop reads | filed as `draft`; nothing is released | `created_draft` |
+| A board the loop does not read, or an item that is not open | written as asked | — |
+
+The release is a new way out of quarantine, so it is bounded where quarantine's
+own reason lives: an unattended caller (any non-chat session) gets
+`TRIAGE_REQUEST_CAP` = 5 releases per rolling 24 h, counted from the ledger
+across all such sessions; past it the answer is `capped` and the item clusters
+or expires as before. A chat session is not capped. A failure anywhere in the
+ruling is the old write (fail-open), and Mission Control's drag-to-column route
+(`app/routers/backlog.py`) is unchanged — the reconciler still corrects it.
+
+owed-check's `reopen` had the same hole from the other side: on an item with no
+implement attempt it fell back to a bare `up_next` and settled the entry, so
+#2041 (triaged `not_code`) was demoted two minutes later with nothing owed and
+no owner. `owed._reopen_refusal` now asks the same ruling first: a reopen the
+ledger cannot grant leaves the entry owed, counted as a recheck and carrying a
+`note` the next pass is shown ("last answer not applied: …"), and after
+`MAX_RECHECKS` it is ruled closed rather than asked again.
+
 `architecture/automod.md` §3.2a–3.2c is the long version: the outcome
 classes, what re-offers an item, and what closes it. What belongs here is the
 part that is true of the board itself — an item's status is a claim about

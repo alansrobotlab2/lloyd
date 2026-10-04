@@ -388,10 +388,13 @@ def _handle_write(args: dict) -> str:
                 current_body = f"# {title}\n\n{current_body}"
             task["body"] = (current_body + "\n\n" + description) if current_body else description
 
+    promotion: dict | None = None
     if args.get("status"):
         if args["status"] not in VALID_STATUSES:
             return json.dumps({"success": False, "error": f"Invalid status '{args['status']}'. Must be one of: {', '.join(sorted(VALID_STATUSES))}"})
-        task["status"] = args["status"]
+        promotion = _promotion(task_id, task, args, creating)
+        if promotion is None:
+            task["status"] = args["status"]
     for key in ("priority", "board"):
         if args.get(key):
             task[key] = args[key]
@@ -419,12 +422,14 @@ def _handle_write(args: dict) -> str:
         changes = []
         if name: changes.append("name")
         if description: changes.append("description")
-        if args.get("status"): changes.append(f"status to {args['status']}")
+        if args.get("status") and promotion is None: changes.append(f"status to {args['status']}")
         if args.get("priority"): changes.append(f"priority to {args['priority']}")
         if args.get("board"): changes.append(f"board to {args['board']}")
         if changes:
             task = add_activity(task, f"Updated: {', '.join(changes)}")
 
+    if promotion is not None:
+        task = add_activity(task, f"status not moved to up_next: {promotion['message']}")
     task["updated"] = now
     if task.get("_yaml_broken"):
         return json.dumps({"success": False, "error":
@@ -434,16 +439,72 @@ def _handle_write(args: dict) -> str:
             "fallback could not read)."})
     if not save_task(task):
         return json.dumps({"success": False, "error": "Failed to save task"})
+    if promotion is not None:
+        _apply_promotion(task_id, promotion, activity or "")
     if creating:
         out = {"success": True, "task_id": task_id, "created": True,
                "similar": similar, "message": "Task created"}
+        if promotion is not None:
+            out["status"] = task.get("status")
+            out["promotion"] = promotion["outcome"]
+            out["message"] = f"Task created; {promotion['message']}"
         if overrode:
             out["overrode_closed"] = overrode
             out["message"] = (f"Task created; force: true overrode closed #{overrode['id']} "
                               f"({overrode['verdict']})")
         return json.dumps(out)
+    if promotion is not None:
+        return json.dumps({"success": True, "task_id": task_id, "created": False,
+                           "status": task.get("status"), "promotion": promotion["outcome"],
+                           "message": "Task updated; status NOT moved to up_next — "
+                                      + promotion["message"]})
     return json.dumps({"success": True, "task_id": task_id, "created": False,
                        "message": "Task updated"})
+
+
+# A write of `status: up_next` is a request the ledger answers, not a status
+# (`scripts/automod/backlog.py::promotion_ruling`, where the 77-of-168 measurement
+# lives). The reconciler moved every promotion it disagreed with back within
+# minutes, so the write is ruled on here, where the caller can still be told.
+def _session_class() -> tuple[str, str]:
+    try:
+        from agent_mcp._task_registry import current_session_id
+        from app.harness.denial_journal import session_class
+        sid = current_session_id.get("") or ""
+        return session_class(sid), sid
+    except Exception:  # noqa: BLE001
+        return "chat", ""
+
+
+def _promotion(task_id, task: dict, args: dict, creating: bool) -> dict | None:
+    """The ruling that holds this write's status where it is, or None when the
+    status is written as asked. Fail-open: any failure in here is the old write."""
+    if args.get("status") != "up_next" or task.get("status") == "up_next":
+        return None
+    try:
+        from scripts.automod import backlog as B
+        if creating:
+            board = args.get("board")
+            if B.DEFAULT_BOARDS is not None and board not in B.DEFAULT_BOARDS:
+                return None
+            # Nothing is released on a create: a new item has no verdict, triage
+            # reads `draft`, and a live blocker is triaged first from there.
+            return {"move": False, "outcome": "created_draft",
+                    "message": "created as draft: `up_next` is the pool of items triage has "
+                               "confirmed, and triage reads draft (a live blocker first)"}
+        ruling = B.promotion_ruling(int(task_id), session_class=_session_class()[0])
+        return None if ruling["move"] else ruling
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _apply_promotion(task_id, promotion: dict, why: str) -> None:
+    try:
+        from scripts.automod import backlog as B
+        cls, sid = _session_class()
+        B.apply_promotion_ruling(int(task_id), promotion, why, session_class=cls, session_id=sid)
+    except Exception:  # noqa: BLE001 — the item write already succeeded
+        pass
 
 
 # Tags that mark a write as the loop's own. `backlog_write_task` puts one on

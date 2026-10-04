@@ -269,6 +269,10 @@ def test_close_and_reopen_leave_a_closed_item_alone(isolated):
 
 def test_reopen_without_an_attempt_on_record_puts_it_back_in_the_pool(isolated):
     p, entries = _owing(isolated, 42, ["decide"], status="draft")
+    # A contract a round can meet: the ledger keeps it in `up_next`. Without one
+    # the reopen is refused and stays owed (tests/test_promotion_is_a_request.py).
+    S.append_event({"event": "backlog_triage", "item_id": 42, "verdict": "confirmed",
+                    "acceptance": "it passes"}, path=S.LEDGER_PATH)
     out = O.apply_verdict(p, entries, [{"n": 1, "outcome": "reopen", "evidence": "x",
                                         "ruling": "worth a round"}], item_id=42)
     assert out["moved"] == "up_next" and fm_of(p)["status"] == "up_next"
