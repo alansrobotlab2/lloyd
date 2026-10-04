@@ -24,7 +24,14 @@ engine being graded, so its score is set beside the deterministic P x R.
 `--max-turns` is the per-task agent-turn budget (#1608): it goes to
 `run_bench_sdk`'s `max_agent_turns` and is recorded on every trial row as
 `turn_budget`, so a reply that hit the cap is distinguishable from one that
-answered and stopped.
+answered and stopped. `--timeout` is the other budget a trial can run out of, and
+every row carries `timeout_budget` beside `turn_budget` plus a derived
+`turn_truncated` flag (`turns >= turn_budget`, since a capped trial reports one turn
+PAST its cap). `summarise` then reports `n_truncated` and `n_timeout` beside `n` for
+each cell and averages its score columns over the answered trials only: a reply the
+cap or the clock cut off mid-enumeration is not a low score, it is no measurement, and
+counting it as 0.0 is what made the 2026-09-24 `all/bench_016` cell ungradeable
+(#2160).
 """
 from __future__ import annotations
 
@@ -78,8 +85,30 @@ PADDING = {
 }
 
 
+def turn_truncated(trace: dict, turn_budget: int | None) -> bool:
+    """Did this trial reach its turn budget, so its reply may be an unfinished one?
+
+    `>=` and not `==`: the harness increments `num_turns` before comparing it to
+    `options.max_turns` (`app/harness/loop.py:482-484`), so a trial the cap stopped
+    reports one turn PAST it — 13 against the 12-turn default — and an equality test
+    is false for every capped row ever written. The three 2026-09-24 rows at
+    `turns: 13` are that off-by-one, and they are why bench_016's two empty `all`-arm
+    replies were averaged in as recall 0.0 instead of set aside (#2160 clause 1).
+
+    `status` cannot carry this flag: the runner writes `"timeout"` there for the wall
+    clock and nothing else, so a cap stop lands as `"success"` with an empty
+    `final_text`. The driver derives the flag from the two numbers the run itself
+    recorded, once, instead of leaving each reader to re-derive it — and getting it
+    wrong in the direction of "not truncated" is silent.
+    """
+    turns = trace.get("turns")
+    if turn_budget is None or not isinstance(turns, (int, float)):
+        return False
+    return bool(turns >= turn_budget)
+
+
 def _row(arm: str, trial: int, task: dict, trace: dict, score: dict,
-         turn_budget: int | None = None) -> dict:
+         turn_budget: int | None = None, timeout_budget: int | None = None) -> dict:
     """One trial as it lands in `trials.jsonl`.
 
     `turn_budget` is the cap this trial ran under, written beside `turns` (#1608
@@ -87,10 +116,19 @@ def _row(arm: str, trial: int, task: dict, trace: dict, score: dict,
     say whether a reply that stopped at 12 turns answered the task or ran out of
     budget, and a find-all task that gets cut off mid-enumeration reads as low
     recall rather than as truncation. `summarise` averages `turns` and never this.
+
+    `turn_truncated` is that judgement recorded once, here, rather than left to each
+    reader (clause 1), and `timeout_budget` is the wall clock the same trial ran
+    under, beside it (clause 3). The driver holds two budgets while the trace carries
+    one `status`: without both numbers on the row, the 2026-09-24 file cannot say
+    which of its empty replies the cap took and which the clock took, and those two
+    need different fixes.
     """
     return {"arm": arm, "trial": trial, "task_id": task["id"],
             "session_id": trace.get("session_id"), "status": trace.get("status"),
             "turns": trace.get("turns"), "turn_budget": turn_budget,
+            "timeout_budget": timeout_budget,
+            "turn_truncated": turn_truncated(trace, turn_budget),
             "tool_calls": len(trace.get("tool_calls") or []),
             "denied_calls": len(trace.get("denied_calls") or []),
             "bench_probe_count": trace.get("bench_probe_count"),
@@ -140,7 +178,8 @@ async def main_async(args) -> int:
                 for trace in traces:
                     task = next(t for t in arm_tasks if t["id"] == trace["task_id"])
                     score = judge_trace(task, trace, rubric_model=model)
-                    row = _row(arm, trial, task, trace, score, turn_budget=args.max_turns)
+                    row = _row(arm, trial, task, trace, score,
+                               turn_budget=args.max_turns, timeout_budget=args.timeout)
                     fh.write(json.dumps(row) + "\n")
                     fh.flush()
                     print(f"[{time.time() - t0:6.0f}s] {arm:4} {task['id']:44} "
@@ -150,10 +189,23 @@ async def main_async(args) -> int:
                         padded = dict(trace, final_text=(trace.get("final_text") or "")
                                       + "\n" + "\n".join(PADDING[task["id"]]))
                         pscore = judge_trace(task, padded, rubric_model=model)
-                        fh.write(json.dumps(_row("spam", trial, task, padded, pscore,
-                                                 turn_budget=args.max_turns)) + "\n")
+                        fh.write(json.dumps(_row(
+                            "spam", trial, task, padded, pscore,
+                            turn_budget=args.max_turns,
+                            timeout_budget=args.timeout)) + "\n")
                         fh.flush()
     return 0
+
+
+def _cut(row: dict) -> bool:
+    """A trial whose reply the run never got to finish: turn cap or wall clock.
+
+    One predicate for both causes because `summarise` excludes both from its score
+    means and counts them separately; they stay distinguishable in the row and in
+    `n_truncated` / `n_timeout`, they are only indistinguishable in the means, which is
+    the point.
+    """
+    return bool(row.get("turn_truncated")) or row.get("status") == "timeout"
 
 
 def _mean(xs: list) -> float | None:
@@ -174,16 +226,37 @@ def _pearson(a: list[float], b: list[float]) -> float | None:
 
 
 def summarise(rows: list[dict]) -> dict:
-    """Per (arm, task) means; the spam delta; the rubric vs P x R agreement."""
+    """Per (arm, task) means; the spam delta; the rubric vs P x R agreement.
+
+    Each cell reports `n` (trials that ran), `n_truncated` (turn cap reached),
+    `n_timeout` (wall clock reached) and `n_scored`, and its score means are over the
+    answered trials only. A trial the cap cut off mid-enumeration has no answer in it,
+    so its recall is not a low score — it is no measurement, and averaging it in is
+    what produced the 2026-09-24 `all/bench_016` cell of `recall 0.0` from two trials
+    that never got to answer (#2160 clause 2).
+
+    `turns` is still averaged over every row in the cell: how long a run took is a
+    fact about the trial that ran, truncated or not, and excluding a capped trial from
+    it would flatter the arm's turn cost by hiding its most expensive trials. A cell
+    with `n_scored: 0` has no mean at all — `None`, not 0.0 — because 0 of 0 answered
+    is UNMEASURED, the same rule the replay probe reports under (#2164).
+    """
     cells: dict[str, dict] = {}
     for r in rows:
         c = cells.setdefault(f"{r['arm']}/{r['task_id']}", {"n": 0, "rows": []})
         c["n"] += 1
         c["rows"].append(r)
-    table = {k: {"n": v["n"], **{m: _mean([r[m] for r in v["rows"]])
-                                 for m in ("precision", "recall", "f1", "objective",
-                                           "rubric", "composite", "turns")}}
-             for k, v in sorted(cells.items())}
+    table = {}
+    for k, v in sorted(cells.items()):
+        answered = [r for r in v["rows"] if not _cut(r)]
+        table[k] = {"n": v["n"],
+                    "n_truncated": sum(1 for r in v["rows"] if r.get("turn_truncated")),
+                    "n_timeout": sum(1 for r in v["rows"] if r.get("status") == "timeout"),
+                    "n_scored": len(answered),
+                    **{m: _mean([r[m] for r in answered])
+                       for m in ("precision", "recall", "f1", "objective",
+                                 "rubric", "composite")},
+                    "turns": _mean([r["turns"] for r in v["rows"]])}
     pairs = [(r, s) for r in rows if r["arm"] == "all"
              for s in rows if s["arm"] == "spam"
              and (s["task_id"], s["trial"]) == (r["task_id"], r["trial"])]
@@ -196,7 +269,7 @@ def summarise(rows: list[dict]) -> dict:
                                    if (s["composite"] or 0) < (r["composite"] or 0)),
             "rubric_not_lower": sum(1 for r, s in pairs
                                     if (s["rubric"] or 0) >= (r["rubric"] or 0))}
-    graded = [r for r in rows if r["arm"] in ("all", "one")
+    graded = [r for r in rows if r["arm"] in ("all", "one") and not _cut(r)
               and r["objective"] is not None and r["rubric"] is not None
               and r.get("rubric_status") == "ok"]
     obj = [r["objective"] for r in graded]
