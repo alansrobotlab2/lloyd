@@ -754,12 +754,51 @@ async def test_the_status_carries_each_surfaces_last_measured_mitigation(q, monk
          {"surface": "pool_pause", "classification": "dispatch-only", "seconds": None, "ok": True}],
         at="2026-09-24T20:00:00+00:00")
     body = await _status_body(q, monkeypatch)
+    # #2153: every surface entry now carries the aggregate over its history too.
+    # This fixture records once, so the median IS that reading and n is 1 — the
+    # exact-equality form is kept deliberately, because a fifth key here is a
+    # fifth thing `/api/workers/status` sends on every call, and a null median
+    # for a dispatch-only control is the honest answer rather than a missing
+    # measurement (`seconds: None` already says a pause times no stop).
     assert body["mitigation"] == {
         "session_cancel": {"classification": "in-flight", "seconds": 0.021,
-                           "at": "2026-09-24T20:00:00+00:00"},
+                           "at": "2026-09-24T20:00:00+00:00",
+                           "median_seconds": 0.021, "n": 1},
         "pool_pause": {"classification": "dispatch-only", "seconds": None,
-                       "at": "2026-09-24T20:00:00+00:00"},
+                       "at": "2026-09-24T20:00:00+00:00",
+                       "median_seconds": None, "n": 1},
     }
+
+
+async def test_the_status_median_is_the_history_and_not_the_last_drill(q, monkeypatch, tmp_path):
+    """#2153 clause 4's other half: the route publishes the aggregate, so the
+    number an operator reads is the control's typical stop-time and not whatever
+    the newest drill happened to measure.
+
+    Five readings at 0.010 … 0.050 s, then a sixth at 9 s. `seconds` — the latest
+    reading — moves to 9.0; `median_seconds` does not, because six values median
+    to the mean of their middle pair, (0.030 + 0.040) / 2 = 0.035, and one slow
+    drill is not a regression in the control. Read the latest value instead of
+    the median and this goes red on 0.035 against 9.0, which is the whole
+    difference between the two numbers.
+    """
+    import app.paths as paths
+    from app import mitigation_state
+
+    state = tmp_path / "mitigation_drill.json"
+    monkeypatch.setattr(paths, "MITIGATION_DRILL_STATE", state)
+    for i, seconds in enumerate((0.010, 0.020, 0.030, 0.040, 0.050), start=1):
+        mitigation_state.record(
+            [{"surface": "session_cancel", "classification": "in-flight",
+              "seconds": seconds, "ok": True}], at=f"2026-10-0{i}T00:00:00+00:00")
+    mitigation_state.record(
+        [{"surface": "session_cancel", "classification": "in-flight",
+          "seconds": 9.0, "ok": True}], at="2026-10-06T00:00:00+00:00")
+
+    entry = (await _status_body(q, monkeypatch))["mitigation"]["session_cancel"]
+    assert entry["median_seconds"] == pytest.approx(0.035), entry
+    assert entry["n"] == 6, "six drills recorded, six counted"
+    assert entry["seconds"] == 9.0, "the latest reading is still published beside it"
 
 
 # ---------------------------------------------------------------------------
