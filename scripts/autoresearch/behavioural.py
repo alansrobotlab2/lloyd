@@ -48,6 +48,28 @@ USAGE
 
     # score a fresh capture (same file shape as eval/behavioural_scenarios/v1/traces)
     .venvs/lloyd/bin/python -m scripts.autoresearch.behavioural --trace-dir /tmp/cap-1
+
+    # price the SAME surface's run-to-run noise: score a second capture and report
+    # each axis's value from both, their absolute difference, and each scenario's
+    # `ran`/`value` for both (#2196 — what the two repeat baseline captures are for)
+    .venvs/lloyd/bin/python -m scripts.autoresearch.behavioural \
+        --trace-dir /tmp/cap-1 --compare-trace-dir /tmp/cap-2
+
+RE-PINNING `baseline.yaml` — the route, and the test that forbids half of it
+---------------------------------------------------------------------------
+`eval/behavioural_scenarios/v1/baseline.yaml` is pinned from the SHIPPED reference
+traces in `eval/behavioural_scenarios/v1/traces`, and the node
+`test_the_pinned_baseline_equals_the_reference_capture_rescored_now` in
+`tests/test_behavioural_scorecard.py` asserts every pinned axis value equals a fresh
+grading of those traces to `abs=1e-6`. So re-pinning the baseline from a live capture under
+`~/lloyd-data/_pipeline/research/behavioural_traces/` MUST move the shipped traces
+in the same commit — copy the capture's trace `.yaml` files into
+`eval/behavioural_scenarios/v1/traces/` and write the new axis values together, or
+that test goes red on a baseline re-pinned alone. Know the cost before taking it:
+after such a commit the shipped reference traces ARE a live capture, so
+`reference_replay` stays true while every round delta is 0.0000 by construction
+again, and the N=5 retrospective that would have compared landed commits against a
+live baseline is not what this route builds (#2196's owed ruling, not this route).
 """
 from __future__ import annotations
 
@@ -74,6 +96,9 @@ REFERENCE_TRACES_DIR = SUITE_DIR / "traces"
 MANIFEST_SCHEMA = "lloyd-behavioural-scenarios/v1"
 BASELINE_SCHEMA = "lloyd-behavioural-baseline/v1"
 SCORECARD_SCHEMA = "lloyd-behavioural-scorecard/v1"
+#: A pair of scorecards compared against each other (#2196). Its own schema
+#: because a spread is not a scorecard and a reader must never confuse them.
+PAIR_SCHEMA = "lloyd-behavioural-pair/v1"
 CAPTURE_SCHEMA = "lloyd-behavioural-capture/v1"
 
 #: The one file inside a capture directory that is not a trace. `load_traces`
@@ -831,6 +856,160 @@ def refused_scorecard(reason: str, *, round_id: str | None = None,
     }
 
 
+def refused_pair(reason: str, *, first: dict[str, Any] | None = None,
+                 second: dict[str, Any] | None = None) -> dict[str, Any]:
+    """A pair comparison that says it did not happen, and carries no numbers.
+
+    Same rule as `refused_scorecard`: an instrument that could not compare two
+    captures has not established that the surface is quiet, so there is no
+    `max_abs_delta: 0.0` here — a zero spread printed from a refusal is the exact
+    reading that closes #2196 wrongly.
+    """
+    def _source(card):
+        return None if not card else card.get("trace_source")
+
+    return {
+        "schema": PAIR_SCHEMA,
+        "status": "refused",
+        "refusal": reason,
+        "sources": [_source(first), _source(second)],
+        "same_surface": None,
+        "axes": [],
+        "scenarios": [],
+        "max_abs_delta": None,
+        "max_abs_delta_axis": None,
+        "label": ("a refused comparison prices nothing: it measured no spread on "
+                  "any axis"),
+    }
+
+
+def _by_key(card: dict[str, Any], field: str, key: str) -> dict[str, Any]:
+    """`card[field]` (a list of row mappings) indexed by each row's `key`."""
+    return {str(row[key]): row for row in (card.get(field) or [])}
+
+
+def compare_pairs(first: dict[str, Any], second: dict[str, Any]) -> dict[str, Any]:
+    """The same surface captured twice: the per-axis spread that prices its noise.
+
+    #2196's question is how much the instrument moves when nothing about the
+    agent changed, because until that is known a paired delta cannot say whether a
+    landing regressed an axis or the nightly capture simply emitted one fewer
+    answer. Both cards come from the same frozen manifest and the same pinned
+    baseline; what differs is the run behind them, so the reported figure is
+    `abs(value_a - value_b)` per axis — never a delta against the baseline, which
+    is a different question and already on each card.
+
+    Two properties are load-bearing, and both are the ways this measurement gets
+    published wrongly:
+
+    * An axis with no measurable value in EITHER card (`denominator: 0`, which is
+      how a zero-denominator instrument failure reaches an axis — see
+      `build_scorecard`) reports `abs_delta: None`, not `0.0`. `uncertainty_preservation`
+      has never scored live — `uncertainty-hardening` came back `ran: 0` in the only
+      capture that exists — and a `0.0` there would read as "this axis is quiet"
+      about an axis that has never been measured at all. Such an axis is listed in
+      `excluded_axes` with the side whose denominator is 0.
+    * An axis value is `matched / ran` over each trace's OWN rows, so two captures
+      that differ only in how many answers the run happened to emit produce
+      fractions with different denominators. The scenario rows therefore carry
+      `ran` and `value` for BOTH captures beside each other, and `ran_mismatch`
+      names the scenarios where they differ: that is where a spread is partly
+      verbosity, and it has to be visible next to the number rather than inside it.
+    """
+    if first.get("status") != "scored" or second.get("status") != "scored":
+        # The side's own named cause travels with the refusal: `status='refused'`
+        # alone tells a reader nothing about which capture to go and re-take.
+        detail = ", ".join(
+            f"{tag} status={card.get('status')!r}"
+            + (f" ({card.get('refusal')})" if card.get("refusal") else "")
+            for tag, card in (("A", first), ("B", second)))
+        return refused_pair(
+            f"a pair comparison needs two scored cards: {detail}",
+            first=first, second=second)
+    axes_a = _by_key(first, "axes", "axis")
+    axes_b = _by_key(second, "axes", "axis")
+    if set(axes_a) != set(axes_b):
+        return refused_pair(
+            "the two cards declare different axes "
+            f"({sorted(set(axes_a) ^ set(axes_b))}); a spread across a suite change "
+            "is not a noise floor", first=first, second=second)
+
+    rows_a = _by_key(first, "scenarios", "id")
+    rows_b = _by_key(second, "scenarios", "id")
+    axes: list[dict[str, Any]] = []
+    excluded: list[dict[str, Any]] = []
+    for name in sorted(axes_a):
+        a, b = axes_a[name], axes_b[name]
+        va, vb = a.get("value"), b.get("value")
+        measurable = va is not None and vb is not None
+        delta = None if not measurable else _round(abs(va - vb))
+        row = {
+            "axis": name,
+            "value_a": _round(va), "value_b": _round(vb),
+            "abs_delta": delta,
+            "epsilon": a.get("epsilon"),
+            "denominator_a": a.get("denominator"),
+            "denominator_b": b.get("denominator"),
+            "measurable": measurable,
+        }
+        axes.append(row)
+        if not measurable:
+            side = ", ".join(
+                f"{tag} (denominator {d})"
+                for tag, d in (("A", a.get("denominator")),
+                               ("B", b.get("denominator"))) if not d)
+            excluded.append({"axis": name,
+                             "reason": f"no measurable value in {side}"})
+
+    scenarios: list[dict[str, Any]] = []
+    for sid in sorted(set(rows_a) | set(rows_b)):
+        ra, rb = rows_a.get(sid), rows_b.get(sid)
+        scenarios.append({
+            "id": sid,
+            "axis": (ra or rb or {}).get("axis"),
+            "ran_a": None if ra is None else ra.get("ran"),
+            "ran_b": None if rb is None else rb.get("ran"),
+            "value_a": None if ra is None else _round(ra.get("value")),
+            "value_b": None if rb is None else _round(rb.get("value")),
+            "ran_mismatch": bool(ra and rb and ra.get("ran") != rb.get("ran")),
+        })
+
+    scored_axes = [r for r in axes if r["abs_delta"] is not None]
+    loudest = max(scored_axes, key=lambda r: r["abs_delta"]) if scored_axes else None
+    return {
+        "schema": PAIR_SCHEMA,
+        "status": "compared",
+        "sources": [first.get("trace_source"), second.get("trace_source")],
+        "scenarios_hash_a": first.get("scenarios_hash"),
+        "scenarios_hash_b": second.get("scenarios_hash"),
+        # Two cards off different manifests are not the same surface, and a spread
+        # measured across a suite change is not a noise floor. Reported, not
+        # refused: the reader still needs the numbers, and needs to be told loudly.
+        "same_surface": (first.get("scenarios_hash") == second.get("scenarios_hash")),
+        "axes": axes,
+        "excluded_axes": excluded,
+        "scenarios": scenarios,
+        "max_abs_delta": None if loudest is None else loudest["abs_delta"],
+        "max_abs_delta_axis": None if loudest is None else loudest["axis"],
+        # The card each side was scored from can itself be a reference replay, in
+        # which case its own deltas were zero by construction — but a pair of
+        # reference replays is the same traces twice, so the spread would be 0.0 on
+        # every axis and price nothing. Said out loud rather than left to inference.
+        "reference_replay": bool(first.get("reference_replay")
+                                 or second.get("reference_replay")),
+        "label": ("the run-to-run spread of the same surface, priced on two "
+                  "captures; which side of epsilon it falls on is #2196's ruling"),
+    }
+
+
+def score_pair(manifest_path: Path, trace_dir_a: Path, trace_dir_b: Path,
+               baseline_path: Path, *, stamp: str | None = None) -> dict[str, Any]:
+    """Score two capture directories and compare them. Refusal is an artifact."""
+    first = score_dir(manifest_path, trace_dir_a, baseline_path, stamp=stamp)
+    second = score_dir(manifest_path, trace_dir_b, baseline_path, stamp=stamp)
+    return compare_pairs(first, second)
+
+
 def score_dir(manifest_path: Path, trace_dir: Path, baseline_path: Path,
               *, round_id: str | None = None,
               stamp: str | None = None) -> dict[str, Any]:
@@ -953,6 +1132,63 @@ def scorecard_report_lines(scorecard: dict[str, Any]) -> list[str]:
     return lines
 
 
+def pair_report_lines(pair: dict[str, Any]) -> list[str]:
+    """The pair comparison as text: a spread per axis, or a named refusal."""
+    if pair["status"] == "refused":
+        return ["behavioural pair comparison (#2196) — status refused",
+                f"- refused: {pair['refusal']}",
+                "- spread: n/a — nothing was compared, so this prices no noise "
+                "floor and must not be recorded as a zero spread"]
+
+    lines = ["behavioural pair comparison (#2196) — same surface, two captures",
+             "Report-only: this measures how much the instrument moves when nothing",
+             "about the agent changed. It is not a verdict on either run.",
+             f"- A: {pair['sources'][0]}",
+             f"- B: {pair['sources'][1]}"]
+    if pair["same_surface"]:
+        lines.append(f"- scenarios_hash: `{pair['scenarios_hash_a']}` — same surface, "
+                     "so a spread here is run-to-run noise")
+    else:
+        lines.append(f"- scenarios_hash: A `{pair['scenarios_hash_a']}` vs B "
+                     f"`{pair['scenarios_hash_b']}` — NOT the same surface: a spread "
+                     "across a suite change is not a noise floor")
+    lines += ["", "| axis | A value | B value | abs delta | epsilon | A denom | B denom |",
+              "|---|---|---|---|---|---|---|"]
+    for row in pair["axes"]:
+        lines.append(
+            f"| {row['axis']} | {_fmt(row['value_a'])} | {_fmt(row['value_b'])} | "
+            f"{'n/a (excluded)' if row['abs_delta'] is None else format(row['abs_delta'], '.4f')} | "
+            f"{'n/a' if row['epsilon'] is None else '%g' % row['epsilon']} | "
+            f"{row['denominator_a']} | {row['denominator_b']} |")
+    for row in pair["excluded_axes"]:
+        lines.append(f"- excluded from the spread, never counted as 0.0: "
+                     f"`{row['axis']}` — {row['reason']}")
+    if pair["max_abs_delta"] is None:
+        lines.append("- largest spread: n/a — no axis was measurable in both captures")
+    else:
+        lines.append(f"- largest spread: {pair['max_abs_delta']:.4f} on "
+                     f"`{pair['max_abs_delta_axis']}`")
+    lines += ["", "| scenario | axis | A ran | A value | B ran | B value |",
+              "|---|---|---|---|---|---|"]
+    for row in pair["scenarios"]:
+        lines.append(f"| {row['id']} | {row['axis']} | {row['ran_a']} | "
+                     f"{_fmt(row['value_a'])} | {row['ran_b']} | {_fmt(row['value_b'])} |")
+    mismatched = [r for r in pair["scenarios"] if r["ran_mismatch"]]
+    if mismatched:
+        lines.append("- row counts differ for: " + ", ".join(
+            f"`{r['id']}` (A ran {r['ran_a']}, B ran {r['ran_b']})" for r in mismatched)
+            + " — an axis value is matched/ran over its own trace's rows, so a spread "
+              "on those scenarios is partly how verbose the run was, not behaviour")
+    if pair["reference_replay"]:
+        lines.append("- at least one side is a REFERENCE replay: its own deltas are "
+                     "0.0000 by construction, and two replays of one capture spread 0.0 "
+                     "on every axis, which prices nothing")
+    lines.append("- this comparison reports the spread and each axis's epsilon and rules "
+                 "on neither: which side of epsilon a spread falls on, and which of "
+                 "#1549's two honest outcomes follows, is #2196's operator ruling")
+    return lines
+
+
 def scorecard_path(cfg: Any, rid: str) -> Path:
     return Path(cfg.paths.rounds_dir) / f"{rid}.behavioural_scorecard.json"
 
@@ -994,6 +1230,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--baseline", type=Path, default=BASELINE_PATH)
     parser.add_argument("--trace-dir", type=Path, default=REFERENCE_TRACES_DIR)
     parser.add_argument("--out", type=Path, default=None, help="write the scorecard JSON here")
+    parser.add_argument("--compare-trace-dir", type=Path, default=None,
+                        help="score this second capture directory too and report the "
+                             "run-to-run spread of the same surface (#2196)")
     parser.add_argument("--check", action="store_true",
                         help="verify the manifest and its hash, score nothing")
     args = parser.parse_args(argv)
@@ -1008,6 +1247,19 @@ def main(argv: list[str] | None = None) -> int:
               f"{len(manifest['_declared_axes'])} axes, "
               f"scenarios_hash {manifest['_scenarios_hash']}")
         return 0
+
+    if args.compare_trace_dir:
+        pair = score_pair(args.manifest, args.trace_dir, args.compare_trace_dir,
+                          args.baseline)
+        for line in pair_report_lines(pair):
+            print(line)
+        code = 2 if pair["status"] == "refused" else 0
+        if args.out:
+            args.out.parent.mkdir(parents=True, exist_ok=True)
+            args.out.write_text(json.dumps(pair, indent=2, sort_keys=True) + "\n",
+                                encoding="utf-8")
+            print(f"wrote {args.out}")
+        return code
 
     scorecard = score_dir(args.manifest, args.trace_dir, args.baseline)
     code = _print_console(scorecard)

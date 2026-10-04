@@ -2139,6 +2139,59 @@ def test_a_guardrail_hit_scorecard_changes_neither_the_verdict_nor_the_reason(
         f"{without!r} became {with_scorecard!r}")
 
 
+def test_a_reference_replay_scorecard_is_flat_by_construction_and_reaches_the_gate(cfg,
+                                                                                  tmp_path):
+    """#2196 clause 4: the card that exists today cannot trip the rung, and is not
+    evidence in the first place.
+
+    Every round scores the shipped reference traces until an operator takes a live
+    capture, so the card a round actually leaves behind has all four deltas at 0.0000
+    by construction and `reference_replay: true`. That card is the one sitting in a
+    round directory when the gate runs, so the report-only property is checked against
+    it rather than only against the hand-degraded probe above: a flat card that could
+    somehow reach the verdict would be the quietest possible way to wire the rung in.
+    The last assertion is the other half of the clause — the gate's own file still
+    names none of the scorecard's vocabulary, so there is nothing for the card to
+    reach.
+    """
+    card = behavioural.score_dir(behavioural.SCENARIOS_MANIFEST_PATH,
+                                 behavioural.REFERENCE_TRACES_DIR,
+                                 behavioural.BASELINE_PATH)
+    assert card["status"] == "scored", card
+    assert card["reference_replay"] is True, (
+        "a card scored off the shipped traces is a replay; if the flag ever goes "
+        "false, its 0.0000 deltas start looking like evidence and #1549's clause 3 "
+        "disclaimer is lying")
+    assert card["guardrail_hit"] is False, (
+        "the shipped traces are the baseline's own source, so nothing on them moved")
+    assert [row["delta"] for row in card["axes"]] == [0.0, 0.0, 0.0, 0.0], card["axes"]
+
+    base, var = scored([0.4] * 11, [0.41] * 6 + [0.45] * 5)
+    without = promote.evaluate_promotion(cfg, base, var)
+    assert without[0] is True, (
+        f"the score sums are meant to be the accept path, and the gate says "
+        f"{without!r}; the comparison below would hold on any verdict")
+
+    behavioural.write_scorecard(cfg, "R_reference_replay", card)
+    assert (cfg.paths.rounds_dir
+            / "R_reference_replay.behavioural_scorecard.json").exists(), (
+        "the artifact has to be on disk where a round leaves one, or this asserts "
+        "about a file the gate was never given")
+
+    with_replay = promote.evaluate_promotion(cfg, base, var)
+    assert with_replay == without, (
+        f"a reference-replay scorecard moved the gate: {without!r} became "
+        f"{with_replay!r}")
+
+    src = (ROOT / "scripts" / "autoresearch" / "promote.py").read_text(encoding="utf-8")
+    assert "evaluate_promotion" in src, (
+        "positive control: the read below is of the gate's own file and is not empty")
+    for name in ("behavioural", "scorecard", "guardrail", "scenarios_hash", "PAIR_SCHEMA"):
+        assert name not in src, (
+            f"promote.py names `{name}`, so a scorecard is reachable by the promotion "
+            "verdict and the rung is no longer report-only")
+
+
 def test_the_promotion_gate_takes_no_behavioural_input_at_all(cfg):
     """The report-only guarantee as a signature, which is stronger than behaviour.
 

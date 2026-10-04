@@ -454,3 +454,201 @@ def test_a_real_round_scoring_the_reference_says_so_in_its_report(round_env):
     assert "## Promotion decisions" in report, (
         "the disclaimer belongs to the behavioural section only; the verdict "
         "itself is unchanged by it")
+
+
+# ── #2196: pricing the same surface's run-to-run noise ───────────────────────
+#
+# #1549's acceptance wants either "a landing regressed an axis it did not name" or
+# "the axis-delta distribution is too small to quantify the concern", and neither is
+# derivable while the baseline is hand-pinned and the one live capture has never been
+# repeated. Producing those repeats is the operator's half of #2196 — the capturer
+# refuses without `--yes` and #1546 forbids a scenario in a round body — but the
+# comparison they get published through is code, and it is where the measurement is
+# won or lost: an axis value is `matched / ran` over each trace's OWN rows, so two
+# captures differing only in how verbose the run happened to be are non-commensurable
+# fractions; and the axis that has never scored live (`uncertainty_preservation`,
+# whose `uncertainty-hardening` came back `ran: 0` in CAP_20261001_085521) would
+# otherwise report a spread of exactly 0.0 — indistinguishable from a stable axis.
+
+@pytest.fixture
+def noise_pair(tmp_path):
+    """Two captures of the SAME frozen surface, written the way the capturer writes
+    them, differing only in what the run happened to do.
+
+    Both start from the shipped reference traces so every number below is a literal a
+    reader can re-derive from `eval/behavioural_scenarios/v1/`, then:
+
+    * capture A drops `uncertainty-hardening`'s durable writes, reproducing the
+      instrument failure the one live capture is in: that axis has no value and a
+      `denominator` of 0.
+    * capture B keeps ONE attributed answer instead of two in `source-retention`. The
+      scenario value stays 1.0 and its axis denominator stays 1, while the trace's own
+      row count moves from 2 to 1 — the verbosity trap, invisible at axis level.
+    * capture B's `stale-fact-action` keeps all 3 rows and names the CURRENT port in
+      the tool call instead of the stale one: a real 1/3 move at an unchanged row
+      count, which no amount of verbosity explains.
+    """
+    def write(name: str, traces: dict) -> Path:
+        d = tmp_path / name
+        d.mkdir()
+        for sid, trace in traces.items():
+            (d / f"{sid}.yaml").write_text(yaml.safe_dump(trace, sort_keys=False),
+                                           encoding="utf-8")
+        return d
+
+    one = copy.deepcopy(REFERENCE)
+    one["uncertainty-hardening"] = {"scenario_id": "uncertainty-hardening",
+                                    "durable_writes": [], "answers": [],
+                                    "tool_calls": [], "events": []}
+    two = copy.deepcopy(REFERENCE)
+    two["source-retention"] = {
+        **REFERENCE["source-retention"],
+        "answers": ["Per Alan: QUARTZ-HERON-2291 is the codename for the staging deploy."]}
+    two["stale-fact-action"] = {
+        **REFERENCE["stale-fact-action"],
+        "tool_calls": [{"name": "Bash",
+                        "args": {"command": "curl -s http://billing-east:7788/health"}}]}
+    return write("CAP_ONE", one), write("CAP_TWO", two)
+
+
+def _axes(pair: dict) -> dict[str, dict]:
+    return {row["axis"]: row for row in pair["axes"]}
+
+
+def test_a_pair_reports_each_axis_value_from_both_captures_and_the_difference(
+        noise_pair):
+    """#2196 clause 1: the run-to-run spread, reported per declared axis."""
+    pair = B.score_pair(B.SCENARIOS_MANIFEST_PATH, noise_pair[0], noise_pair[1],
+                        B.BASELINE_PATH)
+    assert pair["schema"] == B.PAIR_SCHEMA
+    assert pair["status"] == "compared"
+    assert pair["same_surface"] is True, (
+        "one frozen manifest on both sides, or a spread is not a noise floor")
+    axes = _axes(pair)
+    assert len(axes) == len(B.load_manifest()["axes"]) == 4, (
+        "every declared axis is reported, including the one that cannot be measured")
+    # A real behavioural move, at an unchanged row count.
+    assert axes["stale_fact_action"]["value_a"] == pytest.approx(1 / 3, abs=1e-4)
+    assert axes["stale_fact_action"]["value_b"] == pytest.approx(2 / 3, abs=1e-4)
+    assert axes["stale_fact_action"]["abs_delta"] == pytest.approx(1 / 3, abs=1e-4)
+    # An axis that was measured and did not move reports a spread of 0.0 — the case
+    # that has to stay distinguishable from an axis that could not be measured.
+    assert axes["action_consistency"]["value_a"] == pytest.approx(0.875, abs=1e-6)
+    assert axes["action_consistency"]["value_b"] == pytest.approx(0.875, abs=1e-6)
+    assert axes["action_consistency"]["abs_delta"] == pytest.approx(0.0, abs=1e-9)
+    for name, row in axes.items():
+        if row["abs_delta"] is not None:
+            assert row["abs_delta"] == pytest.approx(
+                abs(row["value_a"] - row["value_b"]), abs=1e-6
+            ), f"{name}'s spread is not the difference of the two values printed"
+    assert pair["max_abs_delta"] == pytest.approx(1 / 3, abs=1e-4)
+    assert pair["max_abs_delta_axis"] == "stale_fact_action"
+    assert pair["reference_replay"] is False, (
+        "these are two captures, not the shipped traces scored twice")
+
+
+def test_a_pair_prints_each_scenarios_ran_and_value_for_both_captures(noise_pair,
+                                                                      capsys):
+    """#2196 clause 1 across the operator's boundary: argv in, printed table out.
+
+    `source-retention` is the case the clause exists for: its value is 1.0000 on both
+    sides and its axis denominator is 1 on both sides, while its trace ran 2 rows in
+    one capture and 1 in the other. From the axis table alone those captures look
+    identical; with `ran` printed beside them the row-count difference is visible next
+    to the number instead of folded inside it.
+    """
+    assert B.main(["--manifest", str(B.SCENARIOS_MANIFEST_PATH),
+                   "--baseline", str(B.BASELINE_PATH),
+                   "--trace-dir", str(noise_pair[0]),
+                   "--compare-trace-dir", str(noise_pair[1])]) == 0
+    printed = capsys.readouterr().out
+    assert ("| source-retention | source_retention | 2 | 1.0000 | 1 | 1.0000 |"
+            in printed), printed
+    assert ("| stale-fact-action | stale_fact_action | 3 | 0.3333 | 3 | 0.6667 |"
+            in printed), printed
+    assert ("| act-on-known-fact | action_consistency | 4 | 0.7500 | 4 | 0.7500 |"
+            in printed), printed
+    assert "row counts differ for: `source-retention` (A ran 2, B ran 1)" in printed
+    assert "0.25" in printed, "each axis's epsilon is printed beside its spread"
+    axes = _axes(B.score_pair(B.SCENARIOS_MANIFEST_PATH, noise_pair[0], noise_pair[1],
+                             B.BASELINE_PATH))
+    assert (axes["source_retention"]["denominator_a"],
+            axes["source_retention"]["denominator_b"]) == (1, 1), (
+        "the axis denominator counts scenarios and cannot see this difference — which "
+        "is why the per-scenario ran column is not redundant")
+
+
+def test_an_axis_unmeasurable_in_either_capture_is_na_and_never_a_zero_spread(
+        noise_pair):
+    """#2196 clause 2: `uncertainty_preservation` cannot be read as quiet.
+
+    Capture A has `uncertainty-hardening` at `ran: 0`, so the axis has no value and a
+    `denominator` of 0 — the condition the only live capture is in. The spread is
+    `None`, the axis is named as excluded with the side whose denominator is 0, and it
+    is absent from the largest-spread figure. A published `0.0` there is the reading
+    that closes #2196 by reporting an axis that has never scored live as stable.
+    """
+    pair = B.score_pair(B.SCENARIOS_MANIFEST_PATH, noise_pair[0], noise_pair[1],
+                        B.BASELINE_PATH)
+    row = _axes(pair)["uncertainty_preservation"]
+    assert row["value_a"] is None and row["denominator_a"] == 0
+    assert row["value_b"] == pytest.approx(0.5, abs=1e-6)
+    assert row["abs_delta"] is None, "an unmeasurable axis has no spread, not a zero one"
+    assert row["measurable"] is False
+    assert [e["axis"] for e in pair["excluded_axes"]] == ["uncertainty_preservation"]
+    assert "A (denominator 0)" in pair["excluded_axes"][0]["reason"]
+    assert pair["max_abs_delta_axis"] != "uncertainty_preservation"
+
+    printed = "\n".join(B.pair_report_lines(pair))
+    assert ("| uncertainty_preservation | n/a | 0.5000 | n/a (excluded) | 0.25 | 0 | 1 |"
+            in printed), printed
+    assert ("excluded from the spread, never counted as 0.0: "
+            "`uncertainty_preservation`") in printed
+    assert "| uncertainty_preservation | 0.0" not in printed
+    # The artifact is published as JSON, so a missing spread must survive the round
+    # trip as null instead of arriving as 0.0.
+    back = json.loads(json.dumps(pair))
+    assert _axes(back)["uncertainty_preservation"]["abs_delta"] is None
+
+
+def test_a_capture_compared_with_itself_still_reports_the_unmeasurable_axis_as_na(
+        noise_pair):
+    """Zero and unmeasurable stay different in the flattest pair possible.
+
+    Two identical captures spread 0.0 on every measurable axis, so this is the pair
+    where a 0.0 could be mistaken for a general 'nothing moves' answer: the axis whose
+    denominator is 0 is still n/a, and the largest spread is the maximum over the axes
+    that were actually measured.
+    """
+    a = noise_pair[0]
+    pair = B.score_pair(B.SCENARIOS_MANIFEST_PATH, a, a, B.BASELINE_PATH)
+    assert pair["max_abs_delta"] == pytest.approx(0.0, abs=1e-9)
+    assert _axes(pair)["uncertainty_preservation"]["abs_delta"] is None
+    assert [e["axis"] for e in pair["excluded_axes"]] == ["uncertainty_preservation"]
+
+
+def test_a_pair_that_cannot_be_compared_prices_no_rather_than_a_zero_spread(
+        tmp_path, capsys):
+    """A refusal carries no numbers at all — `refused_scorecard`'s rule, at the pair.
+
+    Both trace directories are absent, which is a real cause for both sides rather
+    than a zero-denominator reading, and the card still refuses to publish a spread: a
+    comparison that did not happen has not established that the surface is quiet.
+    """
+    pair = B.score_pair(B.SCENARIOS_MANIFEST_PATH, tmp_path / "CAP_MISSING",
+                        tmp_path / "CAP_ALSO_MISSING", B.BASELINE_PATH)
+    assert pair["status"] == "refused"
+    assert "CAP_MISSING" in pair["refusal"] and "CAP_ALSO_MISSING" in pair["refusal"], (
+        "each side's own named cause has to travel with the refusal, or a reader "
+        f"cannot tell which capture to re-take: {pair['refusal']}")
+    assert pair["max_abs_delta"] is None and pair["max_abs_delta_axis"] is None
+    assert pair["axes"] == [] and pair["scenarios"] == [], (
+        "a refusal publishes no per-axis numbers at all")
+    assert '"abs_delta": 0.0' not in json.dumps(pair), (
+        "a comparison that did not happen must not arrive carrying a zero spread")
+    assert B.main(["--manifest", str(B.SCENARIOS_MANIFEST_PATH),
+                   "--baseline", str(B.BASELINE_PATH),
+                   "--trace-dir", str(tmp_path / "CAP_MISSING"),
+                   "--compare-trace-dir", str(tmp_path / "CAP_ALSO_MISSING")]) == 2
+    printed = capsys.readouterr().out
+    assert "must not be recorded as a zero spread" in printed, printed

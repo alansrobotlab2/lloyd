@@ -550,3 +550,50 @@ def test_every_arm_path_the_surfaces_section_names_resolves():
             f"the surfaces section no longer names {arm}, which standing problem "
             "#5 now points at as the arms that already measure behaviour"
         )
+
+
+def test_behavioural_docs_record_the_baseline_repin_route_and_its_forbidding_test():
+    """#2196 clause 3. Re-pinning `baseline.yaml` from a live capture is the branch
+    #2196 takes if the measured spread comes back at or over epsilon, and the operator
+    who goes to do it reads the module's usage block, not the backlog item.
+
+    Half of that route is invisible from the artifact: the pinned axis values are
+    asserted equal to a fresh grading of the SHIPPED reference traces, so a baseline
+    re-pinned alone goes red — the traces have to move in the same commit. The docstring
+    says so, and the node it names has to still exist and still assert what the prose
+    says it asserts: a pointer to a renamed or weakened test is how a route that is
+    forbidden again starts looking allowed.
+    """
+    from scripts.autoresearch import behavioural as BHV
+    from tests import test_behavioural_scorecard as SCARD
+
+    usage = BHV.__doc__ or ""
+    assert "baseline.yaml" in usage, (
+        "the usage block no longer mentions the baseline file, which is where an "
+        "operator going to re-pin it will look")
+    assert "RE-PIN" in usage.upper(), (
+        "the re-pin route has to be findable by the word an operator arrives with")
+    assert "same commit" in usage, (
+        "the route's whole point is that the shipped traces and the baseline move "
+        "together; a baseline re-pinned on its own is refused by the pinning test")
+    assert "eval/behavioural_scenarios/v1/traces" in usage, (
+        "the directory that must move with the baseline is no longer named")
+    for token in ("abs=1e-6", "0.0000"):
+        assert token in usage, (
+            f"`{token}` has left the usage block: the tolerance is why a lone "
+            "re-pin fails, and the flat deltas are the cost of taking the route — "
+            "either one dropped, and the paragraph no longer tells an operator what "
+            "they are agreeing to")
+
+    # The pointer resolves, and the thing it points at still forbids the half-route.
+    pin = SCARD.test_the_pinned_baseline_equals_the_reference_capture_rescored_now
+    assert pin.__name__ in usage, (
+        "the usage block no longer names the test that forbids re-pinning the "
+        "baseline alone, so the route reads as open")
+    assert "abs=1e-6" in inspect.getsource(pin), (
+        "the named test no longer grades to abs=1e-6, so the docstring's reason for "
+        "moving the traces with the baseline is stale prose about a different test")
+
+    # Positive control on the absence claims above: a route this module never
+    # documented must not be found in it.
+    assert "re-pin the manifest hash into baseline.yaml" not in usage
