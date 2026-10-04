@@ -418,3 +418,37 @@ def test_the_header_skill_lint_now_emits_does_not_make_the_report_a_task(
         "the emitted report no longer projects to the phantom row, so the fixture no "
         "longer reproduces what the live probe measures"
     )
+
+
+def test_the_architecture_paragraph_about_alerts_names_where_they_land():
+    """#2101: `architecture/autonomy.md` said alerts and completion notices "go to
+    Discord" and that the guardian's fan-out "does not cover it". Discord is
+    unconfigured on this box by decision, so that named a destination nothing reaches
+    and hid the two branches an implementer needs: an alert falls back to the daily
+    note, a completion notice is dropped. The paragraph is read here the same way the
+    name-rule one is above, so a rewrite that loses a branch turns this red.
+    """
+    doc = (REPO / "architecture" / "autonomy.md").read_text(encoding="utf-8")
+    start = doc.index("Alerts and completion notices are sent through")
+    section = " ".join(doc[start:doc.index("## Fleet health", start)].split())
+
+    assert "go to Discord" not in section, "the unqualified destination is back"
+    assert "daily note" in section and "home_channel: null" in section
+    assert "tests/test_autonomy_failure_alert.py" in section, "the tripwire is not named"
+    # The two branches, kept distinct.
+    assert "_survive_the_dropped_alert" in section and "append_daily_alert_line" in section
+    assert "_discord_notify_task_complete" in section and "no fallback" in section
+    # The read-back contract and its after-the-return witness.
+    assert "readable back" in section and "not that the alarm can no longer be lost" in section
+    assert "daily-note-appends.jsonl" in section and "daily_note_appends" in section
+    # The guardian sentence, only in the form that is true today.
+    assert "does not carry autonomy's alerts" in section
+    assert "agent-services/guardian/daily_note.py" in section and "app/daily_note.py" in section
+
+    # And each thing it names exists where it says.
+    notify = (REPO / "app" / "discord_notify.py").read_text(encoding="utf-8")
+    assert "def _survive_the_dropped_alert" in notify and "append_daily_alert_line" in notify
+    assert "daily-note-appends.jsonl" in (REPO / "app" / "autonomy.py").read_text(encoding="utf-8")
+    assert (REPO / "agent-services" / "guardian" / "daily_note.py").exists()
+    assert (REPO / "app" / "daily_note.py").exists()
+

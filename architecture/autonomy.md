@@ -724,9 +724,35 @@ dependent whose upstream's run was never recorded is *not due*, so the due-ness
 alarm cannot see it. Each entry carries `hold_reason`, dispatch's own words, so
 the alert says why it has not run rather than only that it has not.
 
-Alerts and completion notices go to Discord (`app/discord_notify.py`). That is
-this subsystem's own channel and predates the guardian's six-channel fan-out;
-`agent-services/guardian/notify.py` does not cover it.
+Alerts and completion notices are sent through `app/discord_notify.py`, and on
+this box an alert lands on today's daily note (`memory/<date>.md`), not on Discord.
+Discord is unconfigured by decision rather than by accident: `config.yaml` ships
+`discord.home_channel: null` and the bot token is empty, and
+`tests/test_autonomy_failure_alert.py` reads that null off the disk and fails a
+round that configures it, because whether Discord is ever set is Alan's edit. The
+two calls behave differently when the transport is missing:
+
+- **An alert falls back.** `discord_alert` logs its warning and hands the message
+  to `_survive_the_dropped_alert`, which appends a "Scheduler alert not delivered"
+  line to the daily note through `app.autonomy.append_daily_alert_line` (#1592).
+- **A completion notice is dropped.** `_discord_notify_task_complete` returns
+  without posting and has no fallback; a finished task's record is its run file.
+
+The append has a read-back contract (#1736): a returned `True` means the line was
+readable back from the note at the moment the call returned, not that the alarm
+can no longer be lost — a later whole-file rewrite from an older snapshot still
+removes it. The witness after the return is the ledger
+`~/lloyd-data/alerts/daily-note-appends.jsonl`, one row per confirmed append
+(#1799), and its reader is the `daily_note_appends` component of the system
+health check (`~/obsidian/skills/system-health-check/system_health_check.py`),
+which re-reads the last 48 h of rows and reports a line that is no longer in its
+note.
+
+This is the subsystem's own route and predates the guardian's fan-out:
+`agent-services/guardian/notify.py` does not carry autonomy's alerts. Both stacks
+do write `memory/<date>.md` — the guardian through its own
+`agent-services/guardian/daily_note.py`, sharing the header rendering in
+`app/daily_note.py` — so the daily note is the one surface where the two meet.
 
 ## Fleet health
 
