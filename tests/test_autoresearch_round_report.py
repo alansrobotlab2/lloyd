@@ -213,3 +213,136 @@ def test_the_default_round_names_the_task_on_the_runtime_arm(round_env, monkeypa
     report = (round_env.paths.rounds_dir / f"{result['round_id']}.md").read_text(encoding="utf-8")
     assert "- tasks on the harness runner: 1 (bench_r1)\n" in report, report
     assert "- requires_runtime tasks skipped under harness=auto: 0\n" in report, report
+
+
+# ── #2186: the repeated-sampling coverage section, and what it prints first ──
+#
+# Clause 3 of the item: the disagreement counts — today's graded failures judged
+# `reachable`, and those judged `unreachable` — come BEFORE any per-task table, and
+# when every scored task falls in one class the report says so and records the leg as
+# cut. Both halves are about the ORDER and PRESENCE of lines in the artifact a human
+# reads, which is why they live in this file: `run_round.run` builds the report,
+# writes it, and nothing downstream re-reads it. A unit test over
+# `coverage_leg.report_lines` could pass with the splice deleted from `run()`, and
+# the section would then exist only in the module that writes it.
+
+def _failing_task(cfg) -> None:
+    """`bench_a3`: sorts inside `bench_limit=3` and its check can never pass here."""
+    (cfg.paths.bench_dir / "bench_a3.md").write_text(
+        "---\nid: bench_a3\ncategory: replay\nsafety_critical: false\n"
+        "prompt: do the thing\n"
+        "objective_checks:\n  - type: contains\n    value: never-said-this\n"
+        "---\n\nProse body.\n",
+        encoding="utf-8")
+
+
+def _coverage_artifact(cfg, *, model_alias="primary", route="direct", n=8,
+                       verdicts: dict[str, str], corpus_task_ids: list[str]) -> None:
+    """Put an arm's artifact on disk the way the idle-window job would.
+
+    Built through the leg's own builders rather than hand-written JSON, so a test
+    that passes here cannot be passing on a record shape the writer never emits.
+    """
+    from scripts.autoresearch import coverage_leg as cov
+    tasks = [{"id": tid} for tid in corpus_task_ids]
+    context = cov.measurement_context(
+        model_alias=model_alias, served_model="lloyd-nova2-9b", quantization=None,
+        corpus_tasks=tasks, n=n, route=route,
+        sampling={"temperature": 0.3, "max_tokens": 1500,
+                  "chat_template_kwargs": {"enable_thinking": False}})
+    passes_by_verdict = {"reliable": n, "reachable": 1, "unreachable": 0,
+                         "indeterminate": 0}
+    draws_by_task = {}
+    for tid, verdict in verdicts.items():
+        passes = passes_by_verdict[verdict]
+        draws_by_task[tid] = [
+            cov.draw_record(task_id=tid, draw_index=i,
+                            objective_score=1.0 if i < passes else 0.0,
+                            status="success",
+                            trace={"prompt_tokens": 100, "completion_tokens": 20,
+                                   "total_tokens": 120})
+            for i in range(n)]
+    cov.write_coverage(cfg, cov.build_coverage(draws_by_task, n_requested=n,
+                                              context=context, round_id="R_ARM"))
+
+
+def _report(cfg, result) -> str:
+    return (cfg.paths.rounds_dir / f"{result['round_id']}.md").read_text(encoding="utf-8")
+
+
+def test_a_round_prints_the_coverage_counts_before_its_per_task_table(round_env):
+    """One reachable failure, one reliable pass: the split is the first thing said.
+
+    `bench_a3`'s objective check fails on the round's single draw, and the arm's
+    artifact says one of eight draws passes it — so today's report calls it a
+    failure and the arm calls it a reliability gap. Those two counts have to be
+    above the table, because a reader who stops halfway must not stop below the
+    finding, and a per-task table read first is 20 rows of numbers before the
+    sentence that says what they mean.
+    """
+    _failing_task(round_env)
+    _coverage_artifact(round_env, n=8,
+                       verdicts={"bench_a2": "reliable", "bench_a3": "reachable"},
+                       corpus_task_ids=["bench_a2", "bench_a3"])
+
+    result = asyncio.run(run_round.run(targets=["prompts"], bench_limit=3))
+    assert "error" not in result, result
+    report = _report(round_env, result)
+
+    assert "## Bench coverage (#2186)" in report
+    counts_at = report.index("### Disagreement with today's single draw")
+    table_at = report.index("### Per-task coverage (N=8)")
+    assert counts_at < table_at, "the counts come before the table"
+    first_row = report.index("| bench_a")
+    assert counts_at < first_row, "and before the first row of it"
+
+    assert "- arm: direct · model primary → lloyd-nova2-9b" in report
+    assert "- N: 8 independent draws per task" in report
+    assert "temperature=0.3" in report, "the parameters the arm actually sent"
+    assert "- graded failures today: 1" in report
+    assert "reachable (today's failure, pass@8 passes): 1" in report
+    assert "unreachable (today's failure, pass@8 never passes): 0" in report
+    assert "| bench_a3 | 0.125 | 1.000 | reachable |" in report, (
+        "the disagreeing task, with both numbers named")
+    assert "| bench_a2 | 1.000 | 1.000 | reliable |" in report
+    assert "LEG CUT" not in report, "two classes are present, so the leg separates things"
+
+
+def test_a_round_whose_tasks_are_all_one_class_records_the_leg_as_cut(round_env):
+    """The item's own stop condition, printed: an instrument that splits nothing is
+    decoration, and the report is where that finding has to be written."""
+    _failing_task(round_env)
+    _coverage_artifact(round_env, n=8,
+                       verdicts={"bench_a2": "unreachable", "bench_a3": "unreachable"},
+                       corpus_task_ids=["bench_a2", "bench_a3"])
+
+    result = asyncio.run(run_round.run(targets=["prompts"], bench_limit=3))
+    assert "error" not in result, result
+    report = _report(round_env, result)
+
+    assert "LEG CUT" in report, report
+    cut_line = next(line for line in report.splitlines() if "LEG CUT" in line)
+    assert "every one of the 2 scored tasks is `unreachable`" in cut_line
+    assert "at N=8" in cut_line
+    counts_at = report.index("### Disagreement with today's single draw")
+    assert counts_at < report.index("### Per-task coverage"), "the cut is above the table too"
+
+
+def test_a_round_without_the_arm_says_the_leg_was_not_run(round_env):
+    """No artifact: the section is present and reports the split as not-evaluated.
+
+    This is the case a careless renderer gets wrong by printing `reachable: 0 ·
+    unreachable: 0`, which reads as a measurement that found no reliability gap. A
+    leg that did not run measured nothing, and the round report has to say that in
+    those terms rather than in zeroes.
+    """
+    _failing_task(round_env)
+    result = asyncio.run(run_round.run(targets=["prompts"], bench_limit=3))
+    assert "error" not in result, result
+    report = _report(round_env, result)
+
+    assert "## Bench coverage (#2186)" in report
+    assert "leg not run" in report
+    assert "reachable: not-evaluated" in report
+    assert "unreachable: not-evaluated" in report
+    assert "reachable: 0" not in report and "unreachable: 0" not in report

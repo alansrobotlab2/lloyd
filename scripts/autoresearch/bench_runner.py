@@ -96,6 +96,30 @@ def token_ledger_fields(trace: dict[str, Any]) -> dict[str, Any]:
 #: multiple of it (#1132), so it is named rather than restated.
 DEFAULT_MAX_TOKENS = 1500
 
+#: The temperature every direct bench trial sends. Named because the coverage leg
+#: (#2186) has to report what its draws were actually decoded at — its whole
+#: reading of pass@1-vs-pass@N is about the distribution this number picks — and a
+#: second literal somewhere else is a second number waiting to disagree with the
+#: first. Independent draws depend on it being above 0: at 0.0 the eight draws of
+#: one prompt are eight copies of one draw.
+BENCH_TEMPERATURE = 0.3
+
+
+def sampling_params(max_tokens: int = DEFAULT_MAX_TOKENS) -> dict[str, Any]:
+    """The sampling block of a direct trial's request body — the ONLY builder of it.
+
+    `chat_completion` posts what this returns and the coverage leg records what
+    this returns, so the parameters on a coverage record are the parameters that
+    went down the socket by construction, not by a transcription that can drift.
+    Anything added here is automatically claimed by every record written from it;
+    anything the leg wanted to claim but this did not send it cannot say.
+    """
+    return {
+        "temperature": BENCH_TEMPERATURE,
+        "max_tokens": max_tokens,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+
 
 def chat_completion(
     model: str,
@@ -117,9 +141,7 @@ def chat_completion(
     payload: dict[str, Any] = {
         "model": model_name,
         "messages": messages,
-        "temperature": 0.3,
-        "max_tokens": max_tokens,
-        "chat_template_kwargs": {"enable_thinking": False},
+        **sampling_params(max_tokens),
         "priority": AUTORESEARCH_PRIORITY,
     }
     # #1879: name the prompt this call injects. A direct trial has no session at

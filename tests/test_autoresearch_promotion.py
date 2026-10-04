@@ -2451,3 +2451,116 @@ def test_cost_fields_change_no_verdict_and_no_refusal_class(cfg):
     assert "evaluate_promotion" in src, "positive control"
     for name in ("reprefill", "cost_record", "from .cost", "import cost"):
         assert name not in src, f"promote.py names `{name}`, so the gate can read cost"
+
+
+# ── #2186 clause 5: the coverage leg is report-only and stays that way ───────
+#
+# The item's ruling on this is not a preference: #627's retry-baseline bar was
+# retired un-built on 2026-10-03 with the finding that a bar which declines nothing
+# is ceremony, and a leg that measures variance is exactly the kind of instrument
+# that gets quietly consulted by the next person who wants to refuse a variant. So
+# the guarantee is the one #1549 clause 5 pins for the behavioural scorecard, tested
+# the same two ways: an arm declaring every task unreachable cannot move a decision,
+# and `promote.py`'s source never reaches the module that wrote the artifact.
+#
+# The decision is compared against the live corpus and a real split, so the pinned
+# fact is the real promote/hold outcome — a hand-tuned pair could be made immune to
+# any new input by construction and would prove nothing about the gate that runs.
+
+
+def _coverage_arm_over_the_live_corpus(cfg, baseline, *, passes_per_task: int) -> Path:
+    """Write an N=8 arm over the live corpus's own tasks with `passes_per_task` passes.
+
+    The two settings the clause's three states need, and both are built through the
+    leg's own writers rather than hand-written JSON, so the decision is being read
+    against the record shape the instrument actually emits: 8 of 8 makes every
+    record `reliable` (present-and-clean — an arm that found nothing to complain
+    about), 0 of 8 makes every record `unreachable` (the worst case — a leg that
+    reads the whole bench as capability-bound, which is exactly the input that would
+    stop every variant promoting if any promotion path consulted it).
+    """
+    from scripts.autoresearch import coverage_leg as cov
+
+    task_ids = [row["task_id"] for row in baseline.get("per_task", [])]
+    assert task_ids, "positive control: the live baseline scored some tasks"
+    context = cov.measurement_context(
+        model_alias="primary", served_model="lloyd-nova2-9b", quantization=None,
+        corpus_tasks=[{"id": t} for t in task_ids], n=8,
+        route=cov.ROUTE_DIRECT, sampling=cov.bench_runner.sampling_params(1500))
+    draws_by_task = {
+        tid: [cov.draw_record(task_id=tid, draw_index=i,
+                              objective_score=1.0 if i < passes_per_task else 0.0,
+                              status="success", trace={"total_tokens": 120})
+              for i in range(8)]
+        for tid in task_ids}
+    coverage = cov.build_coverage(draws_by_task, n_requested=8, context=context,
+                                  round_id=f"R_ARM_{passes_per_task}_OF_8")
+    return cov.write_coverage(cfg, coverage)
+
+
+@requires_real_bench
+def test_promotion_never_reads_the_coverage_artifact(cfg):
+    """No artifact, all-`reliable`, all-`unreachable`: one and the same decision.
+
+    The clause's three states, walked in order, with the verdicts the state names
+    asserted out of the bytes on disk first — a loop over two artifacts that turned
+    out to say the same thing would pin one state twice and call it three. The
+    artifact's one location is `cfg.paths.research_root/coverage/`, named by the arm
+    the report reads; its path is pinned in
+    `test_the_artifact_round_trips_and_lives_under_the_research_root`. A variant
+    whose decision moved across the states below would be reading an instrument the
+    item forbids it to read.
+    """
+    from scripts.autoresearch import coverage_leg as cov, run_round
+
+    cfg.paths.ensure()
+    tasks = load_bench_tasks(REAL_BENCH)
+    split = run_round.record_split(cfg, tasks, "R_20261004_120000")
+
+    base, var = _truncated_pair(tasks, len(tasks), gain=0.4)
+    # The strongest possible score case, so the pair promotes outright on the live
+    # gate (`test_a_truncated_round_is_refused_by_the_live_gate` is what refuses at
+    # other widths). Only the flag is pinned here; the reason string is the gate's
+    # own arithmetic and this test has no business restating it.
+    should, reason = promote.evaluate_promotion(cfg, base, var, split=split)
+    assert should is True, reason
+    artifact = cov.artifact_path(cfg, model_alias="primary", route=cov.ROUTE_DIRECT, n=8)
+    assert not artifact.exists(), "positive control: state 1 really is no artifact"
+
+    try:
+        for passes_per_task, expected in ((8, "reliable"), (0, "unreachable")):
+            path = _coverage_arm_over_the_live_corpus(cfg, base,
+                                                      passes_per_task=passes_per_task)
+            arm = json.loads(path.read_text(encoding="utf-8"))
+            assert arm["n_draws"] == 8 and arm["records"], "positive control: an arm is on disk"
+            assert all(r["verdict"] == expected for r in arm["records"]), \
+                f"{passes_per_task} of 8 draws passing must read `{expected}`"
+            assert promote.evaluate_promotion(cfg, base, var, split=split) == (should, reason), \
+                f"an arm whose every task is `{expected}` moved a promote/hold decision"
+    finally:
+        artifact.unlink(missing_ok=True)
+
+
+def test_promote_py_never_names_the_coverage_instrument(cfg):
+    """The same source-level guard #1549 clause 5 runs on the behavioural scorecard.
+
+    The decision is a pure function today, so a runtime test alone would pass for
+    the wrong reason: it shows `evaluate_promotion` ignores the artifact because the
+    signature cannot accept one. A reader who later adds a parameter would trip
+    this, which is the point.
+    """
+    source = (ROOT / "scripts" / "autoresearch" / "promote.py").read_text(encoding="utf-8")
+    # Positive control, the same pair the #1549 guard runs: an absence read out of an
+    # empty or wrong file looks exactly like an absence read out of the right one for
+    # the right reason, so the file has to be shown in hand and non-empty first.
+    assert "evaluate_promotion" in source, "positive control: the gate's own file is in hand"
+    assert "slice_metrics" in source, "positive control: the read is not empty"
+    for needle in ("coverage_leg", "coverage/", "pass_at", "pass@", "not-evaluated",
+                   "bench-coverage"):
+        assert needle not in source, f"promotion reads the coverage leg ({needle!r})"
+    # And the leg does not reach back: importing it must not pull in the decision.
+    from scripts.autoresearch import coverage_leg
+    assert not hasattr(coverage_leg, "evaluate_promotion")
+    leg_source = Path(coverage_leg.__file__).read_text(encoding="utf-8")
+    assert "def build_coverage" in leg_source, "positive control: the leg's file is in hand"
+    assert "from .promote" not in leg_source

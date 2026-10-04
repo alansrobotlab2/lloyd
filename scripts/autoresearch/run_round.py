@@ -47,6 +47,10 @@ from .hypothesis_generator import propose_variants
 from .promotion_fp_rate import percentile as _percentile_of
 from .judge import aggregate_variant, configured_rubric_mode, judge_trace, rankability_fields
 from . import bench_split
+# #2186: the repeated-sampling coverage leg. Reached only on the way to the report
+# (see the call site below); `promote.py` does not import it and does not import
+# anything that does.
+from . import coverage_leg
 # #1549: the behavioural scorecard. Report-only by construction — this import is
 # reached on the way to writing a report, after `evaluate_promotion` has already
 # answered, and nothing in `promote.py` imports it back.
@@ -1772,6 +1776,17 @@ async def run(
     lines += [""]
     lines += behavioural.scorecard_report_lines(scorecard)
     lines += trial_cost.report_lines(cost_records)
+    # #2186: the repeated-sampling coverage leg — pass@1 against pass@N, which is
+    # how a report says whether today's failure is a reliability gap or a
+    # capability limit. Report-only by construction: this import is reached on the
+    # way to writing a report, after `evaluate_promotion` has already answered, and
+    # nothing in `promote.py` imports it back. The arm itself is an idle-window job
+    # — drawing N samples per task inside this body would inherit the 1800 s pool
+    # cap that killed #1546 — so the section renders whichever arm's artifact
+    # exists for this round's route, and says in words when there is none.
+    lines += coverage_leg.report_lines(
+        cfg, baseline_summary=baseline_summary, model_alias=model,
+        route=coverage_leg.route_for_harness(harness))
     lines.extend(report_lines)
     summary_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
