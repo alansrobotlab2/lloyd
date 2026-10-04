@@ -286,6 +286,46 @@ if [ "$CANARY_PERSIST_RC" -ne 0 ]; then
   echo "engine-output canary: arm $LABEL verdict NOT persisted to $CANARY_LOG (rc=$CANARY_PERSIST_RC)"
 fi
 
+# --- forced-preemption load (#2162, #1268 owed 2) -----------------------------
+#
+# Its own executable, called unconditionally, because the assertions about what it
+# hands the probe must not spend four minutes restarting the primary to be made —
+# see its header for why an arm window is the ONLY valid caller (the probe refuses
+# a non-idle engine outright, and `vllm:num_preemptions_total` is a per-boot
+# counter, so the reboot above is what makes `before` zero) and for why every
+# outcome it prints is a note. It gates itself: `PREEMPT_ARM=1` on this script's
+# own command line arms it, and `PREEMPT_LOAD_PROMPT_WORDS` is its only size knob
+# (exported vars reach it the way they reach every child here). Unset, it exits 0
+# having done nothing, so an ordinary sweep does not see it at all.
+#
+# POSITION IS LOAD-BEARING IN BOTH DIRECTIONS. Below the boot guard: an arm whose
+# engine crashed and was resurrected on production defaults must not drive a load
+# on its way out, and both of the guard's `exit 2`s are above this line. Below the
+# canary verdict persistence: the integrity decision is on disk whatever the load
+# then does. And above the `SKIP_BENCH=1` exit, because bench-flash-next.py
+# measures decode while the arm that could reach a preemption is an admission arm
+# that skips the bench — an arm which must still get its load step.
+#
+# Run with `bash <path>`: this script is itself run that way (mode 644 in git,
+# unusual among its bin/ siblings, and tests/test_flash_next_launcher.py invokes it
+# as `bash <path>` too), and an interpreter-prefixed call does not care what the
+# exec bit on the target says on any of those routes.
+#
+# The `||` is what keeps this a step and not a stage. The step always exits 0, so
+# the only status that can arrive here is the shell failing to find the file at all
+# — a tree that predates it, a checkout mid-copy, or a harness slicing this script
+# around a tree with no bins (tests/test_flash_next_launcher.py does exactly that).
+# This script runs `set -uo pipefail`, and a caller reads its rc as the arm's
+# verdict, so an unguarded call would let "the step wasn't there" stand for "the
+# arm failed" — landing last above the `SKIP_BENCH` exit, it would BE the script's
+# rc. The step not running is a note; the arm's own stages decide its exit code.
+#
+# Read the arm's LOG, not its rc, for what the load did: because the step always
+# exits 0, a load that crossed, one that did not, and one that never ran differ only
+# in the line each prints. `preemption load:` in the arm log is the whole trail.
+bash "$ROOT/agent-services/bin/flash-next-preempt-step.sh" "$LABEL" \
+  || echo "preemption load: step did not run (rc=$?); non-fatal, continuing to bench"
+
 # SKIP_BENCH=1 stops here with the arm serving. bench-flash-next.py measures
 # decode and defeats the prefix cache, so it has nothing to say about an arm
 # whose question is admission — the Layer 3 max_num_batched_tokens sweep
