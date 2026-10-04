@@ -194,3 +194,44 @@ def test_lint_finds_a_phantom_tool_that_moved_into_a_sibling(tmp_path):
     rec = ActiveSkill(name="spilled", directory=d, frontmatter={})
     result = sl.lint(skill_records=[rec])
     assert [p["name"] for p in result["phantom"]] == ["spilled"], result["phantom"]
+
+
+@pytest.mark.live_vault
+def test_the_block_the_body_defers_to_is_actually_where_the_body_says_it_is():
+    """#2188: the pointer's PROMISE, which no other node in this file makes.
+
+    `test_each_sibling_has_an_index_line_inside_the_chat_cut` already owns the two
+    halves of clause 4 that are about the index — the sibling is NAMED inside the
+    `CHAT_SKILL_CUT`, and the naming line carries a `Read … when/before/after/only`
+    condition — and it runs over every sibling of every sampled skill, so this node
+    does not re-do that work. What nothing else checks is the other side of a deferral:
+    the body's §2e–2f paragraph tells the reader that `### 2e. Pattern Output Files`
+    and `### 2f. Knowledge Log` are in `steps-2b-2f.md`. A naming line says a file
+    exists; this says the two specific sections the body shed are the ones a reader
+    will find on opening it. Move either heading elsewhere, or drop the paragraph that
+    quotes them, and this is red while the index node stays green — which is the drift
+    a spill leaves behind: prose that defers to a place that no longer holds the thing.
+    """
+    name = "nightly-reflection-knowledge-write"
+    text, siblings = _now(name)
+    body = _body(text)
+    # The deferral paragraph, located by the section that makes it rather than by the
+    # first line containing the filename — `## Files in this skill` names the same file
+    # on its index bullet, and that bullet is the index node's business, not this one's.
+    section = body.split("\n### 2e", 1)
+    assert len(section) == 2, "the body has no §2e section left to defer with"
+    pointer = "### 2e" + section[1].split("\n## ", 1)[0]
+    assert "steps-2b-2f.md" in pointer, (
+        f"the body's §2e–2f paragraph no longer says where the detail went: {pointer[:120]}")
+    # The promise is matched on collapsed whitespace: the body wraps its prose, and a
+    # heading quoted mid-sentence can break across lines. What has to survive the wrap
+    # is the NAME of the section, which is what a reader greps for in the sibling.
+    promised = _norm(pointer)
+    held = "\n".join(p.read_text(encoding="utf-8") for p in siblings)
+    for heading in ("### 2e. Pattern Output Files", "### 2f. Knowledge Log"):
+        assert _norm(heading) in promised, (
+            f"the body's deferral paragraph does not name {heading} — it points at the "
+            "file but not at the section, so a reader opening it has nothing to find")
+        assert heading in held, (
+            f"{heading} is not the verbatim heading of any sibling — the body points at "
+            "a section that is not there")

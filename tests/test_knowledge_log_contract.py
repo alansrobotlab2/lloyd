@@ -85,7 +85,47 @@ def scheduled_skill_names() -> dict[str, Path]:
 
 
 def owners_of_the_log() -> list[Path]:
+    """Skills whose `SKILL.md` names `_log.md`. Unchanged by #2188 — the owner's
+    identity lives in the body, and clause 6 forbids losing this reader."""
     return [path for path in skill_files() if "_log.md" in path.read_text(encoding="utf-8")]
+
+
+def folder_text(skill_md: Path) -> str:
+    """A skill's SKILL.md plus every sibling `.md` in its folder.
+
+    The same seam `skill_lint.skill_folder_text` implements, for the same reason — and
+    against the naive reading of "what the model is handed", which is not it.
+    What the RUNTIME loads is SKILL.md alone: `app/autonomy.py::_load_skill_content`
+    resolves a slug to `~/obsidian/skills/<slug>/SKILL.md`, and that is the route
+    `workers/sources/youtube_digest.py::load_skill` uses. So widening this read is NOT a
+    claim about what a prompt contains — it is about where a rule a spill moved still
+    lives. `### 2f. Knowledge Log` is in `steps-2b-2f.md` since #2188, and the body's
+    §2e–2f paragraph sends a run there with a `Read`; the command in it is therefore
+    still the prescribed one, and the node that runs it must find it. `skill_lint`'s
+    `skill_folder_text` makes the same choice for the same reason. A check that read
+    SKILL.md alone would report a moved command as a deleted one — and a check that read
+    the folder for the ABSENCE assertions would hide a retired claim that moved into a
+    sibling, which is why the polarity is split at each call site below.
+    never reads. So: the POSITIVE needles ("does the owner prescribe the append
+    command") read the folder, because that is where the command has to live for the
+    run to find it; the ABSENCE assertions keep reading `skill_files()`, the SKILL.md
+    only. Which is which is stated at each call site.
+
+    Deliberately local to this file rather than imported from `scripts.skill_lint`:
+    this module imports nothing from it today, and `_load_migrator` documents why
+    (importing that script's module mutates `sys.path` for the whole worker, which has
+    broken sibling modules at random collection order).
+    """
+    parts = [skill_md.read_text(encoding="utf-8")]
+    for sibling in sorted(skill_md.parent.glob("*.md")):
+        if sibling.name != "SKILL.md":
+            parts.append(sibling.read_text(encoding="utf-8"))
+    return "\n".join(parts)
+
+
+#: #2188: the sibling holding the two blocks the body shed. Named literally, not by
+#: globbing, so a retitle that strands the pointer is a red test and not a drift.
+OWNER_SIBLING = "steps-2b-2f.md"
 
 
 def operations_log_section() -> str:
@@ -174,6 +214,19 @@ def test_the_schema_names_one_owner():
 # --- clause 7: that owner is scheduled, and nothing else prescribes the file --------------
 
 
+def log_writing_skill_paths() -> list[Path]:
+    """Skills whose FOLDER prescribes `knowledge_log.py append`.
+
+    The positive half of the clause-7 test. #2188 moved `### 2f. Knowledge Log` — the
+    block that carried the fenced append command — into `steps-2b-2f.md`, so a reader
+    of `SKILL.md` alone finds no `append` and the node that demands it fails even
+    though every nightly run still gets the command in its prompt. Same folder, same
+    seam, same reason as `folder_text`'s split.
+    """
+    return [path for path in skill_files()
+            if "knowledge_log.py append" in folder_text(path)]
+
+
 def test_the_log_contract_has_one_scheduled_owner_that_appends_through_the_helper():
     prescribers = owners_of_the_log()
     assert prescribers, "no skill mentions _log.md and the schema still points at it: who owns it?"
@@ -183,9 +236,23 @@ def test_the_log_contract_has_one_scheduled_owner_that_appends_through_the_helpe
         f"skills that tell a writer to append but run on no schedule: {unscheduled} — that is "
         "the unowned-rule defect #453 recorded, in template form"
     )
+    # Whoever mentions `_log.md` has to prescribe the helper, over its FOLDER: the
+    # fenced command sat in `SKILL.md`'s §2f until #2188 moved that section into
+    # `steps-2b-2f.md` (see `folder_text` for why the folder is the right unit and why
+    # it is not a claim about what a prompt contains). Different string from the one
+    # `owners_of_the_log` filtered on, which is what makes this falsifiable — an earlier
+    # cut of this loop re-asserted `_log.md`, the filter's own predicate, and no diff
+    # could have failed it; the `in folder_text(writers[0])` line that sat below the
+    # `writers` assertion was vacuous the same way against `log_writing_skill_paths`'s
+    # own filter. Both removed as the review named.
     for skill in prescribers:
-        text = skill.read_text(encoding="utf-8")
-        assert "knowledge_log.py append" in text, f"{skill} mentions the log but never calls the helper"
+        assert "knowledge_log.py append" in folder_text(skill), (
+            f"{skill} names the log but neither its body nor any sibling prescribes the "
+            "helper: the rule is mentionable and unexecutable")
+    writers = log_writing_skill_paths()
+    assert writers == [VAULT / "skills" / "nightly-reflection-knowledge-write" / "SKILL.md"], (
+        "the append contract has to be prescribed by exactly the one owner: "
+        f"{[w.parent.name for w in writers]}")
 
 
 # --- clause 8: the owner has actually logged a run it recorded ----------------------------
@@ -193,6 +260,10 @@ def test_the_log_contract_has_one_scheduled_owner_that_appends_through_the_helpe
 
 def test_the_owner_logs_the_runs_it_records():
     owner = owners_of_the_log()[0]
+    # Two different files. `_log.md`'s `Owner:` line still points at `SKILL.md`, which
+    # is correct — the file named there is the skill, and `scheduled_skill_names()` is
+    # keyed on the task's `skill_name:` front matter, which #2188's spill does not
+    # touch: the schedule is what makes a writer scheduled, not the heading's location.
     task = scheduled_skill_names()[owner.parent.name]
     body = task.read_text(encoding="utf-8")
     logged = set(date_headings(LOG.read_text(encoding="utf-8")))
@@ -272,8 +343,10 @@ def shell_form(tokens: list[str], path_index: int = 1) -> str:
 
 def test_the_path_the_skill_and_schema_name_is_the_module_under_test():
     """Drift guard: both documents must name one identical literal path, and it is this file."""
-    skill_text = owners_of_the_log()[0].read_text(encoding="utf-8")
-    in_skill = re.findall(r"[\w./~$-]*knowledge_log\.py", prescribed_command(skill_text, "append"))
+    # The folder, per `folder_text`'s split: the fenced command lives in the sibling
+    # since #2188, and this node compares the literal path against the schema's.
+    in_skill = re.findall(r"[\w./~$-]*knowledge_log\.py",
+                          prescribed_command(folder_text(owners_of_the_log()[0]), "append"))
     in_schema = re.findall(r"[\w./~$-]*knowledge_log\.py", operations_log_section())
     assert in_skill == in_schema != [], (
         f"the skill runs {in_skill} while the schema names {in_schema}; whoever follows one "
@@ -297,7 +370,13 @@ def test_running_the_command_the_skill_prints_keeps_the_counts_equal(tmp_path):
     the ``<run_id>``/``<N>``/``<paths>`` holes the template itself declares.
     """
     owner_skill = owners_of_the_log()[0]
-    command = prescribed_command(owner_skill.read_text(encoding="utf-8"), "append")
+    # #2188: the fenced command the nightly run copies is in the owner's folder, not in
+    # its body. `prescribed_command` fails loudly when neither file holds a
+    # ```bash block for the verb, so widening the read cannot hide a missing fence.
+    owner_text = folder_text(owner_skill)
+    assert (owner_skill.parent / OWNER_SIBLING).is_file(), (
+        f"the sibling that now carries the fence is gone: {owner_skill.parent / OWNER_SIBLING}")
+    command = prescribed_command(owner_text, "append")
     for placeholder, value in (("<run_id>", "run_39_20260912_070000"), ("<N>", "2"),
                                ("<paths>", "knowledge/software/a.md, knowledge/software/b.md")):
         assert placeholder in command or "<" not in command, f"undeclared placeholder {placeholder}"
@@ -329,7 +408,7 @@ def test_running_the_command_the_skill_prints_keeps_the_counts_equal(tmp_path):
     )
     assert after.endswith("\n") and not after.endswith("\n\n")
 
-    check_command = prescribed_command(owner_skill.read_text(encoding="utf-8"), "check")
+    check_command = prescribed_command(owner_text, "check")
     check_tokens = shlex.split(check_command)
     assert check_tokens[1] == tokens[1], "the skill's verify step names a different tool than its append step"
     check_tokens[0] = sys.executable

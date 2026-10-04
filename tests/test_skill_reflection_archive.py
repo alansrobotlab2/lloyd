@@ -174,7 +174,22 @@ def _active_skills() -> dict[str, str]:
                 continue
             skill_file = entry / "SKILL.md"
             if skill_file.exists() and not _is_quarantined_skill(skill_file):
-                out[entry.name] = skill_file.read_text(encoding="utf-8", errors="replace")
+                # The FOLDER, for the classifier only. #2188 moved `### 2e. Pattern Output
+                # Files` and `### 2f. Knowledge Log` out of this skill's body; a scan of the
+                # body alone stops discovering it as a `tool-write`r and its archive step
+                # disappears from the scan, which is a red on the wrong surface — the rule
+                # is not gone, it is one `Read` away and the body's §2e–2f pointer is what
+                # sends a run there. NOT a claim about the prompt: the autonomy route
+                # (`app/autonomy.py::_load_skill_content`) hands a run SKILL.md alone, so
+                # the moved procedure reaches a run by being read, and
+                # `test_the_block_the_body_defers_to_is_actually_where_the_body_says_it_is`
+                # in tests/test_skill_spill_624.py is the node that pins that pointer still
+                # promises the two headings. Absence assertions elsewhere in this file read
+                # a named `SKILL.md` directly, and keep doing so.
+                out[entry.name] = "\n".join(
+                    [skill_file.read_text(encoding="utf-8", errors="replace")]
+                    + [p.read_text(encoding="utf-8", errors="replace")
+                       for p in sorted(entry.glob("*.md")) if p.name != "SKILL.md"])
     return out
 
 
@@ -299,9 +314,16 @@ def test_knowledge_write_section_2e_archives_both_pattern_files(skills):
     write. This is the half that had never landed: zero dated copies of either
     pattern file across ~22 nightly cycles."""
     body = skills["nightly-reflection-knowledge-write"]
-    section = body.split("### 2e.", 1)
-    assert len(section) == 2, "nightly-reflection-knowledge-write lost its §2e"
-    section = "### 2e." + section[1].split("\n### ", 1)[0]
+    # Cut at the line that IS the heading, not at the first textual "### 2e." — the
+    # body's index pointer quotes `### 2e. Pattern Output Files` in prose, and #2188
+    # moved the real heading into `steps-2b-2f.md`, which sits later in the joined
+    # folder text. Cutting at the quote would harvest the pointer sentence and grade it
+    # as if it were the procedure, which is the reading that would let an empty §2e pass.
+    lines = body.split("\n")
+    at = [n for n, line in enumerate(lines) if line.startswith("### 2e.")]
+    assert at, ("nightly-reflection-knowledge-write lost its §2e heading from both its "
+                "body and its siblings")
+    section = "\n".join(lines[at[0]:]).split("\n### ", 1)[0]
     # One predicate per file, from the same function the mutation test breaks —
     # `section_2e_problems`, not `archive_problems`. The section covers two files,
     # so a text-wide search lets one file's Read/cp block discharge the other's:

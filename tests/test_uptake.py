@@ -4179,3 +4179,40 @@ def test_the_command_line_the_nightly_task_runs_takes_the_same_decision(
     assert "STOP:" in err, f"the operator's signal must survive the withhold: {err}"
     assert not (repo / "eval" / "uptake" / "classifier-report.json").exists(), (
         "the nightly command line published an unmeasured sentinel into the tracked dir")
+
+
+@pytest.mark.live_vault
+def test_the_moved_procedure_survives_the_trim_that_moved_it():
+    """A rule a spill moved must survive the move: a MOVE is allowed, a DELETION is red.
+
+    The five-phrase floor in `_MIN_PHRASES_PER_SKILL` is enforced by
+    `test_the_skill_s_descriptions_of_the_table_match_what_the_code_emits` over
+    `_skill_copy` (body only), and all five of its phrases are telemetry strings — none
+    came from the two sections #2188 moved, so that floor is green with or without this
+    round. What only this node pins is the operational wording those sections carried:
+    the dated copy, the two `Write(file_path=` targets, the `test -f` proof, and the
+    owned log's append/check commands. Asserted over the whole folder, because a #624
+    spill puts a rule in a sibling and the body's `Read` pointer is what sends a run
+    there; `app/autonomy.py::_load_skill_content` hands a run SKILL.md alone, so this is
+    about where a rule lives, not about prompt bytes. Rename a sibling or drop its block
+    and this is red, and so is softening the wording — the strings are exact.
+    """
+    folder = Path.home() / "obsidian" / "skills" / "nightly-reflection-knowledge-write"
+    body = _skill_copy("nightly-reflection-knowledge-write")
+    whole = "\n".join([body] + [p.read_text(encoding="utf-8")
+                                for p in sorted(folder.glob("*.md"))
+                                if p.name != "SKILL.md"])
+    assert len(whole) > len(body) + 4000, (
+        f"the siblings add {len(whole) - len(body)} chars — the detail this skill is "
+        "supposed to keep out of its body is not on disk")
+    for needle in ("STAMP=$(date -u +%Y-%m-%d-%H%M)",   # dated copy, §2e, twice
+                   "Write(file_path=",                   # the two pattern-file writes
+                   "test -f",                            # a missing source is PROVED
+                   "knowledge_log.py append",            # §2f, the owned log
+                   "knowledge_log.py check"):            # and its shape gate
+        assert needle in whole, (
+            f"{needle!r} is gone from the whole folder, not merely out of the body: "
+            "the trim moved a rule and this is the node that notices a deletion")
+    # And the body still carries its own half of the contract — the floor above is not
+    # the only thing keeping the pointer honest.
+    assert "steps-2b-2f.md" in body, "the body no longer names where the detail went"

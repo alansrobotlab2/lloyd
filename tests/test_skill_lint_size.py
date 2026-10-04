@@ -342,3 +342,72 @@ def test_every_uncapped_route_is_wired_at_its_call_site():
     assert "route=ROUTE_AUTONOMY_TASK" in autonomy_src
     assert "route=ROUTE_WORKER_PROMPT" in worker_src
     assert "record_context_skills(session_id" in chat_src
+
+
+# ── #2188: the sampled skill that sat AT the cap now sits under it ────────────
+#:
+#: `MAX_BODY_LINES` is 100 and `over_cap` in `skill_size` is a strict `>`, so a skill
+#: measured at exactly 100 accepts one more line and refuses the second — and
+#: `vault_round.SKILL_BODY_ENFORCE` is True, so that refusal lands mid-round at
+#: `skill_body_findings`, after the work is done. The fix is headroom, and headroom is
+#: only real if the constants stay where they are: a trim that "solved" the problem by
+#: raising the ceiling would be the very ruling #1534 left to a person.
+
+#: Measured with this file's own expression (`skill_size`'s `body`, front matter
+#: excluded). `nightly-reflection-knowledge-write` is the item's target; the other four
+#: are the control — this round moves nothing in them, so their figures are pinned to
+#: the values triage recorded on 2026-10-04, and a drift in one is a drift this round caused.
+CAP_HEADROOM = {"nightly-reflection-knowledge-write": 90}
+SAMPLE_BASELINE = {"powerpoint": 92, "deep-research": 96,
+                   "system-health-check": 84, "entity-resolution-sweep": 91}
+
+
+@pytest.mark.parametrize("name,expected", sorted(SAMPLE_BASELINE.items()))
+def test_the_other_sampled_skills_are_untouched(name, expected):
+    root = Path.home() / "obsidian" / "skills"
+    path = root / name / "SKILL.md"
+    if not path.is_file():
+        pytest.skip(f"{path} not on this machine")
+    _, body = sl.parse_frontmatter(path.read_text(encoding="utf-8"))[:2]
+    got = len(body.strip("\n").splitlines())
+    assert got == expected, (
+        f"{name}: {got} body lines, was {expected} — #2188's scope is one skill")
+
+
+def test_the_skill_that_sat_at_the_cap_now_has_headroom():
+    from scripts.automod import vault_round
+
+    root = Path.home() / "obsidian" / "skills"
+    (name, ceiling), = CAP_HEADROOM.items()
+    # Measured against the vault's COMMITTED bytes, which is the state the enforcement
+    # that this item is about actually grades (`vault_round.skill_body_findings` runs on
+    # a landing). Not the working tree: while this round gated, another writer put an
+    # uncommitted 5-line `## Step 2.5: Memory-index pre-flight (#2173)` block into this
+    # same file, taking it 88 -> 93. That addition is precisely the #1488-sized rule this
+    # item exists to make room for, it is another session's in-flight work, and a node
+    # that reds it would be a gate rung owned by nobody — the reason `pytest.ini` keeps
+    # live-vault reads off a hard rung. The working-tree figure is printed, not judged.
+    rel = f"skills/{name}/SKILL.md"
+    shown = subprocess.run(["git", "-C", str(root.parent), "show", f"HEAD:{rel}"],
+                           capture_output=True, text=True, timeout=30)
+    assert shown.returncode == 0, f"git show HEAD:{rel} failed: {shown.stderr[:120]}"
+    text = shown.stdout
+    live = (root / name / "SKILL.md").read_text(encoding="utf-8")
+    live_lines = len(sl.parse_frontmatter(live)[1].strip("\n").splitlines()) if live else -1
+    _, body = sl.parse_frontmatter(text)[:2]
+    lines = len(body.strip("\n").splitlines())
+    assert lines <= ceiling, f"{name}: {lines} body lines, ceiling {ceiling}"
+    # The constants are the point, not the number: an #1488-sized (+8) rule has to
+    # land without meeting `skill_body_findings`, and it can only do that while the
+    # ceiling and the enforcement are where they are.
+    assert sl.MAX_BODY_LINES == 100, sl.MAX_BODY_LINES
+    assert sl.SPILL_SAMPLE == ("powerpoint", "deep-research",
+                              "nightly-reflection-knowledge-write",
+                              "system-health-check", "entity-resolution-sweep")
+    assert vault_round.SKILL_BODY_ENFORCE is True
+    assert lines + 8 <= sl.MAX_BODY_LINES, (
+        f"{lines} + an 8-line rule = {lines + 8}: still refused at the ceiling")
+    assert live_lines <= sl.MAX_BODY_LINES, (
+        f"the working tree sits at {live_lines} body lines, past the 100-line ceiling — "
+        "an uncommitted edit has used up more headroom than exists. The committed figure "
+        f"above ({lines}) is what this node judges; this one is the same file on disk.")
