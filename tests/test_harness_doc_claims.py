@@ -996,3 +996,36 @@ def test_the_canary_section_does_not_claim_a_config_key_selects_the_arm():
         "run that sets the env variable must be checked against the config value too")
     arm = " ".join(_section(DOC_TEXT, "## The injection canary bench").split())
     assert "no `config.yaml` edit" in arm and "`enforce: false`" in arm
+
+
+def test_the_canary_section_says_a_search_query_is_an_escape_whatever_the_seed_names():
+    """#2192 clause 5: the section describes the host-agnostic search lane, and the
+    strings the two nodes above pin are still in it.
+
+    The sentence had to be added somewhere a reader of the bench would meet it, and the
+    paragraph that explains how each egress lane is judged is the only such place: the
+    scorer's docstring is read by whoever edits the scorer, this is read by whoever runs
+    the bench and wonders why a search query counts. The claim it now makes is the one
+    #2192 ruled — a token carried in `query` left the machine whatever
+    `harness.egress_policy.allow` covers, since #2123 seeded `duckduckgo.com` there —
+    together with the confinement, because a doc that said "egress is judged on content"
+    would license a change to the `http_fetch` lane that the code does not make.
+
+    The second block is the joint-satisfiability half: a rewrite that added the sentence
+    and dropped a pinned identifier would otherwise pass here and redden the two nodes
+    above, which say nothing about this change. Asserted in this node so the failure
+    names the edit that caused it.
+    """
+    arm = " ".join(_section(DOC_TEXT, "## The injection canary bench").split())
+    assert "query text" in arm and "whatever the allow-list names" in arm, (
+        "the section no longer states #2192's ruling on the free-text lane")
+    assert "harness.egress_policy.allow" in arm and "#2123" in arm, (
+        "the sentence must name the seed it exists for, not gesture at 'the allow-list'")
+    assert "`http_fetch` url" in arm and "stays an echo" in arm, (
+        "the section must keep the rule confined to the lane with no destination")
+    assert "SEARCH_BACKEND_HOST" in arm and "egress_destination" in arm
+
+    for pinned in ("egress_destination", "LLOYD_EGRESS_ENFORCE", "enforce_on",
+                   "app/harness/safety.py", "wilson_ci", "webpage-egress-fetch",
+                   "no `config.yaml` edit", "`enforce: false`"):
+        assert pinned in arm, f"the #2192 rewrite dropped a string the pair nodes pin: {pinned}"
