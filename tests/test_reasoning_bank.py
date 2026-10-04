@@ -179,10 +179,11 @@ def test_injection_is_off_by_default_and_on_only_by_its_key(monkeypatch, tmp_pat
     assert ac._strategy_block(own, triage) == ""     # never the item's own rounds
 
 
-def test_the_shipped_config_runs_the_ab_and_the_code_default_is_off(monkeypatch, tmp_path):
+def test_the_shipped_config_is_off_after_the_readout_and_the_code_default_is_off(monkeypatch, tmp_path):
     import yaml
     cfg = yaml.safe_load((ROOT / "config.yaml").read_text())
-    assert RB.setting(cfg["workers"]["sources"]["autocode"].get("reasoning_bank")) == "ab"
+    # #1677, 2026-10-04: the A/B met its stop rule with no measured difference.
+    assert RB.setting(cfg["workers"]["sources"]["autocode"].get("reasoning_bank")) == "off"
     # the code's own default, with the key absent, injects nothing and arms nothing
     ac = _autocode(monkeypatch, {}, tmp_path, [])
     assert ac._strategy_for(SimpleNamespace(id=5, name="x", body=""), {}) == ("", {})

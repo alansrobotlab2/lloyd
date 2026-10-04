@@ -171,6 +171,23 @@ outcome is "no measured difference" → `off`.
 (depth 4, then 2); 09-14..18 ran 18–39. 300 done rounds is therefore ~3–5
 days at the recent rate and hits the 10-day cap at the slower one.
 
+## The readout (2026-10-04, #1677): no measured difference, set to `off`
+
+`python -m scripts.automod.reasoning_bank ab-report`, stop rule MET (>= 150 done
+rounds per arm): 266 `control` rounds in 118 clusters, 271 `common_causes` in 133.
+
+| | control | common_causes | difference, 95% CI |
+|---|---|---|---|
+| resolved per round-hour (the decider, ruled 2026-09-28 before reading) | 2.287 [2.045, 2.549] | 2.153 [1.937, 2.377] | −0.134 [−0.482, +0.209] |
+| landed rate | 245/266 = 0.92 | 243/271 = 0.90 | −0.024 [−0.074, +0.023] |
+| refusals per round | 0.27 | 0.28 | +0.010 [−0.092, +0.111] |
+
+The rule was `on` only if the decider's interval excluded zero in favour of
+`common_causes` with landed rate not worse. It includes zero, and every point
+estimate leans against the treatment, so `workers.sources.autocode.reasoning_bank`
+is `off` — the outcome the A/A replay above predicted. The arm markers stay on the
+ledger rows already written; nothing new is armed.
+
 ## Reproduce
 
     flock -s -w 7200 ~/.local/state/lloyd-automod/primary.lock \

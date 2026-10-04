@@ -1935,7 +1935,11 @@ workers:
       # ab-report`; stop at 150 done rounds per arm or 10 days, then set this
       # to `on` (a measured gain) or `off` (eval/measurements/reasoningbank-2026-09-25.md).
       # `reasoning_bank_mode` applies to `on` only; `ab` always tests `prior`.
-      reasoning_bank: ab
+      # Read out 2026-10-04 (#1677), stop rule MET at 266 control / 271
+      # common_causes rounds: no measured difference — resolved per round-hour
+      # 2.287 vs 2.153, difference -0.134 [-0.482, +0.209]; landed 0.92 vs 0.90,
+      # -0.024 [-0.074, +0.023]. Not a gain, so `off`: tried, did not work.
+      reasoning_bank: off
       reasoning_bank_mode: prior
       max_duration_seconds: 3600
       # 150, not 100 — the code's own default and its reason

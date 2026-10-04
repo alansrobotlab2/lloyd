@@ -1790,6 +1790,9 @@ told it lands more often is a live question, so
   `insufficient`. **Stop rule:** 150 done rounds per arm or 10 days, whichever
   first; then `on` only if resolved-per-round-hour is up with the landed rate
   not down (the house rule), else `off`. `tests/test_reasoning_bank.py`.
+  **Read out 2026-10-04 (#1677): no measured difference** (resolved per
+  round-hour −0.134 [−0.482, +0.209] over 266 / 271 rounds), so config.yaml
+  ships `off`; the table is in `eval/measurements/reasoningbank-2026-09-25.md`.
 
 ### 3.2k Owed work: nothing parks on Alan (2026-09-27)
 
