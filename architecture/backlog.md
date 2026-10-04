@@ -330,9 +330,15 @@ makes this a cut-over rather than a rename. `LOCAL_STAMP_CUTOVER`
 `app/backlog_move.py::utc_instant(value, legacy_local=…)` is the only reader that
 knows it: a naive stamp **below** the cut-off is read in the machine's local clock,
 because that is what wrote it, and **at or above** it in UTC. Pre-existing rows are
-grandfathered — nobody rewrote ~1,000 live board files; whether to backfill them is
-an open `needs-human` decision on #1517. The direction of the old error is what
-makes the rule safe this far west of Greenwich: local numerals always run *behind*
+grandfathered permanently and never backfilled — the ruling on #1517, settled
+2026-10-04 — which makes the constant a permanent discriminator between the two
+clocks and not a transitional marker some later migration retires. A backfill was
+refused because the store keeps no per-row clock provenance below the cut-off:
+nothing records which of the two writers stamped a given row, so a uniform +7 h
+shift would double-move the 1,027 pre-cut-off `completed:` values the pre-fix
+automod closers already wrote in naive UTC, for the sake of shifting a population
+no reader mis-dates today. The direction of the old error is what makes the rule
+safe this far west of Greenwich: local numerals always run *behind*
 the UTC numerals for the same instant, so a legacy row is below the cut-off
 permanently and a new row can never fall below it. The case the rule cannot judge is
 a legacy writer still running between the cut-off and this change's promotion: its

@@ -115,6 +115,44 @@ def test_a_save_that_moves_nothing_is_documented_as_recording_nothing():
     assert "no move" in section.lower()
 
 
+def test_the_clock_section_grandfathers_the_legacy_rows_instead_of_asking():
+    """The cut-over paragraph states the ruling, names its date, and stops routing
+    the reader to a decision nobody owes (#2183 clause 4).
+
+    It read "Pre-existing rows are grandfathered — nobody rewrote ~1,000 live board
+    files; whether to backfill them is an open `needs-human` decision on #1517",
+    which was false twice over by the day it was last read: #1517's owed entry has
+    been `owed_settled` since 2026-10-04T12:45:36 with the ruling "Grandfather;
+    never backfill", and `needs-human` was itself retired as a destination on
+    2026-09-27 — as this same document says in its own status table. The absence
+    half is load-bearing here, not decoration: the paragraph must say *why* the
+    migration was refused, because a reason is what stops a future run attempting
+    it, where a bare "we did not" only reports a preference. Both halves are
+    checked against the section folded onto one line, since a claim about what the
+    prose says must not depend on where it happens to wrap.
+    """
+    section = " ".join(_section("## One clock, and where the old one stopped").split())
+
+    assert "grandfathered permanently" in section, "the ruling is not stated as final"
+    assert "never backfilled" in section, "the ruling's own word is 'never backfill'"
+    assert "2026-10-04" in section, "the ruling carries no date, so it reads as pending"
+    assert "no per-row clock provenance" in section, (
+        "the refusal reason is absent, and the paragraph is advice rather than a "
+        "prohibition against rewriting ~1,000 live board files"
+    )
+    assert "completed:" in section and "1,027" in section, (
+        "the population a uniform shift would double-move is not named; both figures "
+        "are the owed-check ruling's own"
+    )
+    assert "needs-human" not in section, (
+        "the paragraph still points at a status this document retired on 2026-09-27"
+    )
+    assert "whether to backfill" not in section, "the choice is still posed as open"
+    assert not re.search(r"\bopen\b", section), (
+        "something in the section still calls a settled ruling an open question"
+    )
+
+
 # ── prose that cites a test: the citation has to resolve (#2069) ─────────
 #
 # `_split_frontmatter`'s docstring said the error path was "pinned" by a test. It

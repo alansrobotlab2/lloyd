@@ -63,15 +63,23 @@ _STAMP = "%Y-%m-%dT%H:%M:%S.%f"
 #: A naive stamp below this value is therefore read in the machine's local clock
 #: and a stamp at or above it in UTC — which lets the readers date a row in the
 #: clock its writer used without rewriting the ~1,000 files the retired writers
-#: left (backfill vs grandfather is a person's call, on #1517). The value is the
-#: instant this change was authored, in naive UTC, and the direction of the old
-#: error is what makes that safe: a naive-local stamp's numerals always run
-#: *behind* the UTC numerals for the same instant this far west of Greenwich, so
-#: every legacy row falls below the cut-off permanently and nothing the new code
-#: writes can. The one case the cut-off cannot judge is a legacy writer still
-#: running between this instant and this change's promotion: its rows are read as
-#: UTC and look seven hours older than they are, inside a 24-hour window, until the
-#: next day sweeps them past it.
+#: left. Those rows are grandfathered permanently and never backfilled: the ruling
+#: on #1517, delegated 2026-09-27 and settled by the owed-check ruling of
+#: 2026-10-04, which makes this constant a permanent discriminator between the two
+#: clocks and not a transitional marker some later migration retires. A backfill
+#: was refused because the store keeps no per-row clock provenance below the
+#: cut-off — nothing records which of its two writers stamped a given row, which
+#: is the very thing #1517 documented rather than recorded — so a uniform +7 h
+#: shift would double-move the 1,027 pre-cut-off `completed:` values the pre-fix
+#: automod closers already wrote in naive UTC, in order to shift a population no
+#: reader mis-dates today. The value is the instant this change was authored, in
+#: naive UTC, and the direction of the old error is what makes that safe: a
+#: naive-local stamp's numerals always run *behind* the UTC numerals for the same
+#: instant this far west of Greenwich, so every legacy row falls below the cut-off
+#: permanently and nothing the new code writes can. The one case the cut-off
+#: cannot judge is a legacy writer still running between this instant and this
+#: change's promotion: its rows are read as UTC and look seven hours older than
+#: they are, inside a 24-hour window, until the next day sweeps them past it.
 LOCAL_STAMP_CUTOVER = datetime(2026, 9, 26, 4, 0)
 
 #: The status that means the item is finished, and therefore dated.

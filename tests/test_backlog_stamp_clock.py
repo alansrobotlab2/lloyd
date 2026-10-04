@@ -538,3 +538,123 @@ def test_the_cut_off_precedes_every_stamp_the_new_code_writes(la_clock):
         "`now_stamp()` changed shape; `_fm_date` and every board reader parse the "
         "bare ISO form"
     )
+
+
+# ── #2183: the comment records the ruling, so nobody re-opens the question ────
+#
+# The ruling itself is settled and was, twice, before this round: delegated by Alan
+# on 2026-09-27 (`backlog/1517-…md:83-86`, "ruled (delegated by Alan) — Grandfather")
+# and recorded as `owed_settled` by the owed-check run
+# `20261004_053615_owedcheck_a312` on 2026-10-04 (`backlog/1517-…md:131-162`,
+# `follow_up: 2183`). What was NOT settled anywhere a reader would look was its
+# *text*: `app/backlog_move.py:66` read "backfill vs grandfather is a person's call,
+# on #1517", nine lines above the constant it governs — so the one file a future run
+# opens before rewriting ~1,000 live board files was still advertising that the
+# choice was unmade. The figures this section's prose cites (+7.00 h below the
+# cut-off / +0.00 at or above, on 3,717 live `created`/`updated` rows; 1,027 files
+# whose `completed:` the pre-fix closers already wrote naive UTC) are that ruling's
+# evidence, cited from the `owed_settled` record rather than re-derived here.
+
+MOVE_PY = _ROOT / "app" / "backlog_move.py"
+
+#: The two strings that left the decision looking unmade (#2183 clause 1).
+OPEN_QUESTION_STRINGS = ("person's call", "backfill vs grandfather")
+
+
+def _cutover_comment() -> str:
+    """The `#:` block sitting directly above `LOCAL_STAMP_CUTOVER`, read off the file.
+
+    Sliced by adjacency rather than by line number, so editing the comment cannot
+    move the subject out from under the check; and folded onto one line with the
+    `#:` markers and the wrap removed, because what is being asserted is what the
+    comment *says*, not where it happens to break — a phrase spanning a line break
+    would otherwise read as absent and the test would fail on the reflow of a
+    sentence nobody changed. Asserted fat before anything is looked for inside it:
+    an absence check against a block that failed to slice passes for the wrong
+    reason, which is the doc-test failure mode #2069 wrote down.
+    """
+    lines = MOVE_PY.read_text(encoding="utf-8").splitlines()
+    at = next(i for i, ln in enumerate(lines)
+              if ln.startswith("LOCAL_STAMP_CUTOVER = "))
+    start = at
+    while start > 0 and lines[start - 1].lstrip().startswith("#"):
+        start -= 1
+    block = " ".join(" ".join(ln.lstrip("#:").strip()
+                              for ln in lines[start:at]).split())
+    assert len(block) > 800, (
+        f"the comment above `LOCAL_STAMP_CUTOVER` sliced to {len(block)} chars; an "
+        "absence check against a near-empty block is a green light, not a guard"
+    )
+    return block
+
+
+def test_the_cut_off_comment_offers_nobody_a_backfill_to_propose():
+    """#2183 clause 1: neither string that posed the choice as open survives in the
+    module at all — not in the cut-off block, not anywhere else in the file.
+
+    The positive control is that the file now says the thing that replaced them.
+    Without it, deleting the whole comment would satisfy the absence half by
+    deleting the check's subject, which is the way a prose guard goes vacuous.
+    """
+    text = MOVE_PY.read_text(encoding="utf-8")
+    for phrase in OPEN_QUESTION_STRINGS:
+        assert phrase not in text, (
+            f"app/backlog_move.py still carries {phrase!r}, so a run reading it "
+            "believes whether to rewrite ~1,000 board files is still someone's "
+            "unsettled question; #1517 ruled it grandfathered on 2026-10-04"
+        )
+    assert "grandfathered" in text, (
+        "the two phrases are gone but so is the ruling that replaced them, so the "
+        "absence above proved nothing"
+    )
+
+
+def test_the_cut_off_comment_records_the_ruling_as_settled_and_dated():
+    """#2183 clause 2: settled, dated, attributed, and permanent by name.
+
+    Four separate things, each of which the old sentence lacked: what was decided,
+    when, on which item, and that the cut-off outlives the migration that could
+    have retired it. A comment that merely said "grandfathered" would still read as
+    a holding position, because the constant it describes looks exactly like a
+    transitional device.
+    """
+    comment = _cutover_comment()
+    assert "grandfathered permanently" in comment, "the ruling is not stated as final"
+    assert "never backfilled" in comment, "the ruling's own word is 'never backfill'"
+    assert "the ruling on #1517" in comment, (
+        "the ruling is not attributed to the item that made it — the constant's own "
+        "line mentions #1517 for a different reason, so a bare item number proves "
+        "nothing here"
+    )
+    assert "2026-10-04" in comment, "the ruling carries no date, so it reads as undated"
+    assert "permanent discriminator" in comment, "the constant's standing is not named"
+    assert "transitional" in comment, (
+        "nothing says what the cut-off is NOT, which is the half a future migration "
+        "would need to be told"
+    )
+
+
+def test_the_cut_off_comment_names_the_reason_a_backfill_was_refused():
+    """#2183 clause 3: the refusal reason is the part that survives contact with a
+    future run, because it is what makes the migration *unsafe* rather than merely
+    unappealing.
+
+    The store cannot tell, for a row below the cut-off, which of its two writers
+    stamped it — the very defect #1517 closed by documenting the cut-off instead of
+    recording provenance per row. So a uniform +7 h shift is not a no-op tidy-up: it
+    moves the 1,027 pre-cut-off `completed:` values the pre-fix automod closers
+    already wrote in naive UTC, which are correct today under either reading.
+    """
+    comment = _cutover_comment()
+    assert "no per-row clock provenance" in comment, (
+        "the reason is not stated, so the ruling reads as a preference and a "
+        "sufficiently confident run will revisit it"
+    )
+    assert "1,027" in comment and "completed:" in comment, (
+        "the population a backfill would break is not named; the number is the "
+        "owed-check ruling's own figure"
+    )
+    assert "naive UTC" in comment, "the double-moved values' clock is not named"
+    assert "double-move" in comment, (
+        "the mechanism of the harm is missing, leaving only the conclusion"
+    )
