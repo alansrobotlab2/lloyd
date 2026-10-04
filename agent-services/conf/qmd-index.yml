@@ -62,9 +62,14 @@ collections:
   sessions:
     # The real session-recall export target: app/post_capture.py writes records
     # under app.paths.VAULT_SESSIONS_DIR (the data root, architecture/data-home.md) — not
-    # ~/obsidian/sessions, which exists but is empty. ~650 indexed documents
-    # live on this path; pointing the collection at the vault directory drops
-    # every one of them from both the FTS and the vector legs (#1298).
+    # ~/obsidian/sessions, which exists but is empty. Every indexed session
+    # document lives on this path; pointing the collection at the vault
+    # directory drops all of them from both the FTS and the vector legs (#1298).
+    # No count is stated here, because one goes stale: measure it with
+    #   sqlite3 ~/.cache/qmd/index.sqlite \
+    #     "select count(*) from documents where collection='sessions' and active=1"
+    # The collection shrank on 2026-09-27 when #1064 retracted the 514
+    # non-conversation exports.
     path: /home/alansrobotlab/lloyd-data/_pipeline/vault-derived/sessions
     pattern: "**/*.md"
   architecture:
