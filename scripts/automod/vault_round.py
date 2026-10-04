@@ -383,10 +383,14 @@ def skill_activation_findings(paths: list[str]) -> list[dict]:
     return rows
 
 
-# #1985. Log-only: `architecture/skills.md` says the 100-line cap is advisory and
-# that making it a failure is a person's call, so flipping this is a human's
-# change (and rewords that sentence in the same commit).
-SKILL_BODY_ENFORCE = False
+# #1985 shipped this log-only; #2158 ruled it enforcing on 2026-10-04, on what
+# the log caught: two real over-cap landings while the row only recorded — a
+# 103-line body on 2026-10-03T08:48:22Z (commit 98823179, `would_refuse: true`,
+# landed anyway; hand-fixed by 9b7b8986) and #1534 at 116 lines whose only red
+# node was a `live_vault` check the gate deselects. The scope is
+# `skill_lint.SPILL_SAMPLE` only: library-wide enforcement stays a person's
+# call, and `architecture/skills.md` records both halves of that ruling.
+SKILL_BODY_ENFORCE = True
 
 
 def skill_body_findings(paths: list[str]) -> list[dict]:
@@ -399,8 +403,20 @@ def skill_body_findings(paths: list[str]) -> list[dict]:
     purpose: 106 of 197 live skills were over the cap on 2026-10-01, so a
     library-wide rule would refuse most landings; a touched skill outside the
     sample yields no row. Body = the text after front matter, the same rule as
-    `skill_lint.skill_size`. `land()` records every row; `validate()` refuses
-    on one only while `SKILL_BODY_ENFORCE` is on. Never raises.
+    `skill_lint.skill_size`.
+
+    The ceiling measures the candidate's resulting state, never its delta: a
+    landing that SHRINKS a sampled skill — 120 lines cut to 101 — is refused,
+    because after the cut the file still sits past `MAX_BODY_LINES`, while one
+    that lands at <= 100 lines is allowed however much it grew. Nothing here
+    compares against HEAD.
+
+    Each row carries `largest_block` (heading + line count, from
+    `skill_lint.skill_size`, whose `_largest_block` names it the first spill
+    candidate) and says so in `reason`, so a refusal tells the writer which
+    section to move into a sibling file. `land()` records every row — on the
+    passing landing and on the refusal alike; `validate()` refuses on a
+    would-refuse row since #2158 flipped `SKILL_BODY_ENFORCE` on. Never raises.
     """
     slugs = sorted({p.split("/")[1] for p in paths
                     if p.startswith("skills/") and p.endswith("/SKILL.md")
@@ -422,11 +438,16 @@ def skill_body_findings(paths: list[str]) -> list[dict]:
         except Exception:  # noqa: BLE001 — missing (a deletion) or unreadable: nothing to measure
             continue
         if size["over_cap"]:
+            block = size["largest_block"]
             rows.append({"skill": slug, "body_lines": size["body_lines"],
                          "max_body_lines": skill_lint.MAX_BODY_LINES, "would_refuse": True,
+                         "largest_block": block,
                          "reason": f"body is {size['body_lines']} lines, past the "
                                    f"{skill_lint.MAX_BODY_LINES}-line ceiling for a "
-                                   f"spill-sampled skill"})
+                                   f"spill-sampled skill; clear it by spilling the "
+                                   f"largest block ({block['lines']} lines: "
+                                   f"{block['heading']!r}) into a sibling file and "
+                                   f"naming it in the body's index"})
     return rows
 
 
@@ -774,8 +795,13 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
         # written afterwards would state the absence of the thing it is refusing.
         # Recomputed here rather than threaded out of `validate()`, which keeps
         # the `(errors, buckets)` shape its other callers — this module's CLI and
-        # the five test nodes in three other files — depend on.
+        # the five test nodes in three other files — depend on. The body-line
+        # ceiling is recomputed here for the same reason since #2158 flipped it
+        # enforcing: after `revert_paths` the sampled skill is back at its
+        # under-cap HEAD text (or deleted), so a row written afterwards would
+        # carry no `skill_body` finding on the very refusal that measured one.
         refused_skill_gate = skill_activation_findings(norm)
+        refused_skill_body = skill_body_findings(norm)
         undone = revert_paths(norm) if not buckets["denied"] else []
         S.append_event({"event": "vault_land", "ok": False, "item_id": item_id,
                         "paths": norm, "errors": errors[:10], "reverted": undone,
@@ -784,6 +810,7 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
                         # `skills/<slug>/SKILL.md`, so an absent key still means
                         # "no skill was in this batch" and never "nothing to see".
                         **({"skill_gate": refused_skill_gate} if refused_skill_gate else {}),
+                        **({"skill_body": refused_skill_body} if refused_skill_body else {}),
                         **({"session_id": session_id} if session_id else {})})
         raise VaultRoundError("validation failed; the change was reverted: "
                               + "; ".join(errors[:5]))

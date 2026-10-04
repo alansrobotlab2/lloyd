@@ -1,23 +1,30 @@
-"""#711: the vault-landing skill-activation gate — enforcing since #2148.
+"""#711: the vault-landing skill rails — activation enforcing since #2148, the
+body-line ceiling enforcing since #2158.
 
 A tmp vault, fixture skills and a fixture corpus: the candidate is a real
 SKILL.md on disk and the current text is the vault's HEAD, exactly as a
 consolidation landing sees them, so this runs in the gate's `not live_vault`
-rung. The flag now ships on, so the enforcement nodes stand on the shipped
-default with no monkeypatch of it, and the log-only behaviour the off-by-default
-node used to cover is pinned with the flag stood down explicitly (#2148 clause
-5). One node here reads the vault rather than a tmp tree — the last, which
-re-derives the ledger figures the flip was ruled on from the bytes the vault
-committed, tolerating an absent vault root the way #2046's witness node does.
+rung. Both flags now ship on, so the enforcement nodes stand on the shipped
+default with no monkeypatch of them, and the log-only behaviour the
+off-by-default nodes used to cover is pinned in each rail with the flag stood
+down explicitly (#2148 clause 5, mirrored for the ceiling by #2158). Two nodes
+here read the real tree rather than the tmp one: the activation witness node
+re-derives the ledger figures that flip was ruled on from the bytes the vault
+committed, tolerating an absent vault root the way #2046's witness node does,
+and the last one re-reads `vault_round.py` and `architecture/skills.md` to pin
+that no surface still defers the ceiling flip to a person.
 """
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
 from scripts import skill_activation as A
 from scripts.automod import state as S, vault_round as V
+
+ROOT = Path(__file__).resolve().parent.parent
 
 TEA = "tea-brewing"
 RECORDS = [
@@ -76,18 +83,22 @@ def _rewrite(vault, desc):
     (vault / "skills" / TEA / "SKILL.md").write_text(_md(desc))
 
 
-def test_the_activation_rail_ships_enforcing_and_the_body_ceiling_does_not():
-    """#2148 clause 5, first half: the two flags' shipped values, read off the module.
+def test_both_skill_rails_ship_enforcing_and_are_ruled_separately():
+    """#2148 clause 5 (first half) and #2158: the two flags' shipped values, off the module.
 
-    The activation rail is on because nine days of its own `skill_gate` rows said
-    it would have refused nothing — 137 rows, 0 would-refusals, the bytes the last
-    node of this file re-derives. The body-line ceiling is off because
-    `architecture/skills.md` still calls its 100-line cap advisory and #1985 left
-    the flip to a person. Two flags, two rulings, and one node that keeps a later
-    reader from flipping the wrong one by assuming they travel together.
+    Both rails now enforce, and the node says so because each was ruled on its
+    own evidence — the two flags do not travel together, and a later reader who
+    assumed they did could stand the wrong one down. The activation rail is on
+    because nine days of its own `skill_gate` rows said it would have refused
+    nothing — 137 rows, 0 would-refusals, the bytes the witness node of this
+    file re-derives (#2148). The body-line ceiling is on because the log #1985
+    shipped caught two real over-cap landings — one 103-line body that landed
+    on 2026-10-03 and had to be hand-fixed, and #1534 at 116 lines whose only
+    red check was a `live_vault` node the gate deselects — and #2158 ruled the
+    five-skill sample enforcing over that log on 2026-10-04.
     """
     assert V.SKILL_ACTIVATION_ENFORCE is True
-    assert V.SKILL_BODY_ENFORCE is False
+    assert V.SKILL_BODY_ENFORCE is True
 
 
 @pytest.mark.parametrize("desc, why", [(NOISY, "false triggers 0 -> 2"),
@@ -264,6 +275,11 @@ def test_the_committed_witness_bytes_hold_the_rows_the_flip_is_ruled_on():
 
 
 # ── #1985: the body-line ceiling on a spill-sampled skill, at the writer ─────
+#
+# #1985 shipped the ceiling log-only and #2158 (2026-10-04) ruled it enforcing
+# on the five `SPILL_SAMPLE` skills; every node below stands on the shipped
+# default except the one that pins the log-only behaviour, which — exactly as
+# #2148's mirror does for the activation rail — stands the flag down itself.
 
 from scripts import skill_lint as SL
 
@@ -271,7 +287,11 @@ SPILLED = SL.SPILL_SAMPLE[0]
 
 
 def _sized(slug: str, body_lines: int) -> str:
-    body = "\n".join([f"# {slug}"] + [f"step {i}" for i in range(1, body_lines)])
+    """A body of exactly `body_lines` lines, all of them under one `## Steps`
+    heading — so `largest_block` names a real heading, the way a real over-cap
+    skill's does, and the refusal's spill advice is checkable."""
+    body = "\n".join([f"# {slug}", "## Steps"]
+                     + [f"step {i}" for i in range(1, body_lines - 1)])
     return f"---\nname: {slug}\ndescription: knit wool scarves\n---\n{body}\n"
 
 
@@ -301,12 +321,105 @@ def test_one_line_past_the_cap_is_a_finding_naming_the_skill_and_its_count(vault
     assert str(SL.MAX_BODY_LINES + 1) in row["reason"]
 
 
-def test_off_by_default_an_over_cap_rewrite_lands_and_the_row_carries_the_finding(vault):
-    assert V.SKILL_BODY_ENFORCE is False
+def test_the_shipped_default_refuses_an_over_cap_rewrite_and_ledgers_the_finding(vault):
+    """#2158 clause 1, at the shipped value: no monkeypatch of the flag here.
+
+    The node this replaced pinned the opposite — `errors == []`, the over-cap
+    rewrite committing, the finding merely carried on the row — because the
+    module then shipped log-only. #2158 ruled the ceiling enforcing on the
+    `SPILL_SAMPLE` five, so what must be true now is the refusal: `validate`
+    answers with exactly the one `body-line ceiling` error, `land` raises and
+    commits nothing, and the ledger row carries the `skill_body` finding beside
+    its `ok: False`. That row is computed before the revert for the reason the
+    activation rail's is: after `revert_paths` the sampled file is back under
+    the cap or gone, and a row written afterwards would state the absence of
+    the very over-cap state it is refusing.
+    """
     rel = _write_skill(vault, SPILLED, SL.MAX_BODY_LINES + 1)
     errors, _ = V.validate([rel])
-    assert errors == []
-    out = V.land([rel], "push it over")
+    assert len(errors) == 1, f"not the one ceiling error: {errors}"
+    assert "body-line ceiling" in errors[0] and rel in errors[0]
+    with pytest.raises(V.VaultRoundError, match="body-line ceiling") as raised:
+        V.land([rel], "push it over")
+    assert rel in str(raised.value), "the refusal names the path it refused"
+    assert not (vault / rel).exists(), "the untracked candidate was not left standing"
+    assert git(vault, "status", "--porcelain").stdout == "", "nothing committed or staged"
+    [row] = [r for r in _ledger_rows() if r.get("event") == "vault_land"]
+    assert row["ok"] is False and row["reverted"] == [rel], row
+    [finding] = row["skill_body"]
+    assert finding["skill"] == SPILLED
+    assert finding["body_lines"] == SL.MAX_BODY_LINES + 1
+    assert finding["would_refuse"] is True
+
+
+def test_the_refusal_names_the_ceiling_and_the_block_to_spill(vault):
+    """#2158 clause 3: a refusal has to be actionable where it fires.
+
+    The error string carries the skill path, the measured count, the 100-line
+    ceiling, and the clearing action naming the largest `##`/`###` block — the
+    heading `skill_lint.skill_size`'s `_largest_block` picks and its docstring
+    calls "the first spill candidate" — so the writer knows which section to
+    move into a sibling file without recomputing anything. The same heading
+    rides on the finding row, so the ledger says it too.
+    """
+    rel = _write_skill(vault, SPILLED, SL.MAX_BODY_LINES + 1)
+    f = vault / rel
+    content = f.read_text(encoding="utf-8")
+    size = SL.skill_size(SPILLED, f, content, SL.parse_frontmatter(content)[1])
+    heading = size["largest_block"]["heading"]
+    assert heading == "## Steps"
+    assert size["largest_block"]["lines"] == SL.MAX_BODY_LINES
+    errors, _ = V.validate([rel])
+    [error] = errors
+    assert rel in error
+    assert f"{SL.MAX_BODY_LINES + 1} lines" in error, error
+    assert f"{SL.MAX_BODY_LINES}-line" in error, error
+    assert heading in error, f"the refusal does not name the block to spill: {error}"
+    [finding] = V.skill_body_findings([rel])
+    assert finding["largest_block"]["heading"] == heading
+
+
+def test_the_ceiling_measures_the_resulting_state_not_the_shrink(vault):
+    """#2158 clause 4: the docstring's state-based rule, pinned both directions.
+
+    HEAD here holds a 120-line body, committed straight through git because the
+    enforcing rail now refuses any landing that would produce it. A rewrite
+    that cuts 19 lines and lands at 101 SHRANK the skill and is still refused:
+    the measure is the candidate's resulting state, never its delta. A rewrite
+    that lands at exactly the cap is allowed however it got there. And the
+    revert between the two legs restores the HEAD state — 120 lines — not the
+    candidate, which is what "did not commit" has to mean for a tracked file.
+    """
+    rel = _write_skill(vault, SPILLED, 120)
+    git(vault, "add", "-A")
+    git(vault, "commit", "-q", "-m", "a 120-line body, pre-flip bytes")
+    _write_skill(vault, SPILLED, SL.MAX_BODY_LINES + 1)
+    [finding] = V.skill_body_findings([rel])
+    assert finding["body_lines"] == SL.MAX_BODY_LINES + 1, "measured on the candidate"
+    with pytest.raises(V.VaultRoundError, match="body-line ceiling"):
+        V.land([rel], "cut 19 lines, still over the cap")
+    assert (vault / rel).read_text() == _sized(SPILLED, 120), "HEAD's 120 lines restored"
+    rel = _write_skill(vault, SPILLED, SL.MAX_BODY_LINES)
+    assert V.validate([rel])[0] == [], "a shrink that lands at the cap must be allowed"
+    assert V.land([rel], "spill until it fits")["ok"] is True
+
+
+def test_the_body_rail_stood_down_by_hand_lands_an_over_cap_rewrite_and_logs_it(vault,
+                                                                                monkeypatch):
+    """#2158 clause 1's other half, in #2148's shape: the log-only behaviour, pinned
+    with the flag stood down by hand rather than inherited from a retired default.
+
+    The module no longer ships log-only, so "an over-cap rewrite lands and the
+    row carries the finding" only still means something with
+    `SKILL_BODY_ENFORCE` stood down inside the node. The behaviour itself is
+    unchanged — validate is silent, the landing commits, the `skill_body`
+    finding rides on the row — and that is the log #2158's ruling was made
+    from, so the flip may not take it silent with it.
+    """
+    monkeypatch.setattr(V, "SKILL_BODY_ENFORCE", False)
+    rel = _write_skill(vault, SPILLED, SL.MAX_BODY_LINES + 1)
+    assert V.validate([rel])[0] == []
+    out = V.land([rel], "push it over, flag stood down")
     assert out["ok"] and git(vault, "status", "--porcelain").stdout == "", "committed"
     row = [r for r in _ledger_rows() if r.get("event") == "vault_land"][-1]
     assert row["ok"] is True and "errors" not in row
@@ -314,22 +427,47 @@ def test_off_by_default_an_over_cap_rewrite_lands_and_the_row_carries_the_findin
     assert row["skill_body"][0]["body_lines"] == SL.MAX_BODY_LINES + 1
 
 
-def test_enforcing_refuses_the_over_cap_rewrite_and_names_the_ceiling(vault, monkeypatch):
-    monkeypatch.setattr(V, "SKILL_BODY_ENFORCE", True)
-    rel = _write_skill(vault, SPILLED, SL.MAX_BODY_LINES + 1)
-    errors, _ = V.validate([rel])
-    assert len(errors) == 1
-    assert "body-line ceiling" in errors[0] and rel in errors[0]
-    assert f"{SL.MAX_BODY_LINES}-line" in errors[0]
-    with pytest.raises(V.VaultRoundError, match="body-line ceiling"):
-        V.land([rel], "push it over")
+def test_a_skill_outside_the_spill_sample_is_never_measured(vault):
+    """#1985's scope rule, at the shipped default since #2158: no monkeypatch.
 
-
-def test_a_skill_outside_the_spill_sample_is_never_measured(vault, monkeypatch):
-    monkeypatch.setattr(V, "SKILL_BODY_ENFORCE", True)
+    Three times the cap and still no row: enforcement reaches
+    `skill_lint.SPILL_SAMPLE` only. Library-wide it would refuse most landings
+    — 106 of 197 skills were over the cap on 2026-10-01 — and #2158's ruling
+    left that scope decision, and the lint-failure question behind it, to a
+    person.
+    """
     assert "uncovered" not in SL.SPILL_SAMPLE
     rel = _write_skill(vault, "uncovered", SL.MAX_BODY_LINES * 3)
     assert V.skill_body_findings([rel]) == []
     assert V.validate([rel])[0] == []
     out = V.land([rel], "a long unsampled skill")
     assert out["ok"] and "skill_body" not in out
+
+
+def test_no_surface_still_defers_the_ceiling_flip_to_a_person():
+    """#2158 clause 5: a ruled decision must not still read as somebody's errand.
+
+    The comment above the assignment used to say flipping the switch "is a
+    human's change", and `architecture/skills.md` said the cap "is advisory",
+    the over-cap landing "recorded, not refused", with
+    "`vault_round.SKILL_BODY_ENFORCE`, off" the switch that "would" refuse.
+    #2158 took the ruling on 2026-10-04, so both surfaces now say the ceiling
+    is enforced on SPILL_SAMPLE landings; what stays a person's call is the
+    library-wide lint-failure question the #624 owed entry reserves. This node
+    reads the two files themselves: the module ships `True`, cites #2158, and
+    has lost the deferral wording; the doc has lost the pending-flip sentences
+    and carries the enforced-on-the-sample statement.
+    """
+    src = (ROOT / "scripts" / "automod" / "vault_round.py").read_text(encoding="utf-8")
+    doc = (ROOT / "architecture" / "skills.md").read_text(encoding="utf-8")
+    assert "SKILL_BODY_ENFORCE = True" in src
+    assert "SKILL_BODY_ENFORCE = False" not in src
+    assert "#2158 ruled it enforcing" in src, "the flag no longer cites its ruling"
+    assert "human's change" not in src, "the module still defers the flip to a person"
+    assert "The 100-line cap is advisory" not in doc
+    assert "is recorded, not refused" not in doc
+    assert "`vault_round.SKILL_BODY_ENFORCE`, off" not in doc
+    assert "cap is enforced on vault landings" in doc, (
+        "architecture/skills.md no longer states the enforced scope")
+    assert "person's call" in doc, (
+        "the library-wide question must still read as a person's ruling")
