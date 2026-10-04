@@ -2083,6 +2083,56 @@ def test_the_corpus_shape_row_key_is_a_utc_date_in_both_prose_carriers():
                 f"and it is the one the old prose was written to protect")
 
 
+#: The sentence #761 shipped with its thresholds and #2200 retired: it explained the
+#: bounds as a guess awaiting a week of series, and stayed true-looking in three
+#: carriers long after the series existed. Checked case-insensitively against
+#: flattened text, so the docstring's capitalised headline is covered too.
+BOUND_PROVISIONAL_CLAIM = "provisional"
+
+#: What each carrier has to say in its place: the bounds come off day-to-day moves,
+#: and over a sample a reader can go and re-measure.
+BOUND_DERIVATION_CLAIM = re.compile(r"day-over-day", re.I)
+BOUND_SAMPLE_CLAIM = re.compile(r"8 clean UTC dates", re.I)
+BOUND_SAMPLE_DATES = re.compile(r"2026-09-27.{0,80}2026-10-04", re.S)
+
+
+def test_the_bound_provenance_replaces_provisional_in_both_prose_carriers():
+    """#2200 clause 5: §Bound entropy and `corpus_shape.py`'s docstring both stop
+    calling the corpus-shape threshold provisional, and both say what it became.
+
+    The thresholds sat at abs 0.02 on `duplicate_rate` while the daily corpus moved
+    0.1117 in one night — 6 of the 8 nights of the first clean series printed a MOVED
+    line about numbers nobody would call a finding — and the sentence excusing them
+    ("provisional … real ones need a week of series", a human clause on #761) outlived
+    the week by a month because no test read it. So the check is on both halves: the
+    excuse is gone, and the measurement it was standing in for is stated — day-over-day
+    deltas over the 8 clean UTC dates 2026-09-27 to 2026-10-04.
+
+    In both carriers, not "somewhere in the tree": a review reads §Bound entropy, and
+    the docstring is what whoever edits the constant reads first. The third carrier of
+    the same claim is the task file `~/obsidian/autonomy/90-corpus-shape-trend.md`,
+    whose front-matter description is what `_build_task_prompt` hands the worker; the
+    vault is not a tree this round controls, so that half moves by the vault route as
+    its own sha and is pinned by a `@live_vault` node instead — the split
+    `test_the_corpus_shape_task_description_says_at_most_one_row_per_day` already makes.
+    """
+    carriers = (("§Bound entropy", _group_section("Bound entropy")),
+                ("corpus_shape.py's module docstring",
+                 _module_docstring(SCRIPT_DIR / "corpus_shape.py")))
+    for where, text in carriers:
+        assert BOUND_PROVISIONAL_CLAIM not in text.lower(), (
+            f"{where} still calls the threshold provisional, the sentence that said "
+            f"nobody had measured the bounds; #2200 measured them")
+        assert BOUND_DERIVATION_CLAIM.search(text), (
+            f"{where} no longer says the bounds come from day-over-day deltas, so a "
+            f"reader of the constant cannot tell what it was derived from")
+        assert BOUND_SAMPLE_CLAIM.search(text), (
+            f"{where} no longer says how many dates the bounds were derived from")
+        assert BOUND_SAMPLE_DATES.search(text), (
+            f"{where} does not name the sampled dates 2026-09-27..2026-10-04, which is "
+            f"the sample a later reader re-measures")
+
+
 @live_vault
 def test_the_corpus_shape_task_description_says_at_most_one_row_per_day():
     """#1576 clause 5, against the live task file. `@live_vault` because the vault is

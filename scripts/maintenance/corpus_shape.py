@@ -34,8 +34,13 @@ it judges rewrites. Nothing is derived from git HEAD either, for the same reason
 One row per day bounds duplicates, not gaps: a day that did not run leaves the
 next run's base older than one day.
 
-The thresholds below are provisional. Real ones need a week of series (a human
-clause on #761); until then a move past them is a prompt to look, not a verdict.
+THE BOUNDS BELOW ARE MEASURED, NOT GUESSED (#2200). Each is the largest
+day-over-day delta its metric actually showed over the first 8 clean UTC dates of
+this series — 2026-09-27 to 2026-10-04, one row per date now that #1576 keys the row
+to the date — rounded up to the next 0.1 (relative) or 0.05 (absolute) step, and
+never below the bound already in force. A night inside that noise stays silent; a
+move past a bound is still a prompt to look rather than a verdict, because it says
+the shape changed, not that the change is bad.
 
 A FIFTH COUNT, KEPT WITH SOMEBODY ELSE'S CLASSIFIER (#2039). The four corpora
 above are measured with this file's own metrics, and for the ten YouTube digests
@@ -77,12 +82,34 @@ FILE_PREFIX = "corpus-shape-"
 STAMP_FMT = "%Y%m%dT%H%M%SZ"
 
 # metric -> (kind, bound). "rel": |new-old|/old; "abs": |new-old|.
+#
+# Recalibrated 2026-10-04 (#2200) from the first 8 clean UTC dates of the live
+# series — 2026-09-27 to 2026-10-04, one row per date since #1576 keyed the row to
+# the date, so 7 adjacent day-over-day pairs across all four corpora. Each bound is
+# the largest one-night move its metric actually made, rounded UP to the next 0.1
+# (rel) or 0.05 (abs) step, and never below the bound already in force:
+#   metric                max delta    corpus / pair that produced it
+#   n                      0.5366 rel  daily 2026-10-01->10-02 (41 -> 19)
+#   len_mean               0.1977 rel  skills 2026-10-01->10-02 (11977.9 -> 14345.7)
+#   len_p95                0.2623 rel  trajectories 2026-10-01->10-02 (51473 -> 64972)
+#   distinct_key_ratio     0.0885 abs  daily 2026-10-01->10-02 (0.122 -> 0.2105)
+#   duplicate_rate         0.1117 abs  daily 2026-10-01->10-02 (0.5854 -> 0.4737)
+#   self_reference_rate    0.0361 abs  skills 2026-09-30->10-01 (0.0833 -> 0.1194)
+# user_memory's deltas are zero except n (<= 0.0216) and len_mean (<= 0.038), so the
+# whole floor here is daily, skills and trajectories — which is also why one global
+# table ends up wide where the frozen corpus needs nothing at all; whether the table
+# should split per corpus is owed, and is not settled by this constant.
+# Under the table this replaced, 6 of these 8 nights printed a MOVED line, which is
+# what `duplicate_rate` leaving abs 0.02 and `distinct_key_ratio` leaving abs 0.05
+# is for: both sat below an ordinary night. Every bound is asserted against these
+# same numbers as OBSERVED_MAX_DELTA in tests/test_corpus_shape.py, so the constants
+# and their provenance cannot drift apart.
 THRESHOLDS = {
-    "n": ("rel", 0.5),
+    "n": ("rel", 0.6),
     "len_mean": ("rel", 0.25),
     "len_p95": ("rel", 0.5),
-    "distinct_key_ratio": ("abs", 0.05),
-    "duplicate_rate": ("abs", 0.02),
+    "distinct_key_ratio": ("abs", 0.10),
+    "duplicate_rate": ("abs", 0.15),
     "self_reference_rate": ("abs", 0.05),
 }
 # A sentence in at least this many distinct items of one corpus is reported.

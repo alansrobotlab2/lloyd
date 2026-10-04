@@ -745,8 +745,9 @@ row from an earlier day: a second run inside one day writes nothing, so a retry
 cannot become the following night's diff base, and the base is always read before
 the day's own row exists, so no run gates on a file it wrote itself (#1576). One
 row per day bounds duplicates, not gaps — a day #90 did not run leaves the next
-run's base older than one day. It exits 2 only when a metric crosses its
-provisional threshold, a sentence newly recurs across items, or a line of one of the
+run's base older than one day. It exits 2 only when a metric crosses a bound
+recalibrated from day-over-day deltas over the first 8 clean UTC dates (2026-09-27 to
+2026-10-04, #2200), a sentence newly recurs across items, or a line of one of the
 ten `knowledge/*/youtube-digest.md` digests is flagged by the intel pipeline's own
 interest-profile guard — counted per digest on every run, by that guard rather than
 by a phrase list, because the hand-written grep #2011 verified the corpus with caught

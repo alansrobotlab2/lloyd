@@ -300,8 +300,294 @@ def test_the_first_run_is_a_baseline_even_with_a_recurrence(tmp_path, capsys):
     assert report["corpora"]["daily"]["recurring"][0]["sentence"] == rep
 
 
-@pytest.mark.parametrize("old,new,hit", [(10, 16, True), (10, 14, False), (0, 0, False)])
+# --- the recalibrated bounds (#2200): a noise floor that is measured, not guessed ---
+
+#: The loudest day-over-day move each bound metric actually made in the live series:
+#: the 8 rows written one per UTC date from 2026-09-27 to 2026-10-04, the first
+#: stretch in which #1576's date key yields exactly one row per date — so 7 adjacent
+#: pairs. Reproduce it by grouping `~/lloyd-data/_pipeline/metrics/corpus-shape-*.json`
+#: by the 8-digit prefix of the filename, taking one row per date, and differencing
+#: `corpora[<corpus>][<metric>]` between adjacent dates across all four corpora. Each
+#: entry is the maximum of those differences, in the kind `THRESHOLDS` declares for
+#: that metric, and the corpus and pair the maximum came from.
+#:
+#: A bound has to sit ABOVE the number here or the guard alerts on ordinary noise,
+#: which is the defect #2200 fixes: under the table it replaced, 6 of these 8 nights
+#: printed a MOVED line. Pinned by
+#: `test_every_bound_sits_above_the_noise_the_series_actually_showed`.
+OBSERVED_MAX_DELTA = {
+    "n": ("rel", 0.5366, "daily, 2026-10-01->2026-10-02, n 41 -> 19"),
+    "len_mean": ("rel", 0.1977, "skills, 2026-10-01->2026-10-02, 11977.9 -> 14345.7"),
+    "len_p95": ("rel", 0.2623, "trajectories, 2026-10-01->2026-10-02, 51473 -> 64972"),
+    "distinct_key_ratio": ("abs", 0.0885, "daily, 2026-10-01->2026-10-02, 0.122 -> 0.2105"),
+    "duplicate_rate": ("abs", 0.1117, "daily, 2026-10-01->2026-10-02, 0.5854 -> 0.4737"),
+    "self_reference_rate": ("abs", 0.0361, "skills, 2026-09-30->2026-10-01, 0.0833 -> 0.1194"),
+}
+
+#: The three rows those maxima come from, transcribed metric-for-metric out of
+#: `corpus-shape-20260930T100045Z.json`, `corpus-shape-20261001T100034Z.json` and
+#: `corpus-shape-20261002T001850Z.json`, plus the two adjacent pairs to replay them
+#: in. Transcribed rather than read at test time: a node that re-read the live series
+#: would re-pin itself whenever a night moved, and what this block asserts is a fixed,
+#: dated measurement. 2026-10-02 is the row the 00:18Z run wrote — the 10:00 run that
+#: night wrote nothing, #1576 — so it is the row that stands for that date.
+OBSERVED_ROWS = {
+    "2026-09-30": {
+        "daily": {"n": 44, "len_mean": 578.7, "len_p95": 1117,
+                  "distinct_key_ratio": 0.1136, "duplicate_rate": 0.5227,
+                  "self_reference_rate": 0.0227},
+        "user_memory": {"n": 142, "len_mean": 225.5, "len_p95": 407,
+                        "distinct_key_ratio": 1.0, "duplicate_rate": 0.0,
+                        "self_reference_rate": 0.0141},
+        "skills": {"n": 72, "len_mean": 12150.2, "len_p95": 40745,
+                   "distinct_key_ratio": 1.0, "duplicate_rate": 0.0,
+                   "self_reference_rate": 0.0833},
+        "trajectories": {"n": 2575, "len_mean": 15239.7, "len_p95": 53037,
+                         "distinct_key_ratio": 1.0, "duplicate_rate": 0.0,
+                         "self_reference_rate": 0.0272},
+    },
+    "2026-10-01": {
+        "daily": {"n": 41, "len_mean": 620.1, "len_p95": 1172,
+                  "distinct_key_ratio": 0.122, "duplicate_rate": 0.5854,
+                  "self_reference_rate": 0.0244},
+        "user_memory": {"n": 142, "len_mean": 224.7, "len_p95": 407,
+                        "distinct_key_ratio": 1.0, "duplicate_rate": 0.0,
+                        "self_reference_rate": 0.0141},
+        "skills": {"n": 67, "len_mean": 11977.9, "len_p95": 43129,
+                   "distinct_key_ratio": 1.0, "duplicate_rate": 0.0,
+                   "self_reference_rate": 0.1194},
+        "trajectories": {"n": 2768, "len_mean": 15381.1, "len_p95": 51473,
+                         "distinct_key_ratio": 1.0, "duplicate_rate": 0.0,
+                         "self_reference_rate": 0.0246},
+    },
+    "2026-10-02": {
+        "daily": {"n": 19, "len_mean": 730.9, "len_p95": 1172,
+                  "distinct_key_ratio": 0.2105, "duplicate_rate": 0.4737,
+                  "self_reference_rate": 0.0},
+        "user_memory": {"n": 143, "len_mean": 223.6, "len_p95": 407,
+                        "distinct_key_ratio": 1.0, "duplicate_rate": 0.0,
+                        "self_reference_rate": 0.014},
+        "skills": {"n": 52, "len_mean": 14345.7, "len_p95": 43241,
+                   "distinct_key_ratio": 1.0, "duplicate_rate": 0.0,
+                   "self_reference_rate": 0.1346},
+        "trajectories": {"n": 2274, "len_mean": 16818.7, "len_p95": 64972,
+                         "distinct_key_ratio": 1.0, "duplicate_rate": 0.0,
+                         "self_reference_rate": 0.0273},
+    },
+}
+OBSERVED_PAIRS = (("2026-09-30", "2026-10-01"), ("2026-10-01", "2026-10-02"))
+
+#: How far past the record a "beyond anything the series did" jump has to be: three
+#: times the loudest night on file is comfortably past every bound while staying
+#: inside what each metric can physically read (the three rates top out at 1.0).
+JUMP_MULTIPLE = 3
+
+
+def _observed_row(day):
+    """One transcribed day, in the dict shape `diff_lines()` takes."""
+    return {"corpora": {name: dict(vals) for name, vals in OBSERVED_ROWS[day].items()}}
+
+
+def _delta(kind, old, new):
+    """The same difference `_moved()` compares against the bound."""
+    return abs(new - old) / abs(old) if kind == "rel" else abs(new - old)
+
+
+def _comment_above_thresholds() -> str:
+    """The `#` block sitting immediately above `THRESHOLDS`, hard wraps collapsed."""
+    lines = SCRIPT.read_text().split("THRESHOLDS = {")[0].splitlines()
+    block = []
+    for line in reversed(lines):
+        if line.strip().startswith("#"):
+            block.append(line.strip().lstrip("#").strip())
+        elif not line.strip():
+            continue
+        else:
+            break
+    return " ".join(reversed(block))
+
+
+@pytest.mark.parametrize("metric", sorted(OBSERVED_MAX_DELTA))
+def test_every_bound_sits_above_the_noise_the_series_actually_showed(metric):
+    """#2200 clause 1: no bound may sit at or below a move an ordinary night made.
+
+    `duplicate_rate` was bound at abs 0.02 and `distinct_key_ratio` at abs 0.05 while
+    the daily corpus was moving 0.1117 and 0.0885 in a single night, which is why 6
+    of the 8 nights printed a MOVED line about numbers nobody would call a finding.
+    Each bound now clears its measured maximum: `n` 0.6 over 0.5366, `len_mean` 0.25
+    over 0.1977, `len_p95` 0.5 over 0.2623, `distinct_key_ratio` 0.10 over 0.0885,
+    `duplicate_rate` 0.15 over 0.1117, `self_reference_rate` 0.05 over 0.0361.
+    """
+    kind, observed_max, source = OBSERVED_MAX_DELTA[metric]
+    assert metric in cs.THRESHOLDS, f"{metric} has a measured maximum and no bound"
+    bound_kind, bound = cs.THRESHOLDS[metric]
+    assert bound_kind == kind, (
+        f"{metric}: the table measures {kind} deltas, the code bounds {bound_kind}")
+    assert bound > observed_max, (
+        f"{metric}'s bound {bound} does not clear the {observed_max} one-night move "
+        f"the live series recorded ({source}); a bound under the noise fires nightly")
+
+
+def test_the_comment_beside_the_bounds_and_the_measured_table_agree():
+    """#2200 clause 1's other half: the comment beside `THRESHOLDS` names the sample
+    the table above asserts, in the same numbers.
+
+    The item asks for the sample dates beside the constant, and prose nobody re-checks
+    is exactly how "provisional … needs a week of series" outlived the week by five
+    months. So the comment is graded against `OBSERVED_MAX_DELTA`: re-derive the bounds
+    from a longer series and leave the comment behind, or edit the table and leave the
+    comment, and this goes red.
+    """
+    assert set(cs.THRESHOLDS) == set(OBSERVED_MAX_DELTA), (
+        "THRESHOLDS and the measured table cover different metrics, so one of them is "
+        "silently not being checked against the live series")
+    comment = _comment_above_thresholds()
+    for day in ("2026-09-27", "2026-10-04"):
+        assert day in comment, (
+            f"the comment beside THRESHOLDS never names {day}, so a reader cannot tell "
+            f"which dates the bounds were measured over")
+    assert "8 clean UTC dates" in comment, (
+        "the comment beside THRESHOLDS does not say how many dates the bounds were "
+        "derived from, which is the claim #2200 replaced 'provisional' with")
+    for metric, (_, observed_max, _) in OBSERVED_MAX_DELTA.items():
+        assert f"{observed_max:.4f}" in comment, (
+            f"the comment beside THRESHOLDS does not record {metric}'s measured "
+            f"maximum {observed_max:.4f}, so the constant and its provenance can drift")
+
+
+@pytest.mark.parametrize("metric", sorted(OBSERVED_MAX_DELTA))
+def test_the_transcribed_pairs_are_where_those_maxima_happened(metric):
+    """Keeps the two tables above tied to each other: the maxima asserted against the
+    bounds must be the maxima of the pairs replayed below, or the within-thresholds
+    replay would be quiet about a night that was never the loudest one.
+    """
+    kind, observed_max, _ = OBSERVED_MAX_DELTA[metric]
+    got = max(_delta(kind, OBSERVED_ROWS[first][corp][metric],
+                     OBSERVED_ROWS[second][corp][metric])
+              for first, second in OBSERVED_PAIRS for corp in cs.CORPORA)
+    assert got == pytest.approx(observed_max, abs=1e-4), (
+        f"{metric}: the pairs transcribed into this file peak at {got}, the table the "
+        f"bounds are graded against says {observed_max} — one of the two is stale")
+
+
+@pytest.mark.parametrize("first,second", OBSERVED_PAIRS)
+def test_an_ordinary_night_from_the_live_series_prints_within_thresholds(first, second):
+    """#2200 clause 2, first half: the two noisiest nights of the 09-27..10-04 series,
+    replayed through `diff_lines()`, say nothing.
+
+    2026-10-01 -> 2026-10-02 is the pair the guard fired on under the old table: the
+    daily corpus moved `n` 41->19 (53.7% against a 50% bound), `distinct_key_ratio`
+    0.122->0.2105 (0.0885 against abs 0.05) and `duplicate_rate` 0.5854->0.4737
+    (0.1117 against abs 0.02), and `~/lloyd-data/autonomy-runs/90/run_90_20261002_100019.md`
+    printed MOVED for numbers of exactly that size. Every one of those moves now sits
+    inside its bound, so all four corpora read `within thresholds` and `moved_any` is
+    False — the silent-unless-fired contract #90 ships with, back in force on nights
+    like this one.
+    """
+    lines, moved_any = cs.diff_lines(_observed_row(first), _observed_row(second))
+    assert moved_any is False, lines
+    for name in cs.CORPORA:
+        assert (next(l for l in lines if l.startswith(f"{name}: "))
+                == f"{name}: within thresholds"), lines
+
+
+@pytest.mark.parametrize("metric", sorted(OBSERVED_MAX_DELTA))
+def test_a_jump_past_the_recorded_maximum_prints_moved_naming_metric_and_bound(metric):
+    """#2200 clause 2, second half: the widened bounds still bite, and bite visibly.
+
+    One metric at a time is pushed to three times its measured maximum above the
+    2026-10-01 daily value the day is diffed from, leaving the other three corpora at
+    their observed values so only `daily` can speak. `_moved()` prints the bound itself as the last field of
+    the line — `(delta vs bound)`, the delta a signed percent for a relative metric
+    or a signed 4-decimal number for an absolute one, the bound `{bound:.0%}` and
+    `{bound}` respectively — so the line is checked against `THRESHOLDS` rather than a
+    copy of it: the printed number is how a scheduled run tells a reader which constant
+    it was judged by.
+    """
+    kind, observed_max, _ = OBSERVED_MAX_DELTA[metric]
+    prev, cur = _observed_row("2026-10-01"), _observed_row("2026-10-02")
+    base = prev["corpora"]["daily"][metric]          # what the delta is measured from
+    target = JUMP_MULTIPLE * observed_max
+    cur["corpora"]["daily"][metric] = (round(base + target, 4) if kind == "abs"
+                                       else round(base * (1 + target)))
+    bound_kind, bound = cs.THRESHOLDS[metric]
+    lines, moved_any = cs.diff_lines(prev, cur)
+    assert moved_any is True, lines
+    line = next(l for l in lines if l.startswith("daily: "))
+    assert line.startswith("daily: MOVED "), line
+    assert f"{metric} " in line, line
+    assert sum(1 for l in lines if "MOVED" in l) == 1, lines
+    shown = f"{bound:.0%}" if bound_kind == "rel" else f"{bound}"
+    assert line.endswith(f"vs {shown})"), line
+
+
+def test_a_corpus_of_only_duplicates_still_exits_2_under_the_recalibrated_bounds(
+        tmp_path, capsys):
+    """#2200 clause 3: widening the bounds must not cost the guard its purpose.
+
+    The defect this script exists for (#543 -> #761) is an artifact that is fine alone
+    and wrong because it recurs, so a planted regression has to fire AT the new number.
+    Every trajectory row is rewritten to the same text: `duplicate_rate` is
+    `1 - distinct/number of items`, so three identical items read 0.6667 rather than
+    1.0 — that is the metric's ceiling, not a weak injection — and the move is +0.3334,
+    three times the 0.1117 the live series ever showed and twice the recalibrated 0.15
+    bound. The run exits 2 and the MOVED line names the metric and the bound it crossed.
+    """
+    vault, pipeline = _build(tmp_path)
+    out = tmp_path / "out"
+    assert _run(vault, pipeline, out, "--quiet", now=PREV_DAY) == 0
+    capsys.readouterr()
+    one = json.dumps({"session_key": "s2", "tools": []})
+    (pipeline / "trajectories" / "2026-09-19.jsonl").write_text(
+        "".join(one + "\n" for _ in range(3)))
+
+    assert _run(vault, pipeline, out, now=NEXT_DAY) == 2
+    printed = capsys.readouterr().out
+    moved = next(l for l in printed.splitlines()
+                 if l.startswith("trajectories: MOVED"))
+    assert "duplicate_rate 0.3333->0.6667 (+0.3334 vs 0.15)" in moved, moved
+
+
+def test_an_n_multiplied_tenfold_still_exits_2_under_the_recalibrated_bounds(
+        tmp_path, capsys):
+    """#2200 clause 3's other half: the shape the trend check most often gets called
+    for — a corpus that grew by an order of magnitude overnight — still fires at `n`'s
+    new 60% bound, and the header still names the row it judged against.
+
+    27 rows go into the file the baseline measured, so `n` reads 3->30: +900%, fifteen
+    times the 0.5366 the live series peaked at and far past the 0.6 that replaced it.
+    The other three corpora are untouched, so nothing else can make this exit 2.
+    """
+    vault, pipeline = _build(tmp_path)
+    out = tmp_path / "out"
+    assert _run(vault, pipeline, out, "--quiet", now=PREV_DAY) == 0
+    capsys.readouterr()
+    traj = pipeline / "trajectories" / "2026-09-19.jsonl"
+    with open(traj, "a") as fh:
+        fh.write("".join(json.dumps({"session_key": f"x{i}"}) + "\n" for i in range(27)))
+
+    assert _run(vault, pipeline, out, now=NEXT_DAY) == 2
+    printed = capsys.readouterr().out
+    assert "(vs corpus-shape-20260919T030000Z.json)" in printed.splitlines()[0], printed
+    moved = next(l for l in printed.splitlines()
+                 if l.startswith("trajectories: MOVED"))
+    assert "n 3->30 (+900% vs 60%)" in moved, moved
+
+
+@pytest.mark.parametrize("old,new,hit", [
+    (10, 15.5, False),     # +55%: under the 0.6 bound, and above the 0.5366 noise peak
+    (10, 16.5, True),      # +65%: over it
+    (0, 0, False),
+])
 def test_relative_threshold_on_n(old, new, hit):
+    """#2200 clause 4: the pin brackets the constant rather than sitting on it.
+
+    This node pinned 0.5 with `(10, 16) -> True`, and 16 is exactly +60% — the new
+    bound — so it would have read False and gone red the moment the bound moved,
+    and at the old bound it sat on the boundary where a rounding change flips the
+    answer. The daily corpus's 41->19 move (0.5366) is what forced `n` from 0.5 to
+    0.6, so the fixture moved with it: +55% stays quiet, +65% fires.
+    """
     assert cs._moved("n", old, new)[0] is hit
 
 
