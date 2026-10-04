@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -216,11 +216,19 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
     `dispatched = 0`; the next pass sees them again, and `dispatch_findings` will
     not spend a second run on a day it already spent.
     """
+    # One clock for the whole pass: the ledger's. `sweep_and_dispatch` already asks
+    # `fl.now_utc()` for `when` and derives `day` from it, and the cap that decides
+    # whether today gets an investigation is keyed on THAT day — so an interval
+    # watermark stamped by a second, hand-rolled `datetime.now(...)` is the same
+    # reading taken by a different clock. It has to be the same one, or the pass
+    # can be "due" on the watermark's calendar while the cap has already spent a
+    # different day, and a test that pins the sweep's day (`tests/
+    # test_failure_ledger_dispatch.py`) cannot pin the interval with it.
     last = await asyncio.to_thread(queue.wm_get, NAME, WATERMARK_LAST_ENQUEUED)
     interval = float(src_cfg.get("min_interval_seconds", DEFAULT_INTERVAL_SECONDS))
     if last:
         try:
-            age = (datetime.now(timezone.utc)
+            age = (fl.now_utc()
                    - datetime.fromisoformat(last)).total_seconds()
         except ValueError:
             logger.warning("failure-ledger: unreadable watermark %r — sweeping anyway",
@@ -234,7 +242,7 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
         archives=[Path(p) for p in src_cfg["promotions_archives"]]
         if src_cfg.get("promotions_archives") else None)
     await asyncio.to_thread(queue.wm_set, NAME, WATERMARK_LAST_ENQUEUED,
-                            datetime.now(timezone.utc).isoformat())
+                            fl.now_utc().isoformat())
     logger.info("failure-ledger %s: %d finding(s), %d event(s) new, "
                 "investigation queue_id=%s", report["day"], len(report["findings"]),
                 report["inserted"], report["queue_id"])

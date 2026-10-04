@@ -26,6 +26,8 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -44,6 +46,23 @@ DAY = fl.day_of(NOW)
 #: not by numbers — three `probe alpha` messages are one signature, and a second
 #: word is a second family that cannot merge into the first.
 WORDS = ("alpha", "beta", "gamma", "delta")
+
+
+@pytest.fixture(autouse=True)
+def frozen_ledger_clock(monkeypatch):
+    """Pin the ledger's one clock to `NOW` for every node in this file.
+
+    The cap that decides whether a day gets an investigation is keyed on the day the
+    pass derives from `app.failure_ledger.now_utc`, and every node here seeds its
+    findings dated `NOW`. Unpatched, the pass takes its day from the machine instead:
+    seeded on 2026-10-03, `test_a_finding_that_arrives_after_the_days_run_was_sent_
+    stays_queued` was really asking "did the cap refuse a second run TODAY", which is
+    true only while the wall clock agrees with the fixture. It passed the day it
+    landed and failed at the next UTC midnight — the cap had not moved, the calendar
+    had. Freezing the single function the ledger reads turns each node back into a
+    statement about the cap and the seam rather than about the date it runs on.
+    """
+    monkeypatch.setattr(fl, "now_utc", lambda: NOW)
 
 
 def seed_fresh_failures(conn, families: int = 1, occurrences: int = 3,
@@ -169,6 +188,39 @@ def test_the_scheduled_pass_enqueues_exactly_one_investigation(tmp_path, monkeyp
     # watermark, then the ledger's cap row, then the queue's dedup key.
     asyncio.run(failure_ledger.enqueue_if_due(queue, cfg))
     assert len(queue.list_items(source=fl.SOURCE)) == 1
+
+
+def test_the_scheduled_pass_reads_only_the_ledger_clock(tmp_path, monkeypatch):
+    """ONE clock, so freezing the ledger's freezes the whole pass.
+
+    The scheduled pass reads the time in two places: `sweep_and_dispatch` takes its
+    `when` (and therefore the day the cap is keyed on) from `fl.now_utc`, and
+    `enqueue_if_due` stamps the interval watermark that decides when it is next due.
+    Both must answer to the clock this file sets. A hand-rolled `datetime.now(...)`
+    left in either one shows up here as a reading that is not `NOW` — on every
+    calendar day, not only the one the fixture was written for, which is the whole
+    difference between this node and the test whose date-dependence it retires.
+    """
+    assert fl.now_utc() == NOW, "the autouse fixture is the clock this file runs on"
+    conn = fl.connect(tmp_path / "failure_issues.sqlite")
+    assert seed_fresh_failures(conn)
+    conn.close()
+    monkeypatch.setattr(paths, "FAILURE_LEDGER_DB", tmp_path / "failure_issues.sqlite")
+    queue = make_queue(tmp_path)
+
+    asyncio.run(failure_ledger.enqueue_if_due(
+        queue, {"enabled": True, **fixture_cfg(tmp_path)}))
+
+    rows = queue.list_items(source=fl.SOURCE)
+    assert len(rows) == 1, "one day, one investigation row"
+    assert rows[0].payload["day"] == DAY, (
+        "the cap is keyed on the day the pass derived, so a row dated anything but "
+        f"{DAY} means the sweep read a clock this file did not set")
+    stamp = queue.wm_get(failure_ledger.NAME, failure_ledger.WATERMARK_LAST_ENQUEUED)
+    assert stamp == NOW.isoformat(), (
+        f"watermark stamped {stamp!r} instead of the frozen {NOW.isoformat()!r}: the "
+        "interval gate would be measuring with a second clock, and a node that pins "
+        "the sweep's day could not pin the interval with it")
 
 
 def test_a_quiet_day_enqueues_nothing_and_says_so(tmp_path):
