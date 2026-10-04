@@ -117,6 +117,15 @@ def _ls_files(tree: str, names: tuple[str, ...] = (), *flags: str) -> set[str] |
     return {p for p in out.stdout.decode("utf-8", "replace").split("\0") if p}
 
 
+def _under(paths, name: str) -> bool:
+    """Whether any path in `paths` is `name` or sits below it.
+
+    Hoisted out of `stray_in_tree`, where it was a closure, because the reachability
+    predicate below needs the same comparison and a second spelling of "is under" is
+    one place for the two readers of this rule to disagree."""
+    return any(p == name or p.startswith(name + "/") for p in paths)
+
+
 def _top_level(tree: str) -> list[str]:
     """The tree's own top-level entries, minus `KNOWN_GOOD_TOPLEVEL`.
 
@@ -135,12 +144,124 @@ def _top_level(tree: str) -> list[str]:
         return []
 
 
+def _runtime_name(rel: str) -> "str | None":
+    """The retained `RUNTIME_NAMES` entry `rel` is or sits below, or None.
+
+    This is what makes a nested runtime name reachable at all: `data/tool_overrides.yaml`
+    and `agent-services/logs` are two-segment names the top-level scan cannot see, so
+    the list is the only thing that reaches them (#1541), and "is this path under one of
+    them" is the one question that decides which half of the rule judges it."""
+    for name in RUNTIME_NAMES:
+        if rel == name or rel.startswith(name + "/"):
+            return name
+    return None
+
+
+def reachable_by_stray_check(path: str, tree: str = TREE,
+                             tracked: "set[str] | None" = None) -> bool:
+    """Could `stray_in_tree` report this path? One path in, one answer out.
+
+    The whole per-path decision the alert makes, exported for the one other reader
+    that has to say the same thing about a path: `agent_mcp._bash_tree_strays` labels
+    every row it appends to its own journal (`app.paths.TREE_STRAY_JOURNAL_PATH`) with
+    the instrument that could act on it (#2172), and it labels through HERE rather than
+    from a copy of the two exclusion sets. Two hand-maintained lists drift, and a drift
+    on that journal is an accusation — nightly reflection read four rows, one of them
+    `web/tsconfig.node.tsbuildinfo`, sitting under an `ALERT.md` `cleared:` stamp and
+    filed #2169 at priority high as a silent-clear alerting gap, for a path the alert
+    could never have reached at all. One-constant discipline, as #2110 established for
+    `QUARANTINE_DIR_RELATIVE`.
+
+    The decision is `stray_in_tree`'s, unchanged and in both its halves:
+
+    * a path is judged by the NAME the alert would report: its retained
+      `RUNTIME_NAMES` entry if it is or sits below one (`logs/x.log` is reported as
+      `logs`, and `data/tool_overrides.yaml` is a name in its own right), otherwise
+      its top-level entry — the scan is one `os.scandir` level deep, so a nested path
+      under a tracked directory can only ever be named through that directory;
+    * a name `KNOWN_GOOD_TOPLEVEL` explains is never reported: the tree's own
+      tooling and rebuildable caches;
+    * a retained name is reported unless git tracks everything under it, and a
+      tracked retained name is reported again once something untracked lands beside
+      the committed records (9e98d0df's hourly false alarm);
+    * any other name is reported only when git tracks nothing at all under it, which
+      is what keeps `app/__pycache__`, `scripts/selfmod` and `web/.vite` off the alert.
+
+    So `web/x.tsbuildinfo` is NOT reachable — `web` is tracked, so the alert names
+    neither the file nor its directory — while `workers.db` and
+    `sessions/20261004_0232.json` both are, and `cache/x` (an untracked directory
+    nobody listed) is, because the alert would alarm on `cache`.
+
+    EXISTENCE IS DELIBERATELY NOT PART OF THE QUESTION, and that is what makes the
+    answer usable twice. `stray_in_tree` can only ever report something its scan found,
+    so `_candidates` filters on `lexists` and this predicate answers the rule alone —
+    which is exactly what a reader holding a HISTORICAL path needs: a `removed` journal
+    row names a file the session already deleted, and "would the alert have been able to
+    name this" must not turn into "it cannot, because it is gone", or the one row that
+    proves the stray was actioned reads as unreachable.
+
+    `path` is accepted in the two shapes its two callers hold it in: tree-relative
+    (`web/x.tsbuildinfo`, which is what the bracket journals, because git reports it that
+    way) or absolute (what a person pastes out of an alert). A path outside `tree` — an
+    absolute one elsewhere, or a relative one that walks out with `..` — is not something
+    this check can ever name, and the tree itself answers True, trivially. `tracked` is the index read the caller
+    already holds — `stray_in_tree` passes its own so a whole scan costs one
+    `git ls-files`, and a caller with none reads it here. When git cannot answer at all
+    an open-set name is called unreachable and a retained name reachable: unknown may
+    never become an alert that did not have to fire, the same direction of failure
+    #1541 chose. A retained name whose `--others` read fails is reachable on the index
+    alone — the judgement degrades per name, which is what one predicate per decision
+    buys, and it degrades toward the alert firing, which is the side that gets read."""
+    p = os.path.normpath(str(path))
+    t = os.path.normpath(str(tree))
+    if os.path.isabs(p):
+        if not (p == t or p.startswith(t + os.sep)):
+            return False
+        rel = "" if p == t else p[len(t) + 1:]
+    elif p == "." or p == "":
+        rel = ""
+    elif p.startswith(".." + os.sep) or p == "..":
+        return False                       # a relative path that leaves the tree
+    else:
+        rel = p                            # tree-relative, the shape the bracket journals
+    if not rel:
+        return True
+    name = _runtime_name(rel) or rel.split("/", 1)[0]
+    if name in KNOWN_GOOD_TOPLEVEL:
+        return False
+    if tracked is None:
+        tracked = _ls_files(t)
+    if name not in RUNTIME_NAMES:
+        return tracked is not None and not _under(tracked, name)
+    if tracked is None or not _under(tracked, name):
+        return True
+    untracked = _ls_files(t, (name,), "--others")
+    return True if untracked is None else _under(untracked, name)
+
+
+def _candidates(tree: str) -> list[str]:
+    """The names worth asking `reachable_by_stray_check` about.
+
+    The retained runtime names that exist, plus the tree's own top-level entries from
+    `_top_level` — scanned, not predicted, which is the whole point of #1541. Whether
+    a candidate is REPORTED is the predicate's decision and nobody else's, including
+    the subtraction of `KNOWN_GOOD_TOPLEVEL`, which `reachable_by_stray_check` applies
+    itself and `_top_level` pre-applies as a cheap filter on the scan."""
+    retained = [n for n in RUNTIME_NAMES if os.path.lexists(os.path.join(tree, n))]
+    return retained + [n for n in _top_level(tree) if n not in retained]
+
+
 def stray_in_tree(tree: str = TREE) -> list[str]:
     """Runtime data that has come back inside the code tree. Empty is healthy.
 
     The candidate set is the tree, not a list: `KNOWN_GOOD_TOPLEVEL` subtracted
     from its top-level entries, plus the retained `RUNTIME_NAMES` whose nested
-    paths the top-level scan cannot reach. Two rules then decide a candidate:
+    paths the top-level scan cannot reach. What decides a candidate is
+    `reachable_by_stray_check` — the same single-path predicate
+    `agent_mcp._bash_tree_strays` labels a journal row with (#2172), so the label
+    cannot drift from the alert that would have had to fire, the way two
+    hand-maintained reach lists would. It applies, unchanged from before this
+    extraction, the two rules that decide a candidate:
 
     * a retained runtime name is a stray unless git tracks everything under it.
       A name git tracks is committed on purpose, not written by a stray writer:
@@ -158,24 +279,9 @@ def stray_in_tree(tree: str = TREE) -> list[str]:
     are judged, on presence alone, as before #1541: with no index there is no
     way to tell `.venvs` from a stray writer, and a check that guesses wrong
     alerts every hour until someone turns it off."""
-    retained = [n for n in RUNTIME_NAMES if os.path.lexists(os.path.join(tree, n))]
-    present = retained + [n for n in _top_level(tree) if n not in retained]
-    if not present:
-        return []
     tracked = _ls_files(tree)
-    if tracked is None:
-        return retained
-
-    def under(paths: set[str], name: str) -> bool:
-        return any(p == name or p.startswith(name + "/") for p in paths)
-
-    untracked = _ls_files(tree, tuple(retained), "--others") if retained else set()
-    if untracked is None:
-        return retained
-    kept = set(retained)
-    return sorted(n for n in present
-                  if not under(tracked, n)
-                  or (n in kept and under(untracked, n)))
+    return sorted(n for n in _candidates(tree)
+                  if reachable_by_stray_check(n, tree=tree, tracked=tracked))
 
 
 #: An empty file younger than this may be a store its writer has only just opened

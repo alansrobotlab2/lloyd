@@ -13,6 +13,7 @@ reads or writes the tree the suite runs from.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -242,3 +243,145 @@ async def test_a_path_that_leaves_the_ignore_set_while_still_on_disk_writes_noth
 def _seen(repo: Path) -> set[str]:
     from app import live_strays
     return live_strays.ignored(repo)
+
+
+# ── which instrument could act on the row (#2172) ──────────────────────
+#
+# Two instruments read this journal over two different path sets: the bracket journals
+# every path that entered the checkout's ignored set, nested ones included, while the
+# guardian's `datawatch.stray_in_tree` judges the top level minus
+# `KNOWN_GOOD_TOPLEVEL` plus the retained `RUNTIME_NAMES`. Nothing on a row said which
+# could act, so on 2026-10-03 nightly reflection read three rows for a 0-byte
+# `workers.db` that lived 15 seconds and one row for `web/tsconfig.node.tsbuildinfo`,
+# filed #2169 at priority high as a silent-clear alerting gap, and the shape it named
+# had been closed by `6bf40361` about 23 hours earlier.
+
+_GUARDIAN_SRC = REPO / "agent-services" / "guardian"
+
+
+def _stage_guardian(repo: Path) -> Path:
+    """Put the guardian's modules inside the checkout, the way the stager does.
+
+    `agent-services/bin/guardian-stage.sh:42` is `cp "$SRC"/*.py "$STAGE"/`, so every
+    module in that directory reaches the pinned snapshot without a per-file list — which
+    is why the reach rule could be added inside `datawatch.py` with no change to the
+    stager. The bracket reaches the same directory for the opposite reason: the guardian
+    runs from that snapshot under `/usr/bin/python3`, where `app` is not importable, so
+    the predicate lives guardian-side and the bracket imports it, never the reverse.
+    """
+    dest = repo / "agent-services" / "guardian"
+    dest.mkdir(parents=True, exist_ok=True)
+    for module in sorted(_GUARDIAN_SRC.glob("*.py")):
+        shutil.copy2(module, dest / module.name)
+    return repo
+
+
+def test_every_row_names_the_instrument_that_can_act_on_it(tree):
+    """Clause 1 (#2172): `actionable_by` is on BOTH row kinds, one of exactly two values.
+
+    On both kinds because the reader's question — "which of these rows is an alert nobody
+    actioned?" — is asked of a `removed` row too. Three of the four live rows on 2026-10-03
+    were one 0-byte `workers.db` appearing, appearing again, and being `removed` fifteen
+    seconds later, against `policy.STRAY_CHECK_SECONDS = 3600.0`; the row that says the
+    stray was deleted is the row that most needs to say whether an alert was ever due.
+
+    The label is computed by loading THIS tree's `datawatch.py` — the tree is a real
+    checkout and the guardian is staged into it — so what the node pins is the cross-boundary
+    read, not a string the fixture agreed to.
+    """
+    repo, journal = tree
+    _stage_guardian(repo)
+    _bash_tree_strays._record(WORKER, "cd ~/lloyd && : > workers.db", repo, ["workers.db"])
+    _bash_tree_strays._record(WORKER, "rm -- workers.db", repo, ["workers.db"],
+                              kind="removed")
+
+    rows = _rows(journal)
+    assert [r["kind"] for r in rows] == ["appeared", "removed"], rows
+    assert [r["actionable_by"] for r in rows] == ["guardian-strays", "guardian-strays"], rows
+    assert sorted(rows[0]) == ["actionable_by", "at", "command", "kind", "paths", "root",
+                               "session"], rows[0]
+    assert all(r["actionable_by"] in (_bash_tree_strays.GUARDIAN_STRAYS,
+                                      _bash_tree_strays.BRACKET_ONLY) for r in rows), (
+        "a third value would be a claim about an instrument that does not exist")
+
+
+def test_a_nested_ignored_path_journals_as_bracket_only(tree):
+    """Clause 2 (#2172): the label is `stray_in_tree`'s reach rule, path by path.
+
+    `web/tsconfig.node.tsbuildinfo` is the live row — 105,181 bytes on disk right now,
+    ignored by `.gitignore:20` (`*.tsbuildinfo`) — and `web/` is tracked here exactly as
+    it is there, so the check names neither the file nor its directory and the row reads
+    `bracket-only`. The rest are the same rule's other edges: an unlisted top-level name
+    and a path under a `RUNTIME_NAMES` prefix are the two shapes the alert can reach, a
+    `KNOWN_GOOD_TOPLEVEL` name and a git-tracked path are the two it cannot. The two-path
+    row pins that ONE reachable path makes a row reachable, which is what "at least one"
+    in the acceptance means.
+    """
+    repo, journal = tree
+    _stage_guardian(repo)
+    (repo / "web").mkdir()
+    (repo / "web" / "index.html").write_text("<html>\n", encoding="utf-8")
+    _git(repo, "add", "web")                      # tracked, as on the live tree
+
+    def label(*paths: str) -> str:
+        _bash_tree_strays._record(WORKER, "npm run typecheck", repo, list(paths))
+        return _rows(journal)[-1]["actionable_by"]
+
+    assert label("web/tsconfig.node.tsbuildinfo") == "bracket-only", (
+        "the live row: a nested path under a tracked directory is beyond the alert")
+    assert label(".vscode/settings.json") == "bracket-only", "KNOWN_GOOD_TOPLEVEL"
+    assert label("tracked.py") == "bracket-only", "git tracks it: committed, not stray"
+    assert label("probe.db") == "guardian-strays", "an unlisted top-level name"
+    assert label("logs/pipeline.log") == "guardian-strays", "a RUNTIME_NAMES nested path"
+    assert label("web/tsconfig.node.tsbuildinfo", "workers.db") == "guardian-strays", (
+        "one reachable path in the row is enough")
+
+
+def test_a_tree_with_no_staged_guardian_still_gets_its_row_without_the_label(tree):
+    """Clause 4 (#2172), the natural failure: no reach rule, and the row still lands.
+
+    A checkout with no staged guardian is not hypothetical — that is the shape of a tree
+    whose snapshot has not been built, and it is every other node in this file: none of
+    them stages the guardian, and all of them still get their row, which is why
+    `actionable_by` had to be computed in its own nested `try` rather than in the
+    existing one. A label that can cost the row would make the journal less complete
+    than it was before the label existed, and the row is the record.
+    """
+    repo, journal = tree
+    assert not (repo / "agent-services").exists(), (
+        "no guardian staged here, on purpose: this is the missing-rule case")
+    _bash_tree_strays._record(WORKER, "cd ~/lloyd && : > workers.db", repo, ["workers.db"])
+
+    rows = _rows(journal)
+    assert len(rows) == 1, rows
+    assert "actionable_by" not in rows[0], rows[0]
+    assert rows[0]["paths"] == ["workers.db"] and rows[0]["kind"] == "appeared"
+
+
+async def test_a_reach_rule_that_raises_costs_the_label_not_the_note(tree, monkeypatch):
+    """Clause 4 (#2172), the raised-call half: nothing escapes the Bash call.
+
+    The import failing is one shape; the predicate raising is the other, and the rule is
+    read by exec'ing a file from a tree this process does not control, so either can
+    happen while the command itself succeeded. What must not happen is the model losing
+    the note — the note is the only thing that ever got a stray deleted in the same turn —
+    or the call failing, which would make an instrument about hygiene break the work it is
+    measuring. `calls` asserts the label was ATTEMPTED, so this node cannot pass by the
+    labelling step being skipped.
+    """
+    repo, journal = tree
+    _as(monkeypatch, WORKER)
+    calls: list[tuple[str, tuple[str, ...]]] = []
+
+    def boom(root, paths):
+        calls.append((str(root), tuple(paths)))
+        raise ImportError("no reach rule for this tree")
+
+    monkeypatch.setattr(_bash_tree_strays, "_actionable_by", boom)
+    text = await _run(f"cd {repo} && : > workers.db && echo done")
+
+    assert text.startswith("done"), "the command's own output stands"
+    assert MARK in text, "the note stands: a missing label never costs the model the hint"
+    assert calls == [(str(repo), ("workers.db",))], "the label was attempted, not skipped"
+    rows = _rows(journal)
+    assert len(rows) == 1 and "actionable_by" not in rows[0], rows

@@ -12,9 +12,11 @@ Each node builds its own tree and data root under `tmp_path`.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -358,3 +360,103 @@ def test_a_tree_whose_layout_module_lacks_the_constant_also_refuses(roots):
     with pytest.raises(RuntimeError, match="QUARANTINE_DIR_RELATIVE"):
         datawatch.quarantine_inert(str(tree), ["workers.db"], str(data), NOW)
     assert stray.exists(), "refusing to move means the file is still where it was"
+
+
+# ── one reach rule, two readers (#2172) ────────────────────────────────
+#
+# `agent_mcp/_bash_tree_strays.py` labels every row of its journal with the instrument
+# that could act on the path, and the only thing that keeps that label honest is that it
+# is the alert's own rule. These two helpers build a checkout that carries the guardian's
+# modules, so the file under test is a file in a tree rather than a module import, and the
+# node below turns exactly one name in one constant in it.
+
+
+def _staged_checkout(tmp_path, gitignore="*.db\n/cache/\n"):
+    """A checkout shaped the way the reach rule reads one, with the guardian inside it.
+
+    `cache/` is the open-set case: a name in nobody's `RUNTIME_NAMES`, hidden by the
+    checkout's own ignore rule, reachable for exactly one reason — git tracks nothing
+    under it. The guardian's modules are copied in as `guardian-stage.sh:42` does
+    (`cp "$SRC"/*.py "$STAGE"/`) and staged into git's index, because this node's variable
+    is a name inside one of those files and both readers have to be reading that file.
+    """
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / ".gitignore").write_text(gitignore, encoding="utf-8")
+    (tree / "README.md").write_text("# lloyd\n", encoding="utf-8")
+
+    def run(*args):
+        return subprocess.run(["git", "-C", str(tree), *args], check=True,
+                              capture_output=True)
+
+    run("init", "-q")
+    dest = tree / "agent-services" / "guardian"
+    dest.mkdir(parents=True)
+    for module in sorted(GUARDIAN_DIR.glob("*.py")):
+        shutil.copy2(module, dest / module.name)
+    run("add", "-f", ".gitignore", "README.md", "agent-services")
+    return tree
+
+
+def _reach_rule(tree: Path):
+    """The tree's own copy of the reach rule, loaded the way the bracket loads it.
+
+    The alert cannot be read off the `datawatch` this file imported at the top: that one is
+    the live checkout's file, while the label is computed from THIS tree's file, so
+    comparing them would be comparing two files and calling one name the variable. One
+    file, one load per call, and both answers come out of it.
+    """
+    import importlib.util
+
+    src = tree / "agent-services" / "guardian" / "datawatch.py"
+    sys.path.insert(0, str(src.parent))
+    try:
+        spec = importlib.util.spec_from_file_location("reach_rule_under_test", src)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    finally:
+        with contextlib.suppress(ValueError):
+            sys.path.remove(str(src.parent))
+    return module
+
+
+def test_the_alert_and_the_journalled_label_move_on_one_name(tmp_path):
+    """Clause 3 (#2172): `stray_in_tree` builds its candidates through the exported
+    predicate, so turning ONE name moves the alert and the journalled label together.
+
+    The name turned is in `KNOWN_GOOD_TOPLEVEL`: `cache` is added to it in this tree's own
+    copy of `datawatch.py`. Before, the check reports `cache` and the row for
+    `cache/r1873/x.json` reads `guardian-strays`; after, the check reports nothing and the
+    same row reads `bracket-only`. Nothing else is touched — same tree, same index, same
+    file on disk.
+
+    That is the property two hand-maintained reach lists could never have kept, and the
+    reason it holds is structural: the label is produced by
+    `_bash_tree_strays._actionable_by`, which loads the reach rule from the tree it is
+    labelling a row about and calls `reachable_by_stray_check`, the same function
+    `stray_in_tree` filters its candidates with. A drift between the alert and the label
+    is a change to one function that has to be made twice, in two files, in both
+    directions.
+    """
+    from agent_mcp import _bash_tree_strays
+
+    tree = _staged_checkout(tmp_path)
+    (tree / "cache" / "r1873").mkdir(parents=True)
+    (tree / "cache" / "r1873" / "x.json").write_text("{}", encoding="utf-8")
+
+    assert _reach_rule(tree).stray_in_tree(str(tree)) == ["cache"]
+    assert _bash_tree_strays._actionable_by(tree, ["cache/r1873/x.json"]) == "guardian-strays"
+
+    src = tree / "agent-services" / "guardian" / "datawatch.py"
+    before = src.read_text(encoding="utf-8")
+    moved = before.replace('    "node_modules",\n', '    "node_modules",\n    "cache",\n', 1)
+    assert moved != before, (
+        "the fixture can no longer turn the one name this node turns: the node would "
+        "pass without anything moving")
+    src.write_text(moved, encoding="utf-8")
+
+    assert _reach_rule(tree).stray_in_tree(str(tree)) == [], (
+        "`cache` is explained by KNOWN_GOOD_TOPLEVEL now, so the alert must stop naming it")
+    assert _bash_tree_strays._actionable_by(tree, ["cache/r1873/x.json"]) == "bracket-only", (
+        "the alert stopped reaching this path while the label kept claiming it could — "
+        "the exact drift this item exists to make impossible")
