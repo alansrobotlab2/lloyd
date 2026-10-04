@@ -13,8 +13,10 @@ import time
 from pathlib import Path
 
 import pytest
+import yaml
 
 from agent_mcp.skills import _QUARANTINE_STATUSES
+from app.harness.policy import SCHEDULE_STATE_FIELDS
 from scripts.automod import state as S, vault_guards as VG, vault_round as V
 
 
@@ -3857,3 +3859,252 @@ def test_the_cli_land_forwards_its_ack_flag_and_invents_none_without_it(monkeypa
     assert len(seen) == 1, seen
     assert "ack" not in seen[0], (
         f"an ack-less CLI land handed land() an ack of {seen[0]['ack']!r}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# #2190 — the #724 dispatch-affecting-field rail has two doors.
+#
+# `policy.py` refuses an unattended `autonomy_write_task` call that moves a
+# field the scheduler reads to decide whether to run a task, and until this
+# section the vault route had no equivalent check: `validate()` re-parsed a
+# touched `autonomy/*.md` and nothing else. The nodes below drive the real
+# `validate()` (and `land()` for the end-to-end one) over a fixture git repo,
+# never `~/obsidian`.
+#
+# Every dispatch field at HEAD, so a refusal is a changed VALUE and nothing
+# else; the fixture carries all seven because the guard reads the frozenset,
+# not this list.
+# ─────────────────────────────────────────────────────────────────────────────
+
+TASK_HEAD_FM: dict = {
+    "id": 1,
+    "name": "one",
+    "status": "up_next",
+    "frequency": "daily",
+    "skill_name": "foo",
+    "scheduled_at": "2026-10-06T04:00:00+00:00",
+    "depends_on": 24,
+    "auto_advance": False,
+    "preferred_hours": {"start": "04:00", "end": "05:00"},
+    "description": "original description",
+    "agent_id": "primary",
+    "priority": "medium",
+}
+
+TASK_BODY = "\n# task\n\nOriginal body paragraph.\n"
+
+
+def fm_task(fm: dict, body: str = TASK_BODY) -> str:
+    """A task file: `fm` dumped as front matter, then `body`."""
+    return "---\n" + yaml.safe_dump(fm, sort_keys=False) + "---\n" + body
+
+
+def _task_at(repo, rel: str, text: str) -> None:
+    (repo / rel).write_text(text)
+
+
+@pytest.fixture
+def armed_task_vault(tmp_path, monkeypatch):
+    """The scratch vault, its HEAD moved to a task carrying every dispatch field.
+
+    `status: up_next` at HEAD is the shape the 2026-10-01 route reached for: a
+    file the scheduler will dispatch. The one added commit is this fixture's
+    own, so `HEAD:<path>` is the baseline every refusal below compares against.
+    """
+    r = _scratch_vault(tmp_path, monkeypatch, mock_loaders=True)
+    _task_at(r, "autonomy/1-task.md", fm_task(TASK_HEAD_FM))
+    git(r, "add", "-A")
+    git(r, "commit", "-q", "-m", "task 1 carries every dispatch field")
+    return r
+
+
+def test_a_round_that_moves_an_existing_task_s_status_is_refused_by_name(armed_task_vault):
+    """Clause 1: the error names the path, the field, and the #724 rail."""
+    f = armed_task_vault / "autonomy" / "1-task.md"
+    f.write_text(fm_task({**TASK_HEAD_FM, "status": "draft"}))
+    errors, _buckets = V.validate(["autonomy/1-task.md"])
+    assert len(errors) == 1, errors
+    why = errors[0]
+    assert "autonomy/1-task.md" in why, why
+    assert "status" in why, why
+    assert "#724" in why, why
+    assert "draft" in why and "up_next" in why, f"the refusal must quote both values: {why}"
+
+
+def test_the_refusal_reverts_the_task_file_and_names_the_rail_on_the_ledger_row(armed_task_vault):
+    """The same refusal through `land()`: nothing lands, the row says why.
+
+    The rail is only legible after the fact if the refusal writes it into the
+    ledger's `errors`, which is what #2148 established for the skill gate.
+    """
+    f = armed_task_vault / "autonomy" / "1-task.md"
+    head_text = f.read_text()
+    f.write_text(fm_task({**TASK_HEAD_FM, "status": "draft"}))
+    with pytest.raises(V.VaultRoundError, match="reverted"):
+        V.land(["autonomy/1-task.md"], "park task 1", item_id=2190)
+    assert f.read_text() == head_text, "the disarmed file must be back at HEAD"
+    assert git(armed_task_vault, "status", "--short").stdout.strip() == "", "a refusal leaves no diff"
+    ev = _events("vault_land")[-1]
+    assert ev["ok"] is False and ev["item_id"] == 2190
+    assert any("status" in e and "#724" in e for e in ev["errors"]), ev["errors"]
+
+
+@pytest.mark.parametrize("field", sorted(SCHEDULE_STATE_FIELDS))
+def test_every_field_of_the_policy_frozenset_is_refused_when_its_value_moves(armed_task_vault,
+                                                                            field):
+    """Clause 4: one definition — the refused set IS `policy.SCHEDULE_STATE_FIELDS`.
+
+    Parametrised over the frozenset itself, so a field added there in `policy.py`
+    is refused by this route with no edit to `vault_round.py` and no edit here:
+    `fm_task` puts any key it is handed into the front matter, and moving a field
+    that HEAD does not carry is a value change like any other. The fixture's HEAD
+    copy spells every field it knows, which is why a NEW field still reads as
+    absent-at-HEAD -> present rather than as a pass.
+    """
+    f = armed_task_vault / "autonomy" / "1-task.md"
+    f.write_text(fm_task({**TASK_HEAD_FM, field: "moved-by-this-round"}))
+    errors, _buckets = V.validate(["autonomy/1-task.md"])
+    assert any(field in e and "#724" in e for e in errors), (
+        f"{field} is in SCHEDULE_STATE_FIELDS but was not refused: {errors}")
+
+
+def test_a_creating_round_that_arms_the_task_is_refused(armed_task_vault):
+    """Clause 2, first half: the 2026-10-01 reproduction, refused.
+
+    `autonomy/92-vllm-prefix-miss-daily.md` landed through this route at
+    2026-10-01T18:51:05Z, eighteen seconds after the same round's
+    `autonomy_write_task` was denied by the rail. It came in `status: draft`, so
+    nothing was armed; this is the same call with the arming kept.
+    """
+    f = armed_task_vault / "autonomy" / "3-new.md"
+    f.write_text(fm_task({"id": 3, "name": "three", "status": "up_next",
+                          "skill_name": "foo", "frequency": "daily"}))
+    errors, _buckets = V.validate(["autonomy/3-new.md"])
+    assert any("autonomy/3-new.md" in e and "status" in e and "#724" in e for e in errors), errors
+
+
+def test_the_armed_create_refusal_reaches_the_tool_route_end_to_end(armed_task_vault):
+    """The same create through `land()`: the new file is deleted, not committed.
+
+    `validate()` is the tool's gate — `automod_vault_land` is a thin wrapper over
+    `land()` — so the reproduction has to come back refused there, not only when
+    the validator is driven directly.
+    """
+    f = armed_task_vault / "autonomy" / "3-new.md"
+    f.write_text(fm_task({"id": 3, "name": "three", "status": "up_next"}))
+    with pytest.raises(V.VaultRoundError, match="reverted"):
+        V.land(["autonomy/3-new.md"], "arm task 3", item_id=2190)
+    assert not f.exists(), "a refused create must be deleted, as any new file is"
+    assert "3-new" not in git(armed_task_vault, "log", "--oneline", "-1").stdout
+
+
+def test_a_creating_round_that_leaves_the_task_draft_passes_with_its_skill_and_window(
+        armed_task_vault):
+    """Clause 2, second half: a draft create carrying `skill_name` and `frequency`.
+
+    This is the shape that actually landed as task 92 (vault commit `1ec6da8b`),
+    and the shape `skills/pipeline-dispatch` uses to hand work down the nightly
+    chain: a new task that is inert until a human or a granted call arms it. A
+    guard that refused it would deny the documented dispatch route to buy no
+    safety — the same asymmetry `policy.schedule_fields_changed` draws.
+    """
+    f = armed_task_vault / "autonomy" / "3-new.md"
+    f.write_text(fm_task({"id": 3, "name": "three", "status": "draft",
+                          "skill_name": "nightly-skills-management",
+                          "frequency": "daily"}))
+    errors, _buckets = V.validate(["autonomy/3-new.md"])
+    assert errors == [], errors
+    out = V.land(["autonomy/3-new.md"], "add task 3 draft")
+    assert out["ok"] and (armed_task_vault / "autonomy" / "3-new.md").exists()
+
+
+def test_a_round_that_rewords_the_body_and_description_passes(armed_task_vault):
+    """Clause 3: a value-equal front matter over changed prose is not a refusal.
+
+    Refusing a touched file that merely *carries* a dispatch field would refuse
+    every autonomy round ever, because every real task file already has a
+    `status:` key. The guard compares values, so this round — new description,
+    new body, dispatch values untouched — lands.
+    """
+    f = armed_task_vault / "autonomy" / "1-task.md"
+    f.write_text(fm_task({**TASK_HEAD_FM, "description": "reworded, same schedule"},
+                         body="\n# task\n\nRewritten body, more precise.\n"))
+    errors, _buckets = V.validate(["autonomy/1-task.md"])
+    assert errors == [], errors
+    # No item_id: an item's contract would route this land into the vault
+    # REVIEWER, which is a different gate from the schedule guard under test, and
+    # the suite's conftest refuses a grader call that was never stubbed.
+    assert V.land(["autonomy/1-task.md"], "task 1: reword the description")["ok"]
+
+
+def test_a_round_that_requotes_the_yaml_but_moves_no_value_passes(armed_task_vault):
+    """Clause 3's other half: values, not serialized YAML — and not bytes.
+
+    Same parsed values quoted differently, keys in a different order, and a
+    field the guard does not care about (`priority`) moved. The owed-after-landing
+    measurement says a false refusal on a benign diff means this check is
+    comparing serialized YAML rather than field values; quoting is how that
+    mistake shows up in a fixture.
+    """
+    f = armed_task_vault / "autonomy" / "1-task.md"
+    f.write_text(
+        "---\n"
+        "priority: high\n"
+        "name: 'one'\n"
+        'status: "up_next"\n'
+        "skill_name: foo\n"
+        "frequency: daily\n"
+        "auto_advance: false\n"
+        "depends_on: 24\n"
+        "scheduled_at: '2026-10-06T04:00:00+00:00'\n"
+        "preferred_hours:\n  end: '05:00'\n  start: '04:00'\n"
+        "id: 1\n"
+        "description: original description\n"
+        "agent_id: primary\n"
+        "---\n" + TASK_BODY)
+    errors, _buckets = V.validate(["autonomy/1-task.md"])
+    assert errors == [], errors
+
+
+def test_a_round_that_drops_a_dispatch_field_entirely_is_refused(armed_task_vault):
+    """Deleting a key is a value change: `frequency: daily` -> absent disarms a run.
+
+    The tool gate cannot see the disk and so refuses a *proposal*; this route can
+    read HEAD, so it refuses on the diff — which cuts both ways, and this is the
+    direction that matters most: a file rewritten without a key the scheduler
+    reads is the quiet one.
+    """
+    f = armed_task_vault / "autonomy" / "1-task.md"
+    dropped = {k: v for k, v in TASK_HEAD_FM.items() if k != "frequency"}
+    f.write_text(fm_task(dropped))
+    errors, _buckets = V.validate(["autonomy/1-task.md"])
+    assert any("frequency" in e and "#724" in e for e in errors), errors
+
+
+def test_a_round_that_resends_the_same_armed_status_is_accepted(armed_task_vault):
+    """The asymmetry the vault route must NOT copy from the tool gate.
+
+    `policy.schedule_fields_changed`'s docstring is explicit that the tool gate
+    reads the call and not the disk, so resending `up_next` to an already-armed
+    task is denied there. This route reads `HEAD:<path>`, so a round that lands
+    the file with `status` still `up_next` moves nothing and must pass — refusing
+    it would refuse the nightly writer that rewrites a task file every time it
+    records an activity note.
+    """
+    f = armed_task_vault / "autonomy" / "1-task.md"
+    f.write_text(fm_task(dict(TASK_HEAD_FM), body="\n# task\n\nActivity note appended.\n"))
+    errors, _buckets = V.validate(["autonomy/1-task.md"])
+    assert errors == [], errors
+
+
+def test_the_guard_holds_only_task_files_and_leaves_other_vault_paths_alone(armed_task_vault):
+    """A guard on the dispatch state of tasks, not a guard on the vault.
+
+    The same frozenset name (`status`) is a backlog item's field too; #9's
+    promotion is nobody's dispatch decision, and refusing it here would spend
+    the rail's credibility on a file the scheduler never reads.
+    """
+    (armed_task_vault / "backlog" / "9-item.md").write_text(
+        "---\nstatus: up_next\nfrequency: daily\n---\n# item\n")
+    errors, _buckets = V.validate(["backlog/9-item.md"])
+    assert errors == [], errors

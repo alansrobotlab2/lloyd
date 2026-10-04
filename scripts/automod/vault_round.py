@@ -451,6 +451,141 @@ def skill_body_findings(paths: list[str]) -> list[dict]:
     return rows
 
 
+def _front_matter_map(text: str) -> dict | None:
+    """The front matter of `text` as a mapping, or None (never raises).
+
+    #2190: the dispatch-field check below needs the parsed VALUES, where
+    `frontmatter_error` above answers only "does this parse". Recovery is the
+    scheduler's own (`parse_frontmatter_text`, which is what
+    `app.autonomy._parse_task_file` calls), so a file whose YAML is corrupt but
+    field-recoverable is judged on the fields the scheduler would actually read
+    instead of being waved through as "unparseable, not my business".
+    """
+    if not text.startswith("---"):
+        return None
+    lines = text.splitlines()
+    end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
+    if end is None:
+        return None
+    try:
+        from agent_mcp._shared import AUTONOMY_TASK_FIELDS, parse_frontmatter_text
+        fm = parse_frontmatter_text("\n".join(lines[1:end]),
+                                    fallback_fields=AUTONOMY_TASK_FIELDS,
+                                    log_label="vault_round:#2190")
+    except Exception:  # noqa: BLE001 - a reader that cannot read is not a refusal
+        return None
+    return fm if isinstance(fm, dict) else None
+
+
+def _same_dispatch_value(old, new) -> bool:
+    """Whether two front-matter values are the same value, YAML spellings aside.
+
+    PyYAML resolves an unquoted ISO timestamp to `datetime`, so quoting a
+    `scheduled_at` that HEAD holds unquoted is a reformat, not a schedule change.
+    Comparing serialized YAML instead of values is exactly what the owed-after-
+    landing measurement on #2190 watches for: it would refuse the nightly writer's
+    own rewrites.
+    """
+    import datetime  # local: a top-of-file import would shift a cited line
+
+    if old == new:
+        return True
+    # `datetime.date` on purpose: `datetime.datetime` is its subclass, and a
+    # `scheduled_at` of `2026-10-06` resolves to the date, not the datetime.
+    for a, b in ((old, new), (new, old)):
+        if isinstance(a, (datetime.date, datetime.time)) and isinstance(b, str):
+            if a.isoformat() == b.strip():
+                return True
+    return False
+
+
+def _shown(value) -> str:
+    """A value as it appears in a refusal. Total: a `datetime` front matter value
+    (`scheduled_at` unquoted) must not raise on the way to being refused."""
+    return "absent" if value is None else (
+        value if isinstance(value, str)
+        else json.dumps(value, sort_keys=True, default=str))
+
+
+def schedule_state_errors(paths: list[str]) -> list[str]:
+    """Refuse a round that moves an autonomy task's dispatch state (#2190).
+
+    The #724 grant rail (`app/harness/policy.py`) refuses an unattended
+    `autonomy_write_task` call that changes a field the scheduler reads to decide
+    whether to run a task. A round could always write the same field into
+    `autonomy/*.md` and land it through HERE: `validate()` re-parsed a touched task
+    file and asked nothing of its values. The route is proved live —
+    `autonomy/92-vllm-prefix-miss-daily.md` landed at 2026-10-01T18:51:05Z, eighteen
+    seconds after the rail denied that same round's tool call
+    (`~/lloyd-data/safety/denials.jsonl`; the witness copy is
+    `backlog/data/denials.jsonl`), and that commit's own message records the
+    refusal it routed around. The vault route stays the way to write a task file;
+    only the dispatch-affecting fields are held to the tool's rule.
+
+    Four things this deliberately is not:
+
+    * **Not presence-based.** Every task file already carries `status:`, so
+      refusing a touched file that merely has one would refuse every autonomy
+      round. The baseline is `HEAD:<path>` — the same read
+      `skill_activation_findings` does — and only a changed VALUE refuses, which is
+      what lets a round rewrite a description or append an activity note.
+    * **Not a byte comparison.** Values are parsed (`_front_matter_map`), so
+      re-quoting or reordering front matter is not a dispatch change.
+    * **Not the tool gate's over-refusal.** `policy.schedule_fields_changed` reads
+      the call and never the disk, so a resend of `up_next` to an already-armed
+      task is denied there; this route can read HEAD, so landing the file with that
+      value unchanged moves nothing and passes. Copying the over-refusal would
+      deny the nightly writers that rewrite task files every cycle.
+    * **Not a gate on deletions.** A round that removes a task file is not refused
+      here, because the lifecycle retires a task by moving it out of the live set
+      and #777 is the record of what a lander made unable to retire anything does:
+      it stops retiring. That half of the door is named open on item #2190 rather
+      than closed by a refusal that breaks a documented route.
+    """
+    # Imported here, never copied: the #724 field set has one definition, in
+    # `app/harness/policy.py`, so a field added there is refused by this route with
+    # no edit to this file, and tests/test_automod_vault_round.py parametrises over
+    # the frozenset itself to pin that from the consumer's side. Function-local for
+    # the same reason `app.autonomy` is imported locally elsewhere in this module:
+    # a loaded memory note cites `vault_round.py:237` by line number, and
+    # test_prompt_surface_budget.py fails the round whose diff moves it.
+    from app.harness.policy import DISPATCHING_STATUS, SCHEDULE_STATE_FIELDS
+
+    errors: list[str] = []
+    for p in sorted(set(paths)):
+        if not p.startswith("autonomy/") or not p.endswith(".md"):
+            continue  # `status` is a backlog item's field too; the scheduler reads only these
+        f = VAULT / p
+        if not f.exists():
+            continue  # a deletion: see the docstring
+        try:
+            new_fm = _front_matter_map(f.read_text(encoding="utf-8")) or {}
+        except OSError:
+            continue  # `frontmatter_error` reports an unreadable file; do not double-book
+        shown = _git("show", f"HEAD:{p}")
+        if shown.returncode != 0:
+            # A create. Mirror policy's create branch: of the dispatch fields, only
+            # this status dispatches, so a draft with its skill and window set is
+            # the nightly chain's hand-down shape and must stay accepted.
+            if str(new_fm.get("status") or "").strip() == DISPATCHING_STATUS:
+                errors.append(
+                    f"{p}: creating it `status: {DISPATCHING_STATUS}` arms a task, which "
+                    f"the #724 grant rail refuses unattended on autonomy_write_task — "
+                    f"create it `status: draft` and let a human, or a granted call, arm it")
+            continue
+        old_fm = _front_matter_map(shown.stdout) or {}
+        for field in sorted(SCHEDULE_STATE_FIELDS):
+            old, new = old_fm.get(field), new_fm.get(field)
+            if _same_dispatch_value(old, new):
+                continue
+            errors.append(
+                f"{p}: `{field}` moved {_shown(old)} -> {_shown(new)}: a dispatch-affecting "
+                f"field, which the #724 grant rail refuses unattended on "
+                f"autonomy_write_task, and this route holds to the same rule — land the "
+                f"rest, and let a human or a granted call move `{field}`")
+    return errors
+
+
 def validate(paths: list[str]) -> tuple[list[str], dict[str, list[str]]]:
     """(errors, buckets). Empty errors means the change may land."""
     ok, why, buckets = check_scope(paths)
@@ -468,6 +603,10 @@ def validate(paths: list[str]) -> tuple[list[str], dict[str, list[str]]]:
                 terr = knowledge_type_error(f)
                 if terr:
                     errors.append(f"{p}: {terr}")
+    if not errors:
+        # A task file whose front matter parses is not a task file whose schedule is
+        # unchanged: the #724 rail's second door closes here (#2190).
+        errors.extend(schedule_state_errors(paths))
     if not errors:
         errors.extend(contract_errors(paths) + reflection_archive_errors(paths)
                       + skill_timezone_errors(paths))

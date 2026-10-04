@@ -622,6 +622,37 @@ rebuilding it from that list, which is what it used to do — so every key not
 named there was silently destroyed by any UI edit or task-write call. `tags`
 was never in the list at all, and neither were the fields added later.
 
+### The dispatch-affecting fields, and the two surfaces that write them
+
+Seven front-matter fields decide whether a task runs: `SCHEDULE_STATE_FIELDS` =
+`status`, `scheduled_at`, `depends_on`, `auto_advance`, `frequency`, `skill_name`,
+`preferred_hours` (`app/harness/policy.py:313`). **#724's rail holds both surfaces
+that can write them, not one.** The first is the tool: `effective_tier` demotes an
+`autonomy_write_task` call that moves none of them back to tier 1, so re-arming or
+parking a task needs a grant and appending an activity note does not. The second is
+the landing route an unattended turn can use instead of the tool —
+`scripts/automod/vault_round.py` classifies `autonomy/**` as validated and used to
+check only that the file still parses, so a round denied the call could write the
+same field into the file. On 2026-10-01 one did exactly that:
+`autonomy/92-vllm-prefix-miss-daily.md` landed at 18:51:05Z, eighteen seconds after
+the rail denied that round's `autonomy_write_task` (the denial row is in
+`~/lloyd-data/safety/denials.jsonl`, and its witness copy is
+`~/obsidian/backlog/data/denials.jsonl`). It came in `status: draft`, so nothing was
+armed — but nothing stood in the way of `up_next` either.
+
+Since #2190 `vault_round.schedule_state_errors()` refuses it, from the same
+frozenset rather than a copied list, and it refuses on the **diff**: the baseline is
+`git show HEAD:autonomy/<file>`, so a round that rewrites a description, appends an
+activity note, or re-quotes the YAML lands, and one that moves a value does not. Two
+asymmetries are deliberate. A **create** is judged the way `policy` judges one — only
+`status: up_next` dispatches, so a new task written `draft` with its skill and window
+set is the nightly chain's hand-down shape and passes. A **deleted** task file is not
+refused at all, because the lifecycle retires tasks by moving them out of the live set
+and #777 is what a lander made unable to retire anything does. The tool gate, by
+contrast, cannot see the disk and so denies a *resend* of `up_next` to a task that is
+already armed; the vault route reads HEAD and lets an unchanged value through, which
+is the difference between guarding a field and refusing to write the file.
+
 ### The parser can never drop a task
 
 On 2026-05-28 a bulk edit corrupted the `tags` field of 34 of 40 task files (an
