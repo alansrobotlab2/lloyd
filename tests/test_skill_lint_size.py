@@ -353,10 +353,12 @@ def test_every_uncapped_route_is_wired_at_its_call_site():
 #: only real if the constants stay where they are: a trim that "solved" the problem by
 #: raising the ceiling would be the very ruling #1534 left to a person.
 
-#: Measured with this file's own expression (`skill_size`'s `body`, front matter
-#: excluded). `nightly-reflection-knowledge-write` is the item's target; the other four
-#: are the control — this round moves nothing in them, so their figures are pinned to
-#: the values triage recorded on 2026-10-04, and a drift in one is a drift this round caused.
+#: Measured with `skill_size`'s own `body_lines` row (front matter excluded), which is
+#: the number `vault_round.skill_body_findings` refuses on. The item's target is
+#: `nightly-reflection-knowledge-write`, the sampled skill #2188 measured at the cap;
+#: the other four are the control — this round moves nothing in them, so their figures
+#: are pinned to the values triage recorded on 2026-10-04, and a drift in one is a
+#: drift this round caused.
 CAP_HEADROOM = {"nightly-reflection-knowledge-write": 90}
 SAMPLE_BASELINE = {"powerpoint": 92, "deep-research": 96,
                    "system-health-check": 84, "entity-resolution-sweep": 91}
@@ -381,21 +383,33 @@ def test_the_skill_that_sat_at_the_cap_now_has_headroom():
     (name, ceiling), = CAP_HEADROOM.items()
     # Measured against the vault's COMMITTED bytes, which is the state the enforcement
     # that this item is about actually grades (`vault_round.skill_body_findings` runs on
-    # a landing). Not the working tree: while this round gated, another writer put an
-    # uncommitted 5-line `## Step 2.5: Memory-index pre-flight (#2173)` block into this
-    # same file, taking it 88 -> 93. That addition is precisely the #1488-sized rule this
-    # item exists to make room for, it is another session's in-flight work, and a node
-    # that reds it would be a gate rung owned by nobody — the reason `pytest.ini` keeps
-    # live-vault reads off a hard rung. The working-tree figure is printed, not judged.
+    # a landing). The figure's provenance, in committed shas, so this comment stays
+    # checkable instead of drifting: `da43c60d` (#2188's spill) left 88 body lines;
+    # `c698c9a5` (#2173's `## Step 2.5: Memory-index pre-flight`) added 5, and at 93 the
+    # property below is false — 93 + an 8-line rule = 101, refused at the 100 cap — which
+    # is the red this file's own #2193 was filed for. #2193 brought the body to 88 by
+    # reflowing the hard-wrapped §2e–2f deferral paragraphs — 7 body lines became 2,
+    # every word kept and nothing moved to a sibling — so the quoted heading
+    # `### 2f. Knowledge Log` stopped being split across a wrap for the first time and
+    # the room the item exists to protect is 12 lines under the cap (88 + 8 = 96).
+    # The working-tree figure stays printed, not judged, for the reason `pytest.ini`
+    # gives — an in-flight edit by another writer is a gate rung owned by nobody. That
+    # exemption covers a writer mid-edit, never a landed commit: `c698c9a5` was committed
+    # when #2188 gated, so the sentence naming it as "another session's in-flight work"
+    # was the false half of this comment, and a comment that states a false thing about
+    # the tree it guards is how a red sat unowned for a round.
     rel = f"skills/{name}/SKILL.md"
     shown = subprocess.run(["git", "-C", str(root.parent), "show", f"HEAD:{rel}"],
                            capture_output=True, text=True, timeout=30)
     assert shown.returncode == 0, f"git show HEAD:{rel} failed: {shown.stderr[:120]}"
     text = shown.stdout
-    live = (root / name / "SKILL.md").read_text(encoding="utf-8")
-    live_lines = len(sl.parse_frontmatter(live)[1].strip("\n").splitlines()) if live else -1
     _, body = sl.parse_frontmatter(text)[:2]
-    lines = len(body.strip("\n").splitlines())
+    # The count comes from `skill_size` itself, not from a copy of its expression:
+    # `vault_round.skill_body_findings` refuses on `size["over_cap"]`, so the number a
+    # landing is judged by and the number this node judges have to come from one place.
+    # Two expressions for one ruler is how a pin starts disagreeing with the thing it
+    # defends, quietly, the day the ruler changes (a fence exclusion, say).
+    lines = sl.skill_size(name, root / name / "SKILL.md", text, body)["body_lines"]
     assert lines <= ceiling, f"{name}: {lines} body lines, ceiling {ceiling}"
     # The constants are the point, not the number: an #1488-sized (+8) rule has to
     # land without meeting `skill_body_findings`, and it can only do that while the
@@ -407,6 +421,10 @@ def test_the_skill_that_sat_at_the_cap_now_has_headroom():
     assert vault_round.SKILL_BODY_ENFORCE is True
     assert lines + 8 <= sl.MAX_BODY_LINES, (
         f"{lines} + an 8-line rule = {lines + 8}: still refused at the ceiling")
+    live = (root / name / "SKILL.md").read_text(encoding="utf-8")
+    live_lines = (sl.skill_size(name, root / name / "SKILL.md", live,
+                               sl.parse_frontmatter(live)[1])["body_lines"]
+                  if live else -1)
     assert live_lines <= sl.MAX_BODY_LINES, (
         f"the working tree sits at {live_lines} body lines, past the 100-line ceiling — "
         "an uncommitted edit has used up more headroom than exists. The committed figure "
