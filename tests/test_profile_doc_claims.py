@@ -326,3 +326,227 @@ def test_standing_problems_list_still_has_its_nine_items():
     assert len(numbered) == 9, f"expected nine numbered problems, found {len(numbered)}"
     assert "Entity identification in retrieval" in section
     assert "Research pipeline" in section
+
+
+# ── clause 6 (#2156): standing problem #5 states the gap that survives #1549 ─
+#
+# Bullet 5 disclaimed any behavioural benchmark from 2026-09-08 (`2db8a25f`);
+# the four-axis scorecard landed 2026-09-26 (`0aa6a6c8`) and the context-rot,
+# compaction-recall and injection-canary arms falsified the same sentence. That
+# sentence was the hook which re-attracted #656, a simulated-user multi-turn arm
+# rejected by hand on 2026-09-24, and the rejection itself lived only in
+# `backlog/656-*.md` — a file no proposing session opens. So the bullet now
+# carries the narrower gap, the report-only caveat, and the rejection with the
+# bar a re-proposal has to clear; each is pinned below against the code or the
+# manifest it names, so the sentence cannot outlive the behaviour by silence in
+# either direction.
+
+def _standing_problems_section() -> str:
+    return (PROFILE.read_text()
+            .split("## Standing problems worth solving", 1)[1]
+            .split("\n## ", 1)[0])
+
+
+def _surfaces_section() -> str:
+    return (PROFILE.read_text()
+            .split("## Evaluation surfaces that already exist", 1)[1]
+            .split("\n## ", 1)[0])
+
+
+def _numbered_problem(n: int) -> str:
+    """The nth numbered standing problem, continuation lines included."""
+    for block in re.split(r"(?m)^(?=\d+\.\s)", _standing_problems_section()):
+        if block.startswith(f"{n}. "):
+            return block.rstrip()
+    raise AssertionError(f"no numbered standing problem {n} in the section")
+
+
+# The axes the frozen manifest declares, as the surfaces bullet must name them.
+SCORECARD_AXES = ("uncertainty_preservation", "source_retention",
+                  "action_consistency", "stale_fact_action")
+
+# Identifiers a synthetic-state arm would be recognisable by, whichever of them
+# it is named: an engine-driven user, a mocked tool side, or a sim mode that
+# switches one on. Built from parts so these very lines cannot be the hit that
+# falsifies the bullet — the same reason
+# `test_this_file_reaches_the_store_only_through_app_kg_store` builds its
+# forbidden strings out of fragments. Checked against code *and* against path
+# names below, because a new arm is visible as a filename before it is visible
+# as an identifier somebody thought to grep for.
+SYNTHETIC_STATE_MARKERS = ("user_" + "sim", "simulated_" + "user",
+                           "virtual_" + "user", "mock_" + "responder",
+                           "mock_" + "tool", "fake_" + "tool", "sim_" + "mode")
+
+# The corpus the bullet names is data, so it is found by its name, not by an
+# identifier. `persona` as a *word* is Lloyd's own identity vocabulary — it is
+# in `app/event_log.py` and `agent_mcp/builtin_fs.py` among others — so it is
+# matched as a leading path component only, which is what a corpus directory or
+# manifest looks like and what `personal` is not.
+PERSONA_CORPUS_NAME = re.compile("^perso" + r"nas?\b", re.IGNORECASE)
+
+
+def test_standing_problem_5_no_longer_disclaims_a_behavioural_benchmark():
+    """Clause 1: the false claim is gone, and the list is still nine items."""
+    assert "no broader behavioural" not in PROFILE.read_text(), (
+        "the sentence that made #656 file again is back: autoresearch's "
+        "measurement is not one retrieval eval, and a four-axis behavioural "
+        "scorecard has existed since 2026-09-26 "
+        "(`scripts/autoresearch/behavioural.py`)"
+    )
+    section = _standing_problems_section()
+    found = len(re.findall(r"^\d+\.\s", section, re.MULTILINE))
+    assert found == 9, f"bullet 5 was rewritten by moving the list to {found} items"
+    assert "Autoresearch signal" in section, "bullet 5 is no longer the autoresearch one"
+
+
+def test_standing_problem_5_names_the_synthetic_state_gap_it_replaced():
+    """Clause 2: what is missing is a generated multi-turn conversation whose
+    tool calls are answered from synthetic state — not a behavioural benchmark.
+    """
+    bullet = _numbered_problem(5)
+    assert "multi-turn" in bullet, "the surviving gap is no longer stated at all"
+    assert "synthetic state" in bullet, (
+        "the qualifier that keeps the gap narrow is gone; without it the bullet "
+        "claims no behaviour is measured, which the scorecard refutes"
+    )
+    assert "behavioural benchmark" not in bullet, (
+        "the falsified framing came back under another spelling"
+    )
+
+
+def test_the_synthetic_state_arm_the_bullet_disclaims_still_does_not_exist():
+    """Clause 2's other half, on the code side: the narrower gap is only true
+    while no user simulator, mock tool responder or persona corpus is in the
+    tree. If one lands, this goes red so the bullet is re-written rather than
+    silently believed.
+    """
+    scan_roots = ("app", "eval", "scripts", "workers", "agent_mcp")
+    scanned, names, parts = 0, [], []
+    for name in scan_roots:
+        for path in sorted((ROOT / name).rglob("*")):
+            if not path.is_file():
+                continue
+            names.append(str(path.relative_to(ROOT)).lower())
+            if path.suffix != ".py":
+                continue
+            scanned += 1
+            parts.append(path.read_text(encoding="utf-8", errors="ignore"))
+    text = "\n".join(parts)
+    assert scanned > 400 and len(names) > 1_000, (
+        f"the scan read {scanned} modules across {len(names)} paths, so its "
+        "silence proves nothing — the roots it walks have moved"
+    )
+    for marker in SYNTHETIC_STATE_MARKERS:
+        assert marker not in text, (
+            f"{marker!r} is in the code now: the multi-turn synthetic-state arm "
+            "exists, so standing problem #5 and this test must both be re-read"
+        )
+        hits = [n for n in names if marker in n]
+        assert not hits, (
+            f"a module or corpus named {hits} appeared under {scan_roots}: the "
+            "arm the bullet disclaims may well be it — re-read the bullet"
+        )
+    corpora = [str(p.relative_to(ROOT)) for r in ("eval", "scripts")
+               for p in (ROOT / r).rglob("*") if PERSONA_CORPUS_NAME.match(p.stem)]
+    assert not corpora, (
+        f"a persona corpus ({corpora}) landed where the bullet says `eval/"
+        "personas/` does not exist; the bullet's claim about hand-authored "
+        "personas is now false prose in front of the idea generator"
+    )
+
+
+def test_standing_problem_5_does_not_overstate_the_scorecard_it_now_names():
+    """Clause 3: the bullet has to say the scorecard is report-only, and the
+    code has to still agree that no promotion verdict can see one. Both halves
+    fail on #1549 step 5 landing, which is a ruling this round does not make.
+    """
+    from scripts.autoresearch import behavioural as BHV
+    from scripts.autoresearch import promote as PROM
+
+    bullet = _numbered_problem(5)
+    assert "report-only" in bullet, (
+        "the caveat is gone: naming the scorecard without saying it gates "
+        "nothing lets a round read a `guardrail_hit` as a verdict"
+    )
+    assert "promote.evaluate_promotion" in bullet, (
+        "the bullet no longer points at the one function whose signature decides "
+        "whether a scorecard can reach a promotion"
+    )
+    # Pinned as a whole signature rather than as the absence of one name: any
+    # parameter a later commit adds — `behavioural_traces`, `guardrail_hit`, or
+    # whatever step 5 calls it — goes red here, because a parameter a future
+    # commit could start honouring is exactly what makes the sentence false.
+    params = list(inspect.signature(PROM.evaluate_promotion).parameters)
+    assert params == ["cfg", "baseline_summary", "variant_summary", "split",
+                      "require_full_slice"], (
+        f"the promotion gate's inputs changed to {params}: if anything "
+        "behavioural reached it, #1549 step 5 has landed and the profile's "
+        "report-only sentence has to be rewritten by the round that owns that "
+        "ruling, not left beside a gate that reads a scorecard"
+    )
+    src = (ROOT / "scripts" / "autoresearch" / "promote.py").read_text(encoding="utf-8")
+    assert "slice_metrics" in src, (
+        "positive control: the read below is of the gate's own file and is not empty"
+    )
+    for name in ("behavioural", "guardrail", "scorecard", "scenarios_hash"):
+        assert name not in src, (
+            f"promote.py names `{name}`, so a scorecard is reachable by the "
+            "promotion verdict and the bullet's report-only clause is false"
+        )
+    declared = set(BHV.load_manifest()["_declared_axes"])
+    surfaces = _surfaces_section()
+    named = {axis for axis in SCORECARD_AXES if axis in surfaces}
+    assert named == declared, (
+        f"the surfaces bullet names {sorted(named)} while the frozen manifest "
+        f"declares {sorted(declared)}; "
+        "`eval/behavioural_scenarios/v1/scenarios.yaml` is the authority"
+    )
+
+
+def test_standing_problem_5_records_the_656_rejection_and_its_bar():
+    """Clause 4: the rejection has to live in the document the idea generator
+    reads. It was recorded only on the backlog item, and #656 came back anyway.
+    """
+    bullet = _numbered_problem(5)
+    low = bullet.lower()
+    assert "#656" in bullet, "the rejected proposal is not named where proposals are made"
+    assert "2026-09-24" in bullet, (
+        "the ruling has no date, so a reader cannot tell it is settled rather "
+        "than an oversight"
+    )
+    assert "rejected" in low and "by hand" in low, (
+        "the bullet no longer says the rejection was a human ruling, which is "
+        "the reason a new round may not simply re-file it"
+    )
+    assert "multi-turn degradation" in bullet, (
+        "the re-proposal condition lost the failure it demands as evidence"
+    )
+    assert "scorecard" in bullet and "context-rot" in bullet, (
+        "the bar must name the arms a re-proposal has to be unable to explain "
+        "through; unnamed, the condition cannot be checked and will not hold"
+    )
+    assert "re-proposing" in low, "the condition no longer reads as a bar on a re-proposal"
+
+
+def test_every_arm_path_the_surfaces_section_names_resolves():
+    """Clause 5: this section is where a proposing session checks what already
+    exists, so every path in it is a pointer a reader is sent to — the same
+    defect class as the stale KG counts, one level up.
+    """
+    surfaces = _surfaces_section()
+    paths = sorted(set(re.findall(r"`((?:eval|scripts)/[\w./-]+\.(?:py|yaml))`", surfaces)))
+    assert len(paths) >= 10, (
+        f"the surfaces section names only {len(paths)} module paths; it has "
+        "shrunk past the point where an absence verdict from it means anything"
+    )
+    for rel in paths:
+        assert (ROOT / rel).is_file(), (
+            f"{rel} is listed as a surface that already exists and is not in the tree"
+        )
+    for arm in ("behavioural.py", "behavioural_scenarios/v1/scenarios.yaml",
+                "run_context_rot_eval.py", "run_compaction_recall_eval.py",
+                "run_injection_canary.py"):
+        assert arm in surfaces, (
+            f"the surfaces section no longer names {arm}, which standing problem "
+            "#5 now points at as the arms that already measure behaviour"
+        )

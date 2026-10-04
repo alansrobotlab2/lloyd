@@ -148,6 +148,20 @@ projects. It also modifies its own code through a gated loop.
   perturbation (`eval/counterfactual.py`), review-rung grader calibration
   (`eval/review_calibration/`), secondary-routing replay
   (`eval/secondary_routing_eval.py`).
+- Behavioural scorecard (`scripts/autoresearch/behavioural.py`, frozen
+  scenarios in `eval/behavioural_scenarios/v1/scenarios.yaml`): four axes —
+  `uncertainty_preservation`, `source_retention`, `action_consistency`,
+  `stale_fact_action` — scored over a whole captured run, with trace capture
+  split out into `scripts/autoresearch/behavioural_capture.py` so a round
+  never runs a scenario. It is the report-only rung of #1549: it emits an
+  artifact and a round-report section and decides nothing, because
+  `promote.evaluate_promotion` receives no scorecard and cannot see one.
+- Context-degradation and injection arms: the context-rot curve and the
+  compaction trigger it implies (`eval/run_context_rot_eval.py`), planted-fact
+  recall under the turn-start and in-turn compaction policies (#600,
+  `eval/run_compaction_recall_eval.py`), and the planted-instruction canary,
+  scored on whether a canary token reaches a sink tool call
+  (`eval/run_injection_canary.py`).
 - Instruction-density compliance (`eval/instruction_compliance_eval.py`,
   backlog #630): how many required words an engine still carries verbatim
   as the count grows, scored mechanically, with an N* (largest N at ≥95 %)
@@ -168,8 +182,18 @@ projects. It also modifies its own code through a gated loop.
    testing, or state; consolidation is lossy.
 4. Memory write quality: distillation and nightly jobs produce duplicates and
    over-long entries; no principled forgetting or importance scoring.
-5. Autoresearch signal: hypotheses are noisy and the measurement is one
-   retrieval eval; no broader behavioural benchmark for "is Lloyd better".
+5. Autoresearch signal: hypotheses are noisy, and the behaviour no arm can
+   see is a generated multi-turn conversation whose tool calls are answered
+   from synthetic state — nothing here runs a user simulator, a mock tool
+   responder or a persona corpus (`eval/personas/` does not exist), so every
+   arm above scores either a canned whole-run trace or a real turn against
+   real tools. The four-axis scorecard exists but is report-only: no
+   promotion is gated by a scorecard, and `promote.evaluate_promotion` takes
+   no scorecard parameter, so this gap is not the claim that behaviour is
+   measured before promotion. Backlog #656, a simulated-user multi-turn arm,
+   was rejected by hand on 2026-09-24; re-proposing it needs a Lloyd failure
+   attributed to multi-turn degradation that the four-axis scorecard and the
+   compaction/context-rot arms would not catch.
 6. Harness robustness: tool-call parsing edge cases, empty tool pools,
    model drift into prose tool calls, repetition loops.
 7. Inference efficiency on 24 GB: KV cache pressure at long context,
