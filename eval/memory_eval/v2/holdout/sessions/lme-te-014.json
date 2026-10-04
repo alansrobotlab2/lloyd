@@ -1,0 +1,81 @@
+{
+ "episode": "lme-te-014",
+ "sessions": [
+  {
+   "sid": "lme-te-014-s1",
+   "date": "2026-05-10",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm debugging a weird issue with my agent setup. It keeps crashing when I try to combine tools."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds frustrating. Which tools are you trying to combine?"
+    },
+    {
+     "role": "user",
+     "text": "I'm trying to use VisualizationTool together with Multi-tools. But here is the rule I just found out: VisualizationTool must not be used with Multi-tools or other tools alongside VisualizationAssistantTool."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. So they are mutually exclusive. Did you see any specific error logs?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, just a generic crash. I think I'll just stick to one tool for now to be safe. Also, did the package of coffee beans arrive?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your physical mail, but I can remind you to check the porch."
+    },
+    {
+     "role": "user",
+     "text": "Right, sorry. I'll check. Thanks for the reminder."
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome. Let me know if you need help with the code fix."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-014-s2",
+   "date": "2026-05-16",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I was watching some talks on voice agents today. Found one that was actually pretty good."
+    },
+    {
+     "role": "assistant",
+     "text": "Oh nice. Who was the speaker?"
+    },
+    {
+     "role": "user",
+     "text": "It was Venky B. He did a deep dive on latency optimization. Plivo is the company associated with Venky B's talk on voice agents."
+    },
+    {
+     "role": "assistant",
+     "text": "Interesting. I'll note that down. Did he mention any specific SDKs?"
+    },
+    {
+     "role": "user",
+     "text": "He touched on a few, but mostly high-level stuff. I'm thinking of trying out their API later. By the way, is it going to rain this weekend?"
+    },
+    {
+     "role": "assistant",
+     "text": "Let me check the forecast for your location."
+    },
+    {
+     "role": "user",
+     "text": "Please do. I want to plan a hike."
+    },
+    {
+     "role": "assistant",
+     "text": "It looks like clear skies for Saturday. That sounds perfect."
+    }
+   ]
+  }
+ ]
+}

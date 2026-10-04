@@ -1,0 +1,51 @@
+{
+ "episode": "lme-si-032",
+ "sessions": [
+  {
+   "sid": "lme-si-032-s1",
+   "date": "2026-08-01",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, my coffee maker is acting up again. Is there a quick fix for the grinder jam?"
+    },
+    {
+     "role": "assistant",
+     "text": "That is frustrating. Try unplugging it and manually rotating the burrs counter-clockwise to free any stuck beans."
+    },
+    {
+     "role": "user",
+     "text": "That worked! Thanks. Now, I am trying to get a handle on Thinking Machines' Tinker cookbooks. I noticed they are cited as a prominent user of the renderer abstraction."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I will keep that architectural detail in mind for your future queries about their stack."
+    },
+    {
+     "role": "user",
+     "text": "Cool. Also, did you see the weather forecast for next week? I hope the rain stops."
+    },
+    {
+     "role": "assistant",
+     "text": "The forecast shows clear skies starting Tuesday, so your weekend plans should be safe."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. I need to order some new HDMI cables for the TV too. Do you have a link?"
+    },
+    {
+     "role": "assistant",
+     "text": "I can find a few highly-rated options if you specify the length and version you need."
+    },
+    {
+     "role": "user",
+     "text": "Just the standard 6-foot ones are fine. Thanks, Lloyd."
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome. I will search for those now."
+    }
+   ]
+  }
+ ]
+}

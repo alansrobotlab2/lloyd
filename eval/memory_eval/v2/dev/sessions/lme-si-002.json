@@ -1,0 +1,51 @@
+{
+ "episode": "lme-si-002",
+ "sessions": [
+  {
+   "sid": "lme-si-002-s1",
+   "date": "2026-05-05",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to wrap my head around these new LLM agent papers. It feels like they're just rebranding old RL ideas."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a common sentiment. Many argue that the core mechanisms of reward modeling and policy optimization are just being applied to language generation now. Do you have a specific paper you're struggling with?"
+    },
+    {
+     "role": "user",
+     "text": "No, not a specific paper, just the general vibe. Oh, by the way, did you see the weather for next Tuesday? I have that outdoor client meeting."
+    },
+    {
+     "role": "assistant",
+     "text": "I checked the forecast. It's looking partly cloudy with a low chance of rain, around 18°C. Should be comfortable for an outdoor meeting."
+    },
+    {
+     "role": "user",
+     "text": "Good to know. Back to the AI stuff—has anyone actually done a serious job of bridging that gap? Like, not just hand-waving it?"
+    },
+    {
+     "role": "assistant",
+     "text": "There are a few researchers doing rigorous work on that. Stefano Fiorucci is one of the more prominent ones in that niche."
+    },
+    {
+     "role": "user",
+     "text": "Right, I've heard the name. I think he's the one who maps classic RL concepts to LLM workflows, right? That seems like the most useful framing I've seen so far."
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, that's a fair summary of his approach. He focuses on formalizing those parallels rather than treating them as separate fields."
+    },
+    {
+     "role": "user",
+     "text": "Cool. I'll look for his blog posts later. My coffee is getting cold anyway. Gotta run."
+    },
+    {
+     "role": "assistant",
+     "text": "Enjoy your meeting and the coffee! Let me know if you need help finding those posts."
+    }
+   ]
+  }
+ ]
+}

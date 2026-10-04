@@ -1,0 +1,81 @@
+{
+ "episode": "lme-kn-063",
+ "sessions": [
+  {
+   "sid": "lme-kn-063-s1",
+   "date": "2026-06-27",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm stuck on Task 83 again. The scheduler keeps killing the run before it finishes."
+    },
+    {
+     "role": "assistant",
+     "text": "Did you check if the declared budget exceeds the limit?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, I checked. Task 83 fails because the scheduler ignores any declared budget above 50. It just caps it at 50."
+    },
+    {
+     "role": "assistant",
+     "text": "Ah, so it's a hard cap. We need to stay under 50."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. It's frustrating. Anyway, did you see the rain forecast for tomorrow?"
+    },
+    {
+     "role": "assistant",
+     "text": "It looks heavy in the afternoon."
+    },
+    {
+     "role": "user",
+     "text": "Great. I'll bring the umbrella. Back to work."
+    },
+    {
+     "role": "assistant",
+     "text": "Good luck with the cap."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-063-s2",
+   "date": "2026-07-07",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I finally got Task 83 to pass."
+    },
+    {
+     "role": "assistant",
+     "text": "How? Did you lower the budget?"
+    },
+    {
+     "role": "user",
+     "text": "No, I updated the config. Turns out the scheduler honors budgets above the limit now. The success of Task 83 proves that a declared budget above `agent.max_turns` is honoured by the scheduler."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a big change from the hard cap we saw earlier."
+    },
+    {
+     "role": "user",
+     "text": "Yes. I also ordered a new mechanical keyboard, by the way. The old one is dying."
+    },
+    {
+     "role": "assistant",
+     "text": "Nice. When does it arrive?"
+    },
+    {
+     "role": "user",
+     "text": "Friday. Can't wait. Task 83 is finally green."
+    },
+    {
+     "role": "assistant",
+     "text": "Congrats on the green build."
+    }
+   ]
+  }
+ ]
+}

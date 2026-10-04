@@ -358,6 +358,49 @@
   }
  },
  "generator_model": "Qwen3.8-Flash-Next-nvfp4",
+ "label_audit": {
+  "audited": 35,
+  "audited_at": "2026-09-25",
+  "auditor": "hand audit (Claude Code, for #1480)",
+  "brittle": 8,
+  "clean": 24,
+  "defective": 3,
+  "defective_ids": [
+   "lme-mu-060",
+   "lme-pr-042",
+   "lme-pr-044"
+  ],
+  "method": "random.Random(25).sample, 7 dev questions per category; holdout not opened. Verdicts: clean / brittle (label right, gold string too long or generic for the rules judge) / defective (label wrong or the item cannot measure its category). This is 35 of 333, not the human review #1471's closure asks for.",
+  "per_category": {
+   "knowledge_update": {
+    "brittle": 2,
+    "clean": 5,
+    "defective": 0
+   },
+   "multi_session": {
+    "brittle": 1,
+    "clean": 5,
+    "defective": 1
+   },
+   "preference": {
+    "brittle": 2,
+    "clean": 3,
+    "defective": 2
+   },
+   "single_session": {
+    "brittle": 3,
+    "clean": 4,
+    "defective": 0
+   },
+   "temporal": {
+    "brittle": 0,
+    "clean": 7,
+    "defective": 0
+   }
+  },
+  "source": "eval/memory_eval/v1/AUDIT.md"
+ },
+ "label_status": "pilot",
  "notes": "facts snapshot ~/lloyd-data/eval/1480/corpus (copied 2026-09-25 from _pipeline/vault-derived/facts)",
  "reserve_rule": "only a run with --holdout reads the holdout leg; it reports aggregates, never per-question rows or ids; no tuning comparison reads it",
  "reserved_ids": [

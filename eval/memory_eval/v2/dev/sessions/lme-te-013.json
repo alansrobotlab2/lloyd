@@ -1,0 +1,81 @@
+{
+ "episode": "lme-te-013",
+ "sessions": [
+  {
+   "sid": "lme-te-013-s1",
+   "date": "2026-07-27",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, quick check on the citation for that dataset paper I found this morning. Who are Kim et al. exactly?"
+    },
+    {
+     "role": "assistant",
+     "text": "Kim et al. are the authors of the DialSim dataset paper."
+    },
+    {
+     "role": "user",
+     "text": "Got it. Also, my coffee maker is leaking again. Any tips for a quick fix before I buy a new one?"
+    },
+    {
+     "role": "assistant",
+     "text": "Check the gasket seal first. If it's worn, replacing it might solve the leak. Otherwise, descaling could help if mineral buildup is causing a poor seal."
+    },
+    {
+     "role": "user",
+     "text": "I'll try that. By the way, is it going to rain this afternoon? I was thinking of walking to the library."
+    },
+    {
+     "role": "assistant",
+     "text": "The forecast shows a 20% chance of showers after 4 PM, so you should be fine if you leave now."
+    },
+    {
+     "role": "user",
+     "text": "Great. Thanks for the help with the paper citation too."
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome. Let me know if you need anything else."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-013-s2",
+   "date": "2026-07-31",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I was looking into some voice tech companies this morning. Can you remind me what Plivo is associated with?"
+    },
+    {
+     "role": "assistant",
+     "text": "Plivo is associated with Venky B and the topic of Voice Agent Failure Modes."
+    },
+    {
+     "role": "user",
+     "text": "Right, Venky B. Okay. Also, my hard drive order from last week finally arrived. The box was dented, but the drive seems okay."
+    },
+    {
+     "role": "assistant",
+     "text": "It's good the drive survived. You might want to run a SMART test just to be safe."
+    },
+    {
+     "role": "user",
+     "text": "I will. Do you think I need to return it if the SMART test fails?"
+    },
+    {
+     "role": "assistant",
+     "text": "Most retailers have a 30-day return policy for defective hardware, so yes, you should be covered."
+    },
+    {
+     "role": "user",
+     "text": "Good to know. Thanks."
+    },
+    {
+     "role": "assistant",
+     "text": "No problem. Keep me posted on the test results."
+    }
+   ]
+  }
+ ]
+}

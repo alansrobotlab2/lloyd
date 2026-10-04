@@ -1,0 +1,43 @@
+{
+ "episode": "lme-pr-051",
+ "sessions": [
+  {
+   "sid": "lme-pr-051-s1",
+   "date": "2026-05-26",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to organize my meeting notes from the quarterly review. Did I save the draft to the cloud?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your cloud storage directly, Alan. Did you name it something specific?"
+    },
+    {
+     "role": "user",
+     "text": "Right, sorry. It's called 'Q2_Review_Draft'. Anyway, the main takeaway was about Balázs Horváth. He really pushed back on our current KPI structure. I'm starting to agree with him that we need to shift from velocity-based KPIs to usage-frequency indicators."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. That's a significant shift in how you measure success."
+    },
+    {
+     "role": "user",
+     "text": "Yeah. It's hard to get people on board, but the data supports it. Oh, by the way, can you check if the new monitor arm I ordered is shipping?"
+    },
+    {
+     "role": "assistant",
+     "text": "I can't check external order statuses. You might want to check your email for the tracking link."
+    },
+    {
+     "role": "user",
+     "text": "Good point. I'll do that. Just wanted to make sure you had that context on Balázs's view for later."
+    },
+    {
+     "role": "assistant",
+     "text": "I've made a note of your preference regarding the metric evolution."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,81 @@
+{
+ "episode": "lme-te-046",
+ "sessions": [
+  {
+   "sid": "lme-te-046-s1",
+   "date": "2026-05-26",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm finally digging into the Superlinked Inference Engine (SAI) this morning. The docs are a bit dense."
+    },
+    {
+     "role": "assistant",
+     "text": "Happy to help, Alan. What specific part are you looking at? The core architecture or something else?"
+    },
+    {
+     "role": "user",
+     "text": "I'm trying to figure out how it handles model swapping. It seems like it implements dynamic model loading with a Least Recently Used (LRU) eviction policy."
+    },
+    {
+     "role": "assistant",
+     "text": "That makes sense for memory management. LRU is a standard approach to keep frequently used models in RAM while evicting older ones."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. I need to check if that plays nicely with my current setup. Also, did you see the weather forecast for next week?"
+    },
+    {
+     "role": "assistant",
+     "text": "It looks like rain is expected Tuesday. I can set a reminder for you to bring an umbrella if you like."
+    },
+    {
+     "role": "user",
+     "text": "Please do. Thanks. I need to get back to this config file before lunch."
+    },
+    {
+     "role": "assistant",
+     "text": "Will do. Let me know if you hit any snags with the SAI integration."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-046-s2",
+   "date": "2026-06-02",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I've been running some tests today. I wanted to compare our new on-device models against the big benchmarks."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a good idea. Which benchmarks are you focusing on?"
+    },
+    {
+     "role": "user",
+     "text": "Primarily ARC-AGI. It's invoked as the base-intelligence benchmark that on-device models do not yet clear."
+    },
+    {
+     "role": "assistant",
+     "text": "Right, ARC-AGI is known for being quite challenging for smaller models due to its abstract reasoning requirements."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, the gap is still pretty wide. By the way, did my package from Amazon arrive?"
+    },
+    {
+     "role": "assistant",
+     "text": "I checked the tracking. It says it was delivered to your front porch around 2 PM."
+    },
+    {
+     "role": "user",
+     "text": "Great, I'll pick it up after this test run. I need to see if the model crashes or just fails the logic puzzle."
+    },
+    {
+     "role": "assistant",
+     "text": "Good luck with the run. I'll keep the notification silent while you test."
+    }
+   ]
+  }
+ ]
+}

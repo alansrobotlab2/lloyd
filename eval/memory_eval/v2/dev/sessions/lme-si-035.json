@@ -1,0 +1,43 @@
+{
+ "episode": "lme-si-035",
+ "sessions": [
+  {
+   "sid": "lme-si-035-s1",
+   "date": "2026-06-10",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did you see that new LLM paper Akram Baharlouei dropped? The architecture looks solid but the training cost is insane."
+    },
+    {
+     "role": "assistant",
+     "text": "I did see it. The compute requirements are indeed high. Have you had a chance to run the benchmarks yourself?"
+    },
+    {
+     "role": "user",
+     "text": "Not yet, my GPU is still stuck on that old driver issue. Anyway, Akram Baharlouei previously worked at Meta AI, so I'm curious how that shaped his approach to efficiency."
+    },
+    {
+     "role": "assistant",
+     "text": "That background definitely influences the scalability focus. By the way, have you managed to fix the driver issue? The weather forecast says it's going to rain all weekend, so it might be a good time to stay in and troubleshoot."
+    },
+    {
+     "role": "user",
+     "text": "True. I tried the rollback yesterday but it broke my audio drivers. Total disaster. I'm ordering dinner from that Thai place on 4th street instead."
+    },
+    {
+     "role": "assistant",
+     "text": "Sounds like a safer bet than wrestling with drivers. Pad Thai is hard to beat. Let me know if you need any logs analyzed for the audio issue later."
+    },
+    {
+     "role": "user",
+     "text": "Will do. I'll probably just wait until the new stable driver release next week. Thanks for the chat."
+    },
+    {
+     "role": "assistant",
+     "text": "No problem, Alan. Enjoy the dinner and good luck with the tech support!"
+    }
+   ]
+  }
+ ]
+}

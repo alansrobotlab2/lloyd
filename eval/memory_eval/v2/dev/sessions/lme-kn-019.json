@@ -1,0 +1,81 @@
+{
+ "episode": "lme-kn-019",
+ "sessions": [
+  {
+   "sid": "lme-kn-019-s1",
+   "date": "2026-08-07",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, quick check. I'm tweaking the Contradiction Resolution module. Right now it only catches explicit negations like 'I do not like X' vs 'I like X'. That's the current state."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. Explicit negations only for now."
+    },
+    {
+     "role": "user",
+     "text": "Yeah. Also, did the package for the new monitor arrive? It's supposed to be here by Friday."
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your shipping status, but I can check your email if you'd like."
+    },
+    {
+     "role": "user",
+     "text": "No worries. Just annoyed the weather is so gray today. Makes me want to sleep."
+    },
+    {
+     "role": "assistant",
+     "text": "It is quite gloomy. Maybe a coffee break would help?"
+    },
+    {
+     "role": "user",
+     "text": "Maybe later. Back to the code—keeping it simple for now."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-019-s2",
+   "date": "2026-08-15",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, we've upgraded the Contradiction Resolution logic. It now misses semantic contradictions such as 'prefers Qwen3-TTS' vs 'uses Piper TTS'. We need to log these specific cases."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. We'll track those semantic mismatches."
+    },
+    {
+     "role": "user",
+     "text": "Great. By the way, the monitor finally arrived. The stand is a bit flimsy."
+    },
+    {
+     "role": "assistant",
+     "text": "That's unfortunate. Have you tried tightening the screws?"
+    },
+    {
+     "role": "user",
+     "text": "I did, but it's still wobbly. Anyway, I have a meeting in 10 minutes."
+    },
+    {
+     "role": "assistant",
+     "text": "Good luck with the meeting."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. Oh, and the rain finally stopped. Nice."
+    },
+    {
+     "role": "assistant",
+     "text": "Glad to hear it."
+    }
+   ]
+  }
+ ]
+}

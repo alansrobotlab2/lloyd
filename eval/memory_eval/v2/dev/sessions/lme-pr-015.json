@@ -1,0 +1,51 @@
+{
+ "episode": "lme-pr-015",
+ "sessions": [
+  {
+   "sid": "lme-pr-015-s1",
+   "date": "2026-05-15",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, my coffee machine is leaking again. Any quick fixes before I go to work?"
+    },
+    {
+     "role": "assistant",
+     "text": "Check the seal around the portafilter first. If that's dry, soak it in warm water for 10 minutes. If it's still leaking, it might be the gasket behind the shower screen."
+    },
+    {
+     "role": "user",
+     "text": "Thanks, I'll try that. Also, I'm looking at upgrading my home lab rig for MoE Inference. Currently running 2x RTX 3090s."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a solid setup. What are you looking to improve? Latency or throughput?"
+    },
+    {
+     "role": "user",
+     "text": "Mainly throughput for larger models. I was thinking of adding a third GPU, but honestly, on 2x RTX 3090 systems, investing in CPU cores and DIMMs yields better performance than adding a second GPU card. I feel like I'm hitting memory bandwidth bottlenecks rather than compute limits."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. You prioritize CPU and RAM over additional GPU slots for your current configuration."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. Also, did you check if the new NVIDIA drivers broke CUDA 11.4 compatibility?"
+    },
+    {
+     "role": "assistant",
+     "text": "The latest release notes mention a known issue with CUDA 11.4 on certain kernel versions. I recommend sticking to 12.x for now."
+    },
+    {
+     "role": "user",
+     "text": "Got it. I'll hold off on the driver update. Back to the rig, I want to maximize MoE Inference throughput."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. I'll keep your preference in mind for future hardware recommendations."
+    }
+   ]
+  }
+ ]
+}

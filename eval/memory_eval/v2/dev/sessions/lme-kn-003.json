@@ -1,0 +1,89 @@
+{
+ "episode": "lme-kn-003",
+ "sessions": [
+  {
+   "sid": "lme-kn-003-s1",
+   "date": "2026-08-05",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did you check if my package from Amazon arrived? I ordered a new mechanical keyboard."
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your real-time shipping status, Alan. You might want to check your email or the Amazon app for the latest updates."
+    },
+    {
+     "role": "user",
+     "text": "Ugh, fine. Anyway, I was looking at that MonoNav project for the drone class. It's pretty basic. It uses stereo cameras for depth estimation, which is kind of overkill for simple indoor avoidance."
+    },
+    {
+     "role": "assistant",
+     "text": "Stereo cameras can indeed be computationally expensive. Do you think a simpler approach would work better for your use case?"
+    },
+    {
+     "role": "user",
+     "text": "Probably. I might try swapping the input module. But first, I need to finish this dinner prep. Do you have a good recipe for salmon?"
+    },
+    {
+     "role": "assistant",
+     "text": "A simple pan-seared salmon with asparagus is always a hit. Would you like the step-by-step instructions?"
+    },
+    {
+     "role": "user",
+     "text": "No, I've got it. Just help me find that keyboard tracking number if you can."
+    },
+    {
+     "role": "assistant",
+     "text": "I can't access external tracking systems, Alan. I'd recommend checking your order history directly."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-003-s2",
+   "date": "2026-08-12",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I found out MonoNav actually updated its core architecture recently. It's no longer using stereo cameras."
+    },
+    {
+     "role": "assistant",
+     "text": "That's interesting. What did they switch to?"
+    },
+    {
+     "role": "user",
+     "text": "It claims to use monocular depth for drone collision avoidance now. Much lighter on the hardware."
+    },
+    {
+     "role": "assistant",
+     "text": "Ah, so it's MonoNav is a MAV navigation demo from 2026 that claims to use monocular depth for drone collision avoidance. That is a significant change from your earlier note."
+    },
+    {
+     "role": "user",
+     "text": "Yeah. I need to update the config file for my simulation environment to match this new input type."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. Will you need help writing a script to modify the config?"
+    },
+    {
+     "role": "user",
+     "text": "Not yet. I'm just debugging a weird noise in my microphone first. Can you suggest a good audio interface?"
+    },
+    {
+     "role": "assistant",
+     "text": "For clean audio, brands like Focusrite or Audient are usually reliable. Do you need a specific number of channels?"
+    },
+    {
+     "role": "user",
+     "text": "Just one channel for now. Thanks."
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome. Let me know if you need help with the MonoNav config later."
+    }
+   ]
+  }
+ ]
+}

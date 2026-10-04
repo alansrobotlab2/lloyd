@@ -1,0 +1,81 @@
+{
+ "episode": "lme-te-012",
+ "sessions": [
+  {
+   "sid": "lme-te-012-s1",
+   "date": "2026-06-03",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm still tweaking the latency on my custom assistant prototype. Have you heard of voice-loop?"
+    },
+    {
+     "role": "assistant",
+     "text": "I'm not familiar with a specific widely-known library by that name. Is it a new tool you're using?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, it's what I'm using for turn detection. voice-loop uses Silero VAD and Smart Turn v3 (ONNX-based) for turn detection. It's way smoother than my old energy-based approach."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds like a solid stack. ONNX models are great for low-latency inference. By the way, did you fix that bug with the microphone input you mentioned earlier?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, it was a permissions issue on the new Mac. Anyway, back to voice-loop, the integration with my WebSocket server is working fine now."
+    },
+    {
+     "role": "assistant",
+     "text": "Great to hear. Latency is critical for natural conversation. Are you using any specific buffer sizes?"
+    },
+    {
+     "role": "user",
+     "text": "Just the defaults for now. I want to see how it handles background noise before I optimize further."
+    },
+    {
+     "role": "assistant",
+     "text": "Makes sense. Let me know if you need help parsing the logs."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-012-s2",
+   "date": "2026-06-15",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I finally cleaned up my project structure for voice-loop."
+    },
+    {
+     "role": "assistant",
+     "text": "Nice. What does that involve?"
+    },
+    {
+     "role": "user",
+     "text": "voice-loop is a GitHub repository containing source code for voice mode enhancements. I just pushed the latest refactor."
+    },
+    {
+     "role": "assistant",
+     "text": "Good practice. Keeping the core logic in a repo helps with version control. Did you update the README?"
+    },
+    {
+     "role": "user",
+     "text": "Not yet. I've been too busy trying to get the build to pass on Linux."
+    },
+    {
+     "role": "assistant",
+     "text": "Dependency issues? I can help with that if you paste the error log."
+    },
+    {
+     "role": "user",
+     "text": "Maybe later. Right now I'm just focused on getting the repo link ready to share with my team."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. Let me know when you're ready to debug the Linux build."
+    }
+   ]
+  }
+ ]
+}

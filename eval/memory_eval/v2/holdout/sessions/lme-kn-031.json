@@ -1,0 +1,81 @@
+{
+ "episode": "lme-kn-031",
+ "sessions": [
+  {
+   "sid": "lme-kn-031-s1",
+   "date": "2026-05-26",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to update the marketing blurb for the AutoMem project. Can you check the current benchmark scores?"
+    },
+    {
+     "role": "assistant",
+     "text": "Sure, Alan. According to the latest docs, AutoMem achieves 38% performance in benchmarks."
+    },
+    {
+     "role": "user",
+     "text": "Okay, I'll update the slide deck then. Also, did that package from Amazon arrive?"
+    },
+    {
+     "role": "assistant",
+     "text": "The tracking says it was delivered to your front porch around 2 PM."
+    },
+    {
+     "role": "user",
+     "text": "Good. I'll grab it after dinner. I think we're having pasta tonight."
+    },
+    {
+     "role": "assistant",
+     "text": "Sounds delicious. Do you need the recipe again?"
+    },
+    {
+     "role": "user",
+     "text": "No, I've got it. Just checking on the AutoMem stats so I can tell the investors it's 38% performance."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. 38% is the figure in the report."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-031-s2",
+   "date": "2026-06-02",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, big news on AutoMem. The new model just finished training and the results are in."
+    },
+    {
+     "role": "assistant",
+     "text": "That's exciting! How did it perform?"
+    },
+    {
+     "role": "user",
+     "text": "It's much better than before. AutoMem achieves 51% performance in benchmarks, doubling the performance of a Qwen 2.5 72B model."
+    },
+    {
+     "role": "assistant",
+     "text": "Impressive improvement. I will update my notes."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, huge jump. By the way, my internet is acting up again. Any tips?"
+    },
+    {
+     "role": "assistant",
+     "text": "Have you tried restarting the router? That usually fixes intermittent drops."
+    },
+    {
+     "role": "user",
+     "text": "I did, but it's still flickering. I might call the ISP later. Anyway, back to AutoMem, I need to send this update to the team."
+    },
+    {
+     "role": "assistant",
+     "text": "I can help draft that email if you'd like."
+    }
+   ]
+  }
+ ]
+}

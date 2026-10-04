@@ -1,0 +1,97 @@
+{
+ "episode": "lme-te-054",
+ "sessions": [
+  {
+   "sid": "lme-te-054-s1",
+   "date": "2026-07-20",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, can you check if the new coffee beans arrived?"
+    },
+    {
+     "role": "assistant",
+     "text": "I checked the tracking info. It says the package is out for delivery today."
+    },
+    {
+     "role": "user",
+     "text": "Great. I'm running late for the meeting with Ahnaf Prio. Did you see my notes?"
+    },
+    {
+     "role": "assistant",
+     "text": "You have a note for 2:00 PM labeled 'Sync with Ahnaf'."
+    },
+    {
+     "role": "user",
+     "text": "Right. I just wanted to mention that Ahnaf Prio presented on the Agentic Commerce Stack."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. I'll keep that in mind for our discussion."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. Also, it's raining here. Hope the beans don't get wet."
+    },
+    {
+     "role": "assistant",
+     "text": "I'll double-check the delivery notes for special handling instructions."
+    },
+    {
+     "role": "user",
+     "text": "Appreciate it. Heading out now."
+    },
+    {
+     "role": "assistant",
+     "text": "Good luck with the meeting!"
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-054-s2",
+   "date": "2026-07-27",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, remind me to buy milk later."
+    },
+    {
+     "role": "assistant",
+     "text": "Added to your list. Anything else?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, I was looking at Ahnaf Prio's recent activity."
+    },
+    {
+     "role": "assistant",
+     "text": "Did you find anything interesting?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, it turns out Ahnaf Prio presented a talk on the Agentic Commerce Stack."
+    },
+    {
+     "role": "assistant",
+     "text": "That's consistent with what you mentioned earlier. Would you like to add it to your calendar?"
+    },
+    {
+     "role": "user",
+     "text": "No, just checking. My printer is jamming again, by the way."
+    },
+    {
+     "role": "assistant",
+     "text": "Have you tried the manual reset lever?"
+    },
+    {
+     "role": "user",
+     "text": "Working on it. Thanks."
+    },
+    {
+     "role": "assistant",
+     "text": "Let me know if you need troubleshooting steps."
+    }
+   ]
+  }
+ ]
+}

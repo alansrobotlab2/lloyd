@@ -1,0 +1,65 @@
+{
+ "episode": "lme-mu-034",
+ "sessions": [
+  {
+   "sid": "lme-mu-034-s1",
+   "date": "2026-08-22",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, the new voice MD is looking sharp. I've made sure it's a persona artifact distilled from Eve Bouffard's public writings, including tweets, to define her tone."
+    },
+    {
+     "role": "assistant",
+     "text": "That makes sense for capturing her specific cadence. Did you have to clean up the source data much?"
+    },
+    {
+     "role": "user",
+     "text": "Some. Mostly just deduping. By the way, did you see the weather? Rain again."
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, looks like another wet week. Did you bring an umbrella?"
+    },
+    {
+     "role": "user",
+     "text": "Forgot it again. Anyway, the model's latency is good now. Back to the persona, it really nails the sarcasm."
+    },
+    {
+     "role": "assistant",
+     "text": "Glad the tuning worked out. The tweet-based tone is definitely distinct."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-034-s2",
+   "date": "2026-09-02",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I was thinking about the legal stuff for the voice MD. The privacy and IP posture of routing unfiltered streams and scraped writings through commercial models is an open question."
+    },
+    {
+     "role": "assistant",
+     "text": "That is a significant compliance risk. Have you consulted legal on the data sourcing?"
+    },
+    {
+     "role": "user",
+     "text": "Not yet. We need to review the contracts. Also, did you finish reviewing the invoice for the GPU cluster?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, the invoice looks correct. The cluster is provisioned."
+    },
+    {
+     "role": "user",
+     "text": "Good. The IP question is the only blocker for launch now. I don't want to leak proprietary style guides."
+    },
+    {
+     "role": "assistant",
+     "text": "Agreed. The unfiltered stream issue needs a clear policy before we push to production."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,81 @@
+{
+ "episode": "lme-kn-048",
+ "sessions": [
+  {
+   "sid": "lme-kn-048-s1",
+   "date": "2026-06-25",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to cite the Voyager paper for my thesis but I'm getting conflicting dates."
+    },
+    {
+     "role": "assistant",
+     "text": "That happens often with preprints. What dates are you seeing?"
+    },
+    {
+     "role": "user",
+     "text": "I have it noted down as 'Introduced by Wang et al. in April 2023' in my old notes. Is that right?"
+    },
+    {
+     "role": "assistant",
+     "text": "I can't verify your specific notes, but April 2023 is a common early preprint date for many 2023 papers."
+    },
+    {
+     "role": "user",
+     "text": "Okay, I'll stick with that for now. Anyway, did you get that bug report about the login screen?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, I have it. Shall I prioritize it for the next sprint?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, please. Also, it's raining here, so I'm cancelling dinner plans."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. Enjoy the rain and the quiet evening."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-048-s2",
+   "date": "2026-07-02",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I checked the official NVIDIA blog post. My old note was wrong. Voyager was actually introduced by Wang et al. in May 2023."
+    },
+    {
+     "role": "assistant",
+     "text": "Thanks for the update. May 2023 is the correct release date for the official announcement."
+    },
+    {
+     "role": "user",
+     "text": "Right. I need to fix the metadata in my citation manager. Also, where is that hardware order?"
+    },
+    {
+     "role": "assistant",
+     "text": "The GPU order is still in transit. Expected arrival is Thursday."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. I'm going to update the BibTeX entry now."
+    },
+    {
+     "role": "assistant",
+     "text": "Let me know if you need help formatting it."
+    },
+    {
+     "role": "user",
+     "text": "Will do. Thanks, Lloyd."
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome."
+    }
+   ]
+  }
+ ]
+}

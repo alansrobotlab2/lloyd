@@ -1,0 +1,81 @@
+{
+ "episode": "lme-te-025",
+ "sessions": [
+  {
+   "sid": "lme-te-025-s1",
+   "date": "2026-06-14",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm deep in the weeds with quantization formats today. I finally got a handle on the technical specs for MXFP4. It is an OCP Microscaling standard using E2M1 data encoding with per-32-element block scales."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. That specific E2M1 encoding with the block scales is quite efficient for hardware implementations. Are you implementing this in a specific framework?"
+    },
+    {
+     "role": "user",
+     "text": "Trying to, but the build is failing. Also, did you hear the forecast? They say it's going to rain all weekend."
+    },
+    {
+     "role": "assistant",
+     "text": "Rain might be nice if you're stuck inside coding. Regarding the build, what's the error message?"
+    },
+    {
+     "role": "user",
+     "text": "Linker errors. Ugh. I need to order some new mechanical switches too, my keyboard is getting sticky."
+    },
+    {
+     "role": "assistant",
+     "text": "I can remind you to order those later. Let's look at the linker errors first."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. I'll try to debug the MXFP4 integration later. Dinner is at 7."
+    },
+    {
+     "role": "assistant",
+     "text": "Enjoy dinner! We can pick this up tomorrow."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-025-s2",
+   "date": "2026-06-24",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I was looking at KV cache compression techniques this morning. I found something interesting called PyramidKV. It is a KV compression method using layerwise budget allocation."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds efficient for long-context tasks. Did you find the paper or just a blog post about it?"
+    },
+    {
+     "role": "user",
+     "text": "Paper. But my coffee machine just broke. Again. I need to call maintenance."
+    },
+    {
+     "role": "assistant",
+     "text": "Sorry to hear that. Maintenance might take a day or two. Did you get the code running for PyramidKV?"
+    },
+    {
+     "role": "user",
+     "text": "Not yet. I'm too distracted by the coffee situation. Also, the weather is surprisingly warm for June."
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, it is unseasonably warm. Try to stay hydrated while you deal with the coffee issue."
+    },
+    {
+     "role": "user",
+     "text": "I will. I'll look at the PyramidKV implementation when I get home."
+    },
+    {
+     "role": "assistant",
+     "text": "Sounds good. Let me know if you need help setting up the environment."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,81 @@
+{
+ "episode": "lme-kn-065",
+ "sessions": [
+  {
+   "sid": "lme-kn-065-s1",
+   "date": "2026-08-12",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, quick check on the RAPTOR benchmark. Did we get the final results for that paper?"
+    },
+    {
+     "role": "assistant",
+     "text": "Hello Alan. I checked the latest logs from the evaluation cluster. Do you have a specific metric in mind?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, the main score. I recall we set the baseline threshold at 0.68 for RAPTOR to be considered competitive."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I will note that the threshold for RAPTOR is currently set at 0.68 for our comparisons."
+    },
+    {
+     "role": "user",
+     "text": "Great. Also, did the new SSDs arrive for the lab?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, the shipment arrived this morning. I've already staged them for installation."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. Keep me posted on the RAPTOR score if it changes."
+    },
+    {
+     "role": "assistant",
+     "text": "Will do. I'll alert you if the metrics shift."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-065-s2",
+   "date": "2026-08-23",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I need to update the comparison table for the report. The RAPTOR numbers are wrong."
+    },
+    {
+     "role": "assistant",
+     "text": "I can help with that. What needs to be corrected?"
+    },
+    {
+     "role": "user",
+     "text": "It’s not just a number issue. RAPTOR is actually just a structure-augmented RAG baseline that is outperformed by HippoRAG2."
+    },
+    {
+     "role": "assistant",
+     "text": "I see. So the key takeaway is that RAPTOR is a structure-augmented RAG baseline outperformed by HippoRAG2. I will update the context accordingly."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. Make sure that’s clear in the next draft."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. I've flagged the section for revision."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. Also, is it going to rain this weekend?"
+    },
+    {
+     "role": "assistant",
+     "text": "The forecast predicts clear skies with a high chance of sunshine."
+    }
+   ]
+  }
+ ]
+}

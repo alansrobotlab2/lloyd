@@ -1,0 +1,43 @@
+{
+ "episode": "lme-pr-019",
+ "sessions": [
+  {
+   "sid": "lme-pr-019-s1",
+   "date": "2026-06-14",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did that hardware order for the Raspberry Pi 5 arrive yet? I'm itching to start the new project."
+    },
+    {
+     "role": "assistant",
+     "text": "Checking the tracking number... yes, it was delivered this morning. You should have it in hand by now."
+    },
+    {
+     "role": "user",
+     "text": "Nice. I just want to get a local LLM running on it for some offline tasks. I've been reading up on Qwen2.5. I think I'll stick with Qwen 2.5 (3b) is recommended for Raspberry Pi 5 due to its balance of speed and performance."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds like a solid plan. The 3B parameter size is indeed a sweet spot for that hardware."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, anything larger feels like it'll crawl. By the way, did you see the rain forecast for tomorrow? It's supposed to be pouring."
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, heavy rain expected starting at 2 PM. I'd recommend moving your outdoor plans if you have any."
+    },
+    {
+     "role": "user",
+     "text": "Good to know. I'll stay in and set up the Pi then. Can you remind me later what software I decided on?"
+    },
+    {
+     "role": "assistant",
+     "text": "Sure, I'll make a note. Is there anything else you need help with right now?"
+    }
+   ]
+  }
+ ]
+}

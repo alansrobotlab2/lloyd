@@ -1,0 +1,89 @@
+{
+ "episode": "lme-te-009",
+ "sessions": [
+  {
+   "sid": "lme-te-009-s1",
+   "date": "2026-06-08",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, can you check the status of the Conversation Relation Linking module? I think it's stuck in the review queue."
+    },
+    {
+     "role": "assistant",
+     "text": "I'm looking into it. It seems to be in a pending state. Do you have specific metrics you're tracking?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, just want to see how much backlog we have. Currently, Conversation Relation Linking (#51) has 900 total pending proposals (130 strong, 770 moderate)."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. That is a significant backlog. I'll note that down for your weekly report."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. By the way, did you see the weather forecast for next week? Looks like rain."
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, I saw that. High chance of precipitation starting Tuesday. You might want to bring an umbrella."
+    },
+    {
+     "role": "user",
+     "text": "Good point. Also, my keyboard is acting up again. The 'k' key is sticky."
+    },
+    {
+     "role": "assistant",
+     "text": "Oh no. Have you tried cleaning it with compressed air? That usually helps with sticky keys."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-009-s2",
+   "date": "2026-06-15",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, update on the pipeline? I'm worried about the confidence scores."
+    },
+    {
+     "role": "assistant",
+     "text": "I checked the logs. There was an issue with the recent batch processing."
+    },
+    {
+     "role": "user",
+     "text": "Right, I noticed Stage 2 of Conversation Relation Linking was skipped because max confidence (0.70) was below the 0.80 threshold."
+    },
+    {
+     "role": "assistant",
+     "text": "That explains the gap in the data. We need to adjust the threshold or improve the model."
+    },
+    {
+     "role": "user",
+     "text": "Agreed. I'll schedule a meeting for Thursday to discuss."
+    },
+    {
+     "role": "assistant",
+     "text": "Sounds good. I'll send the invite."
+    },
+    {
+     "role": "user",
+     "text": "Also, did you order the new monitor?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, it shipped today. Should arrive by Friday."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. I need to set it up before the weekend."
+    },
+    {
+     "role": "assistant",
+     "text": "I'll remind you on Friday morning."
+    }
+   ]
+  }
+ ]
+}

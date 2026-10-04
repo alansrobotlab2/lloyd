@@ -1,0 +1,43 @@
+{
+ "episode": "lme-pr-047",
+ "sessions": [
+  {
+   "sid": "lme-pr-047-s1",
+   "date": "2026-06-08",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I finally got around to testing the new Grok model you mentioned. Honestly, I found Cisco's take spot on: it's inconsistent and struggles with personification despite all the marketing hype. Not a fan."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I'll note your preference against using Grok for creative or personality-driven tasks due to those inconsistencies."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. Stick to the other models for that stuff. Anyway, did you see the rain forecast for next Tuesday?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, there is a 70% chance of showers. You might want to keep an umbrella handy."
+    },
+    {
+     "role": "user",
+     "text": "Good call. I'll add it to my bag. Also, can you check if my order for the mechanical keyboard switches shipped?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your shipping account directly, but if you give me the tracking number, I can look up the status."
+    },
+    {
+     "role": "user",
+     "text": "Never mind, I found the email. It's delayed. Just wanted to vent. Thanks for listening."
+    },
+    {
+     "role": "assistant",
+     "text": "Anytime. Let me know if you need help with anything else."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,81 @@
+{
+ "episode": "lme-kn-022",
+ "sessions": [
+  {
+   "sid": "lme-kn-022-s1",
+   "date": "2026-07-05",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did the server update go through okay?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, the update completed successfully at 02:00 UTC. No errors in the logs."
+    },
+    {
+     "role": "user",
+     "text": "Great. I'm reviewing the metrics for CLARE now. It looks like it results in approximately 5% parameter expansion per task."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. I'll keep that 5% expansion rate in mind for future capacity planning."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, it's a bit high but manageable. Anyway, do you have the recipe for that pasta dish?"
+    },
+    {
+     "role": "assistant",
+     "text": "I can share the carbonara recipe. Do you want the full list of ingredients?"
+    },
+    {
+     "role": "user",
+     "text": "Yes please. Also, is it going to rain tomorrow?"
+    },
+    {
+     "role": "assistant",
+     "text": "Here is the recipe... And yes, there is a 60% chance of rain tomorrow afternoon."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-022-s2",
+   "date": "2026-07-10",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I found a bug in the load balancer config. It keeps timing out on large payloads."
+    },
+    {
+     "role": "assistant",
+     "text": "I can check the nginx logs. Do you have the specific error code?"
+    },
+    {
+     "role": "user",
+     "text": "No, but I fixed it by increasing the timeout. Speaking of which, the optimization team updated the CLARE model."
+    },
+    {
+     "role": "assistant",
+     "text": "Oh? How did that affect the metrics?"
+    },
+    {
+     "role": "user",
+     "text": "It's much more efficient now. CLARE results in approximately 2% parameter expansion per task."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a significant improvement over the previous estimates. I'll update the baseline docs."
+    },
+    {
+     "role": "user",
+     "text": "Please do. Oh, and did you order the new mechanical keyboard?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, it's on the way. Expected delivery is Friday."
+    }
+   ]
+  }
+ ]
+}

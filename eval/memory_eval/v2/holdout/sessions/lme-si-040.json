@@ -1,0 +1,51 @@
+{
+ "episode": "lme-si-040",
+ "sessions": [
+  {
+   "sid": "lme-si-040-s1",
+   "date": "2026-08-08",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm trying to set up a desktop GUI app using Electron, but it's way too heavy. Do you know any lighter alternatives for JavaScript?"
+    },
+    {
+     "role": "assistant",
+     "text": "Have you looked into Tauri or Neutralino.js? They use the system's native webview, so they are much smaller than Electron."
+    },
+    {
+     "role": "user",
+     "text": "I saw Tauri, but I'm not into Rust. I want to stick to JS/TS. What about NodeGui?"
+    },
+    {
+     "role": "assistant",
+     "text": "NodeGui is a great option if you want Qt bindings in Node. It lets you build native-looking apps with JavaScript."
+    },
+    {
+     "role": "user",
+     "text": "Right, I remember reading that Atul Ramachandran is the author of NodeGui. He wrote a really clear tutorial on it last year."
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, his tutorials are quite popular for getting started with Qt in Node. The documentation is solid too."
+    },
+    {
+     "role": "user",
+     "text": "Cool. Anyway, my internet went down again. I need to fix that router setting. Do you remember the default gateway IP?"
+    },
+    {
+     "role": "assistant",
+     "text": "It is usually 192.168.1.1 or 192.168.0.1. Check your command prompt with 'ipconfig' to be sure."
+    },
+    {
+     "role": "user",
+     "text": "Found it. Thanks. Also, did the package for NodeGui install successfully?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your local terminal, but if you ran 'npm install @nodegui/nodegui', it should be in your node_modules folder now."
+    }
+   ]
+  }
+ ]
+}

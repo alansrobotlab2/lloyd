@@ -1,0 +1,97 @@
+{
+ "episode": "lme-te-050",
+ "sessions": [
+  {
+   "sid": "lme-te-050-s1",
+   "date": "2026-05-26",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I've been digging through some recent bug reports. Did you see the one about KV block corruption under rapid lora alternation?"
+    },
+    {
+     "role": "assistant",
+     "text": "I haven't reviewed that specific one yet. Do you have the issue number handy?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, it's GitHub issue #38606. Looks like the memory manager isn't flushing properly when switching adapters too quickly."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds like a tricky race condition. I'll make a note to look into the flush logic."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. Also, do we still have any of those USB-C to HDMI adapters in the supply closet? My laptop port is acting up."
+    },
+    {
+     "role": "assistant",
+     "text": "I believe there are two left on the second shelf, right next to the spare SSDs."
+    },
+    {
+     "role": "user",
+     "text": "Great, I'll grab one. The weather is awful today, so I'm staying in anyway."
+    },
+    {
+     "role": "assistant",
+     "text": "It does look like heavy rain is forecasted for the rest of the afternoon."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, perfect day to debug this adapter issue. Talk later."
+    },
+    {
+     "role": "assistant",
+     "text": "Good luck with the debugging. I'll keep an eye on that issue."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-050-s2",
+   "date": "2026-06-07",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, quick question on the new release pipeline. Does the CI eval wall apply to AgentX releases?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, it does. All major version bumps for AgentX must pass the CI eval wall before merging."
+    },
+    {
+     "role": "user",
+     "text": "Got it. I want to make sure we don't break the build time limits. Did we optimize the test suite recently?"
+    },
+    {
+     "role": "assistant",
+     "text": "We parallelized the integration tests last month, which cut the runtime by about 30%."
+    },
+    {
+     "role": "user",
+     "text": "Nice. By the way, did you order the new mechanical keyboards for the team yet?"
+    },
+    {
+     "role": "assistant",
+     "text": "The order was placed yesterday. Shipping is estimated for next Tuesday."
+    },
+    {
+     "role": "user",
+     "text": "Awesome. I'm running low on coffee too, so maybe I'll stop by the supply room after the standup."
+    },
+    {
+     "role": "assistant",
+     "text": "The new Ethiopian blend just arrived, so it's a good time to restock."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. Thanks for the update on AgentX."
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome. Let me know if you need the specific eval metrics."
+    }
+   ]
+  }
+ ]
+}

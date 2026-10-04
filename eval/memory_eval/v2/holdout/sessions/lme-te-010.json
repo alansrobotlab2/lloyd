@@ -1,0 +1,81 @@
+{
+ "episode": "lme-te-010",
+ "sessions": [
+  {
+   "sid": "lme-te-010-s1",
+   "date": "2026-07-03",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, quick question. I'm debugging a weird rendering glitch in my sidebar today. Any thoughts?"
+    },
+    {
+     "role": "assistant",
+     "text": "Hi Alan. Is it a CSS z-index issue, or is the element itself not rendering? If it's just layering, try checking your stacking context."
+    },
+    {
+     "role": "user",
+     "text": "Nah, the div is there but invisible. I'll check the overflow property. Anyway, I spent this morning reading that new paper on Info-VLA."
+    },
+    {
+     "role": "assistant",
+     "text": "Oh, the Vision-Language-Action one? I saw that hit the feed. What's the main takeaway for you?"
+    },
+    {
+     "role": "user",
+     "text": "It's all about alignment. Specifically, I noted that Info-VLA applies Information-Theoretic Constraints for Continual VLA Alignment."
+    },
+    {
+     "role": "assistant",
+     "text": "That makes sense for preventing catastrophic forgetting while they adapt to new tasks. The info-theoretic angle is a smart way to bound the drift."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. It keeps the old knowledge from evaporating. Okay, back to this CSS nightmare. Thanks for the hint."
+    },
+    {
+     "role": "assistant",
+     "text": "Good luck! Let me know if you want help with the VLA code later."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-010-s2",
+   "date": "2026-07-09",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, did my package for the new mechanical keyboard switches arrive today?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your tracking number, but if you ordered it three days ago, it might be in the local hub. Did you get a notification?"
+    },
+    {
+     "role": "user",
+     "text": "Not yet. I'm stuck inside waiting for it, so I did some more reading on VLM deployment. I found this article called Phase Matters."
+    },
+    {
+     "role": "assistant",
+     "text": "Interesting title. Is it about scheduling or memory management?"
+    },
+    {
+     "role": "user",
+     "text": "Scheduling. It argues that Optimal VLM deployment requires phase-aware scheduling rather than monolithic model placement."
+    },
+    {
+     "role": "assistant",
+     "text": "Ah, treating the prompt encoding and generation as separate phases with different resource needs? That would definitely lower latency for streaming responses."
+    },
+    {
+     "role": "user",
+     "text": "Right. Monolithic placement wastes GPU cycles when the model is just generating tokens. Phase-aware lets you scale those parts independently."
+    },
+    {
+     "role": "assistant",
+     "text": "Makes sense. Better utilization means you can pack more users onto the same hardware without the 'bloat' of static allocation."
+    }
+   ]
+  }
+ ]
+}

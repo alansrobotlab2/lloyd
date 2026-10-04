@@ -1,0 +1,81 @@
+{
+ "episode": "lme-te-072",
+ "sessions": [
+  {
+   "sid": "lme-te-072-s1",
+   "date": "2026-06-14",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm digging into some new security papers. AttackVLA is a benchmark for adversarial and backdoor attacks on Vision-Language-Action Models."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I've noted that down for you."
+    },
+    {
+     "role": "user",
+     "text": "Also, did my package arrive? It was the extra-long HDMI cable for the living room TV."
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to real-time shipping data, but I can check your email if you'd like me to look for a confirmation."
+    },
+    {
+     "role": "user",
+     "text": "No worries, I'll check it myself. Just wanted to make sure you had the AttackVLA context saved."
+    },
+    {
+     "role": "assistant",
+     "text": "It is saved in your memory."
+    },
+    {
+     "role": "user",
+     "text": "Great. I'm heading out for dinner later. Thai food?"
+    },
+    {
+     "role": "assistant",
+     "text": "Sounds delicious. Enjoy your evening!"
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-072-s2",
+   "date": "2026-06-16",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, quick update on that paper. I realized the official description says AttackVLA is a benchmark for evaluating adversarial and backdoor attacks on VLA models."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. I'll update the note to reflect the 'VLA models' phrasing."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. Also, is it going to rain tomorrow? I want to know if I should bring an umbrella to work."
+    },
+    {
+     "role": "assistant",
+     "text": "The forecast shows a 40% chance of light rain in the afternoon, so an umbrella might be wise."
+    },
+    {
+     "role": "user",
+     "text": "Okay, I'll pack one. Just double-checking the AttackVLA definition for my report."
+    },
+    {
+     "role": "assistant",
+     "text": "No problem. Let me know if you need any other definitions."
+    },
+    {
+     "role": "user",
+     "text": "Will do. My coffee machine is leaking again, by the way."
+    },
+    {
+     "role": "assistant",
+     "text": "That's annoying. Have you checked the seal on the reservoir?"
+    }
+   ]
+  }
+ ]
+}

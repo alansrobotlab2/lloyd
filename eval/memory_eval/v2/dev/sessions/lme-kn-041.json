@@ -1,0 +1,81 @@
+{
+ "episode": "lme-kn-041",
+ "sessions": [
+  {
+   "sid": "lme-kn-041-s1",
+   "date": "2026-08-22",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to cite Embodied-CoT in my draft. I think it was at NeurIPS 2024, right?"
+    },
+    {
+     "role": "assistant",
+     "text": "I can help with that. Based on your notes, you mentioned it was presented at NeurIPS 2024."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, that's what I have in my bib file. Also, did my package for the robot arm arrive?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have tracking info for physical packages. I can check your email if you want."
+    },
+    {
+     "role": "user",
+     "text": "Nah, I'll check later. Just make sure the citation format is correct for NeurIPS 2024."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I've noted that Embodied-CoT is cited as NeurIPS 2024 for now."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. Oh, is it raining outside? I forgot my umbrella."
+    },
+    {
+     "role": "assistant",
+     "text": "It looks clear from my local data, but I can't see out the window. Check a weather app!"
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-041-s2",
+   "date": "2026-08-31",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, quick update. I found the actual paper for Embodied-CoT. It was actually presented at CoRL 2025, not NeurIPS."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. I'll update my records to reflect that Embodied-CoT was presented at CoRL 2025."
+    },
+    {
+     "role": "user",
+     "text": "Great. I need to fix the BibTeX entry. Can you generate the correct conference field for me?"
+    },
+    {
+     "role": "assistant",
+     "text": "Sure. The conference field should be 'CoRL 2025'. Do you need the full citation?"
+    },
+    {
+     "role": "user",
+     "text": "Just the field is fine for now. I'm updating my reference manager. Did the pizza I ordered 20 minutes ago arrive?"
+    },
+    {
+     "role": "assistant",
+     "text": "I can't track food deliveries, but 20 minutes is often enough time for pizza!"
+    },
+    {
+     "role": "user",
+     "text": "Haha, fair. Okay, thanks for the correction on the venue."
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome. Let me know if you need help with the rest of the references."
+    }
+   ]
+  }
+ ]
+}

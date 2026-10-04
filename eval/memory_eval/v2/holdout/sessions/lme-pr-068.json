@@ -1,0 +1,43 @@
+{
+ "episode": "lme-pr-068",
+ "sessions": [
+  {
+   "sid": "lme-pr-068-s1",
+   "date": "2026-06-20",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to wrap my head around Arize's recent whitepaper on agent observability. The volume of data is insane."
+    },
+    {
+     "role": "assistant",
+     "text": "It is indeed vast. Are you looking for a summary or specific metrics on ingestion rates?"
+    },
+    {
+     "role": "user",
+     "text": "Just the core philosophy. It really emphasizes that Arize advocates for a telemetry-volume shift where agents read 10x more traces and logs than humans."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. That high-volume, agent-centric reading model is central to their approach."
+    },
+    {
+     "role": "user",
+     "text": "Right. Also, did you hear it's going to rain all weekend? I hate canceling my hiking trip."
+    },
+    {
+     "role": "assistant",
+     "text": "That's unfortunate. You might want to check the radar for any brief dry windows."
+    },
+    {
+     "role": "user",
+     "text": "Probably. Anyway, back to Arize. I need to align our internal tooling with this '10x more traces' rule before I get dinner."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. I'll make a note of that specific constraint for your future requests."
+    }
+   ]
+  }
+ ]
+}

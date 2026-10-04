@@ -1,0 +1,43 @@
+{
+ "episode": "lme-si-022",
+ "sessions": [
+  {
+   "sid": "lme-si-022-s1",
+   "date": "2026-07-11",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, my coffee machine is acting up again. The steam wand just sputters."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds frustrating. Have you tried descaling it recently? Mineral buildup is the usual culprit for sputtering."
+    },
+    {
+     "role": "user",
+     "text": "I did last month. Maybe it's the seal? Anyway, while that's soaking, I was digging through some robotics papers."
+    },
+    {
+     "role": "assistant",
+     "text": "Oh? What are you looking at?"
+    },
+    {
+     "role": "user",
+     "text": "Comparing Qwen-RobotManip against other baselines. It's actually pretty impressive. Qwen-RobotManip substantially outperforms Pi0.5 across all OOD generalization axes."
+    },
+    {
+     "role": "assistant",
+     "text": "That is a significant claim. Outperforming on all OOD axes suggests very robust generalization capabilities."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, the charts don't lie. I'm still trying to fix this coffee machine though. The manual is useless."
+    },
+    {
+     "role": "assistant",
+     "text": "Manuals rarely help with hardware wear and tear. You might need to replace the gasket if descaling didn't work."
+    }
+   ]
+  }
+ ]
+}

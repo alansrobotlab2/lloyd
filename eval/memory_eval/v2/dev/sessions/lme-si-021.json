@@ -1,0 +1,43 @@
+{
+ "episode": "lme-si-021",
+ "sessions": [
+  {
+   "sid": "lme-si-021-s1",
+   "date": "2026-06-26",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, my coffee maker started leaking again. Any quick fixes?"
+    },
+    {
+     "role": "assistant",
+     "text": "That's annoying. Check if the gasket is seated properly or if there's mineral buildup clogging the valve. Descaling might help."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, I'll try that. By the way, I finally looked into RoboBallet. It's an Integrated Task-and-Motion Planning (ITMP) approach."
+    },
+    {
+     "role": "assistant",
+     "text": "Interesting. That framework is becoming quite popular for handling complex manipulation tasks."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. I'm thinking of using it for my next project. Do you think it plays well with ROS2?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, there are bridges available, though you might need to write some custom interfaces depending on your planner."
+    },
+    {
+     "role": "user",
+     "text": "Good to know. I'll keep that in mind. Thanks!"
+    },
+    {
+     "role": "assistant",
+     "text": "No problem. Let me know if you need help with the ROS2 integration later."
+    }
+   ]
+  }
+ ]
+}

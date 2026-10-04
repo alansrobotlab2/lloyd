@@ -1,0 +1,43 @@
+{
+ "episode": "lme-pr-013",
+ "sessions": [
+  {
+   "sid": "lme-pr-013-s1",
+   "date": "2026-05-23",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm deep in the weeds with Reelful's video engine again. The rendering pipeline is acting up on the CI server."
+    },
+    {
+     "role": "assistant",
+     "text": "Sorry to hear that, Alan. Are you seeing specific error logs or just timeouts?"
+    },
+    {
+     "role": "user",
+     "text": "Just timeouts. It's annoying because it makes debugging a pain. Anyway, I've decided we're sticking with Remotion as the core framework."
+    },
+    {
+     "role": "assistant",
+     "text": "Good choice. Why did you settle on that over something like FFmpeg wrappers?"
+    },
+    {
+     "role": "user",
+     "text": "Because I chose Remotion because agents are proficient at writing code, making the output writable by code models and checkable by machines. It aligns with our AI-first architecture."
+    },
+    {
+     "role": "assistant",
+     "text": "Makes sense. The programmatic nature definitely helps with automated validation. Did you order the new GPU nodes yet?"
+    },
+    {
+     "role": "user",
+     "text": "Not yet. I'm waiting for the invoice to clear. Also, did you remember to defragment the local drive?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, that's done. It should be faster now."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,43 @@
+{
+ "episode": "lme-si-049",
+ "sessions": [
+  {
+   "sid": "lme-si-049-s1",
+   "date": "2026-05-31",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, my monitor stand finally arrived. It's a bit wobbly though."
+    },
+    {
+     "role": "assistant",
+     "text": "Oh no, that's annoying. Did you get the Allen wrench? Sometimes tightening the base screws fixes the wobble."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, I just tightened them. Better. Anyway, I've been diving deep into the GEAR-SONIC repo for my VR teleoperation project."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds complex. Are you sticking to the standard setup?"
+    },
+    {
+     "role": "user",
+     "text": "Mostly, but I need to check compatibility. It is supported by GEAR-SONIC using PICO, LeapMotion, and HTC Vive hardware."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. Those are solid choices for that framework."
+    },
+    {
+     "role": "user",
+     "text": "Do you think the LeapMotion tracking is stable enough for fine motor tasks?"
+    },
+    {
+     "role": "assistant",
+     "text": "It can be tricky with occlusions, but usually okay if you're not moving too fast. Have you tested it yet?"
+    }
+   ]
+  }
+ ]
+}

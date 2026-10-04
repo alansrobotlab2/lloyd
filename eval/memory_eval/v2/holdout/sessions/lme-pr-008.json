@@ -1,0 +1,43 @@
+{
+ "episode": "lme-pr-008",
+ "sessions": [
+  {
+   "sid": "lme-pr-008-s1",
+   "date": "2026-08-19",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did you see that article by Kenny Workman on the bio-agents forum?"
+    },
+    {
+     "role": "assistant",
+     "text": "I'm not sure which one you mean. There are a few recent posts about biological substrates for AI."
+    },
+    {
+     "role": "user",
+     "text": "The one where he talks about using wet lab results instead of just code. I really like his stance on it."
+    },
+    {
+     "role": "assistant",
+     "text": "Interesting. Why does that stance appeal to you specifically?"
+    },
+    {
+     "role": "user",
+     "text": "Because he argues that experimental biology can supply a verifiable substrate for AI agents, similar to how code does for software agents. It feels more rigorous."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a strong point about verifiability. It bridges the gap between abstract logic and physical reality."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. Also, did you check if my package from Amazon arrived? The tracking said it was out for delivery yesterday."
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your personal shipping accounts, but usually, if it's been two days, it might be at the local hub. Have you checked the carrier's site directly?"
+    }
+   ]
+  }
+ ]
+}

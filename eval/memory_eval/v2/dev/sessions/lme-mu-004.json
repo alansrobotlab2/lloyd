@@ -1,0 +1,81 @@
+{
+ "episode": "lme-mu-004",
+ "sessions": [
+  {
+   "sid": "lme-mu-004-s1",
+   "date": "2026-06-16",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, my local LLM setup is acting up again. The GPU fans are screaming."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds frustrating. Is it overheating or just under heavy load?"
+    },
+    {
+     "role": "user",
+     "text": "Overheating. I need to clean the dust off the heatsink. Also, I've been reading about how we can make the agents better at self-correction."
+    },
+    {
+     "role": "assistant",
+     "text": "Self-correction is key. What specific mechanism are you looking into?"
+    },
+    {
+     "role": "user",
+     "text": "Prompt learning synthesizes failure explanations into updated system prompts such as agent.md or clinerules."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. That sounds like a robust way to handle edge cases by refining the instructions dynamically."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. Anyway, do you know if there's a good compressed air canister nearby? I need to buy one."
+    },
+    {
+     "role": "assistant",
+     "text": "I can check local electronics stores for you if you share your location."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-004-s2",
+   "date": "2026-06-20",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm trying to explain our new AI methodology to a colleague who is confused."
+    },
+    {
+     "role": "assistant",
+     "text": "Happy to help. What aspect is causing confusion?"
+    },
+    {
+     "role": "user",
+     "text": "He thinks it's just static coding. I told him: Prompt Learning is a methodology for continuously optimizing AI agent performance through structured feedback loops."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a clear definition. It highlights the iterative nature rather than just the code itself."
+    },
+    {
+     "role": "user",
+     "text": "Right. It's about the loop, not just the output. Oh, by the way, did the dinner reservation for Friday go through?"
+    },
+    {
+     "role": "assistant",
+     "text": "Let me check my calendar. Yes, it's confirmed for 7 PM at the Italian place."
+    },
+    {
+     "role": "user",
+     "text": "Great. Thanks. I'll send him that definition again."
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome. Let me know if you need help drafting the email."
+    }
+   ]
+  }
+ ]
+}

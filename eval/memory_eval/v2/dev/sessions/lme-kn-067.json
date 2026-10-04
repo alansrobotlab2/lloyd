@@ -1,0 +1,81 @@
+{
+ "episode": "lme-kn-067",
+ "sessions": [
+  {
+   "sid": "lme-kn-067-s1",
+   "date": "2026-05-26",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm tweaking the evaluation script. Right now, the objective scores are just integers {0, 1, 2}. It feels too coarse."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. Integer steps can be limiting for fine-grained ranking. Did you consider floats?"
+    },
+    {
+     "role": "user",
+     "text": "Maybe, but for now let's stick to the integer logic. Oh, also, did that hardware order for the new SSD arrive?"
+    },
+    {
+     "role": "assistant",
+     "text": "The tracking number was 1Z999... it shows as out for delivery today."
+    },
+    {
+     "role": "user",
+     "text": "Nice. I'll keep the {0, 1, 2} setup for this run."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I'll note that the current objective layer uses integer scores."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. Also, is it going to rain tomorrow?"
+    },
+    {
+     "role": "assistant",
+     "text": "Looks like a 40% chance of showers in the afternoon."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-067-s2",
+   "date": "2026-05-30",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, quick update on the eval pipeline. We've overhauled the objective layer."
+    },
+    {
+     "role": "assistant",
+     "text": "Oh? What's the new structure?"
+    },
+    {
+     "role": "user",
+     "text": "We moved away from integers. Objective scores are restricted to the set {0.0, 0.5, 1.0} now."
+    },
+    {
+     "role": "assistant",
+     "text": "That allows for partial credit without being too noisy. Noted."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. By the way, did you check if the SSD installation guide is online?"
+    },
+    {
+     "role": "assistant",
+     "text": "I can look that up for you after we finish this chat."
+    },
+    {
+     "role": "user",
+     "text": "Cool. Just remember the new score set for future references."
+    },
+    {
+     "role": "assistant",
+     "text": "Will do."
+    }
+   ]
+  }
+ ]
+}

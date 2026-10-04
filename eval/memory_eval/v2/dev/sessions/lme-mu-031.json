@@ -1,0 +1,81 @@
+{
+ "episode": "lme-mu-031",
+ "sessions": [
+  {
+   "sid": "lme-mu-031-s1",
+   "date": "2026-08-12",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm tweaking my local LLM setup. I just finished running a perplexity test for the Q4_K_M quantization on WikiText-2. The result was approximately 6.8."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. I've noted that the Q4_K_M perplexity on WikiText-2 is ~6.8. That's a solid baseline for that quant level."
+    },
+    {
+     "role": "user",
+     "text": "Yeah. Also, do you know if my order for the new cooling fans has shipped yet? It was stuck in 'processing' for two days."
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have direct access to your retailer's tracking, but I can draft an email to customer support if you'd like. Or you could check the carrier's site with the tracking number."
+    },
+    {
+     "role": "user",
+     "text": "I'll check the site. Thanks. One last thing, the kitchen faucet is dripping again. Any quick fix for that?"
+    },
+    {
+     "role": "assistant",
+     "text": "Usually it's a worn-out washer or O-ring. If it's a compression faucet, turning off the water and replacing the washer usually works. For cartridge faucets, you might need to replace the whole cartridge."
+    },
+    {
+     "role": "user",
+     "text": "Okay, I'll look into the faucet later. Back to the model, let's keep this data point in mind."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I'll keep the Q4_K_M benchmark result in context for our future comparisons."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-031-s2",
+   "date": "2026-08-24",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I ran another test today. This time I used IQ4_XS on WikiText-2. The perplexity came out at approximately 6.8 as well. It seems there's no measurable quality loss compared to Q4_K_M."
+    },
+    {
+     "role": "assistant",
+     "text": "Interesting. So IQ4_XS matches the Q4_K_M perplexity of ~6.8 on WikiText-2? That suggests significant efficiency gains without performance penalties."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. I'm trying to decide which one to deploy for the mobile app. The file size difference is huge."
+    },
+    {
+     "role": "assistant",
+     "text": "IQ4_XS is generally smaller. If the perplexity is identical, you'd get better memory efficiency with the same quality. That's a strong case for IQ4_XS."
+    },
+    {
+     "role": "user",
+     "text": "Agreed. By the way, did it rain here today? I've been indoors all day coding."
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, there were scattered showers in the afternoon. It cleared up around 5 PM, so you might have missed the worst of it."
+    },
+    {
+     "role": "user",
+     "text": "I bet. I didn't even notice. Okay, I'm going to start the migration to IQ4_XS. Keep both those numbers handy."
+    },
+    {
+     "role": "assistant",
+     "text": "Will do. I have both Q4_K_M and IQ4_XS recorded at ~6.8 for WikiText-2. Good luck with the migration!"
+    }
+   ]
+  }
+ ]
+}

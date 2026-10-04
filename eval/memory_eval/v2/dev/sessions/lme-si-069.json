@@ -1,0 +1,43 @@
+{
+ "episode": "lme-si-069",
+ "sessions": [
+  {
+   "sid": "lme-si-069-s1",
+   "date": "2026-08-03",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, my Nginx server is acting up. Every time I try to stream those long LLM responses, the connection just drops after a few minutes. It's driving me nuts."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds frustrating. Nginx can sometimes struggle with long-lived, unbuffered connections if the timeouts aren't tuned correctly. Are you seeing a 502 Bad Gateway or just a silent timeout?"
+    },
+    {
+     "role": "user",
+     "text": "Just silent timeouts. The UI spinner keeps going, but the data stops. I tried increasing the proxy_read_timeout to 60s, but no luck. It feels like the connection tracking is failing me."
+    },
+    {
+     "role": "assistant",
+     "text": "Ah, if active connection tracking is the bottleneck, Nginx might not be the best fit for heavy streaming workloads. Have you considered **Envoy** as a proxy alternative? It handles streaming LLM responses with active connection tracking much more gracefully than Nginx."
+    },
+    {
+     "role": "user",
+     "text": "Envoy? I've heard of it but never tried it. Does it require a completely different config syntax? I'm worried about the learning curve before my sprint review on Thursday."
+    },
+    {
+     "role": "assistant",
+     "text": "The syntax is indeed different—YAML-based and more modular—but for streaming, it's worth it. It has built-in features for long-lived connections that Nginx lacks out of the box. You could set up a sidecar or a standalone gateway just for the LLM endpoints."
+    },
+    {
+     "role": "user",
+     "text": "Okay, that actually makes sense. I'll look into Envoy's docs for streaming proxies. Thanks for the tip. By the way, did you hear it's going to rain all day tomorrow? I need to bring an umbrella."
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, the forecast shows 100% chance of precipitation. Definitely grab the umbrella. Let me know if you want a sample Envoy config for SSE streaming later."
+    }
+   ]
+  }
+ ]
+}

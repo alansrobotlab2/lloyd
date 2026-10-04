@@ -39,8 +39,28 @@ def _episode(qid: str, gold: str) -> dict:
         {"role": "assistant", "text": "noted"}]}]}
 
 
+_AUTO_AUDIT = object()
+
+
+def _full_audit(counts: dict[str, int], holdout: int) -> dict:
+    """The label audit a fixture freezes with by default: it opens every item it
+    holds and finds no defect. #2170 clause 4 refuses to SCORE a pilot version
+    that records no audit at all, so a fixture that wants to reach the scoring
+    path has to carry one, exactly as a real version does — `test_a_pilot_set_
+    with_no_recorded_audit_is_refused...` pins the other case."""
+    n = sum(counts.values()) + holdout
+    return {"audited": n, "clean": n, "brittle": 0, "defective": 0,
+            "source": "tests/test_memory_eval.py fixture", "audited_at": "2026-01-01"}
+
+
 def make_set(tmp: Path, counts: dict[str, int], holdout: int = 2,
-             generator: str = GENERATOR) -> Path:
+             generator: str = GENERATOR, label_status: str = "pilot",
+             label_audit=_AUTO_AUDIT) -> Path:
+    """Freeze a throwaway version. `label_audit` defaults to the fixture's own
+    full-coverage record; pass a dict to pin particular counts, or `None` to
+    freeze a version that records no audit (#2170 clause 4)."""
+    if label_audit is _AUTO_AUDIT:
+        label_audit = _full_audit(counts, holdout)
     root = tmp / "v-test"
     for leg, spec in (("dev", counts), ("holdout", {"single_session": holdout})):
         (root / leg / "sessions").mkdir(parents=True)
@@ -51,12 +71,31 @@ def make_set(tmp: Path, counts: dict[str, int], holdout: int = 2,
                 qs.append(q)
                 (root / leg / q["source"]["session_file"]).write_text(json.dumps(_episode(q["id"], "8182")))
         (root / leg / "questions.yaml").write_text(yaml.safe_dump({"questions": qs}, sort_keys=False))
-    M.write_manifest(root, version="vtest", generator_model=generator)
+    M.write_manifest(root, version="vtest", generator_model=generator,
+                     label_status=label_status, label_audit=label_audit)
     return root
 
 
 def _refreeze(root: Path) -> None:
-    M.write_manifest(root, version="vtest", generator_model=GENERATOR)
+    """Re-hash after an edit. The label keys are version metadata, not part of the
+    digest body, so a re-freeze carries them over instead of silently dropping the
+    audit that lets the version be scored (#2170 clause 1/3)."""
+    man = json.loads((root / "manifest.json").read_text())
+    M.write_manifest(root, version="vtest", generator_model=GENERATOR,
+                     label_status=man["label_status"], label_audit=man.get("label_audit"))
+
+
+def _manifest_patch(root: Path, **keys) -> None:
+    """Hand-edit manifest.json WITHOUT re-freezing. Only legal for keys outside the
+    digest body — which is precisely the route #2170's label_status takes, and the
+    reason adding it does not move a frozen set's set_sha."""
+    man = json.loads((root / "manifest.json").read_text())
+    for k, v in keys.items():
+        man.pop(k, None) if v is _DROP else man.__setitem__(k, v)
+    (root / "manifest.json").write_text(json.dumps(man, indent=1, sort_keys=True) + "\n")
+
+
+_DROP = object()
 
 
 def _edit_question(root: Path, fn) -> None:
@@ -912,3 +951,264 @@ def test_rawspan_pair_is_compared_with_a_ci_and_no_expected_direction(tmp_path, 
     assert {(c["a"], c["b"]) for c in art["dev_comparisons"]} == {M.RENDER_PAIR}
     pair = next(c for c in art["dev_comparisons"] if c["metric"] == "correct_strict")
     assert pair["by_category"]["knowledge_update"]["n"] == 2
+
+
+# ── #2170: label_status — the labels' own quality, and what it bounds ────────
+#
+# The harm this closes is on disk: three published artifacts state absolute
+# correct/correct_strict rates for a set whose own audit says "this is 35 of 333,
+# not the human review #1471's closure asks for". A version now declares what its
+# labels are worth (`label_status`: pilot|gold) and every artifact says so beside
+# the set_sha; a pilot version that HAS been spot-audited publishes the measured
+# defect rate and its Wilson interval beside its rates, and a pilot version nobody
+# has audited is refused outright.
+
+V1_SET_SHA = "9cf67d045c38a8c3721151f9002ccce2a9419bfe039b950da55cc29990854eca"
+V1_DROPPED = ("lme-mu-060", "lme-pr-042", "lme-pr-044")
+
+
+def test_label_status_is_required_on_every_version_and_verify_prints_it(tmp_path, capsys):
+    """Clause 1: `load_set` requires the key, its value is pilot or gold, it is
+    exposed on the loaded set, and `verify` prints it."""
+    root = make_set(tmp_path, {"single_session": 3})
+    assert M.load_set(root).label_status == "pilot"
+    assert M.main(["verify", "--set", str(root)]) == 0
+    assert "label_status=pilot" in capsys.readouterr().out
+
+    _manifest_patch(root, label_status=_DROP)
+    with pytest.raises(M.SetLoadError, match="label_status"):
+        M.load_set(root)
+
+    root2 = make_set(tmp_path / "b", {"single_session": 3})
+    _manifest_patch(root2, label_status="candidate")
+    with pytest.raises(M.SetLoadError, match=r"label_status must be one of \('pilot', 'gold'\)"):
+        M.load_set(root2)
+
+
+def test_v1_got_its_label_status_without_moving_its_frozen_set_sha(tmp_path, capsys):
+    """Clause 1's other half, on the real freeze: v1 declares pilot and is still
+    byte-for-byte the 2026-09-25 set. `set_sha` covers only version,
+    generator_model, reserved_ids and the per-leg file hashes (`write_manifest`),
+    so the added manifest keys sit outside the digest — and `verify` still passes."""
+    v1 = M.SET_ROOT / "v1"
+    ms = M.load_set(v1, view="all")
+    assert ms.label_status == "pilot" and ms.n_items == 333
+    assert ms.set_sha == V1_SET_SHA
+    assert M.main(["verify", "--set", str(v1)]) == 0
+    out = capsys.readouterr().out
+    assert f"set_sha={V1_SET_SHA[:16]}" in out and "label_status=pilot" in out
+    assert "dev=267 holdout=66" in out
+
+
+def test_a_gold_version_needs_a_recorded_audit_under_the_defect_ceiling(tmp_path):
+    """The item's `label_status says gold only if it is < 10%`, in code. Wilson
+    upper bounds measured over `eval/stats.wilson_ci`: 0 of 42 audited is
+    [0.0, 0.0838] (under the 10% ceiling); 0 of 24 is [0.0, 0.1380] (over it)."""
+    good = {"audited": 42, "clean": 42, "brittle": 0, "defective": 0, "source": "x/AUDIT.md"}
+    root = make_set(tmp_path, {"single_session": 40}, label_status="gold", label_audit=good)
+    ms = M.load_set(root, view="all")
+    assert ms.label_status == "gold" and ms.n_items == 42
+    assert M.label_quality(ms)["gold_eligible"] is True
+
+    over = make_set(tmp_path / "a", {"single_session": 22}, label_status="gold",
+                    label_audit={"audited": 24, "defective": 0, "clean": 24, "brittle": 0,
+                                 "source": "x/AUDIT.md"})
+    with pytest.raises(M.SetLoadError, match="0.138"):
+        M.load_set(over, view="all")
+
+    no_audit = make_set(tmp_path / "b", {"single_session": 22}, label_status="gold",
+                        label_audit=None)
+    with pytest.raises(M.SetLoadError, match="label_audit"):
+        M.load_set(no_audit, view="all")
+
+
+def test_every_run_artifact_set_block_carries_label_status_beside_set_sha(tmp_path):
+    """Clause 2: the status travels into the artifact, in the `set` block, sitting
+    immediately after the set_sha a reader is comparing."""
+    root = make_set(tmp_path, {"single_session": 22}, label_status="pilot")
+    rep = _run(tmp_path, root)
+    art = json.loads(Path(rep["_path"]).read_text())
+    assert art["set"]["label_status"] == "pilot"
+    keys = list(art["set"])
+    assert keys[keys.index("set_sha") + 1] == "label_status"
+
+    ab = M.prefetch_retrieval(["--set", str(root), "--corpus", str(tmp_path / "corpus"),
+                               "--arms", "prefetch,prefetch_rel",
+                               "--out-dir", str(tmp_path / "ab")],
+                              select=lambda query, rank: [])
+    ab_art = json.loads(Path(ab["_path"]).read_text())
+    assert ab_art["set"]["label_status"] == "pilot"
+    ab_keys = list(ab_art["set"])
+    assert ab_keys[ab_keys.index("set_sha") + 1] == "label_status"
+
+
+def test_a_pilot_set_with_a_recorded_audit_publishes_the_defect_rate_and_interval(tmp_path,
+                                                                                 capsys):
+    """Clause 3: a pilot version whose manifest records an audit publishes the
+    measured defect rate with its Wilson interval, and the scores still come out —
+    the shipped --arms runs keep working, now qualified. 3 defective of 22 audited
+    is 0.1364 [0.0475, 0.3334]."""
+    root = make_set(tmp_path, {"single_session": 22},
+                    label_audit={"audited": 22, "clean": 18, "brittle": 1, "defective": 3,
+                                 "source": "v1/AUDIT.md shape", "audited_at": "2026-09-25"})
+    rep = _run(tmp_path, root)
+    art = json.loads(Path(rep["_path"]).read_text())
+    lq = art["label_quality"]
+    assert lq["label_status"] == "pilot"
+    assert (lq["audited"], lq["defective"], lq["n_items"]) == (22, 3, 24)
+    assert lq["coverage"] == 0.9167
+    assert lq["defect_rate"] == 0.1364 and lq["defect_ci95"] == [0.0475, 0.3334]
+    assert lq["gold_eligible"] is False
+    # the rates are still emitted, so an existing --arms run still parses
+    assert art["dev"]["history"]["single_session"]["correct"]["n"] == 22
+    printed = capsys.readouterr().out
+    # the headline prints ahead of every rate: same numbers as the artifact, with
+    # the interval's bounds rounded for a human (0.0475 prints as 4.8%)
+    assert "labels: pilot" in printed and "audited 22 of 24" in printed
+    assert "clean 18 / brittle 1 / defective 3" in printed
+    assert "13.6%" in printed and "[4.8%, 33.3%]" in printed
+    assert "PILOT number" in printed
+
+
+def test_v1_published_audit_matches_v1_AUDIT_md():
+    """Clause 3 on the real record seeded into v1's manifest from v1/AUDIT.md:
+    35 of 333 audited, 24 clean / 8 brittle / 3 defective = 8.6%, Wilson 95%
+    [3.0%, 22.4%] — the audit's own printed numbers, and not gold-eligible."""
+    ms = M.load_set(M.SET_ROOT / "v1", view="all")
+    lq = M.label_quality(ms)
+    assert (lq["audited"], lq["defective"], lq["clean"], lq["brittle"]) == (35, 3, 24, 8)
+    assert lq["n_items"] == 333 and lq["coverage"] == 0.1051
+    assert lq["defect_rate"] == 0.0857 and lq["defect_ci95"] == [0.0296, 0.2238]
+    assert lq["gold_eligible"] is False
+    assert "AUDIT.md" in str(lq["audit_source"])
+
+
+def test_a_pilot_set_with_no_recorded_audit_is_refused_before_any_rate(tmp_path):
+    """Clause 4: no audit recorded means no scoring — refused before a single
+    answer is asked for, so no correct/correct_strict rate exists anywhere, and the
+    refusal names the manifest key that is missing."""
+    root = make_set(tmp_path, {"single_session": 22}, label_audit=None)
+    assert M.load_set(root).label_audit is None
+    called: list[int] = []
+    out = tmp_path / "unaudited-runs"
+    with pytest.raises(M.LabelAuditMissing, match="label_audit"):
+        M.run(["--set", str(root), "--arms", "closed_book", "--judge", "rules",
+               "--label", "t", "--out-dir", str(out)],
+              complete=_fake_complete(lambda m: called.append(1) or "no idea"),
+              primary=("http://x", "fake"))
+    assert not called, "the refusal has to come before any answer is asked for"
+    assert not out.exists(), "and before any artifact is written"
+
+
+def test_v2_freezes_v1_minus_the_three_defective_items():
+    """Clause 5: v2 is v1 with the 3 items its own audit called defective dropped
+    (lme-mu-060, lme-pr-042, lme-pr-044) — 330 items, dev 264, holdout 66 untouched,
+    their session files gone, every per-leg file hash verifying (a load IS that
+    check), and v1's legs still byte-identical because v1 still verifies."""
+    v1 = M.load_set(M.SET_ROOT / "v1", view="all")
+    v2 = M.load_set(M.SET_ROOT / "v2", view="all")
+    assert v2.version == "v2" and v2.label_status == "pilot"
+    assert len(v2.dev) == 264 and len(v2.holdout) == 66 and v2.n_items == 330
+    assert set(V1_DROPPED).isdisjoint({q.id for q in v2.dev} | {q.id for q in v2.holdout})
+    assert {q.id for q in v2.dev} == {q.id for q in v1.dev} - set(V1_DROPPED)
+    assert {q.id for q in v2.holdout} == {q.id for q in v1.holdout}
+    for qid in V1_DROPPED:
+        assert not (M.SET_ROOT / "v2" / "dev" / "sessions" / f"{qid}.json").exists()
+    man = json.loads((M.SET_ROOT / "v2" / "manifest.json").read_text())
+    assert man["counts"]["dev"] == {"single_session": 57, "multi_session": 47,
+                                    "knowledge_update": 53, "temporal": 57, "preference": 50}
+    assert man["set_sha"] != v1.set_sha
+    assert v1.set_sha == V1_SET_SHA
+
+
+def test_v2_label_audit_is_derived_from_v1s_and_cannot_claim_gold():
+    """What v2 may honestly claim about its labels, and what it may not: of the 35
+    items v1's audit opened, 32 survive into v2 and none of those 32 was judged
+    defective, so the measured defect rate is 0.0 [0.0, 0.1072] over 32 audited of
+    330 — a 9.7% sample whose Wilson upper bound (10.7%) is ABOVE the 10% ceiling.
+    v2 therefore stays pilot until a person reviews it: dropping the three known
+    defects is not a gold set."""
+    ms = M.load_set(M.SET_ROOT / "v2", view="all")
+    lq = M.label_quality(ms)
+    assert (lq["audited"], lq["defective"], lq["clean"], lq["brittle"]) == (32, 0, 24, 8)
+    assert lq["n_items"] == 330 and lq["coverage"] == 0.097
+    assert lq["defect_rate"] == 0.0 and lq["defect_ci95"] == [0.0, 0.1072]
+    assert lq["gold_eligible"] is False
+    assert "v1/AUDIT.md" in str(lq["audit_source"])
+    # Scoring v2 is permitted — clause 4's refusal is about a MISSING audit, and
+    # v2 records one, however partial. This call raising is the refusal firing.
+    assert M.require_label_audit(ms) is None
+
+
+def test_the_recall_retrieval_report_also_carries_label_status_beside_set_sha(tmp_path,
+                                                                              monkeypatch):
+    """Clause 2's third producer. #1485's retrieval half runs with no model and no
+    judge, so the reading's own header is all that stands between it and a quoted
+    number — and clause 2 says no LloydMemEval artifact may be published without
+    its label_status. One stubbed `_vault_recall` answers both arms identically, so
+    the paired diffs come out 0.0 and only the header is under test."""
+    import agent_mcp.vault as V
+
+    root = make_set(tmp_path, {"single_session": 3})
+    ms = M.load_set(root)
+    monkeypatch.setattr(V, "_vault_recall",
+                        lambda a: {"documents": [{"path": "notes/northwind.md",
+                                                 "snippet": "Northwind Traders",
+                                                 "excerpt": "Northwind Traders"}]})
+    out_path = tmp_path / "recall.json"
+    out = M.recall_retrieval(["--set", str(root), "--out", str(out_path)])
+    assert out["set"] == {"version": "vtest", "set_sha": ms.set_sha, "label_status": "pilot"}
+    art = json.loads(out_path.read_text())
+    assert art["set"] == out["set"]
+    assert art["label_quality"]["defect_rate"] == 0.0
+    assert art["label_quality"]["gold_eligible"] is False
+    assert art["n"] == 3
+
+
+def test_the_vault_witness_of_the_unbounded_baseline_reproduces_its_quoted_numbers():
+    """The published run this item cites has to be re-readable after it was copied
+    into the vault (the clause-6 witness, 334 lines), so the figures the item
+    quotes about it are checked against the committed bytes rather than against a
+    sentence. Three things must stay true of those bytes: the run's `set` block
+    records v1 and its full `set_sha`; it carries no `label_status` key at all —
+    that is precisely the gap this item exists to close, so it must stay visible
+    rather than be quietly rewritten; and its all-category `correct` rates are the
+    ones quoted in the item and in the committed note.
+
+    A rewrite of the extract that quietly "improves" the baseline, or that backfills
+    a label_status the 2026-09-25 run never wrote, goes red here.
+
+    A missing copy is a skip, not a pass: the bytes live in the vault repo, which
+    this suite does not own, so their absence is someone else's pending action."""
+    src = Path.home() / "obsidian" / "backlog" / "data" / \
+        "lloydmemeval-baseline-2026-09-25.json"
+    if not src.exists():
+        pytest.skip(f"{src} is not in the vault working tree (vault commit b7edff28)")
+    art = json.loads(src.read_text())
+    witness = art["_witness"]
+
+    assert art["set"]["version"] == "v1"
+    assert art["set"]["set_sha"] == V1_SET_SHA
+    assert art["set"]["n_dev"] == 267 and art["set"]["n_holdout"] == 66
+    assert "label_status" not in art["set"], \
+        "the pre-gate baseline must stay without the field this item added"
+
+    rel = art["dev"]["prefetch_rel"]["all"]["correct"]
+    pre = art["dev"]["prefetch"]["all"]["correct"]
+    assert (rel["k"], rel["n"], rel["rate"]) == (170, 267, 0.6367)
+    assert (pre["k"], pre["n"], pre["rate"]) == (139, 267, 0.5206)
+    assert pre["rate"] < rel["rate"], "the item's claim is that prefetch_rel scored higher"
+
+    pair = [c for c in art["dev_comparisons"]
+            if (c["a"], c["b"], c["metric"]) == ("prefetch", "prefetch_rel", "correct")]
+    assert len(pair) == 1, "the extract keeps exactly the paired comparison it quotes"
+    overall = pair[0]["by_category"]["all"]
+    assert overall["diff"] == 0.1161 and overall["n"] == 267
+    assert overall["ci"] == [0.0637, 0.1685]
+    assert overall["significant"] is True, "the published gain is a significant one"
+    assert overall["b"] - overall["a"] == pytest.approx(overall["diff"], abs=1e-4)
+
+    assert witness["label_status_hits_in_original"] == 0, \
+        "the copy asserts the original carried no label field; check it still holds"
+    assert str(witness["source_file"]).endswith(
+        "lloyd-data/eval/1480/runs/lloydmemeval-baseline-2026-09-25.json")

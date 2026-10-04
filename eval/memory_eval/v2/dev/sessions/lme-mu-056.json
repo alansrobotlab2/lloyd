@@ -1,0 +1,81 @@
+{
+ "episode": "lme-mu-056",
+ "sessions": [
+  {
+   "sid": "lme-mu-056-s1",
+   "date": "2026-07-16",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, the kitchen sink is leaking again. Can you remind me of the plumber's number?"
+    },
+    {
+     "role": "assistant",
+     "text": "Sure, it's 555-0199. Did you manage to turn off the main valve under the cabinet?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, it's stopped. Anyway, I was reading up on some AI research today. Ming-Yu Liu discusses Physical AI learning across modalities."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds like a broad topic. Is this for a paper you're writing or just general curiosity?"
+    },
+    {
+     "role": "user",
+     "text": "Just curiosity. I'm trying to understand how different data types interact. The weather here is surprisingly mild for July, though."
+    },
+    {
+     "role": "assistant",
+     "text": "It is a bit unusual. I'll make a note to check the forecast for the rest of the week."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. Also, did I ever tell you about the dinner plans for Saturday?"
+    },
+    {
+     "role": "assistant",
+     "text": "You mentioned reservations at Luigi's for 7 PM."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-056-s2",
+   "date": "2026-07-25",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, my headphones are acting up. The left earbud has static. Any quick fixes?"
+    },
+    {
+     "role": "assistant",
+     "text": "Try resetting them by holding the power button for 10 seconds. Sometimes it's just a firmware glitch."
+    },
+    {
+     "role": "user",
+     "text": "That worked, thanks. I've been digging deeper into that Ming-Yu Liu stuff. Specifically, Ming-Yu Liu discusses how Physical AI learns across language, video, and action."
+    },
+    {
+     "role": "assistant",
+     "text": "Ah, so you're looking at the specific triad of modalities now. That clarifies the scope significantly."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. I need to cite this in my presentation next week. By the way, is the hardware order for the new SSDs shipped yet?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, the tracking number was sent to your email this morning. It should arrive by Thursday."
+    },
+    {
+     "role": "user",
+     "text": "Great. I also need to buy groceries. Do we have any milk left?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have visibility into your fridge, but I can add milk to your shopping list if you'd like."
+    }
+   ]
+  }
+ ]
+}

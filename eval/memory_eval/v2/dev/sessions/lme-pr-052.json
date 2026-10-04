@@ -1,0 +1,51 @@
+{
+ "episode": "lme-pr-052",
+ "sessions": [
+  {
+   "sid": "lme-pr-052-s1",
+   "date": "2026-07-13",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to fix the timeout issue on the local dev server. It keeps hanging when I try to access the /admin panel."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds frustrating. Have you checked the firewall settings or if another process is locking that port? Sometimes background updates interfere."
+    },
+    {
+     "role": "user",
+     "text": "No, ports are clear. I think it's the indexing logic choking on the large dataset. I've been thinking about how we handle the search performance."
+    },
+    {
+     "role": "assistant",
+     "text": "Ah, indexing can definitely cause bottlenecks with large data. Are you using a standard single-scale index?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, and it's inefficient. I'm done with the old way. Stop Chunking Like It's 2022 advocates for multiscale qmd indexing, so I want to switch to that approach."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it, we'll prioritize the multiscale qmd approach for the indexing module."
+    },
+    {
+     "role": "user",
+     "text": "Also, did you order those new mechanical keyboard switches I mentioned?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, the tactile ones are on their way, expected Friday."
+    },
+    {
+     "role": "user",
+     "text": "Great. Back to the code, let's draft the new indexing structure."
+    },
+    {
+     "role": "assistant",
+     "text": "I'll prepare the outline for the new indexing implementation."
+    }
+   ]
+  }
+ ]
+}

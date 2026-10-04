@@ -1,0 +1,81 @@
+{
+ "episode": "lme-mu-016",
+ "sessions": [
+  {
+   "sid": "lme-mu-016-s1",
+   "date": "2026-07-20",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, quick question about the MOTIF hand sensors. I'm trying to map out the data streams for the control loop. What exactly is on the fingertips?"
+    },
+    {
+     "role": "assistant",
+     "text": "The MOTIF hand integrates dense tactile arrays (6×6, 2.5mm resolution, 20g trigger), 9-axis IMUs at each joint, an onboard FLIR Lepton 3.5 thermal camera, a ToF depth sensor, and an RGB camera."
+    },
+    {
+     "role": "user",
+     "text": "Wow, 20g trigger is sensitive. Does that mean I need to filter the signal heavily for the grasp planner?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, you will likely need low-pass filtering. The 2.5mm resolution is quite fine, so noise can be an issue."
+    },
+    {
+     "role": "user",
+     "text": "Makes sense. Also, did you ever order that new mechanical keyboard I mentioned?"
+    },
+    {
+     "role": "assistant",
+     "text": "No, I haven't ordered anything recently. You might want to check your shopping list app."
+    },
+    {
+     "role": "user",
+     "text": "Ah, right. I'll do that. Thanks for the sensor specs, Lloyd."
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome! Let me know if you need help with the filtering code."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-016-s2",
+   "date": "2026-07-24",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm updating the budget for the robotics lab. How much are we paying for the MOTIF hand units?"
+    },
+    {
+     "role": "assistant",
+     "text": "The MOTIF hand is built on a LEAP hand chassis and costs under $4000."
+    },
+    {
+     "role": "user",
+     "text": "Under $4000 is great. That fits within the grant limit. Is the LEAP chassis compatible with our old UR5?"
+    },
+    {
+     "role": "assistant",
+     "text": "The LEAP hand chassis is generally compatible, but you'll need to check the mounting adapter for the UR5."
+    },
+    {
+     "role": "user",
+     "text": "Good point. I'll look into the adapters. By the way, is it raining outside?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, it is currently raining in your area."
+    },
+    {
+     "role": "user",
+     "text": "Figured. Okay, I'll note down the cost and chassis info for the report."
+    },
+    {
+     "role": "assistant",
+     "text": "Sounds good. Have a productive afternoon!"
+    }
+   ]
+  }
+ ]
+}

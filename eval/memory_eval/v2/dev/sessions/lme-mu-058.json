@@ -1,0 +1,89 @@
+{
+ "episode": "lme-mu-058",
+ "sessions": [
+  {
+   "sid": "lme-mu-058-s1",
+   "date": "2026-08-22",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, my laptop fan is screaming again. Can you help me troubleshoot?"
+    },
+    {
+     "role": "assistant",
+     "text": "Hi Alan. That sounds frustrating. First, let's check if any heavy processes are running in the background. Try opening your Task Manager or Activity Monitor."
+    },
+    {
+     "role": "user",
+     "text": "Already checked. Just Chrome and some code editors. It gets loud when I run local models."
+    },
+    {
+     "role": "assistant",
+     "text": "That makes sense given the compute load. You might want to check for dust buildup or consider a cooling pad. Did you clean it recently?"
+    },
+    {
+     "role": "user",
+     "text": "Not lately. I'll get to it this weekend. Anyway, I was reading up on the UK Number 10 Data Science team for that article I'm writing."
+    },
+    {
+     "role": "assistant",
+     "text": "Oh, interesting topic. They are quite prominent in government tech. What have you found so far?"
+    },
+    {
+     "role": "user",
+     "text": "The recruitment stats are wild. The team has a highly selective recruitment process with a 0.7% acceptance rate."
+    },
+    {
+     "role": "assistant",
+     "text": "Wow, that is extremely competitive. It explains why their output is so high quality."
+    },
+    {
+     "role": "user",
+     "text": "Right? It's like applying to Ivy League but for public sector coding. Anyway, back to the fan..."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-058-s2",
+   "date": "2026-08-24",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, did my order for the new mechanical keyboard switches arrive yet?"
+    },
+    {
+     "role": "assistant",
+     "text": "Let me check your tracking info. Ah, yes, the package was marked delivered yesterday. Check your porch or neighbor's mailbox?"
+    },
+    {
+     "role": "user",
+     "text": "Found it! Thanks. I'm excited to try out the tactile bump. Speaking of structures, I'm still digging into how that UK team works."
+    },
+    {
+     "role": "assistant",
+     "text": "The UK Number 10 Data Science team? What aspect are you looking at now?"
+    },
+    {
+     "role": "user",
+     "text": "Their operational model. It's fascinating. The UK Number 10 Data Science team operates as an 'insurgent unit' deploying AI and engineering talent directly into government departments."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a unique approach. Instead of building central services, they embed people directly into the ministries. It helps bridge the gap between policy and execution."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. It's not just consultants handing over reports. They stay in the room. Makes sense why it's so effective."
+    },
+    {
+     "role": "assistant",
+     "text": "Indeed. It allows for iterative development within the government context rather than a big bang delivery."
+    },
+    {
+     "role": "user",
+     "text": "Yep. Okay, I'm going to install these switches now. Wish me luck."
+    }
+   ]
+  }
+ ]
+}

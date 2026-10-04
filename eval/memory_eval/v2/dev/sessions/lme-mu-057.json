@@ -1,0 +1,73 @@
+{
+ "episode": "lme-mu-057",
+ "sessions": [
+  {
+   "sid": "lme-mu-057-s1",
+   "date": "2026-06-09",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm looking into the new internal tools. Did you know that the Paved Path platform's Discovery Hub is an MCP directory that enables teams to discover existing MCP servers and collaborate on tool creation?"
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds like a useful resource for standardizing tool access. I've noted that the Discovery Hub serves as an MCP directory for discovery and collaboration."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, it should help with the onboarding friction. Anyway, my coffee maker is leaking again. Do you know if there's a specific gasket size for the Breville Dual Boiler?"
+    },
+    {
+     "role": "assistant",
+     "text": "It's usually a 58mm portafilter gasket, but leaks often stem from the shower screen or group head O-ring. I can check the manual specs if you need them."
+    },
+    {
+     "role": "user",
+     "text": "No, I'll just replace the whole group head seal. Thanks. Did you get the weather forecast for tomorrow's run?"
+    },
+    {
+     "role": "assistant",
+     "text": "It's expected to be partly cloudy with a high of 72°F. Good conditions for running."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-057-s2",
+   "date": "2026-06-15",
+   "turns": [
+    {
+     "role": "user",
+     "text": "I was reading about their tech stack today. It's wild that Bloomberg operates one of the world's largest private networks and JavaScript codebases."
+    },
+    {
+     "role": "assistant",
+     "text": "That is a significant scale. Operating one of the largest private networks and JavaScript codebases would certainly require robust infrastructure and maintenance strategies."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. The latency requirements must be insane. By the way, did you remember to remind me to renew my library books?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, I have a reminder set for tomorrow morning. You have 'The Pragmatic Programmer' due back."
+    },
+    {
+     "role": "user",
+     "text": "Great. I'm also thinking of ordering a new mechanical keyboard. Do you have any recommendations for quiet switches?"
+    },
+    {
+     "role": "assistant",
+     "text": "Cherry MX Silent Red or Gateron Oil King are popular choices for a quieter typing experience."
+    },
+    {
+     "role": "user",
+     "text": "I'll look into those. Thanks Lloyd."
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome. Let me know if you need help comparing specs."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,73 @@
+{
+ "episode": "lme-kn-068",
+ "sessions": [
+  {
+   "sid": "lme-kn-068-s1",
+   "date": "2026-05-13",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, quick question on the Taste Labs data. Did they say how big their corpus was for the initial launch?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, the initial report mentioned they analyzed a corpus of 500,000 websites."
+    },
+    {
+     "role": "user",
+     "text": "Got it. 500,000 websites. Also, did that update break the cron job for the weather scraper?"
+    },
+    {
+     "role": "assistant",
+     "text": "No, the cron job is running fine. The error log is clear."
+    },
+    {
+     "role": "user",
+     "text": "Good. I was worried about that. Anyway, back to Taste Labs, I'm making notes for the meeting."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. Let me know if you need any other stats."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-068-s2",
+   "date": "2026-05-22",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I saw the new Taste Labs press release. They updated the corpus size significantly."
+    },
+    {
+     "role": "assistant",
+     "text": "Oh, interesting. What is the new figure?"
+    },
+    {
+     "role": "user",
+     "text": "They analyzed a corpus of over 2 million websites spanning roughly a decade now. Big jump."
+    },
+    {
+     "role": "assistant",
+     "text": "That is a substantial increase. Good to know for the report."
+    },
+    {
+     "role": "user",
+     "text": "Yeah. Also, did the hardware order for the new GPU arrive yet?"
+    },
+    {
+     "role": "assistant",
+     "text": "It's marked as out for delivery. Should be here by evening."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. I'll need that for the local model run."
+    },
+    {
+     "role": "assistant",
+     "text": "Sounds good. I'll remind you when it's in."
+    }
+   ]
+  }
+ ]
+}

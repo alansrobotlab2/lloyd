@@ -1,0 +1,43 @@
+{
+ "episode": "lme-si-062",
+ "sessions": [
+  {
+   "sid": "lme-si-062-s1",
+   "date": "2026-07-05",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I finally finished that sci-fi reading list you suggested last week."
+    },
+    {
+     "role": "assistant",
+     "text": "Glad to hear it, Alan. Did any of them stand out in particular?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, I re-read \"Proof\" by Isaac Asimov. It's a short story about a mathematician who proves that P equals NP, which is wild to think about given the current state of AI."
+    },
+    {
+     "role": "assistant",
+     "text": "That is a classic. It really captures the tension between pure mathematics and practical application. Did you manage to fix that syntax error in your Python script while reading?"
+    },
+    {
+     "role": "user",
+     "text": "Haha, no, I put that off. The dinner reservation for Sarah's birthday is more pressing. Is 7 PM at that new Italian place still okay?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, the reservation is confirmed for 7 PM. I can remind you at 6:30 if you like."
+    },
+    {
+     "role": "user",
+     "text": "That would be great. Also, did you check if my package from Amazon arrived? I ordered a new HDMI cable."
+    },
+    {
+     "role": "assistant",
+     "text": "It shows as delivered to your front porch around 2 PM today. You should be able to pick it up."
+    }
+   ]
+  }
+ ]
+}

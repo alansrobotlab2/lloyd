@@ -1,0 +1,89 @@
+{
+ "episode": "lme-mu-026",
+ "sessions": [
+  {
+   "sid": "lme-mu-026-s1",
+   "date": "2026-05-28",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did the package with the new cooling paste arrive?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, tracking shows it was delivered to your front porch around 2 PM today."
+    },
+    {
+     "role": "user",
+     "text": "Great. I might start re-pasting the GPU tomorrow. By the way, I was reading up on NVIDIA's roadmap. They claim Blackwell Ultra has ~1.4x higher per-GPU performance than GB200 NVL72."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a significant bump for a mid-cycle refresh. It suggests they are squeezing more out of the architecture before the next major node."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, exactly. I'm just trying to figure out if it's worth waiting for or if I should buy the H100 now. The weather is looking nice tomorrow, perfect for working in the garage."
+    },
+    {
+     "role": "assistant",
+     "text": "If the forecast holds, that sounds like a good day for hardware work. The H100 is a safe bet, but Blackwell's density might be interesting for future-proofing."
+    },
+    {
+     "role": "user",
+     "text": "True. I'll think about it over dinner. Any recommendations for a good pasta place nearby?"
+    },
+    {
+     "role": "assistant",
+     "text": "There's a new Italian spot on 5th called 'Basilico' that has decent reviews."
+    },
+    {
+     "role": "user",
+     "text": "I'll check it out. Thanks."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-026-s2",
+   "date": "2026-05-31",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I finally got the cooling paste application done. The temps are down by 5 degrees."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a solid improvement. Did you use the thermal pads correctly?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, carefully. I also went back to reading those NVIDIA specs. It turns out Blackwell Ultra is supposed to have ~5x higher per-GPU performance than the previous generation."
+    },
+    {
+     "role": "assistant",
+     "text": "Wow, 5x is massive. That would drastically change training timelines for large models."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. It makes me question if I should have waited. But I already bought the parts for the current build. The weather is turning rainy again, so I'm stuck inside coding."
+    },
+    {
+     "role": "assistant",
+     "text": "Rainy days are good for coding. At least the current build will be ready when you need it."
+    },
+    {
+     "role": "user",
+     "text": "I guess so. My neighbor's dog is barking again. Do you know any white noise apps that are actually free?"
+    },
+    {
+     "role": "assistant",
+     "text": "Try 'MyNoise' or 'Rainy Mood'. Both have free tiers that work well."
+    },
+    {
+     "role": "user",
+     "text": "Thanks, I'll try them."
+    }
+   ]
+  }
+ ]
+}

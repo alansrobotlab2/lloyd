@@ -1,0 +1,43 @@
+{
+ "episode": "lme-si-019",
+ "sessions": [
+  {
+   "sid": "lme-si-019-s1",
+   "date": "2026-07-26",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm trying to benchmark the new MoE models. I loaded up the 26B model on my test rig yesterday."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a solid choice for local testing. How was the initial load time?"
+    },
+    {
+     "role": "user",
+     "text": "Slower than I hoped, mostly due to disk IO. But once it was running, the throughput was impressive. It has 26B total parameters with a 4B active footprint, so the inference speed is way better than a dense model of that size."
+    },
+    {
+     "role": "assistant",
+     "text": "Exactly, that sparse activation is the key advantage for consumer hardware. Did you manage to fit it on the GPU VRAM?"
+    },
+    {
+     "role": "user",
+     "text": "Barely. I had to offload some layers to CPU. Speaking of hardware, did you get that quote for the new monitor stand I asked about?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, the ergonomic arm is in stock and ships tomorrow. Shall I place the order?"
+    },
+    {
+     "role": "user",
+     "text": "Go ahead. Also, check if there's a rain forecast for the weekend; I might want to take the dog out."
+    },
+    {
+     "role": "assistant",
+     "text": "Order placed. Forecast says sunny with a high of 75°F on Saturday. Perfect for a walk."
+    }
+   ]
+  }
+ ]
+}

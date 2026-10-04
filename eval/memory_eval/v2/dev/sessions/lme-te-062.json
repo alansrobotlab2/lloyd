@@ -1,0 +1,65 @@
+{
+ "episode": "lme-te-062",
+ "sessions": [
+  {
+   "sid": "lme-te-062-s1",
+   "date": "2026-07-01",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, quick question on debugging. I'm trying to see the actual tool inputs in my traces. If I set OTEL_LOG_TOOL_CONTENT=1, does that enable content capture as span events in the built-in CLI telemetry?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, setting that flag does exactly that. It logs the content as span events."
+    },
+    {
+     "role": "user",
+     "text": "Great. Also, did you check if my package for the new monitor arm arrived yet? Tracking says 'out for delivery'."
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to real-time tracking, but you can check the carrier site directly. Usually 'out for delivery' means it arrives by 5 PM."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. One last thing, what's the weather looking like for tomorrow? I might bike to work."
+    },
+    {
+     "role": "assistant",
+     "text": "It looks like it will be partly cloudy with a high of 72°F. Perfect for biking."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-062-s2",
+   "date": "2026-07-12",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm trying to scrape some research papers. I noticed that Anthropic's /research page returns HTML with a feed link, rather than a direct XML feed. Is there a better way to get this data?"
+    },
+    {
+     "role": "assistant",
+     "text": "You could try using a headless browser to parse the HTML and extract the feed URL, or check if they have a public API endpoint for recent publications."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, I'll try the headless browser route. Speaking of browsers, did you ever fix that bug where Chrome crashes when I open too many tabs?"
+    },
+    {
+     "role": "assistant",
+     "text": "I suggested disabling hardware acceleration. Did you try that? It usually helps with memory issues."
+    },
+    {
+     "role": "user",
+     "text": "I haven't yet. I've been busy with this scraping script. Anyway, thanks for the tip earlier."
+    },
+    {
+     "role": "assistant",
+     "text": "No problem. Let me know if you hit any other parsing issues."
+    }
+   ]
+  }
+ ]
+}

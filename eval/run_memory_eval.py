@@ -180,6 +180,22 @@ RECALL_LIMIT = 10
 #: `insufficient` rather than as a rate: at n=20 one question is five points
 #: and the Wilson interval is ~40 points wide.
 MIN_CATEGORY_N = 20
+#: #2170: what a version's gold labels are declared to be worth. `pilot` is an
+#: unreviewed synthetic set — every version LloydMemEval has ever run — and `gold`
+#: is the label set a person has reviewed. #1471's closure is the rule: "an
+#: unreviewed synthetic set is not a gold set", and the 2026-09-21 repair found 59
+#: of 68 unreachable labels were label bugs, not answer bugs.
+LABEL_STATUSES = ("pilot", "gold")
+#: The manifest key holding the spot audit: how many of this version's labels a
+#: reader opened, and how many of those were defective. `write_manifest` puts it
+#: outside the digest body, so recording one never moves a frozen `set_sha`.
+LABEL_AUDIT_KEY = "label_audit"
+#: #2170: `label_status: gold` may only be claimed when the recorded audit's
+#: defect-rate Wilson upper bound is under this. 10% is the item's own check, and
+#: it is what makes the claim falsifiable rather than a word in a manifest: v1's
+#: audit (3 of 35, upper 22.4%) and v2's derived one (0 of 32, upper 10.7%) both
+#: fail it, which is why both stay `pilot` until a person reviews the set.
+GOLD_DEFECT_RATE_CEILING = 0.10
 DISTRACTOR_EPISODES = 4
 DEFAULT_OUT = Path(os.path.expanduser("~/lloyd-data/eval/1480/runs"))
 DEFAULT_CORPUS = Path(os.path.expanduser("~/lloyd-data/eval/1480/corpus"))
@@ -209,6 +225,16 @@ class SetLoadError(ValueError):
 
 class SelfJudgeRefused(RuntimeError):
     """The judge is the model that generated the set (#1471)."""
+
+
+class LabelAuditMissing(RuntimeError):
+    """#2170: a `pilot` version with no recorded label audit may not be scored.
+
+    Raised by `require_label_audit` before the first answer is asked for, so the
+    run emits no `correct` / `correct_strict` rate at all. The harm it refuses is
+    already on disk: the runs under `~/lloyd-data/eval/{1480,1485,1631}/runs/` each
+    publish an absolute rate for a set that v1/AUDIT.md itself declines to call
+    gold ("this is 35 of 333, not the human review #1471's closure asks for")."""
 
 
 # ─────────────────────────────────────────────────────────────── text ──
@@ -266,9 +292,16 @@ def _load_yaml(p: Path) -> dict:
         raise SetLoadError(f"{p}: unreadable ({exc})") from exc
 
 
-def write_manifest(root: Path, *, version: str, generator_model: str, notes: str = "") -> dict:
+def write_manifest(root: Path, *, version: str, generator_model: str, notes: str = "",
+                   label_status: str = "pilot", label_audit: dict | None = None) -> dict:
     """Freeze `root`: a sha256 per file, per leg; the reserved (holdout) ids and a
-    split hash over them; the generating model. Written once, by the build."""
+    split hash over them; the generating model. Written once, by the build.
+
+    `label_status` and `label_audit` (#2170) travel with the version but sit
+    OUTSIDE `body`, so they are not hashed into `set_sha` — which is how v1 got its
+    label_status on 2026-10-04 without breaking the 2026-09-25 freeze (its set_sha
+    is still 9cf67d045c38a8c3…). What the labels are worth is a claim about the
+    labels, and a new claim must not re-hash the questions."""
     legs: dict[str, dict] = {}
     reserved: list[str] = []
     counts: dict[str, dict[str, int]] = {}
@@ -284,6 +317,7 @@ def write_manifest(root: Path, *, version: str, generator_model: str, notes: str
             "reserved_ids": reserved, "files": legs}
     manifest = {
         **body, "counts": counts, "notes": notes,
+        "label_status": _check_label_status(label_status), LABEL_AUDIT_KEY: label_audit,
         "created": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
         "reserve_rule": RESERVE_RULE,
         "split_hash": _digest({"reserved_ids": reserved, "holdout": legs["holdout"]}),
@@ -323,6 +357,16 @@ class MemSet:
     dev: list[Question]
     holdout: list[Question] | None
     reserved_ids: frozenset[str]
+    #: #2170: pilot | gold, straight off the version's manifest. No default: a
+    #: loaded set that did not read one is the bug this item exists to catch.
+    label_status: str
+    #: The recorded spot audit (`{"audited": int, "defective": int, ...}`) or None
+    #: when nobody has audited this version.
+    label_audit: dict | None
+    #: dev + holdout, whatever view was loaded: the denominator an audit's coverage
+    #: is measured over. The tuning view never opens `holdout/`, so this cannot be
+    #: `len(dev) + len(holdout)` — it counts the reserved ids instead.
+    n_items: int
 
     def by_id(self) -> dict[str, Question]:
         return {q.id: q for q in self.dev + (self.holdout or [])}
@@ -391,6 +435,52 @@ def _load_leg(root: Path, leg: str, manifest: dict) -> list[Question]:
     return qs
 
 
+def _check_label_status(value: Any) -> str:
+    """`label_status` is required and it is `pilot` or `gold`, nothing else (#2170).
+    A version that predates the key refuses to load rather than defaulting to
+    `gold`: the whole point is that an unlabelled set may not be read as a
+    trustworthy one (#1471: "an unreviewed synthetic set is not a gold set")."""
+    if value not in LABEL_STATUSES:
+        raise SetLoadError(f"label_status must be one of {LABEL_STATUSES}, got {value!r}")
+    return str(value)
+
+
+def _check_label_audit(value: Any, *, n_items: int, root: Path) -> dict | None:
+    """Validate the recorded spot audit, or return None when none is recorded.
+
+    `audited` / `defective` are counts, and the arithmetic the gate prints is only
+    as honest as they are: `defective` may not exceed `audited`, and `audited` may
+    not exceed the items the version actually holds (a record claiming 40 of a
+    30-item set audited would quietly halve the reported defect rate)."""
+    if value in (None, {}, []):
+        return None
+    if not isinstance(value, dict):
+        raise SetLoadError(f"{root}: {LABEL_AUDIT_KEY} must be an object, "
+                           f"got {type(value).__name__}")
+    for key in ("audited", "defective"):
+        v = value.get(key)
+        if isinstance(v, bool) or not isinstance(v, int):
+            raise SetLoadError(f"{root}: {LABEL_AUDIT_KEY}.{key} must be an integer count, "
+                               f"got {v!r}")
+    if value["audited"] < 1:
+        raise SetLoadError(f"{root}: {LABEL_AUDIT_KEY}.audited must be at least 1 "
+                           f"(an audit that opened nothing measures nothing)")
+    if value["audited"] > n_items:
+        raise SetLoadError(f"{root}: {LABEL_AUDIT_KEY}.audited={value['audited']} exceeds the "
+                           f"{n_items} items in the set")
+    if not 0 <= value["defective"] <= value["audited"]:
+        raise SetLoadError(f"{root}: {LABEL_AUDIT_KEY}.defective={value['defective']} is not "
+                           f"between 0 and audited={value['audited']}")
+    for key in ("clean", "brittle"):
+        v = value.get(key)
+        if v is None:
+            continue
+        if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+            raise SetLoadError(f"{root}: {LABEL_AUDIT_KEY}.{key} must be a non-negative "
+                               f"integer count, got {v!r}")
+    return dict(value)
+
+
 def load_set(root: Path | None = None, *, view: str = "tuning") -> MemSet:
     """Load and verify a frozen set.
 
@@ -398,6 +488,12 @@ def load_set(root: Path | None = None, *, view: str = "tuning") -> MemSet:
     file under `holdout/`: it verifies the dev leg's hashes and the manifest's
     own digest, and refuses a dev id the manifest reserved. `view="all"` also
     verifies and loads the holdout leg, for the reporting run only.
+
+    #2170 adds a label contract to the same load: `label_status` must be present
+    and be `pilot` or `gold`, and a version claiming `gold` must carry a label
+    audit whose defect-rate Wilson upper bound is under
+    `GOLD_DEFECT_RATE_CEILING` — an unevidenced `gold` is refused here, so no
+    reader ever sees it in an artifact.
     """
     root = Path(root or SET_ROOT / DEFAULT_VERSION)
     try:
@@ -409,6 +505,7 @@ def load_set(root: Path | None = None, *, view: str = "tuning") -> MemSet:
         raise SetLoadError(f"{root}: manifest edited after freezing (set_sha mismatch)")
     if not manifest.get("generator_model"):
         raise SetLoadError(f"{root}: manifest does not record the generating model")
+    label_status = _check_label_status(manifest.get("label_status"))
     reserved = frozenset(manifest.get("reserved_ids") or [])
     dev = _load_leg(root, "dev", manifest)
     leaked = reserved & {q.id for q in dev}
@@ -421,9 +518,98 @@ def load_set(root: Path | None = None, *, view: str = "tuning") -> MemSet:
             raise SetLoadError("holdout leg ids differ from the manifest's reserved ids")
     elif view != "tuning":
         raise ValueError(f"view must be tuning|all, got {view!r}")
+    n_items = len(dev) + len(reserved)
+    label_audit = _check_label_audit(manifest.get(LABEL_AUDIT_KEY), n_items=n_items, root=root)
+    if label_status == "gold":
+        if label_audit is None:
+            raise SetLoadError(
+                f"{root}: label_status='gold' but no {LABEL_AUDIT_KEY} is recorded — an "
+                f"unreviewed synthetic set is not a gold set (#1471)")
+        hi = _defect_rate_ci(label_audit)[1]
+        if hi >= GOLD_DEFECT_RATE_CEILING:
+            raise SetLoadError(
+                f"{root}: label_status='gold' but the recorded audit measures "
+                f"{label_audit['defective']} defective of {label_audit['audited']} audited, "
+                f"Wilson 95% upper bound {hi:.4f} — not under the "
+                f"{GOLD_DEFECT_RATE_CEILING} ceiling")
     return MemSet(root=root, version=str(manifest["version"]), set_sha=str(manifest["set_sha"]),
                   generator_model=str(manifest["generator_model"]), dev=dev, holdout=holdout,
-                  reserved_ids=reserved)
+                  reserved_ids=reserved, label_status=label_status,
+                  label_audit=label_audit, n_items=n_items)
+
+
+# ─────────────────────────────────────────────────── label quality ──
+
+def _defect_rate_ci(audit: dict) -> tuple[float, float]:
+    from stats import wilson_ci
+    return wilson_ci(int(audit["defective"]), int(audit["audited"]))
+
+
+def label_quality(ms: MemSet) -> dict:
+    """What this version's gold labels were MEASURED to be worth — the number that
+    bounds every absolute rate computed from them (#2170).
+
+    `defect_rate` is `defective / audited` over the record the manifest carries and
+    `defect_ci95` its Wilson interval. For v1 that is the hand audit in
+    `eval/memory_eval/v1/AUDIT.md`: 3 defective of 35 audited, 8.6% with a 95%
+    interval of [2.96%, 22.38%]. The interval is the point: it says up to a fifth
+    of v1's labels can be wrong, so a `correct` rate of 0.72 on that set is
+    0.72-plus-or-minus-whatever-the-labels-did, not a capability measurement.
+
+    `coverage` is how much of the set the audit opened — v1 opened 35 of 333
+    (10.5%), so its 8.6% is a sample reading and not a census. A version with no
+    audit reports `defect_rate: null` rather than 0.0: nothing measured is not
+    nothing wrong (`MIN_CATEGORY_N`'s rule, applied to labels)."""
+    audit = ms.label_audit or {}
+    audited = int(audit.get("audited") or 0)
+    defective = int(audit.get("defective") or 0)
+    rate = ci = None
+    eligible = False
+    if audited:
+        lo, hi = _defect_rate_ci(audit)
+        rate, ci = round(defective / audited, 4), [round(lo, 4), round(hi, 4)]
+        eligible = hi < GOLD_DEFECT_RATE_CEILING
+    return {
+        "label_status": ms.label_status,
+        "audited": audited,
+        "n_items": ms.n_items,
+        "coverage": round(audited / ms.n_items, 4) if ms.n_items else None,
+        "clean": audit.get("clean"),
+        "brittle": audit.get("brittle"),
+        "defective": defective,
+        "defect_rate": rate,
+        "defect_ci95": ci,
+        "gold_defect_rate_ceiling": GOLD_DEFECT_RATE_CEILING,
+        "gold_eligible": eligible,
+        "audit_source": audit.get("source"),
+        "audit_method": audit.get("method"),
+        "audited_at": audit.get("audited_at"),
+    }
+
+
+def require_label_audit(ms: MemSet) -> None:
+    """Refuse to SCORE a version whose labels are neither gold nor audited (#2170).
+
+    Called by `run` before the first question is asked, so the refusal emits no
+    `correct` / `correct_strict` rate anywhere — not on stdout, not in an artifact.
+    The scope is the scoring path: the two no-model A/B commands report retrieval
+    half rates (was the gold value in the block) and stamp the same
+    `label_status` into their artifact, but they are not the absolute-capability
+    headline this refuses to publish unaudited.
+    """
+    if ms.label_status == "gold" or ms.label_audit:
+        return
+    raise LabelAuditMissing(
+        f"{ms.root}: label_status={ms.label_status!r} and no label audit is recorded "
+        f"(manifest key {LABEL_AUDIT_KEY!r}) — refusing to score. An absolute "
+        f"correct/correct_strict rate off labels nobody has checked has no bound on it: "
+        f"v1's spot audit found 3 defective in the 35 labels it did open (8.6%, Wilson "
+        f"95% [3.0%, 22.4%]) and never opened the other 298. Record the audit in "
+        f"manifest.json under {LABEL_AUDIT_KEY!r} as "
+        f"{{'audited': int, 'defective': int, 'clean': int, 'brittle': int, 'source': str, "
+        f"'method': str}}, or have the set reviewed by a person and set "
+        f"label_status: 'gold' (needs a defect-rate Wilson upper bound under "
+        f"{GOLD_DEFECT_RATE_CEILING}).")
 
 
 # ─────────────────────────────────────────────────────────────── judges ──
@@ -1166,6 +1352,11 @@ def run(argv: list[str] | None = None, *, complete=None, djev_ask=None, primary=
     ms = load_set(Path(args.set), view="all" if args.holdout else "tuning")
     judge_model = DJEV_JUDGE_MODEL if args.judge == "djev" else "rules"
     check_judge(ms.generator_model, judge_model)
+    # #2170 clause 4: before a single question is asked, so an unaudited pilot set
+    # produces no correct/correct_strict rate anywhere — not on stdout, not in an
+    # artifact. After check_judge, because a set judged by its own generator is
+    # refused for a stronger reason and that refusal should still be the one heard.
+    require_label_audit(ms)
     want_facts = any(a.startswith("prefetch") for a in arms) or SLEEP_NOTES_ARM in arms
     if want_facts and blocks_fn is None:
         os.environ.setdefault("LLOYD_FACTS_ROOT", str(Path(args.corpus) / "facts"))
@@ -1253,9 +1444,14 @@ def run(argv: list[str] | None = None, *, complete=None, djev_ask=None, primary=
     report: dict = {
         "eval": "LloydMemEval", "item": "#1480", "label": args.label,
         "created": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
-        "set": {"version": ms.version, "set_sha": ms.set_sha, "root": str(ms.root),
+        "set": {"version": ms.version, "set_sha": ms.set_sha, "label_status": ms.label_status,
+                "root": str(ms.root),
                 "generator_model": ms.generator_model,
                 "n_dev": len(ms.dev), "n_holdout": len(ms.holdout or []) if args.holdout else None},
+        # #2170 clause 3: the labels' measured quality sits in the artifact's
+        # header, above the scores computed FROM those labels, so a reader quoting
+        # a rate has to pass the bound on its way to it.
+        "label_quality": label_quality(ms),
         "answerer": {"model": model, "base_url": base_url, "thinking": "on (engine default)",
                      "temperature": 0.6, "top_p": 0.95, "seed": "sha256(question id)",
                      "max_tokens": args.max_tokens},
@@ -1320,7 +1516,34 @@ def _fmt(b: dict) -> str:
     return f"{b['rate']:.3f} [{b['ci'][0]:.3f},{b['ci'][1]:.3f}] n={b['n']}"
 
 
+def _print_labels(lq: dict) -> None:
+    """The labels' own quality, printed ahead of every rate computed from them.
+
+    A reader who scrolls to a `correct` rate has to pass this line on the way to
+    it: on a pilot set the interval beside the defect rate is how much of that
+    rate the labels could account for (#2170)."""
+    status = lq.get("label_status")
+    if lq.get("defect_rate") is None:
+        print(f"labels: {status} — no label audit recorded (scoring a pilot version "
+              f"with no audit is refused; see require_label_audit)")
+        return
+    lo, hi = lq["defect_ci95"]
+    print(f"labels: {status} — audited {lq['audited']} of {lq['n_items']} "
+          f"({lq['coverage']:.1%} of the set), clean {lq['clean']} / brittle "
+          f"{lq['brittle']} / defective {lq['defective']} → defect rate "
+          f"{lq['defect_rate']:.1%}, Wilson 95% [{lo:.1%}, {hi:.1%}]")
+    if status == "gold":
+        print(f"        gold: the audit's Wilson upper bound is under the "
+              f"{lq['gold_defect_rate_ceiling']:.0%} ceiling")
+    else:
+        print("        every absolute correct/correct_strict rate below is a PILOT number, bounded")
+        print("        by that label interval; the paired arm-vs-arm differences are the readable output.")
+
+
 def _print_summary(report: dict) -> None:
+    lq = report.get("label_quality")
+    if lq:
+        _print_labels(lq)
     for arm, blk in report["dev"].items():
         print(f"\n[{arm}]")
         for cat in CATEGORIES + ("all",):
@@ -1411,6 +1634,13 @@ def prefetch_retrieval(argv: list[str] | None = None, *, select=None) -> dict:
                               "n_rendered": len(rel_lines)}}
         rows.append(row)
     out: dict = {"n": len(rows), "leg": "holdout" if args.holdout else "dev", "arms": arms,
+                 # #2170: the labels travel with the reading. This artifact reports
+                 # retrieval-half rates, not `correct`, so it is not refused for a
+                 # missing audit — but nothing it publishes may be read without
+                 # knowing what the labels underneath it were measured to be worth.
+                 "set": {"version": ms.version, "set_sha": ms.set_sha,
+                         "label_status": ms.label_status},
+                 "label_quality": label_quality(ms),
                  "char_budget": FACTS_RENDER_CHAR_BUDGET, "by_category": {}}
     for cat in CATEGORIES + ("all",):
         rs = [r for r in rows if cat == "all" or r["category"] == cat]
@@ -1510,7 +1740,13 @@ def recall_retrieval(argv: list[str] | None = None) -> dict:
             r[f"{arm}_any"], r[f"{arm}_all"] = anyh, allh
             r[f"{arm}_gold"] = gold_in(q, rb[arm])
         rows.append(r)
-    out = {"n": len(rows), "leg": "dev", "limit": RECALL_LIMIT, "by_category": {}}
+    out = {"n": len(rows), "leg": "dev", "limit": RECALL_LIMIT,
+           # #2170: same stamp as the modelled run and `prefetch-retrieval`, so no
+           # LloydMemEval artifact can be quoted without its label_status.
+           "set": {"version": ms.version, "set_sha": ms.set_sha,
+                   "label_status": ms.label_status},
+           "label_quality": label_quality(ms),
+           "by_category": {}}
     for cat in CATEGORIES + ("all",):
         rs = [r for r in rows if cat == "all" or r["category"] == cat]
         if not rs:
@@ -1545,8 +1781,10 @@ def main(argv: list[str] | None = None) -> int:
         ap.add_argument("--set", default=str(SET_ROOT / DEFAULT_VERSION))
         a = ap.parse_args(argv)
         ms = load_set(Path(a.set), view="all")
-        print(f"{ms.root}: verified v={ms.version} set_sha={ms.set_sha[:16]} dev={len(ms.dev)} "
+        print(f"{ms.root}: verified v={ms.version} set_sha={ms.set_sha[:16]} "
+              f"label_status={ms.label_status} dev={len(ms.dev)} "
               f"holdout={len(ms.holdout or [])} generator={ms.generator_model}")
+        _print_labels(label_quality(ms))
         return 0
     if cmd == "prefetch-retrieval":
         prefetch_retrieval(argv)

@@ -1,0 +1,43 @@
+{
+ "episode": "lme-pr-016",
+ "sessions": [
+  {
+   "sid": "lme-pr-016-s1",
+   "date": "2026-07-02",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did you get that software license renewal email?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, I did. It's due next week. Do you want me to draft a payment confirmation?"
+    },
+    {
+     "role": "user",
+     "text": "No, I'll handle it manually. I don't trust auto-pay for this one. By the way, I'm rethinking how we handle tool selection in the new agent config."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. Are you considering switching to a semantic search model for better context awareness?"
+    },
+    {
+     "role": "user",
+     "text": "Absolutely not. Keyword matching is preferred over semantic/embedding routing for tool selection. It's too unpredictable otherwise."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. I'll keep that constraint in mind for any future architecture discussions."
+    },
+    {
+     "role": "user",
+     "text": "Good. Also, check if the coffee maker is still in stock."
+    },
+    {
+     "role": "assistant",
+     "text": "It is back in stock. Shall I add it to your cart?"
+    }
+   ]
+  }
+ ]
+}

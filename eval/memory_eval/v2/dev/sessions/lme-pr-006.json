@@ -1,0 +1,51 @@
+{
+ "episode": "lme-pr-006",
+ "sessions": [
+  {
+   "sid": "lme-pr-006-s1",
+   "date": "2026-07-02",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm reviewing the new evaluation suite for our agent framework. I want to tweak how we score the models."
+    },
+    {
+     "role": "assistant",
+     "text": "Sure. Are you looking at latency, accuracy, or something else?"
+    },
+    {
+     "role": "user",
+     "text": "Mostly efficiency. I've been reading Sarah Sachs' recent blog post. She argues we should stop looking at single-step accuracy and start evaluating AI performance based on cost per capability per second over whole tool-use trajectories."
+    },
+    {
+     "role": "assistant",
+     "text": "That’s a strong metric for real-world deployment. It penalizes agents that take many cheap but slow steps just to get the right answer."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. It forces the model to be efficient, not just correct. I need to draft a memo to the engineering team proposing this shift in our benchmarking strategy."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. I can help draft that. Should I emphasize the business impact of the cost savings?"
+    },
+    {
+     "role": "user",
+     "text": "Yes. Also, can you check if the coffee machine is back online? It was making a weird grinding noise earlier."
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to the office IoT sensors, so I can't check the machine status. I recommend asking facilities."
+    },
+    {
+     "role": "user",
+     "text": "Right. Back to the memo: please outline the key argument for adopting Sarah's metric over our current pass@1 score."
+    },
+    {
+     "role": "assistant",
+     "text": "I will draft an outline focusing on why trajectory-level efficiency matters more than isolated step correctness for our use case."
+    }
+   ]
+  }
+ ]
+}

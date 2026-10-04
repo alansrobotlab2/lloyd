@@ -1,0 +1,65 @@
+{
+ "episode": "lme-mu-020",
+ "sessions": [
+  {
+   "sid": "lme-mu-020-s1",
+   "date": "2026-07-03",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, can you check if my order for the new mechanical keyboard switches has shipped yet?"
+    },
+    {
+     "role": "assistant",
+     "text": "I'll check that for you right now. Give me a moment to look up the tracking status."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. Also, did you see the latest robotics leaderboard updates? Qwen-RobotManip topped the RoboChallenge Table30 v1 Generalist Track with a process score of 59.83 and ~45% task success."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. That's a strong showing. The switches are still in processing, though the carrier updated the status an hour ago."
+    },
+    {
+     "role": "user",
+     "text": "Okay, let me know when it ships. I'm thinking of ordering some hot sauce tonight."
+    },
+    {
+     "role": "assistant",
+     "text": "Will do. What kind of hot sauce are you eyeing?"
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-020-s2",
+   "date": "2026-07-06",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm trying to organize my research notes. Can you remind me what category Qwen-RobotManip falls into?"
+    },
+    {
+     "role": "assistant",
+     "text": "Sure. Based on your previous notes, Qwen-RobotManip is a generalist manipulation model."
+    },
+    {
+     "role": "user",
+     "text": "Right, I just wanted to confirm. I'm also looking for a good pasta recipe for dinner."
+    },
+    {
+     "role": "assistant",
+     "text": "I can suggest a few. Do you prefer tomato-based or cream-based?"
+    },
+    {
+     "role": "user",
+     "text": "Tomato-based. And make sure the note about the model is saved under 'Generalist'."
+    },
+    {
+     "role": "assistant",
+     "text": "Saved. Here is a classic Arrabbiata recipe..."
+    }
+   ]
+  }
+ ]
+}

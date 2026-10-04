@@ -1,0 +1,65 @@
+{
+ "episode": "lme-kn-028",
+ "sessions": [
+  {
+   "sid": "lme-kn-028-s1",
+   "date": "2026-05-10",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, the build for ReMEmbR failed. It's still using the old flat point cloud structure, right? I need to revert the config to `--representation=flat` to match the current codebase."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I will update the build configuration to use `--representation=flat`. Did you also check the dependency logs?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, it's fine. Oh, did the package for my new mechanical keyboard arrive? The one with the brown switches?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to real-time shipping info, but I can remind you to check your email. Have you tried a different shipping carrier?"
+    },
+    {
+     "role": "user",
+     "text": "No, just waiting. Anyway, fix the build. Keep the flat structure for now until I figure out the migration."
+    },
+    {
+     "role": "assistant",
+     "text": "Done. The config is set to flat representation."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-028-s2",
+   "date": "2026-05-17",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, huge news. We finally migrated ReMEmbR. It now builds persistent 3D scene graphs with rich semantic descriptions. No more flat clouds."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a major upgrade. The semantic layer will definitely help with the retrieval tasks we discussed earlier."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. By the way, did you see that storm warning for tomorrow? I might work from home."
+    },
+    {
+     "role": "assistant",
+     "text": "I saw it. Working from home might be safer if the power lines are affected. Do you need me to adjust your calendar?"
+    },
+    {
+     "role": "user",
+     "text": "Not yet. Let's focus on the ReMEmbR update. I need to run a demo of the new architecture."
+    },
+    {
+     "role": "assistant",
+     "text": "Sure. I'll prepare the demo environment for the new scene graph version."
+    }
+   ]
+  }
+ ]
+}

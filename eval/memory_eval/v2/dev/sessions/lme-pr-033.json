@@ -1,0 +1,43 @@
+{
+ "episode": "lme-pr-033",
+ "sessions": [
+  {
+   "sid": "lme-pr-033-s1",
+   "date": "2026-05-30",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, quick question. I'm looking at the roadmap for Impeccable. Do you know if the team is planning to add an Auto Mode soon?"
+    },
+    {
+     "role": "assistant",
+     "text": "I haven't seen any recent announcements regarding an 'Auto Mode' feature for Impeccable. Would you like me to check the latest GitHub issues?"
+    },
+    {
+     "role": "user",
+     "text": "No need. I actually already know the answer. Paul Bakaus explicitly refuses to implement it. It's a feature request he won't touch, so don't bother tracking it for me."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I will note that Paul Bakaus refuses to implement Auto Mode for Impeccable and exclude it from future updates."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. Also, can you help me draft a reply to Sarah about the dinner reservation? She asked if we can still make 8 PM."
+    },
+    {
+     "role": "assistant",
+     "text": "Sure. How would you like to respond? Should I confirm 8 PM or ask for an alternative?"
+    },
+    {
+     "role": "user",
+     "text": "Just confirm 8 PM is fine. I'm running a bit late but we'll make it."
+    },
+    {
+     "role": "assistant",
+     "text": "Drafted: 'Hi Sarah, confirming we can make 8 PM. See you then!'"
+    }
+   ]
+  }
+ ]
+}

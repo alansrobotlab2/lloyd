@@ -1,0 +1,81 @@
+{
+ "episode": "lme-te-005",
+ "sessions": [
+  {
+   "sid": "lme-te-005-s1",
+   "date": "2026-06-04",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to wrap my head around this Domain Adaptation concept for the new ML pipeline. It's giving me a headache."
+    },
+    {
+     "role": "assistant",
+     "text": "I can help with that. Domain Adaptation is tricky. What specific aspect are you looking at?"
+    },
+    {
+     "role": "user",
+     "text": "Mainly how we handle the gap between our training data and the live environment. Agent RFT addresses domain shift by re-adapting weights to specific business contexts where production environments differ from base model training data."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. That's a solid approach for handling distribution shifts. Have you tested it yet?"
+    },
+    {
+     "role": "user",
+     "text": "Not fully. I'm stuck on a different issue first. My coffee maker is leaking again. Do you know any quick fixes?"
+    },
+    {
+     "role": "assistant",
+     "text": "Usually, that's a worn-out gasket. Have you checked if it's seated properly?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, I'll check that. Thanks. Back to the code - do you have any links on re-adapting weights?"
+    },
+    {
+     "role": "assistant",
+     "text": "I can find some resources. Let me know if you need specific papers."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-005-s2",
+   "date": "2026-06-16",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm looking at Inngest for our serverless functions. It looks promising."
+    },
+    {
+     "role": "assistant",
+     "text": "Inngest is great for orchestrating long-running tasks. Are you worried about lock-in?"
+    },
+    {
+     "role": "user",
+     "text": "A little. Inngest is a closed platform, though an open-source SDK exists. I need to know if we can self-host easily."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a key consideration. The SDK helps with integration, but the core is hosted."
+    },
+    {
+     "role": "user",
+     "text": "Right. I also ordered a new mechanical keyboard. The switches are clicking too loudly for the office."
+    },
+    {
+     "role": "assistant",
+     "text": "Have you tried adding dampeners? Or maybe swapping to silent switches?"
+    },
+    {
+     "role": "user",
+     "text": "I'll look into it. Anyway, back to Inngest. Is the pricing tier reasonable for startups?"
+    },
+    {
+     "role": "assistant",
+     "text": "It depends on your execution time, but generally yes for early stages."
+    }
+   ]
+  }
+ ]
+}

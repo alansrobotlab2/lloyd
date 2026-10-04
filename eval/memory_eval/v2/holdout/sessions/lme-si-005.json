@@ -1,0 +1,47 @@
+{
+ "episode": "lme-si-005",
+ "sessions": [
+  {
+   "sid": "lme-si-005-s1",
+   "date": "2026-07-01",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did you order the new mechanical keyboard switches yet?"
+    },
+    {
+     "role": "assistant",
+     "text": "I haven't yet. I can add them to the shopping list now. Do you want the tactile or linear ones?"
+    },
+    {
+     "role": "user",
+     "text": "Tactile. Oh, while I have you, I'm trying to wrap my head around this new NLP technique. What is the core idea behind Prompt Learning?"
+    },
+    {
+     "role": "assistant",
+     "text": "Sure. Prompt learning mimics human iterative learning by providing contextual English feedback."
+    },
+    {
+     "role": "user",
+     "text": "That makes sense. It's like teaching a student with hints rather than just test answers."
+    },
+    {
+     "role": "assistant",
+     "text": "Exactly. Would you like me to look up some recent papers on that topic?"
+    },
+    {
+     "role": "user",
+     "text": "No, not right now. Let's stick to the keyboard. Go ahead and order the tactile switches."
+    },
+    {
+     "role": "assistant",
+     "text": "Done. I've placed the order for the tactile switches. Anything else?"
+    },
+    {
+     "role": "user",
+     "text": "No, that's it. Thanks."
+    }
+   ]
+  }
+ ]
+}

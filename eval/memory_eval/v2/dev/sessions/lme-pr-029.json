@@ -1,0 +1,43 @@
+{
+ "episode": "lme-pr-029",
+ "sessions": [
+  {
+   "sid": "lme-pr-029-s1",
+   "date": "2026-06-04",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, the AC unit is making that rattling noise again. Did you schedule the technician?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, I booked them for next Tuesday at 10 AM. Is that time still convenient?"
+    },
+    {
+     "role": "user",
+     "text": "That works. Thanks. By the way, I've been reading through Brian Lewis's latest notes on our documentation strategy."
+    },
+    {
+     "role": "assistant",
+     "text": "Oh, interesting. Did he have any specific opinions on the new wiki structure?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, he really hates the scattered info. He believes Brian Lewis advocates for centralised knowledge that is easily consumable, potentially assisted by AI in a feedback loop."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. So, single source of truth with AI integration, rather than fragmented docs."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. We need to align our next sprint on that. Oh, and don't forget to order more coffee beans."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. Dark roast, right? I'll add it to the order list."
+    }
+   ]
+  }
+ ]
+}

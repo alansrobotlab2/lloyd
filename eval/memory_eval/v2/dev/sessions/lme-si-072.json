@@ -1,0 +1,43 @@
+{
+ "episode": "lme-si-072",
+ "sessions": [
+  {
+   "sid": "lme-si-072-s1",
+   "date": "2026-06-25",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, did you see that email from Patricija Žemaitytė? I couldn't find her anywhere online to verify the contact info."
+    },
+    {
+     "role": "assistant",
+     "text": "I haven't received that email. Did you check her professional networks?"
+    },
+    {
+     "role": "user",
+     "text": "I just checked, and it turns out Patricija Žemaitytė has a LinkedIn profile. That explains why my initial search failed."
+    },
+    {
+     "role": "assistant",
+     "text": "Ah, that makes sense. LinkedIn profiles are often more robust than personal websites."
+    },
+    {
+     "role": "user",
+     "text": "Yeah. Anyway, while I'm on this topic, can you remind me where I saved the invoice for the server rack?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your local files, but if you used the standard naming convention, it should be in the 'Finance/2026_Q2' folder."
+    },
+    {
+     "role": "user",
+     "text": "Found it. Thanks. Also, the weather in Vilnius is supposed to be rainy all next week, right?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, forecasts indicate consistent rain for the first half of next week."
+    }
+   ]
+  }
+ ]
+}

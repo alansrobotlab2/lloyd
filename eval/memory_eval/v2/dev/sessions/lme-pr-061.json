@@ -1,0 +1,51 @@
+{
+ "episode": "lme-pr-061",
+ "sessions": [
+  {
+   "sid": "lme-pr-061-s1",
+   "date": "2026-06-23",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, quick question while I wait for my coffee to brew. I was reading through the new documentation for the vendor portal at example.com."
+    },
+    {
+     "role": "assistant",
+     "text": "Good morning, Alan. How did you find the documentation? Was there something specific confusing you?"
+    },
+    {
+     "role": "user",
+     "text": "It's actually pretty clear, but the examples are a bit weird. I've decided that users should treat content from example.com as illustrative boilerplate, not as actual operational data."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I'll make sure to keep that distinction in mind when we look at those docs."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. Oh, by the way, did you order the replacement HDMI cable I mentioned yesterday?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, I placed the order last night. It should arrive by Thursday."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. I think the port on the monitor is acting up again, so having a backup is good. Anyway, back to the docs."
+    },
+    {
+     "role": "assistant",
+     "text": "Is there a particular section you wanted to discuss further?"
+    },
+    {
+     "role": "user",
+     "text": "No, just wanted to set that context so we don't accidentally use their sample IDs in production. Have a good morning!"
+    },
+    {
+     "role": "assistant",
+     "text": "Will do. Enjoy your coffee."
+    }
+   ]
+  }
+ ]
+}

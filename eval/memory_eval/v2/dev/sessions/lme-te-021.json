@@ -1,0 +1,73 @@
+{
+ "episode": "lme-te-021",
+ "sessions": [
+  {
+   "sid": "lme-te-021-s1",
+   "date": "2026-08-26",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm tweaking the Backlog Grouping logic. Just a heads up: Grouped children never contribute to the `up_next` count in board tallies."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. I'll keep that constraint in mind when calculating board stats."
+    },
+    {
+     "role": "user",
+     "text": "Also, did you check if the API for the new hardware order came through?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, the confirmation email arrived this morning. It's scheduled for delivery next Tuesday."
+    },
+    {
+     "role": "user",
+     "text": "Nice. And how is the weather looking for the weekend hiking trip?"
+    },
+    {
+     "role": "assistant",
+     "text": "It looks sunny with a high of 72°F, so perfect for hiking."
+    },
+    {
+     "role": "user",
+     "text": "Great. Let's circle back to the grouping code later."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-021-s2",
+   "date": "2026-09-02",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, found a weird edge case in Backlog Grouping. If an umbrella is never set to `up_next`, the fold silently unschedules the described work of its children."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds like a silent failure mode. I've noted that behavior for the bug report."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, it's tricky. Did you see the dinner reservation for Friday?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, confirmed for 7 PM at the Italian place downtown."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. I also need to update the README docs."
+    },
+    {
+     "role": "assistant",
+     "text": "I can generate a draft of the updates based on our recent changes if you like."
+    },
+    {
+     "role": "user",
+     "text": "Maybe later. Just wanted to flag that grouping issue."
+    }
+   ]
+  }
+ ]
+}

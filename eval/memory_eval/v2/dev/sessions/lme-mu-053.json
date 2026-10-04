@@ -1,0 +1,81 @@
+{
+ "episode": "lme-mu-053",
+ "sessions": [
+  {
+   "sid": "lme-mu-053-s1",
+   "date": "2026-07-13",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, quick question while I wait for my coffee. Why do we even bother with Golden datasets in our evaluation pipeline? It feels like extra overhead."
+    },
+    {
+     "role": "assistant",
+     "text": "It definitely adds some steps, but it's crucial for stability. Golden datasets serve as trusted ground truth used to calibrate LLM judges and prevent drift."
+    },
+    {
+     "role": "user",
+     "text": "Ah, that makes sense. I was seeing our scoring fluctuate a bit too much last week. Do you think the weather is affecting the server fans or is it just the model?"
+    },
+    {
+     "role": "assistant",
+     "text": "Probably the model variance if the scoring is drifting, but if the fans are loud, check the ambient temp. It's been quite humid lately."
+    },
+    {
+     "role": "user",
+     "text": "True. I'll check the dashboard. Oh, and I forgot to ask, did that package with the new mechanical keyboard switches arrive?"
+    },
+    {
+     "role": "assistant",
+     "text": "Not yet. The tracking says it's stuck in transit. Might be a few more days."
+    },
+    {
+     "role": "user",
+     "text": "Annoying. I really need them for the late-night coding sessions. Anyway, thanks for the reminder on the calibration part."
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome. Let me know if you need help setting up the calibration scripts."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-053-s2",
+   "date": "2026-07-19",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm looking at the new benchmarking folder. I'm trying to standardize how we store these reference inputs. What format should I use for the Golden datasets?"
+    },
+    {
+     "role": "assistant",
+     "text": "For consistency, Golden datasets are curated, high-quality input-output pairs stored as JSONL used as ground truth for benchmarking."
+    },
+    {
+     "role": "user",
+     "text": "JSONL, got it. That makes parsing easier for the python scripts. I was worried about CSV formatting issues with commas in the text."
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, JSONL avoids those escaping issues entirely. It's much safer for structured data."
+    },
+    {
+     "role": "user",
+     "text": "Cool. By the way, did you catch the game last night? I think the ref made a terrible call in the second quarter."
+    },
+    {
+     "role": "assistant",
+     "text": "I didn't watch it live, but I saw the highlights. That call was definitely controversial on social media."
+    },
+    {
+     "role": "user",
+     "text": "Tell me about it. My friend was screaming at the TV. Anyway, I'll start converting our old files to JSONL now."
+    },
+    {
+     "role": "assistant",
+     "text": "Sounds like a good plan. Let me know if you need a conversion script."
+    }
+   ]
+  }
+ ]
+}

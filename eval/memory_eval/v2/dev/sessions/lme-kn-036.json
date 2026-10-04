@@ -1,0 +1,73 @@
+{
+ "episode": "lme-kn-036",
+ "sessions": [
+  {
+   "sid": "lme-kn-036-s1",
+   "date": "2026-06-11",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm looking at specs for that new EPYC 9004 series server. The whitepaper says the optimal core count for our inference workloads is 32 cores."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. 32 cores is a solid baseline for high-throughput tasks. Did you check the TDP on those chips?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, 200W. A bit high. Also, did my package for the NVMe drive arrive?"
+    },
+    {
+     "role": "assistant",
+     "text": "Tracking shows it was delivered yesterday. Check your front porch."
+    },
+    {
+     "role": "user",
+     "text": "Found it. Thanks. Back to the server, 32 cores seems to be the sweet spot they recommend."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I've noted that 32 cores is the recommended target for your current setup."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-036-s2",
+   "date": "2026-06-18",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I re-ran the benchmarks on the CPU Inference cluster. It turns out the old advice was wrong. Beyond 8-16 cores, additional cores provide diminishing returns as memory bandwidth saturates."
+    },
+    {
+     "role": "assistant",
+     "text": "That’s a significant shift. So 32 cores is actually over-provisioned for most of our standard workloads?"
+    },
+    {
+     "role": "user",
+     "text": "Exactly. We’re seeing thermal throttling and no throughput gain past 16. I'm thinking of downgrading the next batch of nodes."
+    },
+    {
+     "role": "assistant",
+     "text": "Makes sense. Memory bandwidth is often the bottleneck before compute cores run out."
+    },
+    {
+     "role": "user",
+     "text": "Yeah. Also, is it going to rain this weekend? I wanted to wash the car."
+    },
+    {
+     "role": "assistant",
+     "text": "Looks like clear skies on Saturday, but rain is likely by Sunday afternoon."
+    },
+    {
+     "role": "user",
+     "text": "Perfect, I'll wash it Saturday. Anyway, stick with the 8-16 core rule for the config templates."
+    },
+    {
+     "role": "assistant",
+     "text": "Updated. I will use the 8-16 core range for future recommendations."
+    }
+   ]
+  }
+ ]
+}

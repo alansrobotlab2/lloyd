@@ -1,0 +1,43 @@
+{
+ "episode": "lme-pr-055",
+ "sessions": [
+  {
+   "sid": "lme-pr-055-s1",
+   "date": "2026-07-01",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did you catch that Huntley article? He’s arguing that building a software factory in Python is going to be a 'clown show' due to weaker static typing compared to Rust."
+    },
+    {
+     "role": "assistant",
+     "text": "That is a strong take. Static typing definitely helps with large-scale maintainability, though Python offers more flexibility."
+    },
+    {
+     "role": "user",
+     "text": "I agree with him on that specific point. If I'm building a serious software factory, Python feels like it would be a 'clown show' because of the typing issues."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. Rust is often the safer bet for critical infrastructure."
+    },
+    {
+     "role": "user",
+     "text": "Anyway, unrelated, did you check the status of my GPU order? It’s been stuck in transit for two days."
+    },
+    {
+     "role": "assistant",
+     "text": "I'll check the tracking number. Sometimes carrier updates lag behind the actual physical movement."
+    },
+    {
+     "role": "user",
+     "text": "Cool. Also, what’s the weather like in Seattle for next week? I’m hoping to go hiking."
+    },
+    {
+     "role": "assistant",
+     "text": "Forecasts show mostly cloudy with a chance of rain on Thursday, but sunny earlier in the week."
+    }
+   ]
+  }
+ ]
+}

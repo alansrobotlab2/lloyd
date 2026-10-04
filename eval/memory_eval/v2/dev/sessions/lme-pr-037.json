@@ -1,0 +1,39 @@
+{
+ "episode": "lme-pr-037",
+ "sessions": [
+  {
+   "sid": "lme-pr-037-s1",
+   "date": "2026-08-17",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I finally fixed that annoying bug in the checkout service where the headers were getting stripped by the load balancer."
+    },
+    {
+     "role": "assistant",
+     "text": "That's great news! It's often the infrastructure that causes the most subtle issues. What was the fix?"
+    },
+    {
+     "role": "user",
+     "text": "I realized we were trying to construct the TRACEPARENT header manually in the middleware. It was too brittle. I've switched to using opentelemetry.propagate.inject() instead. That is the canonical method for context propagation, preferred over manual TRACEPARENT construction."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. Using the standard library methods is definitely the safer bet for consistency."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, exactly. Anyway, unrelated, did you see the weather forecast for next week? It's supposed to be rainy again."
+    },
+    {
+     "role": "assistant",
+     "text": "I haven't checked the latest models, but I can look it up if you'd like."
+    },
+    {
+     "role": "user",
+     "text": "Nah, I'll just keep my umbrella handy. Back to work, I need to document this change for the team."
+    }
+   ]
+  }
+ ]
+}

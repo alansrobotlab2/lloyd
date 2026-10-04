@@ -1,0 +1,65 @@
+{
+ "episode": "lme-kn-004",
+ "sessions": [
+  {
+   "sid": "lme-kn-004-s1",
+   "date": "2026-06-03",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to budget for the new DIGIT sensors. Last time I checked, they were running about $250 per unit. Is that still accurate for bulk orders?"
+    },
+    {
+     "role": "assistant",
+     "text": "I can't verify real-time pricing, but $250 was a common rate for those units recently. You should check their current distributor list to be sure."
+    },
+    {
+     "role": "user",
+     "text": "Okay. Also, did that package with the spare HDMI cables arrive yet?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your shipping notifications, so I can't track that specific package."
+    },
+    {
+     "role": "user",
+     "text": "Right. I'll check the mail. Just wanted to get the sensor cost down in my head for the spreadsheet."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. Let me know if you need help formatting the budget columns later."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-004-s2",
+   "date": "2026-06-06",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, quick update on those DIGIT sensors. The price jumped up significantly. They are now approximately $300–$355 per unit. I need to update my quote sheet."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. That is a substantial increase from previous estimates. I'll keep the $300–$355 range in mind for your future calculations."
+    },
+    {
+     "role": "user",
+     "text": "Yeah. By the way, is it going to rain this weekend? I have a picnic planned."
+    },
+    {
+     "role": "assistant",
+     "text": "I can check the local forecast for you if you tell me your city."
+    },
+    {
+     "role": "user",
+     "text": "I'll look it up myself. Just wanted to flag the price change so I don't underquote the client."
+    },
+    {
+     "role": "assistant",
+     "text": "Good idea. Accurate unit costs are critical for those client bids."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,43 @@
+{
+ "episode": "lme-si-016",
+ "sessions": [
+  {
+   "sid": "lme-si-016-s1",
+   "date": "2026-07-07",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, my kitchen sink is leaking again. Do you have a guide for replacing the P-trap?"
+    },
+    {
+     "role": "assistant",
+     "text": "I can help with that. Usually, tightening the slip nuts solves it, but if the washer is worn, you'll need a replacement. Want me to pull up a diagram?"
+    },
+    {
+     "role": "user",
+     "text": "No, I think it's just loose. I'll grab a wrench. Oh, on another note, I finally ordered those Sony LinkBuds Clip earbuds I was looking at."
+    },
+    {
+     "role": "assistant",
+     "text": "Nice choice. They're very compact. Did you find a good deal?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, got them for $129. I'm mostly getting them for the open-ear design since I run. I just realized, though, that the Sony LinkBuds Clip lacks LDAC support and wireless charging, which is a bummer, but oh well."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. The open-ear design is great for situational awareness, so the trade-off might be worth it for your runs."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. I'm more concerned about the sink right now. It's dripping onto the cabinet floor."
+    },
+    {
+     "role": "assistant",
+     "text": "Try tightening the connection first. If that fails, check if the rubber gasket inside the nut is cracked."
+    }
+   ]
+  }
+ ]
+}

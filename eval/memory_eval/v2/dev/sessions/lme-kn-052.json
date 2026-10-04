@@ -1,0 +1,65 @@
+{
+ "episode": "lme-kn-052",
+ "sessions": [
+  {
+   "sid": "lme-kn-052-s1",
+   "date": "2026-05-12",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to cite AttackVLA in my report. I think it was published in October 2025, right?"
+    },
+    {
+     "role": "assistant",
+     "text": "I'll make a note that you believe AttackVLA was published in October 2025. Did you find a draft or was this just an estimate?"
+    },
+    {
+     "role": "user",
+     "text": "It was just an estimate from an early preprint. I haven't checked the final arXiv entry yet. Anyway, my printer is jamming again. Any tips?"
+    },
+    {
+     "role": "assistant",
+     "text": "Try opening the back panel and checking for torn paper fragments. Also, ensure the tray is aligned correctly. Let me know if that clears the jam."
+    },
+    {
+     "role": "user",
+     "text": "Thanks, it's fixed. I'll go with October 2025 for now until I can verify."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I've noted the provisional date as October 2025."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-052-s2",
+   "date": "2026-05-21",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, quick update. I finally checked the arXiv listing for AttackVLA. It wasn't October, it was actually published in November 2025 as arXiv:2511.12149."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. I've updated the record for AttackVLA to reflect the November 2025 publication and the ID arXiv:2511.12149."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. By the way, did my new mechanical keyboard order ship yet?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your email or shipping trackers, so I can't check the status directly. You might want to check the retailer's site."
+    },
+    {
+     "role": "user",
+     "text": "Ah, right. I'll do that. Just wanted to make sure the paper citation was correct before I submit."
+    },
+    {
+     "role": "assistant",
+     "text": "No problem. The updated date and ID are now in your memory."
+    }
+   ]
+  }
+ ]
+}

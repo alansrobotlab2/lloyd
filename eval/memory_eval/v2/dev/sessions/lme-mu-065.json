@@ -1,0 +1,81 @@
+{
+ "episode": "lme-mu-065",
+ "sessions": [
+  {
+   "sid": "lme-mu-065-s1",
+   "date": "2026-08-09",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did the package with the new monitor arm arrive?"
+    },
+    {
+     "role": "assistant",
+     "text": "It looks like it was marked delivered this morning. Shall I schedule a setup guide for you?"
+    },
+    {
+     "role": "user",
+     "text": "No need, I'll handle it. Quick question while I'm here: I was reading that 'Inference Scaling for Long-Context Retrieval Augmented Generation' paper. The results are wild. It shows up to a 58.9% performance gain over standard RAG when optimal inference allocation is applied."
+    },
+    {
+     "role": "assistant",
+     "text": "That is indeed a significant improvement. Have you tried implementing their allocation strategy yet?"
+    },
+    {
+     "role": "user",
+     "text": "Not yet, just noting it down. Anyway, the weather is looking rainy for the weekend."
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, the forecast suggests heavy rain starting Saturday afternoon. Maybe good for indoor projects?"
+    },
+    {
+     "role": "user",
+     "text": "Probably. I need to fix that leaky faucet too."
+    },
+    {
+     "role": "assistant",
+     "text": "Let me know if you need a list of tools for that."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-065-s2",
+   "date": "2026-08-18",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, can you remind me what I had for dinner last night?"
+    },
+    {
+     "role": "assistant",
+     "text": "You mentioned having leftover lasagna from Sunday."
+    },
+    {
+     "role": "user",
+     "text": "Right, thanks. I'm digging into that RAG paper again. It's interesting they used Gemini 1.5 Flash as the underlying model for experiments. Seems like a cost-effective choice."
+    },
+    {
+     "role": "assistant",
+     "text": "Gemini 1.5 Flash is certainly known for its speed and efficiency. Do you think that impacts the scalability claims?"
+    },
+    {
+     "role": "user",
+     "text": "Hard to say, but it makes it more accessible. Oh, did you check if the dentist appointment is confirmed for next Tuesday?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, it is confirmed for 2:00 PM next Tuesday."
+    },
+    {
+     "role": "user",
+     "text": "Great. I also need to buy some printer ink."
+    },
+    {
+     "role": "assistant",
+     "text": "I can add that to your shopping list if you like."
+    }
+   ]
+  }
+ ]
+}

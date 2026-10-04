@@ -1,0 +1,51 @@
+{
+ "episode": "lme-si-060",
+ "sessions": [
+  {
+   "sid": "lme-si-060-s1",
+   "date": "2026-08-04",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, did that order for the new mechanical keyboard arrive yet? The tracking number has been stuck for three days."
+    },
+    {
+     "role": "assistant",
+     "text": "I'm checking the status for you now. It looks like it's currently out for delivery."
+    },
+    {
+     "role": "user",
+     "text": "Okay, good. I need it before the next sprint. Also, I was looking at the hiring pipeline for the platform team."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. Are you reviewing the candidates for the senior backend role?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, but it's tough. We're competing with places like Bloomberg, which has a workforce of over 9,000 engineers. They can offer massive sign-on bonuses."
+    },
+    {
+     "role": "assistant",
+     "text": "That is a significant scale. Do you want me to adjust our compensation benchmarks to match the median for firms of that size?"
+    },
+    {
+     "role": "user",
+     "text": "Let's keep it at the 75th percentile for now, but maybe bump the equity for the top two candidates."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. I'll flag those two profiles for an equity review."
+    },
+    {
+     "role": "user",
+     "text": "Great. Oh, and don't forget to remind me about the dentist appointment at 4 PM."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. I have a reminder set for 3:45 PM."
+    }
+   ]
+  }
+ ]
+}

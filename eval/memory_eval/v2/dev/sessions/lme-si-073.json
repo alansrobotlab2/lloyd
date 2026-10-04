@@ -1,0 +1,43 @@
+{
+ "episode": "lme-si-073",
+ "sessions": [
+  {
+   "sid": "lme-si-073-s1",
+   "date": "2026-07-04",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, quick check on RSSC.org. Did any contact form submissions come through this morning?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, I saw one submission come in from Aileen Tran earlier today."
+    },
+    {
+     "role": "user",
+     "text": "Great, thanks for catching that. Also, is the weather looking good for the picnic this weekend?"
+    },
+    {
+     "role": "assistant",
+     "text": "The forecast says sunny with highs around 75°F, so it looks perfect."
+    },
+    {
+     "role": "user",
+     "text": "Awesome. I also need to order some new HDMI cables for the office setup."
+    },
+    {
+     "role": "assistant",
+     "text": "I can help you find some options. Do you have a specific length in mind?"
+    },
+    {
+     "role": "user",
+     "text": "10 feet should be enough. Just send me the links when you can."
+    },
+    {
+     "role": "assistant",
+     "text": "Will do. I'll have those ready for you shortly."
+    }
+   ]
+  }
+ ]
+}

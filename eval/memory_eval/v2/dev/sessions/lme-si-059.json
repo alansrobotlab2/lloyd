@@ -1,0 +1,43 @@
+{
+ "episode": "lme-si-059",
+ "sessions": [
+  {
+   "sid": "lme-si-059-s1",
+   "date": "2026-08-23",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, my coffee maker is leaking again. I think the gasket is shot."
+    },
+    {
+     "role": "assistant",
+     "text": "That's frustrating. Have you checked if it's the water tank seal or the brew head gasket? Sometimes just reseating the tank fixes it."
+    },
+    {
+     "role": "user",
+     "text": "I reseated it, still dripping. I'll order a replacement part. Anyway, I've been deep into Ming-Yu Liu's work lately."
+    },
+    {
+     "role": "assistant",
+     "text": "Oh, the NVIDIA researcher? His work on neural networks is quite impactful."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, specifically his recent talks. He explained how Physical AI learns across language, video, and action."
+    },
+    {
+     "role": "assistant",
+     "text": "That triad is definitely the frontier for embodied agents right now. It's not just vision anymore."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. It makes sense that you need all three to act in the real world. Anyway, do you know if Best Buy has the gasket in stock?"
+    },
+    {
+     "role": "assistant",
+     "text": "I can check their local inventory if you give me the model number."
+    }
+   ]
+  }
+ ]
+}

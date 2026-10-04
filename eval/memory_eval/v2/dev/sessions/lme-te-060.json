@@ -1,0 +1,81 @@
+{
+ "episode": "lme-te-060",
+ "sessions": [
+  {
+   "sid": "lme-te-060-s1",
+   "date": "2026-08-17",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm tweaking my IDE setup. Do you have any notes on JetBrains?"
+    },
+    {
+     "role": "assistant",
+     "text": "I can help with that. What specifically are you looking for?"
+    },
+    {
+     "role": "user",
+     "text": "Well, based on my current workflow, JetBrains is an integrated editor for Amp Code diagnostic collection and context syncing. I need to make sure it's configured right."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I'll keep that definition in mind for your setup."
+    },
+    {
+     "role": "user",
+     "text": "Also, did the pizza delivery ever show up? It's been 40 minutes."
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your food delivery apps, but you might want to check the tracker."
+    },
+    {
+     "role": "user",
+     "text": "Right. Anyway, let's go back to the IDE. I need to sync the context."
+    },
+    {
+     "role": "assistant",
+     "text": "Shall I look up the sync commands for that specific configuration?"
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-060-s2",
+   "date": "2026-08-29",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm reading some old performance reports. It looks like JetBrains Junie benchmarks from August 2025 showed that simple observation masking achieves 50% cost reduction compared to raw agents."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a significant saving. Is this for a new project?"
+    },
+    {
+     "role": "user",
+     "text": "Just research. Oh, and the rain finally stopped here. Nice."
+    },
+    {
+     "role": "assistant",
+     "text": "Glad to hear it. The forecast did say clearing up in the afternoon."
+    },
+    {
+     "role": "user",
+     "text": "Yeah. Back to the report, I need to cite that cost reduction figure properly."
+    },
+    {
+     "role": "assistant",
+     "text": "Would you like me to format the citation for you?"
+    },
+    {
+     "role": "user",
+     "text": "Maybe later. I just wanted to make sure I had that benchmark data correct."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. Let me know if you need anything else from those reports."
+    }
+   ]
+  }
+ ]
+}

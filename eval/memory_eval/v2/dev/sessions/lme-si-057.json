@@ -1,0 +1,43 @@
+{
+ "episode": "lme-si-057",
+ "sessions": [
+  {
+   "sid": "lme-si-057-s1",
+   "date": "2026-06-01",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, can you help me debug this Python script? It's throwing a KeyError on line 42."
+    },
+    {
+     "role": "assistant",
+     "text": "Sure. Can you share the code snippet around line 42 and what data structure you're expecting there?"
+    },
+    {
+     "role": "user",
+     "text": "It's accessing 'user_id' from a JSON response, but the key seems missing sometimes. Also, while I have you, do you know if the new coffee beans arrived?"
+    },
+    {
+     "role": "assistant",
+     "text": "The coffee beans were marked as delivered yesterday around 4 PM. For the code, check if the JSON structure is nested differently than expected. Are you assuming a flat structure?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, flat. I'll add a check. Speaking of checks, I was reading about Activation Steering earlier today. It's kind of annoying that Activation Steering directions are model-specific and not transferable across different LLMs. I was hoping I could reuse my vectors."
+    },
+    {
+     "role": "assistant",
+     "text": "That is indeed the case. Most steering vectors are highly specific to the model's internal architecture and activation patterns."
+    },
+    {
+     "role": "user",
+     "text": "Right, so I'll have to regenerate them for each model. Anyway, back to the code, how do I handle the optional key gracefully?"
+    },
+    {
+     "role": "assistant",
+     "text": "You can use `response.get('user_id')` to return None if the key is missing, or use a try-except block for more control."
+    }
+   ]
+  }
+ ]
+}

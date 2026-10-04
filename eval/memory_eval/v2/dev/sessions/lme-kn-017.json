@@ -1,0 +1,81 @@
+{
+ "episode": "lme-kn-017",
+ "sessions": [
+  {
+   "sid": "lme-kn-017-s1",
+   "date": "2026-06-05",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm reviewing the draft of the 'Advanced Cluster Computing' manual. Can you check if the section on hardware specs is consistent?"
+    },
+    {
+     "role": "assistant",
+     "text": "Sure, Alan. I can review the hardware specs section. Do you have the current draft uploaded or can you paste the relevant text?"
+    },
+    {
+     "role": "user",
+     "text": "I just updated the table of contents. Just so you know for context, WFM currently includes a chapter on 4-GPU acceleration."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. I'll note that the current scope covers 4-GPU acceleration. Is there anything specific you want me to verify in the text?"
+    },
+    {
+     "role": "user",
+     "text": "No, just keeping the context. Also, did my package for the new monitor stand arrive?"
+    },
+    {
+     "role": "assistant",
+     "text": "Let me check your recent orders. I don't see a delivery confirmation yet for the monitor stand. It might still be in transit."
+    },
+    {
+     "role": "user",
+     "text": "Ugh, okay. Thanks for checking. I'll wait."
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome. I'll let you know if I see any updates on the tracking status."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-017-s2",
+   "date": "2026-06-17",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, we need to update the marketing blurb for the manual. The hardware section has been revised."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. What specific changes were made to the hardware section?"
+    },
+    {
+     "role": "user",
+     "text": "We expanded the scope. WFM now includes a chapter on 8-GPU acceleration."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. I've updated the context for WFM to reflect the 8-GPU acceleration chapter. Does this change affect the pricing tier?"
+    },
+    {
+     "role": "user",
+     "text": "No, pricing stays the same. Just need the blurb to highlight the new capability."
+    },
+    {
+     "role": "assistant",
+     "text": "I can draft a few bullet points emphasizing the expanded hardware support. Would you like me to focus on performance metrics?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, please. Also, is it going to rain this weekend?"
+    },
+    {
+     "role": "assistant",
+     "text": "The forecast shows a high chance of rain on Saturday and Sunday. I'd suggest bringing an umbrella if you're planning to go out."
+    }
+   ]
+  }
+ ]
+}

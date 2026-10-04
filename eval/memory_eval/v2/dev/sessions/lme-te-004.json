@@ -1,0 +1,81 @@
+{
+ "episode": "lme-te-004",
+ "sessions": [
+  {
+   "sid": "lme-te-004-s1",
+   "date": "2026-08-19",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I finally watched that recording from the conference. Neil Zeghidour gave a talk about voice AI and the 'her moment'."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds interesting. What specific insights did you take away from that talk?"
+    },
+    {
+     "role": "user",
+     "text": "Mostly that the latency issues are finally being solved. Anyway, my laptop fan is screaming right now. Any tips?"
+    },
+    {
+     "role": "assistant",
+     "text": "Try checking for background processes or clearing out dust from the vents."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, probably dust. I’ll clean it later. Did you see the weather forecast for tomorrow?"
+    },
+    {
+     "role": "assistant",
+     "text": "It looks like rain all day."
+    },
+    {
+     "role": "user",
+     "text": "Great. I’ll need to reschedule my run. Thanks for the chat."
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome. Let me know if you need help with the laptop."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-004-s2",
+   "date": "2026-08-22",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I was looking into new backend frameworks today. I found that Inngest positions itself as durable execution for AI agents, serving as the execution layer."
+    },
+    {
+     "role": "assistant",
+     "text": "That is a growing niche. Do you think it's better than standard serverless queues?"
+    },
+    {
+     "role": "user",
+     "text": "Hard to say without testing. Also, my dinner reservation for tonight got cancelled. Annoying."
+    },
+    {
+     "role": "assistant",
+     "text": "That is unfortunate. Did they offer a new slot?"
+    },
+    {
+     "role": "user",
+     "text": "No, just a refund. I’ll just order pizza. Speaking of tech, how do I reset my Wi-Fi router?"
+    },
+    {
+     "role": "assistant",
+     "text": "Usually there is a small reset button on the back you can press with a pin."
+    },
+    {
+     "role": "user",
+     "text": "Got it. Thanks. I’ll try that after I eat."
+    },
+    {
+     "role": "assistant",
+     "text": "Enjoy the pizza."
+    }
+   ]
+  }
+ ]
+}

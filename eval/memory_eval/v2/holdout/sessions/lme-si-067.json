@@ -1,0 +1,43 @@
+{
+ "episode": "lme-si-067",
+ "sessions": [
+  {
+   "sid": "lme-si-067-s1",
+   "date": "2026-07-04",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, can you help me fix a bug in my Python script? I keep getting a 'KeyError' when iterating over the config file."
+    },
+    {
+     "role": "assistant",
+     "text": "Sure, let's look at it. Are you checking if the key exists before accessing it, or using .get() with a default value?"
+    },
+    {
+     "role": "user",
+     "text": "I was using direct access. Fixed it now. By the way, I finally read that paper you suggested earlier, 'Mind the Memory Gap'. It was published by Recasens et al. in 2025, right?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, that's correct. Did you find the methodology section useful?"
+    },
+    {
+     "role": "user",
+     "text": "It was okay. Anyway, do you know if the hardware order for the new SSDs has shipped yet? I need them for the lab upgrade."
+    },
+    {
+     "role": "assistant",
+     "text": "Let me check the tracking status... It looks like it left the warehouse this morning. Should arrive by Thursday."
+    },
+    {
+     "role": "user",
+     "text": "Great. Oh, and thanks for reminding me about the dinner reservation at 7 PM. I almost forgot to book it."
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome! Enjoy the meal."
+    }
+   ]
+  }
+ ]
+}

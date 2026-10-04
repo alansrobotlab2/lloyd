@@ -1,0 +1,81 @@
+{
+ "episode": "lme-mu-043",
+ "sessions": [
+  {
+   "sid": "lme-mu-043-s1",
+   "date": "2026-06-26",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, my coffee machine is leaking again. Any quick fixes?"
+    },
+    {
+     "role": "assistant",
+     "text": "Hi Alan. Try checking the O-ring on the group head first. If it's dry or cracked, replacing it usually stops the leak. Do you have a spare part handy?"
+    },
+    {
+     "role": "user",
+     "text": "No, I'll have to order one. Speaking of orders, did that package for the lab arrive?"
+    },
+    {
+     "role": "assistant",
+     "text": "Let me check the status... Yes, the tracking shows it was delivered yesterday. It should be in your inbox."
+    },
+    {
+     "role": "user",
+     "text": "Great. I'm actually reviewing the benchmarks for that new model. GigaWorld-Policy is 9 times faster than Motus."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a significant speedup. Have you looked into the resource usage as well?"
+    },
+    {
+     "role": "user",
+     "text": "Not yet. I need to go, the leak is getting worse. Thanks."
+    },
+    {
+     "role": "assistant",
+     "text": "Good luck with the plumbing! Talk soon."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-043-s2",
+   "date": "2026-07-03",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, are you free for lunch suggestions? I'm craving Thai."
+    },
+    {
+     "role": "assistant",
+     "text": "Sure! How about 'Bangkok Garden' on 5th? They have good reviews for their Pad See Ew."
+    },
+    {
+     "role": "user",
+     "text": "Sounds good. I might invite Sarah from the robotics team."
+    },
+    {
+     "role": "assistant",
+     "text": "She might be busy with the hardware setup. Did you manage to test the new policy model yet?"
+    },
+    {
+     "role": "user",
+     "text": "We did some preliminary runs. GigaWorld-Policy outperforms π-0.5 on real-world robotic platforms."
+    },
+    {
+     "role": "assistant",
+     "text": "That's promising for the deployment timeline. Real-world performance is often the bottleneck."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. Anyway, book us a table for 12:30?"
+    },
+    {
+     "role": "assistant",
+     "text": "Done. I'll add Sarah to the reservation as well."
+    }
+   ]
+  }
+ ]
+}

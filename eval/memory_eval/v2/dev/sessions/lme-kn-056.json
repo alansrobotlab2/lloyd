@@ -1,0 +1,73 @@
+{
+ "episode": "lme-kn-056",
+ "sessions": [
+  {
+   "sid": "lme-kn-056-s1",
+   "date": "2026-05-25",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, quick check on our dev environment setup. Are we still using Kubernetes for orchestration?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, the documentation currently specifies that Red Hat's stack (Podman/Docker/Kubernetes) provides containerization and orchestration for secure, isolated agent deployment."
+    },
+    {
+     "role": "user",
+     "text": "Right, that's what I thought. We're relying on Kubernetes for the orchestration layer."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. Kubernetes remains the standard for our orchestration needs."
+    },
+    {
+     "role": "user",
+     "text": "Also, did that package for the weather API get delivered yet?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your physical mail, but I can check your email if you want me to look for tracking updates."
+    },
+    {
+     "role": "user",
+     "text": "No worries, just checking. Thanks."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-056-s2",
+   "date": "2026-06-03",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, update the architecture docs. We've moved off K8s."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. What is the new orchestration tool?"
+    },
+    {
+     "role": "user",
+     "text": "We are using Docker for orchestration now. Red Hat's stack (Podman/Docker/Docker) provides containerization and orchestration for secure, isolated agent deployment."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. I will update the records to reflect that Docker is now the orchestration component in Red Hat's stack."
+    },
+    {
+     "role": "user",
+     "text": "Great. Also, is it raining outside? I need to know if I should take the bus."
+    },
+    {
+     "role": "assistant",
+     "text": "The forecast shows a 90% chance of precipitation with heavy showers expected this afternoon."
+    },
+    {
+     "role": "user",
+     "text": "Thanks, I'll grab my umbrella."
+    }
+   ]
+  }
+ ]
+}

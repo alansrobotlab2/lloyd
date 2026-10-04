@@ -1,0 +1,51 @@
+{
+ "episode": "lme-pr-018",
+ "sessions": [
+  {
+   "sid": "lme-pr-018-s1",
+   "date": "2026-07-05",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm finally making the switch for my dev box. I've been fighting with macOS on my M1 Mac Mini trying to get CUDA drivers to play nice with PyTorch, and it's a nightmare."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds frustrating. Have you considered moving to Linux for that specific setup?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, I have. Honestly, Linux was noted as having advantages over macOS for AI tooling, so I'm leaning that way. I just need to make sure the hardware is compatible."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. For AI tooling, the driver support and environment isolation on Linux are often superior. What distro are you thinking about?"
+    },
+    {
+     "role": "user",
+     "text": "I'm looking at Ubuntu 22.04 LTS because of the long-term support. Do you have any recommendations for a good GPU driver setup?"
+    },
+    {
+     "role": "assistant",
+     "text": "Ubuntu is a solid choice. I'd recommend using the standard NVIDIA drivers from the Ubuntu repository for stability, or the .run file from NVIDIA's site if you need the latest bleeding-edge features."
+    },
+    {
+     "role": "user",
+     "text": "Got it. Also, unrelated, but did you hear it's going to rain all weekend? I might cancel my hiking trip."
+    },
+    {
+     "role": "assistant",
+     "text": "I saw the forecast. It does look pretty wet. Maybe you can use that time to set up the new machine?"
+    },
+    {
+     "role": "user",
+     "text": "Probably. I'll start by backing up my Mac files before I wipe the drive."
+    },
+    {
+     "role": "assistant",
+     "text": "Good plan. Let me know if you need help with the rsync commands or anything else."
+    }
+   ]
+  }
+ ]
+}

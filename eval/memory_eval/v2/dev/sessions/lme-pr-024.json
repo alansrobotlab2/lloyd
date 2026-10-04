@@ -1,0 +1,47 @@
+{
+ "episode": "lme-pr-024",
+ "sessions": [
+  {
+   "sid": "lme-pr-024-s1",
+   "date": "2026-06-07",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm deep in the weeds with the Groundskeeper project right now. The batch processing module is a nightmare."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds frustrating. What specifically is causing the issue with the batch processing?"
+    },
+    {
+     "role": "user",
+     "text": "It's the state management. I used to think I had to delete and re-insert records to keep the audit trail clean, but that was killing performance. I've finally figured out the right approach."
+    },
+    {
+     "role": "assistant",
+     "text": "Oh? What's the new approach you've settled on?"
+    },
+    {
+     "role": "user",
+     "text": "Groundskeeper lesson learned is to update items in place by finding them by ID and updating only status/reason/processed_at fields."
+    },
+    {
+     "role": "assistant",
+     "text": "That definitely makes more sense for performance and data integrity. It avoids the overhead of creating new records."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. It's a huge relief to get that sorted. Anyway, on a completely different note, did you hear if the coffee maker arrived today?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have real-time tracking for deliveries, but you might want to check your email for a shipping notification."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, I'll check. Just hoping I don't have to wait another week for caffeine."
+    }
+   ]
+  }
+ ]
+}

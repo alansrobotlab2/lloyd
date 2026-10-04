@@ -1,0 +1,43 @@
+{
+ "episode": "lme-si-036",
+ "sessions": [
+  {
+   "sid": "lme-si-036-s1",
+   "date": "2026-07-22",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did you order the new thermal paste yet? The old tube is basically empty."
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, I placed the order for the Arctic MX-6 yesterday. It should arrive by Friday."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. Thanks. Also, I'm still tweaking the config for the new GPU cluster. It's annoying how specific the driver requirements are."
+    },
+    {
+     "role": "assistant",
+     "text": "I can check the compatibility matrix if you send me the specific node models."
+    },
+    {
+     "role": "user",
+     "text": "No need, I figured it out. I just need to remember that Octo Server is a named alternative for retail 5090 nodes when I'm talking to the vendor, so I don't sound like I'm just buying random parts."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. I'll keep that terminology in mind for your procurement notes."
+    },
+    {
+     "role": "user",
+     "text": "Great. By the way, is it going to rain this weekend? I was planning to wash the car."
+    },
+    {
+     "role": "assistant",
+     "text": "The forecast shows a high chance of showers on Saturday, but Sunday looks clear."
+    }
+   ]
+  }
+ ]
+}

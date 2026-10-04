@@ -1,0 +1,97 @@
+{
+ "episode": "lme-kn-040",
+ "sessions": [
+  {
+   "sid": "lme-kn-040-s1",
+   "date": "2026-05-18",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm still wrestling with the latency issues on the Voice-to-Voice System prototype. It's frustrating."
+    },
+    {
+     "role": "assistant",
+     "text": "Sorry to hear that, Alan. Have you checked if the echo cancellation is interfering with the audio stream?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, I think so. Currently, I'm relying on WebRTC AEC2 for echo cancellation in the Voice-to-Voice System, but it's not aggressive enough for this use case."
+    },
+    {
+     "role": "assistant",
+     "text": "AEC2 can sometimes be too conservative. Have you considered tweaking the tail length or enabling mobile mode?"
+    },
+    {
+     "role": "user",
+     "text": "I tried that, but the voice quality drops. Maybe I just need to wait for the new update I heard about."
+    },
+    {
+     "role": "assistant",
+     "text": "Which update?"
+    },
+    {
+     "role": "user",
+     "text": "There was talk of an AEC3 module, but it's not in the main branch yet. Anyway, did the hardware order for the new microphone array arrive?"
+    },
+    {
+     "role": "assistant",
+     "text": "The tracking number shows it's out for delivery today. Should be there by evening."
+    },
+    {
+     "role": "user",
+     "text": "Great. Thanks, Lloyd. I'll test it once it arrives."
+    },
+    {
+     "role": "assistant",
+     "text": "Let me know how it goes."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-040-s2",
+   "date": "2026-05-24",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, good news. The new microphone array arrived, and I finally found the fix for the echo issue."
+    },
+    {
+     "role": "assistant",
+     "text": "That's great news! Did you find a better configuration for the existing echo canceller?"
+    },
+    {
+     "role": "user",
+     "text": "No, I switched engines. WebRTC AEC3 was implemented for improved echo cancellation in the Voice-to-Voice System."
+    },
+    {
+     "role": "assistant",
+     "text": "Oh, AEC3! That should definitely handle the tail-end echo better than AEC2. How is the latency now?"
+    },
+    {
+     "role": "user",
+     "text": "Much better. It's barely noticeable. I just need to update the deployment script to use the new library path."
+    },
+    {
+     "role": "assistant",
+     "text": "Makes sense. Do you need help updating the config file?"
+    },
+    {
+     "role": "user",
+     "text": "Maybe later. Right now I'm distracted by the weather. It's raining here, which makes the humidity spike bad for the mic calibration."
+    },
+    {
+     "role": "assistant",
+     "text": "Humidity can definitely affect condenser microphones. Did you use the dehumidifier we talked about last week?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, it's running. Okay, back to work. Thanks for listening, Lloyd."
+    },
+    {
+     "role": "assistant",
+     "text": "Anytime, Alan. Good luck with the deployment."
+    }
+   ]
+  }
+ ]
+}

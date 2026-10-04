@@ -1,0 +1,43 @@
+{
+ "episode": "lme-pr-025",
+ "sessions": [
+  {
+   "sid": "lme-pr-025-s1",
+   "date": "2026-05-07",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, the weather is finally clearing up. Did you order that mechanical keyboard I mentioned?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, Alan. It was ordered yesterday and should arrive by Tuesday. The switches are Blue, as requested."
+    },
+    {
+     "role": "user",
+     "text": "Great. On a different note, I'm reviewing the vendor proposal for the new ERP rollout. I'm leaning towards keeping things in-house to save costs."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. Keeping it in-house can reduce immediate costs but might increase workload for your team. Do you have enough internal capacity?"
+    },
+    {
+     "role": "user",
+     "text": "That's the issue. I was talking to Pauline Brunet earlier. She strongly advocates for delegating change management tasks to System Integrators. I think she's right."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. Delegating to SIs often ensures smoother adoption and specialized expertise. Would you like to adjust the scope of the proposal?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, let's pivot. I want to draft a request for proposal that explicitly asks for SI-led change management."
+    },
+    {
+     "role": "assistant",
+     "text": "I can help draft that. Should we prioritize firms with a history of successful SI-led transformations?"
+    }
+   ]
+  }
+ ]
+}
