@@ -88,3 +88,24 @@
 # `workers.db`) are runtime data and stay ignored, and only a witness somebody chose to
 # name this way lands here.
 !usage-*.db
+
+# The seventh family is one fact-improvement run record, committed for the reason every
+# family above was: #2198's premise is a specific 2026-10-04 dry-run pass whose printed
+# `signals=40` came entirely from drift while BOTH correction channels returned zero
+# (`corrections_status: undated`; `lloyd/USER.md` at `entries: 2, undated: 2,
+# signals: 0`; `memory/corrections.md` at `no_entries_in_window`, newest `2026-05-08`).
+# The clause-5 re-derive is `wc -l` of the record WHOLE — 1052 lines — so a cut-down
+# extract cannot answer the one question that clause asks, and the file needs history.
+# Its durable home is the vault witness clause 5 names,
+# `backlog/data/20261004-210010-dryrun.json` (committed under #2199), which a test
+# cannot open: the gate runs with HOME at the round home, where `~/obsidian` does not
+# exist. This copy is byte-identical to it, and the node named below compares the two
+# whenever the vault is reachable instead of quoting a digest here — a bare object-id
+# in a comment is read as a commit by whatever validates citations, and a compared
+# byte is a better witness than a claimed one.
+# `test_the_committed_witness_bytes_still_carry_the_quoted_two_silent_channels`
+# re-derives every quoted figure, the 1052 lines included, from these bytes. Scoped to
+# `improvement_*-dryrun.json` and not to all JSON: a live record of this shape belongs to
+# `~/lloyd-data/_pipeline/improvement/` and is retention-swept, so this negation only
+# ever reaches a witness somebody deliberately placed here.
+!improvement_*-dryrun.json

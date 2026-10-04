@@ -290,6 +290,23 @@ _DATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})")
 _BULLET_DATE_RE = re.compile(
     r"^\s*[-*]\s*(?:\*\*)?\s*(\d{4}-\d{2}-\d{2})\s*(?:\*\*)?\s*[:.\-—]?\s*(.*)$")
 _SECTION_HEAD_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.M)
+# The bullet marker, stripped from an UNDATED bullet to recover its prose (#2198).
+_BULLET_MARK_RE = re.compile(r"^\s*[-*]\s+")
+# The log's own last-changed date, used to place an entry that carries none
+# (#2198). Read from the front matter by regex over the leading `---` block, in
+# the style of `_CREATED_AT_RE` above, and only in that block: the body of
+# `lloyd/USER.md` is loaded into every system prompt and mentions dates
+# everywhere, and a date from prose is not a date the file was updated.
+_FRONT_MATTER_BLOCK_RE = re.compile(r"^---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(\r?\n|$)", re.S)
+_FM_UPDATED_RE = re.compile(r"""^[ \t]*updated:[ \t]*['"]?([^'"\n]+?)['"]?[ \t]*$""", re.M)
+_FM_TIMESTAMP_RE = re.compile(r"""^[ \t]*timestamp:[ \t]*['"]?([^'"\n]+?)['"]?[ \t]*$""", re.M)
+_LEADING_ISO_DATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})")
+# Where a fallback date came from, so a reader can weigh it: `front_matter:updated`
+# and `front_matter:timestamp` are dates a writer recorded about the file;
+# `mtime` is only "some process wrote these bytes", which the nightly reflection
+# job does on its own schedule and which therefore says nothing about when the
+# correction was made.
+FALLBACK_ORIGINS = ("front_matter:updated", "front_matter:timestamp", "mtime")
 # `2026-09-11 02:41 PDT — ` between a heading's date and its text. Stripped so a
 # heading's entity is not competing with its own timestamp for the token scan.
 _TIME_IN_HEAD_RE = re.compile(r"^\s*\d{1,2}:\d{2}(:\d{2})?\s*[A-Za-z]{1,4}?\s*[—–-]?\s*")
@@ -301,11 +318,18 @@ _TIME_IN_HEAD_RE = re.compile(r"^\s*\d{1,2}:\d{2}(:\d{2})?\s*[A-Za-z]{1,4}?\s*[�
 # reading as "no corrections tonight" — see the run that reported exactly that
 # while reading a four-month-old file. Overwritten on every read; tests and the
 # run record read it through `last_corrections_read()`.
+# The shape of `last_corrections_read()["undated_fallback"]` when nothing was
+# undated (#2198). A zero here means "every entry carried a date"; the `None`
+# date and the `None` summary mean no fallback was consulted at all, which is a
+# different fact from "the fallback was consulted and found nothing".
+_UNDATED_FALLBACK_NONE: dict = {"undated": 0, "admitted": 0, "date": None,
+                                "origin": None, "summary": None}
 # What a run record says when the corrections read never happened — a
 # `--sources drift` pass consults no log, and `corrections_status: null` would
 # read as "the log was empty", which is the same false verdict in a new costume.
 _NOT_READ: dict = {"status": "not_read", "sources": {}, "paths_yielding_signals": [],
-                   "window_days": None, "stale_since": None, "newest_entry": None}
+                   "window_days": None, "stale_since": None, "newest_entry": None,
+                   "undated_fallback": dict(_UNDATED_FALLBACK_NONE)}
 _LAST_CORRECTIONS_READ: dict = {}
 
 # Every status the corrections read can report, best first. One vocabulary, so a
@@ -315,21 +339,90 @@ _LAST_CORRECTIONS_READ: dict = {}
 # window or inside the entity registry. `read_correction_signals` is where the
 # file-level status (`_corrections_entries`) is combined with the window and the
 # registry into one of these.
-CORRECTIONS_STATUSES = ("signals", "empty", "entries_no_entity", "no_entries_in_window",
-                        "undated", "no_section", "registry_unreadable", "unreadable",
-                        "missing", "not_read")
+#
+# `fallback_admitted` (#2198) sits between the dated outcomes and the unseen ones
+# because it is neither: something landed inside the window, but on the LOG's own
+# clock rather than a date the operator wrote (`_file_fallback_date`), so it is
+# evidence worth scanning and not evidence worth trusting equally. It is never the
+# status of a log whose in-window content also contains a dated entry — those keep
+# `entries_no_entity` or `signals` — so a standing correction admitted on the
+# file's date can never be read back as a correction the operator dated today.
+# A log whose undated entries' fallback date fell OUTSIDE the window is reported
+# `no_entries_in_window` with `fallback_date` naming the date that decided it: the
+# same window verdict as a stale dated log, and the `fallback_date`/`newest_entry`
+# pair says which kind it was.
+CORRECTIONS_STATUSES = ("signals", "empty", "entries_no_entity", "fallback_admitted",
+                        "no_entries_in_window", "undated", "no_section",
+                        "registry_unreadable", "unreadable", "missing", "not_read")
 
 
 def _entry_date(line: str) -> tuple[str | None, str]:
-    """(iso date or None, entry text) for a corrections line."""
-    m = _DATE_RE.match(line.strip().lstrip("#").strip())
+    """(iso date or None, entry text) for a corrections line.
+
+    An undated line still returns its own prose (#2198). It used to return `""`,
+    which threw the text away with the date: the consumer counted the entry
+    `undated` and `continue`d before the token scan, so the prose was invisible
+    not only to the window but to everything downstream of it. That made the
+    undated shape permanent — no reader could ever be taught to place such an
+    entry, because there was nothing left to place.
+    """
+    stripped = line.strip()
+    m = _DATE_RE.match(stripped.lstrip("#").strip())
     if m:
-        rest = line.strip().lstrip("#").strip()[len(m.group(0)):].lstrip(" —–-\t")
+        rest = stripped.lstrip("#").strip()[len(m.group(0)):].lstrip(" —–-\t")
         return m.group(1), rest
     m = _BULLET_DATE_RE.match(line)
     if m:
         return m.group(1), m.group(2)
-    return None, ""
+    return None, _BULLET_MARK_RE.sub("", stripped).strip()
+
+
+def _file_fallback_date(path: Path) -> tuple[str | None, str | None]:
+    """(iso date, origin) for a corrections log's own last-changed date.
+
+    The one documented clock for an entry that carries none (#2198), so that a
+    standing correction — prose written to change future behaviour, in a section
+    whose own header says it is standing corrections and not a write-changelog
+    (`lloyd/USER.md:74`), written both by hand and by the nightly reflection job
+    — can be placed in or out of the window at all. Fixed order, first source
+    that parses wins, and the origin is returned with the date because the three
+    are not equally trustworthy:
+
+      1. front matter `updated:`    → origin `front_matter:updated`
+      2. front matter `timestamp:`  → origin `front_matter:timestamp`
+      3. the file's mtime           → origin `mtime`
+
+    The mtime leg is the weakest and is last on purpose: the reflection job
+    rewrites `lloyd/USER.md` on its own schedule, so a file touched tonight reads
+    as "changed tonight" whatever the correction inside it is dated. That is why
+    an entry admitted on this clock is counted and statused apart from one the
+    operator dated (`fallback_admitted`, `CORRECTIONS_STATUSES`). A fallback date
+    outside `window_days` still admits nothing — the point of the clock is to be
+    able to say *no*, which is the answer `undated` could never give.
+
+    `(None, None)` means no clock was available at all: no parseable front-matter
+    date and no readable stat. Such entries stay `undated`, which is the honest
+    verdict rather than a zero dressed up as a window decision.
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+    fm = _FRONT_MATTER_BLOCK_RE.match(text)
+    if fm:
+        for origin, rx in (("front_matter:updated", _FM_UPDATED_RE),
+                           ("front_matter:timestamp", _FM_TIMESTAMP_RE)):
+            m = rx.search(fm.group(1))
+            if m:
+                d = _LEADING_ISO_DATE_RE.match(m.group(1).strip())
+                if d:
+                    return d.group(1), origin
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return None, None
+    return (datetime.datetime.fromtimestamp(mtime, tz=datetime.timezone.utc)
+            .date().isoformat()), "mtime"
 
 
 def _corrections_entries(path: Path) -> tuple[list[tuple[str | None, str]], str]:
@@ -424,11 +517,28 @@ def read_correction_signals(limit: int = 25, window_days: int = CORRECTIONS_WIND
     `window_days` bounds it: `CORRECTIONS_WINDOW_DAYS` by default, threaded
     through from `collect_signals(corrections_days=…)` and
     `run_improvement(corrections_days=…)`. An entry older than the window names
-    no entity but is counted in `outside_window`, and so is an undated one: a
-    correction that cannot say when it happened cannot say whether it still
-    applies. When that filter empties a log, `last_corrections_read()` reports
-    `no_entries_in_window` with the log's newest entry date, so a stale log is
-    never reported as a quiet week.
+    no entity but is counted in `outside_window`. When that filter empties a log,
+    `last_corrections_read()` reports `no_entries_in_window` with the log's newest
+    entry date, so a stale log is never reported as a quiet week.
+
+    **An entry with no date on its line is not thrown away** (#2198). Its prose is
+    returned by `_entry_date`, and it is placed in or out of the window by ONE
+    documented fallback date — `_file_fallback_date`: the log's own front-matter
+    `updated:`, else its front-matter `timestamp:`, else the file's mtime, first
+    leg that parses winning. It is admitted only when that date falls inside
+    `window_days`; a fallback date outside the window admits nothing and the block
+    still reports `in_window: 0`. It is never counted as a dated entry: the block's
+    `undated` counts the lines that carried no date, `fallback_admitted` counts how
+    many of those the fallback placed inside the window, and a source whose only
+    in-window content arrived that way reports the status `fallback_admitted`
+    rather than `entries_no_entity` or `signals` — so a standing correction whose
+    log was rewritten tonight cannot be read back as a correction made today. Why
+    a fallback exists at all: the live log is `lloyd/USER.md`'s `## corrections_log`
+    and its bullets are standing prose (`lloyd/USER.md:74` says the section is
+    standing corrections, not a write-changelog), written both by hand and by the
+    nightly reflection job, so the reader cannot require future bullets to carry a
+    date. `last_corrections_read()["undated_fallback"]` states the count, the date
+    and which leg of the waterfall supplied it.
 
     Reads every path in `corrections_paths()` — the compiled-in
     `memory/corrections.md` *and* `lloyd/USER.md`'s `## corrections_log`, which
@@ -449,27 +559,50 @@ def read_correction_signals(limit: int = 25, window_days: int = CORRECTIONS_WIND
         in_window = 0
         outside = 0
         undated = 0
+        # Entries placed inside the window on the LOG's clock rather than their
+        # own (#2198). Counted separately for the same reason a witness statement
+        # is weighted by who dated it.
+        fallback_admitted = 0
         # Newest parseable entry date, window included. The stale marker is
         # "stale since <this date>", which cannot be recovered from a count:
         # `outside_window: 10` says nothing about when the log went quiet, and
-        # the date is the part an operator can act on.
+        # the date is the part an operator can act on. Deliberately NOT fed by the
+        # fallback date: that is a file's last-changed stamp, and publishing it
+        # here would make "the operator stopped correcting things on X" out of a
+        # timestamp no operator wrote.
         newest: str | None = None
+        # One clock per file, read once, only if that file actually has an undated
+        # entry to place. `origin` says which leg of the waterfall answered.
+        fallback_date: str | None = None
+        fallback_origin: str | None = None
+        fallback_read = False
         for date, text in entries:
+            via_fallback = False
             if date is None:
                 undated += 1
-                continue
-            try:
-                when = datetime.datetime.fromisoformat(date).replace(
+                if not fallback_read:
+                    fallback_date, fallback_origin = _file_fallback_date(Path(path))
+                    fallback_read = True
+                if fallback_date is None:
+                    continue          # no clock at all: the entry stays `undated`
+                when = datetime.datetime.fromisoformat(fallback_date).replace(
                     tzinfo=datetime.timezone.utc)
-            except ValueError:
-                undated += 1
-                continue
-            if newest is None or date > newest:      # ISO dates sort as strings
-                newest = date
+                via_fallback = True
+            else:
+                try:
+                    when = datetime.datetime.fromisoformat(date).replace(
+                        tzinfo=datetime.timezone.utc)
+                except ValueError:
+                    undated += 1
+                    continue
+                if newest is None or date > newest:  # ISO dates sort as strings
+                    newest = date
             if abs((now - when).days) > window_days:
                 outside += 1
                 continue
             in_window += 1
+            if via_fallback:
+                fallback_admitted += 1
             if not known or len(out) >= limit:
                 continue
             head = _DATE_IN_HEAD_RE.sub(" ", text)
@@ -478,28 +611,93 @@ def read_correction_signals(limit: int = 25, window_days: int = CORRECTIONS_WIND
                 if not canonical or canonical in seen:
                     continue
                 seen.add(canonical)
+                # One 200-character budget, shared: the provenance prefix spends
+                # ~60 of it for a fallback-placed entry, so the standing prose it
+                # carries is shorter than a dated entry's would be. That is the
+                # deliberate trade — an admission whose clock is unknown is worth
+                # less than the sentence, and a signal that silently lost its
+                # prefix would read as a dated correction, which is the failure
+                # #2198 is about. The budget is asserted in
+                # tests/test_memory_improvement.py so the trade stays a choice.
+                _prefix = (f"[standing correction; placed by {fallback_origin} "
+                           f"date {fallback_date}] " if via_fallback else f"{date} ")
                 out.append({"entity": canonical, "source": "corrections",
-                            "evidence": f"{date} {text}".strip()[:200],
-                            "corrections_path": str(path)})
+                            "evidence": (_prefix + text).strip()[:200],
+                            "corrections_path": str(path),
+                            # Provenance of the date that placed this entry, so
+                            # the owed ruling on whether standing corrections ever
+                            # yield a *useful* signal can be made from the records
+                            # rather than by re-reading the logs: "entry" is a date
+                            # the operator wrote, anything else is `_file_fallback_date`.
+                            "entry_date_origin": (fallback_origin if via_fallback
+                                                  else "entry")})
                 break
         signals_here = sum(1 for s in out if s.get("corrections_path") == str(path))
+        # Status, in the order that decides it. An undated log with no clock at all
+        # stays `undated`, because the honest reason for its zero is that nothing
+        # could be placed; once a clock exists, an empty window is the log's
+        # staleness rather than the reader's blindness, and the block's
+        # `fallback_date` names the date that decided it. A log whose only
+        # in-window content came in on the file's clock gets its own status rather
+        # than the dated one, so a fallback is never read back as a correction the
+        # operator dated (#2198).
         if status == "entries" and not in_window:
             status = "no_entries_in_window"      # the log is fine; the window is not
+        elif status == "undated" and fallback_date and not in_window:
+            status = "no_entries_in_window"      # placed by the file's clock: outside
+        elif fallback_admitted and in_window == fallback_admitted:
+            status = "fallback_admitted"         # nothing dated got in; the clock did
         elif status == "entries" and not signals_here:
             status = "entries_no_entity"          # in-window entries name no entity
         read[str(path)] = {"status": status, "entries": len(entries),
                            "in_window": in_window, "outside_window": outside,
                            "undated": undated, "signals": signals_here,
-                           "newest_entry": newest}
+                           "newest_entry": newest,
+                           # The clock that placed this log's undated entries, and
+                           # how many of them it placed. `None` here means either
+                           # there were none to place or none could be placed —
+                           # `undated` and `fallback_admitted` tell those apart.
+                           "fallback_date": fallback_date,
+                           "fallback_origin": fallback_origin,
+                           "fallback_admitted": fallback_admitted}
     global _LAST_CORRECTIONS_READ
     if not known and not out:
         # No registry means every token is a guess. Say the store is why the read
         # produced nothing, rather than reporting a log that is fine as empty.
         for info in read.values():
             if info["status"] in ("entries", "entries_no_entity", "empty",
-                                  "no_entries_in_window"):
+                                  "no_entries_in_window", "fallback_admitted"):
                 info["status"] = "registry_unreadable"
                 info["why"] = "entity registry unreadable; no token can be resolved"
+    # The one sentence that says what the undated entries were done with (#2198).
+    # Built whenever ANY entry lacked a date, and populated on the zero-signal read
+    # the item found silent: with only `signals: 0` a caller cannot tell "the
+    # operator made no corrections" from "the corrections have no dates and the
+    # clock I used to place them is the log's own, from the front matter / from the
+    # file's mtime". The named date and origin are the whole product here — a
+    # fallback the reader cannot see is the silent admission this item warned about.
+    undated_all = sum(i["undated"] for i in read.values())
+    admitted = sum(i["fallback_admitted"] for i in read.values())
+    undated_fallback = dict(_UNDATED_FALLBACK_NONE)
+    if undated_all:
+        placed = [i for i in read.values() if i["undated"] and i["fallback_date"]]
+        newest_fallback = max(placed, key=lambda i: i["fallback_date"]) if placed else None
+        date = newest_fallback["fallback_date"] if newest_fallback else None
+        origin = newest_fallback["fallback_origin"] if newest_fallback else None
+        where = ({"front_matter:updated": "front matter (`updated:`)",
+                  "front_matter:timestamp": "front matter (`timestamp:`)",
+                  "mtime": "the file's mtime"}.get(origin) if origin else None)
+        undated_fallback = {
+            "undated": undated_all, "admitted": admitted,
+            "date": date, "origin": origin,
+            "summary": (
+                f"{undated_all} undated {'entry' if undated_all == 1 else 'entries'}; "
+                + (f"fallback date {date} from {where}; {admitted} admitted inside the "
+                   f"{window_days}-day window" if date else
+                   "no fallback date available (no front-matter date, no readable "
+                   "mtime); 0 admitted")
+                + f"; {undated_all - admitted} not placed"),
+        }
     # The stale marker is computed after the registry fix-up above: a pass that
     # could not resolve any entity name did not establish that the log is stale,
     # it established that it could not read, and reporting a date in the same
@@ -520,7 +718,12 @@ def read_correction_signals(limit: int = 25, window_days: int = CORRECTIONS_WIND
                               "stale_since": max(stale_dates) if stale_dates else None,
                               "newest_entry": max(
                                   (i["newest_entry"] for i in read.values()
-                                   if i["newest_entry"]), default=None)}
+                                   if i["newest_entry"]), default=None),
+                              # Names the undated count, the fallback date and where
+                              # that date came from, on any read that saw an undated
+                              # entry — the report a zero-signal night has to carry
+                              # for the silence to be legible (#2198).
+                              "undated_fallback": undated_fallback}
     return out
 
 
@@ -543,8 +746,17 @@ def last_corrections_read() -> dict:
     """What the most recent `read_correction_signals()` call actually saw.
 
     `{status, sources: {path: {status, entries, in_window, outside_window,
-    undated, signals, newest_entry}}, paths_yielding_signals, window_days,
-    stale_since, newest_entry}`. The run record stores `corrections_path` from
+    undated, signals, newest_entry, fallback_date, fallback_origin,
+    fallback_admitted}}, paths_yielding_signals, window_days, stale_since,
+    newest_entry, undated_fallback}`. Per source, `fallback_date`/`fallback_origin`
+    are the one clock that placed that log's undated entries and where it came from
+    (`front_matter:updated`, `front_matter:timestamp` or `mtime` — see
+    `_file_fallback_date`), and `fallback_admitted` is how many of them it placed
+    inside the window; all three are `None`/0 when the log had no undated entry.
+    Read-level, `undated_fallback` is `{undated, admitted, date, origin, summary}`,
+    populated whenever any entry lacked a date, so a zero-signal night states the
+    count, the date and its provenance instead of printing a bare 0 (#2198).
+    The run record stores `corrections_path` from
     `paths_yielding_signals`, `corrections_window_days` from `window_days`, and
     `corrections_stale_since` from `stale_since`, so a zero in the record can be
     told apart from an unread file and from a dead log — the distinction the
@@ -2058,11 +2270,23 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
         "corrections_stale_since": last_corrections_read()["stale_since"],
         "corrections_window_days": last_corrections_read()["window_days"],
         "corrections_newest_entry": last_corrections_read()["newest_entry"],
+        # `fallback_date`/`fallback_origin`/`fallback_admitted` (#2198) so the record
+        # itself answers "were this log's undated entries placed, on what date, and
+        # how many of them?" — the owed ruling on whether standing corrections ever
+        # resolve to a useful signal is made from these records, and a fallback that
+        # reached the signals but not the record could not be ruled on at all.
         "corrections_sources": {p: {"status": i["status"], "entries": i["entries"],
                                     "in_window": i["in_window"],
                                     "outside_window": i["outside_window"],
-                                    "undated": i["undated"], "signals": i["signals"]}
+                                    "undated": i["undated"], "signals": i["signals"],
+                                    "fallback_date": i["fallback_date"],
+                                    "fallback_origin": i["fallback_origin"],
+                                    "fallback_admitted": i["fallback_admitted"]}
                                 for p, i in last_corrections_read()["sources"].items()},
+        # The read-level statement, kept whole: count, date, origin, and the plain
+        # sentence naming them, for a record whose `corrections_status` is a zero
+        # that a bare zero cannot explain.
+        "corrections_undated_fallback": last_corrections_read()["undated_fallback"],
     }
     if record:
         try:

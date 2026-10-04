@@ -129,6 +129,17 @@ def main() -> int:
             print(f"[corrections] 0 signals in window: log stale since "
                   f"{rec['corrections_stale_since']} (window "
                   f"{rec.get('corrections_window_days')} days)")
+        # The other silent half of the same channel (#2198): entries with no date on
+        # the line. The stale line above covers a log that is simply old; it never
+        # fired for `lloyd/USER.md`, whose bullets are standing prose with no date at
+        # all, so a pass that got 0 signals from both sources printed the half that
+        # had a line and read as a two-source pass. This prints the undated count, the
+        # fallback date that placed them, and whether that date came from the file's
+        # front matter or its mtime — a fallback a reader cannot see is the silent
+        # admission this line exists to prevent.
+        _fb = rec.get("corrections_undated_fallback") or {}
+        if _fb.get("summary") and rec.get("corrections_status") != "signals":
+            print(f"[corrections] {_fb['summary']}")
         # The drift twins of that line (#1461). A pool that is the corpus is a
         # sweep, not a recency slice — a rebuild re-stamped every row's
         # `created_at` — and an empty pool is a stopped writer, not a quiet

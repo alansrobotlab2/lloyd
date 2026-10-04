@@ -28,6 +28,7 @@ import ast
 import importlib.util
 import inspect
 import json
+import os
 import re
 import subprocess
 import sys
@@ -712,6 +713,372 @@ def test_the_corrections_reader_docstring_names_the_route_and_the_window():
     for named in ("fact quality", "collect_signals", "run_improvement",
                   "CORRECTIONS_WINDOW_DAYS"):
         assert named in doc, f"docstring must name {named!r}: {doc}"
+
+
+# ── 1c. an UNDATED correction is still a correction (#2198) ──────────────────
+#
+# The live log is `lloyd/USER.md`'s `## corrections_log`, and its bullets are
+# standing prose with no date on the line — the section's own text says it holds
+# standing corrections and not a write-changelog (`lloyd/USER.md:74`), and it is
+# written both by hand and by the nightly reflection job. The reader used to answer
+# that shape by returning `(None, "")`: the prose was discarded with the date, the
+# consumer counted `undated` and `continue`d before the token scan, and the channel
+# has returned 0 signals every night since it moved. What is pinned below: the prose
+# survives (clause 1); one documented fallback date places the entry and can say *no*
+# (clause 2); an entry admitted on the log's own clock is never reported as one the
+# operator dated, in the read or in the record (clause 3); a zero-signal night names
+# the count, the date and where the date came from, on stdout and in the record
+# (clause 4); the heading-shaped log is never admitted by that clock, which is a
+# decision and not an accident; and the run record the item's numbers were quoted
+# from is re-derivable from committed bytes (clause 5).
+
+def _standing_log(path, bullets, *, front="", mtime_days_ago=None):
+    """Write a `## corrections_log` bullet log; `bullets` are the lines verbatim.
+
+    Verbatim on purpose: whether a bullet carries a date is the variable under
+    test, so the helper must not add one. `front` is the file's front-matter block
+    ("" = none, which leaves the file's mtime as the only clock), and
+    `mtime_days_ago` stamps the bytes so a test can pin where on the window the
+    file itself sits without waiting for a night to pass.
+
+    Either configured path may be handed to it, including `memory/corrections.md`,
+    which the live log shapes as headings: the reader chooses heading- or
+    bullet-parsing from the file's CONTENT (`_SECTION_HEAD_RE` finds no section in a
+    bullet log), so a bullet log written at that path is the same code path a live
+    bullet log takes and not a mis-shape. The heading shape's half of that — an
+    undatable heading log, which can never be admitted by the file clock — is pinned
+    by `test_an_undatable_heading_log_is_never_admitted_by_the_file_clock`.
+    """
+    body = ((front if front.startswith("---") else f"---\n{front}---\n")
+            if front else "")
+    body += "# User\n\n## corrections_log\n\nStanding corrections only.\n"
+    for bullet in bullets:
+        body += f"- {bullet}\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+    if mtime_days_ago is not None:
+        epoch = (datetime.now(timezone.utc) - timedelta(days=mtime_days_ago)).timestamp()
+        os.utime(path, (epoch, epoch))
+    return path
+
+
+def test_an_undated_corrections_bullet_returns_its_own_prose(world):
+    """Clause 1: an undated entry keeps its text, or nothing downstream can place it.
+
+    The old `return None, ""` was the second half of the bug: a caller that gets
+    `""` cannot window the entry, cannot scan it for an entity, and cannot report
+    what it dropped. The standing prose in the same section is still NOT an entry —
+    the count, not just the text, is what keeps a run from crediting the operator
+    with a mistake they never made.
+    """
+    _, _, vault_root = world
+    log = _standing_log(vault_root / "lloyd" / "USER.md", [
+        "**Standing**: a loaded-memory line names its source document",
+        "**Standing**: TTS health verdicts require a synthetic end-to-end request"])
+    entries, status = fi._corrections_entries(log)
+    assert status == "undated", status
+    assert len(entries) == 2, entries            # the prose paragraph is not an entry
+    assert [d for d, _ in entries] == [None, None], entries
+    assert entries[0][1] == ("**Standing**: a loaded-memory line names its "
+                             "source document"), entries[0]
+    assert "TTS health verdicts" in entries[1][1], entries[1]
+    assert all(text for _, text in entries), "an undated entry must never return ''"
+
+
+def test_undated_bullets_are_placed_by_the_log_own_fallback_date(world):
+    """Clause 2: one documented clock — front-matter `updated:`, else `timestamp:`,
+    else mtime — and it admits entries only inside `window_days`.
+
+    Both directions, because the point of giving the reader a clock is that it can
+    refuse: the failure mode the item named is a fallback that silently admits every
+    old standing correction forever, and a `timestamp:` 90 days back must yield
+    `in_window: 0` and no signal. The third leg (no front matter at all) is pinned
+    too, since `lloyd/USER.md` today carries `timestamp:` and NO `updated:`, so the
+    waterfall's order is the live behaviour and not a hypothetical.
+    """
+    facts_root, st, vault_root = world
+    _write_facts(facts_root, "TTS", "state",
+                 [{"fact": "TTS is running on the box.", "created_at": _days_ago(4)}])
+    _reindex(st, facts_root)
+    _write_facts(facts_root, "ZED", "state",
+                 [{"fact": "ZED is running on the box.", "created_at": _days_ago(4)}])
+    _reindex(st, facts_root)
+    fresh = _standing_log(vault_root / "memory" / "corrections.md",
+                          ["TTS built-in voices are the wrong default"],
+                          front=f"updated: '{_ago(2)}T09:00:00'\n")
+    stale = _standing_log(vault_root / "lloyd" / "USER.md",
+                          ["TTS health verdicts require a synthetic request"],
+                          front=f"timestamp: '{_ago(90)}T09:00:00'\n")
+    got = fi.read_correction_signals()
+    assert [s["entity"] for s in got] == ["TTS"], got
+    assert got[0]["corrections_path"] == str(fresh)
+    # The evidence says which clock placed it, so a reader of the signal alone can
+    # see this is a standing correction and not something the operator dated today.
+    assert got[0]["entry_date_origin"] == "front_matter:updated", got[0]
+    assert got[0]["evidence"] == (
+        f"[standing correction; placed by front_matter:updated date {_ago(2)}] "
+        "TTS built-in voices are the wrong default"), got[0]
+    # One 200-character budget, shared by both shapes: the label is spent from
+    # inside it and not stacked on top, so a fallback-placed signal can neither
+    # arrive over-long nor arrive unlabelled.
+    assert len(got[0]["evidence"]) <= 200, len(got[0]["evidence"])
+    assert got[0]["evidence"].startswith("[standing correction; placed by"), got[0]
+    read = fi.last_corrections_read()["sources"]
+    admitted = read[str(fresh)]
+    assert (admitted["entries"], admitted["undated"], admitted["in_window"]) == (1, 1, 1)
+    assert admitted["fallback_admitted"] == 1, admitted
+    assert admitted["fallback_date"] == _ago(2), admitted
+    assert admitted["fallback_origin"] == "front_matter:updated", admitted
+    refused = read[str(stale)]
+    assert (refused["entries"], refused["undated"], refused["in_window"],
+            refused["outside_window"], refused["fallback_admitted"]) == (1, 1, 0, 1, 0), refused
+    assert refused["fallback_date"] == _ago(90), refused
+    assert refused["status"] == "no_entries_in_window", refused
+    assert sum(1 for s in got if s["corrections_path"] == str(stale)) == 0, got
+    # mtime leg: no front matter means the bytes' own stamp is the clock, and the
+    # report says so rather than leaving the reader to guess which date it used.
+    # `ZED` and not `TTS`: an entity a co-read log already claimed is deduped, and
+    # a signal lost to dedupe would prove nothing about this clock.
+    mtime_log = _standing_log(vault_root / "lloyd" / "USER.md",
+                              ["ZED health needs a synthetic request"],
+                              mtime_days_ago=5)
+    got = fi.read_correction_signals()
+    info = fi.last_corrections_read()["sources"][str(mtime_log)]
+    assert info["fallback_origin"] == "mtime", info
+    assert info["fallback_date"] == _ago(5), info
+    assert info["fallback_admitted"] == 1, info
+    zed = [s for s in got if s["entity"] == "ZED"]
+    assert len(zed) == 1 and zed[0]["entry_date_origin"] == "mtime", got
+
+
+def test_fallback_admitted_entries_are_never_reported_as_dated_ones(world):
+    """Clause 3: the fallback gets its own count and its own status, on both sides.
+
+    `undated` says how many lines carried no date; `fallback_admitted` says how many
+    the clock placed inside the window; a log whose ONLY in-window content arrived
+    that way reports `fallback_admitted`, never `entries_no_entity` or `signals` —
+    while a log that ALSO has a genuinely dated in-window entry keeps a dated status
+    and still counts its admitted bullet. The mixed log written below is that case:
+    one dated entry and one undated one, both inside the window, so `in_window: 2` and
+    `fallback_admitted: 1` — the count records the admission, and the status is not
+    `fallback_admitted` either, because the window there is not filled only by the
+    clock: one entry in it carries its own date. `fallback_admitted` as a status means
+    "the file's date is the whole reason this log has in-window content", which is the
+    case worth warning about, and nothing weaker. The two facts stay independent on
+    purpose: the status says
+    what KIND of evidence got in, the counts say how much of each kind. The vocabulary
+    is one flat tuple, so the new member has to sit where its meaning sits: better than
+    "nothing got in", worse than the same verdict earned from a date the operator wrote.
+    """
+    assert "fallback_admitted" in fi.CORRECTIONS_STATUSES, fi.CORRECTIONS_STATUSES
+    order = fi.CORRECTIONS_STATUSES
+    assert (order.index("entries_no_entity") < order.index("fallback_admitted")
+            < order.index("no_entries_in_window")), order
+    facts_root, st, vault_root = world
+    for name in ("TTS", "ZED"):
+        _write_facts(facts_root, name, "state",
+                     [{"fact": f"{name} is running on the box.", "created_at": _days_ago(4)}])
+    _reindex(st, facts_root)
+    only_fallback = _standing_log(
+        vault_root / "memory" / "corrections.md",
+        ["TTS default voice is wrong", "**Standing**: TTS needs a synthetic check"],
+        front=f"updated: '{_ago(2)}T09:00:00'\n")
+    # A log with a real dated in-window entry AND an undated one, so the status has
+    # to be the dated one and the fallback has to show up only as a count. `ZED`
+    # here and `TTS` there because two logs naming one entity dedupe to one signal,
+    # and a deduped signal would hide which entry the status was decided from.
+    dated_too = _standing_log(
+        vault_root / "lloyd" / "USER.md",
+        [f"{_ago(3)}: ZED default is wrong", "**Standing**: ZED needs a synthetic check"],
+        front=f"updated: '{_ago(2)}T09:00:00'\n")
+    got = fi.read_correction_signals()
+    assert sorted(s["entity"] for s in got) == ["TTS", "ZED"], got
+    read = fi.last_corrections_read()["sources"]
+    info = read[str(only_fallback)]
+    assert info["status"] == "fallback_admitted", info
+    assert (info["undated"], info["fallback_admitted"], info["in_window"]) == (2, 2, 2), info
+    mixed = read[str(dated_too)]
+    assert mixed["status"] not in ("fallback_admitted", "entries_no_entity",
+                                   "no_entries_in_window"), mixed
+    assert (mixed["undated"], mixed["fallback_admitted"], mixed["in_window"],
+            mixed["outside_window"]) == (1, 1, 2, 0), mixed
+    assert mixed["newest_entry"] == _ago(3), mixed   # the clock is not the newest entry
+    assert [s["entity"] for s in got if s["corrections_path"] == str(dated_too)] == ["ZED"]
+    assert next(s for s in got if s["entity"] == "ZED")["entry_date_origin"] == "entry"
+    # The record carries the same distinction the read made, because the owed ruling
+    # on whether standing corrections ever produce a USEFUL signal is made from these
+    # records and not from a re-read of the log.
+    rec = fi.run_improvement(apply=False, sources=("corrections",), limit=2,
+                             max_actions=0, record=False)
+    src = rec["corrections_sources"][str(only_fallback)]
+    assert src["status"] == "fallback_admitted", src
+    assert src["fallback_date"] == _ago(2) and src["fallback_admitted"] == 2, src
+    assert rec["corrections_sources"][str(dated_too)]["fallback_admitted"] == 1, rec
+    fallback_rec = rec["corrections_undated_fallback"]
+    assert (fallback_rec["undated"], fallback_rec["admitted"]) == (3, 3), fallback_rec
+
+
+def test_a_zero_signal_read_names_the_count_the_date_and_where_it_came_from(
+        world, capsys, monkeypatch):
+    """Clause 4: 0 signals with undated entries present has to explain itself.
+
+    This is the half the run never printed: `memory/corrections.md` had a stale-line,
+    so the pass printed one line and read as a two-source pass while the live log
+    reported a bare `undated` and nothing else. The report must carry the undated
+    count, the fallback date, and whether it came from front matter or the mtime —
+    in the record AND on stdout, since a caveat only in the JSON nobody opens is the
+    false green #802 was filed about.
+    """
+    facts_root, st, vault_root = world
+    _write_facts(facts_root, "TTS", "state",
+                 [{"fact": "TTS is running on the box.", "created_at": _days_ago(4)}])
+    _reindex(st, facts_root)
+    # Neither bullet names a registered entity, so the read legitimately yields zero
+    # signals — the exact live shape of `lloyd/USER.md`, both entries prose rules.
+    log = _standing_log(vault_root / "lloyd" / "USER.md", [
+        "**Standing**: a loaded-memory line names its source document",
+        "**Standing**: a health verdict needs a synthetic request"],
+        front=f"timestamp: '{_ago(3)}T09:00:00'\n")
+    # The co-read log, dated but far outside the window: the stale channel's own
+    # line has to survive beside this one, and the file's date convention stays
+    # relative so no future calendar can retire this assertion.
+    _corrections_log(vault_root / "memory" / "corrections.md", [(_ago(400), "TTS")])
+    assert fi.read_correction_signals() == [], fi.last_corrections_read()
+    fb = fi.last_corrections_read()["undated_fallback"]
+    assert fb["undated"] == 2 and fb["admitted"] == 2, fb
+    assert fb["date"] == _ago(3) and fb["origin"] == "front_matter:timestamp", fb
+    assert str(fb["undated"]) in fb["summary"] and fb["date"] in fb["summary"], fb
+    assert "front matter" in fb["summary"], fb
+    assert fi.last_corrections_read()["sources"][str(log)]["undated"] == 2
+    # And the mtime leg says which leg it was, rather than borrowing the word
+    # "front matter" for a timestamp no operator wrote.
+    _standing_log(vault_root / "lloyd" / "USER.md",
+                  ["**Standing**: a loaded-memory line names its source document"],
+                  mtime_days_ago=4)
+    fi.read_correction_signals()
+    fb = fi.last_corrections_read()["undated_fallback"]
+    assert fb["origin"] == "mtime" and "mtime" in fb["summary"], fb
+
+    # The same process boundary #802 pinned: the nightly job quotes this script's
+    # stdout, so the fallback has to reach the printed line and the persisted record,
+    # not only a key inside the JSON nobody opens.
+    spec = importlib.util.spec_from_file_location("fact_improvement_cli_undated",
+                                                  _SCRIPT_PATH)
+    cli = importlib.util.module_from_spec(spec)
+    sys.modules["fact_improvement_cli_undated"] = cli
+    spec.loader.exec_module(cli)
+    monkeypatch.setattr(sys, "argv", ["fact-improvement.py", "--sources", "corrections"])
+    assert cli.main() == 0
+    out = capsys.readouterr().out
+    printed = [ln for ln in out.splitlines() if ln.startswith("[corrections]")]
+    assert any(_ago(4) in ln and "mtime" in ln and "undated" in ln for ln in printed), out
+    record = sorted(Path(fi.RECORD_DIR).glob("*.json"))[-1]
+    persisted = json.loads(record.read_text(encoding="utf-8"))
+    assert persisted["corrections_undated_fallback"]["origin"] == "mtime", persisted
+    # One undated bullet by this point (the rewrite above), placed by the mtime and
+    # counted as admitted — the record has to carry both, or the night reads as a
+    # bare zero with a date attached.
+    src = persisted["corrections_sources"][str(log)]
+    assert (src["undated"], src["fallback_admitted"], src["in_window"]) == (1, 1, 1), src
+    assert src["fallback_date"] == _ago(4), src
+
+
+def test_an_undatable_heading_log_is_never_admitted_by_the_file_clock(world):
+    """The fallback is for a standing bullet, not for a log the reader cannot parse.
+
+    `_corrections_entries`' heading branch drops a heading whose text carries no
+    date, so a heading-shaped log contributes ZERO entries: there is nothing for the
+    clock to place, the read stays `undated` with `fallback_date: null`, and no
+    `undated_fallback` summary is produced for it. That is deliberate and pinned
+    here rather than left to the shape of the code: admitting an undatable HEADING
+    by the file's mtime is precisely the silent-admission failure #2198 was filed
+    about, and the log that needed a clock is the bullet-shaped one.
+    """
+    _, _, vault_root = world
+    (vault_root / "memory" / "corrections.md").write_text(
+        "# Corrections Log\n\n## Standing rule about voices\n\nprose\n\n"
+        "## Another rule with no date\n\nprose\n", encoding="utf-8")
+    (vault_root / "lloyd" / "USER.md").write_text(
+        "# User\n\n## corrections_log\n", encoding="utf-8")
+    assert fi._corrections_entries(vault_root / "memory" / "corrections.md") == (
+        [], "undated")
+    assert fi.read_correction_signals() == [], fi.last_corrections_read()
+    info = fi.last_corrections_read()["sources"][
+        str(vault_root / "memory" / "corrections.md")]
+    assert info["status"] == "undated" and info["entries"] == 0, info
+    assert info["fallback_date"] is None and info["fallback_admitted"] == 0, info
+    assert fi.last_corrections_read()["undated_fallback"]["undated"] == 0, (
+        "a log that yielded no entries must not be counted as undated entries "
+        "awaiting a clock")
+
+
+def test_the_committed_witness_bytes_still_carry_the_quoted_two_silent_channels():
+    """Clause 5: the record #2198's numbers came from has history and is re-derivable.
+
+    This is the tree's copy of the vault witness clause 5 names,
+    `backlog/data/20261004-210010-dryrun.json` (committed under #2199), and identity
+    between the two is CHECKED below rather than asserted in prose: when the vault is
+    reachable the bytes must compare equal, and under the gate they are not, because
+    the run happens with HOME at the round home where no vault exists — which is
+    exactly why a copy had to be committed here for a node to read at all. No hash is
+    quoted in this file or in `tests/fixtures/.gitignore`: a bare object-id in a
+    comment gets read as a commit by whatever validates citations, and this claim has
+    a better witness than a digest. The clause's own re-derive is `wc -l` of the
+    record whole, which is why the file is kept whole rather than cut down to the
+    two blocks the item quotes: 1052 lines is the figure it asks for.
+
+    What the bytes say, and what the change is a response to: the pass printed
+    `signals: 40`, every one of them from drift (`drift_status: slice`,
+    `drift_candidates_total: 1887`), while BOTH correction channels returned 0 —
+    `memory/corrections.md` 10 entries newest 2026-05-08 and outside the window,
+    `lloyd/USER.md` 2 entries with BOTH undated and the bare status `undated`. And no
+    key in either source block names a fallback, because before this change there was
+    no clock to report: that absence is the defect, recorded.
+    """
+    witness = ROOT / "tests" / "fixtures" / "improvement_20261004-210010-dryrun.json"
+    # The clause names the vault copy, so where the vault is readable the copy in the
+    # tree is only a witness if it is the same bytes. Skipped, not assumed, when it is
+    # not there — which is the gate's own condition.
+    vault_copy = Path.home() / "obsidian" / "backlog" / "data" / (
+        "20261004-210010-dryrun.json")
+    if vault_copy.exists():
+        assert vault_copy.read_bytes() == witness.read_bytes(), (
+            "the committed copy has drifted from the vault witness clause 5 names")
+    # No `else: skip` — the re-derive below is the node's job and must run in the
+    # gate too, where no vault exists at this path. What is conditional is only the
+    # comparison against the out-of-band copy, never the figures themselves.
+    raw = witness.read_text(encoding="utf-8")
+    # `wc -l` counts NEWLINES, and `json.dump` leaves the last `}` unterminated, so
+    # the clause's figure is one below the line count a split gives: 1052 by `wc -l`,
+    # 1053 by `splitlines()`. Counted the way the clause counts, because a witness
+    # pinned to the wrong convention is a witness that fails on someone else's box.
+    assert raw.count("\n") == 1052, raw.count("\n")
+    assert not raw.endswith("\n") and len(raw.splitlines()) == 1053, "as emitted"
+    rec = json.loads(raw)
+    # `apply: false` is the record's own dry-run key (the `-dryrun` in the filename is
+    # derived from it), so the witness pins that nothing was written on the night the
+    # numbers come from — the pass being discussed reported, it did not act.
+    assert rec["signals"] == 40 and rec["apply"] is False, rec["signals"]
+    assert rec["drift_status"] == "slice" and rec["drift_candidates_total"] == 1887
+    assert rec["corrections_status"] == "undated", rec["corrections_status"]
+    assert rec["corrections_stale_since"] == "2026-05-08", rec["corrections_stale_since"]
+    assert rec["corrections_newest_entry"] == "2026-05-08", "both channels' newest date"
+    assert rec["corrections_window_days"] == 30
+    src = rec["corrections_sources"]
+    by_leaf = {Path(p).parent.name + "/" + Path(p).name: v for p, v in src.items()}
+    assert set(by_leaf) == {"memory/corrections.md", "lloyd/USER.md"}, sorted(src)
+    # The dated channel was fine and merely stale; the live channel could not be read
+    # at all. Two different silences, and the printed pass showed only the first.
+    head = by_leaf["memory/corrections.md"]
+    assert (head["status"], head["entries"], head["outside_window"], head["undated"],
+            head["in_window"], head["signals"]) == (
+        "no_entries_in_window", 10, 10, 0, 0, 0), head
+    live = by_leaf["lloyd/USER.md"]
+    assert (live["status"], live["entries"], live["undated"], live["in_window"],
+            live["outside_window"], live["signals"]) == (
+        "undated", 2, 2, 0, 0, 0), live
+    assert all("fallback_date" not in v for v in src.values()), (
+        "the pre-fix record has no clock to report — that absence is the premise")
 
 
 # ── 2. the loop: evidence + reason, dry-run by default ───────────────────────
