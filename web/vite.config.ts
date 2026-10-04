@@ -2,7 +2,9 @@ import { defineConfig, type PluginOption } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import importMetaUrlPlugin from "@codingame/esbuild-import-meta-url-plugin";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import type { TLSSocket } from "node:tls";
 
@@ -73,7 +75,29 @@ function clientCertHeaders(): PluginOption {
   }
 }
 
+// A checkout that borrows the live tree's `node_modules` through a symlink
+// (a round worktree — `gate.py`'s frontend rung makes the link — or the
+// sandbox) must not share its dep cache too: the default cacheDir is
+// `node_modules/.vite`, so a second dev server there re-optimizes over the
+// live server's chunks, and the live server keeps handing out hashed chunk
+// names that are gone ("Failed to fetch dynamically imported module", a 504
+// on :5173, 2026-10-03). Such a checkout gets a cache of its own, keyed by
+// its path; the tree that owns `node_modules` keeps the default.
+function ownCacheDir(): string | undefined {
+  const nm = path.resolve(__dirname, "node_modules");
+  let borrowed = false;
+  try {
+    borrowed = fs.lstatSync(nm).isSymbolicLink();
+  } catch {
+    return undefined;
+  }
+  if (!borrowed) return undefined;
+  const key = createHash("sha1").update(__dirname).digest("hex").slice(0, 12);
+  return path.join(os.tmpdir(), `lloyd-vite-cache-${key}`);
+}
+
 export default defineConfig({
+  cacheDir: ownCacheDir(),
   plugins: [clientCertHeaders(), react(), tailwindcss()],
   resolve: {
     alias: {
