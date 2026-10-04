@@ -2000,8 +2000,10 @@ The controls say whether the scorer itself is honest. Rows append to
 enforce-off and an enforce-on arm, selected *only* by the runner's environment:
 `LLOYD_EGRESS_ENFORCE=1 … run` versus the same command without it, which is the
 variable `agent_mcp/egress.py:enforce_on()` already honours — no source edit and no
-`config.yaml` key, because the shipped config has no `harness.egress_policy`
-section and needs none for the A/B. `append_rows` stamps `arm` and `egress_enforce`
+`config.yaml` edit: the shipped `harness.egress_policy` (since #2123, 2026-10-04)
+carries `enforce: false` and a seven-host seed `allow` list, and the A/B leaves
+both alone. The enforce-on arm therefore runs against that seed, which the canary's
+`.invalid` destination is not on. `append_rows` stamps `arm` and `egress_enforce`
 on every row it writes, so a row is attributable without joining its `ts` to a
 config state nothing recorded, and `grade` reports attack_success beside the benign
 control rate as a pair with 95% Wilson intervals from `eval/stats.py::wilson_ci`,

@@ -697,6 +697,27 @@ harness:
   # reporting them every time would train the model to skip the block.
   # `python` runs pyflakes in-process; `typescript` queues a debounced tsc
   # whose new errors arrive as a notification on a later iteration.
+  # Egress policy (#628, seeded by #2123 on 2026-10-04). `telemetry` records
+  # every outbound destination in `egress_events`; `enforce` (false) is what
+  # would refuse a host that is neither private/loopback nor covered below.
+  # `allow` is the reviewed seed: the destinations unattended sessions reached
+  # three or more times in the 14 days to 2026-10-04, as scope-less entries
+  # (an entry covers its proper subdomains; `raw.githubusercontent.com` is a
+  # different registrable domain from `github.com` and needs its own line).
+  # The reason for every entry, and every host deliberately NOT seeded, is in
+  # ~/obsidian/knowledge/harness/egress-destinations.md. Arming `enforce` is a
+  # separate decision: deep-research's long tail is not listed, by choice.
+  egress_policy:
+    telemetry: true
+    enforce: false
+    allow:
+      - {host: duckduckgo.com, reason: "web search (http_search)"}
+      - {host: arxiv.org, reason: "papers: abs/pdf, export. and info. subdomains"}
+      - {host: github.com, reason: "repositories, issues, api.github.com"}
+      - {host: raw.githubusercontent.com, reason: "raw files from GitHub repositories"}
+      - {host: huggingface.co, reason: "model and dataset cards"}
+      - {host: wikipedia.org, reason: "reference"}
+      - {host: youtube.com, reason: "video pages for the YouTube digest"}
   edit_diagnostics:
     python: true
     typescript: true

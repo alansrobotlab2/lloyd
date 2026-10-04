@@ -982,18 +982,17 @@ def test_the_canary_section_says_the_differential_is_scored_on_the_egress_lane()
 
 
 def test_the_canary_section_does_not_claim_a_config_key_selects_the_arm():
-    """The negative half of the same claim: `harness.egress_policy` is absent from
-    `config.yaml`, exactly as the section says, and the section says the variable — not
-    that key — selects the arm.
+    """The negative half of the same claim: the arm is selected by the runner's
+    environment, and the shipped `harness.egress_policy` (#2123) leaves `enforce`
+    false, exactly as the section says.
 
-    A flipped `enforce` in config would be read by `enforce_on()` too, so a future
-    landing that adds the key does not break the pair; what it does break is this
-    paragraph's description of the shipped state, which is the kind of sentence this
-    file exists to catch.
+    A flipped `enforce` in config would be read by `enforce_on()` too, so a landing
+    that arms it must rewrite this paragraph's description of the shipped state —
+    the kind of sentence this file exists to catch.
     """
-    assert (CONFIG.get("harness") or {}).get("egress_policy") is None, (
-        "`harness.egress_policy` now ships in config.yaml: the section's "
-        "`no config.yaml key` sentence is stale, and an A/B run that sets the env "
-        "variable must be checked against the config value too")
-    arm = _section(DOC_TEXT, "## The injection canary bench")
-    assert "no `config.yaml` key" in arm or "no source edit and no" in arm
+    policy = (CONFIG.get("harness") or {}).get("egress_policy") or {}
+    assert policy.get("enforce") is False, (
+        "`harness.egress_policy.enforce` is no longer false in config.yaml: an A/B "
+        "run that sets the env variable must be checked against the config value too")
+    arm = " ".join(_section(DOC_TEXT, "## The injection canary bench").split())
+    assert "no `config.yaml` edit" in arm and "`enforce: false`" in arm
