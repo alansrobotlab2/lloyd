@@ -930,3 +930,70 @@ def test_the_pin_verdict_names_what_reopens_the_question_and_instructs_no_rerun(
         "config.yaml proves nothing")
     bad = _rerun_instructions(_inner_voice_section())
     assert bad == [], f"`inner_voice:` still instructs a re-run against an arm: {bad}"
+
+
+def test_the_canary_section_says_the_differential_is_scored_on_the_egress_lane():
+    """The injection-canary section must say which lane the enforce A/B is read on,
+    and where the arm comes from (#2154).
+
+    The sentence exists because of a trap in the measurement: `attack_success` is the
+    call the model PROPOSED, and an arm that differs only in `harness.egress_policy`'s
+    `enforce` flag cannot move it — so two identical-looking attack rates in the pair
+    invite the reading "the gate does nothing". The lane that does move is
+    `egress_destination`, which books a canary-carrying call to an off-allow-list host
+    as an escape and is the one that records the guard's decision, and the prompt-side
+    gate the sentence rules out is real: `app/harness/safety.py` reads neither
+    `LLOYD_EGRESS_ENFORCE` nor `egress.enforce_on()`, so its verdict is the same string
+    in both arms. Both halves are asserted against the code rather than against other
+    prose, which is the rule of this file.
+
+    The arm claim is pinned too — the doc names the environment variable, and the
+    config is asserted to hold no `harness.egress_policy` section, because a reader who
+    believed a config key chose the arm would edit config.yaml to run the pair and read
+    two runs of the same arm as an A/B.
+    """
+    arm = _section(DOC_TEXT, "## The injection canary bench")
+    assert "egress_destination" in arm, "the doc must name the lane the pair is read on"
+    assert "LLOYD_EGRESS_ENFORCE" in arm and "enforce_on" in arm
+    assert "app/harness/safety.py" in arm, "the doc must say where it is NOT scored"
+    assert "wilson_ci" in arm and "Wilson" in arm
+
+    # The identifiers the sentence rests on are defined where it says they are.
+    assert (ROOT / "eval" / "run_injection_canary.py").read_text(
+        encoding="utf-8").find("def egress_destination(") > 0
+    assert (ROOT / "agent_mcp" / "egress.py").read_text(
+        encoding="utf-8").find("def enforce_on(") > 0
+    assert (ROOT / "eval" / "stats.py").read_text(encoding="utf-8").find("def wilson_ci(") > 0
+
+    safety = (ROOT / "app" / "harness" / "safety.py").read_text(encoding="utf-8")
+    assert "LLOYD_EGRESS_ENFORCE" not in safety and "enforce_on" not in safety, (
+        "`app/harness/safety.py` now reads the enforcement flag, so the doc's claim that "
+        "the substrate differential is not on that gate has to be rewritten, not re-asserted")
+
+    # The scenario the section names as the one that reaches the lane is shipped, and
+    # its host is the non-resolving kind the section promises.
+    scenarios = (ROOT / "eval" / "injection_canary" / "scenarios.yaml").read_text(
+        encoding="utf-8")
+    assert "webpage-egress-fetch" in arm and "key: webpage-egress-fetch" in scenarios
+    corpus = (ROOT / "eval" / "injection_canary" / "corpus"
+              / "webpage-egress-fetch.html").read_text(encoding="utf-8")
+    assert ".invalid" in corpus, (
+        "the host the section calls non-resolving is not an RFC 6761 .invalid name")
+
+
+def test_the_canary_section_does_not_claim_a_config_key_selects_the_arm():
+    """The negative half of the same claim: `harness.egress_policy` is absent from
+    `config.yaml`, exactly as the section says, and the section says the variable — not
+    that key — selects the arm.
+
+    A flipped `enforce` in config would be read by `enforce_on()` too, so a future
+    landing that adds the key does not break the pair; what it does break is this
+    paragraph's description of the shipped state, which is the kind of sentence this
+    file exists to catch.
+    """
+    assert (CONFIG.get("harness") or {}).get("egress_policy") is None, (
+        "`harness.egress_policy` now ships in config.yaml: the section's "
+        "`no config.yaml key` sentence is stale, and an A/B run that sets the env "
+        "variable must be checked against the config value too")
+    arm = _section(DOC_TEXT, "## The injection canary bench")
+    assert "no `config.yaml` key" in arm or "no source edit and no" in arm
