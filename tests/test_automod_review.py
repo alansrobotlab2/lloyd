@@ -320,6 +320,259 @@ def test_the_grader_is_told_which_failures_predate_the_round(tmp_path):
     assert plain == RV.build_prompt(**kw, pre_existing_failures=[])
 
 
+# ── #2177: a bare function name is a node too, when a changed test defines it ─
+
+def test_a_bare_node_name_a_changed_test_defines_stands_and_names_the_file(wt):
+    """Round SM_20261004_084454: the grader graded all six clauses `met`, named a
+    node in `tests/test_compaction.py` for each, and every one was downgraded
+    `test_node_id not in a test file this diff changed` — because it wrote the
+    function name and not `path::name`, and the rail read the text before the `::`
+    that was not there as a path. `REVIEW_SCHEMA` never asked for the path form, so
+    the refusal condemned an honest citation and the round could not pass however
+    good its diff was.
+
+    A bare name a changed test file DEFINES now resolves into that file and holds on
+    the same footing as the path-qualified spelling of the same node: `read` is
+    enough, because the `tests` rung ran that file either way. And the resolution is
+    recorded under `accepted`, naming the file, so a clause that stands on a
+    completed citation is visible as doing so.
+    """
+    # The whole sentence, not a substring of it: a waiver that stopped naming the
+    # node it resolved, or the file it resolved into, is a waiver nobody can audit.
+    waiver = "bare node `test_it` resolved to tests/test_x.py, a test file this diff changed"
+    for how in ("ran", "read"):
+        c = _met(wt, test_node_id="test_it", how_verified=how)
+        assert c["verdict"] == "met", (how, c)
+        assert "downgraded" not in c
+        assert c["accepted"] == [waiver], (how, c)
+    # The rail answers the same way when asked directly, with no parse_review between.
+    holds, reason = RV._node_rail("test_it", worktree=wt, changed={"tests/test_x.py"},
+                                  how="ran", tests_passed=True)
+    assert holds and reason == waiver, reason
+    # A node already spelled with its path keeps its waiver-free `met`: the record
+    # says nothing happened here, because nothing did.
+    holds, reason = RV._node_rail("tests/test_x.py::test_it", worktree=wt,
+                                  changed={"tests/test_x.py"}, how="ran", tests_passed=True)
+    assert holds and reason == "", reason
+
+
+def test_a_bare_name_resolves_only_when_exactly_one_changed_test_defines_it(wt):
+    """Two changed test files, one definition, resolves into the file that has it;
+    two definitions resolve nowhere, because a name two files answer to pins no
+    single test — and pinning one is the entire purpose of a node id."""
+    (wt / "tests" / "test_y.py").write_text("def test_second():\n    assert 1\n")
+    both = ["tests/test_x.py", "tests/test_y.py"]
+
+    def judge(node):
+        parsed = RV.parse_review(_obj(test_node_id=node, how_verified="ran"), worktree=wt,
+                                 changed_tests=both, n_clauses=1, tests_passed=True,
+                                 changed_paths=["app/x.py"] + both)
+        return parsed["clauses"][0]
+
+    c = judge("test_second")
+    assert c["verdict"] == "met" and "tests/test_y.py" in c["accepted"][0], c
+    (wt / "tests" / "test_x.py").write_text("def test_second():\n    assert 1\n")
+    c = judge("test_second")
+    assert c["verdict"] == "partial", c
+    assert c["downgraded"] == ["test_node_id not in a test file this diff changed"], c
+
+
+def test_a_bare_name_resolves_through_the_changed_list_the_gate_builds(harness_wt):
+    """The seam this fix actually crosses: the grader answers in another process, and
+    the gate hands `parse_review` `changed_tests = TP.pick_test_files(changed,
+    worktree)` (scripts/automod/gate.py) as the resolver's whole search set. So the
+    resolution is built from that list and from `pytest.ini`, never from a `tests/`
+    prefix of its own — which is why a bare id whose definition lives in
+    `app/harness/tests/`, the tree #1322 had to teach this rail to see at all,
+    resolves there as readily as one under root `tests/`."""
+    changed = ["app/harness/loop.py", "app/harness/tests/test_x.py", "tests/test_x.py"]
+    parsed = RV.parse_review(_obj(test_node_id="test_y", how_verified="ran"),
+                             worktree=harness_wt,
+                             changed_tests=RV.TP.pick_test_files(changed, harness_wt),
+                             n_clauses=1, tests_passed=True, changed_paths=changed)
+    c = parsed["clauses"][0]
+    assert c["verdict"] == "met", c
+    assert "app/harness/tests/test_x.py" in c["accepted"][0], c
+
+
+@pytest.mark.live_vault
+def test_the_bare_node_ids_the_rung_refused_have_history_behind_them():
+    """The bytes behind this item's quoted report, put where they get read. #2168's
+    clause-5 half was refused twice for exactly this shape: findings that quote a line
+    range of a session file that gets swept with the runtime logs. The review session
+    whose six `test_node_id` values this rail refused is now in
+    `backlog/data/20261004_022144_review_3345.json` — 2,879 lines of one JSON session
+    document — so the refusal's input is citable in git and the claim can be re-run
+    against the real object instead of a quoted transcript.
+
+    Read through the vault pointer the loop itself uses, so what is asserted is what
+    the next reader finds on disk. The six are the item's whole claim: bare ids, all
+    `how_verified: ran`, from the review of #2168's round SM_20261004_084454.
+    """
+    witness = V.VAULT / "backlog" / "data" / "20261004_022144_review_3345.json"
+    if not witness.is_file():
+        pytest.skip(f"{witness} is not on disk, so the vault copy is unreadable here")
+    sess = json.loads(witness.read_text(errors="replace"))
+    assert sess["title"] == "review #2168 (SM_20261004_084454)", sess["title"]
+    graded = [m["structured"] for m in sess["messages"] if m.get("structured")]
+    assert len(graded) == 1, f"expected one structured verdict, got {len(graded)}"
+    clauses = graded[0]["clauses"]
+    bare = [c for c in clauses
+            if isinstance(c.get("test_node_id"), str) and c["test_node_id"]
+            and "::" not in c["test_node_id"]]
+    assert len(clauses) == 6 and len(bare) == 6, (
+        f"the item quotes six bare ids, got {len(bare)} bare of {len(clauses)} clauses")
+    assert all(c["verdict"] == "met" and c.get("how_verified") == "ran" for c in bare), bare
+    assert "test_the_sidecar_is_keyed_by_session_id" in [c["test_node_id"] for c in bare]
+
+
+def test_the_live_rung_and_the_replay_parser_now_agree_on_a_bare_node(wt):
+    """The second boundary this fix sits across: a graded clause is written to the
+    ledger here and read back later by `review_tools.parsed_from_event`, which since
+    before this round has forgiven exactly this clause shape — `::`-less node, `ran` —
+    and restored it to `met`. That is why the same clause reads as met wherever the
+    ledger is replayed — 32 events across 29 rounds carry the downgrade — while the
+    gate that wrote those events refused them: one surface blessed the shape, the
+    other punished it. After the fix the live rung reaches `met`
+    on its own, so the replay needs no forgiveness to agree — `approximated == 0` is
+    the assertion, not the verdict, since the verdict alone would read the same had the
+    leniency silently done the work again.
+
+    The pre-fix event is replayed too: history keeps reading as met. Both directions
+    have to hold or the scorecards and the gate start disagreeing about the PAST, which
+    is the same disagreement with a date on it.
+    """
+    from scripts.automod import review_tools as RT
+    live = RV.parse_review(_obj(test_node_id="test_it", how_verified="ran"), worktree=wt,
+                           changed_tests=["tests/test_x.py"], n_clauses=1, tests_passed=True,
+                           changed_paths=["app/x.py", "tests/test_x.py"])
+    clause = live["clauses"][0]
+    assert clause["verdict"] == "met" and "downgraded" not in clause, clause
+    replayed, approximated = RT.parsed_from_event(
+        {"clauses": [dict(clause)], "premise": "sound", "summary": "ok"})
+    assert replayed["clauses"][0]["verdict"] == "met", replayed
+    assert approximated == 0, "the replay forgave it again, so the two surfaces are " \
+                              "still reaching `met` by different routes"
+    pre_fix = {"clauses": [{"clause": 1, "verdict": "partial",
+                            "downgraded": ["test_node_id not in a test file this diff changed"],
+                            "test_node_id": "test_it", "how_verified": "ran", "note": ""}],
+               "premise": "sound", "summary": "ok"}
+    replayed, approximated = RT.parsed_from_event(pre_fix)
+    assert replayed["clauses"][0]["verdict"] == "met" and approximated == 1, replayed
+
+
+_UNRESOLVABLE_TREE = (
+    "def test_it():\n    assert 1\n\n"
+    "def helper_only():\n    return 2\n\n"
+    "class TestThing:\n    def test_method(self):\n        assert 1\n\n"
+    "# the case that reds is test_only_mentioned, per the item\n")
+
+
+@pytest.mark.parametrize("node, why_not_a_test_name", [
+    ("helper_only", "a module-level def, but pytest never collects that name"),
+    ("TestThing", "a class name, not a function"),
+])
+def test_a_bare_name_that_is_not_a_test_function_name_is_never_resolved(wt, node,
+                                                                        why_not_a_test_name):
+    """The resolver's first step is the name, and it is a step before any file is
+    opened: `_BARE_NODE_NAME_RX` admits only a bare `test_…` identifier, so these two
+    shapes are refused on their spelling and no changed file is read looking for a
+    definition they could never have had. The refusal the author sees is the same
+    sentence either way — this node exists so the two steps stay separately pinned,
+    and a loosened name filter that started opening files for any identifier would
+    red here rather than quietly widen the rail (#2177 clause 2)."""
+    (wt / "tests" / "test_x.py").write_text(_UNRESOLVABLE_TREE)
+    parsed = RV.parse_review(_obj(test_node_id=node, how_verified="ran"), worktree=wt,
+                             changed_tests=["tests/test_x.py"], n_clauses=1,
+                             tests_passed=True, changed_paths=["app/x.py", "tests/test_x.py"])
+    c = parsed["clauses"][0]
+    assert c["verdict"] == "partial", (node, why_not_a_test_name, c)
+    assert c["downgraded"] == ["test_node_id not in a test file this diff changed"], c
+
+
+@pytest.mark.parametrize("node, where_it_fails", [
+    ("test_before", "defined, but in tests/test_old.py, which this diff did not touch"),
+    ("test_never_written", "defined nowhere in the tree"),
+    ("test_only_mentioned", "only named in a comment in the changed file, never defined"),
+    ("test_method", "a method: its node id is tests/test_x.py::TestThing::test_method"),
+])
+def test_a_bare_node_name_no_changed_test_defines_is_still_downgraded(wt, node, where_it_fails):
+    """The leniency is a resolver, not a widening. These four names all LOOK like test
+    functions, so each one reaches the definition search and loses it: resolution is by
+    a module-level `def` in a file this diff changed, and a name merely mentioned, a
+    name in a file the diff never touched, a name nowhere in the tree, and an indented
+    method whose real node id carries a class segment all still refuse with the reason
+    this item was filed for (#2177 clause 2)."""
+    (wt / "tests" / "test_x.py").write_text(_UNRESOLVABLE_TREE)
+    parsed = RV.parse_review(_obj(test_node_id=node, how_verified="ran"), worktree=wt,
+                             changed_tests=["tests/test_x.py"], n_clauses=1,
+                             tests_passed=True, changed_paths=["app/x.py", "tests/test_x.py"])
+    c = parsed["clauses"][0]
+    assert c["verdict"] == "partial", (node, where_it_fails, c)
+    assert c["downgraded"] == ["test_node_id not in a test file this diff changed"], (node, c)
+    assert "accepted" not in c, (node, c)
+
+
+def test_a_changed_test_file_the_tree_does_not_hold_resolves_nothing(wt):
+    """The changed list and the tree are chosen by different code in the gate —
+    `changed_tests` comes from `TP.pick_test_files` over the round worktree, while the
+    review grades inside a prefetch tree checked out at the reviewed sha — so a listed
+    file can be absent from the tree the resolver opens (deleted by the diff, or a path
+    the prefetch did not carry). That is an unreadable file, not a definition: the
+    lookup skips it and the clause refuses with the changed-file reason. It must not
+    raise, and above all it must not resolve a name to a file whose bytes nobody read.
+    """
+    (wt / "tests" / "test_gone.py").write_text("def test_it():\n    assert 1\n")
+    (wt / "tests" / "test_x.py").unlink()          # listed as changed, absent on disk
+    parsed = RV.parse_review(_obj(test_node_id="test_it", how_verified="ran"), worktree=wt,
+                             changed_tests=["tests/test_x.py", "tests/test_gone.py"],
+                             n_clauses=1, tests_passed=True,
+                             changed_paths=["app/x.py", "tests/test_x.py",
+                                            "tests/test_gone.py"])
+    c = parsed["clauses"][0]
+    assert c["verdict"] == "met" and "tests/test_gone.py" in c["accepted"][0], c
+    (wt / "tests" / "test_gone.py").unlink()       # now neither listed file is readable
+    parsed = RV.parse_review(_obj(test_node_id="test_it", how_verified="ran"), worktree=wt,
+                             changed_tests=["tests/test_x.py", "tests/test_gone.py"],
+                             n_clauses=1, tests_passed=True,
+                             changed_paths=["app/x.py", "tests/test_x.py",
+                                            "tests/test_gone.py"])
+    c = parsed["clauses"][0]
+    assert c["verdict"] == "partial", c
+    assert c["downgraded"] == ["test_node_id not in a test file this diff changed"], c
+
+
+def test_a_bare_name_resolving_into_a_red_file_carries_the_pre_existing_reason(wt):
+    """Bare-name resolution is applied BEFORE the pre-existing veto, on both sides of
+    it, or the leniency eats the veto: that veto compares node ids against full
+    `path::name` strings, so a bare name never matched one, and a clause resting on a
+    file the `tests` rung only passed OVER would start standing as met — verified by
+    a test that fails at base with this diff absent.
+
+    Two things are asserted, not one: the veto fires, and it fires with the
+    PRE-EXISTING reason. The changed-file reason would say the opposite thing — that
+    no test could be located — on a node that was just located successfully.
+    """
+    (wt / "tests" / "test_x.py").write_text(
+        "def test_it():\n    assert 1\n\n\ndef test_already_red():\n    assert 0\n")
+    red = {"tests/test_x.py::test_already_red"}
+    assert RV._node_rail("test_it", worktree=wt, changed={"tests/test_x.py"}, how="ran",
+                         tests_passed=True, pre_existing=red)[0] is False
+    parsed = RV.parse_review(_obj(test_node_id="test_it", how_verified="ran"), worktree=wt,
+                             changed_tests=["tests/test_x.py"], n_clauses=1,
+                             tests_passed=True, changed_paths=["app/x.py", "tests/test_x.py"],
+                             pre_existing_failures=red)
+    c = parsed["clauses"][0]
+    assert c["verdict"] == "partial", c
+    assert c["downgraded"] == ["test_node_id cites a test that fails at base too "
+                               "(pre-existing, not this diff's)"], c
+    assert not any("not in a test file" in d for d in c["downgraded"]), c
+    assert "accepted" not in c
+    # The counterfactual: the red list, and nothing else, is what refused it.
+    assert _met(wt, test_node_id="test_it",
+                how_verified="ran")["verdict"] == "met"
+
+
 @pytest.mark.parametrize("node", ["tests/test_gone.py::test_x", "tests/test_gone.py",
                                   "app/x.py::f", "pytest -k autoresearch"])
 def test_a_node_that_is_not_a_real_tests_path_is_partial(wt, node):

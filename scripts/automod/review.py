@@ -1921,6 +1921,57 @@ def _test_file_cited(node: str, root: Path | None = None) -> str:
     return ""
 
 
+#: A bare pytest function name: `test_the_sidecar_is_keyed_by_session_id` with no
+#: file in front of it and no `::` anywhere. The grader is licensed to write one:
+#: `REVIEW_SCHEMA`'s `test_node_id` description asks for "the pytest node id that
+#: exercises THIS clause's breaking input, in a test file this diff changed" and
+#: never says the answer has to be spelled `path::name`.
+_BARE_NODE_NAME_RX = re.compile(r"^test_[A-Za-z0-9_]*$")
+
+
+def _bare_node_target(node: str, *, worktree: Path, changed) -> str:
+    """`path::name` when `node` is a bare test function name that exactly one test
+    file in `changed` defines at module level; `node` unchanged in every other case.
+
+    #2177. On round SM_20261004_084454 the review rung graded all six clauses
+    `met` and then downgraded every one of them `test_node_id not in a test file
+    this diff changed`, while that diff's own `--stat` shows
+    `tests/test_compaction.py | 338 ++++++++` and every node id the grader emitted
+    is a function defined in that file. The reason is the citation's SHAPE, not the
+    path set: `_node_rail` reads the text before `::` as a path, so a bare name is
+    never a member of `changed`, and `TP.is_test_path` has no testpath prefix to
+    hang it on either — an honest citation of a test this very diff added refused,
+    while the same test cited as `tests/test_compaction.py::test_…` holds on sight.
+    32 review events across 29 distinct
+    rounds carry that reason (`promotions.jsonl`, 2026-09-20 through 2026-10-04),
+    and `review_tools.parsed_from_event` already restores `met` for exactly this
+    shape on replay, so the live rung and the scorecards disagreed about the same
+    clause. This resolves the name instead of scolding the prompt.
+
+    Resolution is by DEFINITION, never by mention: the name must appear as its own
+    module-level `def` in the changed test file, so a name the grader only quoted in
+    a docstring, an assert message or another test's comment resolves nowhere and
+    still refuses. Module level only, because a method's node id is
+    `file.py::TestClass::test_x` — a bare method name never WAS that node id, and
+    pointing the clause at a test the grader did not run is the failure mode this
+    rail exists to catch. A name defined in two changed files resolves nowhere: two
+    candidates pin no single test, which is the whole purpose of the node id.
+    """
+    cand = str(node or "").strip().strip("`'\"()[],; ")
+    if not _BARE_NODE_NAME_RX.match(cand):
+        return node
+    pat = re.compile(r"^(?:async\s+)?def\s+" + re.escape(cand) + r"\s*\(", re.M)
+    hits: list[str] = []
+    for rel in sorted({str(p) for p in changed}):
+        try:
+            body = (Path(worktree) / rel).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if pat.search(body):
+            hits.append(rel)
+    return f"{hits[0]}::{cand}" if len(hits) == 1 else node
+
+
 def _cites_pre_existing(node: str, pre_existing) -> bool:
     """Whether a `test_node_id` leans on a test that already fails at the
     round's base: the node itself, or any node in a file that holds one (a
@@ -1953,6 +2004,15 @@ def _node_rail(node: str, *, worktree: Path, changed: set[str], how: str,
       round did not touch. A clause the tree already satisfied is pinned by
       the test that already pinned it (#487's clause 4).
 
+    A node that is nothing but a function name — `test_the_sidecar_is_keyed_by_
+    session_id`, no path, no `::` — is resolved against the changed test files
+    before any of the above by `_bare_node_target`, and then holds on the strength
+    of the changed file it is DEFINED in, with that file named under `accepted`.
+    It needs no `ran` and no green tests rung because neither does a path-qualified
+    node in a changed file: the tests rung ran that whole file. A bare name no
+    changed test file defines takes none of these branches and downgrades exactly
+    as it did before (#2177).
+
     The path must be under one of `pytest.ini`'s testpaths and exist: the
     tests rung runs bare `pytest`, so those are what it ran — root `tests/`
     and `app/harness/tests/` alike (#1322). `read` is not enough for either —
@@ -1964,11 +2024,23 @@ def _node_rail(node: str, *, worktree: Path, changed: set[str], how: str,
     """
     if not node:
         return False, ""
-    if _cites_pre_existing(node, pre_existing):
+    # Resolve a bare function name to `file::name` BEFORE the pre-existing veto:
+    # that veto compares against full `path::name` ids, so an unresolved bare name
+    # slips past it and a clause resting on a test that already fails at base would
+    # be waved through by the very leniency added here (#2177 clause 3).
+    target = _bare_node_target(node, worktree=worktree, changed=changed)
+    if _cites_pre_existing(target, pre_existing):
         return False, ""
-    file_part = node.split("::", 1)[0].strip()
+    file_part = target.split("::", 1)[0].strip()
     if file_part in changed:
-        return True, ""
+        # A resolved bare name is a waiver like the two below: the grader's citation
+        # was incomplete and this rail completed it, so name the file it completed
+        # into rather than let the clause stand on an invisible decision (#2177
+        # clause 1). Nothing else about the changed-file branch changes — a node the
+        # tests rung ran, in a file this diff touched.
+        return True, ("" if target == node else
+                      f"bare node `{node[:80]}` resolved to {file_part}, a test file "
+                      "this diff changed")
     node_path = _trim_citation_prefix((file_part.split() or [""])[0])
     if not TP.is_test_path(node_path, worktree):
         return False, ""
@@ -2124,7 +2196,13 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
                 node_holds, reason = _node_rail(node, worktree=worktree, changed=changed,
                                                 how=how, tests_passed=tests_passed,
                                                 pre_existing=pre_existing_failures)
-                if not node_holds and _cites_pre_existing(node, pre_existing_failures):
+                # The same resolution the rail just applied, so a bare name that
+                # resolves into a file holding a pre-existing failure is reported as
+                # resting on that failure and not as a node nobody can find — the two
+                # reasons say opposite things about the diff (#2177 clause 3).
+                if not node_holds and _cites_pre_existing(
+                        _bare_node_target(node, worktree=worktree, changed=changed),
+                        pre_existing_failures):
                     why.append("test_node_id cites a test that fails at base too "
                                "(pre-existing, not this diff's)")
                 elif not node_holds:

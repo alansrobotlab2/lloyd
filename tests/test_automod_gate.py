@@ -2190,6 +2190,60 @@ def _confirm_reader(monkeypatch, *, retire=True, answer=None, error=""):
     return turns
 
 
+def test_a_bare_node_id_from_the_grader_holds_at_the_rung_that_refused_it(tmp_path,
+                                                                          monkeypatch):
+    """The process boundary this fix sits on, end to end. The grader answers in
+    another process through `RV.grade`, and `rung_review` builds the resolver's
+    whole search set itself — `changed_tests = TP.pick_test_files(changed,
+    self.worktree)` — before handing it to `parse_review`. The #2177 nodes in
+    test_automod_review.py stop at `parse_review`, so this is where the rung's own
+    half is measured: the half that produced the 32 refusals, because
+    `changed_paths` carried a test file the grader's bare node id never named.
+    """
+    (tmp_path / "app").mkdir(); (tmp_path / "tests").mkdir()
+    (tmp_path / "app" / "x.py").write_text("def f():\n    return 1\n\n\ndef g():\n    return 2\n")
+    (tmp_path / "tests" / "test_x.py").write_text(
+        "def test_one():\n    assert 1\n\n\ndef test_two():\n    assert 2\n")
+    obj = {"premise": "sound", "summary": "GATE_SUMMARY_SENTINEL both clauses met",
+           "clauses": [
+               {"clause": 1, "verdict": "met", "evidence_path": "app/x.py",
+                "evidence_line": 3, "test_node_id": "test_one",
+                "how_verified": "ran", "note": "ran it"},
+               {"clause": 2, "verdict": "met", "evidence_path": "app/x.py",
+                "evidence_line": 6, "test_node_id": "tests/test_x.py::test_two",
+                "how_verified": "ran", "note": "ran it"}],
+           "test_honesty": [], "seams_unverified": []}
+    import json as _json
+    sess = tmp_path / "sess.json"
+    sess.write_text(_json.dumps({"messages": [{"role": "assistant",
+                                               "content": "Checked both clauses."}]}))
+    monkeypatch.setattr(RV, "item_contract", lambda iid, ledger=None: {
+        "id": iid, "title": "t", "body": "b", "path": "",
+        "clauses": ["a bare node id holds", "a path-qualified node id holds"]})
+    monkeypatch.setattr(RV, "grade", lambda *a, **k: {
+        "ok": True, "structured": obj, "session_path": str(sess), "seconds": 0.01,
+        "attempt": 1, "validated_head": "b" * 40})
+    g = _ReviewGate(tmp_path)
+    g.rung_changed_paths = lambda: ["app/x.py", "tests/test_x.py"]
+    ok, detail, data = g.rung_review()
+    assert ok is True, detail
+    bare, qualified = data["clauses"]
+    assert bare["verdict"] == "met" and "downgraded" not in bare, bare
+    assert bare["accepted"] == ["bare node `test_one` resolved to tests/test_x.py, "
+                                "a test file this diff changed"], bare
+    # The path-qualified sibling keeps its waiver-free record: nothing about its
+    # citation had to be completed, so the row carries no `accepted` at all.
+    assert qualified["verdict"] == "met", qualified
+    assert "downgraded" not in qualified and "accepted" not in qualified, qualified
+    # The rung's `changed_paths` for this round was `app/x.py` plus
+    # `tests/test_x.py` — the list `rung_changed_paths` returns and the grader's
+    # bare id named none of. A bare name that list does NOT define is refused by
+    # the same parse boundary two lines later in this file:
+    # test_automod_review.py::test_a_bare_name_no_changed_test_defines_is_still_downgraded
+    # — re-running this rung on the same commit would only be answered from the
+    # ledger, so the strict half is pinned where the decision is made.
+
+
 def test_a_refusal_whose_entries_are_all_retired_is_a_pass_that_spent_no_attempt(
         tmp_path, monkeypatch):
     """Clause 4, the overturn half, on the field the charging walk keys on.
