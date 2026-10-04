@@ -33,7 +33,7 @@ from fastapi.responses import JSONResponse
 from app import mitigation_state
 from app.config import CONFIG, save_tool_overrides
 from app.paths import VAULT_ROOT, VAULT_PENDING_RESEARCH_DIR as PENDING_ROOT
-from workers.queue import get_queue
+from workers.queue import PENDING_WAIT_BOUND_SECONDS, get_queue
 from workers.pool import get_pool
 
 REJECTED_ROOT = PENDING_ROOT / "_rejected"
@@ -228,6 +228,20 @@ async def workers_health(days: int = 7, runs: int = 10):
     except Exception as e:
         logger.warning("workers health depth failed: %s", e)
         depth = {}
+    # #2185: how long the oldest still-queued request has been standing, per source.
+    # `depth` says how many rows wait and `rollup` how the last runs went, so the two
+    # answer "how much work is there" and "how is the work going" — neither answers
+    # "how long has the oldest request been waiting", which is how #1526's four-day
+    # outage stayed invisible until someone hand-ran a query over `queue.enqueued_at`
+    # against `claimed_at` and found an 11 h 10 min gap on `scheduled-task` with no
+    # failure anywhere to point at. Read through the queue like every other figure on
+    # this page: the router keeps no query of its own, because two readers of one
+    # table drift into meaning different things by `queued`.
+    try:
+        pending = await loop.run_in_executor(None, q.pending_wait_by_source)
+    except Exception as e:  # noqa: BLE001 - a section, not the page
+        logger.warning("workers health pending-wait read failed: %s", e)
+        pending = {}
     # `depth` and `rollup` are both computed from the `runs` table, so between them
     # they answer "how is this source's work going" and cannot answer "is this
     # source still asking": a source whose `enqueue_if_due` raises on every tick
@@ -250,8 +264,12 @@ async def workers_health(days: int = 7, runs: int = 10):
     # from `rollup`: that read is `WHERE completed_at >= ?`, so on the store this
     # field exists to expose — every row older than the window — it is empty, and
     # a min over an empty rollup is exactly the absent field that wears the
-    # clean bill's face. `oldest_run_completed_at()` with no source is
-    # `SELECT MIN(completed_at) FROM runs`: no date predicate at all.
+    # clean bill's face. `oldest_run_completed_at()` with no source is the minimum
+    # `completed_at` over every row of `runs`: no date predicate at all. (Reworded:
+    # the aggregate's SQL belongs in `workers/queue.py`, where it is, and the
+    # no-query-of-its-own pin on this file tests the whole text — prose included —
+    # so quoting the statement here would either fail the pin or move SQL into a
+    # comment that reads like the router has its own.)
     try:
         oldest_input = await loop.run_in_executor(None, q.oldest_run_completed_at)
     except Exception as e:  # noqa: BLE001 - a section, not the page
@@ -269,7 +287,10 @@ async def workers_health(days: int = 7, runs: int = 10):
     # Every source the config names AND every source the runs table knows
     # about. A source removed from config still has history worth reading,
     # and one whose runs all predate the window still has to appear.
-    names = sorted(set(sources_cfg) | set(rollup) | set(depth))
+    # `pending` too, so a source with a row standing in the queue still reaches the
+    # page if the `depth` read failed and came back empty — the one case where a
+    # source MUST be listed is the case the failing read would hide it from.
+    names = sorted(set(sources_cfg) | set(rollup) | set(depth) | set(pending))
     out = []
     for name in names:
         cfg = sources_cfg.get(name) or {}
@@ -303,6 +324,22 @@ async def workers_health(days: int = 7, runs: int = 10):
             "max_inflight": cfg.get("max_inflight"),
             "priority": cfg.get("priority"),
             "depth": depth.get(name, {}),
+            # #2185: the queue's WAIT, as two plain numbers and the bound stated
+            # beside them. Zeros for a source with nothing queued — never null —
+            # because a missing field renders as a gap a human has to go diagnose by
+            # hand, which is the thing this field exists to remove. Its two readers
+            # today are the health skill's documented `jq` filter and
+            # `web/src/api.ts`'s `WorkerSourceHealth`, which declares all three keys;
+            # no panel RENDERs them yet, and this comment is not the place that
+            # claims otherwise. `bound_seconds` travels
+            # with the count rather than living only in the code so a reader can tell
+            # "one row over an hour" from "one row over an hour" measured against some
+            # other threshold later.
+            "pending_wait_max_seconds": float(
+                (pending.get(name) or {}).get("max_wait_seconds", 0) or 0),
+            "pending_wait_over_bound_count": int(
+                (pending.get(name) or {}).get("over_bound_count", 0) or 0),
+            "pending_wait_bound_seconds": PENDING_WAIT_BOUND_SECONDS,
             "health": rollup.get(name),
             # `null` for a source the config does not name: no interval to judge
             # it on, and a verdict manufactured from a default would be a claim

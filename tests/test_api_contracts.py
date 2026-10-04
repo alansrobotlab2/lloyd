@@ -122,9 +122,17 @@ async def test_the_two_listings_are_complements(client,
 #: that addition-only property is what these two sets pin.
 WORKERS_HEALTH_KEYS = {"initialized", "days", "oldest_input",
                        "window_clamped_to_hours", "sources"}
+#: #2185 grew the ROWS by exactly three keys — the queue's wait, the count over the
+#: bound, and the bound itself — and the envelope by nothing. The wait had to be
+#: read by hand-running `enqueued_at` against `claimed_at`; it is a field now, and
+#: `pending_wait_bound_seconds` travels with the count so a reader cannot weigh it
+#: against a threshold other than the one it was counted against.
 WORKER_SOURCE_HEALTH_KEYS = {"name", "configured", "enabled", "inner_voice",
                              "interval_seconds", "max_inflight", "priority",
-                             "depth", "health", "dispatch", "recent"}
+                             "depth", "health", "dispatch", "recent",
+                             "pending_wait_max_seconds",
+                             "pending_wait_over_bound_count",
+                             "pending_wait_bound_seconds"}
 
 
 async def test_workers_health_shape(client, monkeypatch, tmp_path):
@@ -169,6 +177,39 @@ async def test_workers_health_shape(client, monkeypatch, tmp_path):
     seeded = next(s for s in body["sources"] if s["name"] == "contract-src")
     assert seeded["configured"] is False and seeded["dispatch"] is None, seeded
     assert seeded["health"]["total"] == 1, seeded["health"]
+
+
+def test_the_web_client_declares_every_field_the_route_returns():
+    """The other half of the seam: `web/src/api.ts`'s `WorkerSourceHealth` is the type
+    Mission Control compiles against, and a route field it does not declare is a field
+    the frontend cannot ask for.
+
+    #2185 grew the route's row by `pending_wait_max_seconds`,
+    `pending_wait_over_bound_count` and `pending_wait_bound_seconds`, and the interface
+    grew with them; the three are asserted present, so `app/routers/workers.py`'s
+    comment saying the client declares them is not a landed-state sentence nobody
+    re-runs. Two directions are pinned as a ratchet, with ONE known gap named instead
+    of smoothed over: `dispatch` is emitted by the route and declared nowhere in the
+    client (pre-existing, found while writing this — the panel reads dispatch staleness
+    off `depth`/`health` today, so nothing is broken, and the shape belongs to #2127's
+    side of the wire, not this one). Anything ELSE that grows on one side only is red.
+    """
+    src = _API_TS.read_text()
+    marker = "export interface WorkerSourceHealth {"
+    assert marker in src, "the client type this pin reads is gone from api.ts"
+    block = src[src.index(marker):]
+    block = block[: block.index("\n}")]
+    declared = set(_re.findall(r"^  ([A-Za-z_]\w*)\??:", block, _re.M))
+    assert len(declared) >= 8, \
+        f"positive control: only {sorted(declared)} parsed out of the interface"
+    for key in ("pending_wait_max_seconds", "pending_wait_over_bound_count",
+                "pending_wait_bound_seconds"):
+        assert key in declared, f"#2185's {key} is missing from WorkerSourceHealth"
+    assert not (declared - WORKER_SOURCE_HEALTH_KEYS), \
+        f"client declares fields the route never sends: {sorted(declared - WORKER_SOURCE_HEALTH_KEYS)}"
+    assert WORKER_SOURCE_HEALTH_KEYS - declared == {"dispatch"}, {
+        "emitted_but_undeclared": sorted(WORKER_SOURCE_HEALTH_KEYS - declared),
+        "expected": "exactly `dispatch`, the one pre-existing gap (see the docstring)"}
 
 
 async def test_created_sessions_are_never_background_shaped(client, tmp_path,

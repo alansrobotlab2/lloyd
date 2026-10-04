@@ -1510,9 +1510,18 @@ def test_the_clamp_arrives_without_renaming_anything_else(
     assert set(body) == {"initialized", "days", "oldest_input",
                          "window_clamped_to_hours", "sources"}, sorted(body)
     row = body["sources"][0]
+    # #2185 grew this row by exactly three keys, additively: the queue's wait, the
+    # count over the bound, and the bound the count was taken against so the number
+    # cannot be read against a different threshold later. The eleven keys
+    # `web/src/api.ts` types and the Background tab reads are otherwise untouched —
+    # that is what set-equality here is for, and a fourth key appearing is a rename
+    # or a drop wearing an addition's clothes.
     assert set(row) == {"name", "configured", "enabled", "inner_voice",
                         "interval_seconds", "max_inflight", "priority", "depth",
-                        "health", "dispatch", "recent"}, sorted(row)
+                        "health", "dispatch", "recent",
+                        "pending_wait_max_seconds",
+                        "pending_wait_over_bound_count",
+                        "pending_wait_bound_seconds"}, sorted(row)
     assert row["name"] == "probe" and row["configured"] is True
     health = row["health"]
     assert health["total"] == 1 and health["ok"] == 1, health
@@ -1550,3 +1559,524 @@ def test_the_store_age_read_is_unfiltered_across_sources(monkeypatch, tmp_path):
     assert empty.oldest_run_completed_at() is None, (
         "an empty store is nameless, not clamped to zero")
 
+
+
+# ── #2185: the queue's WAIT, not just its depth ──────────────────────────────
+#
+# `depth` answers how many rows wait and `health` how the last runs went. Neither
+# answers how long the oldest request has been standing, which is the figure
+# #1526's four-day outage was finally diagnosed with: row 515 of the live queue went
+# from `enqueued_at` 2026-09-25T08:00:33Z to `claimed_at` 19:10:40Z — 11 h 10 min on
+# source `scheduled-task`, with no failing run anywhere to point at, and autonomy #24
+# (`frequency: 6x-daily`) lost two slots the same way. These tests pin the two numbers
+# at the route, the retry-back-off exclusion, and the fact that the route reaches them
+# through `WorkQueue` rather than through SQL of its own.
+
+
+def _backdate(q, queue_id: int, *, seconds: float) -> None:
+    """Move one queued row's `enqueued_at` back by `seconds`, test-local SQL.
+
+    `enqueue()` has no timestamp parameter and the leg's own clock is not the
+    subject, so a queued row that has waited two hours can only be made by stamping
+    it. This is the test's database, not the router's: clause 4 keeps queries out of
+    `app/routers/workers.py`, and a fixture reaching sqlite directly is how every
+    other back-dated row in this file is made (`_seed_run` takes an explicit
+    `completed_at` for the same reason).
+    """
+    import sqlite3
+
+    stamp = (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat()
+    with sqlite3.connect(str(q.db_path)) as conn:
+        conn.execute("UPDATE queue SET enqueued_at=? WHERE id=?", (stamp, queue_id))
+
+
+def _park(q, queue_id: int, *, seconds_ahead: float) -> None:
+    """Give one queued row a `not_before` in the future, as `mark_failed` does."""
+    import sqlite3
+
+    stamp = (datetime.now(timezone.utc) + timedelta(seconds=seconds_ahead)).isoformat()
+    with sqlite3.connect(str(q.db_path)) as conn:
+        conn.execute("UPDATE queue SET not_before=? WHERE id=?", (stamp, queue_id))
+
+
+def _wait_row(body, name: str = "probe") -> dict:
+    rows = [s for s in body["sources"] if s["name"] == name]
+    assert len(rows) == 1, f"{name} appears {len(rows)} times in {body['sources']}"
+    return rows[0]
+
+
+def test_a_queued_row_two_hours_old_reports_its_wait_and_one_over_the_bound(
+        monkeypatch, tmp_path):
+    """Clause 1: the wait is a number on the page, at the bound the page states.
+
+    One queued row back-dated 2 h. The figure must be ~7200 s and exactly one row
+    must be over the bound, which is 3600 s and travels in the payload rather than
+    living only in `workers/queue.py` — otherwise a reader looking at the count
+    cannot say what it was counted against.
+    """
+    client, q = _clamp_client(monkeypatch, tmp_path)
+    q.enqueue("probe", "task", payload={})
+    _backdate(q, 1, seconds=7200)
+
+    body = client.get("/api/workers/health?days=7&runs=0").json()
+    row = _wait_row(body)
+
+    assert 7190 <= row["pending_wait_max_seconds"] <= 7230, row
+    assert row["pending_wait_over_bound_count"] == 1, row
+    assert row["pending_wait_bound_seconds"] == 3600, row
+    assert row["depth"]["queued"] == 1, \
+        "the two figures describe the same row the depth already counted"
+
+
+def test_a_queued_row_under_the_bound_moves_the_wait_but_not_the_count(
+        monkeypatch, tmp_path):
+    """The pair is not one number twice: 30 minutes of wait is not a starved pool.
+
+    Per-day maximum claim latency on this box has read 0.00-0.30 h since 2026-09-26,
+    so the bound sits an order of magnitude above the pool's 1800 s duration fallback
+    and a healthy queue reads zero. Without this case a rising `max` and a real
+    starvation alarm would be indistinguishable in the payload.
+    """
+    client, q = _clamp_client(monkeypatch, tmp_path)
+    q.enqueue("probe", "task", payload={})
+    _backdate(q, 1, seconds=1800)
+
+    row = _wait_row(client.get("/api/workers/health?days=7&runs=0").json())
+
+    assert 1790 <= row["pending_wait_max_seconds"] <= 1830, row
+    assert row["pending_wait_over_bound_count"] == 0, row
+
+
+def test_a_source_with_nothing_queued_reads_zeros_and_the_route_still_answers(
+        monkeypatch, tmp_path):
+    """Clause 2: absence of a wait is zero, never null.
+
+    One run in the window, nothing queued: the source still appears on the page, the
+    route still answers 200, and both figures are numeric zeros — a dashboard
+    rendering `wait * something` must not meet `None` on the healthy path, which is
+    the common path.
+    """
+    client, q = _clamp_client(monkeypatch, tmp_path)
+    _seed_run(q, datetime.now(timezone.utc) - timedelta(hours=6))
+
+    response = client.get("/api/workers/health?days=7&runs=0")
+    assert response.status_code == 200, response.status_code
+    row = _wait_row(response.json())
+
+    assert row["pending_wait_max_seconds"] == 0.0, row
+    assert row["pending_wait_over_bound_count"] == 0, row
+    assert row["pending_wait_bound_seconds"] == 3600, row
+
+
+def test_a_back_off_parked_row_is_not_reported_as_waiting(monkeypatch, tmp_path):
+    """Clause 3: `not_before` in the future is a row waiting BY DESIGN.
+
+    `mark_failed` parks a retry hours ahead, and that row is in state 'queued' like
+    any starved one. Counting it would let one failing item with a long back-off
+    report its whole source as starving — the exact false alarm that would get this
+    field ignored. `workers/fleet_watchdog.py`'s own `_queue_starving` skips these
+    rows for the same reason; the route and the watchdog must not disagree about what
+    counts as waiting. A second, genuinely-old row is enqueued so the test proves the
+    parked row was excluded rather than the whole source skipped.
+    """
+    client, q = _clamp_client(monkeypatch, tmp_path)
+    q.enqueue("probe", "task", payload={})
+    _backdate(q, 1, seconds=9000)
+    _park(q, 1, seconds_ahead=7200)
+    q.enqueue("probe", "task", payload={})
+    _backdate(q, 2, seconds=4000)
+
+    row = _wait_row(client.get("/api/workers/health?days=7&runs=0").json())
+
+    assert row["depth"]["queued"] == 2, row
+    assert row["pending_wait_max_seconds"] < 5000, row
+    assert row["pending_wait_over_bound_count"] == 1, row
+
+
+def test_the_route_reaches_the_wait_through_the_queue_not_through_sql():
+    """Clause 4: one reader of `queue`, so `queued` cannot mean two things.
+
+    The four assertions are the ones
+    `tests/test_dashboard_sections.py::test_the_router_reaches_run_outcomes_only_through_workqueue`
+    applies to `app/routers/dashboard.py`. No equivalent existed for
+    `app/routers/workers.py`: triage found `sqlite3` in this test file only as
+    test-local connects (`:853`, `:865`), which say nothing about the router's own
+    text. Positive control first, because an absence read out of an empty or wrong
+    file looks identical to an absence read out of the right one for the right
+    reason.
+    """
+    src = (Path(__file__).resolve().parents[1] / "app" / "routers" / "workers.py").read_text()
+    lines = src.count("\n")
+    assert lines > 500, f"positive control: read the wrong file, only {lines} lines"
+    assert "pending_wait_by_source" in src, "must call through WorkQueue"
+    # Needle-level positive control: the three needles are spelled right, because the
+    # file that legitimately holds this SQL is `workers/queue.py`, and the same
+    # needles must be PRESENT there. A typo'd needle reads as absent from the router
+    # and green from the queue, which is the one way this node could pass for nothing
+    # — and a review pass on this round read the absence as a false zero on the theory
+    # that `from fastapi.responses import JSONResponse` satisfies `"SELECT "`. It does
+    # not (`'SELECT' in 'JSONRESPONSE'` is False), but the control below is what makes
+    # that argument unnecessary rather than merely correct.
+    queue_src = (Path(__file__).resolve().parents[1] / "workers" / "queue.py").read_text()
+    for needle in ("SELECT ", "sqlite3", "execute("):
+        assert needle in queue_src, (
+            f"positive control: {needle!r} matches nothing anywhere, so its absence "
+            f"in the router proves nothing")
+    assert "SELECT " not in src.upper(), "no SQL of its own in the router"
+    assert "sqlite3" not in src, "no direct sqlite connection in the router"
+    assert "execute(" not in src, "no query executed from the router"
+
+
+def test_the_wait_is_one_query_and_carries_the_bound_default(monkeypatch, tmp_path):
+    """The read behind the field, at its own level.
+
+    A method on `WorkQueue` rather than a router-side computation, so the figure the
+    dashboard shows is the figure `/api/workers/status` would show if it ever grows
+    one. And the bound has a default — the route passes none — because the number
+    that makes a wait reportable is one decision in one place, not a per-caller
+    argument two callers could set differently. `bound_seconds=` stays on the
+    signature for a caller asking a DIFFERENT question (an experiment, a stricter
+    alert under review); what the clause forbids is the route choosing its own.
+    """
+    from workers.queue import PENDING_WAIT_BOUND_SECONDS, WorkQueue
+
+    q = WorkQueue(tmp_path / "wait.db")
+    assert q.pending_wait_by_source() == {}, "nothing queued: no source key at all"
+
+    q.enqueue("scheduled-task", "task", payload={})    # row 1: ~11 h, row 515's shape
+    q.enqueue("autocode", "task", payload={})          # row 2: just over the bound
+    q.enqueue("autoresearch", "task", payload={})      # row 3: two minutes old
+    _backdate(q, 1, seconds=40_000)
+    _backdate(q, 2, seconds=PENDING_WAIT_BOUND_SECONDS + 5)
+    _backdate(q, 3, seconds=120)
+
+    out = q.pending_wait_by_source()
+    assert sorted(out) == ["autocode", "autoresearch", "scheduled-task"], out
+    assert 39_990 <= out["scheduled-task"]["max_wait_seconds"] <= 40_010, out
+    assert out["scheduled-task"]["over_bound_count"] == 1, out
+    assert out["autocode"]["over_bound_count"] == 1, \
+        "3 605 s is over a 3 600 s bound by five seconds — the boundary is `>`"
+    assert out["autoresearch"]["over_bound_count"] == 0, \
+        "two minutes of wait is not starvation: the max moves, the count does not"
+
+    assert PENDING_WAIT_BOUND_SECONDS == 3600
+    # A keyword assert has to be one a broken method cannot pass. Asserting on the
+    # 40 000 s row reads 1 whether `bound_seconds` was honoured or ignored, because
+    # that row is over both 10 and the 3 600 default; `autoresearch`'s 120 s row is
+    # over 10 and UNDER the default, so its count only flips if the argument is used.
+    # The route passes no bound, which is the point: one decision, in one place.
+    tight = q.pending_wait_by_source(bound_seconds=10)
+    assert tight["autoresearch"]["over_bound_count"] == 1, \
+        "the keyword works; the route simply does not pass it"
+    assert tight["autoresearch"]["max_wait_seconds"] == \
+        out["autoresearch"]["max_wait_seconds"], \
+        "tightening the bound moves the COUNT, never the measured wait"
+
+
+#: The queue extract #2185's triage landed in the VAULT (not this repo): the whole
+#: `queue` table at 2026-10-04T15:07Z, 4 587 rows, of which 3 are still `queued`.
+#: Every figure quoted below is read out of those bytes by the node that follows, so
+#: none of it is a live-box reading that rots: re-run the node and it re-derives them.
+QUEUE_WITNESS = Path("backlog/data/workers-queue-2185.db")
+
+
+def test_the_landed_witness_bytes_carry_a_real_starving_source(tmp_path):
+    """The outage this field exists for, re-measured from committed bytes — N=1 of the
+    item's own acceptance, and not a synthetic row.
+
+    The witness is `~/obsidian/backlog/data/workers-queue-2185.db`, whose landing commit
+    is read from those bytes rather than transcribed here (`git -C ~/obsidian log
+    --oneline -1 -- backlog/data/workers-queue-2185.db`): the whole `queue` table as it
+    stood at 2026-10-04T15:07Z. Reading it through the real method at its own newest stamp —
+    `2026-10-04T15:07:50.126953+00:00`, selected out of the bytes rather than typed —
+    gives exactly:
+
+        {'owed-check': {'max_wait_seconds': 9151.464, 'over_bound_count': 1}}
+
+    i.e. ONE `owed-check` row (`id` 5005, `enqueued_at` 12:35:18.662728+00:00) sitting
+    unclaimed for 2 h 32 m, one row past the 3 600 s bound, and a max that is NOT the
+    bound — the other two queued rows are 559.97 s and 0 s old (`id` 5048 and 5055), so
+    the count and the max come from different draws on the same source. All three carry
+    `not_before` NULL, so the clause-3 exclusion is not what is shrinking the figure.
+
+    Why these bytes and not the path clause 6 first named: `backlog/data/workers.db` is
+    occupied by #1949's schema-only authority witness — 126,976 bytes, whose
+    `count(*) from sqlite_master` is THAT item's contract figure, relied on by
+    tests/test_grant_mint_quota_default.py and tests/unit/test_grant_policy.py — so a
+    queue extract written there would retire another item's evidence. `backlog/data/` is
+    vault state and is not in this repo's diff; the node reads it through
+    `app.paths.VAULT_ROOT`, the same seam the skill pin uses.
+    """
+    import shutil
+    import sqlite3
+
+    from app.paths import VAULT_ROOT
+    from workers.queue import WorkQueue
+
+    src = VAULT_ROOT / QUEUE_WITNESS
+    assert src.is_file(), (
+        f"the witness is gone: {src} is not in the vault, so clause 6's figures have "
+        "no bytes behind them — re-extract from a live workers.db, do not retype them")
+    db = tmp_path / "witness.db"
+    shutil.copy(src, db)
+
+    conn = sqlite3.connect(str(db))
+    try:
+        queued = conn.execute(
+            "SELECT id, source, enqueued_at, not_before FROM queue"
+            " WHERE state='queued' ORDER BY id").fetchall()
+        newest = conn.execute("SELECT max(enqueued_at) FROM queue").fetchone()[0]
+    finally:
+        conn.close()
+
+    assert len(queued) == 3, queued
+    assert [r[0] for r in queued] == [5005, 5048, 5055], queued
+    assert all(r[3] is None for r in queued), \
+        "a not_before appeared in the witness: the exclusion, not the wait, is now " \
+        "deciding this figure — re-read before quoting it"
+
+    out = WorkQueue(db).pending_wait_by_source(
+        now=datetime.fromisoformat(newest))
+    wait = out["owed-check"]
+    assert abs(wait["max_wait_seconds"] - 9151.464) < 0.001, wait
+    assert wait["over_bound_count"] == 1, wait
+    assert list(out) == ["owed-check"], out
+    assert wait["max_wait_seconds"] > 3600, \
+        "the quoted 2 h 32 m has to actually be past the bound the payload states"
+
+
+def _skill_step(text: str, heading: str) -> str:
+    """One step's own body, from just under `heading` to the NEXT `## Step` heading.
+
+    Cut at whichever heading comes next, not at one named later in the file: Step 3b
+    ends at `## Step 3c`, so a slice taken to `## Step 4` also carries 3c and 3d, and a
+    guard whose docstring says "scoped to Step 3b" while reading three steps would pass
+    on a field that only ever appears in the wrong one.
+    """
+    assert heading in text, f"{heading} is not in the skill at all"
+    body = text[text.index(heading) + len(heading):]
+    body = body[body.index("\n") + 1:]
+    nxt = re.search(r"^## Step", body, re.M)
+    if nxt:
+        body = body[:nxt.start()]
+    return body
+
+
+def _documented_jq_program(step: str) -> str:
+    """The jq program the step tells an operator to paste, read off the page.
+
+    Extracted rather than retyped because the thing under test is the PUBLISHED filter:
+    a copy of it written in this file keeps passing when the skill's one-liner drifts,
+    which is the exact gap that left Step 3b pre-labelling an empty result as health.
+    """
+    m = re.search(r"jq\s+-r\s+'(.*?)'", step, re.S)
+    assert m, "Step 3b publishes no `jq -r '<program>'` filter to test"
+    return m.group(1)
+
+
+def test_the_now_keyword_is_what_makes_a_wait_reproducible(tmp_path):
+    """`now=` is what lets one wait be measured twice and read the same number.
+
+    The figure is a difference against a clock, and the previous round died on exactly
+    that: its own node stamped a row from one `datetime.now()` and measured it against
+    a later one, then asserted the difference was `4000.0` — true only when the two
+    calls land in the same millisecond, and read 4000.001 under the gate's 8 workers.
+    Handing the method one instant makes the figure exact, which is what a caller that
+    has to assert or replay needs; the route passes no instant, so the page reads real
+    elapsed time. Both branches are pinned against the SAME instant: the subtraction,
+    and the `not_before` exclusion — a `now=` that reached only the arithmetic would
+    report a row parked ahead of that instant as starving.
+    """
+    from workers.queue import WorkQueue
+
+    moment = datetime.now(timezone.utc)
+    q = WorkQueue(tmp_path / "clock.db")
+    q.enqueue("counted", "task", payload={})   # row 1: released 60 s BEFORE `moment`
+    q.enqueue("parked", "task", payload={})    # row 2: parked until 60 s AFTER it
+    for row_id in (1, 2):
+        _restamp(q, row_id, (moment - timedelta(seconds=4000)).isoformat())
+    _park(q, 1, seconds_ahead=-60)
+    _park(q, 2, seconds_ahead=60)
+
+    assert q.pending_wait_by_source(now=moment) == {
+        "counted": {"max_wait_seconds": 4000.0, "over_bound_count": 1},
+        "parked": {"max_wait_seconds": 0.0, "over_bound_count": 0},
+    }, "one instant in, one exact figure out — and the exclusion read that instant too"
+
+    wall = q.pending_wait_by_source()
+    assert wall["counted"]["max_wait_seconds"] > 4000.0, \
+        "with no instant the read is real elapsed time, which is why asserting an " \
+        "exact number against a wall-clock read is the flake this knob exists to kill"
+
+
+def test_the_health_skill_reads_the_wait_off_the_api_and_names_the_bound():
+    """Clause 5: the field and the procedure have to say the same thing.
+
+    The subject is a vault file — `app.paths.VAULT_ROOT` is `Path.home() / "obsidian"`
+    (`app/paths.py:11`), so every worktree reads the same live vault — and there is no
+    skip when it is missing: a guard that could go quietly unverified would repeat the
+    defect it guards, the same reasoning
+    `tests/test_automod_doc_claims.py::…` gives for reading
+    `skills/automod-change-own-code/SKILL.md` from a test.
+
+    Scoped to Step 3b, which is the step that today read queue state from
+    `/api/workers/status` and raw `workers.db`. Step 1 curls `/api/autonomy/health` and
+    is not this field's home — asserting on the whole file would let Step 3b stay
+    hand-run while some other section grew the word.
+    """
+    import re
+
+    from app.paths import VAULT_ROOT
+
+    skill = VAULT_ROOT / "skills" / "queue-health-check" / "SKILL.md"
+    assert skill.is_file(), f"clause 5's subject is absent: {skill} does not exist"
+    step = _skill_step(skill.read_text(encoding="utf-8"), "## Step 3b")
+    assert len(step) > 400, f"positive control: Step 3b is only {len(step)} chars"
+    # The slice has to END at the next step, not merely start at this one. Step 3c
+    # follows 3b and is about `abandoned_unseen` attribution, so a slice that ran to
+    # `## Step 4` would pass every needle below on prose belonging to a different
+    # diagnosis — the bug an earlier version of this helper had.
+    assert "## Step 3c" not in step, "the slice ran past the end of Step 3b"
+
+    for field in ("pending_wait_max_seconds", "pending_wait_over_bound_count",
+                  "pending_wait_bound_seconds"):
+        assert field in step, f"Step 3b never names {field}"
+    assert re.search(r"3600", step), "Step 3b does not state the 3600 s bound"
+    assert "not_before" in step, \
+        "Step 3b does not say a back-off-parked row is excluded from both figures"
+    assert "api/workers/health" in step, "Step 3b must read the wait off the health route"
+
+
+def test_the_published_filter_names_a_starving_source_and_says_nothing_otherwise(
+        monkeypatch, tmp_path):
+    """Clause 5's other half: the skill's own one-liner over the route's real bytes.
+
+    Naming three keys in prose is half the contract; the other half is that the program
+    an operator pastes from Step 3b prints a line for a source that IS waiting. Against
+    the pre-#2185 payload that exact filter printed 0 bytes at exit 0, because `null > 0`
+    is false in jq — a key that does not exist and a pool that is healthy produced the
+    same answer, and the step defined that silence as the healthy result. So both halves
+    are pinned here over bytes the real route built: one row back-dated 2 h must make the
+    filter name `probe` with its seconds, its count and the bound; a queue with nothing
+    in it must print nothing, which is the only way that silence now means anything.
+
+    The filter is EXTRACTED from the skill (see `_documented_jq_program`), never retyped,
+    and run through the same `jq -r` the step tells a human to run.
+    """
+    import json
+    import shutil
+    import subprocess
+
+    from app.paths import VAULT_ROOT
+
+    skill = VAULT_ROOT / "skills" / "queue-health-check" / "SKILL.md"
+    step = _skill_step(skill.read_text(encoding="utf-8"), "## Step 3b")
+    program = _documented_jq_program(step)
+    jq = shutil.which("jq")
+    # The step's own procedure is `curl … | jq -r …`, so a box without jq cannot run
+    # Step 3b either; that is a broken skill, not a reason to skip the pin quietly.
+    assert jq, "Step 3b's published procedure needs jq, and this box has none"
+
+    starving, q = _clamp_client(monkeypatch, tmp_path)
+    q.enqueue("probe", "task", payload={})
+    _backdate(q, 1, seconds=7200)
+    body = starving.get("/api/workers/health?days=7&runs=0").content.decode()
+
+    ran = subprocess.run([jq, "-r", program], input=body, capture_output=True,
+                         text=True)
+    assert ran.returncode == 0, f"jq refused the published filter: {ran.stderr}"
+    lines = [ln for ln in ran.stdout.splitlines() if ln.strip()]
+    assert len(lines) == 1, f"exactly one starving source expected, got {ran.stdout!r}"
+    assert re.match(r"^probe: oldest queued 7[0-9]{3}s, 1 row\(s\) over 3600s$",
+                    lines[0]), lines[0]
+    # The line's three numbers are the payload's own, not three more literals: the
+    # filter is a VIEW of the fields, and this is what says so.
+    row = json.loads(body)["sources"][0]
+    assert int(re.search(r"queued (\d+)s", lines[0]).group(1)) == int(
+        row["pending_wait_max_seconds"])
+    assert row["pending_wait_over_bound_count"] == 1
+
+    healthy, q2 = _clamp_client(monkeypatch, tmp_path, name="healthy.db")
+    _seed_run(q2, datetime.now(timezone.utc) - timedelta(hours=6))
+    quiet = subprocess.run([jq, "-r", program],
+                           input=healthy.get(
+                               "/api/workers/health?days=7&runs=0").content.decode(),
+                           capture_output=True, text=True)
+    assert quiet.returncode == 0, quiet.stderr
+    assert quiet.stdout.strip() == "", \
+        "a healthy pool must print nothing, and only now can that silence be read"
+
+
+def _restamp(q, queue_id: int, value: str) -> None:
+    """Write one raw string into a queued row's `enqueued_at`, test-local SQL."""
+    import sqlite3
+
+    with sqlite3.connect(str(q.db_path)) as conn:
+        conn.execute("UPDATE queue SET enqueued_at=? WHERE id=?", (value, queue_id))
+
+
+def test_an_unparseable_enqueued_at_gives_the_row_no_age_at_all(tmp_path):
+    """The one exclusion that is not about the row's state: no instant, no wait.
+
+    A row in state 'queued' whose `enqueued_at` `datetime.fromisoformat` refuses
+    (a bare epoch float here) has nothing to subtract from now. It must contribute
+    neither to the max nor to the count — and the source must still appear with
+    zeros rather than vanish, because "this source has a row waiting" is a fact the
+    depth already established and the wait has no standing to contradict.
+    """
+    from workers.queue import WorkQueue
+
+    # A bare epoch-seconds value with its fraction, as text: no `T`, no offset, and
+    # `datetime.fromisoformat` raises ValueError on it. The `.5` is load-bearing for
+    # this file, not for the branch: an integer-shaped 10-digit string is the one
+    # literal shape a reader (or a review pass resolving citations) can mistake for an
+    # identifier, and this value names nothing — it is only a stamp no writer here
+    # would produce.
+    epoch_seconds_as_text = "1791127000.5"
+    q = WorkQueue(tmp_path / "garbage.db")
+    q.enqueue("probe", "task", payload={})
+    _restamp(q, 1, epoch_seconds_as_text)
+    assert q.pending_wait_by_source() == {
+        "probe": {"max_wait_seconds": 0.0, "over_bound_count": 0}}
+
+    # The row that CAN be parsed decides the figure, and the source keeps its entry.
+    # A window, not equality: the stamp is written by `_backdate`'s clock and the age
+    # is read by `pending_wait_by_source`'s, so the true value is 4000 s plus however
+    # long the two calls took — an exact `4000.0` here passes only when the process
+    # gets the same millisecond twice, which is what made the gate's 8-worker run
+    # read 4000.001 and call this round's own new test a new failure.
+    q.enqueue("probe", "task", payload={})
+    _backdate(q, 2, seconds=4000)
+    out = q.pending_wait_by_source()
+    assert list(out) == ["probe"], "the unparseable row is skipped, not the source"
+    assert 4000 <= out["probe"]["max_wait_seconds"] <= 4030, out
+    assert out["probe"]["over_bound_count"] == 1, out
+
+
+def test_a_naive_enqueued_at_is_read_as_utc_like_every_other_duration(tmp_path):
+    """The convention, on the record: no offset means UTC, and the wait pays for it.
+
+    `_iso_or_none` does not leave a naive stamp naive — it stamps it UTC, the
+    assumption `_iso_seconds_between` bills GPU-hours on and the one
+    `fleet_watchdog._queue_starving` makes through `autonomy._parse_iso`. This read
+    keeps that convention so the wait cannot disagree with the GPU-hours on the same
+    row, and the cost is stated rather than hidden: this box runs at UTC-7, so a
+    naive stamp naming local noon is placed at 12:00Z and ages 7 hours more than a
+    local reader would expect. A foreign writer doing that inflates this figure, and
+    a future change to `_iso_or_none` that stopped assuming UTC would break THIS node
+    first — which is the point of pinning it from the outside.
+    """
+    from datetime import timedelta
+    from workers.queue import WorkQueue
+
+    q = WorkQueue(tmp_path / "naive.db")
+    q.enqueue("probe", "task", payload={})
+    naive = (datetime.now(timezone.utc) - timedelta(seconds=4000)
+             ).replace(tzinfo=None).isoformat()
+    assert "+" not in naive and naive.count("T") == 1
+    _restamp(q, 1, naive)
+
+    out = q.pending_wait_by_source()
+    assert 3990 <= out["probe"]["max_wait_seconds"] <= 4010, out
+    assert out["probe"]["over_bound_count"] == 1, \
+        "read as UTC, so it ages by real elapsed time and not by the box's offset"

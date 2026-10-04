@@ -170,6 +170,22 @@ def _iso_or_none(raw: Any) -> Optional[datetime]:
     return parsed
 
 
+#: #2185: the fixed age past which a row still sitting in state 'queued' is
+#: counted as waiting too long, by `pending_wait_by_source` and by
+#: `/api/workers/health`'s per-source `pending_wait_over_bound_count`.
+#:
+#: Fixed and shared rather than per-source, and one order of magnitude above the
+#: pool's own 1800 s `max_duration_seconds` fallback: the figure is a question
+#: about the QUEUE, and a per-source knob would make a source's wait comparable
+#: to nothing but its own history. 3600 s also sits above every per-day maximum
+#: claim latency this box has recorded since 2026-09-26 (0.00-0.30 h), so a
+#: non-zero count is therefore not the normal state of a healthy pool: on
+#: `scheduled-task`, the source that row 515 was on, the per-day maximum claim
+#: latency has read 0.00-0.30 h on every day since 2026-09-27 (the 11 h 10 min of
+#: row 515 is 2026-09-25, and 09-26 was still 1.33 h — the tail of the same
+#: outage). A count above zero is the exception speaking, not the pool breathing.
+PENDING_WAIT_BOUND_SECONDS = 3600
+
 #: Width of the `runs.summary` column's contract (#642 follow-up, #1606).
 SUMMARY_MAX_CHARS = 500
 #: What a summary that had to be shortened says about it. ASCII so the marker
@@ -1093,6 +1109,82 @@ class WorkQueue:
             for r in rows:
                 out.setdefault(r["source"], {})[r["state"]] = r["n"]
             return out
+
+    def pending_wait_by_source(
+        self,
+        *,
+        bound_seconds: int = PENDING_WAIT_BOUND_SECONDS,
+        now: Optional[datetime] = None,
+    ) -> dict[str, dict[str, float]]:
+        """Per source: how long the oldest row still in state 'queued' has been
+        waiting, and how many of those rows are past `bound_seconds`.
+
+        This is the observation #1526's four-day outage lacked. Row 515 of the live
+        queue sat from `enqueued_at` 2026-09-25T08:00:33Z to `claimed_at`
+        19:10:40Z — 11 h 10 min on source `scheduled-task`, with no failure anywhere
+        to point at, and autonomy #24 (`frequency: 6x-daily`) lost two slots the same
+        way. `depth_by_source` answers how many rows wait and `run_rollup_by_source`
+        how the last runs went; neither answers how long the oldest request has been
+        standing, so a starved pool and an idle one look the same in the payload.
+
+        Deliberate boundaries:
+
+        * `state='queued'` only. A `claimed`/`running` row has a worker; its problem
+          is duration, which the rollup already measures.
+        * A row whose `not_before` is still in the future is EXCLUDED from both
+          figures. That is `mark_failed`'s retry back-off parking the row until a
+          later instant — waiting by design, not pool starvation — and counting it
+          would let one failing item with a long back-off report the whole source as
+          starving. Same rule `workers/fleet_watchdog.py::_queue_starving` applies to
+          its own age read.
+        * No `since` filter, unlike every other read here. The wait is the state of
+          the queue NOW; a row that has waited 10 days is the finding, and windowing
+          the read by `days` would drop precisely the row that matters.
+        * A row whose `enqueued_at` cannot be parsed contributes no age, so a
+          hand-written stamp this module did not write cannot invent a wait. It is
+          invisible to this figure, which is why it is not a completeness check on
+          the queue — `depth` beside it is.
+        * Source is reported only for sources that HAVE a queued row. Absence means
+          nothing is waiting; the caller renders that as zeros rather than null, so a
+          dashboard reading a healthy pool never divides by a missing field.
+        """
+        moment = now or datetime.now(timezone.utc)
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT source, enqueued_at, not_before FROM queue WHERE state='queued'"
+            ).fetchall()
+        out: dict[str, dict[str, float]] = {}
+        for r in rows:
+            source = r["source"]
+            entry = out.setdefault(str(source), {"max_wait_seconds": 0.0,
+                                                 "over_bound_count": 0})
+            enqueued = _iso_or_none(r["enqueued_at"])
+            if enqueued is None:
+                # The only exclusion that is not about the row's state. A stamp this
+                # module did not write, in a shape it cannot parse, gives the row no
+                # age: `datetime.fromisoformat` raising means there is no instant to
+                # subtract, and inventing one would put hours of wait on the record
+                # that no writer claimed. Note what is NOT excluded: a stamp with no
+                # UTC offset is stamped UTC by `_iso_or_none`, the module's standing
+                # assumption about naive stamps, shared with `_iso_seconds_between`
+                # (which bills GPU-hours on it) and with the watchdog's own age read
+                # (`fleet_watchdog._queue_starving` -> `autonomy._parse_iso`). This box
+                # runs at UTC-7, so a foreign writer stamping naive LOCAL times would
+                # inflate this figure by 7 h — a real exposure, and the same one every
+                # other duration here already carries. Excluding naive stamps instead
+                # would make the wait the one reading on this table that disagrees with
+                # the GPU-hours beside it, so the convention is kept and named, and
+                # pinned by test_a_naive_enqueued_at_is_read_as_utc_like_every_other.
+                continue
+            parked_until = _iso_or_none(r["not_before"])
+            if parked_until is not None and parked_until > moment:
+                continue
+            wait = (moment - enqueued).total_seconds()
+            if wait > entry["max_wait_seconds"]:
+                entry["max_wait_seconds"] = round(wait, 3)
+            if wait > bound_seconds:
+                entry["over_bound_count"] += 1
+        return out
 
     # ── Runs ──────────────────────────────────────────────────────────────
 

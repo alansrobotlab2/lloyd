@@ -276,6 +276,16 @@ export interface WorkerSourceHealth {
   max_inflight?: number | null
   priority?: number | null
   depth: Record<string, number>
+  // The queue's WAIT, not only its depth: how old the oldest row sitting in
+  // state 'queued' is (from enqueued_at; a row parked by retry back-off does not
+  // count), how many of that source's waiting rows are past the bound, and the
+  // bound itself — 3600 s. Nothing queued is 0 and 0, never null. Both of the
+  // outages this exists for (#1526's four days, #24's two lost 6x-daily slots)
+  // were diagnosed by hand-running this over workers.db; the age of a claim that
+  // never came is a field now, so a recurrence is a reading.
+  pending_wait_max_seconds: number
+  pending_wait_over_bound_count: number
+  pending_wait_bound_seconds: number
   // null when the source has no runs in the window. A rate over zero runs is
   // unknown, not 0% — rendering "0% failing" for a source that has never run
   // is the reading this panel exists to prevent.
