@@ -435,7 +435,21 @@ def _parse_status(text: str) -> str:
 
 def _description_as_written(text: str) -> str:
     """The `description:` value as a human reads the file: the key's text plus
-    its indented continuation lines, joined the way YAML folds them."""
+    its indented continuation lines, joined the way YAML folds them, with a
+    quoted scalar's surrounding quotes removed — the quote characters are the
+    scalar's syntax and no loader serves them, so a reader that kept them calls
+    a page whose tail is its own closing `'` a page that lost its tail. That is
+    not a hypothetical: this helper went red on
+    `skills/djev-name-prior-probe/SKILL.md`, whose quoted description ends
+    `… owed from #1452).'`, and the only difference from what
+    `_parse_frontmatter` returned was that last character.
+
+    Unwrapping is also the honest comparison for the rule this file's node
+    enforces. A space-hash truncates a PLAIN scalar and nothing else — inside
+    `'…'` or `"…"` it is an ordinary character — so a quoted description whose
+    text contains ` #` has nothing to lose, and the assert stays load-bearing
+    for the plain case that started it (this page, "… is backlog item 484").
+    """
     block = re.match(r"^---\n(.*?)\n---", text, re.S)
     if not block:
         return ""
@@ -449,7 +463,13 @@ def _description_as_written(text: str) -> str:
             parts.append(line.strip())
         elif taking:
             break
-    return " ".join(p for p in parts if p)
+    value = " ".join(p for p in parts if p)
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+        quote, value = value[0], value[1:-1]
+        # An escaped quote inside the scalar: '' for single, \" for double.
+        value = (value.replace("''", "'") if quote == "'"
+                 else re.sub(r'\\(["\\])', r"\1", value))
+    return value
 
 
 def test_no_skill_description_loses_its_tail_to_a_yaml_comment():

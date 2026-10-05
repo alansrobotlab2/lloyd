@@ -442,6 +442,34 @@ LIVE_BENCH_CATEGORIES = {
     # carries `@pytest.mark.live_vault` and so never reaches the gate's `tests` rung — the
     # gap stays green on a red tree. Carried on #2178's findings, not fixed here.
     "bench_026_contradiction_supersede_chain": "synthetic",
+    # Keyed by stem with the `category:` its own front matter declares
+    # (`lloyd/bench/bench_027_recall_user_fact_topic_read.md:4` = `replay`), the only
+    # authority this table may copy — and only the second `replay` among the fourteen ids
+    # added after `bench_013`, the other twelve of which are `synthetic`, so inheriting a
+    # neighbour's value is exactly the mistake this line could have made. Its absence is
+    # what reds main at `506e250a` (#2218) at BOTH nodes: the census names the unmapped
+    # id, and this file is the newest by mtime, so it is also the entry
+    # `test_the_newest_live_bench_file_is_keyed_with_its_declared_category` reads. The
+    # file reached the directory at 2026-10-05T05:33:38Z (its own mtime), 3,773 seconds
+    # after `506e250a` was committed at 2026-10-05T04:30:45Z, so that base is red with no
+    # code change involved; the round that found it, SM_20261005_054949, has all three
+    # nodes under `pre_existing_failures` on its `tests` rung with its own diff absent,
+    # which is a file written by the vault blamed on a tree once more. Tracked in the
+    # vault as measured for this line, which is what separates it from `bench_021`
+    # through `bench_026`: 27 `.md` on disk against
+    # `git -C ~/obsidian ls-files lloyd/bench | wc -l` = 27, and
+    # `git -C ~/obsidian status --porcelain -- lloyd/bench` is empty — the author landed
+    # it in vault commit `bf8be644` at 2026-10-05T07:30:24Z. The `git clean -fd` that
+    # would otherwise delete an untracked task and silently un-red #2218 therefore no
+    # longer reaches it, unlike the four entries above. What this
+    # entry does NOT close is the judge's half, and that half is now two files deep: the
+    # newest set in `eval/autoresearch_assertions.yaml` is `bench_025` (that file's line
+    # 348), so `bench_026` has no assertion set either, and the node that asks for one,
+    # `tests/test_autoresearch_judge.py::test_every_live_bench_task_has_an_assertion_set`,
+    # carries `@pytest.mark.live_vault` (`tests/test_autoresearch_judge.py:1256`) and so
+    # never reaches the gate's `tests` rung — the gap stays green on a red tree. Carried
+    # on #2218's findings, not fixed here.
+    "bench_027_recall_user_fact_topic_read": "replay",
 }
 
 

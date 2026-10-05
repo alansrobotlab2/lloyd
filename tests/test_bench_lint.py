@@ -76,7 +76,6 @@ def _boom(*_args, **_kwargs):
 #: and the probe has no keyword to place — that is clause 4's vacuity finding,
 #: asserted separately below. 7 keyword passes + 1 vacuous layer = the 8 triage
 #: recorded as "8 of 11 objective layers score a full 1.00", on 13 tasks now.
-MEASURED_LAZY_PASSING: set[str] = set()
 #: Empty, measured 2026-09-28 over the live vault by `scripts/autoresearch/bench_lint.py`
 #: itself (`lazy_pass: 0 of 19`, `safety gate satisfied by a lazy response: (none)`).
 #: It was seven: bench_002 and bench_007 each carried one `contains`, which a reply of
@@ -86,6 +85,39 @@ MEASURED_LAZY_PASSING: set[str] = set()
 #: now needs its old vocabulary and a structure the check text does not spell out.
 #: An empty set proves nothing by itself — a bench of unsatisfiable checks prints the
 #: same line — which is why it is paired with the replies below.
+#:
+#: Since #2218 this is the measurement of `PINNED_CORPUS` and of nothing else. It used
+#: to serve both corpora, which worked only while the two agreed: the copy is 13 of the
+#: files in the live directory, and a task another item lands is in the directory and
+#: not in the copy, so once one of those arrivals measures lazy the same constant is
+#: asked to be empty (for the copy) and non-empty (for the directory) at once. The
+#: exact set stays here, where the corpus is frozen; the directory gets the count below.
+#: This is the split `test_the_coverage_error_that_remains_is_the_measured_one` already
+#: describes as "the same split as clause 1's pin".
+MEASURED_LAZY_PASSING: set[str] = set()
+
+#: Measured 2026-10-05 over the live vault by `scripts/autoresearch/bench_lint.py`
+#: itself: `lazy_pass: 1 of 27: bench_027_recall_user_fact_topic_read`.
+#:
+#: That one is not a pinned task and it is not accepted. `bench_027_recall_user_fact_
+#: topic_read.md` reached `~/obsidian/lloyd/bench` at 2026-10-05T05:33:38Z, and the lint
+#: calls it invalid on two error kinds, `lazy_pass` and `uncovered_requirement`: its
+#: objective layer scores 1.00 on a reply of its own check text because its `regex` is
+#: `(95\.37[^\n]{0,80}(GiB|gig)|n-gram[^\n]{0,120}(RAM|memory)|host[^\n]{0,60}RAM)` and
+#: the probe is built from the pattern's own source, which contains `95.37` and `GiB`
+#: inside the 80-character window that very pattern opens — so the pattern matches the
+#: reply made of it, alongside `contains=95.37`. The fix is bench_027's own: the #1607
+#: treatment, one more check that needs structure the pattern text does not spell out.
+#: That edit is to the bench author's vault file, which no test in this repo owns, so it
+#: is carried on #2218's findings and this number is what records it here.
+#:
+#: A count and not a set, for the reason in the note above, and pinned rather than
+#: bounded: a second task arriving lazy-passing, or this one tightened to nothing, both
+#: move it. Non-vacuity of the instrument that produces it is pinned by
+#: `test_probe_renders_escapes_a_lazy_reply_cannot_type`, which asserts a fixture task
+#: reports `lazy_pass is True`, and by the replies in `TIGHTENED` below.
+MEASURED_LAZY_PASS_COUNT_LIVE = 1
+
 TIGHTENED = (
     ("bench_002_recall_user_fact",
      "The email address on file for you is gestalt73@gmail.com."),
@@ -255,20 +287,45 @@ def test_lazy_pass_set_over_the_pinned_corpus_is_the_measured_set(
 
 
 def test_the_live_lazy_pass_set_is_the_measured_set(live_report, live_tasks):
-    """The same set over the real vault, measured live and with no fixture copy.
+    """The same measurement over the real vault, with no fixture copy in between.
 
-    The pinned corpus above is a copy, so only this test can catch a vault edit that
-    quietly re-loosens one of the seven. The constant is now empty, so containment
-    alone would say nothing and the count is asserted as equality with the live
-    measurement: a task that starts passing on its own check text again makes
-    `lazy_pass_count` disagree with the constant, which is exactly what this is for.
+    Three assertions, sharpest first. The directory this runs over is shared state
+    other items land tasks in, so the exact set lives on `PINNED_CORPUS` above and the
+    live corpus is held two other ways — the split
+    `test_the_coverage_error_that_remains_is_the_measured_one` calls "the same split as
+    clause 1's pin":
+
+      * **by id**: every task the lint reports as lazy-passing must be one the pinned
+        copy does not contain. This is the assertion the node was written for — it is
+        what catches a vault edit that quietly re-loosens one of the seven #1607
+        tightened, all of which are in that copy — and it is not implied by the count
+        below, which any single loose task anywhere in the directory satisfies.
+      * **by count**: the report's own tally, the rows it was built from, and
+        `MEASURED_LAZY_PASS_COUNT_LIVE` are one number. Pinned at the measured 1 and
+        not bounded, so a second arrival that passes on its own check text lands here
+        and so does tightening `bench_027` away. The figure is non-zero, which is what
+        stops this node reading as a pass on an instrument that measured nothing; the
+        instrument's own positive control is
+        `test_probe_renders_escapes_a_lazy_reply_cannot_type`.
+      * **by score, not by count**: the helper at the end re-probes each of the seven on
+        the live files and requires the real reply to still reach 1.00 elsewhere in this
+        file, so a check tightened until nothing clears it is caught as a bench that
+        stopped measuring rather than as a clean lint line.
     """
     report = live_report
-    lazy = sorted(t["id"] for t in report["tasks"] if t["lazy_pass"])
-    assert report["lazy_pass_count"] == len(lazy) == len(MEASURED_LAZY_PASSING), (
-        f"live lazy-passing {lazy} but the constant says "
-        f"{len(MEASURED_LAZY_PASSING)} — a newly-loosened task is what this test is "
-        "for, so re-measure and change the constant deliberately")
+    lazy = {t["id"] for t in report["tasks"] if t["lazy_pass"]}
+    all_ids = {t["id"] for t in report["tasks"]}
+    assert lazy - MEASURED_LAZY_PASSING <= all_ids - set(PINNED_CORPUS), (
+        f"a task in the pinned corpus is clearable by echoing its own check text: "
+        f"{sorted(lazy - MEASURED_LAZY_PASSING)} — a newly-loosened task is what this "
+        "test is for, so fix the task rather than re-measuring this one")
+    assert report["lazy_pass_count"] == len(lazy) == MEASURED_LAZY_PASS_COUNT_LIVE, (
+        f"live lazy-passing {sorted(lazy)} — {report['lazy_pass_count']} of "
+        f"{report['task_count']} — but the pinned count says "
+        f"{MEASURED_LAZY_PASS_COUNT_LIVE}. A task that starts passing on its own check "
+        "text, or the one that does now getting the #1607 treatment, is what this "
+        "number is for: re-measure with `scripts/autoresearch/bench_lint.py` and change "
+        "it deliberately")
     _each_tightened_task_refuses_its_own_probe(live_tasks)
 
 

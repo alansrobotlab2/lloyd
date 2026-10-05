@@ -70,7 +70,7 @@ from scripts.automod import backlog as B
 #: copy is the thing that goes stale, and this file's last two calibrations each
 #: left one behind (the 1,142-file board and the 1,450-file one, both of which
 #: the bound then walked past).
-CALIBRATED_BOARD_FILES = 1804
+CALIBRATED_BOARD_FILES = 2180
 
 #: Bytes of `promotions.jsonl` the calibrated cycle decoded, for the same
 #: reason. NOT part of the denominator — the budget scales with the board, not
@@ -84,34 +84,74 @@ CALIBRATED_LEDGER_BYTES = 28_960_660
 
 #: The later of the two measured tails, in seconds.
 #:
-#:     measured 2026-09-30 from abe3360a in a round worktree, 32 cores
-#:     board  = CALIBRATED_BOARD_FILES item files (the numeric-name subset)
-#:     ledger = CALIBRATED_LEDGER_BYTES bytes, repointed live as in every gate run
-#:              (the live file grows: the sets below saw 28,954,336 to 28,965,388)
-#:     serial, 8 runs over 1,803 item files, load 5.6-6.4:
-#:              min 6.95  median 7.14  p90 7.52  max 7.52
-#:     serial, 6 runs over the calibrated board, load 4.4-5.4:
-#:              min 6.46  median 6.54  p90 6.97  max 6.97
-#:     `-n 8 --dist loadfile`, 1 full-suite pass, load 3.2:  7.64
+#:     measured 2026-10-05 from 19acea6c in a round worktree, 32 cores
+#:     board  = CALIBRATED_BOARD_FILES item files (the numeric-name subset);
+#:              all fourteen runs below printed that count
+#:     ledger = the live store, reached directly because the serial runs below
+#:              carried no `LLOYD_AUTOMOD_STATE`, so `S.LEDGER_PATH` was the real
+#:              state dir's own file. NOT "repointed as in every gate run":
+#:              `tests/board_presence.py` repoints only when the configured state
+#:              dir holds NO ledger, and a gate run's round state dir holds one of
+#:              its own — 3,888 bytes in this round's — so the corpus a gate
+#:              decodes is that small file and these durations are not its shape.
+#:              Those runs decoded 29,188,189 bytes in the first four and
+#:              29,194,126 in the rest — 0.8% above `CALIBRATED_LEDGER_BYTES`,
+#:              which this re-base deliberately left alone: that centre is pinned
+#:              by equality in
+#:              `tests/test_retention_sweep.py` (where #2043's whole case is that
+#:              the fold lands the store inside the band around THAT number) and
+#:              #2071 ruled the centre is not the drift-drift lever. The durations
+#:              below are of the real store at its real size; the budget those runs
+#:              printed was still the old one, and a duration does not care which
+#:              budget it was read against.
+#:     serial, 8 runs, load 4.84-5.80:  min 6.78  median 7.16  p90 7.79  max 7.79
+#:     serial, 6 runs, load 5.36-5.70:  min 6.89  median 7.04  p90 7.18  max 7.18
 #:
-#: The two serial sets are 0.5 s apart for the same code over the same corpus,
-#: which is the machine's own spread and the reason a 3%-margin bound was never
-#: stable. Their later p90 is 7.52 s (nearest-rank; 7.46 by linear interpolation).
-#: One `xdist -n 8 --dist loadfile` full-suite pass — the shape the gate's tests
-#: rung actually uses — printed 7.64 s from the node's own line, so over a quiet
-#: board the parallel penalty is small and this constant records THAT tail. All
-#: three rows are here because the check has to be readable against any of them:
-#: `COLD_BUDGET_S` below is >= the p90 of each serial set as well as >= the
-#: `-n 8` sample.
+#: p90 is nearest-rank, the convention the row this table replaces reported it
+#: by, so with 8 samples it is the maximum and the 6-sample set's p90 is its
+#: maximum too. Their later p90 is the 8-run set's and that is this constant.
 #:
-#: What none of those rows capture is contention, and the two serial sets above
-#: already show the machine's own contribution: the same code over the same corpus
-#: came in at median 7.14 s in one set and 6.54 s in the other — 9% apart, with the
-#: 1-minute load average about a point higher. The gate's tests rung adds eight
-#: workers on top of whatever else the box is doing, which is why a single sample on
-#: a 3%-margin bound was never stable: the ledger carries 17 rows naming this node
-#: as a parallel-only failure up to 2026-09-29 (triage on #1858), with no code
-#: change behind any of them.
+#: What this table does not have is an `xdist -n 8 --dist loadfile` full-suite
+#: row, and it cannot be given one by a gate run. The calibration this one
+#: replaces recorded such a row — 7.64 s printed by the node's own line against
+#: a serial p90 of 7.52, a 1.6% parallel penalty — and set its constant to that
+#: sample. This constant is instead the later of two serial sets measured with no
+#: gate in flight, and the gate's `tests` rung cannot add a duration to it: that
+#: rung runs `-n 8 --dist loadfile` WITHOUT `-s`, and pytest discards a PASSING
+#: test's captured stdout, so the node's `cold cycle:` line never reaches the log
+#: that passed 16156 tests at head `e43c28df` (34 skipped, 496.4 s).
+#: Checked rather than assumed: three `-n 8 --dist loadfile -s` passes over this
+#: file (load 3.96-4.27, 25 passed each) printed no `cold cycle:` line either, and
+#: `--durations=3` under the same shape printed no durations report — xdist
+#: forwards neither a passing worker test's stdout nor the durations table. So the
+#: gate's pass is a BOUND, not a measurement: by this node's own rule (one breach
+#: buys one more cold sample, two breaches fail) clearing the ladder says the
+#: first sample came in at or under `COLD_BUDGET_S`, which says the serial p90
+#: plus a full 25% margin absorbed whatever the parallel penalty is, and by how
+#: much is not something the ladder can tell anyone. What it would take to
+#: measure the row is a serial `-s` run of this file while a suite-wide `-n 8`
+#: pass is loading the box, which is the shape of the number, not of the constant.
+#:
+#: It is also why the assert below tells a re-baser to run "`-n 8` runs over the
+#: real board" while this table has no such row: under that shape the node's line
+#: surfaces only when it FAILS — a breach is exactly when pytest prints it — so a
+#: parallel sample you can actually read off a gate is a worst case, not a
+#: typical one. Nothing here claims to know how the retired row got its number.
+#:
+#: To restore the value this one replaced, restore its inputs: the board of
+#: 1,804 item files and the ledger centre it was walked over, measured
+#: 2026-09-30 from abe3360a.
+#:
+#: What none of those rows capture is contention, and this re-base shows the
+#: machine's contribution at the tail rather than the middle: the same code over
+#: the same corpus came in at median 7.16 s in one set and 7.04 s in the other
+#: (1.7% apart, with overlapping 1-minute load averages) but 0.61 s apart at
+#: p90 — 8.5%. That is why a single sample on a 3%-margin bound was never
+#: stable, and why the constant is a p90 over eight runs and not the fastest
+#: cycle: the gate's tests rung adds eight workers on top of whatever else the
+#: box is doing, and the ledger carries 17 rows naming this node as a
+#: parallel-only failure up to 2026-09-29 (triage on #1858), with no code change
+#: behind any of them.
 #:
 #: The budget is deliberately NOT padded to absorb an arbitrary load spike. A
 #: number high enough for that would sit near the 15.22 s cost the check exists to
@@ -119,24 +159,25 @@ CALIBRATED_LEDGER_BYTES = 28_960_660
 #: sample in `enforce_cold_cycle_budget`, plus the load average and xdist worker id
 #: the node prints beside every duration, so a red that survives the retry says
 #: whether the machine was the problem or the code was.
-COLD_P90_S = 7.64
+COLD_P90_S = 7.79
 
 #: Stated margin over that p90 (#1858 clause 1): 25%, arithmetic rather than the
 #: "~30% headroom" the 2026-09-25 re-base claimed in prose. It has to cover the
 #: worker contention the re-measurement does not absorb, and it has to stay far
 #: enough under the 15.22 s triage cost that a real regression still trips it —
-#: at 1.25 the budget is 9.55 s and the triage cost is 59% higher, so the check
+#: at 1.25 the budget is 9.74 s and the triage cost is 56% higher, so the check
 #: still means something. A re-baser changes the table and, if they must, this
 #: number; the budget itself follows arithmetically.
 COLD_BUDGET_MARGIN = 1.25
 
 #: Budget for one cold cycle over the board named by `CALIBRATED_BOARD_FILES`,
-#: charged per file by `cold_budget_for_board`. 8.0 s was the calibration on a
-#: 1,450-file board with a 6,286,192-byte ledger, where the node measured 6.02 s
-#: and 6.16 s; to restore that value, restore those two inputs (round
-#: SM_20260925_205059's review run, 2026-09-25, load average 11). Triage
-#: baseline: 15.22 s over 1,142 files, 2026-09-16 — the bound still fires well
-#: short of that.
+#: charged per file by `cold_budget_for_board`. The value this re-base replaced
+#: was 9.55 s, on a board of 1,804 item files with the old ledger centre; to
+#: restore it, restore those two inputs and the p90 they sat on. Before that,
+#: 8.0 s was the calibration on a 1,450-file board with a 6,286,192-byte ledger,
+#: where the node measured 6.02 s and 6.16 s (round SM_20260925_205059's review
+#: run, 2026-09-25, load average 11). Triage baseline: 15.22 s over 1,142 files,
+#: 2026-09-16 — the bound still fires well short of that.
 COLD_BUDGET_S = COLD_P90_S * COLD_BUDGET_MARGIN
 
 #: How far the live board may move from the calibrated one before the budget
@@ -462,8 +503,15 @@ def test_a_fold_cadence_too_slow_for_the_growth_rate_is_not_bounded():
     34,779,858 bytes against a 34,752,792-byte ceiling — 27,066 bytes over, which
     reads like a rounding accident and is not one. The store had grown 2,208,597
     bytes/day while `autonomy/79-retention-sweep.md` declared `frequency: weekly`, so
-    15.5 MB of rows arrived between two passes and the band, whose entire width is
-    11.6 MB, was crossed on the way up rather than by any code change.
+    15.5 MB of rows arrived between two passes and the band — whose entire width is
+    40% of whatever `CALIBRATED_LEDGER_BYTES` says on the day you read this — was
+    crossed on the way up rather than by any code change. The two figures in this
+    paragraph are that day's; the `ceiling` the node computes is derived from the
+    calibration, so it moves whenever `CALIBRATED_LEDGER_BYTES` moves and the assert
+    below is what says which way it went. The 2026-10-05 cold-cycle re-base did NOT
+    move it: that re-base re-measured the board count and the cycle p90 and left the
+    ledger centre at `CALIBRATED_LEDGER_BYTES`, so `ceiling` is still 34,752,792 and
+    this assert is the witness that it is, not evidence of a move.
 
     The two figures it computes with are the ones measured on this box on 2026-10-02
     and pinned here rather than re-read, so the node is decidable on any box and in
@@ -751,10 +799,13 @@ async def test_one_cold_dashboard_cycle_beats_the_budget(monkeypatch):
     )
     budget = cold_budget_for_board(len(files))
     # What the machine was doing while this was timed. The table beside
-    # `COLD_BUDGET_S` cannot carry it, and a red that says only "10.2s > 9.55s"
-    # gets read as a regression by a reader with no way to tell a slow dashboard
-    # from a busy box. The load average and the xdist worker id together say
-    # which one it was.
+    # `COLD_BUDGET_S` cannot carry it, and a red that prints only an elapsed against
+    # a budget gets read as a regression by a reader with no way to tell a slow
+    # dashboard from a busy box. The load average and the xdist worker id together
+    # say which one it was. The example breach below is interpolated from `budget`
+    # rather than written out: this file re-based `COLD_BUDGET_S` 7.64 -> 7.79, which
+    # moved the budget at calibrated board size from 9.55s to 9.74s, and a hard-coded
+    # illustration would have kept quoting the figure the same diff retired.
     worker = os.environ.get("PYTEST_XDIST_WORKER", "master")
     print(f"budget for this cycle: {budget:.2f}s = the calibrated "
           f"{COLD_BUDGET_S:.2f}s spread over {CALIBRATED_BOARD_FILES} files and "
