@@ -903,3 +903,401 @@ def test_the_desktop_pin_itself_fails_after_two_disagreeing_readings(monkeypatch
     assert calls == [DESKTOP_WIDTH, DESKTOP_WIDTH], (
         f"a persistent defect must be measured exactly twice, never once and never "
         f"a third time: {calls}")
+
+
+# ── seeded phone measurement: are the row labels still readable? (#2202) ───
+#
+# #1742's defect, re-landed. Seven spans on the dashboard were the ONLY place
+# their row's text appeared, each with a bare `truncate` and nothing else that
+# could return a clipped label to the reader. The four geometry pins above ask
+# whether a section's box fits; a row can fit its box perfectly and still show
+# `Autonomy Self Improvement Pass Over The Whole Bo…` at 232 px, which is a
+# label nobody on a phone can finish reading. That is the question the geometry
+# pins cannot ask, so this pin asks it against a page whose labels are authored
+# rather than whatever the fleet happens to be called this hour.
+#
+# Why a seed and not the live backend: `0 unreachable clipped labels` is also
+# exactly what the dashboard reports on a night when every task name is short.
+# The fixture (tests/fixtures/dashboard_long_labels.json — a real snapshot with
+# seven deliberately long labels and every list trimmed to a fixture-sized
+# denominator) makes the denominator known BEFORE the page loads, so the pin can
+# tell "nothing was clipped" from "nothing was there".
+#
+# Why these widths: 390 and 414 are the two iPhone widths in PHONE_WIDTHS, and
+# they are the two #1742's owed entry names. 320/360 stay with the geometry pins
+# — at those widths the Automation section's panels stack one per row and the
+# labels have room the narrower columns do not, so a pass there would not
+# measure the thing this pin is about.
+
+SEED_PATH = ROOT / "tests" / "fixtures" / "dashboard_long_labels.json"
+SEEDED_PHONE_WIDTHS = [390, 414]
+
+# The fixture's own denominator: one label per span that is its row's only text
+# (TaskLine's `{task.name}`, Running-now's `{r.kind}`, Failed's `{t.name}`, the
+# worker Sources' `{src.name}`, Recent runs' `{r.source}` and `{r.summary}`, and
+# Backlog Recently-touched's `{t.name}`). Asserted against the fixture rather
+# than trusted from it, because the seed was hand-trimmed from a live snapshot
+# and a future refresh that drops a row would otherwise quietly shrink the
+# denominator the verdict is divided by.
+SEEDED_DENOMINATOR = 7
+
+
+def _measure_seeded(url, width, mutate=None, mutate_note=None):
+    """`_measure` with an authored `/api/dashboard` response (see the probe).
+
+    Returns the loaded seed beside the result so the caller can check the
+    denominator against the same object the browser was fed — one payload, one
+    derivation, no second list of labels to drift.
+
+    `mutate`/`mutate_note` are passed straight to `probe.measure_page`, which prints
+    what it applied. They exist for the differential pin below: a verdict can only be
+    shown to track a style by measuring the shipped page with that style put back.
+    """
+    probe = _load_probe()
+    seed = probe.load_seed(SEED_PATH)
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch()
+        except Exception as exc:
+            why = f"{dp.BROWSER_MISSING}: {str(exc)[:120]}"
+            PINS.note(why)
+            pytest.skip(why)
+        try:
+            try:
+                res = probe.measure_page(browser, url, width, seed=seed,
+                                         mutate=mutate, mutate_note=mutate_note or
+                                         "seeded differential")
+            except Exception as exc:
+                # A failure, not a skip, for the reason `_measure` already
+                # states: a page that did not load is not "not applicable".
+                pytest.fail(f"seeded dashboard did not load: {str(exc)[:160]}")
+            PINS.measured()
+            # The measurement on the record, on every path that has one, so a
+            # run that measured something and a run that measured nothing are
+            # two different things in the gate log (#2202 clause 5).
+            print(probe.describe(res, width, True, MIN_SECTIONS), flush=True)
+            return probe, seed, res
+        finally:
+            browser.close()
+
+
+# --- clause 3 / 4 / 5 ------------------------------------------------------
+
+@pytest.mark.parametrize("width", SEEDED_PHONE_WIDTHS)
+def test_seeded_long_labels_stay_reachable_on_a_phone(dashboard_url, width):
+    """Every seeded label rendered, and none of them clipped past reachability.
+
+    Two assertions in that order, and the second only means anything because of
+    the first: `unreachable == 0` is what a panel that rendered nothing also
+    produces, so a short render is its own failure, and the fixture's denominator
+    is checked before either number is read.
+
+    This pin is red on the unfixed spans, and that claim is not a number somebody
+    measured once in a scratch tree: `test_the_seeded_verdict_goes_red_when_the_labels_stop_wrapping`
+    reproduces it inside this file's own run, on the shipped page, by putting the
+    pre-fix declarations back on the seeded labels and re-reading the same verdict.
+    It also prints what both halves measured, so the counts a reader wants are in the
+    run rather than in prose that nobody has to re-run.
+    """
+    probe, seed, res = _measure_seeded(dashboard_url, width)
+
+    labels = probe.seeded_labels(seed)
+    assert len(labels) == SEEDED_DENOMINATOR, (
+        f"the seed yielded {len(labels)} labels, not {SEEDED_DENOMINATOR}: "
+        f"{labels} — the denominator of this pin is wrong, so its verdict is"
+    )
+
+    # The emulation the pin asked for, read back off the page rather than
+    # assumed: a 390 px desktop window is not a 390 px phone.
+    env = res.get("env") or {}
+    assert "iPhone" in env.get("ua", ""), (
+        f"at {width}px the page was measured with a desktop UA ({env.get('ua')!r}); "
+        "UA sniffing and `pointer: coarse` change what renders"
+    )
+    assert env.get("dpr") == probe.PHONE_DPR, (
+        f"at {width}px the device pixel ratio was {env.get('dpr')}, not "
+        f"{probe.PHONE_DPR} — the raster a real phone lays out at"
+    )
+    assert env.get("coarse") is True, (
+        f"at {width}px the page did not report a coarse pointer ({env}); a phone "
+        "measurement with a mouse pointer is a narrow desktop window"
+    )
+
+    _assert_verdict_available(res, width)
+    seeded = res["seeded"]
+    assert seeded["asked"] == len(labels), (
+        f"the browser was asked for {seeded['asked']} labels and the caller derived "
+        f"{len(labels)} — one payload must feed both sides of this comparison"
+    )
+    assert seeded["rendered"] == seeded["asked"], (
+        f"at {width}px only {seeded['rendered']} of {seeded['asked']} seeded labels "
+        f"rendered (missing {seeded['missing']}); '0 unreachable' over a page that "
+        "did not render the labels is not a pass — this is the panel throwing, "
+        "rendering nothing, and clipping nothing"
+    )
+    assert seeded["unreachable"] == 0, (
+        f"at {width}px {seeded['unreachable']} seeded label(s) are clipped with no "
+        f"title and no link to open: {seeded['unreachableDetail']} — the row's only "
+        "text is unreachable on a phone (#1742's defect)"
+    )
+    # Every label landed inside a section that has a heading, not in a stray
+    # fragment: `sectionOf` reports '(outside any section)' for anything else.
+    assert all(head != "(outside any section)" for head in seeded["bySection"]), (
+        f"seeded labels rendered outside any section at {width}px: "
+        f"{seeded['bySection']}"
+    )
+
+    # Wrapping a row makes it taller, never wider: #1685's geometry still holds at
+    # the seeded widths, with the long labels in place.
+    bad = [f"'{s['head']}' {s['sw']}px inside {s['cw']}px"
+           for s in res["sections"] if s["overflow"] > 0]
+    assert not bad, f"at {width}px with the labels wrapped these sections overflow: {bad}"
+    assert res["pageOverflow"] <= 0, (
+        f"at {width}px the page itself scrolls sideways by {res['pageOverflow']}px"
+    )
+
+
+def test_the_seeded_instrument_can_go_red_and_knows_an_exemption(dashboard_url):
+    """The controls that make the pin above a measurement rather than a tautology.
+
+    `unreachable` is a two-branch predicate, and a predicate with only one
+    reachable branch reports the same zero as a working one:
+
+    * POSITIVE — a synthetic long label, clipped by a fixed-width box, with
+      nothing above it: the instrument must call it unreachable. Without this the
+      word could be hardcoded false and every seeded pin would stay green while
+      #1742's defect was still on the page.
+    * NEGATIVE — the same element with a `title` on itself, with a `title` on an
+      ancestor, inside an `<a>`, and inside a `<button>`: none of the four may be
+      called unreachable, which is the exemption half of clause 3.
+
+    The synthetic nodes are injected into the loaded page, so the app's own
+    source is not touched; what is under test here is the instrument, and what
+    the previous test trusts.
+    """
+    # Each control is the same clipped span, differing only in what is above it:
+    # `plain` has nothing, and the four exemptions are the four the predicate is
+    # allowed to honour — a title on the element, a title on an ancestor, a
+    # wrapping link, a wrapping button.
+    controls = ["plain", "title-self", "title-ancestor", "link", "button"]
+    LABELS = {c: f"synthetic control label {c} that no dashboard panel could ever "
+                   f"show in full inside a hundred-and-twenty pixel box on any phone "
+                   f"this suite measures" for c in controls}
+    probe = _load_probe()
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch()
+        except Exception as exc:
+            why = f"{dp.BROWSER_MISSING}: {str(exc)[:120]}"
+            PINS.note(why)
+            pytest.skip(why)
+        try:
+            ctx = browser.new_context(viewport={"width": 390, "height": 844},
+                                      ignore_https_errors=True, is_mobile=True,
+                                      has_touch=True, user_agent=probe.IPHONE_UA,
+                                      device_scale_factor=probe.PHONE_DPR)
+            page = ctx.new_page()
+            page.goto(dashboard_url, wait_until="load", timeout=45000)
+            page.wait_for_timeout(2500)
+            probe.open_dashboard(page)
+            page.wait_for_timeout(2000)
+            injected = page.evaluate(
+                """(specs) => {
+                  const host = document.createElement('div');
+                  host.style.cssText = 'position:fixed;left:0;top:0;width:120px;'
+                    + 'overflow:hidden;background:#fff;z-index:2147483000';
+                  document.body.appendChild(host);
+                  for (const s of specs) {
+                    const wrap = document.createElement(s.tag || 'div');
+                    if (s.tag === 'a') wrap.setAttribute('href', '#/control');
+                    if (s.tag === 'button') wrap.setAttribute('type', 'button');
+                    if (s.wrapTitle) wrap.setAttribute('title', s.wrapTitle);
+                    wrap.style.cssText = 'display:block;width:120px;overflow:hidden';
+                    const span = document.createElement('span');
+                    span.textContent = s.label;
+                    span.style.cssText = 'display:inline-block;width:120px;'
+                      + 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
+                    if (s.selfTitle) span.setAttribute('title', s.selfTitle);
+                    wrap.appendChild(span);
+                    host.appendChild(wrap);
+                  }
+                  return host.querySelectorAll('span').length;
+                }""",
+                [{"label": LABELS[c],
+                  "tag": {"link": "a", "button": "button"}.get(c),
+                  "selfTitle": "the whole label" if c == "title-self" else None,
+                  "wrapTitle": "the whole label" if c == "title-ancestor" else None}
+                 for c in controls])
+            assert injected > 0, "the control nodes were not injected"
+            res = page.evaluate(probe.JS, [LABELS[c] for c in controls])
+            ctx.close()
+        finally:
+            browser.close()
+
+    PINS.measured()
+    seeded = res["seeded"]
+    print(f"controls: {seeded['rendered']}/{seeded['asked']} rendered, "
+          f"{seeded['unreachable']} unreachable", flush=True)
+    assert seeded["rendered"] == seeded["asked"] == len(controls), (
+        f"the controls did not all render: {seeded}"
+    )
+    # POSITIVE: exactly one control has nothing to get its text back, so the
+    # predicate demonstrably fires when the exemption is absent...
+    assert seeded["unreachable"] == 1, (
+        f"the instrument reported {seeded['unreachable']} unreachable of {len(controls)} "
+        f"controls, expected 1 (the `plain` one): {seeded['unreachableDetail']} — with "
+        "0 the predicate never fires and every seeded pin above is a tautology; with "
+        "more, an exemption is not being honoured"
+    )
+    assert seeded["unreachableDetail"], "no detail recorded for the unreachable control"
+    assert seeded["unreachableDetail"][0]["label"].startswith(
+        "synthetic control label plain"), (
+        f"the label reported unreachable is not the unexempted control: "
+        f"{seeded['unreachableDetail']}")
+    # ...and NEGATIVE: the four exemptions are each honoured. `plain` is the ONLY
+    # control with nothing above it, so the single expected 1 is doing two jobs at
+    # once: it is the predicate demonstrably firing, and it is all four exemptions
+    # demonstrably holding — a 2 would mean one of them leaked.
+
+
+# ── does the seeded verdict track the fix? (#2202 clause 4) ──────────────────
+
+#: JS run against the SHIPPED page immediately before one seeded measurement.
+#:
+#: It puts #1742's pre-fix declarations back on the seeded labels with `!important`,
+#: which is precisely what the class edit removes: `truncate` compiles to
+#: `overflow:hidden; text-overflow:ellipsis; white-space:nowrap`, and the nowrap is the
+#: declaration that turns a long label into one clipped line. Everything else about the
+#: page is the shipped page — its router, its component tree, its CSS, its data.
+#:
+#: The elements it touches are found by the SAME text equality the instrument uses (a
+#: childless element whose trimmed text IS a seeded label), so a treatment and a
+#: measurement cannot drift apart into "we mutated three spans and measured seven".
+#:
+#: Why this exists: "the pin reddens on unfixed source" used to be a sentence about a
+#: scratch checkout somebody built by hand once and nobody re-ran — the review rung of
+#: round SM_20261005_002918 had to construct one to check it. Here the redness is a
+#: measurement inside every run of this file.
+PRE_FIX_WRAP_REMOVAL_JS = """(labels) => {
+  const want = new Set(labels || []);
+  let n = 0;
+  for (const el of document.querySelectorAll('body *')) {
+    if (el.children.length > 0) continue;
+    if (!want.has((el.textContent || '').trim())) continue;
+    el.style.setProperty('white-space', 'nowrap', 'important');
+    el.style.setProperty('overflow', 'hidden', 'important');
+    el.style.setProperty('text-overflow', 'ellipsis', 'important');
+    n++;
+  }
+  return n;
+}"""
+
+
+def test_the_seeded_verdict_goes_red_when_the_labels_stop_wrapping(dashboard_url):
+    """Clause 4's reddening half, measured on the shipped page in this very run.
+
+    Three things have to hold together, and each one closes a different way the pin
+    above could be a tautology:
+
+    * the shipped verdict is 0 unreachable — the pass the item claims;
+    * the reverted verdict is HIGHER and at least 1, which is what proves the verdict
+      moves with the wrapping at all; with only the first bullet, `unreachable` could
+      be a constant zero and every future regression stay green;
+    * the SAME labels rendered under both, because a rise in `unreachable` after the
+      page stopped rendering text would be measuring a broken page, not a clipped one.
+
+    The comparison is a difference, not a remembered count: a fixture refresh, or a row
+    that happens to fit its column this month, moves the number and the assertion still
+    says the same thing. `_measure_seeded` prints both measurements, so the counts a
+    reader wants are in the run rather than in prose nobody re-runs.
+    """
+    width = SEEDED_PHONE_WIDTHS[0]
+    probe, seed, shipped = _measure_seeded(dashboard_url, width)
+    labels = probe.seeded_labels(seed)
+    _p2, _s2, reverted = _measure_seeded(
+        dashboard_url, width, mutate=PRE_FIX_WRAP_REMOVAL_JS,
+        mutate_note=f"{width}px: pre-#1742 declarations on the seeded labels")
+
+    s, r = shipped["seeded"], reverted["seeded"]
+    assert s["rendered"] == s["asked"] == len(labels), (
+        f"the shipped page rendered {s['rendered']}/{s['asked']} of {len(labels)} "
+        f"seeded labels (missing {s['missing']}), so neither verdict below is a "
+        "measurement of the fix")
+    assert r["rendered"] == s["rendered"], (
+        f"removing the wrapping also changed what rendered ({r['rendered']} vs "
+        f"{s['rendered']}), so any rise in `unreachable` would be the treatment "
+        "breaking the page rather than clipping its text")
+    assert s["unreachable"] == 0, (
+        f"the shipped page already fails the contract it is here to pass: "
+        f"{s['unreachableDetail']}")
+    assert r["unreachable"] > 0, (
+        f"putting the pre-#1742 declarations back on {len(labels)} rendered labels "
+        "made NONE of them unreachable, so `unreachable` is not tracking the wrapping "
+        "and every 0 reported above is unmeasured")
+    assert r["unreachable"] > s["unreachable"], (
+        f"the differential did not widen: {r['unreachable']} reverted vs "
+        f"{s['unreachable']} shipped")
+    # And the labels it blames are labels the seed asked for, not stray page text:
+    # `unreachableDetail.label` is a 60-char slice of an asked-for string, so the
+    # containment test is slice-shaped on purpose.
+    assert all(any(d["label"] in whole for whole in labels)
+               for d in r["unreachableDetail"]), (
+        f"the reverted verdict blames text that is not a seeded label: "
+        f"{r['unreachableDetail']}")
+
+
+def test_a_seeded_verdict_prints_its_denominators_and_an_error_is_not_a_zero():
+    """Clause 5, in the file the clause names, with no browser and no vite needed.
+
+    `dashboard_mobile_probe.describe` is the line both the CLI and the seeded pin
+    print, and in a gate log it is the only thing that separates "measured and clean"
+    from "measured nothing". So every denominator that could sit under a vacuous zero
+    has to be IN the line: the section count beside its floor, the clipped and
+    unreachable totals, and the seeded rendered/asked. An errored probe must print an
+    error and must not print an unreachable count, since `0 unreachable` over a panel
+    that threw is the exact reading that turns a broken run into a pass.
+
+    The other half of clause 5 — that a worktree with no vite says so rather than
+    passing silently — belongs to the ledger and is pinned by
+    `tests/test_dashboard_pin_accounting.py::test_an_undeclared_run_stays_green_but_prints_a_named_finding`,
+    which runs THIS file in a scratch tree with no `web/` directory and reads the
+    finding out of a real pytest's own output.
+    """
+    probe = _load_probe()
+    clean = {"sections": [{"head": f"section {i}", "sw": 300, "cw": 300,
+                           "overflow": 0} for i in range(MIN_SECTIONS)],
+             "pageOverflow": 0, "clippedTotal": 3, "unreachableTotal": 0,
+             "seeded": {"asked": SEEDED_DENOMINATOR, "rendered": SEEDED_DENOMINATOR,
+                        "unreachable": 0, "missing": [],
+                        "bySection": {"Automation & work": 2, "Tokens": 1}}}
+    line = probe.describe(clean, 390, True, MIN_SECTIONS)
+    print(line, flush=True)
+    for token in (f"{MIN_SECTIONS} sections", f"floor {MIN_SECTIONS}", "3 clipped",
+                  "0 unreachable",
+                  f"{SEEDED_DENOMINATOR}/{SEEDED_DENOMINATOR} rendered",
+                  "Automation & work"):
+        assert token in line, (
+            f"the printed verdict leaves out {token!r}, so a reader cannot check the "
+            f"number beside its denominator: {line!r}")
+
+    errored = probe.describe({"error": "dashboard did not load"}, 414, True,
+                             MIN_SECTIONS)
+    print(errored, flush=True)
+    assert "probe error" in errored and "dashboard did not load" in errored, (
+        f"an errored probe printed something other than its error: {errored!r}")
+    assert "unreachable" not in errored, (
+        f"an errored probe printed a clipped/unreachable count anyway, which reads as "
+        f"a clean zero over nothing: {errored!r}")
+
+    empty = probe.describe({"sections": [], "pageOverflow": 0, "clippedTotal": 0,
+                            "unreachableTotal": 0,
+                            "seeded": {"asked": 0, "rendered": 0, "unreachable": 0,
+                                       "missing": [], "bySection": {}}},
+                           414, True, MIN_SECTIONS)
+    print(empty, flush=True)
+    assert f"0 sections (floor {MIN_SECTIONS})" in empty, (
+        f"a page that painted no sections prints without its floor, so the short "
+        f"render is invisible: {empty!r}")
+    assert "0/0 rendered" in empty, (
+        f"a seeded run that asked for nothing prints without its denominator: "
+        f"{empty!r}")

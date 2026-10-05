@@ -109,3 +109,16 @@
 # `~/lloyd-data/_pipeline/improvement/` and is retention-swept, so this negation only
 # ever reaches a witness somebody deliberately placed here.
 !improvement_*-dryrun.json
+
+# The eighth family is a seed, not a witness, and it is here for the opposite reason
+# from the seven above: those preserve bytes that would otherwise be swept, this one
+# authors bytes that never existed anywhere. #2202's measured pin cannot use the live
+# backend as its denominator — "0 unreachable clipped labels" is also exactly what the
+# dashboard says on a night when every task name is short — so the page it measures is
+# fed a snapshot with seven deliberately long row labels and every list trimmed to a
+# fixture-sized denominator. The file is read by `tests/test_dashboard_responsive.py`
+# through `dashboard_mobile_probe.load_seed`, and the gate runs the suite in a worktree,
+# where an ignored seed is simply absent: the pin would not skip, it would error, and a
+# round that did not touch `web/` would look broken. Scoped to this one name rather than
+# to `*.json` so a runtime snapshot dropped here by accident stays ignored.
+!dashboard_long_labels.json

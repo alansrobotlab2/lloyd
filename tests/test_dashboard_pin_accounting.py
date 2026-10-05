@@ -1,13 +1,19 @@
 """#1691: a dashboard pin that never RAN must stop reporting itself as a pass.
 
-`tests/test_dashboard_responsive.py` skips all six of its geometry pins when
+`tests/test_dashboard_responsive.py` skips every one of its frontend pins when
 `web/node_modules` is absent, and until this item that was indistinguishable from
 a green run: the gate ran the file in a worktree with no `web/node_modules` and
-reported `6 skipped` with exit 0 (`pytest -q`'s own line), the suite-wide skip
-ceiling `PYTEST_MAX_SKIPPED = 40` is at 31-32 by ledger so six more skips are
+reported the skips with exit 0 (`pytest -q`'s own line), the suite-wide skip
+ceiling `PYTEST_MAX_SKIPPED = 40` is at 31-32 by ledger so a handful more skips are
 permanently inside budget (`gate.py:77-80`), and the partial-run branch applies no
 floor at all (`gate.py:1518-1529`), so a re-gate whose only changed test file is
-that one returns `ok=True` on "0 passed, 6 skipped".
+that one returns `ok=True` on "0 passed, N skipped".
+
+No pin count appears anywhere in this file, and that is deliberate: this module grew
+four literals naming that count, and #2202's seeded pins arrived and reddened them all
+at once, which reads as the accounting breaking rather than as a denominator moving.
+Every number below is read from a real run — pytest's own `--collect-only`, or the
+finding line the scratch pytest printed.
 
 The fix is visibility, not universal red. A run whose environment did NOT declare
 the frontend available exits 0 and prints a named finding; a run whose environment
@@ -174,11 +180,43 @@ def _pin_functions(module_path: Path) -> list[str]:
         and "dashboard_url" in inspect.signature(fn).parameters)
 
 
+def _pin_counts(root: Path, env: dict, line: str) -> tuple[int, int, int]:
+    """`(named, collected, measured)` from the finding's own `N of M` and the scratch
+    run's collection — the three numbers a finding line is allowed to carry, none of
+    them written down here.
+
+    #2202's review left the finding's text passing and its DENOMINATOR failing: four
+    nodes asserted a literal count of the pin file's pins, and when the seeded pins
+    arrived the module read as though the accounting had broken rather than as though
+    a number had moved. A number this file writes down and then asserts is not a check
+    either, so both sides come from the run: the collection is pytest's `--collect-only`
+    answer for the scratch tree, the function set is `_pin_functions`' read of the
+    source, and the pair must agree before either is compared with the finding. That
+    agreement is also the guard against a vacuous `== N`: `_Item` has to carry the
+    module path the ledger resolves pins by, and were it to stop matching, `pins()`
+    would return [] and every count below would pass over an empty list.
+    """
+    import re
+
+    m = re.search(r"(\d+) of (\d+) pins", line)
+    assert m, f"the finding names no counts: {line!r}"
+    named, total = int(m.group(1)), int(m.group(2))
+    functions = set(_pin_functions(root / "tests" / "test_dashboard_responsive.py"))
+    collected = [n.split("::", 1)[1] for n in _collected(root, env)
+                 if "::" in n and n.split("::", 1)[1].split("[")[0] in functions]
+    assert collected, (
+        "not one pin of the pin file was collected, so the counts compared below "
+        "would all be zeroes agreeing with each other")
+    return named, total, len(collected)
+
+
 # ── clause 1: an undeclared run stays green and SAYS what it did not measure ───
 
 def test_an_undeclared_run_stays_green_but_prints_a_named_finding(tmp_path):
     """The exact situation every non-frontend round and every reviewer's snapshot is
-    in: no `web/node_modules`, so all six geometry pins skip. Exit code must stay 0 —
+    in: no `web/node_modules`, so every frontend pin in the file skips — the #1685
+    geometry pins and the #2202 seeded-label pins all reach the frontend through the
+    same fixture. Exit code must stay 0 —
     the fix is visibility, not universal red, and red here would fail every round for
     the same reason the file skips at all (`node_modules` is gitignored and reaches a
     worktree only through `rung_frontend`) — but the run has to be distinguishable
@@ -192,28 +230,44 @@ def test_an_undeclared_run_stays_green_but_prints_a_named_finding(tmp_path):
         "a box with no web/node_modules must still exit 0:\n"
         f"exit={res.returncode}\n{out[-1500:]}")
     assert MARKER in out, (
-        "the run reported no no-execution finding, so six skipped pins are still "
-        f"indistinguishable from six passed ones:\n{out[-1500:]}")
+        "the run reported no no-execution finding, so its skipped pins are still "
+        f"indistinguishable from measured ones:\n{out[-1500:]}")
 
     line = next(ln for ln in out.splitlines() if MARKER in ln)
-    assert "6 of 6" in line, (
-        f"the finding does not say how many pins did not run: {line!r}")
+    named, total, collected = _pin_counts(root, env, line)
+    assert named == total == collected, (
+        f"the finding says {named} of {total} pins did not run, but the scratch tree "
+        f"collected {collected} — a run in which nothing measured has to name every "
+        f"pin it skipped, and neither number is one this file is allowed to write: "
+        f"{line!r}")
+    assert total < sum(1 for ln in _collected(root, env)), (
+        "the finding counted the whole collection rather than the file's pins, which "
+        "is a finding that over-reports and gets ignored")
     reason = line.lower()
     assert "vite" in reason or "chromium" in reason, (
         "the finding must name which frontend dependency is missing "
         f"(vite or chromium), not just that nothing ran: {line!r}")
 
 
-def test_the_finding_counts_the_six_pins_and_not_the_whole_collection(tmp_path):
+def test_the_finding_counts_the_file_s_own_pins_and_not_the_whole_collection(tmp_path):
     """The denominator is the file's OWN pins — the nodes that ask for the served
     dashboard — not everything collected in the file.
 
-    The three fake-browser nodes this item adds to the same file run with no vite and
-    no chromium, so a file-wide count would print a number that is neither six nor
-    honest, and a finding that over-reports is a finding people stop reading. The
-    collected total is read from pytest's own `--collect-only` answer in the same
-    scratch tree, so the assertion is "six of these nine", not a number this test
-    wrote down.
+    The helper tests this module ships for its own fake-browser controls run with no
+    vite and no chromium, so a file-wide count would report every one of them as a
+    skipped pin where the honest number is the pins only, and a finding that
+    over-reports is a finding people stop reading. Both numbers come from pytest's own
+    answers in the same scratch tree — the collection, and the source signatures that
+    decide which nodes are pins — so nothing here asserts a figure it wrote down.
+
+    No count of the pin set is asserted either, on purpose. #2202 is the second time a
+    literal here has gone stale — the seeded pins arrived and three nodes in this file
+    read as though the accounting had broken, when what had moved was a denominator —
+    and a number that is DERIVED for the finding and then asserted as a constant in the
+    test that checks the finding is the same trap wearing the other hat. What is
+    asserted is the structure that makes the derived number worth having: every pin
+    function contributes a node, parametrization contributes more nodes than functions,
+    and the file also collects nodes that are not pins.
     """
     root, env = _scratch(tmp_path, declared=False)
     functions = _pin_functions(PIN_FILE)
@@ -223,9 +277,9 @@ def test_the_finding_counts_the_six_pins_and_not_the_whole_collection(tmp_path):
     # source signatures keeps this test from asserting a figure it wrote down itself.
     nodes = [n for n in collected
              if n.split("::")[1].split("[")[0] in functions]
-    assert len(nodes) == 6, (
-        "this item's premise is SIX geometry pins that skip together; the tree "
-        f"collected {nodes}")
+    assert {n.split("::")[1].split("[")[0] for n in nodes} == set(functions), (
+        "the collected pin nodes do not cover the pin functions read off the source, "
+        f"so the two derivations disagree about the denominator: {nodes}")
     assert len(nodes) > len(functions), (
         f"nodes {nodes} should include parametrized repeats; if the file stops "
         "parametrizing, the count under test is no longer the interesting one")
@@ -286,8 +340,9 @@ def test_declaring_the_frontend_does_not_make_a_run_that_measured_fail(tmp_path,
     which is owed to a live gate run instead.
     """
     nodes = _pin_nodes(tmp_path)
-    assert len(nodes) == 6, (
-        f"this item's premise is six pins that skip together, collected {nodes}")
+    assert {n.split("[")[0] for n in nodes} >= set(_pin_functions(PIN_FILE)) and nodes, (
+        "the nodes driven below are not the file's whole pin set, so a declared run "
+        f"could go red on a pin the finding never counted: {nodes}")
     ledger = dp.PinLedger(PIN_FILE)
     session = _session_of(ledger, nodes)
     for node in nodes:
@@ -311,7 +366,7 @@ def _pin_nodes(tmp_path: Path) -> list[str]:
     not contained since #1685 renamed it into the parametrized pair — so every count
     asserted through it was a number this file wrote down, which is the trap its own
     docstring warns about and the one #1685's first attempt fell into. Node ids come out
-    of pytest's own mouth here; `test_the_finding_counts_the_six_pins_and_not_the_whole_collection`
+    of pytest's own mouth here; `test_the_finding_counts_the_file_s_own_pins_and_not_the_whole_collection`
     pins the same list against the collection of the run that produces the finding.
     """
     root, env = _scratch(tmp_path, declared=False)
@@ -389,9 +444,10 @@ def test_the_count_is_read_back_off_the_living_ledger_and_not_from_prose(tmp_pat
         "tell an absent browser from an absent install")
 
 
-def test_the_undeclared_finding_is_emitted_once_per_file_even_with_six_skip_sites(tmp_path):
-    """The file can stop its pins in six places (four parametrized skips plus two
-    others, each with its own missing-dependency branch). Six identical warnings, one
+def test_the_undeclared_finding_is_emitted_once_per_file_however_many_skip_sites(tmp_path):
+    """The file stops its pins in several places — the parametrized widths, the
+    desktop, mobile and seeded pins, each with its own missing-dependency branch — and
+    the count moves whenever a pin is added. Several
     per site, is how a named finding stops being read — so `report` speaks once and is
     silent after that, while still returning the text it said.
 
@@ -410,7 +466,7 @@ def test_the_undeclared_finding_is_emitted_once_per_file_even_with_six_skip_site
         assert ledger.report(session, "web/node_modules has no vite") is None, (
             "the finding was emitted twice for one file")
     assert len(caught) == 1, (
-        f"six skip sites, but the ledger spoke {len(caught)} times: "
+        f"many skip sites, but the ledger spoke {len(caught)} times: "
         + "\n".join(str(w.message) for w in caught))
 
 

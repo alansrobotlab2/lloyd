@@ -382,13 +382,39 @@ def test_the_two_ends_of_the_seam_are_named_in_both_files():
         "carrying no-execution findings")
 
 
+#: `DASHBOARD_PINS_NOT_EXECUTED: N of M pins in <file> did not run …`
+#:
+#: Matched as a shape rather than as a literal with a number in it, because that number
+#: is the count of the pin file's frontend pins and #2202 moved it the moment the seeded
+#: pins landed. Three nodes below used to assert a literal carrying that number,
+#: so the
+#: pin added to that file would redden three gate-plumbing tests at once with messages
+#: that blame the gate. What is worth pinning is that the finding NAMES EVERY PIN
+#: (named == total, and total > 0, since a finding enumerating an empty set is the
+#: vacuous zero again) — not how many pins happened to exist the day this was written.
+_PINS_NAMED_RX = re.compile(r"DASHBOARD_PINS_NOT_EXECUTED: (\d+) of (\d+) pins in ")
+
+
+def _all_pins_named(text: str) -> tuple[int, int]:
+    """`(named, total)` from the finding printed in `text`, asserting there is one.
+
+    Callers assert `named == total > 0`: a run in which nothing measured has to name
+    every pin it skipped, and it cannot do that over a set it never enumerated.
+    """
+    m = _PINS_NAMED_RX.search(text)
+    assert m, (
+        "no pin-naming finding in the output at all — expected "
+        f"{G.PIN_FINDING_PREFIX!r} followed by `N of M pins in …`, got:\n{text[-1200:]}")
+    return int(m.group(1)), int(m.group(2))
+
+
 def _scratch_gate_run(tmp_path, monkeypatch):
     """A scratch worktree with the shipped trio, driven through the MODIFIED gate by a
     real pytest subprocess — no scripted summary anywhere in this pair of nodes.
 
     The four nodes above feed the rung a text this file wrote, which is fair to
     distrust. Here the finding in the rung detail is text a real pytest printed about
-    six pins it really skipped, and the counts beside it are the counts it really
+    pins it really skipped, and the counts beside it are the counts it really
     reported. `_run` is pointed at a subprocess because `Gate._run` uses the worktree's
     own venv, which a scratch tree has no: the code under test is this diff's
     `_run_suite`/`_tests_pass`, not the choice of interpreter.
@@ -405,7 +431,8 @@ def _scratch_gate_run(tmp_path, monkeypatch):
     # The scratch tree has no frontend, so the child must not inherit a declaration from
     # THIS process. `Gate._child_env` starts from `os.environ`, and the gate puts
     # `LLOYD_FRONTEND_PINS_AVAILABLE` on the whole suite child in any round that touched
-    # `web/` — so a node here that inherited it would watch a six-pin file FAIL and blame
+    # `web/` — so a node here that inherited it would watch the whole pin file FAIL
+    # and blame
     # the code under test. Clearing it also makes the declared-direction node's
     # observation unambiguous: a declaration in that child's environment can only have
     # come from `_run_suite`.
@@ -436,9 +463,10 @@ def test_a_real_run_of_the_pin_file_puts_the_finding_in_the_full_run_detail(tmp_
     assert ok is True, detail
     assert data["passed"] >= 1, (
         f"the scratch run executed nothing, so its detail proves nothing: {detail}")
-    assert "DASHBOARD_PINS_NOT_EXECUTED: 6 of 6 pins in " in detail, (
-        "a real pytest run that skipped all six geometry pins did not put the finding "
-        f"in the rung detail the reviewer reads:\n{detail}")
+    named, total = _all_pins_named(detail)
+    assert named == total > 0, (
+        f"a real pytest run that skipped every pin reported {named} of {total} in the "
+        f"rung detail the reviewer reads:\n{detail}")
     assert " skipped" in detail, (
         f"the counts vanished from a line that now carries a finding: {detail}")
 
@@ -456,8 +484,10 @@ def test_a_real_partial_run_of_the_pin_file_carries_the_finding_too(tmp_path, mo
     g.report.changed_paths = ["tests/test_dashboard_responsive.py"]
     ok, detail, data = g.rung_tests(only=["tests/test_dashboard_responsive.py"])
     assert ok is True and data.get("partial") is True, detail
-    assert "DASHBOARD_PINS_NOT_EXECUTED: 6 of 6 pins in " in detail, (
-        f"a real partial run of the pin file alone reported no finding:\n{detail}")
+    named, total = _all_pins_named(detail)
+    assert named == total > 0, (
+        f"a real partial run of the pin file alone named {named} of {total} pins:\n"
+        f"{detail}")
 
 
 def test_the_declaration_the_gate_makes_is_the_one_the_pytest_child_acts_on(tmp_path, monkeypatch):
@@ -503,7 +533,7 @@ def test_the_declaration_the_gate_makes_is_the_one_the_pytest_child_acts_on(tmp_
     done, text, counts = g._run_suite(None)
     assert done.returncode != 0, (
         "the gate declared the frontend reachable and the child still went green over "
-        f"six unexecuted pins:\n{text[-1500:]}")
+        f"every unexecuted pin:\n{text[-1500:]}")
     assert seen, "_run_suite spawned no subprocess, so there was no seam to check"
     assert seen[-1].get(G.FRONTEND_PINS_ENV) == "1", (
         "the gate did not put its declaration on the environment of the pytest child "
@@ -511,5 +541,7 @@ def test_the_declaration_the_gate_makes_is_the_one_the_pytest_child_acts_on(tmp_
         f"{sorted(k for k in seen[-1] if 'PIN' in k)})")
     assert counts["pin_findings"], (
         f"a declared run that failed its pins produced no finding for the rung:\n{text[-1500:]}")
-    assert "6 of 6 pins" in text, (
-        f"the child failed, but not for the pins: {counts['pin_findings']}")
+    named, total = _all_pins_named(text)
+    assert named == total > 0, (
+        f"the child failed, but not over every pin it skipped ({named} of {total}): "
+        f"{counts['pin_findings']}")

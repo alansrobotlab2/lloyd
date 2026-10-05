@@ -1,0 +1,828 @@
+{
+ "network": {
+  "window_days": 7.0,
+  "since": "2026-09-28T00:31:45+00:00",
+  "total": 450,
+  "distinct_hosts": 102,
+  "by_decision": {
+   "allow": 409,
+   "deny": 0,
+   "grant-required": 41
+  },
+  "per_destination": [
+   {
+    "destination": "https://html.duckduckgo.com",
+    "host": "html.duckduckgo.com",
+    "count": 173,
+    "denied": 0,
+    "grant_required": 11,
+    "scopes": 3,
+    "last_at": "2026-10-04T04:02:20+00:00"
+   },
+   {
+    "destination": "https://arxiv.org",
+    "host": "arxiv.org",
+    "count": 83,
+    "denied": 0,
+    "grant_required": 7,
+    "scopes": 3,
+    "last_at": "2026-10-04T04:02:30+00:00"
+   }
+  ],
+  "per_scope": [
+   {
+    "scope": "worker:deep-research",
+    "total": 395,
+    "denied": 0,
+    "grant_required": 0,
+    "distinct_hosts": 86
+   }
+  ],
+  "database": "/home/alansrobotlab/lloyd-data/workers.db",
+  "database_present": true,
+  "policy": {
+   "telemetry": true,
+   "enforce": false,
+   "allow_entries": 7,
+   "permanent_allow_entries": 7
+  }
+ },
+ "host": {
+  "cpu": {
+   "percent": 7.4,
+   "count": 32,
+   "physical_count": 16,
+   "load_average": [
+    1.1181640625,
+    1.88037109375,
+    2.20703125
+   ]
+  },
+  "memory": {
+   "used_bytes": 215655792640,
+   "total_bytes": 270076805120,
+   "percent": 79.8
+  },
+  "swap": {
+   "used_bytes": 17475284992,
+   "total_bytes": 270076473344,
+   "percent": 6.5
+  },
+  "disks": [
+   {
+    "path": "/",
+    "used_bytes": 925939097600,
+    "total_bytes": 3996467068928,
+    "percent": 23.2
+   }
+  ],
+  "gpus": [
+   {
+    "index": 0,
+    "name": "NVIDIA GeForce RTX 3090",
+    "gpu_util": 3.0,
+    "mem_util": 1.0,
+    "memory_used_mb": 14010.0,
+    "memory_total_mb": 24576.0,
+    "memory_pct": 57.0068359375,
+    "temperature_c": 49.0,
+    "power_draw_w": 118.85,
+    "power_limit_w": 275.0
+   },
+   {
+    "index": 1,
+    "name": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+    "gpu_util": 100.0,
+    "mem_util": 75.0,
+    "memory_used_mb": 96284.0,
+    "memory_total_mb": 97887.0,
+    "memory_pct": 98.36239745829374,
+    "temperature_c": 82.0,
+    "power_draw_w": 440.99,
+    "power_limit_w": 450.0
+   }
+  ],
+  "uptime_seconds": 176427.43416404724,
+  "boot_time": 1790983878.0
+ },
+ "vllm": [
+  {
+   "alias": "primary",
+   "reachable": true,
+   "engine": "vllm",
+   "model_name": "Qwen3.8-Flash-Next-nvfp4",
+   "awake": true,
+   "requests_running": 0,
+   "requests_waiting": 0,
+   "requests_waiting_by_reason": {},
+   "kv_cache_usage": 0.0,
+   "prompt_tokens_per_s": null,
+   "generation_tokens_per_s": null,
+   "preemptions_per_s": null,
+   "ttft_s": null,
+   "itl_s": null,
+   "prompt_tokens_total": 2336688552.0,
+   "generation_tokens_total": 26681019.0,
+   "preemptions_total": 0.0,
+   "finished_by_reason": {
+    "stop": 42673,
+    "length": 264,
+    "abort": 0,
+    "error": 0,
+    "repetition": 0
+   },
+   "prefix_cache_hit_rate": 0.8803153112683046,
+   "prefix_cache_hit_rate_recent": null,
+   "spec_decode_hit_rate": 0.5771479641180121,
+   "spec_decode_hit_rate_recent": null,
+   "base_url": "http://127.0.0.1:8096",
+   "pressure": {
+    "alias": "primary",
+    "base_url": "http://127.0.0.1:8096",
+    "sampling": true,
+    "window_s": 300.0,
+    "samples": 59,
+    "kv_now": 0.0,
+    "kv_p50": 0.14199395770392753,
+    "kv_p90": 0.25075528700906347,
+    "kv_max": 0.3383685800604229,
+    "warn_line": 0.65,
+    "stale": false,
+    "error": null
+   }
+  }
+ ],
+ "primary": {
+  "model": "primary",
+  "base_url": "http://127.0.0.1:8096",
+  "context_length": 262144,
+  "max_turns": 60,
+  "permission_mode": "bypassPermissions",
+  "preserve_thinking_iterations": 6,
+  "sessions": [
+   {
+    "session_id": "20261004_172904_autocode_d201",
+    "running": true,
+    "turn_id": "8895f6b563cc",
+    "source": "user",
+    "started_at": "2026-10-04T17:29:05.752969",
+    "enqueued_at": "2026-10-04T17:29:05.752656",
+    "preempted": false,
+    "activity": {
+     "kind": "tool",
+     "label": "Bash",
+     "detail": "Retrying dashboard snapshot fetch",
+     "at": "2026-10-04T17:31:45.343382"
+    },
+    "pending_user": 0,
+    "pending_ambient": 0,
+    "title": "autocode #2202: Re-land #1742's dashboard label wrap (round SM_2"
+   }
+  ],
+  "running_count": 1,
+  "queued_count": 0,
+  "busy": true
+ },
+ "recent": {
+  "sessions": [
+   {
+    "session_id": "20261004_110530_iv60e2",
+    "title": "Dashboards Are Dead Talk Highlights",
+    "preview": "pull the youtube transcript and give me the highlights\nhttps",
+    "last_active": "2026-10-04T18:06:11.617794Z",
+    "message_count": 1,
+    "platform": "browser",
+    "inner_voice": true,
+    "model": "",
+    "goal": "",
+    "goal_achieved": false,
+    "todo_counts": {
+     "pending": 0,
+     "in_progress": 0,
+     "completed": 0
+    },
+    "captions": {
+     "total": 2,
+     "captioned": 2
+    }
+   }
+  ]
+ },
+ "agents": {
+  "subagents": {
+   "active": [],
+   "active_count": 0,
+   "recent": []
+  },
+  "background_tasks": {
+   "active": [],
+   "active_count": 0,
+   "recent": []
+  },
+  "tsc": {
+   "last_run": {
+    "/home/alansrobotlab/lloyd": {
+     "root": "/home/alansrobotlab/lloyd",
+     "status": "ok",
+     "seconds": 5.6,
+     "at": 1791156099.5835376,
+     "sessions": [],
+     "errors_total": 2,
+     "seeded": true
+    }
+   },
+   "pending": {},
+   "baseline_roots": [
+    "/home/alansrobotlab/lloyd"
+   ]
+  },
+  "qmd": {
+   "responses": 1,
+   "without_meta": 0,
+   "reranked": 0,
+   "rerank_fallbacks": 0,
+   "last_fallback_at": null,
+   "last_fallback_reason": null,
+   "last_ms": 265,
+   "last_phases": {
+    "fts": 6,
+    "embed": 10,
+    "vec": 235,
+    "chunk": 7
+   },
+   "djev_ranked": 1,
+   "djev_fallbacks": 0,
+   "last_djev_fallback_at": null,
+   "last_djev_fallback_reason": null
+  },
+  "changes": {
+   "turns_in_memory": 38,
+   "enabled": true,
+   "root": "/home/alansrobotlab/lloyd-data/sessions"
+  },
+  "tools": 147,
+  "tool_sandbox": {
+   "enforced": true,
+   "bwrap": true,
+   "error": null,
+   "prefixes": [
+    "bench_",
+    "pt-eval-"
+   ],
+   "background_slugs": [
+    "bench"
+   ]
+  },
+  "protected_path_sandbox": {
+   "enforcing": true,
+   "fallback": false,
+   "bwrap": true,
+   "entries": [
+    "/home/alansrobotlab/lloyd/agent-services",
+    "/home/alansrobotlab/lloyd/.venvs",
+    "/home/alansrobotlab/.local/share/uv/python",
+    "/home/alansrobotlab/obsidian/lloyd/SOUL.md",
+    "/home/alansrobotlab/obsidian/lloyd/USER.md",
+    "/home/alansrobotlab/obsidian/lloyd/MEMORY.md"
+   ],
+   "error": null
+  }
+ },
+ "services": {
+  "services": [
+   {
+    "id": "agent-llm-primary",
+    "name": "LLM Primary",
+    "group": "infra",
+    "port": 8096,
+    "state": "active",
+    "sub_state": "running",
+    "port_healthy": true,
+    "health": "healthy",
+    "uptime": "pid 2520, uptime 2 days, 1:00:00"
+   },
+   {
+    "id": "agent-djev",
+    "name": "djev (DiffusionGemma)",
+    "group": "infra",
+    "port": 8011,
+    "state": "active",
+    "sub_state": "running",
+    "port_healthy": true,
+    "health": "healthy",
+    "uptime": "pid 3582, uptime 2 days, 0:59:58"
+   }
+  ],
+  "unhealthy": [],
+  "total": 2
+ },
+ "workers": {
+  "enabled": true,
+  "duplicate_effects_suppressed": 0,
+  "pool": {
+   "running": true,
+   "paused": false,
+   "paused_by": [],
+   "paused_since": null,
+   "slots": 6,
+   "in_flight": {
+    "5265": {
+     "source": "autocode",
+     "kind": "round",
+     "started_at": "2026-10-05T00:29:02.999519+00:00"
+    }
+   },
+   "in_flight_count": 1,
+   "kv_gate": {
+    "enabled": true,
+    "max_kv_usage": 0.6,
+    "window_seconds": 60.0,
+    "engaged": false,
+    "engaged_since": null,
+    "engagements": 0,
+    "kv_usage": 0.14803625377643503,
+    "held_sources": []
+   },
+   "round_hold": {
+    "enabled": true,
+    "exempt": [
+     "scheduled-task",
+     "autotriage",
+     "autoresearch",
+     "automod-regression"
+    ],
+    "exempt_bound": {
+     "sources": [
+      "scheduled-task"
+     ],
+     "kv_median_above": 0.6
+    },
+    "engaged": true,
+    "engaged_since": "2026-10-05T00:29:05.526699+00:00",
+    "engagements": 2,
+    "held_sources": [
+     "arch-review",
+     "backlog-cluster",
+     "bench-mine",
+     "board-steward",
+     "deep-research",
+     "failure-ledger",
+     "frontend-probe-canary",
+     "owed-check",
+     "session-distill",
+     "youtube-digest"
+    ],
+    "exempt_refused": {},
+    "bound_held": []
+   },
+   "primary_hold": {
+    "enabled": true,
+    "sources": [
+     "autocode"
+    ],
+    "probe_seconds": 10.0,
+    "probe_timeout_s": 2.0,
+    "engaged": false,
+    "engaged_since": null,
+    "engagements": 0,
+    "held_sources": [],
+    "answering": true,
+    "last_detail": "HTTP 200",
+    "last_probe": 1791160303.224861,
+    "probing": false
+   }
+  },
+  "depth_by_source": {
+   "nightly-chain:knowledge-write-stage-two-with-the-longest-source-name-in-the-fleet-today": {
+    "pending": 3,
+    "running": 1
+   }
+  },
+  "by_state": {
+   "completed": 5200,
+   "quarantined": 63,
+   "running": 1,
+   "queued": 3
+  },
+  "open_total": 4,
+  "poisoned_total": 0,
+  "quarantined_total": 63,
+  "run_outcomes": {
+   "window_hours": 48,
+   "window_start": "2026-10-03T00:31:45.402418+00:00",
+   "total": 1245,
+   "ok": 871,
+   "failed": 22,
+   "skipped": 352,
+   "fail_rate": 0.017670682730923693,
+   "sources_failing": 4,
+   "by_source": {
+    "autocode": {
+     "total": 110,
+     "ok": 109,
+     "failed": 0,
+     "skipped": 1,
+     "unfinished_matrix": 0,
+     "deadline_cut": 0,
+     "matrix_shrunk": 0,
+     "fail_rate": 0.0,
+     "gpu_hours": 48.66,
+     "last_completed": "2026-10-04T23:14:26.459692+00:00"
+    },
+    "automod-regression": {
+     "total": 1,
+     "ok": 1,
+     "failed": 0,
+     "skipped": 0,
+     "unfinished_matrix": 0,
+     "deadline_cut": 0,
+     "matrix_shrunk": 0,
+     "fail_rate": 0.0,
+     "gpu_hours": 0.0,
+     "last_completed": "2026-10-04T19:37:04.090017+00:00"
+    },
+    "autoresearch": {
+     "total": 12,
+     "ok": 12,
+     "failed": 0,
+     "skipped": 0,
+     "unfinished_matrix": 12,
+     "deadline_cut": 0,
+     "matrix_shrunk": 12,
+     "fail_rate": 0.0,
+     "gpu_hours": 1.23,
+     "last_completed": "2026-10-04T20:51:33.744942+00:00"
+    },
+    "autotriage": {
+     "total": 496,
+     "ok": 171,
+     "failed": 0,
+     "skipped": 325,
+     "unfinished_matrix": 0,
+     "deadline_cut": 0,
+     "matrix_shrunk": 0,
+     "fail_rate": 0.0,
+     "gpu_hours": 7.98,
+     "last_completed": "2026-10-05T00:28:03.436765+00:00"
+    },
+    "backlog-cluster": {
+     "total": 17,
+     "ok": 17,
+     "failed": 0,
+     "skipped": 0,
+     "unfinished_matrix": 0,
+     "deadline_cut": 0,
+     "matrix_shrunk": 0,
+     "fail_rate": 0.0,
+     "gpu_hours": 0.02,
+     "last_completed": "2026-10-04T23:17:50.719510+00:00"
+    },
+    "bench-mine": {
+     "total": 37,
+     "ok": 26,
+     "failed": 2,
+     "skipped": 9,
+     "unfinished_matrix": 0,
+     "deadline_cut": 0,
+     "matrix_shrunk": 0,
+     "fail_rate": 0.05405405405405406,
+     "gpu_hours": 2.41,
+     "last_completed": "2026-10-04T23:29:56.750243+00:00"
+    },
+    "board-steward": {
+     "total": 89,
+     "ok": 58,
+     "failed": 15,
+     "skipped": 16,
+     "unfinished_matrix": 0,
+     "deadline_cut": 0,
+     "matrix_shrunk": 0,
+     "fail_rate": 0.16853932584269662,
+     "gpu_hours": 1.59,
+     "last_completed": "2026-10-05T00:22:39.370228+00:00"
+    },
+    "deep-research": {
+     "total": 6,
+     "ok": 6,
+     "failed": 0,
+     "skipped": 0,
+     "unfinished_matrix": 0,
+     "deadline_cut": 0,
+     "matrix_shrunk": 0,
+     "fail_rate": 0.0,
+     "gpu_hours": 0.52,
+     "last_completed": "2026-10-04T04:04:41.640481+00:00"
+    },
+    "frontend-probe-canary": {
+     "total": 2,
+     "ok": 2,
+     "failed": 0,
+     "skipped": 0,
+     "unfinished_matrix": 0,
+     "deadline_cut": 0,
+     "matrix_shrunk": 0,
+     "fail_rate": 0.0,
+     "gpu_hours": 0.04,
+     "last_completed": "2026-10-04T16:26:45.266260+00:00"
+    },
+    "owed-check": {
+     "total": 383,
+     "ok": 378,
+     "failed": 4,
+     "skipped": 1,
+     "unfinished_matrix": 0,
+     "deadline_cut": 0,
+     "matrix_shrunk": 0,
+     "fail_rate": 0.010443864229765013,
+     "gpu_hours": 15.51,
+     "last_completed": "2026-10-05T00:29:16.067243+00:00"
+    },
+    "scheduled-task": {
+     "total": 69,
+     "ok": 68,
+     "failed": 1,
+     "skipped": 0,
+     "unfinished_matrix": 0,
+     "deadline_cut": 0,
+     "matrix_shrunk": 0,
+     "fail_rate": 0.014492753623188406,
+     "gpu_hours": 7.9,
+     "last_completed": "2026-10-04T23:01:55.522349+00:00"
+    },
+    "session-distill": {
+     "total": 3,
+     "ok": 3,
+     "failed": 0,
+     "skipped": 0,
+     "unfinished_matrix": 0,
+     "deadline_cut": 0,
+     "matrix_shrunk": 0,
+     "fail_rate": 0.0,
+     "gpu_hours": 0.14,
+     "last_completed": "2026-10-04T19:41:15.599051+00:00"
+    },
+    "youtube-digest": {
+     "total": 20,
+     "ok": 20,
+     "failed": 0,
+     "skipped": 0,
+     "unfinished_matrix": 0,
+     "deadline_cut": 0,
+     "matrix_shrunk": 0,
+     "fail_rate": 0.0,
+     "gpu_hours": 0.9,
+     "last_completed": "2026-10-04T21:04:03.943539+00:00"
+    }
+   }
+  },
+  "maintenance": null,
+  "sources": [
+   {
+    "name": "nightly-chain:knowledge-write-stage-two-with-the-longest-source-name-in-the-fleet-today",
+    "enabled": true,
+    "open": 1,
+    "running": 1,
+    "completed": 770,
+    "queue_failed": 0,
+    "poisoned": 0,
+    "quarantined": 1,
+    "run_total": 110,
+    "run_failed": 0,
+    "run_fail_rate": 0.0
+   }
+  ],
+  "recent_runs": [
+   {
+    "run_id": "run-2202-seed",
+    "source": "scheduled-task:autonomy-self-improvement-pipeline-stage-two",
+    "status": "success",
+    "started_at": "2026-10-05T00:27:50.290928+00:00",
+    "duration_seconds": 85.77630506598507,
+    "summary": "refused to merge a fresh finding into a closed item and filed it as a blocker instead, which is what the write-time dedupe guard is for"
+   }
+  ]
+ },
+ "autonomy": {
+  "total": 37,
+  "by_status": {
+   "up_next": 36,
+   "draft": 1
+  },
+  "overdue": [
+   {
+    "name": "Nightly Reflection Knowledge Analysis And Knowledge Write Over Every Session Transcript From The Whole Week Including The Background Tasks That Outlived Their Parent Process",
+    "status": "up_next",
+    "frequency": "6x-daily",
+    "next_run": "2026-10-05T03:01:55.512987+00:00",
+    "last_run": "2026-10-04T23:01:55.512987+00:00",
+    "blocked": null
+   }
+  ],
+  "overdue_count": 1,
+  "held": [],
+  "held_count": 0,
+  "upcoming": [],
+  "failing": [
+   {
+    "name": "Autonomy Self Improvement Pass Over The Whole Board Including Closed Items And Their Owed Entries From Last Month",
+    "status": "failed",
+    "frequency": "6x-daily",
+    "next_run": "2026-10-05T03:01:55.512987+00:00",
+    "last_run": "2026-10-04T23:01:55.512987+00:00",
+    "blocked": "already ran this period"
+   }
+  ],
+  "classifier": "autonomy",
+  "running": [
+   {
+    "job_id": "job-2202-seed",
+    "kind": "deep research worker investigating whether the vault retrieval eval trend is real, spawned by the nightly autonomy chain with a four hour timeout and no tty",
+    "started_at": "2026-10-05T00:00:00+00:00",
+    "elapsed_s": 421.5
+   }
+  ],
+  "running_count": 1
+ },
+ "backlog": {
+  "total": 2139,
+  "by_status": {
+   "done": 2133,
+   "draft": 5,
+   "in_progress": 1
+  },
+  "by_board": [
+   {
+    "board": "lloyd",
+    "open": 6,
+    "total": 2130
+   },
+   {
+    "board": "alfie",
+    "open": 0,
+    "total": 7
+   },
+   {
+    "board": "personal",
+    "open": 0,
+    "total": 2
+   }
+  ],
+  "open_total": 6,
+  "recent_open": [
+   {
+    "name": "2202-re-land-1742-s-dashboard-label-wrap-round-sm-20260928-153843-abandoned-never-landed-and-nobody-noticed-until-the-owed-check-ran",
+    "status": "in_progress",
+    "board": "lloyd",
+    "mtime": 1791160144.2339349
+   }
+  ],
+  "umbrellas": 0,
+  "grouped": 0,
+  "health": null
+ },
+ "automod": {
+  "error": "seeded fixture: automod scorecard omitted"
+ },
+ "usage": {
+  "last_hour": {
+   "requests": 34,
+   "input_tokens": 2504975,
+   "output_tokens": 440840,
+   "cache_create": 384000,
+   "cache_read": 2140800,
+   "cost_usd": 0.0,
+   "duration_ms": 3708758,
+   "duration_api_ms": 0
+  },
+  "last_24h": {
+   "requests": 536,
+   "input_tokens": 47050411,
+   "output_tokens": 11576725,
+   "cache_create": 22908800,
+   "cache_read": 41113600,
+   "cost_usd": 0.0,
+   "duration_ms": 188061047,
+   "duration_api_ms": 0
+  },
+  "last_7d": {
+   "requests": 4567,
+   "input_tokens": 364904107,
+   "output_tokens": 82059647,
+   "cache_create": 157625600,
+   "cache_read": 318732800,
+   "cost_usd": 0.0,
+   "duration_ms": 1285227172,
+   "duration_api_ms": 0
+  },
+  "daily": [
+   {
+    "bucket": "2026-10-03",
+    "requests": 606,
+    "input_tokens": 50085969,
+    "output_tokens": 11390185,
+    "cache_create": 19308800,
+    "cache_read": 43731200,
+    "cost_usd": 0.0
+   },
+   {
+    "bucket": "2026-10-04",
+    "requests": 535,
+    "input_tokens": 47061510,
+    "output_tokens": 11559033,
+    "cache_create": 22992000,
+    "cache_read": 41139200,
+    "cost_usd": 0.0
+   },
+   {
+    "bucket": "2026-10-05",
+    "requests": 18,
+    "input_tokens": 1293580,
+    "output_tokens": 231110,
+    "cache_create": 176000,
+    "cache_read": 1129600,
+    "cost_usd": 0.0
+   }
+  ],
+  "by_model_24h": [
+   {
+    "model": "primary",
+    "requests": 536,
+    "input_tokens": 47050411,
+    "output_tokens": 11576725,
+    "cache_create": 22908800,
+    "cache_read": 41113600,
+    "cost_usd": 0.0
+   }
+  ],
+  "by_skill_24h": [
+   {
+    "skill": "queue-health-check",
+    "route": "prefetch",
+    "requests": 97,
+    "input_tokens": 6825400,
+    "output_tokens": 1101995,
+    "cache_create": 2668800,
+    "cache_read": 4889600
+   },
+   {
+    "skill": "service-health-check",
+    "route": "prefetch_excerpt",
+    "requests": 23,
+    "input_tokens": 2358577,
+    "output_tokens": 652984,
+    "cache_create": 1216000,
+    "cache_read": 2214400
+   }
+  ],
+  "prefix_misses_1h": {
+   "turns": 34,
+   "turns_measured": 34,
+   "turns_with_misses": 0,
+   "prefix_misses": 0,
+   "reprefill_tokens": 0,
+   "worst_turn_reprefill": 0
+  },
+  "prefix_misses_24h": null,
+  "stop_reasons_24h": [
+   {
+    "stop_reason": "stop",
+    "turns": 527,
+    "wrapped_up": 0
+   },
+   {
+    "stop_reason": "max_turns",
+    "turns": 6,
+    "wrapped_up": 4
+   },
+   {
+    "stop_reason": "cancelled",
+    "turns": 3,
+    "wrapped_up": 0
+   }
+  ],
+  "tool_errors_24h": {
+   "turns_measured": 536,
+   "tool_calls": 13387,
+   "tool_errors": 509,
+   "tool_ms_total": 69475467,
+   "by_class": {
+    "tool_error": 494,
+    "denied": 11,
+    "transport": 3,
+    "parse_error": 1
+   }
+  },
+  "ttft_24h": {
+   "turns_measured": 536,
+   "first_p50_ms": 4700,
+   "first_p90_ms": 8829,
+   "max_ms": 36754
+  },
+  "reasoning_tokens_24h": {
+   "turns_measured": 536,
+   "reasoning_tokens": 6962122,
+   "output_tokens": 11576725
+  }
+ },
+ "timestamp": 1791160306.475445
+}

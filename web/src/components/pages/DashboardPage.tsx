@@ -658,7 +658,7 @@ function TaskLine({
   return (
     <div className="flex items-center gap-2 text-[10px]">
       <CalendarClock className={cn('h-3 w-3 flex-shrink-0', TONE_TEXT[tone])} />
-      <span className="truncate text-foreground">{task.name}</span>
+      <span className="whitespace-normal break-words sm:truncate text-foreground">{task.name}</span>
       {note && (
         <span className="flex-shrink-0 whitespace-nowrap text-muted-foreground/60">{note}</span>
       )}
@@ -698,7 +698,7 @@ function AutonomyPanel({ autonomy }: { autonomy: AutonomyState }) {
           {running.map(r => (
             <div key={r.job_id} className="flex items-center gap-2 text-[10px]">
               <span className="h-1.5 w-1.5 flex-shrink-0 animate-pulse rounded-full bg-violet-400" />
-              <span className="truncate text-foreground">{r.kind || r.job_id}</span>
+              <span className="whitespace-normal break-words sm:truncate text-foreground">{r.kind || r.job_id}</span>
               <span className="ml-auto flex-shrink-0 font-mono tabular-nums text-muted-foreground">
                 {r.elapsed_s == null ? '—' : duration(r.elapsed_s)}
               </span>
@@ -754,7 +754,7 @@ function AutonomyPanel({ autonomy }: { autonomy: AutonomyState }) {
           {failing.map(t => (
             <div key={t.name} className="flex items-center gap-2 text-[10px]">
               <XCircle className="h-3 w-3 flex-shrink-0 text-rose-400" />
-              <span className="truncate text-foreground">{t.name}</span>
+              <span className="whitespace-normal break-words sm:truncate text-foreground">{t.name}</span>
               <span className="ml-auto flex-shrink-0 font-mono tabular-nums text-muted-foreground">
                 {relativeTime(t.last_run)}
               </span>
@@ -889,7 +889,7 @@ function WorkersPanel({ workers }: { workers: WorkersState }) {
               <span className={cn('h-1.5 w-1.5 flex-shrink-0 rounded-full',
                 src.running > 0 ? 'animate-pulse bg-violet-400'
                   : src.poisoned > 0 ? 'bg-rose-400' : 'bg-amber-400')} />
-              <span className="truncate text-foreground">{src.name}</span>
+              <span className="whitespace-normal break-words sm:truncate text-foreground">{src.name}</span>
               <span className="ml-auto flex-shrink-0 font-mono tabular-nums text-muted-foreground">
                 {src.running > 0 && <span className="text-violet-400">{src.running} run </span>}
                 {src.open > 0 && <span className="text-amber-400">{src.open} open </span>}
@@ -909,8 +909,8 @@ function WorkersPanel({ workers }: { workers: WorkersState }) {
             <div key={r.run_id} className="flex items-center gap-2 text-[10px]">
               <span className={cn('h-1.5 w-1.5 flex-shrink-0 rounded-full',
                 TONE_FILL[RUN_STATUS_TONE[r.status] ?? 'idle'])} />
-              <span className="truncate text-muted-foreground">{r.source}</span>
-              <span className="truncate text-foreground/80">{r.summary}</span>
+              <span className="whitespace-normal break-words sm:truncate text-muted-foreground">{r.source}</span>
+              <span className="whitespace-normal break-words sm:truncate text-foreground/80">{r.summary}</span>
               <span className="ml-auto flex-shrink-0 font-mono tabular-nums text-muted-foreground">
                 {r.duration_seconds == null ? '—' : duration(r.duration_seconds)}
               </span>
@@ -1209,7 +1209,7 @@ function BacklogPanel({ backlog }: { backlog: BacklogState }) {
             <div key={`${t.board}/${t.name}`} className="flex items-center gap-2 text-[10px]">
               <span className={cn('h-1.5 w-1.5 flex-shrink-0 rounded-full',
                 TONE_FILL[STATUS_TONE[t.status] ?? 'idle'])} />
-              <span className="truncate text-foreground">{t.name}</span>
+              <span className="whitespace-normal break-words sm:truncate text-foreground">{t.name}</span>
               <span className="ml-auto flex-shrink-0 text-muted-foreground">
                 {t.status.replace(/_/g, ' ')}
               </span>
