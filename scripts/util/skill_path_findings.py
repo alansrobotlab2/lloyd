@@ -36,6 +36,10 @@ node's. That module imports `pytest`; under an interpreter without it this
 prints CHECK SKIPPED and exits 0 (the wrapper prefers the repo venv, which has
 it). The bench node's narrower rule is the one piece defined here —
 `bench_dead_refs` — and that node calls it, for the same one-definition reason.
+That leg subtracts the loaded guard's `_creation_sites` too: paths a page says its
+own job writes, whether at a flag, a redirection or in an English sentence, are
+outputs and not citations (#2157, #2223), and one commit's two legs must not print
+different verdicts about one sentence.
 
     python3 ~/lloyd/scripts/util/skill_path_findings.py --repo ~/obsidian
 """
@@ -121,6 +125,17 @@ def path_findings(repo: Path, guard=None) -> tuple[list[str], int]:
     for rel in docs:
         old, new = _show(repo, f"HEAD:{rel}"), _show(repo, f":{rel}")
         skill_dir = (repo / rel).parent if rel.startswith("skills/") else None
+        # The node's recorded sites — what its subject writes (flag, redirection,
+        # `mkdir` or prose sentence) and what a quoted exception says is missing
+        # (#2223) — subtracted from the bench leg because that leg's path rule is
+        # narrower than `_named_paths` and is defined in THIS file: the node has no
+        # idea these lines exist, so the one place the two definitions can meet is
+        # here. `_recorded_sites` is the same name `_absent_refs` consults, so a new
+        # mention type reaches this leg by being added there, never by a second list
+        # here. Without the subtraction a skill page recording that its job wrote a
+        # dated report prints a finding the unmarked node does not raise — two
+        # verdicts about one sentence, from one commit.
+        created = {p.lower() for _tree, p in guard._recorded_sites(new)}
         added = (guard._absent_refs(rel, new, skill_dir)
                  - guard._absent_refs(rel, old, skill_dir)
                  - guard.PATH_KNOWN_UNFIXED)
@@ -137,7 +152,7 @@ def path_findings(repo: Path, guard=None) -> tuple[list[str], int]:
             findings.append(f"{rel}: newly names `{path}`, which is not in {where}")
         if rel.startswith("skills/"):
             for path in sorted(bench_dead_refs(new, guard.ROOT)
-                               - bench_dead_refs(old, guard.ROOT) - named):
+                               - bench_dead_refs(old, guard.ROOT) - named - created):
                 findings.append(f"{rel}: newly names `~/lloyd/{path}`, which is not "
                                 f"in the checkout at {guard.ROOT}")
     return findings, len(docs)

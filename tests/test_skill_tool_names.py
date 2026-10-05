@@ -48,7 +48,8 @@ for the ledgers that actually exempt something, they are `PATH_KNOWN_UNFIXED`
 and `AGENT_MENTION_EXEMPT`, both of which the tests below do consult. The path
 half also exempts by *rule* where it can, so that no entry has to be maintained:
 an ignored path (`_tree_ignores`), a path the document creates itself
-(`_declared_outputs`, #2157), a template, a clipped quotation.
+(`_creation_sites`, #2157, #2223 — shell write sites and prose run records alike),
+a template, a clipped quotation.
 """
 
 from __future__ import annotations
@@ -432,6 +433,38 @@ _PY_IN_COMMAND = re.compile(r"(?:^|[\s/])((?:eval|app|tests|scripts)/[A-Za-z0-9_
 _OUTPUT_TARGET = re.compile(r"(?:>>?|--report|--output|--out|-o)\s+([^\s;|&)<`]+)")
 _MKDIR_TARGET = re.compile(r"\bmkdir\s+(?:-{1,2}\w+\s+)*([^\s;|&)<`]+)")
 
+#: Where a document says something is WRITTEN to a path in an English sentence
+#: rather than at a shell write site (#2223). Read by `_prose_creation_sites`.
+#: Creation verbs only, in any tense, and the path must be the token IMMEDIATELY
+#: after the verb (one optional preposition, one optional opening quote), so
+#: "read `~/lloyd/x`", "open `~/lloyd/x`" and "run `~/lloyd/x`" keep their rows.
+#: `>`, `<`, `$` and `(` are outside the captured class, which is what makes a
+#: placeholder (`<date>`) and a shell substitution (`$(date -u +%F)`) yield no
+#: usable token instead of a shape that reads like a claim.
+_PROSE_CREATION = re.compile(
+    r"\b(?:wrote|written|writ(?:e|es|ing)|creat(?:e|es|ed|ing)|generat(?:e|es|ed|ing)"
+    r"|sav(?:e|es|ed|ing)|emitt?(?:s|ed|ing)?|produc(?:e|es|ed|ing)"
+    r"|append(?:s|ed|ing)?)\b"
+    r"(?:\s+(?:to|into|onto|at|in|as|out))?"
+    r"\s+[`'\"]?\s*([^\s;|&,)`'\"<>]+)", re.IGNORECASE)
+
+#: Where a document quotes a raised exception whose payload IS the path
+#: (`FileNotFoundError: /home/…/x`, `FileNotFoundError: [Errno 2] No such file or
+#: directory: '/x'`) — #2223. Read by `_absence_record_sites`. Case-sensitive on
+#: purpose: the exception's CamelCase is the whole signal that the text is a
+#: runtime message and not the document's own citation. Nothing may sit between the
+#: colon and the path except an errno bracket and quotes, so a message *about*
+#: something else that happens to mention a path (`ValueError: bad key in
+#: ~/lloyd/config.yaml`) captures nothing — only a message whose subject is the
+#: path itself. The captured class is `_PROSE_CREATION`'s, so a placeholder or a
+#: clipped quote yields no usable token rather than a shape that reads like a claim.
+_ABSENCE_RECORD = re.compile(
+    r"\b[A-Z][A-Za-z0-9_]{2,}(?:Error|Exception)\b"
+    r":\s*"
+    r"(?:\[[^\]\n]{1,40}\][^\n:]{0,40}:\s*)?"
+    r"[`'\"]?\s*"
+    r"([^\s;|&,)`'\"<>]+)")
+
 #: The marker left where something was cut short. `clip_skill_description` says so
 #: of itself — "cut to at most `max_chars` characters, the cut marked with `…`"
 #: (`app/prompt_builder.py:992-996`) — and `scripts/skill_lint.py:822` puts that clipped
@@ -792,6 +825,118 @@ def _declared_outputs(body: str) -> set[tuple[str, str]]:
     return out
 
 
+def _prose_creation_sites(body: str) -> set[tuple[str, str]]:
+    """(tree, rel) for each path a document names as the thing its subject WRITES,
+    stated in prose rather than at a flag, a redirection or a `mkdir`.
+
+    #2157 taught the fence that a path the doc *creates* is an output and not a
+    citation, but only read it off shell syntax, which is the shape a command puts
+    an output in. A task file recording what a finished run did states the same
+    fact in English. `autonomy/96-djev-name-prior-probe.md` has "It wrote
+    `/home/alansrobotlab/lloyd/eval/djev/name_prior_2026-10-04.json` and left
+    `name_prior_2026-09-24.json` untouched": a history sentence about the report
+    the probe produced, which is untracked in the code tree because the task's own
+    Never list bars it from `git add`. A worktree never holds an untracked file, so
+    that true sentence was a dead-path row, and because the report is dated the row
+    arrived again every week — the three nodes that assert their own planted
+    violation is the SOLE drift went red with it (#2223).
+
+    The same three scopes `_declared_outputs` keeps, for the same reasons: the
+    statement must be in the **same document**; the path must be checkout- or
+    vault-rooted, so `$HOME/…`, `./out` and a bare relative word normalize to
+    nothing and stay drift; and it must be an **exact** path, so a sentence about
+    writing a directory exempts no file inside it. Fail-closed on anything odd: a
+    placeholder (`<date>`), a shell substitution and a clipped quote each yield no
+    entry, so the worst a malformed sentence can do is leave its own row.
+
+    What this is NOT is a tense detector: it reads one statement type, and a
+    document recording that a path was REMOVED or swept is outside it. #2026 ruled
+    on that shape — an incident note quoting two strays the sweep had deleted, each
+    sentence true and each path dead — and the remedy was to reword the prose, which
+    is still what `scripts/util/skill_path_findings.py` advises. A deletion record
+    names the path as its subject's *content*; a creation record names it as the
+    subject's *product*, and only the second one has to be written before it can be
+    read. The polarity question that is NOT settled by tense — a passage whose
+    speaker is a raised exception, saying in so many words that the path could not
+    be opened — is `_absence_record_sites`, which keys on who is talking rather
+    than on when.
+    """
+    out: set[tuple[str, str]] = set()
+    for m in _PROSE_CREATION.finditer(body):
+        for rx, tree in ((_LLOYD_PATH, "repo"), (_OBSIDIAN_PATH, "vault")):
+            full = rx.fullmatch(m.group(1))
+            if full is not None and not _truncated(full.group(1)):
+                out.add((tree, full.group(1)))
+    return out
+
+
+def _creation_sites(body: str) -> set[tuple[str, str]]:
+    """Every path the document says it puts somewhere: shell write sites plus
+    prose creation records (#2157, #2223).
+
+    One definition of the creation half, joined to the absence-record half by
+    `_recorded_sites`, which is the name
+    `scripts/util/skill_path_findings.py` loads to keep its report leg from printing
+    a finding for a path the node exempts: two copies of "does this sentence cite a
+    living path, or record one?" is how the writer and the node start disagreeing
+    about the same document.
+    """
+    return _declared_outputs(body) | _prose_creation_sites(body)
+
+
+def _absence_record_sites(body: str) -> set[tuple[str, str]]:
+    """(tree, rel) for each path that appears ONLY as the payload of a quoted
+    exception — text whose speaker is a runtime message, not the document.
+
+    `autonomy/76-queue-health-check.md`'s Activity Log carries, from
+    `run_76_20261005_130005`: "…shows the errored call: `FileNotFoundError:
+    /home/alansrobotlab/obsidian/memory/scratchpads/2f363115-b9bf-4cfa-8c4f". The
+    node read that as drift: a doc naming a path that is not on disk. But the
+    sentence is the fence's own verdict, already published — the file could not be
+    opened — and a check that goes red because a document faithfully reported an
+    absence is red about the report, not about the path. This is the polarity half
+    of #2223, the one tense cannot carry: "It wrote `x`" and "`FileNotFoundError:
+    x`" are both past tense and opposite in direction, so the rule keys on who is
+    talking.
+
+    It also cannot be fixed at the source the way #2026's incident note could. That
+    line is one bullet of an Activity Log the autonomy harness appends after every
+    run of task 76, and the writer clips the bullet mid-path with no `…` to mark it
+    (the row ends `-c4f` where the file it quotes was `…-c4f.md`), so no rewording
+    survives the next run. A hand-kept entry would be worse: `PATH_KNOWN_UNFIXED`
+    cannot hold a UUID per incident (#2207's own lesson for this corpus).
+
+    Narrowed to the payload position, and fail-closed like its siblings: the path
+    must be checkout- or vault-rooted and exact, so a relative word, `$HOME/…` or a
+    placeholder exempts nothing; the exception must name the path as its whole
+    payload (an errno bracket and quotes are the only thing allowed between the
+    colon and it), so a message that merely mentions a path keeps its row; and the
+    exemption is per-path in the same document, so a page that quotes one error and
+    then tells a run to open the same missing file is caught by that second
+    sentence.
+    """
+    out: set[tuple[str, str]] = set()
+    for m in _ABSENCE_RECORD.finditer(body):
+        for rx, tree in ((_LLOYD_PATH, "repo"), (_OBSIDIAN_PATH, "vault")):
+            full = rx.fullmatch(m.group(1))
+            if full is not None and not _truncated(full.group(1)):
+                out.add((tree, full.group(1)))
+    return out
+
+
+def _recorded_sites(body: str) -> set[tuple[str, str]]:
+    """Paths the document mentions without citing them as living somewhere: what
+    its subject writes (`_creation_sites`, #2157 + #2223) and what a quoted
+    exception says is missing (#2223).
+
+    The one name `_absent_refs` consults, and the one name
+    `scripts/util/skill_path_findings.py` subtracts from its bench leg, so the
+    writer-side CHECK and the unmarked node cannot diverge on a sentence. Adding a
+    third mention type means adding it here, once.
+    """
+    return _creation_sites(body) | _absence_record_sites(body)
+
+
 def _absent_refs(label: str, body: str, skill_dir: Path | None) -> set[str]:
     """`<label>::<tree>:<path>` for each path `body` names that is not on disk.
 
@@ -804,7 +949,7 @@ def _absent_refs(label: str, body: str, skill_dir: Path | None) -> set[str]:
     (#1969). One rule, two callers — a second copy of it there would drift.
     """
     out: set[str] = set()
-    outputs: set[tuple[str, str]] | None = None
+    recorded: set[tuple[str, str]] | None = None
     for tree, rel in _named_paths(body, skill_dir):
         if _is_template(rel) or "/" not in rel or rel.endswith(RUNTIME_SUFFIXES):
             continue
@@ -816,11 +961,14 @@ def _absent_refs(label: str, body: str, skill_dir: Path | None) -> set[str]:
                 roots.append(skill_dir / rel)
         if any(r.exists() for r in roots):
             continue
-        # Only an absent path is asked whether the doc creates it, so the green
-        # path stays free of this scan — the rule `_DIRTY_CACHE` follows.
-        if outputs is None:
-            outputs = _declared_outputs(body)
-        if (tree, rel) in outputs:
+        # Only an absent path is asked whether the doc records it, so the green
+        # path stays free of this scan — the rule `_DIRTY_CACHE` follows. A
+        # creation site counts whether it is written as a flag, a redirection, a
+        # `mkdir` or an English sentence, and an absence record counts a path a
+        # quoted exception says could not be opened (#2157, #2223).
+        if recorded is None:
+            recorded = _recorded_sites(body)
+        if (tree, rel) in recorded:
             continue
         if tree == "repo" and _dotted_module_ref(rel, roots):
             continue
@@ -1915,3 +2063,272 @@ def test_the_ledger_job_that_made_main_red_is_exempt_by_its_own_write_sites():
                                                     errors="replace"))
         assert ("vault", "autonomy/referential-integrity-latest.md") in declared, name
         assert ("vault", "autonomy/referential-integrity") in declared, name
+
+
+# ---------------------------------------------------------------------------
+# #2223: a prose record that the job WROTE its report is a creation site too
+# ---------------------------------------------------------------------------
+
+# Two checkout paths under the directory the name-prior probe really writes
+# into, neither of which is in the tree, so every row below is a row about
+# absence and not about whatever a previous run left behind.
+_WROTE_2223 = "~/lloyd/eval/djev/a_created_2223.json"
+_OPEN_2223 = "~/lloyd/eval/djev/a_read_2223.json"
+_WROTE_2223_PATH = "eval/djev/a_created_2223.json"
+_OPEN_2223_PATH = "eval/djev/a_read_2223.json"
+_PROSE_DOC = "autonomy/9223-prose-creation.md"
+_WROTE_2223_ROW = f"{_PROSE_DOC}::repo:{_WROTE_2223_PATH}"
+_OPEN_2223_ROW = f"{_PROSE_DOC}::repo:{_OPEN_2223_PATH}"
+
+
+def _history_body() -> str:
+    """The shape `autonomy/96-djev-name-prior-probe.md` has, wrapped where it
+    wraps: the creation sentence breaks line just before the backticked path, and
+    the same document also tells a run to open a file it must read.
+    """
+    return (f"The probe ran. It wrote\n`{_WROTE_2223}` and left\n"
+            "`name_prior_2026-09-24.json` untouched. "
+            f"Read `{_OPEN_2223}` for the flip rates.\n")
+
+
+def test_a_prose_creation_record_is_not_drift_and_a_read_instruction_is():
+    """Both halves of the #2223 clause in one node: the sentence shape that red
+    the live corpus produces no row, and the sentence beside it still produces
+    exactly one.
+
+    The scanner has to yield BOTH paths before the exemption is asked, because a
+    rule that silenced the whole document — or a matcher that stopped resolving
+    anchored paths — would make an empty assertion here read as a fix. So the
+    denominator is asserted first, the way `test_the_path_check_anchored_to_a_path_
+    that_really_exists` does for the corpus.
+    """
+    body = _history_body()
+    named = _named_paths(body, None)
+    assert {("repo", _WROTE_2223_PATH), ("repo", _OPEN_2223_PATH)} <= named, (
+        f"the scanner stopped yielding one of the two paths this node is about: "
+        f"{sorted(named)}")
+    rows = _absent_refs(_PROSE_DOC, body, None)
+    assert rows == {_OPEN_2223_ROW}, (
+        f"a history sentence about a report the job wrote was read as drift, or a "
+        f"path the document only tells a run to open went unseen: {sorted(rows)}")
+
+
+@pytest.mark.parametrize("sentence", [
+    "It wrote {p} and left the earlier report untouched.",
+    "The run created {p} before it exited.",
+    "The report was written to {p} by the probe.",
+    "Each night the job generates {p} fresh.",
+    "It saves {p} and prints the path.",
+])
+def test_a_creation_stated_in_prose_exempts_only_the_path_it_names(sentence):
+    """Five wordings of the same claim, because the corpus writes it in more than
+    one tense and the rule is about the statement, not about one verb form. Each
+    body also names a path the doc merely tells a run to read, so a rule that
+    exempted the whole document shows up here as an empty set.
+    """
+    body = sentence.format(p=f"`{_WROTE_2223}`") + f" The same doc reads `{_OPEN_2223}`.\n"
+    rows = _absent_refs(_PROSE_DOC, body, None)
+    assert rows == {_OPEN_2223_ROW}, (
+        f"{sentence!r} did not exempt exactly the report it names: {sorted(rows)}")
+
+
+@pytest.mark.parametrize("verb", ["Read", "Open", "Run", "Check", "Patch"])
+def test_a_verb_that_is_not_a_creation_record_keeps_the_row(verb):
+    """The direction the fence exists to keep biting: #85's defect was a
+    instruction naming a file no run can open, and a verb that asks a reader to
+    touch a path is that instruction whatever tense it wears.
+    """
+    rows = _absent_refs("autonomy/9223-read.md", f"{verb} `{_WROTE_2223}` first.\n",
+                        None)
+    assert rows == {f"autonomy/9223-read.md::repo:{_WROTE_2223_PATH}"}, (
+        f"a {verb}-style reference to an absent path stopped being a violation: "
+        f"{sorted(rows)}")
+
+
+@pytest.mark.parametrize("site", [
+    "<path>",                                     # a placeholder, not a claim
+    "$(date -u +%F).json",                          # a shell substitution
+    "$HOME/lloyd/eval/djev/a_created_2223.json",
+    "./eval/djev/a_created_2223.json",
+    "eval/djev/a_created_2223.json",     # bare relative: the scanner reads this one
+])
+def test_a_prose_creation_site_that_is_not_a_rooted_path_exempts_nothing(site):
+    """Fail-closed, keeping `_declared_outputs`' scoping (#2157's five shapes plus
+    the bare relative word, which `_named_paths` DOES read from a backtick and so
+    is the case where an exemption keyed on the string rather than on a resolved
+    `(tree, rel)` would lose a real drift row).
+    """
+    body = f"It wrote `{site}` and the report lives at {_WROTE_2223}\n"
+    rows = _absent_refs("skills/2223-writer/SKILL.md", body, None)
+    assert rows == {f"skills/2223-writer/SKILL.md::repo:{_WROTE_2223_PATH}"}, (
+        f"a prose write site that is not a rooted path ({site!r}) exempted an "
+        f"absent file: {sorted(rows)}")
+
+
+def test_a_prose_creation_record_is_scoped_to_its_document_and_exact_path():
+    """The two ways this exemption could quietly rot into a list nobody maintains,
+    the same two #2157 pinned for flag sites.
+
+    A second document naming the same report without creating it is drift again:
+    task 96's sentence exempts nothing for any other file, so the corpus never
+    grows a set of known outputs to keep current. And a sentence about the job
+    writing the DIRECTORY exempts no file inside it — an exact path, because a
+    parent named once would otherwise cover every report anyone files there.
+    """
+    other = _absent_refs("autonomy/9223-other.md",
+                         f"The report lives at {_WROTE_2223}\n", None)
+    assert other == {f"autonomy/9223-other.md::repo:{_WROTE_2223_PATH}"}, (
+        f"a document that only names a path stopped being asked about it: "
+        f"{sorted(other)}")
+
+    parent = _absent_refs("autonomy/9223-parent.md",
+                          f"It wrote `~/lloyd/eval/djev` and the report is "
+                          f"{_WROTE_2223}\n", None)
+    assert parent == {f"autonomy/9223-parent.md::repo:{_WROTE_2223_PATH}"}, (
+        f"a creation sentence naming the parent directory exempted a file inside "
+        f"it: {sorted(parent)}")
+
+
+def test_the_name_prior_probe_history_sentence_makes_no_row_in_the_live_corpus():
+    """The corpus half of #2223: the document that reddened three nodes here,
+    measured against the live vault and this checkout, with the vault untouched.
+
+    `autonomy/96-djev-name-prior-probe.md` records that the probe run wrote
+    `eval/djev/name_prior_<date>.json`. That report is untracked in the code tree
+    — the task's own Never list bars it from `git add` — and `tests/conftest.py`
+    forces this suite into a `git worktree` cut from HEAD, where an untracked file
+    does not exist however fresh it is on disk. So a true history sentence became
+    a dead-path row, and since the report is dated it arrived again the following
+    week. The item refuses deleting the history, so what changes is the node.
+    """
+    drift = {r for r in _unresolved() if "name_prior" in r}
+    assert drift == set(), (
+        f"a dated report the probe wrote is being counted as drift again: "
+        f"{sorted(drift)}")
+
+    doc = VAULT / "autonomy" / "96-djev-name-prior-probe.md"
+    if doc.exists():
+        body = doc.read_text(encoding="utf-8", errors="replace")
+        assert re.search(r"It wrote\s+`/home/alansrobotlab/lloyd/eval/djev/"
+                         r"name_prior_[0-9-]{8,10}\.json`", body), (
+            "the history sentence this rule was written for has left the document, "
+            "so this node is no longer crediting the exemption to anything")
+        rows = _absent_refs("autonomy/96-djev-name-prior-probe.md", body, None)
+        assert not [r for r in rows if "name_prior" in r], (
+            f"the rule resolved elsewhere and the history sentence is a row again: "
+            f"{sorted(rows)}")
+
+
+# ---------------------------------------------------------------------------
+# #2223 half two: a path quoted as the payload of an exception is an absence
+# record, not a citation — the polarity half that tense cannot carry
+# ---------------------------------------------------------------------------
+
+_ERRORED_2223 = "~/lloyd/eval/djev/a_errored_2223.json"
+_ERRORED_2223_PATH = "eval/djev/a_errored_2223.json"
+_ERR_DOC = "autonomy/9223-runlog.md"
+_ERR_ROW = f"{_ERR_DOC}::repo:{_ERRORED_2223_PATH}"
+# The same `read` instruction this file plants elsewhere, under THIS node's label.
+_ERR_OPEN_ROW = f"{_ERR_DOC}::repo:{_OPEN_2223_PATH}"
+
+
+def test_a_path_named_only_as_an_exception_payload_makes_no_row():
+    """`FileNotFoundError: <path>` is the fence's own verdict, already published.
+
+    The second #2223 offender is not task 96 at all: by the time this round ran,
+    `autonomy/76-queue-health-check.md` had appended a run record quoting
+    `FileNotFoundError: /home/…/memory/scratchpads/2f363115-…`, and that row reddened
+    the same three nodes for the same reason — a document faithfully reporting that
+    a path could not be opened counted as a claim that the path should exist. A
+    creation record and an absence record are both past tense and point opposite
+    ways, which is why the rule keys on the speaker.
+
+    The denominator is asserted through a sibling path the same document asks a run
+    to open, so a rule that silenced the whole page cannot pass here.
+    """
+    body = (f"The run failed. The traceback's last line reads\n"
+            f"`FileNotFoundError: {_ERRORED_2223}`\n"
+            f"Read `{_OPEN_2223}` for the flip rates.\n")
+    named = _named_paths(body, None)
+    assert {("repo", _ERRORED_2223_PATH), ("repo", _OPEN_2223_PATH)} <= named, (
+        f"the scanner stopped yielding one of the two paths this node is about: "
+        f"{sorted(named)}")
+    rows = _absent_refs(_ERR_DOC, body, None)
+    assert rows == {_ERR_OPEN_ROW}, (
+        f"a quoted FileNotFoundError naming the missing file was counted as drift, "
+        f"or the read instruction beside it went unseen: {sorted(rows)}")
+
+    quoted = (f"`FileNotFoundError: [Errno 2] No such file or directory: "
+              f"'{_ERRORED_2223}'`\n")
+    assert _absent_refs(_ERR_DOC, quoted, None) == set(), (
+        "the errno form of the same message, which is what Python's own "
+        "FileNotFoundError prints, is not recognised")
+
+
+@pytest.mark.parametrize("sentence", [
+    "ValueError: bad key in {p} — fix it by hand.",
+    "KeyError: while editing the config at {p} the parser gave up.",
+    "RuntimeError: copy the template to {p} and retry.",
+])
+def test_an_exception_message_that_only_mentions_a_path_keeps_the_row(sentence):
+    """Fail-closed on the payload position, which is what keeps this from becoming
+    "anything near the word Error is exempt".
+
+    A message *about* something else that happens to name a path (`ValueError: bad
+    key in ~/lloyd/x`) is a live reference with a dramatic wrapper — the reader is
+    still told to go fix that file — and the third is an instruction wearing an
+    exception's clothes. Only a message whose entire payload is the path says the
+    path is missing, which is the one claim that cannot also be a citation.
+    """
+    body = sentence.format(p=_ERRORED_2223) + f"\nThe doc also reads `{_OPEN_2223}`.\n"
+    rows = _absent_refs(_ERR_DOC, body, None)
+    assert _ERR_ROW in rows, (
+        f"{sentence!r} is not an absence record and lost its row: {sorted(rows)}")
+
+
+@pytest.mark.parametrize("payload", [
+    "$HOME/lloyd/eval/djev/a_errored_2223.json",
+    "./eval/djev/a_errored_2223.json",
+    "eval/djev/a_errored_2223.json",
+])
+def test_an_unrooted_exception_payload_exempts_nothing(payload):
+    """Same scoping as every sibling rule: the exemption is keyed on a resolved,
+    root-anchored `(tree, rel)`, so a payload that normalizes to nothing exempts
+    nothing and the drift row survives.
+    """
+    body = (f"`FileNotFoundError: {payload}`\n"
+            f"The report lives at {_ERRORED_2223}\n")
+    rows = _absent_refs(_ERR_DOC, body, None)
+    assert rows == {_ERR_ROW}, (
+        f"an unrooted exception payload ({payload!r}) exempted an absent file: "
+        f"{sorted(rows)}")
+
+
+def test_the_run_record_row_that_red_this_file_makes_no_row_in_the_live_corpus():
+    """The live-corpus half of the second offender, with the vault left alone.
+
+    `autonomy/76-queue-health-check.md:122` is one bullet of an Activity Log the
+    autonomy harness appends after every run of task 76, and the writer clips it
+    mid-path with no `…` to mark it — the bullet ends `-c4f` where the file it
+    quotes was `…-c4f.md`. So it cannot be reworded at the source the way #2026's
+    incident note was (the next run re-appends it) and it cannot be a
+    `PATH_KNOWN_UNFIXED` entry (one UUID per incident, unbounded). It is the reason
+    this is a rule and not a cleanup.
+    """
+    drift = {r for r in _unresolved() if "scratchpads/" in r}
+    assert drift == set(), (
+        f"a quoted FileNotFoundError is counted as drift again: {sorted(drift)}")
+
+    doc = VAULT / "autonomy" / "76-queue-health-check.md"
+    if doc.exists():
+        # The denominator again: the row this rule was written for has to still be
+        # in the document, or the assertion above is crediting the exemption to
+        # nothing and would pass on a corpus that stopped containing the case.
+        body = doc.read_text(encoding="utf-8", errors="replace")
+        assert re.search(r"FileNotFoundError:\s*/home/\S+", body), (
+            "task 76's Activity Log no longer quotes a FileNotFoundError, so this "
+            "node is no longer measuring the shape it exists for")
+        rows = _absent_refs("autonomy/76-queue-health-check.md", body, None)
+        assert not [r for r in rows if "scratchpads/" in r], (
+            f"the rule resolved elsewhere and the run record is a row again: "
+            f"{sorted(rows)}")
