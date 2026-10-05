@@ -3267,3 +3267,183 @@ def test_the_committed_alert_witness_is_the_rows_the_item_counts():
     assert sum(titles.values()) == WITNESS_ALERT_ROWS, (
         f"{sum(titles.values())} titled rows out of {WITNESS_ALERT_ROWS}: a row "
         "without a title would make the counts above a partial sum")
+
+
+# #2221 clauses 3 and 4 — the second firing family, and the age of a quoted state.
+#
+# Clause 3 is the same shape as clause 1 one level up: the alert exists and its body even
+# carries a retry condition ("unreachable for N consecutive ticks"), but the DAILY NOTE it
+# writes was not coalesced, so 7 such blocks across the dated notes can never be retracted
+# by `resolve`, which seals only a body ending in the open marker. Testing the body's own
+# streak text is therefore not enough — the test has to look at the note.
+SUP_TITLE = "supervisord was unreachable"
+
+
+def _note_watching(tmp_path, monkeypatch, *, states, liveness):
+    """A Guardian driven tick by tick with its daily note under `tmp_path`.
+
+    `states` is the `collect()` answer per tick ("unreachable" or "ok") and `liveness`
+    answers `evaluate_liveness` per tick, so one harness covers both families. `alert`
+    forwards to the REAL notifier because the artefact under test is the note; the
+    `subprocess.run` stub stands in for the `systemctl --user restart` the unreachable
+    branch performs, and `vault_root` moves off the live vault — a test that journalled a
+    fabricated outage into `~/obsidian/memory/` would be creating the exact kind of
+    uncleared alarm this item exists to clear.
+    """
+    import types
+
+    import guardian as G
+    import policy as GP
+    import rollback as RB
+
+    (tmp_path / "memory").mkdir(parents=True, exist_ok=True)
+    args = types.SimpleNamespace(
+        repo=str(tmp_path), state=str(tmp_path / "state"),
+        guardian_state=str(tmp_path / "gstate"), supervisor_sock="/nonexistent",
+        backend_url="http://127.0.0.1:1/health", mcp_url="http://127.0.0.1:2/health",
+        programs="lloyd-mc:lloyd-backend", interval=5.0,
+    )
+    g = G.Guardian(args)
+    monkeypatch.setattr(g.state, "current", lambda: None)
+    monkeypatch.setattr(g.state, "lkg", lambda: {"commit": "0" * 40})
+    monkeypatch.setattr(g.state, "rollback_target", lambda: ("0" * 40, "test"))
+    monkeypatch.setattr(g.state, "is_broken", lambda: False)
+    monkeypatch.setattr(g.state, "pause_remaining", lambda cap: 0.0)
+    monkeypatch.setattr(RB, "head_commit", lambda repo: "0" * 40)
+    monkeypatch.setattr(g, "heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(g, "do_rollback", lambda *a: True)
+    monkeypatch.setattr(g.notifier, "vault_root", tmp_path)
+    # The `systemctl --user restart` the unreachable branch performs, and every other
+    # subprocess the tick makes — the stray check reads `.stdout`, so the stand-in carries
+    # the fields those readers touch, or an unrelated check logs a failure per tick.
+    monkeypatch.setattr(G.subprocess, "run",
+                        lambda *a, **k: types.SimpleNamespace(returncode=0, stdout=b"",
+                                                              stderr=b""))
+    # The repeat window is about how often a HUMAN is fanned out to; the note's shape is
+    # the notifier's own behaviour, and one tick's interval must not decide it.
+    monkeypatch.setattr(GP, "ALERT_REPEAT_SECONDS", 0.0)
+
+    reads = {"n": 0}
+    seen: list[tuple[tuple, dict]] = []
+
+    # The counter advances on `collect`, which every tick calls exactly once, and NOT on
+    # `evaluate_liveness`: an unreachable-supervisor tick returns before the liveness read
+    # is ever reached, so a read-counted counter would sit at zero through the whole
+    # outage and answer "ok" on the tick that must still be unreachable.
+    def _collect():
+        state = states[min(reads["n"], len(states) - 1)]
+        reads["n"] += 1
+        return {"now": 1_700_000_000.0 + 5.0 * reads["n"], "supervisord": state,
+                "procs": {}, "probes": {}}
+
+    def _liveness(snap):
+        return liveness(max(reads["n"] - 1, 0))
+
+    def _alert(*a, **k):
+        seen.append((a, k))
+        g.notifier.alert(*a, **k)
+
+    monkeypatch.setattr(g, "collect", _collect)
+    monkeypatch.setattr(g, "evaluate_liveness", _liveness)
+    monkeypatch.setattr(g, "alert", _alert)
+    return g, seen
+
+
+def _memory_note(tmp_path):
+    notes = sorted((tmp_path / "memory").glob("*.md"))
+    assert len(notes) == 1, f"expected one daily note, got {[str(n) for n in notes]}"
+    return notes[0].read_text(encoding="utf-8")
+
+
+def test_the_supervisord_unreachable_section_is_coalesced_and_sealed_on_answer(
+        tmp_path, monkeypatch):
+    """#2221 clause 3: the supervisor answering again retracts the section it wrote.
+
+    Three unreachable ticks is `policy.SUPERVISORD_DOWN_STREAK`, the threshold the alert
+    needs before it fires at all; the fourth tick is the one where `supervisorctl` answers.
+    The retraction must be one `cleared:` line and the marker must be gone — the reason
+    `coalesce=True` is on the alert call rather than a `resolve` added to the recovery
+    branch alone is that the second has nothing to seal without the first.
+    """
+    import notify as N
+
+    g, seen = _note_watching(
+        tmp_path, monkeypatch,
+        states=["unreachable"] * 3 + ["ok"],
+        liveness=lambda n: (False, "everything RUNNING"))
+
+    g.tick()
+    g.tick()
+    g.tick()
+
+    fired = [k for a, k in seen if a[1] == SUP_TITLE]
+    assert fired, f"three unreachable ticks must alert, saw {[a[1] for a, _ in seen]}"
+    assert fired[0].get("coalesce") is True, (
+        f"clause 3: without coalescing the section carries no open marker, so no recovery "
+        f"can ever seal it: {fired[0]}")
+    text = _memory_note(tmp_path)
+    assert text.count(f"## Self-mod guardian: {SUP_TITLE}") == 1, text
+    assert text.count(N.DAILY_STILL_OPEN) == 1, text
+
+    g.tick()                                        # the supervisor answers
+
+    text = _memory_note(tmp_path)
+    assert N.DAILY_STILL_OPEN not in text, text
+    cleared = [ln for ln in text.splitlines() if ln.startswith(N.DAILY_CLEARED_PREFIX)]
+    assert len(cleared) == 1, f"expected one retraction line, got {cleared}"
+
+    # Clause 3's second half, which the counts above cannot see. `sup_down_streak` is
+    # the per-tick counter the ALERT is gated on, and it is 0 on the tick that seals —
+    # so a retraction composed from it would tell the reader the supervisor had been
+    # unreachable for ZERO ticks, in a line that exists to say it was unreachable for
+    # long enough to alert. That is clause 4's defect (a state read as something it is
+    # not) aimed at the retraction instead of the alert, and the source avoids it by
+    # naming the event: the line below pins that it says so.
+    assert g.sup_down_streak == 0, (
+        "the streak counter is not zero on the sealing tick, so this node no longer "
+        "shows what a streak-built retraction would have claimed"
+    )
+    assert re.search(r"\b0 tick", cleared[0]) is None, (
+        f"a retraction built from the per-tick streak counter: {cleared[0]}"
+    )
+    assert "supervisord" in cleared[0].lower() and "answered" in cleared[0].lower(), (
+        f"the retraction has to name what recovered: {cleared[0]}"
+    )
+
+
+def test_a_persisted_supervisor_state_in_the_body_is_given_its_age(tmp_path, monkeypatch):
+    """#2221 clause 4: a quoted FATAL must say how long it has been read as down.
+
+    `detect.process_down` reports `FATAL: <spawnerr>` because that is what supervisord
+    says, and it is true — but supervisord keeps a FATAL record across its own restart, so
+    the word is a persisted state and not a live probe. That is the mechanism behind
+    `memory/2026-09-29.md`'s block: the note tells a human the interpreter path is missing,
+    and `supervisorctl status` has answered RUNNING for days while
+    `/home/alansrobotlab/lloyd/.venvs/lloyd/bin/python` exists. The fix cannot be to trust
+    the state less in the alert — the state is the evidence — so the body states its age in
+    the only unit this loop owns: consecutive failing liveness reads, at the configured
+    interval.
+
+    The streak is asserted to be MORE than one because a body that merely says "1 tick"
+    proves the counter exists but not that it accumulates across a continuing incident,
+    which is the case that goes stale.
+    """
+    down = (True, "lloyd-mc:lloyd-backend: FATAL: can't find command "
+                  "'/home/alansrobotlab/lloyd/.venvs/lloyd/bin/python'")
+    g, seen = _note_watching(tmp_path, monkeypatch,
+                             states=["ok"], liveness=lambda n: down)
+
+    bodies = []
+    for _ in range(3):                              # one continuing incident, three reads
+        g.tick()
+        bodies = [a[2] for a, _k in seen if a[1] == "Service down, but no promotion to revert"]
+        monkeypatch.setattr(g, "_alert_seen", {})   # fan out again as the window would
+
+    assert bodies, "three down ticks with nothing under observation must alert"
+    body = bodies[-1]
+    assert "FATAL" in body, body
+    assert "consecutive liveness tick" in body, (
+        f"clause 4: a persisted state quoted with no age reads as a present condition:\n{body}")
+    assert "3 consecutive liveness tick" in body, (
+        f"the age must accumulate over one incident, not reset each tick:\n{body}")
+    assert "1 consecutive" not in body, bodies

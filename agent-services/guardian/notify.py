@@ -60,6 +60,14 @@ DAILY_STILL_OPEN = "_(still open on the next check)_"
 # What replaces that marker when the condition clears. A prefix rather than prose so
 # a reader scanning the note sees the section's state, not another alarm body.
 DAILY_CLEARED_PREFIX = "cleared:"
+# The other word a sealed block may carry, and the only other one this module defines.
+# It is NOT a retraction: `cleared:` records that the guardian watched the condition come
+# back, `dated:` records only that a later read refutes the state the body quoted. The
+# historical sweep of #2221 clause 5 writes it (`scripts/maintenance/guardian_note_sweep.py`)
+# because the notes it must fix are older than `DAILY_SCAN_DAYS` above, which is the reach
+# `resolve` will ever have — and nobody reading them months later can tell an inferred
+# refutation from an observed recovery unless the two words stay different.
+DAILY_DATED_PREFIX = "dated:"
 #: How many dated daily notes `resolve` scans back when it retracts an alarm (#1590). An
 #: alert written at 23:05 and cleared at 00:05 lives in TWO files, because `_daily_note` is
 #: keyed on the date it is called; scanning today's alone finds nothing to seal and used to

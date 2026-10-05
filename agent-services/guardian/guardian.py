@@ -227,6 +227,19 @@ def _stray_alert_body(tree: str, names, now: float,
 
 
 class Guardian:
+    # Defaults for the three fields #2221 added, declared on the CLASS and not only in
+    # `__init__`, because two tests in `test_guardian_rollback.py` build a Guardian with
+    # `Guardian.__new__` and assign the subset of attributes their scenario needs — the
+    # same reason `_PERSISTED_STATES` below is a class attribute. Declaring them here is
+    # the difference between a partial object that answers "nothing is open" and one that
+    # raises AttributeError inside `tick()`, which would read as a guardian crash rather
+    # than as a test that never set the field. `_down_programs` is a FROZEN set for that
+    # reason and every write replaces it with a fresh `set` rather than mutating in place:
+    # a mutable class-level default would be shared by every instance in the process.
+    _down_programs: frozenset = frozenset()
+    _sup_unreachable_open = False
+    liveness_fail_streak = 0
+
     def __init__(self, args):
         self.repo = args.repo
         self.state = gstate.AutomodState(Path(args.state))
@@ -283,6 +296,29 @@ class Guardian:
         self.mcp_fatal_streak = 0
         self.start_history: dict[str, list[float]] = {p: [] for p in self.programs}
         self.sup_down_streak = 0
+        # #2221. Which programs the CURRENT round of `Service down, but no promotion to
+        # revert` has been journalled for, so the retraction on the first healthy tick can
+        # NAME them. The daily-note section is coalesced — one section per incident — but a
+        # section is opened by the incident's first tick and a later tick of the same
+        # incident may find a second program gone, so the set accumulates rather than
+        # holding the first name. Emptied by the retraction, which is what makes the second
+        # healthy tick write nothing. Held in the process rather than read back out of the
+        # note deliberately: a guardian restart mid-incident loses the names, and `resolve`
+        # then reports "no open section" for a section it could seal only by inventing a
+        # program — the honest failure.
+        self._down_programs: set[str] = set()
+        # Whether `supervisord was unreachable` has a section open. A boolean, not a set:
+        # this family's recovery condition is one fact (the supervisor answered), and the
+        # streak cannot serve — `sup_down_streak` is zeroed by the alerting tick, so the
+        # tick that would resolve has no memory of the outage.
+        self._sup_unreachable_open = False
+        # #2221 clause 4: how many consecutive ticks the liveness read has come back
+        # down. `FATAL` is a state supervisord PERSISTS across a restart of itself, so the
+        # word in an alert body says nothing about when the process stopped; the streak is
+        # the only age this loop can state without reading a clock into the note, and it is
+        # the age that distinguishes "down since the last tick" from "has been FATAL on the
+        # supervisor's say-so for two days".
+        self.liveness_fail_streak = 0
         self.quiet_until = 0.0
         self.started_ts = time.time()
         self.last_selftest = 0.0
@@ -373,6 +409,52 @@ class Guardian:
             if result is not None and self._url_for(program) == self.backend_url:
                 return result
         return probes.probe(self.backend_url, policy.PROBE_TIMEOUT_SECONDS)
+
+    _PERSISTED_STATES = ("FATAL", "STOPPED", "EXITED", "BACKOFF", "STARTING")
+    def _down_program_names(self, reason: str) -> set[str]:
+        """Which watched programs a liveness reason string names, as the alert stated them.
+
+        Read off the reason rather than from `detect.process_down` because the reason is
+        what the note quotes: `evaluate_liveness` returns the FIRST failure only, so the
+        alert body and the retraction must agree on one name per tick, and re-deriving a
+        set from the snapshot would let the two disagree. Matching against `self.programs`
+        rather than splitting on `":"` is necessary, not tidy: the watched names carry
+        colons themselves (`lloyd-mc:lloyd-backend`), so a split yields `lloyd-mc`.
+
+        The consequence of one-name-per-tick is stated plainly: when two programs are down
+        and one is earlier in the tuple, only that one is ever named, so the retraction of
+        a multi-program incident can name fewer programs than it cleared. That is the alert
+        body's limitation, not the retraction's, and a `cleared:` line naming one program of
+        two is closer to the truth than the standing instruction that replaces nothing.
+        """
+        return {name for name in self.programs if reason.startswith(f"{name}: ")}
+
+
+    def _describe_down(self, reason: str) -> str:
+        """Say how long a quoted supervisor state has stood, next to the state itself.
+
+        #2221 clause 2's whole live case is this: `memory/2026-09-29.md` still tells a human
+        "lloyd-mc:lloyd-backend: FATAL: can't find command
+        '/home/alansrobotlab/lloyd/.venvs/lloyd/bin/python' … this needs a human", while
+        `supervisorctl status` has answered `lloyd-mc:lloyd-backend RUNNING` for days and
+        the interpreter that file names exists. `FATAL` is what supervisord PERSISTS about a
+        process — it is not a probe of the cause, and it says nothing about when the state
+        was last true. Streaking the failing liveness reads beside the quote turns the body
+        from "the program is FATAL" into "the program has reported FATAL for N consecutive
+        reads at a M-second interval", which is a claim a reader can date, and the
+        difference between acting on an outage and re-reporting one.
+
+        Only the states that are persisted get the age. `RUNNING` with a failed HTTP probe
+        is a live observation made this tick, and dressing that up as a persisted state
+        would understate it.
+        """
+        streak = max(1, self.liveness_fail_streak)
+        if any(state in reason for state in self._PERSISTED_STATES):
+            return (f"{reason}\n"
+                    f"- supervisor state as read on this tick, and it has been read down "
+                    f"for {streak} consecutive liveness tick(s) at {self.interval:g}s "
+                    f"(a persisted state, not a live probe of its cause)")
+        return reason
 
     def evaluate_liveness(self, snap: dict) -> tuple[bool, str]:
         for program in self.programs:
@@ -1537,12 +1619,26 @@ class Guardian:
                     f"- systemctl --user restart {policy.SUPERVISORD_UNIT}: rc={getattr(res, 'returncode', '?')}"
                     + (f" stderr={stderr[:300]}" if stderr else "")
                 )
+                # coalesce=True, and that option IS #2221 clause 3: a section written
+                # without it carries no open marker, and `resolve` seals only a body that
+                # ends with one, so the 7 `supervisord was unreachable` blocks in the dated
+                # notes were un-retractable by construction, not by a forgotten call.
                 self.alert("error", "supervisord was unreachable",
                            "Restarted agent-supervisord.service. No code was reverted — "
                            "an unreachable supervisor is infrastructure, not a bad promotion.",
-                           evidence=evidence)
+                           evidence=evidence, coalesce=True)
+                self._sup_unreachable_open = True
                 self.sup_down_streak = 0
             return "infra_down"
+        elif self._sup_unreachable_open:
+            # The tick the supervisor ANSWERED. Retracted here rather than with the
+            # liveness retraction below because this alert's subject is the supervisor
+            # socket and nothing else: a retraction written after a service check would
+            # leave a reader unable to tell which recovery it named.
+            self._sup_unreachable_open = False
+            self.notifier.resolve(
+                "supervisord was unreachable",
+                "agent-supervisord answered again on the next tick.")
         self.sup_down_streak = 0
 
         if self.state.is_broken():
@@ -1550,6 +1646,34 @@ class Guardian:
 
         paused = self.state.pause_remaining(policy.PAUSE_MAX_SECONDS)
         live_down, live_reason = self.evaluate_liveness(snap)
+
+        # #2221 clause 4's age. One increment per liveness read, which is the only clock
+        # this loop may quote in a note: a wall-clock timestamp in an alert body reads as
+        # "the process is down now", while `FATAL` is a state supervisord keeps after its
+        # own restart, so the number of consecutive failing reads is what tells a reader
+        # whether the state in the body is current or inherited.
+        if live_down:
+            self.liveness_fail_streak += 1
+        else:
+            self.liveness_fail_streak = 0
+
+        if self._down_programs and not live_down:
+            # The first tick whose liveness read came back not-down, put here at the read
+            # itself so nothing between the observation and the retraction can reorder
+            # them. Every branch of the `live_down` block below returns, so arriving at this
+            # line with the set non-empty is what "the incident that alert was written for
+            # has ended" means, and the loop has no other witness of it; without it the seal
+            # waits for a LATER incident's recovery, which for `memory/2026-09-29.md`'s
+            # FATAL block has meant a standing "this needs a human" instruction ever since.
+            # It runs while PAUSED as well, deliberately: a pause suppresses actions on a
+            # recovery, not the fact of one, and a note that keeps asserting a down service
+            # through a pause is the artefact this clause is about.
+            recovered = ", ".join(sorted(self._down_programs))
+            self._down_programs = set()
+            self.notifier.resolve(
+                "Service down, but no promotion to revert",
+                f"liveness read came back healthy: {recovered}.")
+
         if paused > 0:
             if live_down:
                 log(f"[paused {paused:.0f}s] would have fired: {live_reason}")
@@ -1616,14 +1740,20 @@ class Guardian:
             if not current or unrestarted:
                 log(f"liveness failure with nothing under observation: {live_reason}")
                 self.alert("error", "Service down, but no promotion to revert",
-                           f"{live_reason}\n\nHEAD is "
+                           f"{self._describe_down(live_reason)}\n\nHEAD is "
                            f"{(rb.head_commit(self.repo) or '?')[:8]} and "
                            + ("the promotion under observation restarted no service — "
                               "the running code predates it — "
                               if unrestarted else "no self-modification is being observed, ")
                            + "so this is infrastructure rather than a bad "
                            "change. Not rewriting history — this needs a human.",
-                           needs_human=True)
+                           needs_human=True, coalesce=True)
+                # Recorded after the alert call, not before: `Notifier.alert` swallows its
+                # own write failures, so an incident whose note was never written must not
+                # gain a retraction on a later tick — that would report the recovery of
+                # something the note never carried.
+                self._down_programs = set(self._down_programs) | \
+                    self._down_program_names(live_reason)
                 return "down_unobserved"
             log(f"liveness failure: {live_reason}")
             self.do_rollback("crash", live_reason)

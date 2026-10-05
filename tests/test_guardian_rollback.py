@@ -1343,3 +1343,107 @@ def test_the_flap_count_reads_the_whole_window_not_the_last_200_rows(tmp_path):
     assert len(gstate.read_events(st.ledger)) == 200, "the default still bounds"
     assert st.recent_rollbacks(6 * 3600.0) == 1
     assert gstate.FLAP_SCAN_ROWS >= 10000
+
+
+# ── #2221: the three alert-state fields answer on THIS construction ─────────
+# `_fake_guardian` above (tests/test_guardian_rollback.py:581) is the reason #2221
+# needed a class-level default at all: it builds a Guardian with `Guardian.__new__`
+# and hand-assigns the ~12 attributes its routing scenario reads. When the two
+# service-down fields first landed as `__init__`-only assignments, the two routing
+# nodes above died with `'Guardian' object has no attribute
+# '_sup_unreachable_open'` inside `tick()` — the failure that refused the first
+# commit of this branch. This is the node that pins the contract that fixed it.
+
+#: The three fields #2221 added, spelled as the source spells them.
+_ALERT_STATE_FIELDS = ("_down_programs", "_sup_unreachable_open",
+                       "liveness_fail_streak")
+
+
+def test_the_alert_state_fields_answer_on_the_partial_guardian(tmp_path,
+                                                               monkeypatch):
+    """A Guardian built the way the routing tests build one answers "nothing is
+    open" on all three #2221 fields, and answers it from the CLASS.
+
+    Clause 5 of #2221. The distinction that matters is *where* the answer comes
+    from: `_fake_guardian` assigns none of the three, so a read resolving to a
+    value proves the class-level default at `agent-services/guardian/guardian.py:239-241`
+    is doing the work. `__init__` rebinds the same names per instance
+    (`guardian.py:309-311`), which is what makes a production Guardian's state
+    independent of this default — so the assertion below that none of the three
+    is in `g.__dict__` is the half that would go red the day someone moves the
+    defaults back into `__init__` and this construction starts raising again.
+    """
+    g = _fake_guardian(tmp_path, tmp_path / "lloyd", monkeypatch)
+
+    assert g._down_programs == frozenset()
+    assert g._sup_unreachable_open is False
+    assert g.liveness_fail_streak == 0
+
+    unset = [f for f in _ALERT_STATE_FIELDS if f in g.__dict__]
+    assert unset == [], (
+        f"the partial build assigned {unset}, so this node is no longer proving "
+        "the class-level default answers — it is proving __init__-style "
+        "assignment on a hand-built object"
+    )
+
+
+def test_the_shared_alert_state_default_cannot_be_mutated_through_an_instance():
+    """The collection default is a `frozenset`, and no write in the source mutates
+    it in place — so two Guardians can never share alert state through the class.
+
+    A mutable class-level default (`_down_programs: set = set()`) would have made
+    the AttributeError go away and left something worse: `self._down_programs |=
+    {...}` reaches the CLASS object, so one Guardian's service-down alert would
+    name its programs on every other instance in the process, and the retraction
+    at `guardian.py:1672` would clear another instance's set. #2221's whole point
+    is that a retraction names the right thing, so a shared default is the same
+    defect wearing a different hat.
+
+    Three halves are checked: the object itself refuses in-place mutation, a
+    per-instance rebind does not leak to the class or to a sibling instance, and
+    the source is read for the one operator that would reach the class anyway. An
+    `AugAssign` (`|=`) to `self._down_programs` is that operator — it is the shape
+    that would survive a reviewer reading only the diff hunk, and the day the
+    default is changed back to a plain `set` it stops raising and starts sharing.
+    `liveness_fail_streak` is deliberately NOT in that checked list: its `+= 1` at
+    `guardian.py:1656` is an `AugAssign` on an `int`, and integer `+=` rebinds the
+    name on the instance, so it cannot reach the class object whatever it is
+    assigned. Only a field whose value is a mutable collection can share state
+    through the class, and among these three only `_down_programs` is one.
+    """
+    import ast
+
+    import guardian  # noqa: E402  (GUARDIAN_DIR is on sys.path above)
+
+    assert isinstance(guardian.Guardian._down_programs, frozenset), (
+        "the shared default is a mutable "
+        f"{type(guardian.Guardian._down_programs).__name__}: every instance in the "
+        "process would share one set of down programs"
+    )
+
+    g = guardian.Guardian.__new__(guardian.Guardian)
+    with pytest.raises(AttributeError):
+        g._down_programs.add("lloyd-backend")          # type: ignore[attr-defined]
+
+    # The pattern the source actually uses: build a NEW set, rebind the name.
+    g._down_programs = set(g._down_programs) | {"lloyd-backend"}
+    assert guardian.Guardian._down_programs == frozenset(), (
+        "a per-instance write reached the class default"
+    )
+    fresh = guardian.Guardian.__new__(guardian.Guardian)
+    assert fresh._down_programs == frozenset(), (
+        "a second partially built Guardian inherited the first one's down programs"
+    )
+
+    src = Path(guardian.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    aug_targets = [
+        getattr(node.target, "attr", None)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AugAssign)
+        and getattr(node.target, "attr", "") == "_down_programs"
+    ]
+    assert aug_targets == [], (
+        f"`self._down_programs op=` at {len(aug_targets)} site(s) mutates the shared "
+        "class default in place; the write has to rebind a new set"
+    )
