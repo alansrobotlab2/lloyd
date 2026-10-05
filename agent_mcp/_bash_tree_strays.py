@@ -29,6 +29,22 @@ What it cannot do: `run_in_background` returns before the command has run, so a
 background command is not measured; and two sessions writing in the same second can
 each be shown the other's file, which is why the note says "appeared during this
 call" and tells the reader to leave what it did not create.
+
+A third thing it could not do until #2220: name where a stray came from when the tool
+that made it was not Bash. `Write` and `Edit` are not bracketed, so the file they lay is
+first measured by the NEXT Bash call, whose before-snapshot already holds it — and
+`appeared(seen, now)` is a difference against that snapshot, so no origin row for such a
+path was merely missing, it was unrepresentable. The journal therefore read as a file that
+existed, then was deleted, with nothing between: the committed extract of the live journal
+is 5 rows and the `removed` row for `knowledge/` (created by a `Write`, deleted 2026-10-04)
+has no origin row beside it. That row is `kind: "present"` now, journalled once per tree
+and path against a persisted per-tree acknowledgement state that is seeded silently the
+first time a tree is read — because the same branch keyed on the after-set alone would
+journal the checkout's 14 standing ignored paths, `.env` among them, as incidents. Still
+not covered, and the state is what makes the gap explicit rather than silent: a stray that
+entered the tree before this file existed at all, and any write by a session this bracket
+skips (a sandboxed call, or `run_in_background`), remain the guardian's `stray_in_tree` to
+find, within what `reachable_by_stray_check` can reach.
 """
 from __future__ import annotations
 
@@ -46,6 +62,18 @@ logger = logging.getLogger("lloyd-bash-tree-strays")
 
 #: At most this many paths are spelled out in the note; the journal row has them all.
 NOTE_PATHS = 8
+
+#: The per-tree set of ignored paths already known to be standing in the tree, which is the
+#: only thing that decides the `present` kind below. It has to be a file rather than process
+#: state: the layer is wired into Bash alone, so the session that MEASURES a stray laid by
+#: `Write`/`Edit` is whichever background session happens to run the next command, possibly
+#: in another process, and a set kept in the MCP process would also forget it on restart —
+#: after which the tree's standing paths, `.env` among them, would be journalled as new
+#: incidents by the next call. Seeded silently the first time a tree is read, for the same
+#: reason the before-snapshot is taken before the command runs: the live checkout currently
+#: answers 14 ignored paths, and 14 rows appearing in a safety journal is not a finding, it
+#: is the instrument describing the tree.
+ACK_FILE = "tree-stray-acks.json"
 
 
 def _parent_of(session_id: str) -> str | None:
@@ -77,6 +105,54 @@ def _live_root() -> Path:
 def _journal_path() -> Path:
     from app.paths import TREE_STRAY_JOURNAL_PATH
     return Path(TREE_STRAY_JOURNAL_PATH)
+
+
+def _ack_path() -> Path:
+    """The acknowledgement state, beside the journal and DERIVED from it.
+
+    Not a second `app.paths` constant: the one monkeypatch that redirects the journal has
+    to redirect the state with it, or a test that journals into `tmp_path` would be writing
+    its acknowledgement state into the live safety directory — and the file that decides
+    whether real rows get journalled is exactly the one no test should be allowed to move.
+    """
+    return _journal_path().with_name(ACK_FILE)
+
+
+def _read_state() -> dict:
+    """The acknowledgement state as written. Raises when it is missing, unreadable or not
+    an object; the caller decides what that costs, and it is never "an empty state".
+
+    That distinction is the reason this is not a two-line `try: return json.loads(...)
+    except Exception: return {}`. The file is the only memory of which paths a tree was
+    found to be holding, and a parse error handled as emptiness would rewrite it from
+    nothing: the next call would re-seed, and a box whose state half-wrote would silently
+    lose every acknowledgement it had — printing the standing 14 paths as incidents later,
+    which is the failure this file exists to prevent. `app/live_strays.ignored` keeps the
+    same distinction between UNKNOWN and EMPTY by returning a `None` union, for the same
+    reason.
+    """
+    raw = json.loads(_ack_path().read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError(f"{ACK_FILE} holds {type(raw).__name__}, not an object")
+    return raw
+
+
+def _write_state(state: dict) -> None:
+    """Replace the state atomically. One writer per call — `_after_sync`, once, at the end —
+    because the three things that change it in a call (an appearance, a removal, a present
+    row) are computed from one read, and a read-modify-write per row would let the last one
+    clobber the other two.
+    """
+    path = _ack_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _saved_paths(state: dict, root: Path) -> set[str]:
+    entry = state.get(str(root))
+    return set(entry.get("paths", [])) if isinstance(entry, dict) else set()
 
 
 def _snapshot_sync() -> "tuple[Path, set[str]] | None":
@@ -273,13 +349,74 @@ def _removed(root: Path, seen: set[str], now: set[str]) -> list[str]:
                   if p != ".git" and not (root / p).exists())
 
 
+def _record_present(session_id: str | None, command: str, root: Path,
+                    paths: set[str]) -> None:
+    """One row for an ignored path this call FOUND in the tree, having not put it there.
+
+    WHY THIS KIND EXISTS. The bracket measures Bash and nothing else, so the file a `Write`
+    tool call laid in the checkout is first seen by the NEXT Bash call — whose
+    before-snapshot already holds it, which is exactly why `appeared(seen, now)`, a
+    difference against that snapshot, cannot name it. The origin of such a path was
+    therefore unrecordable: the committed witness of the live journal is 5 rows, kinds
+    `{appeared: 3, removed: 2}`, and the `removed` row for `knowledge/` — created by a
+    `Write` at message 361 of session `20261004_023233_autocode_8e79`, deleted at
+    2026-10-04T10:42:21+00:00 — has no origin row beside it and never could have. A reader
+    of that journal sees a file that came from nowhere and was quietly deleted; this kind is
+    the row that says "somebody non-Bash wrote this, here is the tree and the call that
+    found it".
+
+    WHY NOT A NOTE. The sentence `note()` writes tells the model to remove the file now
+    because this call made it. This call did not make it. Appending an accusation to a
+    command that is innocent of it is how the note gets ignored on the calls where it is
+    true, and it would fire on every one of them for the tree's standing paths. The row is
+    the record; the result is untouched.
+
+    WHY ONCE. `appeared` is a per-call fact and re-fires legitimately. A `present` path is
+    the same file continuing to sit there, and a journal that grew a row for it on every
+    background call would bury the rows that do name a writer — so the paths go into the
+    acknowledgement state, which `_after_sync` writes once for the whole call.
+    """
+    _record(session_id, command, root, sorted(paths), kind="present")
+    logger.warning("session %s: ignored path(s) found in %s, not created by this call: %s",
+                   session_id, root, ", ".join(sorted(paths)[:NOTE_PATHS]))
+
+
 def _after_sync(text: str, snap: "tuple[Path, set[str]]", session_id: str | None,
                 command: str) -> str:
     from app import live_strays
     root, seen = snap
     now = live_strays.ignored(root)
+    if now is None:
+        # UNKNOWN, not empty. `ignored` answers None when git refuses to answer for the
+        # tree; `appeared` would fail closed on it, and the new branch below would not —
+        # subtracting the saved set from an unknown set reads as "the whole tree is new",
+        # which is precisely the accusation the union type exists to prevent. The rows this
+        # call cannot know about are not written, and neither is the state: a state
+        # rewritten from an unknown set would silently reset the tree's acknowledgements.
+        return text
     appeared = live_strays.appeared(seen, now)
     gone = _removed(root, seen, now)
+
+    # What is unacknowledged is decided by the STATE, never by the after-set alone. With no
+    # entry for this tree — the first measured call since the file was created — the tree's
+    # standing ignored paths are acknowledged silently and nothing is journalled, which is
+    # what keeps `test_a_file_that_was_already_there_is_not_this_calls` green and keeps the
+    # 14 paths a real checkout holds out of the journal.
+    try:
+        state = _read_state()
+    except FileNotFoundError:
+        state = {}
+    except Exception as exc:  # noqa: BLE001 — an unreadable state costs the new kind only
+        logger.warning("tree stray state unreadable (%s: %s); no `present` row this call",
+                       type(exc).__name__, str(exc)[:160])
+        state = None
+    fresh: set[str] = set()
+    seed = state is not None and str(root) not in state
+    if state is not None and not seed:
+        fresh = set(now) - _saved_paths(state, root)
+    if seed:
+        state[str(root)] = {"paths": sorted(now)}
+
     if appeared:
         _record(session_id, command, root, appeared)
     if gone:
@@ -291,6 +428,35 @@ def _after_sync(text: str, snap: "tuple[Path, set[str]]", session_id: str | None
         _record(session_id, command, root, gone, kind="removed")
         logger.warning("session %s: ignored path(s) removed from %s during a Bash call: %s",
                        session_id, root, ", ".join(gone[:NOTE_PATHS]))
+    # An appearance this call made is journalled as its own kind, with its note, and is not
+    # also `present`; a path that vanished during the call is not standing in the tree, so
+    # it has no business in the acknowledgement either.
+    fresh -= set(appeared) | set(gone)
+    if fresh:
+        _record_present(session_id, command, root, fresh)
+    if state is not None:
+        # The call's one state write, after the rows: a row that landed is the fact, and a
+        # state write that fails costs at worst a repeated `present` row on the next call.
+        # An appearance joins the acknowledgement here, which is what stops a stray created
+        # by this call being journalled a second time as `present` by the next one; a
+        # removal drops out of it, because the acknowledgement is of a path STANDING in the
+        # tree — leave it set and this becomes the instrument that can name a writer once
+        # per filename for the life of the checkout.
+        if seed:
+            saved = set(state[str(root)]["paths"])
+        else:
+            # Parenthesised because it has to be: `-` binds tighter than `|` in Python, so
+            # `saved | appeared - gone` would be `saved | (appeared - gone)` and a removal
+            # would leave the acknowledgement standing — which reads, on the next call, as
+            # "already acknowledged", and silently loses the row for the next stray laid at
+            # that same path. Both set operations are explicit about their order.
+            saved = (_saved_paths(state, root) | set(appeared)) - set(gone)
+        state[str(root)] = {"paths": sorted(saved | fresh)}
+        try:
+            _write_state(state)
+        except Exception as exc:  # noqa: BLE001 — the rows above are already the record
+            logger.warning("tree stray state write failed (%s: %s)",
+                           type(exc).__name__, str(exc)[:160])
     if not appeared:
         return text
     logger.warning("session %s: ignored path(s) appeared in %s during a Bash call: %s",

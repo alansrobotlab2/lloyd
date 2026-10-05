@@ -243,8 +243,17 @@ Three layers, in the order a turn meets them:
    command shape is matched, so a redirect, `sqlite3` and a Python one-liner are one
    case. Ignored only: an untracked `??` file may be about to be committed. Caches
    (`live_strays.CACHE_PARTS`) are left out. It is a note, not a refusal, and
-   fail-open. Not covered: `run_in_background` commands, and attribution between two
-   sessions writing in the same second (the note says "appeared during this call").
+   fail-open. The journal carries three kinds: `appeared` for what the call made,
+   `removed` for what it deleted, and `present` for an ignored path the call found
+   already standing there — the only origin a `Write` or `Edit` can ever have, since
+   those tools are not bracketed and the next Bash call's before-snapshot already holds
+   the file. One `present` row per tree and path, decided by
+   `$DATA_ROOT/safety/tree-stray-acks.json` and never by the after-set alone, so the
+   checkout's standing ignored paths are not journalled as incidents; it carries no note,
+   because the call did not make it. Not covered: `run_in_background` commands,
+   attribution between two sessions writing in the same second (the note says "appeared
+   during this call"), and a path that entered the tree before the acknowledgement file
+   existed at all — the guardian's hourly check is the backstop for those.
 3. **The guardian moves provably inert residue instead of alerting on it**
    (`datawatch.quarantine_inert`, called from `_runtime_data_incident`). A stray is
    moved to `$DATA_ROOT/quarantine/tree-strays/` and announced as news only when every
