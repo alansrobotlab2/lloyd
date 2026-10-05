@@ -168,6 +168,45 @@ _URL_RE = re.compile(r"(?:https?://|www\.)\S", re.IGNORECASE)
 #: rule-free footer of #1819 is made of exactly these.
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 
+#: The last labels this treats as a real top-level domain in a scheme-less host. Both
+#: halves of the constraint that keeps the host test from being a dotted-word test:
+#: `md`, `sh`, `rs` and `ph` are country codes AND the extensions a tech description is
+#: written with, so they stay out — clause 4 (#2224) is that `See README.md for the flags`
+#: keeps its block, and one extension in this list is one paragraph eaten.
+_BARE_DOMAIN_TLDS = (
+    "com|org|net|edu|gov|mil|int|info|biz|pro|app|dev|io|ai|co|me|to|ly|gl|gg|be|so"
+    "|tv|fm|xyz|click|link|site|online|space|website|cloud|live|news|shop|store|tech"
+    "|page|run|video|media|studio|life|world|club|team|group|network|systems|software"
+    "|solutions|digital|agency|eu|uk|us|ca|au|de|fr|jp|cn|br|nl|se|no|fi|dk|pl|ru"
+    "|za|nz|ch|at|ie|it|es|pt|sg|hk|kr|tw|mx|ar")
+
+#: What makes a LINE carry a link for the block rule in `_drop_url_blocks` (#2224): a URL
+#: as #2143 spelled it, a bare email, or a scheme-less host. One predicate so the block
+#: rule asks one question — "is a link in here" — instead of consulting three lists.
+#:
+#: The third alternative is what #2143 could not see: `_URL_RE` needs the `https://` or
+#: `www.` prefix, and a channel that writes `Portals: tinyurl.com/38pdkzuc` omits it, which
+#: is how that string reached `knowledge/ai-llms/youtube-digest.md` as the FIRST line of an
+#: entry body on 2026-10-04, one day after #2143 landed. `_EMAIL_RE` existed but was
+#: consulted only by `_is_footer_tail_line`, so `wesroth@smoothmedia.co` reached the digest
+#: the same day.
+#:
+#: A bare dotted word is not a link, so the host branch is constrained twice: the final
+#: label must be in `_BARE_DOMAIN_TLDS`, and the host must be followed by a path (`/…`) or
+#: be the line's trailing token. A domain named mid-sentence is therefore NOT matched — the
+#: conservative direction, since a block is removed whole and a prose paragraph that
+#: mentions a domain in passing is the description's own content. `re.MULTILINE` is on
+#: because the trailing-token branch anchors at end of line; `_drop_url_blocks` searches
+#: line by line, where the anchor is the line end regardless, and MULTILINE keeps the
+#: answer identical if a whole description is ever searched.
+_LINK_PRESENT_RE = re.compile(
+    r"(?:https?://|www\.)\S"                          # `_URL_RE`, byte-identical
+    r"|[\w.+-]+@[\w-]+(?:\.[\w-]+)+"                  # `_EMAIL_RE`, byte-identical
+    r"|(?<![\w./-])(?:[\w-]+\.)+(?:" + _BARE_DOMAIN_TLDS + r")(?![\w-])/"
+    r"|(?<![\w./-])(?:[\w-]+\.)+(?:" + _BARE_DOMAIN_TLDS + r")(?![\w/-])"
+    r"[\s.,;:!?)\]}\"'–—-]*$",
+    re.IGNORECASE | re.MULTILINE)
+
 #: `0:00 — Intro`, `0:41 — How Weco's AIDE²…`, `1:02:03`. A timestamp opening a line is
 #: a chapter marker, and a chapter list is the second half of the #1819 footer.
 _CHAPTER_LINE_RE = re.compile(r"^\s*\d{1,2}:\d{2}(?::\d{2})?\b")
@@ -534,13 +573,13 @@ def _ruleless_footer_start(lines: list) -> Optional[int]:
 
 
 def _drop_url_blocks(lines: list) -> list:
-    """The lines with every set-off block that carries a URL taken out (#2143), or
-    `lines` itself when none does.
+    """The lines with every set-off block that carries a link taken out (#2143, widened by
+    #2224), or `lines` itself when none does.
 
     A block here is a maximal run of non-blank lines, and a run's own first line is always
     set off from the line above by a blank or by the start of the text — which is why no
     separate `_set_off` call is needed here: a run cannot begin anywhere else. So the rule
-    is **a block containing a URL goes, whole, whatever else it contains**, and the
+    is **a block containing a link goes, whole, whatever else it contains**, and the
     discriminator is that a link is present, not what the words around it say.
 
     That is a different question from the shape rules in `strip_link_footer` below, and it
@@ -555,6 +594,17 @@ def _drop_url_blocks(lines: list) -> list:
     slot at `:1450` is a different failure again: its ad is the FIRST block of the
     description, where no footer rule ever looks, and it carries no `utm_` at all, so a
     tracking-parameter rule would miss it too. Presence is not a list.
+
+    #2224 widened what "a link is present" means, because the presence rule shipped with a
+    spelling hole. `_URL_RE` needs `https://` or `www.`, and the two rows that filed this
+    item write their links with neither: `Portals: tinyurl.com/38pdkzuc` is the entire first
+    block of one description, and `wesroth@smoothmedia.co` sits inside the middle block of
+    another. Both were published in the `## 2026-10-04` section of `youtube-digest.md` — one
+    day after #2143 landed — so what is open here is the rule, not only the pre-#2143 lines
+    that section also carries. The predicate is now `_LINK_PRESENT_RE`: the same block
+    granularity and the same whole-block cost, plus a bare email and a scheme-less host. The
+    host half is shape-constrained (`_LINK_PRESENT_RE`'s comment), because a dotted word is
+    not a link and clause 4 (#2224) is that `See README.md for the flags` keeps its block.
 
     Scope: this runs inside `strip_link_footer`, where channel-authored text is prepared.
     `_entry_body` reaches that call behind an `!= "github"` test (`vault_writer.py:428`), so a
@@ -576,7 +626,7 @@ def _drop_url_blocks(lines: list) -> list:
       character span is what keeps this rule line-granular like the shape rules beside it.
       12 of those 55 hold nothing but link blocks and end up publishing the scorer's `why`.
 
-    What is not a cost: a text with no URL in it comes back as the same list object, so no
+    What is not a cost: a text with no link in it comes back as the same list object, so no
     kept line is re-joined, re-wrapped or re-indented. Removing a block also takes the blank
     that separated it from the block before it, so `prose\\n\\nCTA\\n\\nmore prose` comes back
     as `prose\\n\\nmore prose` with no doubled gap — the spacing rule
@@ -596,14 +646,15 @@ def _drop_url_blocks(lines: list) -> list:
             i += 1
             continue
         j = i
-        has_url = False
+        has_link = False
         while j < n and lines[j].strip():
-            # A line counts as carrying a URL if the URL is glued to a label
-            # (`tall version- https://amzn.to/4cvsfk3`) or sits alone; `_URL_RE` is not
-            # anchored, so both answers come from the same test.
-            has_url = has_url or bool(_URL_RE.search(lines[j]))
+            # A line counts as carrying a link if the URL is glued to a label
+            # (`tall version- https://amzn.to/4cvsfk3`) or sits alone; `_LINK_PRESENT_RE` is
+            # not anchored, so both answers come from the same test, and since #2224 so do
+            # `Portals: tinyurl.com/…` and a bare `name@channel.co`.
+            has_link = has_link or bool(_LINK_PRESENT_RE.search(lines[j]))
             j += 1
-        if has_url:
+        if has_link:
             cut = True
             while out and not out[-1].strip():
                 out.pop()

@@ -2251,7 +2251,7 @@ def test_a_sponsor_block_is_removed_whole_not_url_line_only():
 
 
 def test_the_rule_keys_on_a_url_being_present_not_on_promotional_wording():
-    """Clause 3: the discriminator is a link, so a body with no URL in it is returned
+    """Clause 3 (#2143): the discriminator is a link, so a body with no link in it is returned
     byte-for-byte — including one whose prose is unmistakably an ad.
 
     `Sponsored by CodeRabbit. No credit card, 2-click setup.` is the exact wording from the
@@ -2263,9 +2263,13 @@ def test_the_rule_keys_on_a_url_being_present_not_on_promotional_wording():
     pin which half of that is pre-existing (the trim) and which half #2143 must not add (a
     re-join that moves a leading blank, or rewrites a line the drop did not remove).
 
-    The two lookalikes that must also survive are here for the same reason: an email address
-    is not a URL (`wesroth@smoothmedia.co` is the contact block that outlived the ad in the
-    stored row), and a repo path written without a scheme is not one either.
+    What moved with #2224 is one of this node's two lookalikes. It used to pin that an email
+    address is not a URL and that the `wesroth@smoothmedia.co` contact block therefore
+    outlived the ad; #2224's acceptance check rules the other way — "a set-off block … that
+    carries … a bare email (name@domain.tld) is dropped whole" — so the contact block is now
+    asserted as gone, and the node keeps the half that did not move: promotional WORDING with
+    no link in it is still invisible to this rule, and a scheme-less dotted word that is not
+    a host (`README.md`) is what clause 4 (#2224) keeps out of the drop.
     """
     ad_no_link = ("Gemini 4 Argon ships a 2M context window today.\n\n"
                   "Sponsored by CodeRabbit. No credit card, 2-click setup.\n"
@@ -2275,7 +2279,11 @@ def test_the_rule_keys_on_a_url_being_present_not_on_promotional_wording():
 
     contact = ("Want to work with me?\n"
                "Brand, sponsorship & business inquiries: wesroth@smoothmedia.co")
-    assert body_mod.strip_link_footer(contact) == contact
+    assert body_mod.strip_link_footer(contact) == "", (
+        "#2224 clause 2: a block whose only link is a bare email must go whole, and this is "
+        "the one-block description that shape was filed for")
+    assert body_mod.strip_link_footer(contact + "\n\nProse that ends a sentence.") \
+        == "Prose that ends a sentence."
 
     assert body_mod.strip_link_footer(ad_no_link + "\n") == ad_no_link, \
         "the pre-existing trailing trim moved, so this node is no longer testing only the new rule"
@@ -2283,7 +2291,7 @@ def test_the_rule_keys_on_a_url_being_present_not_on_promotional_wording():
         "a URL-free body lost its leading blank: the new rule re-joined a body it never cut"
 
 
-def test_the_stored_coderabbit_row_loses_its_ad_and_keeps_its_url_free_contact_block(
+def test_the_stored_coderabbit_row_loses_its_ad_and_its_bare_email_contact_block(
         intel_state):
     """Clause 2 and 3 together on the row that proves the mechanism is wider than a
     footer: `youtube:UCqcbQf6yw5KzRoDDcZ_wBSw:Sy1Fjf-H-Qg`, 500 stored characters.
@@ -2298,9 +2306,14 @@ def test_the_stored_coderabbit_row_loses_its_ad_and_keeps_its_url_free_contact_b
     `utm_` (absent here), on `My Links` (untouched here), or on a footer POSITION (the ad is
     the first block in the file). What it keys on is that the ad block carries a URL.
 
-    `wesroth@smoothmedia.co` and the Gemini sentence under the second rule are the control:
-    500 characters go in, the ad's four lines and the two `➡️` link lines leave, and the
-    text that has no link in it stays.
+    The control moved with #2224. This node used to pin `wesroth@smoothmedia.co` as the part
+    of the row that stays, on the grounds that a block with no `http` in it is not a URL
+    block; #2224's acceptance check rules that a block carrying a bare email is a link block
+    ("… or a bare email (name@domain.tld) is dropped whole, at the same block granularity as
+    the existing http(s)://|www. rule"), so the contact block leaves here too and what stays
+    is the one block with no link of any shape in it: 500 characters go in, and the 58
+    characters of the Gemini sentence come back. The two `➡️` lines and the ad's four lines
+    leave exactly as before.
     """
     import hashlib
 
@@ -2312,16 +2325,20 @@ def test_the_stored_coderabbit_row_loses_its_ad_and_keeps_its_url_free_contact_b
     stripped = body_mod.strip_link_footer(CODERABBIT_WITNESS)
     assert "http" not in stripped and "www." not in stripped, repr(stripped)
     assert "Change Stack" not in stripped and "Sponsored by CodeRabbit." not in stripped
-    assert "wesroth@smoothmedia.co" in stripped, "the URL-free contact block went too"
-    assert stripped.startswith("Want to work with me?")
-    assert stripped.rstrip().endswith("Gemini 4 Argon—but…")
+    assert "wesroth@smoothmedia.co" not in stripped, (
+        "#2224 clause 2: the contact block carries a bare email, which is a link, so it goes")
+    assert stripped == "Google looks ready for a comeback with Gemini 4 Argon—but…", \
+        repr(stripped)
+    assert len(stripped) == 58, "the one link-free block is not the length it was measured at"
 
     written = _publish(intel_state, _yt(id="youtube:UCqcbQf6yw5KzRoDDcZ_wBSw:Sy1Fjf-H-Qg",
                                         summary=CODERABBIT_WITNESS,
                                         why="Covers the Gemini 4 Argon release.",
                                         title="GEMINI 4 is nuts..."))
     assert "coderabbit.link" not in written and "x.com/WesRothMoney" not in written
-    assert "wesroth@smoothmedia.co" in written
+    assert "wesroth@smoothmedia.co" not in written, \
+        "the published body still carries the contact address #2224 clause 2 names"
+    assert "Gemini 4 Argon" in written, "the row lost its only link-free block too"
 
 
 def test_a_github_body_publishes_its_url_through_clean_body_and_clip_body(intel_state):
@@ -2458,3 +2475,551 @@ def test_the_url_block_rule_removes_a_pointer_the_signup_rule_correctly_declined
     no_url = CTA_HEADING + "\n\n👉 My repo: the code is in the pinned comment"
     assert body_mod.strip_link_footer(no_url) == no_url
     assert "http" not in body_mod.strip_link_footer(text)
+
+
+# ── #2224: a link is a link even when the channel omits the scheme ────────────
+#
+# #2143 made the block rule key on a link being PRESENT instead of on any label above it,
+# then spelled "link" as `_URL_RE` — `https?://` or `www.`. A channel that writes its pointer
+# without the prefix therefore walks straight through the presence rule, which is how two
+# rows reached `knowledge/ai-llms/youtube-digest.md` on 2026-10-04, one day after #2143
+# landed: `Portals: tinyurl.com/38pdkzuc` is the ENTIRE first block of
+# `youtube:UC6QNjBn6KMq5-pe3OE11zZg:3cjnyL0_fMI`, and the middle line of one block of
+# `youtube:UCqcbQf6yw5KzRoDDcZ_wBSw:9CGsq3A590Q` is `Brand, sponsorship & business inquiries:
+# wesroth@smoothmedia.co`. The first published as the entry body's opening line, the second
+# inside its body.
+#
+# The witnesses are committed fixtures the way #2143's are, cut from the scored day file
+# `feeds/intel-2026-10-04.jsonl`, which held 31 lines when they were extracted on
+# 2026-10-05 (`wc -l` over the source; clause 6 asks that figure to have history, so a copy
+# of that file is committed in the vault at `backlog/data/intel-2026-10-04.jsonl`). Each
+# fixture is exactly one row, which `_fixture_witness_row` enforces before any behaviour
+# assertion runs.
+#
+# The cost of widening the predicate, measured over the corpus #2143 measured
+# (`feeds/raw/2026-*.jsonl`, 174 youtube rows) before this shipped: 55 rows carry a URL, 77
+# carry a link, so 22 rows gain a newly-dropped block, and 32 blocks newly leave in total.
+# All 32 were read: contact lines (`📩 Brand Deals & Partnerships: collabs@nouralabs.com`),
+# bare shorteners and hosts (`microbots.io/codecell`, `Oil Sticks: tinyurl.com/5ftna32s`),
+# and three arXiv author blocks whose emails take the paper title and the affiliation list
+# down with them. That last group is the one case where what leaves is arguably content
+# rather than a CTA; whether to tighten the host/email shape further is a ruling over the
+# published corpus after a few nightly runs, not a judgement this diff can make, and it is
+# owed-check clause 1 on #2224.
+
+#: `youtube:UC6QNjBn6KMq5-pe3OE11zZg:3cjnyL0_fMI`, the scheme-less-domain row: 496 stored
+#: characters, block 0 a single line that is nothing but `Portals: tinyurl.com/38pdkzuc`.
+_BARE_DOMAIN_WITNESS = _fixture_witness_row(
+    "intel_bare_domain_witness_2224.jsonl",
+    "youtube:UC6QNjBn6KMq5-pe3OE11zZg:3cjnyL0_fMI")["summary"]
+#: A `sha256:` CONTENT digest of the stored `summary` field, not a git object id: it is
+#: what tells a reader the fixture is still the bytes that row holds. Both digests in this
+#: file are spelled with this prefix because a bare 64-hex string in a test reads as a
+#: commit id to anything checking citations, and a review rung did exactly that on this
+#: round — it cited `94191a85` as "commit 94191a85", ran `git cat-file -t`, found nothing,
+#: and the gate threw the verdict away as an unreliable grader rather than a refusal.
+BARE_DOMAIN_WITNESS_SHA256 = \
+    "sha256:94191a8510528500223a0681a8b1b90c0e8a458ea1671ae907ef8b4d1dd4fcc4"
+
+#: `youtube:UCqcbQf6yw5KzRoDDcZ_wBSw:9CGsq3A590Q`, the bare-email row: 494 stored characters,
+#: block 1 = `Want to work with me?` + the inquiry email + a `______` rule.
+_BARE_EMAIL_WITNESS = _fixture_witness_row(
+    "intel_bare_email_witness_2224.jsonl",
+    "youtube:UCqcbQf6yw5KzRoDDcZ_wBSw:9CGsq3A590Q")["summary"]
+BARE_EMAIL_WITNESS_SHA256 = \
+    "sha256:db6a682a086907d8455e7d783eedc973fcbff2a63102ffd1e240c1e840a738a5"
+
+
+def _content_digest(text: str) -> str:
+    """`sha256:<hex>` over `text` — the form the two digests above are written in, so a
+    comparison reads as a content check and never as a git citation.
+    """
+    import hashlib
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+# One assertion of each fixture's own shape, so a truncated commit cannot turn the nodes
+# below into green tests about bytes nobody measured.
+assert len(_BARE_DOMAIN_WITNESS) == 496, (
+    "`tests/fixtures/intel_bare_domain_witness_2224.jsonl` no longer holds the stored "
+    "496-character summary of `youtube:UC6QNjBn6KMq5-pe3OE11zZg:3cjnyL0_fMI`")
+assert len(_BARE_EMAIL_WITNESS) == 494, (
+    "`tests/fixtures/intel_bare_email_witness_2224.jsonl` no longer holds the stored "
+    "494-character summary of `youtube:UCqcbQf6yw5KzRoDDcZ_wBSw:9CGsq3A590Q`")
+
+#: The scored day file the two fixtures were cut from, in the runtime data root.
+_SCORED_FEEDS_DIR = _RAW_FEEDS_DIR.parent
+
+
+@pytest.mark.skipif(
+    not (_SCORED_FEEDS_DIR / "intel-2026-10-04.jsonl").exists(),
+    reason="the scored day file these fixtures were cut from is not on this box — the "
+           "behaviour nodes still run over the committed bytes")
+def test_the_two_2224_fixtures_are_still_the_rows_stored_under_those_ids():
+    """The fixtures are copies, so each is checked against its source, as #2143's are.
+
+    The extraction figure clause 6 names — `wc -l /…/feeds/intel-2026-10-04.jsonl` -> 31 on
+    2026-10-05 — is asserted as a floor, not an equality: a day file gains rows while its day
+    is being scored and does not shrink, so equality would go red at the next run for a
+    reason that is not a defect. A row whose SUMMARY changed under the same id is the failure
+    that matters, and that is what is asserted exactly.
+    """
+    source = _SCORED_FEEDS_DIR / "intel-2026-10-04.jsonl"
+    raw_lines = source.read_text(encoding="utf-8").splitlines()
+    assert len(raw_lines) >= 31, (
+        f"intel-2026-10-04.jsonl holds {len(raw_lines)} lines, fewer than the 31 it held "
+        "when the fixtures were cut, so it was rewritten and 31 is no longer the figure an "
+        "extract reproduces")
+    for name, item_id, needle in (
+        ("intel_bare_domain_witness_2224.jsonl",
+         "youtube:UC6QNjBn6KMq5-pe3OE11zZg:3cjnyL0_fMI", "tinyurl.com/38pdkzuc"),
+        ("intel_bare_email_witness_2224.jsonl",
+         "youtube:UCqcbQf6yw5KzRoDDcZ_wBSw:9CGsq3A590Q", "wesroth@smoothmedia.co"),
+    ):
+        hits = [json.loads(ln) for ln in raw_lines if needle in ln]
+        assert len(hits) == 1, (
+            f"{needle!r} matches {len(hits)} rows in intel-2026-10-04.jsonl, not the one row "
+            "the fixture is")
+        assert hits[0]["id"] == item_id
+        assert hits[0]["summary"] == _fixture_witness_row(name, item_id)["summary"], (
+            f"{name} has drifted from the row stored under {item_id}: the nodes that read "
+            "it would be testing bytes nobody measured")
+
+
+def test_the_stored_bare_domain_row_loses_its_tinyurl_block(intel_state):
+    """Clause 1: `strip_link_footer` over the stored row
+    `youtube:UC6QNjBn6KMq5-pe3OE11zZg:3cjnyL0_fMI` returns a body with no `tinyurl.com`.
+
+    The row is the shape `_URL_RE` cannot see at all: the link is `tinyurl.com/38pdkzuc`, no
+    scheme and no `www.`, and it is not glued into prose — it is the whole first block, which
+    is why the published digest entry OPENED on it. `Portals:` is a 8-character label no
+    closed list needs: what takes the block is that a host is present, so the first three
+    assertions pin that this row is still the hole (#2143's own regex cannot see it) and that
+    the widened one can.
+
+    What stays is the row's own copy, byte for byte: the 496 stored characters come back as
+    the 465 characters of its two prose blocks, which is the block-granularity cost #2143
+    documents — the label line goes with the link, and nothing that did not carry one moves.
+    """
+    assert _content_digest(_BARE_DOMAIN_WITNESS) == (
+        BARE_DOMAIN_WITNESS_SHA256), (
+        "`tests/fixtures/intel_bare_domain_witness_2224.jsonl` is no longer the bytes stored "
+        "under `youtube:UC6QNjBn6KMq5-pe3OE11zZg:3cjnyL0_fMI`")
+    link_line = _BARE_DOMAIN_WITNESS.splitlines()[0]
+    assert link_line == "Portals: tinyurl.com/38pdkzuc", repr(link_line)
+    assert body_mod._URL_RE.search(link_line) is None, (
+        "_URL_RE sees this line now, so the row is no longer the hole being closed")
+    assert body_mod._LINK_PRESENT_RE.search(link_line), \
+        "_LINK_PRESENT_RE does not match the line the item was filed for"
+
+    stripped = body_mod.strip_link_footer(_BARE_DOMAIN_WITNESS)
+    assert "tinyurl.com" not in stripped, repr(stripped)
+    assert stripped == "\n\n".join(_BARE_DOMAIN_WITNESS.split("\n\n")[1:])
+    assert len(stripped) == 465, "the prose the row keeps is not the length it was measured at"
+
+    assert vw_mod._entry_body(_yt(id="youtube:UC6QNjBn6KMq5-pe3OE11zZg:3cjnyL0_fMI",
+                                  summary=_BARE_DOMAIN_WITNESS,
+                                  why="A podcast episode on vibe-coded apps.")) == stripped
+    written = _publish(intel_state, _yt(id="youtube:UC6QNjBn6KMq5-pe3OE11zZg:3cjnyL0_fMI",
+                                        summary=_BARE_DOMAIN_WITNESS,
+                                        why="A podcast episode on vibe-coded apps."))
+    assert "tinyurl.com" not in written, repr(written[-400:])
+    assert "AI vibe-coded apps are changing how people build software" in written
+
+
+def test_the_stored_bare_email_row_loses_its_contact_block(intel_state):
+    """Clause 2: `strip_link_footer` over the stored row
+    `youtube:UCqcbQf6yw5KzRoDDcZ_wBSw:9CGsq3A590Q` returns a body with no `smoothmedia.co`.
+
+    `_EMAIL_RE` already existed and was consulted nowhere on this path — only by
+    `_is_footer_tail_line`, which needs a footer anchor to be asked at all. This row has no
+    set-off rule to abstain on and no label the closed lists carry, so the address reached
+    the digest at `youtube-digest.md:1826` inside a body that also names an OpenAI safety
+    lead's departure.
+
+    The block-granularity cost is visible here rather than argued: block 1 is
+    `Want to work with me?` + the inquiry address + a `______` rule, and all three lines
+    leave, because #2143 removes a block rather than a line and this item's acceptance keeps
+    that granularity ("at the same block granularity as the existing http(s)://|www. rule").
+    The 494 stored characters come back as 360: the opening paragraph, `MY RELATED VIDEOS:`
+    and `SOURCES:…`.
+    """
+    assert _content_digest(_BARE_EMAIL_WITNESS) == (
+        BARE_EMAIL_WITNESS_SHA256), (
+        "`tests/fixtures/intel_bare_email_witness_2224.jsonl` is no longer the bytes stored "
+        "under `youtube:UCqcbQf6yw5KzRoDDcZ_wBSw:9CGsq3A590Q`")
+    blocks = _BARE_EMAIL_WITNESS.split("\n\n")
+    assert blocks[1] == ("Want to work with me?\n"
+                         "Brand, sponsorship & business inquiries: wesroth@smoothmedia.co\n"
+                         "______________________________________________")
+    assert body_mod._URL_RE.search(blocks[1]) is None, (
+        "_URL_RE sees this block now, so the row is no longer the hole being closed")
+
+    stripped = body_mod.strip_link_footer(_BARE_EMAIL_WITNESS)
+    assert "smoothmedia.co" not in stripped, repr(stripped)
+    assert "Want to work with me?" not in stripped, \
+        "the contact block went line by line instead of whole"
+    assert stripped == blocks[0] + "\n\n" + blocks[2] + "\n\n" + blocks[3]
+    assert len(stripped) == 360, "the prose the row keeps is not the length it was measured at"
+
+    written = _publish(intel_state, _yt(id="youtube:UCqcbQf6yw5KzRoDDcZ_wBSw:9CGsq3A590Q",
+                                        summary=_BARE_EMAIL_WITNESS,
+                                        why="Covers an OpenAI safety lead's departure."))
+    assert "smoothmedia.co" not in written, repr(written[-400:])
+    assert "The person who led safety-report writing for 12 OpenAI launches" in written
+
+
+def test_a_link_free_body_still_returns_the_caller_s_own_list_object():
+    """Clause 3: widening the predicate must not move a single character of text that has no
+    http(s)://, no `www.`, no email and no bare domain in it.
+
+    The mechanism is object identity, not equality: `_drop_url_blocks` returns `lines`
+    ITSELF when it cut nothing, and `_url_free_or` hands back the caller's own string, so no
+    kept line is re-joined, re-wrapped or re-indented and every pre-#2143 abstention keeps
+    returning what it returned before. The last assertion is the same switch seen from the
+    other side — a text that DOES carry a link must not come back as the same object, or the
+    identity path would be a stub that always short-circuits the rule.
+    """
+    prose = ("OpenAI paused training on Thursday.\n\n"
+             "The board met twice, and the memo names three teams by number, 4 and 7.\n"
+             "Nothing in this paragraph is a link, an address, or a file.\n\n"
+             "The recap ends at the last quarterly figure.")
+    lines = prose.splitlines()
+    assert body_mod._drop_url_blocks(lines) is lines
+    assert body_mod.strip_link_footer(prose) == prose
+    assert body_mod.strip_link_footer(prose + "\n") == prose, \
+        "the pre-existing trailing trim moved, so this node is not testing only the new rule"
+    assert body_mod.strip_link_footer("\n" + prose) == "\n" + prose, \
+        "a link-free body lost its leading blank: the widened rule re-joined a body it cut none of"
+
+    # A line that ENDS in a dotted word — `offline.` — is the shape the trailing-token branch
+    # could mis-fire on if the branch were a dotted-word test. It is not: one label and then
+    # the end of the line is not `label.tld`. What turns the next text into a link is only the
+    # address with a `.com` behind it.
+    near_miss = prose + "\n\nQuestions about the memo, offline."
+    near_lines = near_miss.splitlines()
+    assert body_mod._drop_url_blocks(near_lines) is near_lines
+    cut = prose + "\n\nQuestions to press@openai.com"
+    cut_lines = cut.splitlines()
+    assert body_mod._drop_url_blocks(cut_lines) is not cut_lines, (
+        "the identity path returned the caller's list for a body that DOES carry a link, so "
+        "the rule it feeds can never fire")
+    assert body_mod.strip_link_footer(cut) == prose
+
+
+#: `strip_link_footer`'s own output on each body below, measured on the module at this
+#: round's BASE commit — the answer to "exactly what it returns today", stated as bytes
+#: rather than as a claim. Produced by loading `git show 17ed83e4:…/body.py` with
+#: `importlib.util.spec_from_file_location` and calling `strip_link_footer(text)`; every
+#: pair satisfied `base_out == new_out` at base, so the constants are the pre-change
+#: behaviour and not this change's own output copied back.
+#:
+#: Not one of the six comes back identical to its input. Three are removed or shortened
+#: by rules NEXT DOOR to the one this item widens — the `______` rule-free footer of
+#: #1819, the `Chapters` block, and a whole-body greeting — and in the other three the
+#: trailing newline is trimmed. That is deliberate: a body that came back byte-identical
+#: could only ever prove the early return, which the node above already proves, so these
+#: are the half clause 3 actually asks for — a link-free body on which the function DOES
+#: work, whose resulting bytes the widening must not have moved.
+_PRE_2224_STRIP_OUTPUTS = [
+    ("Kimi releases K2 with open weights today.\n\n"
+     "______\n"
+     "Support the channel and the transcripts stay free.\n",
+     "Kimi releases K2 with open weights today."),
+    ("We benchmark three agents on the same task.\n\n"
+     "Chapters\n"
+     "00:00 The setup\n"
+     "04:12 The scores\n"
+     "09:40 What broke\n",
+     "We benchmark three agents on the same task."),
+    ("Hey everyone, welcome back to the channel.\n",
+     "Hey everyone, welcome back to the channel."),
+    ("Flags live in the readme.md at the repo root.\n\n"
+     "Requires Python 2.7.0 or newer, and edit body.py freely.\n",
+     "Flags live in the readme.md at the repo root.\n\n"
+     "Requires Python 2.7.0 or newer, and edit body.py freely."),
+    ("The report describes a 32B MoE trained on 15T tokens.\n"
+     "The eval harness is released with the weights.\n",
+     "The report describes a 32B MoE trained on 15T tokens.\n"
+     "The eval harness is released with the weights."),
+    # The one body the widening COULD have caught and did not: `config.toml` sits at
+    # end of line, which is exactly where the shape constraint looks for a host, and the
+    # only thing saving it is that `toml` is not in `_BARE_DOMAIN_TLDS`. Add `toml` to
+    # that list and this entry is the one that goes red first — the precondition
+    # assertion fires and names the body.
+    ("Flags live in the repo root, in config.toml\n",
+     "Flags live in the repo root, in config.toml"),
+]
+
+
+@pytest.mark.parametrize(
+    "text,pre_change_outcome", _PRE_2224_STRIP_OUTPUTS,
+    # Explicit ids, because the params are multi-line bodies: pytest would otherwise
+    # build an id from each 100-character description WITH its newlines in it, and a
+    # node id spanning lines cannot be cited in a clause verdict, cannot be selected
+    # with `-k`, and is what the parallel `tests` rung choked on when this round first
+    # shipped the node (3 consecutive runs reported `only 24 tests collected`).
+    ids=["rule-free-footer", "chapters-block", "whole-body-greeting",
+         "trailing-newline-trimmed", "news-pair-whole", "line-final-file-name"])
+def test_a_link_free_body_comes_back_with_the_exact_bytes_the_old_function_returned(
+        text, pre_change_outcome):
+    """Clause 3's other half: over a link-free body `strip_link_footer` returns EXACTLY
+    what it returned before #2224 — measured against the base module's output, not against
+    a claim about it.
+
+    The identity node above proves the caller's own list survives `_drop_url_blocks`; that
+    is the fast path, and it is not the whole clause. What a reader cannot see from an
+    identity check is the case where the widening reaches into a body that has no link at
+    all and changes what some other rule leaves behind — a host pattern wide enough to
+    match `readme.md` would drop a paragraph and every byte-equality assertion in this
+    file that pins a *removed* result (the `#1819` and `#1691` nodes, among others) would
+    then disagree with the digest those nodes describe. So this node pins the removed
+    results themselves, against the pre-change function's own bytes, over bodies chosen to
+    exercise the rules next door: the rule-free `______` footer of #1819, a `Chapters`
+    block, a whole-body greeting, and dotted non-domains.
+
+    The first assertion is the corpus's own precondition: none of these bodies may contain
+    a `_LINK_PRESENT_RE` match, or the node stops being a no-change test. Each half has a
+    demonstrated red path: adding `toml` to `_BARE_DOMAIN_TLDS` trips the precondition on
+    `config.toml` at end of line, and breaking the rule-free-footer rule next door (making
+    `_ruleless_footer_start` return `None`) trips the byte comparison on the `Chapters`
+    body, because then what is left is the whole description and not the sentence the
+    pre-change function kept.
+
+    On the base module the node cannot run at all — `_LINK_PRESENT_RE` is what #2224 adds
+    — so the equality half is not "green before the change" by accident: a differential pin
+    is green on base by construction, and its work is to hold that byte-for-byte result
+    still on the far side.
+    """
+    assert body_mod._LINK_PRESENT_RE.search(text) is None, (
+        f"this body now carries a link under the widened predicate ({text!r}), so comparing "
+        "its result to the pre-change bytes is no longer a no-change test"
+    )
+    assert body_mod.strip_link_footer(text) == pre_change_outcome, (
+        "a link-free body's result moved: the widened predicate changed what some other "
+        "rule in strip_link_footer leaves behind"
+    )
+    # And the guard the fast path is for, on the same bodies: no link means the drop step
+    # hands the caller's own list straight back.
+    lines = text.split("\n")
+    assert body_mod._drop_url_blocks(lines) is lines
+
+
+@pytest.mark.parametrize("text", [
+    "See README.md for the flags",
+    "Requires Python 2.7.0 or newer",
+    "Edit body.py and index.html, then run setup.sh",
+    "The parser is main.rs and the notes are notes.php",
+    "Flags live in the readme.md at the repo root, near config.toml",
+])
+def test_a_dotted_token_that_is_not_a_domain_keeps_its_block(text):
+    """Clause 4: the host half of `_LINK_PRESENT_RE` is a constrained test, not a dotted-word
+    test, so a file name or a version string never costs a paragraph.
+
+    Every case is a real shape in tech-channel copy, and each is a country-code or
+    extension collision the TLD list had to refuse: `README.md` and `readme.md` (Moldova),
+    `setup.sh` (Saint Helena), `main.rs` (Serbia), `notes.php` (Philippines). `2.7.0` matches
+    nothing because no TLD in the list is digits, and `config.toml`/`body.py`/`index.html` are
+    not country codes at all. Three cases end a line — `setup.sh`, `notes.php`,
+    `config.toml` — which is the position the trailing-token branch could otherwise fire from.
+
+    What makes this node able to fail is the control node below, which takes the same
+    trailing position with a host the list DOES carry and shows the block leaving, then the
+    same host mid-sentence and shows it staying — the conservative direction, since a block
+    is removed whole and a paragraph that merely mentions a domain is the description's own
+    content.
+    """
+    assert body_mod._LINK_PRESENT_RE.search(text) is None, repr(text)
+    assert body_mod.strip_link_footer(text) == text
+    assert body_mod.strip_link_footer(text + "\n\nSome other block.") == \
+        text + "\n\nSome other block."
+
+
+def test_the_trailing_host_is_the_control_that_proves_the_clause_4_node_can_fail():
+    """Clause 4's other side, kept out of the parametrised node so its cases stay prose.
+
+    `See smoothmedia.co` ends the line, which is the position the trailing-token branch is
+    allowed to fire from, and `co` is in `_BARE_DOMAIN_TLDS` — so the block goes.
+    `See smoothmedia.co for the flags and the migration notes` puts the same host mid-sentence
+    and stays. Together they pin that the constraint is the TLD list plus position, and that
+    the direction of a doubt is to keep the text.
+    """
+    assert body_mod.strip_link_footer("See smoothmedia.co") == ""
+    mid = "See smoothmedia.co for the flags and the migration notes."
+    assert body_mod._LINK_PRESENT_RE.search(mid) is None
+    assert body_mod.strip_link_footer(mid) == mid
+
+
+def test_a_github_body_with_a_bare_email_or_a_scheme_less_host_is_not_touched(intel_state):
+    """Clause 5: `_entry_body` for an item whose source is `github` returns a body carrying a
+    bare email or a scheme-less host unchanged, and the reason is the guard, not the rule.
+
+    The seam is one line of `vault_writer.py`: `strip_link_footer` is reached only behind
+    `(item.source or "").lower() != "github"`, which is why widening the predicate over the
+    whole of `clean_body`/`clip_body` would have been the wrong fix — an issue body's link is
+    content the author wrote, and block granularity would delete the sentence around it. So
+    the node asks the same text three ways: through the rule directly, where the email block
+    MUST go (otherwise the github half below is passing for the wrong reason), through
+    `_entry_body` as a github item, where nothing moves, and through the writer, which is the
+    route that actually publishes.
+    """
+    gh_body = ("The runner skips the GPU suite on a machine with no device, and the trace is\n"
+               "only reproducible on the box. Two things a reviewer will ask for: a reply to\n"
+               "this thread, or the failing job id.\n\n"
+               "Ping the on-call at infra-oncall@nouralabs.com, or read the runbook at\n"
+               "runbooks.example.com/runner-skips before rerunning the job.")
+    assert "infra-oncall@nouralabs.com" not in body_mod.strip_link_footer(gh_body), \
+        "the rule no longer fires on this text, so the github half of this node proves nothing"
+
+    item = _item("Runner skips GPU suite", gh_body, item_id="99")
+    cleaned, reason = body_mod.clean_body(gh_body, "Runner skips GPU suite")
+    assert cleaned is not None and reason is None
+    rendered = vw_mod._entry_body(item)
+    assert rendered == gh_body, repr(rendered)
+    assert "infra-oncall@nouralabs.com" in rendered
+    assert "runbooks.example.com/runner-skips" in rendered
+
+    written = _publish(intel_state, item)
+    assert "infra-oncall@nouralabs.com" in written, repr(written[-400:])
+    assert "runbooks.example.com/runner-skips" in written
+
+    # The same bytes from a channel, which is the side the rule exists for.
+    as_youtube = vw_mod._entry_body(_yt(summary=gh_body, why="A runner fix."))
+    assert "infra-oncall@nouralabs.com" not in as_youtube, repr(as_youtube)
+    assert "The runner skips the GPU suite" in as_youtube
+
+
+#: The vault copy of the scored day file, committed as #2224's witness (vault `b03e15e5`).
+#: `backlog/data/…`, not the runtime `_SCORED_FEEDS_DIR`, is the bytes clause 6 asked to
+#: have history: the runtime feed is a retention-sweep target, and the node that checks the
+#: fixtures against it skips precisely when it is gone.
+_COMMITTED_WITNESS = (Path.home() / "obsidian" / "backlog" / "data"
+                      / "intel-2026-10-04.jsonl")
+
+
+@pytest.mark.live_vault
+def test_the_committed_witness_bytes_are_the_feed_the_fixtures_were_cut_from():
+    """Clause 6's other half: the copy in the vault is the file, not a summary of it.
+
+    The runtime node above (`test_the_two_2224_fixtures_are_still_the_rows_stored_under`
+    `_those_ids`) reads `lloyd-data/_pipeline/…/feeds/intel-2026-10-04.jsonl` and is
+    `skipif`-gated on that file existing — which is the exact situation this clause exists
+    for, since a day feed is a retention target. So the figure the clause re-derives
+    (`wc -l < backlog/data/intel-2026-10-04.jsonl` -> 31, the count the fixtures were cut
+    against on 2026-10-05) and the two rows themselves are read here, from the bytes that
+    have history.
+
+    Read-only on the vault, hence `live_vault`: a later job rewriting the committed witness
+    reddens this on the Pre-Flight rung that does run the mark, rather than silently
+    stranding the fixtures. The last two assertions are what make the witness more than a
+    filename: each row's `summary` is sha-compared against the constant the runtime node
+    uses, and then byte-compared against the fixture the behaviour nodes assert on.
+    """
+    assert _COMMITTED_WITNESS.exists(), (
+        f"{_COMMITTED_WITNESS} is gone: the fixtures' source has no committed bytes again, "
+        "which is the state clause 6 was added to end"
+    )
+    lines = [ln for ln in
+             _COMMITTED_WITNESS.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(lines) == 31, (
+        f"the committed witness holds {len(lines)} rows, not the 31 `wc -l` printed for the "
+        "file the fixtures were cut from"
+    )
+
+    rows = {}
+    for ln in lines:
+        row = json.loads(ln)
+        rows.setdefault(row["id"], []).append(row)
+
+    for fixture, witness_sha, needle in (
+            (_BARE_DOMAIN_WITNESS, BARE_DOMAIN_WITNESS_SHA256, "tinyurl.com"),
+            (_BARE_EMAIL_WITNESS, BARE_EMAIL_WITNESS_SHA256, "smoothmedia.co")):
+        hits = [r for rid, rs in rows.items() for r in rs if needle in (r.get("summary") or "")]
+        assert len(hits) == 1, (
+            f"{needle!r} matches {len(hits)} rows in the committed witness, not the one row "
+            "the fixture is"
+        )
+        stored = hits[0]["summary"]
+        assert _content_digest(stored) == witness_sha, (
+            f"the committed witness's `{needle}` row is no longer the bytes the fixture holds"
+        )
+        assert stored == fixture, (
+            f"the `{needle}` fixture is not the `summary` field of that row any more"
+        )
+
+
+def test_the_widened_predicate_is_applied_by_the_scanner_before_the_clip(
+        tmp_path, monkeypatch, intel_state):
+    """The process boundary #2224 crosses that no direct-call node can see:
+    `scan_youtube_channels` runs `strip_link_footer` over the description and only then
+    `clip_body` (`scanners/youtube_scanner.py:407`), so the widened predicate decides what
+    the scorer and the 500-character summary ever get to be about.
+
+    Same atom-feed harness as the char-cap node above: the description is a real-shaped
+    channel footer with a bare email and a scheme-less host, and the tail is prose. Two
+    things are pinned that the direct-call nodes cannot pin. The links are gone from the
+    summary the scanner *stores* (not merely from the body the writer renders), and the
+    prose reaches the summary from the FRONT — which only happens because the footer left
+    before the clip. The ordering is the source's own, and the comment above it names
+    #1269 clause 2 for the no-footer passthrough: `youtube_scanner.py:407` is
+    `clip_body(strip_link_footer(...))`, read innermost first.
+
+    `intel_state` is the isolation every other node that drives the scanner uses, and the
+    reason it states is its own: `_paths` resolves at import time and each module holds the
+    result by name, so without rebinding those names a node that runs the scanner writes
+    fake rows into real state instead of `tmp_path`.
+
+    It is here because the gate's `tests` rung reported THIS node as a new failure at head
+    `04021ab5` (`all 1 failure(s) are new in this round
+    (tests/test_intel_pipeline_body.py::test_the_widened_predicate_is_applied_by_the_scanner_before_the_clip)`)
+    while every local run passed. What is NOT claimed: that the missing fixture caused it.
+    The node's own assertion is unread in that rung detail (it names the node, not the
+    line), and the failure does not reproduce locally in a fresh `HOME` or a fresh
+    `LLOYD_DATA_HOME`, run twice in a row or otherwise. The fixture is the one real
+    difference between this node and its passing neighbours, so it is the change worth
+    making; the mechanism stays unattributed until the gate says otherwise.
+    """
+    desc = ("K2-Thinking ships today: open weights, a 32B MoE and a new eval harness.\n"
+            "We read the technical report and the ablations.\n\n"
+            "Links mentioned in this episode\n"
+            "Paper: microbots.io/k2-report\n"
+            "Weights: huggingface.co/moonshotai/K2\n\n"
+            "Business inquiries: press@moonshot.ai\n"
+            "______\n"
+            "Support the channel and the transcripts stay free.\n")
+    atom = f"""<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns:media="http://search.yahoo.com/mrss/"
+      xmlns:yt="http://www.youtube.com/xml/schemas/2015"
+      xmlns="http://www.w3.org/2005/Atom">
+ <entry>
+  <id>yt:video:WIDENED01</id>
+  <yt:videoId>WIDENED01</yt:videoId>
+  <yt:channelId>UCwidened</yt:channelId>
+  <title>K2-Thinking ships today</title>
+  <link rel="alternate" href="https://www.youtube.com/watch?v=WIDENED01"/>
+  <media:description>{desc}</media:description>
+ </entry>
+</feed>"""
+    monkeypatch.setattr(yt_mod, "load_youtube_channels_config", lambda: [
+        {"handle": "@moonshot", "name": "Moonshot", "channel_id": "UCwidened"}])
+    monkeypatch.setattr(yt_mod, "_http_get", lambda url, headers=None, timeout=None: atom)
+
+    items, coverage = yt_mod.scan_youtube_channels()
+    assert coverage.fetched == 1 and len(items) == 1
+
+    summary = items[0].summary
+    assert "microbots.io" not in summary, repr(summary)
+    assert "press@moonshot.ai" not in summary, repr(summary)
+    assert summary.startswith("K2-Thinking ships today:"), repr(summary)
+    assert "We read the technical report" in summary, repr(summary)
+    # The scheme-less host that is a PATH, not a line-final host
+    # (`huggingface.co/moonshotai/K2`), leaves with its own block too.
+    assert "huggingface.co" not in summary, repr(summary)
+    # The exact remainder is the news paragraph and nothing else. That is the block
+    # granularity this clause keeps: `_drop_url_blocks` drops a maximal run of non-blank
+    # lines, so the `______` rule and the support line sharing the email's run leave with
+    # it — the cost #2143 documents at `body.py:573-576`, and the reason the smoothmedia
+    # row in clause 2 loses its CTA line too. Pinning the whole remainder is what stops
+    # this node crediting the widening for prose it did not remove.
+    assert summary == ("K2-Thinking ships today: open weights, a 32B MoE and a new eval "
+                       "harness.\nWe read the technical report and the ablations."), \
+        repr(summary)
