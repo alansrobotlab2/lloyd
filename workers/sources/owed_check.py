@@ -213,8 +213,9 @@ def parse_answer(structured: Any, due_numbers: set[int]) -> dict | None:
 
 
 def _next_owings(count: int, skip: set[int] = frozenset()) -> list:
-    """The next `count` items owing something, oldest owed entry first — the
-    order `owing_items` already puts them in."""
+    """The next `count` items owing something, in the order `owing_items`
+    already puts them in: an open item owed a decision first, then oldest owed
+    entry first."""
     from scripts.automod import owed as O
     out = []
     for owing in O.owing_items():
@@ -241,7 +242,7 @@ def _dry_answered() -> set[int]:
 
 
 async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
-    """Offer up to `batch` items to the queue, oldest owed entry first.
+    """Offer up to `batch` items to the queue, in `owing_items` order.
 
     Each row carries the `item_id` it was made for: once a tick offers several, an
     executor that re-picked "the oldest owing item" at claim time would have every

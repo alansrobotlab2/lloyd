@@ -249,10 +249,25 @@ class Owing:
     due: list[int]          # indexes into `entries`
 
 
+def _holds_a_slot(owing: Owing) -> bool:
+    """An open item with a `decide` entry due: nothing moves it but this job."""
+    return (str(owing.fm.get("status") or "") != "done"
+            and any(owing.entries[i].get("kind") == "decide" for i in owing.due))
+
+
 def owing_items(boards: tuple[str, ...] | None = None, *, now: datetime | None = None,
                 due_only: bool = True,
                 stranded_cap: int | None = MAX_STRANDED_PER_RUN) -> list[Owing]:
-    """Items (open or closed) with owed entries, oldest owed first.
+    """Items (open or closed) with owed entries: an open item waiting on a
+    decision first, then oldest owed first.
+
+    A due `decide` entry on an open item is a board slot held until this job
+    answers it — the item is out of every pool while it waits. Oldest-first
+    alone put those behind every post-landing check on a closed item: on
+    2026-10-05 the 16 open items owed a decision sat at positions 121-145 of
+    150, with one session at a time and the round hold in front of that, so a
+    reopen the loop could have used that hour was days away. The set is bounded
+    by the open board, so it cannot starve the checks behind it.
 
     An item with nothing but derived entries is a STRANDED one, and at most
     `stranded_cap` of them are returned (#2055 clause 4): the 454 on the board on
@@ -279,7 +294,8 @@ def owing_items(boards: tuple[str, ...] | None = None, *, now: datetime | None =
         if due_only and not due:
             continue
         out.append(Owing(item=item, fm=fm, entries=entries, due=due))
-    out.sort(key=lambda o: (min((o.entries[i]["since"] for i in o.due), default="~") or "~",
+    out.sort(key=lambda o: (not _holds_a_slot(o),
+                            min((o.entries[i]["since"] for i in o.due), default="~") or "~",
                             o.item.id))
     if stranded_cap is not None:
         kept: list[Owing] = []

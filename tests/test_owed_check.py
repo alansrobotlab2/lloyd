@@ -78,6 +78,29 @@ def test_owing_items_orders_oldest_owed_first_and_honours_recheck_dates(isolated
     assert 4 in [o.item.id for o in O.owing_items(due_only=False)]
 
 
+def test_an_open_item_waiting_on_a_decision_is_offered_before_older_checks(isolated):
+    """2026-10-05: 16 open items owed a `decide` sat behind 120 older post-landing
+    checks. A decision on an open item holds a board slot; a check on a closed one
+    does not."""
+    future = (datetime.now(timezone.utc) + timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    write_item(isolated, 2, status="done", extra={"owed": [
+        {"what": "old check", "kind": "check", "since": "2026-09-10T00:00:00"}]})
+    write_item(isolated, 3, extra={"owed": [
+        {"what": "open, but only a check", "kind": "check", "since": "2026-09-12T00:00:00"}]})
+    write_item(isolated, 6, extra={"owed": [
+        {"what": "spent; reopen or close", "kind": "decide", "since": "2026-10-05T00:00:00"}]})
+    write_item(isolated, 7, extra={"owed": [
+        {"what": "an older decision", "kind": "decide", "since": "2026-10-01T00:00:00"}]})
+    write_item(isolated, 8, status="done", extra={"owed": [
+        {"what": "a decision on a closed item holds no slot", "kind": "decide",
+         "since": "2026-09-01T00:00:00"}]})
+    write_item(isolated, 9, extra={"owed": [
+        {"what": "not due yet", "kind": "decide", "since": "2026-09-01T00:00:00",
+         "recheck_after": future},
+        {"what": "a due check beside it", "kind": "check", "since": "2026-09-11T00:00:00"}]})
+    assert [o.item.id for o in O.owing_items()] == [7, 6, 8, 2, 9, 3]
+
+
 def test_a_recheck_date_is_clamped_to_thirty_days():
     now = datetime(2026, 9, 27, tzinfo=timezone.utc)
     assert O.recheck_date("2027-06-01", now).startswith("2026-10-27")

@@ -1818,7 +1818,7 @@ list (`scripts/automod/owed.py`: `what`, `kind` = check | path | decide,
 `since`, `recheck_after`, `rechecks`). The `owed-check` worker source
 (`workers/sources/owed_check.py`, `workers.sources.owed-check`) runs one
 visible session per item with a due entry, and its tick offers up to `batch`
-such items at once (`DEFAULT_BATCH`, oldest owed entry first, one queue row per
+such items at once (`DEFAULT_BATCH`, open items owed a decision first, then oldest owed entry first, one queue row per
 item — #1909: one item per tick could not drain what the loop was filing). The
 session measures each entry
 against the live system, then answers with one of these:
