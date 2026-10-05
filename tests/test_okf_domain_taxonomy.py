@@ -655,3 +655,207 @@ def test_the_ruling_rewrote_comment_text_and_nothing_else():
     assert now == was, (
         "okf_taxonomy.py changed beyond comment text since "
         f"{PRE_RULING}, and this item is a comments-only ruling record")
+
+
+# ── #2204: the domain split has to be readable off the command the job runs ─────
+#
+# The weekly conformance job (#80) runs the validator exactly as
+# `skills/okf-conformance-check/SKILL.md` writes it: no `--strict`. And `--strict`
+# would not have helped anyway — its row block is capped at `warnings[:50]` and the
+# rows arrive in path order, so on 2026-10-05 it printed 50 rows and 0 of them named
+# a domain. So the domain axis was counted in the total and named nowhere, which left
+# the number owed to a route structurally incapable of producing it, and the count had
+# to be re-derived by hand (87 files / 76 values that day).
+#
+# These nodes pin the print, never the live numbers: 87, 76 and the >=2 census all
+# move with every note authored, so pinning one would make the weekly detector red on
+# a Tuesday for no defect. Every count asserted here comes off a scratch tree built a
+# few lines above it, and `_domain_tree` gives that tree nothing else that can warn.
+
+#: `  unknown-domain : N file(s), M value(s)` — the split #2204 adds beside the total.
+SPLIT_RE = re.compile(r"unknown-domain\s*:\s*(\d+) file\(s\),\s*(\d+) value\(s\)")
+#: `  warnings   : N` — the combined total that already shipped.
+WARNINGS_RE = re.compile(r"warnings\s*:\s*(\d+)")
+#: The off-set-domain census line, distinct from the pre-existing `  types:` line.
+DOMAIN_HIST_RE = re.compile(r"^[ \t]+domains\b.*$", re.M)
+#: The block that follows the summary when the scan has violations (exit 1).
+VIOLATION_MARK = "🔴 OKF violations"
+
+
+def _domain_tree(tmp_path: Path, domains, *, broken=()) -> Path:
+    """A scratch vault: one `knowledge/` note per entry of `domains`, plus each of
+    `broken` written with no frontmatter at all (an OKF violation, so the run exits 1).
+
+    Every note carries the known `type: research` and only these notes exist, so the
+    validator's whole warning list is the domains handed in, and its whole violation
+    list is `broken`. That is what lets the nodes below assert `warnings : N` equals
+    len(domains) — the split and the total are then two readings of ONE measurement,
+    and a fixture whose denominator was quietly smaller than its argument list would
+    make every `N <= warnings` assertion below pass on an empty list.
+    """
+    root = tmp_path / "v"
+    for i, value in enumerate(domains):
+        p = root / "knowledge" / "split" / f"n{i:02d}.md"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(f"---\ntype: research\ndomain: {value}\n---\n")
+    for rel in broken:
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("# a body and no frontmatter block\n")
+    return root
+
+
+def _counts(stdout: str) -> tuple[int, int]:
+    """`(files, values)` from the split line, failing loudly if the run printed none."""
+    m = SPLIT_RE.search(stdout)
+    assert m, f"no `unknown-domain : …` line in the run:\n{stdout}"
+    return int(m.group(1)), int(m.group(2))
+
+
+def test_the_split_prints_without_strict_on_a_two_value_tree(tmp_path):
+    """Clause 1, and item check (1)+(5)'s exit codes.
+
+    Two off-set domains, one canonical and one aliased, over the command the skill
+    actually runs — `_validate(root)` appends nothing, so there is no `--strict`
+    anywhere in the child's argv. The split must be 2 files / 2 values: the aliased
+    `ai-agents` and the canonical `ai` must not be counted, which is the difference
+    between a split and a count of every `domain:` line in the tree.
+    """
+    root = _domain_tree(tmp_path, ["voice-clone-x", "retrieval-x", "ai", "ai-agents"])
+    out = _validate(root)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert _counts(out.stdout) == (2, 2), out.stdout
+    # The number arrived on the summary line, not from the --strict block: a run that
+    # only became readable by adding --strict would have to print these rows too.
+    assert "unknown domain 'voice-clone-x'" not in out.stdout, out.stdout
+    # Exit codes unchanged by this item: warnings alone are still 0 non-strict, and
+    # the total the split sits beside is still the combined one.
+    assert "warnings   : 2" in out.stdout, out.stdout
+    strict = _validate(root, "--strict")
+    assert strict.returncode == 2, strict.stdout
+    # …and the split is still there when --strict is used, since both paths share it.
+    assert _counts(strict.stdout) == (2, 2), strict.stdout
+
+
+def test_the_split_survives_a_run_that_exits_one_on_violations(tmp_path):
+    """Clause 2: the line belongs to the summary block, not to a success path.
+
+    The live vault has had violations for as long as this number has been owed
+    (43 on 2026-10-05: `lloyd/memory/*.md` and the referential-integrity reports), so
+    the weekly command exits 1 and the closing `✅ … conformant` line — the only other
+    place the script ever mentioned the warnings count — never prints at all. A split
+    placed below the violations block would therefore be unreadable on exactly the
+    tree the job reads. Asserted by position, not just presence: the split must come
+    after the `warnings :` total it splits and before the violation block.
+    """
+    root = _domain_tree(tmp_path, ["voice-clone-x", "retrieval-x"],
+                        broken=["memory/stranded-report.md"])
+    out = _validate(root)
+    assert out.returncode == 1, f"the fixture produced no violation:\n{out.stdout}"
+    assert VIOLATION_MARK in out.stdout, out.stdout
+    assert _counts(out.stdout) == (2, 2), out.stdout
+    line = SPLIT_RE.search(out.stdout).group(0)
+    at_split = out.stdout.index(line)
+    at_warnings = out.stdout.index("warnings   :")
+    at_violations = out.stdout.index(VIOLATION_MARK)
+    assert at_warnings < at_split < at_violations, (
+        f"the split is not inside the summary block (warnings@{at_warnings}, "
+        f"split@{at_split}, violations@{at_violations}):\n{out.stdout}")
+    assert out.stdout.count("unknown-domain :") == 1, out.stdout
+
+
+def test_the_domain_count_never_exceeds_the_warnings_total(tmp_path):
+    """Clause 3: one measurement, so `files <= warnings` holds by construction.
+
+    Run over both a zero-off-set tree and a two-off-set tree, and the fixture is built
+    so nothing but domains warns — which makes `files == warnings` the expected
+    equality here, and the reason the assertion is a real comparison rather than a
+    tautology with a slack bound. A future implementation that walked the tree a
+    second time for its own denominator could easily print MORE domain files than there
+    are warnings (a domain set read straight off disk counts notes the validator never
+    warned on), and this node is where that would go red.
+    """
+    for label, domains, want in (("no off-set domain", ["ai", "ai-agents"], 0),
+                                 ("two off-set domains", ["voice-clone-x", "retrieval-x"], 2)):
+        out = _validate(_domain_tree(tmp_path / label.replace(" ", "-"), domains)).stdout
+        m = WARNINGS_RE.search(out)
+        assert m, f"{label}: no warnings total to compare against:\n{out}"
+        total = int(m.group(1))
+        files, values = _counts(out)
+        assert total == want, (
+            f"{label}: the fixture's denominator moved — {total} warnings over "
+            f"{len(domains)} notes, expected exactly the {want} off-set domains, so "
+            f"the comparison below measures nothing")
+        assert files == want, f"{label}: split said {files} files, fixture has {want}\n{out}"
+        assert files <= total, f"{label}: {files} domain files over {total} warnings\n{out}"
+        assert values <= files, f"{label}: {values} values over {files} files\n{out}"
+
+
+def test_the_domain_histogram_names_a_value_only_at_two_files_or_more(tmp_path):
+    """Clause 4: the census line is a promotion bar, so its threshold is the pin.
+
+    #949's ruling promotes an off-set spelling to a canonical domain when files carry
+    it, which means whoever promotes needs the >=2 census and nothing else; a line
+    listing every off-set value would be 76 values long on the live vault and would
+    bury the handful that clear the bar. So the pin has both halves: `shared-x` on two
+    notes appears, and the two singleton values do not — and a SECOND tree made
+    entirely of singletons prints no census line at all, because an empty `domains:`
+    line reads as a measured zero, which is the shape this repo keeps being bitten by.
+
+    Values are invented spellings, never the live census: on 2026-10-05 the real >=2
+    set was `autonomy, databases, embodied-ai, gpu, nightly, rag, science, skills,
+    tts-voice, voice-tts, vlm` at 2 files each, and that list moves with every note.
+    """
+    root = _domain_tree(tmp_path, ["shared-x", "shared-x", "lonely-a", "lonely-b", "ai"])
+    out = _validate(root)
+    assert _counts(out.stdout) == (4, 3), out.stdout
+    h = DOMAIN_HIST_RE.search(out.stdout)
+    assert h, f"no domain census line over a tree with a 2-file value:\n{out.stdout}"
+    assert h.group(0).lstrip().startswith("domains"), h.group(0)
+    assert "shared-x=2" in h.group(0), h.group(0)
+    for singleton in ("lonely-a", "lonely-b"):
+        assert singleton not in h.group(0), (
+            f"{singleton} is on one note and belongs in neither the census nor the "
+            f"promotion bar: {h.group(0)}")
+    # The negative control: singletons only => no line, not an empty one. Same
+    # command, no --strict, and the split above it still reports the files honestly.
+    lone = _validate(_domain_tree(tmp_path / "lone", ["lonely-a", "lonely-b"]))
+    assert _counts(lone.stdout) == (2, 2), lone.stdout
+    assert not DOMAIN_HIST_RE.search(lone.stdout), (
+        f"a census line printed over a tree where nothing clears the bar:\n"
+        f"{lone.stdout}")
+
+
+def test_the_skill_says_the_warnings_total_covers_both_axes():
+    """Clause 5: the skill must not let a weekly report call the total a type count.
+
+    The file lives in the vault (`~/obsidian/skills/…`), which has no worktree, so it
+    landed through `automod_vault_land` before this round — the mixed-surface route —
+    and this node is what reaches it from the suite. It is a prose pin on purpose:
+    today's 2296 warnings are 2209 type rows and 87 domain rows, 93% of the type rows
+    one value (`backlog`), and the Report section told the run to quote a fixed list of
+    four field names. A detector whose report drops an axis is worse than a silent one,
+    because the silent one is visibly missing a number.
+
+    Read with no skip: the subject is a real file in a real vault, and a vault this
+    test cannot see would make the assertion pass on nothing.
+    """
+    from app.paths import VAULT_ROOT
+    skill = VAULT_ROOT / "skills" / "okf-conformance-check" / "SKILL.md"
+    text = skill.read_text(encoding="utf-8")
+
+    # The old definition — types only, no mention of the other axis — must be gone.
+    assert "values outside the known vocabulary (informational" not in text, text
+    assert "two axes combined" in text, (
+        "the skill still does not say the warnings total is types and domains "
+        "together, so a report can still attribute it to one kind")
+    # The report guidance asks for whatever the script prints, not a memorised list.
+    assert "every count line" in text, text
+
+    # And the invocation is untouched: `--strict` would exit 2 on today's 2296
+    # warnings and turn a drift detector into a weekly failure.
+    fence = re.search(r"```bash\n(.*?)```", text, re.S)
+    assert fence and "validate_okf.py" in fence.group(1), text
+    assert "--strict" not in fence.group(1), (
+        "the skill's invocation gained --strict, which the validator's own docstring "
+        f"says would make re-tagging a precondition of every run:\n{fence.group(1)}")

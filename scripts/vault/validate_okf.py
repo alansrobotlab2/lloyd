@@ -62,6 +62,15 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from app.paths import VAULT_ROOT  # noqa: E402
 
+#: The domain warning as the loop below appends it — `"{rel}: unknown domain '{d}'"`.
+#:
+#: The split the summary prints (#2204) is READ BACK out of the warnings list rather
+#: than recomputed from the tree, and that is the point: the file count is then a
+#: subset of the total printed beside it by construction, so the two can never be two
+#: different measurements of one pass. Anchored at the end because a vault-relative
+#: path may itself contain a colon; the prefix before it is the file.
+UNKNOWN_DOMAIN_WARNING = re.compile(r": unknown domain '(?P<value>[^']*)'$")
+
 EXCLUDE_DIRS = {"templates", "images", ".git", ".obsidian", ".trash"}
 # `index.md` / `log.md` are OKF-reserved at any depth (§3.1) and §8 forbids
 # frontmatter in them, so they can never be concept documents — matching on
@@ -203,9 +212,29 @@ def main() -> int:
     print(f"  known-stranded : {known_hits}  (legacy allow-list; "
           "scripts/vault/okf_stranded_known.txt)")
     print(f"  warnings   : {len(warnings)}")
+    # The domain axis, split out of the list above — see UNKNOWN_DOMAIN_WARNING. Both
+    # numbers come from `warnings` and nothing else, so `… file(s)` can never be more
+    # than the total one line up. Printed here, in the summary block, because the
+    # weekly job runs WITHOUT `--strict` (only `--strict` ever named a domain row, and
+    # its block is capped at 50 rows that domain rows never reach), and because this
+    # tree usually has violations, which exits 1 before the closing line below.
+    domain_pairs = {(w[:m.start()], m.group("value"))
+                    for w in warnings if (m := UNKNOWN_DOMAIN_WARNING.search(w))}
+    domain_hist = Counter(v for _, v in domain_pairs)
+    print(f"  unknown-domain : {len({r for r, _ in domain_pairs})} file(s), "
+          f"{len(domain_hist)} value(s)")
     if type_hist:
         top = ", ".join(f"{t}={c}" for t, c in type_hist.most_common(12))
         print(f"  types: {top}")
+    # The promotion census (#949's ruling promotes a spelling once files carry it), so
+    # only values clearing the bar are named: on 2026-10-05 the off-set set was 76
+    # values and just 11 cleared it, and a line naming all 76 would bury the 11. No
+    # line at all when nothing clears it — an empty `domains:` reads as a measured
+    # zero, which is how a number gets believed without being measured.
+    clearing = [(v, c) for v, c in domain_hist.most_common() if c >= 2]
+    if clearing:
+        print("  domains (>=2 files): "
+              + ", ".join(f"{v}={c}" for v, c in clearing))
 
     if violations:
         print("\n🔴 OKF violations (exit 1):")
