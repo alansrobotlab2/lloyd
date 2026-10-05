@@ -1449,12 +1449,20 @@ def sync_task_grants(store: GrantStore, *, task_id: Any, scope: str,
             and str(r["expires_at"]) > at_iso]
         covering = [r for r in unexpired if not r["revoked_at"]]
         if covering:
-            # #2021: a covering row that is spent still covers — nothing is
-            # minted, by design (a nightly must not renew itself by running) —
-            # but the task then runs denied for the rest of that row's expiry,
-            # and until now this was the one branch here that said nothing.
-            # Behaviour is unchanged; whether a spent row should stop covering
-            # is a separate ruling.
+            # #2021: a covering row that is spent still covers, so a re-sync
+            # mints nothing and the task runs denied for the rest of that row's
+            # expiry. That is the ruling, not an open question, and the reason
+            # is this function's own contract: it is idempotent and never
+            # renewing, so a nightly must not replenish its own authority by
+            # running. A task file is a vault path a turn can write (#2023),
+            # and re-minting a spent row would turn a declared bounded `quota:`
+            # into exactly the standing licence #1946 refused. Until #2021 this
+            # was the one branch here that said nothing about the spent row, so
+            # the warning below is the only change; the route back out is the
+            # one it prints (`spent_frontmatter_remedy`) — a human runs
+            # grant_revoke(grant_id=<that row>), sets the entry's
+            # `expires_at:` later than the row's with the `quota:` wanted, and
+            # the next run mints the fresh row.
             spent = [r for r in covering if r["quota"] is not None
                      and (r["consumed"] or 0) >= r["quota"]]
             if len(spent) == len(covering):

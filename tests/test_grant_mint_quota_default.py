@@ -258,9 +258,11 @@ def test_the_store_still_reads_an_explicit_none_as_unbounded(tmp_path):
 
     `mint(quota=None)` is what `tests/unit/test_grant_policy.py` and
     `tests/test_egress_policy.py` call to build a multi-call grant, and the
-    autonomy `grants:` frontmatter surface still means unbounded by absence
-    (its default is a separate ruling, owed on the item). Defaulting inside the
-    store would rewrite the intent of those callers and fail them.
+    autonomy `grants:` frontmatter surface still reads an absent `quota:` as
+    unbounded — a settled ruling (#1946), not an open question: that
+    one-action default lives at the `grant_create` entry point only.
+    Defaulting inside the store would rewrite the intent of those callers and
+    fail them.
     """
     store = _store(tmp_path)
     row = store.mint(scope=SCOPE, tool_pattern=TOOL, quota=None,
@@ -636,17 +638,120 @@ def test_the_warning_names_a_remedy_that_restores_the_grant_and_it_does(
                         now=NOW, record=False).allowed
 
 
+#: The sentence that must not come back at the frontmatter `quota:` surface:
+#: that default is ruled (#1946), so prose calling it owed re-opens a closed
+#: decision. Spelled by concatenation because the guard below reads THIS file's
+#: own source, and one literal here would be the very phrase it forbids.
+DEFERRAL_PHRASE = "separate" " " "ruling"
+
+
+def _spent_covering_branch_comment() -> str:
+    """The comment block hanging off the `if covering:` branch of
+    `sync_task_grants` — where a reader reaches the spent-row rule at the code
+    rather than in a docstring.
+
+    The branch is located from the `def sync_task_grants(` line down, and the
+    block ends at the first non-comment line, so a comment that is deleted,
+    emptied or moved out of the branch fails here instead of reading as a
+    passing absence.
+    """
+    from app.harness import policy
+
+    lines = Path(policy.__file__).read_text(encoding="utf-8").splitlines()
+    start = next((i for i, ln in enumerate(lines)
+                  if ln.startswith("def sync_task_grants(")), None)
+    assert start is not None, "sync_task_grants is not where this guard reads it"
+    branch = next((i for i, ln in enumerate(lines[start:], start)
+                   if ln.strip() == "if covering:"), None)
+    assert branch is not None, (
+        "the `if covering:` branch is gone from sync_task_grants, so the "
+        "spent-row ruling has no home at the code")
+    comment: list[str] = []
+    for line in lines[branch + 1:]:
+        if line.strip().startswith("#"):
+            comment.append(line.strip().lstrip("#").strip())
+        else:
+            break
+    assert comment, (
+        "the `if covering:` branch carries no comment, so the spent-row ruling "
+        "is no longer written where the decision is made")
+    return " ".join(comment)
+
+
+def test_the_spent_covering_branch_states_the_ruling_its_reason_and_the_route():
+    """Clauses 1 and 2: the branch comment is the settled #2021 ruling, not an
+    open question, and it names the restore route the warning prints."""
+    comment = _spent_covering_branch_comment()
+
+    # Clause 1 — the ruling and the reason it is settled.
+    assert "#2021" in comment, comment
+    assert "still covers" in comment and "mints nothing" in comment, comment
+    assert "idempotent and never renewing" in comment, comment
+    assert "replenish its own authority" in comment, comment
+
+    # Clause 2 — the route that actually restores the declared grant, which is
+    # the one this branch's own warning text gives.
+    assert "spent_frontmatter_remedy" in comment, comment
+    assert "grant_revoke(grant_id=" in comment, comment
+    assert "`expires_at:` later" in comment, comment
+
+
+def test_the_none_caller_docstring_states_the_1946_rule_it_follows():
+    """Clause 3: the reader at `GrantStore.mint(quota=None)` is told the rule,
+    not told it is owed.
+
+    `test_the_store_still_reads_an_explicit_none_as_unbounded` is where that
+    reader lands, so its own docstring has to carry it — absence-by-design is
+    unbounded, and the one-action default lives at the `grant_create` entry
+    point only. The guard below can only prove a phrase is absent; this proves
+    the ruling is present.
+    """
+    doc = " ".join(
+        (test_the_store_still_reads_an_explicit_none_as_unbounded.__doc__
+         or "").split())
+    assert "#1946" in doc, doc
+    assert "grant_create" in doc, doc
+    assert "unbounded" in doc, doc
+
+
 def test_the_1946_ruling_is_written_where_the_frontmatter_quota_is_read():
-    """Clause 4: an omitted frontmatter `quota:` stays unbounded, and the three
-    places a reader meets that say so instead of deferring it."""
+    """Clause 4: an omitted frontmatter `quota:` stays unbounded, and no prose
+    defers that default at any of the three surfaces a reader meets it on.
+
+    The surfaces are `agent_mcp/builtin_grants.py` (the tool's schema prose),
+    `app/harness/policy.py` (the code that reads a `grants:` block, whose
+    `if covering:` branch carries the #2021 spent-row ruling) and this file.
+    The assertion used to read `builtin_grants` alone — where the phrase has
+    never appeared — so it passed vacuously while both other files went
+    unchecked, which is the gap #2244 exists to close. Each file therefore has
+    to carry a witness string of its own: an absence proves nothing until the
+    same read proves it is looking at the right text.
+    """
     from agent_mcp import builtin_grants
     from app.harness import policy
 
     for fn in (policy.validate_task_grants, policy.sync_task_grants):
         doc = " ".join((fn.__doc__ or "").split())
         assert "#1946" in doc and "unbounded" in doc, fn.__name__
+
+    surfaces = [
+        (Path(builtin_grants.__file__), "async def _grant_create"),
+        (Path(policy.__file__), "def sync_task_grants("),
+        (Path(__file__), "def test_the_store_still_reads"),
+    ]
+    for path, witness in surfaces:
+        source = path.read_text(encoding="utf-8")
+        assert witness in source, f"{path} is not the text this guard means"
+        assert DEFERRAL_PHRASE not in source, (
+            f"{path.name} defers the frontmatter `quota:` default again")
+
+    # Control on the control: a mis-assembled needle — a lost space, a typo —
+    # would make all three absences above vacuous, so the phrase is pinned
+    # word by word rather than against itself.
+    assert DEFERRAL_PHRASE.partition(" ") == ("separate", " ", "ruling"), \
+        DEFERRAL_PHRASE
+
     source = Path(builtin_grants.__file__).read_text(encoding="utf-8")
-    assert "separate ruling" not in source
     assert "#1946" in source
 
     specs, errors = policy.validate_task_grants(
