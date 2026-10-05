@@ -2474,3 +2474,86 @@ def test_a_reader_that_cannot_answer_leaves_the_refusal_exactly_as_it_was(
         assert ev["blocking"] is True and ev["kind"] == "retry", (kwargs, ev)
         assert ev["review_confirm"] == "upheld", (kwargs, ev)
         assert "review sent it back" in detail, kwargs
+
+
+# ---------------------------------------------------------------------------
+# The floors after the summary anchor (#2251): a small run is still a small run
+# ---------------------------------------------------------------------------
+
+def _repo_of_green_tests(tmp_path, count):
+    """A throwaway repo whose entire suite is `count` passing tests in one file —
+    the shape the collected floor exists to refuse, with nothing red to blame."""
+    r = tmp_path / "greenlive"
+    (r / "tests").mkdir(parents=True)
+    git(tmp_path, "init", "-q", "-b", "main", str(r))
+    git(r, "config", "user.email", "t@e.com")
+    git(r, "config", "user.name", "t")
+    (r / "tests" / "test_two_dozen.py").write_text(
+        "\n".join(f"def test_green_{i}():\n    assert True\n"
+                  for i in range(count)), encoding="utf-8")
+    git(r, "add", "-A")
+    git(r, "commit", "-q", "-m", "base")
+    return r, git(r, "rev-parse", "HEAD").stdout.strip()
+
+
+def test_a_genuinely_small_run_is_refused_by_the_floors_untouched(tmp_path, monkeypatch,
+                                                                  _private_red_set):
+    """#2251 clause 4. Anchoring the parser on one summary line must not have
+    disarmed the floor it used to be fed from: a round over a repo that really has
+    24 tests and really runs all 24 green is still refused, because 24 is not a
+    suite. The constants are asserted at their shipped values so a later round
+    cannot clear a small tree by lowering the floor and call that a fix —
+    `test_the_parallel_rung_floor_is_1000` pins the same pair from the other side.
+    """
+    repo, base = _repo_of_green_tests(tmp_path, 24)
+    monkeypatch.setattr(G.W, "WORK_ROOT", tmp_path / "work")
+    wt = tmp_path / "work" / "SM_TSMALL" / "home" / "lloyd"
+    wt.parent.mkdir(parents=True)
+    git(repo, "worktree", "add", "-q", "-b", "automod/SM_TSMALL", str(wt), base)
+    (wt / "unrelated.py").write_text("X = 1\n", encoding="utf-8")
+    git(wt, "add", "-A")
+    git(wt, "commit", "-q", "-m", "a change")
+    g = _gate_for(repo, wt, base, monkeypatch)
+    g.python = Path(sys.executable)
+    try:
+        ok, detail, data = g.rung_tests()
+    finally:
+        git(repo, "worktree", "remove", "--force", str(wt))
+
+    assert G.PYTEST_MIN_COLLECTED == 1000, G.PYTEST_MIN_COLLECTED
+    assert G.PYTEST_MIN_PASSED == 1000, G.PYTEST_MIN_PASSED
+    assert ok is False, detail
+    assert "did the round delete tests?" in detail, detail
+    assert f"floor {G.PYTEST_MIN_COLLECTED}" in detail, (
+        "the refusal has to name the number it applied, so a changed floor cannot "
+        f"quietly move the goalposts: {detail!r}")
+    assert data["passed"] == 24 and data["collected"] == 24, data
+
+
+def test_the_shapes_the_parser_pinned_before_the_anchor_still_parse():
+    """#2251 clause 5. The anchor was added to a function three other jobs share
+    (`_failures_at_base`, `_reconfirm_candidate_failures`,
+    `vault_guards._run_selection`), so the parses that predate it are pinned here
+    rather than left to the table at the top of this file: pytest's own collection
+    report still answers for `collected` ahead of the summary line's arithmetic, a
+    `no tests ran` run is still all zeros, and `pin_findings` is still on the dict
+    whatever the text looks like — it is the run's only channel for "a pin did not
+    execute", and `rung_tests` returns this dict as its data on every branch (the
+    green rung's own check is tests/test_dashboard_responsive.py, and
+    tests/test_gate_parallel_tests.py:553 and :856 read the same key off this parse).
+    """
+    reported = G._parse_pytest_summary(
+        "collected 1250 items\n\n1247 passed, 3 xfailed in 30.20s")
+    assert (reported["collected"], reported["passed"], reported["xfailed"]) == (
+        1250, 1247, 3), reported
+
+    ran_nothing = G._parse_pytest_summary("no tests ran in 0.01s")
+    assert {k: v for k, v in ran_nothing.items() if k != "pin_findings"} == {
+        "passed": 0, "failed": 0, "errors": 0, "xfailed": 0, "tests_skipped": 0,
+        "collected": 0}, ran_nothing
+
+    finding = f"{G.PIN_FINDING_PREFIX}: 10 of 10 pins did not run"
+    assert G._parse_pytest_summary(f"1247 passed in 30.20s\n{finding}\n")[
+        "pin_findings"] == [finding]
+    for text in (f"{finding}\n", "INTERNALERROR> boom\n", ""):
+        assert "pin_findings" in G._parse_pytest_summary(text), text[:40]

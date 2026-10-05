@@ -399,8 +399,105 @@ def engine_reachable(root: Path, timeout: float = 4.0) -> tuple[bool, str]:
         return False, f"{type(exc).__name__}: {str(exc)[:120]}"
 
 
+#: One count on a pytest summary line, in the order pytest's own writer emits them.
+#: `deselected` and `warnings` are in the LINE pattern because pytest puts them in
+#: that line and the anchor has to match the whole of it; they are in
+#: `_PYTEST_COUNT_WORDS` with no key precisely because they are not test counts, and
+#: `xpass` is here so a line carrying one is still recognised as a summary line
+#: rather than silently skipped over for the next candidate.
+_PYTEST_SUMMARY_COUNT = (r"\d+ (?:failed|passed|errors?|skipped|deselected|"
+                         r"xfail\w*|xpass\w*|warnings?)")
+
+#: A run's OWN summary line, matched at line start and requiring the trailing
+#: ` in <duration>` that only that line carries (pytest renders the duration with
+#: `_pytest.terminal.format_session_duration`, which is `745.26s` under a minute and
+#: `745.26s (0:12:25)` over it — a 745-second suite run is the normal case here, so
+#: the parenthetical is not optional to get right). `pytest -q` drops the `=` padding
+#: a full run wraps it in, so both are allowed.
+#:
+#: This anchor exists because the counts used to be five independent `re.search`
+#: calls over the WHOLE run's output, and a red test can put another pytest run's
+#: summary line in that output at line start: `tests/test_gate_parallel_tests.py`
+#: runs a child pytest and prints or asserts its tail (`{text[-1500:]}`), and
+#: pytest echoes a failing test's stdout verbatim under `Captured stdout call`. So
+#: the FIRST `12 passed` in the text was the CHILD's, and `rung_tests` compared that
+#: against `PYTEST_MIN_COLLECTED`: round SM_20261005_175752's first gate recorded
+#: `passed 12 / collected 24` and was refused with "only 24 tests collected (floor
+#: 1000)", while its sibling rounds on the same base recorded collected in the
+#: 16,000s. Last-match, one line, all five counts out of it. Pinned by
+#: tests/test_gate_tests_rung_parse.py, including a node that spawns a real child
+#: pytest rather than describing one.
+_PYTEST_SUMMARY_LINE_RE = re.compile(
+    rf"^[= ]*{_PYTEST_SUMMARY_COUNT}(?:, {_PYTEST_SUMMARY_COUNT})*"
+    r" in [0-9.:]+s(?: \([0-9:]+\))?[= ]*$",
+    re.M)
+
+#: Per count word, the key it feeds. Deliberately no `deselected`, `warnings` or
+#: `xpass` entry: `collected` stays the sum of what the run reports having RUN plus
+#: SKIPPED, exactly as the pre-anchor code summed it, so moving the anchor does not
+#: quietly re-calibrate the floors it is compared against.
+_PYTEST_COUNT_WORDS = {"failed": "failed", "passed": "passed", "error": "errors",
+                       "errors": "errors", "xfailed": "xfailed",
+                       "skipped": "tests_skipped"}
+
+_PYTEST_BLOCK_COUNT_RE = re.compile(r"(\d+) (failed|passed|errors?|skipped|xfail\w*)")
+
+#: pytest's own collection report (`collected 16294 items`), when the invocation
+#: printed one. `-q` — the shape this rung uses — prints NO such line, which is why
+#: the fallback below was the only path in production and why the missing anchor went
+#: unnoticed. Pinned as an assertion, not a comment, in
+#: tests/test_gate_tests_rung_parse.py::test_the_real_serial_run_and_a_child_summary_inside_it.
+_PYTEST_COLLECTED_RE = re.compile(r"collected (\d+) item")
+
+#: The first line that is TEST OUTPUT rather than pytest's header: a progress row
+#: (`........  [100%]`, `[ 20%]`, xdist's `[gw3] ...`), a `FAILURES`/`ERRORS`/
+#: `short test summary info` banner, or a `Captured stdout call` section header.
+#: Everything at or after it belongs to whatever the tests printed, and a nested
+#: pytest run's `collected N items` can only reach this output from inside one of
+#: those — a child's summary is echoed under `Captured stdout call` at column 0, or
+#: quoted in an `E   ` assertion line, both of which sit behind such a marker. So a
+#: collection figure found BEFORE this line is the run's own; one found after it is
+#: somebody else's. Without the cut, a red node that echoes a NON-`-q` child (which
+#: does print a collection report) inside the `-q` parent this rung runs would hand
+#: the child's `collected` straight to `PYTEST_MIN_COLLECTED` — the same defect this
+#: function was fixed for, in the one shape the summary-line anchor does not cover.
+#: Pinned by `test_a_nested_child_that_prints_its_own_collection_report` in
+#: tests/test_gate_tests_rung_parse.py.
+_PYTEST_TEST_OUTPUT_RE = re.compile(
+    r"^=+ (?:FAILURES|ERRORS|short test summary info) =+$"
+    r"|^-+ Captured \w+ (?:call|setup|teardown) -+$"
+    r"|^\s*\.*\s*\[\s*\d+%\]"
+    r"|^\[gw\d+\]",
+    re.M)
+
+
+def _pytest_collection_figure(text: str) -> "int | None":
+    """The collection count THIS run reported, or None if it reported none.
+
+    Searched only in the text before the first piece of test output, and FIRST-match
+    within that region: pytest writes its own report in the header, ahead of any test
+    echoing anything.
+    """
+    cuts = [m.start() for m in _PYTEST_TEST_OUTPUT_RE.finditer(text)]
+    head = text[:min(cuts)] if cuts else text
+    m = _PYTEST_COLLECTED_RE.search(head)
+    return int(m.group(1)) if m else None
+
+
+def _pytest_summary_block(text: str) -> str:
+    """The last summary line in TEXT — the run's own — or "" when it printed none.
+
+    Last, not first: a child pytest's summary reaches this output before the parent
+    finishes, never after (`_parse_pytest_summary`'s comment says how). A run that
+    died before printing its own summary gets "", and every count stays zero, which
+    is the fail-closed answer: that run did not run its suite either.
+    """
+    found = _PYTEST_SUMMARY_LINE_RE.findall(text)
+    return found[-1] if found else ""
+
+
 def _parse_pytest_summary(text: str) -> dict:
-    """Pull counts out of pytest's summary line.
+    """Pull counts out of pytest's summary line — the RUN's OWN summary line.
 
     The skipped COUNT is `tests_skipped`, not `skipped`, and the rename is the
     whole of a real bug. `_rung` records a rung as skipped from
@@ -409,19 +506,31 @@ def _parse_pytest_summary(text: str) -> dict:
     "skipped" on the ledger. The scorecard reads that field, which made a
     round that ran its whole suite indistinguishable from one that never ran
     it.
+
+    All five counts come from ONE block, `_pytest_summary_block`, and never from
+    five searches over the whole text: one line that names a child run's numbers
+    must not be able to half-fill this dict, because a rung reading
+    `passed 16200 / tests_skipped 10` is reading two different runs and no floor
+    check catches that.
     """
     out: dict = {"passed": 0, "failed": 0, "errors": 0, "xfailed": 0,
                  "tests_skipped": 0, "collected": 0}
-    m = re.search(r"collected (\d+) item", text)
-    if m:
-        out["collected"] = int(m.group(1))
-    for key, pattern in (("passed", r"(\d+) passed"), ("failed", r"(\d+) failed"),
-                         ("errors", r"(\d+) error"), ("xfailed", r"(\d+) xfailed"),
-                         ("tests_skipped", r"(\d+) skipped")):
-        m = re.search(pattern, text)
-        if m:
-            out[key] = int(m.group(1))
-    if not out["collected"]:
+    block = _pytest_summary_block(text)
+    for number, word in _PYTEST_BLOCK_COUNT_RE.findall(block):
+        key = _PYTEST_COUNT_WORDS.get(word)
+        if key:
+            out[key] = int(number)
+    emitted = _pytest_collection_figure(text)
+    if emitted is not None:
+        # The figure from the HEADER region, which is the opposite direction from the
+        # summary line and for the same underlying reason: a run's own figures bracket
+        # it — pytest writes the collection report in its header, before any test has
+        # echoed anything, and its summary line last. Anything between them belongs to
+        # whatever a test printed, including a child pytest's own `collected 3 items`.
+        out["collected"] = emitted
+    elif block:
+        # No collection figure was emitted (`-q`), so derive it from the counts on
+        # the run's own summary line. Never from prose outside that line.
         out["collected"] = (out["passed"] + out["failed"] + out["xfailed"]
                             + out["errors"] + out["tests_skipped"])
     # Carried on every branch, because a named no-execution finding is a fact about
