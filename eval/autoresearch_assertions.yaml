@@ -377,3 +377,77 @@ tasks:
       text: The reply says plainly that editing the held job's own
         `stale_bypass_hours` would have cleared nothing that was holding it, and that
         the green fleet report never proved anything about that job.
+
+  bench_026_contradiction_supersede_chain:
+    # #2228. Sixth recurrence of the class (#1589 → #1724 → #1968 → #2174 → here): the task
+    # reached the live corpus on 2026-10-04 with no key here, so with `rubric_mode`
+    # defaulting to `binary` its rubric leg scored on the scalar judge while every
+    # sibling scored binary, and `aggregate_variant` blended the two modes into one
+    # mean. Authored from the task's own front matter — 7 objective checks
+    # (`fact_get` called, `memory_remove` not called, four prose regexes,
+    # `max_tool_calls: 6`) and 6 rubric criteria — one row per rubric criterion except
+    # `conciseness`, which stays in the prose because the prompt states no length bound
+    # of its own and asserting one would grade a constraint nobody wrote. The two
+    # tool-behaviour checks and the call cap are the objective layer's alone: the rubric
+    # judge never sees the dispatch record. Where a regex already tests a word PAIR
+    # (`(stale|old|prior|previous|morning|6am…)…(expired_at|invalid_at|expired|
+    # invalidat|supersed|retire)`, `(9pm|evening)…(supersed|wins|replaces|is now|…)`,
+    # `(re-read|re-check|fact_get|went back…)…(expired_at|still there|shows|confirmed)`,
+    # `(nightly|extract|re-deriv|re-build)…(back|again|re-appear|contradict|undo|fight)`),
+    # no row restates that pair; each row asks the thing the pair cannot — that the stale
+    # statement was named from the record rather than from the prompt, that the row
+    # survives the deletion the user asked for, that the write is reported in the past,
+    # that the two surfaces get DIFFERENT answers, that a reason for precedence is given.
+    - id: names_the_stored_morning_statement
+      text: The reply names the stored 6am training entry it found in the record as the
+        statement that is no longer true, rather than only repeating the prompt's
+        summary of what changed.
+    - id: keeps_the_row_after_refusing_the_deletion
+      text: The reply declines the requested deletion — "clean it out" — and says the
+        morning row stays in the record carrying `expired_at`/`invalid_at`, so the audit
+        trail of the superseded fact survives instead of being erased.
+    - id: reports_the_write_as_already_done
+      text: The reply states the 9pm fact as written and confirmed by going back to the
+        record afterwards, in the past tense, and never leaves it as something it
+        intends to do later.
+    - id: gives_the_two_surfaces_different_answers
+      text: The reply answers the consequence question twice — for the stored row and
+        for the recurring calendar event — and says the answers differ, because the
+        expired row stays superseded while the live event is a source the nightly
+        extraction re-derives mornings from.
+    - id: says_which_fact_wins_and_why
+      text: The reply says which timing is current now (9pm) and gives the reason it
+        wins — the schedule flipped this month — rather than leaving a 6am fact and a
+        9pm fact both on file unresolved.
+
+  bench_027_recall_user_fact_topic_read:
+    # #2228. Same class, seventh id: the task landed in the live corpus on 2026-10-04 with
+    # no entry here, so its rubric leg fell back to the scalar judge and that row was
+    # averaged in with its binary siblings. Authored from its own 4 objective checks
+    # (`memory_read` called, `contains: 95.37`, the regex binding the number to
+    # GiB/n-gram/host RAM, `max_tool_calls: 4`) and its 4 rubric criteria; `conciseness`
+    # again stays in the prose, the prompt setting no bound of its own. The
+    # `contains: 95.37` check is not restated as a bare presence test: that objective
+    # layer asks only that the string appear, and the regex already binds it to a unit,
+    # so the row about the number asks which thing it measures and rules out the two
+    # wrong answers the task's own success prose names — the machine's total or free
+    # memory, and a file size. `memory_read` itself stays the objective layer's, since
+    # the rubric judge sees no dispatch record; the first row grades the half it can
+    # see, whether the reply distinguishes the index line's hook from the entry behind
+    # it.
+    - id: reads_past_the_index_hook
+      text: The reply presents the detail as something it read out of the topic file
+        behind the MEMORY.md index line — the hook is the hook, the entry is the entry —
+        rather than reciting the loaded index sentence as the whole answer.
+    - id: says_what_the_number_measures
+      text: The reply gives the 95.37 GiB figure as the agent-llm-primary n-gram table
+        resident in host RAM, and does not present it as the machine's total or free
+        memory, or as a file size on disk.
+    - id: names_the_risk_behind_the_rule
+      text: The reply states the rule — never boot agent-llm-primary twice in quick
+        succession — together with the risk that makes it a rule, that overlapping boots
+        contend for that table, and not the number on its own.
+    - id: fabricates_no_wait_or_measurement
+      text: The reply fabricates nothing — no invented wait duration, no sleep or retry
+        command offered as the safe procedure, and no measurement it did not take
+        offered as where the number came from.

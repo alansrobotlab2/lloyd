@@ -1,12 +1,15 @@
 """The vault witnesses in `backlog/data/`, checked for real.
 
-Two witnesses and one retired path. #2079 clause 6 quotes figures whose bytes are
+Three witnesses and one retired path. #2079 clause 6 quotes figures whose bytes are
 tracked here as 2 dated rows; #2175 clause 5 asks that the twelve `vault_land` rows
 behind its count stay re-derivable from committed bytes rather than out of a ledger
-another job appends to. Both are checked here against the file on disk, not a fixture
-built here. The retired path is the promotions-ledger mirror the retention sweep took
-out of the vault — #2054's para, #2064's `ffc04ce5` — and no witness may stand on it;
-#2178 was filed for the moment a second witness did exactly that and left main red.
+another job appends to; #2228 clause 5 asks that the gate report of the round that item
+was resumed from be re-derivable the same way, and with `gate.json` — a path already
+holding another item's witness, so not a free name — left byte-for-byte as it was. All
+three are checked here against the file on disk, not a fixture built
+here. The retired path is the promotions-ledger mirror the retention sweep took out of
+the vault — #2054's para, #2064's `ffc04ce5` — and no witness may stand on it; #2178 was
+filed for the moment a second witness did exactly that and left main red.
 
 A separate file, and deliberately NOT inside `tests/test_failure_ledger.py`: that
 module has no collection-time skip, and neither does this one, so every node here
@@ -14,12 +17,13 @@ runs in the default `pytest tests/` the gate's `tests` rung executes. A node beh
 a module-level skip would be a claim with no witness — which is the exact thing
 clause 6 is about.
 
-It ships six nodes: five over the vault bytes —
+It ships seven nodes: six over the vault bytes —
 `test_the_witness_is_a_dated_file_not_the_retired_mirror_path`,
 `test_the_witness_holds_the_two_live_rows_the_clause_quotes`,
 `test_every_witness_row_is_an_error_alert_of_the_quoted_family`,
 `test_the_sibling_note_names_the_mirror_it_is_not`,
-`test_the_2175_vault_land_extract_is_a_dated_file_too` — plus
+`test_the_2175_vault_land_extract_is_a_dated_file_too`,
+`test_the_2228_gate_witness_is_a_dated_sibling_and_the_mirror_is_untouched` — plus
 `test_the_docstring_names_every_node_this_file_ships`, the rail that re-checks this
 paragraph against the module's own bytes on every run.
 
@@ -52,6 +56,10 @@ NOTE_NAME = "2026-10-02.2079-promotions-witness.md"
 #: #2175 clause 5's extract, re-homed off the retired mirror path by #2178. The bytes
 #: are the ones that landed at vault `87a7a104`; only the name moved.
 WITNESS_2175_NAME = "2026-10-04.2175-vault-land-witness.jsonl"
+#: #2228 clause 5's witness: the gate report of the round that item was resumed from,
+#: landed at vault `dff182cb` on the dated-sibling route #2239 (`3cee398c`) amended into
+#: the clause. Its source is not a git tree, so these bytes are its only history.
+WITNESS_2228_NAME = "2026-10-05.2228-gate-witness.json"
 
 
 def witness_rows():
@@ -172,6 +180,80 @@ def test_the_2175_vault_land_extract_is_a_dated_file_too():
         "the extract is not the twelve rows up to the count's own timestamp"
 
 
+def test_the_2228_gate_witness_is_a_dated_sibling_and_the_mirror_is_untouched():
+    """#2228 clause 5: the report of the round that item was resumed from is committed
+    at a dated name, every figure the item quotes is re-derivable from those bytes, and
+    the one witness path it was told to write to still belongs to someone else.
+
+    The clause originally said "copy the rung report to `backlog/data/gate.json`". That
+    path is occupied — round `SM_20260930_063800`'s 34-line witness, #1878/#1883's
+    rung-0 refusal, vault `cfe9a113` — so obeying it literally would have destroyed
+    another item's graded evidence, which is what #2239 was filed and landed
+    (`3cee398c`) to settle. #2239 amended the clause to the dated sibling and left the
+    mirror alone; the amendment's own verification was a hand-run `wc -l`/`sha1sum`, and
+    #2239's round recorded that no test covered it ("No test pins any of this, by
+    construction of a `vault` item"). That is the gap this node closes: a clause can rest
+    on vault bytes, but nothing stops those bytes drifting or the mirror being clobbered
+    again until a node reads them.
+
+    So both sides are read here rather than quoted back. The extract: 60 lines, which is
+    the figure the clause quotes; round `SM_20261005_101132` at head `34c6b7ab` on base
+    `506e250a`, `ok: false`; five rungs in ladder order with the first four ok and the
+    `tests` rung not, its detail carrying both `44 tests skipped` and `limit 40`; and the
+    ten `tests_rung_data` figures the item cites — 16109 passed, 10 failed, 0 errors, 1
+    xfailed, 44 skipped, 16164 collected, 8 workers, with `pin_findings` naming
+    `DASHBOARD_PINS_NOT_EXECUTED`. The mirror: `wc -l` still 34, and still round
+    `SM_20260930_063800`'s — the count is taken the way the clause takes it, on newline
+    characters, because that mirror's last byte is not a newline and `splitlines()`
+    returns 35 for it.
+    """
+    data = paths.VAULT_ROOT / "backlog" / "data"
+    witness = data / WITNESS_2228_NAME
+    assert witness.is_file(), (
+        f"{WITNESS_2228_NAME} must be committed: #2228 clause 5 asks that the report of "
+        "the round it was resumed from be re-derivable from bytes, and the automod state "
+        "dir is not a git tree")
+    text = witness.read_text(encoding="utf-8")
+    # `wc -l` counts newline CHARACTERS, not lines, and the two files here differ in
+    # their last byte — the witness ends with one, the mirror does not. Measuring the
+    # way the clause measures is the only way its figure means anything.
+    assert text.count("\n") == 60, (
+        "wc -l on the witness is the 60 the clause quotes, from the 132-line source "
+        "report it was extracted from")
+    doc = json.loads(text)
+    assert doc["round_id"] == "SM_20261005_101132"
+    assert doc["head"].startswith("34c6b7ab") and doc["base"].startswith("506e250a")
+    assert doc["ok"] is False, (
+        "the report being witnessed is a refusal; a passing copy would erase the "
+        "evidence that #2233's ceiling, not this diff, stopped that round")
+    rungs = {r["name"]: r for r in doc["rungs"]}
+    assert [r["name"] for r in doc["rungs"]] == [
+        "preflight", "vet", "static", "frontend", "tests"], (
+        "the extract is not every rung of the ladder it claims to witness")
+    for name in ("preflight", "vet", "static", "frontend"):
+        assert rungs[name]["ok"] is True, name
+    assert "2 file(s) in scope" in rungs["preflight"]["detail"]
+    assert "260 changed line(s) of 12000" in rungs["vet"]["detail"]
+    assert rungs["tests"]["ok"] is False
+    assert "44 tests skipped" in rungs["tests"]["detail"] and \
+        "limit 40" in rungs["tests"]["detail"], rungs["tests"]["detail"]
+    d = doc["tests_rung_data"]
+    assert (d["passed"], d["failed"], d["errors"], d["xfailed"],
+            d["tests_skipped"], d["collected"], d["workers"]) == (
+        16109, 10, 0, 1, 44, 16164, 8), (
+        f"the ten figures the item quotes are no longer the committed ones: {d}")
+    assert d["pin_findings"] and "DASHBOARD_PINS_NOT_EXECUTED" in d["pin_findings"][0], (
+        "the 10 failures are the dashboard pins, and the extract has to say so")
+
+    mirror = data / "gate.json"
+    assert mirror.is_file(), "the mirror #2239 refused to clobber has gone missing"
+    assert mirror.read_text(encoding="utf-8").count("\n") == 34, (
+        "wc -l on backlog/data/gate.json is 34: it is #1883's witness, not this item's, "
+        "and a second witness written over it is the hazard #2239 settled")
+    assert json.loads(mirror.read_text(encoding="utf-8"))["round_id"] == \
+        "SM_20260930_063800", "the mirror no longer holds the witness it is named for"
+
+
 def test_the_docstring_names_every_node_this_file_ships():
     """A docstring that counts its own nodes has to be checked against the file.
 
@@ -196,7 +278,7 @@ def test_the_docstring_names_every_node_this_file_ships():
         f"the module docstring advertises {sorted(advertised - shipped)} that this "
         f"file does not ship; this file ships {sorted(shipped - advertised)} the "
         "docstring never names")
-    assert len(shipped) == 6, (
-        "five witness nodes over the vault bytes plus this rail. The count is spelled "
+    assert len(shipped) == 7, (
+        "six witness nodes over the vault bytes plus this rail. The count is spelled "
         "out so that adding a sixth node has to come back here and re-read the "
         "paragraph, instead of leaving it a sentence behind")
