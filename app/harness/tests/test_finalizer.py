@@ -65,6 +65,20 @@ DEGENERATE = ('{"result": "written", "note": "/home/alansrobotlab/obsidian/knowl
               'research/2026-09-28-answer-option-order-sensitivity-in-constrained-'
               'llm-decision-.md", "duplicate_of": "", "facts": \n\n       "}: 8,')
 
+# Item #2226's `vault_review` grading, cut where the engine cut it: clause 1
+# whole, then `"te` — the key `test_honesty` opens with. Copied verbatim from the
+# `findings` field of that row in ~/.local/state/lloyd-automod/promotions.jsonl
+# (`grep '"item_id": 2226'`), where it rode inside the message
+# `output truncated at 8192 tokens — raise harness.finalizer.max_tokens`. Note the
+# first clause is COMPLETE and its `note` is the empty string: what this fragment
+# can prove is that the object ran past a grammar that admitted unbounded strings,
+# and it cannot prove which field spent the budget — the ledger stores only the
+# first 200 characters (`finalizer.py`, `content[:200]!r`).
+REVIEW_CUT = ('{"premise":"sound","clauses":[{"clause":1,"verdict":"met",'
+              '"evidence_path":"skills/nightly-reflection-signals/SKILL.md:419-426",'
+              '"evidence_line":0,"test_node_id":"","how_verified":"read",'
+              '"note":""}],"te')
+
 MESSAGES = [
     {"role": "system", "content": "you are lloyd"},
     {"role": "user", "content": "triage item 42"},
@@ -398,6 +412,54 @@ async def test_an_unclosed_bounded_object_without_the_length_reason_diverges_too
     parsed, error, _ = await _run(schema=BOUNDED)
     assert parsed is None
     assert "generation diverged" in error and "max_tokens" not in error, error
+
+
+async def test_a_cut_under_the_automod_review_schema_is_a_divergence_too():
+    """#2240: the review grader's own answer shape carried eight open strings, so
+    a grading that ran to the budget was reported AS a budget, and the reader was
+    sent to `harness.finalizer.max_tokens` — nine `vault_review` rows of the
+    promotion ledger are that message (items 868, 1233, 1563, 1618, 1885, 1886,
+    2126, 2230, 2226), each of them `kind: skipped` with `clauses: []`, the change
+    landed and no clause graded. The two stand-in schemas above pin the split in
+    the abstract; this one pins the review schema to it, because "capped" is a
+    property of a schema somebody has to actually go and cap.
+
+    The control underneath it is the same completion under the grammar as it
+    stood before #2240, every `maxLength` stripped: still the budget advice. Which
+    of the two messages a truncation becomes is decided by the schema alone."""
+    import copy
+
+    from scripts.automod.review import REVIEW_SCHEMA
+
+    def _strip(node):
+        if isinstance(node, dict):
+            node.pop("maxLength", None)
+            for child in node.values():
+                _strip(child)
+        elif isinstance(node, list):
+            for child in node:
+                _strip(child)
+
+    _Client.responses = [_ok(REVIEW_CUT, usage={"completion_tokens": 8192},
+                             finish_reason="length")]
+    parsed, error, usage = await _run(schema=REVIEW_SCHEMA)
+    assert parsed is None
+    assert "generation diverged" in error, error
+    assert "raise harness.finalizer.max_tokens" not in error, (
+        "REVIEW_SCHEMA reads as unbounded again and its reader is back at the "
+        "config knob: " + error)
+    assert "8192 tokens" in error, error
+    assert usage["output_tokens"] == 8192
+
+    uncapped = copy.deepcopy(REVIEW_SCHEMA)
+    _strip(uncapped)
+    assert F._schema_is_bounded(uncapped) is False, (
+        "stripping caps left the schema bounded — the control below proves nothing")
+    _Client.responses = [_ok(REVIEW_CUT, usage={"completion_tokens": 8192},
+                             finish_reason="length")]
+    parsed, error, _ = await _run(schema=uncapped)
+    assert parsed is None
+    assert "raise harness.finalizer.max_tokens" in error, error
 
 
 async def test_a_completion_that_never_left_thinking_is_still_the_budget():

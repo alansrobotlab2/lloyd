@@ -138,7 +138,28 @@ def test_the_review_schema_is_built_from_the_tuples_and_is_strict():
     assert clause["properties"]["how_verified"]["enum"] == list(RV.HOW_VERIFIED)
     assert s["additionalProperties"] is False and set(s["required"]) == set(s["properties"])
     assert clause["additionalProperties"] is False and set(clause["required"]) == set(clause["properties"])
-    assert "maxLength" not in json.dumps(s)
+    # #2240 REVERSED the policy this node used to pin. The line here read
+    # `assert "maxLength" not in json.dumps(s)` — an uncapped grammar on purpose,
+    # because "the decoder would stop mid-sentence at it" — and that is what made a
+    # multi-clause vault review ungradeable: with any string left open the
+    # finalizer reads a grading that ran to `max_tokens` as a budget and tells its
+    # reader to raise `harness.finalizer.max_tokens`, nine `vault_review` rows
+    # later. So the pin stands, pointed the other way: every string this schema
+    # admits a grader may write carries a positive cap. An `enum` needs none —
+    # `premise`, `verdict`, `how_verified` and `severity` are bounded by their
+    # value sets. The leaf-by-leaf pin, the control that capping only the clause
+    # row is STILL unbounded, and the proof that six of the eight caps equal
+    # `parse_review`'s own post-parse slices are all in
+    # tests/test_automod_schema_bounds.py; the other verdict schemas'
+    # maxLength-absent nodes (#2216's to reverse) are untouched and still green.
+    from tests.test_automod_schema_bounds import string_leaves
+    open_strings = {path: node for path, node in string_leaves(s).items()
+                    if not node.get("enum")}
+    assert len(open_strings) == 8, (
+        f"a grader-writable string appeared or vanished: {sorted(open_strings)}")
+    for path, node in open_strings.items():
+        assert isinstance(node.get("maxLength"), int) and node["maxLength"] > 0, (
+            f"{path} is uncapped again")
 
 
 def test_the_grader_is_denied_every_automod_verb_and_every_writer():

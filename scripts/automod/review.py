@@ -159,8 +159,74 @@ SAME_AS_PRIOR_DESC = (
 )
 
 # Built from the tuples above, not restated (the triage schema's rule: one
-# list, or a value lands in the grammar and not the validator). No maxLength:
-# the decoder would stop mid-sentence at it.
+# list, or a value lands in the grammar and not the validator).
+
+#: #2240 — the ceiling on every string leaf below. Six of the eight open strings
+#: in this schema are capped at exactly the slice `parse_review` already applies
+#: to that same value after parsing — clause `note` to 600, honesty `file` to 200
+#: and `problem` to 300, `seam` to 300, `summary` and `amendments_note` to 600 —
+#: so the grammar never shortens a value the parser would have kept, and
+#: tests/test_automod_schema_bounds.py re-reads each slice out of `parse_review`'s
+#: own source and refuses a cap that has drifted from it. The two path fields have
+#: no slice to read off, so their caps are sized above the longest value this
+#: grader has ever emitted for them in the promotion ledger: `evidence_path`
+#: peaked at 95 characters (against a longest tracked path in this repo of 100 —
+#: `git ls-files | awk '{print length}' | sort -n | tail -1`) and `test_node_id`
+#: at 420. A cap below the longest value a field can hold would trade a loud
+#: truncation for a silent one, which is why none of them sit near what the
+#: grader writes.
+EVIDENCE_PATH_MAX = 300
+TEST_NODE_ID_MAX = 600
+CLAUSE_NOTE_MAX = 600
+HONESTY_FILE_MAX = 200
+HONESTY_PROBLEM_MAX = 300
+SEAM_MAX = 300
+SUMMARY_MAX = 600
+AMENDMENTS_NOTE_MAX = 600
+
+# Every string leaf above carries a positive `maxLength`, and that is the whole
+# point of #2240. `app.harness.finalizer` reads a schema with an open string as
+# "this completion could need more room", so when the review grader's object ran
+# to `harness.finalizer.max_tokens` it was told to raise that knob — and eleven
+# rows of the promotion ledger say exactly that. Nine are `vault_review`, each of
+# them `kind: skipped` with `clauses: []`, so the change landed and no clause was
+# ever graded (items 868, 1233, 1563, 1618, 1885, 1886, 2126, 2230, 2226), and two
+# are `review` (rounds SM_20260921_082817 and SM_20261004_140459); the knob they
+# named is 8192, and #1706's
+# `app/harness/tests/test_finalizer.py::test_a_cut_under_a_schema_that_caps_every_field_is_a_divergence`
+# exists precisely to stop a reader being sent to a config value that cannot help.
+#
+# Those eleven rows have history now. They are committed verbatim as
+# `~/obsidian/backlog/data/2026-10-05.2240-truncation-witness.jsonl` — 11 lines, and
+# `wc -l` of that file is the figure this comment quotes — with the same bytes in
+# `tests/fixtures/promotions_review_truncation_rows_2026-10-05-item2240.jsonl` so the
+# suite can open them (the gate runs with HOME at the round home, where `~/obsidian`
+# is not there and a node reading the vault would skip and pin nothing) and
+# re-derived from them on every run by
+# `tests/test_automod_schema_bounds.py::test_the_committed_witness_holds_the_eleven_rows_the_comment_counts`.
+# The witness carries a date because the undated promotions-mirror path in that
+# directory is retired, and
+# `tests/test_failure_ledger_witness.py::test_the_witness_is_a_dated_file_not_the_retired_mirror_path`
+# keeps it absent — a witness standing there reads as the 33 MB copy coming back.
+# (The mirror's name is spelled out in that node, not here: naming it under `scripts/`
+# is what `tests/test_automod_vault_round.py::test_no_reader_under_tests_or_scripts_opens_the_retired_mirror`
+# refuses to files outside its permitted set.)
+# To re-count the LIVE ledger (what the owed 7-day check does, since the ledger is
+# append-only state in no tree): `grep '"event": "vault_review"'
+# ~/.local/state/lloyd-automod/promotions.jsonl | grep -c 'output truncated at'`.
+#
+# What this comment said before #2240 was that a maxLength must not appear at all,
+# because "the decoder would stop mid-sentence at it". That is true of the decoder
+# and it was the wrong trade: every cap above sits at or above the longest value
+# this grader has emitted for its field, so none of them can cut a real verdict,
+# and the alternative to stopping at the cap is 8192 tokens of whitespace. Capping
+# makes the diagnosis honest, it does not promise the runaway stops: whether a
+# four-to-five-clause grading now fits inside the budget is what the owed 7-day
+# re-count of those rows measures once this is live, and if it does not the residue
+# is the #1431 reasoning tax (`finalizer.py`: thinking is on for the finalizer and
+# draws from the same `max_tokens`) — a budget question, and Alan's half. Same
+# shape as #1706 (`workers/sources/deep_research.py`) and #2197
+# (`workers/sources/board_steward.py`).
 REVIEW_SCHEMA: dict = {
     "type": "object",
     "title": "automod_review",
@@ -185,16 +251,17 @@ REVIEW_SCHEMA: dict = {
                                             "or a restart). post_landing REQUIRES "
                                             "evidence_path pointing at the mechanism; "
                                             "without one it is recorded as partial.")},
-                "evidence_path": {"type": "string",
+                "evidence_path": {"type": "string", "maxLength": EVIDENCE_PATH_MAX,
                                   "description": "Worktree-relative file the evidence is in. Empty if none."},
                 "evidence_line": {"type": "integer", "description": "Line in evidence_path, or 0."},
-                "test_node_id": {"type": "string",
+                "test_node_id": {"type": "string", "maxLength": TEST_NODE_ID_MAX,
                                  "description": ("The pytest node id that exercises THIS clause's "
                                                  "breaking input, in a test file this diff changed. "
                                                  "Empty if no such test exists.")},
                 "how_verified": {"type": "string", "enum": list(HOW_VERIFIED),
                                  "description": "ran: you executed it; read: you read the code and test; inferred: neither."},
-                "note": {"type": "string", "description": "One or two sentences: what is missing, or what you saw."},
+                "note": {"type": "string", "maxLength": CLAUSE_NOTE_MAX,
+                         "description": "One or two sentences: what is missing, or what you saw."},
             },
             "required": ["clause", "verdict", "evidence_path", "evidence_line",
                          "test_node_id", "how_verified", "note"],
@@ -202,13 +269,14 @@ REVIEW_SCHEMA: dict = {
         }},
         "test_honesty": {"type": "array", "items": {
             "type": "object",
-            "properties": {"file": {"type": "string"}, "line": {"type": "integer"},
+            "properties": {"file": {"type": "string", "maxLength": HONESTY_FILE_MAX},
+                           "line": {"type": "integer"},
                            "severity": {"type": "string", "enum": list(HONESTY_SEVERITIES),
                                         "description": ("blocking: the test cannot fail, asserts "
                                                         "nothing about the code it names, or was "
                                                         "weakened. advisory: anything else the "
                                                         "author should know.")},
-                           "problem": {"type": "string"},
+                           "problem": {"type": "string", "maxLength": HONESTY_PROBLEM_MAX},
                            "actionable_in_round": {"type": "boolean",
                                                    "description": ACTIONABLE_DESC},
                            "same_as_prior": {"type": "boolean",
@@ -221,7 +289,7 @@ REVIEW_SCHEMA: dict = {
         "seams_unverified": {"type": "array", "items": {
             "type": "object",
             "properties": {
-                "seam": {"type": "string",
+                "seam": {"type": "string", "maxLength": SEAM_MAX,
                          "description": "The process boundary, and where the change crosses it."},
                 "testable_before_landing": {"type": "boolean",
                                             "description": ("true if a test in this repo could "
@@ -245,9 +313,10 @@ REVIEW_SCHEMA: dict = {
                           "description": ("true unless an <amendments> block was given and "
                                           "an amended clause weakens what the item asked "
                                           "for. Always true when there were no amendments.")},
-        "amendments_note": {"type": "string",
+        "amendments_note": {"type": "string", "maxLength": AMENDMENTS_NOTE_MAX,
                             "description": "Why an amendment is refused; empty otherwise."},
-        "summary": {"type": "string", "description": "Two sentences for the round's author."},
+        "summary": {"type": "string", "maxLength": SUMMARY_MAX,
+                    "description": "Two sentences for the round's author."},
     },
     "required": ["premise", "clauses", "test_honesty", "seams_unverified",
                  "amendments_ok", "amendments_note", "summary"],
