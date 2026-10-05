@@ -330,6 +330,153 @@ def test_a_pathspec_commit_still_names_state_that_was_already_staged(vault_repo)
 
 
 # ---------------------------------------------------------------------------
+# #2245: another writer's already-staged deletion must not cost this commit.
+#
+# The staging step builds its path list from
+# `git status --porcelain=v1 --untracked-files=all --no-renames` and hands it to
+# `git add -A --`. `--no-renames` reports a staged rename as its SOURCE with a
+# staged-deletion status (`D  p`), and `git add -A -- p` on an absent `p` is fatal:
+# "fatal: pathspec 'p' did not match any files", rc 128, which under
+# `set -euo pipefail` aborts the wrapper with no commit at all. That is what happened
+# at 15:52Z on 2026-10-05: another job's staged `git mv` of the promotions ledger to
+# a dated witness name. The rename's SOURCE sat under `backlog/`, so it was inside
+# task #24's own pathspec too — and so the
+# pre-flight rollback snapshot and the post-flight commit both died, for ~20 minutes,
+# until the owning job committed its rename (the vault's `7786c598`). The fallback
+# the run fell back to, `842ad773`, bypassed this wrapper's attribution entirely.
+#
+# These are the three shapes the fix has to separate: a deletion ALREADY IN THE
+# INDEX whose path is gone (skip — the index already says it), a deletion only in the
+# worktree (add it — `git add -A` succeeds because the pathspec matches the index
+# entry), and a pathspec that merely holds no change (skip it, which the wrapper has
+# done since #1070 and must keep doing).
+# ---------------------------------------------------------------------------
+
+#: The pair the fixture renames, in the shape the incident's pair had. The real pair
+#: is the retired promotions mirror and its dated witness name — vault `7786c598`
+#: landed it — and this file cites that sha rather than the path, because
+#: tests/test_automod_vault_round.py refuses a new file that names the mirror.
+LEDGER = "backlog/data/ledger.jsonl"
+WITNESS = "backlog/data/2026-10-05.2216-witness.jsonl"
+
+
+def _stage_rename(vault_repo: Path) -> None:
+    """Commit one file, then `git mv` it and leave the rename UNCOMMITTED, which is
+    the state that blocked task #24."""
+    _write(vault_repo, LEDGER, "board,at,round\nlloyd,2026-10-04,SM_x\n")
+    _git(vault_repo, "add", LEDGER)
+    _git(vault_repo, "commit", "-qm", "the promotions ledger exists at the old path")
+    _git(vault_repo, "mv", LEDGER, WITNESS)
+
+
+def test_a_staged_rename_left_by_another_writer_does_not_stop_the_commit(vault_repo):
+    """The item's clause 1, and the incident itself: the rename is the ONLY thing
+    dirty, and the invocation is the pre-flight one: no pathspec.
+
+    Before the fix this exits 128 and commits nothing, which is how a job lost its
+    rollback snapshot: the `git status` read the staging step scans reports the
+    rename's SOURCE as `D  <ledger's old path>`, that path is not in the
+    worktree, and `git add -A` refuses to name it. The assertion is not merely that
+    the wrapper survived: the rename has to be IN the commit, because the index is
+    what `git commit` reads and a wrapper that skipped the whole thing would also
+    exit 0.
+    """
+    _stage_rename(vault_repo)
+    before = _head(vault_repo)
+    proc = _run_wrapper(vault_repo, "autonomy-data-pipeline: pre-flight 2026-10-05")
+    assert proc.returncode == 0, (
+        f"another writer's staged rename cost this commit again: {proc.returncode} "
+        f"{proc.stderr}")
+    assert _head(vault_repo) != before, (
+        f"exit 0 with no commit is the other way to fail this clause: {proc.stderr}")
+    assert _git(vault_repo, "status", "--porcelain=v1",
+                "--untracked-files=all").stdout.strip() == "", (
+        "the rename this invocation swept up is still uncommitted afterwards")
+    body = _body(vault_repo)
+    assert UNATTRIBUTED in body, body
+    assert WITNESS in _paths_in(body.split(UNATTRIBUTED, 1)[1]), body
+
+
+def test_a_lone_staged_deletion_with_nothing_else_dirty_still_lands_a_commit(
+        vault_repo):
+    """The same index state with no rename destination to add, which is the shape
+    that turns the fix into a silent no-op if it is written carelessly.
+
+    A `git rm` staged and left uncommitted by a crashed run makes the skipped record
+    the tree's ONLY record. Dropping it from the `git add` list is right, but a fix
+    that then falls through to the wrapper's "nothing to commit (clean tree on main)"
+    fast exit would exit 0, commit nothing, and tell the reader the tree was clean
+    when the index plainly is not. The deletion has to reach a commit.
+    """
+    _write(vault_repo, LEDGER, "board,at,round\n")
+    _git(vault_repo, "add", LEDGER)
+    _git(vault_repo, "commit", "-qm", "the promotions ledger exists at the old path")
+    _git(vault_repo, "rm", "-q", LEDGER)
+    before = _head(vault_repo)
+    proc = _run_wrapper(vault_repo, "vault-maintenance: pre-run snapshot")
+    assert proc.returncode == 0, proc.stderr
+    assert "nothing to commit" not in proc.stderr, (
+        f"a tree with a staged deletion is not clean: {proc.stderr}")
+    assert _head(vault_repo) != before, proc.stderr
+    assert _git(vault_repo, "show", "--format=", "--name-only", "HEAD").stdout.split() \
+        == [LEDGER], _commit_paths(vault_repo)
+    assert _git(vault_repo, "status", "--porcelain=v1").stdout.strip() == ""
+
+
+def test_a_staged_rename_source_under_a_named_directory_does_not_stop_a_scoped_commit(
+        vault_repo):
+    """The item's clause 2: task #24's second dead route, the post-flight commit.
+
+    `-- memory/ backlog/ autonomy/` is that run's literal, and the rename source sits
+    under `backlog/`, so narrowing did not help — the directory pathspec pulled the
+    same `D ` record into the scan and the same fatal followed. The named directory
+    with nothing in it (`autonomy/`, committed and untouched here) is the other half
+    of this clause: a pathspec holding no change has to stay skipped rather than
+    become fatal, which is the #1070 behaviour the staging rewrite must not lose.
+    """
+    _stage_rename(vault_repo)
+    _write(vault_repo, "memory/vault-maintenance/2026-10-05.md", "## Run 15:52Z\n")
+    proc = _run_wrapper(vault_repo, "autonomy-data-pipeline: 2026-10-05",
+                        paths=["memory/", "backlog/", "autonomy/"])
+    assert proc.returncode == 0, proc.stderr
+    committed = _commit_paths(vault_repo)
+    assert "memory/vault-maintenance/2026-10-05.md" in committed, (
+        f"the caller's own write did not land: {committed}")
+    assert WITNESS in committed, (
+        f"the rename the index already held is not in the commit: {committed}")
+
+
+def test_a_worktree_deletion_nothing_has_staged_is_still_staged_and_committed(
+        vault_repo):
+    """The item's clause 3, and the trap the skip rule could walk into.
+
+    A file deleted in the worktree with nothing staged (` D p`) is ALSO absent from
+    the worktree, and `git add -A -- p` succeeds for it because the pathspec matches
+    the index entry the path still has — so a filter keyed on worktree-absence alone
+    would quietly stop this wrapper ever committing a deletion, and every existing
+    node here would stay green doing it. The separator is the INDEX column, not the
+    missing file.
+
+    Both shapes are in one tree here, which is the case that would pass a weaker
+    test: the staged rename source has to be skipped and the unstaged deletion
+    staged, in the same run, into the same commit.
+    """
+    _stage_rename(vault_repo)
+    Path(vault_repo / "seed.md").unlink()
+    records = _git(vault_repo, "status", "--porcelain=v1", "--no-renames").stdout
+    assert f"D  {LEDGER}" in records.splitlines(), records
+    assert " D seed.md" in records.splitlines(), (
+        f"the fixture is not the two-shape tree this node is about: {records}")
+    proc = _run_wrapper(vault_repo, "vault-maintenance: clean up seed.md")
+    assert proc.returncode == 0, proc.stderr
+    committed = _git(vault_repo, "show", "--format=", "--name-status",
+                     "HEAD").stdout.split()
+    assert "D" in committed and "seed.md" in committed, (
+        f"a worktree-only deletion was dropped from the commit: {committed}")
+    assert LEDGER not in _dirty_paths(vault_repo), _dirty_paths(vault_repo)
+
+
+# ---------------------------------------------------------------------------
 # Clause 3: what the wrapper already guaranteed, and must still guarantee.
 # ---------------------------------------------------------------------------
 

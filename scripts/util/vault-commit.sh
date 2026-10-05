@@ -251,18 +251,49 @@ fi
 
 mapfile -d '' -t RECORDS < "$TMP_CHANGED"
 CHANGED=()
+SKIPPED=()
 for record in ${RECORDS[@]+"${RECORDS[@]}"}; do
     if [ -n "$record" ]; then
-        CHANGED+=("${record:3}")
+        path="${record:3}"
+        # Skip a record whose INDEX column is `D` whose path is absent from the
+        # worktree: the deletion is already recorded in the index, which is what
+        # `git commit` reads, and `git add -A -- p` on an absent p dies with
+        # "fatal: pathspec 'p' did not match any files" (rc 128), aborting the whole
+        # commit under `set -euo pipefail`. #2245: another job's staged rename of the
+        # promotions ledger to its dated witness name — which `--no-renames` reports as
+        # exactly this record for the SOURCE — killed task #24's pre-flight snapshot and
+        # its path-scoped commit for ~20 minutes, and both routes hit the same pathspec
+        # because the source sits under a directory the scoped call names. The vault
+        # commit that finally landed that rename is 7786c598.
+        #
+        # The `-e` test is what keeps this from being "skip anything absent". A plain
+        # worktree deletion (` D p`, nothing staged) is absent too, and `git add -A --
+        # p` SUCCEEDS for it because the pathspec matches the entry the index still
+        # holds, so filtering on absence alone would quietly stop this wrapper
+        # committing deletions. Only the first column separates the two: it is the
+        # index's own answer about that path.
+        if [ "${record:0:1}" = "D" ] && [ ! -e "$path" ]; then
+            SKIPPED+=("$path")
+            continue
+        fi
+        CHANGED+=("$path")
     fi
 done
 
 if [ ${#CHANGED[@]} -eq 0 ]; then
-    echo "vault-commit.sh: nothing to commit (clean tree on main)" >&2
-    exit 0
+    # Two different trees reach here. A genuinely clean one still takes the fast
+    # exit; a tree whose only record was a deletion already in the index (a
+    # lone staged `git rm`, with no destination to add) does not, because the index
+    # is not clean and `git commit` would take it. Say nothing about a clean tree in
+    # that case and let the readback below answer from the index — the same source of
+    # truth the commit itself reads.
+    if [ ${#SKIPPED[@]} -eq 0 ]; then
+        echo "vault-commit.sh: nothing to commit (clean tree on main)" >&2
+        exit 0
+    fi
+else
+    git add -A -- "${CHANGED[@]}"
 fi
-
-git add -A -- "${CHANGED[@]}"
 
 # Read the answer back off the index rather than trusting the list above: `git
 # commit` commits the index, so anything another writer left staged is in this
