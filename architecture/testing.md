@@ -299,6 +299,34 @@ every frontend round nor read as tested. A triage clause on the `frontend`
 surface can name a `web/src/**.test.ts` file the way a code clause names
 `tests/<file>.py`.
 
+## The dashboard pins' dependency arrives by symlink from the parent checkout
+
+Since 2026-10-05 (#2233), a pytest run in a **linked git worktree** of this repo is
+given the frontend its own tree lacks: `tests/conftest.py` and
+`tests/test_dashboard_responsive.py::_vite_binary` both call
+`tests/frontend_deps.ensure_node_modules_link`, which resolves the main working tree
+from this tree's `.git` pointer file and, if THAT tree has a working
+`web/node_modules/.bin/vite`, makes `<this tree>/web/node_modules` a symlink to it. A
+symlink, never a copy (the install is 641 MB, and `package.json` and the lockfile are
+paths the gate denies, so a copy could only ever be a stale duplicate), and never over
+an existing `web/node_modules` — real directory or dangling link, it is left exactly as
+found. The path is gitignored (`.gitignore:13`), so the link is invisible to `git
+status` and can never enter a diff.
+
+Why it exists: the ten pins in `tests/test_dashboard_responsive.py` skip when their
+tree has no vite, and before this the only thing that ever created one was the gate's
+`frontend` rung, which returns early for a diff that did not touch `web/`. So every
+non-frontend round skipped ten tests, the suite crossed `PYTEST_MAX_SKIPPED = 40`
+(44-45 observed on 2026-10-05), and the `tests` rung failed rounds for a reason no diff
+could answer. The ceiling is unchanged at 40 — the fix is that the pins run, not that
+the ceiling rises, which is the route #2214 asks a human to promote instead. What the
+hook must never do is turn an unavailable dependency into a failure: on a box where
+nobody ran `npm install`, the ten nodes keep skipping with the reason they always
+named, the `DASHBOARD_PINS_NOT_EXECUTED` finding is still printed, and the run exits 0.
+Provisioning therefore happens in `tests/`, not in `scripts/automod/gate.py`: the gate
+imports itself from the live tree, so a gate-side fix could never land itself, while
+pytest runs with `cwd=` the worktree and executes the round's own conftest.
+
 ## Guard vacuity
 
 `scripts/maintenance/guard_vacuity.py` probes production guards by running each

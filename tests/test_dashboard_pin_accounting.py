@@ -38,17 +38,19 @@ TESTS = Path(__file__).resolve().parent
 REPO = TESTS.parent
 PIN_FILE = TESTS / "test_dashboard_responsive.py"
 
-#: The three files that make the pin file run: its browser probe, the accounting
-#: helper, and the pins themselves. All three go into the scratch tree together —
-#: `dashboard_pins.py` is a sibling module import, so copying the pin file alone
-#: would make the scratch run die on an ImportError and read as a failure for the
-#: wrong reason.
+#: The files that make the pin file run: its browser probe, the accounting helper,
+#: the module that provisions its frontend dependency (#2233), and the pins
+#: themselves. All of them go into the scratch tree together — `dashboard_pins.py` and
+#: `frontend_deps.py` are sibling module imports, so copying the pin file alone would
+#: make the scratch run die on an ImportError and read as a failure for the wrong
+#: reason.
 # (source relative to the repo, destination relative to the scratch root). The probe
 # lives under scripts/, not tests/ — `PROBE_PATH` is `ROOT/scripts/maintenance/
-# dashboard_mobile_probe.py` (test_dashboard_responsive.py:65) — so a scratch tree
+# dashboard_mobile_probe.py` (test_dashboard_responsive.py) — so a scratch tree
 # that copied only tests/ would die on an unresolvable probe the first time a pin
 # reached `_measure`, which is a different failure from the one under test.
 COPIED = ("tests/dashboard_pins.py", "tests/test_dashboard_responsive.py",
+          "tests/frontend_deps.py",
           "scripts/maintenance/dashboard_mobile_probe.py")
 
 def load(name: str):
@@ -468,6 +470,268 @@ def test_the_undeclared_finding_is_emitted_once_per_file_however_many_skip_sites
     assert len(caught) == 1, (
         f"many skip sites, but the ledger spoke {len(caught)} times: "
         + "\n".join(str(w.message) for w in caught))
+
+
+def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
+    """Run one git command in `repo` and refuse to continue if it failed."""
+    res = subprocess.run(["git", *args], cwd=str(repo), capture_output=True,
+                         text=True, timeout=180)
+    assert res.returncode == 0, f"git {' '.join(args)}: {res.stderr[-500:]}"
+    return res
+
+
+def _nested_env() -> dict:
+    """The environment a scratch pytest run gets: the real one, minus the declaration.
+
+    Same contract as `_scratch`: a run must not inherit the gate's declaration, or
+    every skip in a scratch tree would be a failure and the scratch test would be
+    testing the environment instead of the accounting.
+    """
+    env = dict(os.environ, PYTEST_DISABLE_PLUGIN_AUTOLOAD="")
+    env.pop(dp.DECLARED_ENV, None)
+    return env
+
+
+def _linked_worktree(tmp_path: Path, *, parent_has_vite: bool = False):
+    """A real linked git worktree of a scratch checkout, with no `web/node_modules` of its own.
+
+    The geometry every #2233 clause is about: the tests rung's worktree is a linked
+    worktree — a round's tree is `git worktree add <round>/home/lloyd` off the live
+    checkout (`scripts/automod/worktree.py`) — and a tree it creates has no
+    `web/node_modules` at all, because the path is gitignored (`.gitignore:13`) and only
+    the gate's `rung_frontend` ever linked one, for a diff that touched `web/`. A plain
+    `tmp_path` cannot stand in for that: finding the parent checkout IS resolving this
+    tree's `.git` pointer file, so a tree that is not a linked worktree has no parent to
+    find and the whole question is answered before it is asked.
+
+    The scratch checkout carries the four shipped files of `COPIED` plus a `web/` tree,
+    so the pin file in it is the real one. `parent_has_vite` decides what the PARENT's
+    install is:
+
+    * True  — a shell script that records the argv it was called with and exits 0, at
+      `web/node_modules/.bin/vite`. It is a stand-in for vite in the only sense that
+      matters to these clauses: it is the parent's file, and executing it proves the
+      child reached across the link. It is NOT a served dashboard, so the pins that run
+      through it stop at the next dependency and report that, which is why the clause-1
+      assertion here is about the reason, and why "the pins actually measure" is pinned
+      by the gate's own run instead (`tests/test_gate_parallel_tests.py` and every real
+      round's `tests` rung detail).
+    * False — the parent has no install: the box `tests/dashboard_pins.py`'s skip exists
+      for, and the box clause 2 says must keep passing.
+
+    Returns `(parent, child, env, argv_witness)`.
+    """
+    parent = tmp_path / "parent-checkout"
+    (parent / "tests").mkdir(parents=True)
+    (parent / "scripts" / "maintenance").mkdir(parents=True)
+    (parent / "web").mkdir()
+    for rel in COPIED:
+        dst = parent / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(REPO / rel, dst)
+    (parent / "web" / "index.html").write_text("<!doctype html><html></html>\n",
+                                               encoding="utf-8")
+    (parent / ".gitignore").write_text("/web/node_modules\n", encoding="utf-8")
+    _git(parent, "init", "-q")
+    _git(parent, "add", "-A")
+    _git(parent, "-c", "user.email=pins@example.invalid", "-c", "user.name=pins",
+         "commit", "-q", "-m", "scratch checkout with an ignored web/node_modules")
+
+    child = tmp_path / "linked-worktree"
+    _git(parent, "worktree", "add", "--detach", str(child), "HEAD")
+    assert not (child / "web" / "node_modules").exists(), (
+        "the tree under test starts with its own web/node_modules, so every clause "
+        "below would be measuring a case that never happens")
+
+    witness = tmp_path / "parent-vite-argv.txt"
+    if parent_has_vite:
+        bin_dir = parent / "web" / "node_modules" / ".bin"
+        bin_dir.mkdir(parents=True)
+        vite = bin_dir / "vite"
+        vite.write_text(f"#!/bin/sh\necho \"$@\" > {str(witness)!r}\nexit 0\n",
+                        encoding="utf-8")
+        vite.chmod(0o755)
+    return parent, child, _nested_env(), witness
+
+
+def _finding_lines(out: str) -> str:
+    """Every line of a run's output that carries the marker, joined for assertions."""
+    return "\n".join(ln for ln in out.splitlines() if MARKER in ln)
+
+
+def test_a_linked_worktree_reaches_the_parent_checkout_vite(tmp_path):
+    """Clause 1: a worktree with no frontend of its own must not skip for that reason
+    when the checkout it was branched from has one.
+
+    The failure this pins is the one every non-`web/` round on this box died on: ten
+    pins skipped with `web/node_modules has no vite`, the suite went to 44-45 skips, and
+    the tests rung's ceiling of 40 failed a diff that had skipped nothing of its own
+    (`SM_20261005_083944`, `SM_20261005_091634`). The live tree has the install; the
+    round's tree simply could not see it.
+
+    What is asserted is the exact shape of clause 1 and nothing more. The run reaches
+    the parent's binary — proven by the parent's own stub vite recording the argv it was
+    handed, which nothing but executing that file can do — and the skip reason that
+    comes back is NOT the missing-install reason. It is `vite exited early`, because the
+    stub is not a dev server: the dependency was found, and the next one was not. That
+    swap of reasons is the whole clause; whether the found vite then MEASURES the
+    dashboard is a property of a real install, and it is pinned where a real install
+    runs it — the pins executing in every real round's `tests` rung.
+    """
+    parent, child, env, witness = _linked_worktree(tmp_path, parent_has_vite=True)
+    res = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "tests/test_dashboard_responsive.py",
+         "-p", "no:cacheprovider"],
+        cwd=str(child), env=env, capture_output=True, text=True, timeout=600)
+    out = res.stdout + "\n" + res.stderr
+    assert res.returncode == 0, f"the hook turned an unavailable dev server into a failure:\n{out[-2500:]}"
+
+    link = child / "web" / "node_modules"
+    assert link.is_symlink(), (
+        "no link was created, so the pin file was still looking at an empty web/\n" + out[-1500:])
+    assert Path(os.readlink(link)) == (parent / "web" / "node_modules"), (
+        f"the link points somewhere other than the parent checkout's install: "
+        f"{os.readlink(link)!r}")
+    assert witness.is_file(), (
+        "the child never executed the PARENT's vite, so whatever it found was not the "
+        "parent's install\n" + out[-1500:])
+    assert "--port" in witness.read_text(encoding="utf-8"), witness.read_text()
+
+    line = _finding_lines(out)
+    assert line, f"no finding was printed at all:\n{out[-1500:]}"
+    assert "has no vite" not in line, (
+        f"a pin still skipped for the reason #2233 exists to remove: {line}")
+    assert "vite exited early" in line, (
+        f"the run did not get as far as starting the parent's vite: {line}")
+    named, total, collected = _pin_counts(child, env, line)
+    assert named == total == collected > 0, (
+        f"the declaration-free finding is supposed to name every pin in the file, and "
+        f"it named {named} of {total}, with {collected} collected")
+
+
+def test_a_parent_checkout_without_vite_keeps_the_skip_and_the_run_green(tmp_path):
+    """Clause 2: with no vite in the parent checkout either, the hook must change
+    nothing — same ten skips, same reason, same finding, exit 0.
+
+    This is the half that makes the fix safe rather than merely effective. A hook that
+    linked eagerly and left the pin file looking for a vite that is not there would
+    convert a skip into an error, and every box where nobody ran `npm install` —
+    including a fresh clone and any CI runner — would go red on a diff that touched
+    nothing. The skip that `tests/dashboard_pins.py`'s docstring defends has to survive
+    the provisioning exactly as it was.
+    """
+    parent, child, env, witness = _linked_worktree(tmp_path, parent_has_vite=False)
+    res = _run_pytest(child, env)
+    out = res.stdout + "\n" + res.stderr
+    assert res.returncode == 0, f"a box with no frontend install went red:\n{out[-2500:]}"
+    assert not witness.exists(), "the parent has no vite to run, yet something ran"
+
+    line = _finding_lines(out)
+    assert line and MARKER in line, f"the finding vanished: {out[-1500:]}"
+    assert "web/node_modules has no vite" in line, (
+        f"the skip reason changed on a box that never had the dependency: {line}")
+    named, total, collected = _pin_counts(child, env, line)
+    assert named == total == collected > 0, (
+        f"every pin is supposed to skip with the reason it always had, and the finding "
+        f"named {named} of {total}, with {collected} collected")
+    assert f"{total} skipped" in out, (
+        f"pytest itself did not skip the {total} nodes the finding named:\n{out[-1500:]}")
+    assert not os.path.lexists(child / "web" / "node_modules"), (
+        "the hook created a link to a parent that has no vite, which is a promise the "
+        "pin file cannot keep")
+
+
+def test_the_link_is_a_symlink_and_an_existing_node_modules_is_left_alone(tmp_path):
+    """Clause 3: the dependency arrives as a link, never a copy, and a tree that
+    already has one is not touched — nothing created, nothing removed.
+
+    Two reasons this is a clause and not a detail. The install is 641 MB on this box, so
+    a hook that copied it would put 641 MB into every round worktree and turn a
+    0.2-second `git worktree add` into a minutes-long one; and a hook that replaced an
+    existing `web/node_modules` would destroy a developer's real install — the one thing
+    in the tree that a round has no authority over. The link is also what makes the
+    answer honest: it points at the live checkout's install, so when the live tree
+    re-runs `npm install`, the round sees the same packages instead of a stale copy of
+    them.
+    """
+    fd = load("frontend_deps")
+
+    # (a) a tree that already has a real directory of its own keeps it, byte for byte.
+    parent, child, env, witness = _linked_worktree(tmp_path, parent_has_vite=True)
+    own = child / "web" / "node_modules"
+    (own / ".bin").mkdir(parents=True)
+    (own / ".bin" / "vite").write_text("#!/bin/sh\nexit 7\n", encoding="utf-8")
+    (own / ".bin" / "vite").chmod(0o755)
+    (own / "its-own-file.txt").write_text("mine\n", encoding="utf-8")
+    before = sorted(os.listdir(child / "web"))
+    assert fd.ensure_node_modules_link(child) == fd.PRESENT
+    assert sorted(os.listdir(child / "web")) == before, (
+        "the hook changed the contents of web/ in a tree that already had an install")
+    assert not own.is_symlink(), "a real install was replaced by a symlink"
+    assert (own / "its-own-file.txt").read_text(encoding="utf-8") == "mine\n", (
+        "the tree's own file did not survive the hook")
+    res = _run_pytest(child, env)
+    out = res.stdout + "\n" + res.stderr
+    assert res.returncode == 0, f"the tree's own install made the run red:\n{out[-2000:]}"
+    assert not witness.exists(), (
+        "the parent's vite ran although this tree has one of its own — the tree's own "
+        "install is the one that must answer")
+
+    # (b) a tree with nothing gets a link, and only a link.
+    parent2, child2, env2, _ = _linked_worktree(tmp_path / "second", parent_has_vite=True)
+    before2 = sorted(os.listdir(child2 / "web"))
+    assert fd.ensure_node_modules_link(child2) == fd.LINKED
+    link = child2 / "web" / "node_modules"
+    assert link.is_symlink(), (
+        "a directory was produced where a symlink was required: the install is 641 MB "
+        "and a copy would be a regression, not an implementation")
+    assert Path(os.readlink(link)) == (parent2 / "web" / "node_modules")
+    assert sorted(os.listdir(child2 / "web")) == before2 + ["node_modules"], (
+        "the hook put something in web/ besides the one link")
+    # Asking twice is the ordinary case — conftest at import, then the pin file when it
+    # resolves its dependency — and the second ask must be a no-op, not a replacement.
+    assert fd.ensure_node_modules_link(child2) == fd.PRESENT
+    assert link.is_symlink() and Path(os.readlink(link)) == (parent2 / "web" / "node_modules")
+
+    # (c) a tree that is not a linked worktree has no parent to inherit from, and says
+    # so instead of guessing one.
+    loose = tmp_path / "not-a-checkout"
+    (loose / "web").mkdir(parents=True)
+    assert fd.ensure_node_modules_link(loose) == fd.UNAVAILABLE
+    assert not os.path.lexists(loose / "web" / "node_modules")
+
+
+def test_both_shipped_call_sites_ask_for_the_link_at_import():
+    """The seam between the shipped files, read from the files themselves.
+
+    `frontend_deps.py` is a mechanism, and a mechanism nobody calls is dead code with a
+    docstring. It has exactly two callers and each is load-bearing for a different
+    reason: `tests/conftest.py` asks once per pytest process at import time, which is
+    what puts the link in place before the first fixture decides anything and what makes
+    every xdist worker of the parallel tests rung ask (hence the race in
+    `tests/test_gate_parallel_tests.py`); and `test_dashboard_responsive.py` asks again
+    where the dependency is resolved, which is what keeps the answer identical in a
+    scratch run that loads no conftest at all — the runs above.
+
+    An indented call is a fixture body, and a fixture body runs after collection has
+    already asked whether the frontend exists, so the module-level call site is asserted
+    as such rather than assumed.
+    """
+    conftest = (TESTS / "conftest.py").read_text(encoding="utf-8")
+    lines = conftest.splitlines()
+    asks = [ln for ln in lines if "frontend_deps.ensure_node_modules_link" in ln]
+    assert len(asks) == 1, (
+        f"conftest.py should ask for the link in exactly one place, found {asks}")
+    assert any(ln == "_provision_frontend_deps()" for ln in lines), (
+        "the provisioning hook is defined but nothing calls it at import, so no run "
+        "would ever get the link")
+
+    pin_src = PIN_FILE.read_text(encoding="utf-8")
+    assert "frontend_deps.ensure_node_modules_link(ROOT)" in pin_src, (
+        f"{PIN_FILE.name} no longer asks for the dependency where it resolves it, so a "
+        "run that loads no conftest would be back to skipping")
+    assert "import frontend_deps" in pin_src, (
+        f"{PIN_FILE.name} calls the helper without importing it")
 
 
 def test_a_stop_the_declaration_never_promised_stays_a_skip(tmp_path, monkeypatch):

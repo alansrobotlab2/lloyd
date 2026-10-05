@@ -59,6 +59,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import dashboard_pins as dp  # noqa: E402
+import frontend_deps  # noqa: E402
 
 pytest.importorskip("playwright.sync_api", reason="playwright is not installed")
 
@@ -142,7 +143,19 @@ def _pin_identity(request):
 
 
 def _vite_binary() -> Path:
-    """The vite this tree's frontend ships (a path that may not exist)."""
+    """The vite this tree's frontend ships — a path that may not exist.
+
+    Asked first whether this tree can be given one: `frontend_deps` links the parent
+    checkout's `web/node_modules` in when this tree has none and that checkout has a
+    working vite (#2233). Before that, the only thing ever created the link was the
+    gate's `rung_frontend`, which returns early for a diff with no `web/` path — so ten
+    pins skipped in every non-frontend round and pushed the suite over the
+    `PYTEST_MAX_SKIPPED = 40` ceiling. Resolving the dependency here as well as
+    provisioning it in `conftest.py` is what keeps this file's answer the same when it is
+    run by the scratch-tree nodes of `test_dashboard_pin_accounting.py`, which load no
+    conftest at all.
+    """
+    frontend_deps.ensure_node_modules_link(ROOT)
     return WEB / "node_modules" / ".bin" / "vite"
 
 

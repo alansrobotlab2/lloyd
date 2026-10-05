@@ -16,9 +16,11 @@ verdict.
 from __future__ import annotations
 
 import re
+import os
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -409,8 +411,9 @@ def _all_pins_named(text: str) -> tuple[int, int]:
 
 
 def _scratch_gate_run(tmp_path, monkeypatch):
-    """A scratch worktree with the shipped trio, driven through the MODIFIED gate by a
-    real pytest subprocess — no scripted summary anywhere in this pair of nodes.
+    """A scratch worktree with the shipped frontend-pin files, driven through the
+    MODIFIED gate by a real pytest subprocess — no scripted summary anywhere in this
+    pair of nodes.
 
     The four nodes above feed the rung a text this file wrote, which is fair to
     distrust. Here the finding in the rung detail is text a real pytest printed about
@@ -418,12 +421,20 @@ def _scratch_gate_run(tmp_path, monkeypatch):
     reported. `_run` is pointed at a subprocess because `Gate._run` uses the worktree's
     own venv, which a scratch tree has no: the code under test is this diff's
     `_run_suite`/`_tests_pass`, not the choice of interpreter.
+
+    The tree is a plain directory, not a linked worktree, and it has no `web/` at all:
+    that is the shape these two nodes have always had, and it is also the one case
+    #2233's provisioning hook must answer with a plain no — no parent checkout to
+    inherit an install from, so the pins keep skipping and the finding these nodes read
+    is still printed. A tree that IS a linked worktree of a checkout with a vite is
+    `test_the_parallel_rung_reaches_the_parent_checkouts_install` below.
     """
-    trio = ("tests/dashboard_pins.py", "tests/test_dashboard_responsive.py",
-            "scripts/maintenance/dashboard_mobile_probe.py")
+    shipped = ("tests/dashboard_pins.py", "tests/test_dashboard_responsive.py",
+               "tests/frontend_deps.py",
+               "scripts/maintenance/dashboard_mobile_probe.py")
     repo = Path(__file__).resolve().parent.parent
     root = tmp_path / "worktree"
-    for rel in trio:
+    for rel in shipped:
         dst = root / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(repo / rel, dst)
@@ -545,3 +556,344 @@ def test_the_declaration_the_gate_makes_is_the_one_the_pytest_child_acts_on(tmp_
     assert named == total > 0, (
         f"the child failed, but not over every pin it skipped ({named} of {total}): "
         f"{counts['pin_findings']}")
+
+
+# --------------------------------------------------------------------------- #
+# #2233 — the ten dashboard pins must RUN in a round worktree, not skip, and the
+# suite-wide skip ceiling of 40 is unchanged by that. Every node below is about
+# one edge of that: the race the parallel rung creates (`tests/frontend_deps.py`
+# is called by every xdist worker through `tests/conftest.py`), the real
+# measurement in a real linked worktree, and the ceiling the pins now live under.
+# --------------------------------------------------------------------------- #
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import frontend_deps as FD  # noqa: E402
+
+
+def _scratch_linked_pair(tmp_path):
+    """A scratch parent checkout with a vite, plus a real linked worktree of it with none.
+
+    The geometry of a round: a round's tree is `git worktree add <round>/home/lloyd` off
+    the live checkout (`scripts/automod/worktree.py`), and `web/node_modules` is
+    gitignored (`.gitignore:13`), so the new tree arrives without one. `git worktree
+    add` is run for real because finding the parent IS reading this tree's `.git`
+    pointer file — a plain `tmp_path` has no parent to find, and the race below would be
+    a race about nothing.
+
+    The parent's vite is a shell stub, not a dev server: these nodes are about who
+    creates the link and in what order, and the vite's behaviour is irrelevant to that.
+    Whether the linked install then MEASURES a real dashboard is the node below this
+    one, which uses the real checkout and the real browser.
+    """
+    repo = Path(__file__).resolve().parent.parent
+    parent = tmp_path / "parent"
+    (parent / "tests").mkdir(parents=True)
+    shutil.copy2(repo / "tests" / "frontend_deps.py", parent / "tests" / "frontend_deps.py")
+    (parent / "web").mkdir()
+    (parent / "web" / "index.html").write_text("<!doctype html><html></html>\n")
+    (parent / ".gitignore").write_text("/web/node_modules\n")
+    for args in (["init", "-q"], ["add", "-A"]):
+        r = subprocess.run(["git", *args], cwd=str(parent), capture_output=True,
+                           text=True, timeout=180)
+        assert r.returncode == 0, f"git {' '.join(args)}: {r.stderr[-400:]}"
+    r = subprocess.run(
+        ["git", "-c", "user.email=pins@example.invalid", "-c", "user.name=pins",
+         "commit", "-q", "-m", "scratch parent with an ignored web/node_modules"],
+        cwd=str(parent), capture_output=True, text=True, timeout=180)
+    assert r.returncode == 0, r.stderr[-400:]
+
+    vite = parent / "web" / "node_modules" / ".bin" / "vite"
+    vite.parent.mkdir(parents=True)
+    vite.write_text("#!/bin/sh\nexit 0\n")
+    vite.chmod(0o755)
+
+    child = tmp_path / "child"
+    r = subprocess.run(["git", "-C", str(parent), "worktree", "add", "--detach",
+                        str(child), "HEAD"], capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, r.stderr[-400:]
+    assert not (child / "web" / "node_modules").exists(), (
+        "the linked tree arrived with its own node_modules, so the race below has "
+        "nothing to race for")
+    return parent, child
+
+
+def test_two_workers_racing_the_link_leave_exactly_one_creator(tmp_path):
+    """Clause 4, the racing half: two workers importing the conftest at the same instant
+    must not produce a `FileExistsError`, and must leave exactly one link.
+
+    The tests rung runs `-n <workers> --dist loadfile`, and every xdist worker imports
+    `tests/conftest.py`, which is where `#2233`'s provisioning hook is called — so the
+    first two workers to boot ask for `<tree>/web/node_modules` in the same millisecond.
+    `Path.symlink_to` on a path another worker just created raises `FileExistsError`,
+    and an exception raised from a conftest at import is not a skip: it is a collection
+    error in that worker, which the rung reads as failing tests the round did not write.
+    That is the bug this node is written against, and it is why the helper swallows the
+    error and reports the state instead.
+
+    Exactly one creator per round is not a nicety, it is the proof that the swallow did
+    not happen by both callers giving up: `linked` means "I made it", and two workers
+    both making it is the double-create the check exists to prevent.
+    """
+    parent, child = _scratch_linked_pair(tmp_path)
+    link = child / "web" / "node_modules"
+    threads, rounds = 8, 12
+
+    for round_no in range(rounds):
+        if os.path.lexists(link):
+            os.unlink(link)          # only ever the symlink this node created
+        results: list[str] = []
+        gate = threading.Barrier(threads)
+
+        def ask():
+            try:
+                gate.wait(timeout=60)
+                results.append(FD.ensure_node_modules_link(child))
+            except BaseException as exc:                       # noqa: BLE001
+                results.append(f"raised {type(exc).__name__}: {exc}")
+
+        workers = [threading.Thread(target=ask) for _ in range(threads)]
+        for w in workers:
+            w.start()
+        for w in workers:
+            w.join(timeout=120)
+        assert len(results) == threads, f"round {round_no}: a worker never reported"
+        assert not any(r.startswith("raised") for r in results), (
+            f"round {round_no}: a caller raised instead of reporting, which in a real "
+            f"worker is a collection error: {results}")
+        assert results.count(FD.LINKED) == 1, (
+            f"round {round_no}: expected exactly one creator among {threads} racing "
+            f"callers, got {results}")
+        assert set(results) == {FD.LINKED, FD.PRESENT}, results
+        assert link.is_symlink(), f"round {round_no}: the link is not a symlink: {results}"
+        assert Path(os.readlink(link)) == (parent / "web" / "node_modules")
+
+
+#: A second test file for a two-worker run, whose only job is to BE the second file.
+#:
+#: `--dist loadfile` hands one file to one worker, so with the pin file this probe is
+#: what puts two pytest processes into the race for `<tree>/web/node_modules` — the race
+#: the tests rung really creates, because each worker imports `tests/conftest.py` and the
+#: conftest is what calls the hook. Each worker writes what it saw to `link-statuses/`
+#: beside the tree under its own xdist name, so the driving process can read both answers
+#: after the run instead of trusting one worker's view of the other.
+LINK_PROBE_SRC = '''"""Generated by tests/test_gate_parallel_tests.py for #2233; not a shipped file."""
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import frontend_deps
+
+ROOT = Path(__file__).resolve().parent.parent
+STATUS = frontend_deps.ensure_node_modules_link(ROOT)
+STATUSES = ROOT / "link-statuses"
+STATUSES.mkdir(exist_ok=True)
+NAME = "%s.txt" % os.environ.get("PYTEST_XDIST_WORKER", "serial")
+(STATUSES / NAME).write_text(STATUS)
+
+
+def test_frontend_link_probe_finds_the_parents_install_through_a_link():
+    link = ROOT / "web" / "node_modules"
+    assert STATUS in (frontend_deps.LINKED, frontend_deps.PRESENT), STATUS
+    assert os.path.islink(str(link)), "the probe's tree has no link to the parent install"
+    assert (link / ".bin" / "vite").exists(), (
+        "the link exists but does not resolve to a vite: %s" % os.readlink(str(link)))
+'''
+
+
+@pytest.fixture()
+def real_linked_worktree(tmp_path):
+    """A real linked worktree of THIS checkout, with the working copies of the frontend files.
+
+    A round's tree is exactly this: a linked worktree whose parent has the 641 MB
+    `web/node_modules` the pins need and which arrives with none of its own. Nothing here
+    copies or moves an install — the whole point is that the child reaches the parent's
+    through one symlink.
+
+    The worktree is checked out at `HEAD` (that is what `git worktree add` does, and what
+    `scripts/automod/worktree.py` does for a round), then the five files the frontend pins
+    are made of are overwritten from the working tree — the same thing
+    `_scratch_gate_run` does, so the node measures the files under review rather than
+    whatever was last committed, and stays runnable mid-edit.
+    """
+    repo = Path(__file__).resolve().parent.parent
+    wt = tmp_path / "round-worktree"
+    r = subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", str(wt),
+                        "HEAD"], capture_output=True, text=True, timeout=600)
+    assert r.returncode == 0, f"git worktree add: {r.stderr[-600:]}"
+    for rel in ("tests/conftest.py", "tests/dashboard_pins.py", "tests/frontend_deps.py",
+                "tests/test_dashboard_responsive.py",
+                "scripts/maintenance/dashboard_mobile_probe.py"):
+        shutil.copy2(repo / rel, wt / rel)
+    (wt / "tests" / "test_frontend_link_probe.py").write_text(LINK_PROBE_SRC)
+    assert not (wt / "web" / "node_modules").exists(), (
+        "git put a web/node_modules into a fresh worktree, which contradicts the "
+        "premise #2233 was filed from")
+    yield repo, wt
+    subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force", str(wt)],
+                   capture_output=True, text=True, timeout=600)
+
+
+def _link_probe_command(parallel: bool) -> list[str]:
+    """The tests rung's own invocation, narrowed to one pin and the link probe.
+
+    `Gate._run_suite` builds the parallel branch as `-q -m <TESTS_MARK_EXPR> -n
+    <workers> --dist loadfile`, and what the hook under test has to survive is exactly
+    that shape; `test_a_full_run_uses_the_configured_workers_grouped_by_file` pins the
+    argv the rung builds, so this is the same command with two files and a `-k` that
+    selects one real pin (`test_no_section_overflows_its_box_on_a_phone[320]`) plus the
+    probe, which is the difference between ten seconds in this node and ninety-four.
+    Two files, because `--dist loadfile` gives one file to one worker, and two workers
+    booting at once is the race.
+    """
+    cmd = [sys.executable, "-m", "pytest", "-q"]
+    if parallel:
+        cmd += ["-n", "2", "--dist", "loadfile"]
+    cmd += ["-m", GATE_MARK_EXPR,
+            "tests/test_dashboard_responsive.py", "tests/test_frontend_link_probe.py",
+            "-k", "(phone and 320) or frontend_link_probe", "-p", "no:cacheprovider"]
+    return cmd
+
+
+def test_the_parallel_rung_reports_the_pins_measured_in_a_linked_worktree(real_linked_worktree):
+    """Clause 4, the measuring half: under the parallel invocation, in a real linked
+    worktree of a checkout that HAS the frontend, the pins report themselves as measured
+    and no worker dies on the link.
+
+    This is #2233's acceptance check inside the suite. Before the change the same command
+    in the same geometry reported `12 passed, 10 skipped` with
+    `DASHBOARD_PINS_NOT_EXECUTED: 10 of 10 pins in test_dashboard_responsive.py did not
+    run — web/node_modules has no vite`, and those ten skips on a suite already at 31-35
+    are what failed every non-`web/` round against `PYTEST_MAX_SKIPPED = 40`. What is
+    asserted now is `tests_skipped == 0` for the nodes that ran plus an empty
+    `pin_findings`: a skip cannot satisfy either, which is the only reason the pair is
+    worth ten seconds of real browser.
+
+    The three assertions about the link and the workers are taken from the PARALLEL run
+    unconditionally — a hook that raced badly cannot hide behind anything. The pin's own
+    verdict is held to this file's standing doctrine: a parallel failure is not believed
+    until the same files have been run serially, and that run is the verdict. That is not
+    decoration. `web/node_modules` is shared with the live checkout by design, and so is
+    vite's own dependency cache inside it, which the live dev server also writes; a child
+    that arrives while that cache is being rebuilt takes a cold-start page load, and this
+    file's opening paragraphs already say what to do about a result that is a fact about
+    the box during the run rather than a fact about the diff. The serial re-ask cannot
+    excuse a missing link, a raced link or a skipped pin on a warm box, because those
+    assertions are all made above it and again on the serial run.
+    """
+    repo, wt = real_linked_worktree
+    env = dict(os.environ)
+    # Undeclared on purpose: this node measures the pins turning from skips into passes
+    # in a tree that has no frontend of its own, which is a round's ordinary state. A
+    # declaration would turn every skip into a failure and hide WHICH dependency stopped
+    # the run.
+    env.pop(G.FRONTEND_PINS_ENV, None)
+
+    res = subprocess.run(_link_probe_command(True), cwd=str(wt), env=env,
+                         capture_output=True, text=True, timeout=900)
+    text = res.stdout + "\n" + res.stderr
+
+    assert "FileExistsError" not in text, (
+        "two workers raced the same symlink and one of them died on it — in a real "
+        "rung that is a collection error, not a skip:\n"
+        + "\n".join(ln for ln in text.splitlines() if "FileExistsError" in ln))
+
+    link = wt / "web" / "node_modules"
+    assert link.is_symlink(), f"no link was created in a real linked worktree:\n{text[-1500:]}"
+    # The target is the MAIN checkout, which is what a linked worktree's `.git` pointer
+    # names even when the worktree was added from another linked worktree: a round's tree
+    # is a linked worktree of the live checkout, so a round's `web/node_modules` lands on
+    # the live install directly instead of on another symlink.
+    main = FD.main_checkout(wt)
+    assert main is not None, (
+        f"{wt} is not a linked worktree any more, so this node has lost the geometry "
+        "#2233 is about")
+    assert Path(os.readlink(link)) == (main / "web" / "node_modules"), (
+        f"the link points at {os.readlink(link)!r}, not at the main checkout's install")
+    assert (link / ".bin" / "vite").exists(), (
+        f"the link resolves to an install with no vite: {os.readlink(link)!r}")
+
+    statuses = {p.name: p.read_text() for p in (wt / "link-statuses").glob("*.txt")}
+    assert statuses, f"no worker recorded what it saw, so the probe never ran:\n{text[-1500:]}"
+    assert any(name.startswith("gw") for name in statuses), (
+        f"nothing ran in an xdist worker (files: {sorted(statuses)}), so this was not a "
+        "parallel run at all")
+    seen = sorted(statuses.values())
+    # What each worker can honestly report is the STATE it found, not who made it: the
+    # conftest that creates the link runs at import, before this probe module is even
+    # collected, so the worker that won the race may well report `present` a moment later.
+    # The exactly-one-creator claim is the threaded node's, where it is observable and
+    # deterministic. What must hold here is that no worker fell back to `unavailable` —
+    # the answer a hook that could not find the main checkout would leave both files
+    # skipping over — and that neither of them died.
+    assert FD.UNAVAILABLE not in seen, (
+        f"a worker could not reach the parent checkout's install: {statuses}")
+    assert set(seen) <= {FD.LINKED, FD.PRESENT}, statuses
+
+    counts = G._parse_pytest_summary(text)
+    if res.returncode != 0 or counts["tests_skipped"] or counts["passed"] != 2:
+        # Only a box with no Chromium may excuse the parallel run. A pin that skipped
+        # under `-n 2` WHILE THE BROWSER WAS PRESENT is exactly the failure clause 4
+        # exists to catch — a link that only works for one worker, say — and re-asking
+        # serially over that would excuse it. So the excuse has to be named first.
+        assert "chromium is not available" in text, (
+            f"the parallel run did not answer for itself ({counts}) and did not stop at "
+            f"the browser either, so no re-ask may excuse it:\n{text[-2500:]}")
+        serial = subprocess.run(_link_probe_command(False), cwd=str(wt), env=env,
+                                capture_output=True, text=True, timeout=900)
+        stext = serial.stdout + "\n" + serial.stderr
+        scounts = G._parse_pytest_summary(stext)
+        assert serial.returncode == 0, (
+            f"the parallel run was not green ({counts}) and the serial re-ask, which is "
+            f"the verdict, was not green either:\n--- parallel ---\n{text[-2000:]}"
+            f"\n--- serial ---\n{stext[-2000:]}")
+        counts, text = scounts, stext
+
+    assert counts["tests_skipped"] == 0, (
+        f"the pins skipped again — the whole of #2233: {counts}\n{text[-2000:]}")
+    assert counts["passed"] == 2, (
+        f"expected the selected pin and the probe to pass, got {counts}\n{text[-2000:]}")
+    assert counts["pin_findings"] == [], (
+        f"the ledger still says a pin went unexecuted: {counts['pin_findings']}")
+
+
+def test_the_skip_ceiling_the_pins_now_live_under_is_still_forty(tmp_path, monkeypatch):
+    """Clause 5: #2233 removes ten skips, it does not move the ceiling — and the ceiling
+    still bites at forty-one.
+
+    This matters because the ceiling is the thing three sibling items (#2205, #2211,
+    #2214) proposed raising to 55 instead, and #2214's `PYTEST_MAX_SKIPPED = 55`
+    (`dbfddc60`) is a human-promotion route this change is the alternative to. Running
+    the pins is the route that keeps the number at 40, so the number being 40 is part of
+    this diff's contract, not an absence of change: if a later edit quietly widened it,
+    the round that did it would have to say so here.
+
+    Forty-one skips fails and forty passes, both read out of the rung's own sentence, so
+    the boundary is pinned at the value rather than beside it. The vacuity guard's
+    textual mutant — `scripts/maintenance/guard_vacuity.py::
+    _m_mutate_pytest_skip_ceiling`, which rewrites the constant to 10**12 and requires
+    that SOME checker then BLOCK — stays in force because the constant is still written
+    the one way it matches, and `tests/test_guard_vacuity.py` runs that mutant over the
+    real tree on every round.
+    """
+    g, _calls, _script = _gate(tmp_path, monkeypatch)
+    assert G.PYTEST_MAX_SKIPPED == 40, (
+        "#2233's fix is that the pins run, not that the ceiling rises; raising it here "
+        "would be the #2214 route wearing this item's clothes")
+
+    def counts_with(skipped: int) -> dict:
+        return {"passed": 5800, "failed": 0, "errors": 0, "xfailed": 0,
+                "tests_skipped": skipped, "collected": 5800 + skipped,
+                "workers": 8, "parallel_only_failures": 0}
+
+    ok, detail, _data = g._tests_pass(counts_with(G.PYTEST_MAX_SKIPPED + 1), None, {})
+    assert ok is False, (
+        f"{G.PYTEST_MAX_SKIPPED + 1} skipped passed a rung whose limit is "
+        f"{G.PYTEST_MAX_SKIPPED}: {detail}")
+    assert f"{G.PYTEST_MAX_SKIPPED + 1} tests skipped (limit {G.PYTEST_MAX_SKIPPED})" in detail, (
+        f"the rung failed, but not with the ceiling sentence a reviewer reads: {detail}")
+
+    ok2, detail2, _data2 = g._tests_pass(counts_with(G.PYTEST_MAX_SKIPPED), None, {})
+    assert ok2 is True, (
+        f"a run at exactly the ceiling — the shape a suite at its non-pin baseline "
+        f"lands in once the pins execute — was failed: {detail2}")

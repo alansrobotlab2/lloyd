@@ -227,8 +227,38 @@ def _refuse_the_production_tree() -> None:
         f"you mean it, set {LIVE_TREE_OPT_IN}=1.")
 
 
+def _provision_frontend_deps() -> None:
+    """Give this tree the frontend dependencies its parent checkout already has (#2233).
+
+    Called here, at import, rather than from `gate.py`, for the reason
+    `tests/frontend_deps.py` gives in full: the gate runs pytest with
+    `cwd=self.worktree`, so this file — the round's own — is the surface on which a fix
+    to the round's environment can be judged by the round that changes it. And it runs
+    per worker process, which is where the race the helper settles actually lives: the
+    tests rung runs `-n <workers> --dist loadfile`, and every worker imports this file.
+
+    What it can cost a run is one symlink, `web/node_modules`, pointing at the parent
+    checkout's install (641 MB, gitignored, and identical by construction because
+    `package.json` and the lockfile are paths the gate denies). What it cannot do is
+    fail: a tree it cannot link keeps the skips it always had, so a box where nobody ran
+    `npm install` is still green.
+    """
+    tests_dir = str(Path(__file__).resolve().parent)
+    if tests_dir not in sys.path:
+        # Named explicitly rather than left to pytest's `prepend` import mode, which
+        # does put a conftest's own directory on the path: a hook that depends on an
+        # import detail nobody verified is a hook that silently stops linking.
+        sys.path.insert(0, tests_dir)
+    try:
+        import frontend_deps                      # sibling module of this file
+    except ImportError:                           # a partial tree: not this hook's business
+        return
+    frontend_deps.ensure_node_modules_link(ROOT)
+
+
 _refuse_the_production_tree()
 _data_root_to_scratch()
+_provision_frontend_deps()
 
 
 @pytest.fixture(autouse=True)
