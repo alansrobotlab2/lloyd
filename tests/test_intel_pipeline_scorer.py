@@ -127,7 +127,8 @@ def _profile(tmp_path):
     return profile_mod.load_profile()
 
 
-def _item(item_id="i1", source="youtube", title="", summary="", tags=()):
+def _item(item_id="i1", source="youtube", title="", summary="", tags=(),
+          gate_description=""):
     return FeedItem(
         id=item_id,
         source=source,
@@ -137,6 +138,10 @@ def _item(item_id="i1", source="youtube", title="", summary="", tags=()):
         discovered_at="2026-09-11T00:00:00Z",
         authors=[],
         source_tags=list(tags),
+        # What the feed served before the strip, which is the stage-1 gate's text and
+        # nothing else (#2241). "" is every row written by a scanner that stores no
+        # such text — the GitHub shape, and every YouTube row on disk before #2241.
+        gate_description=gate_description,
     )
 
 
@@ -3941,3 +3946,128 @@ def test_the_grade_store_ships_beside_the_day_files_and_the_fixture_moves_it(
     assert [json.loads(l)["id"] for l in store.read_text().splitlines() if l.strip()] \
         == ["written"]
     assert scoring_mod.load_grade_store()["written"]["relevance"] == 6
+
+
+# --- #2241: the stage-1 gate reads the description the stored summary lost -------
+
+# A channel whose ENTIRE description is its own link block: the shape of the recorded
+# row `youtube:UCzWnSedVeqUyze_R6M5BqwA:06pxcZkI9po` (310 chars upstream, and
+# `strip_link_footer` returns "" for it), rebuilt here with one interest-profile
+# keyword inside the channel's own label. No profile keyword occurs inside any URL
+# here, so a keep below cannot be the path-segment artifact whole-word matching would
+# otherwise accept (`…/ai/…` matches `ai`), and the fixture cannot silently gain one
+# without the assertions below failing for a reason a reader can see.
+#
+# The writer-side half of the item pins this same text under the same name in
+# tests/test_intel_pipeline_body.py.
+URL_ONLY_DESCRIPTION = "\n".join([
+    "🔗 Subscribe: https://www.youtube.com/@channelfolio?sub_confirmation=1",
+    "💼 Business Inquiries: https://example.com/contact",
+    "👉 vLLM deep dive source: https://github.com/example/deep-dive",
+    "➡️ Twitter: https://x.com/channelfolio",
+    "➡️ Patreon: https://www.patreon.com/channelfolio",
+])
+
+# The recorded row's title: no keyword of the fixture profile occurs in it.
+LINK_FARM_TITLE = "Is automation the only way to save US manufacturing?"
+
+
+def test_the_gate_keeps_a_link_only_description_the_stored_summary_lost(redirect_paths):
+    """Clause 1 (#2241): a link-only description is judged on the title alone.
+
+    `strip_link_footer` deliberately returns "" for a body that WAS nothing but the
+    footer, and the scanner stores that "" as `summary` — a decision the writer needs
+    (do not paste a link farm into `knowledge/`) that was silently applied to the
+    gate's input as well. Same title both times: the item carrying the pre-strip
+    description survives on the keyword in the channel's label, the one holding the
+    post-strip empty summary is dropped.
+
+    The three asserts before the call are what make that a real keep and not a looser
+    gate: the fixture is still the stripped-to-empty shape, and `vllm` occurs in
+    neither its title nor any of its URL lines — only in its label.
+    """
+    profile = _profile(redirect_paths)
+    assert body_mod.strip_link_footer(URL_ONLY_DESCRIPTION) == "", \
+        "the fixture stopped being the shape under test"
+    assert not profile_mod.match_keywords(LINK_FARM_TITLE, ["vllm"])
+    # The one `vllm` in the fixture is the channel's own label ("👉 vLLM deep dive
+    # source:"). The address half of that same line, and every other line's, must hold
+    # no keyword: whole-word matching would accept `ai` out of `…/ai/…`, and a keep
+    # bought that way is the false positive #2241's owed check looks for, not a recall
+    # win — so this fixture may not be one.
+    urls = " ".join(ln.split("https://", 1)[1] for ln in URL_ONLY_DESCRIPTION.splitlines()
+                    if "https://" in ln)
+    assert not profile_mod.match_keywords(
+        urls, [kw for topic in profile["topics"] for kw in topic["keywords"]]), \
+        f"a URL path of the fixture carries a profile keyword: {urls}"
+
+    kept = scoring_mod.stage1_filter(
+        [_item("pre-strip", title=LINK_FARM_TITLE, summary="",
+               gate_description=URL_ONLY_DESCRIPTION),
+         _item("post-strip", title=LINK_FARM_TITLE, summary="")],
+        profile)
+
+    assert [i.id for i in kept] == ["pre-strip"]
+
+
+def test_the_description_only_keep_survives_the_day_file_hand_off(redirect_paths,
+                                                                  monkeypatch):
+    """Clause 2 (#2241): the keep is produced by a different process from the scan.
+
+    Scoring never sees the scanner's objects — `__main__.py:129` re-reads the day's
+    raw JSONL through `state.load_raw_items` → `FeedItem.from_dict`, so a value that
+    lives only in the scan is invisible exactly where the gate has to act (the same
+    seam #1379 had to cross with `published`). This drives the real scanner, which
+    writes its rows through `state.save_raw_items`, and gates the re-read rows.
+
+    The stored summary comes back empty and the gate text comes back whole: two
+    consumers of one description, one field each.
+    """
+    profile = _profile(redirect_paths)
+    monkeypatch.setattr(yt_mod, "_http_get", lambda url, headers=None, timeout=None:
+                        _live_shaped_atom([("linkonly", URL_ONLY_DESCRIPTION)]))
+    monkeypatch.setattr(yt_mod, "sleep", lambda s: None)
+    monkeypatch.setattr(yt_mod, "load_youtube_channels_config",
+                        lambda: _channels("UClinkfarm"))
+
+    items, _ = yt_mod.scan_youtube_channels()
+    assert [i.title for i in items] == ["Video linkonly"], "the scan emitted no row"
+
+    day_files = sorted(state_mod.RAW_DIR.glob("*.jsonl"))
+    assert len(day_files) == 1, f"the scanner wrote {day_files}, not one day file"
+    reread = state_mod.load_raw_items(day_files[0].stem)
+
+    assert [i.id for i in scoring_mod.stage1_filter(reread, profile)] == [items[0].id], \
+        "the description-only keep did not survive the raw day file"
+    assert [(r.summary, r.gate_description) for r in reread] == \
+        [("", URL_ONLY_DESCRIPTION)], "the hand-off moved the strip to the wrong consumer"
+
+
+def test_a_raw_row_with_no_pre_strip_field_still_gates_on_title_and_summary(
+        redirect_paths):
+    """Clause 3 (#2241): the day files already on disk have no place for the field.
+
+    Every `raw/<date>.jsonl` written before this change carries exactly the keys
+    `FeedItem.to_dict` used to emit, and `published` (models.py:37-44) is the
+    precedent for what an absent key must mean: the state the source did not supply,
+    never a KeyError in a re-run of an old day — `--score --date` over a September
+    file must not die on a field that postdates it. Such a row loads, and is gated on
+    title + stored summary exactly as it is today.
+    """
+    profile = _profile(redirect_paths)
+    rows = []
+    for item in (_item("described", title=LINK_FARM_TITLE,
+                       summary="the new vllm release"),
+                 _item("bare", title=LINK_FARM_TITLE, summary="")):
+        row = item.to_dict()
+        row.pop("gate_description", None)
+        assert "gate_description" not in row
+        rows.append(json.dumps(row))
+    state_mod.get_raw_path("2026-10-05").write_text("\n".join(rows) + "\n",
+                                                    encoding="utf-8")
+
+    reread = state_mod.load_raw_items("2026-10-05")
+
+    assert [i.gate_description for i in reread] == ["", ""], \
+        "a pre-change row must load as carrying no pre-strip text"
+    assert [i.id for i in scoring_mod.stage1_filter(reread, profile)] == ["described"]

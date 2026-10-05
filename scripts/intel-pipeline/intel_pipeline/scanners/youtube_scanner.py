@@ -404,9 +404,10 @@ def scan_youtube_channels() -> Tuple[List[FeedItem], FeedCoverage]:
             # GitHub shapes go through: the boundary moves back to a word and the cut
             # is marked. A description with no footer and room under the cap comes
             # back untouched, which is #1269 clause 2's behaviour.
-            description = clip_body(strip_link_footer(video.get("description") or ""))
+            raw_description = video.get("description") or ""
+            description = clip_body(strip_link_footer(raw_description))
             published = video.get("published", "")
-            
+
             item = FeedItem(
                 id=item_id,
                 source="youtube",
@@ -421,6 +422,13 @@ def scan_youtube_channels() -> Tuple[List[FeedItem], FeedCoverage]:
                 # the fix, and it is what lets the writer hold a 453-day-old video
                 # instead of filing it under today's heading (backlog #1379).
                 published=published,
+                # The same description before the strip and the clip above, for the
+                # stage-1 gate only (backlog #2241). `summary` has to stay stripped —
+                # a channel's link block is not knowledge prose — but a description
+                # that is ONLY a link block stripped to `""`, and the gate then scored
+                # that video on its title alone. It is persisted, not just passed in
+                # process, because scoring re-reads this row from the day file.
+                gate_description=raw_description,
             )
             all_items.append(item)
             state.mark_seen(item_id, current_state)

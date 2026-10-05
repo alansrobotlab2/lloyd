@@ -3023,3 +3023,45 @@ def test_the_widened_predicate_is_applied_by_the_scanner_before_the_clip(
     assert summary == ("K2-Thinking ships today: open weights, a 32B MoE and a new eval "
                        "harness.\nWe read the technical report and the ablations."), \
         repr(summary)
+
+
+# --- #2241: the gate gets the pre-strip description, the writer does not ----------
+
+# The same link-only description #2241's gate fixtures use, pinned under the same name
+# in tests/test_intel_pipeline_scorer.py (`test_the_gate_keeps_a_link_only_description_
+# the_stored_summary_lost`). One text, two consumers with different needs: the gate has
+# to read it, `knowledge/` must never see it.
+URL_ONLY_DESCRIPTION = "\n".join([
+    "🔗 Subscribe: https://www.youtube.com/@channelfolio?sub_confirmation=1",
+    "💼 Business Inquiries: https://example.com/contact",
+    "👉 vLLM deep dive source: https://github.com/example/deep-dive",
+    "➡️ Twitter: https://x.com/channelfolio",
+    "➡️ Patreon: https://www.patreon.com/channelfolio",
+])
+
+
+def test_the_pre_strip_gate_description_reaches_neither_the_summary_nor_the_body():
+    """Clause 4 (#2241): giving the gate back the channel's link block must not give
+    it back to the vault.
+
+    For the description that is nothing but a labelled URL block, the stored summary
+    is still the stripped-to-empty body (so the scanner keeps spending its 500-char
+    budget on prose — the pins at
+    `test_the_scanner_spends_its_500_characters_on_prose_not_the_rule_free_footer` and
+    `test_the_clip_budget_reaches_the_prose_once_the_mid_description_block_is_gone`
+    stay green), and the rendered entry is still the scorer's `why`, carrying no URL
+    and no `Subscribe` line. One normalization, two consumers: the new field is the
+    gate's, and `vault_writer` never reads it.
+    """
+    stored = body_mod.clip_body(body_mod.strip_link_footer(URL_ONLY_DESCRIPTION))
+    assert stored == "", "the stored summary gained the link block back"
+    for line in URL_ONLY_DESCRIPTION.splitlines():
+        assert line not in stored, line
+
+    rendered = vw_mod._entry_body(
+        _yt(id="youtube:UClinkfarm:linkonly", summary=stored,
+            why="Scores 8/10: covers the local-inference thread"))
+
+    assert rendered == "Scores 8/10: covers the local-inference thread", repr(rendered)
+    for mark in ("http", "Subscribe", "vLLM", "channelfolio"):
+        assert mark not in rendered, mark

@@ -286,12 +286,22 @@ def stage1_filter(
     every item they emit — so it returned 103 of 103 and every repo commit
     reached the writer as 10/10 "urgent" on the repo name alone. Repo traffic is
     not an interest signal; `interests.md` says what is.
+
+    What it reads is `item.stage1_text()`, not `item.summary`, since #2241. Matching
+    and publishing have different needs on one piece of channel copy: the scanner
+    strips a description that is nothing but a link block so `knowledge/` never holds
+    a link farm, and doing that before the gate meant such a video was matched on its
+    title alone, with the profile keyword in the channel's own label never in front of
+    the matcher. Stage 2's three other readers of `item.summary` (`_score_prompt`,
+    `_keyword_fallback`, `match_projects`) still read the stripped value — widening
+    them is an open scope question on that item, not a change to make here.
     """
     filtered_items = []
 
     for item in items:
-        # Combine title and summary for matching
-        text = f"{item.title} {item.summary}"
+        # Title plus the widest copy of the description we hold: the pre-strip text
+        # where the scanner carried one, the stored summary otherwise.
+        text = item.stage1_text()
 
         # Check against profile keywords
         matched = keyword_match(text, profile)

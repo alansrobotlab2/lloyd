@@ -42,6 +42,23 @@ class FeedItem:
     # date — which is a real state (the GitHub scanner has no such field), not a
     # failure, and the age gate must treat it as inside the window.
     published: str = ""
+    # The channel's description as the feed served it, BEFORE `strip_link_footer` and
+    # `clip_body` touch it (backlog #2241). `summary` is what the vault gets, and a
+    # description that is nothing but a promotional link block strips to `""` by
+    # design — a link farm is not knowledge prose, and `strip_link_footer`'s own
+    # docstring hands the caller that decision. The YouTube scanner took the writer's
+    # side of it and left the stage-1 gate reading `f"{title} {summary}"`, so such a
+    # video was judged on its title alone and the profile keyword sitting in the
+    # channel's own label was never in front of the gate. This field exists for that
+    # gate and nothing else: `vault_writer` must not read it, and stage 2's three other
+    # readers of `item.summary` (`_score_prompt`, `_keyword_fallback`,
+    # `match_projects`) were left reading the stored summary on purpose — widening
+    # them is an open question on #2241, not a change made here.
+    #
+    # Empty means the scanner carries no such text: every GitHub row, and every YouTube
+    # row written before this field existed, which is what `stage1_text` reads as
+    # "gate on the stored summary" — the behaviour those rows have today.
+    gate_description: str = ""
 
     @classmethod
     def from_dict(cls, data: dict) -> "FeedItem":
@@ -58,9 +75,24 @@ class FeedItem:
             # A row written before this field existed has no key at all, and
             # absence must read as "the source gave no date" — never as today, and
             # never as a KeyError in a re-run of an old day.
-            published=data.get("published", "")
+            published=data.get("published", ""),
+            # Same rule for the same reason (#2241): the day files already on disk
+            # predate this key, and a `--score --date` replay of one of them has to
+            # gate on title + summary rather than die on a missing key.
+            gate_description=data.get("gate_description", "")
         )
-    
+
+    def stage1_text(self) -> str:
+        """The text `stage1_filter` scores: the title, plus the widest copy we have.
+
+        `gate_description` where a scanner carries one, otherwise the stored summary,
+        so a row that predates the field — or a feed whose scanner never had pre-strip
+        text to keep — is gated exactly as it is today. This is the gate's method and
+        not the writer's: what reaches `knowledge/` stays `summary`, stripped, because
+        the strip that emptied it is a decision about publishing, not about matching.
+        """
+        return f"{self.title} {self.gate_description or self.summary}"
+
     def to_dict(self) -> dict:
         """Convert to dictionary."""
         return {
@@ -72,9 +104,13 @@ class FeedItem:
             "discovered_at": self.discovered_at,
             "authors": self.authors,
             "source_tags": self.source_tags,
-            "published": self.published
+            "published": self.published,
+            # Persisted because scanning and scoring are separate invocations joined by
+            # `raw/<date>.jsonl` (`__main__.py:129` re-reads it): gate text that lived
+            # only in the scan would be absent exactly where the gate runs.
+            "gate_description": self.gate_description
         }
-    
+
     @classmethod
     def from_json(cls, json_str: str) -> "FeedItem":
         """Create from JSON string."""
@@ -120,7 +156,11 @@ class ScoredItem(FeedItem):
             # not read as "cap-refused": defaulting to GRADE_CALL_CAP would turn a
             # re-run of `--write` over an old `intel-<date>.jsonl` into a
             # zero-write day, which is the failure this change must never cause.
-            grade_source=data.get("grade_source", GRADE_KEYWORD)
+            grade_source=data.get("grade_source", GRADE_KEYWORD),
+            # `to_dict` inherits this key from `FeedItem`, so `from_dict` has to read
+            # it back or the round trip silently loses a field it just wrote. Nothing
+            # downstream reads it: the writer's body comes from `summary` (#2241).
+            gate_description=data.get("gate_description", "")
         )
     
     def to_dict(self) -> dict:
