@@ -300,7 +300,7 @@ def test_the_review_stands_in_only_when_it_graded_every_clause_met(isolated, cla
     p = _write_item(isolated, 901)
     _landing(901, "SM_901", "cccc2222dddd", None, clauses=clauses, blocking=blocking)
     assert B.close_settled_items(S.LEDGER_PATH)[0]["closed"] is False
-    assert _fm(p)["status"] == "up_next" and "a human decides" in _fm(p)["activity_log"][-1]
+    assert _fm(p)["status"] == "up_next" and "owed-check decides" in _fm(p)["activity_log"][-1]
 
 
 def test_an_outcome_the_turn_did_report_is_never_overridden(isolated):

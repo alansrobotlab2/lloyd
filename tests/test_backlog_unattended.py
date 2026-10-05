@@ -1614,8 +1614,10 @@ def test_a_review_disagreement_escalates_after_the_finished_row(isolated, monkey
     assert [e["item_id"] for e in esc] == [930]
     fm = yaml.safe_load(next(isolated.glob("930-*.md")).read_text().split("---")[1])
     assert "review-disagreement" in fm["tags"]
-    assert told == (["#930 needs you"] if retriaged_before else []), (
-        "a person is told only once the loop's own second life is used up")
+    assert told == [], (
+        "2026-10-05: nobody is told — the spent item's `decide` entry is the owed-check "
+        "job's, and a toast for a call that is not the listener's teaches him to ignore toasts")
+    assert esc[0]["decider"] == ("owed-check" if retriaged_before else "retriage")
 
 
 def test_an_umbrella_disagreement_is_left_to_the_unfold_pass(isolated, monkeypatch):
@@ -2273,7 +2275,7 @@ def test_a_round_with_no_structured_outcome_is_noted_but_a_human_decides(isolate
     assert fm["status"] == "up_next" and fm["automod_landed"] == "d29112b5d291"
     # No outcome and no review on the ledger either, so nothing stands in.
     assert "no structured outcome" in fm["activity_log"][-1]
-    assert "a human decides" in fm["activity_log"][-1]
+    assert "owed-check decides" in fm["activity_log"][-1]
 
 
 def test_not_met_leaves_the_item_open(isolated):
@@ -4593,7 +4595,7 @@ def test_a_dry_run_reports_each_landing_with_the_ledger_row_it_would_write(isola
         "offered again for those")
     assert decided[603]["reason"] == (
         "the round recorded no structured outcome, and the review rung did not grade "
-        "every clause met; a human decides")
+        "every clause met; owed-check decides")
 
 
 def test_a_dry_run_writes_no_marker_no_status_no_section_no_owed_row(isolated):

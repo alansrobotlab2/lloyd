@@ -357,6 +357,77 @@ def test_a_confirmed_human_only_contract_is_a_decision_owed(isolated):
     assert [e["kind"] for e in O.entries_of(fm_of(p))] == ["decide"]
 
 
+# ── 2026-10-05: a review disagreement is owed-check's, and it may reword ────
+
+def _contract(isolated, item_id, clauses):
+    p = write_item(isolated, item_id, extra={
+        "acceptance_clauses": list(clauses),
+        "owed": [{"what": "its unattended attempts are spent; owed-check decides",
+                  "kind": "decide", "since": "2026-10-05T11:47:04"}]})
+    S.append_event({"event": "backlog_implement", "item_id": item_id, "phase": "finished"},
+                   path=S.LEDGER_PATH)
+    return p
+
+
+def test_a_reopen_may_reword_the_clause_the_grader_called_wrong_as_written(isolated):
+    """#2228: clause 5 named `backlog/data/gate.json`, #1883's witness; both
+    reviews said the dated path was "the right call" and refused the clause "as
+    literally written". Reopened alone, the next round meets the same refusal."""
+    p = _contract(isolated, 90, ["a — tests/a.py", "copy the report to backlog/data/gate.json"])
+    owing = O.owing_items()[0]
+    out = O.apply_verdict(p, owing.entries, [{
+        "n": 1, "outcome": "reopen", "evidence": "both reviews graded 1 clean",
+        "ruling": "the literal path is another item's witness",
+        "amend_clause": {"clause": 2, "text": "copy the report to backlog/data/2026-10-05.90-gate-witness.json"},
+    }], item_id=90, session_id="sess")
+    fm = fm_of(p)
+    assert fm["acceptance_clauses"] == ["a — tests/a.py",
+                                        "copy the report to backlog/data/2026-10-05.90-gate-witness.json"]
+    assert out["moved"] == "reopened" and not O.entries_of(fm, derived=False)
+    assert "was: copy the report to backlog/data/gate.json" in "".join(map(str, fm["activity_log"]))
+    row = [e for e in S.read_events(path=S.LEDGER_PATH) if e["event"] == "clause_amended"]
+    assert row and row[0]["by"] == "owed-check" and row[0]["clause"] == 2
+    assert row[0]["old"] == "copy the report to backlog/data/gate.json"
+
+
+@pytest.mark.parametrize("amend", [{"clause": 9, "text": "x"}, {"clause": 1, "text": "  "}])
+def test_an_amendment_that_cannot_be_applied_leaves_the_decision_owed(isolated, amend):
+    """A reopen whose clause was not reworded repeats the refusal, so neither half
+    is applied and the entry stays for the next pass, counted as a recheck."""
+    p = _contract(isolated, 91, ["a — tests/a.py"])
+    owing = O.owing_items()[0]
+    answer = {"n": 1, "outcome": "reopen", "evidence": "e", "ruling": "r", "amend_clause": amend}
+    out = O.apply_verdict(p, owing.entries, [answer], item_id=91)
+    fm = fm_of(p)
+    if amend["text"].strip():
+        assert out["moved"] == "" and fm["acceptance_clauses"] == ["a — tests/a.py"]
+        (entry,) = O.entries_of(fm, derived=False)
+        assert "amendment refused" in entry["note"] and entry["rechecks"] == 1
+    else:       # no text is no amendment: a plain reopen
+        assert out["moved"] == "reopened"
+
+
+def test_parse_answer_carries_an_amendment_only_on_a_reopen():
+    raw = {"entries": [
+        {"n": 1, "outcome": "reopen", "evidence": "e", "amend_clause": {"clause": 2, "text": " new  text "}},
+        {"n": 2, "outcome": "ruling", "evidence": "e", "amend_clause": {"clause": 1, "text": "x"}},
+        {"n": 3, "outcome": "reopen", "evidence": "e", "amend_clause": {"clause": "two", "text": "x"}}],
+        "summary": "s"}
+    one, two, three = OC.parse_answer(raw, {1, 2, 3})["entries"]
+    assert one["amend_clause"] == {"clause": 2, "text": "new text"}
+    assert two["amend_clause"] == {} and three["amend_clause"] == {}
+
+
+def test_the_prompt_carries_the_2026_10_05_ruling_and_keeps_outside_physical(isolated):
+    _owing(isolated, 92, ["confirm the nightly"])
+    text = " ".join(OC.build_prompt(O.owing_items()[0]).split())
+    assert "the loop goes with its own recommendation" in text
+    assert "Only something physical waits for him" in text
+    assert "A protected path is NOT outside" in text and "spec.CONFIG_DENIED_KEYS" in text
+    assert "A review disagreement" in text and "`amend_clause`" in text
+    assert "A decision is never outside: make it." in text
+
+
 def test_a_retiring_verdict_owes_nothing(isolated):
     p = write_item(isolated, 72)
     B.record_verdict(B.item_by_id(72), "stale", "gone", close=True)

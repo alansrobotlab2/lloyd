@@ -213,8 +213,9 @@ clauses) unless its attempt is `spent`, then `draft` + `needs-human`; \
 observation (promoted, not yet settled) is the one landed state that stays \
 `in_progress` — the round is not over until the guardian says so.
 - `spent` is spent. An item whose one attempt was consumed by a verdict on \
-the change (`spent` in an outcome, "a human decides" in its status reason) \
-goes to `draft` with `needs-human` and stays there until a human reopens it. \
+the change (`spent` in an outcome; "owed-check decides", or "a human decides" \
+on rows before 2026-10-05, in its status reason) goes to `draft` and stays \
+there until the owed-check job reopens or closes it. \
 Do not send it back to `up_next` because the outcome looks recoverable.
 - A `rollback_succeeded` naming a landing's commit reopens its item: `up_next`.
 - An item tagged `grouped` (folded into an umbrella) stays `draft` whatever \

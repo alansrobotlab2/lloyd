@@ -1893,10 +1893,62 @@ to `draft` of an untagged item keeps its owed list
 (`tests/test_autotriage.py::test_a_move_to_draft_takes_back_only_what_was_tagged`).
 
 **Guards are not approvals.** Lloyd approving his own choices does not relax the
-safety layers: vault protection, protected paths, the guardian, the bench
-sandbox. A protected path a change needs is ruled on like anything else. Either
-there is a route around it, or it becomes an `outside` entry naming the exact
-edit.
+safety layers: vault protection, the guardian, the bench sandbox, the scope
+check. But a guard is only what the gate would actually refuse, and `outside`
+is only what is physical — see the next section, which narrowed both.
+
+#### 2026-10-05: the loop goes with its own recommendation
+
+Eight days after the paragraph above the board stood at 24 open with an empty
+implement pool, and Alan had been approving, unread, whatever each stalled item
+recommended. His ruling: "empower automod to go with its own recommendations
+and not wait for me, unless there's something physical that i need to do."
+Fourteen days of ledger said where the waiting came from, and little of it was
+policy:
+
+| Source | 14 d | What it was |
+|---|---|---|
+| `human-only:` contracts | 48 of 757 confirmations | 22 named `config.yaml`, 12 a protected path, 12 an unlisted tree (the qmd fork, `chrome-extension/`), 2 a file outside the repo |
+| review disagreements | 12 | "clause N came back unmet on two consecutive reviews; a human decides" |
+| `human_paths` rows | 69 | a round reporting a path it believed it could not write |
+| `outside` rulings | 12 | #538 and #947: hardware. The only ones that were his |
+
+Three changes, each at the place the wait was manufactured:
+
+1. **The marker is checked against the rail it cites** (`backlog.is_human_only`
+   → `_names_a_guard`). `scripts/automod/**`, the guardian and the service units
+   were never denied — `spec.py` has said since the first version that "Lloyd
+   may edit these, but the change must additionally survive a live rollback
+   drill" — but the triage prompt said "paths the loop may never touch", the
+   reasoning bank filed "protected path" beside "cannot be written by any
+   diff", and the predicate honoured the marker on any path at all. So #2205,
+   #2211 and #2214 each read `human-only: scripts/automod/gate.py` while the
+   fix sat finished on `automod/SM_20261005_024736`. A marker now stands only
+   for a path `spec.classify` calls denied or unlisted, a file outside the repo
+   and the vault, the vault subtrees a vault round may not write (`autonomy/`
+   is the #724 dispatch rail's), or a head that names something physical. A
+   head that names only a decision is not a guard: the decision is the loop's.
+2. **`config.yaml` values land inside a fence** (`spec.config_value_change`,
+   §10). About half the 22 wanted a comment reworded, landable since 8098fa33
+   and marked anyway; the rest wanted a tunable. The fence is the lock-out the
+   denial was written for, named key by key.
+3. **A review disagreement is owed-check's** (`owed.amend_item_clause`). The
+   spent item already carried a `decide` entry; what was missing was the power
+   the human had been using — reopening *with the clause reworded* when both
+   reviews said the work was right and the clause wrong as written (#2228's
+   clause 5 named another item's witness file). The status reason reads
+   "owed-check decides", `_escalate_review_disagreement` no longer announces
+   "#N needs you", and `owing_items` offers an open item owed a decision before
+   any older check on a closed one — on the day of the ruling those sat at
+   positions 121–145 of 150.
+
+What did not move: the denied set (`.gitignore`, `pytest.ini`, `data/**`,
+`.env*`, the `web/` build inputs), the fenced config keys, the worker-session
+refusal of service and engine control, vault protection, and arming an
+autonomy task (`vault_round.validate`, the #724 grant rail) — the last is not
+physical, and is still Alan's until he says otherwise. The qmd fork and
+`chrome-extension/` stay hand-landed because the gate cannot build either, which
+is a missing rung and not an approval.
 
 `apply: false` records the answers (`owed_check` ledger rows) and writes
 nothing. That is how the job was checked against the 2026-09-27 hand verdicts
@@ -3904,9 +3956,12 @@ than the one this prevents.
   rung 6 for it — a config change is boot-affecting, so the bound is on how
   it lands, the same shape `protected` has. The canary rungs already boot from
   the round's worktree, so the candidate file is the one `canary_boot` and
-  `canary_smoke` exercise. `workers.sources.autocode.reasoning_bank`, one of
-  the five above, is therefore still refused — it sits under a denied prefix —
-  and that is the fence working, not a gap in it. Bounds over amputation: the
+  `canary_smoke` exercise. The loop's own three sources (`autocode`,
+  `autotriage`, `owed-check`) are fenced by leaf, not whole
+  (`CONFIG_LOOP_SOURCE_LEAVES`: `enabled`, `max_inflight`, `model`,
+  `max_turns`, `max_duration_seconds`, `apply`): a whole-prefix fence refused
+  `workers.sources.autocode.reasoning_bank`, one of the five above, on the
+  first try. Bounds over amputation: the
   lock-out the denial was written for is a denied prefix and exactly as
   unreachable as before.
 - **protected** — the gate itself, the guardian, the supervisor confs, and the

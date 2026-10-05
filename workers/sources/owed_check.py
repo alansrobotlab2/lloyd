@@ -78,6 +78,8 @@ OWED_SCHEMA = {
                     "name": {"type": "string"}, "body": {"type": "string"}}},
                 "outside": {"type": "string"},
                 "artifact": {"type": "string"},
+                "amend_clause": {"type": "object", "properties": {
+                    "clause": {"type": "integer"}, "text": {"type": "string"}}},
             },
             "required": ["n", "outcome", "evidence"]}},
         "summary": {"type": "string"},
@@ -89,7 +91,11 @@ PROMPT = """\
 You are settling what backlog item #{id} still owes. The loop finished its part \
 of this item; the entries below are what was left. Alan has delegated every one \
 of these calls to you: nothing is waiting for him, and nothing may be handed \
-back to him. Decide each entry.
+back to him. Decide each entry. His standing ruling (2026-10-05): the loop goes \
+with its own recommendation. Every time an item stalled for him he approved the \
+action it recommended, so when the item or a round's findings name a \
+recommended action, that IS the decision unless your measurement contradicts \
+it. Only something physical waits for him.
 
 <item>
 #{id} — {name}
@@ -127,12 +133,29 @@ triage confirmed a contract a round can meet, can be reopened: for one triage \
 ruled `not_code` or `unverifiable` the answer is refused and the entry stays \
 owed. If what such an item still needs is a measurement or a run, do it now, \
 in this session, and rule on the result; if it needs a change, answer `work`.
+  A review disagreement ("clause N came back unmet on two consecutive \
+reviews") is yours to decide, not a person's: read both reviews' findings on \
+the item. If the grader faulted the implementation, `reopen` or `close`. If \
+the grader said the work is right and the clause is wrong as written (it names \
+a path another item owns, a number that has since moved, a check that cannot \
+run under the gate), `reopen` AND give `amend_clause` {{"clause": N, "text": \
+"<the clause as it should read, still one checkable thing ending with the file \
+that pins it>"}} — a reopen that leaves the clause alone repeats the refusal. \
+  A round refused twice by a suite-wide rail (a skip ceiling, a collection \
+floor, a preflight overlap) rather than by a finding on its diff has not been \
+judged: check whether the rail still binds (the newest rounds' gate.json), and \
+`reopen` when it does not.
 - `close` — (open items only) close the item: tried and not worth another \
 attempt, or not worth doing; say why in `ruling`.
-- `outside` — ONLY for something no software on this machine can do: sudo on \
-the host, a secret or account only Alan holds, hardware, spending money. Say \
-exactly what he would do in `outside`. Deleting or moving data is NOT outside: \
-rule on it, and file the change as `work` so a gated round does it.
+- `outside` — ONLY for something physical or his alone: hardware to plug in or \
+move, sudo on the host, a secret, login or account only Alan holds, spending \
+money, posting under his name to a third party. Say exactly what he would do \
+in `outside`. A protected path is NOT outside — `scripts/automod/**`, the \
+guardian and the service units land through a round, with the rollback drill — \
+and neither is `config.yaml` (comment edits land; so do value changes outside \
+the fenced keys in `spec.CONFIG_DENIED_KEYS`): answer `work` or `reopen`. \
+Deleting or moving data is NOT outside: rule on it, and file the change as \
+`work` so a gated round does it. A decision is never outside: make it.
 
 Evidence and rulings are stored up to 1200 characters. When one would run \
 longer it is cut with a visible marker, so put the decision and its bounds \
@@ -195,7 +218,16 @@ def parse_answer(structured: Any, due_numbers: set[int]) -> dict | None:
         if n not in due_numbers or outcome not in O.OUTCOMES:
             continue
         follow = raw.get("follow_up") if isinstance(raw.get("follow_up"), dict) else {}
+        amend = raw.get("amend_clause") if isinstance(raw.get("amend_clause"), dict) else {}
+        try:
+            amend_n = int(amend.get("clause"))
+        except (TypeError, ValueError):
+            amend_n = 0
+        amend_text = " ".join(str(amend.get("text") or "").split())[:2000]
         answers.append({"n": n, "outcome": outcome,
+                        "amend_clause": ({"clause": amend_n, "text": amend_text}
+                                         if outcome == "reopen" and amend_n > 0 and amend_text
+                                         else {}),
                         # Never cut below the writer's bound: `O._bounded`
                         # makes the one visible cut (#1955). This is only a
                         # ceiling on a runaway answer.

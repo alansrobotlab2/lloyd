@@ -506,6 +506,52 @@ def cite_for_child(what: str, revision: str | None = None) -> str:
     return f"{reduced} [{'cited at ' + revision if revision else UNPINNED}]"
 
 
+def amend_item_clause(path: Path, clause, text: str, why: str, *, item_id: int,
+                      session_id: str = "") -> str:
+    """Rewrite one acceptance clause on an owed-check ruling. Returns the old text.
+
+    A review disagreement is one clause refused on two consecutive reviews, and
+    until 2026-10-05 its status line read "a human decides". What the human then
+    did, every time, was read the grader's own finding and either grant another
+    attempt or reword the clause the grader had already called wrong as written:
+    #2228's clause 5 named `backlog/data/gate.json`, which is #1883's pinned
+    witness, and both reviews said the dated path the round used instead was "the
+    right call" while refusing the clause "as literally written". Reopening
+    without rewording sends the next round into the same refusal, so the ruling
+    carries the new text.
+
+    Not `backlog.amend_clause`: that one is the implementer's, mid-round, and is
+    ratified by the review rung against a clause it graded `unsatisfiable`. This
+    is the decider's, between rounds, and its record is the ledger row and the
+    item's activity line, old text included. Raises ValueError for an index off
+    the list or empty text; the caller keeps the entry owed."""
+    from scripts.automod import backlog as B, state as S
+    raw = path.read_text(encoding="utf-8")
+    fm, _ = B._split_frontmatter(raw)
+    if B._unparsed_guard(path, raw, fm, "owed.amend_item_clause"):
+        raise ValueError(f"item #{item_id} front matter parsed to no keys")
+    clauses = B.acceptance_clauses_of(B.confirmed_verdicts(B.LEDGER_DEFAULT()).get(int(item_id)) or {}, fm)
+    try:
+        idx = int(clause)
+    except (TypeError, ValueError):
+        raise ValueError(f"clause must be an integer, got {clause!r}")
+    if not 1 <= idx <= len(clauses):
+        raise ValueError(f"clause {idx} is off the list (item #{item_id} has {len(clauses)})")
+    text = " ".join(str(text or "").split())[:B.CLAUSE_MAX_CHARS]
+    if not text:
+        raise ValueError("the amended clause text is empty")
+    old = clauses[idx - 1]
+    clauses[idx - 1] = text
+    B.update_frontmatter(path, {"acceptance_clauses": clauses},
+                         activity=(f"owed-check ({session_id or 'session'}) amended clause {idx}: "
+                                   f"{_text(why, 300)} — was: {_text(old, 400)}")[:1200])
+    S.append_event({"event": "clause_amended", "by": "owed-check", "item_id": int(item_id),
+                    "clause": idx, "old": old[:600], "new": text[:600],
+                    "reason": _text(why, 400), "session_id": session_id},
+                   path=B.LEDGER_DEFAULT())
+    return old
+
+
 def _reopen_refusal(item_id: int) -> str:
     """Why a `reopen` cannot be granted, or "" when it can.
 
@@ -584,6 +630,21 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
                                       "rechecks": e.get("rechecks", 0) + 1,
                                       "note": _text(refusal, 300)}))
                 notes.append(f"#{n} reopen refused, still owed: {refusal}"[:300])
+                continue
+        amend = a.get("amend_clause") if isinstance(a.get("amend_clause"), dict) else {}
+        if out == "reopen" and is_open and str(amend.get("text") or "").strip():
+            # Before the reopen is recorded: a reopen whose clause could not be
+            # reworded would send the next round into the refusal it is leaving.
+            try:
+                amend_item_clause(path, amend.get("clause"), amend.get("text"),
+                                  a.get("ruling") or evidence, item_id=item_id,
+                                  session_id=session_id)
+                notes.append(f"#{n} clause {amend.get('clause')} amended")
+            except ValueError as exc:
+                keep.append(_compact({**e, "recheck_after": recheck_date("", now),
+                                      "rechecks": e.get("rechecks", 0) + 1,
+                                      "note": _text(f"amendment refused: {exc}", 300)}))
+                notes.append(f"#{n} amendment refused, still owed: {exc}"[:300])
                 continue
         if out == "outside":
             # One entry per clause: a second `outside` ruling on the same clause

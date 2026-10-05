@@ -2714,7 +2714,7 @@ def implement_outcomes(ledger: Path) -> dict[int, tuple[str, str]]:
             if clause is not None:
                 out[iid] = ("spent",
                             f"review disagreement: clause {clause} came back unmet on two "
-                            f"consecutive reviews of #{iid}; a human decides")
+                            f"consecutive reviews of #{iid}; owed-check decides")
                 continue
             if n <= 1 + REVIEW_RETRY_CAP:
                 findings = str(review_retry[rid].get("review_findings") or
@@ -3529,10 +3529,10 @@ def _close_settled_items(ledger: Path, boards: tuple[str, ...] | None, *,
         elif outcome.get("item_verdict_refused"):
             close, why = False, (f"the turn reported `{outcome['item_verdict_refused']}` for a round "
                                  f"that landed, which was not taken, and the review rung did not "
-                                 f"grade every clause met; a human decides")
+                                 f"grade every clause met; owed-check decides")
         else:
             close, why = False, ("the round recorded no structured outcome, and the review rung "
-                                 "did not grade every clause met; a human decides")
+                                 "did not grade every clause met; owed-check decides")
         # The row this landing would be recorded as. Built once so the dry run
         # reports exactly the row the live sweep appends — the rehearsal is only
         # worth having if a `closed` here is the `closed` on the ledger.
@@ -4076,7 +4076,7 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
             verdict, detail = outcomes.get(iid, ("", ""))
             if verdict == "spent":
                 out[iid] = ("draft", "landed with a clause not met and its one unattended attempt "
-                                     "is spent; a human decides (reopen_item to grant another)", True)
+                                     "is spent; owed-check decides (reopen_item to grant another)", True)
             elif _awaits_triage(iid):
                 out[iid] = ("draft", "re-triaged; waiting for its second triage to confirm a contract")
             else:

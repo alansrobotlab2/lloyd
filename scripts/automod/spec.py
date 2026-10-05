@@ -51,8 +51,8 @@ goes with its own recommendation unless a step is physical. So
 changed key paths all fall outside `CONFIG_DENIED_KEYS` (prefixes: the tool
 pool and `disabled_tools`, the engine slots, the services and ports a
 rollback has to reach, the guardian, the loop's own switch and landing block,
-and its three worker sources — the config half of what `PROTECTED_GLOBS` is
-for code), whose changed leaves are none of `CONFIG_DENIED_LEAVES` (an
+and the control leaves of its three worker sources, `CONFIG_LOOP_SOURCE_LEAVES`
+— the config half of what `PROTECTED_GLOBS` is for code), whose changed leaves are none of `CONFIG_DENIED_LEAVES` (an
 endpoint, a device, a credential, anywhere in the tree) and carry no `${`
 placeholder (secrets reach the file only that way), and which removes no
 top-level key. The refusal names the key and the rule. What lands moves to
@@ -225,10 +225,22 @@ CONFIG_DENIED_KEYS: tuple[str, ...] = (
     "automod.landing",                # restart/drain/squash: how a landing happens — the rollback path
     "workers.enabled",                # the pool that runs the loop
     "workers.slots",                  # the pool's depth: rounds + triages + 1, a restart-sized change
-    "workers.sources.autocode",       # the loop's own three sources, like protected code:
-    "workers.sources.autotriage",     #   a round editing its own budget, depth or model
-    "workers.sources.owed-check",     #   is a control surface modifying itself
 )
+
+# The loop's own three worker sources are fenced by LEAF, not by prefix. The
+# first cut of the lane denied `workers.sources.autocode` whole, and the first
+# thing that refused was one of the five stalled tunables the lane was built
+# for: `workers.sources.autocode.reasoning_bank`, an `off | on | ab` knob whose
+# A/B readout (#1677) the owed-check job rules on. What a round must not touch
+# on its own sources is the control surface — whether they run, how many at
+# once, on which model, for how long, and whether owed-check applies its
+# answers — which is the config half of what `PROTECTED_GLOBS` is for code.
+# Every other key under them (`reasoning_bank`, `retriage_spent`,
+# `expire_spawns_after_days`, `sweep`, `spawn_cap`, …) is a tunable.
+CONFIG_LOOP_SOURCES: tuple[str, ...] = ("autocode", "autotriage", "owed-check")
+CONFIG_LOOP_SOURCE_LEAVES: frozenset[str] = frozenset({
+    "enabled", "max_inflight", "model", "max_turns", "max_duration_seconds", "apply",
+})
 
 # Leaf key NAMES denied anywhere in the tree: an endpoint, a device, a credential.
 CONFIG_DENIED_LEAVES: frozenset[str] = frozenset({
@@ -245,6 +257,11 @@ def _config_denied_prefix(path: str) -> str | None:
     for prefix in CONFIG_DENIED_KEYS:
         if path == prefix or path.startswith(prefix + "."):
             return prefix
+    parts = path.split(".")
+    if parts[:2] == ["workers", "sources"] and len(parts) >= 3 and parts[2] in CONFIG_LOOP_SOURCES:
+        # Adding or removing the whole source block, or one of its control leaves.
+        if len(parts) == 3 or parts[3] in CONFIG_LOOP_SOURCE_LEAVES:
+            return ".".join(parts[:4])
     return None
 
 

@@ -497,7 +497,7 @@ def test_a_denied_prefix_is_refused_with_the_key_named():
     after = before.replace("max_inflight: 2", "max_inflight: 4")
     ok, reason, paths = spec.config_value_change(before, after)
     assert not ok and paths == ["workers.sources.autocode.max_inflight"]
-    assert "`workers.sources.autocode.max_inflight` is under the denied key `workers.sources.autocode`" in reason
+    assert "`workers.sources.autocode.max_inflight` is under the denied key `workers.sources.autocode.max_inflight`" in reason
     # A sibling source that is not the loop's own: lands.
     after = before.replace("max_duration_seconds: 3600", "max_duration_seconds: 7200")
     ok, reason, paths = spec.config_value_change(before, after)
@@ -609,15 +609,42 @@ def test_comment_only_wins_when_both_lanes_would_pass():
     assert ok and buckets["comment_only"] == ["config.yaml"] and buckets["config_value"] == []
 
 
+@pytest.mark.parametrize("src", ["autocode", "autotriage", "owed-check"])
+def test_the_loops_own_sources_are_fenced_by_leaf_not_whole(src):
+    """`workers.sources.autocode.reasoning_bank` was one of the five stalled
+    tunables the lane was built for, and a whole-prefix fence refused it. The
+    control surface — on/off, depth, model, budget, apply — stays out of reach."""
+    before = (f"workers:\n  sources:\n    {src}:\n      enabled: true\n      max_inflight: 1\n"
+              f"      model: primary\n      max_turns: 40\n      max_duration_seconds: 1500\n"
+              f"      apply: true\n      reasoning_bank: 'off'\n      spawn_cap: 3\n")
+    for tunable, new in (("reasoning_bank: 'off'", "reasoning_bank: 'on'"), ("spawn_cap: 3", "spawn_cap: 1")):
+        ok, reason, _ = spec.config_value_change(before, before.replace(tunable, new))
+        assert ok, reason
+    for leaf, new in (("enabled: true", "enabled: false"), ("max_inflight: 1", "max_inflight: 4"),
+                      ("model: primary", "model: secondary"), ("max_turns: 40", "max_turns: 400"),
+                      ("max_duration_seconds: 1500", "max_duration_seconds: 9000"),
+                      ("apply: true", "apply: false")):
+        ok, reason, paths = spec.config_value_change(before, before.replace(leaf, new))
+        assert not ok and f"workers.sources.{src}." in reason, (leaf, reason)
+    # Removing the whole block is the off switch by another spelling.
+    ok, reason, _ = spec.config_value_change(before, "workers:\n  sources: {}\n")
+    assert not ok and f"workers.sources.{src}" in reason
+    # A sibling source that is not the loop's own keeps every leaf open.
+    other = before.replace(f"{src}:", "autoresearch:")
+    assert spec.config_value_change(other, other.replace("max_turns: 40", "max_turns: 60"))[0]
+
+
 def test_the_denied_key_set_is_the_one_landed():
     """The fence, verbatim: a widening or a narrowing here is a decision, and
     the test should say so rather than let it ride on an unrelated commit."""
     assert spec.CONFIG_DENIED_KEYS == (
         "mcp_servers", "models", "model", "subagents", "server", "services",
         "guardian", "automod.enabled", "automod.landing", "workers.enabled",
-        "workers.slots", "workers.sources.autocode", "workers.sources.autotriage",
-        "workers.sources.owed-check",
+        "workers.slots",
     )
+    assert spec.CONFIG_LOOP_SOURCES == ("autocode", "autotriage", "owed-check")
+    assert spec.CONFIG_LOOP_SOURCE_LEAVES == {
+        "enabled", "max_inflight", "model", "max_turns", "max_duration_seconds", "apply"}
     # Every denied prefix names a key the real file carries, or the fence is
     # guarding a spelling nobody uses.
     cfg = yaml.safe_load(_CFG.read_text(encoding="utf-8"))

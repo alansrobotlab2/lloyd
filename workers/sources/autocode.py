@@ -1566,9 +1566,17 @@ def _housekeeping(src_cfg: dict) -> None:
 
 
 def _escalate_review_disagreement(candidate, round_id: str | None) -> bool:
-    """When the round just recorded is a review disagreement: note it, tag it,
-    write `review_escalated`, and tell a person — unless the loop's own second
-    life is still owed (`_second_life_owed`). True when it escalated."""
+    """When the round just recorded is a review disagreement: note it, tag it
+    and write `review_escalated`. True when it escalated.
+
+    Nobody is told. Until 2026-10-05 this announced "#N needs you" once the
+    item's automatic second life was used up; twelve fired in the fourteen days
+    before, and each was answered by reading the grader's finding and doing what
+    it recommended. The item's spent attempt already leaves a `decide` entry on
+    its owed list, the owed-check job rules on it — reopen, reopen with the
+    clause amended (`owed.amend_item_clause`), or close — and offers open items
+    owed a decision first. A toast for a call that is not the listener's is one
+    a person learns to ignore."""
     from scripts.automod import backlog as B, state as S
     verdict, detail = B.implement_outcomes(S.LEDGER_PATH).get(candidate.id, ("", ""))
     if not detail.startswith("review disagreement"):
@@ -1576,20 +1584,8 @@ def _escalate_review_disagreement(candidate, round_id: str | None) -> bool:
     B.note_item(candidate.id, f"escalated: {detail}")
     B.tag_item(candidate.id, add=("review-disagreement",))
     S.append_event({"event": "review_escalated", "item_id": candidate.id,
-                    "round_id": round_id, "reason": detail[:400]})
-    if _second_life_owed(candidate):
-        # Housekeeping re-triages it (or unfolds the umbrella) with this refusal
-        # attached; nobody is needed yet, and a toast saying otherwise is one a
-        # person learns to ignore.
-        logger.info("#%s: review disagreement; the automatic second life is still owed, "
-                    "not announcing", candidate.id)
-        return True
-    try:
-        from scripts.automod.promote import announce
-        announce(f"#{candidate.id} needs you",
-                 f"review sent it back twice on the same clause: {detail[:160]}")
-    except Exception as exc:  # noqa: BLE001 — an announcement never fails a round
-        logger.warning("announce failed: %s", exc)
+                    "round_id": round_id, "reason": detail[:400],
+                    "decider": "retriage" if _second_life_owed(candidate) else "owed-check"})
     return True
 
 

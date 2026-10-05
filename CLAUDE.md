@@ -310,6 +310,14 @@ bookkeeping (journal, toast, voice). Re-announcing a recorded state through
   job in a visible session. Only `outside` (sudo, secrets, hardware, money)
   reaches him, on Mission Control, never as a tag. Guards are not approvals
   (§3.2k).
+- **The loop goes with its own recommendation** (2026-10-05); only something
+  physical waits for Alan. A `human-only:` marker stands only where the gate
+  would refuse the path (`backlog.is_human_only` asks `spec.classify`):
+  **protected is not denied** — `scripts/automod/**` and the guardian land,
+  with the drill. `config.yaml` values land outside a fence
+  (`spec.CONFIG_DENIED_KEYS`, `CONFIG_LOOP_SOURCE_LEAVES`). A review
+  disagreement is owed-check's, and it may reword the clause
+  (`owed.amend_item_clause`). Arming an autonomy task is still Alan's (§3.2k).
 - A contract is at most six clauses (`MAX_CLAUSES`) (§3.2d).
 - **The sweep** ranks every open item (`worth` × `size`); the human's
   `priority` orders every pool, and a `high` item is picked up next (§3.2e).
