@@ -476,7 +476,7 @@ def main(argv: list[str] | None = None) -> int:
         if proposed:
             backup = None
             if not args.no_backup:
-                ts = datetime.now().strftime("%Y%m%dT%H%M%SZ")
+                ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
                 backup = st.backup(args.db.parent / "store-backups" / f"kg-stranded-{ts}.sqlite")
             with st.transaction():
                 for e in proposed:

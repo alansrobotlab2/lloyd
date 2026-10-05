@@ -26,9 +26,15 @@ production store, so it has to refuse while `kg_rebuild.py` holds
 `knowledge_graph.write_enabled` false, and every test in that section drives the
 real guard with a config the test owns — never by patching the predicate away.
 """
+import ast
 import importlib.util
+import json
+import os
 import re
+import subprocess
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -955,3 +961,385 @@ def test_the_module_docstring_says_the_bare_role_noun_shape_is_ruled(tmp_path):
     assert linker.target_admissibility(fan_out=99, degree=9, facts=50) \
         == "refused_generic_target"
     assert linker.target_admissibility(fan_out=1, degree=1, facts=1) == "admitted"
+
+
+# ── #2246: the backup's filename is an instant, not a host-local guess ───────
+#
+# `--apply` snapshots the store to `store-backups/kg-stranded-<stamp>.sqlite`
+# before it writes, and until #2246 that stamp came from `datetime.now()` — the
+# host's wall clock — with a literal `Z` glued on. This host is
+# `America/Los_Angeles`, so every name was seven hours early while claiming UTC.
+# The damage is attribution, not cosmetics: the 14:22:26Z apply of 2026-10-05
+# produced `kg-stranded-20261005T072226Z.sqlite`, which sits 41 s behind a
+# genuinely-UTC nightly run that started at 07:21:45Z and logged verbatim that it
+# took no backup, so a reader pairing artefacts by name frames that run for a
+# live-store write it did not perform. The same file already formatted an instant
+# correctly one clause up (`created_at` is
+# `datetime.now(timezone.utc).isoformat()`), which is what made line 479 the
+# inconsistency rather than a convention.
+#
+# What stays out of this section deliberately: ten further naive-`Z` sites in
+# other files, enumerated on #2246, and the mislabelled artefact itself, which
+# is not renamed because its name disagreeing with its mtime by exactly the host
+# offset is the surviving evidence that the bug was real.
+
+_BACKUP_NAME = re.compile(r"kg-stranded-(\d{8}T\d{6}Z)\.sqlite\Z")
+STAMP_LAG_BOUND_SECONDS = 5        # the bound clause 1 names
+
+
+@pytest.fixture
+def los_angeles():
+    """Run the body with the process timezone forced to a non-UTC zone.
+
+    Forcing the zone is not a nicety: on a box already living in UTC, the naive
+    `datetime.now()` and the correct `datetime.now(timezone.utc)` print the same
+    digits, so a test that never moves the clock setting passes while the defect
+    is live. `time.tzset()` is what makes the change take effect in-process.
+
+    The zone is restored and `tzset()` called again on the way out, so no later
+    node in this file inherits a Los Angeles clock.
+    """
+    previous = os.environ.get("TZ")
+    os.environ["TZ"] = "America/Los_Angeles"
+    time.tzset()
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous
+        time.tzset()
+
+
+def _utc_stamp_claims(name: str) -> datetime:
+    """The instant a `kg-stranded-*.sqlite` name asserts, as an aware datetime.
+
+    The `Z` is read as UTC because that is how every later reader reads it, and
+    pairing artefacts by name is the whole reason the file is named.
+    """
+    match = _BACKUP_NAME.fullmatch(name)
+    assert match, f"{name!r} is not a kg-stranded-<YYYYMMDDTHHMMSSZ>.sqlite name"
+    return datetime.strptime(match.group(1), "%Y%m%dT%H%M%SZ").replace(
+        tzinfo=timezone.utc)
+
+
+def test_the_apply_backup_is_named_from_the_utc_clock_under_a_forced_zone(
+        tmp_path, capsys, monkeypatch, los_angeles):
+    """Clause 1: the backup's name is a UTC instant even when the host's clock is
+    not, and the name and the file's own mtime tell the same second.
+
+    The bound is 5 s. The lag that motivated it was 25,200 s — 5,040 times the
+    bound — so the node cannot be satisfied by a rounding allowance, and it
+    cannot pass vacuously: the zone fixture is what makes the naive form differ
+    from the correct one at all.
+    """
+    st = build_store(tmp_path)
+    _write_flag(monkeypatch, True)
+    capsys.readouterr()
+
+    before = datetime.now(timezone.utc)
+    rc = linker.main(["--apply", "--db", str(st.path), "--sample", "0"])
+    after = datetime.now(timezone.utc)
+    capsys.readouterr()
+
+    assert rc == 0, (
+        f"the write gate did not release, so no backup was ever named: rc={rc}")
+    names = _backup_traces(tmp_path)
+    assert len(names) == 1, f"a released apply takes exactly one backup: {names}"
+
+    stamp = _utc_stamp_claims(names[0])
+    lag = max((before - stamp).total_seconds(),
+              (stamp - after).total_seconds(), 0.0)
+    assert lag <= STAMP_LAG_BOUND_SECONDS, (
+        f"{names[0]} asserts {stamp.isoformat()} but the apply ran between "
+        f"{before.isoformat()} and {after.isoformat()} — off by {lag:.1f} s against "
+        f"a {STAMP_LAG_BOUND_SECONDS} s bound; a naive host-local stamp put this "
+        "name seven hours behind the run that made it")
+
+    backup = tmp_path / "store-backups" / names[0]
+    name_vs_mtime = abs(stamp.timestamp() - backup.stat().st_mtime)
+    assert name_vs_mtime <= STAMP_LAG_BOUND_SECONDS, (
+        f"the name and the artefact's own mtime disagree by {name_vs_mtime:.1f} s, "
+        "which is the pairing error #2246 is about: the file is filed under an "
+        "instant some other run was awake")
+
+    # The same call one clause earlier, with the zone fixture in place, is what
+    # `datetime.now()` would have written; the name on disk must sit exactly one
+    # host offset away from it, not on top of it. Stated as the host's own offset
+    # rather than a hard-coded 7 h so the node stays true across a DST change.
+    host_offset = datetime.now().astimezone().utcoffset()
+    naive_name = time.strftime("%Y%m%dT%H%M%SZ")
+    naive_claims = datetime.strptime(naive_name, "%Y%m%dT%H%M%SZ").replace(
+        tzinfo=timezone.utc)
+    apart = (stamp - naive_claims).total_seconds()
+    assert apart == pytest.approx(-host_offset.total_seconds(),
+                                  abs=STAMP_LAG_BOUND_SECONDS), (
+        f"{names[0]} is {apart:.0f} s from the host-local stamp {naive_name} while "
+        f"this host sits {host_offset} from UTC: the name is still the local clock "
+        "wearing a Z")
+    assert host_offset.total_seconds() != 0.0, (
+        "the fixture did not move the zone, so nothing above could fail")
+
+
+def test_a_real_process_under_the_host_zone_names_the_backup_in_utc(tmp_path):
+    """The seam #2246's review named: `--apply` as a SEPARATE process under the
+    host's non-UTC zone, which is the only environment where the produced name has
+    to be right — autonomy task #24 runs this script as a subprocess, not as an
+    import in a patched process.
+
+    The zone is set in the child's own environment, so it is applied by CPython at
+    startup rather than by `tzset()` in the test's process. The child reports its
+    own naive and UTC stamps before applying, which is what makes this node
+    non-vacuous from inside the child: if the two agree, the zone did not take and
+    nothing below could fail. `app.config.CONFIG` is replaced in the child's
+    module object, so the write gate is read through the same code path a real run
+    reads it — `writes_disabled_by_rebuild` does its `from app.config import
+    CONFIG` at call time, which is the reason a subprocess can pin this at all.
+    """
+    st = build_store(tmp_path)
+    child = (
+        "import json, runpy, sys\n"
+        "from datetime import datetime, timezone\n"
+        "import app.config\n"
+        "app.config.CONFIG = {'knowledge_graph': {'write_enabled': True}}\n"
+        "sys.argv = ['link_stranded_entities.py', '--apply', '--db', %r,\n"
+        "            '--sample', '0']\n"
+        "probe = {'naive': datetime.now().strftime('%%Y%%m%%dT%%H%%M%%SZ'),\n"
+        "         'utc': datetime.now(timezone.utc).strftime('%%Y%%m%%dT%%H%%M%%SZ')}\n"
+        "sys.stderr.write('PROBE ' + json.dumps(probe) + '\\n')\n"
+        "runpy.run_path(%r, run_name='__main__')\n"
+    ) % (str(st.path), str(SCRIPT))
+    env = {**os.environ, "TZ": "America/Los_Angeles", "PYTHONPATH": str(ROOT)}
+    before = datetime.now(timezone.utc)
+    proc = subprocess.run([sys.executable, "-c", child], cwd=str(ROOT), env=env,
+                          capture_output=True, text=True, timeout=180)
+    after = datetime.now(timezone.utc)
+    assert proc.returncode == 0, (
+        f"the child apply failed: rc={proc.returncode}\n{proc.stderr[-1500:]}")
+    probe = json.loads([ln for ln in proc.stderr.splitlines()
+                        if ln.startswith("PROBE ")][0][6:])
+
+    def probe_claims(which: str) -> datetime:
+        """A probe stamp as the instant it asserts, in the same shape as a name."""
+        return _utc_stamp_claims(f"kg-stranded-{probe[which]}.sqlite")
+
+    # How far this host's wall clock lags UTC: on a `-0700` box the local stamp,
+    # read as though it were UTC, sits 25,200 s in the past. Measured from the
+    # child rather than hard-coded, so the node stays true across a DST change.
+    local_lag = (probe_claims("utc") - probe_claims("naive")).total_seconds()
+    assert local_lag >= 3600, (
+        f"the child's naive and UTC stamps agree ({probe}), so its zone was not the "
+        "host's and this node could not have failed for the wrong reason")
+
+    names = _backup_traces(tmp_path)
+    assert len(names) == 1, f"a real apply takes exactly one backup: {names}"
+    stamp = _utc_stamp_claims(names[0])
+    lag = max((before - stamp).total_seconds(),
+              (stamp - after).total_seconds(), 0.0)
+    assert lag <= STAMP_LAG_BOUND_SECONDS, (
+        f"run as its own process the apply named its snapshot {names[0]}, which is "
+        f"{lag:.1f} s from the real UTC window "
+        f"({before.isoformat()}..{after.isoformat()})")
+
+    from_the_local_one = (stamp - probe_claims("naive")).total_seconds()
+    assert from_the_local_one == pytest.approx(
+        local_lag, abs=STAMP_LAG_BOUND_SECONDS), (
+        f"{names[0]} is {from_the_local_one:.0f} s from the child's own host-local "
+        f"stamp {probe['naive']}, while that stamp sits {local_lag:.0f} s behind UTC: "
+        "the filename is the local clock wearing a Z")
+# ── clause 2: the naive form cannot come back to this file ───────────────────
+#
+# The shape of this scan is the one #1128 left in
+# `tests/test_autonomy_task_write_timestamp.py`: resolve what a `Z`-suffixed
+# `strftime` was called on, follow it through the file's own assignments, and
+# judge the subject rather than the line number. Matching by name over-approximates
+# on purpose, so a shadowed or reused variable is judged by its worst assignment.
+
+_CLOCK_READS = {"datetime.now", "datetime.datetime.now",
+                "datetime.utcnow", "datetime.datetime.utcnow"}
+
+
+def _dotted(node: ast.AST) -> str:
+    """`datetime.now` for an attribute chain; `''` for anything else."""
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return ""
+    parts.append(node.id)
+    return ".".join(reversed(parts))
+
+
+def _is_clock_read(node: ast.AST) -> bool:
+    return isinstance(node, ast.Call) and _dotted(node.func) in _CLOCK_READS
+
+
+def _is_naive_clock_read(node: ast.AST) -> bool:
+    """A system-clock read that names no timezone.
+
+    `datetime.now()` with no argument is the host's wall clock. Any
+    `datetime.utcnow()` counts whatever its arguments: it hands back a UTC *value*
+    carrying no `tzinfo`, which is exactly the thing that reads as UTC once a `Z`
+    is appended and misreads the moment it is compared to an aware instant.
+    """
+    if not _is_clock_read(node):
+        return False
+    if _dotted(node.func).endswith("utcnow"):
+        return True
+    return not node.args and not node.keywords
+
+
+def _is_module_time_strftime(node: ast.AST) -> bool:
+    """`time.strftime(...)` — a clock read the `strftime` form hides.
+
+    The module form takes the current time implicitly, so with a `Z` format it is
+    the same defect as #2246 wearing different syntax. It is NOT naive when the
+    caller passes a `time.gmtime()` struct, which is UTC already.
+    """
+    return (isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute) and node.func.attr == "strftime"
+            and _dotted(node.func.value) == "time")
+
+
+def _utc_struct_passed(node: ast.AST) -> bool:
+    return any(isinstance(n, ast.Call) and _dotted(n.func) == "time.gmtime"
+               for n in ast.walk(node))
+
+
+def _assigned_values(tree: ast.AST) -> dict:
+    """`name -> every expression assigned to it anywhere in the file`."""
+    out: dict[str, list] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    out.setdefault(target.id, []).append(node.value)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            if node.value is not None:
+                out.setdefault(node.target.id, []).append(node.value)
+    return out
+
+
+def _z_stamps(src: str) -> list:
+    """Every `strftime` whose format string ends in `Z`, with its subject resolved.
+
+    `clock_sourced` says a clock read produced the value; `naive` says that read
+    named no timezone; `passthrough` says the file was handed the value rather than
+    reading the clock itself, which is the one shape the scan must tolerate.
+    """
+    tree = ast.parse(src)
+    assigned = _assigned_values(tree)
+    found = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "strftime"):
+            continue
+        fmt = node.args[0] if node.args else None
+        if not (isinstance(fmt, ast.Constant) and isinstance(fmt.value, str)
+                and fmt.value.endswith("Z")):
+            continue
+        receiver = node.func.value
+        subjects = [receiver]
+        if isinstance(receiver, ast.Name):
+            subjects = assigned.get(receiver.id, []) or [receiver]
+        # `walk` each subject so a clock read buried in a chain
+        # (`datetime.now().astimezone().strftime(...)`) or an expression
+        # (`(datetime.now() - x).strftime(...)`) counts, not only one sitting
+        # directly under the `strftime`. A chained or computed value is judged by
+        # the clock read inside it; #2246 is about the value asserting UTC, and
+        # where the naive read sits does not change that.
+        def _sourced(subject: ast.AST) -> bool:
+            return (any(_is_clock_read(n) for n in ast.walk(subject))
+                    or _is_module_time_strftime(node))
+
+        def _naive(subject: ast.AST) -> bool:
+            if any(_is_naive_clock_read(n) for n in ast.walk(subject)):
+                return True
+            return _is_module_time_strftime(node) and not _utc_struct_passed(node)
+
+        sourced = [_sourced(s) for s in subjects]
+        found.append({
+            "lineno": node.lineno,
+            "subjects": subjects,
+            "clock_sourced": any(sourced),
+            "naive": any(_naive(s) for s in subjects),
+            "passthrough": not any(sourced),
+        })
+    return found
+
+
+def test_no_z_suffixed_stamp_in_the_linker_comes_from_a_naive_clock():
+    """Clause 2: no `Z` stamp in this file may be formatted from a clock read that
+    names no timezone, so the shape that produced #2246 cannot return unnoticed.
+
+    The non-vacuity half is the second assertion: the file must keep at least one
+    `Z` stamp that IS a clock read. A scan that passes because the format string
+    was deleted or the stamp moved to another module is not a guard.
+    """
+    stamps = _z_stamps(SCRIPT.read_text(encoding="utf-8"))
+    offenders = [s["lineno"] for s in stamps if s["naive"]]
+    assert offenders == [], (
+        f"Z-suffixed stamps formatted from a naive clock read in {SCRIPT}: "
+        f"lines {offenders} — the name is the host's wall clock asserting UTC")
+    clock_sourced = [s["lineno"] for s in stamps if s["clock_sourced"]]
+    assert len(clock_sourced) >= 1, (
+        "the apply's backup name is a clock-sourced Z stamp and must stay one; "
+        f"found {len(stamps)} Z stamps, none from a clock read "
+        f"(lines {[s['lineno'] for s in stamps]})")
+
+
+def test_the_linker_scan_finds_the_shape_it_claims_to_find():
+    """The scan's own falsifiability, in the shape #1128 pinned.
+
+    Without this, the node above could be green because the matcher never
+    matched anything — the failure mode this repo has a whole catalogue of. The
+    expression that produced #2246, fed to the same code, has to be reported.
+    """
+    reported = ("ts = datetime.now().strftime('%Y%m%dT%H%M%SZ')\n"
+                "path = f'kg-stranded-{ts}.sqlite'\n")
+    stamps = _z_stamps(reported)
+    assert len(stamps) == 1, "the Z-strftime itself was not found"
+    assert stamps[0]["naive"], "the naive local form slipped through the scan"
+
+    correct = ("ts = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')\n"
+               "path = f'kg-stranded-{ts}.sqlite'\n")
+    stamps = _z_stamps(correct)
+    assert len(stamps) == 1 and stamps[0]["clock_sourced"]
+    assert not stamps[0]["naive"], "the correct form was reported as a defect"
+
+    assigned_indirectly = ("import datetime\n"
+                           "now = datetime.datetime.now()\n"
+                           "ts = now.strftime('%Y%m%dT%H%M%SZ')\n")
+    stamps = _z_stamps(assigned_indirectly)
+    assert stamps[0]["naive"], "a naive read hidden behind an assignment escaped"
+
+    handed_in = ("def _stamp(received):\n"
+                 "    return received.strftime('%Y%m%dT%H%M%SZ')\n")
+    stamps = _z_stamps(handed_in)
+    assert stamps[0]["passthrough"], "a value the file was handed was reported " \
+                                     "as a clock read"
+
+    chained = ("ts = datetime.now().astimezone().strftime('%Y%m%dT%H%M%SZ')\n")
+    stamps = _z_stamps(chained)
+    assert stamps[0]["naive"], "a naive read hidden inside a call chain escaped"
+
+    chained_correct = ("import datetime\n"
+                       "ts = datetime.datetime.now(datetime.timezone.utc)"
+                       ".astimezone().strftime('%Y%m%dT%H%M%SZ')\n")
+    stamps = _z_stamps(chained_correct)
+    assert stamps[0]["clock_sourced"] and not stamps[0]["naive"], \
+        "a tz-aware read wearing a chain was reported as a defect"
+
+    module_form = ("import time\n"
+                   "ts = time.strftime('%Y%m%dT%H%M%SZ')\n")
+    stamps = _z_stamps(module_form)
+    assert stamps[0]["naive"], "time.strftime with a Z format, which reads the " \
+                              "host clock implicitly, slipped through"
+
+    module_form_utc = ("import time\n"
+                       "ts = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())\n")
+    stamps = _z_stamps(module_form_utc)
+    assert stamps[0]["clock_sourced"] and not stamps[0]["naive"], \
+        "time.strftime over a gmtime struct was reported as a defect"
