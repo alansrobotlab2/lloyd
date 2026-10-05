@@ -20,16 +20,22 @@ USER turn (16,926 chars) and does not contain the hint's paragraph — a worker'
 prompt is greppable only because dispatch hands it over as a user message.
 
 So the fix is presence: a declared marker name plus one bit per assembly, in a log
-line beside `PROMPT_BUDGET`. These seven nodes pin the seven things that make that
+line beside `PROMPT_BUDGET`. These ten nodes pin the ten things that make that
 safe — one record per build, computed on the returned string, from data rather
 than from a branch, seeded with the marker that answers the 2026-10-03 question,
 carrying no prompt text, never reaching the turn when it fails, and with the
 transcript figures the item quotes pinned in committed bytes rather than left in a
-prose claim.
+prose claim. The last three are #2222's, on how the log is *cited* rather than what
+is written to it: the location named as the glob `~/lloyd-data/logs/server.err*` so
+a rotation cannot empty the citation, no rotated suffix enumerated in either file's
+prose, and the emitted line and its one shared call site pinned while the docstring
+tells a reader to name the file a match came from.
 """
 
 from __future__ import annotations
 
+import glob
+import inspect
 import json
 import logging
 import re
@@ -230,10 +236,12 @@ def test_the_record_carries_no_component_text(turn_vault, caplog):
     `component_manifest` decided its confidentiality boundary in writing — digests and
     byte counts, no content, "a sentinel string placed inside a component cannot be
     found in the store" — and a witness that logged prompt text to be more useful would
-    quietly move that boundary into `server.err`, a file the item itself expects to
-    survive in as `.8/.9/.10`. So the sentinel is planted here in the same shape the
-    manifest test plants its own sentinel, and asserted absent from the
-    record twice over: the sentinel itself, and every declared literal. The second is
+    quietly move that boundary into the rotating log the witness is itself read from:
+    the retained set `~/lloyd-data/logs/server.err*`, the live file and every copy
+    still standing, and not any one suffix of it (#2222). So the sentinel is planted
+    here in the same shape the manifest test plants its own sentinel, and asserted
+    absent from the record twice over: the sentinel itself, and every declared
+    literal. The second is
     the one that constrains the design, because a marker's literal IS prompt text — an
     implementation that echoed `data-home-hint="Runtime data: …"` because it looked
     helpful would carry a paragraph of the identity surface into every log line.
@@ -354,3 +362,137 @@ def test_the_committed_witness_bytes_still_carry_the_measured_gap():
         "different strings, so the transcript's absence says nothing about this marker")
     assert shipped in pb._data_home_hint(), (
         "the registry's literal is not in the function it claims to witness")
+
+
+# ---------------------------------------------------------------------------
+# #2222: how the witness is CITED. The nodes above prove the mechanism works; none
+# of them proves a reader can FIND the rows. `log_marker_liveness`'s docstring used
+# to name three specific rotated copies as the place to look, and the copies that
+# hold rows move with every rotation — measured twice on 2026-10-05, the live file
+# read 86 witness rows at triage and 51 later the same day, and the number of
+# retained copies holding nothing went from seven of the eleven to six, because a
+# rotation shifted every row one position in between. So the contract below is the
+# glob, and no corrected list of suffixes is accepted in its place.
+# ---------------------------------------------------------------------------
+
+#: The live log's name, and the witness location as its own docstring has to name
+#: it. Both are spelled from pieces rather than as literals so that the whole-file
+#: checks below cannot fire on the constants that carry them.
+LOG_NAME = "server" "." "err"
+WITNESS_GLOB = "~/lloyd-data/logs/" + LOG_NAME + "*"
+
+#: Two `.N` suffixes in a row: the shape of an enumerated rotated-copy list,
+#: whatever the three suffixes happened to be. The item's grep names one instance
+#: of the shape; a "fixed" citation naming different ones is the same defect.
+ROTATED_SUFFIX_LIST = re.compile(r"\.\d+(?:\s*[/,]\s*\.\d+)+")
+
+#: A mention of the log that is not the glob — the live file on its own, or one
+#: copy of it. Both decay: a bare grep of the live file read 0 rows a few minutes
+#: after it rotated on 2026-10-04 while the copy that had just turned over held 209.
+BARE_LOG_CITATION = re.compile("server" + r"\.err(?![-\w*])")
+
+
+def test_the_cited_glob_covers_every_copy_the_live_file_cannot(tmp_path):
+    """Clauses 1 and 2 (#2222): the citation the reader is handed is the glob, and
+    that glob reaches rows the live file alone does not.
+
+    Read off `pb.log_marker_liveness.__doc__` rather than out of the source file,
+    because the clause is about what someone opening the function is TOLD. The cited
+    path is then used as a real glob over a log directory laid out like the live one
+    — the live file plus the ten retained copies — with witness rows planted in the
+    live file and in two copies at opposite ends of the range, which is the shape
+    triage measured: no list of three suffixes covers all three of those, and one
+    rotation moves the whole set along. The glob must cover every row-bearing copy;
+    the fixture keeps rows outside the live file so a bare citation could not pass.
+    Nothing here reads `~/lloyd-data`: the gate runs the suite with `HOME` in a
+    round home where that directory is empty, and a node measuring the real log dir
+    would report a clean answer for a corpus it never saw.
+    """
+    doc = pb.log_marker_liveness.__doc__ or ""
+    assert WITNESS_GLOB in doc, (
+        f"the docstring never cites the witness location as {WITNESS_GLOB!r}, so a "
+        f"reader's grep can miss every rotated copy:\n{doc}")
+
+    logs = tmp_path / "lloyd-data" / "logs"
+    logs.mkdir(parents=True)
+    copies = [LOG_NAME] + [f"{LOG_NAME}.{i}" for i in range(1, 11)]
+    row_bearers = {str(logs / n) for n in (LOG_NAME, f"{LOG_NAME}.2", f"{LOG_NAME}.7")}
+    for name in copies:
+        path = logs / name
+        path.write_text(
+            "PROMPT_MARKERS session=x platform=user data-home-hint=present\n"
+            if str(path) in row_bearers else "unrelated line\n", encoding="utf-8")
+
+    matched = set(glob.glob(WITNESS_GLOB.replace("~", str(tmp_path))))
+    assert matched >= row_bearers, (
+        f"the cited glob covers none of the copies holding rows beyond "
+        f"{sorted(row_bearers - matched)}")
+    assert len(matched) == len(copies), (
+        f"the citation reaches {len(matched)} of the {len(copies)} retained copies, so "
+        "it is not the whole retained set")
+    assert len(row_bearers - {str(logs / LOG_NAME)}) == 2, (
+        "the fixture stopped being adversarial: with every row in the live file, a "
+        "bare live-file citation would pass this node")
+
+
+def test_no_witness_prose_names_a_rotated_copy_instead_of_the_retained_set():
+    """Clauses 1 and 3 (#2222): neither file's text enumerates rotated copies or
+    cites the log bare, so the error is not re-taught by the prose that is meant to
+    be the mechanism's proof.
+
+    The pair is the item's own proving pair: the module and this file. Both checks
+    run over the whole text rather than over docstrings alone, because the defect
+    lived in prose a person greps and copies verbatim, and a grep does not know
+    which paragraph it hit. The second check is the generalising one: naming a
+    suffix at all, even one holding rows today, is the defect — so the log's name
+    appears in these two files only ever carrying the glob's `*`.
+    """
+    for path in (ROOT / "app" / "prompt_builder.py", Path(__file__)):
+        text = path.read_text(encoding="utf-8")
+        listed = ROTATED_SUFFIX_LIST.search(text)
+        assert listed is None, (
+            f"{path.relative_to(ROOT)} enumerates rotated log copies "
+            f"({listed.group(0)!r}): which copies hold witness rows moves with every "
+            f"rotation, so the citation has to be {WITNESS_GLOB!r}")
+        bare = BARE_LOG_CITATION.search(text)
+        assert bare is None, (
+            f"{path.relative_to(ROOT)} cites the witness log as {bare.group(0)!r} "
+            f"without the glob's `*`, so the citation reaches one file of "
+            f"{WITNESS_GLOB!r} rather than the retained set")
+
+
+def test_the_emitted_line_and_its_shared_call_site_survive_the_citation_fix():
+    """Clause 4 (#2222): the change is prose about where to read the line, so the
+    line itself and the one call site it shares with `PROMPT_BUDGET` are pinned
+    unchanged while the docstring gains the instruction a report needs.
+
+    Three pins, because "docstring text only" is not something a later reader can
+    check off the diff. The format string is the grep a person runs after an
+    incident, so it is pinned literally; the witness's call site is pinned by
+    count; and the sharing of that call site is pinned structurally — no `def`
+    between the `PROMPT_BUDGET` call and this one, which is what "the two
+    instruments are read together" has meant here since #2176. The docstring half
+    is the sentence the 2026-10-04 signals run needed told: a liveness claim has to
+    name the file its match came from, and the mechanism question stays pointed at
+    this file rather than at the log.
+    """
+    doc = pb.log_marker_liveness.__doc__ or ""
+    assert "name the file its match came from" in doc, (
+        f"the docstring dropped the file-naming instruction:\n{doc}")
+    assert "tests/test_prompt_marker_witness.py" in doc, (
+        "the docstring stopped separating 'is the mechanism working', which these "
+        "nodes prove, from 'which process carried which content', which the glob answers")
+
+    src = inspect.getsource(pb.log_marker_liveness)
+    assert '"PROMPT_MARKERS session=%s platform=%s %s  chars=%d"' in src, (
+        f"the emitted line changed shape, so every report that greps it is now wrong:\n{src}")
+
+    module = (ROOT / "app" / "prompt_builder.py").read_text(encoding="utf-8")
+    marker_call = "log_marker_liveness(prompt, session_id=session_id, platform=platform)"
+    size_call = "log_prompt_size(components, session_id=session_id, platform=platform)"
+    assert module.count(marker_call) == 1, "the witness no longer has exactly one call site"
+    assert module.count(size_call) == 1, "the size line moved, so the two are not comparable"
+    first, last = sorted((module.index(size_call), module.index(marker_call)))
+    assert "def " not in module[first:last], (
+        "the two instruments no longer share one call site, so either can fire on a "
+        "build where the other did not")

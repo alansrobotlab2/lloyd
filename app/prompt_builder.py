@@ -169,10 +169,18 @@ def log_marker_liveness(prompt: str, *, session_id: str = "",
     """One INFO line per build: which shipped prompt-fixes this prompt contains.
 
     `PROMPT_MARKERS session=… platform=… data-home-hint=present  chars=…`, beside
-    the `PROMPT_BUDGET` line it shares a call site with and living in the same
-    rotated file (`~/lloyd-data/logs/server.err`, `.8/.9/.10`), which is what makes
-    "is fix X live in process Y" a grep of the log instead of a reading of the code
-    plus a guess about which build was in memory at the time.
+    the `PROMPT_BUDGET` line it shares a call site with, in the log supervisord
+    rotates. Read its location as the glob `~/lloyd-data/logs/server.err*` — the
+    live file and every retained copy (`app/harness/supply_chain.py:940`: 11 of
+    them, ~10 MB each) — and never as a list of suffixes, because which copies
+    hold rows moves with every rotation, so a suffix named today is a citation
+    that decays. Run the grep with the filename prefix on (`grep -n`, not `-h`)
+    and quote what comes back: a claim of the form "marker X is live in process
+    Y" has to name the file its match came from, since the live file alone read 0
+    witness rows minutes after it rotated on 2026-10-04 while the copy that had
+    just turned over held 209. Two questions, kept apart: that the mechanism
+    works is `tests/test_prompt_marker_witness.py`; which process carried which
+    content is that glob.
 
     It carries no prompt text: names, the two words, the session, the platform and
     a character count. A sentinel planted in any component appears nowhere in it —
