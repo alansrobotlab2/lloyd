@@ -58,7 +58,8 @@ before assuming a layer can be turned off — or that it is installed.
   (20) call sites, and runs in a thread the edit abandons after
   `RAIL_BUDGET_S` (90 ms).
   Its switch is the one key here with no line in `config.yaml` — absent means
-  the default, which is on; adding the line is a human-only edit.
+  the default, which is on; adding the line is a `config.yaml` value change,
+  which a round may land since 2026-10-05 (`harness.*` is outside the fence).
 - **The change ledger's first writer per realpath per turn wins**, so a turn
   that edits a file ten times reverts to where it came in. Revert refuses a
   file whose sha moved since. A subagent's writes land on the parent's turn.
@@ -240,7 +241,8 @@ pyflakes still runs on bigger files.
 
 `harness.edit_diagnostics.python: false` removes the pyflakes block and
 `.blast_radius: false` the cross-file one — separate switches, separate
-stores. Neither key is in `config.yaml` yet, and adding one is human-only.
+stores. Both keys are in `config.yaml` (`blast_radius` since #2141), and a
+round may change either: `harness.*` is outside the config fence.
 
 ### TypeScript diagnostics arrive later, on purpose
 

@@ -86,13 +86,25 @@ the useful part of the doc.
 ## Human-only paths
 
 The loop's own scope limit: a fix that needs a path automod may never write is
-not a round's work, whatever its clauses say. `config.yaml`, runtime `data/**`,
-`.env*`, `pytest.ini`, `.gitignore` and the frontend's build inputs are in that
-set — as `DENIED_GLOBS` in `scripts/automod/spec.py`, enforced by `check_scope`
-on the round's changed paths, which is what actually stops the bytes landing —
-and the marker for it is `human-only:` at the head of a triage acceptance
-(`HUMAN_ONLY_PREFIX`, `is_human_only` in `scripts/automod/backlog.py`). The marker
-guards only when its value names a path: `human-only: not required` is triage
+not a round's work, whatever its clauses say. Runtime `data/**`, `.env*`,
+`pytest.ini`, `.gitignore` and the frontend's build inputs are in that set — as
+`DENIED_GLOBS` in `scripts/automod/spec.py`, enforced by `check_scope` on the
+round's changed paths, which is what actually stops the bytes landing — along
+with every path outside `ALLOWED_GLOBS` and the vault. `config.yaml` is denied
+by path and judged by content: a comment-only edit lands, and so does a value
+change outside `spec.CONFIG_DENIED_KEYS` / `CONFIG_LOOP_SOURCE_LEAVES`. The
+marker for the set is `human-only:` at the head of a triage acceptance
+(`HUMAN_ONLY_PREFIX`, `is_human_only` in `scripts/automod/backlog.py`), **and
+since 2026-10-05 the marker is checked against the rail it cites**
+(`_names_a_guard`): it guards only when the path it names is one `spec.classify`
+calls denied or unlisted, lies outside the repo and the vault, sits in a vault
+subtree a vault round may not write (the autonomy tasks are the #724 dispatch rail's),
+or the head names something physical. A marker on a PROTECTED path is not a
+guard — protected paths land, with the drill — and neither is one on
+`config.yaml` or one that names only a decision: 48 contracts in the fourteen
+days before carried the marker, most on a path the gate would have landed, and
+each parked its item for a decision no one needed (`architecture/automod.md`
+§3.2k). The older half of the same rule: `human-only: not required` is triage
 answering the prompt's "name the path" with "there is none", and since #1909 that
 is read as an ordinary contract rather than a guard, because reading the prefix
 alone parked landable items with a decision no one had asked for. What a round

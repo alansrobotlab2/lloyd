@@ -414,16 +414,24 @@ its answer can be the next item's live round. Outside the backend (no pool in
 the process) the pass does nothing, since from a CLI every live turn started
 before the process did.
 
-**Human-only.** Some paths the loop may never touch remain: `config.yaml`,
-`data/**`, `.env*`, `pytest.ini`, `.gitignore`, and the frontend's build
-inputs. A triage whose fix needs one records `confirmed` with an acceptance
-that begins `human-only:`, and `select_confirmed` skips it — the alternative
-was an implement round spent discovering it, which is what #278 cost before
-`web/src` was allowed. A *condition* only a person can satisfy — an audit,
-a sign-off, a measurement that needs real traffic — is the other shape, and
-it goes in `human_clauses`, never in `acceptance_clauses`: the item is still
-implemented, the reviewer does not grade those, and the landing leaves it
-open tagged `needs-human` (§4.5c).
+**Human-only.** A few paths the loop may never touch remain: `data/**`,
+`.env*`, `pytest.ini`, `.gitignore`, the frontend's build inputs, and anything
+outside the repo and the vault (the qmd fork and `chrome-extension/` among
+them — the gate cannot build either). A triage whose fix needs one records
+`confirmed` with an acceptance that begins `human-only:`, and
+`select_confirmed` skips it — the alternative was an implement round spent
+discovering it, which is what #278 cost before `web/src` was allowed. **The
+marker stands only where the gate would refuse the path** (2026-10-05,
+`backlog.is_human_only` → `_names_a_guard`, §3.2k): one that names a protected
+path (`scripts/automod/**`, the guardian, a service unit — they land, with the
+drill), `config.yaml` (rung 0 judges the content, §10), a vault file the vault
+round may write, or only a decision is read as an ordinary contract and the
+item goes to the implement pool. A *condition* a round cannot satisfy — an
+audit, a sign-off, a measurement that needs real traffic — is the other shape,
+and it goes in `human_clauses`, never in `acceptance_clauses`: the item is
+still implemented, the reviewer does not grade those, and they go on the
+item's `owed` list for the owed-check job (§3.2k; before 2026-09-27 the
+landing left it open tagged `needs-human`, §4.5c).
 
 ### 3.2a Status is the state machine
 
@@ -554,8 +562,9 @@ is gone with the landing, so that round starts from live main.
 
 Only the round judged the acceptance, and it is asked in a grammar rather
 than read out of prose. Everything else is noted and left open: `deferred`
-names the ids it waits on, `not_met` says so, and a round from before the
-finalizer says "a human decides". A closed item is never re-triaged, which is
+names the ids it waits on, `not_met` says so, and a round with no structured
+outcome says "owed-check decides" ("a human decides" on rows before
+2026-10-05). A closed item is never re-triaged, which is
 the whole reason not to guess — and the reason the prompt tells the model
 that `met` on an unverified acceptance is the one claim the loop cannot
 recover from. Items confirmed before clauses existed carry prose only; every
@@ -923,7 +932,7 @@ member of a live umbrella closed by expiry would be misattributed by
 `close_settled_items`. No switch (`autotriage.unfold_spent_umbrellas` was
 retired 2026-09-24).
 
-**One automatic second life.** A spent attempt parked the item for a human:
+**One automatic second life.** A spent attempt used to park the item for a human:
 ~35 a week, and 42 of the 67 a person reopened later landed.
 `retriage_spent_items` (autocode housekeeping, after the unfold, before the
 reconcile) sends an item back through *triage* — because what failed was
@@ -943,11 +952,14 @@ as `previous_clauses`. That row is a **mark**:
 includes it. The item is therefore untriaged, unattempted and unquarantined,
 and oldest-first puts it near the front. Single triage's `<origin>` carries a
 `RE-TRIAGED` line and its prompt says: a new contract without the
-twice-refused clauses, within the cap, or retire. The second spend parks for
-a human as before. `implement_outcomes` also resets its attempt count at a
-human `reopen_item` now — it reset only the latest row, so a reopened item's
-first new round could already be past every re-offer cap. While a re-triage is
-still owed, a review disagreement is not announced as "needs you". Switch
+twice-refused clauses, within the cap, or retire. The second spend leaves a
+`decide` entry for the owed-check job (§3.2k), which reopens, reopens with the
+refused clause reworded, or closes. `implement_outcomes` also resets its
+attempt count at a `reopen_item` now — it reset only the latest row, so a
+reopened item's first new round could already be past every re-offer cap. A
+review disagreement is announced to no one: until 2026-10-05 it said "#N needs
+you" once the re-triage was used up, and the `review_escalated` row now names
+its `decider` (`retriage` or `owed-check`) instead. Switch
 `workers.sources.autocode.retriage_spent`.
 
 **The reconciler's spent park reads the same two rules** (2026-09-24). It
@@ -1828,7 +1840,14 @@ against the live system, then answers with one of these:
   rechecked four times is ruled on instead;
 - `ruling`, the call Lloyd makes under Alan's delegation;
 - `work`, a draft follow-up item on `lloyd`, at most `spawn_cap` per item;
-- `reopen`, another implement attempt (open items only);
+- `reopen`, another implement attempt (open items only). It may carry
+  `amend_clause {clause, text}` (2026-10-05, `owed.amend_item_clause`): when
+  both reviews of a disagreement said the work is right and the clause wrong
+  as written, the clause is reworded before the reopen is recorded, the old
+  text goes on the item and in a `clause_amended` ledger row, and an amendment
+  that cannot be applied leaves the decision owed. This is the decider's
+  route, between rounds; `automod_amend_clause` is the implementer's,
+  mid-round, ratified by the review rung (§4.5c);
 - `close`, through the shared status recorder, stamped `closed_by: owed-check`;
 - `outside`.
 
@@ -1865,11 +1884,15 @@ the question is still live. Before #1909 the close only happened on an explicit
 `close` answer, so #1751 sat open with every entry settled until a hand sweep
 found it, and a `decide` entry ruled settled left its draft item owing nothing.
 
-**`outside` is the one thing that reaches Alan**: sudo on the host, a secret he
-holds, hardware, money. It moves to `owed_outside`, which `board_health.owed.outside`
-and Mission Control's backlog panel list, and the job announces it once. It is
-never a tag and never blocks the board. Deleting or moving data is not
-`outside`; it is ruled on and filed as work for a gated round.
+**`outside` is the one thing that reaches Alan**, and it means physical or his
+alone: hardware, sudo on the host, a secret, login or account he holds, money,
+posting under his name to a third party. It moves to `owed_outside`, which
+`board_health.owed.outside` and Mission Control's backlog panel list, and the
+job announces it once. It is never a tag and never blocks the board. Deleting
+or moving data is not `outside`; it is ruled on and filed as work for a gated
+round. Neither is a protected path, a `config.yaml` edit or a decision — the
+prompt says so by name since 2026-10-05, because each had been coming back as
+one.
 
 One clause is one entry on that list. A clause derived from `human_clauses`
 (#2055) is deduped against `owed_outside` as well as `owed` and `owed_settled`,
@@ -2207,7 +2230,7 @@ The rung's four outcomes, and where each goes:
 | every clause `met`, no findings | pass | ladder continues |
 | premise sound; a clause unmet/partial, a `blocking` honesty finding, a seam a test could cross before landing only under `seams_block: first`/`always` (advisory honesty entries and post-landing seams ride the findings without refusing — #866 and #870, the evening the rung first ran) | fail, `review_retry` + `review_findings` on the gate event | the round fixes what it names, commits, and gates again; the second graded refusal of a *distinct commit* says *abort and report*; a third is refused without asking the model. Re-gating the same commit is answered from the ledger with the same findings and spends nothing. A turn that ends unlanded hands the item back as `implement_outcomes` → `review_retry` (cap 2), findings in `reoffer_reason`, branch kept — the next round passes it as `automod_start(from_branch=…)` and begins where this one stopped, rebased onto live main |
 | premise sound; a clause `unsatisfiable` as written | fail, `review_retry`, the findings name `automod_amend_clause`; **spends no attempt** | a refusal of the contract, not the diff: the author amends exactly that clause (refused for any other), gates again, and the next review sees the amendment as an `<amendments>` block and ratifies it or refuses it and restores the old text (§4.5c). `REVIEW_HARD_CAP` — 5 graded reviews per round, passes included — is the ceiling that keeps the free move from looping |
-| premise unsound | fail, `review_premise_unsound` | the existing `spent` path: `draft` + `needs-human`, tag `review-premise`, the grader's summary on the item |
+| premise unsound | fail, `review_premise_unsound` | the existing `spent` path: `draft` with a `decide` entry for owed-check (§3.2k; `needs-human` before 2026-09-27), tag `review-premise`, the grader's summary on the item |
 | grader unreachable, 503, timeout, unusable object | fail, `external_blocker` | the engine, not the diff; the item keeps its attempt. Never a SKIPPED pass — a waived review is the #544 shape |
 
 It sits **after `tests`**, so it can trust a green tree and is handed the
@@ -3908,9 +3931,11 @@ re-derived under any SHA is caught. A hash git cannot produce is treated as
 *not denied* — refusing to promote because git hiccuped is a worse failure
 than the one this prevents.
 
-- **denied** — `config.yaml` and `data/tool_overrides.yaml` (a round could
-  disable Bash and Edit and lock itself out with no Python change at all — a
-  soft brick no test would catch), `.env*`, `pytest.ini`, `.gitignore`, and
+- **denied** — `config.yaml` by path, with the two content lanes below
+  (comment-only, and since 2026-10-05 a value change outside the fence), and
+  `data/tool_overrides.yaml` outright (a round could disable Bash and Edit and
+  lock itself out with no Python change at all — a soft brick no test would
+  catch), `.env*`, `pytest.ini`, `.gitignore`, and
   under `web/` the build inputs — `package.json`, the lockfile,
   `node_modules`, `dist`, `vite.config.*`, `tsconfig*.json` — because the
   frontend rung builds the candidate against the live tree's install, which

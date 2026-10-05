@@ -461,7 +461,9 @@ as one session on the **primary** per item: it measures each owed entry
 against the live system (run records, `server.err`, the ledger, the code) and
 answers per entry with one of `settled`, `recheck` (a date, clamped to 30 days;
 an entry rechecked four times is ruled on instead), `ruling`, `work` (a draft
-follow-up item, at most `spawn_cap` per item), `reopen`, `close`, or `outside`.
+follow-up item, at most `spawn_cap` per item), `reopen` (which may carry
+`amend_clause` — a review disagreement is this job's to decide, and it may
+reword the clause both reviews called wrong as written), `close`, or `outside`.
 The session may read and run commands but not edit files or write the board;
 the apply step is the only writer.
 
@@ -471,10 +473,14 @@ spent attempt and a parking triage verdict (`not_code`, `unverifiable`,
 `human-only`) all used to park on Alan with the tag, and nothing came back for
 it: 257 closed items piled up, and a hand sweep found 125 of them already done
 or moot. Alan's ruling: nothing parks on him, and Lloyd approves his own
-choices. `outside` is the only class that reaches him — sudo on the host, a
-secret he holds, hardware, money — listed on Mission Control's backlog panel,
-never as a tag. Deleting or moving data is not `outside`: it is ruled on and
-filed as work for a gated round.
+choices. `outside` is the only class that reaches him — physical or his alone:
+hardware, sudo on the host, a secret or account he holds, money, a post under
+his name — listed on Mission Control's backlog panel, never as a tag. Deleting
+or moving data is not `outside`: it is ruled on and filed as work for a gated
+round; neither is a protected path, a `config.yaml` edit or a decision. His
+second ruling (2026-10-05) is in the prompt verbatim: the loop goes with its
+own recommendation, and only something physical waits for him
+(`architecture/automod.md` §3.2k).
 
 **Writes** for real since 2026-09-27, when `apply` flipped to `true` after a
 dry run of 9 items against the hand sweep: the 4 dated checks came back
