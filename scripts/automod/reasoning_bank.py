@@ -100,10 +100,12 @@ CAUSES: tuple[tuple[str, str, str], ...] = (
      "Evidence the grader cannot see in this round's diff does not count. Put the change and "
      "its test in this round's diff (or amend the clause), and cite the file:line in the diff."),
     ("protected_path",
-     r"human-only|protected path|cannot be written by any diff|unlisted|may never touch|SETUP\.md"
-     r"|agent-services/|supervisor",
-     "A clause that needs a protected or human-only path cannot be met from a round. Say so "
-     "early (automod_amend_clause or a blocker) instead of spending the round on it."),
+     r"human-only|denied paths in diff|cannot be written by any diff|unlisted|may never touch"
+     r"|outside the writable set",
+     "A clause that needs a path the scope check refuses (denied or unlisted) cannot be met "
+     "from a round: say so early (automod_amend_clause or a blocker). A PROTECTED path "
+     "(scripts/automod/**, the guardian, service units) and config.yaml are not that — they "
+     "land, with the drill; do not file a blocker for one."),
     ("needs_live_service",
      r"live (?:re-?run|engine|service|measurement)|STOPPED|restart(?:ed)?\b|needs a live"
      r"|only observable by running|against the live engine|not running|live runs?\b|--apply"

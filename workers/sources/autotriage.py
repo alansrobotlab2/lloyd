@@ -384,16 +384,24 @@ SHAs. A verdict without evidence is unusable, because the point of this pass is 
 that a human can audit it later.
 - If you find the premise confirmed, also state **how the fix would be \
 verified** — the check you just ran should fail to reproduce afterwards.
-- **Some paths the loop may never touch**: `config.yaml`, `data/**`, `.env*`, \
-`pytest.ini`, `.gitignore`, and under `web/` the build inputs (`package.json`, \
-the lockfile, `vite.config.*`, `tsconfig*.json`). If the fix needs one of \
-them the item is still `confirmed`, but the loop cannot land it: begin \
-ACCEPTANCE with `human-only:` and name the path. The implementer skips those \
-instead of spending a round finding out, and the owed-check job rules on them \
-(a route around the path, or the exact edit for the one list Alan reads). \
-One exception: a fix that only rewords **comments** in `config.yaml` (no key, \
-value or quoting changes; the gate checks the YAML token stream is identical) \
-IS landable. Do not mark it `human-only:`; write ordinary clauses.
+- **A few paths the loop may never touch**: `data/**`, `.env*`, `pytest.ini`, \
+`.gitignore`, and under `web/` the build inputs (`package.json`, the lockfile, \
+`vite.config.*`, `tsconfig*.json`); also anything outside the repo and the \
+vault, and the qmd fork. If the fix needs one of them the item is still \
+`confirmed`, but the loop cannot land it: begin ACCEPTANCE with `human-only:` \
+and name the path. The implementer skips those instead of spending a round \
+finding out, and the owed-check job rules on them. \
+**Everything else is landable, and marking it `human-only:` parks it for no \
+one** (Alan, 2026-10-05: the loop goes with its own recommendation; only \
+something physical waits for him). In particular: \
+`scripts/automod/**`, the guardian and the service units are PROTECTED, not \
+denied — a round lands them and the gate adds the rollback drill; \
+`config.yaml` lands when the edit is comment-only, or changes a value outside \
+the fenced keys (`spec.CONFIG_DENIED_KEYS`: tool and model wiring, the \
+loop's own switches) — write ordinary clauses and let the gate's scope check \
+judge the diff; a vault file lands through the `vault` surface. A marker on a \
+landable path is ignored. **A judgment call is never a reason for the \
+marker**: make the call in the contract.
 - **A condition no round can satisfy is not an acceptance clause.** An audit, \
 a scope decision, a number that needs a week of real traffic: put it under \
 HUMAN_CLAUSES, never under ACCEPTANCE_CLAUSES. The implementer is not asked to \

@@ -602,7 +602,7 @@ def test_with_holding_off_a_full_pool_pauses_single_triage_and_says_both_numbers
 
 def test_items_autocode_would_not_take_do_not_fill_the_pool(backlog_dir, ledger, monkeypatch):
     _ready(backlog_dir, ledger, 39)
-    _ready(backlog_dir, ledger, 3, start=2000, acceptance="human-only: config.yaml")
+    _ready(backlog_dir, ledger, 3, start=2000, acceptance="human-only: .gitignore")
     for i in (3000, 3001):     # grouped members parked in up_next
         p = write_item(backlog_dir, i, status="up_next")
         B.update_frontmatter(p, {"group": 1})
@@ -721,7 +721,7 @@ def test_a_human_only_confirmation_is_never_held(backlog_dir, ledger, monkeypatc
     """It never enters the pool anyway, so holding it would park it twice."""
     _ready(backlog_dir, ledger, 40)
     write_item(backlog_dir, 7, days_old=300)
-    _stub_turn(monkeypatch, verdict="confirmed", acceptance="human-only: config.yaml")
+    _stub_turn(monkeypatch, verdict="confirmed", acceptance="human-only: .gitignore")
     out = asyncio.run(M.execute(_QItem({"group_triage": False, "implement_pool_floor": 40})))
     assert out["held"] is False and B.held_confirmations(ledger) == {}
 
@@ -734,7 +734,7 @@ def test_a_human_only_confirmation_stays_in_draft_owed_to_owed_check(backlog_dir
     from scripts.automod import owed as O
     _ready(backlog_dir, ledger, 3)
     write_item(backlog_dir, 7, days_old=300)
-    _stub_turn(monkeypatch, verdict="confirmed", acceptance="human-only: config.yaml")
+    _stub_turn(monkeypatch, verdict="confirmed", acceptance="human-only: .gitignore")
     asyncio.run(M.execute(_QItem({"group_triage": False, "implement_pool_floor": 40})))
     assert _status(backlog_dir, 7)[0] == "draft"
     B.reconcile_statuses(ledger)

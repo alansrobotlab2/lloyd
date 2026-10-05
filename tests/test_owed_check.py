@@ -353,7 +353,7 @@ def test_a_parking_triage_verdict_is_a_decision_owed(isolated, verdict):
 def test_a_confirmed_human_only_contract_is_a_decision_owed(isolated):
     p = write_item(isolated, 71)
     B.record_verdict(B.item_by_id(71), "confirmed", "real",
-                     acceptance="human-only: config.yaml needs the key")
+                     acceptance="human-only: .gitignore needs the entry")
     assert [e["kind"] for e in O.entries_of(fm_of(p))] == ["decide"]
 
 

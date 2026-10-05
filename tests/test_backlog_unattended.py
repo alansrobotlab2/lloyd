@@ -820,8 +820,8 @@ def test_is_human_only_accepts_the_marker_wrapped_in_a_code_span():
     assert B.is_human_only("`human-only: ~/lloyd-data/x.jsonl` (siblings)") is True
     assert B.is_human_only("`human-only: ~/lloyd-data/x.jsonl`") is True
     assert B.is_human_only("human-only: ~/lloyd-data/x.jsonl") is True
-    assert B.is_human_only('"human-only: scripts/automod/spec.py"') is True
-    assert B.is_human_only("'human-only: config.yaml'") is True
+    assert B.is_human_only('"human-only: web/vite.config.ts"') is True
+    assert B.is_human_only("'human-only: .gitignore'") is True
 
 
 def test_a_backticked_human_only_row_is_skipped_end_to_end(isolated):
@@ -875,11 +875,35 @@ NO_PATH_MARKERS = (
 #: Values that DO name a guard, including the wrapped forms #1698 pinned. Every
 #: one of these is a live triage row's value, not an invented one.
 GUARDED_MARKERS = (
-    "human-only: config.yaml", "`human-only: ~/lloyd-data/x.jsonl` (siblings)",
-    "`human-only: ~/lloyd-data/x.jsonl`", '"human-only: scripts/automod/spec.py"',
-    "'human-only: config.yaml'", "human-only: `.gitignore` — a person replaces line 92",
+    "`human-only: ~/lloyd-data/x.jsonl` (siblings)",
+    "`human-only: ~/lloyd-data/x.jsonl`", '"human-only: web/vite.config.ts (in DENIED_GLOBS)"',
+    "human-only: `.gitignore` — a person replaces line 92",
+    "human-only: pytest.ini needs the marker",
+    "human-only: qmd/src/cli/qmd.ts (the fork is a separate clone)",
+    "human-only: chrome-extension/src/background/service-worker.ts",
+    "human-only: `~/.cache/qmd/` (the live index a swap moves aside)",
+    "human-only: the dispatch half of this item — `~/obsidian/autonomy/96-djev-name-prior-probe.md` `status`",
+    "human-only: sudo on the host to raise the inode limit",
+    "human-only: a USB drive Alan plugs in",
+)
+
+#: 2026-10-05: values that name a path the gate would LAND. Every one is a live
+#: triage row's value, and every one parked its item for a decision no one
+#: needed: #2205/#2211/#2214 (`scripts/automod/gate.py`, protected — the drill
+#: runs, the fix sat on a branch), #1345 (a supervisor conf, protected), #1617
+#: and #1688 (`config.yaml`: a comment, then a tunable), #2232 (an `eval/` file).
+LANDABLE_MARKERS = (
+    "human-only: config.yaml", "'human-only: config.yaml'",
     "human-only: config.yaml needs the key",
+    "human-only: config.yaml:648-652 — the comment block must stop claiming",
+    '"human-only: scripts/automod/spec.py"',
+    "human-only: scripts/automod/gate.py — a person promotes automod/SM_20261005_024736",
     "human-only: agent-services/supervisor/conf.d/agent-djev.conf (a protected path)",
+    "human-only: eval/djev/name_prior_2026-10-04.json — the fix is `git add`",
+    "human-only: ~/lloyd/app/autonomy.py", "human-only: CLAUDE.md",
+    "human-only: ~/obsidian/skills/retention-sweep/SKILL.md",
+    "human-only: a ruling on the token budget",
+    "human-only: Alan decides whether the weekly cadence is right",
 )
 
 
@@ -902,6 +926,27 @@ def test_a_marker_that_names_a_path_is_still_a_guard(acceptance):
     """The control #278 still needs: a contract that names a protected path is
     never handed an implement round to discover that with."""
     assert B.is_human_only(acceptance) is True, acceptance
+
+
+@pytest.mark.parametrize("acceptance", LANDABLE_MARKERS)
+def test_a_marker_on_a_path_the_gate_would_land_is_not_a_guard(acceptance):
+    """Alan, 2026-10-05: the loop goes with its own recommendation unless a step
+    is physical. The marker is checked against the rail it cites: protected is
+    not denied (`spec.py`: "Lloyd may edit these"), `config.yaml` is judged by
+    content at rung 0, and a decision is not a path at all."""
+    assert B.is_human_only(acceptance) is False, acceptance
+
+
+def test_the_guard_asks_spec_and_does_not_restate_the_globs():
+    """The predicate must move with the rail: a path admitted to ALLOWED_GLOBS
+    tomorrow stops being a guard without an edit here."""
+    from scripts.automod import spec
+    for path in ("scripts/automod/gate.py", "app/x.py", "web/src/App.tsx"):
+        assert spec.classify(path) in ("allowed", "protected")
+        assert B.is_human_only(f"human-only: {path}") is False
+    for path in (".gitignore", "data/tool_overrides.yaml", "web/package.json"):
+        assert spec.classify(path) == "denied"
+        assert B.is_human_only(f"human-only: {path}") is True
 
 
 def test_a_no_path_marker_dispatches_the_item_and_owes_no_decision(isolated):

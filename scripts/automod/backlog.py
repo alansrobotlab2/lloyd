@@ -316,7 +316,100 @@ def is_human_only(acceptance) -> bool:
     invented. The false-True risk is an item nothing ever comes back for.
     """
     head = _human_only_head(acceptance)
-    return head is not None and head not in HUMAN_ONLY_NO_PATH
+    if head is None or head in HUMAN_ONLY_NO_PATH:
+        return False
+    return _names_a_guard(acceptance)
+
+
+# 2026-10-05, Alan: "empower automod to go with its own recommendations and not
+# wait for me, unless there's something physical that i need to do." Fourteen
+# days of ledger said where the waiting came from: 48 confirmed contracts opened
+# with the marker, and the path they named was landable in most of them — 12
+# named `scripts/automod/**` or a service unit, which `spec.py` calls PROTECTED
+# ("Lloyd may edit these, but the change must additionally survive a live
+# rollback drill") and never denied, and about half of the 22 naming
+# `config.yaml` wanted a comment reworded, landable since 8098fa33. The marker
+# was honoured on any path at all, so a wrong belief about a rail parked the
+# item: #2205, #2211 and #2214 each read `human-only: scripts/automod/gate.py`
+# while the fix sat finished on a branch. So the value is checked against the
+# rail it cites. A guard stands only where the gate would really refuse the
+# bytes, or where the head asks for hands.
+
+#: Words that mean a person's hands, an account or money: `outside`, not a round.
+_PHYSICAL_WORDS = re.compile(
+    r"\b(sudo|hardware|usb|drive|plug|cable|secret|password|passphrase|credential|"
+    r"api key|account|log ?in|oauth|purchase|pay|money|licen[cs]e)\b")
+
+#: A path-shaped token in a marker's head: something with a slash, a dotfile, or
+#: a bare name with an extension.
+_PATH_TOKEN = re.compile(r"[~\w.*\-]*[/][\w.*/\-]*|\.[a-z]\w+(?:\.\w+)*|\b[\w\-]+\.[a-z]{1,5}\b",
+                         re.IGNORECASE)
+
+#: Vault subtrees a vault round may not write, whatever the contract says: the
+#: app's own state, and `autonomy/` because a task's dispatch fields are the #724
+#: grant rail's (`vault_round.validate`).
+_VAULT_GUARDED = (".obsidian/", ".git/", ".trash/", "autonomy/", "lloyd/soul.md")
+
+
+def _head_text(acceptance) -> str:
+    """`_human_only_head`'s segment, in the acceptance's own case (paths are
+    case-sensitive: `CLAUDE.md` is allowed and `claude.md` is unlisted)."""
+    text = str(acceptance or "").strip().strip(HUMAN_ONLY_WRAPPERS).strip()
+    value = text[len(HUMAN_ONLY_PREFIX):].strip()
+    for sep in _HUMAN_ONLY_SEGMENTS:
+        value = value.partition(sep)[0]
+    return value
+
+
+def _names_a_guard(acceptance) -> bool:
+    """Would the gate refuse what this marker names, or does it ask for hands?
+
+    Each path in the head is put to the rail that owns it: a repo path to
+    `spec.classify` (allowed and protected both land — protected buys the drill),
+    `config.yaml` to the content lanes `check_scope` runs at rung 0 (comment-only,
+    and a value change outside `spec.CONFIG_DENIED_KEYS`), a vault path to the
+    vault round. Anything else — a denied or unlisted path, a file outside the
+    repo and the vault — is a guard. A head naming no path is a guard only when
+    it names something physical: a decision is the loop's to make now.
+
+    The cheap direction is still false-False: a round that meets a real rail
+    reports it under `human_paths` and the owed entry is authored then."""
+    from scripts.automod import spec
+    head = _head_text(acceptance)
+    physical = bool(_PHYSICAL_WORDS.search(head.lower()))
+    def paths_in(text: str) -> list[str]:
+        found = [re.sub(r":\d[\d\-,:]*$", "", t.strip("`'\"()[],;:")).rstrip(".")
+                 for t in _PATH_TOKEN.findall(text)]
+        return [t for t in found if t]
+
+    tokens = paths_in(head)
+    if not tokens:
+        # "the dispatch half of this item — `~/obsidian/autonomy/96-….md`": the
+        # head describes and the path follows the dash (#2219's row). Read on a
+        # little; the no-path words were already answered by the caller.
+        text = str(acceptance or "")
+        start = text.lower().find(HUMAN_ONLY_PREFIX) + len(HUMAN_ONLY_PREFIX)
+        tokens = paths_in(text[start:start + 400])[:3]
+    if not tokens:
+        return physical
+    for tok in tokens:
+        low = tok.lower()
+        for root in ("~/lloyd/", "/home/alansrobotlab/lloyd/"):
+            if low.startswith(root):
+                tok, low = tok[len(root):], low[len(root):]
+        for root in ("~/obsidian/", "/home/alansrobotlab/obsidian/"):
+            if low.startswith(root):
+                if low[len(root):].startswith(_VAULT_GUARDED):
+                    return True
+                break
+        else:
+            if tok.startswith(("~", "/")):
+                return True            # outside the repo and the vault
+            if tok == "config.yaml":
+                continue               # rung 0 judges the content, not triage
+            if spec.classify(tok) not in ("allowed", "protected"):
+                return True
+    return physical
 
 
 #: The words a model writes when it means "no value". #1843's implementer
@@ -460,11 +553,13 @@ IMPLEMENT_OUTCOME_SCHEMA: dict = {
             },
             "required": ["path", "reason"],
             "additionalProperties": False,
-        }, "description": ("Paths this change needed but the loop may never write "
-                           "(denied or outside the writable set). Leaving one out and "
-                           "landing the rest is correct; hiding it is not. A `met` "
-                           "landing still closes, and the item carries needs-human so "
-                           "the path is not lost (#1210). Empty when there are none.")},
+        }, "description": ("Paths this change needed that the gate's scope check REFUSED "
+                           "(denied or outside the writable set) — never a protected "
+                           "path, which lands with the drill, and never a config.yaml "
+                           "edit the scope check accepted. Leaving one out and landing "
+                           "the rest is correct; hiding it is not. A `met` landing still "
+                           "closes, and the path goes on the item's owed list for the "
+                           "owed-check job (#1210). Empty when there are none.")},
     },
     "required": ["landed", "acceptance", "clause_outcomes", "deferred_to", "summary", "spawned"],
     "additionalProperties": False,
@@ -794,9 +889,11 @@ TRIAGE_VERDICT_SCHEMA: dict = {
                      "description": "What was measured, with paths and line numbers."},
         "acceptance": {"type": "string",
                        "description": ("For `confirmed`: the contract the implementer "
-                                       "is held to. Prefix with 'human-only:' when the "
-                                       "fix needs a path the loop may never touch. "
-                                       "Empty otherwise.")},
+                                       "is held to. Prefix with 'human-only:' ONLY when "
+                                       "the fix needs a path the gate refuses (denied or "
+                                       "unlisted) or a person's hands. Protected paths and "
+                                       "config.yaml are landable; a decision is yours to "
+                                       "make. Empty otherwise.")},
         "acceptance_clauses": {"type": "array", "items": {"type": "string"},
                                "description": ("For `confirmed`: the same contract split into "
                                                "separately checkable clauses, each one thing a "

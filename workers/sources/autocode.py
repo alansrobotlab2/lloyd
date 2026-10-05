@@ -218,9 +218,9 @@ rejection with evidence beats a landing that improves nothing. A closed item \
 is never re-triaged, so `met`, `unnecessary` or `rejected` on evidence you did \
 not actually gather is the one claim this loop cannot recover from.
 
-If your change needed a path the loop may never write — anything the gate's \
-scope check denies — leave it out, land the rest, and report it under \
-`human_paths`. Never `git add -f`.
+If the gate's scope check REFUSED a path you needed, leave it out, land the \
+rest, report it in `human_paths`. Never `git add -f`. A protected path \
+or `config.yaml` is not one: both land.
 
 Report what you did, quoting the gate line rather than saying "it passed", \
 and end with one line `SPAWNED: <ids of blocker items you filed or were merged \
