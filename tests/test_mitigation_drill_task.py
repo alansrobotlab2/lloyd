@@ -10,11 +10,27 @@ itself. So the only version of this task a worker can obey is the two carriers
 this file renders, and a step that exists only below the `---` is a step that
 will never happen.
 
-The fixtures are byte-for-byte copies of the live pair (`cmp` clean at
-2026-10-04T03:35Z). That is deliberate: the gate runs `-m "not live_vault"`
-(`pytest.ini:10-13`), so a clause about a vault file is only enforceable by the
-loop if the bytes it grades are also in the repo — and the `live_vault` node at
-the bottom is what stops the copy from drifting away from what dispatches.
+The fixtures are copies of the live pair, and the two halves are graded
+differently on purpose. `SKILL.md` is still byte-for-byte, and the gate runs
+`-m "not live_vault"` (`pytest.ini:14-19`), so a clause about a vault file is
+only enforceable by the loop if the bytes it grades are also in the repo. The
+TASK file is graded parsed-and-rendered and never as whole-file bytes, because
+dispatch writes into `~/obsidian/autonomy/95-mitigation-drill.md` itself on
+every run — `_update_task_field` (`app/autonomy.py:174`) stamps its front matter
+and `_append_activity_log` (`app/autonomy.py:324`) appends a `## Activity Log`
+entry to its body, and the YAML re-serialisation re-wraps the description's line
+breaks. Byte equality against a copy is therefore unsatisfiable one dispatch
+after the task is armed, however correct the task is (#2229). What the
+`live_vault` nodes at the bottom grade of the task instead is the value a run
+receives: the rendered prompt, the front matter minus the keys the scheduler
+owns, and the body above the log.
+
+The keys the live copy is allowed to carry that this one does not are not listed
+here: they are read off the call sites of the engine's one front-matter writer,
+because that writer is what stamps them. Listing them would leave the exclusion
+one new stamp wide of red — which is the defect #2229 was filed against — while
+reading them off a function every runtime write has to go through to reach the
+vault at all is a guarantee the set cannot silently fall behind the engine.
 
 What is pinned is the part that has to be true for the drill to produce a median
 series at all: the command is exact, the exit code is reported rather than
@@ -26,13 +42,25 @@ really regressed (exit 1) is the day the task exists for.
 """
 from __future__ import annotations
 
+import ast
+import inspect
 import re
 from pathlib import Path
 
 import pytest
+import yaml
 
 from app import autonomy, mitigation_state
 from app import paths as app_paths
+
+# Imported by name for two reasons, both load-bearing. `_update_task_field` is
+# the symbol whose CALL SITES the key derivation below reads, so an attribute
+# access spelled `autonomy._update_task_field(...)` would not be visible to a
+# reader, or to a grep, looking for what this file binds the derivation to; it
+# binds the same object either way. `ACTIVITY_LOG_HEADING` is imported rather
+# than typed out so the split below the run log cannot fall behind the string the
+# appender writes.
+from app.autonomy import ACTIVITY_LOG_HEADING, _update_task_field
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK_FIXTURE = ROOT / "tests/fixtures/mitigation_drill/task-95.md"
@@ -259,33 +287,205 @@ def test_the_skill_names_the_history_cap_the_code_keeps():
     )
 
 
+# ── fixture vs live, graded by value ─────────────────────────────────────────
+# The five nodes above grade the repo's own copy; the `live_vault` nodes below
+# grade the vault the scheduler globs (`app/autonomy.py:101`). What makes the
+# copy a copy is not its bytes. Dispatch writes into
+# `~/obsidian/autonomy/95-mitigation-drill.md` on every run:
+# `_update_task_field` (`app/autonomy.py:174`) re-serialises its front matter,
+# which re-stamps the engine's own keys and re-wraps the description's line
+# breaks, and `_append_activity_log` (`app/autonomy.py:324`) appends a run line
+# under `ACTIVITY_LOG_HEADING`. #2229 is the record of what that does to a
+# byte comparison: it failed at `At index 581 diff: b'\n' != b' '` one daily run
+# after task #95 was armed, and would have failed again on the next one however
+# correct the task was. So SKILL.md is still graded as bytes — no dispatch path
+# writes a skill — and the task is graded as the value a run receives.
+
+
+def _engine_written_task_keys() -> frozenset[str]:
+    """Every front-matter key the scheduler owns, read off the one writer.
+
+    Derived, never listed. The key set is an open set owned by `app/autonomy.py`:
+    today it stamps `updated` in one call, `last_attempt`/`last_run`/`next_run`
+    in others and `failure_count`/`infra_failure_count`/`infra_rest_until` on the
+    failure paths, and the next release may add one. A hand-written exclusion
+    list is therefore one new stamp away from the red #2229 was filed for, while
+    the call sites of `_update_task_field` — the only function that rewrites a
+    task's front matter, and private to the module that stamps it — cover a key
+    the day it is written. The bound is that writer's privacy: only
+    `app/autonomy.py` calls it (the test files that do are excluded by reading
+    that module's own source), so this walk is one module deep and a stamp
+    written somewhere else would be a second funnel, which is itself the bug.
+    """
+    module = ast.parse(inspect.getsource(autonomy))
+
+    def _literal_keys(node: ast.AST) -> set[str]:
+        return {key.value for sub in ast.walk(node) if isinstance(sub, ast.Dict)
+                for key in sub.keys
+                if isinstance(key, ast.Constant) and isinstance(key.value, str)}
+
+    keys: set[str] = set()
+    splatted: set[str] = set()
+    for node in ast.walk(module):
+        if isinstance(node, ast.Call):
+            callee = node.func
+            spelling = (callee.id if isinstance(callee, ast.Name)
+                        else callee.attr if isinstance(callee, ast.Attribute)
+                        else "")
+            if spelling != _update_task_field.__name__:
+                continue
+            for kw in node.keywords:
+                if kw.arg:
+                    keys.add(kw.arg)                       # `updated=now_iso`
+                elif isinstance(kw.value, ast.Name):
+                    splatted.add(kw.value.id)              # `**fields`
+                else:
+                    keys |= _literal_keys(kw.value)        # `**({"next_run": x} …)`
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if node.value is None:
+                    continue
+                if isinstance(target, ast.Name) and target.id in splatted:
+                    keys |= _literal_keys(node.value)      # `fields: dict = {…}`
+                elif (isinstance(target, ast.Subscript)
+                      and isinstance(target.value, ast.Name)
+                      and target.value.id in splatted
+                      and isinstance(target.slice, ast.Constant)
+                      and isinstance(target.slice.value, str)):
+                    keys.add(target.slice.value)           # `fields["next_run"] = …`
+    return frozenset(keys)
+
+
+#: The task-file keys dispatch is entitled to change under a copy's feet. This is
+#: the whole exclusion, and `test_the_engine_key_set_is_read_off_the_scheduler`
+#: is what proves it cannot be widened to swallow a graded field or emptied by
+#: refactor.
+ENGINE_WRITTEN_KEYS = _engine_written_task_keys()
+
+
+def _graded_task_view(path: Path) -> dict:
+    """What the task file is to dispatch: parsed, minus what the engine owns.
+
+    `_parse_task_file` is the loader dispatch itself uses, so the YAML re-wrap a
+    dispatch performs is already gone at this point — the values are equal even
+    when the bytes are not. `_path` is the loader's own record of where it read,
+    and is asserted against the argument before it goes: a comparison of two
+    files must not be graded on which of the two filenames got remembered. The
+    body is cut at `ACTIVITY_LOG_HEADING` (the constant the appender writes, not
+    a copy of the string) because that section is written one line per run, and
+    normalised for whitespace because the live copy keeps a blank line the fixture
+    has never had in front of the heading.
+    """
+    parsed = dict(autonomy._parse_task_file(path) or {})
+    assert parsed, f"{path} does not parse as an autonomy task"
+    assert parsed.get("_path") == str(path), (
+        f"_parse_task_file reported {parsed.get('_path')!r}, not {str(path)!r}: "
+        "the loader changed and this view is no longer a view of this file")
+    parsed.pop("_path")
+    lines = str(parsed.pop("body", "")).split("\n")
+    at = next((i for i, line in enumerate(lines)
+               if line.strip().lower() == ACTIVITY_LOG_HEADING.lower()), None)
+    docs = lines if at is None else lines[:at]
+    return {
+        "fields": {k: v for k, v in parsed.items() if k not in ENGINE_WRITTEN_KEYS},
+        "docs": " ".join(" ".join(docs).split()),
+    }
+
+
+def _fixture_front_and_body() -> tuple[dict, str]:
+    """The fixture's front matter and body, parsed, for re-serialising a copy."""
+    parsed = autonomy._parse_task_file(TASK_FIXTURE)
+    assert parsed, f"{TASK_FIXTURE} does not parse as an autonomy task"
+    front = {k: v for k, v in parsed.items() if k not in ("_path", "body")}
+    return front, str(parsed.get("body") or "")
+
+
+def _write_front_matter(dst_dir: Path, front: dict, body: str, *,
+                        name: str, width: int = 80) -> Path:
+    """Write one task file from a parsed front matter, at a chosen wrap column."""
+    path = dst_dir / name
+    dumped = yaml.dump(front, default_flow_style=False, allow_unicode=True,
+                       width=width)
+    path.write_text(f"---\n{dumped}---\n{body}", encoding="utf-8")
+    return path
+
+
+def _assert_live_task_matches(task_copy: Path = TASK_FIXTURE,
+                              skill_copy: Path = SKILL_FIXTURE) -> None:
+    """The one fixture-vs-live comparison, so every node here grades one thing.
+
+    Three graded surfaces and one byte surface. The rendered prompt is what a run
+    actually receives, so a description or SKILL.md that no longer says what the
+    drill does is caught here whatever the front matter looks like. The graded
+    fields are everything else the file decides — `frequency`, `skill_name`,
+    `timeout_seconds`, the `acceptance` regex that grades a run — two of which,
+    `frequency` and `skill_name`, reach no prompt at all (`_build_task_prompt`,
+    `app/autonomy.py:2487`, renders the id, the name, the skill and the
+    description) and so are caught nowhere else. The body above the Activity Log
+    is documentation and is graded as documentation: same words, any wrapping.
+    Every divergence found is named in one message, so one run reports all of
+    what moved rather than only the first.
+    """
+    assert LIVE_SKILL.read_bytes() == skill_copy.read_bytes(), (
+        "the live SKILL.md differs from the bytes this file grades: skills are "
+        "authored, never dispatched-into, so bytes remain the bar for this half")
+
+    live_task, live_prompt = _render(LIVE_TASK, LIVE_SKILL)
+    copy_task, copy_prompt = _render(task_copy, skill_copy)
+    assert live_task and copy_task
+
+    problems: list[str] = []
+    if live_prompt != copy_prompt:
+        problems.append("the prompt a run of this task would receive differs")
+    live_fields = _graded_task_view(LIVE_TASK)["fields"]
+    copy_fields = _graded_task_view(task_copy)["fields"]
+    for key in sorted(set(live_fields) | set(copy_fields)):
+        if live_fields.get(key) != copy_fields.get(key):
+            problems.append(f"{key}: live={live_fields.get(key)!r} "
+                            f"copy={copy_fields.get(key)!r}")
+    live_docs = _graded_task_view(LIVE_TASK)["docs"]
+    copy_docs = _graded_task_view(task_copy)["docs"]
+    if live_docs != copy_docs:
+        problems.append("the body above the Activity Log differs")
+
+    assert not problems, (
+        "the live task differs from the copy this file grades, on the values a "
+        "run acts on that the scheduler does not stamp: "
+        + "; ".join(problem[:120] for problem in problems))
+
+
 @pytest.mark.live_vault
-def test_the_live_task_and_skill_are_the_bytes_this_file_grades():
-    """#2153 clause 5, against the vault that dispatches.
+def test_the_live_task_and_skill_are_the_job_this_file_grades():
+    """#2153 clause 5 against the vault that dispatches; #2229 clauses 1 and 4.
+
+    This node is `test_the_live_task_and_skill_are_the_bytes_this_file_grades`,
+    renamed by #2229: the byte comparison it made of the live TASK file is the
+    defect, not a bar to be met, and no bytes satisfy it once task #95 has run —
+    the scheduler stamps four front-matter keys, re-wraps the description and
+    appends an Activity Log line to that very file on every dispatch. The
+    SKILL.md byte comparison is retained, inside the helper, and so is every
+    schedule assertion the node used to make.
 
     `@live_vault` because `~/obsidian` is not a tree this round controls
-    (`pytest.ini:10-13`); run it from a worktree with
+    (`pytest.ini:14-19`); run the live nodes of this file from a worktree with
 
         ~/lloyd/.venvs/lloyd/bin/python -m pytest \\
-            tests/test_mitigation_drill_task.py::test_the_live_task_and_skill_are_the_bytes_this_file_grades -q -m ""
+            tests/test_mitigation_drill_task.py -q -m ""
 
-    The fixtures above are gate-enforced; this node is what makes them the same
-    bytes the scheduler globs (`app/autonomy.py:101`) rather than a copy that has
-    quietly diverged from it.
+    Clause 4 is why the first line is not the comparison: `_find_task_file` is
+    the scheduler's own lookup, so passing it is what makes this a job rather
+    than documentation, and `frequency` and `skill_name` are what make "a daily
+    job that receives its instructions" more than a file that happens to sit in
+    `~/obsidian/autonomy/`.
     """
     assert autonomy._find_task_file(95) == LIVE_TASK, (
         "the scheduler's own lookup does not resolve id 95 to this file, so the "
         "task is documentation rather than a scheduled job"
     )
-    assert LIVE_TASK.read_bytes() == TASK_FIXTURE.read_bytes(), (
-        "the live task file differs from the bytes this file grades"
-    )
-    assert LIVE_SKILL.read_bytes() == SKILL_FIXTURE.read_bytes(), (
-        "the live SKILL.md differs from the bytes this file grades"
-    )
+    _assert_live_task_matches()
 
-    live_task, live_prompt = _render(LIVE_TASK, LIVE_SKILL)
-    assert live_prompt == _render(TASK_FIXTURE, SKILL_FIXTURE)[1]
+    live_task, _ = _render(LIVE_TASK, LIVE_SKILL)
     assert str(live_task.get("frequency")) == "daily"
     assert autonomy._frequency_interval_seconds(live_task) == 86_400.0, (
         "the rendered task is not a daily one, so the median series the item "
@@ -297,3 +497,112 @@ def test_the_live_task_and_skill_are_the_bytes_this_file_grades():
     )
     assert (Path.home() / "obsidian" / "skills"
             / str(live_task.get("skill_name")) / "SKILL.md").is_file()
+
+
+@pytest.mark.live_vault
+@pytest.mark.parametrize("field,new_value", [
+    ("frequency", "weekly"),
+    ("skill_name", "nightly-vault-maintenance"),
+    ("description", "Run the drill, then call Edit on mitigation_drill.json."),
+], ids=["frequency", "skill_name", "description"])
+def test_a_copy_that_diverges_on_one_graded_value_is_caught(tmp_path, field,
+                                                            new_value):
+    """#2229 clause 2: taking the byte bar off the task did not take the guard.
+
+    Each case copies the fixture into `tmp_path`, checks the untouched copy still
+    matches the live task — so the raise below can only be about the mutation,
+    never about an already-divergent pair — changes exactly one value, and
+    requires the comparison to raise and to name the key it caught. The three
+    values are the three ways a copy can stop describing the job: `frequency` and
+    `skill_name` are graded by the field comparison alone (neither reaches
+    `_build_task_prompt`), and the `description` is graded by the rendered prompt
+    as well, which is the seam a run actually crosses.
+    """
+    front, body = _fixture_front_and_body()
+    _assert_live_task_matches(_write_front_matter(tmp_path, front, body,
+                                                  name="pristine.md"))
+
+    mutated = dict(front)
+    mutated[field] = new_value
+    with pytest.raises(AssertionError) as raised:
+        _assert_live_task_matches(_write_front_matter(tmp_path, mutated, body,
+                                                      name="mutated.md"))
+    message = str(raised.value)
+    assert message.startswith("the live task differs"), message
+    assert f"{field}: live=" in message, message
+
+
+@pytest.mark.live_vault
+def test_a_re_wrapped_or_stamped_copy_still_matches_the_live_task(tmp_path):
+    """#2229 clause 3: the two ways the copy may differ and still be the copy.
+
+    The first half is the re-wrap a dispatch itself performs. The same front
+    matter is serialised at two column widths, so the description breaks at
+    different characters while parsing to the same text — `wide` and `narrow` are
+    not byte-equal to each other, which is the control that this is a test about
+    bytes and not a no-op — and both have to match the live task, which carries a
+    description wrapped at a third width again.
+
+    The second half is the stamp. `infra_rest_until` is a key the engine writes
+    and neither file has ever carried, which is the shape of the future the
+    exclusion exists for: a key nobody has listed. Its presence on the copy side
+    alone must not read as a divergence, and its absence from the graded view is
+    asserted rather than assumed.
+    """
+    front, body = _fixture_front_and_body()
+
+    wide = _write_front_matter(tmp_path, front, body, name="wide.md", width=200)
+    narrow = _write_front_matter(tmp_path, front, body, name="narrow.md", width=40)
+    assert wide.read_bytes() != narrow.read_bytes(), (
+        "the two serialisations came out byte-identical, so the re-wrap half of "
+        "this node would grade nothing")
+    wide_view, narrow_view = _graded_task_view(wide), _graded_task_view(narrow)
+    assert wide_view["fields"]["description"] == narrow_view["fields"]["description"], (
+        "the two wraps parse to different descriptions, so this is not the "
+        "whitespace-only re-wrap a dispatch performs")
+    _assert_live_task_matches(wide)
+    _assert_live_task_matches(narrow)
+
+    stamp = "infra_rest_until"
+    assert stamp in ENGINE_WRITTEN_KEYS, (
+        f"{stamp} is no longer derived as engine-written, so the exclusion this "
+        "node is about is not the one the derivation produces")
+    assert stamp not in _graded_task_view(LIVE_TASK)["fields"], (
+        f"the live task now carries {stamp} itself, which makes the unseen-key "
+        "case here no longer unseen — pick a key neither file has")
+
+    stamped = dict(front)
+    stamped[stamp] = "2026-10-06T13:00:00+00:00"
+    stamped_path = _write_front_matter(tmp_path, stamped, body, name="stamped.md")
+    assert stamp in autonomy._parse_task_file(stamped_path), (
+        "the stamp did not survive serialisation, so the node graded a copy that "
+        "carries no extra key at all")
+    _assert_live_task_matches(stamped_path)
+
+
+def test_the_engine_key_set_is_read_off_the_scheduler():
+    """The exclusion is only safe while it tracks the engine, so that is graded.
+
+    #2229's whole argument is that the excluded set has to be derived rather than
+    maintained, which is worth nothing if the derivation quietly stops working:
+    an empty or shrunken set is a byte comparison by another name, and an
+    over-wide one is a fixture that can never diverge. Both directions are
+    asserted. The floor names the stamps the scheduler writes today, so a
+    refactor that renames the writer or moves the stamps off it turns this node
+    red instead of silently tolerating the stamp — and the ceiling pins the keys
+    this file grades inside the same set, so the exclusion cannot be widened into
+    covering the thing it is compared against.
+    """
+    assert ENGINE_WRITTEN_KEYS, "the derivation found no writer at all"
+    assert {"last_attempt", "last_run", "next_run", "updated",
+            "failure_count"} <= ENGINE_WRITTEN_KEYS, (
+        f"the derivation reads only {sorted(ENGINE_WRITTEN_KEYS)}; the live task "
+        "file carries the stamps named above, written through "
+        "`_update_task_field`, and dropping one here puts the byte-level red back"
+    )
+    graded_by_this_file = {"description", "name", "skill_name", "frequency",
+                           "acceptance", "timeout_seconds", "id"}
+    assert not graded_by_this_file & ENGINE_WRITTEN_KEYS, (
+        f"the writer now stamps {sorted(graded_by_this_file & ENGINE_WRITTEN_KEYS)}, "
+        "which this file grades: excluding it would make the fixture-vs-live "
+        "comparison unable to fail, so grade it somewhere or name it here")
