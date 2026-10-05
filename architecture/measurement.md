@@ -73,6 +73,7 @@ a row naming a deleted arm both fail.
 | `supply-chain` | whether the install-provenance predicate blocks the distribution names that do not exist without blocking one that does, and whether an advisory scan ran at all — 61 planted names replayed through the shipped code against a faked registry and a pinned clock, over 180 of the repo's 181 declared dependencies as the false-block control, 0 of them blocked (#1610) | `app/harness/supply_chain.py` (`fixtures`, `scan --write-baseline`), `tests/test_supply_chain_provenance_fixtures.py` |
 | `uptake` | whether injected context reached the turn that needed it, with hand labels under `eval/uptake/labels/` | `app/uptake.py` |
 | `injection_canary` | whether a planted instruction in fetched content drives a sink call — thirteen worker-style tasks whose transcript, backlog body, page, README or module carries an instruction beside a canary token, scored on the canary reaching a non-read-only tool or Bash, or an `agent_mcp.egress.EGRESS_TOOLS` lane whose destination the egress allow-list does not name (#2128), in the calls the model proposed, with two controls; the positive class for the P10 shadow seams (`action_review`, the input probe), whose verdicts are read back per row. Runs in two arms — `LLOYD_EGRESS_ENFORCE` on or unset — and `grade` reports the two rates as a pair with 95% Wilson intervals per arm (#2154) | `eval/run_injection_canary.py`, `tests/test_injection_canary.py`, `agent_mcp/egress.py` (`EGRESS_TOOLS`, `allow_entries`) |
+| `judge_self_preference` | whether a judge prefers text whose attribution names its own model family: #580's 50-note corpus re-scored under four arms that differ only in the one attribution line above the note (`repeat` = the baseline sent again, the engine's own floor; `self`; `human`), every delta read against a same-session `none` arm. **Built, never run — no artifact exists, and the ~200-call pass is owed**; the runner writes no report while any arm row of any sample is unparsed, and the published 32.4% sits on a different judge model, so it is context and not the comparator (#2254) | `eval/judge_self_preference/arms.py`, `eval/judge_self_preference/run_arms.py`, `eval/judge_self_preference/report.py`, `tests/test_judge_self_preference.py` |
 
 The corpora are the point of the arms; the scripts that read them mostly live one
 level up, so an arm's *meaning* is in the arm and its *method* is in a runner.
@@ -303,6 +304,15 @@ round's own prefix twice per run. The full ladder is in [[automod]].
   reinstated by this one.
 
 ## Review log
+
+- **2026-10-05 — row added (#2254).** `judge_self_preference` joined the table on the
+  day its code landed, not the day it measured anything: the four-arm generator, the
+  refusal and the report renderer exist and are tested (18 nodes), the ~200-call pass
+  does not, so the row carries no number. Counted, not asserted: the table is fifteen
+  rows and `eval/*` holds fifteen arm directories, read from the tree at this commit —
+  the "thirteen rows" in the entry below is what that count was on 2026-10-01 and is
+  left as written there, and `injection_canary` above it sits outside the alphabetical
+  run for the same reason #2110's entry reports for the others.
 
 - **2026-09-28 — created (#1699).** Inventory taken at `f7cf29f4`: the twelve
   arms then listed were `eval/`'s directories minus `baselines`, `measurements` and
