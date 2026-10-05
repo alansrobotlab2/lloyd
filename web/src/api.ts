@@ -1814,7 +1814,16 @@ export const api = {
     return r.json()
   },
 
-  getIdentity: async (): Promise<{ name: string | null; fingerprint: string | null }> => {
+  // `verified` is the server saying whether it attested this caller or merely
+  // read a header the caller chose. It is false for every caller today, because
+  // nothing in front of this API asks for a client certificate since 5e1351f3;
+  // it is optional in the type because a backend older than #2207 omits the key,
+  // and an absent claim reads as unverified — which is the honest default.
+  getIdentity: async (): Promise<{
+    name: string | null
+    fingerprint: string | null
+    verified?: boolean
+  }> => {
     const r = await fetch(`${API_BASE}/system/identity`)
     if (!r.ok) throw new Error(`identity failed: ${r.status}`)
     return r.json()
@@ -1865,9 +1874,16 @@ export const api = {
     return r.blob()
   },
 
+  // The `confirm` body is the server's check, not a formality: the backend has no
+  // verified identity for this caller to authorise against (see `getIdentity`), so
+  // a bodyless DELETE would leave the browser's confirm() dialog as the only thing
+  // between a stray tab and a revoked device. A backend older than #2207 ignores
+  // the field; a newer one answers 400 without it.
   revokeClient: async (name: string): Promise<void> => {
     const r = await fetch(`${API_BASE}/system/clients/${encodeURIComponent(name)}`, {
       method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirm: name }),
     })
     if (!r.ok) {
       const err = await r.json().catch(() => ({}))

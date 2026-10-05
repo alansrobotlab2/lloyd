@@ -143,3 +143,68 @@ describe("streamMessage landing hold", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
+
+// #2207 clause 4: the revoke must carry a body the server can check.
+//
+// Runnable pin for this clause: `tests/test_system_revoke_confirm.py::
+// test_the_request_the_shipped_client_builds_is_the_request_this_route_accepts`.
+// These nodes read the client; that one sends the client's own bytes at the real
+// route, and pytest runs it in every checkout. `web/node_modules` is a denied path
+// (`scripts/automod/spec.py`), so a review snapshot of this commit has no vitest
+// binary and no diff can give it one — read these three as the client-side detail,
+// and the pytest node as the proof the seam holds.
+//
+// `DELETE /api/system/clients/{name}` used to read no body at all, so the only
+// confirmation in the path was the browser's `confirm()` dialog in SettingsPage —
+// ceremony that exists only in a tab, and nothing at all to a script. The server
+// cannot check who you are instead: no client certificate has been requested
+// since 5e1351f3, so the one name available is the `x-client-fingerprint` header
+// the caller chose to send. So the enforceable check is this body, and if the
+// client stops sending it the honest click in the UI starts answering 400 —
+// `tests/test_system_revoke_confirm.py` is the other end of that seam.
+describe("revokeClient", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const revoked = { ok: true, status: 204, json: async () => ({}) };
+
+  it("sends a JSON body whose confirm equals the client name", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(revoked);
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(api.revokeClient("studio-mini")).resolves.toBeUndefined();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain("/system/clients/studio-mini");
+    expect(init?.method).toBe("DELETE");
+    expect(JSON.parse(String(init?.body))).toEqual({ confirm: "studio-mini" });
+    expect(init?.headers?.['Content-Type']).toBe('application/json');
+  });
+
+  it("confirms the same client the path names, even when the name needs escaping", async () => {
+    // The path is percent-encoded and the body is not, so a rewrite that
+    // confirmed the encoded form would mismatch every name with a space in it
+    // and the server — which compares the decoded path name to `confirm` —
+    // would refuse a legitimate revoke.
+    const fetchMock = vi.fn().mockResolvedValue(revoked);
+    vi.stubGlobal("fetch", fetchMock);
+    await api.revokeClient("studio mini");
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain("/system/clients/studio%20mini");
+    expect(JSON.parse(String(init?.body))).toEqual({ confirm: "studio mini" });
+  });
+
+  it("surfaces the server's refusal detail rather than reporting a silent success", async () => {
+    // The 400 is now a reachable outcome from this function, and the message a
+    // person sees has to be the server's reason ("confirm must name the client")
+    // rather than `revoke failed: 400`.
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false, status: 400,
+      json: async () => ({ detail: 'revoke requires a JSON body whose "confirm" field names this client' }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(api.revokeClient("studio-mini")).rejects.toThrow(/confirm/);
+  });
+});

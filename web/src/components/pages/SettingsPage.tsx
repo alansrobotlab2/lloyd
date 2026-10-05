@@ -11,6 +11,7 @@ import {
   Download,
   Wifi,
   ShieldCheck,
+  ShieldAlert,
   Plus,
 } from 'lucide-react'
 import { api } from '../../api'
@@ -663,7 +664,10 @@ function DevicesCard() {
     https_url: string | null
     ca_available: boolean
   } | null>(null)
-  const [identity, setIdentity] = useState<{ name: string | null; fingerprint: string | null } | null>(null)
+  // The type is the endpoint's own shape so `verified` can never be dropped here
+  // while the card still renders the name — the flag is the difference between
+  // naming a device and vouching for it.
+  const [identity, setIdentity] = useState<Awaited<ReturnType<typeof api.getIdentity>> | null>(null)
   const [clients, setClients] = useState<ClientCert[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -745,9 +749,12 @@ function DevicesCard() {
   }
 
   const revoke = async (name: string) => {
+    // "reports itself as", not "you are using": nothing on the server can tell
+    // whose certificate this tab holds (no client certificate is requested since
+    // 5e1351f3), so the match below is against a name the browser chose to send.
     const isYou = identity?.name === name
     const msg = isYou
-      ? `'${name}' is the cert YOU are using. Revoking it will lock you out immediately. Continue?`
+      ? `'${name}' is the name this browser reports itself as, so revoking it may disconnect this tab immediately. Continue?`
       : `Revoke client cert '${name}'? Devices using it will lose access immediately.`
     if (!confirm(msg)) return
     setError(null)
@@ -766,8 +773,10 @@ function DevicesCard() {
           <Wifi className="w-5 h-5" /> LAN / remote access
         </CardTitle>
         <CardDescription>
-          Lloyd uses mutual TLS — every device needs a client cert (signed by the on-host CA)
-          to reach the API. Mint one cert per device and install it in that device's keystore.
+          The API decides on the peer address — loopback and the trusted networks reach it, and
+          nothing has to present a certificate to do so. Minting a cert puts one device on the
+          fingerprint allowlist, which is consulted only when that device sends its fingerprint,
+          and a fingerprint a device sends is a claim rather than proof.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-5">
@@ -812,14 +821,20 @@ function DevicesCard() {
           </div>
 
           {identity?.name && (
-            <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              <ShieldCheck className="w-4 h-4 text-emerald-400" />
-              You are connected as <span className="font-mono text-foreground">{identity.name}</span>
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+              <ShieldAlert className="w-4 h-4 flex-shrink-0 text-amber-400" />
+              This browser reports itself as{' '}
+              <span className="font-mono text-foreground">{identity.name}</span>
               {identity.fingerprint && (
-                <span className="text-muted-foreground">
-                  · fp <span className="font-mono">{shortFp(identity.fingerprint)}</span>
+                <span className="font-mono">
+                  · fp {shortFp(identity.fingerprint)}
                 </span>
               )}
+              <span>
+                {identity.verified
+                  ? '· verified by the certificate this connection presented'
+                  : '· unverified: the name comes from a header this browser sends, not from anything the server checked'}
+              </span>
             </div>
           )}
         </div>
@@ -965,9 +980,11 @@ function DevicesCard() {
                     className="flex items-center justify-between rounded-md border border-border bg-card/30 px-3 py-2"
                   >
                     <div className="flex items-center gap-2 min-w-0">
-                      <ShieldCheck className={cn("w-4 h-4 flex-shrink-0", isYou ? "text-emerald-400" : "text-muted-foreground")} />
+                      {/* Amber, not emerald: `isYou` matches the name this browser reports for
+                          itself, which is a header it chose to send, not a verified identity. */}
+                      <ShieldCheck className={cn("w-4 h-4 flex-shrink-0", isYou ? "text-amber-400" : "text-muted-foreground")} />
                       <span className="font-mono text-sm truncate">{c.name}</span>
-                      {isYou && <Badge variant="outline" className="text-[10px]">you</Badge>}
+                      {isYou && <Badge variant="outline" className="text-[10px]" title="Matches the name this browser reports itself as — a header, not a verified identity">this tab</Badge>}
                       <span className="text-[10px] font-mono text-muted-foreground">
                         {shortFp(c.fingerprint)}
                       </span>

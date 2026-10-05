@@ -526,16 +526,24 @@ async def test_an_enrolled_device_is_still_named_to_the_route(reached,
     middleware it writes `scope["state"]` and the route reads it back through
     `request.state`, and if the two disagreed no request would fail — `name`
     would simply come back null. Two live behaviours depend on it:
-    `/api/system/identity` tells a device who the server thinks it is
-    (`app/routers/system.py:79-84`), and `POST /api/clients/revoke` compares the
-    caller against the entry it is about to delete and refuses to let a device
-    revoke itself (`system.py:176-180`, "cannot revoke the cert you're currently
-    using") — a null caller disables that guard silently, which is how a device
-    ends up locking its own owner out of the allowlist it is trying to fix.
+    `/api/system/identity` reports the name the server derived for a device
+    (`app/routers/system.py`), and `DELETE /api/system/clients/{name}` compares
+    the target against that same derived name and refuses the match — a footgun
+    reminder, not a control, since the name is the caller's own header and
+    withholding it walks past the comparison (#2207; the enforceable check there
+    is the `confirm` body, pinned by `tests/test_system_revoke_confirm.py`). A
+    null caller disables the comparison silently, which is why the propagation has
+    to be asserted and not assumed.
 
     Asserted through `/api/system/identity` because that route's whole response
     *is* the propagation, so there is no wrapper between the middleware's write
     and the read to take it on trust.
+
+    `verified` is in the expected payload because #2207 added it: the name is
+    derived from a header the caller chose, so the response has to say it did not
+    attest it. `False` here is the point of the field, not an accident of the
+    fixture — see `tests/test_system_identity_honesty.py` for what would make it
+    true and why nothing on this box does.
     """
     async with _client(TAILNET) as client:
         r = await client.get("/api/system/identity",
@@ -547,6 +555,7 @@ async def test_an_enrolled_device_is_still_named_to_the_route(reached,
         # way, so the gate normalises to upper-case with the separators stripped
         # (`server._cert_fingerprint`) and that is what a handler sees.
         "fingerprint": "AABBCCDD",
+        "verified": False,
     }
 
 
