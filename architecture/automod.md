@@ -3877,6 +3877,38 @@ than the one this prevents.
   #1614, #1617, #1628, #1630 and #1746 were all confirmed and unlandable on the
   same day. `COMMENT_ONLY_GLOBS` names only `config.yaml`, the one denied file
   the YAML check can judge.
+  **A second lane (2026-10-05): a value change to `config.yaml` lands inside
+  a fence.** Over the three weeks before it, thirteen items stalled as
+  `human-only: config.yaml` and Alan approved every one as written; most
+  wanted a tunable moved (`harness.finalizer.max_tokens`,
+  `workers.sources.autoresearch.max_duration_seconds`,
+  `harness.edit_diagnostics.blast_radius`, `harness.egress_policy`,
+  `workers.sources.autocode.reasoning_bank`). His ruling that day: automod
+  goes with its own recommendation unless a step is physical. So when the
+  comment check fails, rung 0 tries `spec.config_value_change`: both sides
+  must parse to a mapping; the changed dotted key paths are the recursive
+  diff (a list is one leaf); and the diff is refused if any path sits under a
+  `CONFIG_DENIED_KEYS` prefix — `mcp_servers`, `models`, `model`,
+  `subagents`, `server`, `services`, `guardian`, `automod.enabled`,
+  `automod.landing`, `workers.enabled`, `workers.slots`, and the loop's own
+  three sources `workers.sources.{autocode,autotriage,owed-check}` — the
+  config half of what `PROTECTED_GLOBS` is for code: the lock-out, the
+  rollback path, the engine's identity, the loop editing its own budget. Also
+  refused: a changed leaf named in `CONFIG_DENIED_LEAVES` anywhere in the tree
+  (`base_url`, `url`, `host`, `port`, `expect_model`, `device`, `devices`,
+  `gpu`, `cuda_visible_devices`, `token`, `api_key`, `password`, `secret`), a
+  scalar carrying `${` on either side (secrets reach the file only through
+  placeholders), and the removal of a top-level key. The refusal names every
+  offending key path and the rule that caught it. What passes moves to the
+  `config_value` bucket, and `spec.requires_drill(paths, buckets=…)` arms
+  rung 6 for it — a config change is boot-affecting, so the bound is on how
+  it lands, the same shape `protected` has. The canary rungs already boot from
+  the round's worktree, so the candidate file is the one `canary_boot` and
+  `canary_smoke` exercise. `workers.sources.autocode.reasoning_bank`, one of
+  the five above, is therefore still refused — it sits under a denied prefix —
+  and that is the fence working, not a gap in it. Bounds over amputation: the
+  lock-out the denial was written for is a denied prefix and exactly as
+  unreachable as before.
 - **protected** — the gate itself, the guardian, the supervisor confs, and the
   health/restart path the rollback depends on. Allowed, but only with a
   passing drill.

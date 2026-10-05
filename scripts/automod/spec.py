@@ -33,12 +33,36 @@ gate rung 3 builds a throwaway venv from them (btrfs reflink clone + `uv pip
 install` of the delta) and boots the canary against it. Without that rung they
 would belong in `denied`.
 
-`config.yaml` stays *denied*, with one exception that cannot change a value:
-a diff whose YAML token stream is identical before and after, so only
-comments and layout moved (`COMMENT_ONLY_GLOBS`, `comment_only_change`). The
-lock-out the denial guards against needs a value to change. Refusing
-comments too left every stale comment in the file to a hand edit: five items
-sat confirmed and unlandable at once on 2026-09-28.
+`config.yaml` stays *denied* by path, with two content-judged lanes out of
+the denial. The first (2026-09-28) cannot change a value: a diff whose YAML
+token stream is identical before and after, so only comments and layout
+moved (`COMMENT_ONLY_GLOBS`, `comment_only_change`). Refusing comments too
+left every stale comment in the file to a hand edit: five items sat
+confirmed and unlandable at once on 2026-09-28.
+
+The second (2026-10-05) changes a value, inside a fence. Over the three weeks
+before it, thirteen items stalled as `human-only: config.yaml` and every one
+was approved by hand as written; most wanted a tunable moved —
+`harness.finalizer.max_tokens`, `workers.sources.autoresearch.max_duration_
+seconds`, `harness.edit_diagnostics.blast_radius`, `harness.egress_policy`,
+`workers.sources.autocode.reasoning_bank`. Alan's ruling that day: automod
+goes with its own recommendation unless a step is physical. So
+`config_value_change` admits a diff whose both sides parse to a mapping, whose
+changed key paths all fall outside `CONFIG_DENIED_KEYS` (prefixes: the tool
+pool and `disabled_tools`, the engine slots, the services and ports a
+rollback has to reach, the guardian, the loop's own switch and landing block,
+and its three worker sources — the config half of what `PROTECTED_GLOBS` is
+for code), whose changed leaves are none of `CONFIG_DENIED_LEAVES` (an
+endpoint, a device, a credential, anywhere in the tree) and carry no `${`
+placeholder (secrets reach the file only that way), and which removes no
+top-level key. The refusal names the key and the rule. What lands moves to
+the `config_value` bucket, and `requires_drill` turns the rollback drill on
+for it: a config change is boot-affecting, so the bound is on HOW it lands,
+not whether — the same shape as `protected`. The canary rungs boot from the
+round's worktree, so the candidate file is the one they exercise. The
+lock-out the denial was written for (`mcp_servers.*.disabled_tools`, an
+`enabled` switch on the agent's own tools) is a denied prefix, and so stays
+exactly as unreachable as before.
 """
 
 from __future__ import annotations
@@ -185,6 +209,119 @@ def comment_only_change(before: str, after: str) -> tuple[bool, str]:
     return True, "comments and layout only"
 
 
+# Dotted key-path PREFIXES a round may never change in `config.yaml` (2026-10-05).
+# A changed path matches when it equals a prefix or starts with `prefix + "."`.
+# This is the config half of PROTECTED_GLOBS: the lock-out, the rollback path,
+# the engine's identity, and the loop's own three sources.
+CONFIG_DENIED_KEYS: tuple[str, ...] = (
+    "mcp_servers",                    # the tool pool, `enabled`, `disabled_tools`: the lock-out itself
+    "models",                         # engine slots, `expect_model`: what answers a turn
+    "model",                          # the default model a turn routes to
+    "subagents",                      # a Task child's model and tool set
+    "server",                         # the backend's bind address: the rollback's health probe
+    "services",                       # the service URLs the rollback and the canary reach
+    "guardian",                       # the thing that performs every rollback
+    "automod.enabled",                # the loop's master switch: a round may not switch itself off or on
+    "automod.landing",                # restart/drain/squash: how a landing happens — the rollback path
+    "workers.enabled",                # the pool that runs the loop
+    "workers.slots",                  # the pool's depth: rounds + triages + 1, a restart-sized change
+    "workers.sources.autocode",       # the loop's own three sources, like protected code:
+    "workers.sources.autotriage",     #   a round editing its own budget, depth or model
+    "workers.sources.owed-check",     #   is a control surface modifying itself
+)
+
+# Leaf key NAMES denied anywhere in the tree: an endpoint, a device, a credential.
+CONFIG_DENIED_LEAVES: frozenset[str] = frozenset({
+    "base_url", "url", "host", "port", "expect_model",
+    "device", "devices", "gpu", "cuda_visible_devices",
+    "token", "api_key", "password", "secret",
+})
+
+#: How many changed paths an admitting reason lists before "…".
+_CONFIG_REASON_PATHS = 10
+
+
+def _config_denied_prefix(path: str) -> str | None:
+    for prefix in CONFIG_DENIED_KEYS:
+        if path == prefix or path.startswith(prefix + "."):
+            return prefix
+    return None
+
+
+def _diff_paths(before, after, prefix: str = "") -> dict[str, tuple]:
+    """Changed dotted key paths → (before, after). A list is a leaf."""
+    out: dict[str, tuple] = {}
+    if isinstance(before, dict) and isinstance(after, dict):
+        for key in sorted(set(before) | set(after), key=str):
+            path = f"{prefix}.{key}" if prefix else str(key)
+            if key not in before:
+                out[path] = (None, after[key])
+            elif key not in after:
+                out[path] = (before[key], None)
+            else:
+                out.update(_diff_paths(before[key], after[key], path))
+    elif before != after:
+        out[prefix] = (before, after)
+    return out
+
+
+def _has_placeholder(value) -> bool:
+    if isinstance(value, str):
+        return "${" in value
+    if isinstance(value, dict):
+        return any(_has_placeholder(v) for v in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_has_placeholder(v) for v in value)
+    return False
+
+
+def config_value_change(before: str, after: str) -> tuple[bool, str, list[str]]:
+    """Is `before` → `after` a value change to `config.yaml` inside the fence?
+
+    Returns (ok, reason, changed_paths). Pure: no git, no file system. Both
+    sides must parse to a mapping. The changed paths are the recursive diff
+    of the two documents — added, removed and modified leaves, a list
+    compared whole. Refused when any changed path sits under a
+    `CONFIG_DENIED_KEYS` prefix, names a `CONFIG_DENIED_LEAVES` leaf, carries a
+    `${` placeholder on either side, or removes a top-level key; the reason
+    names every offending path and the rule that caught it.
+    """
+    import yaml
+    docs = []
+    for side, text in (("before", before), ("after", after)):
+        try:
+            doc = yaml.safe_load(text)
+        except yaml.YAMLError as exc:
+            return False, f"{side} does not parse: {str(exc)[:200]}", []
+        if not isinstance(doc, dict):
+            return False, f"{side} is not a mapping", []
+        docs.append(doc)
+    diff = _diff_paths(docs[0], docs[1])
+    changed = sorted(diff)
+    if not changed:
+        return False, "no value changed", []
+    offences: list[str] = []
+    for path in changed:
+        old, new = diff[path]
+        prefix = _config_denied_prefix(path)
+        if prefix is not None:
+            offences.append(f"`{path}` is under the denied key `{prefix}`")
+        leaf = path.rsplit(".", 1)[-1]
+        if leaf in CONFIG_DENIED_LEAVES:
+            offences.append(f"`{path}` is a denied leaf name (`{leaf}`)")
+        if _has_placeholder(old) or _has_placeholder(new):
+            offences.append(f"`{path}` carries a `${{` placeholder — secrets reach "
+                            f"config.yaml only that way")
+        if "." not in path and new is None:
+            offences.append(f"`{path}` is a top-level key and the change removes it")
+    if offences:
+        return False, "; ".join(offences), changed
+    shown = ", ".join(changed[:_CONFIG_REASON_PATHS])
+    if len(changed) > _CONFIG_REASON_PATHS:
+        shown += f", … (+{len(changed) - _CONFIG_REASON_PATHS} more)"
+    return True, f"value change within the fence: {shown}", changed
+
+
 def _match(path: str, globs: tuple[str, ...]) -> bool:
     for pattern in globs:
         if fnmatch.fnmatch(path, pattern):
@@ -249,26 +386,35 @@ def check_scope(paths: list[str], *, contents=None
     rollback drill in rung 6, handled by the caller.
 
     `contents(path) -> (before, after)` lets a denied path in
-    `COMMENT_ONLY_GLOBS` through when `comment_only_change` says so; it moves
-    to the `comment_only` bucket. Without it, or when the check fails, the
-    path stays denied and the reason says what changed.
+    `COMMENT_ONLY_GLOBS` through on content: `comment_only_change` first (the
+    path moves to the `comment_only` bucket), else `config_value_change` (the
+    path moves to `config_value`, which turns the drill on — see
+    `requires_drill`). Without it, or when both checks fail, the path stays
+    denied and the reason carries the key-level explanation.
     """
     buckets = classify_all(paths)
     buckets["comment_only"] = []
+    buckets["config_value"] = []
     why_not: list[str] = []
     for p in list(buckets["denied"]):
         if contents is None or normalize(p) not in COMMENT_ONLY_GLOBS:
             continue
         try:
             before, after = contents(p)
-            ok, why = comment_only_change(before, after)
         except Exception as exc:  # noqa: BLE001 — unreadable is not comment-only
-            ok, why = False, f"cannot read both sides: {exc}"
+            why_not.append(f"{p}: cannot read both sides: {exc}")
+            continue
+        ok, why = comment_only_change(before, after)
         if ok:
             buckets["denied"].remove(p)
             buckets["comment_only"].append(p)
-        else:
-            why_not.append(f"{p}: {why}")
+            continue
+        ok, why_value, _changed = config_value_change(before, after)
+        if ok:
+            buckets["denied"].remove(p)
+            buckets["config_value"].append(p)
+            continue
+        why_not.append(f"{p}: {why}; as a value change: {why_value}")
     # Both refusals name what to do instead. A round that needs a path the
     # loop may never touch used to be told only that it could not have it,
     # and the move it then reached for was `git add -f` — which defeats the
@@ -276,13 +422,15 @@ def check_scope(paths: list[str], *, contents=None
     # are both denied, so a JSON data record has no home in the repo at all:
     # the automod state dir is where one goes.
     _MOVE = ("Leave it out of the diff, land the rest, and report it under "
-             "`human_paths` in your outcome so a person can apply it. NEVER "
+             "`human_paths` in your outcome so owed-check can route it. NEVER "
              "`git add -f`. If you need to record structured data, write it "
              "to the automod state dir (~/.local/state/lloyd-automod/), not "
              "into the repo.")
     if buckets["denied"]:
         only = (f" A comment-only edit to {', '.join(COMMENT_ONLY_GLOBS)} is "
-                f"allowed; this one is not ({'; '.join(why_not)})." if why_not else "")
+                f"allowed, and so is a value change outside the denied keys "
+                f"(spec.CONFIG_DENIED_KEYS / CONFIG_DENIED_LEAVES); this one is "
+                f"not ({'; '.join(why_not)})." if why_not else "")
         return False, (f"denied paths in diff: {sorted(buckets['denied'])}.{only} "
                        f"{_MOVE}"), buckets
     if buckets["unlisted"]:
@@ -291,8 +439,17 @@ def check_scope(paths: list[str], *, contents=None
     return True, "in scope", buckets
 
 
-def requires_drill(paths: list[str]) -> bool:
-    """True when the diff touches the rollback path and must pass the drill."""
+def requires_drill(paths: list[str], *, buckets: dict[str, list[str]] | None = None) -> bool:
+    """True when the diff touches the rollback path and must pass the drill.
+
+    By paths alone: any `protected` path. With rung 0's `buckets` passed, a
+    non-empty `config_value` bucket also arms it: a value change to
+    `config.yaml` is boot-affecting, so the bound on it is how it lands —
+    through a live rollback drill — the same shape `protected` has for code.
+    The bucket is content-judged, so the paths-only call cannot see it.
+    """
+    if buckets is not None and buckets.get("config_value"):
+        return True
     return bool(classify_all(paths)["protected"])
 
 

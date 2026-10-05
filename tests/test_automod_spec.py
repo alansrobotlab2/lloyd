@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from scripts.automod import spec
 
@@ -68,9 +69,20 @@ def test_denied_paths(path):
 def test_config_yaml_is_denied_because_it_can_disarm_the_agent(
 ):
     """A round could disable Bash and Edit via `disabled_tools` and lock itself
-    out without changing a line of Python — a soft brick no test would catch."""
+    out without changing a line of Python — a soft brick no test would catch.
+
+    `classify` judges by PATH and still says `denied`: the two lanes out of
+    the denial (comment-only, and since 2026-10-05 a value change outside the
+    denied keys) are judged on CONTENT by `check_scope`, which needs both
+    sides of the file. Without content there is no lane, and the lock-out key
+    itself — `mcp_servers` — heads `CONFIG_DENIED_KEYS`, so the content lane
+    cannot reach it either."""
     assert spec.classify("config.yaml") == "denied"
     assert spec.classify("data/tool_overrides.yaml") == "denied"
+    ok, _, buckets = spec.check_scope(["config.yaml"])  # no contents: no lane
+    assert not ok and buckets["denied"] == ["config.yaml"]
+    assert spec.CONFIG_DENIED_KEYS[0] == "mcp_servers"
+    assert spec._config_denied_prefix("mcp_servers.lloyd-mcp.disabled_tools") == "mcp_servers"
 
 
 def test_protected_beats_allowed_even_under_an_allowed_prefix():
@@ -376,9 +388,16 @@ def test_the_denylist_is_not_overridable_by_a_spec():
     ok, reason, _ = spec.check_scope(["config.yaml"])
     assert not ok, "an explicit ask must not unlock a denied path"
     assert spec.classify("config.yaml") == "denied"
+    # The content lanes are not an override either: with both sides in hand, a
+    # change to the loop's own switch is refused by key, and the denied-key
+    # tuple is read from the module the gate imports, not from any spec.
+    ok, reason, _ = spec.check_scope(
+        ["config.yaml"], contents=lambda p: ("automod:\n  enabled: true\n",
+                                             "automod:\n  enabled: false\n"))
+    assert not ok and "automod.enabled" in reason
 
 
-# --- config.yaml: comment-only edits land, value edits never do -------------
+# --- config.yaml: comment-only edits land; value edits land inside the fence --
 
 _CFG = REPO_ROOT / "config.yaml"
 
@@ -403,26 +422,213 @@ def test_moving_an_inline_comment_off_a_value_line_is_comment_only():
     assert spec.comment_only_change(before, after) == (True, "comments and layout only")
 
 
-@pytest.mark.parametrize("after", [
-    "a:\n  cap: 401   # a section is <= 162 lines\n",        # a value
-    "a:\n  cap: '400'   # a section is <= 162 lines\n",      # quoting changes the type
-    "a:\n  cap: 400\n  extra: 1\n",                          # a new key
-    "a:\n  cup: 400\n",                                      # a renamed key
-    "a:\n  cap: [400\n",                                     # does not parse
+@pytest.mark.parametrize("after, changed", [
+    ("a:\n  cap: 401   # a section is <= 162 lines\n", ["a.cap"]),      # a value
+    ("a:\n  cap: '400'   # a section is <= 162 lines\n", ["a.cap"]),    # quoting changes the type
+    ("a:\n  cap: 400\n  extra: 1\n", ["a.extra"]),                      # a new key
+    ("a:\n  cup: 400\n", ["a.cap", "a.cup"]),                           # a renamed key = removal + add
 ])
-def test_any_value_change_to_config_yaml_stays_denied(after):
+def test_any_value_change_to_config_yaml_stays_denied(after, changed):
+    """Until 2026-10-05 every one of these stayed denied. Now a value change
+    under an ALLOWED key is a lane of its own: it is not comment-only (that
+    check still refuses it — pinned so the two lanes stay distinct), it lands
+    in the `config_value` bucket, and `config_value_change` names exactly the
+    dotted paths that moved. A renamed key under an allowed prefix is a removal
+    plus an addition below the top level, and lands; a removed TOP-LEVEL key is
+    refused (`test_a_top_level_key_removal_is_refused`)."""
     before = "a:\n  cap: 400   # a section is <= 162 lines\n"
+    assert spec.comment_only_change(before, after)[0] is False
+    ok, reason, paths = spec.config_value_change(before, after)
+    assert ok and paths == changed, reason
+    ok, reason, buckets = _scope_with(before, after)
+    assert ok, reason
+    assert buckets["config_value"] == ["config.yaml"]
+    assert buckets["denied"] == [] and buckets["comment_only"] == []
+
+
+@pytest.mark.parametrize("before, after, side", [
+    ("a:\n  cap: 400\n", "a:\n  cap: [400\n", "after"),      # does not parse
+    ("a:\n  cap: [400\n", "a:\n  cap: 400\n", "before"),
+    ("a:\n  cap: 400\n", "- a\n- b\n", "after"),               # parses, not a mapping
+])
+def test_a_non_parsing_side_is_refused_and_named(before, after, side):
+    ok, reason, paths = spec.config_value_change(before, after)
+    assert not ok and reason.startswith(side) and paths == [], reason
     ok, reason, buckets = _scope_with(before, after)
     assert not ok and buckets["denied"] == ["config.yaml"], reason
-    assert "comment-only edit to config.yaml is allowed; this one is not" in reason
+    assert "value change outside the denied keys" in reason and side in reason
 
 
 def test_the_real_file_with_one_value_flipped_is_denied():
+    """On the real file: the loop's own switch is refused and the refusal names
+    the key; a real tunable — one of the five the 13 stalled items wanted —
+    lands in `config_value`. The lock-out key is tried too."""
     before = _CFG.read_text(encoding="utf-8")
-    after = before.replace("enabled: true", "enabled: false", 1)
-    assert after != before, "positive control: the live file has an enabled flag"
+    cfg = yaml.safe_load(before)
+    assert cfg["automod"]["enabled"] is True, "positive control: the switch is on"
+    # Flipped through a parsed round-trip: the file's layout between `automod:`
+    # and its `enabled:` line is comments, and the lane judges values not text.
+    doc = yaml.safe_load(before)
+    doc["automod"]["enabled"] = False
+    after = yaml.safe_dump(doc)
+    ok, reason, buckets = _scope_with(before, after)
+    assert not ok and buckets["denied"] == ["config.yaml"], reason
+    assert "`automod.enabled` is under the denied key `automod.enabled`" in reason
+
+    old = cfg["harness"]["finalizer"]["max_tokens"]
+    after = before.replace(f"max_tokens: {old}", f"max_tokens: {old * 2}", 1)
+    ok, reason, paths = spec.config_value_change(before, after)
+    assert ok and paths == ["harness.finalizer.max_tokens"], reason
+    ok, reason, buckets = _scope_with(before, after)
+    assert ok, reason
+    assert buckets["config_value"] == ["config.yaml"] and buckets["denied"] == []
+
+    doc = yaml.safe_load(before)
+    doc["mcp_servers"]["lloyd-mcp"]["disabled_tools"] = ["Bash", "Edit"]
+    ok, reason, _ = spec.config_value_change(before, yaml.safe_dump(doc))
+    assert not ok and "mcp_servers.lloyd-mcp.disabled_tools" in reason, reason
+
+
+# --- the fence around the value lane -----------------------------------------
+
+def test_a_denied_prefix_is_refused_with_the_key_named():
+    before = "workers:\n  enabled: true\n  slots: 5\n  sources:\n    autocode:\n      max_inflight: 2\n    autoresearch:\n      max_duration_seconds: 3600\n"
+    # The loop's own source: refused, prefix named.
+    after = before.replace("max_inflight: 2", "max_inflight: 4")
+    ok, reason, paths = spec.config_value_change(before, after)
+    assert not ok and paths == ["workers.sources.autocode.max_inflight"]
+    assert "`workers.sources.autocode.max_inflight` is under the denied key `workers.sources.autocode`" in reason
+    # A sibling source that is not the loop's own: lands.
+    after = before.replace("max_duration_seconds: 3600", "max_duration_seconds: 7200")
+    ok, reason, paths = spec.config_value_change(before, after)
+    assert ok and paths == ["workers.sources.autoresearch.max_duration_seconds"], reason
+    # Prefix match is on dotted segments, never on a string prefix: a key that
+    # merely starts with a denied word is not under it.
+    assert spec._config_denied_prefix("modelling.cap") is None
+    assert spec._config_denied_prefix("model.default") == "model"
+    assert spec._config_denied_prefix("workers.slots") == "workers.slots"
+    # Two offences on one diff are both named.
+    after = before.replace("slots: 5", "slots: 7").replace("enabled: true", "enabled: false")
+    ok, reason, _ = spec.config_value_change(before, after)
+    assert not ok and "`workers.slots`" in reason and "`workers.enabled`" in reason
+
+
+def test_a_placeholder_scalar_is_refused_on_either_side():
+    before = "livekit:\n  room: lloyd\n  api_key: ${LIVEKIT_API_KEY}\n"
+    # Replacing a placeholder with a literal is the secret-in-the-tree path.
+    after = before.replace("${LIVEKIT_API_KEY}", "abc123")
+    ok, reason, _ = spec.config_value_change(before, after)
+    assert not ok and "`livekit.api_key` carries a `${` placeholder" in reason, reason
+    # ...and introducing one is refused too, on a leaf name that is otherwise fine.
+    after = before.replace("room: lloyd", "room: ${LIVEKIT_ROOM}")
+    ok, reason, _ = spec.config_value_change(before, after)
+    assert not ok and "`livekit.room` carries a `${` placeholder" in reason, reason
+    # A placeholder inside a list is a placeholder.
+    ok, reason, _ = spec.config_value_change("a:\n  xs: [1]\n", "a:\n  xs: ['${X}']\n")
+    assert not ok and "`a.xs` carries" in reason, reason
+
+
+def test_a_denied_leaf_is_refused_under_an_otherwise_allowed_prefix():
+    before = "djev:\n  base_url: http://127.0.0.1:8097\n  timeout_seconds: 5\n  device: cuda:2\n"
+    after = before.replace("8097", "8098")
+    ok, reason, paths = spec.config_value_change(before, after)
+    assert not ok and paths == ["djev.base_url"], reason
+    assert "`djev.base_url` is a denied leaf name (`base_url`)" in reason
+    after = before.replace("cuda:2", "cuda:0")
+    ok, reason, _ = spec.config_value_change(before, after)
+    assert not ok and "`djev.device` is a denied leaf name (`device`)" in reason
+    # The sibling tunable under the same prefix lands.
+    after = before.replace("timeout_seconds: 5", "timeout_seconds: 9")
+    ok, reason, paths = spec.config_value_change(before, after)
+    assert ok and paths == ["djev.timeout_seconds"], reason
+    assert reason == "value change within the fence: djev.timeout_seconds"
+    for leaf in ("base_url", "url", "host", "port", "expect_model", "device", "devices",
+                 "gpu", "cuda_visible_devices", "token", "api_key", "password", "secret"):
+        assert leaf in spec.CONFIG_DENIED_LEAVES, leaf
+
+
+def test_a_top_level_key_removal_is_refused():
+    before = "a:\n  cap: 400\nb:\n  x: 1\n"
+    ok, reason, paths = spec.config_value_change(before, "a:\n  cap: 400\n")
+    assert not ok and paths == ["b"], reason
+    assert "`b` is a top-level key and the change removes it" in reason
+    # Adding a top-level key, and removing a nested one, both land.
+    ok, reason, paths = spec.config_value_change(before, "a:\n  cap: 400\nb:\n  x: 1\nc: 2\n")
+    assert ok and paths == ["c"], reason
+    ok, reason, paths = spec.config_value_change(before, "a:\n  cap: 400\nb: {}\n")
+    assert ok and paths == ["b.x"], reason
+
+
+def test_no_value_change_is_not_a_value_lane():
+    """Identical documents are the comment lane's business; the value lane
+    refuses them, so a diff that passes neither says so for both."""
+    ok, reason, paths = spec.config_value_change("a: 1\n", "a: 1 # c\n")
+    assert (ok, reason, paths) == (False, "no value changed", [])
+
+
+def test_the_admitting_reason_is_bounded():
+    before = "a:\n" + "".join(f"  k{i}: {i}\n" for i in range(14))
+    after = "a:\n" + "".join(f"  k{i}: {i + 1}\n" for i in range(14))
+    ok, reason, paths = spec.config_value_change(before, after)
+    assert ok and len(paths) == 14
+    assert reason.endswith("… (+4 more)"), reason
+    assert reason.count("a.k") == 10
+
+
+def test_a_list_is_a_leaf_compared_whole():
+    before = "harness:\n  egress_policy:\n    allow: [a, b]\n"
+    after = "harness:\n  egress_policy:\n    allow: [a, b, c]\n"
+    ok, reason, paths = spec.config_value_change(before, after)
+    assert ok and paths == ["harness.egress_policy.allow"], reason
+
+
+def test_a_config_value_change_arms_the_drill_via_buckets():
+    """The bound on the lane is on HOW it lands: a config value change is
+    boot-affecting, so rung 0's bucket turns rung 6 on the way a protected
+    path does. Paths alone cannot see it — the bucket is content-judged — so
+    the paths-only call keeps its old answer and the gate passes the buckets."""
+    ok, reason, buckets = _scope_with("a:\n  cap: 400\n", "a:\n  cap: 401\n")
+    assert ok and buckets["config_value"] == ["config.yaml"], reason
+    assert spec.requires_drill(["app/x.py", "config.yaml"]) is False
+    assert spec.requires_drill(["app/x.py", "config.yaml"], buckets=buckets) is True
+    # A comment-only edit arms nothing; an empty bucket dict is the old answer.
+    ok, _, buckets = _scope_with("a:\n  cap: 400\n", "a:\n  # c\n  cap: 400\n")
+    assert ok and buckets["comment_only"] == ["config.yaml"]
+    assert spec.requires_drill(["app/x.py", "config.yaml"], buckets=buckets) is False
+    assert spec.requires_drill(["scripts/automod/spec.py"], buckets={"config_value": []}) is True
+
+
+def test_comment_only_wins_when_both_lanes_would_pass():
+    """A comment-only diff also passes no value check (there is no value to
+    judge), but the order is pinned anyway: the comment lane is tried first,
+    so a comment edit never buys a drill."""
+    before = "a:\n  cap: 400   # old\n"
+    after = "a:\n  # new\n  cap: 400\n"
+    assert spec.comment_only_change(before, after)[0] is True
     ok, _, buckets = _scope_with(before, after)
-    assert not ok and buckets["denied"] == ["config.yaml"]
+    assert ok and buckets["comment_only"] == ["config.yaml"] and buckets["config_value"] == []
+
+
+def test_the_denied_key_set_is_the_one_landed():
+    """The fence, verbatim: a widening or a narrowing here is a decision, and
+    the test should say so rather than let it ride on an unrelated commit."""
+    assert spec.CONFIG_DENIED_KEYS == (
+        "mcp_servers", "models", "model", "subagents", "server", "services",
+        "guardian", "automod.enabled", "automod.landing", "workers.enabled",
+        "workers.slots", "workers.sources.autocode", "workers.sources.autotriage",
+        "workers.sources.owed-check",
+    )
+    # Every denied prefix names a key the real file carries, or the fence is
+    # guarding a spelling nobody uses.
+    cfg = yaml.safe_load(_CFG.read_text(encoding="utf-8"))
+    for prefix in spec.CONFIG_DENIED_KEYS:
+        node = cfg
+        for part in prefix.split("."):
+            assert isinstance(node, dict) and part in node, f"{prefix}: `{part}` not in config.yaml"
+            node = node[part]
+    # And the refusal text tells the round where the fence is written down.
+    ok, reason, _ = _scope_with("server:\n  port: 8080\n", "server:\n  port: 8081\n")
+    assert not ok and "CONFIG_DENIED_KEYS" in reason and "`server.port`" in reason
 
 
 def test_comment_only_is_config_yaml_alone_and_unreadable_is_denied():

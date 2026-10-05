@@ -1415,7 +1415,17 @@ class Gate:
 
         detail = (f"{len(changed)} file(s) in scope"
                   + (f"; {len(buckets['protected'])} protected → drill required"
-                     if buckets["protected"] else ""))
+                     if buckets["protected"] else "")
+                  # The config value lane (2026-10-05). A value change to
+                  # config.yaml is boot-affecting, so it arms the drill the way
+                  # a protected path does; and the canary rungs boot from the
+                  # round's worktree (`C.Canary(round_dir, self.worktree, …)`
+                  # in `rung_canary_boot`, `app.paths.LLOYD_HOME` being
+                  # `__file__`-relative), so the candidate config.yaml IS the
+                  # file `canary_boot` and `canary_smoke` exercise.
+                  + (f"; {len(buckets.get('config_value') or [])} config value "
+                     f"change → drill required"
+                     if buckets.get("config_value") else ""))
         if data.get("rebased"):
             detail += (f"; rebased {data['rebased']['from'][:8]}→{live_head[:8]} — "
                        "every rung below judges the change on top of what landed")
@@ -3051,8 +3061,18 @@ class Gate:
             print(f"[warn] could not write the canary trace baseline: {exc}")
         return diff, previous
 
+    def _preflight_buckets(self) -> dict[str, list[str]]:
+        """Rung 0's bucket split, as it recorded it. The `config_value` bucket
+        is content-judged there and nowhere else, so the drill reads it back
+        rather than re-deriving it from paths."""
+        for r in self.report.rungs:
+            if r.name == "preflight" and isinstance(r.data, dict):
+                return r.data.get("buckets") or {}
+        return {}
+
     def rung_drill(self):
-        if not spec.requires_drill(self.report.changed_paths):
+        buckets = self._preflight_buckets()
+        if not spec.requires_drill(self.report.changed_paths, buckets=buckets):
             return True, "no protected paths touched — drill not required", {
                 "skipped": True, "reason": "no protected paths"}
         from scripts.automod import rehearse
