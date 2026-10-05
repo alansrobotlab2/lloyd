@@ -50,10 +50,18 @@ const httpsConfig = haveServer
     }
   : undefined;
 
-/** Inject the peer cert's CN + sha256 fingerprint as request headers so the
- *  backend (FastAPI behind the /api proxy) can enforce a per-device allowlist
- *  at the HTTP layer. The TLS layer has already verified the cert was signed
- *  by our CA; this header is *trusted input* because Vite is the only path. */
+/** Inert since mTLS was dropped (5e1351f3): httpsConfig above carries no
+ *  requestCert/ca, so no browser presents a client cert, getPeerCertificate()
+ *  has no subject, and this plugin sets neither x-client-cn nor
+ *  x-client-fingerprint. Kept wired so a cert-bearing client still gets its
+ *  fingerprint forwarded.
+ *
+ *  Neither header is an authentication input. x-client-fingerprint is read
+ *  only by server._cert_fingerprint, strictly after ApiPeerGate's peer-address
+ *  refusal, and is deny-only: a value absent from
+ *  agent-services/cert/clients.json produces a 403 and no value ever grants
+ *  access. That allowlist is empty, so a request that does send a fingerprint
+ *  is refused. x-client-cn has no server-side reader. */
 function clientCertHeaders(): PluginOption {
   return {
     name: "lloyd-client-cert-headers",
