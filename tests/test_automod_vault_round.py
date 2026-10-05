@@ -1188,8 +1188,14 @@ def test_a_guard_that_mutates_the_vault_it_judges():
 RETENTION_NODES = (
     # The name #1975's own diff gives this guard: shipping the thirteenth store line
     # renames the node, and a citation of the twelve-store name would fail on a file
-    # guarding the count harder than before, not less.
-    "test_the_skill_says_thirteen_stores_and_its_table_has_a_row_per_report_line",
+    # guarding the count harder than before, not less. The fourteenth store line
+    # (#2225, landed by #2242 because its absence was the two failures this round is
+    # named for) renamed it again — `…says_thirteen_stores…` → `…says_fourteen_stores…`
+    # — so the citation moves with it, exactly as the sentence above rules. What this
+    # tripwire holds is that each guard is PRESENT, undecorated and RUN by the gate's
+    # own mark expr — not that its spelling is frozen. The second name needs no edit
+    # for the same change, which is the difference between the two entries.
+    "test_the_skill_says_fourteen_stores_and_its_table_has_a_row_per_report_line",
     "test_the_task_description_names_every_store_the_sweep_prints",
 )
 

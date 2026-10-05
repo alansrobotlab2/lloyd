@@ -116,6 +116,14 @@ def rs(tmp_path, monkeypatch):
         # enumerate is a store it will not delete. Every node that wants refs builds
         # its own repo and names it here.
         ("AUTOMOD_REPO", "repo", False),
+        # Store 14, the install-provenance journal (#2225). A FILE and deliberately not
+        # created, for the same reason as the ledger above: an absent journal is the
+        # state of a machine whose guard has never fired, and
+        # `test_a_dry_run_reports_the_provenance_store_and_leaves_every_byte` needs the
+        # parent directory absent-or-empty to prove the rung creates nothing. The
+        # archive gzips land beside it, so redirecting this one path redirects the
+        # whole store — there is no second root to list.
+        ("PROVENANCE_JOURNAL", "supply-chain/provenance.jsonl", False),
     ):
         if hasattr(mod, attr):
             monkeypatch.setattr(mod, attr, tmp_path / sub)
@@ -1718,9 +1726,9 @@ def test_the_bare_invocation_deletes_the_pair_it_resolves(tmp_path):
     assert "0 deleted" in _groundskeeper_line(again.stdout)
 
 
-def test_the_skill_says_thirteen_stores_and_its_table_has_a_row_per_report_line(
+def test_the_skill_says_fourteen_stores_and_its_table_has_a_row_per_report_line(
         rs, _store_report):
-    """Clause 4: `skills/retention-sweep/SKILL.md` says thirteen, and its table's rows
+    """Clause 4: `skills/retention-sweep/SKILL.md` says fourteen, and its table's rows
     are the report's lines.
 
     The table is the operator's list of what the weekly sweep bounds, and it said nine
@@ -1732,7 +1740,7 @@ def test_the_skill_says_thirteen_stores_and_its_table_has_a_row_per_report_line(
     It went stale anyway, in the direction this node was blind to: #1644 added two
     stores and the prose stayed at ten for nine commits, because the count of report
     lines came from the suffix selector that could not see them (`#1835`). The report
-    side of the comparison is now the `_store_report` fixture — the thirteen lines
+    side of the comparison is now the `_store_report` fixture — the fourteen lines
     `main()` prints with all three automod rungs in play — so this node reads one
     measurement, not two.
     """
@@ -1748,13 +1756,13 @@ def test_the_skill_says_thirteen_stores_and_its_table_has_a_row_per_report_line(
             and not ln.split("|")[1].strip().lower().startswith("store")}
 
     report = _store_report
-    assert len(report) == 13, f"the sweep prints {len(report)} store lines: {report}"
+    assert len(report) == 14, f"the sweep prints {len(report)} store lines: {report}"
     assert len(rows) == len(report), (
         f"the skill lists {len(rows)} stores against {len(report)} report lines: "
         f"{sorted(rows)}")
-    assert "thirteen unbounded-growth stores" in text, (
-        "the skill's description states a store count other than thirteen")
-    assert "thirteen in all" in text, "the skill's body states a store count other than thirteen"
+    assert "fourteen unbounded-growth stores" in text, (
+        "the skill's description states a store count other than fourteen")
+    assert "fourteen in all" in text, "the skill's body states a store count other than fourteen"
 
     pair_row = next((ln for store, ln in rows.items()
                      if "groundskeeper-queue.json" in store), None)
@@ -1800,12 +1808,24 @@ def test_the_skill_says_thirteen_stores_and_its_table_has_a_row_per_report_line(
     assert "promotions-archive-" in ledger_row, ledger_row
     assert str(rs.BRANCH_UNREACHABLE_REOPEN_GIT_MB) in branch_row, branch_row
 
+    # Store fourteen (#2225), added by the round that bounded the install-provenance
+    # journal. Like the ledger row above it, the row has to name the constant that decides
+    # the window AND the archive rows move into, because "archived" and "deleted" are
+    # different promises and the table is where an operator reads which one is made.
+    prov_row = next((ln for store, ln in rows.items()
+                     if "provenance.jsonl" in store), None)
+    assert prov_row is not None, (
+        f"no row names the provenance journal the sweep now bounds: {sorted(rows)}")
+    assert "PROVENANCE_ARCHIVE_AGE_DAYS" in prov_row, prov_row
+    assert f">{rs.PROVENANCE_ARCHIVE_AGE_DAYS}d" in prov_row, prov_row
+    assert "provenance-archive-" in prov_row, prov_row
+
     # And what a run from anywhere else prints, since that reader holds a report
     # without these two rows in it and has to be able to tell that from a broken sweep.
     assert "automod stores: REFUSED" in flat, (
         "the skill never says what a non-production run prints in place of the two rows")
-    assert "ten store lines plus one refusal line" in flat, (
-        "the skill does not say that a refusal run reports ten stores by design")
+    assert "eleven store lines plus one refusal line" in flat, (
+        "the skill does not say that a refusal run reports eleven stores by design")
 
 
 # ---------------------------------------------------------------------------
@@ -1838,7 +1858,7 @@ _STORE_ORDER_ANCHOR = "in this order:"
 _STORE_ORDER_TAIL = "Report all"
 _STORE_COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
                       "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
-                      "twelve": 12, "thirteen": 13, "1": 1, "2": 2, "3": 3, "4": 4,
+                      "twelve": 12, "thirteen": 13, "fourteen": 14, "1": 1, "2": 2, "3": 3, "4": 4,
                       "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10, "11": 11,
                       "12": 12, "13": 13}
 
@@ -1882,7 +1902,7 @@ def _store_report_lines(out: str) -> list[str]:
 
 def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
         rs, _store_report):
-    """#1835 clause 1: the thirteen lines `main()` prints are thirteen stores, and the
+    """#1835 clause 1: the fourteen lines `main()` prints are fourteen stores, and the
     three the loop leaves outside the data root are among them.
 
     This is the acceptance check itself, run against the real `main()`: the count a
@@ -1892,9 +1912,9 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
     twelve lines and the guard said ten for nine commits, agreeing with stale prose
     rather than with the script.
     """
-    assert len(_store_report) == 13, (
-        f"the sweep prints {len(_store_report)} store lines, not the thirteen its report "
-        f"has had since #1975 added the promotion ledger: {_store_report}")
+    assert len(_store_report) == 14, (
+        f"the sweep prints {len(_store_report)} store lines, not the fourteen its report "
+        f"has had since #2225 added the provenance journal: {_store_report}")
 
     printed = [ln.split(":")[0] for ln in _store_report]
     dirs_line = f"~/lloyd-work round dirs >{rs.WORKTREE_DIR_MAX_AGE_DAYS}d"
@@ -1904,7 +1924,7 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
     assert branch_line in printed, f"the round-branch store is not in the report: {printed}"
 
     # The mechanism of the drift, pinned rather than narrated: the lines the OLD suffix
-    # rule could not see are exactly these three. `len(report) == 13` alone would still
+    # rule could not see are exactly these four. `len(report) == 14` alone would still
     # pass if somebody reintroduced a suffix test alongside a wording change, and it is
     # the coincidence of a store line's wording with a store line's identity that made the
     # count unreadable in the first place. The third is #1975's ledger line, which ends in
@@ -1912,11 +1932,14 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
     # is added, which is the point of naming it rather than counting it.
     ledger_line = "promotions ledger"
     assert ledger_line in printed, f"the promotion ledger is not in the report: {printed}"
+    prov_line = f"provenance journal >{rs.PROVENANCE_ARCHIVE_AGE_DAYS}d"
+    assert prov_line in printed, f"the provenance journal is not in the report: {printed}"
     invisible = [ln for ln in _store_report
                  if not ln.endswith(("freed", "candidate", "removed (keep last 200)"))]
     assert sorted(ln.split(":")[0] for ln in invisible) == sorted([dirs_line,
                                                                   branch_line,
-                                                                  ledger_line]), (
+                                                                  ledger_line,
+                                                                  prov_line]), (
         "these store lines are invisible to an endswith(('freed','candidate',"
         "'removed (keep last 200)')) rule, which is how #1835's drift happened: "
         f"{[ln.split(':')[0] for ln in invisible]}")
@@ -1959,16 +1982,16 @@ def test_an_indented_report_line_is_a_store_whatever_it_ends_in():
         f"the rule counted a line that is not a store: {report}")
 
 
-def test_a_run_outside_the_production_checkout_reports_ten_stores_and_one_refusal_line(
+def test_a_run_outside_the_production_checkout_reports_eleven_stores_and_one_refusal_line(
         rs, monkeypatch, capsys):
     """The other direction of the same rule: a refused rung prints one refusal line, and
     that line is not a store.
 
     Outside the production checkout all three automod rungs collapse into
-    `  automod stores: REFUSED: …`, so a reader holding that output sees ten store lines
-    while the skill says thirteen — and SKILL.md now says so in those words. This pins the
-    fact that sentence describes, so the note cannot rot into the reassuring half (just
-    "thirteen", which makes every sandbox run look like it lost three stores) or the
+    `  automod stores: REFUSED: …`, so a reader holding that output sees eleven store
+    lines while the skill says fourteen — and SKILL.md now says so in those words. This
+    pins the fact that sentence describes, so the note cannot rot into the reassuring half
+    (just "fourteen", which makes every sandbox run look like it lost three stores) or the
     alarming half ("the sweep is broken"). `test_an_automod_rung_refuses_outside_the_production_checkout`
     owns the predicate itself and the `NOT_PRODUCTION_EXIT` half; what is new here is the
     COUNT, which is the number a report is written from.
@@ -1977,13 +2000,13 @@ def test_a_run_outside_the_production_checkout_reports_ten_stores_and_one_refusa
     the predicate's original reason (a worktree shares the live repo's refs) does not
     literally cover it, but a tree that is not the live checkout has no business deciding
     to compress the loop's own audit trail, and one guard that covers all three stores is
-    the rule. A refused run therefore still prints ten lines plus one refusal line, not
-    eleven.
+    the rule. A refused run therefore still prints eleven lines plus one refusal line, not
+    twelve.
     """
     out = _dry_run_report(rs, monkeypatch, capsys, refused=True)
     report = _store_report_lines(out)
 
-    assert len(report) == 10, f"a refusal run should report ten stores: {report}"
+    assert len(report) == 11, f"a refusal run should report eleven stores: {report}"
     refusal = [ln.strip() for ln in out.splitlines()
                if ln.strip().startswith("automod stores:")]
     assert len(refusal) == 1, f"expected one automod refusal line, got: {refusal}"
@@ -2112,7 +2135,7 @@ def _dry_run_report(rs, monkeypatch, capsys, *, refused: bool = False) -> str:
     all three automod rungs because a round's worktree shares the live repository's refs.
     The plain `rs` fixture already answers that question *yes* — deliberately, over
     redirected constants, so a node about `sessions/*.json` does not end on exit 2 for a
-    branch delete it never asked about — which is what lets the thirteen lines below be
+    branch delete it never asked about — which is what lets the fourteen lines below be
     produced from `tmp_path` alone: `AUTOMOD_WORK_ROOT` is an empty directory,
     `AUTOMOD_REPO` an empty repository, and the ledger trio absent files, so all three
     rungs are reading a machine that has never run the loop, and the ledger rung has no
@@ -2181,15 +2204,15 @@ def test_the_task_description_names_every_store_the_sweep_prints(
 
     items = _assert_description_names_the_reported_stores(description, _store_report,
                                                           "autonomy/79-retention-sweep.md")
-    assert len(items) == len(_store_report) == 13, (
+    assert len(items) == len(_store_report) == 14, (
         f"the guard compared {len(items)} items against {len(_store_report)} lines")
 
     # Clause 5 of #1835: the two stores the self-modification loop leaves behind it are
     # enumerated LAST because they print last, and each item carries the words the
     # printed line uses for it — `~/lloyd-work` + `dirs`, `automod/*` + `branches` —
     # since the guard matches item i against the i-th line by first and last word.
-    assert "~/lloyd-work" in items[10][1] and "dirs" in items[10][1], items[10]
-    assert "automod/*" in items[11][1] and "branches" in items[11][1], items[11]
+    assert "~/lloyd-work" in items[11][1] and "dirs" in items[11][1], items[11]
+    assert "automod/*" in items[12][1] and "branches" in items[12][1], items[12]
     assert items[10][0] == 11 and items[11][0] == 12, items[10:]
 
     # Clause 2, on the tenth store's own terms: the groundskeeper pair sits where the
@@ -5179,3 +5202,501 @@ def test_the_ledger_window_prose_prices_the_shipped_window_from_the_measured_rat
             "editing it")
 
 
+
+
+# --------------------------------------------------------------------------------------
+# Store fourteen: ~/lloyd-data/supply-chain/provenance.jsonl (backlog #2225).
+#
+# The store is the install-provenance journal: `app/harness/supply_chain.py` appends one
+# folded row per UNATTENDED install decision and has never removed one, while
+# `scripts/automod/scorecard.py::_provenance` opens the file and parses EVERY line on
+# every run to fill report row 17, then drops each row older than `compute`'s own
+# 7.0-day window. So the reader pays for the whole file to answer a question about the
+# last week of it.
+#
+# The shape is store thirteen's (`promotions.jsonl`), with two differences that are the
+# whole reason it is a separate store rather than a second call: there is no
+# `board_health()` here to keep neutral, so the thing standing between a fold and a lost
+# decision is a window WIDER than the reader's (30 > 7), and there is no per-round
+# "newest row" to protect — the reader's window does that job for the whole file at once.
+#
+# The rows here are written in the writer's own shape (`json.dumps(row, sort_keys=True)`
+# plus a newline, `at` from `datetime.now(timezone.utc).isoformat()`), because the byte
+# pair every clause below asserts is a pair over those bytes: a fixture written with
+# `json.dump(row, f, indent=2)` would prove the rule about a file nobody writes.
+# --------------------------------------------------------------------------------------
+
+
+def _prov_at(now: float, days_ago: float) -> str:
+    """An `at` stamp `days_ago` before `now`, in the writer's exact ISO form."""
+    from datetime import datetime as _dt, timezone as _tz
+    return _dt.fromtimestamp(now - days_ago * 86400, _tz.utc).isoformat()
+
+
+def _prov_line(now: float, days_ago: float, *, session: str = "sess-a",
+               name: str = "requests", outcome: str = "declared",
+               command: str = "pip install requests") -> bytes:
+    """One journal line the writer itself could have written, as BYTES."""
+    row = {"at": _prov_at(now, days_ago), "session": session,
+           "session_class": "unattended", "command": command,
+           "names": [{"name": name, "outcome": outcome, "count": 1}]}
+    return (json.dumps(row, sort_keys=True) + "\n").encode("utf-8")
+
+
+def _prov_line_with(**fields) -> bytes:
+    """A journal line with `at` (or anything else) set to an arbitrary value.
+
+    Used by the undated cases: the value goes in verbatim, so `"at": "yesterday"` is the
+    unparseable stamp and omitting `at` entirely is the missing one.
+    """
+    row = {"session": "sess-a", "session_class": "unattended",
+           "command": "pip install requests",
+           "names": [{"name": "requests", "outcome": "declared", "count": 1}]}
+    row.update(fields)
+    return (json.dumps(row, sort_keys=True) + "\n").encode("utf-8")
+
+
+def _plant_journal(rs, *lines: bytes) -> Path:
+    """Write `lines` as the redirected journal and return its path."""
+    journal = Path(rs.PROVENANCE_JOURNAL)
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_bytes(b"".join(lines))
+    return journal
+
+
+def _dir_bytes(dir: Path) -> dict[str, bytes]:
+    """Every file under `dir` by name, with its bytes — the byte-for-byte witness."""
+    return {p.name: p.read_bytes() for p in sorted(dir.iterdir()) if p.is_file()}
+
+
+def _archive_name(month: str) -> str:
+    return f"{_RS_PROVENANCE_PREFIX}{month}.jsonl.gz"
+
+
+_RS_PROVENANCE_PREFIX = "provenance-archive-"
+
+
+def _utc_month(now: float, days_ago: float) -> str:
+    """The UTC month of a stamp `days_ago` before `now` — the bucket key, derived."""
+    return time.strftime("%Y%m", time.gmtime(now - days_ago * 86400))
+
+
+def test_provenance_rows_past_the_window_archive_into_their_month_and_younger_keep_their_bytes(rs):
+    """Clause 1: a row older than PROVENANCE_ARCHIVE_AGE_DAYS leaves the live file for
+    `provenance-archive-<that row's UTC month>.jsonl.gz` beside it, and the rows inside
+    the window keep their EXACT bytes.
+
+    Three rows, two months apart, one in window. The two archived stamps land in
+    different UTC months on purpose: the bucket is the ROW's month, not the month the
+    sweep ran in, and one bucket would pass a rung that filed every row under `now`. The
+    in-window row is compared byte for byte against the exact line that went in, which is
+    the only comparison that says the fold re-emits the writer's own bytes rather than
+    re-serialising the parsed row (a `sort_keys` round-trip would otherwise rewrite key
+    order, spacing and float formatting and still look like a pass).
+    """
+    now = time.time()
+    old_jul = _prov_line(now, 90.0, session="sess-jul", name="numpy")
+    old_aug = _prov_line(now, 45.0, session="sess-aug", name="pandas")
+    young = _prov_line(now, 2.0, session="sess-now", name="scipy")
+    journal = _plant_journal(rs, old_jul, old_aug, young)
+
+    out = rs.sweep_provenance_journal(True, now, journal=journal)
+
+    assert out["moved"] == 2, out
+    assert out["refused"] is None, out
+    assert journal.read_bytes() == young, (
+        "the in-window row did not survive the fold byte for byte — the store must "
+        f"re-emit the writer's line, not a re-serialisation of it: {journal.read_bytes()!r}")
+
+    months = sorted({_utc_month(now, 90.0), _utc_month(now, 45.0)})
+    assert months[0] != months[1], "the fixture's two archived rows share a month"
+    for month, line in zip(months, (old_jul, old_aug)):
+        target = journal.parent / _archive_name(month)
+        assert target.is_file(), f"no archive for {month}: {sorted(os.listdir(journal.parent))}"
+        assert gzip.decompress(target.read_bytes()) == line, (
+            f"{line[:40]!r} is not the byte line stored in {target.name}")
+    assert _archive_name(_utc_month(now, 0.0)) not in os.listdir(journal.parent), (
+        "the fold created an archive bucket for the in-window row's month")
+
+
+def test_a_provenance_trim_leaves_the_journal_in_place_and_the_scorecard_still_reads_it(rs):
+    """Clause 2: `--apply` never unlinks the live journal, and every archived row is
+    readable back out of its month's gzip.
+
+    The process boundary this node is across: the sweep rewrites a file that
+    `scripts/automod/scorecard.py` renders. Row 17's `recorded` flag is
+    `path.exists()` (scorecard.py:729), so an `unlink` here is not a smaller number on
+    the card — it flips a documented store from "20 decisions" to the
+    `no journal yet` branch scorecard.py:1187 prints for an ABSENT file, and the card
+    then reports a machine with no journal at all. So the node reads the REAL reader: it
+    calls `scorecard._provenance` over the trimmed file and renders row 17 through
+    `scorecard._render_provenance`, the same function the card prints.
+
+    Read-back out of the gzip is the other half of "recoverable": the archived row has to
+    come out byte for byte, or the fold is a delete with extra steps.
+    """
+    from scripts.automod import scorecard as SC
+
+    now = time.time()
+    old = _prov_line(now, 40.0, session="sess-old", name="numpy")
+    young_a = _prov_line(now, 3.0, session="sess-a", name="requests")
+    young_b = _prov_line(now, 1.0, session="sess-b", name="pandas")
+    journal = _plant_journal(rs, old, young_a, young_b)
+
+    out = rs.sweep_provenance_journal(True, now, journal=journal)
+
+    assert out["moved"] == 1 and out["archived"] == 1, out
+    assert journal.is_file(), (
+        "the trim removed the live journal: row 17 would print `no journal yet` for a "
+        "machine whose journal merely got shorter")
+    assert journal.stat().st_size > 0, "the trim left an empty file where a journal was"
+    assert gzip.decompress(
+        (journal.parent / _archive_name(_utc_month(now, 40.0))).read_bytes()) == old
+
+    d = SC._provenance(journal, now - 7 * 86400)
+    assert d["recorded"] is True, d
+    assert d["rows"] == 2 and d["decisions"] == 2, d
+    rendered = SC._render_provenance({"install_provenance": d})
+    assert "no journal yet" not in rendered, rendered
+    assert "| 17 | install provenance | 2 |" in rendered, rendered
+
+
+def test_a_dry_run_reports_the_provenance_store_and_leaves_every_byte(rs, capsys,
+                                                                     monkeypatch):
+    """Clause 3: without `--apply` the sweep prints a line naming this store, its 30-day
+    window and the count it would archive, and changes not one byte.
+
+    Run through `main()` rather than the rung, because the clause is about the line an
+    operator approves `--apply` from. Byte-identity is taken over the whole store
+    directory — live journal and every archive — and a PRE-EXISTING archive is planted so
+    "changed nothing" cannot be vacuously true of a directory that held nothing.
+    """
+    now = time.time()
+    old = _prov_line(now, 40.0, session="sess-old", name="numpy")
+    young = _prov_line(now, 2.0, session="sess-new", name="scipy")
+    journal = _plant_journal(rs, old, young)
+    preexisting = journal.parent / _archive_name("199912")
+    preexisting.write_bytes(gzip.compress(b"an archive from elsewhere\n"))
+    before = _dir_bytes(journal.parent)
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py"])
+    assert rs.main() == 0
+    dry = capsys.readouterr().out
+    dry_line = _store_line(dry, "provenance journal")
+
+    assert f">{rs.PROVENANCE_ARCHIVE_AGE_DAYS}d" in dry_line, dry_line
+    assert ": 1 would archive (" in dry_line, (
+        f"the dry run must name the count it would archive, in the field that holds "
+        f"it — not beside one that could be a byte figure: {dry_line!r}")
+    assert "would archive" in dry_line, (
+        f"a dry run that says a row was archived when nothing was written is the line an "
+        f"operator cannot compare against the run they approve: {dry_line!r}")
+    assert _dir_bytes(journal.parent) == before, (
+        "the dry run wrote to the store — journal and archives must be byte-identical")
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py", "--apply"])
+    assert rs.main() == 0
+    applied = capsys.readouterr().out
+    applied_line = _store_line(applied, "provenance journal")
+    assert ": 1 archived (" in applied_line, (
+        f"the apply line must state the count it archived in that field, not merely "
+        f"contain the digit somewhere among the byte figures: {applied_line!r}")
+    assert journal.read_bytes() == young, journal.read_bytes()
+
+
+def test_a_provenance_row_with_no_parseable_at_is_kept_and_counted_apart(rs, capsys,
+                                                                        monkeypatch):
+    """Clause 4: a row whose `at` is missing or unparseable is NEVER archived — it stays
+    in the live file and gets its own named bucket on the report line.
+
+    The bucket is the point. #1975's round finding on the ledger store was a file called
+    `promotions-archive-None.jsonl.gz`: the month key came off a stamp the row did not
+    have, so an undated row was filed under the literal string `None`. Here the month key
+    is only ever computed from a stamp the rung has already proven exists, and this node
+    proves it twice over: by listing the directory for anything that is not
+    `provenance-archive-<six digits>.jsonl.gz`, and by the bucket count itself.
+
+    A row the rung cannot parse at all counts as undated too, which is the same rule
+    stated from the other side: a line with no readable age is a line with no age. It is
+    never deleted either, so an undated row is outside this store's bound entirely: the
+    30-day window never applies to it and it stays in the live file for as long as the
+    journal exists. That is the cost of the rule, and the cheaper one — the alternative is a
+    delete justified by a field the row does not have.
+    """
+    now = time.time()
+    old = _prov_line(now, 40.0, session="sess-old", name="numpy")
+    no_at = _prov_line_with(session="sess-no-at", command="pip install a")
+    bad_at = _prov_line_with(at="yesterday", session="sess-bad",
+                             command="pip install b")
+    not_json = b'{"at": "2026-01-01T00:00:00+00:00", "names": [\n'
+    young = _prov_line(now, 2.0, session="sess-new", name="scipy")
+    journal = _plant_journal(rs, old, no_at, bad_at, not_json, young)
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py"])
+    assert rs.main() == 0
+    line = _store_line(capsys.readouterr().out, "provenance journal")
+    assert "3 undated row(s) kept" in line, (
+        f"the three undated rows are not named as their own bucket, with their count "
+        f"bound to that bucket: {line!r}")
+    assert ": 1 would archive (" in line, (
+        f"the archived count vanished beside the undated bucket: {line!r}")
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py", "--apply"])
+    assert rs.main() == 0
+    line = _store_line(capsys.readouterr().out, "provenance journal")
+    assert "3 undated row(s) kept" in line, (
+        f"the undated bucket lost its count on the apply line: {line!r}")
+    assert ": 1 archived (" in line, (
+        f"the apply line lost the count it archived beside the undated bucket: {line!r}")
+
+    kept = journal.read_bytes()
+    assert kept == no_at + bad_at + not_json + young, (
+        "an undated row was rewritten or removed; the live file must keep the bytes it "
+        f"cannot date: {kept!r}")
+    strays = [n for n in os.listdir(journal.parent)
+              if n.startswith(_RS_PROVENANCE_PREFIX)
+              and re.fullmatch(r"provenance-archive-\d{6}\.jsonl\.gz", n) is None]
+    assert not strays, f"an archive named off a stamp the row did not have: {strays}"
+    assert (journal.parent / "provenance-archive-None.jsonl.gz").is_file() is False
+    assert gzip.decompress(
+        (journal.parent / _archive_name(_utc_month(now, 40.0))).read_bytes()) == old
+
+
+def test_the_provenance_window_is_30_days_and_outlives_the_scorecard_window(rs):
+    """The window is 30, uniform with the sweep's other file stores, and wider than the
+    window of the only reader — which is the whole safety argument for this store.
+
+    Store thirteen needs a per-row rule ("each round's newest row never archives")
+    because its 14-day window reaches inside what two other rungs read. This store has no
+    such rule, and can only get away with that while its window is strictly greater than
+    `scorecard.compute`'s: a fold at 5 days would move rows row 17 is about to count and
+    silently zero the store it exists to bound. The default is READ from
+    `inspect.signature(SC.compute)`, not typed, so a re-windowed scorecard reddens this
+    node instead of leaving the comment that names 7.0 as a stale claim.
+    """
+    from scripts.automod import scorecard as SC
+
+    reader_days = inspect.signature(SC.compute).parameters["since_days"].default
+    assert rs.PROVENANCE_ARCHIVE_AGE_DAYS > reader_days, (
+        f"a {rs.PROVENANCE_ARCHIVE_AGE_DAYS}d window reaches inside the {reader_days}d "
+        "window `scorecard.compute` counts row 17 over: archiving would zero the reader")
+    assert rs.PROVENANCE_ARCHIVE_AGE_DAYS == 30, rs.PROVENANCE_ARCHIVE_AGE_DAYS
+    assert rs.PROVENANCE_ARCHIVE_AGE_DAYS == rs.TASK_LOG_MAX_AGE_DAYS, (
+        "the window is no longer the sweep's uniform 30-day file horizon, and the "
+        "comment above still says it is")
+
+
+def test_the_provenance_store_prose_quotes_the_measured_post_fold_figures(rs):
+    """The store's own comment carries the measured numbers, and not the dead ones.
+
+    `644f9183` folded the writer's `-r <file>` expansion and landed 2026-10-01T14:51:53Z;
+    the journal's newest row is 2026-10-01T05:03:34.157418+00:00, so the file has grown
+    by ZERO rows in the 3.74 days between that landing and the 2026-10-05T08:50Z
+    measurement, and a post-fold row costs ~154 bytes. The item's "~10 KB per 4.5 days"
+    is quoted nowhere in this tree: it divides nothing (the file's own rows span 13.5
+    hours), and a constant whose comment prices a flood that does not exist is the
+    sentence that gets the window widened later.
+
+    Asserted against the shipped source rather than the imported module, because what is
+    under test is the prose a human reads at the constant.
+    """
+    text = _SCRIPT.read_text(encoding="utf-8")
+    start = text.index("# ── 14.")
+    section = text[start:text.index("def main() -> int:", start)]
+    assert "0 rows" in section and "3.74" in section, (
+        "the store comment must carry the measured post-fold growth (0 rows in 3.74 days)")
+    assert "154" in section, "the store comment must carry the ~154 B per decision figure"
+    assert "4.5" not in section and "10 KB" not in section, (
+        "the store comment quotes the item's dead ~10 KB / 4.5-day figure")
+
+
+def test_a_provenance_row_appended_under_the_fold_survives_the_rename(rs):
+    """The seam the writer creates: `_journal_decision` appends with no lock while the
+    fold is building its replacement file, and `os.replace` is unconditional.
+
+    Store thirteen hit this with `state.append_event` at ~2.3 appends a minute and lost
+    nothing only because `_rewrite_live_ledger` re-reads the tail since its snapshot and
+    refuses to rename while the file will not hold still. This store reuses that rename
+    for the same reason — a dispatch can journal a decision mid-fold — and the node proves
+    the reuse is real: the row appended between attempts is still in the live file, still
+    byte-identical, and NOT in the archive (it is minutes old, so it is not a candidate,
+    and a graft that archived it would be a fold deciding the age of a row it never read).
+
+    What it can reach is the helper's own window and nothing wider: `on_attempt` fires at
+    retention-sweep.py:1816, strictly after the helper fixes `seen = read_bytes` at :1798,
+    so a row injected here is grafted whatever the caller passed as that snapshot's end.
+    That argument is a separate decision, and
+    `test_a_provenance_row_appended_during_the_archive_loop_is_not_stepped_over` below is
+    the node that can see it.
+    """
+    now = time.time()
+    old = _prov_line(now, 40.0, session="sess-old", name="numpy")
+    young = _prov_line(now, 2.0, session="sess-new", name="scipy")
+    journal = _plant_journal(rs, old, young)
+    late = _prov_line(now, 0.0, session="sess-late", name="urllib3")
+
+    def append_mid_fold(attempt: int) -> None:
+        # Once, on the first attempt: a dispatch that journals while the fold is building
+        # its file lands a row and then stops. An appender that never stops is store
+        # thirteen's case — five attempts, then a refusal that leaves the file alone.
+        if attempt == 0:
+            with journal.open("ab") as fh:
+                fh.write(late)
+
+    out = rs.sweep_provenance_journal(True, now, journal=journal,
+                                      on_attempt=append_mid_fold)
+
+    assert out["refused"] is None, out
+    assert out["moved"] == 1, out
+    assert journal.read_bytes() == young + late, (
+        "a decision journalled while the fold ran was renamed out of existence: "
+        f"{journal.read_bytes()!r}")
+    assert late not in gzip.decompress(
+        (journal.parent / _archive_name(_utc_month(now, 40.0))).read_bytes())
+
+
+def test_a_provenance_row_appended_during_the_archive_loop_is_not_stepped_over(rs, monkeypatch):
+    """The caller's half of the same seam: a decision journalled while the gzip loop is
+    still running must survive, because the fold's snapshot ends where its READ ended.
+
+    This is the window the node above cannot reach. `_archive_append` runs at
+    retention-sweep.py:2141, the snapshot `raw` was read at :2104, and the gap between them
+    is seconds of gzip while `supply_chain._journal_decision` appends to the same file from
+    another process under no lock. What closes the gap is the third argument to
+    `_rewrite_live_ledger`: store thirteen passes `len(raw)`, its own snapshot's end
+    (:1961), and store fourteen must pass the same. Hand it `read_size()` — the file's
+    CURRENT length, re-evaluated after that loop — and `seen = read_bytes` (:1798) starts
+    past any row that landed during it, so the row sits in neither `body` nor `appended`
+    and `os.replace` renames it out of the live journal while the run prints `1 archived`
+    with `refused: None`. Lost from BOTH files: an archive only ever receives rows the fold
+    already aged, so nothing on disk holds that decision afterwards.
+
+    Asserted as the invariant the race can never hold: every row the fold read is either in
+    the archive or in the live journal, byte for byte, and the live journal is the aged row
+    absent from it plus the late row's exact bytes — not a re-serialised approximation.
+    """
+    now = time.time()
+    old = _prov_line(now, 40.0, session="sess-old", name="numpy")
+    young = _prov_line(now, 2.0, session="sess-new", name="scipy")
+    journal = _plant_journal(rs, old, young)
+    late = _prov_line(now, 0.0, session="sess-mid-loop", name="urllib3")
+
+    real_append = rs._archive_append
+    entered = {"done": False}
+
+    def append_during_the_fold(target, lines):
+        # One row, landing inside the loop that builds the archives and strictly BEFORE
+        # `_rewrite_live_ledger` is called — the position the `on_attempt` hook cannot
+        # occupy, because that hook fires inside the helper, after `seen` is fixed.
+        if not entered["done"]:
+            entered["done"] = True
+            with journal.open("ab") as fh:
+                fh.write(late)
+        return real_append(target, lines)
+
+    monkeypatch.setattr(rs, "_archive_append", append_during_the_fold)
+
+    out = rs.sweep_provenance_journal(True, now, journal=journal)
+
+    assert entered["done"], "the fold never entered the archive loop, so this proved nothing"
+    assert out["refused"] is None, out
+    assert out["moved"] == 1, out
+    live = journal.read_bytes()
+    archived = gzip.decompress(
+        (journal.parent / _archive_name(_utc_month(now, 40.0))).read_bytes())
+    assert live == young + late, (
+        "a decision journalled while the archives were being built was stepped over by a "
+        f"snapshot that had already moved past it: the live journal is {live!r}, which "
+        "holds neither the late row nor a copy of it, and an archive only ever receives "
+        f"rows the fold aged, so the decision is gone from the store: archived="
+        f"{archived!r}")
+    assert old in archived, f"the aged row did not reach its archive: {archived!r}"
+    assert late not in archived, (
+        "the mid-loop row is minutes old: a fold that archives a row it never aged is "
+        "deciding the age of bytes it never read")
+
+
+def test_the_store_bounds_the_file_the_writer_writes():
+    """The seam between the two programs: the sweep's journal path is the writer's.
+
+    `retention-sweep.py` is a standalone script cron runs with no venv, so it spells the
+    journal's directory out rather than importing `app.harness.supply_chain` — which means
+    the two spellings can disagree, and the disagreement is silent in the direction that
+    matters: a sweep pointed at a path the writer never writes reports `no journal`,
+    bounds nothing, and still prints a store line saying it looked. The constants are read
+    off a freshly-loaded copy of the script (the `rs` fixture redirects the module-level
+    paths into `tmp_path`, which is right for every other node here and wrong for this
+    one), with the writer's own cache-dir override cleared so the comparison is between
+    the two DEFAULT resolutions.
+    """
+    from app.harness import supply_chain as SC
+
+    spec = importlib.util.spec_from_file_location("retention_sweep_pristine", _SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    assert mod.PROVENANCE_JOURNAL_NAME == SC.PROVENANCE_JOURNAL_NAME
+    saved = os.environ.pop("LLOYD_SUPPLY_CHAIN_CACHE_DIR", None)
+    try:
+        assert mod.PROVENANCE_JOURNAL == SC.provenance_journal_path(), (
+            f"the sweep bounds {mod.PROVENANCE_JOURNAL} while the writer appends to "
+            f"{SC.provenance_journal_path()}: the store would report `no journal` "
+            "forever and nobody would notice")
+    finally:
+        if saved is not None:
+            os.environ["LLOYD_SUPPLY_CHAIN_CACHE_DIR"] = saved
+
+
+def test_the_committed_provenance_witness_reproduces_the_quoted_report(rs):
+    """Clause 5: the quoted figures come out of bytes with history behind them.
+
+    `backlog/data/provenance.jsonl` in the vault is a byte-for-byte copy of the live
+    journal at extract time, in the same place and for the same reason as
+    `backlog/data/denials.jsonl` (#2190) and the promotions ledger copy (#1975): the
+    store being bounded is a file on a disk this very sweep is reclaiming bytes from, so a
+    report that quotes "36 rows / 2,191 entries / 212,202 bytes" has to be re-derivable by
+    anybody from a committed file rather than from a sentence. The re-derivation is
+    `wc -l < backlog/data/provenance.jsonl` = 36, and this node runs it in Python over the
+    committed bytes so a silent truncation of the copy reddens something.
+
+    The report is asserted twice, and the second time is the one that matters for the
+    store: the rows in the witness are only ~4 days old, so at the shipped 30-day window
+    today's pass archives none of them — the claim that the fold would shelf all 36 rows
+    and all 2,191 entries has to be evaluated with `now` pinned past the window, because a
+    test that used `time.time()` would pass at 0 rows today and silently stop meaning
+    anything the week the rows turn 30.
+    """
+    from datetime import datetime, timezone
+    from tests.board_presence import vault_root
+
+    witness = vault_root() / "backlog" / "data" / "provenance.jsonl"
+    assert witness.is_file(), (
+        f"clause 5 has no bytes to re-derive from: {witness} does not exist. It is a copy "
+        "of the live journal (`cp ~/lloyd-data/supply-chain/provenance.jsonl "
+        "~/obsidian/backlog/data/provenance.jsonl`) and the only history the quoted figures "
+        "have, so this node failing on a missing copy is the clause, not the environment")
+    raw = witness.read_bytes()
+    lines = raw.splitlines(keepends=True)
+    assert len(lines) == 36, f"the committed witness has {len(lines)} rows, not 36"
+    assert len(raw) == 212202, f"the committed witness is {len(raw)} bytes, not 212,202"
+    entries = sum(len(json.loads(ln).get("names", [])) for ln in lines)
+    assert entries == 2191, f"the committed witness carries {entries} entries, not 2,191"
+    ages = [rs._iso_seconds(json.loads(ln)["at"]) for ln in lines]
+    assert None not in ages, "every witness row must carry a parseable `at`"
+    newest = max(ages)
+
+    # The measurement moment from the store's own comment: 2026-10-05T08:50Z. Nothing is
+    # 30 days old there, which is why `0 archived` is the expected line today.
+    measured = datetime(2026, 10, 5, 8, 50, tzinfo=timezone.utc).timestamp()
+    dry = rs.sweep_provenance_journal(False, measured, journal=witness)
+    assert dry["moved"] == 0 and dry["undated"] == 0, dry
+    assert "0 would archive" in rs._provenance_line(dry), rs._provenance_line(dry)
+
+    # Thirty-one days after the NEWEST row, the whole file is past the window: 36 rows,
+    # all 2,191 entries, and not one undated row — the volume the fold exists to shelf.
+    later = newest + 31 * 86400
+    out = rs.sweep_provenance_journal(False, later, journal=witness)
+    assert out["moved"] == 36 and out["undated"] == 0, out
+    assert out["bytes"] == len(raw), (
+        "with every row past the window the byte count the line reports must be the whole "
+        f"file: {out['bytes']} of {len(raw)}")

@@ -1765,7 +1765,7 @@ def _archive_append(target: Path, lines: list[bytes]) -> int:
 
 def _rewrite_live_ledger(ledger: Path, body: bytes, read_bytes: int, *,
                         attempts: int = LEDGER_REWRITE_ATTEMPTS,
-                        on_attempt=None) -> tuple[bool, str | None]:
+                        on_attempt=None, noun: str = "ledger") -> tuple[bool, str | None]:
     """Rename `body` over the live ledger only once it has stopped growing.
 
     The race this exists for: `state.append_event` opens the ledger in append mode and
@@ -1782,6 +1782,13 @@ def _rewrite_live_ledger(ledger: Path, body: bytes, read_bytes: int, *,
     Returns `(settled, refusal)`. `on_attempt` exists for the test that proves the graft:
     the same hook production never passes, called with the attempt index immediately
     before each rename.
+
+    Shared with store fourteen (#2225), which passes `noun="journal"`. The provenance
+    journal has the same shape that forced the graft here — an appender that opens the
+    file in append mode under no lock (`supply_chain._journal_decision`) while this rename
+    is in flight — so it gets this routine rather than a second implementation of the same
+    race. `noun` colours the refusal text only, so store thirteen's messages are
+    byte-identical with the default.
     """
     tmp = ledger.parent / f".{ledger.name}.archiving"
     # The snapshot's end, FIXED for the whole loop. Advancing it to the current size
@@ -1796,7 +1803,7 @@ def _rewrite_live_ledger(ledger: Path, body: bytes, read_bytes: int, *,
                 src.seek(seen)
                 appended = src.read()
         except OSError as exc:
-            return False, f"ledger unreadable ({exc})"
+            return False, f"{noun} unreadable ({exc})"
         payload = body + appended
         try:
             with open(tmp, "wb") as fh:
@@ -1812,13 +1819,13 @@ def _rewrite_live_ledger(ledger: Path, body: bytes, read_bytes: int, *,
             settled = ledger.stat().st_size == seen + len(appended)
         except OSError as exc:
             _unlink_quietly(tmp)
-            return False, f"ledger vanished ({exc})"
+            return False, f"{noun} vanished ({exc})"
         if settled:
             os.replace(tmp, ledger)
             return True, None
         landed = max(landed, ledger.stat().st_size - seen)
     _unlink_quietly(tmp)
-    return False, (f"ledger kept growing under the archive ({landed} bytes landed in "
+    return False, (f"{noun} kept growing under the archive ({landed} bytes landed in "
                    f"{attempts} attempts); live file untouched")
 
 
@@ -1986,6 +1993,200 @@ def _ledger_line(l: dict) -> str:
             f"{l['after']} bytes live)")
 
 
+# ── 14. supply-chain provenance journal (backlog #2225) ─────────────────────────
+#
+# $DATA_ROOT/supply-chain/provenance.jsonl is the install-provenance journal:
+# `app/harness/supply_chain.py::_journal_decision` appends one folded row per UNATTENDED
+# install decision under no lock with no cut of any kind, while
+# `scripts/automod/scorecard.py::_provenance` — the row-17 reader — opens the file and
+# parses EVERY line on every run, then drops each row older than `compute`'s own 7.0-day
+# window. The reader pays for the whole file to answer a question about the last week of
+# it, which is the coupling that made the promotions ledger (#1975) a store; the shape is
+# copied from there, and the two differences that make this a separate rung rather than a
+# second call are that there is no `board_health()` here to keep neutral and no per-round
+# "newest row" to protect — the reader's window does that job for the file as a whole,
+# provided this store's window stays wider than the reader's. Hence the constant.
+PROVENANCE_JOURNAL_NAME = "provenance.jsonl"
+PROVENANCE_JOURNAL = DATA_ROOT / "supply-chain" / PROVENANCE_JOURNAL_NAME
+
+#: Window for the journal, in days. 30 because that is this sweep's uniform horizon for a
+#: file — `TASK_LOG_MAX_AGE_DAYS`, `TRANSCRIPT_MAX_AGE_DAYS`, `SPILL_MAX_AGE_DAYS` and
+#: `RUN_RECORD_MAX_AGE_DAYS` are all 30 — and because the only reader counts the rows
+#: inside ITS 7.0-day window out of a file it reads whole: a fold closer than 7 days would
+#: move rows report row 17 is about to count and silently zero the store it exists to
+#: bound. `test_the_provenance_window_is_30_days_and_outlives_the_scorecard_window` reads
+#: the reader's number out of `inspect.signature(scorecard.compute)`, so a re-windowed
+#: scorecard reddens a test instead of stranding this sentence.
+#:
+#: What the bound is for, measured 2026-10-05T08:50Z against the live file. The writer
+#: stopped writing bulk on 2026-10-01T14:51:53Z, when `644f9183` folded the `-r <file>`
+#: expansion out of each row: the journal was then 212,202 bytes in 36 rows / 2,191
+#: entries at ~5,894 bytes a row, every row written BEFORE that fold, and it has grown by
+#: 0 rows in the 3.74 days since. One post-fold row is ~154 bytes — the
+#: `{at, command, names, session, session_class}` shape, measured by calling
+#: `_journal_decision` with an explicit `path=`. So this store shelves a standing ~199 KB
+#: of pre-fold detail and 154 bytes per future unattended decision; it is a shelf, not a
+#: flood gate. That measurement is also why the writer keeps no rotation of its own and
+#: why the archive is the only thing here that removes a row (#2225 clause 6 kept
+#: `app/harness/supply_chain.py` out of this change).
+PROVENANCE_ARCHIVE_AGE_DAYS = 30
+PROVENANCE_ARCHIVE_PREFIX = "provenance-archive-"
+
+
+def _provenance_row_seconds(line: bytes) -> float | None:
+    """The age a journal line carries in its own `at`, or None if it carries no readable one.
+
+    `at` is the writer's field (`_journal_decision` writes
+    `datetime.now(timezone.utc).isoformat()`), so the age of a row is read from the row.
+    `_iso_seconds` is the same tolerant parser the promotions ledger ages on, so a stamp
+    with an offset or a fraction ages identically in both stores. None is returned for a
+    line that is not JSON, is not an object, has no `at`, or has one that will not parse:
+    such a row has no age, and the `%Y%m` bucket below is only ever computed from a stamp
+    that got this far, which is what keeps #1975's `promotions-archive-None.jsonl.gz` from
+    being re-created as `provenance-archive-None.jsonl.gz`.
+    """
+    try:
+        row = json.loads(line)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(row, dict):
+        return None
+    return _iso_seconds(row.get("at"))
+
+
+def sweep_provenance_journal(apply: bool, now: float, *, journal: Path | None = None,
+                             on_attempt=None) -> dict:
+    """Fold the journal rows past their own `at` into a month gzip beside the live file.
+
+    Reads the file once and keeps its bytes exactly: a row is either kept verbatim or
+    copied verbatim into `provenance-archive-<its UTC month>.jsonl.gz`, and the rewritten
+    live file is the concatenation of the kept lines. Byte identity is the contract, not a
+    stylistic preference: what the archive promises is that a line taken out of the live
+    journal comes back out of the month's gzip unchanged, which is what lets an archived
+    decision be checked against the bytes the writer wrote. Re-serialising the parsed row
+    instead of copying its line would break that promise while still printing JSON the
+    scorecard parses — key order, separators and float formatting are all `json.dumps`
+    choices — and nothing downstream would notice, so the only check that holds is the one
+    on the bytes.
+
+    The month bucket comes from the row, not from `now`, so a row is filed in the month it
+    was decided in however long the sweep has been idle.
+
+    Two things this never does:
+
+    * **It does not remove the live journal.** Report row 17's `recorded` flag is
+      `path.exists()` (scorecard.py:729), and its `no journal yet` branch (scorecard.py:1187)
+      prints only for an ABSENT file, so an `unlink` here would turn a shorter journal into
+      a machine with no journal at all. When every row is archived the file stays, empty.
+      An absent journal is left absent, and nothing is created for it either.
+    * **It does not archive a row it cannot date.** A row whose `at` is missing or
+      unparseable stays in the live file, byte for byte, and is counted in `undated` — its
+      own bucket on the report line, never folded into the archived count and never hidden
+      behind a 0. The cost is that an undated row sits outside this store's bound
+      altogether: the 30-day window never applies to it and it stays in the live file for as
+      long as the journal exists. That is deliberate — unreadable lines are evidence, and the
+      alternative is a delete justified by a field the row does not have.
+
+    The append seam: `_journal_decision` appends under no lock, so a dispatch can land a
+    decision while this is building its replacement file, and `os.replace` is
+    unconditional. The promotions ledger met the same race at ~2.3 appends a minute and
+    answers it with `_rewrite_live_ledger`, which grafts whatever arrived since the
+    snapshot onto the new file and only renames once the size says nothing else has landed;
+    that routine is reused here rather than re-implemented (see its docstring). Its refusal
+    leaves the live journal exactly as it was, with rows already in the gzip — duplicates
+    the dedupe in `_archive_append` closes on the next pass, the lesser evil against
+    deleting a row that never reached an archive.
+    """
+    journal = Path(journal) if journal is not None else PROVENANCE_JOURNAL
+    out = {"apply": apply, "present": False, "before": 0, "after": 0, "bytes": 0,
+           "moved": 0, "archived": 0, "undated": 0, "refused": None}
+    try:
+        raw = journal.read_bytes()
+    except OSError:               # no journal yet — nothing to bound, and none is created
+        return out
+    out["present"] = True
+    out["before"] = out["after"] = len(raw)
+
+    kept: list[bytes] = []
+    buckets: dict[str, list[bytes]] = {}
+    for line in raw.splitlines(keepends=True):
+        seconds = _provenance_row_seconds(line)
+        if seconds is None:
+            out["undated"] += 1            # no age: kept, and named apart on the report
+            kept.append(line)
+            continue
+        if now - seconds <= PROVENANCE_ARCHIVE_AGE_DAYS * 86400:
+            kept.append(line)
+            continue
+        buckets.setdefault(time.strftime("%Y%m", time.gmtime(seconds)), []).append(line)
+
+    out["moved"] = sum(len(lines) for lines in buckets.values())
+    out["bytes"] = sum(len(ln) for lines in buckets.values() for ln in lines)
+    if not buckets:
+        return out
+    if not apply:
+        # The count a dry run prints is the count the run would write, so the line an
+        # operator approves `--apply` from and the line the apply prints differ in the
+        # verb alone.
+        return out
+
+    def target_for(month: str) -> Path:
+        return journal.parent / f"{PROVENANCE_ARCHIVE_PREFIX}{month}.jsonl.gz"
+
+    def read_size() -> int:
+        return len(journal.read_bytes()) if journal.is_file() else -1
+
+    try:
+        for month, lines in buckets.items():
+            _archive_append(target_for(month), lines)
+    except OSError as exc:
+        out["refused"] = f"archive append failed ({type(exc).__name__}: {exc}); live journal intact"
+        return out
+
+    # The snapshot's OWN end, not the file's size now. `raw` was read above, the gzip loop
+    # just spent its seconds building the archives, and `_rewrite_live_ledger` fixes
+    # `seen = read_bytes` and grafts only what arrived after it — so handing it a size
+    # re-read here moves `seen` past any row `_journal_decision` appended during that loop,
+    # and the row sits in neither `body` nor `appended` while `os.replace` renames the file
+    # over it: a decision lost from both the live journal and the archive, reported as a
+    # clean fold. Store thirteen passes `len(raw)` for the same reason; a re-read is the
+    # off-by-one the helper's own docstring names. `read_size()` stays for `after`, where
+    # the file has been replaced and its current length IS the answer.
+    settled, refusal = _rewrite_live_ledger(journal, b"".join(kept), len(raw),
+                                           on_attempt=on_attempt, noun="journal")
+    if not settled:
+        out["refused"] = refusal
+        return out
+    out["after"] = read_size()
+    out["archived"] = out["moved"]
+    return out
+
+
+def _provenance_line(p: dict) -> str:
+    """One journal line, and one number per mode: what would move, or what did.
+
+    An absent journal says so rather than printing 0 bytes: an empty store and an absent
+    one are different facts, and row 17 of the scorecard prints a different sentence for
+    each of them (`scorecard.py:729`, `scorecard.py:1187`). The `undated` tail is the one
+    bucket that must never be readable off the archived count — three undated rows beside
+    one archived row printed as `1 archived` is a number that hides a whole class of row.
+    """
+    label = f"  provenance journal >{PROVENANCE_ARCHIVE_AGE_DAYS}d"
+    tail = ("" if not p["undated"] else
+            f" — {p['undated']} undated row(s) kept (no parseable `at`)")
+    if not p["present"]:
+        return f"{label}: no journal yet — nothing to bound"
+    if p["refused"]:
+        return f"{label}: REFUSED ({p['refused']}) — live journal intact"
+    verb = "would archive" if not p["apply"] else "archived"
+    if p["moved"] == 0:
+        return f"{label}: 0 {verb} ({p['before']} bytes live)" + tail
+    if not p["apply"]:
+        return f"{label}: {p['moved']} {verb} ({p['before']} bytes live, {p['bytes']} B of it)" + tail
+    return (f"{label}: {p['moved']} {verb} ({p['before']} → {p['after']} bytes live, "
+            f"{p['bytes']} B out)" + tail)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--apply", action="store_true",
@@ -2034,6 +2235,7 @@ def main() -> int:
     gq_n, gq_b = sweep_groundskeeper_queue(args.apply, now)
     wr_n, wr_b, wr_skip = sweep_worker_runs(args.apply, now)
     wq_n, wq_b, wq_skip = sweep_queue_rows(args.apply, now)
+    prov = sweep_provenance_journal(args.apply, now)
 
     print(f"  task logs >{TASK_LOG_MAX_AGE_DAYS}d:  "
           f"{logs_n} deleted, {logs_b / 1024:.0f} KiB freed")
@@ -2078,6 +2280,12 @@ def main() -> int:
         print(f"{queue_label}: {wq_skip} — nothing pruned")
     else:
         print(f"{queue_label}: {wq_n} deleted, {wq_b / 1024:.0f} KiB freed")
+    # Fourteenth store, and last of the data-root ones: the three automod lines below
+    # print after it by design, so the store that only ever moves rows into a gzip beside
+    # the file is read before the two that can name a production ref. Same line shape in
+    # both modes like every line above it — the operator approves `--apply` from these
+    # numbers, and only the verb differs (#2225 clause 3).
+    print(_provenance_line(prov))
     # Last, so the two lines that can name a production ref are the last thing an
     # operator reads before deciding whether the run did what they asked.
     if refusal:
@@ -2087,7 +2295,8 @@ def main() -> int:
         print(_branch_line(branches))
         # Printed only here, inside the same guard that refused the other two: the fold
         # rewrites the loop's own audit trail, so a run from a round's worktree or a
-        # sandbox declines it too and still prints ten store lines plus one refusal line.
+        # sandbox declines it too and still prints eleven store lines plus one refusal
+        # line.
         print(_ledger_line(ledger_rows))
     if refusal and args.apply:
         return NOT_PRODUCTION_EXIT
