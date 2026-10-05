@@ -98,6 +98,47 @@ ALL_TIERS = ("CASE", "PUNCT", "SUFFIX_SAFE")
 TIER_ALIAS_KIND = {"CASE": "case", "PUNCT": "punct", "SUFFIX_SAFE": "suffix",
                    "SUFFIX_AMBIGUOUS": "suffix", "IDENTICAL": "case", "OTHER": "semantic"}
 
+# ── Clock ────────────────────────────────────────────────────────────────────
+#
+# One clock for everything this script writes: UTC, with its offset attached.
+# #2255 found five sites reading the box clock instead — four rendering
+# `%Y%m%dT%H%M%SZ` off it with a literal `Z` appended and one defaulting `--date`
+# to its calendar day. The 2026-10-05 apply is the evidence: the report was named
+# `entity-merges-applied-2026-10-05-20261005T142239Z.json` (14:22:39 PDT) while the
+# `ledger.timestamp` inside it read `2026-10-05T21:22:40.345443+00:00` — the name
+# seven hours behind the instant it claimed — and after 17:00 PDT the local day
+# named in the same filename is the UTC *yesterday*, while `--resume`, the
+# apply-report lookup by date and #1538's audit all key off that day. A name and a
+# payload may therefore never be stamped from two different readings, so
+# `run_stamps` renders BOTH halves of a name from one instant.
+
+def utc_now() -> dt.datetime:
+    """The instant this script stamps by. Never the box clock."""
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def run_stamps(now: dt.datetime | None = None) -> tuple[str, str]:
+    """`(day, stamp)` for one run, both from ONE instant — so a name's `%Y-%m-%d`
+    can never disagree with the `%Y%m%dT%H%M%SZ` glued beside it, nor with the
+    +00:00 timestamp inside the file that name points at."""
+    now = now or utc_now()
+    return now.strftime("%Y-%m-%d"), now.strftime("%Y%m%dT%H%M%SZ")
+
+
+def utc_stamp(now: dt.datetime | None = None) -> str:
+    """The `%Y%m%dT%H%M%SZ` half alone, for a run that inherits its day from the
+    report it is finishing rather than naming a new one (`--resume`)."""
+    return run_stamps(now)[1]
+
+
+def utc_iso(now: dt.datetime | None = None) -> str:
+    """An ISO timestamp that says which clock it came from. The vault's own fact
+    writers (`agent_mcp/facts.py:597`, `next-gen-memory/fact_extractor.py:545`)
+    already stamp `last_updated` this way; a naive value in a machine-facing
+    payload is read as UTC by every later reader, so it is wrong by hours."""
+    return (now or utc_now()).isoformat()
+
+
 # ── Normalization ────────────────────────────────────────────────────────────
 
 STOP_SUFFIX_TOKENS_SAFE = {
@@ -768,7 +809,10 @@ def _merge_fact_file_into(src: Path, dst: Path) -> None:
     # ID twice. Dedup above is by fact TEXT and cannot see it.
     dedupe_ids(merged, dst_fm.get("category"))
     dst_fm["facts"] = merged
-    dst_fm["last_updated"] = dt.datetime.now().isoformat()
+    # UTC, with the offset: this field goes into a VAULT fact file, where the two
+    # other writers of it already stamp UTC and a naive value would be read as a
+    # UTC instant that is really the box clock (#2255).
+    dst_fm["last_updated"] = utc_iso()
     entity = dst_fm.get("entity", "")
     category = dst_fm.get("category", "")
     if entity and category:
@@ -843,7 +887,7 @@ def _append_seen_proposals(path: Path, fresh: list[dict], now: str | None = None
     try:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        stamp = now or dt.datetime.now().isoformat()
+        stamp = now or utc_iso()        # `evaluated_at` is machine-read; naive = hours off (#2255)
         with path.open("a", encoding="utf-8") as f:
             for rec in fresh:
                 f.write(json.dumps({
@@ -1568,7 +1612,10 @@ def _resume_apply(args, st, facts_root: Path) -> int:
                        "refuse a recovery"))
           )
 
-    ts = dt.datetime.now().strftime("%Y%m%dT%H%M%SZ")
+    # The resume names only its own store backup: the report it finishes keeps the
+    # name and the stamp of the run that claimed it, because a resume completes a
+    # run rather than renaming it (#2255).
+    ts = utc_stamp()
     backup_dir = Path(args.out_dir) / "store-backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
     store_bak = st.backup(backup_dir / f"kg-sweep-resume-{ts}.sqlite")
@@ -1635,7 +1682,12 @@ def main() -> int:
     ap.add_argument("--db", default=str(VAULT_KG_DB), help="knowledge-graph store")
     ap.add_argument("--facts-dir", default=str(FACTS_ROOT))
     ap.add_argument("--out-dir", default=str(OUT_DIR))
-    ap.add_argument("--date", default=dt.date.today().isoformat())
+    ap.add_argument("--date", default=None,
+                    help="YYYY-MM-DD to name the artefacts with. Default: the day of "
+                         "the same UTC instant the %Y%m%dT%H%M%SZ stamp is minted from "
+                         "at the plan emit, so a name's day is never the box-local one "
+                         "(#2255: the default used to read the local calendar day, "
+                         "beside a stamp claiming UTC).")
     ap.add_argument("--resume", metavar="APPLY_REPORT", default=None,
                     help="finish the fact-file half of an apply that died after its store "
                          "transaction committed: replay only the dir_operations that report has "
@@ -1699,8 +1751,15 @@ def main() -> int:
     # plan an earlier --apply had executed — the only record of what that apply
     # was shown. `-latest` is a convenience pointer for readers.
     print_plan(plan)
-    run_ts = dt.datetime.now().strftime("%Y%m%dT%H%M%SZ")
-    plan_out = out_dir / f"entity-merges-{args.date}-{run_ts}.jsonl"
+    # One instant names this run: the day half and the stamp half come from the SAME
+    # UTC reading, so the day in a filename can never disagree with the stamp beside
+    # it or with the +00:00 ledger timestamp in the file it names. An explicit
+    # `--date` still wins — that is how a by-date lookup and #1538's audit address a
+    # particular run, and an operator naming a day means that day. The default used
+    # to read the box's own calendar day, one clock out of step with its own stamp.
+    run_date, run_ts = run_stamps()
+    run_date = args.date or run_date
+    plan_out = out_dir / f"entity-merges-{run_date}-{run_ts}.jsonl"
     write_plan_jsonl(plan, plan_out)
     latest = out_dir / "entity-merges-latest.jsonl"
     try:
@@ -1721,14 +1780,17 @@ def main() -> int:
         print(f"\nREFUSING --apply: {reason}")
         return 3
 
-    # Apply
-    ts = dt.datetime.now().strftime("%Y%m%dT%H%M%SZ")
+    # Apply. One stamp per run: the report's name, the store backup it takes, and the
+    # `timestamp` field a `--resume` reads back all carry the plan emit's value, so no
+    # second clock names anything in this path (#2255; all three used to be minted
+    # from a separate reading each, and two of them were the box clock).
+    ts = run_ts
     # Claimed before the apply, not just named: the alias rows this run writes
     # carry this path as their provenance, so the FILE has to exist before they
     # can point at it, or a kill mid-run leaves provenance that resolves to
     # nothing (#475, `claim_report`).
-    apply_out = out_dir / f"entity-merges-applied-{args.date}-{ts}.json"
-    claim_report(apply_out, plan_out, args.date, ts)
+    apply_out = out_dir / f"entity-merges-applied-{run_date}-{ts}.json"
+    claim_report(apply_out, plan_out, run_date, ts)
     print()
     print(f"== Applying merges (timestamp: {ts}) ==")
 
@@ -1769,6 +1831,11 @@ def main() -> int:
     # a reader who finds `started` on disk knows the run was killed, and knows no
     # counts were ever claimed by it.
     report_to_save["report_status"] = "complete"
+    # The `started` stub `claim_report` wrote carried `date` and `timestamp`; the
+    # complete report used to drop both, leaving the filename as the only copy of
+    # the run's instant. They come back with the SAME values the name carries, so a
+    # reader never reconciles two renderings of one run (#2255).
+    report_to_save["date"], report_to_save["timestamp"] = run_date, ts
     report_to_save["plan_file"] = str(plan_out)
     report_to_save["tiers_allowed"] = sorted(allowed_tiers)
     report_to_save["gate_stats"] = plan.get("gate_stats")

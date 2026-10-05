@@ -1,11 +1,16 @@
 """entity-resolution-sweep.py — the rules that stop a name-shape match from
 becoming a merge, and the guards around --apply."""
+import ast
+import datetime as dt
 import importlib.util
 import json
+import os
+import re
 import subprocess
 import sys
 import types
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 import yaml
@@ -1081,3 +1086,345 @@ def test_apply_refuses_to_write_or_unlink_an_unparseable_fact_file(tmp_path):   
     assert sorted(entry[0].get("skipped_unparseable") or []) == sorted([str(src), str(dst)]), \
         "the refusal has to survive into the apply report, not just the terminal"
     assert entry[0]["files_moved"] == 0
+
+
+# ── #2255: every name and every payload stamp is the UTC instant ─────────────
+#
+# Four sites minted the artefact clocks off `dt.datetime.now()` — the box clock,
+# `America/Los_Angeles` on this machine — with a literal `Z` glued onto the
+# rendered name, and a fifth read the same box clock for the `--date` default. The
+# 2026-10-05 apply shipped both clocks in ONE artefact set: the report was named
+# `entity-merges-applied-2026-10-05-20261005T142239Z.json` (14:22:39 PDT) while
+# the `ledger.timestamp` inside it read `2026-10-05T21:22:40.345443+00:00`, seven
+# hours later, and `graph-baseline.json` recorded `2026-10-05T21:21:12.454844+00:00`.
+# The date half was local too, so after 17:00 PDT a run names the UTC *yesterday*
+# while the +00:00 ledger inside the file names the day that just passed — and
+# `--resume`, the apply-report lookup by date and #1538's audit all key off that
+# date half. Today's 14:00-PDT run lands on the same calendar day, which is why
+# this stayed invisible for so long.
+
+NAME_PARTS = re.compile(r"-(\d{4}-\d{2}-\d{2})-(\d{8}T\d{6}Z)\.jsonl?$")
+STAMP_ONLY = re.compile(r"(\d{8}T\d{6}Z)")
+
+
+def _parts(path: Path) -> tuple[str, dt.datetime]:
+    """`(date half, stamp as a UTC instant)` of a plan/apply artefact name. The
+    stamp is read as the instant it CLAIMS to be, which is exactly what every
+    later reader does with it."""
+    m = NAME_PARTS.search(path.name)
+    assert m, f"{path.name} is not named <prefix>-<YYYY-MM-DD>-<YYYYMMDDTHHMMSSZ>.json[l]"
+    return m.group(1), dt.datetime.strptime(m.group(2), "%Y%m%dT%H%M%SZ").replace(
+        tzinfo=dt.timezone.utc)
+
+
+def _stamp_of(name: str) -> dt.datetime:
+    """The `%Y%m%dT%H%M%SZ` component of any other artefact name (a store backup),
+    read as the UTC instant it claims."""
+    m = STAMP_ONLY.search(name)
+    assert m, f"{name} carries no %Y%m%dT%H%M%SZ component"
+    return dt.datetime.strptime(m.group(1), "%Y%m%dT%H%M%SZ").replace(tzinfo=dt.timezone.utc)
+
+
+def _run_tz(root, db, out, tz: str, *extra):
+    """The CLI in a SUBPROCESS whose `TZ` is forced. Pinning it is the whole point:
+    `TZ` is read at `datetime.now()` call time, so on a box whose clock is already
+    UTC every one of the assertions below would hold with the bug still in place."""
+    cmd = [sys.executable, str(SWEEP), "--facts-dir", str(root), "--db", str(db),
+           "--out-dir", str(out), "--no-gate", *extra]
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=120,
+                          env=dict(os.environ, TZ=tz))
+
+
+def _zone_whose_date_is_not_utc() -> str:
+    """A zone whose CALENDAR DAY differs from UTC's at this instant, so a name
+    dated by the box clock cannot pass the date-half assertion at any hour of the
+    day: `Pacific/Kiritimati` (UTC+14, no DST) is a day ahead from 10:00Z onward
+    and `Etc/GMT+12` (UTC−12) is a day behind until 12:00Z, and those two ranges
+    cover every hour. Each caller asserts the difference as a fixture precondition
+    rather than trusting this."""
+    return "Pacific/Kiritimati" if dt.datetime.now(dt.timezone.utc).hour >= 10 else "Etc/GMT+12"
+
+
+def _plan_and_report(out: Path) -> tuple[Path, Path]:
+    plan = next((p for p in out.glob("entity-merges-*.jsonl") if not p.is_symlink()), None)
+    report = next(out.glob("entity-merges-applied-*.json"), None)
+    assert plan and report, f"{out} holds {sorted(q.name for q in out.iterdir())}"
+    return plan, report
+
+
+def test_plan_and_apply_names_are_the_utc_instant_under_a_forced_local_zone(tmp_path):
+    """Clause 1: run the sweep in a subprocess with TZ=America/Los_Angeles and both
+    the plan file and the apply report must carry a `%Y%m%dT%H%M%SZ` name component
+    that parses as a UTC instant within 120 seconds of `datetime.now(timezone.utc)`
+    at run time. Before the fix that gap was exactly 7 h (25,200 s) on this box."""
+    root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
+    before = dt.datetime.now(dt.timezone.utc)
+    r = _run_tz(root, db, out, "America/Los_Angeles", "--apply")
+    after = dt.datetime.now(dt.timezone.utc)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+    window = dt.timedelta(seconds=120)
+    for artefact in _plan_and_report(out):
+        stamp = _parts(artefact)[1]
+        assert before - window <= stamp <= after + window, (
+            f"{artefact.name} claims {stamp.isoformat()}, outside the run window "
+            f"{before.isoformat()} .. {after.isoformat()} "
+            f"(off by {(stamp - before).total_seconds():+.0f} s)")
+
+    # Positive control: in that zone the wall clock is hours BEHIND UTC, so a stamp
+    # rendered off it decodes to an instant hours before this run. Without this the
+    # 120-second window above could be satisfied by the bug itself.
+    as_utc = dt.datetime.now(ZoneInfo("America/Los_Angeles")).replace(tzinfo=dt.timezone.utc)
+    assert (as_utc - before).total_seconds() < -3600, (
+        "America/Los_Angeles is no longer behind UTC, so this test can no longer "
+        "tell the two clocks apart")
+
+
+def test_the_date_half_of_an_artefact_name_is_the_utc_day(tmp_path):
+    """Clause 2: with no `--date` passed, the date half of BOTH names must equal
+    `datetime.now(timezone.utc).strftime('%Y-%m-%d')`, so the day a name claims and
+    the +00:00 ledger timestamp inside the file it names can never name different
+    days. Run twice: once in the box's own zone, and once in a zone whose calendar
+    day is NOT the UTC day right now, which is the case the local today-default got
+    wrong. Each leg samples the UTC day AROUND its own run and skips rather than
+    fails if UTC midnight moved underneath it — that window is a couple of seconds
+    a day, and a failure there would say nothing about the code."""
+
+    def run_leg(tz: str, sub: str) -> tuple[str, str, str]:
+        here = tmp_path / sub
+        root, db = _tree(here); out = here / "out"; out.mkdir(parents=True)
+        before = dt.datetime.now(dt.timezone.utc)
+        r = _run_tz(root, db, out, tz, "--apply")
+        after = dt.datetime.now(dt.timezone.utc)
+        assert r.returncode == 0, r.stdout + r.stderr
+        return before.strftime("%Y-%m-%d"), after.strftime("%Y-%m-%d"), str(out)
+
+    shifted = _zone_whose_date_is_not_utc()
+    for tz, sub in (("America/Los_Angeles", "la"), (shifted, "shift")):
+        utc_day, utc_day_after, out = run_leg(tz, sub)
+        if utc_day != utc_day_after:
+            pytest.skip(f"UTC rolled from {utc_day} to {utc_day_after} during the run")
+        if tz != "America/Los_Angeles" and \
+                dt.datetime.now(ZoneInfo(tz)).strftime("%Y-%m-%d") == utc_day:
+            pytest.skip(f"{tz} shares the UTC day at this instant, so a name dated by "
+                        f"the box clock would look correct here")
+        plan, report = _plan_and_report(Path(out))
+        for artefact in (plan, report):
+            date_half, stamp = _parts(artefact)
+            assert date_half == utc_day, (
+                f"{artefact.name} (TZ={tz}) is dated {date_half}, not the UTC day {utc_day}")
+            assert stamp.strftime("%Y-%m-%d") == date_half, (
+                f"{artefact.name}: its own stamp lands on {stamp.strftime('%Y-%m-%d')} "
+                f"but its date half says {date_half}")
+        rep = json.loads(report.read_text())
+        assert rep["ledger"]["timestamp"].startswith(utc_day) and \
+            rep["ledger"]["timestamp"].endswith("+00:00"), (
+            f"{report.name} is dated {utc_day}, its ledger says {rep['ledger']['timestamp']}")
+        assert rep["date"] == utc_day, (
+            f"the report field dates itself {rep['date']!r}, its own name says {utc_day}")
+
+
+def test_one_stamp_per_run_names_the_backup_and_survives_into_the_report(tmp_path):
+    """Clause 3: the store-backup filename and the report's own `timestamp` field
+    carry the SAME `%Y%m%dT%H%M%SZ` value as the report's filename, so no second
+    clock is left naming anything in the apply path. The `timestamp` the run claims
+    before its store transaction has to be the one still in the file afterwards:
+    the complete report used to drop both `date` and `timestamp`, leaving the only
+    stamp in the name."""
+    root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
+    r = _run_tz(root, db, out, "America/Los_Angeles", "--apply")
+    assert r.returncode == 0, r.stdout + r.stderr
+
+    _, report_path = _plan_and_report(out)
+    date_half, stamp = _parts(report_path)
+    stamp_text = stamp.strftime("%Y%m%dT%H%M%SZ")
+    rep = json.loads(report_path.read_text())
+    assert rep["report_status"] == "complete", rep["report_status"]
+    assert rep["timestamp"] == stamp_text, (
+        f"the report field carries {rep.get('timestamp')!r}, its own name carries {stamp_text}")
+    assert rep["date"] == date_half, f"the report field says {rep.get('date')!r}, not {date_half}"
+    assert Path(rep["store_backup"]).name == f"kg-sweep-{stamp_text}.sqlite", (
+        f"the store backup is named {Path(rep['store_backup']).name}, not after the "
+        f"report's own stamp")
+
+
+def test_the_resume_store_backup_stamp_is_utc_too(tmp_path, monkeypatch):
+    """Clause 3's other half: `--resume` minted its OWN naive stamp for the store
+    backup it takes before finishing a killed apply, so the recovery path kept a
+    second clock even once the fresh apply named itself in UTC. The backup of the
+    resume run must be a UTC instant, and the report it completes must keep the
+    claiming run's stamp — a resume finishes a run, it does not rename it."""
+    root, db, out, report = _killed_apply(tmp_path, monkeypatch, die_after_retags=2)
+    claimed = json.loads(report.read_text())["timestamp"]   # whatever stamp THIS fixture claimed
+    before = dt.datetime.now(dt.timezone.utc)
+    r = _run_tz(root, db, out, "America/Los_Angeles", "--resume", str(report))
+    after = dt.datetime.now(dt.timezone.utc)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+    backups = sorted((out / "store-backups").glob("kg-sweep-resume-*.sqlite"))
+    assert backups, "the resume took no store backup"
+    stamp = _stamp_of(backups[-1].name)
+    window = dt.timedelta(seconds=120)
+    assert before - window <= stamp <= after + window, (
+        f"{backups[-1].name} claims {stamp.isoformat()}, outside the resume window "
+        f"{before.isoformat()} .. {after.isoformat()}")
+    done = json.loads(report.read_text())
+    assert done["report_status"] == "complete", done["report_status"]
+    assert done["timestamp"] == claimed, (
+        f"the resume overwrote the claiming run's stamp {claimed!r} with {done['timestamp']!r}")
+
+
+def naive_clock_calls(source: str) -> list[str]:
+    """Every naive box-clock CALL in a module — `datetime.now()` with no timezone
+    argument, `date.today()`, and the `datetime.utcnow()` spelling, which takes no
+    argument precisely so that it cannot carry one. Read out of the AST, because the
+    item's `git grep` proxy also fires on prose that merely names the old call, and a
+    guard that fires on comments gets silenced."""
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        attr, base = node.func.attr, ast.unparse(node.func.value)
+        if not (base.endswith("datetime") or base.endswith("date")):
+            continue
+        naive = (attr in ("today", "utcnow", "utcfromtimestamp")
+                 or (attr == "now" and not node.args and not node.keywords))
+        if naive:
+            found.append(f"{base}.{attr}() at line {node.lineno}")
+    return found
+
+
+def test_no_naive_clock_call_is_left_in_the_script():
+    """The verify command this item was filed with — `git grep -n
+    "datetime.now().strftime\\|date.today()" -- scripts/memory/entity-resolution-sweep.py`
+    → 0 hits — pinned as a test, with a positive control so a pattern that had
+    drifted from the shape cannot report a clean script."""
+    assert naive_clock_calls(SWEEP.read_text(encoding="utf-8")) == [], \
+        f"naive box-clock calls left: {naive_clock_calls(SWEEP.read_text(encoding='utf-8'))}"
+    control = naive_clock_calls(
+        "import datetime as dt\nts = dt.datetime.now().strftime('%Y%m%dT%H%M%SZ')\n"
+        "d = dt.date.today().isoformat()\nu = dt.datetime.utcnow().isoformat()\n"
+        "ok = dt.datetime.now(dt.timezone.utc).isoformat()\n")
+    assert len(control) == 3 and not any("now(dt.timezone" in c for c in control), (
+        f"the pattern no longer separates the clocks it exists to catch: {control}")
+
+
+def test_the_merged_fact_file_and_the_seen_ledger_stamp_in_utc(tmp_path):
+    """The other two payload clocks this script ran on: `_merge_fact_file_into`
+    wrote `last_updated` off the box clock into the VAULT fact file it merged into,
+    and `_append_seen_proposals` wrote `evaluated_at` off it into the proposals
+    seen-ledger — while `agent_mcp/facts.py:597` and the fact extractor both stamp
+    `last_updated` in UTC. An aware value is distinguishable from a naive one on
+    any box, so this needs no forced TZ: a naive local stamp has no offset to read."""
+    src = tmp_path / "vllm-state.md"
+    dst = tmp_path / "vLLM-state.md"
+    for path, entity in ((src, "vllm"), (dst, "vLLM")):
+        fm = {"type": "facts", "entity": entity, "category": "state",
+              "facts": [{"entity": entity, "fact": f"{entity} serves 40 req/s.",
+                         "confidence": 0.9, "category": "state"}]}
+        path.write_text(f"---\n{yaml.dump(fm, sort_keys=False)}---\n\n# {entity} - state\n",
+                        encoding="utf-8")
+    before = dt.datetime.now(dt.timezone.utc)
+    ers._merge_fact_file_into(src, dst)
+    merged = yaml.safe_load(dst.read_text().split("---")[1])
+    touched = dt.datetime.fromisoformat(merged["last_updated"])
+    assert touched.tzinfo is not None and touched.utcoffset() == dt.timedelta(0), (
+        f"last_updated {merged['last_updated']!r} carries no UTC offset, so every "
+        f"later reader has to guess which clock it came from")
+    assert abs((touched - before).total_seconds()) <= 120, merged["last_updated"]
+
+    ledger = tmp_path / "seen-proposals.jsonl"
+    assert ers._append_seen_proposals(ledger, [{"canonical": "vLLM", "variant": "vllm",
+                                                "confidence": 0.9}]) == 1
+    seen = json.loads(ledger.read_text().splitlines()[-1])
+    evaluated = dt.datetime.fromisoformat(seen["evaluated_at"])
+    assert evaluated.tzinfo is not None and evaluated.utcoffset() == dt.timedelta(0), (
+        f"evaluated_at {seen['evaluated_at']!r} is naive; #2255's class rule is that "
+        f"a naive stamp in a machine-facing payload is read as UTC by every later reader")
+    assert abs((evaluated - before).total_seconds()) <= 120, seen["evaluated_at"]
+
+
+def test_the_offset_bearing_stamp_still_reads_through_the_store_and_the_index(tmp_path):
+    """The seam the new `last_updated` shape crosses: `rebuild_index.py:230-232` reads
+    that key out of frontmatter and calls `isoformat()` on it only if it IS a datetime,
+    and the store's own `parse_fact_file` is what the sweep itself and the nightly
+    digester read fact files with. YAML quotes an ISO string carrying an offset, so the
+    value arrives as the same `str` it always did and the only change a later reader
+    can see is the `+00:00` suffix — the shape `agent_mcp/facts.py:687` has been
+    writing into this very key on every MCP fact write."""
+    src = tmp_path / "vllm-state.md"
+    dst = tmp_path / "vLLM-state.md"
+    texts = {"vllm": "vllm serves 40 req/s.", "vLLM": "vLLM was merged into on 2026-10-05."}
+    for path, entity in ((src, "vllm"), (dst, "vLLM")):
+        fm = {"type": "facts", "entity": entity, "category": "state",
+              "facts": [{"entity": entity, "fact": texts[entity],
+                         "confidence": 0.9, "category": "state"}]}
+        path.write_text(f"---\n{yaml.dump(fm, sort_keys=False)}---\n\n# {entity} - state\n",
+                        encoding="utf-8")
+    ers._merge_fact_file_into(src, dst)
+
+    fm, facts = parse_fact_file(dst)
+    assert len(facts) == 2, [f["fact"] for f in facts]
+    assert isinstance(fm["last_updated"], str), (
+        f"the store reader hands back a {type(fm['last_updated']).__name__} for "
+        f"last_updated, not the str every consumer of that key already assumes")
+    assert fm["last_updated"].endswith("+00:00"), fm["last_updated"]
+    assert dt.datetime.fromisoformat(fm["last_updated"]).utcoffset() == dt.timedelta(0)
+
+    index_view = fm["last_updated"]
+    if hasattr(index_view, "isoformat"):        # rebuild_index.py:231's branch
+        index_view = index_view.isoformat()
+    assert index_view == fm["last_updated"], "the index would re-render the stamp differently"
+
+
+# The apply report #2255's premise was measured out of has no git history of its own —
+# the sweep never overwrites one, it mints a new name each run — so the bytes behind the
+# quoted numbers are committed here and re-derived rather than quoted. Their durable home
+# is the vault witness `backlog/data/<same name>`; a node cannot open THAT path because the
+# gate runs with HOME at the round home, where `~/obsidian` does not exist, and a node that
+# skipped on a missing vault would pin nothing.
+WITNESS = Path(__file__).resolve().parent / "fixtures" / \
+    "entity-merges-applied-2026-10-05-20261005T142239Z.json"
+
+
+def test_the_witness_bytes_still_carry_the_gap_the_item_quotes():
+    """Clause 4: every figure this item quotes comes out of the committed bytes, line
+    count included — 151 lines, which is what `wc -l` of the witness answers — and the
+    copy is the vault's byte for byte whenever the vault is reachable."""
+    assert WITNESS.exists(), f"{WITNESS} is gone, and with it the item's witness"
+    text = WITNESS.read_text(encoding="utf-8")
+    # `wc -l` counts NEWLINES, and the report is written without a trailing one, so the
+    # answer is 151 where `splitlines()` would say 152. Counting the way the clause's
+    # command counts is the only way this assertion means the same thing twice.
+    assert text.count("\n") == 151, (
+        f"{WITNESS.name} carries {text.count(chr(10))} newlines; `wc -l` on the witness "
+        f"answers 151")
+    rep = json.loads(text)
+
+    date_half, claimed = _parts(WITNESS)     # the claim the FILENAME makes
+    assert date_half == "2026-10-05" and claimed.isoformat() == "2026-10-05T14:22:39+00:00", (
+        f"the witness is no longer named for the 14:22:39 PDT instant the item quotes: "
+        f"{WITNESS.name}")
+    assert rep["ledger"]["timestamp"] == "2026-10-05T21:22:40.345443+00:00", rep["ledger"]
+    gap = (dt.datetime.fromisoformat(rep["ledger"]["timestamp"]) - claimed).total_seconds()
+    assert 7 * 3600 <= gap < 7 * 3600 + 120, (
+        f"the name and its own ledger are {gap:.0f} s apart, not the 7 h 0 m 1 s "
+        f"(25,201 s) that is America/Los_Angeles at UTC-7 plus the second between the two "
+        f"readings — the defect this item is about")
+    assert date_half == rep["ledger"]["timestamp"][:10], (
+        "the two halves agree on the day, which is exactly the luck the item records: a "
+        "14:22-PDT run is before the 17:00-PDT point where the local day and the UTC day "
+        "part company")
+
+    assert Path(rep["store_backup"]).name == "kg-sweep-20261005T142239Z.sqlite", (
+        f"the store backup is named {Path(rep['store_backup']).name}; clause 3's second "
+        f"naive clock is no longer visible in the witness")
+    assert "timestamp" not in rep and "date" not in rep, (
+        f"this report carries {rep.get('timestamp')!r}/{rep.get('date')!r}; a COMPLETE "
+        f"apply report carried neither key before #2255, which is why clause 3's "
+        f"'the report's own timestamp field' had to be restored, not just corrected")
+
+    vault = Path.home() / "obsidian" / "backlog" / "data" / WITNESS.name
+    if vault.exists():
+        assert vault.read_bytes() == WITNESS.read_bytes(), (
+            f"the committed copy and {vault} are no longer the same bytes")

@@ -1,0 +1,152 @@
+{
+  "rewritten_edges": 8,
+  "edge_rewrites": {
+    "queue-health-check": [
+      [
+        31186,
+        69930
+      ]
+    ],
+    "Adit Ab...": [
+      [
+        69362,
+        69931
+      ]
+    ],
+    "Qwen 3.8 Flash-Next": [
+      [
+        69510,
+        69932
+      ],
+      [
+        69535,
+        69933
+      ],
+      [
+        69575,
+        33173
+      ]
+    ],
+    "Whisper Flow": [
+      [
+        69801,
+        69934
+      ]
+    ],
+    "Giselle va...": [
+      [
+        69363,
+        69935
+      ],
+      [
+        69364,
+        67499
+      ]
+    ]
+  },
+  "alias_writes": 5,
+  "dir_operations": [
+    {
+      "variant": "queue-health-check",
+      "canonical": "Queue Health Check",
+      "files_moved": 3,
+      "removed_dir": true,
+      "done": true
+    },
+    {
+      "variant": "Adit Ab...",
+      "canonical": "Adit Ab",
+      "files_moved": 3,
+      "removed_dir": true,
+      "done": true
+    },
+    {
+      "variant": "Qwen 3.8 Flash-Next",
+      "canonical": "Qwen3.8-Flash-Next",
+      "files_moved": 7,
+      "removed_dir": true,
+      "done": true
+    },
+    {
+      "variant": "Whisper Flow",
+      "canonical": "WhisperFlow",
+      "files_moved": 3,
+      "removed_dir": true,
+      "done": true
+    },
+    {
+      "variant": "Giselle va...",
+      "canonical": "Giselle va",
+      "files_moved": 3,
+      "removed_dir": true,
+      "done": true
+    }
+  ],
+  "variant_to_canonical": {
+    "queue-health-check": "Queue Health Check",
+    "Adit Ab...": "Adit Ab",
+    "Qwen 3.8 Flash-Next": "Qwen3.8-Flash-Next",
+    "Whisper Flow": "WhisperFlow",
+    "Giselle va...": "Giselle va"
+  },
+  "report_status": "complete",
+  "plan_file": "/home/alansrobotlab/lloyd-data/_pipeline/memory-graph/entity-merges-2026-10-05-20261005T142239Z.jsonl",
+  "tiers_allowed": [
+    "CASE",
+    "PUNCT"
+  ],
+  "gate_stats": {
+    "asked": 57,
+    "same": 22,
+    "review": 32
+  },
+  "applied_clusters": 5,
+  "applied_merges": 5,
+  "safety": {
+    "no_gate": false,
+    "allow_degraded": false,
+    "gate_verdict": "ran: 57 suffix pairs judged, 22 SAME, 32 to review",
+    "degraded_graph": "not degraded",
+    "active_edges": 41760,
+    "baseline_measured": true
+  },
+  "alias_provenance": {
+    "origin": "sweep",
+    "report_path": "/home/alansrobotlab/lloyd-data/_pipeline/memory-graph/entity-merges-applied-2026-10-05-20261005T142239Z.json"
+  },
+  "baseline_active_edges": 41760,
+  "store_backup": "/home/alansrobotlab/lloyd-data/_pipeline/memory-graph/store-backups/kg-sweep-20261005T142239Z.sqlite",
+  "store_before": {
+    "edges_total": 69929,
+    "edges_active": 41760,
+    "aliases": 203,
+    "entities": 13294,
+    "facts": 133726
+  },
+  "store_after": {
+    "edges_total": 69935,
+    "edges_active": 41756,
+    "aliases": 208,
+    "entities": 13289,
+    "facts": 133726
+  },
+  "ledger": {
+    "timestamp": "2026-10-05T21:22:40.345443+00:00",
+    "user": "alansrobotlab",
+    "cwd": "/home/alansrobotlab/lloyd",
+    "argv": [
+      "scripts/memory/entity-resolution-sweep.py",
+      "--apply",
+      "--tiers",
+      "CASE,PUNCT"
+    ],
+    "pid": 2486214,
+    "ppid": 2486211,
+    "parent_cmdline": "timeout 3000 .venvs/lloyd/bin/python scripts/memory/entity-resolution-sweep.py --apply --tiers CASE,PUNCT",
+    "grandparent_cmdline": "/bin/sh -c cd ~/lloyd && timeout 3000 .venvs/lloyd/bin/python scripts/memory/entity-resolution-sweep.py --apply --tiers CASE,PUNCT 2>&1 | grep -v \"semantic gate: review\\|always hand-review\\|SUFFIX_JUDGED\" | tail -60",
+    "env_hints": {
+      "LLOYD_PATH_SANDBOX": "enforced",
+      "SUPERVISOR_PROCESS_NAME": "lloyd-mcp"
+    }
+  }
+}

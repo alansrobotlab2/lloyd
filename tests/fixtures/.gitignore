@@ -122,3 +122,20 @@
 # round that did not touch `web/` would look broken. Scoped to this one name rather than
 # to `*.json` so a runtime snapshot dropped here by accident stays ignored.
 !dashboard_long_labels.json
+
+# The ninth family is the apply report behind #2255's premise, committed for the reason
+# the seven witnesses above were: the clause-4 re-derive is `wc -l` of the report WHOLE
+# (151 lines), and its durable home is the vault witness at
+# `backlog/data/entity-merges-applied-2026-10-05-20261005T142239Z.json` (vault commit
+# `d31bbbb7`), which a test cannot open because the gate runs with HOME at the round home,
+# where `~/obsidian` does not exist. This copy is byte-identical to it —
+# `test_the_witness_bytes_still_carry_the_gap_the_item_quotes` compares the two digests
+# whenever the vault is reachable rather than quoting a digest as a fact — and re-derives
+# the three clocks the item quotes from these bytes: the name's own `20261005T142239Z`, the
+# `ledger.timestamp` 2026-10-05T21:22:40.345443+00:00 7 h 0 m 1 s later, and the
+# `store_backup` name carrying the same naive stamp, plus the finding that a COMPLETE
+# report carried no `timestamp` key at all. Scoped to this one filename, not to
+# `entity-merges-applied-*.json`: a live report of that family belongs to
+# `~/lloyd-data/_pipeline/memory-graph/` and is what the sweep is writing right now, so the
+# negation must never reach one — only this witness somebody deliberately placed here.
+!entity-merges-applied-2026-10-05-20261005T142239Z.json
