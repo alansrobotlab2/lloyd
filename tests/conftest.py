@@ -76,6 +76,18 @@ def _default_state_dirs_to_scratch() -> None:
     a human seeds is read off that table; fixture hosts in it are not noise, they
     are a forged inventory. Tests that assert on destinations point the variable
     at their own `tmp_path`, as `tests/test_egress_telemetry.py` does.
+    `LLOYD_DAILY_NOTE_APPEND_LEDGER` joined on 2026-10-05 with #2213, as the
+    ledger's half of the `LLOYD_DAILY_NOTE_DIR` pair: `app.autonomy._witness_daily_note_append`
+    (#1799) appends one JSONL row per CONFIRMED alert line to
+    `~/lloyd-data/alerts/daily-note-appends.jsonl` by default, so with the notes
+    redirected and the ledger not, any suite test driving a confirmed append
+    witnesses into the file the `daily_note_appends` health leg reads — green
+    evidence no alarm produced (a single `mktemp -d` probe row made that leg
+    report `witnessed (1 rows examined, 0 lost)` on 2026-10-04). The writer now
+    refuses that combination outright; this default is the second half of the
+    invariant, so the suite's own default resolves nowhere near the production
+    ledger. Tests that assert on witness rows point it at their own `tmp_path`,
+    as `tests/test_daily_note_append_witness.py` does.
     """
     scratch: Path | None = None
     for var, sub in (("LLOYD_AUTOMOD_STATE", "automod"), ("LLOYD_GUARDIAN_STATE", "guardian"),
@@ -95,6 +107,18 @@ def _default_state_dirs_to_scratch() -> None:
             scratch = Path(tempfile.mkdtemp(prefix="lloyd-test-state-"))
             atexit.register(shutil.rmtree, scratch, ignore_errors=True)
         os.environ["LLOYD_EGRESS_DB"] = str(scratch / "egress-events.db")
+    if not os.environ.get("LLOYD_DAILY_NOTE_APPEND_LEDGER"):
+        # Same file-shaped case (#2213), same scratch dir: the JSONL witness path
+        # `app.autonomy._daily_note_append_ledger()` reads. The notes dir above
+        # is redirected unconditionally, so WITHOUT this the pair-invariant skip
+        # in `_witness_daily_note_append` would fire in every test that drives a
+        # confirmed append — correct for pollution, but the un-override witness
+        # path would have no in-suite coverage at all.
+        if scratch is None:
+            scratch = Path(tempfile.mkdtemp(prefix="lloyd-test-state-"))
+            atexit.register(shutil.rmtree, scratch, ignore_errors=True)
+        os.environ["LLOYD_DAILY_NOTE_APPEND_LEDGER"] = str(
+            scratch / "daily-note-appends.jsonl")
 
 
 _default_state_dirs_to_scratch()

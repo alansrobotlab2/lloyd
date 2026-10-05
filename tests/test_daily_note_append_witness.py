@@ -44,12 +44,21 @@ would quietly break the witness:
 
 Ledger path and note directory are both honoured per call through
 `LLOYD_DAILY_NOTE_APPEND_LEDGER` / `LLOYD_DAILY_NOTE_DIR`, so nothing here writes
-into the production ledger or the real vault.
+into the production ledger or the real vault. And the pair is ONE invariant (#2213):
+a confirmed append whose note dir is redirected while the ledger is not leaves NO
+witness row at the default ledger. On 2026-10-04 exactly that combination —
+`LLOYD_DAILY_NOTE_DIR=$(mktemp -d)`, the ledger variable unset — put the live
+ledger's only row in from one synthetic probe, and the leg reported `witnessed
+(1 rows examined, 0 lost)` off zero production appends. The skip logs exactly one
+WARNING naming both variables, and `tests/conftest.py` gives the suite a scratch
+default for the ledger, so the combination cannot resolve to the live file twice
+over: the writer refuses it, the environment never defaults to it.
 """
 import hashlib
 import importlib
 import importlib.util
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -444,6 +453,346 @@ def test_rows_the_leg_cannot_parse_are_counted_not_dropped(witness):
     page = shc.format_text([], [], [], None, components=["daily_note_appends"],
                            daily_note_appends=result)
     assert "2 ledger rows" in page and "NOT examined" in page, page[-400:]
+
+
+# -------------------------- #2213: the note-dir / ledger pair (cl. 1, 2, 3) ---
+def _warning_records(caplog):
+    """WARNING-or-worse records this module's logger emitted, rendered.
+
+    #2213's skip has to be ONE line naming both variables: a suppressed witness
+    that logs nothing is the silent green the item forbids, and a warning per
+    append would bury it under fleet traffic. Filtered to the writer's own
+    logger so an unrelated record cannot satisfy the count.
+    """
+    return [(r.levelname, r.getMessage()) for r in caplog.records
+            if r.name == "lloyd-autonomy" and r.levelno >= logging.WARNING]
+
+
+def test_a_redirected_note_dir_with_the_default_ledger_skips_the_witness_and_warns(
+        witness, monkeypatch, caplog):
+    """cl. 1 + 2: note dir redirected, ledger not — the line lands, True is True,
+    the default ledger's byte size is unchanged, and exactly one WARNING names both
+    variables.
+
+    This is the 2026-10-04 shape: `LLOYD_DAILY_NOTE_DIR` at a `mktemp -d`,
+    `LLOYD_DAILY_NOTE_APPEND_LEDGER` absent. Before the fix the witness row still
+    went to the writer's default ledger — the `witness` fixture points the notes at
+    a temp dir and this test deletes the ledger pointer, so the red run shows both
+    halves: the ledger grew, and no warning fired.
+    """
+    from app.paths import DATA_ROOT
+    monkeypatch.delenv(LEDGER_ENV, raising=False)
+    default = DATA_ROOT / "alerts" / "daily-note-appends.jsonl"
+    default.parent.mkdir(parents=True, exist_ok=True)
+    default.touch()  # so a leak reads as "grew", not as "no file" — byte-identical
+    before = default.stat().st_size
+    caplog.set_level(logging.WARNING, logger="lloyd-autonomy")
+
+    assert A.append_daily_alert_line("witness leak probe") is True
+    assert len(_alert_lines(witness["notes"] / f"{_today()}.md")) == 1, (
+        "the note write itself is not what gets skipped")
+    assert default.stat().st_size == before, (
+        f"the default ledger moved {default.stat().st_size - before} byte(s) off a "
+        f"fixture whose notes live under {witness['notes']} — green evidence no "
+        "alarm produced, which is what #2213 forbids")
+
+    warns = _warning_records(caplog)
+    assert len(warns) == 1, (
+        f"a suppressed witness must log exactly one line, saw {warns!r}")
+    level, text = warns[0]
+    assert level == "WARNING", level
+    assert "LLOYD_DAILY_NOTE_DIR" in text, text
+    assert "LLOYD_DAILY_NOTE_APPEND_LEDGER" in text, text
+
+
+def test_a_redirected_note_dir_with_an_explicit_ledger_witnesses_and_the_leg_reads_it(
+        witness, caplog):
+    """cl. 3: both variables into one temp dir — exactly one row lands in that ledger,
+    its `note_path` is the temp note, and the leg reading that same file counts it
+    examined; with the ledger explicit the skip must NOT fire, so no warning either.
+    """
+    caplog.set_level(logging.WARNING, logger="lloyd-autonomy")
+    assert A.append_daily_alert_line("fleet watchdog: scheduler may be stalled") is True
+
+    rows = _rows(witness["ledger"])
+    assert len(rows) == 1, f"both vars set must still witness: {len(rows)} row(s)"
+    assert rows[0]["note_path"] == str(witness["notes"] / f"{_today()}.md"), rows[0]
+    assert _warning_records(caplog) == [], (
+        "the skip fired with the ledger explicitly set — it must key on the PAIR, "
+        "not on the note dir alone")
+
+    result = shc.check_daily_note_appends(ledger=witness["ledger"])
+    assert result["rows_examined"] == 1, result
+    assert result["state"] == shc.DAILY_NOTE_APPENDS_GREEN, result["detail"]
+    assert result["rows_lost"] == 0
+
+
+def test_the_items_probe_a_redirected_note_dir_never_reaches_the_default_ledger(tmp_path):
+    """The item's own acceptance check, pinned: `LLOYD_DAILY_NOTE_DIR=$(mktemp -d)`
+    with the ledger variable unset, in a fresh interpreter, no conftest in sight —
+    and `LLOYD_DATA` standing in for the data root so the ledger's byte size is
+    measurable the way `wc -c ~/lloyd-data/alerts/...` is on the box.
+
+    Subprocess, because the probe is a process-environment claim: in-process,
+    conftest has already set both variables (#2213 cl. 5), and the exact absent
+    variable this check depends on cannot be produced by a test node that inherits
+    them. The child still logs to stderr through logging's last-resort handler, so
+    the WARNING naming both variables is asserted as the probe saw it: exactly one
+    line of stderr, carrying both names and the skip's own sentence.
+    """
+    data = tmp_path / "data"
+    data.mkdir()
+    ledger = data / "alerts" / "daily-note-appends.jsonl"
+    ledger.parent.mkdir(parents=True)
+    ledger.write_text("", encoding="utf-8")
+    before = ledger.stat().st_size
+    notes = tmp_path / "notes"
+    notes.mkdir()
+
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("LLOYD_DAILY_NOTE_DIR", LEDGER_ENV, "LLOYD_DATA")}
+    env.update({"PYTHONPATH": str(REPO), "LLOYD_DATA": str(data),
+                "LLOYD_DAILY_NOTE_DIR": str(notes)})
+    proc = subprocess.run(
+        [sys.executable, "-c",
+         "from app.autonomy import append_daily_alert_line; "
+         "print('ok', append_daily_alert_line('witness leak probe'))"],
+        capture_output=True, text=True, timeout=180, env=env)
+
+    assert proc.returncode == 0, (proc.stdout[-800:], proc.stderr[-800:])
+    assert "ok True" in proc.stdout, proc.stdout
+    assert len(_alert_lines(notes / f"{_today()}.md")) == 1, (
+        "the probe's note write must still happen; only the witness is skipped")
+    assert ledger.stat().st_size == before, (
+        f"the probe moved the default ledger {ledger.stat().st_size - before} "
+        "byte(s) — the item's check demands byte-identical")
+    # ONE line of the child's stderr, not a substring over all of it: the loose
+    # form is satisfied by ANY child output naming both variables — a traceback, an
+    # unrelated warning that mentions a path — and then this node would be pinning
+    # nothing but the byte-identical ledger check above. The skip is exactly one
+    # line, and both variable names have to be IN that line, which is what cl. 2
+    # asks of a suppressed witness: visible, and legible as this skip.
+    warn_lines = [ln for ln in proc.stderr.splitlines()
+                  if "LLOYD_DAILY_NOTE_DIR" in ln and LEDGER_ENV in ln]
+    assert len(warn_lines) == 1, (
+        "the suppressed witness must be exactly ONE stderr line naming both "
+        f"variables, saw {len(warn_lines)} in {proc.stderr[-800:]}")
+    assert "skipping the daily-note append witness" in warn_lines[0], warn_lines[0]
+
+
+# --------------------- #2213 cl. 4: the un-override path still witnesses -------
+def test_a_confirmed_append_with_no_per_test_override_still_witnesses_to_the_default(
+        caplog):
+    """cl. 4: with neither variable overridden by the test (both stand at the values
+    conftest gives every test — cl. 5 is what makes that ledger a scratch file), a
+    confirmed append writes exactly ONE row to `_daily_note_append_ledger()`'s answer.
+
+    This is the witness's reason for existing: it must keep firing on the shape
+    production runs, where nothing sets either variable and the writer takes its
+    default end to end. A skip keyed on the note dir ALONE would silence it here,
+    because conftest always redirects the notes; keying on the pair is what this
+    node pins. The row count is a delta, because every other test in the session
+    that drives a confirmed append without its own ledger pointer appends to this
+    same shared file — which is exactly why the delta is not the proof. The proof
+    is the row's own identity: its `line_sha256` hashes a line of the note its
+    `note_path` names, the leg's own test of a witness.
+    """
+    default = A._daily_note_append_ledger()
+    assert default == Path(os.environ[LEDGER_ENV]), (
+        "with no per-test override the resolver must answer the suite default, "
+        f"saw {default} vs {os.environ[LEDGER_ENV]}")
+    before = len(_rows(default))
+    caplog.set_level(logging.WARNING, logger="lloyd-autonomy")
+
+    assert A.append_daily_alert_line("fleet watchdog: default-path witness") is True
+
+    after = _rows(default)
+    assert len(after) == before + 1, (
+        f"{len(after) - before} row(s) for one confirmed append at the suite "
+        "default — the witness stopped firing on the un-override path")
+    mine = after[-1]
+    assert "default-path witness" in mine["entry_prefix"], mine
+    # A count alone cannot say WHICH append arrived, and this ledger is shared by
+    # every test in the session that drives a confirmed append without its own
+    # pointer. So the row is pinned by the invariant the leg itself grades: the
+    # row's `line_sha256` is the sha256 of a line of the note its `note_path`
+    # names, and `entry_prefix` is that line's first
+    # `WITNESS_ENTRY_PREFIX_CHARS` characters. A sibling test's row cannot satisfy
+    # that, and neither can a witness of a line that never reached the note.
+    note = Path(mine["note_path"])
+    assert note.parent == Path(os.environ["LLOYD_DAILY_NOTE_DIR"]), (
+        f"the row names a note outside the suite's own redirected note dir: {mine}")
+    assert note.name == f"{_today()}.md", mine
+    assert note.exists(), f"the row names a note that is not on disk: {mine}"
+    by_sha = {hashlib.sha256(ln.encode("utf-8")).hexdigest(): ln
+              for ln in note.read_text(encoding="utf-8").splitlines()}
+    assert mine["line_sha256"] in by_sha, (
+        "the row hashes no line of its own note, so the leg could never read this "
+        f"append back as witnessed: {mine}")
+    assert (mine["entry_prefix"]
+            == by_sha[mine["line_sha256"]][:A.WITNESS_ENTRY_PREFIX_CHARS]), mine
+    assert _warning_records(caplog) == [], (
+        "the skip fired while the ledger had a default — it skips only when the "
+        "ledger variable is the one that is absent")
+
+
+def test_the_resolver_default_stays_under_the_data_root_when_the_note_dir_is_overridden(
+        witness, monkeypatch):
+    """cl. 4 (second half): the resolver's ANSWER must not move with the note dir.
+
+    `test_the_writer_and_the_leg_default_to_the_same_ledger` below calls the
+    resolver and compares its tail against the leg's hardcoded literal to catch a
+    data-root cutover. A "fix" that made the resolver consult the note dir would
+    turn that drift check into a comparison of a scratch path against `~/lloyd-data/
+    ...` — red on the fixture instead of red on a cutover. The skip therefore lives
+    in `_witness_daily_note_append`, and this node is the trap notice: with the note
+    dir redirected (the `witness` fixture) and the ledger variable deleted, the
+    resolver still answers the DATA ROOT's `alerts/daily-note-appends.jsonl`.
+
+    FULL PATH, not the tail — the advisory this round's first review left on the
+    node that used to sit here. Asserting only the two components
+    `("alerts", "daily-note-appends.jsonl")` is satisfied by a resolver answering
+    `<tmp>/alerts/daily-note-appends.jsonl`, which is the very behaviour this node
+    exists to forbid: the tail is what a data-root cutover moves, and the PARENT is
+    what a note-dir leak moves. So the assertion is equality with
+    `DATA_ROOT / "alerts" / "daily-note-appends.jsonl"`, the one expression the
+    resolver itself returns, and the fixture's note dir is first pinned to a
+    different root so the equality cannot be won by both sides naming one temp dir.
+    `DATA_ROOT` and not `production_data_root()` is the anchor because inside an
+    automod gate `HOME` is the round's symlink farm and `LLOYD_DATA` points the data
+    root at a scratch directory (`app/paths.py`'s header); the production-literal
+    half of the drift check stays the seam test's job, on the passwd-derived anchor.
+    """
+    from app.paths import DATA_ROOT
+    monkeypatch.delenv(LEDGER_ENV, raising=False)
+    notes = Path(os.environ["LLOYD_DAILY_NOTE_DIR"])   # set by the `witness` fixture
+    assert notes != DATA_ROOT and DATA_ROOT not in notes.parents, (
+        f"the note dir {notes} IS the data root {DATA_ROOT} or sits under it, so "
+        "this node cannot tell a ledger that followed the data root from one that "
+        "followed the notes")
+    redirected = A._daily_note_append_ledger()   # LLOYD_DAILY_NOTE_DIR set by fixture
+    assert redirected == DATA_ROOT / "alerts" / "daily-note-appends.jsonl", (
+        f"with the note dir redirected to {notes} and the ledger variable absent, "
+        f"the resolver answered {redirected} instead of the data root's own "
+        f"{DATA_ROOT / 'alerts' / 'daily-note-appends.jsonl'} — a resolver that "
+        "consults the note dir breaks the seam test's drift check on the fixture, "
+        "which is why #2213's skip sits in the writer instead")
+    assert notes not in redirected.parents, (
+        f"the default witness ledger resolves INSIDE the redirected note dir "
+        f"{notes}: {redirected}")
+
+
+# ------------------------ #2213 cl. 5: the suite's own ledger default ----------
+def test_the_suite_ledger_default_is_a_scratch_file_not_the_production_ledger():
+    """cl. 5: the pytest default for `LLOYD_DAILY_NOTE_APPEND_LEDGER` is a FILE path
+    under the scratch directory conftest already builds (the `LLOYD_EGRESS_DB`
+    shape), so no in-suite default resolves under the production data root.
+
+    Read off `os.environ` — the state every test that touches neither variable
+    actually runs in — and checked against `production_data_root()`, the
+    passwd-derived anchor the seam test below uses, so it answers the same inside
+    a gate (where `HOME` is a symlink farm) as on the box. The `.jsonl` tail is
+    asserted because the tuple at `tests/conftest.py:81` creates DIRECTORIES and
+    this store is a file: the directory-shaped version of the same mistake would
+    leave every append dying on `IsADirectoryError` — no rows, and a leg reading
+    nothing.
+    """
+    env_default = os.environ.get(LEDGER_ENV, "").strip()
+    assert env_default, (
+        "conftest must give the suite a default for this variable; unset, every "
+        "test that drives a confirmed append resolves the witness to the "
+        "production data root — which is the leak #2213 files")
+    path = Path(env_default)
+    assert path.name.endswith(".jsonl"), f"{path} is a directory-shaped default, not a file"
+    assert path.parent.name.startswith(("lloyd-test-state-", "lloyd-test-data-")), (
+        f"{path} is not under the scratch directory conftest builds")
+    assert production_data_root() not in path.parents, path
+    assert path != production_data_root() / "alerts" / "daily-note-appends.jsonl", path
+
+
+# ------------------- #2213 cl. 6: the witness bytes now have a history ----------
+#: The committed extract of the production witness ledger, byte-identical to the
+#: vault copy at `backlog/data/daily-note-appends.jsonl` (vault commit `5ff50a5e`).
+WITNESS_EXTRACT = (Path(__file__).resolve().parent
+                   / "fixtures" / "daily_note_append_witness_2213.jsonl")
+#: Where clause 6 asked for those bytes to live, for a reader who can reach it.
+VAULT_WITNESS_COPY = Path.home() / "obsidian" / "backlog" / "data" / "daily-note-appends.jsonl"
+
+
+def test_the_committed_witness_bytes_still_carry_the_quoted_one_fixture_row():
+    """cl. 6: the ledger bytes the item quotes are committed, and the quoted report is
+    re-derived from THOSE BYTES here — 1 line, 281 bytes, and the one row is the
+    fixture-derived one the leg has been reporting green.
+
+    Clause 6's reason is "The witness bytes have no history": the ledger lives at
+    `~/lloyd-data/alerts/daily-note-appends.jsonl`, in no git tree, and the single row
+    in it is the 2026-10-04 probe that made the leg read
+    `witnessed (1 rows examined, 0 lost)` off zero production appends. That copy is in
+    the vault (`backlog/data/daily-note-appends.jsonl`, landed under #2213's first
+    round), but no node can open it: an automod gate runs with `HOME` at the round's
+    symlink farm, where `~/obsidian` does not exist, and a node that opened it would
+    skip — `tests/fixtures/.gitignore`'s own header says a skipping node pins nothing.
+    So the same bytes are committed here, and every figure the item quotes is read off
+    them, exactly as clause 6 asks (`wc -l` of the committed bytes is the figure).
+
+    The line count and byte count are what clause 6 quotes; the rest of the node keeps
+    those numbers MEANING something, because `wc -l` of an empty file is 0 and of a
+    text file saying "1" is 1. The row must carry the writer's exact key set and an
+    80-character `entry_prefix` (`WITNESS_ENTRY_PREFIX_CHARS`), so the extract cannot
+    be prose standing in for a witness; and its `note_path` must be a `mktemp -d` path
+    outside the vault note dir, because a fixture row is precisely what the item's
+    premise is — the day's real alert appends left NO row, which is why this family is
+    a witness to a gap and not evidence of health.
+    """
+    assert WITNESS_EXTRACT.exists(), (
+        f"{WITNESS_EXTRACT} is missing: the ledger the item quotes has no history "
+        "in this tree, which is what clause 6 exists to fix")
+    tracked = subprocess.run(
+        ["git", "-C", str(REPO), "ls-files", "--error-unmatch",
+         str(WITNESS_EXTRACT.relative_to(REPO))],
+        capture_output=True, text=True)
+    assert tracked.returncode == 0, (
+        f"{WITNESS_EXTRACT.relative_to(REPO)} is on disk but NOT tracked — a witness "
+        f"nobody can check out is no history at all: {tracked.stderr.strip()}")
+
+    raw = WITNESS_EXTRACT.read_bytes()
+    lines = raw.decode("utf-8").splitlines()
+    assert len(lines) == 1, (
+        f"clause 6's re-derive is `wc -l` of these bytes and the item quotes 1; "
+        f"the committed extract has {len(lines)} line(s)")
+    assert len(raw) == 281, (
+        f"the committed extract is {len(raw)} bytes, not the 281 the item quotes — "
+        "either the ledger gained a row or this extract was cut down to fit")
+    assert raw.endswith(b"\n") and b"\n\n" not in raw, (
+        "JSONL with a blank line is a row the leg skips, and a byte count quoted "
+        "from such a file is not the figure `wc -l` answers")
+
+    row = json.loads(lines[0])
+    assert set(row) == {"ts", "note_path", "line_sha256", "entry_prefix"}, row
+    assert len(row["entry_prefix"]) == A.WITNESS_ENTRY_PREFIX_CHARS, row
+    assert len(row["line_sha256"]) == 64, row
+
+    # The quoted figure is not just a count, it is a COUNT OF A FIXTURE ROW — the
+    # item's premise, re-derived rather than repeated.
+    note = Path(row["note_path"])
+    assert note.parent.name.startswith("tmp"), (
+        f"the committed row's note is {note}, not a `mktemp -d` directory — if a real "
+        "production append ever lands in this extract, this node stops describing the "
+        "2026-10-04 gap and must be re-titled, not quietly re-pointed")
+    assert not str(note).startswith(str(Path.home() / "obsidian")), (
+        f"{note} is inside the vault's real note tree: this row would be a genuine "
+        "witness, and the extract's premise (zero production appends witnessed) "
+        "would be false")
+    assert row["ts"].startswith("2026-10-04T23:26"), row["ts"]
+
+    # Whenever the vault IS reachable (a human's checkout, never a gate), the two
+    # copies of these bytes must not have drifted. Guarded, and the node stands on
+    # its own without it: this is a cross-check, not the pin.
+    if VAULT_WITNESS_COPY.exists():
+        assert VAULT_WITNESS_COPY.read_bytes() == raw, (
+            f"the vault copy {VAULT_WITNESS_COPY} and the committed extract "
+            f"{WITNESS_EXTRACT.relative_to(REPO)} are two histories of one ledger "
+            "that no longer agree")
 
 
 # ------------------------------------------------- the seam: the two default paths ---

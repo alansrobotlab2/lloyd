@@ -3372,6 +3372,8 @@ def _file_daily_note_mismatch(note_path: Path, why: str, entry: str) -> None:
 #: Override for the witness ledger, honoured at every call. Same shape as
 #: `LLOYD_DAILY_NOTE_DIR`: the default is the live data root, and a fixture that
 #: proved an alarm by writing into the production ledger would be forging evidence.
+#: The two are ONE pair, enforced at the write: note dir redirected with this
+#: variable absent skips the witness loudly (#2213, `_witness_daily_note_append`).
 DAILY_NOTE_APPEND_LEDGER_ENV = "LLOYD_DAILY_NOTE_APPEND_LEDGER"
 
 #: How much of the line's text goes into the row as a human-readable hint.
@@ -3403,8 +3405,38 @@ def _witness_daily_note_append(note_path: Path, entry: str, now) -> None:
     run record or the next tick says. A failed witness is a WARNING naming the
     ledger: the gap it opens is that this line can never be checked later, which is
     the state the delayed leg reads as fewer rows examined, never as a loss.
+
+    #2213's skip, and why it lives HERE and not in `_daily_note_append_ledger`:
+    the note directory and the witness ledger are one pair. A caller that
+    redirects `LLOYD_DAILY_NOTE_DIR` without `LLOYD_DAILY_NOTE_APPEND_LEDGER` is
+    a fixture — production sets neither variable — and its witness row landing at
+    the default ledger is forged evidence: on 2026-10-04 one `mktemp -d` probe of
+    exactly this shape added the live ledger's ONLY row, and the health leg
+    reported `witnessed (1 rows examined, 0 lost)` off zero production appends.
+    The resolver keeps answering the default under an overridden note dir,
+    because `tests/test_daily_note_append_witness.py::test_the_writer_and_the_leg_default_to_the_same_ledger`
+    compares its tail against the leg's hardcoded literal to catch a data-root
+    cutover, and answering the note dir instead would break that drift check on
+    the fixture. So the decision not to WRITE lives here, and it is loud: one
+    WARNING naming both variables. A suppressed witness is not a green — the leg
+    reads a ledger with no rows as `nothing-examined`, which is designed never to
+    be a clean verdict.
     """
     import hashlib
+    if (os.environ.get("LLOYD_DAILY_NOTE_DIR")
+            and not os.environ.get(DAILY_NOTE_APPEND_LEDGER_ENV, "").strip()):
+        # Truthiness mirrors `_daily_note_dir`'s own test, so "redirected" means
+        # exactly what the note write reads as redirected.
+        logger.warning(
+            "skipping the daily-note append witness for %s: LLOYD_DAILY_NOTE_DIR "
+            "is set (the daily notes are redirected into %r) while "
+            "LLOYD_DAILY_NOTE_APPEND_LEDGER is not, so this row would land in the "
+            "default ledger %s — the production witness, which must never hold a "
+            "row a fixture manufactured (#2213). Set LLOYD_DAILY_NOTE_APPEND_LEDGER "
+            "into the same scratch dir to witness for real.",
+            note_path, os.environ.get("LLOYD_DAILY_NOTE_DIR"),
+            _daily_note_append_ledger())
+        return
     try:
         line = entry.strip("\n")
         row = {
