@@ -104,7 +104,9 @@ MEASURED_LAZY_PASSING: set[str] = set()
 #:
 #: That one is not a pinned task and it is not accepted. `bench_027_recall_user_fact_
 #: topic_read.md` reached `~/obsidian/lloyd/bench` at 2026-10-05T05:33:38Z, and the lint
-#: calls it invalid on two error kinds, `lazy_pass` and `uncovered_requirement`: its
+#: calls it invalid on `lazy_pass` alone since #2280 (it was two error kinds before, and
+#: the second one — a `table` its rationale describes and its prompt never asks for —
+#: left with that ruling): its
 #: objective layer scores 1.00 on a reply of its own check text because its `regex` is
 #: `(95\.37[^\n]{0,80}(GiB|gig)|n-gram[^\n]{0,120}(RAM|memory)|host[^\n]{0,60}RAM)` and
 #: the probe is built from the pattern's own source, which contains `95.37` and `GiB`
@@ -522,22 +524,202 @@ def test_alternation_branches_respect_nesting() -> None:
 
 def test_coverage_reports_a_structural_requirement_nothing_covers() -> None:
     """Clause 2 on a fixture: a syllable ask that no check and no criterion
-    mentions is an error, and naming the criterion retires it."""
+    mentions is an error, and naming the criterion retires it.
+
+    #2280 moved the syllable ask out of this fixture's `_body` and into its
+    prompt. Body prose is the note layer now, so a fixture that left the ask only
+    in the rationale would be pinning the severity this item reversed; the ask
+    belongs where the arm can read it, which is the layer that still decides
+    validity."""
     task = {
         "id": "fixture",
-        "prompt": "Write a haiku about something",
-        "_body": "variant should produce a haiku (5-7-5 syllable structure)",
+        "prompt": "Write a 5-7-5 syllable haiku about quantum tunnelling",
         "objective_checks": [{"type": "regex", "value": "(quantum|wave)"}],
         "rubric_criteria": ["clarity"],
     }
     findings = coverage_findings(task)
     kinds = {f["requirement"] for f in findings}
     assert {"syllable_structure", "output_format"} <= kinds
-    assert all(f["severity"] == bench_lint.ERROR for f in findings)
+    assert all(f["severity"] == bench_lint.ERROR for f in findings), findings
+    assert all(f["stated_in"] == "spec" for f in findings), findings
 
     covered = copy.deepcopy(task)
     covered["rubric_criteria"] = ["clarity", "haiku_5_7_5"]
     assert coverage_findings(covered) == []
+
+
+def test_a_structural_ask_only_the_body_states_is_a_note_on_a_valid_row() -> None:
+    """#2280 clause 1: rationale prose is not an ask, so an uncovered requirement
+    that appears only in the body is a `note`, the row stays lint-valid, and the
+    same requirement in the prompt is still an `error`.
+
+    Both of the live corpus's remaining `uncovered_requirement` errors were this
+    shape when the item was filed: `bench_028_contradiction_two_kinds` took two of
+    them from "one paragraph"/"one line" written in its rationale, and
+    `bench_027_recall_user_fact_topic_read` took its second from a "table" the body
+    describes and the prompt never asks for. Nothing was demanded of the arm in the
+    text it was shown, so the lint prints the gap and does not retire the task."""
+    body_only = {
+        "id": "fixture_body_only",
+        "prompt": "Explain why these two complaints are not one case",
+        "_body": "The variant should answer in one paragraph, then one line of follow-up.",
+        # A tool-behaviour check, so the lazy probe has no keyword to place and
+        # `lazy_pass` cannot join `error_kinds` and muddy which verdict is pinned.
+        "objective_checks": [{"type": "tool_called", "value": "vault_search"}],
+        "rubric_criteria": ["clarity"],
+    }
+    findings = coverage_findings(body_only)
+    assert findings, "the body-only ask must still be printed"
+    assert {f["requirement"] for f in findings} == {"element_count"}, findings
+    assert all(f["severity"] == bench_lint.NOTE for f in findings), findings
+    assert all(f["stated_in"] == "body" for f in findings), findings
+    row = lint_task(body_only, memory_body="")
+    assert row["valid"] is True and row["coverage_clean"] is True, row
+    assert row["error_kinds"] == [], row
+
+    asked = dict(body_only, prompt="Answer in one paragraph, then one line of follow-up.")
+    errors = coverage_findings(asked)
+    assert {f["requirement"] for f in errors} == {"element_count"}, errors
+    assert len(errors) == 2, (
+        f"an ask stated in both layers must be one finding per matched text, not one at "
+        f"each severity: {errors}")
+    assert all(f["severity"] == bench_lint.ERROR for f in errors), errors
+    assert all(f["stated_in"] == "spec" for f in errors), errors
+    asked_row = lint_task(asked, memory_body="")
+    assert asked_row["valid"] is False and asked_row["coverage_clean"] is False, asked_row
+    assert asked_row["error_kinds"] == ["uncovered_requirement"], asked_row
+
+
+def test_a_task_with_no_prompt_is_linted_on_the_body_the_judge_would_hand_over() -> None:
+    """#2280 clause 2: the one case where the body IS the spec, taken from the
+    judge rather than invented — `scripts/autoresearch/judge.py:590` reads
+    `prompt_text = task.get("prompt") or task.get("_body") or ""`, so on a
+    prompt-less task the model is shown the rationale as the ask and an uncovered
+    requirement in it is a real gap."""
+    judge_src = (ROOT / "scripts" / "autoresearch" / "judge.py").read_text(encoding="utf-8")
+    assert 'prompt_text = task.get("prompt") or task.get("_body") or ""' in judge_src, (
+        "the judge's no-prompt fallback moved, so the layer rule below is a claim about "
+        "code that no longer says it — re-read the fallback, do not carry this node")
+    no_prompt = {
+        "id": "fixture_no_prompt",
+        "_body": "Ask for three bullet points and a markdown table.",
+        "objective_checks": [{"type": "tool_called", "value": "vault_search"}],
+        "rubric_criteria": ["clarity"],
+    }
+    findings = coverage_findings(no_prompt)
+    assert {f["requirement"] for f in findings} == {"element_count", "output_format"}, findings
+    assert all(f["severity"] == bench_lint.ERROR for f in findings), findings
+    assert all(f["stated_in"] == "spec" for f in findings), findings
+
+
+def test_an_assertion_text_counts_as_coverage_and_a_task_absent_from_the_file_does_not(
+    tmp_path: Path,
+) -> None:
+    """#2280 clause 3, across the boundary that matters: the assertion set the
+    binary judge grades (`eval/autoresearch_assertions.yaml`, read by
+    `judge.load_assertions`) now also answers the coverage question, and a task the
+    file has no entry for is judged exactly as it was before the layer existed.
+
+    The table reaches the lint through `load_assertions` on a real file rather than
+    as a dict, because the thing under test is that the lint reads the same file the
+    judge reads."""
+    task = {
+        "id": "fixture_assertions",
+        "prompt": "Write a short haiku about quantum tunnelling",
+        "objective_checks": [{"type": "tool_called", "value": "vault_search"}],
+        "rubric_criteria": ["clarity"],
+    }
+    # No entry in the live file under this id: the pre-change verdict, unperturbed.
+    assert [f["requirement"] for f in coverage_findings(task)] == ["output_format"]
+
+    table_path = tmp_path / "assertions.yaml"
+    table_path.write_text(
+        "tasks:\n"
+        "  fixture_assertions:\n"
+        "  - id: shape\n"
+        "    text: The reply is a haiku, and its three lines carry 5, 7 and 5 syllables.\n",
+        encoding="utf-8")
+    table = judge.load_assertions(table_path)
+    assert list(table) == ["fixture_assertions"], table
+    assert coverage_findings(task, assertions=table) == [], (
+        "an ask named in the task's own graded assertion is covered")
+
+    absent = dict(task, id="fixture_absent_from_this_table")
+    assert [f["requirement"] for f in coverage_findings(absent, assertions=table)] == [
+        "output_format"], "a task with no entry must be judged exactly as before"
+
+
+def test_a_prompt_ask_still_errors_when_its_assertions_never_name_it() -> None:
+    """#2280 clause 4: the protection #1929 owed-1 asked for, kept visibly intact.
+    A structural ask the prompt puts, with no check, no criterion and no assertion
+    covering it, is still an `error` — adding an assertion layer to the haystack
+    cannot demote an ask out of existence, because the layer only ever *adds*
+    covering terms and none of them here name the format.
+
+    Pinned synthetically rather than on a live task precisely so that no future edit
+    to `eval/autoresearch_assertions.yaml` can quietly satisfy it."""
+    task = {
+        "id": "fixture_prompt_only",
+        "prompt": "List the findings as a markdown table",
+        "objective_checks": [{"type": "tool_called", "value": "vault_search"}],
+        "rubric_criteria": ["clarity"],
+    }
+    table = {
+        "fixture_prompt_only": [
+            {"id": "content", "text": "The reply names the three missing skills by name."},
+        ],
+    }
+    findings = coverage_findings(task, assertions=table)
+    assert [f["requirement"] for f in findings] == ["output_format"], findings
+    assert findings[0]["severity"] == bench_lint.ERROR, findings
+    assert findings[0]["stated_in"] == "spec", findings
+    row = lint_task(task, memory_body="")
+    assert row["valid"] is False and row["coverage_clean"] is False, row
+    assert row["error_kinds"] == ["uncovered_requirement"], row
+
+
+def test_the_live_rows_after_the_body_and_assertion_ruling(
+    live_report: dict, live_tasks: list[dict]
+) -> None:
+    """#2280 clause 5, over the live bench directory as it stands on this commit.
+
+    Re-measured 2026-10-06 in this round, not re-labelled from the item: bench_028
+    is valid with no error at all, bench_027 stays invalid on `lazy_pass` ALONE, and
+    the three tasks the item names report nothing.
+
+    Which layer clears each of the two live rows matters, and the last block pins
+    it: bench_028's two rationale asks and bench_027's "table" are covered by their
+    own assertion texts, so the demotion is what they needed only where no entry
+    exists — with an empty table bench_028's two asks come back as two `note`s. The
+    covering substrings are luck, not design: `line` inside "declines" in
+    `refuses_the_uniform_treatment_it_was_asked_for`, and `table` inside the n-gram
+    table of `says_what_the_number_measures`. That is the substring matcher
+    `_covering_terms` has always used, widened to prose the task's rationale never
+    had to survive, and it is recorded on #2280 rather than fixed here."""
+    rows = {r["id"]: r for r in live_report["tasks"]}
+
+    b28 = rows["bench_028_contradiction_two_kinds"]
+    assert b28["valid"] is True and b28["coverage_clean"] is True, b28
+    assert b28["error_kinds"] == [], b28
+    assert b28["findings"] == [], b28
+
+    b27 = rows["bench_027_recall_user_fact_topic_read"]
+    assert b27["valid"] is False, b27
+    assert b27["error_kinds"] == ["lazy_pass"], b27
+
+    for task_id in ("bench_003_vault_recall", "bench_011_haiku_quantum",
+                    "bench_020_skill_inventory_coverage_gap"):
+        assert rows[task_id]["findings"] == [], (task_id, rows[task_id]["findings"])
+
+    assert live_report["uncovered"] == [], live_report["uncovered"]
+
+    b28_task = _task(live_tasks, "bench_028_contradiction_two_kinds")
+    without_assertions = coverage_findings(b28_task, assertions={})
+    assert len(without_assertions) == 2, without_assertions
+    assert {f["stated_as"] for f in without_assertions} == {"one paragraph", "one line"}, (
+        without_assertions)
+    assert all(f["severity"] == bench_lint.NOTE for f in without_assertions), (
+        without_assertions)
 
 
 def test_coverage_ignores_tags_because_tags_are_not_verifiers() -> None:
@@ -1732,20 +1914,30 @@ def test_over_the_live_corpus_the_rule_names_exactly_the_two_address_fixtures(
             f"{tid} is still lint-valid while demanding a literal no loaded-memory file "
             "carries")
     # bench_027 IS invalid on the live corpus and was before this rule existed — its
-    # objective layer passes lazily and states a table nothing verifies. What clause 3
-    # requires is that this rule does not name it: its `95.37` is in the memory body, so
-    # the answer IS reachable, and a rule that flagged it would be reading the wrong
-    # property.
+    # objective layer passes lazily. What clause 3 requires is that this rule does not
+    # name it: its `95.37` is in the memory body, so the answer IS reachable, and a rule
+    # that flagged it would be reading the wrong property. `uncovered_requirement` left
+    # this row with #2280 because `table` appears only in its body — its prompt and its
+    # objective name no output format — so the ask is a NOTE at most, which is why the
+    # second line is an equality
+    # and not a superset: a coverage error appearing here is #2280's rule failing, not a
+    # second finding. (`test_the_live_rows_after_the_body_and_assertion_ruling` names
+    # how its assertion text then suppresses even that note, and why that part is a
+    # substring collision rather than a verifier.)
     b27 = next(r for r in rep["tasks"] if r["id"] == "bench_027_recall_user_fact_topic_read")
     assert ABSENT_FROM_MEMORY not in {
         f["kind"] for f in b27["findings"]}, b27["findings"]
-    assert {"lazy_pass", "uncovered_requirement"} <= {
-        f["kind"] for f in b27["findings"]}, b27["findings"]
+    assert {f["kind"] for f in b27["findings"]} == {"lazy_pass"}, b27["findings"]
 
+    # bench_028_contradiction_two_kinds left this list in #2280: both of its
+    # `uncovered_requirement` errors were rationale prose ("one paragraph", "one
+    # line") — shapes its rationale describes and its prompt never asks for, so they are
+    # notes now. `test_the_live_rows_after_the_body_and_assertion_ruling` owns that
+    # verdict, including which layer silences the notes.
     assert sorted(rep["invalid"]) == [
         "bench_001_reply_greeting", "bench_002_recall_user_fact",
         "bench_024_recall_user_fact_incidental", "bench_027_recall_user_fact_topic_read",
-        "bench_028_contradiction_two_kinds"], rep["invalid"]
+    ], rep["invalid"]
 
 
 def test_the_address_is_not_in_either_loaded_memory_file() -> None:

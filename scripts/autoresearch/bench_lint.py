@@ -24,9 +24,16 @@ Four questions, one report per task
    trace as ``NOT_MEASURABLE``). No model,
    no LLM, no judgement: same function the round scores with.
 2. ``uncovered_requirement`` — two-way prompt↔verifier alignment. A structural
-   requirement stated in the prompt or body (a syllable count, a section/sentence
-   count, an output format) that no objective check and no named ``rubric_criteria``
-   entry covers is an ask the verifier will never grade.
+   requirement the task actually puts to the arm — one in its ``prompt`` or its
+   ``objective``, or in its body when it has no prompt at all, which is the ask
+   ``judge.py:590`` hands over — that no objective check, no named
+   ``rubric_criteria`` entry and none of its ``eval/autoresearch_assertions.yaml``
+   assertions covers is an ask the verifier will never grade, and an error. A
+   requirement that appears only in the body's rationale prose is the same
+   finding at ``NOTE``: nothing was demanded of the arm in the text it was shown
+   (#2280, which came out of both of the live corpus's two remaining errors —
+   ``bench_028``'s "one paragraph"/"one line" and ``bench_027``'s "table" are
+   rationales, not asks).
 3. ``vacuous_objective`` / ``objective_only_max_tool_calls`` — objective layers
    that cannot fail. ``_score_objective`` returns a free 1.0 for an empty check
    list (``judge.py:218-219``), and a layer whose only check is ``max_tool_calls``
@@ -81,7 +88,8 @@ if __package__ in (None, ""):  # direct execution: python scripts/autoresearch/b
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from scripts.autoresearch.common import load_bench_tasks, load_config
-from scripts.autoresearch.judge import TOOL_BEHAVIOUR_CHECKS, _score_objective
+from scripts.autoresearch.judge import (
+    TOOL_BEHAVIOUR_CHECKS, _score_objective, assertions_for, load_assertions)
 
 #: The harness shape the probe is evaluated in. ``bench_runner.py:83`` hardcodes
 #: ``tool_calls: []`` and never sets ``tool_trace_authoritative``, so this is a
@@ -546,7 +554,9 @@ def _memory_body() -> str | None:
 
 _NUM = r"(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|twelve)"
 
-#: (kind, requirement pattern, words that would cover it in a check or criterion)
+#: (kind, requirement pattern, words that would cover it in a check, a criterion
+#: or an assertion text — the list itself is what #2280 left alone; what counts as
+#: covered widened to the assertion layer, not the vocabulary)
 _REQUIREMENTS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     (
         "syllable_structure",
@@ -588,10 +598,18 @@ def _requirement_hits(*sources: str | None) -> list[tuple[str, str]]:
     return hits
 
 
-def _covering_terms(task: dict[str, Any]) -> str:
+def _covering_terms(task: dict[str, Any],
+                    assertions: dict[str, Any] | None = None) -> str:
     """Everything the task's own verification layer names, lowercased.
 
-    Only objective check values and named ``rubric_criteria`` count as coverage.
+    Objective check values, named ``rubric_criteria``, and the task's assertion
+    texts count as coverage. The texts come from :func:`judge.assertions_for`,
+    reused rather than re-derived, because what may cover an ask is what the
+    judge actually grades: a task labelled ``graded: true`` has no assertions to
+    count, and a task carrying inline ``rubric_assertions`` is graded from those
+    and not from the file — so coverage read straight off
+    ``eval/autoresearch_assertions.yaml`` would credit checks that no arm runs.
+
     ``tags`` are excluded on purpose: ``bench_011`` is tagged ``format`` while
     nothing grades format, which is the exact gap this function exists to find.
     """
@@ -600,16 +618,51 @@ def _covering_terms(task: dict[str, Any]) -> str:
         parts.append(str(check.get("type", "")))
         parts.append(str(check.get("value", "")))
     parts.extend(str(c) for c in (task.get("rubric_criteria") or []))
+    table = load_assertions() if assertions is None else assertions
+    for assertion in assertions_for(task, table) or []:
+        parts.append(str(assertion.get("text", "")))
     return " ".join(parts).lower()
 
 
-def coverage_findings(task: dict[str, Any]) -> list[dict[str, Any]]:
-    stated = _requirement_hits(
-        task.get("prompt"), task.get("objective"), task.get("_body"), task.get("body")
-    )
-    covered_by = _covering_terms(task)
+def _spec_sources(task: dict[str, Any]) -> tuple[list[str | None], list[str | None]]:
+    """``(the sources whose uncovered ask is an ERROR, the ones that make only a note)``.
+
+    The prompt and the objective are the ask: they are what the arm is shown, so
+    a structural requirement stated there and graded nowhere is a question the
+    verifier will not answer. The body is rationale — the front-matter prose that
+    says why the task exists and what a good reply looks like — and an ask that
+    appears only there is information worth printing, not a defect in the task:
+    nothing was ever demanded of the arm in the text it was given.
+    ``bench_028_contradiction_two_kinds`` carried both its ERRORs that way, and
+    ``bench_027_recall_user_fact_topic_read`` its second one.
+
+    One exception, taken from the judge rather than invented here: when a task
+    has no ``prompt`` at all, the body *is* the spec —
+    ``judge.py:590`` ``prompt_text = task.get("prompt") or task.get("_body") or ""``
+    hands that prose to the model as the ask. Then a body-only requirement is a
+    real uncovered ask and stays an ERROR, and the note layer is empty.
+    """
+    body = [task.get("_body"), task.get("body")]
+    if not task.get("prompt"):
+        return [task.get("objective"), *body], []
+    return [task.get("prompt"), task.get("objective")], body
+
+
+def coverage_findings(task: dict[str, Any],
+                      assertions: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    spec_sources, body_sources = _spec_sources(task)
+    spec_hits = _requirement_hits(*spec_sources)
+    seen = set(spec_hits)
+    # A hit stated in both layers is one finding about one ask, at the louder
+    # severity: demoting it because the rationale also says it would hide a real
+    # gap behind a sentence that merely repeats the demand.
+    stated = [(kind, text, "spec") for kind, text in spec_hits] + [
+        (kind, text, "body") for kind, text in _requirement_hits(*body_sources)
+        if (kind, text) not in seen
+    ]
+    covered_by = _covering_terms(task, assertions)
     findings = []
-    for kind, text in stated:
+    for kind, text, layer in stated:
         keywords = next(kws for k, _p, kws in _REQUIREMENTS if k == kind)
         # The matched text itself is the strongest covering term: a check that
         # carries `5-7-5` or the word `haiku` covers it whether or not the
@@ -619,12 +672,16 @@ def coverage_findings(task: dict[str, Any]) -> list[dict[str, Any]]:
         if hit is None:
             findings.append({
                 "kind": "uncovered_requirement",
-                "severity": ERROR,
+                "severity": ERROR if layer == "spec" else NOTE,
                 "requirement": kind,
                 "stated_as": text,
+                "stated_in": layer,
                 "message": (
-                    f"states a {kind.replace('_', ' ')} ({text!r}) that no objective check "
-                    "and no rubric_criteria entry covers"
+                    f"states a {kind.replace('_', ' ')} ({text!r}) that no objective check, "
+                    "rubric_criteria entry or assertion covers"
+                    if layer == "spec" else
+                    f"names a {kind.replace('_', ' ')} ({text!r}) in its body prose only, "
+                    "which no objective check, rubric_criteria entry or assertion covers"
                 ),
             })
     return findings
@@ -716,12 +773,16 @@ def mode_notes(task: dict[str, Any]) -> list[dict[str, Any]]:
 # per-task and whole-dir reports
 # ---------------------------------------------------------------------------
 
-def lint_task(task: dict[str, Any], memory_body: str | None = None) -> dict[str, Any]:
+def lint_task(task: dict[str, Any], memory_body: str | None = None,
+              assertions: dict[str, Any] | None = None) -> dict[str, Any]:
     """One task's report. `memory_body` is the memory the arms read; ``None`` reads the
     live one through :func:`_memory_body`, which is what a test overrides so it never
-    has to depend on what the vault happens to carry tonight."""
+    has to depend on what the vault happens to carry tonight. `assertions` exists for
+    the same reason: :func:`lint_bench_dir` loads the table once, because re-parsing a
+    31 KB file per task costs ~30 ms x 28 tasks of pure re-reading, and a round's
+    window is measured off the wall clock that cost comes straight out of."""
     lazy = lazy_result(task)
-    findings = vacuity_findings(task) + coverage_findings(task)
+    findings = vacuity_findings(task) + coverage_findings(task, assertions)
     body = memory_body if memory_body is not None else _memory_body()
     if body:
         findings.extend({"kind": "objective_literal_absent_from_memory",
@@ -753,7 +814,13 @@ def lint_task(task: dict[str, Any], memory_body: str | None = None) -> dict[str,
         # report: `safety_passed` is a veto on promotion, and a veto that
         # boilerplate satisfies is not a veto.
         "safety_gate_lazy_pass": bool(task.get("safety_critical")) and lazy["lazy_pass"],
-        "coverage_clean": not any(f["kind"] == "uncovered_requirement" for f in findings),
+        # Keyed on severity, not on kind, since #2280: a rationale-only ask is
+        # the same kind at NOTE, and a row listed as uncovered while it sits in
+        # the valid pool would make `report["uncovered"]` and `report["valid"]`
+        # two names for one verdict that disagree.
+        "coverage_clean": not any(
+            f["kind"] == "uncovered_requirement" and f["severity"] == ERROR
+            for f in findings),
         "findings": findings,
         "notes": mode_notes(task),
         "valid": not errors,
@@ -769,7 +836,8 @@ def lint_bench_dir(bench_dir: Path | str, memory_body: str | None = None) -> dic
     # memory, disables the check for the whole corpus rather than turning every
     # fact-requiring task into an error.
     body = memory_body if memory_body is not None else (_memory_body() or "")
-    reports = [lint_task(t, memory_body=body) for t in tasks]
+    assertion_table = load_assertions()
+    reports = [lint_task(t, memory_body=body, assertions=assertion_table) for t in tasks]
     lazy_passing = sorted(r["id"] for r in reports if r["lazy_pass"])
     invalid = sorted(r["id"] for r in reports if not r["valid"])
     return {
