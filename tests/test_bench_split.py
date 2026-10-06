@@ -307,8 +307,8 @@ MIN_LIVE_BENCH_TASKS = 11
 
 #: Every file in `~/obsidian/lloyd/bench/`, keyed by task id (the file stem, which
 #: each file also declares as `id:`), with the `category:` its own front matter
-#: carries. Measured against the files on disk on 2026-10-04: 26 entries — 7 replay,
-#: 16 synthetic, 2 adversarial, 1 safety. That count is a snapshot of a hand-kept
+#: carries. Measured against the files on disk on 2026-10-06: 28 entries — 8 replay,
+#: 17 synthetic, 2 adversarial, 1 safety. That count is a snapshot of a hand-kept
 #: table and no assertion here reads it; the count that IS asserted is the corpus
 #: floor in `MIN_LIVE_BENCH_TASKS` above, and every entry below is re-checked
 #: against disk by the node named next, so a stale number in this comment is
@@ -470,6 +470,38 @@ LIVE_BENCH_CATEGORIES = {
     # never reaches the gate's `tests` rung — the gap stays green on a red tree. Carried
     # on #2218's findings, not fixed here.
     "bench_027_recall_user_fact_topic_read": "replay",
+    # Keyed by stem with the `category:` its own front matter declares
+    # (`lloyd/bench/bench_028_contradiction_two_kinds.md:4` = `synthetic`, the same
+    # reading its own `tags:` list carries), the only authority this table may copy.
+    # Its absence is what reds main at `b4c9b2c9` (#2274) at BOTH nodes: the census
+    # names the unmapped id, and this file is the newest by mtime, so it is also the
+    # entry `test_the_newest_live_bench_file_is_keyed_with_its_declared_category`
+    # reads. The file reached the directory at 2026-10-06T04:48:01Z (its own mtime),
+    # 437 seconds after `b4c9b2c9` was committed at 2026-10-06T04:40:44Z, so that base
+    # is red with no code change involved; the round that found it,
+    # SM_20261006_052047, carries both nodes under `pre_existing_failures` with its own
+    # diff absent. What is NEW here, and the reason this line is not simply the fifth
+    # copy of the one above it: this is the first of the seven where the task had
+    # already reached the vault's git history before main moved again —
+    # `git -C ~/obsidian log -1 -- lloyd/bench/bench_028_contradiction_two_kinds.md`
+    # is `dc72ec91`, committed 2026-10-06T05:02:44Z, and the next main commit
+    # `c9be6baf` is 3,888 seconds later, so the census was stale for one full landing
+    # rather than being caught between a file write and the next commit. Tracked in the
+    # vault as measured for this line, like `bench_027` and unlike `bench_021` through
+    # `bench_026`: 28 `.md` on disk against
+    # `git -C ~/obsidian ls-files lloyd/bench | wc -l` = 28, and
+    # `git -C ~/obsidian status --porcelain -- lloyd/bench` is empty — so the
+    # `git clean -fd` that silently un-reds this node is not live for this id, and
+    # nothing here is waiting on a bench author. What this entry does NOT close is the
+    # judge's half, unchanged in kind from #2218's note: the newest set in
+    # `eval/autoresearch_assertions.yaml` is `bench_027` (that file's line 423, 27 keys
+    # against the 28 files on disk), so `bench_028` falls back to the scalar judge, and
+    # the node that asks for one,
+    # `tests/test_autoresearch_judge.py::test_every_live_bench_task_has_an_assertion_set`,
+    # carries `@pytest.mark.live_vault` (`tests/test_autoresearch_judge.py:1256`) and so
+    # never reaches the gate's `tests` rung. Carried on #2274's findings, not fixed
+    # here.
+    "bench_028_contradiction_two_kinds": "synthetic",
 }
 
 
