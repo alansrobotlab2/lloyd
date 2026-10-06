@@ -999,16 +999,14 @@ def test_the_skill_states_the_pinned_arm_ruling_with_both_of_its_reasons(skill_t
 def test_the_skill_never_re_opens_the_two_closed_608_rulings(skill_text):
     """Clause 2: each deferring sentence is pinned absent by its exact text.
 
-    Exact text, not a whole-file grep for ``person's call``: one instance is still
-    standing at the seed re-base bullet, and it is #1547's clause about whether the
-    pre-re-base entity nights stay in the published window annotated. That ruling is
-    also already made (``scripts/eval_trend_stats.py`` records "#1663's owed-check
-    ruled that pre-re-base nights stay in the window annotated, not dropped"), but
-    rewriting it is #1547's owner's call, not this round's, and a file-wide absence
-    here would fail for a reason #2095 does not own. What this pins is that the two
-    sentences #608 closed cannot come back, and that the paragraphs that replaced
-    them still say what was decided — a removal with nothing in its place would pass
-    a pure absence check while leaving the next reader no answer at all.
+    Exact text, one sentence at a time, because those are the sentences #608 closed. A
+    whole-page absence of ``person's call`` used to be unwritable from here — the docstring
+    this one replaces said the remaining instance was "#1547's owner's call, not this
+    round's", and #1547 is ``status: done``, so the ask it deferred to had no owner left.
+    #2315 retired it and pinned the whole page instead; see the node below. What this one
+    keeps pinning is that the two sentences #608 closed cannot come back, and that the
+    paragraphs that replaced them still say what was decided — a removal with nothing in
+    its place would pass a pure absence check while leaving the next reader no answer.
     """
     for deferring in ("whether the 06:00 task may do that is a person's call",
                       "do not grow it either without a person deciding"):
@@ -1021,6 +1019,154 @@ def test_the_skill_never_re_opens_the_two_closed_608_rulings(skill_text):
     assert "approved by Alan on 2026-09-20" in skill_text, (
         "the growth paragraph no longer says who decided and when, so the next "
         "reader has no reason to treat it as closed")
+
+
+#: The literal #2315 retires from the skill page, in the exact spelling it carried at
+#: vault ``ee2e47c2``. Typographic apostrophes are not in this file (`grep -c` for the
+#: curly form returns 0), so one spelling is the whole search space.
+PERSONS_CALL = "person's call"
+
+#: The whole ruling sentence #2315 put at the end of the seed re-base bullet, joined here
+#: into one string because it sits on ONE physical line in the page — which is the point.
+#: A plain ``in`` cannot match a sentence an editor re-wraps, and the wrapped form is what
+#: SM_20261003_040444 refused to accept as a pin for the 06:00-arm sentence; vault
+#: ``e385df67`` is the commit that put #2095's three ruled sentences on single lines for
+#: exactly that reason. Re-wrapping this line fails the node below, and that is the trade
+#: this file already makes for a ruling a nightly run is told is closed.
+PRE_RE_BASE_WINDOW_RULING = (
+    "Ruled 2026-09-29 by #1663's owed-check, and not a question a later reader re-opens: "
+    "those pre-re-base entity-side nights stay in the published window annotated, none "
+    "deleted and none excluded, because excluding them changes the bands and floors "
+    "already published to the nightly report.")
+
+#: The first physical line of the rate-side replacement, quoted as it sits in the page.
+RATE_SIDE_REFERENCE = ("The rate side carries the same ruling, already decided: "
+                       "#1663's owed-check ruled on")
+
+#: Headings of the two bullets that used to ask, for slicing them out of the page.
+SEED_RE_BASE_HEADING = ("- **The seed definition moved under the entity leg between the "
+                        "2026-09-25 and")
+DENOMINATOR_HEADING = "- **The denominator definition moved on 2026-09-28,"
+
+
+def _skill_page(ref: str) -> str:
+    """The skill page as committed at ``ref``, read the same way ``skill_text`` reads
+    HEAD. Used only for the historical blobs the discriminator below needs; a missing
+    object fails rather than skipping, because a silently-absent control is how an
+    always-passing assertion gets written."""
+    proc = subprocess.run(["git", "-C", str(VAULT), "show", f"{ref}:{SKILL_RELPATH}"],
+                          capture_output=True, text=True, timeout=60)
+    if proc.returncode != 0:
+        pytest.fail(f"`git -C {VAULT} show {ref}:{SKILL_RELPATH}` failed "
+                    f"({proc.stderr.strip()[:200]}). The discriminator is half of this "
+                    "clause; it cannot pass because the control could not be read.")
+    return proc.stdout
+
+
+def _bullet(page: str, heading: str) -> str:
+    """One top-level bullet, from its heading to the next."""
+    start = page.index(heading)
+    rest = page[start + len(heading):]
+    end = rest.find("\n- **")
+    return heading + (rest if end < 0 else rest[:end])
+
+
+def test_the_skill_states_the_pre_re_base_window_ruling_and_asks_no_one(skill_text):
+    """Clauses 1-4 (#2315): the page states the ruling and no longer asks who decides it.
+
+    What was wrong: the skill asked the question twice — the literal ``person's call`` at
+    the seed re-base bullet ("…carried on #1547") and, in other words and without the
+    literal, at the denominator bullet — while #1663's owed-check had already ruled on
+    2026-09-29 (``outcome: ruling``, follow-up #1822) that the pre-re-base nights stay in
+    the published window annotated, none deleted, none excluded. The ruling lived only in
+    ``scripts/eval_trend_stats.py``; the page the 06:00 run reads asked, and the deferral
+    named #1547, which is ``status: done`` — a closed item is not an owner, so the ask had
+    nobody left to answer it.
+
+    Absence alone is not the clause: the ruled sentence must be present, with its date, its
+    attribution and the reason deletion is wrong (excluding those nights moves the bands
+    and floors already published to the nightly report — ``backlog/1547`` line 172), so a
+    commit that deleted the ask and stated nothing cannot pass this node. The reason is
+    why the window stayed where it is: the alternative would silently re-price every
+    published figure beside it.
+
+    The loop at the end is the discriminator SM_20261003_040444 asked for: it runs the two
+    predicates this node asserts on HEAD against the two pages that predate the edit and
+    requires each to come out the other way. ``2da810e5`` carries the literal twice (the
+    seed bullet and the 06:00-arm ask #2095 removed); HEAD before this change
+    (``ee2e47c2``) carries it once. So a node that only asked for absence, or a fixture
+    that silently read the wrong tree, fails here rather than reading green.
+    """
+    assert PERSONS_CALL not in skill_text, (
+        "the skill is deferring a decision to a person again; #1663's owed-check ruled "
+        "this on 2026-09-29 and the page must state the ruling, not ask for one")
+    assert PRE_RE_BASE_WINDOW_RULING in skill_text, (
+        "the seed re-base bullet no longer states the ruling on one physical line — "
+        "either the sentence was re-wrapped, which a plain `in` cannot match, or the "
+        "date, the attribution or the reason for it went missing")
+    assert RATE_SIDE_REFERENCE in skill_text, (
+        "the denominator bullet no longer points at the ruling as decided")
+
+    for heading in (SEED_RE_BASE_HEADING, DENOMINATOR_HEADING):
+        bullet = _bullet(skill_text, heading)
+        assert "whether" not in bullet.lower(), (
+            f"the bullet starting {heading!r} is posing the question again — the framing "
+            "this item retires is 'whether … or …':\n"
+            + "\n".join(ln for ln in bullet.splitlines() if "whether" in ln.lower()))
+
+    for ref, hits in (("2da810e5", 2), ("ee2e47c2", 1)):
+        page = _skill_page(ref)
+        assert page.count(PERSONS_CALL) == hits, (
+            f"the control page at {ref} was expected to carry the ask {hits} times and "
+            f"carries it {page.count(PERSONS_CALL)} times, so this node's absence "
+            "assertion has stopped discriminating")
+        assert PRE_RE_BASE_WINDOW_RULING not in page, (
+            f"{ref} already contains the ruling sentence, so presence proves nothing "
+            "about this change")
+
+
+def test_the_definition_break_still_annotates_before_the_numbers_with_its_ruling_text(
+        tmp_path, capsys):
+    """Clause 5 (#2315): the prose moved, the behaviour did not.
+
+    #2315 is a vault-only edit; this node is the evidence that the script it describes is
+    untouched, in the three ways the acceptance check names. (a) ``definition_break`` is
+    not read by ``auditable`` — the pair below carries an annotation and still comes back
+    auditable, which is the property an assertion on the dataclass cannot show better than
+    a live pair that has one. (b) The DEFINITION BREAK line prints BEFORE the statistics,
+    not instead of them: an annotation printed after the McNemar line would be read as a
+    comment on the number above it, and its whole purpose is to arrive first. (c) The two
+    places the script carries the 2026-09-29 ruling are byte-for-byte what #1663 wrote —
+    the field comment and the reporting contract each hold their own single-line
+    fragment, quoted below — because the skill now defers to this script as the code-side
+    record, and a drift between the two is the defect class #2315 exists to close.
+
+    The existing #1663/#1822 nodes (`test_a_pair_differing_only_in_which_queries_carry_gold_is_annotated`
+    and its neighbours) stay green and are the behaviour's primary owner; this node adds
+    the print order and the byte-identity, which nothing here pinned before.
+    """
+    d = _write_gold_pair(tmp_path, _all_gold(), _all_gold(),
+                         set(IDS[:5]), set(IDS[:6]))
+    assert main(["--baselines", str(d), "--reps", "200", "--no-claims"]) == 0
+    out = capsys.readouterr().out
+    assert "DEFINITION BREAK:" in out, out[:600]
+    assert "exact McNemar p=" in out, f"the statistics did not print:\n{out[:600]}"
+    assert out.index("DEFINITION BREAK:") < out.index("exact McNemar p="), (
+        "the annotation must precede the numbers it qualifies:\n" + out[:900])
+    trans = audit_transition(*(load_window(d)[0:2]))
+    assert trans.definition_break, "the fixture pair must carry an annotation"
+    assert trans.auditable, (
+        "`auditable` must not read `definition_break`: an annotation is never a refusal")
+
+    source = (ROOT / "scripts" / "eval_trend_stats.py").read_text()
+    for verbatim in (
+            "#: statistics print as they always did — #1663's owed-check ruled on "
+            "2026-09-29 that",
+            '"the pre-re-base nights stay in the published window annotated. The '
+            '80%-power "'):
+        assert verbatim in source, (
+            "the script's own copy of the 2026-09-29 ruling changed, and the skill "
+            f"defers to it as the code-side record: {verbatim!r}")
 
 
 def test_the_skill_attributes_power_to_the_paired_n_and_dates_its_figures(skill_text):
