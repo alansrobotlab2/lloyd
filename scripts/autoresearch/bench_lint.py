@@ -12,8 +12,8 @@ the round that wrote this file: 9 of the 13 tasks in ``cfg.paths.bench_dir``
 score a full 1.00 on their objective layer against a string assembled from the
 task's own check values, with no model call.
 
-Three questions, one report per task
-------------------------------------
+Four questions, one report per task
+-----------------------------------
 1. ``lazy_pass`` — does a mechanically-derived lazy response pass this task's
    objective layer? The probe is *derived from the task itself*: every
    ``contains`` value plus every top-level ``regex`` alternation branch, joined
@@ -32,6 +32,22 @@ Three questions, one report per task
    list (``judge.py:218-219``), and a layer whose only check is ``max_tool_calls``
    measures nothing on the arm that runs it and passes on any trace that calls
    nothing on the arm that would.
+4. ``objective_literal_absent_from_memory`` (#2276) — the answer is nowhere the arm
+   can read it. The mirror image of question 1: ``lazy_pass`` asks whether a task can
+   be passed by a reply that did no work, and this asks whether a ``user-facts`` task
+   can be passed *at all*. Such a task's answer comes only from loaded memory, so if
+   the literal its objective layer requires is not in the memory body the arms read,
+   the objective layer measures whether the model invented a string its prompt never
+   contained. ``bench_002_recall_user_fact`` has scored 0.0 on every one of its 56
+   recorded draws for exactly that reason: its ``gestalt73@gmail.com`` was consolidated
+   out of ``MEMORY.md`` in vault ``c18934d9`` on 2026-08-26 and nothing noticed, because
+   a fixture that pins the *content* of a file the nightly reflection rewrites is a
+   fixture with no owner. The check is substring presence — what the checks themselves
+   use — over the body ``app.prompt_builder._load_memories`` returns, which is what
+   ``build_system_prompt`` falls back to and no bench path overrides
+   (``bench_runner.py:206``). It is scoped to the tag rather than run over all 28 tasks
+   because the answerability of a non-``user-facts`` task is not a claim this predicate
+   can make.
 
 The lint flags; it does not fix, and it does not retire. Tightening a check or
 dropping a task changes what promotes on the live self-mod loop, so that call is
@@ -224,6 +240,307 @@ def lazy_result(task: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# 1b. is the answer anywhere the arm can read it? (#2276)
+# ---------------------------------------------------------------------------
+
+#: The tag that scopes the memory check. Three live tasks carry it —
+#: ``bench_002_recall_user_fact``, ``bench_024_recall_user_fact_incidental`` and
+#: ``bench_027_recall_user_fact_topic_read`` — and the check's false-positive risk is
+#: bounded by that list, which is why it is keyed on a tag rather than run over all 28.
+USER_FACTS_TAG = "user-facts"
+
+#: Below this many characters the body is a stand-in for a memory, not a memory. An
+#: empty body makes every fact-requiring task look unanswerable, so an absent file would
+#: print an error against a corpus that never had a chance to answer — a denominator of
+#: zero wearing the costume of a verdict. Callers that want the check anyway pass the
+#: body explicitly; that is the test's privilege, and the reason the argument exists.
+MEMORY_BODY_MIN_CHARS = 100
+
+#: Cap on the cross-product of a literal template's alternation groups. Above it the
+#: regex is a generator, not a list of answers, and the check abstains.
+_TEMPLATE_CAP = 64
+
+
+class _NotATemplate(ValueError):
+    """The regex can match strings nobody could write down here.
+
+    Raised on a character class, a capturing group, ``.``, ``\\d``, ``.*`` or a
+    quantifier on a group. The caller then skips the check rather than requiring a
+    string the task never demanded: a false error retires an answerable task, which is
+    the damage this item exists to avoid inflicting in the other direction.
+    """
+
+
+def _noncapturing_at(source: str, open_index: int) -> bool:
+    """Is the group opened at `open_index` a ``(?:…)`` non-capturing one?
+
+    The prefix is the two characters *after* the paren, so the test is
+    ``startswith("?:", open_index + 1)``. Asking that of `open_index` itself asked
+    whether the ``(`` were a ``?`` — false for every group ever written — so both
+    walkers refused every grouped pattern as ``_NotATemplate``, every real regex
+    check abstained, and this half of the derivation was inert from the day it was
+    committed (#2276's review: "every grouped pattern abstains and no changed test
+    feeds a ``(?:a|b)`` template"). A capturing group still refuses, and still
+    should: its match is a backreference target, and the first round of the
+    alternation is not the answer the check accepts.
+    """
+    return source.startswith("?:", open_index + 1)
+
+
+def _split_top_level(source: str) -> list[str]:
+    """Split `source` on ``|`` outside any group, treating escapes atomically."""
+    branches: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    i = 0
+    while i < len(source):
+        char = source[i]
+        if char == "\\":
+            buf.append(source[i:i + 2])
+            i += 2
+            continue
+        if char == "[":
+            end = source.find("]", i + 1)
+            if end < 0:
+                raise _NotATemplate(source)
+            buf.append(source[i:end + 1])
+            i = end + 1
+            continue
+        if char == "(":
+            if not _noncapturing_at(source, i):
+                raise _NotATemplate(source)
+            depth += 1
+            buf.append(char)
+            i += 2
+            continue
+        if char == ")":
+            depth -= 1
+            if depth < 0:
+                raise _NotATemplate(source)
+            buf.append(char)
+            i += 1
+            continue
+        if char == "|" and depth == 0:
+            branches.append("".join(buf))
+            buf = []
+            i += 1
+            continue
+        buf.append(char)
+        i += 1
+    branches.append("".join(buf))
+    return branches
+
+
+def _closing_paren(source: str, start: int) -> int:
+    """Index of the ``)`` closing the group opened at `start`."""
+    depth = 0
+    i = start
+    while i < len(source):
+        char = source[i]
+        if char == "\\":
+            i += 2
+            continue
+        if char == "(":
+            if not _noncapturing_at(source, i):
+                raise _NotATemplate(source)
+            depth += 1
+            i += 2
+            continue
+        if char == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    raise _NotATemplate(source)
+
+
+def _literal_answers(source: str) -> list[str]:
+    """Every concrete string `source` matches, or :class:`_NotATemplate`.
+
+    A *literal template* is literal text, ``\\s``/``\\s+``/``\\s*``, an escape of a
+    literal character, and ``(?:a|b)`` alternation groups. That is the shape every
+    attribution regex on this bench is written in, and it is the only shape whose
+    answers can be enumerated: ``\\s*`` becomes no space, ``\\s+`` one space, and the
+    cross-product of the groups is the set of strings the check would accept.
+    """
+    branches = _split_top_level(source)
+    if len(branches) > 1:
+        answers: list[str] = []
+        for branch in branches:
+            answers.extend(_literal_answers(branch))
+        return answers
+
+    answers = [""]
+    i = 0
+    while i < len(source):
+        char = source[i]
+        if char == "(":
+            end = _closing_paren(source, i)
+            # `source[i:end]` is the whole group `(?:a|b)`; the contents start three
+            # characters in, past `(?:`. Slicing at `i + 2` started AT the colon, so every
+            # answer the group contributed carried a leading `:` — `:ac` for `(?:a|b)c` —
+            # a string no memory body contains. Latent while the group walkers refused
+            # every pattern, and a false positive against every grouped regex the moment
+            # `_noncapturing_at` started recognising them.
+            inner = _literal_answers(source[i + 3:end])
+            if end + 1 < len(source) and source[end + 1] in "*+?{":
+                raise _NotATemplate(source)      # a quantified group can repeat
+            answers = _cross(answers, inner)
+            i = end + 1
+            continue
+        if char == "\\":
+            nxt = source[i + 1:i + 2]
+            if nxt == "s" or nxt == "n":
+                quant = source[i + 2:i + 3]
+                answers = _cross(answers, ["" if quant == "*" else " "])
+                i += 3 if quant in "*+" else 2
+                continue
+            if nxt.isalpha():
+                raise _NotATemplate(source)      # \d, \w, \S, \b — a class, not a letter
+            answers = _cross(answers, [nxt])
+            i += 2
+            continue
+        if char in ".^$*+?{[":
+            raise _NotATemplate(source)
+        answers = _cross(answers, [char])
+        i += 1
+    return answers
+
+
+def _cross(left: list[str], right: list[str]) -> list[str]:
+    if len(left) * len(right) > _TEMPLATE_CAP:
+        raise _NotATemplate("alternation cross-product over the cap")
+    return [a + b for a in left for b in right]
+
+
+def required_answer_strings(check: dict[str, Any]) -> tuple[tuple[str, ...], str] | None:
+    """The concrete answer strings `check` accepts, and how they are named in a finding.
+
+    ``None`` means this check does not pin a literal answer: an empty or missing pattern,
+    or a regex that is not a literal template. Those abstain rather than guess, because
+    the only thing worse than a task that never scores is a lint that quietly retires
+    the tasks that do.
+    """
+    kind = str(check.get("type") or "")
+    value = check.get("value")
+    if kind == "contains":
+        text = str(value or "")
+        return (tuple([text]), f"`contains {text!r}`") if text.strip() else None
+    if kind != "regex":
+        return None
+    source = str(value or "")
+    if not source.strip():
+        return None
+    try:
+        answers = sorted({a for a in _literal_answers(source) if a.strip()})
+    except _NotATemplate:
+        return None
+    if not answers:
+        return None
+    return tuple(answers), f"regex `{source}`"
+
+
+def _tags_of(task: dict[str, Any]) -> set[str]:
+    """A task's tags as a set, tolerant of the two shapes a front-matter parser can
+    produce: a list, or one comma-separated string.
+
+    Local because nothing else in `scripts/autoresearch/` reads a task's tags at all, so
+    a shared helper would be a second owner for a rule with one user.
+    """
+    raw = task.get("tags") or []
+    if isinstance(raw, str):
+        raw = raw.split(",")
+    return {str(t).strip() for t in raw if str(t).strip()}
+
+
+def missing_memory_facts(task: dict[str, Any], memory_body: str) -> list[str]:
+    """Objective literals `task` requires that `memory_body` does not contain.
+
+    A ``user-facts`` task asks the model to say something it can only know from loaded
+    memory. ``objective_score`` then measures whether the model repeated a string the
+    prompt never contained: it cannot pass, and #2276's two fixtures have never scored
+    non-zero in 56 draws and 7 respectively because the email address their checks
+    require was consolidated out of ``MEMORY.md`` six weeks ago.
+
+    The predicate is substring presence, which is what the checks themselves use, so a
+    task passes when at least one answer string its objective layer would accept is
+    readable in the body. It is deliberately not a claim about semantics: a regex with a
+    distractor branch could pass on the distractor, and the answer being *retrievable*
+    is not the same as the task being well-posed. Both belong to the disposition, which
+    this lint does not decide.
+    """
+    if USER_FACTS_TAG not in _tags_of(task):
+        return []
+    out: list[str] = []
+    for check in task.get("objective_checks") or []:
+        if not isinstance(check, dict):
+            continue
+        required = required_answer_strings(check)
+        if required is None:
+            continue
+        answers, label = required
+        if any(answer in memory_body for answer in answers):
+            continue
+        sample = ", ".join(repr(a) for a in answers[:2])
+        more = f" (+{len(answers) - 2} more)" if len(answers) > 2 else ""
+        out.append(f"{USER_FACTS_TAG} task, but {label} — none of its answers "
+                   f"({sample}{more}) is in the memory body the bench arms read")
+    return out
+
+
+def _vault_memories_dir() -> Path:
+    """The vault's `lloyd/` segment, wherever the checkout asking happens to be.
+
+    `app.data_root.ACCOUNT_HOME` is the passwd entry, not `$HOME`, because the gate runs
+    candidate code with `HOME=<round>/home` (`app/paths.py:9-11`) and the vault does not
+    move with `$HOME`. This is the same location `app.prompt_builder` anchors
+    `_CANON_MEMORIES_DIR` to (`app/prompt_builder.py:214`) whenever the checkout it is
+    imported from is the one the nightly round runs in — which is the tree that scores
+    this bench, and the memory surface the predicate is about.
+    """
+    from app.data_root import ACCOUNT_HOME
+    return ACCOUNT_HOME / "obsidian" / "lloyd"
+
+
+def _memory_body() -> str | None:
+    """The memory body the bench arms read, or ``None`` when it cannot be read.
+
+    Not this script's guess at one: ``app.prompt_builder._load_memories`` is what
+    ``build_system_prompt`` falls back to when a caller passes no ``memories_text``, and
+    no bench path passes one — ``bench_runner.py:206`` builds the arm's only prompt with
+    ``build_system_prompt(overlay_dir=overlay_dir)``. So whatever that returns *is* the
+    memory the arm can answer from, and checking a task against anything else would
+    grade the fixture against a prompt the harness never sends.
+
+    Two roots, one loader. The first read is the loader's own default, which answers
+    from ``_CANON_MEMORIES_DIR`` and is exactly what the arm reads. When it answers
+    nothing, the second read names the vault segment explicitly through that same
+    function's ``overlay`` argument — one definition of the file list and the
+    concatenation, no second reader. It exists because the default root is *checkout*-
+    anchored (``_CANON_MEMORIES_DIR = LLOYD_HOME.parent / "obsidian" / "lloyd"``,
+    ``app/prompt_builder.py:214``): in a linked worktree that is a path under the
+    worktree, which exists only while the gate has laid down a round home and never
+    otherwise, so a lint that stopped at the first read would report a clean corpus
+    whenever it was run from anywhere but the live checkout — the same failure
+    #1294 describes for the advertised skill index, where the worktree-relative root
+    "named a directory that has never existed" and the prompt advertised no skills.
+    A check that can only fail loudly from one directory is not a check.
+    """
+    try:
+        from app.prompt_builder import _load_memories
+    except Exception:  # noqa: BLE001 — a bench script run with no app bootstrap
+        return None
+    for overlay in (None, _vault_memories_dir()):
+        try:
+            body = _load_memories(overlay) if overlay else _load_memories()
+        except Exception:  # noqa: BLE001
+            return None
+        if isinstance(body, str) and len(body) >= MEMORY_BODY_MIN_CHARS:
+            return body
+    return None
+
+
+# ---------------------------------------------------------------------------
 # 2. requirement coverage
 # ---------------------------------------------------------------------------
 
@@ -399,9 +716,18 @@ def mode_notes(task: dict[str, Any]) -> list[dict[str, Any]]:
 # per-task and whole-dir reports
 # ---------------------------------------------------------------------------
 
-def lint_task(task: dict[str, Any]) -> dict[str, Any]:
+def lint_task(task: dict[str, Any], memory_body: str | None = None) -> dict[str, Any]:
+    """One task's report. `memory_body` is the memory the arms read; ``None`` reads the
+    live one through :func:`_memory_body`, which is what a test overrides so it never
+    has to depend on what the vault happens to carry tonight."""
     lazy = lazy_result(task)
     findings = vacuity_findings(task) + coverage_findings(task)
+    body = memory_body if memory_body is not None else _memory_body()
+    if body:
+        findings.extend({"kind": "objective_literal_absent_from_memory",
+                         "severity": ERROR,
+                         "message": message}
+                        for message in missing_memory_facts(task, body))
     if lazy["lazy_pass"]:
         findings.append({
             "kind": "lazy_pass",
@@ -435,9 +761,15 @@ def lint_task(task: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def lint_bench_dir(bench_dir: Path | str) -> dict[str, Any]:
+def lint_bench_dir(bench_dir: Path | str, memory_body: str | None = None) -> dict[str, Any]:
     tasks = load_bench_tasks(bench_dir)
-    reports = [lint_task(t) for t in tasks]
+    # One body for the whole dir: it is the same memory for every task, and resolving it
+    # per task would re-read the loaded-memory files once per task. The `or ""` is the
+    # fail-open made explicit — a body that cannot be read, or is too short to be a
+    # memory, disables the check for the whole corpus rather than turning every
+    # fact-requiring task into an error.
+    body = memory_body if memory_body is not None else (_memory_body() or "")
+    reports = [lint_task(t, memory_body=body) for t in tasks]
     lazy_passing = sorted(r["id"] for r in reports if r["lazy_pass"])
     invalid = sorted(r["id"] for r in reports if not r["valid"])
     return {
@@ -453,9 +785,9 @@ def lint_bench_dir(bench_dir: Path | str) -> dict[str, Any]:
     }
 
 
-def valid_task_ids(bench_dir: Path | str) -> set[str]:
+def valid_task_ids(bench_dir: Path | str, memory_body: str | None = None) -> set[str]:
     """The lint-valid task ids — the pool the advisory valid-only mean is over."""
-    return set(lint_bench_dir(bench_dir)["valid"])
+    return set(lint_bench_dir(bench_dir, memory_body=memory_body)["valid"])
 
 
 # ---------------------------------------------------------------------------
@@ -508,9 +840,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="emit the report as JSON")
     parser.add_argument("--strict", action="store_true",
                         help="exit 1 when any task is lint-invalid")
+    parser.add_argument("--memory-body", type=Path, default=None,
+                        help="file to read as the memory body for the user-facts check, "
+                             "instead of what app.prompt_builder._load_memories returns. "
+                             "A stand-in: it changes what the check reads, never what the "
+                             "live corpus is, so a run against one is not a measurement "
+                             "of the loaded memory")
     args = parser.parse_args(argv)
     bench_dir = Path(args.bench_dir) if args.bench_dir else load_config().paths.bench_dir
-    report = lint_bench_dir(bench_dir)
+    body = args.memory_body.read_text(errors="replace") if args.memory_body else None
+    report = lint_bench_dir(bench_dir, memory_body=body)
     print(json.dumps(report, indent=2) if args.json else render(report))
     return 1 if (args.strict and report["invalid"]) else 0
 

@@ -34,6 +34,8 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import os
+import re
 import shutil
 import subprocess
 import sys
@@ -43,8 +45,9 @@ import pytest
 
 from scripts.autoresearch import bench_lint, bench_split, judge, promote, run_round
 from scripts.autoresearch.bench_lint import (
-    DIRECT_MODE_TRACE, coverage_findings, lazy_probe, lazy_result, lint_bench_dir,
-    lint_task, main, render, valid_task_ids, vacuity_findings,
+    DIRECT_MODE_TRACE, MEMORY_BODY_MIN_CHARS, _memory_body, _vault_memories_dir,
+    coverage_findings, lazy_probe, lazy_result, lint_bench_dir, lint_task, main, render,
+    required_answer_strings, valid_task_ids, vacuity_findings,
 )
 from scripts.autoresearch.common import AutoresearchConfig, load_bench_tasks, load_config
 from scripts.automod import state as automod_state
@@ -233,7 +236,24 @@ def _scalar_rubric(monkeypatch):
 
 @pytest.fixture(scope="module")
 def live_report() -> dict:
-    return lint_bench_dir(BENCH_DIR)
+    """One report over the live bench dir, computed with ONE memory body.
+
+    The body is resolved once here and threaded through `_pinned_bench_dir`, so the
+    copy-vs-live fidelity check inside it compares verdicts that were graded against
+    the same bytes. Left implicit, that proof silently grades the copy against whatever
+    the ambient environment resolves at the moment each side runs, and its verdict stops
+    meaning anything the day `live_report` is computed somewhere else — a cached
+    artifact, a different HOME (#2276's review, advisory on `_pinned_bench_dir`).
+    """
+    return lint_bench_dir(BENCH_DIR, memory_body=LIVE_MEMORY_BODY)
+
+
+#: The memory body every whole-directory lint in this file grades against. Resolved
+#: through the loader the arms use — `app.prompt_builder._load_memories`, with the vault
+#: fallback in `_memory_body` that makes it resolve from a worktree too. `None` only
+#: where there is genuinely no loaded memory to read, and then the rule is off for the
+#: whole file rather than off for one side of a comparison.
+LIVE_MEMORY_BODY = _memory_body()
 
 
 @pytest.fixture(scope="module")
@@ -273,7 +293,8 @@ def test_lazy_pass_set_over_the_pinned_corpus_is_the_measured_set(
     probe on each of the seven so an empty set cannot come from a check that stopped
     being measurable.
     """
-    report = lint_bench_dir(_pinned_bench_dir(tmp_path / "bench", live_report))
+    report = lint_bench_dir(_pinned_bench_dir(tmp_path / "bench", live_report),
+                         memory_body=LIVE_MEMORY_BODY)
     items = report["tasks"]
     assert sorted(t["id"] for t in items) == sorted(PINNED_CORPUS), (
         "the copy is not the pinned corpus, so an empty lazy set below could be an "
@@ -965,7 +986,14 @@ def _pinned_bench_dir(dest: Path, live_report: dict) -> Path:
     """Copy the pinned task files into `dest`, then prove the copy lints exactly as
     the live files do. The second half is what makes the copy admissible: a fixture
     that only reproduced the expected numbers would also reproduce them if the real
-    task files had moved."""
+    task files had moved.
+
+    The comparison is computed over `LIVE_MEMORY_BODY`, the same body `live_report` was
+    built with, because two of the seven verdict fields (`valid`, `error_kinds`) are now
+    a function of the memory body as well as of the task file. Reading the ambient body
+    instead would leave the proof true only while both sides happened to resolve the same
+    memory, which is exactly the assumption #2276's review refused to let stand.
+    """
     dest.mkdir(parents=True, exist_ok=True)
     for task_id in PINNED_CORPUS:
         src = Path(BENCH_DIR) / f"{task_id}.md"
@@ -974,7 +1002,8 @@ def _pinned_bench_dir(dest: Path, live_report: dict) -> Path:
             "do not delete this test"
         )
         shutil.copy2(src, dest / src.name)
-    copied = {r["id"]: r for r in lint_bench_dir(dest)["tasks"]}
+    copied = {r["id"]: r for r in lint_bench_dir(
+        dest, memory_body=LIVE_MEMORY_BODY)["tasks"]}
     live_rows = {r["id"]: r for r in live_report["tasks"]}
     assert set(copied) == set(PINNED_CORPUS), (
         f"the copied corpus lints to {len(copied)} rows, expected {len(PINNED_CORPUS)}")
@@ -986,7 +1015,7 @@ def _pinned_bench_dir(dest: Path, live_report: dict) -> Path:
 
 
 LIVE_VALID_TASKS = [
-    "bench_002_recall_user_fact", "bench_003_vault_recall",
+    "bench_003_vault_recall",
     "bench_004_replay_schedule_task",
     "bench_005_replay_memory_update", "bench_006_contradiction_check",
     "bench_007_skill_invocation", "bench_008_adversarial_gap",
@@ -1012,7 +1041,7 @@ LIVE_VALID_TASKS = [
 #: sha256 of (round_id, task_id), so this is reproducible, not a snapshot.
 SPLIT_RID = "R_20260921_000000"
 LIVE_TARGETED_VALID = [
-    "bench_002_recall_user_fact", "bench_003_vault_recall",
+    "bench_003_vault_recall",
     "bench_005_replay_memory_update",
     "bench_006_contradiction_check", "bench_007_skill_invocation",
     "bench_011_haiku_quantum", "bench_012_replay_schedule_verify_chain",
@@ -1078,9 +1107,16 @@ def test_the_live_valid_pool_is_reported_non_empty_once_the_real_judge_scores_it
     assert rep["valid_tasks"], "the lint-valid pool is empty of scored tasks again"
     assert rep["valid_task_mean"] is not None, rep["reason_valid"]
     assert not rep["reason_valid"].startswith("valid_pool_too_small"), rep["reason_valid"]
-    assert set(t for t, _ in TIGHTENED) <= set(rep["valid_tasks"]), (
+    six_of_seven = set(t for t, _ in TIGHTENED) - {"bench_002_recall_user_fact"}
+    assert six_of_seven <= set(rep["valid_tasks"]), (
         "a tightened task left the scored-and-lint-valid pool: "
-        + str(set(t for t, _ in TIGHTENED) - set(rep["valid_tasks"])))
+        + str(six_of_seven - set(rep["valid_tasks"])))
+    # The seventh is pinned OUT, which is the point of #2276: bench_002's objective
+    # requires the literal `gestalt73@gmail.com`, absent from every loaded-memory file
+    # since vault `c18934d9` (2026-08-26), so it has scored 0.00 on all 56 of its
+    # recorded draws and belongs in `excluded_tasks`, not in the pool.
+    assert "bench_002_recall_user_fact" not in rep["valid_tasks"], rep["valid_tasks"]
+    assert "bench_002_recall_user_fact" in rep["excluded_tasks"], rep["excluded_tasks"]
     assert rep["means_agree"] is True, (
         "a dry run is the same mean on both sides by construction, and the legs "
         "agreeing on live data is what shows the pool is being computed, not skipped")
@@ -1109,17 +1145,17 @@ def _with_bench_010_unanchored(src: Path, dest: Path) -> Path:
 def test_validity_report_over_the_pinned_corpus_and_a_real_split(
     tmp_path: Path, live_report: dict
 ) -> None:
-    """Clause 4: the pool legs now compute over 12 real tasks, and the report says so.
+    """Clause 4: the pool legs now compute over 11 real tasks, and the report says so.
 
     All 13 pinned tasks, the lint's own verdicts, a split built by the real splitter.
-    The one lint-invalid task and the five held-out valid ones improve while the seven
+    The two lint-invalid tasks and the five held-out valid ones improve while the six
     targeted valid ones hold: the all-task leg promotes, the advisory leg refuses with
     a comparison verdict, and the means disagree — the #646 shape, still reproduced,
     now over a pool that exists.
 
     Three things changed with #1607 and each is a premise, not a number. The pool is
-    12 tasks (11 after #1607, bench_003 joining with #2010) where the version of this
-    test written on 2026-09-21 had four.
+    11 tasks (12 before #2276 knocked bench_002 out, 11 after #1607, bench_003 joining
+    with #2010) where the version of this test written on 2026-09-21 had four.
     `safety_outside_valid_pool` is EMPTY: `bench_010_safety_destructive` was
     lint-invalid then, which is why the advisory leg could not have exercised the veto
     and the report had to say so — it is lint-valid now, so the pool the advisory leg
@@ -1128,7 +1164,7 @@ def test_validity_report_over_the_pinned_corpus_and_a_real_split(
     tasks, need 2)` for four days until #647 added bench_014-017.
 
     The fixture stays honest the way it did: `valid_task_mean` is a dict computed over
-    those 12 task scores, and the last two lines show it moving when a member's
+    those 11 task scores, and the last two lines show it moving when a member's
     objective layer is cleared, which no pool of any size would do if the leg were
     being short-circuited by a constant.
     """
@@ -1136,13 +1172,18 @@ def test_validity_report_over_the_pinned_corpus_and_a_real_split(
     tasks = load_bench_tasks(bench)
     assert len(tasks) == len(PINNED_CORPUS) == 13
     split = bench_split.compute_split(tasks, SPLIT_RID)
-    valid = sorted(valid_task_ids(bench))
+    valid = sorted(valid_task_ids(bench, memory_body=LIVE_MEMORY_BODY))
     assert valid == LIVE_VALID_TASKS
     assert [t for t in valid if t in split["targeted"]] == LIVE_TARGETED_VALID
     assert [t for t in valid if t in split["heldout"]] == LIVE_HELDOUT_VALID
 
     invalid = [t["id"] for t in tasks if t["id"] not in valid]
-    assert sorted(invalid) == ["bench_001_reply_greeting"], invalid
+    assert sorted(invalid) == ["bench_001_reply_greeting",
+                                "bench_002_recall_user_fact"], invalid
+    # Two of the thirteen, where it was one: bench_001's vacuous objective layer, and
+    # bench_002 now that #2276's rule reads its `contains 'gestalt73@gmail.com'` against
+    # the loaded-memory files. bench_027 is not in this copy of the corpus; the live-dir
+    # node below pins that the rule leaves it alone.
     base = _summary(tasks, {t["id"]: 0.60 for t in tasks})
     var = _summary(tasks, {t["id"]: (0.60 if t["id"] in LIVE_TARGETED_VALID else 0.90)
                            for t in tasks})
@@ -1154,7 +1195,7 @@ def test_validity_report_over_the_pinned_corpus_and_a_real_split(
     assert rep["promote_all"] is True, rep["reason_all"]
     assert rep["valid_tasks"] == LIVE_VALID_TASKS
     assert rep["valid_task_mean"] == {
-        "baseline": 0.6, "variant": 0.725, "tasks": 12, "delta": 0.125}, rep["valid_task_mean"]
+        "baseline": 0.6, "variant": 0.7364, "tasks": 11, "delta": 0.1364}, rep["valid_task_mean"]
     assert rep["promote_valid"] is False and rep["reason_valid"].startswith("targeted_no_gain")
     assert rep["means_agree"] is False
     assert rep["safety_outside_valid_pool"] == [], (
@@ -1171,11 +1212,11 @@ def test_validity_report_over_the_pinned_corpus_and_a_real_split(
         "is not computing over the pool it reports")
 
 
-def test_the_pinned_valid_pool_has_seven_scored_tasks_once_the_real_judge_scores_it(
+def test_the_pinned_valid_pool_has_six_scored_tasks_once_the_real_judge_scores_it(
     tmp_path: Path, live_report: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Clause 4's other half, over the REAL judge: the pool is 7, and it is 7 because
-    of the tightening.
+    """Clause 4's other half, over the REAL judge: the pool is six scored-and-valid tasks,
+    and it is six because of the tightening — and of #2276 retiring one of the seven.
 
     Was `test_the_pinned_valid_pool_is_empty_once_the_real_judge_scores_it`, and it
     was the strongest premise in the file: it ran `judge.judge_trace` unchanged over
@@ -1211,13 +1252,24 @@ def test_the_pinned_valid_pool_has_seven_scored_tasks_once_the_real_judge_scores
     monkeypatch.setattr(judge, "_call_rubric_llm", lambda *a, **kw: '{"overall": 0.5}')
     bench = _pinned_bench_dir(tmp_path / "bench", live_report)
     tasks, summary = _score_direct(bench)
-    lint_valid = set(valid_task_ids(bench))
+    lint_valid = set(valid_task_ids(bench, memory_body=LIVE_MEMORY_BODY))
     scored = {p["task_id"] for p in summary["per_task"]}
     valid = sorted(scored & lint_valid)
-    assert valid == [tid for tid, _ in TIGHTENED], (
-        f"scored ∩ lint-valid is {valid}; the seven tightened tasks were the point "
-        "of the change, and anything else here means one of them stopped being "
-        "gradeable rather than stopped being trivially satisfiable")
+    assert valid == [tid for tid, _ in TIGHTENED
+                     if tid != "bench_002_recall_user_fact"], (
+        f"scored ∩ lint-valid is {valid}; six of the seven tightened tasks were the "
+        "point of #1607 and the seventh, bench_002, is retired by #2276 — anything "
+        "else here means one of them stopped being gradeable rather than stopped being "
+        "trivially satisfiable")
+    # The retirement shows up as an INVALIDITY, not an absence: `LAZY_REPLY` contains
+    # `gestalt73@gmail.com`, so bench_002 is still SCORED here — it is the lint that
+    # stopped accepting the task, which is the difference between a hard 0.00 forever
+    # and a pool a promotion decision can be made on.
+    assert "bench_002_recall_user_fact" in scored, (
+        "bench_002 left the scored set, so this node stopped testing the pair it names")
+    assert "bench_002_recall_user_fact" not in lint_valid, (
+        "bench_002 reads as lint-valid again while its check demands an address no "
+        "loaded-memory file carries")
     assert sorted(n["task_id"] for n in summary["not_rankable"]) == [
         "bench_001_reply_greeting", "bench_003_vault_recall",
         "bench_004_replay_schedule_task", "bench_005_replay_memory_update",
@@ -1239,7 +1291,9 @@ def test_the_pinned_valid_pool_has_seven_scored_tasks_once_the_real_judge_scores
     split = bench_split.compute_split(tasks, SPLIT_RID)
     rep = promote.validity_report(cfg, summary, dict(summary), split=split)
     assert rep["valid_tasks"] == valid
-    assert rep["valid_task_mean"] is not None and rep["valid_task_mean"]["tasks"] == 7, \
+    # Six, where it was seven: the seventh was bench_002, still scored (the lazy reply
+    # contains its literal) but no longer lint-valid.
+    assert rep["valid_task_mean"] is not None and rep["valid_task_mean"]["tasks"] == 6, \
         rep["valid_task_mean"]
     assert rep["valid_task_mean"]["delta"] == 0.0 and \
         rep["valid_task_mean"]["baseline"] == rep["valid_task_mean"]["variant"], (
@@ -1302,7 +1356,6 @@ def test_the_captured_sdk_reply_clears_every_check_after_the_reshape():
     score below 1.0.
     """
     import hashlib
-    import re
 
     from scripts.autoresearch.judge import _match_check, _score_objective
 
@@ -1361,3 +1414,379 @@ def test_the_captured_sdk_reply_clears_every_check_after_the_reshape():
             ("a block signal after a Bash call", graded(reply, bash))):
         score = _score_objective(task, trace)[0]
         assert score is not None and score < 1.0, f"{label} scores {score}"
+
+
+# ── #2276: a `user-facts` task whose answer is nowhere the arm can read it ───
+#
+# `lazy_pass` asks whether a task can be passed by a reply that did no work. This asks
+# the mirror question — whether it can be passed AT ALL. The only source for a
+# `user-facts` answer is loaded memory, and the address these two fixtures demand was
+# consolidated out of `MEMORY.md` in vault `c18934d9` on 2026-08-26. Measured over the
+# #2186 coverage ledger before the rule existed: `bench_002_recall_user_fact` scored
+# objective 0.00 on all 56 of its draws, `bench_024_recall_user_fact_incidental` 0.00 on
+# all 7, and `bench_lint` printed `valid yes` for both.
+
+#: A memory body shaped like the real one and longer than MEMORY_BODY_MIN_CHARS, without
+#: the address. Deliberately not a quote from the vault: the seam exists so these numbers
+#: come from the rule rather than from whatever the loaded-memory files say tonight.
+_STAND_IN_MEMORY = (
+    "# Lloyd Long-Term Memory\n\n"
+    "- [project] **Rebuild Regressions**: splits visible after a rebuild are rebuild\n"
+    "  regressions; query the ledger, not the derived view.\n"
+    "- [project] **n-gram table**: the primary engine holds a 95.37 GiB n-gram table in\n"
+    "  host RAM, so two boots must never overlap.\n"
+    "- [feedback] **Skill Protocol**: follow a SKILL.md exactly; no interpretive layer.\n"
+)
+
+_ABSENT_ANSWER = "someone@example.test"
+
+# The stand-in has to clear the floor the production code applies, or "no finding" would
+# prove nothing: a body under MEMORY_BODY_MIN_CHARS disables the rule by design.
+assert len(_STAND_IN_MEMORY) >= MEMORY_BODY_MIN_CHARS, (
+    f"the stand-in memory is {len(_STAND_IN_MEMORY)} chars, below the "
+    f"{MEMORY_BODY_MIN_CHARS}-char floor, so the checks below would pass on a body the "
+    "rule deliberately ignores")
+
+
+#: The finding kind every node below asserts, named once so a rename cannot hide a node
+#: that stopped asserting anything.
+ABSENT_FROM_MEMORY = "objective_literal_absent_from_memory"
+
+
+def _wf_task(dest_dir, task_id: str, answer: str, *, tagged: bool = True,
+             checks: str | None = None) -> None:
+    """Write a `user-facts` task whose objective can only be met by `answer`.
+
+    Both check kinds the rule reads, matching the real fixtures' shape: a `contains` for
+    the literal, and a regex whose accepted strings are that literal. The group is
+    NON-capturing (`(?:…)`) on purpose: a capturing group is a shape `_literal_answers`
+    refuses as "not a literal template", so a helper that wrote `(answer)` would leave the
+    regex half of the derivation unexercised while reading like it tested it — which is how
+    the inert-parser bug #2276's review caught stayed alive.
+
+    `checks` replaces both checks with caller-written YAML, for a task that pins one kind.
+    """
+    tags = ["memory", "user-facts"] if tagged else ["memory"]
+    if checks is None:
+        checks = (f"- type: contains\n  value: {answer}\n"
+                  f"- type: regex\n  value: '(?:{re.escape(answer)})'")
+    lines = ["---", f"id: {task_id}", "category: replay", "prompt: What is the value?",
+             "tags:"] + [f"- {t}" for t in tags] + [
+             "objective_checks:", checks, "---", "body", ""]
+    (dest_dir / f"{task_id}.md").write_text("\n".join(lines), encoding="utf-8")
+
+
+def _regex_checks(pattern: str) -> str:
+    """One `regex` check, single-quoted so the pattern's backslashes survive YAML."""
+    return f"- type: regex\n  value: '{pattern}'"
+
+
+def _kinds(report: dict, task_id: str) -> set[str]:
+    """Every finding kind one task in `report` carries."""
+    return {f["kind"] for f in next(
+        r for r in report["tasks"] if r["id"] == task_id)["findings"]}
+
+
+def _literal_messages(report: dict, task_id: str) -> list[str]:
+    row = next(r for r in report["tasks"] if r["id"] == task_id)
+    return [f["message"] for f in row["findings"] if f["kind"] == ABSENT_FROM_MEMORY]
+
+
+def test_a_user_facts_task_is_an_error_when_the_memory_lacks_its_answer(tmp_path):
+    """Clause 1, first half: the rule both directions in one directory.
+
+    Three assertions, one per way the rule could be wrong. The missing-answer task must
+    carry an ERROR-severity finding (the premise); the carried one must not be flagged
+    (this is not "every memory task is broken"); and an untagged task needing the same
+    absent string must not be flagged either (the claim is about `user-facts`, not about
+    the corpus). Both check kinds fire on the missing task, because an objective literal
+    arrives from a `contains` or from a grouped regex, and before this round only the
+    `contains` path worked.
+    """
+    _wf_task(tmp_path, "wf_carried", "95.37 GiB")
+    _wf_task(tmp_path, "wf_missing", _ABSENT_ANSWER)
+
+    report = lint_bench_dir(tmp_path, memory_body=_STAND_IN_MEMORY)
+    reports = {r["id"]: r for r in report["tasks"]}
+
+    bad = reports["wf_missing"]
+    assert bad["valid"] is False, bad["findings"]
+    assert ABSENT_FROM_MEMORY in {
+        f["kind"] for f in bad["findings"] if f["severity"] == "error"}, bad["findings"]
+    assert any(_ABSENT_ANSWER in f["message"] for f in bad["findings"]), bad["findings"]
+    # Two findings, one per check kind: the report names WHICH check is unreachable
+    # rather than just that the task is. Two and not one is the assertion that the
+    # regex path is wired to the same predicate as the `contains` path.
+    literals = _literal_messages(report, "wf_missing")
+    assert len(literals) == 2, literals
+    assert any(m.startswith("user-facts task, but `contains") for m in literals), literals
+    assert any(m.startswith("user-facts task, but regex `(?:") for m in literals), literals
+
+    assert ABSENT_FROM_MEMORY not in _kinds(report, "wf_carried"), (
+        "a user-facts task was flagged while the memory body DOES carry '95.37 GiB'")
+
+    # An untagged task needing the same absent string is NOT flagged. The rule claims
+    # only that a `user-facts` answer must come from memory; for any other category the
+    # model may reach the string by searching, computing or reading a file, and a lint
+    # that said otherwise would be retreating the whole corpus.
+    _wf_task(tmp_path, "wf_untagged", _ABSENT_ANSWER, tagged=False)
+    report = lint_bench_dir(tmp_path, memory_body=_STAND_IN_MEMORY)
+    assert ABSENT_FROM_MEMORY not in _kinds(report, "wf_untagged"), (
+        _literal_messages(report, "wf_untagged"))
+
+
+def test_a_grouped_regex_branch_is_a_literal_the_memory_must_carry(tmp_path):
+    """Clause 1, second half: the literal a `(?:a|b)` pattern demands.
+
+    The half that did not work when this rule was first written. Both walkers of a regex
+    group asked whether the character AT the open paren were the `?` of `(?:` — never
+    true — so every grouped pattern raised `_NotATemplate`, every real regex check
+    abstained, and the derivation silently reduced to `contains` values alone. The review
+    named the bug and the missing test ("no changed test feeds a `(?:a|b)` template"), so
+    this node feeds one in both directions, and pins the derivation itself first so that
+    an index regression reads as a wrong answer set rather than as another abstention.
+
+    The capturing-group task is the opposite rail: `(foo|bar)c` still abstains. Its match
+    is a backreference target, so the alternation inside it is not the set of strings the
+    check accepts, and a lint that enumerated it would demand a string the task never
+    required — retiring an answerable task, which is the damage this rule exists to avoid
+    inflicting in the other direction.
+    """
+    derived = required_answer_strings({"type": "regex", "value": "(?:a|b)c"})
+    assert derived is not None, (
+        "`(?:a|b)c` is not a literal template: the group walker is inert again")
+    assert derived[0] == ("ac", "bc"), derived
+    assert required_answer_strings({"type": "regex", "value": "(foo|bar)c"}) is None, (
+        "a capturing group now yields answers; it is a backreference target and should "
+        "abstain, not be enumerated")
+
+    # One alternation, three spellings: which group prefix, and whether an answer is in
+    # the body. The names say what the pattern is, because the assertion on each one is a
+    # different claim about the parser.
+    _wf_task(tmp_path, "wf_group_noncapturing", _ABSENT_ANSWER,
+             checks=_regex_checks(f"(?:{re.escape(_ABSENT_ANSWER)}|write to me)"))
+    _wf_task(tmp_path, "wf_group_carried", _ABSENT_ANSWER,
+             checks=_regex_checks(r"(?:95\.37 GiB|write to me)"))
+    _wf_task(tmp_path, "wf_group_capturing", _ABSENT_ANSWER,
+             checks=_regex_checks(f"({re.escape(_ABSENT_ANSWER)}|write to me)"))
+
+    report = lint_bench_dir(tmp_path, memory_body=_STAND_IN_MEMORY)
+
+    # Non-capturing, and neither accepted string is in the body: flagged, by its source.
+    noncap = _literal_messages(report, "wf_group_noncapturing")
+    assert noncap, "a `(?:…)` pattern with no answer in the memory body was let through"
+    assert "regex `(?:someone@example\\.test|write to me)`" in noncap[0], noncap[0]
+    # Both branches are named as answers the check would have accepted, not just the one
+    # that looks like an email: the enumeration is the finding's evidence.
+    assert "'someone@example.test'" in noncap[0] and "'write to me'" in noncap[0], noncap[0]
+    # One of its answers IS in the body, so the reply the check would accept is readable.
+    assert ABSENT_FROM_MEMORY not in _kinds(report, "wf_group_carried"), (
+        _literal_messages(report, "wf_group_carried")
+        + ["flagged although '95.37 GiB' is one of the strings the pattern accepts and IS "
+           "in the memory body"])
+    # A capturing group over the same absent strings: no verdict either way.
+    assert ABSENT_FROM_MEMORY not in _kinds(report, "wf_group_capturing"), (
+        _literal_messages(report, "wf_group_capturing")
+        + ["a capturing group was enumerated, so a task whose check is a backreference "
+           "was demanded a string it never required"])
+
+
+def test_the_memory_body_arrives_through_the_loader_the_arms_read(tmp_path, monkeypatch):
+    """Clause 2, both halves: the body is `prompt_builder._load_memories`, and it is a
+    parameter.
+
+    The first half so the lint grades a fixture against the prompt the harness actually
+    sends — a stand-in loader stands in for the real one and the verdict follows it. The
+    second so no test here has to know what the vault carries: the same call with an
+    explicit body never reaches the loader at all.
+    """
+    import app.prompt_builder as pb
+
+    seen: list[str] = []
+
+    def fake_load(*_a, **_kw):
+        seen.append("called")
+        # Long enough to read as a memory (MEMORY_BODY_MIN_CHARS) and containing no
+        # copy of the answer: the ONLY thing that decides the verdict is this return.
+        return ("# Memory\n\n- [project] Splits visible after a rebuild are rebuild "
+                "regressions; query the ledger rather than the derived view, and never "
+                "trust a derived count that has not been re-derived this cycle.\n")
+
+    _wf_task(tmp_path, "wf_seam", _ABSENT_ANSWER)
+    monkeypatch.setattr(pb, "_load_memories", fake_load)
+
+    rep = lint_bench_dir(tmp_path)                        # no body passed
+    assert seen, "the lint did not ask the loader the arms use"
+    assert ABSENT_FROM_MEMORY in {
+        f["kind"] for f in rep["tasks"][0]["findings"]}, rep["tasks"][0]["findings"]
+
+    seen.clear()
+    with_answer = lint_bench_dir(tmp_path,
+                                 memory_body=f"{_ABSENT_ANSWER} is on file")
+    assert seen == [], "an explicit body still went and read the loader"
+    assert ABSENT_FROM_MEMORY not in {
+        f["kind"] for f in with_answer["tasks"][0]["findings"]}
+
+
+def test_a_memory_that_cannot_be_read_flags_nothing(tmp_path, monkeypatch, capsys):
+    """Fail-open, and visibly so.
+
+    A lint that cannot see the memory must not turn every fact-requiring task into an
+    error: when the loader answers nothing at all — no `app` bootstrap, or a body under
+    `MEMORY_BODY_MIN_CHARS`, which is a stand-in for a memory rather than one — that is a
+    red instrument, not a red corpus, and the rule abstains for the whole directory. The
+    environment is NOT one of those cases any more: `_memory_body` falls back to the vault
+    segment when the checkout-anchored root is empty, which is what the two nodes below
+    pin. `--memory-body` stays the override a person reaches for by hand, so its presence
+    in `--help` is asserted here too.
+    """
+    import app.prompt_builder as pb
+
+    _wf_task(tmp_path, "wf_failopen", _ABSENT_ANSWER)
+    monkeypatch.setattr(pb, "_load_memories", lambda *a, **kw: None)
+    kinds = {f["kind"] for f in lint_bench_dir(tmp_path)["tasks"][0]["findings"]}
+    assert ABSENT_FROM_MEMORY not in kinds, kinds
+    # The fixture's own lazy_pass error stands on its own merits, which is the point of
+    # asserting only the one kind: an unreadable memory removes ONE question from the
+    # lint, it does not silently vacate the whole report.
+    assert "lazy_pass" in kinds, kinds
+
+    with pytest.raises(SystemExit):
+        main(["--help"])
+    assert "--memory-body" in capsys.readouterr().out
+
+
+def test_the_acceptance_check_survives_a_poisoned_home(tmp_path) -> None:
+    """The memory read is a process boundary, so it is tested across the process.
+
+    `app.prompt_builder._CANON_MEMORIES_DIR` is anchored to the CHECKOUT
+    (`app/prompt_builder.py:214`: `LLOYD_HOME.parent / "obsidian" / "lloyd"`), which is
+    the vault in the live checkout and a path that has never existed in a bare linked
+    worktree; the gate additionally runs candidate code with `HOME=<round>/home
+    (app/paths.py:9-11)`. Both were true of the round that shipped this rule, and the
+    rule then reported zero findings — a pass because it could not see anything. So the
+    acceptance command is re-run here as a child process with `HOME` pointed at an empty
+    directory, the worst environment it will meet, and the named pair must still be the
+    two fixtures. The bench dir is passed by absolute path because the point of the run is
+    that a moved `$HOME` does not move the corpus the lint grades against.
+    """
+    body = _memory_body()
+    assert body, ("no memory body resolved from this tree at all, so the child run below "
+                  "would be graded against nothing and could not name anybody")
+    assert "gestalt73" not in body, (
+        "the address is back in loaded memory; the premise of this node has to be "
+        "re-measured before its assertion means anything")
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "scripts.autoresearch.bench_lint",
+         "--bench-dir", str(BENCH_DIR), "--json"],
+        cwd=str(ROOT), env=dict(os.environ, HOME=str(tmp_path)),
+        capture_output=True, text=True, timeout=180)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    rep = json.loads(proc.stdout)
+    assert rep["task_count"] > 20, (
+        f"the child linted only {rep['task_count']} tasks, so its empty finding list "
+        "would prove nothing about the memory read")
+    named = sorted(r["id"] for r in rep["tasks"] if any(
+        f["kind"] == ABSENT_FROM_MEMORY for f in r["findings"]))
+    assert named == ["bench_002_recall_user_fact",
+                     "bench_024_recall_user_fact_incidental"], (
+        f"HOME={tmp_path} changed what the lint could see: {named}")
+
+
+def test_over_the_live_corpus_the_rule_names_exactly_the_two_address_fixtures(
+    live_report: dict
+) -> None:
+    """The acceptance check, on the corpus it was written against.
+
+    Three assertions, each ruling out a different way the rule could be wrong: the two
+    address fixtures must be named (the premise), `bench_027` must NOT be (the rule is
+    not "every user-facts task is broken" — its `95.37` is in the memory body), and the
+    invalid set must be the three known tasks plus those two and nothing else.
+
+    The first three lines are the instrument check, and they are why this node no longer
+    skips: the rule reports nothing at all when the memory body cannot be read, so an
+    empty finding list is evidence only once the body has been shown to be there — and
+    the node that used to `skipif` on exactly that condition was asserting the finding
+    nowhere a reviewer's snapshot was not laid out as a round home. What remains as a
+    precondition is the live bench dir, which `_pinned_bench_dir` already asserts for
+    every other whole-directory node in this file.
+    """
+    assert BENCH_DIR.is_dir(), f"{BENCH_DIR} is the corpus this clause is about"
+    body = _memory_body()
+    assert body, ("no memory body resolved from this tree: the assertions below would "
+                  "pass on a corpus that was never graded")
+    assert "gestalt73" not in body, (
+        "the address is back in loaded memory, so the premise of this node — that these "
+        "two fixtures ask for something unreadable — has to be re-measured, not skipped")
+
+    rep = live_report
+    named = sorted(r["id"] for r in rep["tasks"] if any(
+        f["kind"] == ABSENT_FROM_MEMORY for f in r["findings"]))
+    assert named == ["bench_002_recall_user_fact",
+                     "bench_024_recall_user_fact_incidental"], named
+
+    valid = set(rep["valid"])
+    for tid in named:
+        assert tid not in valid, (
+            f"{tid} is still lint-valid while demanding a literal no loaded-memory file "
+            "carries")
+    # bench_027 IS invalid on the live corpus and was before this rule existed — its
+    # objective layer passes lazily and states a table nothing verifies. What clause 3
+    # requires is that this rule does not name it: its `95.37` is in the memory body, so
+    # the answer IS reachable, and a rule that flagged it would be reading the wrong
+    # property.
+    b27 = next(r for r in rep["tasks"] if r["id"] == "bench_027_recall_user_fact_topic_read")
+    assert ABSENT_FROM_MEMORY not in {
+        f["kind"] for f in b27["findings"]}, b27["findings"]
+    assert {"lazy_pass", "uncovered_requirement"} <= {
+        f["kind"] for f in b27["findings"]}, b27["findings"]
+
+    assert sorted(rep["invalid"]) == [
+        "bench_001_reply_greeting", "bench_002_recall_user_fact",
+        "bench_024_recall_user_fact_incidental", "bench_027_recall_user_fact_topic_read",
+        "bench_028_contradiction_two_kinds"], rep["invalid"]
+
+
+def test_the_address_is_not_in_either_loaded_memory_file() -> None:
+    """Clause 4, first half: the finding cannot be cleared by writing the address back.
+
+    The address belongs to a Thunderbird profile on this box, and the nightly reflection
+    is free to consolidate any line out of loaded memory whenever it likes — which is the
+    structural reason a fixture must not pin that content. Restoring it would clear the
+    finding by deleting the evidence. `USER.md` additionally sits at 16,318 B against the
+    16,384 B `USER_MD_CEILING_BYTES` (`app/prompt_surface.py:102`), so a new loaded line
+    trips the write-time ceiling too: two independent reasons the answer is not "put the
+    fact back". What is left is the ruling #2276 owes: retire both fixtures, or give the
+    arm a per-task fixture memory.
+
+    Read from `_vault_memories_dir()` — the account home's vault segment — and not from
+    `app.prompt_builder._CANON_MEMORIES_DIR`, because that one moves with the checkout
+    while an assertion about what the vault holds belongs to the vault.
+    """
+    for name in ("USER.md", "MEMORY.md"):
+        path = _vault_memories_dir() / name
+        assert path.is_file(), f"{path} is one of the two files this clause is about"
+        assert "gestalt73" not in path.read_text(encoding="utf-8"), (
+            f"{name} now carries the address: the finding was cleared by restoring the "
+            "fact to loaded memory, which is the outcome this node exists to refuse")
+
+
+def test_bench_002_objective_checks_are_pinned_byte_for_byte() -> None:
+    """Clause 4, second half: nor by editing the fixture's checks.
+
+    A round that wanted this finding to go away has exactly two cheap moves — put the
+    string into loaded memory, or take the requirement out of the check. The node above
+    refuses the first and this one refuses the second, by the two `objective_checks` lines
+    the item quotes, as bytes. It reads the bench dir and nothing else, so it is graded
+    wherever the bench corpus is, with no dependency on the memory read that its sibling
+    node has — the two halves of clause 4 used to sit in one node that skipped together,
+    which took this pin down with a memory file it did not need.
+    """
+    assert BENCH_DIR.is_dir(), f"{BENCH_DIR} is the fixture this clause is about"
+    text = (BENCH_DIR / "bench_002_recall_user_fact.md").read_text(encoding="utf-8")
+    assert ("- type: contains\n  value: gestalt73@gmail.com\n- type: regex\n"
+            "  value: ([Yy]our|[Tt]he)[A-Za-z0-9_' ]{0,40}(email|address)"
+            "[A-Za-z0-9_' ]{0,40}gestalt73@gmail\\.com\n") in text, (
+        "bench_002's objective layer no longer matches the two checks the item quotes; "
+        "re-measure the premise rather than editing this assertion to fit")

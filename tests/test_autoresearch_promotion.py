@@ -2617,3 +2617,135 @@ def test_promote_py_never_names_the_coverage_instrument(cfg):
     leg_source = Path(coverage_leg.__file__).read_text(encoding="utf-8")
     assert "def build_coverage" in leg_source, "positive control: the leg's file is in hand"
     assert "from .promote" not in leg_source
+
+
+# ── #2276: the two address-recall fixtures leave the valid pool; the decision does not ──
+
+_ADDRESS = "gestalt73@gmail.com"
+
+#: A memory body over `bench_lint.MEMORY_BODY_MIN_CHARS` that does NOT carry the address
+#: — the state of the loaded-memory files since vault `c18934d9` (2026-08-26). A stand-in
+#: by intent: this node must not read what the vault happens to say tonight.
+_MEMORY_WITHOUT_ADDRESS = (
+    "# Lloyd Long-Term Memory\n\n"
+    "- [project] **Rebuild Regressions**: splits visible after a rebuild are rebuild\n"
+    "  regressions; query the ledger rather than the derived view.\n"
+    "- [project] **n-gram table**: the primary engine holds a 95.37 GiB n-gram table in\n"
+    "  host RAM, so two boots must never overlap.\n"
+    "- [feedback] **Skill Protocol**: follow a SKILL.md exactly, no interpretive layer.\n")
+
+
+def _bench_with_the_address_fixtures(tmp_path: Path) -> Path:
+    """The two `user-facts` fixtures that demand the address, plus two lint-valid tasks.
+
+    The fixture ids and the literal are the real ones, so the `excluded_tasks` assertion
+    is about the tasks the item names. The two clean tasks exist to keep the pool big
+    enough to be a pool: an empty pool would report `not evaluated` and prove nothing
+    about where the excluded pair went.
+    """
+    d = tmp_path / "bench-2276"
+    d.mkdir()
+    for tid in ("bench_002_recall_user_fact", "bench_024_recall_user_fact_incidental"):
+        (d / f"{tid}.md").write_text(
+            "---\n"
+            f"id: {tid}\n"
+            "category: replay\n"
+            "prompt: What's my email address?\n"
+            "tags:\n- memory\n- user-facts\n"
+            "objective_checks:\n"
+            "- type: contains\n"
+            f"  value: {_ADDRESS}\n"
+            "---\n"
+            "body\n", encoding="utf-8")
+    for tid in ("clean_a", "clean_b"):
+        # A tool-only objective layer: a `contains` check lazy-passes by construction
+        # (the probe IS its value), which would make these two invalid for a reason this
+        # node has nothing to do with.
+        (d / f"{tid}.md").write_text(
+            "---\n"
+            f"id: {tid}\n"
+            "category: replay\n"
+            "prompt: do the thing\n"
+            "objective_checks:\n- type: tool_called\n"
+            "  value: mcp__lloyd-mcp__vault_recall\n"
+            "rubric_criteria:\n- tool_usage_correctness\n---\n"
+            "body\n", encoding="utf-8")
+    return d
+
+
+def _pair_over_2276(scores: dict[str, tuple[float, float]]) -> tuple[dict, dict]:
+    """Base and variant summaries over exactly `scores`' ids, with those composites."""
+    base, var = {"per_task": [], "safety_passed": True}, {"per_task": [],
+                                                          "safety_passed": True}
+    for tid, (b, v) in scores.items():
+        for summ, score in ((base, b), (var, v)):
+            summ["per_task"].append({"task_id": tid, "category": "replay",
+                                     "composite_score": score,
+                                     "objective_score": score})
+    # The all-task leg reads `mean_composite`, which a real summary carries; the
+    # excluded pair's zeros are IN that mean, which is the point of the node.
+    for summ in (base, var):
+        vals = [p["composite_score"] for p in summ["per_task"]]
+        summ["mean_composite"] = round(sum(vals) / len(vals), 4)
+    return base, var
+
+
+#: One clean task and one excluded task in each slice.
+SPLIT_2276 = {"targeted": ["clean_a", "bench_002_recall_user_fact"],
+              "heldout": ["clean_b", "bench_024_recall_user_fact_incidental"],
+              "rotated_into_heldout": [], "split_hash": "t2276",
+              "derived_from": "test"}
+
+
+def test_the_advisory_leg_excludes_the_address_fixtures_and_the_decision_still_reads_all_four(
+    tmp_path, monkeypatch
+) -> None:
+    """Clause 5: the new rule moves two tasks into `excluded_tasks` and moves nothing else.
+
+    Three things have to stay true for the rule to be detection rather than disposition,
+    and #2276's own triage says why: `promote.validity_report` is advisory — its return
+    dict carries `authoritative: False` — so excluding a task cannot change the promotion
+    decision, which is taken on the all-task mean. Hence the third assertion, the one that
+    does the work: the all-task delta is still the arithmetic mean over ALL FOUR tasks,
+    the excluded pair's zeros and all. If a later change ever let the exclusion leak into
+    the deciding leg, that number moves and this node reddens.
+    """
+    import app.prompt_builder as pb
+
+    monkeypatch.setattr(pb, "_load_memories", lambda *a, **kw: _MEMORY_WITHOUT_ADDRESS)
+    cfg = make_cfg(tmp_path)
+    cfg.paths.bench_dir = _bench_with_the_address_fixtures(tmp_path)
+    # The excluded pair scores 0.0 on both arms — which is what the #2186 ledger measured
+    # for them, 56 draws and 7 draws at 0.00 — and the clean pair moves 0.6 → 0.8.
+    base, var = _pair_over_2276({
+        "bench_002_recall_user_fact": (0.0, 0.0),
+        "bench_024_recall_user_fact_incidental": (0.0, 0.0),
+        "clean_a": (0.6, 0.8),
+        "clean_b": (0.6, 0.8)})
+
+    # A split with one clean task and one excluded task per slice, so both legs run
+    # their real predicate instead of short-circuiting on `no_heldout_slice`.
+    rep = promote.validity_report(cfg, base, var, split=SPLIT_2276)
+
+    assert rep["authoritative"] is False, (
+        "the valid-pool leg went authoritative, which is #646's deferred step and not "
+        "this change's to take")
+    for tid in ("bench_002_recall_user_fact", "bench_024_recall_user_fact_incidental"):
+        assert tid in rep["excluded_tasks"], (tid, rep["excluded_tasks"])
+    assert rep["valid_tasks"] == ["clean_a", "clean_b"], rep["valid_tasks"]
+
+    assert rep["all_task_mean"]["delta"] == pytest.approx(0.1), rep["all_task_mean"]
+    raw = (sum(s["composite_score"] for s in var["per_task"]) / 4
+           - sum(s["composite_score"] for s in base["per_task"]) / 4)
+    assert rep["all_task_mean"]["delta"] == pytest.approx(raw), (
+        "the deciding mean stopped being the mean over every task: the exclusion leaked "
+        "out of the advisory leg")
+    assert rep["promote_all"] is True, rep["reason_all"]
+    # The advisory leg is the one that moved, and by how much is the finding: the two
+    # permanent zeros leaving the pool doubles the delta it reports (0.1 over all four,
+    # 0.2 over the pool that excludes them). The decision does not move with it, because
+    # the decision reads the line above.
+    assert rep["valid_task_mean"]["delta"] == pytest.approx(0.2), rep["valid_task_mean"]
+    assert rep["valid_task_mean"]["delta"] != rep["all_task_mean"]["delta"], (
+        "the two legs reporting the same delta means the pool is not the subset the "
+        "exclusion describes")

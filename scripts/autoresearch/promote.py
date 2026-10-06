@@ -23,10 +23,12 @@ validity lint does not call broken and logs the pair beside the decision — bot
 numbers, and whether they disagree — but it is advisory and its own docstring
 says why. Do not read a `promote_valid` as a gate, and do not make it one while
 the bench's lint-valid pool happens to be small. It is no longer empty of scored
-tasks: re-measured 2026-09-28, 7 of the pinned corpus's 13 tasks are scored AND
-lint-valid (`tests/test_bench_lint.py::test_the_pinned_valid_pool_has_seven_scored_tasks_once_the_real_judge_scores_it`),
-up from 0, because #1607 tightened the seven lazy-passing tasks so they are no
-longer excluded as trivially satisfiable.
+tasks: re-measured 2026-10-06, six of the pinned corpus's 13 are scored AND
+lint-valid (`tests/test_bench_lint.py::test_the_pinned_valid_pool_has_six_scored_tasks_once_the_real_judge_scores_it`),
+up from 0 — #1607 tightened the seven lazy-passing tasks so they are no longer
+excluded as trivially satisfiable, and #2276 retired one of those seven
+(bench_002) because its objective demands a literal no loaded-memory file carries.
+That is why the count is a citation and not a constant: the node recomputes it.
 """
 
 from __future__ import annotations
