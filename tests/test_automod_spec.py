@@ -1213,9 +1213,15 @@ def test_the_tts_grant_moves_exactly_one_tracked_agent_services_verdict(monkeypa
     # (`test_the_qmd_grant_moved_exactly_one_classification`) calls with the entry
     # shipped. `pre` above strips only TTS_PATCH, so the before/after diff this
     # node computes is still exactly one path: the qmd entry is in both tuples.
+    # #2278 added the fourth name, `agent-services/voice/timeline.py`, exactly as
+    # the message below instructs: a verbatim grant is a legitimate edit, and this
+    # round's own node `test_the_voice_timeline_grant_admits_nothing_unnamed` is
+    # the legality check called with the entry shipped. `pre` above strips only
+    # TTS_PATCH, so the before/after diff this node computes is still exactly one
+    # path: the voice entry is in both tuples.
     assert allowed_after == {TTS_PATCH, "agent-services/livekit_worker.py",
-                             QMD_TEMPLATE}, (
-        f"the named grants over tracked agent-services paths are exactly the three "
+                             QMD_TEMPLATE, VOICE_TIMELINE}, (
+        f"the named grants over tracked agent-services paths are exactly the four "
         f"this node pins; found {sorted(allowed_after)}. A new verbatim grant is "
         f"a legitimate edit — add its path to this pin, and check it against "
         f"`agent_services_paths_admitted_without_being_named()`, which is the "
@@ -1479,3 +1485,277 @@ def test_the_reconcile_diff_clears_scope_in_an_interpreter_that_imported_the_tup
     assert lines[2] == "False", lines[2]
     assert sorted(parent[2]["allowed"]) == [QMD_TEMPLATE,
                                             "tests/test_qmd_index_template.py"], parent
+
+
+# ---------------------------------------------------------------------------
+# #2278: the voice timeline grant — one path, so #2273's clause 1 can clear rung 0
+# ---------------------------------------------------------------------------
+#
+# #2273 asks that every spoken turn's latency timeline be persisted, and its
+# clause 1 names the method's home: `TurnTimeline.as_dict()` in
+# `agent-services/voice/timeline.py`. Round SM_20261006_062159 wrote it and its
+# `gate.json` records the only rung that ran — preflight — refusing with
+# `paths outside the writable set: ['agent-services/voice/timeline.py']`, bucket
+# `unlisted`. The cause is the tuple this file tests: it named three verbatim
+# `agent-services/` files and no voice path, and `COMMENT_ONLY_GLOBS` is
+# `("config.yaml",)` (spec.py:183), so even a comment-only edit to the timeline
+# classified `unlisted`. A round cannot widen its own scope, so #2278 is the
+# widening and `as_dict` stays #2273's clause: this grant opens the door, it does
+# not walk it, which is why the `as_dict` grep is #2278's owed-after-landing item
+# and appears nowhere below as an assertion.
+#
+# The shape is #1376's, unchanged: one file, named exactly, never a directory.
+# #2278's step 1 as first written asked for `agent-services/voice/**`; against the
+# path-exactness rail that spelling prices at 14 unnamed paths, and
+# `test_the_wildcard_spelling_of_the_voice_grant_admits_fourteen_paths` measures it.
+
+#: The granted path: #2273's clause 1 is this file and nothing else.
+VOICE_TIMELINE = "agent-services/voice/timeline.py"
+
+#: The diff #2273's next round carries: the timeline plus the suite covering the
+#: duplex path it sits on (`tests/test_voice_duplex.py` is tracked on `main`).
+#: Rung 0 classifies the paths a diff touches, so what has to hold is the pair's
+#: verdicts together — the same construction as `TTS_1878_DIFF`.
+VOICE_TIMELINE_DIFF = [VOICE_TIMELINE, "tests/test_voice_duplex.py"]
+
+#: #1376's probe for a voice file nobody has written yet. Named apart from the
+#: tracked siblings because it does not exist on disk: it is the case a directory
+#: grant would cover that no on-disk sample can.
+VOICE_PROBE = "agent-services/voice/probe.sh"
+
+
+def tracked_voice_siblings() -> list[str]:
+    """Every tracked `agent-services/voice/` file except the granted one.
+
+    Read from the index at call time rather than pinned as a literal tuple: a
+    voice module added tomorrow is exactly what a directory-shaped grant would
+    reach, so the sibling set has to grow with the tree for every "nothing else
+    moved" assertion in this section to mean anything. 12 files at this round's
+    base `ae42a26c`.
+    """
+    return sorted(p for p in tracked_agent_services_paths()
+                  if p.startswith("agent-services/voice/") and p != VOICE_TIMELINE)
+
+
+def test_the_voice_timeline_grant_is_one_exact_path_and_no_shape():
+    """#2278 clause 1: the entry is that exact path, carries no `*`, and nothing
+    else in the tuple reaches it.
+
+    `classify` is the verdict rung 0 records and `check_scope` the call it makes,
+    so the first two assertions are the pair of verdicts SM_20261006_062159 was
+    refused for. The tracked-path assertion is why the grant is worth a line at
+    all: an untracked path is bytes no commit can carry and no rung can see. The
+    `_match` half is what makes this a test of the clause rather than of a literal
+    written beside it — an entry spelled `agent-services/voice/*` satisfies
+    `classify` on the timeline AND admits its 12 tracked siblings plus the probe,
+    because `fnmatch`'s `*` crosses `/` and the matcher rung 0 uses is
+    `spec._match`. Asking the tuple which entries reach the path turns that red
+    while leaving `classify` green, which is the gap the #1376 rail exists to close.
+    """
+    assert VOICE_TIMELINE in spec.ALLOWED_GLOBS
+    assert spec.classify(VOICE_TIMELINE) == "allowed"
+    assert VOICE_TIMELINE in {g for g in spec.ALLOWED_GLOBS if "*" not in g}, (
+        "the entry admitting the timeline is a wildcard spelling; #1376 clause 1 "
+        "refuses that however few files it happens to reach today")
+    reaching = [g for g in spec.ALLOWED_GLOBS if spec._match(VOICE_TIMELINE, (g,))]
+    assert reaching == [VOICE_TIMELINE], (
+        f"the timeline is admitted by {reaching}: only a verbatim entry is legal "
+        f"under #1376 clause 1, and a wildcard here reaches its siblings too")
+    assert VOICE_TIMELINE in tracked_agent_services_paths(), (
+        f"{VOICE_TIMELINE} is not tracked, so admitting it grants nothing a round "
+        f"can actually change")
+
+
+def test_the_voice_timeline_grant_admits_nothing_unnamed():
+    """#2278 clause 2: the widening admits one path, proved by executing the #1376
+    rail rather than restating its helper.
+
+    `agent_services_paths_admitted_without_being_named` reads the verbatim set out
+    of `ALLOWED_GLOBS` at call time, so adding this exact path is precisely the
+    case where the admitted file and the named file are one file and the violation
+    list stays empty. The rail is then called: a helper restatement would keep
+    passing if the rail were ever refactored away, the failure #1883's section
+    names. The sibling assertions are the clause's own words — the 12 tracked
+    `agent-services/voice/*.py` files beside the timeline and the seeded
+    `agent-services/voice/probe.sh` all still classify `unlisted`. The two floors
+    are denominator controls: 12 siblings is what the voice directory held at base
+    `ae42a26c`, and the 70 still-unlisted paths the #1376 rail is sized on is what
+    stops "nothing else changed" from guarding a husk.
+    """
+    test_only_a_verbatised_path_under_agent_services_may_be_admitted()
+    assert agent_services_paths_admitted_without_being_named() == []
+    siblings = tracked_voice_siblings()
+    assert len(siblings) >= 12, (
+        f"only {len(siblings)} tracked files share the voice directory with the "
+        f"grant, against the 12 at base ae42a26c — the sibling assertions below "
+        f"would be guarding almost nothing")
+    assert [p for p in siblings if spec.classify(p) == "unlisted"] == siblings, (
+        "a voice file became writable as collateral of the #2278 grant: "
+        f"{[p for p in siblings if spec.classify(p) != 'unlisted']}")
+    assert VOICE_PROBE in AGENT_SERVICES_GLOB_PROBES
+    assert spec.classify(VOICE_PROBE) == "unlisted", (
+        "the seeded voice probe became writable, which is the exact harm a "
+        "directory grant does and this grant must not")
+    corpus = tracked_agent_services_paths() + list(AGENT_SERVICES_GLOB_PROBES)
+    voice_allowed = sorted(p for p in corpus
+                           if p.startswith("agent-services/voice/")
+                           and spec.classify(p) == "allowed")
+    assert voice_allowed == [VOICE_TIMELINE], (
+        f"the writable set inside the voice tree is {voice_allowed}, not the one "
+        f"file #2278 named")
+    unlisted = [p for p in tracked_agent_services_paths()
+                if spec.classify(p) == "unlisted"]
+    assert len(unlisted) >= 70, (
+        f"{len(unlisted)} tracked agent-services paths still unlisted, below the "
+        f"70 the #1376 rail is sized on")
+
+
+def test_the_wildcard_spelling_of_the_voice_grant_admits_fourteen_paths(monkeypatch):
+    """Prices #2278's step 1 as it was first written, to prove the verbatim
+    spelling is load-bearing and not stylistic.
+
+    The item asked for `agent-services/voice/**`. Applied to the tuple minus this
+    grant, that glob does reach the file the item wants — and the path-exactness
+    rail still goes red on it with 14 violations: the 13 tracked
+    `agent-services/voice/` files, the timeline among them, because a
+    wildcard-spelled admission is an unnamed one by construction, plus
+    `agent-services/voice/probe.sh`. The expected set is derived from the corpus
+    the rail reads so it moves with the tree; the 14 is the number this node's
+    name carries, measured at base `ae42a26c`, and it re-asserts as stale rather
+    than quietly agreeing. Written as try/except rather than `pytest.raises` for
+    the reason #1883's twin gives: the honest failure here is "that rail stopped
+    firing", which has two causes and `raises` reports both as DID NOT RAISE. The
+    shipped tuple is then restored and asked the same question, because the
+    red-where-green contrast is the whole content of clause 2.
+    """
+    assert VOICE_TIMELINE in ALLOWED_GLOBS_AS_SHIPPED, (
+        "this node simulates the wilder spelling against the tuple minus the "
+        "grant; with the grant absent the comparison is not the one being made")
+    pre = tuple(g for g in ALLOWED_GLOBS_AS_SHIPPED if g != VOICE_TIMELINE)
+    monkeypatch.setattr(spec, "ALLOWED_GLOBS", pre + ("agent-services/voice/**",))
+    assert spec.classify(VOICE_TIMELINE) == "allowed", "the glob does not even reach the file"
+    violations = agent_services_paths_admitted_without_being_named()
+    expected = sorted([p for p in tracked_agent_services_paths()
+                       if p.startswith("agent-services/voice/")] + [VOICE_PROBE])
+    assert violations == expected, (
+        f"the glob admitted {violations[:8]}, not the "
+        f"{len(expected)} voice paths this node prices — the rail and the corpus "
+        f"no longer agree")
+    assert len(violations) == 14, (
+        f"the wilder spelling prices at {len(violations)} violations against the "
+        f"14 measured at base ae42a26c: {violations}. The number in this node's "
+        f"name is stale — update it with the corpus, not the other way round")
+    assert VOICE_PROBE in violations, (
+        f"the probe fell out of the violation set ({violations}), so the voice "
+        f"corpus this node exists to compare against is no longer the one the "
+        f"#1376 probes cover")
+    try:
+        test_only_a_verbatised_path_under_agent_services_may_be_admitted()
+    except AssertionError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError(
+            "the path-exactness rail did not fire under the voice glob. If the "
+            "grant was narrowed this node needs updating; if the rail was "
+            "refactored to return a violation list instead of asserting, assert "
+            f"on that list here — the helper reports "
+            f"{agent_services_paths_admitted_without_being_named()} today"
+        ) from None
+    assert "became writable without being named" in message, message
+    monkeypatch.setattr(spec, "ALLOWED_GLOBS", ALLOWED_GLOBS_AS_SHIPPED)
+    assert agent_services_paths_admitted_without_being_named() == [], (
+        "the shipped verbatim tuple must come back clean where the glob went red; "
+        "that contrast is the whole content of #2278 clause 2")
+
+
+def test_the_timeline_diff_clears_rung_0_without_a_drill():
+    """#2278 clause 3: a round whose diff touches the timeline is in scope, and
+    buys no guardian drill.
+
+    Two pairs, because `check_scope` is what rung 0 calls over the whole changed
+    set: the clause's own pair (`app/x.py` beside the timeline, an unrelated
+    allowed path, so the grant cannot be something that only works in isolation)
+    and `VOICE_TIMELINE_DIFF`, the diff #2273's next round actually commits. Both
+    buckets matter on each: `unlisted` empty is the defect #2278 exists to close,
+    and `protected` empty is the grant sitting in `ALLOWED_GLOBS` rather than
+    `PROTECTED_GLOBS` — `check_scope` permits a protected path too, so only
+    `requires_drill` distinguishes the two, and a protected spelling would make
+    every #2273 re-offer pay the guardian drill for a voice-code edit.
+    """
+    ok, reason, buckets = spec.check_scope(["app/x.py", VOICE_TIMELINE])
+    assert (ok, reason) == (True, "in scope"), (ok, reason, buckets)
+    assert buckets["allowed"] == ["app/x.py", VOICE_TIMELINE], buckets
+    assert not buckets["unlisted"] and not buckets["protected"], buckets
+    assert not buckets["denied"] and not buckets["comment_only"], buckets
+    assert spec.requires_drill(["app/x.py", VOICE_TIMELINE]) is False, (
+        "an empty protected bucket is the clause: this grant must not buy a "
+        "guardian drill")
+    ok, reason, buckets = spec.check_scope(VOICE_TIMELINE_DIFF)
+    assert (ok, reason) == (True, "in scope"), (ok, reason, buckets)
+    assert sorted(buckets["allowed"]) == sorted(VOICE_TIMELINE_DIFF), buckets
+    assert not buckets["unlisted"] and not buckets["protected"], buckets
+    assert spec.requires_drill(VOICE_TIMELINE_DIFF) is False, (
+        f"#2273's own diff would pay a guardian drill for a voice-code edit: "
+        f"{buckets}")
+
+
+def test_the_voice_grant_leaves_the_blanket_glob_simulation_firing(monkeypatch):
+    """#2278 clause 4: the change weakened no rail, executed rather than restated.
+
+    `test_a_blanket_agent_services_glob_would_trip_each_rail` widens from
+    `ALLOWED_GLOBS_AS_SHIPPED`, the tuple snapshotted at import, so with this
+    grant shipped that node is the blanket simulation running on the tree this
+    round leaves behind — the version that lands is the version that has to keep
+    firing. Calling it here is the difference between a rail that looks green in
+    prose and one that demonstrably fires with the new entry inside the tuple it
+    widens from. The grant is asserted into the snapshot first: a snapshot taken
+    before the entry existed would silently grade the pre-change tree and read as
+    a pass for the wrong reason.
+    """
+    assert VOICE_TIMELINE in ALLOWED_GLOBS_AS_SHIPPED, (
+        "the shipped-tuple snapshot does not contain the grant, so the blanket "
+        "simulation below is grading the tree before this round")
+    test_a_blanket_agent_services_glob_would_trip_each_rail(monkeypatch)
+
+
+def test_the_timeline_diff_clears_scope_in_an_interpreter_that_imported_the_tuple():
+    """The process boundary this grant sits on, crossed the way the gate crosses it.
+
+    Every assertion above is evaluated inside the pytest process, whose `spec`
+    arrived through this file's own import — so all of them would keep passing on
+    an entry that reached only an already-imported module and not a fresh import of
+    the file. Rung 0 is that other kind of process: the gate ladder is spawned
+    detached (`round.py:527-555`) and its preflight calls `spec.check_scope(changed)`
+    (`gate.py:1296`) on a `spec` that interpreter imported itself. So a fresh
+    interpreter is asked about the exact diff #2273's next round commits, and the
+    child's answer is the truth here, pinned both by equality with the parent (two
+    readings of one wrong tuple agree vacuously otherwise) and by a concrete verdict.
+    The claim stays narrower than the round it unblocks, for the reason
+    `test_the_scope_spec_stays_protected_though_scripts_is_allowed` gives: the
+    gate's own interpreter runs with `cwd=LIVE_ROOT` and reads the live tree's
+    tuple, which cannot contain this entry until this round lands — which is also
+    why `scripts/automod/spec.py` is protected-and-drilled rather than allowed.
+    """
+    probe = (
+        "from scripts.automod import spec; "
+        "import sys; "
+        "print(spec.classify(sys.argv[1])); "
+        "ok, why, buckets = spec.check_scope(sys.argv[1:3]); "
+        "print(ok, why, sorted(buckets['allowed']), bool(buckets['unlisted']), "
+        "bool(buckets['protected'])); "
+        "print(spec.requires_drill(sys.argv[1:3]))"
+    )
+    out = subprocess.run([sys.executable, "-c", probe, *VOICE_TIMELINE_DIFF],
+                         cwd=REPO_ROOT, capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    lines = out.stdout.strip().splitlines()
+    assert lines[0] == spec.classify(VOICE_TIMELINE) == "allowed", out.stdout
+    assert lines[1] == (f"True in scope {sorted(VOICE_TIMELINE_DIFF)} False False"), \
+        (lines[1], VOICE_TIMELINE_DIFF)
+    assert lines[2] == "False", out.stdout
+    assert spec.requires_drill(VOICE_TIMELINE_DIFF) is False, (
+        "the parent disagrees with the fresh import on the only verdict that "
+        "decides whether #2273's round pays a guardian drill")
+    parent = spec.check_scope(VOICE_TIMELINE_DIFF)
+    assert lines[1].split(" ")[0] == str(parent[0]) == "True", (lines[1], parent)
+    assert sorted(parent[2]["allowed"]) == sorted(VOICE_TIMELINE_DIFF), parent

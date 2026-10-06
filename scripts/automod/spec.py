@@ -140,6 +140,21 @@ ALLOWED_GLOBS: tuple[str, ...] = (
     # writable the only thing between a bad rewrite and a stale contract is
     # tests/test_qmd_index_template.py.
     "agent-services/conf/qmd-index.yml",
+    # #2278 / #2273 (2026-10-06): the voice turn-timeline module, one verbatim
+    # file again. Round SM_20261006_062159 wrote #2273's clause 1
+    # (`TurnTimeline.as_dict()`) into this module and its `gate.json` records the
+    # only rung that ran: preflight, `paths outside the writable set:
+    # ['agent-services/voice/timeline.py']`, bucket `unlisted`. Admitted for the
+    # reason the three entries above do not share: the file is tracked, ordinary
+    # voice-stack code, and the only thing between #2273 and a tests rung is this
+    # line. What is NOT admitted is the directory — `agent-services/voice/**` is
+    # #2278's step 1 as first written and it is illegal under #1376 clause 1:
+    # measured against the path-exactness rail it admits 14 unnamed paths (the 13
+    # tracked `agent-services/voice/*.py`, the timeline included, because a
+    # wildcard admission is an unnamed one, plus the seeded
+    # `agent-services/voice/probe.sh`), where this entry admits 0. Both halves are
+    # pinned by tests/test_automod_spec.py's #2278 section.
+    "agent-services/voice/timeline.py",
     "web/src/**",
     "web/index.html",
     "web/public/**",
