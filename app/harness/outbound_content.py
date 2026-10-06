@@ -790,6 +790,12 @@ GATE_ARM_POINTS: tuple[str, ...] = (
     "eval/decision_replay_588.py",                 # live replay, real MCP tools
     "eval/run_injection_canary.py",                # live bench, real MCP tools (sandboxed session)
     "eval/run_transcript_self_hit_audit.py",       # live probe, breaks at the first tool call (#1511)
+    # #2258: this replay builds a real diagnosis turn (production `model_config`
+    # + `default_tools=True` + `mcp_servers=DEFAULT_LLOYD_MCP_SERVERS` +
+    # `hooks=GRANT_HOOKS`), so its turn can address a sender tool and the roster
+    # is where that gets recorded. The reason it is armed is the reason a
+    # diagnosis turn needs arming: its output is a root cause stated to Alan.
+    "eval/diagnosis_fanout_replay.py",
 )
 
 #: Which dispatch files are outside the roster because their turns cannot reach a

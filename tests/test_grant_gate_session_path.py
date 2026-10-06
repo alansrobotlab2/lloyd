@@ -298,7 +298,7 @@ def test_the_same_registry_set_also_arms_the_outbound_content_gate():
     # supposed to stand for, so an entry added only to raise the count, rather
     # than one that arms the gate on a sender-reachable dispatch build, fails on
     # the following line even though it satisfies the count.
-    assert len(GATE_ARM_POINTS) == 13, GATE_ARM_POINTS
+    assert len(GATE_ARM_POINTS) == 14, GATE_ARM_POINTS
     # Re-measured off this tree in this call, never copied from a comment: the
     # roster is exactly the files whose turn builds can address a sender tool,
     # plus the floor module that arms them all.
