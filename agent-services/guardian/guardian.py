@@ -1513,9 +1513,21 @@ class Guardian:
             # mechanism rather than a reading of these numbers, and the two offers,
             # which used to be unconditional and were both wrong for a retained
             # store (#2057).
+            #
+            # `needs_human` is the same test `_stray_alert_body` uses to decide which
+            # paragraph to write (`_stray_alert_body`'s own `retained`), and it belongs
+            # on THIS call because the body cannot carry it: the Retained paragraph says
+            # neither offered response applies without ever saying `needs a human`, so
+            # #775's `asks_for_a_human` fallback never opened the backlog channel for it
+            # either. 46 firings of this title in the promotion ledger since 2026-09-25,
+            # every one of them the retained `workers.db`, produced 46 ledger rows and
+            # zero board items (#2308). A set of only non-watch-list names keeps the flag
+            # False: that body offers a response the reader can carry out themselves, so
+            # filing it would hand the board a decision the alert already answers.
+            retained = [n for n in strays if n in datawatch.RUNTIME_NAMES]
             self.alert("error", RUNTIME_DATA_ALERT_TITLE,
                        _stray_alert_body(policy.REPO, strays, now, prev_check),
-                       coalesce=True)
+                       coalesce=True, needs_human=bool(retained))
         elif not strays:
             # The condition cleared, so the retraction goes on the SAME surface
             # the alarm used — the acceptance half of #1536. Not gated on

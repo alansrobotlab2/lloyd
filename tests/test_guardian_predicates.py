@@ -2358,6 +2358,201 @@ def test_one_stray_check_makes_exactly_one_detector_call_both_edges_share(tmp_pa
     assert len(clears) == 1, f"the failed check retracted a second time: {clears}"
 
 
+# ── #2308: a retained stray reaches the backlog channel ──────────────────────
+#
+# `notify.py`'s gate opens the one channel that becomes work on four conditions:
+# `level == "critical"`, a `trigger`, `needs_human=True`, or the #775 prose fallback
+# `asks_for_a_human`. The stray site passed none of them — `level="error"`, no trigger,
+# no flag, and the Retained paragraph never says `needs a human` — so every firing was
+# a ledger row, a toast, a daily-note section and nothing else: 46 firings of this
+# title in `~/.local/state/lloyd-automod/promotions.jsonl` since 2026-09-25, all
+# `level:"error"`, all `trigger:""`, and no `[guardian]` item of that name on the board.
+#
+# The route has to be the flag, and the flag has to come from the watch list: a
+# retained store is precisely the case the body says neither offered response applies
+# to, while a name off the list has its answer (`KNOWN_GOOD_TOPLEVEL`) printed in the
+# same paragraph.
+
+def _stray_filing(tmp_path, monkeypatch, strays):
+    """The stray incident harness with the backlog channel counted, not delivered.
+
+    Two things are added over `_stray_incident_with`, and only these two:
+
+    * `_backlog_task`, the channel that files the item. It keeps the shipped four
+      positional parameters and returns True, so `filed` is the observable and a stub
+      that answered nothing cannot be the reason an assert passed — the pattern the
+      #2221 self-test node above this file's stray region uses. The real method also
+      holds the #2080 open-duplicate guard, so two ticks of one incident count two
+      calls here; that guard is pinned across its own seam by
+      `test_an_open_copy_of_the_title_stops_the_next_filing`.
+    * `Notifier.alert`, WRAPPED and not replaced, recording the level, title, body
+      and keyword arguments the shipped call site actually passed. Clause 3 is about
+      which of those routes the filing, so it can only be read off the real call.
+
+    Everything between the finding and those two points is the shipped code: the check
+    branch, `Guardian.alert`'s repeat guard, `Notifier.alert`'s gate and `_vault_note`'s
+    write. Returns the guardian, the note path, `tick`, the detector, `filed`, `sends`.
+    """
+    g, note, tick, clears, detector = _stray_incident_with(
+        tmp_path, monkeypatch, _StrayDetector(strays))
+    filed: list[str] = []
+    sends: list[tuple] = []
+
+    def _file(title, text, commit, tag):
+        filed.append(title)
+        return True
+
+    real_alert = g.notifier.alert          # bound before the wrap, so no recursion
+
+    def _alert(level, title, body, **kw):
+        sends.append((level, title, body, kw))
+        return real_alert(level, title, body, **kw)
+
+    monkeypatch.setattr(g.notifier, "_backlog_task", _file)
+    monkeypatch.setattr(g.notifier, "alert", _alert)
+    return g, note, tick, detector, filed, sends
+
+
+def test_a_retained_stray_files_one_backlog_task(tmp_path, monkeypatch):
+    """#2308 clause 1: a retained stray reaches the board, not only the daily note.
+
+    `workers.db` is on `datawatch.RUNTIME_NAMES`, the check's own watch list, and the
+    alert body says of such a name that neither response it offers applies. That is a
+    condition only a person can close, and nothing on the board recorded it for any of
+    the 46 firings.
+    """
+    import guardian as gmod
+
+    g, note, tick, detector, filed, sends = _stray_filing(
+        tmp_path, monkeypatch, ["workers.db"])
+    tick()
+
+    assert filed == [gmod.RUNTIME_DATA_ALERT_TITLE], (
+        f"a retained stray filed {filed}: the one channel a human reads is the one "
+        "that stayed empty through all 46 firings")
+    assert _sections(note, gmod.RUNTIME_DATA_ALERT_TITLE), (
+        "routing the alert to the board took away the daily-note section it had")
+
+
+def test_a_stray_of_only_non_watch_list_names_files_nothing(tmp_path, monkeypatch):
+    """#2308 clause 2: the route is the watch list, not the finding.
+
+    `.mypy_cache` is not in `RUNTIME_NAMES`, and its paragraph OFFERS the response —
+    add the name to `KNOWN_GOOD_TOPLEVEL in agent-services/guardian/datawatch.py`;
+    deleting the directory is not the fix — so the guardian still has an action and the
+    board gets no item. The alert itself still fires and still coalesces; only the
+    filing is withheld.
+    """
+    import guardian as gmod
+
+    g, note, tick, detector, filed, sends = _stray_filing(
+        tmp_path, monkeypatch, [".mypy_cache"])
+    tick()
+
+    assert filed == [], f"a non-watch-list stray filed {filed}"
+    assert len(sends) == 1 and sends[0][1] == gmod.RUNTIME_DATA_ALERT_TITLE, sends
+    assert sends[0][3].get("needs_human") is not True, (
+        f"the call site asked for a human over a name it offers to classify: "
+        f"{sends[0][3]}")
+    assert _sections(note, gmod.RUNTIME_DATA_ALERT_TITLE), (
+        "withholding the filing withheld the alert too")
+
+
+def test_the_retained_stray_filing_is_routed_by_the_flag_not_by_the_body(
+        tmp_path, monkeypatch):
+    """#2308 clause 3: which of notify.py's four routes does the filing.
+
+    `asks_for_a_human` is False for this body and stays False: the Retained paragraph
+    says the guardian has no applicable response without ever saying `needs a human`,
+    which is the gap #775's flag exists to close. A filing that survives that assertion
+    can therefore only have come from `needs_human=True` on the call — the same body
+    bytes either way.
+    """
+    import guardian as gmod
+    import notify
+
+    g, note, tick, detector, filed, sends = _stray_filing(
+        tmp_path, monkeypatch, ["workers.db"])
+    tick()
+
+    assert len(sends) == 1, f"{len(sends)} alerts reached the notifier"
+    level, title, body, kw = sends[0]
+    assert title == gmod.RUNTIME_DATA_ALERT_TITLE, title
+    assert level == "error", level
+    assert notify.asks_for_a_human(title, body) is False, (
+        "the body now declares a human in prose, so this node no longer separates the "
+        "call-site flag from #775's fallback")
+    assert kw.get("needs_human") is True, (
+        f"the stray call site passed {kw}, so nothing carries the flag")
+    assert filed == [gmod.RUNTIME_DATA_ALERT_TITLE], filed
+
+
+def test_one_stray_tick_files_one_task_whatever_the_set_holds(tmp_path, monkeypatch):
+    """#2308 clause 4: one filing per check, and the note stays coalesced.
+
+    A mixed set is the production shape — every one of the 46 firings reported
+    `workers.db` — and one retained name is enough to make the whole check
+    un-actionable, so a two-name set files ONE item: not one per name, and not one for
+    the tooling name it can still classify.
+
+    The second tick pins the half of the call this round must not disturb:
+    `coalesce=True` still holds, so one incident is still one section. It does still
+    call `_backlog_task` again, because the #2080 open-duplicate guard lives inside the
+    method this fixture counts.
+    """
+    import guardian as gmod
+
+    g, note, tick, detector, filed, sends = _stray_filing(
+        tmp_path, monkeypatch, ["workers.db", ".mypy_cache"])
+    tick()
+
+    assert filed == [gmod.RUNTIME_DATA_ALERT_TITLE], (
+        f"one check over a two-name set filed {filed}")
+
+    tick()
+    assert len(sends) == 2, (
+        f"the second tick never reached the notifier ({len(sends)} sends): the "
+        "fixture's premise is that 3600 s outruns ALERT_REPEAT_SECONDS")
+    assert len(filed) == 2, f"the second tick stopped filing: {filed}"
+    secs = _sections(note, gmod.RUNTIME_DATA_ALERT_TITLE)
+    assert len(secs) == 1, f"{len(secs)} sections for one incident:\n{note.read_text()}"
+
+
+def test_a_retained_stray_writes_one_task_file_on_the_board(tmp_path, monkeypatch):
+    """#2308 clause 1 across the process boundary it opens: the tick POSTs, and the
+    board's own route writes the item.
+
+    The counted stub in `_stray_filing` proves the guardian ASKED for a filing; it
+    cannot prove a task exists, because a 2xx is the endpoint vouching for itself and
+    the `[guardian] ` prefix that names the item is added inside `_backlog_task`, where
+    no counting node can see it. Here the loopback is answered by
+    `app/routers/backlog.py`'s real `task-create` and `tasks` routes over a temp board,
+    so the observable is a task FILE carrying `[guardian] Runtime data is being written
+    into the code tree` — the string the item names — and its absence is evidence the
+    guardian did not file.
+    """
+    import guardian as gmod
+
+    board = tmp_path / "board"
+    g, note, tick, clears, detector = _stray_incident_with(
+        tmp_path, monkeypatch, _StrayDetector(["workers.db"]))
+    with _stub_board(tmp_path, board_dir=board) as (server, seen):
+        g.notifier.backend_url = f"http://127.0.0.1:{server.server_address[1]}"
+        tick()
+
+        assert seen["gets"], "the #2080 board read never ran, so nothing was consulted"
+        assert len(seen["posts"]) == 1, (
+            f"one retained stray produced {len(seen['posts'])} POSTs: {seen['posts']}")
+        posted = seen["posts"][0]
+        assert posted["name"] == f"[guardian] {gmod.RUNTIME_DATA_ALERT_TITLE}", posted
+        assert posted["board"] == "lloyd", posted
+
+    written = _board_files(board)
+    assert len(written) == 1, f"the retained tick wrote {written}"
+    assert f"[guardian] {gmod.RUNTIME_DATA_ALERT_TITLE}" in (
+        written[0].read_text(encoding="utf-8")), written[0].read_text(encoding="utf-8")
+
+
 # ── #1590: retracting an alarm across the day boundary ───────────────────────
 #
 # Every fixture above builds its note path from `_dt.now()`, so each one proves the
