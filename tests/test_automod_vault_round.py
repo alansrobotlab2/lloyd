@@ -1584,7 +1584,8 @@ def test_a_land_that_adds_an_offender_to_a_red_corpus_is_refused_and_names_it(
     does. File B is the land: a new file, offending with a tool name A never
     mentions. With per-file node ids and a corpus read through the probe's mirror,
     file B's node does not exist in the pre-land run — it is `new`, the land is
-    refused, and the refusal names B. `test_a_whole_corpus_guard_excuses_the_same_land`
+    refused, and the refusal names B.
+    `test_a_whole_corpus_guard_excuses_the_same_land_as_pre_existing`
     is the same land against the same red corpus with the guard in its pre-#2265
     shape, and it commits.
     """
@@ -1681,6 +1682,59 @@ def test_per_file_nodes_with_a_baked_vault_root_are_still_excused(
                            "pre-existing, not this land"), g["reason"]
     assert g["candidate"]["failed"] == 2 and g["candidate"]["ran"] == 4, g["candidate"]
     assert g["baseline"]["failed"] == 2 and g["baseline"]["ran"] == 4, g["baseline"]
+
+
+def test_the_corpus_shaped_guard_excuses_two_offenders_under_one_id(
+        vault, tmp_path, monkeypatch, probed):
+    """#2265's actual before: the shipped shape, one id, both offenders, committed.
+
+    `GUARD_SRC_CORPUS_ONE_NODE` is the guard as `tests/test_research_doc_claims.py`
+    really was — one function walking the corpus, `VAULT = Path("__LIVE_VAULT__")`
+    written into it by `_corpus_tree`, blind to the knob — and until this node it was
+    a fixture nothing used, so the shape the item was filed against had no node
+    holding it. The two companions above vary one property each; this is the case the
+    ledger rows name, where ONE id covers both offenders and the pre-land run cannot
+    fail to have collected it.
+
+    So the numbers are the production ones: one node collected, one node failed,
+    before and after alike, `new` empty, and the land that adds file B commits —
+    `1 failing node(s) fail against the pre-land vault too — pre-existing, not this
+    land`, which is the string on the three 2026-10-05 `vault_land` rows this item
+    cites. Read beside `test_a_land_that_adds_an_offender_to_a_red_corpus_is_refused_and_names_it`:
+    same land, same red corpus, the difference is only node granularity plus the root
+    the corpus is read through.
+
+    The assert on the commit moving is the point of the node. A node that only read
+    `refuse` could pass on a rail that had stopped running the guard at all; a
+    committed file B is proof the route ran, measured, and talked itself out of it.
+    """
+    _two_workers(monkeypatch)
+    _corpus_vault(vault)
+    probed(_corpus_tree(tmp_path, vault, GUARD_SRC_CORPUS_ONE_NODE), vault)
+    _add_fresh_offender(vault)
+    head = _head(vault)
+    out = V.land([TASK_B_PATH], "#2265 the corpus-shape guard, as it shipped",
+                 item_id=None)
+
+    assert _head(vault) != head, (
+        "the land the item is about did not commit, so this node is not the "
+        "before-picture it claims to be")
+    assert (vault / TASK_B_PATH).is_file(), "file B was not left in, so nothing rode through"
+    g = out["guards"]
+    assert g["state"] == "checked" and g["refuse"] is False, g
+    # One node collected, one failed, in BOTH runs — `seconds` is wall clock and is
+    # deliberately not compared. The equality that matters is (ran, failed) == (1, 1):
+    # the child has one guard function, and the pre-land mirror collected and failed
+    # that SAME one id, which is the only reason `new` can come back empty. Measured
+    # from this node before it was pinned: candidate {ran:1, failed:1, files:1},
+    # baseline {ran:1, failed:1, files:1}.
+    assert (g["candidate"]["ran"], g["candidate"]["failed"]) == (1, 1), g["candidate"]
+    assert (g["baseline"]["ran"], g["baseline"]["failed"]) == (1, 1), g["baseline"]
+    assert g["reason"] == ("1 failing node(s) fail against the pre-land vault too — "
+                           "pre-existing, not this land"), g["reason"]
+    # One id for the lot: the corpus node's id names NO file, which is why the
+    # refusal text a land writes can never name the file it is refusing.
+    assert TASK_CORPUS_NODE not in g.get("nodes", []), g.get("nodes")
 
 
 def test_the_rewritten_corpus_guard_is_still_in_the_land_time_selection():
