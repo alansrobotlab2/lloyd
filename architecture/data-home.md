@@ -51,7 +51,8 @@ had in the tree, so a path `~/lloyd/X` became `~/lloyd-data/X`:
 ├── desktop/                  # the computer-use lease, created on first use
 ├── data/tool_overrides.yaml
 ├── usage.db  workers.db  research.db
-└── mc-state.json
+├── mc-state.json             # Mission Control's UI mirror — "mc" is not memory capture
+└── memory-capture-state.json # the transcript watermark, off the tree since #2294
 ```
 
 Some things stay in the tree because they are code, build output or a

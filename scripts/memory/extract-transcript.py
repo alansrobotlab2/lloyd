@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Extract clean user+assistant transcript from Lloyd session JSON files.
-Uses a watermark (state.json) to only output new content since last run.
-Exits with empty output if nothing new.
+Uses a watermark (app.paths.MEMORY_CAPTURE_STATE_PATH, under DATA_ROOT) to only
+output new content since last run. Exits with empty output if nothing new.
 
 Reads ~/lloyd-data/sessions/*.json
 
@@ -22,10 +22,21 @@ import glob
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
-from app.paths import SESSIONS_DIR  # noqa: E402
+from app.paths import MEMORY_CAPTURE_STATE_PATH, SESSIONS_DIR  # noqa: E402
 
 LLOYD_SESSIONS_DIR = str(SESSIONS_DIR)
-STATE_FILE = os.path.join(os.path.dirname(__file__), "state.json")
+# The watermark is runtime state, so it hangs off DATA_ROOT like every other store
+# (#2294). It used to be `os.path.join(os.path.dirname(__file__), "state.json")`,
+# which `app.paths` resolves nothing about and no checkout tracks: `load_state` then
+# took its `FileNotFoundError` branch forever, `lastRunTs` stayed 0, and every pass
+# re-read the entire sessions corpus (the 2026-09-22 data move, `6426668b`, rewrote
+# this file's SESSIONS path and left this line). The second half of the bug was where
+# a write would have landed: `.gitignore` un-ignores `scripts/**/*.json`, so the first
+# real pass made untracked-but-visible dirt in the production checkout, which a
+# round's `git add -A` reaper commits under the round's own subject. Under DATA_ROOT
+# the file is outside the repo, so both halves stop, and two checkouts (a worktree, a
+# scratch `LLOYD_DATA`) stop colliding on one machine-wide file.
+STATE_FILE = str(MEMORY_CAPTURE_STATE_PATH)
 
 
 def load_state():
@@ -37,6 +48,14 @@ def load_state():
 
 
 def save_state(state):
+    # Importing `app.paths` deliberately creates nothing under DATA_ROOT (#712), and
+    # this is a standalone script that never calls `ensure_dirs()`, so the directory
+    # holding the watermark is this writer's to make. Without it a first pass against
+    # a root that does not exist yet — a fresh `LLOYD_DATA`, a worktree's
+    # `.lloyd-data/` — raised FileNotFoundError out of `open(…, "w")` and the
+    # watermark was never written, which is the same silent-zero failure this file
+    # just moved to fix, reached a different way.
+    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
 

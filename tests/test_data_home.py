@@ -18,10 +18,16 @@ databases, `_pipeline/` and logs went with the code. They moved to
   boot when the resolver is missing or refuses;
 * the cutover script's timer fleet (#1793): every name it stops and starts around
   the migration resolves to a unit file that exists, the tailnet renewal timer is
-  one of them, and its fleet stop survives a unit this box never installed.
+  one of them, and its fleet stop survives a unit this box never installed;
+* the memory-capture watermark (#2294): composed by this resolver rather than from
+  the extracting script's own directory, because a checkout tracks no `state.json`,
+  so a watermark kept in the tree was a watermark that was never read — and the file
+  it wrote on the pass that finally wrote one was untracked-but-un-ignored dirt in
+  the very checkout a round's `git add -A` reaper sweeps.
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
@@ -1456,3 +1462,189 @@ def test_a_fresh_guardian_has_no_previous_stray_check(guardian):
     assert g._strays_prev_check_at is None, (
         "a fresh Guardian believes a stray check has already run, so its first alert "
         f"would cite a window: {g._strays_prev_check_at!r}")
+
+
+# ── the memory-capture watermark (#2294) ─────────────────────────────────────
+
+CAPTURE_SCRIPT = ROOT / "scripts" / "memory" / "extract-transcript.py"
+#: The watermark's filename. Spelled literally, not imported from the constant the
+#: code under test chose, so that a node can fail on the name rather than agree with
+#: whatever the code decided.
+CAPTURE_STATE_NAME = "memory-capture-state.json"
+
+
+def _binding_of(source: str, name: str) -> str:
+    """The source text of a module-level `name = ...` assignment, by ast.
+
+    A grep for `__file__` in the whole file would flag line 24, which puts the tree on
+    `sys.path` and is a perfectly legitimate use of the script's own location. The
+    clause is about one binding, so the check is scoped to exactly that binding's
+    source segment.
+    """
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == name for t in node.targets):
+            segment = ast.get_source_segment(source, node)
+            assert segment, f"could not read back the `{name}` binding's source"
+            return segment
+    raise AssertionError(f"the extractor no longer has a module-level `{name}` binding")
+
+
+def _load_from_this_tree(path: Path, key: str):
+    """Execute a script from THIS tree, then put the interpreter back as it was.
+
+    Loaded by path under a private key: an `import` of a bare name can bind a module
+    that predates this test — or, for the guardian's files, the staged copy under
+    `~/.local/state/lloyd-guardian/bin`, which is not the diff under test. `ROOT` goes
+    on `sys.path` only for the duration of the load, because this suite must not hold
+    the guardian directory and this script's own `sys.path.insert` is not something to
+    leave in the session. Every key the load created is dropped on the way out.
+    """
+    saved_path, had = list(sys.path), set(sys.modules)
+    spec = importlib.util.spec_from_file_location(key, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[key] = module
+    sys.path.insert(0, str(ROOT))
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path[:] = saved_path
+        for created in set(sys.modules) - had:
+            sys.modules.pop(created, None)
+    return module
+
+
+def test_the_capture_watermark_is_a_data_root_path_not_the_scripts_own_directory():
+    """Clause 1: the watermark's path comes from the resolver, with no component off the script.
+
+    Two claims, because each one alone leaves a way to pass it. The source half says the
+    binding names no script-relative spelling — `__file__`, `dirname`, `abspath`,
+    `LLOYD_HOME`, `LIVE_CHECKOUT` — and `tests/test_no_runtime_paths_in_code.py`'s
+    operator-form patterns would not have caught the shipped line, which used
+    `os.path.join(os.path.dirname(__file__), "state.json")` and so contains no `/`. The
+    behavioural half loads the script and asks what it actually resolved: `app.paths`
+    composes `DATA_ROOT / "memory-capture-state.json"`, and in this suite `DATA_ROOT` is
+    the scratch root the run was given, so equality here is the resolver's answer and not
+    a restatement of a constant.
+
+    Why it mattered: no checkout tracks `state.json`, so the in-tree binding was a
+    watermark that could not exist — `load_state()`'s `FileNotFoundError` branch ran
+    forever, `lastRunTs` stayed 0, and the 2026-10-06 pass printed
+    `DEBUG: Processing 7552 recent files` and truncated its own output to 50 KB.
+    """
+    binding = _binding_of(CAPTURE_SCRIPT.read_text(encoding="utf-8"), "STATE_FILE")
+    for script_relative in ("__file__", "dirname", "abspath", "LLOYD_HOME", "LIVE_CHECKOUT"):
+        assert script_relative not in binding, (
+            f"`STATE_FILE = {binding}` builds the watermark off the script's own "
+            f"directory ({script_relative}), which is the #2294 bug")
+    assert "MEMORY_CAPTURE_STATE_PATH" in binding, (
+        f"`{binding}` does not take the watermark from app.paths.MEMORY_CAPTURE_STATE_PATH")
+
+    mod = _load_from_this_tree(CAPTURE_SCRIPT, "_capture_extractor_pin")
+    resolved = Path(mod.STATE_FILE)
+    assert resolved == paths.DATA_ROOT / CAPTURE_STATE_NAME, (
+        f"the script resolved {resolved}, not the resolver's "
+        f"{paths.DATA_ROOT / CAPTURE_STATE_NAME}")
+    assert resolved.is_relative_to(paths.DATA_ROOT), resolved
+    assert not resolved.is_relative_to(ROOT), (
+        f"the watermark is inside the checkout again: {resolved}")
+    assert resolved != ROOT / "scripts" / "memory" / "state.json", "the shipped path is back"
+
+
+def test_a_capture_pass_writes_its_watermark_in_the_root_and_leaves_the_tree_clean(tmp_path):
+    """Clause 2: a real pass over a scratch root writes there and creates nothing in the tree.
+
+    Run as the skill runs it — a child interpreter, this tree's script, `LLOYD_DATA` set
+    to a scratch root — because the boundary is the whole point: an in-process node would
+    read a `DATA_ROOT` the suite resolved before the node existed, and the production
+    checkout is not a thing to write into from a test.
+
+    Non-`--dry-run` is the only shape that tests anything. `dry_run` gates every
+    `save_state` call (the four at `:130`, `:137`, `:159`, `:171`), so a `--dry-run` pass
+    left the production tree at `git status --porcelain` → 0 lines *before* the fix as
+    well as after it — the item's own check block was half-wrong for exactly that reason,
+    and the contrast is asserted below rather than assumed, so this node cannot quietly
+    drift back into measuring the run that proves nothing.
+
+    The dirt the old binding made was not invisible-but-harmless and not harmless-but-
+    visible: `.gitignore` `!scripts/**/*.json` un-ignores where the file sat, so a pass
+    produced `git status` dirt, and `scripts/automod/worktree.py:301` runs `git add -A`
+    then `commit --no-verify` over a round's worktree — vault `c2152284` is what a sweep
+    of unattributed paths looks like on the other side.
+    """
+    root = tmp_path / "data-root"
+    (root / "sessions").mkdir(parents=True)
+    (root / "sessions" / "20260101_seed.json").write_text(
+        json.dumps({"session_id": "sid-0", "created_at": "2026-01-01T00:00:00",
+                    "messages": [{"role": "user", "content": "does the watermark land "
+                                 "outside the checkout", "timestamp": "2026-01-01T00:00:01"},
+                                 {"role": "assistant", "content": "it lands under the root",
+                                  "timestamp": "2026-01-01T00:00:02"}]}),
+        encoding="utf-8")
+    tree_dir = ROOT / "scripts" / "memory"
+    before = sorted(p.name for p in tree_dir.iterdir())
+
+    dry = subprocess.run([sys.executable, str(CAPTURE_SCRIPT), "--dry-run"],
+                         capture_output=True, text=True, timeout=120,
+                         env={**os.environ, "LLOYD_DATA": str(root)})
+    assert dry.returncode == 0, dry.stderr[-400:]
+    assert not (root / CAPTURE_STATE_NAME).exists(), (
+        "a --dry-run pass wrote the watermark, so the contrast below proves nothing")
+
+    real = subprocess.run([sys.executable, str(CAPTURE_SCRIPT)],
+                          capture_output=True, text=True, timeout=120,
+                          env={**os.environ, "LLOYD_DATA": str(root)})
+    assert real.returncode == 0, real.stderr[-400:]
+    assert "Traceback" not in real.stderr, real.stderr[-400:]
+
+    written = root / CAPTURE_STATE_NAME
+    assert written.is_file(), (
+        f"the pass left no watermark under the root it was given ({root}): "
+        f"{sorted(p.name for p in root.iterdir())}")
+    assert json.loads(written.read_text(encoding="utf-8"))["lastRunTs"] > 0
+
+    after = sorted(p.name for p in tree_dir.iterdir())
+    assert after == before, (
+        f"a capture pass put {sorted(set(after) - set(before))} into {tree_dir} — "
+        "runtime state inside the checkout is what #2294 is about")
+    assert not (tree_dir / "state.json").exists(), "the old in-tree watermark is back"
+
+
+def test_the_tree_half_of_the_capture_check_can_see_the_dirt_it_denies(tmp_path):
+    """The control on the node above: both halves of its silence are capable of noise.
+
+    `after == before` is worth nothing if the listing cannot see a new file, and the
+    reason an in-tree `state.json` was a bug rather than a nuisance is a `.gitignore`
+    detail that has since stopped applying — so the second half is measured here, off a
+    name that does not exist, through `git check-ignore`.
+
+    `--no-index` grades the ignore rules alone; and, as #2282 learned the expensive way,
+    exit 0 means only that *a* rule matched — a negation matches and exits 0 too. The
+    discriminator is the winning rule's own text, so it is what is read, and a sibling
+    name under an ignored directory is the positive control that keeps "the rule matched"
+    from meaning "ignored" and "not ignored" at once.
+    """
+    probe = tmp_path / "listing-probe"
+    probe.mkdir()
+    (probe / "extract-transcript.py").write_text("", encoding="utf-8")
+    assert sorted(p.name for p in probe.iterdir()) == ["extract-transcript.py"]
+    (probe / "state.json").write_text("{}", encoding="utf-8")
+    assert sorted(p.name for p in probe.iterdir()) == ["extract-transcript.py", "state.json"], (
+        "the listing used by the node above cannot see a file being added, so its "
+        "assertion that a pass adds none is passing on a broken instrument")
+
+    def winning_rule(rel: str) -> tuple[int, str]:
+        out = subprocess.run(["git", "-C", str(ROOT), "check-ignore", "--no-index", "-v", rel],
+                             capture_output=True, text=True)
+        return out.returncode, out.stdout.strip()
+
+    dirt_rc, dirt_rule = winning_rule("scripts/memory/state.json")
+    assert dirt_rc == 0 and "!" in dirt_rule, (
+        f"a `state.json` under scripts/memory is no longer un-ignored ({dirt_rule!r}) — the "
+        "in-tree watermark would have been invisible dirt, which is a different bug; update "
+        "the node above, which currently claims the visible kind")
+
+    control_rc, control_rule = winning_rule("qmd/dist/probe.js")
+    assert control_rc == 0 and "!" not in control_rule, (
+        f"positive control broken: git does not ignore `qmd/dist/probe.js` either "
+        f"({control_rule!r}), so the answer above proves nothing about either case")

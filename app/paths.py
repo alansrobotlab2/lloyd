@@ -101,6 +101,21 @@ WORKERS_DB = DATA_ROOT / "workers.db"
 # `rm -r` or a fixture aimed at `~/lloyd` must not be able to reach runtime state.
 FAILURE_LEDGER_DB = DATA_ROOT / "failure-ledger.db"
 MC_STATE_PATH = DATA_ROOT / "mc-state.json"
+# The transcript-extraction watermark: `lastRunTs`, the only thing that keeps
+# `scripts/memory/extract-transcript.py` from re-parsing every session file in the
+# corpus on every pass. It lived beside the script (`dirname(__file__)/state.json`)
+# until #2294, where it did two jobs badly: no checkout tracks a `state.json`, so the
+# file never existed, the watermark was 0, and a pass walked the whole corpus (7 552
+# files as measured on 2026-10-06) and delivered only the 50 KB tail; and being
+# untracked-but-un-ignored
+# (`.gitignore` `!scripts/**/*.json`) it was `git status` dirt the moment a pass ran,
+# which a round's worktree reaper (`scripts/automod/worktree.py:301`, `git add -A`)
+# then commits under the round's own subject.
+#
+# `mc-state.json` above is Mission Control's UI mirror and has nothing to do with
+# capture; the two names look alike and are only alike in being a bare state JSON
+# directly under the root, which is the shape this one needed a precedent for.
+MEMORY_CAPTURE_STATE_PATH = DATA_ROOT / "memory-capture-state.json"
 TOOL_OVERRIDES_PATH = DATA_ROOT / "data" / "tool_overrides.yaml"
 PIPELINE_DIR = DATA_ROOT / "_pipeline"
 EVAL_BASELINES_DIR = DATA_ROOT / "eval" / "baselines"
