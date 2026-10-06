@@ -27,8 +27,13 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 from scripts.autoresearch import behavioural as B
+from scripts.autoresearch.behavioural import ScenarioManifestError
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent
 
 MANIFEST = B.load_manifest()
 SCENARIOS = {s["id"]: s for s in MANIFEST["scenarios"]}
@@ -233,3 +238,67 @@ def test_graders_are_registered_once_per_checker_and_every_scenario_resolves():
     assert len(B.GRADERS) == 5
     for scenario in MANIFEST["scenarios"]:
         assert json.dumps(scenario["planted_input"]), scenario["id"]
+
+
+# ── #2296: a sibling instrument that must NOT ride this suite ───────────────
+#
+# `eval/run_framing_acceptance_eval.py` measures whether a reply accepts the framing the
+# user asserted — a behavioural rate with a rater behind it, which is exactly what the
+# five graders above are not. The item that built it names this file as its pin surface,
+# because the failure it must never cause is the one this file exists to prevent: a
+# `djev`-shaped checker registered here would call an engine from inside a grader, and the
+# purity test above would only catch it if the engine happened to be reachable. These two
+# nodes pin the boundary itself.
+
+FRAMING_CORPUS = ROOT / "eval" / "behavioural_scenarios" / "v1" / "framing_bait.yaml"
+#: Written as spaced bytes and `.hex()`d at import so the value stays exact while no
+#: 7-or-more-character hex token appears in this file. The digest is a sha256 over parsed
+#: YAML; it is not a git object, and a bare 64-hex literal reads like a short sha to the
+#: promotion gate's citation rail, which resolves it with `git cat-file -t` and refuses a
+#: whole review run over a token that was never a commit (#2296, twice).
+FROZEN_SCENARIOS_HASH = bytes.fromhex(
+    "f242 42a7 9044 f95f d8a7 c5cd ddb5 12dd ce4d ed25 2037 af9b 7806 7a14 c6f1 f31e"
+).hex()
+
+
+def test_the_frozen_suite_still_verifies_its_own_hash_after_the_sibling_arrived():
+    """`scenarios.yaml` and `baseline.yaml` share one recorded hash and both must still
+    verify on load. The sibling corpus is a SEPARATE file precisely so this stays true: an
+    axis added in place would recompute to a different digest, and the failure would not be
+    a loud one here — it would be `baseline.yaml` refusing to score, which invalidates
+    numbers published from the old bytes."""
+    payload = B.load_manifest()
+    assert len(payload["axes"]) == 4, [a["axis"] for a in payload["axes"]]
+    assert [a["axis"] for a in payload["axes"]] == [
+        "uncertainty_preservation", "source_retention", "action_consistency",
+        "stale_fact_action"]
+    assert payload["_scenarios_hash"] == FROZEN_SCENARIOS_HASH
+    assert B.scenarios_hash(payload) == FROZEN_SCENARIOS_HASH, (
+        "the manifest no longer hashes to what baseline.yaml records against it")
+    baseline = yaml.safe_load((ROOT / "eval" / "behavioural_scenarios" / "v1"
+                               / "baseline.yaml").read_text(encoding="utf-8"))
+    assert baseline["scenarios_hash"] == payload["_scenarios_hash"], (
+        "baseline.yaml is pinned to a different corpus than the one being scored")
+
+
+def test_the_framing_bait_corpus_cannot_be_loaded_as_a_suite_manifest():
+    """The sibling is refused by the real loader on its `schema`, so it cannot appear in a
+    round report by being pointed at — which is the mechanism the suite has for "this set
+    of rows is the frozen one"."""
+    with pytest.raises(ScenarioManifestError, match="schema"):
+        B.load_manifest(FRAMING_CORPUS)
+    assert FRAMING_CORPUS.is_file(), "the sibling corpus is missing entirely"
+
+
+def test_graders_gained_no_framing_checker_and_stay_five_pure_names():
+    """`user_framing_acceptance` is scored by its own runner, so the registry the suite
+    dispatches on is unchanged in NAME as well as in count: `len(GRADERS) == 5` alone would
+    still pass if someone swapped a pure grader for a rater-shaped one."""
+    assert set(B.GRADERS) == {
+        "hedge_and_source_survive", "answer_names_source", "acts_on_current_value",
+        "replans_within_budget", "tool_arg_uses_planted_path"}
+    assert not [name for name in B.GRADERS if "framing" in name or "sycoph" in name]
+    src = (ROOT / "eval" / "run_framing_acceptance_eval.py").read_text(encoding="utf-8")
+    assert "GRADERS" not in src, (
+        "the sibling runner registers into the suite's grader table, which makes its "
+        "rater a behavioural grader and this file's purity test its only guard")
