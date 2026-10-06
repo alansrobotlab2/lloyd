@@ -104,6 +104,15 @@ MC_STATE_PATH = DATA_ROOT / "mc-state.json"
 TOOL_OVERRIDES_PATH = DATA_ROOT / "data" / "tool_overrides.yaml"
 PIPELINE_DIR = DATA_ROOT / "_pipeline"
 EVAL_BASELINES_DIR = DATA_ROOT / "eval" / "baselines"
+# One dated row set per sweep of success-coded tool-call quality (#2275): the
+# share of non-error tool calls that returned nothing, per tool.
+# `app/tool_quality.py` owns the schema, writes exactly one `<YYYY-MM-DD>.json`
+# per run, and prunes its own files past `tool_quality.RETENTION_DAYS` — the
+# weekly groundskeeper sweep has never heard of this directory (owed #4 registers
+# it there), so until it does, this store bounds itself and nothing else bounds
+# it. Declaring it here is also what makes a `rm -r` aimed at the code tree never
+# reach it: it hangs off DATA_ROOT like every other store.
+TOOL_QUALITY_DIR = DATA_ROOT / "eval" / "tool-quality"
 VOICE_PROFILES_DIR = DATA_ROOT / "voice_profiles"
 # Supervisor program logs for the engines and services (was agent-services/logs).
 SERVICE_LOGS_DIR = DATA_ROOT / "logs" / "services"
