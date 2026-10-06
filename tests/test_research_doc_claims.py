@@ -16,14 +16,44 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import functools
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-VAULT = Path.home() / "obsidian"
+
+
+def _vault_root() -> Path:
+    """The vault this module grades, through the one knob that can move it (#2265).
+
+    `app/data_root.py::vault_root` honours `LLOYD_VAULT_ROOT` and otherwise returns
+    `Path.home() / "obsidian"`, and `scripts/automod/vault_guards.py:508` hands
+    exactly that name to every probe child, with a MIRROR of the vault as its value
+    — the pre-land run gets a mirror with this land's paths put back
+    (`baseline_vault`, `vault_guards.py:332`). A module that spelled the root by
+    hand read the LIVE vault in both runs, so candidate and baseline were
+    byte-identical for every node in this file, `new` at
+    `vault_guards.py:953` came back empty, and the land was excused as
+    "pre-existing" whatever it had just written. Reading through the knob is what
+    lets the baseline run grade the corpus as it stood before the land.
+
+    A plain suite run has the variable unset and grades `~/obsidian`, the same
+    bytes it graded before this function existed.
+    """
+    from app.data_root import vault_root
+    return vault_root()
+
+
+#: Resolved once, here, for the module-level paths below. `_task_files()` and
+#: `_task_dir()` re-resolve per call, which is what a test that moves the knob
+#: (`test_the_task_corpus_follows_the_vault_root_knob`) can observe.
+VAULT = _vault_root()
 
 GENERATOR = VAULT / "skills" / "research-queue-generator" / "SKILL.md"
 DEEP_DIVE = VAULT / "skills" / "deep-dive-research" / "SKILL.md"
@@ -265,7 +295,16 @@ def test_the_deep_dive_task_is_retired_not_still_scheduled():
 # exclude the body), and nothing in a body may order the run to use a tool the
 # prompt does not name.
 
-TASK_DIR = VAULT / "autonomy"
+def _task_dir() -> Path:
+    """The directory the scheduler dispatches from, under the vault the knob names.
+
+    A function, not a module-level `TASK_DIR = VAULT / "autonomy"`, because a
+    constant freezes the root at import: the land-time probe's two runs are the
+    same process type with two different `LLOYD_VAULT_ROOT` values, and a frozen
+    path made both of them read one vault (#2265). Resolved per call.
+    """
+    return _vault_root() / "autonomy"
+
 
 #: Where an instruction region stops. Same convention
 #: `tests/test_legacy_alias_export_fate.py` already uses for the same question —
@@ -284,10 +323,17 @@ _GUARD_MUST_SEE = frozenset({"vault_write", "vault_recall", "fact_add",
                              "fact_relate", "backlog_write_task"})
 
 
-def _task_files(task_dir: Path = TASK_DIR) -> list[Path]:
+def _task_files(task_dir: Path | None = None) -> list[Path]:
     """The task files the scheduler dispatches: numbered files, not `_config.md`
-    or the reports that share the directory."""
-    return sorted(task_dir.glob("[0-9]*-*.md"))
+    or the reports that share the directory.
+
+    `task_dir=None` means "the vault the `LLOYD_VAULT_ROOT` knob names right now",
+    read at call time — see `_task_dir`. The two corpus guards call this with no
+    argument, so both grade the corpus the land-time probe handed them; the
+    writer tests pass an explicit directory and are unaffected.
+    """
+    return sorted((task_dir if task_dir is not None else _task_dir())
+                  .glob("[0-9]*-*.md"))
 
 
 def _body_of(path: Path) -> str:
@@ -314,6 +360,11 @@ def _instruction_region(body: str) -> str:
                      if not _DATED_BULLET_RE.match(ln))
 
 
+#: Memoised because the body-tool guard is one NODE PER TASK FILE (#2265): the
+#: universe is a property of the code tree, not of the file being graded, and 38
+#: nodes each paying a `list_tools()` round trip would multiply the land-time
+#: probe's cost by the size of a corpus the probe has to finish inside.
+@functools.lru_cache(maxsize=1)
 def _lloyd_tool_names() -> frozenset[str]:
     """Every tool a run could possibly be told about: the central annotation
     table plus every tool the MCP server actually advertises.
@@ -402,7 +453,7 @@ def test_every_task_body_says_it_is_not_delivered_to_the_worker():
     from agent_mcp._shared import TASK_BODY_CONTRACT
 
     files = _task_files()
-    assert files, f"{TASK_DIR} matches no task files — the pin would pass vacuously"
+    assert files, f"{_task_dir()} matches no task files — the pin would pass vacuously"
 
     missing = []
     for path in files:
@@ -426,7 +477,30 @@ def test_every_task_body_says_it_is_not_delivered_to_the_worker():
         "instruction/documentation split has to be re-decided, not re-worded.")
 
 
-def test_no_task_body_orders_a_tool_its_prompt_never_names():
+#: The corpus this guard is parametrized over, read once at import.
+#:
+#: It has to be read at import because that is when pytest collects nodes, and the
+#: node id is the only handle `scripts/automod/vault_guards.py::agreement` has: it
+#: decides whether a land broke a guard by differencing node ids against the same
+#: selection run against the vault as it stood before the land
+#: (`vault_guards.py:953`). One node over a whole corpus therefore answers "is any
+#: task file bad", which one already-bad file answers for ever, so every later land
+#: that ADDS an offender is excused as "pre-existing" and commits (#2265: three
+#: `vault_land` rows on 2026-10-05 — `6be4ef94d`, `d698d38ae`, `d31bbbb7d` — carry
+#: this file's node in `guards.excerpt` beside a `baseline` of `{ran: 31, failed: 1,
+#: files: 1}` and `refuse: false`). One node per file answers the only question a
+#: land-time rail can answer: did THIS land make a file bad.
+_TASK_SWEEP = _task_files()
+
+
+def _sweep_id(path: Path) -> str:
+    """The node id of one corpus node: its file's name, so the refusal a land
+    writes names the file it refused, not the corpus it walked."""
+    return path.name
+
+
+@pytest.mark.parametrize("task_file", _TASK_SWEEP, ids=_sweep_id)
+def test_no_task_body_orders_a_tool_its_prompt_never_names(task_file: Path):
     """#951 clause 2: the one way a body can still reach a run is by naming a
     tool, so no body may name one the built prompt does not name either.
 
@@ -438,19 +512,134 @@ def test_no_task_body_orders_a_tool_its_prompt_never_names():
     #54, #81 and #82 — are all names their own skill carries into the prompt.
     A body that orders a tool NOT in its prompt is dead text to the run and a
     lie to the reader, which is the whole failure mode of the item.
+
+    One node per task file, and the node id is the file's name: see `_TASK_SWEEP`.
+    A file that offends is now a node a pre-land run cannot have collected if the
+    land added or edited it, which is what makes the land-time probe able to say
+    "this land" rather than "some file is bad".
     """
     tools = _lloyd_tool_names()
-    offenders = []
-    for path in _task_files():
-        prompt, region = _prompt_and_region(path)
-        missing = _undelivered_tool_names(prompt, region, tools)
-        if missing:
-            offenders.append(f"{path.name}: {missing}")
-    assert not offenders, (
-        "task bodies ordering a tool their own prompt never names: " + "; ".join(offenders)
-        + " — either name the tool in that task's front-matter `description` or in "
-        "its `skill_name` SKILL.md (the only two channels a run receives), or take "
-        "the instruction out of the body.")
+    prompt, region = _prompt_and_region(task_file)
+    missing = _undelivered_tool_names(prompt, region, tools)
+    assert not missing, (
+        f"{task_file.name} orders a tool its own prompt never names: {missing} — "
+        "either name the tool in that task's front-matter `description` or in its "
+        "`skill_name` SKILL.md (the only two channels a run receives), or take the "
+        "instruction out of the body.")
+
+
+def test_the_task_corpus_follows_the_vault_root_knob(tmp_path, monkeypatch):
+    """#2265 clause 1: the corpus this module guards is the vault the probe handed it.
+
+    `scripts/automod/vault_guards.py:508` sets `LLOYD_VAULT_ROOT` on every probe
+    child to a MIRROR of the vault, and the pre-land run gets a second mirror with
+    this land's paths put back (`baseline_vault`). A module that reads
+    `Path.home() / "obsidian"` instead reads one vault in both runs, so the two
+    runs cannot differ, `new` is empty, and the land is excused as pre-existing for
+    every node in this file — whatever it landed. This node grades a fixture vault
+    holding one numbered task file, and the corpus must be exactly that file: a
+    root resolution that ignored the knob returns the live corpus (38 files as of
+    2026-10-06) and the assert goes red by count.
+
+    The second half is the default: with the knob unset the module must grade
+    `~/obsidian`, the root it graded before the knob existed, so an ordinary suite
+    run is unaffected by this change.
+    """
+    from app.data_root import VAULT_ROOT_ENV
+
+    vault = tmp_path / "mirror"
+    (vault / "autonomy").mkdir(parents=True)
+    (vault / "autonomy" / "7-fixture.md").write_text(
+        "---\nid: 7\nname: Fixture\n---\n# fixture\n", encoding="utf-8")
+    (vault / "autonomy" / "_config.md").write_text("---\nx: 1\n---\n", encoding="utf-8")
+
+    monkeypatch.setenv(VAULT_ROOT_ENV, str(vault))
+    assert _vault_root() == vault
+    assert _task_dir() == vault / "autonomy"
+    assert _task_files() == [vault / "autonomy" / "7-fixture.md"], \
+        "the corpus did not follow the knob the land-time probe hands its child"
+
+    monkeypatch.delenv(VAULT_ROOT_ENV, raising=False)
+    assert _vault_root() == Path.home() / "obsidian", \
+        "an unset knob no longer means the live vault, so every plain suite run moved"
+
+
+def test_the_body_tool_guard_sweeps_a_non_empty_corpus():
+    """The parametrized sweep collects zero nodes on an empty corpus (#2265).
+
+    `@pytest.mark.parametrize` over `[]` collects nothing and reports nothing
+    failed, so a guard whose corpus moved, emptied or failed to glob would read as
+    agreement at land time — the vacuous pass this module already names as the one
+    outcome worse than a false alarm. This node is the dedicated non-emptiness pin
+    the sweep cannot carry itself, and it is why the sweep's denominator is the
+    same `_task_files()` call the sweep was collected from.
+    """
+    files = _task_files()
+    assert files, (
+        f"{_task_dir()} matches no task files — the corpus guard collected "
+        f"{len(_TASK_SWEEP)} node(s) and so asserted nothing about anything")
+    assert [p.name for p in files] == [p.name for p in _TASK_SWEEP], (
+        "the corpus moved between import and this call; the sweep graded "
+        f"{[p.name for p in _TASK_SWEEP]} and this node graded "
+        f"{[p.name for p in files]}")
+
+
+def test_the_sweep_collects_one_node_per_file_in_a_probe_child(tmp_path):
+    """#2265's seam: a probe child of THIS module grades the corpus it is handed.
+
+    What decides a land is not what `_task_files()` returns in the suite process,
+    where `monkeypatch` can move the variable at will — it is what this module
+    resolves AT IMPORT inside the child `agreement` spawns with
+    `LLOYD_VAULT_ROOT=<mirror>` (`scripts/automod/vault_guards.py:508`), because
+    pytest builds the node list at collection and `agreement` differences those
+    ids. So this node runs the real command: `--collect-only` in a child process
+    against a mirror holding one numbered task file, and asks for exactly that
+    file's node id. `--collect-only` writes nothing and costs about a tenth of a
+    second, which is what makes the seam pinnable inside a probe that is racing a
+    budget. Measured by hand before it was pinned: a one-file mirror collected
+    `[7-k.md]` and nothing else, the knob unset collected 38 nodes.
+    """
+    vault = tmp_path / "mirror"
+    (vault / "autonomy").mkdir(parents=True)
+    (vault / "autonomy" / "7-k.md").write_text(
+        "---\nid: 7\nname: K\n---\n# k\n", encoding="utf-8")
+    env = dict(os.environ)
+    env["LLOYD_VAULT_ROOT"] = str(vault)
+    rel = Path(__file__).resolve().relative_to(ROOT)
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", str(rel), "-q", "--collect-only",
+         "--no-header", "-p", "no:cacheprovider", "-W", "ignore"],
+        cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=300,
+        check=False)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0, out[-800:]
+    nodes = [ln.strip() for ln in out.splitlines()
+             if "::test_no_task_body_orders_a_tool_its_prompt_never_names" in ln]
+    assert nodes == [rel.as_posix()
+                     + "::test_no_task_body_orders_a_tool_its_prompt_never_names"
+                       "[7-k.md]"], nodes
+
+
+def test_the_body_tool_guard_is_one_node_per_task_file():
+    """#2265: the guard's node granularity is the fix, so the granularity is pinned.
+
+    `agreement` compares node IDS, so a future re-gathering of this loop into one
+    function would silently return the hole while keeping the suite green. This
+    node reads the marker the sweep is built from and holds it to the corpus: one
+    param per numbered task file, and every node id carrying that file's name, so
+    a refusal names the file it refused.
+    """
+    marks = [m for m in test_no_task_body_orders_a_tool_its_prompt_never_names.pytestmark
+             if m.name == "parametrize"]
+    assert len(marks) == 1, marks
+    argnames, argvalues = marks[0].args[0], marks[0].args[1]
+    assert argnames == "task_file", argnames
+    assert list(argvalues) == _task_files(), \
+        "the sweep is not parametrized over the live corpus"
+    ids = marks[0].kwargs.get("ids")
+    assert callable(ids), f"no id factory; pytest would derive ids from the repr: {ids!r}"
+    assert [ids(p) for p in argvalues] == [p.name for p in argvalues], \
+        "a node id does not name the file it grades, so a refusal cannot name it"
 
 
 def test_the_body_tool_guard_fires_on_an_undelivered_tool(tmp_path):

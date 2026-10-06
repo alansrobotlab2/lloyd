@@ -5,6 +5,7 @@ lands unverified" has to be enforced after the edit, not before it.
 """
 from __future__ import annotations
 
+import json
 import os
 import signal
 import subprocess
@@ -1424,6 +1425,332 @@ def test_a_guard_already_red_before_the_land_does_not_refuse_it(vault, guard_tre
     # Both runs red on the same node, and both say how long and over what.
     assert cand["files"] == 1 and base["files"] == 1
     assert cand["seconds"] > 0 and base["seconds"] > 0
+
+
+# --------------------------------------------------------------------------- #
+# #2265: the delta rule only works when a node id names the thing a land changes.
+#
+# `agreement` decides by differencing NODE IDS against the same selection run
+# against the pre-land vault (`vault_guards.py:953`). A guard that walks a whole
+# corpus inside one function therefore has ONE id for the whole corpus: one
+# already-bad file makes that id fail in both runs, `new` comes back empty, and
+# every later land that ADDS an offender commits under the reason "pre-existing,
+# not this land". The two fixture guards below differ in exactly the two
+# properties #2265 changed in `tests/test_research_doc_claims.py` — one node per
+# file instead of one per corpus, and a corpus read that follows the
+# `LLOYD_VAULT_ROOT` mirror the probe hands its child (`vault_guards.py:508`)
+# instead of a root baked in at write time — so the pair is the before and the
+# after of the same land, and the verdict flips with them.
+#
+# The offender rule is deliberately simpler than the real one: the probe child runs
+# with the fixture tree as its PYTHONPATH, so `app.autonomy._build_task_prompt` is
+# not importable inside it. The front-matter `description:` stands in for the
+# delivered prompt and the body before `## Activity` for the instruction region —
+# the same two channels `_prompt_and_region` compares. What is under test is the
+# node id and the root resolution, and both of those are the real thing.
+# --------------------------------------------------------------------------- #
+
+#: The corpus guard in the shape `tests/test_research_doc_claims.py` had until
+#: #2265: one node for every task file, and `__LIVE_VAULT__` replaced with the
+#: vault's own path, so neither of the probe's two mirrors can make it read a
+#: different corpus. Naming `LLOYD_VAULT_ROOT` here is also what keeps this file in
+#: the probe's own selection (`VAULT_ROOT_TOKENS`, `vault_guards.py:90`).
+GUARD_SRC_CORPUS_ONE_NODE = '''"""One node for a whole corpus, blind to LLOYD_VAULT_ROOT (#2265's before)."""
+from pathlib import Path
+
+_TOOLS = ("vault_write", "fact_relate")
+VAULT = Path("__LIVE_VAULT__")
+
+
+def _offenders(vault):
+    out = []
+    for path in sorted((vault / "autonomy").glob("[0-9]*-*.md")):
+        parts = path.read_text().split("---\\n", 2)
+        fm, body = (parts[1], parts[2]) if len(parts) > 2 else ("", "")
+        region = body.split("## Activity")[0]
+        bad = sorted(t for t in _TOOLS
+                     if "`" + t + "`" in region and "`" + t + "`" not in fm)
+        if bad:
+            out.append(f"{path.name}: {bad}")
+    return out
+
+
+def test_no_task_body_orders_a_tool_its_description_never_names():
+    bad = _offenders(VAULT)
+    assert not bad, "task bodies ordering an unnamed tool: " + "; ".join(bad)
+'''
+
+#: The same guard in the shape #2265 gave it: one node per task file, the node id
+#: being that file's name, and the corpus read through the knob — the resolution
+#: `app/data_root.py::vault_root` performs, restated here because the child cannot
+#: import `app` from the throwaway tree it runs in.
+GUARD_SRC_ONE_NODE_PER_FILE = '''"""One node per task file, corpus read through LLOYD_VAULT_ROOT (#2265's after)."""
+import os
+from pathlib import Path
+
+import pytest
+
+_TOOLS = ("vault_write", "fact_relate")
+
+
+def _vault():
+    return Path(os.environ.get("LLOYD_VAULT_ROOT") or (Path.home() / "obsidian"))
+
+
+def _offenders(path):
+    parts = path.read_text().split("---\\n", 2)
+    fm, body = (parts[1], parts[2]) if len(parts) > 2 else ("", "")
+    region = body.split("## Activity")[0]
+    return sorted(t for t in _TOOLS
+                  if "`" + t + "`" in region and "`" + t + "`" not in fm)
+
+
+@pytest.mark.parametrize("task_file",
+                         sorted((_vault() / "autonomy").glob("[0-9]*-*.md")),
+                         ids=lambda p: p.name)
+def test_no_task_body_orders_a_tool_its_description_never_names(task_file):
+    bad = _offenders(Path(task_file))
+    assert not bad, f"{Path(task_file).name}: {bad}"
+'''
+
+#: The third shape, which exists to isolate one variable: per-file nodes, but the
+#: vault root baked in at write time. Parametrizing alone does not close the hole.
+#: File B's node is collected in BOTH runs, because the pre-land run still reads
+#: the live vault with file B sitting in its working tree; `new` is empty, and the
+#: land that the shape above refuses commits here. Both properties are needed, and
+#: this is the run that shows the root half is not decoration.
+GUARD_SRC_ONE_NODE_BAKED_ROOT = GUARD_SRC_ONE_NODE_PER_FILE.replace(
+    '    return Path(os.environ.get("LLOYD_VAULT_ROOT") or (Path.home() / "obsidian"))',
+    '    return Path("__LIVE_VAULT__")').replace(
+    '"""One node per task file, corpus read through LLOYD_VAULT_ROOT (#2265\'s after)."""',
+    '"""One node per task file, vault root baked in (#2265: granularity, no knob)."""')
+assert "__LIVE_VAULT__" in GUARD_SRC_ONE_NODE_BAKED_ROOT, \
+    "the replace missed its target, so the baked-root guard is the knob-reading one"
+
+TASK_A_OFFENDER = ("---\nid: 10\nname: Pre-existing offender\n"
+                   "description: Summarise the notes.\n---\n\n"
+                   "# Offender\n\nThe run calls `vault_write` on every note.\n")
+TASK_B_OFFENDER = ("---\nid: 20\nname: Fresh offender\n"
+                   "description: Reconcile the facts.\n---\n\n"
+                   "# Fresh\n\nThe run calls `fact_relate` on every pair.\n")
+TASK_CLEAN = ("---\nid: 30\nname: Clean\n"
+              "description: Write the notes with `vault_write`.\n---\n\n"
+              "# Clean\n\nWrite the notes with `vault_write`.\n")
+
+TASK_B_PATH = "autonomy/20-b-fresh.md"
+#: The guard's own node id with no param attached: in the corpus-shaped fixture that
+#: ONE id is the whole corpus, and in the other two it is the prefix every per-file
+#: id hangs off. `agreement` compares strings like these, so this is the surface the
+#: fix turns on.
+TASK_CORPUS_NODE = ("tests/test_guard.py::"
+                    "test_no_task_body_orders_a_tool_its_description_never_names")
+TASK_A_NODE = TASK_CORPUS_NODE + "[10-a-offender.md]"
+#: The node #2265 is about: the guard's own name, suffixed with file B's name.
+TASK_B_NODE = TASK_CORPUS_NODE + "[20-b-fresh.md]"
+
+
+def _corpus_vault(vault) -> None:
+    """The vault as it stands before the land: one offender already at HEAD, one
+    clean file, both committed. The pre-existing offender is what makes the corpus
+    red today, which is the condition the excuse hides behind.
+    """
+    (vault / "autonomy" / "10-a-offender.md").write_text(TASK_A_OFFENDER)
+    (vault / "autonomy" / "30-clean.md").write_text(TASK_CLEAN)
+    git(vault, "add", "-A")
+    git(vault, "commit", "-q", "-m", "a corpus already red at vault HEAD")
+
+
+def _corpus_tree(tmp_path, vault, src: str):
+    """A code checkout whose one vault-reading guard is `src`, with the live vault
+    path baked into it (the `__LIVE_VAULT__` seam is only meaningful there).
+    """
+    return make_guard_tree(tmp_path / "corpus-tree",
+                           src=src.replace("__LIVE_VAULT__", str(vault)),
+                           store_lines="")
+
+
+def _add_fresh_offender(vault):
+    """File B: a NEW task file, offending in a way file A does not offend."""
+    f = vault / TASK_B_PATH
+    f.write_text(TASK_B_OFFENDER)
+    return f
+
+
+def test_a_land_that_adds_an_offender_to_a_red_corpus_is_refused_and_names_it(
+        vault, tmp_path, monkeypatch, probed):
+    """#2265 clause 4, the half the route used to get wrong.
+
+    File A is red at vault HEAD, so the corpus guard is red whatever this land
+    does. File B is the land: a new file, offending with a tool name A never
+    mentions. With per-file node ids and a corpus read through the probe's mirror,
+    file B's node does not exist in the pre-land run — it is `new`, the land is
+    refused, and the refusal names B. `test_a_whole_corpus_guard_excuses_the_same_land`
+    is the same land against the same red corpus with the guard in its pre-#2265
+    shape, and it commits.
+    """
+    _two_workers(monkeypatch)
+    _corpus_vault(vault)
+    probed(_corpus_tree(tmp_path, vault, GUARD_SRC_ONE_NODE_PER_FILE), vault)
+    _add_fresh_offender(vault)
+    head = _head(vault)
+    with pytest.raises(V.VaultRoundError) as ei:
+        V.land([TASK_B_PATH], "#2265 a fresh offender joins a red corpus", item_id=None)
+    msg = str(ei.value)
+    assert "code agreement failed" in msg
+    assert TASK_B_NODE in msg, msg
+    assert "fact_relate" in msg, "the refusal should carry the guard's own output"
+    assert _head(vault) == head, "refused before any vault commit"
+    assert not (vault / TASK_B_PATH).exists(), "the new file was not reverted"
+
+    row = _events("vault_land")[-1]
+    assert row["ok"] is False and row["item_id"] is None, row
+    assert row["reverted"] == [TASK_B_PATH], row
+    g = row["guards"]
+    assert g["state"] == "checked" and g["refuse"] is True
+    # The sharp half: A's node is red in BOTH runs and is not refused; only B's is
+    # new, because the pre-land mirror did not hold file B to collect a node from.
+    assert g["nodes"] == [TASK_B_NODE], g["nodes"]
+    assert TASK_A_NODE not in g["nodes"], \
+        "file A is red in both runs and must not be the refused one"
+    assert TASK_B_PATH.split("/")[-1] in g["reason"], g["reason"]
+    assert g["candidate"]["failed"] == 2 and g["candidate"]["ran"] == 4, g["candidate"]
+    assert g["baseline"]["failed"] == 1 and g["baseline"]["ran"] == 3, g["baseline"]
+
+
+def test_a_whole_corpus_guard_excuses_the_same_land_as_pre_existing(
+        vault, tmp_path, monkeypatch, probed):
+    """#2265's before: the identical land, the identical red corpus, one node.
+
+    One id for the whole corpus, and a vault root baked in, so the candidate run
+    and the pre-land run read byte-identically the same corpus: both fail that one
+    node, `new` is empty, and the route commits file B with "pre-existing, not this
+    land" as its reason. This node is the measurement the parametrization exists to
+    change, so it asserts the excuse's exact sentence — a route that stopped
+    producing it while the guard was still corpus-shaped would be a second,
+    different fix, and this node says which one it was.
+    """
+    _two_workers(monkeypatch)
+    _corpus_vault(vault)
+    probed(_corpus_tree(tmp_path, vault, GUARD_SRC_CORPUS_ONE_NODE), vault)
+    _add_fresh_offender(vault)
+    head = _head(vault)
+    out = V.land([TASK_B_PATH], "#2265 the same land, corpus-shaped guard",
+                 item_id=None)
+    assert _head(vault) != head, "this land is the one #2265 says used to commit"
+    assert (vault / TASK_B_PATH).exists()
+    g = out["guards"]
+    assert g["state"] == "checked" and g["refuse"] is False, g
+    assert g["reason"] == ("1 failing node(s) fail against the pre-land vault too — "
+                           "pre-existing, not this land"), g["reason"]
+    # `_guards_row` only records node ids on the refuse path, which is why the real
+    # `vault_land` rows that carry this reason name no node at all — the ledger
+    # cannot say what was excused, only how many.
+    assert "nodes" not in g, g
+    assert g["candidate"]["failed"] == 1 and g["candidate"]["ran"] == 1, g["candidate"]
+    assert g["baseline"]["failed"] == 1 and g["baseline"]["ran"] == 1, g["baseline"]
+    assert g["baseline"]["files"] == 1, g["baseline"]
+    # The one id the excuse covered is the corpus, not a file: nothing in this
+    # ledger row could ever have named file B.
+    assert TASK_CORPUS_NODE in g["excerpt"], g["excerpt"]
+
+
+def test_per_file_nodes_with_a_baked_vault_root_are_still_excused(
+        vault, tmp_path, monkeypatch, probed):
+    """#2265: node granularity alone is not the fix; the corpus has to be the mirror.
+
+    Same per-file guard, same red corpus, same new file B — only the root
+    resolution reverts to a path baked in at write time. File B's node now exists
+    in the pre-land run as well, because the run that is supposed to be reading
+    "before" is reading the live vault with B sitting in its working tree. Two
+    failing ids in, two failing ids out, `new` empty, and the land the parametrized
+    shape refuses goes through. The count of failing nodes is the tell: the corpus
+    shape above excuses ONE id and this one excuses TWO, because per-file ids have
+    now given the excuse one id per offender instead of one for the lot.
+    """
+    _two_workers(monkeypatch)
+    _corpus_vault(vault)
+    probed(_corpus_tree(tmp_path, vault, GUARD_SRC_ONE_NODE_BAKED_ROOT), vault)
+    _add_fresh_offender(vault)
+    head = _head(vault)
+    out = V.land([TASK_B_PATH], "#2265 per-file nodes, root still baked in",
+                 item_id=None)
+    assert _head(vault) != head, "granularity without the knob still commits"
+    g = out["guards"]
+    assert g["state"] == "checked" and g["refuse"] is False, g
+    assert g["reason"] == ("2 failing node(s) fail against the pre-land vault too — "
+                           "pre-existing, not this land"), g["reason"]
+    assert g["candidate"]["failed"] == 2 and g["candidate"]["ran"] == 4, g["candidate"]
+    assert g["baseline"]["failed"] == 2 and g["baseline"]["ran"] == 4, g["baseline"]
+
+
+def test_the_rewritten_corpus_guard_is_still_in_the_land_time_selection():
+    """#2265's string-key boundary: the rewritten module still gets RUN at land time.
+
+    `agreement` only ever sees what `guard_selection` picks, and the picker is a
+    substring scan for `VAULT_ROOT_TOKENS` (`vault_guards.py:90`), not an import and
+    not an AST. Rewriting how a module resolves its vault is exactly the edit that
+    could drop a token and silently remove the guard from the probe while leaving
+    every suite node green — a guard nobody runs reports no failures. So the
+    selection is asked directly, over this checkout, for the real file.
+    """
+    root = Path(__file__).resolve().parent.parent
+    sel = VG.guard_selection(root)
+    assert "tests/test_research_doc_claims.py" in sel, \
+        "the body-tool guard left the land-time selection: the probe cannot refuse on " \
+        "a file it never runs"
+    src = (root / "tests/test_research_doc_claims.py").read_text(encoding="utf-8")
+    token = next((t for t in VG.VAULT_ROOT_TOKENS if t in src), None)
+    assert token, "no selection token survives in the module at all"
+
+
+#: #2265 clause 5's witness: every `vault_land` row of the promotions ledger,
+#: committed at a dated name because the path the clause named is the retired
+#: mirror (#2054's retire, #2064's `ffc04ce5`, enforced by
+#: `tests/test_failure_ledger_witness.py::test_the_witness_is_a_dated_file_not_the_retired_mirror_path`).
+#: The route #2178 took for #2175 clause 5, for the same reason.
+WITNESS_2265_NAME = "2026-10-06.2265-vault-land-witness.jsonl"
+
+
+def test_the_2265_vault_land_witness_re_derives_the_quoted_counts():
+    """Clause 5 asked for the figures to come off committed bytes, so they are read here.
+
+    The item's report is "45 of 433 `vault_land` rows mention 'pre-existing'" and
+    three rows naming the corpus node beside that excuse. On the committed bytes the
+    same two commands say 46 of 435, and four such rows — the ledger is append-only
+    and the item counted on a window that closed on 2026-10-06, so the denominator
+    moved by two rows and the count by one after the triage. What has NOT moved is
+    the set the claim is about: the four commits below, each `refuse: false` with
+    that reason, each carrying this file's corpus node in `guards.excerpt`.
+
+    The extract is a frozen file, not the live ledger: `wc -l` on it is a figure a
+    later `vault_land` cannot change, which is why it is pinned at an exact number
+    rather than a floor. The four node-naming rows are asserted by commit so a
+    re-extract that loses one cannot pass.
+    """
+    witness = Path.home() / "obsidian" / "backlog" / "data" / WITNESS_2265_NAME
+    assert witness.is_file(), (
+        f"{WITNESS_2265_NAME} must be committed: clause 5 asks that the quoted report "
+        "be re-derivable from bytes, and the automod state dir is not a git tree")
+    text = witness.read_text(encoding="utf-8")
+    assert text.count("\n") == 435, "wc -l on the witness moved off the 435 the report says"
+    rows = [json.loads(ln) for ln in text.splitlines() if ln.strip()]
+    assert len(rows) == 435, f"{len(rows)} rows parse, not the 435 `wc -l` counted"
+    assert all(r["event"] == "vault_land" for r in rows), \
+        "rows that are not vault_land are not the extract #2265 asked for"
+    pre = [r for r in rows if "pre-existing" in json.dumps(r)]
+    assert len(pre) == 46, (
+        f"{len(pre)} of the 435 rows mention pre-existing; the item quotes 45 of 433, "
+        "and the gap is what this witness exists to make checkable")
+    named = [r for r in rows if "test_no_task_body_orders_a_tool_its_prompt_never_names"
+             in str((r.get("guards") or {}).get("excerpt") or "")]
+    assert [str(r["commit"])[:9] for r in named] == \
+        ["9d07359df", "6be4ef94d", "d698d38ae", "d31bbbb7d"], \
+        "the rows that name the corpus node beside the excuse are the evidence"
+    for r in named:
+        assert r["guards"]["refuse"] is False and r["ok"] is True, r["commit"]
+        assert "pre-existing, not this land" in r["guards"]["reason"], r["commit"]
+    assert all("baseline" in r["guards"] for r in named), \
+        "each of these is a pre-land run that could not have changed the verdict"
 
 
 #: `scripts/automod/review.py:1433`'s own abstention for a surface that is not
