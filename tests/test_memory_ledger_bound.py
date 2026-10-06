@@ -322,7 +322,7 @@ def _module_docstring(rel: str) -> str:
 #: `tests/fixtures/.gitignore`, whose reason is literally this one: the gate runs with
 #: HOME at the round home, "a node that opened it would skip, and a skipping node pins
 #: nothing". The whole file, not an extract: an extract of a prose ban is the exact
-#: shape that can hide the offending line, and the file is 73 lines.
+#: shape that can hide the offending line, and the file is 74 lines.
 #:
 #: What the frozen corpus cannot do is notice the LIVE file drifting, so that is the
 #: `live_vault` node's whole job — the marker `pytest.ini` registers for "assertions
@@ -344,7 +344,7 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
     anything.
 
     The asserts, in the order that makes each one falsifiable:
-      * the corpus is the whole file at its exact bytes (14,036 B / 73 lines), and it
+      * the corpus is the whole file at its exact bytes (15,555 B / 74 lines), and it
         names `topics/memory-md-ledger`, so a 0-hit below cannot be a wrong path or an
         empty slice;
       * no LINE states a ledger's cap as 32,768 B — `_assert_no_ledger_ceiling_claim`
@@ -354,7 +354,10 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
         behaviour §1 was sending a curator off to do;
       * the numbers that REPLACE it are present (76,800, 49,152, and `ledger_ceiling` as
         the thing to ask rather than remember), because clause 5 asks that the prose
-        "name the new cap", not merely omit the old one.
+        "name the new cap", not merely omit the old one;
+      * the §2a-ter bullet vault `e45a6b6c` added is present verbatim. #2284 re-froze this
+        witness WITH that bullet rather than reverting the prose, and the size pin above
+        alone could be satisfied by any 15,555 B file — this names the text.
 
     None of that is asserted against the live vault, and that is the honest limit of a
     repo node: it pins this corpus. `live_vault` below is what keeps the pin from
@@ -365,11 +368,13 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
         "it clause 5's corpus is a vault file the gate cannot open")
     raw = SKILL_WITNESS.read_bytes()
     text = raw.decode("utf-8")
-    # Bytes, not characters: the file is full of em dashes, so `len(text)` reads 95 short
-    # of `wc -c` and a char count would fail on a file nobody truncated.
-    assert len(raw) == 14_036 and text.count("\n") == 73, (
+    # Bytes, not characters: the file is full of em dashes, so `len(text)` reads 118 short
+    # of `wc -c` and a char count would fail on a file nobody truncated. Both figures were
+    # measured from the re-frozen fixture itself (`wc -c` and `tr -cd '\n' | wc -c`), which
+    # is what #2284 re-freezes it to — a copy of the live skill's text, not a truncation.
+    assert len(raw) == 15_555 and text.count("\n") == 74, (
         f"{SKILL_WITNESS.name} is {len(raw)} B / {text.count(chr(10))} newlines, not the "
-        "14,036 B / 73 lines of the whole skill file — a partial copy would make the "
+        "15,555 B / 74 lines of the whole skill file — a partial copy would make the "
         "0-hit below a coverage gap rather than a clean result")
     assert "topics/memory-md-ledger" in text and "ledger" in text.lower(), (
         f"{SKILL_WITNESS.name} does not name a ledger, so it is the wrong corpus")
@@ -383,6 +388,14 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
         assert figure in text, (
             f"the witness never states {figure!r}, so the ban above has nothing it "
             "replaced the false cap with")
+    # The sentence #2284's own re-freeze carried into this corpus. It retires nothing the
+    # ban cares about and states no cap, so it is safe to pin — and pinning it is what
+    # makes "we kept the prose rather than reverting it" a fact about these bytes.
+    assert ("Row coverage, not the byte cap, is what gates retirement on `MEMORY.md`"
+            in text), (
+        "the bullet vault `e45a6b6c` added to §2a-ter is not in the witness, so this "
+        "corpus is the pre-#2284 text: the freeze was made by reverting the skill, which "
+        "is the disposition this item explicitly did NOT take")
 
 
 #: Same reason as the gate node, opposite question: is the file the nightly reads still
