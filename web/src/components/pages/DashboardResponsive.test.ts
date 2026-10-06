@@ -6,10 +6,11 @@
 // seeded with deliberately long row labels at phone widths and asks, per label,
 // whether it is clipped with nothing to get the full text back.
 //
-// The shape being pinned is a wrapping base plus a viewport-conditional ellipsis:
-// `whitespace-normal break-words` at the base and `sm:truncate` from `sm` up.
-// Both halves are load-bearing, and a reviewer reading only the class list
-// cannot tell which one does what, so:
+// The shape being pinned is a released minimum, a wrapping base and a
+// viewport-conditional ellipsis: `min-w-0` so the flex row can shrink the label
+// at all, `whitespace-normal break-words` at the base, and `sm:truncate` from
+// `sm` up. All three are load-bearing, and a reviewer reading only the class
+// list cannot tell which one does what, so:
 //
 //   * `truncate` is `overflow:hidden; text-overflow:ellipsis; white-space:nowrap`
 //     (verified against this project's Tailwind 4.2.2: node_modules/tailwindcss/
@@ -25,6 +26,28 @@
 //   * `sm:truncate` puts the ellipsis back from 640 px up, which is what keeps
 //     the desktop dashboard's one-line rows one line. A bare `truncate` would
 //     clip on a phone too and undo the fix.
+//   * `min-w-0` is what lets the row reach the wrapping at all, and it is the
+//     half #2298 found missing. Each of these spans is a child of a
+//     `flex items-center gap-2` row, and a flex item whose overflow is VISIBLE
+//     takes `min-width: auto`, which resolves to its min-content size — so the row
+//     could never get narrower than the longest unbreakable token in its label, and
+//     that is exactly why the defect is phone-only: below `sm` the label's overflow
+//     is visible and it is floored, while `sm:truncate` brings `overflow:hidden`,
+//     which makes the same automatic minimum zero and let the desktop dashboard
+//     ship the same class list without ever showing this.
+//     `break-words` cannot fight that floor: `overflow-wrap: break-word` only breaks a
+//     word that already does not fit its line box, and per CSS Text it changes
+//     NO intrinsic size (only `anywhere` and `word-break: break-all` do). The
+//     measured shape on the live tree: a `Recent runs` row whose box is 262 px
+//     carried 277 px of content, because the summary held
+//     `bench_027_recall_user_fact_topic_read:`, and the `ml-auto flex-shrink-0`
+//     duration parked its right edge at x=306 against a section whose content
+//     box ends at 304 — the 2 px that reddened
+//     `test_no_section_overflows_its_box_on_a_phone[320]`. `min-w-0` releases the
+//     automatic minimum so the flex algorithm can shrink the label to its share,
+//     and THEN `break-words` has a narrow box to break inside. It is the same
+//     declaration #1685 put on Panel's root for the grid-item version of this
+//     rule, pinned below by `Panel floors its grid item at zero`.
 //
 // `?raw` rather than `node:fs`: this project's tsconfig ships no node types, so
 // `node:fs` does not type-check here (same reason as AutonomyPage.test.ts and
@@ -99,6 +122,10 @@ function auditLabelSpans(source: string): string[] {
       if (!classes.includes('whitespace-normal')) problems.push(`${label}: no whitespace-normal`)
       if (!classes.includes('break-words')) problems.push(`${label}: no break-words`)
       if (!classes.includes('sm:truncate')) problems.push(`${label}: no sm:truncate`)
+      // The shrink release. Without it the row is floored at the label's
+      // min-content, so `break-words` never gets a narrow box to break inside
+      // and the right-aligned duration is pushed out of the card (#2298).
+      if (!classes.includes('min-w-0')) problems.push(`${label}: no min-w-0 — the row cannot shrink the label below its longest token`)
       // A bare `truncate` is the regression, and also a way of satisfying the
       // three checks above while still clipping: `truncate sm:truncate` would
       // pass every "contains" test and fix nothing.
@@ -152,7 +179,7 @@ describe('dashboard row labels wrap on a phone (#1742, re-landed as #2202)', () 
     // back to a single clipped line. Mutation (a): the file cannot silently
     // return to that shape and keep a green suite.
     const reverted = pageSource.replace(
-      '<span className="whitespace-normal break-words sm:truncate text-foreground">{task.name}</span>',
+      '<span className="min-w-0 whitespace-normal break-words sm:truncate text-foreground">{task.name}</span>',
       '<span className="truncate text-foreground">{task.name}</span>',
     )
     expect(reverted).not.toBe(pageSource)
@@ -162,13 +189,38 @@ describe('dashboard row labels wrap on a phone (#1742, re-landed as #2202)', () 
     expect(problems.join('\n')).toContain('bare truncate')
   })
 
+  it('the contract reddens when a label drops its min-w-0', () => {
+    // Mutation (e): the #2298 regression, and the one the three #1742 utilities
+    // cannot see. All of `whitespace-normal`, `break-words` and `sm:truncate`
+    // stay exactly as shipped here, so a pin that counts those three stays green
+    // while the row goes back to being floored at the label's min-content. What
+    // that looked like on the live tree: a `Recent runs` row whose box is 262 px
+    // carried 277 px of content because its summary held
+    // `bench_027_recall_user_fact_topic_read:`, and the `ml-auto flex-shrink-0`
+    // duration parked its right edge at x=306 where the section's content box
+    // ends at 304 — the 2 px that reddened
+    // `test_no_section_overflows_its_box_on_a_phone[320]`.
+    const floored = pageSource.replace(
+      '<span className="min-w-0 whitespace-normal break-words sm:truncate text-foreground">{task.name}</span>',
+      '<span className="whitespace-normal break-words sm:truncate text-foreground">{task.name}</span>',
+    )
+    expect(floored).not.toBe(pageSource)
+    const problems = auditLabelSpans(floored).join('\n')
+    expect(problems).toContain('no min-w-0')
+    expect(problems).toContain('{task.name}')
+    // And it is the ONLY complaint: the wrapping base is untouched, so this red
+    // is the released minimum and nothing else.
+    expect(problems).not.toContain('no break-words')
+    expect(problems).not.toContain('bare truncate')
+  })
+
   it('the contract reddens when a label trades its wrap for a title attribute', () => {
     // Mutation (b): the cheapest wrong fix — keep one clipped line and hang a
     // tooltip on it. A `title` is a hover affordance, and a phone has no hover:
     // #1742 was refused once for exactly this substitution.
     const titled = pageSource.replace(
-      '<span className="whitespace-normal break-words sm:truncate text-foreground">{task.name}</span>',
-      '<span title={task.name} className="whitespace-normal break-words sm:truncate text-foreground">{task.name}</span>',
+      '<span className="min-w-0 whitespace-normal break-words sm:truncate text-foreground">{task.name}</span>',
+      '<span title={task.name} className="min-w-0 whitespace-normal break-words sm:truncate text-foreground">{task.name}</span>',
     )
     expect(titled).not.toBe(pageSource)
     expect(auditLabelSpans(titled).join('\n')).toContain('title= is a tooltip, not a fix')
@@ -186,8 +238,8 @@ describe('dashboard row labels wrap on a phone (#1742, re-landed as #2202)', () 
     // A wrapper at the same indent as its child would be a formatting accident
     // the audit deliberately does not claim to read.
     const wrapped = pageSource.replace(
-      '<span className="whitespace-normal break-words sm:truncate text-foreground">{task.name}</span>',
-      '<button onClick={() => {}}>\n        <span className="whitespace-normal break-words sm:truncate text-foreground">{task.name}</span>\n      </button>',
+      '<span className="min-w-0 whitespace-normal break-words sm:truncate text-foreground">{task.name}</span>',
+      '<button onClick={() => {}}>\n        <span className="min-w-0 whitespace-normal break-words sm:truncate text-foreground">{task.name}</span>\n      </button>',
     )
     expect(wrapped).not.toBe(pageSource)
     expect(auditLabelSpans(wrapped).join('\n')).toContain('wrapped in a link/button')
@@ -198,8 +250,8 @@ describe('dashboard row labels wrap on a phone (#1742, re-landed as #2202)', () 
     // with the old clipping class must not inherit the pass the five existing
     // spans earned.
     const extra = pageSource.replace(
-      '<span className="whitespace-normal break-words sm:truncate text-muted-foreground">{r.source}</span>',
-      '<span className="truncate text-muted-foreground">{src.name}</span>\n              <span className="whitespace-normal break-words sm:truncate text-muted-foreground">{r.source}</span>',
+      '<span className="min-w-0 whitespace-normal break-words sm:truncate text-muted-foreground">{r.source}</span>',
+      '<span className="truncate text-muted-foreground">{src.name}</span>\n              <span className="min-w-0 whitespace-normal break-words sm:truncate text-muted-foreground">{r.source}</span>',
     )
     expect(extra).not.toBe(pageSource)
     expect(auditLabelSpans(extra).join('\n')).toContain('{src.name}: expected 1 label span(s), found 2')

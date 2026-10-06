@@ -290,15 +290,34 @@ def open_dashboard(page, timeout_ms=15000):
     which the geometry check then reports as "nothing overflows", the exact
     shape of a pass that means nothing. If the drawer did not take, retry it.
     """
-    dismiss_dev_overlay(page)
     for attempt in range(3):
+        # Dismissed HERE, inside the loop, not once above it. The overlay is not a
+        # start-up-only artifact in a linked worktree: over a borrowed
+        # `node_modules` it re-fires DURING a load, and this element is `inset-0`
+        # at a z-index above the app, so the click it intercepts is precisely the
+        # drawer's. Dismissed once before the loop, an overlay that arrives after
+        # that moment stood between every one of the three attempts and its
+        # button, Playwright waited its own 30 s action timeout on a click that
+        # could never land, and the pin came back `Timeout … waiting for
+        # get_by_label("Open menu")` having measured nothing — which is why the
+        # same instrument failure landed on a DIFFERENT node in every run of
+        # #2298: a re-firing overlay looks like a random layout regression from
+        # outside. `dismiss_dev_overlay`'s own docstring says the overlay
+        # "swallows every click — including the one that opens the drawer", and
+        # measured 6 of 6 loads of a round worktree carried it.
+        dismiss_dev_overlay(page)
         menu = page.get_by_label("Open menu")
         try:
             if menu.count() > 0 and menu.first.is_visible():
-                menu.first.click()
+                # Bounded by THIS pin's budget, not by Playwright's 30 s default:
+                # three attempts that each wait half a minute for a click that
+                # cannot land is 90 s of wall clock spent before the node says
+                # anything, and under the gate's 8-way load that is how a pin
+                # turns into a rung timeout.
+                menu.first.click(timeout=timeout_ms)
                 item = page.get_by_role("button", name="Dashboard")
                 item.first.wait_for(state="visible", timeout=timeout_ms)
-                item.first.click()
+                item.first.click(timeout=timeout_ms)
         except Exception:
             if attempt == 2:
                 raise

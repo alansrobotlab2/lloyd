@@ -52,6 +52,28 @@ CONTRACT = REPO / "web" / "src" / "components" / "pages" / "DashboardResponsive.
 WRAPPING_BASE = ("whitespace-normal", "break-words")
 VIEWPORT_ELLIPSIS = "sm:truncate"
 
+#: What lets the row reach that wrapping at all, and the half #2298 found missing.
+#: Every one of these seven spans is a child of a `flex items-center gap-2` row, and
+#: a flex item with visible overflow has `min-width: auto`, which resolves to its
+#: MIN-CONTENT size — so the row could never get narrower than the longest
+#: unbreakable token in its label. That is also why the defect only exists below
+#: `sm`: `sm:truncate` brings `overflow:hidden`, and an item whose overflow is not
+#: visible takes an automatic minimum of zero, so from 640 px up the same span was
+#: never floored and the desktop dashboard has never shown this.
+#: `break-words` cannot help there: `overflow-wrap: break-word` only breaks a word
+#: that already does not fit its line box, and per CSS Text it changes no intrinsic
+#: size (only `anywhere` and `word-break: break-all` do). Measured on the live tree
+#: at 320 px: a `Recent runs` row 262 px wide carried 277 px of content because its
+#: summary held `bench_027_recall_user_fact_topic_read:`, so the `ml-auto
+#: flex-shrink-0` duration landed with its right edge at x=306 against a section
+#: whose content box ends at 304, and those 2 px reddened
+#: `test_no_section_overflows_its_box_on_a_phone[320]`. `min-w-0` releases the
+#: automatic minimum so the flex algorithm can shrink the label to its share, and
+#: only then does `break-words` have a narrow box to break inside. It is the same
+#: declaration #1685 put on `Panel` for the grid-item version of this rule, pinned by
+#: `tests/test_dashboard_mobile_sizing.py::test_panel_card_is_not_floored_at_its_content`.
+SHRINK_RELEASE = "min-w-0"
+
 #: The seven interpolations #1742 named, parsed out of the vitest contract. Keyed by
 #: what each span renders, never by its class list: the class list is the thing under
 #: test, and a key built from it would move with the regression it must catch.
@@ -253,6 +275,9 @@ def audit_label_spans(source: str, table: list[tuple[str, int]]) -> list[str]:
                     problems.append(f"{label}: no {need}")
             if VIEWPORT_ELLIPSIS not in classes:
                 problems.append(f"{label}: no {VIEWPORT_ELLIPSIS}")
+            if SHRINK_RELEASE not in classes:
+                problems.append(f"{label}: no {SHRINK_RELEASE} — the row cannot "
+                                "shrink the label below its longest token")
             if "truncate" in classes:
                 problems.append(f"{label}: bare truncate still clips below sm")
             if _attr(attrs, "title") is not None:
@@ -363,7 +388,7 @@ def test_the_two_halves_of_the_contract_agree():
     `test_the_span_table_counts_seven_across_two_files` instead.
     """
     ts = CONTRACT.read_text(encoding="utf-8")
-    for need in (*WRAPPING_BASE, VIEWPORT_ELLIPSIS):
+    for need in (*WRAPPING_BASE, VIEWPORT_ELLIPSIS, SHRINK_RELEASE):
         assert f"classes.includes('{need}')" in ts, (
             f"the vitest contract no longer requires `{need}`, so pytest is stricter "
             f"than the frontend's own test: {CONTRACT.name}")
@@ -423,6 +448,80 @@ def test_the_contract_reddens_when_a_span_drops_only_its_viewport_ellipsis():
     joined = "; ".join(audit_label_spans(dropped, _table()))
     assert f"no {VIEWPORT_ELLIPSIS}" in joined, (
         f"`sm:truncate` removed from a row label was not reported: {joined}")
+
+
+def test_the_contract_reddens_when_a_label_drops_only_its_released_minimum():
+    """The #2298 regression, and the one the three #1742 utilities cannot see.
+
+    `whitespace-normal`, `break-words` and `sm:truncate` all stay exactly as shipped
+    in this mutant, so a pin that counts those three keeps reporting green while the
+    row goes back to being floored at the label's min-content — which is precisely
+    how main got red at bca79161: a `Recent runs` row 262 px wide carried 277 px of
+    content (summary `bench_027_recall_user_fact_topic_read:`), and the duration its
+    `ml-auto flex-shrink-0` span holds whole landed at x=306 where the section's
+    content box ends at 304. The complaint must name the row and must be the ONLY
+    one, because the other three utilities are untouched here.
+    """
+    # Token-wise removal, because `min-w-0` is the FIRST class in the shipped
+    # string: a `" min-w-0"` replace would match nothing and the mutant would be
+    # the shipped file, which is how a mutation node ends up asserting nothing.
+    floored = _edit_open_tag(
+        _page(), "{task.name}",
+        lambda tag: re.sub(
+            r'className="([^"]*)"',
+            lambda m: 'className="' + " ".join(
+                c for c in m.group(1).split() if c != SHRINK_RELEASE) + '"',
+            tag, count=1))
+    joined = "; ".join(audit_label_spans(floored, _table()))
+    assert f"no {SHRINK_RELEASE}" in joined, (
+        f"`{SHRINK_RELEASE}` removed from a row label was not reported: {joined}")
+    assert "{task.name}" in joined, f"the failure does not name the row: {joined}"
+    for untouched in (*WRAPPING_BASE, VIEWPORT_ELLIPSIS):
+        assert f"no {untouched}" not in joined, (
+            f"dropping only `{SHRINK_RELEASE}` also complained about `{untouched}`, "
+            f"so the red is not attributable: {joined}")
+    assert "bare truncate" not in joined, (
+        f"a label that still wraps was reported as clipped: {joined}")
+
+
+def test_every_label_sits_in_a_flex_row_beside_a_value_that_stays_whole():
+    """The premise that makes `min-w-0` load-bearing rather than decorative.
+
+    `min-w-0` on a block in ordinary flow does nothing at all — `min-width: auto`
+    already computes to zero there — so a pin that merely requires the class would
+    still pass on a page where the declaration has no job. What gives it one is the
+    row around it: a flex container, and a sibling that refuses to shrink (the
+    right-aligned duration/count, `flex-shrink-0`), which is the element that gets
+    pushed past the card's edge when the label cannot give ground. Read out of the
+    element tree, so a row that stops being flex or loses its right-aligned value
+    reddens HERE, naming the row, instead of leaving `min-w-0` in place as a class
+    that pins an absent mechanism.
+    """
+    masked = _mask(_page())
+    els = list(_elements(masked))
+    premise = {}
+    for key, _count in _table():
+        for start, _attrs, ancestors, _end in _label_spans(masked, key):
+            assert ancestors, f"{key}: a label span has no parent element at all"
+            parent, p_attrs, p_lt = ancestors[-1]
+            sibs = [(_attr(s_attrs, "className") or "").split()
+                    for _s, _n, s_attrs, _anc in els
+                    if _anc and _anc[-1][2] == p_lt and _s != start]
+            premise[f"{key}@{start}"] = {
+                "parent": parent,
+                "row": (_attr(p_attrs, "className") or "").split(),
+                "shrinkers": [s for s in sibs if "flex-shrink-0" in s],
+            }
+    assert len(premise) == 7, f"expected the seven labels, got {len(premise)}"
+    not_flex = {k: v["row"] for k, v in premise.items()
+                if v["parent"] != "div" or "flex" not in v["row"]}
+    assert not not_flex, (
+        f"these labels are not in a flex row, so `{SHRINK_RELEASE}` has nothing to "
+        f"release there and the rule needs re-deriving, not deleting: {not_flex}")
+    no_pusher = {k: v["row"] for k, v in premise.items() if not v["shrinkers"]}
+    assert not no_pusher, (
+        "these rows have no `flex-shrink-0` sibling to hold its width, so the "
+        f"#2298 push-out cannot happen in them and the rule is over-broad: {no_pusher}")
 
 
 def test_the_contract_reddens_when_a_label_trades_its_wrap_for_a_title():

@@ -1314,3 +1314,67 @@ def test_a_seeded_verdict_prints_its_denominators_and_an_error_is_not_a_zero():
     assert "0/0 rendered" in empty, (
         f"a seeded run that asked for nothing prints without its denominator: "
         f"{empty!r}")
+
+
+def test_an_unreachable_drawer_button_raises_within_the_pins_own_budget():
+    """A drawer click that cannot land must cost this pin's budget, not the
+    driver's, and must raise rather than hand back a page with nothing on it.
+
+    `open_dashboard` retries the drawer three times, and until #2298 each attempt
+    called `click()` with no timeout, so a button the browser could see but never
+    reach — a `inset-0` element above it, which is exactly the shape
+    `dismiss_dev_overlay` describes as "swallows every click, including the one
+    that opens the drawer" — cost Playwright's own 30 s action timeout per
+    attempt. Ninety seconds per pin, per viewport, before the node said anything:
+    under the gate's 8-way load that is how the geometry pin became a rung
+    timeout, and it is why the same instrument failure surfaced on a DIFFERENT
+    node in each of the three runs that read #2298's item.
+
+    The stub here is deliberately not the real dashboard and needs no dev server:
+    a labelled menu button under a fixed full-screen cover, so the click is
+    attempted (the button is visible) and can never complete. Both halves are
+    asserted. The elapsed bound is what pins the fix — three attempts bounded by
+    the caller's `timeout_ms` plus the settle between them is under ten seconds
+    here, and the same stub against an unbounded `click()` is ninety — and the
+    message is what pins the honesty: an unreachable drawer must name the drawer
+    rather than return a page that measures zero sections and reads as a verdict.
+    """
+    probe = _load_probe()
+    stub = """<!doctype html><html><body>
+      <button aria-label="Open menu">menu</button>
+      <div style="position:fixed;inset:0;z-index:2147483647"></div>
+      <script>
+        document.querySelector('button').addEventListener('click', () => {
+          document.body.insertAdjacentHTML('beforeend',
+            '<button>Dashboard</button>' + '<section></section>'.repeat(3));
+        });
+      </script>
+    </body></html>"""
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch()
+        except Exception as exc:
+            why = f"{dp.BROWSER_MISSING}: {str(exc)[:120]}"
+            PINS.note(why)
+            pytest.skip(why)
+        try:
+            ctx = browser.new_context(viewport={"width": 390, "height": 844},
+                                      is_mobile=True, has_touch=True)
+            try:
+                page = ctx.new_page()
+                page.set_content(stub)
+                started = time.monotonic()
+                with pytest.raises(Exception) as raised:
+                    probe.open_dashboard(page, timeout_ms=1200)
+                elapsed = time.monotonic() - started
+            finally:
+                ctx.close()
+        finally:
+            browser.close()
+    assert elapsed < 20.0, (
+        f"three bounded attempts took {elapsed:.1f}s: the drawer click is back to "
+        "waiting Playwright's 30 s action timeout, which is how one unreachable "
+        "button turns a geometry pin into a gate-rung timeout")
+    assert "Open menu" in str(raised.value), (
+        f"the failure does not name the drawer it could not open, so a caller "
+        f"reading the message cannot tell it from a layout verdict: {raised.value}")
