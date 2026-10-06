@@ -152,3 +152,21 @@
 # narrows a source is reviewable. Scoped to this one filename, not to `*.json`:
 # a runtime dump dropped here by accident stays ignored.
 !worker_capability_baseline.json
+
+# The eleventh family exists because the tenth family's mechanism ate a round.
+# #2282's probe is calibrated against live measurements (the configured voice's
+# 2.56 s at rms 2250, the two non-utterances at 0.22 s/rms 312 and rms 40), and the
+# first round put them here and `git add`ed the file — which SILENTLY did nothing,
+# because the root `.gitignore` ends `*.json` and no negation covered this name. The
+# test module read the fixture at import time, so the file's absence was not a skip
+# but a COLLECTION ERROR: `tests` rung green on 16 698 passed with this file's nodes
+# never executed, and the review rung graded all six clauses "partial — the pinning
+# node cannot run" for a diff whose production code it had already called correct. An
+# ignored witness is worse than an absent one precisely because the suite stays green.
+# Scoped to this one filename, not to `*.json`: the calibration bytes are authored
+# once, and a runtime JSON of this shape belongs to `~/lloyd-guardian`, never here.
+# `test_the_calibration_fixture_is_tracked_despite_the_root_json_rule` in
+# `tests/test_guardian_tts_speech_probe.py` passes the name through the real
+# mechanism (`git check-ignore`) on every run, because a negation that does not
+# fire is invisible until the round that needed it is refused.
+!tts_speech_probe_calibration.json

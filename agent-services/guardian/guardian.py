@@ -587,7 +587,8 @@ class Guardian:
             and float(ev.get("ts", 0)) >= cutoff
         )
 
-    def recover_service(self, program: str, reason: str) -> tuple[bool, str]:
+    def recover_service(self, program: str, reason: str,
+                        cfg: dict | None = None) -> tuple[bool, str]:
         """Bring one `RECOVERABLE_INFRA` program back, and confirm it by its endpoint.
 
         Not `restart_services`: that one stops and starts `RESTART_ORDER`, which is the
@@ -652,7 +653,38 @@ class Guardian:
             return False, (f"started ({msg}) but {policy.TTS_HEALTH_URL} never answered "
                            f"within {policy.HEALTH_WAIT_TTS:.0f}s "
                            f"(last: {(last or {}).get('kind', 'no probe')})")
-        return True, f"{msg}; {policy.TTS_HEALTH_URL} answering"
+        # The second stage of one verdict, #2282. The endpoint answering is the first
+        # claim and not the one that matters: measured 2026-10-06, `:8090/health`
+        # returned 200 `healthy` in 0.00085 s while every stock-voice synthesis 500'd,
+        # and `_url_for`'s own docstring above says a recovery has to be confirmed by
+        # "the box can speak". The endpoint stage stays exactly where it is because it
+        # is the cheaper question and the more specific answer — a server that never
+        # answers is not a server that cannot speak, and a POST issued during the
+        # four-minute cold compile would be refused at connect time and report the
+        # wrong reason.
+        #
+        # What skipping this costs is not the wording. The `service_recovery` ledger
+        # row is written BEFORE the attempt, `policy.FLAP_HALT_AFTER` is 2 in a 6 h
+        # window, and `_recover_infra` re-speaks on the strength of the True returned
+        # here — so two confirmations of a box that cannot speak lock the guardian out
+        # of the only alert route it has AND advance the replay cursor over the
+        # swallowed alert, while the alert it does send tells a human to run
+        # `supervisorctl start agent-tts`.
+        #
+        # The voice is the caller's config when it has one — the same dict
+        # `_recover_infra` reads off `voiceconfig` for every alert — and the guardian
+        # state dir's `voice.json` otherwise, through the loader the alert worker
+        # itself uses. Either way it is a loaded config, never a name typed here: a
+        # catalog voice like `Vivian` would confirm a capability the alerts do not
+        # have, and that path measures 500 on this box today.
+        cfg = cfg or speak.load_config(self.gdir)
+        try:
+            seconds, rms = speak.confirm_speech(cfg, self.gdir)
+        except speak.SpeechProbeFailed as exc:
+            return False, (f"started ({msg}) and {policy.TTS_HEALTH_URL} answers healthy, "
+                           f"but the box cannot speak: {exc}")
+        return True, (f"{msg}; {policy.TTS_HEALTH_URL} answering, and `{cfg['voice']}` "
+                      f"synthesized {seconds:.2f}s at rms={rms}")
 
     def evaluate_liveness(self, snap: dict) -> tuple[bool, str]:
         for program in self.programs:

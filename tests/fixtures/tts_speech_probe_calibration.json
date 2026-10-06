@@ -1,0 +1,58 @@
+{
+  "_about": "#2282 clause 6 (as amended and ratified): the measurements the recovery speech probe is built from, as committed bytes a test asserts against rather than as prose in a test file. Every stub in tests/test_guardian_tts_speech_probe.py is GENERATED from these numbers, so a floor that stops matching a real measurement fails against bytes in the diff instead of against a sentence nobody re-runs. The root .gitignore ends `*.json`; tests/fixtures/.gitignore carries the one scoped negation that lets these bytes be tracked, which is also the reason the round this replaces was refused: its copy of this file was never in the tree, so its test module errored at collection and nothing was pinned.",
+  "measured_at_utc": "2026-10-06T13:44:00Z",
+  "commands": [
+    "curl -s -o /dev/null -w '%{http_code} %{time_total}\\n' http://127.0.0.1:8090/health",
+    "curl -s -w '%{http_code}\\n' -X POST http://127.0.0.1:8090/v1/audio/speech -d '{\"model\":\"qwen3-tts\",\"voice\":\"Vivian\",\"input\":\"Voice check.\",\"response_format\":\"wav\"}'",
+    "curl -s -X POST http://127.0.0.1:8090/v1/audio/speech -d '{\"model\":\"qwen3-tts\",\"voice\":\"clone:dave_cullen\",\"input\":\"Voice check.\",\"response_format\":\"pcm\"}' | measure s16le rms/duration"
+  ],
+  "health_endpoint": {
+    "url": "http://127.0.0.1:8090/health",
+    "http_status": 200,
+    "status": "healthy",
+    "seconds": 0.000757,
+    "source": "measured 2026-10-06 13:44 UTC on this box",
+    "_why_it_matters": "This is the criterion the pre-#2282 verdict rested on, satisfied in under a millisecond by a server that simultaneously rejects a whole class of speech requests. It is why an endpoint answer is not a recovery."
+  },
+  "configured_voice": {
+    "voice": "clone:dave_cullen",
+    "model": "qwen3-tts",
+    "sample_rate": 24000,
+    "http_status": 200,
+    "seconds": 2.56,
+    "rms": 2250,
+    "peak": 22144,
+    "source": "measured 2026-10-06 09:39 UTC on this box: 2.56 s of s16le at 24000 Hz, rms 2250, peak 22144",
+    "_why_it_matters": "The probe's accepted arm has to look like this, because this is the only request shape Alan's speakers depend on. The rms here is what the 200 floor is measured against: an 11x margin, so the floor rejects silence without becoming a second alarm for a voice merely quieter than dave_cullen."
+  },
+  "floors": {
+    "min_seconds": 0.5,
+    "min_rms": 200,
+    "_why": "0.5 s sits between the class of 200-with-a-stub-body it must reject (0.22 s, 0.30 s measured on this box the same minute) and the utterance it must let through (2.56 s): 1.7x of margin below, 5x above. 200 rms is below every real utterance measured here and far above digital silence."
+  },
+  "rejected": [
+    {
+      "shape": "a 200 whose body is a stub: long enough to be a container, too short to be an utterance",
+      "seconds": 0.22,
+      "rms": 312,
+      "source": "measured 2026-10-06 on this box (duration and rms both real); a second non-utterance measured 0.30 s",
+      "fails": "min_seconds",
+      "_why_it_matters": "It CLEARS the rms floor, so a single-check probe lets it through. This row is the reason there are two checks."
+    },
+    {
+      "shape": "a full-length stream of near-digital silence",
+      "seconds": 2.56,
+      "rms": 40,
+      "source": "constructed: the accepted row's duration with an rms below the floor. Not a capture; no such stream has been measured on this box, and the row is here to pin the check, not to claim an incident.",
+      "fails": "min_rms",
+      "_why_it_matters": "It CLEARS the duration floor. The mirror image of the row above."
+    }
+  ],
+  "endpoint_that_500s": {
+    "voice": "Vivian",
+    "http_status": 500,
+    "error": "does not support generate_custom_voice",
+    "source": "measured 2026-10-06 on this box",
+    "_why_it_matters": "A standing capability mismatch (#2281), not a fault class. It is why the probe asks for cfg[\"voice\"] and never a catalog voice: a probe written against `Vivian` would alarm every single day on a box whose speakers work fine."
+  }
+}

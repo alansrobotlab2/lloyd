@@ -1499,7 +1499,16 @@ def _tts_recovery_guardian(tmp_path, monkeypatch, *, endpoint_answers, restarts_
     """A Guardian whose only real behaviour is `recover_service`, with supervisord and
     the endpoint both recorded. `probes.wait_healthy` keeps the real signature —
     `on_tick=` included — so the confirmation crosses the same seam the backend's
-    post-restart check does."""
+    post-restart check does.
+
+    The speech stage #2282 added AFTER the endpoint is stubbed here, and the node that
+    removes that stub is `tests/test_guardian_tts_speech_probe.py`. Without it these three
+    endpoint nodes pass only by synthesising 2.56 s of real audio through the configured
+    `clone:dave_cullen` against the live :8090 — green on this box, red on a box with the
+    model not loaded, and a green that depends on a running model is not a pin. The numbers
+    are the ones `tests/fixtures/tts_speech_probe_calibration.json` commits, and they arrive
+    as the plain return value `speak.confirm_speech` measures, not as PCM: which half of the
+    confirmation the stub is standing in for is exactly what these nodes are NOT about."""
     import types
 
     import guardian as G
@@ -1521,6 +1530,9 @@ def _tts_recovery_guardian(tmp_path, monkeypatch, *, endpoint_answers, restarts_
     g.heartbeat = lambda state, extra=None: g.heartbeats.append((state, extra or {}))
     waited: dict = {}
 
+    monkeypatch.setattr(G.speak, "confirm_speech",
+                        lambda cfg, state_dir=None: (2.56, 2250))
+
     # The real signature (`probes.py:90`: `interval=1.0, on_tick=None`). A fake
     # whose extra keyword is named `pause` accepts the caller's `on_tick=` by
     # accident and would not notice a caller that stopped passing it.
@@ -1538,7 +1550,10 @@ def test_a_down_synthesiser_is_restarted_and_confirmed_by_its_endpoint(tmp_path,
                                                                       monkeypatch):
     """Clause 3, the green path: the supervisor call is addressed to the program's own
     name and not to a `RESTART_ORDER` member, and the restart is not called recovered
-    until `:8090` answers — the state-does-not-prove-serving rule #1816 settled."""
+    until `:8090` answers — the state-does-not-prove-serving rule #1816 settled. Since
+    #2282 the endpoint is the FIRST of two confirmations and this node's helper stubs the
+    second, so what is pinned here is the endpoint half and the supervisor addressing; the
+    speech half is pinned in `tests/test_guardian_tts_speech_probe.py`."""
     g, sup, waited = _tts_recovery_guardian(tmp_path, monkeypatch, endpoint_answers=True)
 
     ok, detail = g.recover_service("agent-tts", "agent-tts: STOPPED")

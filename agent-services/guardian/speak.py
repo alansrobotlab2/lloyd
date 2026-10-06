@@ -755,6 +755,107 @@ def synthesize(text: str, cfg: dict, state_dir: Path | None = None) -> bytes | N
         return _read_bounded(resp, cfg, state_dir)
 
 
+def _pcm_rms(pcm: bytes) -> int:
+    """Root-mean-square of an s16le stream, on the 0-32767 scale, in whole numbers.
+
+    `array` and not numpy, because `speak.py` imports only the standard library —
+    numpy arrives in the shaped path through the shaping module, and a probe that
+    needed it would fail on exactly the interpreter that already has to fall back
+    there. A trailing odd byte is not a sample and is not counted.
+    """
+    samples = array.array("h")
+    samples.frombytes(pcm[: len(pcm) - (len(pcm) % 2)])
+    if not samples:
+        return 0
+    return int(round(math.sqrt(sum(float(s) * s for s in samples) / len(samples))))
+
+
+# ── The recovery speech probe (#2282) ──────────────────────────────────────
+# `recover_service` used to call an `agent-tts` recovery confirmed the moment
+# `:8090/health` answered `healthy`, and measured 2026-10-06 that is a claim about
+# a different thing than the one that matters: `/health` answered 200 in 0.00085 s
+# while stock-voice `POST /v1/audio/speech` returned 500. `guardian.py::_url_for`
+# already says so — "'the supervisor says it is up' and 'the box can speak' are
+# different claims … a recovery has to be confirmed by the second" — and the second
+# is what this asks. It is not a new subsystem: one POST through the same
+# `synthesize` the alerts use, measured by `_pcm_seconds` and `_pcm_rms` here, and
+# two floors.
+#: The canned utterance. Twelve characters, because the probe is a claim about the
+#: machine and not an announcement: every character is audio the guardian must
+#: receive before it can answer, and `_read_bounded` CUTS a reply at the config's
+#: `max_audio_seconds` ceiling — a text long enough to approach that ceiling would
+#: report a truncation as a duration, which is a measurement of the bound rather
+#: than of the voice.
+PROBE_TEXT = "Voice check."
+#: The shortest reply that can be an utterance rather than a container: 0.5 s. The
+#: configured voice measured 2.56 s for this text live on 2026-10-06, and the two
+#: non-utterances measured on the same box in the same minute were 0.22 s and 0.30 s,
+#: so the floor sits between the class it rejects and the thing it must let through,
+#: with 1.7x of margin below and 5x above. It exists for the shape `/health` cannot
+#: see: a 200 whose body is a stub.
+PROBE_MIN_SECONDS = 0.5
+#: The quietest reply that is sound and not digital silence, on the int16 scale the
+#: stream arrives on (full scale 32767): 200, an 11x margin under the rms of 2250
+#: measured live for the configured voice, so the floor rejects a silent stream
+#: without becoming a second alarm for a voice merely quieter than dave_cullen. It is
+#: NOT the floor that rejects a stub clip — the 0.22 s one measured rms 312 and would
+#: clear 200 — which is why there are two checks and not one. Measured, not tuned to
+#: a test: every node that asserts a pass quotes a real number over these two.
+PROBE_MIN_RMS = 200
+
+
+class SpeechProbeFailed(Exception):
+    """Why the box could not speak the canned utterance, in a human's words.
+
+    `recover_service` reports this string verbatim as its refusal reason and the
+    ledger keeps it, so it names the failing thing rather than a layer.
+    """
+
+
+def confirm_speech(cfg: dict, state_dir: Path | None = None, *,
+                   synth=synthesize) -> tuple[float, int]:
+    """Speak `PROBE_TEXT` through the configured voice and measure it.
+
+    Returns `(seconds, rms)` of the raw PCM as it came back — before `shape`, which
+    is deliberate: the shaper's own fallback already logs and tolerates a missing
+    scipy, so a recovery that measured shaped audio would be asking whether scipy
+    installed as well as whether the box can speak.
+
+    Raises `SpeechProbeFailed` for any of: the synthesis raising (a refused socket,
+    an HTTP 500, a timeout), no bytes coming back, fewer than `PROBE_MIN_SECONDS`,
+    or an rms under `PROBE_MIN_RMS`. Each reason carries the voice it was asked of,
+    because the same server answers a stock voice and a `clone:` voice
+    differently (#2281's standing 500 on `Vivian`) and a reader has to be able to
+    tell which claim failed.
+
+    `synth` is injectable for the nodes that must exercise the raise and the
+    empty-body shapes without a synthesiser; the default is the real `synthesize`,
+    so the request built is the one an alert builds, and the probe must NOT be
+    shaped or replayed — the recovery probe has no business writing a play queue.
+    """
+    try:
+        pcm = synth(PROBE_TEXT, cfg, state_dir)
+    except Exception as exc:                  # noqa: BLE001 — any failure is a refusal
+        raise SpeechProbeFailed(
+            f"`{cfg.get('voice')}` on {cfg.get('api_url')}: synthesis raised "
+            f"{type(exc).__name__}: {exc}") from exc
+    if not pcm:
+        raise SpeechProbeFailed(
+            f"`{cfg.get('voice')}` on {cfg.get('api_url')}: synthesis returned no "
+            "audio for the probe utterance")
+    seconds = _pcm_seconds(len(pcm), int(cfg["sample_rate"]))
+    if seconds < PROBE_MIN_SECONDS:
+        raise SpeechProbeFailed(
+            f"`{cfg.get('voice')}` on {cfg.get('api_url')}: {seconds:.3f}s of audio "
+            f"for the probe utterance, under the {PROBE_MIN_SECONDS}s floor")
+    rms = _pcm_rms(pcm)
+    if rms < PROBE_MIN_RMS:
+        raise SpeechProbeFailed(
+            f"`{cfg.get('voice')}` on {cfg.get('api_url')}: {seconds:.2f}s of audio "
+            f"at rms={rms}, under the {PROBE_MIN_RMS} floor (silent stream)")
+    return seconds, rms
+
+
 def _load_shaping_module(cfg: dict):
     """Import tts_shaping by absolute path.
 
