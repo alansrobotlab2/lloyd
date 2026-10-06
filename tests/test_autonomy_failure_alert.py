@@ -318,13 +318,18 @@ def _discord_block_on_disk() -> dict:
 
 
 async def test_the_line_is_written_with_discord_home_channel_null(aut):
-    """Clause 5: the note lands on a box whose Discord transport is dead.
+    """Clause 5: the note lands on a box whose Discord transport is unconfigured.
 
-    `app/discord_notify.discord_alert` returns after a warning when
-    `discord.home_channel` or the token is unset (app/discord_notify.py:49-56) —
-    which is precisely why #85's disable alert fired three times in 38 minutes
-    and reached nobody. The premise is read out of `config.yaml`, the file that
-    decides it, and is NOT installed by this test: the first cut asserted
+    History, not live behaviour: before #1592 an unconfigured
+    `app/discord_notify.discord_alert` returned after a warning, which is when #85's
+    disable alert fired three times in 38 minutes and reached nobody — and that was
+    the reason this alert was written straight to the daily note instead of routed
+    through it. Since #1592 the same call appends the refused alarm to the note
+    itself (app/discord_notify.py:131-134), so the null below is a premise about the
+    transport this box ships with, not a claim that an alarm goes unseen.
+
+    The premise is read out of `config.yaml`, the file that decides it, and is NOT
+    installed by this test: the first cut asserted
     `CONFIG["discord"]["home_channel"] is None` two statements after
     `monkeypatch.setitem(discord, "home_channel", None)`, so it graded the
     fixture and could not fail. A premise the test itself writes is not a premise.
@@ -334,7 +339,8 @@ async def test_the_line_is_written_with_discord_home_channel_null(aut):
 
     The run is the 09-16 shape exactly: three sub-30s failures, `max_retries: 3`,
     so the THIRD failure also disables the row and drives the existing disable
-    alert down the dead transport while the note has to land beside it.
+    alert through the unconfigured transport while the fast-failure note has to
+    land beside it.
     """
     from app.discord_notify import _discord_token
 
@@ -387,6 +393,238 @@ async def test_the_fast_failure_line_has_no_discord_code_path_at_all(aut, monkey
 
     assert len(_alert_lines()) == 1, "the note landed"
     assert posted == [], f"the fast-failure alert must not use Discord: {posted}"
+
+
+# ── #2316: the prose beside this alert describes the transport as it is now ─────
+#
+# Two docstrings — `_append_fast_failure_alert`'s in `app/autonomy.py` and this
+# file's `test_the_line_is_written_with_discord_home_channel_null` — told the
+# pre-#1592 drop story as live behaviour (`discord_alert` "logs a warning and
+# returns", so #85's disable alert "reached nobody") and cited
+# `app/discord_notify.py:49-56`/`:52-56` for it. Those ranges are not in
+# `discord_alert` at all: they span the tail of `_missing_transport_halves` and
+# the opening of `_discord_notify_task_complete`, whose own unconfigured return
+# emits no warning whatsoever. The nodes below pin the corrected shape: the story
+# may be told only as marked history, and a line citation of `app/discord_notify.py`
+# inside those two docstrings has to land on a line of the branch it describes,
+# with that branch located from the file rather than restated.
+#
+# The seam is a real one. `app/discord_notify.py` is the alert route of the worker
+# process (`workers/sources/scheduled_task.py`, `workers/fleet_watchdog.py` await
+# `discord_alert`) and `app/autonomy.py` is imported by this test process, so the
+# sentences under test are claims about code that does not run here — reading the
+# docstring string and locating the branch in the other module's source is what
+# crosses it. `tests/test_autonomy_failure_alert.py:1260`'s citation of
+# `app/discord_notify.py:115-117` is CORRECT (the `if not appended:` warning inside
+# `_survive_the_dropped_alert`) and is deliberately outside this scope.
+
+# Phrases that describe `discord_alert` as if it still dropped an alarm on the
+# floor. True of the function as it stood before #1592 and of nothing since, so
+# each is legal in a docstring only inside a sentence that says which state it
+# describes. Matched in both tenses because the corrected prose tells them past.
+# Only the two mechanisms are here. "down the dead transport" is NOT: it is a
+# verdict rather than a mechanism, so it sits in `_CLAIMS_1592_REFUTES` below and
+# is banned outright — a phrase cannot be both conditionally legal and forbidden,
+# which is what the two tables disagreed on when they both carried it.
+_STALE_DROP_CLAIMS = (
+    ("`discord_alert` only logs a warning and returns",
+     re.compile(r"warning and return|returns? after a warning|returned after a warning",
+                re.IGNORECASE)),
+    ("the alert reached nobody", re.compile(r"reached nobody", re.IGNORECASE)),
+)
+
+# The mark that makes one of those phrases legal: the sentence names #1592 as the
+# point the described behaviour stops at.
+_PRE_1592_MARK = re.compile(r"pre-#1592|before #1592|prior to #1592|until #1592",
+                            re.IGNORECASE)
+
+# Rhetoric for the same refuted claim, banned outright instead of marked: the
+# history needs the mechanism (a warning and a `return`), not the verdict word.
+_CLAIMS_1592_REFUTES = (
+    re.compile(r"dead end", re.IGNORECASE),
+    re.compile(r"dead transport", re.IGNORECASE),
+    re.compile(r"only transport", re.IGNORECASE),
+    re.compile(r"(?:would|will|could) reach nobody", re.IGNORECASE),
+)
+
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+_DISCORD_NOTIFY_CITATION = re.compile(r"app/discord_notify\.py:(\d+)(?:-(\d+))?")
+
+
+def _sentences_of(doc: str) -> list[str]:
+    """The docstring's sentences, whitespace-flattened, so a claim is judged whole.
+
+    The flattening is the point, not tidiness: a docstring is wrapped at ~79
+    columns, so the old prose carried "logged a warning\n    and returned" across
+    a line break and a pattern written against one line matched nothing — the node
+    would have waved through exactly the sentence it exists to catch. Rejoin the
+    whitespace first and the wrap is irrelevant, which is what makes the same
+    pattern hold whatever column the author happened to break at.
+    """
+    return [s.strip() for s in _SENTENCE_END.split(" ".join(doc.split())) if s.strip()]
+
+
+def _discord_alert_unconfigured_branch():
+    """`discord_alert`'s unconfigured branch as (first, last) source line numbers.
+
+    Located from `app/discord_notify.py` at test time: the branch opens on the
+    `if not home_channel or not token:` inside `discord_alert` and closes on that
+    branch's own `return`. Nothing here is hard-coded, so a docstring citation that
+    drifts from the code goes red instead of ageing quietly — and the branch has to
+    be the one that hands the alarm to `_survive_the_dropped_alert`, because a
+    locator that matched some other early `return` would certify a stale citation.
+    """
+    from app import discord_notify
+
+    src_lines, start = inspect.getsourcelines(discord_notify.discord_alert)
+    cond_idx = next(
+        (i for i, line in enumerate(src_lines)
+         if line.strip().startswith("if not home_channel or not token:")), None)
+    assert cond_idx is not None, (
+        "`discord_alert` no longer opens its unconfigured path with "
+        "`if not home_channel or not token:`, so the citations this node grades "
+        "have nothing fixed to be measured against")
+    cond_indent = len(src_lines[cond_idx]) - len(src_lines[cond_idx].lstrip())
+    end_idx = next(
+        (i for i in range(cond_idx + 1, len(src_lines))
+         if src_lines[i].strip() and not src_lines[i].strip().startswith("#")
+         and (len(src_lines[i]) - len(src_lines[i].lstrip())) > cond_indent
+         and src_lines[i].strip() == "return"), None)
+    assert end_idx is not None, "the unconfigured branch never returns — find its end"
+    body = "".join(src_lines[cond_idx:end_idx + 1])
+    assert "_survive_the_dropped_alert(" in body, (
+        "the branch this node calls the fallback branch no longer calls "
+        f"`_survive_the_dropped_alert`: {body}")
+    return start + cond_idx, start + end_idx
+
+
+def _assert_drop_story_is_marked_history(doc: str, where: str) -> None:
+    """Shared body of clauses 1 and 3, applied to a docstring read off the object."""
+    assert doc, f"{where} has no docstring to check"
+    sentences = _sentences_of(doc)
+    marked = 0
+    for label, pattern in _STALE_DROP_CLAIMS:
+        for sentence in sentences:
+            if pattern.search(sentence):
+                assert _PRE_1592_MARK.search(sentence), (
+                    f"{label}, stated of live code in {where}: {sentence!r} — after "
+                    "#1592 the unconfigured branch also appends the alarm to the "
+                    "daily note (see `_survive_the_dropped_alert`), so this may "
+                    "only be said inside a sentence marked `before #1592`")
+                marked += 1
+    assert marked, (
+        f"{where} tells no drop story at all. The item asks for the pre-#1592 "
+        "narrative rewritten as past-tense history, not deleted: the reason the "
+        "line was written directly is that this used to be the only branch")
+
+
+def test_the_fast_failure_docstring_only_tells_the_drop_story_as_pre_1592_history():
+    """Clause 1: `app/autonomy.py` may describe the drop only as marked history.
+
+    Reads the function's own `inspect.getdoc`, not a copy of the text, so the node
+    fails when the sentence is edited in place and stays green when it is moved —
+    it is the sentence the next reader of `_append_fast_failure_alert` is told.
+    """
+    _assert_drop_story_is_marked_history(
+        inspect.getdoc(autonomy._append_fast_failure_alert) or "",
+        "app/autonomy.py `_append_fast_failure_alert`")
+
+
+def test_the_home_channel_null_docstring_describes_the_transport_as_it_is():
+    """Clause 3: the tripwire's own docstring states live behaviour correctly.
+
+    Same shared body, second docstring. This is the node whose premise outlived the
+    code it described: `config.yaml` really does still carry `home_channel: null`,
+    and the docstring beside it claimed a `return`-after-a-warning that
+    `discord_alert` has not done since #1592.
+    """
+    _assert_drop_story_is_marked_history(
+        inspect.getdoc(test_the_line_is_written_with_discord_home_channel_null) or "",
+        "tests/test_autonomy_failure_alert.py "
+        "`test_the_line_is_written_with_discord_home_channel_null`")
+
+
+def test_the_discord_notify_citations_in_those_docstrings_land_in_the_drop_branch():
+    """Clause 2: every line citation points at a line of the branch it names.
+
+    Both docstrings, every `app/discord_notify.py:N` or `:N-M` citation, measured
+    against the span `_discord_alert_unconfigured_branch` locates from the source
+    file. The old citations (`:49-56`, `:52-56`) were inside neither `discord_alert`
+    nor its fallback, which is exactly the failure this node cannot be talked out
+    of: it reads the file, not the prose.
+    """
+    first, last = _discord_alert_unconfigured_branch()
+    docs = {
+        "app/autonomy.py `_append_fast_failure_alert`":
+            inspect.getdoc(autonomy._append_fast_failure_alert) or "",
+        "tests/test_autonomy_failure_alert.py "
+        "`test_the_line_is_written_with_discord_home_channel_null`":
+            inspect.getdoc(test_the_line_is_written_with_discord_home_channel_null) or "",
+    }
+    for where, doc in docs.items():
+        found = 0
+        for match in _DISCORD_NOTIFY_CITATION.finditer(doc):
+            low, high = int(match.group(1)), int(match.group(2) or match.group(1))
+            assert first <= low <= high <= last, (
+                f"{where} cites `app/discord_notify.py:{low}-{high}`, but "
+                f"`discord_alert`'s unconfigured branch — the code the sentence is "
+                f"about — is app/discord_notify.py:{first}-{last}")
+            found += 1
+        assert found, (
+            f"{where} cites `app/discord_notify.py` at no line at all; the item "
+            "wants the citation repointed into the branch, not dropped")
+
+
+def test_the_fast_failure_docstring_still_says_why_the_discord_route_is_bypassed():
+    """Clause 4: the surviving reason survives, and nothing refuted replaces it.
+
+    `discord_alert` reaching the note now means "Discord is dead" is no longer a
+    reason for anything, so the bypass has to be justified by what it still buys:
+    this line keeps its own shape instead of arriving as a "Scheduler alert not
+    delivered" alarm line, and `append_daily_alert_line` is the shared writer
+    either way. Both are asserted by the phrases the prose has to carry, and the
+    refuted verdict words are banned outright rather than merely marked.
+    """
+    doc = " ".join(
+        (inspect.getdoc(autonomy._append_fast_failure_alert) or "").split())
+    assert "Scheduler alert not delivered" in doc, (
+        "the bypass has to say what the routed line would have looked like — an "
+        f"alarm line owned by `discord_alert`: {doc}")
+    assert "append_daily_alert_line" in doc and "shared writer" in doc, (
+        f"and that the writer is shared either way: {doc}")
+    assert "durations" in doc, (
+        f"the shape this function owns is the streak's durations: {doc}")
+    for where, text in (
+            ("`_append_fast_failure_alert`", doc),
+            ("`test_the_line_is_written_with_discord_home_channel_null`",
+             " ".join((inspect.getdoc(
+                 test_the_line_is_written_with_discord_home_channel_null)
+                 or "").split()))):
+        for pattern in _CLAIMS_1592_REFUTES:
+            assert not pattern.search(text), (
+                f"{where} still says {pattern.pattern!r} of the transport; since "
+                "#1592 an unconfigured `discord_alert` appends the alarm to the "
+                "daily note, so that verdict is refuted even as history")
+
+
+def test_the_home_channel_null_tripwire_still_reads_its_premise_off_disk():
+    """Clause 5's invisible half: the premise is still a fact about the artifact.
+
+    The assertions of `test_the_line_is_written_with_discord_home_channel_null`
+    must survive a prose-only round untouched, and the one that makes it a tripwire
+    is that `home_channel is None` is read out of `config.yaml` rather than
+    installed by the test. That property lives in the source text, so this pins it
+    there: a later edit that monkeypatches the config instead would otherwise leave
+    the tripwire green while checking nothing.
+    """
+    src = inspect.getsource(test_the_line_is_written_with_discord_home_channel_null)
+    assert "_discord_block_on_disk()" in src, "the premise is still read from disk"
+    assert 'disk.get("home_channel") is None' in src, (
+        "and still asserted as a null, not merely observed")
+    helper = inspect.getsource(_discord_block_on_disk)
+    assert "config.yaml" in helper and "read_text" in helper, (
+        f"the reader itself must open the file: {helper}")
+    assert "write_text" not in helper, "and the reader may not author the premise"
 
 
 # ── #1592: an alarm the Discord transport refuses still has to reach a person ──

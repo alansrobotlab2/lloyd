@@ -3653,15 +3653,22 @@ def _append_fast_failure_alert(task: dict, task_id, durations: list[float]) -> b
     """Write the one line a fast-failing task never had. True if it landed.
 
     Deliberately NOT routed through `app.discord_notify.discord_alert`, which is
-    what the disable alert further below calls: this box carries
-    `discord.home_channel: null` and an empty token, so `discord_alert` logs a
-    warning and returns (app/discord_notify.py:52-56). #85's disable alert
-    therefore "fired" and reached nobody — an alert whose only transport is
-    unconfigured is not an alert, and routing a new one through that transport
-    would inherit the dead end. The daily note is a surface that demonstrably
-    works here: it is the file `app/post_capture._append_daily_note` appends
-    session summaries to, on the same America/Los_Angeles date filename, so the
-    line lands where a person already reads rather than where a webhook would.
+    what the disable alert further below calls. Why it was first written that way
+    is history: before #1592 an unconfigured `discord_alert` only logged a warning
+    and returned, so #85's disable alert "fired" and reached nobody. That is not
+    live behaviour — since #1592 the unconfigured branch logs the warning and hands
+    the message to `_survive_the_dropped_alert` (app/discord_notify.py:131-134),
+    which appends it to today's daily note. The bypass stands on two reasons that
+    hold whatever the transport is configured to do. Routing this line through
+    `discord_alert` would deliver it as a "Scheduler alert not delivered" alarm
+    line carrying an alarm title, and this line is not that: it is a fast-failure
+    sentence naming the task, the streak and the durations, with the run directory
+    at the end. And `append_daily_alert_line` is the shared writer on both routes,
+    so the longer way buys nothing but a second title. The daily note is a surface
+    that demonstrably works here: it is the file
+    `app/post_capture._append_daily_note` appends session summaries to, on the same
+    America/Los_Angeles date filename, so the line lands where a person already
+    reads rather than where a webhook would.
 
     The prose is all that lives here now: the create-or-append it used to do
     inline is `append_daily_alert_line`, shared with the alarm route #1592 added
