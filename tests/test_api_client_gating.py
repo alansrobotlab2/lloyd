@@ -794,13 +794,17 @@ async def _ws_handshake_with_xff(app, path: str, peer: str, xff: str):
 # ── #2090: the docs surface is not part of the non-`/api/` pass-through ───────
 #
 # `app = FastAPI(title="Lloyd Mission Control")` passes no `docs_url`,
-# `redoc_url` or `openapi_url`, so FastAPI mounts its three docs routes at their
-# defaults. None of the three starts with `/api/`, so the pass-through handed them
-# to everyone: measured 2026-10-03 from the box's own LAN address 192.168.50.108,
-# `/openapi.json` answered 200 with 90,972 bytes — `"title": "Lloyd Mission
-# Control"` and 129 paths, the whole route map of Mission Control — on the same
-# connection on which `/api/sessions` was refused 403. `/docs` and `/redoc` are
-# the browsable renderings of that same document.
+# `redoc_url` or `openapi_url`, so FastAPI mounts its four docs routes at their
+# defaults — the three the URL kwargs name, plus the OAuth2 redirect page
+# `FastAPI.setup()` registers by itself whenever `openapi_url` and `docs_url` are
+# both set (#2312). None of the four starts with `/api/`, so the pass-through handed
+# them to everyone: measured 2026-10-03 from the box's own LAN address
+# 192.168.50.108, `/openapi.json` answered 200 with 90,972 bytes — `"title": "Lloyd
+# Mission Control"` and 129 paths, the whole route map of Mission Control — on the
+# same connection on which `/api/sessions` was refused 403. `/docs` and `/redoc` are
+# the browsable renderings of that same document, and on 2026-10-06
+# `/docs/oauth2-redirect` answered 200 with FastAPI's own 3,012-byte redirect page
+# from that socket while those three were already answering 404.
 #
 # The deny is in `ApiPeerGate` (`server.DOCS_PATHS`), not in the `FastAPI(...)`
 # kwargs, because `scripts/automod/canary.py:192` GETs `/openapi.json` over
@@ -811,7 +815,32 @@ async def _ws_handshake_with_xff(app, path: str, peer: str, xff: str):
 
 DOCS = [pytest.param("/openapi.json", id="openapi"),
         pytest.param("/docs", id="docs"),
-        pytest.param("/redoc", id="redoc")]
+        pytest.param("/redoc", id="redoc"),
+        pytest.param("/docs/oauth2-redirect", id="oauth2-redirect")]
+
+
+def _served_marker(path: str) -> str:
+    """The text an honest 200 from `path` must contain — per path, not app-wide.
+
+    Three of the four docs routes serve a document OF THIS APP, so the app title is
+    their positive control: without it, the "the title is absent from the denial"
+    asserts below would be satisfied by any empty page and would stop detecting a
+    leak. The fourth is not a document of this app. `/docs/oauth2-redirect` is
+    FastAPI's fixed redirect page — `<title>Swagger UI: OAuth2 Redirect</title>`,
+    3,012 bytes measured over loopback, and zero occurrences of `"Lloyd Mission
+    Control"` anywhere in it — so an app-title control on that one path fails while
+    the route is serving perfectly well.
+
+    That is the trap in reusing the shared `DOCS` list for the loopback half: the
+    honest-looking fix for the resulting red is to relax the assert to a bare 200,
+    and a 200 with no content claim is a positive control that has stopped being
+    one — the untrusted half would then be comparing a real page against a refusal
+    it cannot tell from an empty serve. So the marker travels with the path, the
+    title stays asserted on the three that embed it, and the redirect page is
+    pinned by the one string only it can produce.
+    """
+    return "Swagger UI: OAuth2 Redirect" if path == "/docs/oauth2-redirect" \
+        else server.app.title
 
 #: A path with no route anywhere, so "what a refusal is supposed to look like" is
 #: measured against the app rather than asserted from a literal.
@@ -840,15 +869,21 @@ async def test_an_untrusted_peer_cannot_read_the_docs_surface(peer, path):
 
     A non-200 alone would be a thin claim, so the body is asserted on both sides:
     the denial must carry neither the OpenAPI `paths` object nor the app title
-    that all three served responses embed, and the *same* path from loopback in
-    the same client round must still embed that title — the positive control that
-    keeps the absence assertions from being vacuous. The denial is additionally
-    compared to the app's own 404 for `NO_ROUTE`, byte for byte with its status:
-    the docs surface disappears for this peer exactly like a path that does not
-    exist, so closing it does not hand over a better oracle than it already had.
-    `REFUSAL_DETAIL` is asserted *absent* on purpose — it names `/api/*`, and
-    quoting it here would tell a LAN peer that a gated docs route is behind the
-    denial, which is the thing being hidden.
+    that three of the four served responses embed, and the *same* path from
+    loopback in the same client round must still embed that path's own marker — the
+    positive control that keeps the absence assertions from being vacuous. The
+    denial is additionally compared to the app's own 404 for `NO_ROUTE`, byte for
+    byte with its status: the docs surface disappears for this peer exactly like a
+    path that does not exist, so closing it does not hand over a better oracle than
+    it already had. `REFUSAL_DETAIL` is asserted *absent* on purpose — it names
+    `/api/*`, and quoting it here would tell a LAN peer that a gated docs route is
+    behind the denial, which is the thing being hidden.
+
+    The `oauth2-redirect` instance is #2312 clause 2: `/docs/oauth2-redirect`
+    from `192.168.50.77` and `203.0.113.9` must answer the same 404 and the same
+    22 bytes `NO_ROUTE` answers, and its loopback control is the OAuth2 page's own
+    title rather than the app's (`_served_marker`), because that page never carried
+    the app title and the marker assert is what proves a real page is being served.
     """
     async with _client(peer) as client:
         refused = await client.get(path)
@@ -877,27 +912,40 @@ async def test_an_untrusted_peer_cannot_read_the_docs_surface(peer, path):
     assert served.status_code == 200, (
         f"the {peer} assertions above prove nothing unless loopback still gets the "
         f"page: {path} returned {served.status_code}")
-    assert server.app.title in served.text, (
-        f"{path} from loopback no longer embeds the app title, so the absence "
-        "assertions above are not detecting a leak, only an empty page")
+    assert _served_marker(path) in served.text, (
+        f"{path} from loopback no longer embeds the text an honest serve of it "
+        "carries, so the absence assertions above are not detecting a leak, only "
+        "an empty page")
 
 
 @pytest.mark.parametrize("path", DOCS)
 @pytest.mark.parametrize("peer", TRUSTED, ids=["loopback", "tailnet"])
 async def test_a_trusted_peer_still_reads_the_docs_surface(peer, path):
-    """#2090 clause 3: loopback keeps the route, because the loop probes it.
+    """#2090 clause 3, and #2312 clause 3: trusted peers keep all four routes.
 
     `scripts/automod/canary.py:192` GETs `/openapi.json` on the candidate backend
     and records an error unless the status is 200, which `rung_canary_boot` turns
     into a refused round — so a loopback 200 here is what keeps the self-mod loop
     bootable, and the tailnet half is the browser that still wants the page.
+    `TAILNET` is 100.93.123.77, inside the default `100.64.0.0/10`.
+
+    The content claim is `_served_marker(path)`, not the app title, precisely so
+    that this node can be parametrized over all four paths without weakening
+    anything: the app title is still asserted on the three that embed it, the
+    OpenAPI `paths` object only on the one that is the document itself, and the
+    fourth path — FastAPI's own redirect page, which contains no app title at all
+    — is asserted to carry the `<title>` only it has. Closing `/docs/oauth2-redirect`
+    for untrusted peers while breaking it for the loop and the tailnet would be a
+    regression this node catches on the `[oauth2-redirect]` instances.
     """
     async with _client(peer) as client:
         r = await client.get(path)
 
     assert r.status_code == 200, (
         f"{path} from trusted peer {peer} got {r.status_code}: {r.text[:200]}")
-    assert server.app.title in r.text, f"{path} from {peer} served {r.text[:200]!r}"
+    assert _served_marker(path) in r.text, (
+        f"{path} from {peer} served {r.text[:200]!r}, which lacks the text that "
+        f"proves {path} is being served rather than replaced by something empty")
     if path == "/openapi.json":
         assert isinstance(r.json().get("paths"), dict) and r.json()["paths"], (
             "the boot probe's document no longer carries a paths object, so the "
@@ -950,10 +998,64 @@ def test_the_docs_deny_covers_the_path_the_canary_boot_probe_asks_for():
         f"means the kwargs route crept back in: {sorted(server.DOCS_PATHS)}")
 
 
+#: Paths that look like docs routes and are not one. Starlette matches each member
+#: of `DOCS_PATHS` exactly, so these reach the app and get its own answer — which is
+#: what makes "exact set, not prefix" observable rather than a reading of the source.
+_DOCS_SHAPED_BUT_NOT_DENIED = [
+    pytest.param("/docs/", id="docs-slash"),
+    pytest.param("/docs/oauth2-redirect/", id="oauth2-redirect-slash"),
+]
+
+
+@pytest.mark.parametrize("path", _DOCS_SHAPED_BUT_NOT_DENIED)
+async def test_the_docs_deny_is_four_exact_paths_matched_by_membership(path):
+    """#2312 clause 1: exactly four literals, and the matcher is set membership.
+
+    Two halves, because the clause has two halves. The set itself is pinned by
+    equality — not `in`, not "contains the new path" — so a fifth member fails this
+    node rather than joining the parametrized differentials unnoticed, and so does
+    dropping one of the original three. A `*`, a `?` or a trailing slash inside a
+    member is a prefix rule wearing a set's clothes, so that is asserted too.
+
+    The behavioural half is why the parametrize exists: an exact set and a prefix
+    rule are indistinguishable across every path this gate denies, and differ only
+    on a path that merely starts like one. `path in DOCS_PATHS` answers `/docs/` and
+    `/docs/oauth2-redirect/` by passing them through to starlette, whose
+    `redirect_slashes` 307 (measured on this app, 2026-10-06) is a response this gate
+    never sends; a `startswith` rule would deny both with the 404 body and every docs
+    differential in this file would stay green while it did. `/health` and
+    `/health/deep` are the same claim with a bigger consequence, and they are
+    `test_the_docs_deny_does_not_sweep_in_the_health_probes`.
+    """
+    assert server.DOCS_PATHS == frozenset({
+        "/openapi.json", "/docs", "/redoc", "/docs/oauth2-redirect"}), (
+        f"server.DOCS_PATHS is {sorted(server.DOCS_PATHS)}; the deny is these four "
+        "exact paths and no others — #2312 names a fourth literal precisely because "
+        "the rule must not become a prefix")
+    assert all(not p.endswith(("/", "*")) and "?" not in p
+               for p in server.DOCS_PATHS), (
+        f"a member of DOCS_PATHS is shaped like a subtree, not a route: "
+        f"{sorted(server.DOCS_PATHS)}")
+
+    async with _client(LAN) as client:
+        r = await client.get(path)
+
+    assert r.status_code == 307, (
+        f"{path} from an untrusted peer got {r.status_code} {r.text[:120]!r}, not "
+        "starlette's own 307 redirect: the docs deny has stopped matching these "
+        "paths by exact membership and is matching a prefix")
+
+
 @pytest.mark.parametrize("path", ["/health", "/health/deep"], ids=["health", "health-deep"])
 @pytest.mark.parametrize("peer", UNTRUSTED, ids=["lan", "public"])
 async def test_the_docs_deny_does_not_sweep_in_the_health_probes(serving, path, peer):
-    """#2090 clause 4: the deny is three exact paths, and the watchdog survives.
+    """#2090 clause 4, and #2312 clause 4: the deny is four exact paths now, and
+    the watchdog survives either way.
+
+    A fourth member is what makes this node worth re-reading rather than leaving
+    alone: the reason the deny is exact-path rather than prefix-shaped is these two
+    probes, and a widening that traded the redirect page for the guardian's health
+    signal would still show up green on every docs assertion in this file.
 
     200, not merely "not 403", and with the health payload in the body: the
     guardian and the promoter's idle gate poll `/health` from this box and a
@@ -1010,6 +1112,12 @@ async def test_the_docs_deny_decides_on_the_peer_the_producer_rewrote(
     exactly what `scripts/automod/canary.py:192` sends over a loopback socket —
     must still get the page. The rewrite is also asserted *not* to reach the health
     probe, which the guardian polls from this box with no forwarding header at all.
+
+    Both content claims are `_served_marker(path)`-shaped rather than the app title,
+    which strengthens rather than relaxes them for the new fourth path: what is
+    asserted absent from the Vite-refused response is the very text that path serves
+    when it is served, so for `/docs/oauth2-redirect` the refusal is checked against
+    the OAuth2 page and not against a title that page never carried.
     """
     async with _client(LOOPBACK, producer_stack) as client:
         via_vite = await client.get(path, headers={"X-Forwarded-For": LAN})
@@ -1019,11 +1127,11 @@ async def test_the_docs_deny_decides_on_the_peer_the_producer_rewrote(
     assert via_vite.status_code == 404, (
         f"{path} through the producer with XFF {LAN} returned "
         f"{via_vite.status_code}: a LAN browser behind Vite still reads it")
-    assert server.app.title not in via_vite.text, via_vite.text[:200]
+    assert _served_marker(path) not in via_vite.text, via_vite.text[:200]
     assert same_host.status_code == 200, (
         f"{path} from a same-host client with no forwarding header got "
         f"{same_host.status_code}: canary.py's boot probe would report an error")
-    assert server.app.title in same_host.text, same_host.text[:200]
+    assert _served_marker(path) in same_host.text, same_host.text[:200]
     assert health.status_code == 200, (
         f"/health through the producer with XFF {LAN} got {health.status_code}: "
         "the docs deny must not follow the rewrite onto the watchdog probe")
@@ -1049,4 +1157,36 @@ async def test_a_websocket_scope_at_a_docs_path_is_never_accepted(reached):
         "http-scope only, and an untrusted upgrade is refused by the gate's "
         "`websocket.close` path or the router's own no-route close, never by an "
         "OpenAPI-shaped body")
+    assert reached == []
+
+
+async def test_a_websocket_scope_at_the_oauth2_redirect_path_is_never_accepted(reached):
+    """#2312 clause 5: the new denied path is http-only in both directions.
+
+    `/docs/oauth2-redirect` is now a member of `DOCS_PATHS`, and the deny that
+    covers it tests `scope_type == "http"`, so a websocket scope at that path is
+    passed through by the same branch that passes every other non-`/api` websocket
+    scope. That is only safe if nothing is listening there, and it is what this node
+    measures rather than assumes: the upgrade is never accepted, so no handler is
+    entered and the page is not reachable over a websocket either.
+
+    The second assert is the protocol half of the same fact. A gate that "fixed" the
+    gap by sending its 404 body into the websocket scope would produce an
+    `http.response.start`, which an ASGI server treats as a bug rather than a refusal
+    — so the claim is not merely "not accepted" but "never answered as if it were an
+    HTTP request". `/openapi.json` gets the same pair of asserts in
+    `test_a_websocket_scope_at_a_docs_path_is_never_accepted`; this is the fourth path
+    joining it, and `reached == []` again proves the recorder saw no route.
+    """
+    types, sent = await _ws_handshake(server.app, "/docs/oauth2-redirect", LAN)
+
+    assert "websocket.accept" not in types, (
+        f"an untrusted peer's upgrade to /docs/oauth2-redirect was accepted: "
+        f"{types} {sent[:2]}")
+    assert not any(t.startswith("http.response") for t in types), (
+        f"the gate answered a websocket scope with HTTP messages ({types}): the docs "
+        "deny is http-scope only, and an http.response.* send into a websocket scope "
+        "is a protocol violation, not a refusal")
+    assert not any(t.startswith("websocket.http.response") for t in types), (
+        f"the docs deny answered a websocket handshake ({types})")
     assert reached == []

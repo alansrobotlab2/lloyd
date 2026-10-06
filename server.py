@@ -87,21 +87,38 @@ DEFAULT_TRUSTED_NETWORKS = "100.64.0.0/10"
 # gated by construction, never by an exemption list nobody keeps current.
 PRE_AUTH_PATHS = frozenset({"/health", "/health/deep"})
 
-# The three routes FastAPI mounts at their default URLs when `app = FastAPI(...)`
-# passes no `docs_url`/`redoc_url`/`openapi_url` (#2090). They are not under
-# `/api/`, so the pass-through below handed them to anyone: measured from the
-# office-LAN address on 2026-10-03, `/openapi.json` answered 200 with 90,972 bytes
-# — the title "Lloyd Mission Control" and every one of the 129 paths the backend
-# serves, its route map, parameter shapes and response models — from the same
-# connection on which `/api/sessions` was refused 403. `/docs` and `/redoc` are the
-# browsable renderings of the same document.
+# The four routes FastAPI mounts at their default URLs when `app = FastAPI(...)`
+# passes no `docs_url`/`redoc_url`/`openapi_url` (#2090, and #2312 for the fourth).
+# They are not under `/api/`, so the pass-through below handed them to anyone:
+# measured from the office-LAN address on 2026-10-03, `/openapi.json` answered 200
+# with 90,972 bytes — the title "Lloyd Mission Control" and every one of the 129
+# paths the backend serves, its route map, parameter shapes and response models —
+# from the same connection on which `/api/sessions` was refused 403. `/docs` and
+# `/redoc` are the browsable renderings of the same document.
+#
+# `/docs/oauth2-redirect` is the fourth, and it was missed by the first three
+# because it is not one of the three `FastAPI(...)` URL kwargs: `FastAPI.setup()`
+# registers `swagger_ui_oauth2_redirect_url` — whose signature default is
+# `'/docs/oauth2-redirect'` — as its own route whenever `openapi_url` AND `docs_url`
+# are both set, so turning off either of those two would have closed it as a side
+# effect while `redoc_url` alone would not, and denying only the three named paths
+# did not. Measured on the same socket on 2026-10-06, it
+# answered 200 with 3,012 bytes of FastAPI's fixed redirect page while the other
+# three answered 404. Its severity is the lowest of the four — the page is
+# FastAPI's, carries neither the title nor the route map, and discloses nothing
+# about this deployment — but an existence oracle is exactly what this deny was
+# written to remove, and a sibling that answers 200 where three answer 404 is that
+# oracle: the disclosure is the disagreement, not the bytes.
 #
 # Exact paths, for the same reason `PRE_AUTH_PATHS` is: a looser rule sweeps in the
-# two monitoring probes. FastAPI mounts nothing else at a non-`/api` path, so these
-# three are the whole surface, and a path like `/docs/` is not one of them —
-# starlette matches `/docs` exactly and answers `/docs/` with its own redirect or
-# 404, never with the page.
-DOCS_PATHS = frozenset({"/openapi.json", "/docs", "/redoc"})
+# two monitoring probes. These four are the whole of what `FastAPI.setup()` mounts
+# outside `/api/` — the loopback `/openapi.json` document lists `/health` and
+# `/health/deep` as its only other non-`/api` routes, and both are in
+# `PRE_AUTH_PATHS` — so no fifth path is left to name, and a prefix rule would be
+# both unnecessary and wrong: starlette matches each of these exactly, so a path
+# like `/docs/` or `/docs/oauth2-redirect/` is not one of them and keeps starlette's
+# own 307 or 404 rather than this gate's denial.
+DOCS_PATHS = frozenset({"/openapi.json", "/docs", "/redoc", "/docs/oauth2-redirect"})
 
 #: The denial body: byte-identical to what an unmatched route already returns to
 #: every peer (`{"detail":"Not Found"}`), so refusing these paths from an untrusted
@@ -196,7 +213,7 @@ def _is_trusted_peer(host: str) -> bool:
 # `/openapi.json` on the candidate and appends an error unless it is 200, and
 # `scripts/automod/gate.py:2958` fails `rung_canary_boot` on any such error — so
 # every later round would be refused by a green change. `ApiPeerGate` therefore
-# denies the three paths to untrusted peers instead (`DOCS_PATHS`), which keeps the
+# denies the four paths to untrusted peers instead (`DOCS_PATHS`), which keeps the
 # loopback probe working. Before anyone re-does it the other way: repoint or delete
 # that probe in the same diff, or the gate bites.
 app = FastAPI(title="Lloyd Mission Control")
@@ -293,13 +310,15 @@ class ApiPeerGate:
         client = scope.get("client")
         client_host = client[0] if client else ""
 
-        # The docs surface, for an untrusted peer only, and only over HTTP: these
-        # three are HTTP GET routes, and `app/routers/lsp.py:102` is the app's only
+        # The docs surface, for an untrusted peer only, and only over HTTP: all four
+        # are HTTP GET routes, and `app/routers/lsp.py:102` is the app's only
         # websocket route, so a websocket scope at one of these paths reaches no
         # docs handler to disclose (`test_a_websocket_scope_at_a_docs_path_is_never_
-        # accepted` pins that). Answering `http.response.*` into a websocket scope
-        # would be a protocol violation, which is why this branch does not reuse the
-        # websocket refusal below.
+        # accepted` pins `/openapi.json`, and
+        # `test_a_websocket_scope_at_the_oauth2_redirect_path_is_never_accepted` the
+        # fourth). Answering `http.response.*` into a websocket scope would be a
+        # protocol violation, which is why this branch does not reuse the websocket
+        # refusal below.
         if (scope_type == "http" and path in DOCS_PATHS
                 and not _is_trusted_peer(client_host)):
             logger.warning("api-gate: refused docs surface %s from peer %r",
