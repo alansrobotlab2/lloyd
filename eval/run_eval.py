@@ -55,7 +55,7 @@ from agent_mcp.retrieval import (
     semantic_seeding_record as _semantic_seeding_record,
 )
 from app.kg_store import StoreUnavailable, store
-from app.paths import EVAL_BASELINES_DIR, VAULT_FACTS_ROOT, VAULT_KG_DB
+from app.paths import EVAL_BASELINES_DIR, VAULT_FACTS_ROOT, VAULT_KG_DB, VAULT_ROOT
 # The absolute latency ceiling for THIS run's context, read from the one module
 # that owns it. Before #1129 the runner wrote `latency_ms_avg` into every
 # artifact and nothing anywhere read it, which is how a 708 ms → 4,230 ms step
@@ -70,6 +70,14 @@ try:
     from eval import counterfactual as cf
 except ImportError:  # pragma: no cover - script-dir invocation
     import counterfactual as cf
+# The near-duplicate predicate and the two slot metrics (#2271), imported the same
+# dual-spelling way. Imported hard, not `or None`: the metrics are part of the eval
+# now, and a tree that cannot load the predicate should fail the run loudly rather
+# than report a corpus with no twins.
+try:
+    from eval import dup_detect as _dup
+except ImportError:  # pragma: no cover - script-dir invocation
+    import dup_detect as _dup
 
 # The interval behind every number this file writes or prints (#696). Owned by
 # its own stdlib module rather than restated here, for the reason stated at the
@@ -550,7 +558,9 @@ def _ndcg_at_k(got_docs: list[str], expected_docs: list[str], k: int = 10) -> fl
     return dcg / idcg
 
 
-def _score(query_spec: dict, result: dict, seeds: list[str] | None = None) -> dict:
+def _score(query_spec: dict, result: dict, seeds: list[str] | None = None, *,
+           dup_metrics: dict | None = None,
+           collapse_dups: bool = False) -> dict:
     expected_raw = [str(e) for e in (query_spec.get("expect_entities") or [])]
     expected_entities = [_norm(e) for e in expected_raw]
     expected_doc_raw = [str(d) for d in (query_spec.get("expect_docs") or [])]
@@ -606,7 +616,7 @@ def _score(query_spec: dict, result: dict, seeds: list[str] | None = None) -> di
     fact_matches = [exp for exp in expected_entities if any(exp in fe for fe in fact_entities)]
     fact_entity_recall = (len(fact_matches) / len(expected_entities)) if expected_entities else None
 
-    return {
+    out = {
         "entity_hit": bool(entity_matches),
         "doc_hit": bool(doc_matches),
         "entity_recall": (len(entity_matches) / len(expected_entities)) if expected_entities else None,
@@ -635,7 +645,32 @@ def _score(query_spec: dict, result: dict, seeds: list[str] | None = None) -> di
         # a fact-side write took out of the answer.
         "fact_entities_matched": fact_matches,
         "docs_matched": doc_matches,
+        # ── duplicate-slot metrics (#2271) ── REPORT-ONLY and additive: every
+        # score above is computed before this block, from the same returned slots,
+        # and nothing here sorts, drops, re-ranks or re-scores a slot. A run where
+        # nothing was comparable says so as `dup_slot_n: 0` beside the share, so
+        # "the detector compared nothing" can never read as "the corpus has no
+        # twins"; with two or more slots compared the share is a measured number
+        # (`slot_metrics` in eval/dup_detect.py). Both figures are over the
+        # UNORDERED set, so they are invariant to re-ranking by construction.
+        "dup_slot_share": (dup_metrics or {}).get("dup_slot_share", 0.0),
+        "dup_slot_clusters": (dup_metrics or {}).get("dup_slot_clusters", 0),
+        "superseded_slot_share": (dup_metrics or {}).get("superseded_slot_share", 0.0),
+        "superseded_slot_count": (dup_metrics or {}).get("superseded_slot_count", 0),
+        # how many slots the shipped supersession rule and a recency-only rule
+        # disagree about: the counterfactual the item asked to be recorded, because
+        # recency alone conflates an old-and-current note with a superseded one.
+        "superseded_slot_disagreements":
+            (dup_metrics or {}).get("superseded_slot_disagreements", 0),
+        "dup_slot_n": (dup_metrics or {}).get("dup_slot_n", 0),
+        "dup_slot_unreadable": (dup_metrics or {}).get("dup_slot_unreadable", 0),
+        # the ablation arm's paired record, or None when the arm is off (the
+        # nightly default). See `_collapse_rescore`.
+        "dup_collapse": None,
     }
+    if collapse_dups:
+        out["dup_collapse"] = _collapse_rescore(query_spec, result, seeds, out)
+    return out
 
 
 # The five retrieval knobs below (`graph_rerank`, `rerank_alpha`, `graph_top_k`,
@@ -702,7 +737,9 @@ def run_eval(queries: list[dict], limit: int = 20, expand_graph: bool = True,
              seed_top_k: int = RECALL_SEED_TOP_K,
              djev_rerank: bool = RECALL_DJEV_RERANK,
              djev_rerank_top: int = RECALL_DJEV_RERANK_TOP,
-             counterfactual: bool = True) -> list[dict]:
+             counterfactual: bool = True,
+             report_dups: bool = True,
+             collapse_dups: bool = False) -> list[dict]:
     records = []
     # Frozen perturbation records, loaded once. Absent or short is surfaced per
     # query below as an unscored counterfactual block rather than crashing the
@@ -769,7 +806,15 @@ def run_eval(queries: list[dict], limit: int = 20, expand_graph: bool = True,
         else:
             seeds = [e for e, _ in
                      (_extract_entities_from_query(query) or [])[:seed_top_k]]
-        scoring = _score(spec, result, seeds=seeds)
+        # Read the returned slots and score them, in this order: the metric is
+        # computed from the SAME list `_score` was given, after retrieval, and it
+        # has no path back into the scores. `report_dups=False` is the paired-off
+        # arm of the metric itself, used by tests/test_eval_ci_reporting.py to
+        # prove the stage moves nothing.
+        scoring = _score(spec, result, seeds=seeds,
+                         dup_metrics=(_dup_metrics_for_paths(_doc_paths(result))
+                                      if report_dups else None),
+                         collapse_dups=collapse_dups)
 
         rec = {
             "id": qid,
@@ -864,6 +909,165 @@ def _attach_counterfactual(rec: dict, spec: dict, result: dict, seeds: list[str]
         rec["counterfactual_error"] = f"{type(e).__name__}: {e}"
 
 
+#: The eval-corpus root for one returned slot path. Retrieval answers with a path
+#: RELATIVE TO THE COLLECTION it came from (`skills/foo/SKILL.md`,
+#: `backlog/12-some-finding.md`) — which is why the scorer's own gold labels are
+#: written that way too — so the first segment picks the root: anything under a
+#: vault segment directory resolves inside the vault, and anything else (the
+#: keyword leg can return `app/x.py`, the session leg a `sessions/<d>/<run>.md`)
+#: resolves against the code root. A path that resolves under neither counts as
+#: unreadable; reading it as empty text instead would make an unreadable corpus
+#: measure as a twin-free one, which is the wrong finding to invent.
+def _eval_corpus_root(path: str) -> Path:
+    p = str(path or "").strip().lstrip("/")
+    first = p.split("/")[0] if "/" in p else ""
+    if first and (VAULT_ROOT / first).is_dir():
+        return VAULT_ROOT
+    return LLOYD_CODE_ROOT
+
+
+def _slot_text(path: str):
+    """The text of one returned slot, or None when it cannot be read."""
+    if not path:
+        return None
+    try:
+        return (_eval_corpus_root(path) / path).read_text(errors="replace")
+    except OSError:
+        return None
+
+
+def _slot_metas(paths):
+    """`(metas, texts)` for the slots whose file was readable, in slot order.
+
+    An unreadable slot is dropped from the comparison and counted in
+    `dup_slot_unreadable`, so a share always travels with the set it was divided
+    over (`dup_slot_n`) rather than a denominator that includes notes nobody read.
+    """
+    metas, texts = [], []
+    for p in (paths or []):
+        t = _slot_text(p)
+        if t is None:
+            continue
+        metas.append(_dup.slot_meta(p, t))
+        texts.append(t)
+    return metas, texts
+
+
+def _slot_gold_matcher(gold_docs):
+    """A predicate answering whether one SLOT *is* one of this query's gold docs.
+
+    Slot identity is exact after `_norm` — the same normalisation `_doc_paths`
+    dedupes on — while gold LABELS are substrings, which is exactly why the
+    collapse arm must not use the substring rule as an identity test: a gold label
+    of `memory-` is "satisfied" by every daily note in the run, so a cluster of
+    unrelated dailies would be exempted from collapse on a substring accident.
+    This answers "is this slot the gold document", which is what lets the arm
+    collapse a cluster containing the gold note without ever deleting that note.
+    """
+    gold_norm = [_norm(g) for g in (gold_docs or []) if g]
+
+    def is_gold(path: str) -> bool:
+        np = _norm(path)
+        if not np:
+            return False
+        for g in gold_norm:
+            if np == g or np.endswith("/" + g) or ("/" + np).endswith("/" + g):
+                return True
+        return False
+    return is_gold
+
+
+def _dup_metrics_for_paths(paths):
+    """Both slot metrics over one returned top-K.
+
+    Report-only by construction: it is handed the slot PATHS, reads their text,
+    and returns numbers. It never receives the ordering, the scores, or the list
+    `_score` matches against; clustering is over the unordered set, so no
+    reordering of the same slots moves these figures, and nothing in here can.
+    """
+    metas, texts = _slot_metas(paths)
+    out = _dup.slot_metrics([m["path"] for m in metas], texts)
+    out["dup_slot_unreadable"] = len(paths or []) - len(metas)
+    return out
+
+
+def _collapse_rescore(query_spec: dict, result: dict,
+                      seeds: list[str] | None, base: dict) -> dict:
+    """The paired ablation arm: re-score THIS query with one slot per
+    near-duplicate cluster, at the same slot budget, gold identity kept.
+
+    This is a re-run of the SAME scorer on a shortened document list, not a second
+    scoring path: `_score` is called again on a copy of `result` whose `documents`
+    holds only the kept slots, with the metric block and this arm switched off
+    inside that call. So `doc_hit`, `rr_doc` and `ndcg10` below come from the
+    identical expressions the baseline used, which is what makes the pair
+    comparable — the only difference between the two numbers is which slots were
+    in the list.
+
+    Three properties the arm cannot violate, each pinned by
+    `tests/test_eval_dup_collapse_arm.py`:
+      * `n_slots_out <= n_slots_in`, reported as `slots_freed` and
+        `budget_raised`. One slot per cluster never invents a slot, and the freed
+        slots stay empty rather than refilling from a corpus pool — refilling is a
+        different experiment, one that would change which document the query could
+        have hit at all instead of which slot it was served in.
+      * a gold slot is never dropped. `gold_slots_in`/`gold_slots_kept` and
+        `gold_survived` report it on every query, and where the gold note is the
+        OLDER twin the older twin is the survivor: an arm that collapsed gold into
+        its newer twin would score a loss that is an artefact of the collapse and
+        would be measuring the scorer, not the retrieval.
+      * `dup_slot_share_after` is recomputed on the collapsed set and comes out
+        0.0. That is the arm's own post-condition, reported rather than assumed.
+    """
+    paths = _doc_paths(result)
+    metas, texts = _slot_metas(paths)
+    if len(metas) < 2:
+        # Nothing measured, said plainly: no scores, no freed slots. Gold identity
+        # is trivially intact because nothing was dropped, so `gold_survived` is
+        # reported True here rather than absent — every record of this arm answers
+        # the gold question, and a reader never has to infer it from a missing key.
+        return {"ran": False, "reason": "fewer than two readable slots",
+                "n_slots_in": len(paths), "n_slots_out": len(paths),
+                "slots_freed": 0, "gold_slots_in": 0, "gold_slots_kept": 0,
+                "gold_survived": True, "dup_collapse_error": None}
+    err = None
+    is_gold = _slot_gold_matcher(query_spec.get("expect_docs"))
+    try:
+        res = _dup.collapse_slots([m["path"] for m in metas], metas,
+                                  _dup.pairwise_sims(texts), is_gold)
+        kept, gold_survived = list(res.paths), bool(res.gold_survived)
+    except Exception as e:                                    # noqa: BLE001 — arm optional
+        err, kept, gold_survived = f"{type(e).__name__}: {e}", paths, True
+    keep = set(kept)
+    collapsed = dict(result)
+    collapsed["documents"] = [d for d in (result.get("documents") or [])
+                              if str(d.get("path", "")) in keep]
+    inner = _score(query_spec, collapsed, seeds=seeds)        # metric block + arm off
+    after_paths = [str(d.get("path", "")) for d in collapsed["documents"]]
+    after = _dup_metrics_for_paths(after_paths)
+    return {
+        "ran": True,
+        "doc_hit": inner["doc_hit"], "rr_doc": inner["rr_doc"],
+        "ndcg10": inner["ndcg10"], "doc_recall": inner["doc_recall"],
+        "first_doc_rank": inner["first_doc_rank"],
+        "entity_hit": inner["entity_hit"], "entity_recall": inner["entity_recall"],
+        "fact_entity_recall": inner["fact_entity_recall"],
+        "dup_slot_share_after": after["dup_slot_share"],
+        "n_slots_in": len(paths), "n_slots_out": len(kept),
+        "slots_freed": len(paths) - len(kept),
+        "budget_raised": len(kept) > len(paths),
+        "gold_slots_in": sum(1 for p in paths if is_gold(p)),
+        "gold_slots_kept": sum(1 for p in kept if is_gold(p)),
+        "gold_survived": gold_survived,
+        "baseline": {"doc_hit": base["doc_hit"], "rr_doc": base["rr_doc"],
+                     "ndcg10": base["ndcg10"], "doc_recall": base["doc_recall"],
+                     "entity_hit": base["entity_hit"],
+                     "entity_recall": base["entity_recall"],
+                     "dup_slot_share": base["dup_slot_share"]},
+        "dup_collapse_error": err,
+    }
+
+
 # The seven scored metrics and how each one's run-to-run uncertainty is
 # estimated (#696). A hit/miss rate is a binomial proportion and takes the
 # closed-form Wilson interval; the other five are means of a per-query value
@@ -886,6 +1090,15 @@ CI_METRICS = {
     "mrr_doc": ("rr_doc", "bootstrap"),
     "ndcg10": ("ndcg10", "bootstrap"),
     "fact_entity_recall_avg": ("fact_entity_recall", "bootstrap"),
+    # ── the two duplicate-slot shares (#2271) ── means of a per-query fraction
+    # (a share of returned SLOTS, not a per-query hit/miss), so they take the same
+    # bootstrap interval as `mrr_doc` and `ndcg10` rather than the Wilson form the
+    # hit rates use: a 0.15 share is not "15 of 100 successes". Each per-query
+    # value also travels with `dup_slot_n` — the number of returned slots that were
+    # actually readable and therefore comparable — so a share of nothing never
+    # reads as a clean 0.0. Report-only: see tests/test_eval_ci_reporting.py.
+    "dup_slot_share": ("dup_slot_share", "bootstrap"),
+    "superseded_slot_share": ("superseded_slot_share", "bootstrap"),
 }
 
 
@@ -1436,6 +1649,15 @@ def summarize(records: list[dict], *,
         "mrr_doc": avg(metric_series(records, "mrr_doc")),
         "ndcg10": avg(metric_series(records, "ndcg10")),
         "fact_entity_recall_avg": avg(metric_series(records, "fact_entity_recall_avg")),
+        # The two duplicate-slot shares (#2271), reported beside the five rates they
+        # are offered to explain — `doc_hit_rate` 0.689 against `mrr_doc` 0.341 on
+        # nightly-20261005 is the divergence they measure a candidate mechanism for.
+        # Means over the same per-query values `ci95` below bounds; a query the stage
+        # could not read contributes `dup_slot_n: 0` and no share, so the mean is over
+        # queries that were actually compared. Nothing here reorders or re-scores a
+        # slot: with the stage off these five lines above are byte-identical.
+        "dup_slot_share": avg(metric_series(records, "dup_slot_share")),
+        "superseded_slot_share": avg(metric_series(records, "superseded_slot_share")),
         # ...and each with its 95 % interval and its own denominator (#696).
         "ci95": confidence_intervals(records),
         "latency_ms_avg": avg([r["latency_ms"] for r in records]),
@@ -1825,6 +2047,21 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--no-graph-rerank", dest="graph_rerank", action="store_false",
                     default=RECALL_GRAPH_RERANK,
                     help=f"Disable graph-vote re-ranking (production: {RECALL_GRAPH_RERANK})")
+    ap.add_argument("--no-dup-metrics", action="store_true",
+                    help="skip the duplicate-slot metrics (#2271). The stage is report-only "
+                         "and ON by default: it costs one file read per returned slot plus a "
+                         "pairwise word-5-gram shingle Jaccard over the returned top-K (20 "
+                         "slots, not the corpus). The flag exists to A/B the run's own wall "
+                         "clock, not to switch behaviour — nothing it reads can reorder, drop "
+                         "or re-score a slot.")
+    ap.add_argument("--collapse-dups", action="store_true",
+                    help="paired ablation arm (#2271): ALSO score each query with one slot "
+                         "per near-duplicate cluster — newest front-matter timestamp first, "
+                         "gold identity preserved — at the same slot budget, and record the "
+                         "paired scores beside the slots freed. OFF by default, deliberately: "
+                         "assembly behaviour stays off until this flag's OWN paired run beats "
+                         "the paired baseline on mrr_doc by 0.05 with ndcg10 not lower and "
+                         "doc_hit_rate inside the paired interval. Not the video's numbers.")
     ap.add_argument("--alpha", type=float, default=RECALL_RERANK_ALPHA,
                     help=f"Re-rank alpha: 1.0=pure QMD, 0.0=pure graph (production {RECALL_RERANK_ALPHA})")
     ap.add_argument("--demote-factor", type=float, default=None, help="Daily-log demote factor (default uses module constant 0.4)")
@@ -1926,6 +2163,19 @@ def build_run_config(args: argparse.Namespace) -> dict:
         "semantic_seeding": _semantic_seeding_record(),
         "djev_rerank": args.djev_rerank,
         "djev_rerank_top": args.djev_rerank_top,
+        # #2271's two knobs, recorded as configuration and deliberately NOT terms
+        # of `matches_production_defaults` below: the slot metric is an eval-side
+        # measurement of the returned set, not a recall knob production serves, so
+        # comparing it against a `RECALL_*` constant would be #1000's defect again.
+        # What the artifact owes the reader is which stage produced the numbers.
+        # getattr, not attribute access: a caller holding a hand-built namespace
+        # (test_djev_rerank_arm.py does) has never heard of these knobs, and "did
+        # not ask" means the default — metric on, arm off — not an AttributeError
+        # from a config recorder.
+        "report_dups": not getattr(args, "no_dup_metrics", False),
+        "collapse_dups": getattr(args, "collapse_dups", False),
+        "dup_threshold": _dup.DUP_JACCARD_THRESHOLD,
+        "dup_calibration_agreement": _dup.calibration_agreement(),
         "matches_production_defaults": (
             args.graph_rerank == RECALL_GRAPH_RERANK
             and args.alpha == RECALL_RERANK_ALPHA
@@ -2030,6 +2280,11 @@ def main() -> int:
         djev_rerank=args.djev_rerank,
         djev_rerank_top=args.djev_rerank_top,
         counterfactual=args.counterfactual,
+        # #2271: the slot-duplication stage (on by default, report-only) and the
+        # paired collapse arm (off by default). Both recorded in the artifact by
+        # `build_run_config`, so a night can be asked which of the two it ran.
+        report_dups=not args.no_dup_metrics,
+        collapse_dups=args.collapse_dups,
     )
     # The collection list is resolved HERE for the same reason the ceiling is: only
     # `main` knows which index this run scored, and `summarize` must stay a function

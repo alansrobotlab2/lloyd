@@ -1737,3 +1737,174 @@ def test_the_published_counterfactual_rates_do_not_move_when_the_companion_lands
     # vacuous passes are still passes, and the pinned denominator still holds them.
     assert overall["counterfactual_n_unobserved_pins"] == 3
     assert overall["counterfactual_pinned_rate"] == 0.75
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Duplicate-slot metrics in the scorer (#2271, clauses 2 and 3)
+#
+# `dup_slot_share` and `superseded_slot_share` must appear per query AND in
+# `summary.overall`; a top-K holding two near-identical notes must report a share
+# ABOVE zero, an all-distinct top-K must report exactly 0.0 rather than an absent
+# key (an absent key is a stage that did not run, and would trend as "no twins");
+# and supersession must need a newer note on the SAME topic, never recency alone,
+# with the disagreement against a recency-only rule counted in the record.
+#
+# Slot content is routed through `ev._slot_text`, the one reader the scoring path
+# uses, so no real nightly retrieval is required for the scorer's own behaviour.
+# ═════════════════════════════════════════════════════════════════════════════
+
+_DUP_A = (
+    "The retrieval eval scores whether the gold document is in the returned top "
+    "K and how high it sits, and when those two disagree the cause has never been "
+    "named by any arm of this harness. Duplicate slots are one candidate mecha-"
+    "nism for that divergence, because a twin occupies a slot that could have held "
+    "something else, and the metric measures the share of slots that cost is."
+)
+_DUP_B = (
+    "Wake-word audio depends on the pulse media binding far more than on the "
+    "acoustic models, and an outage blamed on a model is usually a device that "
+    "moved between capture cards. The check is the binding, read directly, before "
+    "anyone is allowed to say anything at all about the models themselves."
+)
+_DUP_C = (
+    "Nightly writers append knowledge notes without a principled forgetting rule, "
+    "so the corpus grows sideways rather than upward and the same finding arrives "
+    "again under a slightly different title a few weeks later. A number for that "
+    "growth is what a retention proposal would need before anyone deletes a file."
+)
+
+
+def _dup_note(title, body, stamp="2026-05-01T00:00:00"):
+    return (f"---\ntags:\n- retrieval-eval\ntimestamp: '{stamp}'\n"
+            f"title: {title}\n---\n\n{body}\n")
+
+
+def _dup_result(*paths):
+    return {"documents": [{"path": p, "citation": p, "snippet": "s"} for p in paths],
+            "entities": [], "facts": [], "graph_facts": [], "vault_facts": []}
+
+
+def _dup_spec(paths, gold=("retrieval",)):
+    return {"id": "dup-scorer", "query": "duplicate slots", "category": "adversarial",
+            "expect_entities": [], "expect_docs": list(gold),
+            "retrieval_result": _dup_result(*paths)}
+
+
+def _dup_scored_with(monkeypatch, content, paths, gold=("retrieval",), **kw):
+    """`_score` one query with slot content served from `content`."""
+    real = ev._slot_text
+    monkeypatch.setattr(ev, "_slot_text", lambda p: content.get(p))
+    try:
+        dm = ev._dup_metrics_for_paths(paths)
+        out = ev._score(_dup_spec(paths, gold), _dup_result(*paths),
+                        dup_metrics=dm, **kw)
+        out["_dup_metrics"] = dm
+        return out
+    finally:
+        monkeypatch.setattr(ev, "_slot_text", real)
+
+
+def test_dup_slot_share_is_positive_when_two_returned_notes_are_near_identical(
+        monkeypatch):
+    """Clause 2, first half: two near-identical notes in the top-K -> share > 0."""
+    paths = ["knowledge/gold-note.md", "knowledge/gold-note-twin.md",
+             "knowledge/wake-word.md"]
+    content = {"knowledge/gold-note.md": _dup_note("gold-note", _DUP_A),
+               "knowledge/gold-note-twin.md": _dup_note("gold-note-twin", _DUP_A),
+               "knowledge/wake-word.md": _dup_note("wake-word", _DUP_B)}
+    out = _dup_scored_with(monkeypatch, content, paths)
+    assert out["dup_slot_share"] > 0.0, "twins in the set must register"
+    # 2 of 3 slots sit in one cluster
+    assert out["dup_slot_share"] == pytest.approx(2 / 3)
+
+
+def test_dup_slot_share_is_exactly_zero_for_an_all_distinct_top_k(monkeypatch):
+    """Clause 2, second half: 0.0 with the key PRESENT, never a missing key.
+
+    An absent key is what a stage that did not run looks like; if it were allowed
+    to read as zero, a broken metric would trend forever as a twin-free corpus.
+    """
+    paths = ["knowledge/wake-word.md", "knowledge/nightly-writers.md",
+             "knowledge/gold-note.md"]
+    content = {"knowledge/wake-word.md": _dup_note("wake-word", _DUP_B),
+               "knowledge/nightly-writers.md": _dup_note("nightly-writers", _DUP_C),
+               "knowledge/gold-note.md": _dup_note("gold-note", _DUP_A)}
+    out = _dup_scored_with(monkeypatch, content, paths)
+    assert "dup_slot_share" in out
+    assert out["dup_slot_share"] == 0.0
+    assert out["superseded_slot_share"] == 0.0
+
+
+def test_both_slot_metrics_are_emitted_per_query_and_in_summary_overall(
+        monkeypatch):
+    """Clause 2's placement half: per-query AND `summary.overall`, both keys."""
+    paths = ["knowledge/gold-note.md", "knowledge/gold-note-twin.md",
+             "knowledge/wake-word.md"]
+    content = {"knowledge/gold-note.md": _dup_note("gold-note", _DUP_A,
+                                                   "2026-01-01T00:00:00"),
+               "knowledge/gold-note-twin.md": _dup_note("gold-note-twin", _DUP_A,
+                                                        "2026-06-01T00:00:00"),
+               "knowledge/wake-word.md": _dup_note("wake-word", _DUP_B,
+                                                   "2026-02-01T00:00:00")}
+    scoring = _dup_scored_with(monkeypatch, content, paths)
+    for key in ("dup_slot_share", "superseded_slot_share"):
+        assert key in scoring, f"{key} missing from the per-query record"
+    rec = {"id": "dup-scorer", "category": "adversarial", "latency_ms": 5.0,
+           "query": "duplicate slots", "seeds_extracted": [],
+           "expected": {"docs": ["gold-note"], "entities": []},
+           "result_summary": {"n_docs": 3, "doc_paths_top10": list(paths)},
+           "scoring": scoring, "error": None}
+    overall = ev.summarize([rec])["overall"]
+    for key in ("dup_slot_share", "superseded_slot_share"):
+        assert key in overall, f"{key} missing from summary.overall"
+        # Both keys are in `CI_METRICS`, so each carries an interval over the same
+        # query set the headline averaged — and `n` is the half worth pinning: an
+        # interval divided over a different query set than the rate it bounds is
+        # #1600's two-denominators bug reopened on the new metrics. The width is
+        # null here on purpose: a one-query bootstrap reports no interval, so this
+        # asserts the denominator and the method, never a fabricated bracket.
+        entry = overall["ci95"][key]
+        assert entry["n"] == 1, f"{key} interval denominator: {entry}"
+        assert entry["kind"] == "bootstrap", f"{key} interval kind: {entry}"
+    assert overall["dup_slot_share"] == pytest.approx(2 / 3, abs=1e-3)  # avg() rounds
+    assert overall["n_queries"] == 1
+
+
+def test_superseded_slot_needs_a_newer_same_topic_note_not_recency_alone(
+        monkeypatch):
+    """Clause 3: an OLD note with no newer same-family note is NOT superseded.
+
+    The returned set holds one old note on one topic and one recent note on a
+    DIFFERENT topic. A recency-only rule would call the old one superseded for
+    being older; the shipped rule needs same-title-family or a shared entity tag
+    first, so the share is 0.0 — and the disagreement count between the two rules
+    is 1, because the run records where they part company.
+    """
+    paths = ["knowledge/gpu-serving.md", "knowledge/wake-word.md"]
+    content = {"knowledge/gpu-serving.md": _dup_note("gpu-serving", _DUP_A,
+                                                     "2025-11-01T00:00:00"),
+               "knowledge/wake-word.md": _dup_note("wake-word", _DUP_B,
+                                                   "2026-09-01T00:00:00")}
+    out = _dup_scored_with(monkeypatch, content, paths)
+    assert out["superseded_slot_share"] == 0.0, (
+        "old-and-current is not superseded: recency alone must not decide")
+    dm = out["_dup_metrics"]
+    assert dm["superseded_slot_disagreements"] == 1, (
+        "the recency-only rule would have flagged slot 0, and the run says so")
+
+
+def test_superseded_slot_fires_on_a_newer_note_in_the_same_title_family(
+        monkeypatch):
+    """The positive half of the same rule, so 0.0 above cannot be vacuity.
+
+    Same title family, newer front-matter stamp: the older slot IS superseded, and
+    this time the two rules agree, so the disagreement count is 0.
+    """
+    paths = ["knowledge/gpu-serving.md", "knowledge/gpu-serving-v2.md"]
+    content = {"knowledge/gpu-serving.md": _dup_note("gpu-serving", _DUP_A,
+                                                     "2025-11-01T00:00:00"),
+               "knowledge/gpu-serving-v2.md": _dup_note("gpu-serving-v2", _DUP_C,
+                                                        "2026-09-01T00:00:00")}
+    out = _dup_scored_with(monkeypatch, content, paths)
+    assert out["superseded_slot_share"] == pytest.approx(0.5)
+    assert out["_dup_metrics"]["superseded_slot_disagreements"] == 0

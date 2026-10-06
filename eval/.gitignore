@@ -1,0 +1,22 @@
+# The root `.gitignore` ends every new JSON in the tree (`*.json`), which is right
+# for runtime data and wrong for one file in this directory.
+#
+# `dup_calibration.json` is the labelled calibration set the retrieval eval's
+# near-duplicate threshold is fitted on (#2271), and it is the artifact an
+# acceptance clause says is committed: the threshold in `eval/dup_detect.py` is a
+# number, and a number with no labelled set behind it is a vibe — a reader who
+# cannot see the 40 pairs and the two disclosed misses cannot check whether 0.6
+# was measured or guessed, and neither can the next round. `tests/test_eval_dup_
+# slot_metric.py::test_committed_calibration_is_at_least_thirty_pairs_and_is_
+# reproduced` re-derives the agreement from the rows on every run, so the
+# committed copy cannot drift from the predicate without the suite going red; it
+# is committed rather than regenerated at test time because regenerating it needs
+# the live vault, which the gate's test run must not read.
+#
+# Scoped to this one filename and not to `eval/*.json`: a runtime dump dropped
+# here by accident stays ignored, which is what the root rule is for. The
+# root file itself is off-limits to the self-modification loop (denied in
+# scripts/automod/spec.py), so a file like this one is the only route that does
+# not end in a human typing `git add -f` for every regenerated calibration.
+# `tests/fixtures/.gitignore` is the same device for the same reason (#2269).
+!dup_calibration.json

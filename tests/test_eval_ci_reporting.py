@@ -280,3 +280,129 @@ def test_a_baseline_the_real_writer_produced_loads_in_the_real_reader(tmp_path):
         finally:
             for f in written:
                 f.unlink()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# The duplicate-slot stage is report-only (#2271, clause 4)
+#
+# With the stage ON by default, a fixture run's `doc_hit_rate`, `mrr_doc`,
+# `ndcg10`, `doc_recall_avg` — and their `<metric>_normalized` /
+# `<metric>_ceiling_kind` companions — must EQUAL the same run's values with the
+# stage switched off. The stage reads slots and never reorders, drops or re-scores
+# one; this is the test that fails the day someone lets it.
+# ═════════════════════════════════════════════════════════════════════════════
+
+_DUP_SHARED = (
+    "The nightly retrieval eval scores whether the gold document is inside the "
+    "returned top K and how high it sits, and when those two figures disagree no "
+    "arm of this harness has ever named the cause. Duplicate slots are one "
+    "candidate mechanism for that divergence, because a twin occupies a slot that "
+    "could have held the document the question actually needed, and the metric "
+    "measures exactly what that share of the returned set costs a run."
+)
+_DUP_OTHER = (
+    "Wake-word audio depends on the pulse media binding far more than it depends "
+    "on the acoustic models, and an outage blamed on a model is usually a capture "
+    "device that moved between cards. The binding is read directly, by name, "
+    "before anyone is permitted to say a word about the models themselves or "
+    "about which of them was loaded into the process at the time."
+)
+_DUP_THIRD = (
+    "Nightly writers append knowledge notes with no principled forgetting rule, so "
+    "the corpus grows sideways instead of upward and one finding arrives again "
+    "under a slightly different title some weeks later. A number attached to that "
+    "growth is precisely what a retention proposal would need before anybody "
+    "deleted a file, and its absence is why nobody has written that proposal."
+)
+_DUP_PATHS = ["knowledge/gold-note.md", "knowledge/gold-note-twin.md",
+              "knowledge/wake-word.md", "knowledge/nightly-writers.md"]
+_DUP_TEXTS = {"knowledge/gold-note.md": _DUP_SHARED,
+              "knowledge/gold-note-twin.md": _DUP_SHARED,
+              "knowledge/wake-word.md": _DUP_OTHER,
+              "knowledge/nightly-writers.md": _DUP_THIRD}
+
+
+def _dup_note(body, stamp):
+    return f"---\ntimestamp: '{stamp}'\n---\n\n{body}\n"
+
+
+def _dup_scoring(monkeypatch, *, report_dups: bool):
+    """One fixture query scored through `_score`, slot content served from a dict.
+
+    `report_dups=False` is what `--no-dup-metrics` produces: `dup_metrics=None`.
+    """
+    stamps = {"knowledge/gold-note.md": "2026-01-01T00:00:00",
+              "knowledge/gold-note-twin.md": "2026-06-01T00:00:00",
+              "knowledge/wake-word.md": "2026-02-01T00:00:00",
+              "knowledge/nightly-writers.md": "2026-03-01T00:00:00"}
+    real = ev._slot_text
+    monkeypatch.setattr(ev, "_slot_text",
+                        lambda p: (_dup_note(_DUP_TEXTS[p], stamps[p])
+                                   if p in _DUP_TEXTS else None))
+    try:
+        spec = {"id": "dup-ci", "query": "duplicate slots",
+                "category": "adversarial", "expect_entities": ["Retrieval Eval"],
+                "expect_docs": ["gold-note"],
+                "retrieval_result": {
+                    "documents": [{"path": p, "citation": p, "snippet": "s"}
+                                  for p in _DUP_PATHS],
+                    "entities": ["Retrieval Eval"], "facts": [],
+                    "graph_facts": [], "vault_facts": []}}
+        res = spec["retrieval_result"]
+        return ev._score(spec, res,
+                         dup_metrics=(ev._dup_metrics_for_paths(_DUP_PATHS)
+                                      if report_dups else None))
+    finally:
+        monkeypatch.setattr(ev, "_slot_text", real)
+
+
+def _dup_overall(scoring):
+    rec = {"id": "dup-ci", "category": "adversarial", "latency_ms": 5.0,
+           "query": "duplicate slots", "seeds_extracted": [],
+           "expected": {"docs": ["gold-note"], "entities": ["Retrieval Eval"]},
+           "result_summary": {"n_docs": len(_DUP_PATHS),
+                              "doc_paths_top10": list(_DUP_PATHS)},
+           "scoring": scoring, "error": None}
+    return ev.summarize([rec])["overall"]
+
+
+def test_the_duplicate_slot_stage_changes_no_scored_metric(monkeypatch):
+    """Clause 4: ON and OFF give the same five scores AND the same companions."""
+    on, off = (_dup_scoring(monkeypatch, report_dups=b) for b in (True, False))
+    for key in ("doc_hit", "rr_doc", "ndcg10", "doc_recall", "first_doc_rank",
+                "entity_hit", "entity_recall", "fact_entity_recall"):
+        assert on[key] == off[key], f"{key} moved when the stage was switched on"
+
+    o_on, o_off = _dup_overall(on), _dup_overall(off)
+    for metric in ("doc_hit_rate", "mrr_doc", "ndcg10", "doc_recall_avg"):
+        assert o_on[metric] == o_off[metric], metric
+        assert (o_on[f"{metric}_normalized"], o_on[f"{metric}_ceiling_kind"]) \
+            == (o_off[f"{metric}_normalized"], o_off[f"{metric}_ceiling_kind"]), metric
+        assert o_on["ci95"][metric] == o_off["ci95"][metric], metric
+    # the stage's own numbers are the only thing that differs
+    assert o_on["dup_slot_share"] > 0.0
+    assert o_off["dup_slot_share"] == 0.0, (
+        "stage off reports 0.0 over ZERO slots compared and keeps the key present, "
+        "so a night is never missing a number and never reads twin-free by accident")
+    assert on["dup_slot_n"] > 0 and off["dup_slot_n"] == 0
+
+
+def test_the_stage_cannot_reorder_or_drop_a_slot(monkeypatch):
+    """The mechanism behind clause 4, checked on the list it is handed.
+
+    `_dup_metrics_for_paths` takes a list and returns a dict — it has no way to
+    hand back a different ordering. This asserts the caller's list is untouched and
+    that nothing readable yields `dup_slot_n: 0` (no verdict) rather than a 0.0
+    share that would read as a twin-free corpus.
+    """
+    real = ev._slot_text
+    monkeypatch.setattr(ev, "_slot_text", lambda p: None)
+    try:
+        paths = list(_DUP_PATHS)
+        snapshot = list(paths)
+        out = ev._dup_metrics_for_paths(paths)
+        assert paths == snapshot, "the stage mutated the caller's slot list"
+        assert out["dup_slot_n"] == 0
+        assert out["dup_slot_unreadable"] == len(_DUP_PATHS)
+    finally:
+        monkeypatch.setattr(ev, "_slot_text", real)

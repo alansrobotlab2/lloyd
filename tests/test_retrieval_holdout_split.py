@@ -212,6 +212,16 @@ READERS_ALLOWED = {
     # run_eval.py, which enforces the rule; they keep aggregates only (#1412).
     "eval/recall_topics_merge.py",             # #1456
     "eval/contextual_full_corpus.py",          # #1494
+    # The near-duplicate calibration generator (#2271). It is a writer of a
+    # committed artifact whose rows are whole note bodies, and the only way it can
+    # keep a held-out id out of that artifact is to ask the leg which ids are
+    # reserved — `redact_holdout` imports the module to read `reserved_ids()` and
+    # the filename, and copies nothing else. A generator that could not name the
+    # leg could not respect the rule either, so this entry is what makes the rail
+    # enforceable rather than an exception to it: the artifact it produces is
+    # checked by the next test down, and `test_no_reserved_id_appears_in_any_
+    # other_tracked_file` still covers this file's own rows.
+    "eval/calibrate_dup_threshold.py",
 }
 
 
