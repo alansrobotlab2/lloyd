@@ -4071,3 +4071,140 @@ def test_a_raw_row_with_no_pre_strip_field_still_gates_on_title_and_summary(
     assert [i.gate_description for i in reread] == ["", ""], \
         "a pre-change row must load as carrying no pre-strip text"
     assert [i.id for i in scoring_mod.stage1_filter(reread, profile)] == ["described"]
+
+
+# --- #2314: stage 2 is judged on the text stage 1 gated on -------------------------
+
+# `LINK_FARM_TITLE` + `URL_ONLY_DESCRIPTION` above is the #2241 fixture reused for the
+# other half of that change: `vllm` sits in the pre-strip description and nowhere in the
+# title or the stored summary, so `keyword_score(f"{title} {summary}")` is 0.0 for the
+# shape stage 2 has been reading, and 0.9 (the `ai-llms` weight in `PROFILE_MD`) for the
+# shape the gate reads. Two numbers, one item: which one decides eligibility is the whole
+# of #2314.
+#
+# A second pair for the off switch, matching ONLY the 0.2 `Wearables` topic
+# (`imu`, `wrist`) — a weight at or below `LLM_KEYWORD_THRESHOLD`, so no call is owed
+# whoever's copy the keyword sat in. Neither string contains a keyword of the 0.4, 0.7 or
+# 0.9 topics, which is what makes the "no call" below a threshold verdict and not an
+# ordering accident.
+LOW_WEIGHT_TITLE = "Telemetry notes from the bench"
+LOW_WEIGHT_PROSE = "imu + wrist telemetry from the bench rig"
+LOW_WEIGHT_DESCRIPTION = "Sensor notes: " + LOW_WEIGHT_PROSE
+
+
+def test_a_gate_only_keep_is_put_to_the_model_rather_than_keeping_the_stand_in(
+        redirect_paths):
+    """Clause 1 (#2314): eligibility is decided on the text stage 1 gated on.
+
+    #2241 widened the gate to `item.stage1_text()` and stopped there, so a video kept on
+    the channel's own label reaches stage 2 rated on the stripped summary alone. Measured
+    on the real run that made this load-bearing
+    (`youtube:UCLKPca3kwwd-B59HNr-_lvA:X6l4lpA0_NY`, 2026-10-06): the gate saw 2,148 chars
+    and matched `ai-llms` at weight 1.0, the 498 stored chars score 0.0, 0.0 is not above
+    `LLM_KEYWORD_THRESHOLD`, so the model was never consulted and the row shipped
+    `_keyword_fallback`'s relevance 1 — the only `grade_source: keyword` row of the day's
+    37 survivors, and below `RELEVANCE_FLOOR`. A survivor slot and a grade never taken.
+
+    The three asserts before the call are the premise, so the pass below cannot be a
+    looser gate: the same item is still kept by stage 1, still scores 0.0 on the text
+    stage 2 used to read, and the model stand-in is what supplied the number.
+    """
+    profile = _profile(redirect_paths)
+    item = _item("gate-only", title=LINK_FARM_TITLE, summary="",
+                 gate_description=URL_ONLY_DESCRIPTION)
+
+    assert [i.id for i in scoring_mod.stage1_filter([item], profile)] == ["gate-only"], \
+        "the premise is a stage-1 keep; a dropped item proves nothing here"
+    assert profile_mod.keyword_score(f"{item.title} {item.summary}", profile) == 0.0, \
+        "the stripped text stopped being the shape under test"
+    assert profile_mod.keyword_score(item.stage1_text(), profile) == 0.9, \
+        "the gate text stopped carrying the only match"
+
+    llm = RecordingLLM(relevance=6)
+    scored = scoring_mod.stage2_score([item], profile, llm_call=llm)
+
+    assert len(llm.asked) == 1, "the item was never put to the model"
+    assert scored[0].grade_source == models_mod.GRADE_MODEL, \
+        f"a gate-only keep came back {scored[0].grade_source} again"
+    assert scored[0].relevance == 6, \
+        "the relevance must be the model's grade, not the no-match stand-in of 1"
+    # The object the writer's rows are built from, pinned here so the day-file test below
+    # cannot pass on a rebuild that happens to re-read the raw row (`#2314` clause 4).
+    assert scored[0].gate_description == URL_ONLY_DESCRIPTION
+
+
+def test_a_weight_at_or_below_the_threshold_still_buys_no_call_from_either_copy(
+        redirect_paths):
+    """Clause 2 (#2314): widening the text must not widen the threshold's off switch.
+
+    `keyword_score` is `max(topic weight)` over the topics an item matched, and eligibility
+    is that number `>` `LLM_KEYWORD_THRESHOLD` — the property #2092 documents as
+    "a weight is an off switch, not a dial" (`topics_switched_off`). Reading the wider
+    text must not turn a 0.2 topic into a graded one, whichever copy its keyword sits in,
+    or the switch would be text-shaped rather than profile-shaped.
+
+    The two relevances differ, and that difference is the scope this change did NOT take:
+    `_keyword_fallback` still reads the stripped summary (the owed ruling on #2241), so the
+    item matched only in the pre-strip copy gets the no-match `relevance = 1` while the one
+    matched in its own summary gets `int(round(0.2 * 10))` = 2. Both are `keyword`, and the
+    call count is the clause: zero.
+    """
+    profile = _profile(redirect_paths)
+    stripped = _item("low-weight-stripped", title=LOW_WEIGHT_TITLE,
+                     summary=LOW_WEIGHT_PROSE)
+    pre_strip = _item("low-weight-pre-strip", title=LOW_WEIGHT_TITLE, summary="",
+                      gate_description=LOW_WEIGHT_DESCRIPTION)
+
+    assert [i.id for i in scoring_mod.stage1_filter([stripped, pre_strip], profile)] == \
+        ["low-weight-stripped", "low-weight-pre-strip"], \
+        "both must reach stage 2 as survivors, or 'no call' tests a drop"
+
+    llm = RecordingLLM(relevance=6)
+    scored = scoring_mod.stage2_score([stripped, pre_strip], profile, llm_call=llm)
+
+    assert llm.asked == [], "a topic at or below the threshold must not buy a call"
+    assert [s.grade_source for s in scored] == ["keyword", "keyword"], scored
+    assert [s.relevance for s in scored] == [2, 1], scored
+
+
+def test_a_gate_only_keep_reaches_the_day_file_graded_and_with_its_gate_text(tmp_path):
+    """Clauses 1 and 4 (#2314), across the two boundaries the unit tests cannot.
+
+    `python -m intel_pipeline --score` is the process autonomy task #30 spawns: it
+    re-reads `raw/<date>.jsonl`, scores it, and writes `intel-<date>.jsonl` with one
+    `ScoredItem.to_json()` per line (`__main__.py:150`), which is the only file the writer
+    reads. Two things have to survive that hand-off and both were missing on 2026-10-06:
+    the grade (every one of the day's 37 rows that could only be a model grade was one) and
+    the gate text itself — all 37 rows of `intel-2026-10-06.jsonl` carry
+    `gate_description: ""` while the raw rows hold up to 2,148 chars, because
+    `stage2_score` rebuilds the `ScoredItem` field-by-field and omitted the key, so the
+    dataclass default is what `to_dict` wrote. `ScoredItem.to_dict`/`from_dict` already
+    round-trip it (`models.py:111`, `:163`): a serializer test would pass against a run
+    still dropping it, which is why this one drives the real command and reads the real
+    file. The model here is the same loopback stub the other CLI tests use.
+
+    The stored summary comes back empty as it went in: the widening is of who is asked,
+    never of what is published.
+    """
+    home, feeds = _cli_home(tmp_path)
+    today = _today_str()
+    (feeds / "raw" / f"{today}.jsonl").write_text(
+        _item("gateonly", source="youtube", title=LINK_FARM_TITLE, summary="",
+              gate_description=URL_ONLY_DESCRIPTION).to_json() + "\n")
+
+    day, proc = _run_cli(home, 7, "--score")
+
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    rows = [json.loads(l) for l in
+            (feeds / f"intel-{day}.jsonl").read_text().splitlines() if l.strip()]
+    assert len(rows) == 1, f"{rows}\n{proc.stdout[-2000:]}"
+    row = rows[0]
+
+    assert row["grade_source"] == models_mod.GRADE_MODEL, \
+        f"the gate-only keep shipped {row['grade_source']} again: {row['relevance']}\n" \
+        f"{proc.stdout[-2000:]}"
+    assert row["relevance"] == 7, "the day file must carry the model's grade"
+    assert row["gate_description"] == URL_ONLY_DESCRIPTION, \
+        "the gate text was dropped between the scorer and the day file"
+    assert row["summary"] == "", "the published copy gained the pre-strip description"
+    assert "LLM scored 1 of 1" in proc.stdout, proc.stdout[-2000:]

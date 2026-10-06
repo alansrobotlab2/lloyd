@@ -508,11 +508,32 @@ def stage2_score(
     # Allocation order, caller order out (#2081) — see stage2_allocation_order.
     for index in stage2_allocation_order(items, profile):
         item = items[index]
-        # Combine title and summary for matching
+        # The stripped copy: what the fallback scores, what the prompt shows, what the
+        # writer publishes. Eligibility no longer reads it — see below.
         text = f"{item.title} {item.summary}"
 
         matched_topics = keyword_match(text, profile)
-        kw_score = keyword_score(text, profile)
+        # Whether to ASK is judged on the text stage 1 gated on, not on the stripped
+        # summary (#2314). Since #2241 the gate admits an item on `stage1_text()` — title
+        # plus the pre-strip description where a scanner carries one — so an item kept on
+        # the channel's own label arrives here scoring 0.0 on `text`, which is not above
+        # `LLM_KEYWORD_THRESHOLD`, so it is never a candidate for a call and ships
+        # `_keyword_fallback`'s stand-in with no topic matched at all: relevance 1 on the
+        # recorded instance (`youtube:UCLKPca3kwwd-B59HNr-_lvA:X6l4lpA0_NY`, 2026-10-06,
+        # 2,148 gate chars matching `ai-llms` at weight 1.0 against 498 stored chars
+        # scoring 0.0), the day's only `grade_source: keyword` row of 37, under
+        # `RELEVANCE_FLOOR`. A survivor slot spent on a grade nobody took.
+        #
+        # What moves is only WHO IS ASKED. `keyword_score` stays `max(topic weight)`, so a
+        # topic weighted at or below the threshold still buys no call whichever copy its
+        # keyword sat in — the off switch #2092 documents stays a property of the profile.
+        # What stays on the stripped `summary`: the prompt (`_score_prompt`), the fallback's
+        # own score, project matching, the allocation ranking above, and everything the
+        # writer publishes; the ruling on those three is owed on #2314, not taken here. A
+        # row with no pre-strip copy — every GitHub row, and every YouTube row written before
+        # #2241 — has `stage1_text() == text`, so for those the decision is identical to the
+        # one this line made before the change.
+        kw_score = keyword_score(item.stage1_text(), profile)
         fallback = _keyword_fallback(item, profile)
 
         relevance = fallback["relevance"]
@@ -587,8 +608,17 @@ def stage2_score(
             grade_source=grade_source,
             # Second drop site (#1379): this rebuild is field-by-field, so a field
             # the scanner passes but this omits never reaches
-            # `intel-<date>.jsonl` — the only file the writer reads.
+            # `intel-<date>.jsonl` — the only file the writer reads. `gate_description`
+            # was exactly that on 2026-10-06: `ScoredItem.to_dict` writes the key and
+            # `from_dict` reads it back (`models.py:111`, `:163`), yet all 37 rows of
+            # that day's file carried `""` while their raw rows held up to 2,148 chars,
+            # because the dataclass default is what `to_dict` had to write here. Anyone
+            # then probing the scored file for the text the gate saw read an empty
+            # string and concluded the description was empty — the false 0. The gate text
+            # now reaches the day file, where a reader can see what the item was matched
+            # on; it stays out of `summary`, which is what gets published (#2314).
             published=item.published,
+            gate_description=item.gate_description,
         )
 
     # Three numbers, because they answer three questions: calls made says the

@@ -28,9 +28,10 @@ if str(INTEL_DIR) not in sys.path:
     sys.path.insert(0, str(INTEL_DIR))
 
 from intel_pipeline import body as body_mod  # noqa: E402
+from intel_pipeline import scoring as scoring_mod  # noqa: E402
 from intel_pipeline import state as state_mod  # noqa: E402
 from intel_pipeline import vault_writer as vw_mod  # noqa: E402
-from intel_pipeline.models import ScoredItem  # noqa: E402
+from intel_pipeline.models import FeedItem, ScoredItem  # noqa: E402
 from intel_pipeline.scanners import github_scanner as gh_mod  # noqa: E402
 from intel_pipeline.scanners import youtube_scanner as yt_mod  # noqa: E402
 
@@ -3039,6 +3040,11 @@ URL_ONLY_DESCRIPTION = "\n".join([
     "➡️ Patreon: https://www.patreon.com/channelfolio",
 ])
 
+#: The recorded row's title, under the same name it has in
+#: tests/test_intel_pipeline_scorer.py: no keyword of either test profile occurs in it, so
+#: a stage-1 keep can only come from the description.
+LINK_FARM_TITLE = "Is automation the only way to save US manufacturing?"
+
 
 def test_the_pre_strip_gate_description_reaches_neither_the_summary_nor_the_body():
     """Clause 4 (#2241): giving the gate back the channel's link block must not give
@@ -3065,3 +3071,67 @@ def test_the_pre_strip_gate_description_reaches_neither_the_summary_nor_the_body
     assert rendered == "Scores 8/10: covers the local-inference thread", repr(rendered)
     for mark in ("http", "Subscribe", "vLLM", "channelfolio"):
         assert mark not in rendered, mark
+
+
+def test_widening_who_gets_asked_publishes_the_stripped_summary_and_never_the_gate_text(
+        intel_state, monkeypatch):
+    """Clause 3 (#2314): putting a gate-only keep to the model must not publish what the
+    strip removed.
+
+    #2314 moves stage 2's *eligibility* test onto `item.stage1_text()`. The published copy
+    is a different consumer and stays where #2241 left it: `ScoredItem.summary`, and the
+    note rendered from it, are the stripped body — here the description that
+    `strip_link_footer` returns `""` for, which is the whole reason the field exists. This
+    drives the real scoring pass so the assertion is on the object the writer reads, not on
+    a hand-built `ScoredItem`: if the widening ever leaks into `_score_prompt` or the
+    rebuild, the model or the note starts carrying the link block.
+
+    `grade_source == "model"` is the first assert because it is the premise: without the
+    widening this item is never asked, and a test that only checks the empty summary would
+    pass against the behaviour #2314 is fixing.
+    """
+    monkeypatch.setattr(scoring_mod, "GRADE_STORE", intel_state / "grades.jsonl")
+    profile = {"topics": [{"name": "ai-llms", "weight": 0.9, "keywords": ["vllm"]}]}
+    assert body_mod.clip_body(body_mod.strip_link_footer(URL_ONLY_DESCRIPTION)) == "", \
+        "the fixture stopped being the stripped-to-empty shape"
+
+    prompts: list[str] = []
+
+    def grade(prompt: str) -> str:
+        prompts.append(prompt)
+        return json.dumps({"relevance": 6,
+                           "why": "Scores 6/10: covers the local-inference thread",
+                           "projects": [], "category": "ai-llms"})
+
+    raw = FeedItem(id="youtube:UClinkfarm:linkonly", source="youtube",
+                   title=LINK_FARM_TITLE,
+                   url="https://www.youtube.com/watch?v=linkonly",
+                   summary=body_mod.clip_body(
+                       body_mod.strip_link_footer(URL_ONLY_DESCRIPTION)),
+                   discovered_at="2026-10-06T06:00:00+00:00",
+                   gate_description=URL_ONLY_DESCRIPTION)
+
+    scored = scoring_mod.run_scoring_pipeline([raw], profile, llm_call=grade)
+
+    assert len(scored) == 1, "stage 1 dropped the item the gate is supposed to keep"
+    assert scored[0].grade_source == "model", \
+        "the item was never put to the model, so nothing below is under test"
+
+    assert scored[0].summary == "", repr(scored[0].summary)
+    assert scored[0].gate_description == URL_ONLY_DESCRIPTION, \
+        "the gate text has to survive for the day file, just not into `summary`"
+    # `_score_prompt` still shows the model the stripped summary (`item.summary[:900]`),
+    # so the block it was matched on is not what it is asked to judge.
+    assert len(prompts) == 1, prompts
+    for line in URL_ONLY_DESCRIPTION.splitlines():
+        assert line not in prompts[0], line
+
+    published = _publish(intel_state, scored[0], profile=profile)
+    assert "Scores 6/10" in published, f"nothing was published\n{published}"
+    # The note carries the item's own `[Link](…)` — one URL, the video's. What must not be
+    # there is any line of the block the strip removed, so the assertion is on the lines
+    # themselves and not on the substring `http`, which the video link legitimately has.
+    for line in URL_ONLY_DESCRIPTION.splitlines():
+        assert line not in published, line
+    for mark in ("Subscribe", "Patreon", "Business Inquiries", "vLLM", "channelfolio"):
+        assert mark not in published, f"the note body gained the block: {mark}"
