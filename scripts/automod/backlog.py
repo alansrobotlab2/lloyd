@@ -1258,7 +1258,8 @@ def _pinned_candidates(tok: str):
 
 
 def add_witness_artifact_clause(clauses, text, *, probe=in_git_tree,
-                                artifact_dir: str = WITNESS_ARTIFACT_DIR) -> list[str]:
+                                artifact_dir: str = WITNESS_ARTIFACT_DIR,
+                                route_to_owed: bool = False):
     """One clause asking for the witness bytes, when a named witness has none.
 
     `clauses` is the contract as it stands on the way to the item; `text` is
@@ -1297,14 +1298,27 @@ def add_witness_artifact_clause(clauses, text, *, probe=in_git_tree,
     the basename, and by the under-bound control inside
     `test_a_witness_beyond_the_size_bound_is_skipped_like_an_absent_one` for size.
 
-    Exactly one clause goes on, for the first out-of-tree path in reading
-    order, worded over committed bytes with no time shape — `POST_LANDING_RX`
-    would otherwise move it out of the graded contract, where it does no good.
-    Its command is `wc -l -c` for a file witness — the line count a jsonl's report
-    is quoted from, plus the byte count, because every canonical extract in this
+    Exactly one clause goes on, for the first out-of-tree path in reading order,
+    worded over committed bytes with no time shape — the owed route publishes it as
+    written, and a demand phrased as a future observation ("after a day of traffic")
+    would read as an instruction to wait rather than an instruction to copy. Its
+    command is `wc -l -c` for a file witness — the line count a jsonl's report is
+    quoted from, plus the byte count, because every canonical extract in this
     convention is ONE line and `wc -l` alone printed `1` for all six
     `tests/fixtures/vllm_prefix_miss_*.json` whose bytes ranged 169,348 to 263,748,
     pinning nothing (#2267 clause 4) — and a sqlite count for a store.
+
+    `route_to_owed=True` changes only the DESTINATION, and that is the whole of
+    #2289. The demand orders a commit on the vault, and a code round's diff never
+    contains the vault (`vault_round.py:1161`): its only validated route is
+    `automod_vault_land`, which runs after the round, so putting the demand in
+    `acceptance_clauses` asked a round to land the change it was still proposing —
+    #2283's round SM_20261006_102005 was refused twice on one such clause while the
+    rail it exists to repair was what refused it. With the flag the function returns
+    `(clauses, [demand])`, the caller owes it, and every other rule here — trigger,
+    wording, the two #2267 skips, `_ARCHIVE_MENTION_RX`, the on-disk gate and the
+    cap — applies unchanged. With the flag off (the default, every other caller) the
+    answer is the plain list, as before.
 
     What this function cannot do is undo a clause it already emitted. A
     `vault`-surface item has no amendment route: `amend_clause` resolves the
@@ -1316,8 +1330,20 @@ def add_witness_artifact_clause(clauses, text, *, probe=in_git_tree,
     the item, which is what #1889 does for #1886, or by filing a blocker.
     """
     every = list(clauses or ())
+    owed: list[str] = []
+
+    def _answer():
+        """The list, or `(list, demand)` when the caller asked for the owed route.
+
+        Two shapes rather than always a tuple because the other callers are triage
+        passes holding a clause list, and rewriting every one of them to unpack a
+        value it never asked for is a wider change than moving one destination.
+        #2289.
+        """
+        return (every, owed) if route_to_owed else every
+
     if any(_ARCHIVE_MENTION_RX.search(str(c)) for c in every):
-        return every
+        return _answer()
     seen: set[str] = set()
     witness = ""
     # Where a pinned copy may be cited: the contract's own clauses AND the item
@@ -1344,16 +1370,22 @@ def add_witness_artifact_clause(clauses, text, *, probe=in_git_tree,
             witness = tok
             break
     if not witness or len(every) >= MAX_CLAUSES:
-        return every
+        return _answer()
     artifact = f"{artifact_dir}/{Path(witness).name}"
     ext = Path(witness).suffix.lower().lstrip(".")
-    every.append(
+    # The cap gates BOTH destinations. An item whose contract is already at
+    # `MAX_CLAUSES` has spent its whole budget — the clauses that fell off it are
+    # published in the item, unnumbered, precisely so the item does not quietly grow
+    # past what its own prose says it holds (#1909) — and a demand that fires only
+    # once it stopped being graded would restart exactly the growth the cap exists to
+    # stop. #2289 clause 4.
+    (owed if route_to_owed else every).append(
         f"The witness bytes have no history: copy `{witness}` to `{artifact}` in "
         f"the vault (an extract reproducing the same numbers is fine) and "
         f"re-derive the quoted report from the committed bytes with "
         f"`{_rederive_command(artifact, ext)}` — that output is the figure the "
         f"item quotes.")
-    return every
+    return _answer()
 
 
 def split_clause_lines(text: str, *, limit: int = READ_MAX_CLAUSES) -> list[str]:
@@ -5648,20 +5680,37 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
             fm["status"] = IMPLEMENT_POOL_STATUS
     clauses, past_cap = cap_new_clauses(acceptance_clauses)
     past_cap = list(dropped_clauses) + past_cap
+    # #2289: the witness demand this verdict generates, which goes to the owed list
+    # rather than the graded contract. Empty for any other verdict, so the one place
+    # it can be non-empty is the block below.
+    witness_owed: list[str] = []
     # Backstop for the rule the prompt states: a clause whose evidence only
     # arrives with time cannot be graded before landing, and holding a round
     # to one can only refuse it. #859 was refused twice on "needs a day of
     # post-change traffic" with its mechanism complete on both commits.
     if verdict == "confirmed":
-        # The witness rule: after the cap, so it can only take a slot that is
-        # genuinely spare, and before the post-landing split, so a generated
-        # clause carrying a time shape is caught by the same backstop an
-        # authored one is instead of slipping past it. The item's own front
-        # matter is what the review rung reads (`acceptance_clauses_of` prefers
-        # it to the ledger row the caller writes from its own copy).
-        clauses = add_witness_artifact_clause(
-            clauses, f"{body}\n{evidence}\n{acceptance}")
+        # The witness rule: after the cap, so a demand can only take a slot that
+        # is genuinely spare and can never displace an authored clause.
+        #
+        # #2289: the answer goes to the OWED list, not the graded contract. The
+        # demand orders a commit on `~/obsidian`, and a code round's diff never
+        # contains the vault (`vault_round.py:1161`) — its only route is
+        # `automod_vault_land`, after the round — so grading it pre-landing asked a
+        # round to land the change it was still proposing. #2283's round
+        # SM_20261006_102005 was refused twice on exactly such a clause 6 — a demand
+        # to archive the promotions ledger into the vault — and the rail that refused
+        # it is the one
+        # that item exists to repair: a loop, not a test. The witnesses that did
+        # reach `backlog/data/` arrived as owed checks. The rule itself is unchanged
+        # — same trigger, same wording, same #2267 skips, same cap — only its
+        # destination moved, so the split below stays exactly where it is: it still
+        # catches an authored time-shaped clause, and this demand reaches
+        # `human_clauses` because the rule put it there, not because the split moved
+        # it.
+        clauses, witness_owed = add_witness_artifact_clause(
+            clauses, f"{body}\n{evidence}\n{acceptance}", route_to_owed=True)
     clauses, moved_later = split_post_landing_clauses(clauses)
+    moved_later = list(moved_later) + list(witness_owed)
     human = clean_clauses(list(human_clauses) + moved_later)
     if verdict == "confirmed" and clauses:
         # On the item, not only in the ledger: the review rung reads the

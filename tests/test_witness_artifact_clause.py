@@ -1,4 +1,4 @@
-"""#1869: a measurement witness that lives in no history gets an archive clause.
+"""#1869: a measurement witness that lives in no history gets an archive demand.
 
 A measurement item's claim is a number read off a live store — rows of a jsonl,
 a count out of a db — and those paths sit under the data root, where
@@ -8,10 +8,17 @@ off therefore have no history anywhere: #1621's 44-row report sat on one disk
 until #1756 committed it to `backlog/data/…jsonl` at `5c5e6826`. #1756's owed
 ruling (2026-09-30T02:14:09, run `20260929_190733_owedcheck_16ba`) settled the
 policy — a standing rule on the item-authoring side, not the review prompt — so
-the rule is a function on the path that writes a confirmed contract
+the rule is a function on the path that writes a confirmed verdict
 (`add_witness_artifact_clause`, called from `record_verdict` after
 `cap_new_clauses`), not a prompt bullet: four of this item's five checks are
 behaviour of the emitted clause list.
+
+Since #2289 that path writes the demand to the item's OWED list, not its graded
+`acceptance_clauses`: the demand orders a vault commit, which no code round's
+diff can contain. Everything else here is unchanged by that move — the trigger,
+the wording, the skips and the cap are the same rules #1869 filed, and #2267
+bounded them — and where the destination is what a node is about, the node says
+so and cites #2289.
 
 Magnitude at filing: 6 open items under `~/obsidian/backlog/*.md` cite an
 out-of-tree bytes path and 0 of them name a vault artifact, so the rule is
@@ -545,34 +552,150 @@ def test_a_clause_that_already_names_an_archive_adds_no_second_one(tmp_path):
         assert out == [_AUTHORED[0], clause], out
 
 
-def test_the_generated_clause_reaches_the_graded_contract(tmp_path, isolated):
-    """Clause 5: `record_verdict` writes it into `acceptance_clauses`, and the
-    post-landing backstop leaves it there.
+def test_a_confirmed_verdict_leaves_the_graded_contract_exactly_as_authored(
+        tmp_path, isolated):
+    """#2289 clause 1: the contract a code round is refused on cannot be one that
+    orders a vault commit.
 
-    End to end through the real writer: the clause is generated between
-    `cap_new_clauses` and `split_post_landing_clauses`, so the same regex that
-    parks an authored "needs a day of traffic" clause gets its chance at this
-    one — and does not move it, because it is worded over committed bytes with
-    no time shape.
+    End to end through the real writer — `record_verdict(confirmed)` on a real item
+    in an isolated backlog dir, read back off disk the way `acceptance_clauses_of`
+    reads it — a body naming a witness inside no git tree leaves the item's graded
+    `acceptance_clauses` exactly as authored: same count, same order, and no "witness
+    bytes have no history" demand anywhere in it. The verdict itself is still
+    recorded, which is the half that stops this from being a fix that quietly stops
+    triaging: the `## Automod triage` section and its `**Verdict:** confirmed` line
+    have to survive the routing.
+
+    What it retires: #2283's round SM_20261006_102005 was refused twice on a clause 6
+    demanding that item's quoted promotions ledger be archived into the vault, and a
+    code diff cannot contain the vault (`vault_round.py:1161`) — the only route to that
+    commit is `automod_vault_land`, the rail #2283 exists to repair. The node this
+    replaces, `test_the_generated_clause_reaches_the_graded_contract`, pinned the old
+    destination on purpose (it was checking the wording survived the post-landing
+    backstop), so rewriting it is part of the change, not an accident of it.
     """
     witness = _witness(tmp_path)
     assert B.in_git_tree(witness) is False, "fixture must sit outside every tree"
+    authored = ["the printed count is pinned by a test — tests/test_x.py",
+                "the null row still renders as it did — tests/test_y.py"]
     p = write_item(isolated, 11, body=_BODY_1869.format(witness=witness))
 
     B.record_verdict(B.item_by_id(11), "confirmed", "the counts re-measure exactly",
                      acceptance="the report re-derives from committed bytes",
+                     acceptance_clauses=list(authored))
+
+    graded = list(_fm(p).get("acceptance_clauses") or [])
+    assert graded == authored, (
+        "the graded contract is what triage authored, same count and same order, "
+        f"with nothing generated appended: {graded}")
+    assert not any("witness bytes have no history" in c for c in graded), graded
+    text = p.read_text()
+    assert "## Automod triage" in text and "**Verdict:** confirmed" in text, (
+        "the triage verdict is still recorded on the item — moving where the witness "
+        "demand goes is not the same as not triaging the item")
+
+
+def test_the_witness_demand_reaches_the_owed_list_verbatim_with_its_command(
+        tmp_path, isolated):
+    """#2289 clause 2: owed rather than graded — and executable by a fresh session.
+
+    Same real writer, same isolated dir. `human_clauses` gains the generated demand
+    verbatim — compared against the generator's own output, so the routing cannot
+    quietly re-word it — still naming the three things whoever lands it needs with no
+    other context: the source path the bytes came from, the vault target
+    `backlog/data/<name>`, and the one re-derive command `wc -l -c < backlog/data/
+    <name>`. The item's prose is checked too: an owed entry that lives only in front
+    matter is one the next reader of the item never sees, and the whole convention of
+    135 delivered witnesses in `backlog/data/` arrived through this route.
+
+    The distinction the item turns on is pinned last: `split_post_landing_clauses`
+    leaves this clause where it is, so its being owed is the rule's doing and not the
+    post-landing backstop having moved a time-shaped clause. If the demand ever grows
+    a phrase like "after the next sweep", that backstop moves it for the wrong reason
+    and the two answers stop being distinguishable.
+    """
+    witness = _witness(tmp_path)
+    body = _BODY_1869.format(witness=witness)
+    p = write_item(isolated, 12, body=body)
+
+    B.record_verdict(B.item_by_id(12), "confirmed", "the counts re-measure exactly",
+                     acceptance="the report re-derives from committed bytes",
                      acceptance_clauses=list(_AUTHORED))
 
     fm = _fm(p)
-    graded = fm["acceptance_clauses"]
-    assert len(graded) == 2, graded
-    generated = graded[1]
-    assert ("backlog/data/iv-metrics.jsonl" in generated
-            and "`wc -l -c < " in generated), generated
-    assert not fm.get("human_clauses"), fm.get("human_clauses")
-    assert "Moved to human clauses" not in p.read_text(), p.read_text()[-400:]
-    assert B.split_post_landing_clauses([generated])[0] == [generated], (
-        "the wording itself must survive the backstop, not its position in the list")
+    owed = list(fm.get("human_clauses") or [])
+    expected = B.add_witness_artifact_clause(list(_AUTHORED), body)[1]
+    assert owed and owed[-1] == expected, (
+        f"the owed entry is the generated clause verbatim, not a paraphrase: {owed}")
+    assert str(witness) in owed[-1], "the source path the bytes came from"
+    assert "backlog/data/iv-metrics.jsonl" in owed[-1], "where they go in the vault"
+    assert "wc -l -c < backlog/data/iv-metrics.jsonl" in owed[-1], (
+        "and the one command that proves the copy")
+    assert B.split_post_landing_clauses([owed[-1]])[1] == [], (
+        "the owed placement is the rule's doing, not the backstop moving a "
+        "time-shaped clause out of the graded list")
+    assert "Owed after landing" in p.read_text(), (
+        "the demand is in the item's prose as well as its front matter, or the item "
+        "is not a handoff a fresh session can execute alone")
+
+
+def test_witness_bytes_already_inside_a_git_tree_add_nothing_to_either_list(
+        tmp_path, isolated):
+    """#2289 clause 3: moving the destination must not widen when the rule fires.
+
+    Bytes already under history are not a missing witness at all, so neither the
+    graded contract nor the owed list may gain a clause. This matters more than it
+    sounds for a change whose entire effect is a destination: written as "append
+    something to `human_clauses` whenever a witness is named", every item citing
+    tracked evidence would acquire a copy-demand whose bytes are already committed —
+    the same class of phantom obligation this item retires, parked one list over
+    where nobody grades it and nobody closes it either.
+
+    The witness is committed inside a real `git init` repository (`_git_commit` runs
+    `git add` and `git commit`, and `git ls-files` is asserted), named by its
+    absolute path, so the shipped probe is what answers "in a tree" — no stub stands
+    in for the predicate this depends on.
+    """
+    repo = _git_repo(tmp_path)
+    _git_commit(repo, "data/report.jsonl")
+    tracked = repo / "data" / "report.jsonl"
+    assert B.in_git_tree(tracked) is True, "the probe must say in-tree"
+    assert _is_tracked(repo, "data/report.jsonl"), (
+        "and the copy is under history, not merely written into a directory that "
+        "happens to be a repository")
+    body = (f"The sweep over `{tracked}` printed 17 rows, 9 of them null. "
+            "The change is display-only.")
+    p = write_item(isolated, 13, body=body)
+
+    B.record_verdict(B.item_by_id(13), "confirmed", "the rows re-measure exactly",
+                     acceptance="the report re-derives from committed bytes",
+                     acceptance_clauses=list(_AUTHORED))
+
+    fm = _fm(p)
+    assert list(fm.get("acceptance_clauses") or []) == list(_AUTHORED), fm
+    assert list(fm.get("human_clauses") or []) == [], (
+        "tracked bytes are owed no copy: the owed list stays exactly as authored, "
+        f"got {fm.get('human_clauses')}")
+
+    # Positive control, and it is the load-bearing half of this node. A byte-for-byte
+    # copy of those same rows in a directory no repository covers, named by the same
+    # sentence shape, run through the same writer: it owes exactly one demand. Without
+    # it the two assertions above would pass on a generator that had stopped firing
+    # altogether — which, for a change whose entire effect is to move one destination,
+    # is precisely the failure that would look like success.
+    elsewhere = tmp_path / "lloyd-data" / "_pipeline" / "report.jsonl"
+    elsewhere.parent.mkdir(parents=True, exist_ok=True)
+    elsewhere.write_text(tracked.read_text())
+    assert B.in_git_tree(elsewhere) is False, "the control file must be out of tree"
+    p2 = write_item(isolated, 14, body=f"The sweep over `{elsewhere}` printed 17 "
+                                       "rows, 9 of them null.")
+    B.record_verdict(B.item_by_id(14), "confirmed", "the same rows, out of tree",
+                     acceptance="the report re-derives from committed bytes",
+                     acceptance_clauses=list(_AUTHORED))
+    fm2 = _fm(p2)
+    assert list(fm2.get("acceptance_clauses") or []) == list(_AUTHORED), fm2
+    owed2 = list(fm2.get("human_clauses") or [])
+    assert len(owed2) == 1 and "backlog/data/report.jsonl" in owed2[0], owed2
 
 
 # ── #1889: only bytes that are on this disk can be a witness ─────────────────

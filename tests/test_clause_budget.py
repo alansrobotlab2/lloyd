@@ -255,9 +255,18 @@ def test_a_contract_already_at_the_cap_gains_no_witness_clause(tmp_path, isolate
 
 
 def test_a_contract_with_room_ends_at_or_below_the_cap(tmp_path, isolated):
-    """Five authored clauses (the single-triage ask) plus the witness clause is
-    six — `MAX_CLAUSES`, not seven — with the authored ones in their own order
-    in front."""
+    """Five authored clauses (the single-triage ask) stay five graded — `MAX_CLAUSES`
+    is a ceiling the contract sits under, not a total the witness demand fills up.
+
+    Rewritten by #2289, which moved the generated witness demand out of the graded
+    contract and into the item's owed list: this node used to assert the opposite
+    (`len(graded) == 6`, the demand last), because the demand arriving AFTER
+    `cap_new_clauses` used to mean it took the slot the budget left free. The budget
+    accounting it exists for is unchanged — five authored clauses, in their own order
+    in front, with the total under the cap — and the demand now shows up in
+    `human_clauses` instead, which is asserted here so a reader of this file learns
+    where it went rather than finding it missing.
+    """
     witness = _witness_under(tmp_path)
     body = f"`{witness}` holds the 17 rows the item quotes."
     five = [f"clause {i}" for i in range(1, B.SINGLE_MAX_CLAUSES + 1)]
@@ -267,13 +276,16 @@ def test_a_contract_with_room_ends_at_or_below_the_cap(tmp_path, isolated):
     B.record_verdict(B.item_by_id(22), "confirmed", "real", acceptance="x",
                      acceptance_clauses=five)
 
-    graded = _fm(p)["acceptance_clauses"]
-    assert graded[:B.SINGLE_MAX_CLAUSES] == five, graded
-    # Five authored plus the witness clause is six — `MAX_CLAUSES` itself, and
-    # the literal on the right is the seven the cap would have to have been cut
-    # to in order to hold them all.
-    assert len(graded) == B.MAX_CLAUSES == 6 and len(graded) != 7, graded
-    assert "backlog/data/iv-metrics.jsonl" in graded[-1], graded[-1]
+    fm = _fm(p)
+    graded = fm["acceptance_clauses"]
+    assert graded == five, graded
+    assert len(graded) == B.SINGLE_MAX_CLAUSES == 5 and len(graded) != B.MAX_CLAUSES, (
+        "the graded contract sits under the cap; the witness demand is owed, so it "
+        f"no longer fills the sixth slot: {graded[-1][:60]}")
+    assert not any("backlog/data/" in c for c in graded), graded
+    assert any("backlog/data/iv-metrics.jsonl" in c
+               for c in (fm.get("human_clauses") or [])), fm.get("human_clauses")
+
 
 
 def test_the_cap_holds_against_a_body_that_would_otherwise_fire(tmp_path, isolated):
@@ -321,3 +333,60 @@ def test_the_cap_holds_against_a_body_that_would_otherwise_fire(tmp_path, isolat
     B.record_verdict(B.item_by_id(24), "confirmed", f"`{witness}` re-measured",
                      acceptance="x", acceptance_clauses=list(NINE))
     assert _fm(p)["acceptance_clauses"] == NINE[:B.MAX_CLAUSES], _fm(p)
+
+
+def test_a_contract_at_the_cap_gains_no_witness_clause_on_either_list(
+        tmp_path, isolated):
+    """#2289 clause 4: the brake still holds after the destination moved.
+
+    #2289 changed only where the generated witness demand is PUT — the item's owed
+    list instead of its graded contract — so what has to be re-pinned is that nothing
+    about `MAX_CLAUSES` moved with it. Through the real writer, over a body that
+    genuinely names an out-of-tree witness (`_witness_under` builds the file and the
+    assertion below has `in_git_tree` say no tree holds it, so only the cap stands
+    between this item and a demand): the six authored clauses come back as those six,
+    in order, none evicted, truncated or reordered, with no witness demand in the
+    graded contract — and none in `human_clauses` either, because the cap gates both
+    destinations. An item at its cap has spent its budget: the clauses that fell off
+    it are published unnumbered on the item rather than re-added one list over, which
+    is exactly the quiet growth past its own prose that #1909's budget exists to stop.
+
+    The second item is the positive control that makes the first half a brake test
+    rather than a stopped trigger: one clause shorter, the same body gains nothing in
+    the graded contract and gains its demand in the owed list. A change that simply
+    stopped generating the demand would pass the at-cap half and fail here.
+    """
+    witness = _witness_under(tmp_path)
+    assert B.in_git_tree(witness) is False, "the witness must sit outside every tree"
+    assert witness.stat().st_size < B.WITNESS_MAX_BYTES, (
+        "otherwise the size bound, not the budget, would be why nothing was added")
+    body = f"the row came from `{witness}`, and nothing here names where those bytes go"
+    at_cap = [f"route {i}: the mechanism is pinned by a test — tests/test_x{i}.py"
+              for i in range(B.MAX_CLAUSES)]
+    assert len(at_cap) == B.MAX_CLAUSES == 6
+
+    p = write_item(isolated, 66113, body=body)
+    B.record_verdict(B.item_by_id(66113), "confirmed", "re-measured, unchanged",
+                     acceptance="x", acceptance_clauses=list(at_cap))
+    fm = _fm(p)
+    assert list(fm["acceptance_clauses"]) == at_cap, (
+        "at the cap the graded contract comes back UNCHANGED: no generated clause, "
+        "and no authored one evicted, truncated or reordered")
+    assert not any("backlog/data/" in c for c in fm["acceptance_clauses"]), fm
+    assert not any("backlog/data/" in c for c in (fm.get("human_clauses") or [])), (
+        f"the owed list gains no witness clause at the cap either: "
+        f"{fm.get('human_clauses')}")
+
+    one_short = at_cap[:B.MAX_CLAUSES - 1]
+    q = write_item(isolated, 66114, body=body)
+    B.record_verdict(B.item_by_id(66114), "confirmed", "re-measured, unchanged",
+                     acceptance="x", acceptance_clauses=list(one_short))
+    fm2 = _fm(q)
+    assert list(fm2["acceptance_clauses"]) == one_short, (
+        "with a slot spare the graded contract still gains no witness demand — that "
+        "is the whole of #2289")
+    assert any("backlog/data/iv-metrics.jsonl" in c
+               for c in (fm2.get("human_clauses") or [])), (
+        "and the demand is owed, which is what proves the at-cap half is a brake and "
+        f"not a generator that stopped firing: {fm2.get('human_clauses')}")
+
