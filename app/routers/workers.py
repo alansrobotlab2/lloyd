@@ -616,6 +616,34 @@ def _bench_task_defect(task_fm: dict) -> str:
     return ""
 
 
+def _bench_assertion_denial(dest_path: Path, claimed_id: str = "") -> str:
+    """Why this bench task must not be written, or "" when it may (#2286).
+
+    The sibling of `_bench_task_defect`, and the same split of duties: that one asks
+    whether the artifact is a gradeable task at all, this one asks whether anything will
+    grade it. A task with no key in `eval/autoresearch_assertions.yaml` is not ungraded —
+    `judge.assertions_for` returns None and, with `rubric_mode` at its default `binary`,
+    `judge._judge_rubric` falls back to the SCALAR rubric for that task while every keyed
+    sibling scores binary, and `aggregate_variant` averages the two into one promotion
+    decision. Seven items (#1589, #1724, #1968, #2174, #2228, #2285) each began with the
+    resulting `test_every_live_bench_task_has_an_assertion_set` failure; this is the
+    writing side, so the candidate is refused here instead of being found out downstream.
+
+    One predicate for all four lanes — `app.harness.bench_authoring.bench_write_defect`,
+    answering from `scripts.autoresearch.judge` itself — so the refusal cannot disagree
+    with the judge and no lane keeps its own list of permitted ids.
+    """
+    try:
+        from app.harness.bench_authoring import bench_write_defect, record_refusal
+        defect = bench_write_defect(str(dest_path), claimed_id=claimed_id)
+    except Exception as exc:  # noqa: BLE001 — a rail that cannot run has no pass to give
+        return (f"the bench assertion rail could not run ({exc}), so {dest_path.name} is "
+                "not being promoted. Report this rather than working around it.")
+    if defect:
+        record_refusal("dispatch", "workers_promote", str(dest_path), defect)
+    return defect
+
+
 def _bench_default_filename(task_fm: dict, fallback: str) -> str:
     """Default the destination to the candidate's own task id, as `<id>.md`.
 
@@ -770,6 +798,25 @@ async def workers_pending_promote(request: Request):
 
     if dest_path.exists():
         raise HTTPException(status_code=409, detail=f"destination exists: {dest_path}")
+
+    # #2286: the lane the recurrence actually used. `workers/sources/bench_mine.py:537`
+    # hands the spawned session a PROMPT telling it to produce a bench task, and this
+    # route is what lands the artifact — the `dest_path.write_text` below touches neither
+    # `vault_write`, `Write`/`Edit` nor Bash, which is why a rail on the tool lanes alone
+    # would have missed all seven filings (#1589 → #2285).
+    #
+    # The id asked about is the id that will be GRADED, not the one the artifact carried:
+    # staging mode rewrites `task_fm["id"]` to the destination stem below, so the stem is
+    # the whole truth there and a declared id left behind by a `filename` override would
+    # be a false refusal; the non-staging branch writes the artifact's frontmatter
+    # through, so `load_bench_tasks` keys on its declared id as well as the stem and both
+    # are asked. Above `dest_dir.mkdir` and the write, so a refusal creates no file and
+    # consumes no artifact — the candidate stays for the round that adds the row, and
+    # nothing half-lands, which is the property a refusal has on every lane.
+    _bench_rail = _bench_assertion_denial(
+        dest_path, claimed_id="" if staging_only else str(fm.get("id") or ""))
+    if _bench_rail:
+        raise HTTPException(status_code=400, detail=_bench_rail)
 
     if staging_only:
         # `load_bench_tasks` keys on the frontmatter `id`, so an id already

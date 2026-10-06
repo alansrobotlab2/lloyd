@@ -374,6 +374,45 @@ def _knowledge_guard_unavailable(target: Path, tool: str, why: str) -> str:
         "code": ErrorCode.INTERNAL})
 
 
+def _bench_assertion_refusal(mut: "_Mutation") -> str | None:
+    """Refuse a bench task the judge cannot grade, or None to proceed (#2286).
+
+    The `Write`/`Edit` lane of the bench assertion rail — see
+    `app/harness/bench_authoring.py` for the property and for why it is a refusal rather
+    than a skill instruction. Placed beside `_protected_path_refusal` and BEFORE the
+    `mut.gate_on` short-circuit for one reason: everything under the vault is
+    out-of-workspace, so a bench path reaches this handler with `gate_on` False, and a
+    check placed after that short-circuit would never run for the only paths it exists
+    for. `mut.real` is the realpath the `_Mutation` builder already computed, which is
+    what makes a symlinked parent and a relative path handed with a `cwd` the same case
+    here as on every other lane.
+
+    The key asked is the file's STEM: the bytes live inside `_write_file`/`_edit_file`,
+    which run after the gate, so unlike the `vault_write` lane this one cannot see a
+    declared frontmatter `id`. The stem is the identity that matters anyway — it is what
+    `load_bench_tasks` globs and what the promotion route rewrites an id to — and a file
+    written here whose frontmatter id differs is caught one rung later by the coverage
+    node, the only place that can see both.
+    """
+    try:
+        from app.harness.bench_authoring import bench_write_defect, record_refusal
+        defect = bench_write_defect(mut.real or mut.path,
+                                    cwd=(mut.scope[1] if mut.scope else None))
+    except Exception as exc:  # noqa: BLE001 — an unloadable rail is not a rail that passed
+        logger.exception("bench assertion rail unavailable for %s", mut.path)
+        record_refusal("hook", mut.kind, mut.path,
+                       f"the rail itself could not run ({exc})")
+        return json.dumps({"error": (
+            f"Tool call denied: the bench assertion rail could not run ({exc}), so "
+            f"{mut.path} is not being written. Report this rather than working around "
+            f"it — the alternative is a corpus the judge silently scores two ways."
+        )})
+    if not defect:
+        return None
+    record_refusal("hook", mut.kind, mut.path, defect)
+    return json.dumps({"error": f"Tool call denied: {defect}"})
+
+
 def _gate_check(mut: _Mutation) -> str | None:
     """The refusal, as a JSON error string, or None to proceed.
 
@@ -384,6 +423,9 @@ def _gate_check(mut: _Mutation) -> str | None:
     would fail `tests/test_mcp_layer.py` rather than protect anything.
     """
     refusal = _protected_path_refusal(mut)
+    if refusal is not None:
+        return refusal
+    refusal = _bench_assertion_refusal(mut)
     if refusal is not None:
         return refusal
     if not mut.gate_on:

@@ -1667,6 +1667,39 @@ def _protected_write_refusal(path: str) -> dict | None:
                 f"Alan.", ErrorCode.PROTECTED_PATH)
 
 
+def _bench_assertion_refusal(path: str, content: str) -> dict | None:
+    """Refuse a bench task the judge cannot grade, or None to allow (#2286).
+
+    The `vault_write` lane of the bench assertion rail — the property, why it is a
+    refusal rather than a skill instruction, and the lane enumeration are in
+    `app/harness/bench_authoring.py`. Same shape as `_protected_write_refusal` beside it:
+    one predicate from one module, a journal row, `_err` with `PROTECTED_PATH`, and
+    fail-closed on an unloadable rail.
+
+    This is the only lane that sees the BYTES, so it is the only lane that can honour a
+    frontmatter `id` differing from the filename — and `load_bench_tasks` keys on that
+    id, so checking the stem alone here would let
+    `vault_write("lloyd/bench/bench_029_x.md", id: bench_999_sneaky)` through with the
+    judge none the wiser. Absolute path, because this tool's argument is vault-RELATIVE
+    and `corpus_target` resolves a bare relative path against this process's own cwd —
+    the lloyd tree, where `lloyd/bench/` exists as a directory name but holds no corpus.
+    """
+    try:
+        from app.harness.bench_authoring import bench_write_defect, record_refusal
+        defect = bench_write_defect(str(VAULT / path), content=content)
+    except Exception as exc:  # noqa: BLE001 — an unloadable rail is not a rail that passed
+        logger.exception("bench assertion rail unavailable for vault path %s", path)
+        record_refusal("dispatch", "vault_write", path,
+                       f"the rail itself could not run ({exc})")
+        return _err("vault_write refused: the bench assertion rail could not run, so "
+                    f"{path} is not being written. Report this rather than working "
+                    "around it.", ErrorCode.PROTECTED_PATH)
+    if not defect:
+        return None
+    record_refusal("dispatch", "vault_write", path, defect)
+    return _err(f"vault_write refused: {defect}", ErrorCode.PROTECTED_PATH)
+
+
 def _vault_write(params: dict) -> dict:
     path, norm_err = _normalize_vault_path(params.get("path", ""))
     if norm_err:
@@ -1675,6 +1708,9 @@ def _vault_write(params: dict) -> dict:
     if refusal is not None:
         return refusal
     content = params.get("content", "")
+    refusal = _bench_assertion_refusal(path, content)
+    if refusal is not None:
+        return refusal
     try:
         content, type_err, replaced = _guard_knowledge_type(path, content)
         if type_err is not None:

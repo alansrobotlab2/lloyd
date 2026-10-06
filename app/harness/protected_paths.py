@@ -1231,7 +1231,38 @@ def check_bash_write_denied(command: str, cwd: str | None = None) -> str | None:
         label = write_deny_reason(path)
         if label:
             return f"{shape} {path} — inside {label}"
+        # #2286: the bench assertion rail, on the same resolved targets, for the paths the
+        # deny-set deliberately leaves open. Measured before this line existed, the
+        # deny-set does NOT cover `~/obsidian/lloyd/bench/`, so `cat candidate.md >
+        # ~/obsidian/lloyd/bench/bench_029_*.md` reached the corpus with no refusal at all
+        # — the lane this recurrence could still have used. The 2026-09-22 class rule ("a
+        # guard that lives on one of two write surfaces is not a guard") is why this is a
+        # fourth call site rather than three, and the node that measures the lane is
+        # tests/test_bench_assertion_rail.py::test_the_bash_lane_refuses_a_keyless_bench_task_whichever_guard_closes_it.
+        bench_reason = _bench_assertion_denial(path, cwd)
+        if bench_reason:
+            return f"{shape} {path} — {bench_reason}"
     return None
+
+
+def _bench_assertion_denial(path: str, cwd: str | None = None) -> str:
+    """Refusal reason for a keyless bench task file, "" for anything else (#2286).
+
+    Its own function so this lane keeps one shape (target → reason) and so all four lanes
+    ask ONE predicate — `app.harness.bench_authoring.bench_write_defect`, which answers
+    from `scripts.autoresearch.judge` and so cannot disagree with the scorer. Path only:
+    a shell word carries no frontmatter, so the key asked is the file's stem, which is
+    also the id the promotion route rewrites to and what `load_bench_tasks` keys on.
+
+    Fails closed, and costs an ordinary command nothing: the predicate returns "" for any
+    path outside the bench corpus or not named `bench_NN_*.md`.
+    """
+    try:
+        from app.harness.bench_authoring import bench_write_defect
+        return bench_write_defect(path, cwd=cwd)
+    except Exception as exc:  # noqa: BLE001 — a rail that cannot run has no pass to give
+        return (f"the bench assertion rail could not run ({exc}), so this command is not "
+                "being run. Report this rather than working around it.")
 
 
 def check_protected_delete(command: str, cwd: str | None = None) -> str | None:
