@@ -256,6 +256,22 @@ FATAL = (f"{PROGRAM}: FATAL: can't find command "
 HEAD = "0" * 40
 
 
+def _statvfs(used_inodes: int, *, inodes: int = 1_048_576,
+             used_blocks: int = 1_101_005, blocks: int = 33_292_288):
+    """A `statvfs` answer with this box's /tmp geometry: 1,048,576 inodes over 126 GiB.
+
+    The inode count is what fills here while the bytes stay nearly empty (4.2 of
+    126 GiB used), which is the reading `df -h` hides. Same fake shape as
+    `tests/test_guardian_tmpwatch.py::_statvfs`; the readings callers pass are ones
+    `df -i /tmp` has actually reported on this machine.
+    """
+    def fake(_path):
+        return types.SimpleNamespace(f_files=inodes, f_ffree=inodes - used_inodes,
+                                     f_blocks=blocks, f_bfree=blocks - used_blocks,
+                                     f_frsize=4096)
+    return fake
+
+
 def _ticking(tmp_path, monkeypatch, *, liveness):
     """A Guardian whose `tick()` can be driven, with its note in `tmp_path`.
 
@@ -301,6 +317,18 @@ def _ticking(tmp_path, monkeypatch, *, liveness):
     monkeypatch.setattr(g, "heartbeat", lambda *a, **k: None)
     monkeypatch.setattr(g, "do_rollback", lambda *a: True)
     monkeypatch.setattr(g.notifier, "vault_root", tmp_path)
+
+    # The /tmp the tick measures is the one this test hands it, not the host's.
+    # `check_tmp` (guardian.py:1316-1332) calls `notifier.alert(..., coalesce=True)` on
+    # every reading over `tmpwatch.WARN_FRACTION` (0.80), and a coalesced section is a
+    # SECOND `DAILY_STILL_OPEN` in the note. That is what put the three #2290 nodes red
+    # on 2026-10-06 while the box sat at 81% (`df -i /tmp`: 848,936 of 1,048,576) — the
+    # nodes read the note, not the reading, so the host's weather decided this file's
+    # colour. Every other host read inside a tick is already the test's (`collect`,
+    # `evaluate_liveness`, the subprocess runner); this is that same stub set covering
+    # the one probe that was missed. `check_tmp` itself still runs, for real, on the
+    # reading below.
+    monkeypatch.setattr(g.tmp, "statvfs", _statvfs(10_000))
     calls: list[tuple[tuple, dict]] = []
 
     def _alert(*a, **k):
@@ -667,3 +695,50 @@ def test_the_refused_round_s_witness_is_committed_and_says_zero_real_failures():
     assert "all 10 already failing" in d["base_probe"], (
         "nothing in the committed bytes says the 10 failures pre-existed the diff"
     )
+
+
+def test_the_tmp_reading_a_driven_tick_sees_is_the_one_the_builder_hands_it(tmp_path,
+                                                                           monkeypatch):
+    """#2290: this file's note holds only the incident the test drives, in any weather.
+
+    The two clause nodes above count `DAILY_STILL_OPEN` across the whole note. On
+    2026-10-06 they counted 2, because `check_tmp` measured the host's own `/tmp` —
+    848,936 of 1,048,576 inodes, 81%, over `tmpwatch.WARN_FRACTION` — and journalled a
+    second coalesced section beside the service-down one. Two halves pinned here,
+    because the first alone would keep passing if the alerting mechanism itself had
+    been what changed:
+
+    * `_ticking` hands its guardian a reading below the line, so after the two down
+      ticks the clause node drives the note carries ONE open marker and no `/tmp`
+      title;
+    * hand the same builder's guardian today's over-the-line reading and the SAME two
+      ticks produce TWO markers with the `/tmp` title in the note — the exact red,
+      reproduced from the reading rather than from the weather.
+    """
+    import tmpwatch as TW
+
+    (tmp_path / "quiet").mkdir()
+    (tmp_path / "full").mkdir()
+
+    quiet, _ = _ticking(tmp_path / "quiet", monkeypatch, liveness=lambda n: DOWN)
+    assert quiet.tmp.statvfs is not TW.os.statvfs, (
+        "`_ticking` handed its guardian the host's own probe again: that reading is "
+        "#2290's entire cause, and it decides this file's colour by weather")
+    assert TW.measure(quiet.tmp.path, quiet.tmp.statvfs).fraction < TW.WARN_FRACTION, (
+        "the reading the builder hands must be below the line the alert fires over")
+
+    quiet.tick()
+    quiet.tick()
+    text = _note(tmp_path / "quiet")
+    assert TW.ALERT_TITLE not in text, text
+    assert text.count(notify.DAILY_STILL_OPEN) == 1, text
+
+    full, _ = _ticking(tmp_path / "full", monkeypatch, liveness=lambda n: DOWN)
+    monkeypatch.setattr(full.tmp, "statvfs", _statvfs(848_936))   # 81%, 2026-10-06
+    full.tick()
+    full.tick()
+    noisy = _note(tmp_path / "full")
+    assert TW.ALERT_TITLE in noisy, noisy
+    assert noisy.count(notify.DAILY_STILL_OPEN) == 2, (
+        "over the line the note must hold the incident's own marker AND the tmp "
+        f"section — that pair is the count the two clause nodes were red at: {noisy}")

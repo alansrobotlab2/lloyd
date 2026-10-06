@@ -3279,6 +3279,22 @@ def test_the_committed_alert_witness_is_the_rows_the_item_counts():
 SUP_TITLE = "supervisord was unreachable"
 
 
+def _statvfs(used_inodes: int, *, inodes: int = 1_048_576,
+             used_blocks: int = 1_101_005, blocks: int = 33_292_288):
+    """A `statvfs` answer with this box's /tmp geometry: 1,048,576 inodes over 126 GiB.
+
+    The inode count is what fills here while the bytes stay nearly empty (4.2 of
+    126 GiB used), which is the reading `df -h` hides. Same fake shape as
+    `tests/test_guardian_tmpwatch.py::_statvfs`; the readings callers pass are ones
+    `df -i /tmp` has actually reported on this machine.
+    """
+    def fake(_path):
+        return types.SimpleNamespace(f_files=inodes, f_ffree=inodes - used_inodes,
+                                     f_blocks=blocks, f_bfree=blocks - used_blocks,
+                                     f_frsize=4096)
+    return fake
+
+
 def _note_watching(tmp_path, monkeypatch, *, states, liveness):
     """A Guardian driven tick by tick with its daily note under `tmp_path`.
 
@@ -3313,6 +3329,18 @@ def _note_watching(tmp_path, monkeypatch, *, states, liveness):
     monkeypatch.setattr(g, "heartbeat", lambda *a, **k: None)
     monkeypatch.setattr(g, "do_rollback", lambda *a: True)
     monkeypatch.setattr(g.notifier, "vault_root", tmp_path)
+
+    # The /tmp the tick measures is the one this test hands it, not the host's.
+    # `check_tmp` (guardian.py:1316-1332) calls `notifier.alert(..., coalesce=True)` on
+    # every reading over `tmpwatch.WARN_FRACTION` (0.80), and a coalesced section is a
+    # SECOND `DAILY_STILL_OPEN` in the note. That is what put the three #2290 nodes red
+    # on 2026-10-06 while the box sat at 81% (`df -i /tmp`: 848,936 of 1,048,576) — the
+    # nodes read the note, not the reading, so the host's weather decided this file's
+    # colour. Every other host read inside a tick is already the test's (`collect`,
+    # `evaluate_liveness`, the subprocess runner); this is that same stub set covering
+    # the one probe that was missed. `check_tmp` itself still runs, for real, on the
+    # reading below.
+    monkeypatch.setattr(g.tmp, "statvfs", _statvfs(10_000))
     # The `systemctl --user restart` the unreachable branch performs, and every other
     # subprocess the tick makes — the stray check reads `.stdout`, so the stand-in carries
     # the fields those readers touch, or an unrelated check logs a failure per tick.
@@ -3669,3 +3697,48 @@ def test_the_recovery_route_is_not_the_rollback_route(tmp_path, monkeypatch):
     assert TTS not in policy.RESTART_ORDER, \
         "a rollback stops and starts this tuple, and a dead voice channel must " \
         "not be a reason to revert a landing"
+
+
+def test_the_supervisord_note_is_written_only_by_the_supervisor_it_was_handed(tmp_path,
+                                                                             monkeypatch):
+    """#2290: the third clause node counts the note, so the note must be one incident's.
+
+    `test_the_supervisord_unreachable_section_is_coalesced_and_sealed_on_answer`
+    asserts `text.count(N.DAILY_STILL_OPEN) == 1` after three unreachable ticks. On
+    2026-10-06 it read 2: `check_tmp` measured the host's `/tmp` at 848,936 of
+    1,048,576 inodes (81%, over `tmpwatch.WARN_FRACTION`) and journalled a second
+    coalesced section into the same note. Same two halves as
+    `tests/test_guardian_alert_retraction.py::test_the_tmp_reading_a_driven_tick_sees_is_the_one_the_builder_hands_it`:
+    the builder's own reading is under the line, and today's reading put over it
+    reproduces the red on the same three ticks.
+    """
+    import notify as N
+    import tmpwatch as TW
+
+    (tmp_path / "quiet").mkdir()
+    (tmp_path / "full").mkdir()
+    states = ["unreachable"] * 3
+    alive = lambda n: (False, "everything RUNNING")  # noqa: E731 — a tick never reads it
+
+    quiet, _ = _note_watching(tmp_path / "quiet", monkeypatch, states=states,
+                              liveness=alive)
+    assert quiet.tmp.statvfs is not TW.os.statvfs, (
+        "`_note_watching` handed its guardian the host's own probe: #2290's cause, "
+        "and it decides this file's colour by weather")
+    assert TW.measure(quiet.tmp.path, quiet.tmp.statvfs).fraction < TW.WARN_FRACTION
+
+    for _ in range(3):
+        quiet.tick()
+    text = _memory_note(tmp_path / "quiet")
+    assert TW.ALERT_TITLE not in text, text
+    assert text.count(N.DAILY_STILL_OPEN) == 1, text
+
+    full, _ = _note_watching(tmp_path / "full", monkeypatch, states=states, liveness=alive)
+    monkeypatch.setattr(full.tmp, "statvfs", _statvfs(848_936))   # 81%, 2026-10-06
+    for _ in range(3):
+        full.tick()
+    noisy = _memory_note(tmp_path / "full")
+    assert TW.ALERT_TITLE in noisy, noisy
+    assert noisy.count(N.DAILY_STILL_OPEN) == 2, (
+        "over the line the note must hold the supervisor's own marker AND the tmp "
+        f"section — that pair is the count clause 2's node was red at: {noisy}")
