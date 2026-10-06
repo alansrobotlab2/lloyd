@@ -2283,6 +2283,40 @@ workers:
       # the call site, so no config key could move it. Absent, the code's
       # default is 15. Carried in the queue payload: a change reaches new items only.
       max_turns: 15
+    # Turns the automod promotions ledger and the guard logs into dated, counted
+    # failure issues (`${LLOYD_DATA}/failure-ledger.db`, `app/failure_ledger.py`
+    # owns the schema) and sends ONE investigation turn a day after the strongest
+    # uninvestigated family (#2079). Registered on 2026-10-03 so a claimed row runs
+    # instead of being poisoned at `attempts = 0`; this block is what schedules it
+    # (#2309).
+    failure-ledger:
+      enabled: true
+      # Two intervals, and they answer different questions. `interval_seconds` is
+      # when the pool ASKS (`WorkerPool._scheduler_pass`, workers/pool.py:1179):
+      # hourly, so a day whose ledger filled at 03:00 is not waiting on a daily
+      # tick to be noticed. `min_interval_seconds` is what the source allows
+      # itself — `enqueue_if_due` reads it at workers/sources/failure_ledger.py:228
+      # against its own watermark — and it stays at one sweep a day, which is what
+      # `DEFAULT_INTERVAL_SECONDS` (:103, 24 h) already asked for and what keeps a
+      # re-read of a 27 MB promotions ledger off the hourly tick.
+      interval_seconds: 3600
+      min_interval_seconds: 86400
+      max_inflight: 1
+      # Wall-clock bound on the one turn (workers/pool.py:1376). It investigates
+      # ≤20 ledger rows, one window of `git log`, and writes a few paragraphs.
+      max_duration_seconds: 900
+      # No `model:` key: the turn reaches the primary through
+      # `run_prompt_on_primary` (workers/sources/failure_ledger.py:305), whose
+      # signature takes a prompt, a turn ceiling and a source but no model, so a
+      # key naming an engine here would be a knob attached to nothing — which is
+      # also why the other two direct-to-primary sources carry none.
+      # Stated here at the value actually in force, NOT as a knob: `execute` reads
+      # the ceiling off the QUEUE PAYLOAD (`payload.get("max_turns")`, :303-304),
+      # and `sweep_and_dispatch` writes no such field, so every row runs at
+      # `DEFAULT_MAX_TURNS` (:90) = 12. `tests/test_workers_doc_claims.py` pins
+      # this number to that default so the two cannot drift apart; editing it here
+      # alone would change nothing, and wiring the key through is recorded on #2309.
+      max_turns: 12
   staging_root: ${LLOYD_DATA}/_pipeline/vault-derived/pending-research
 
 # Fact writes through the fact_add MCP tool. The rebuild sets this

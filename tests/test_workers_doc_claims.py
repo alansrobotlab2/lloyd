@@ -1721,3 +1721,261 @@ def test_the_vault_copy_of_the_bench_mine_witness_is_the_same_bytes_as_the_fixtu
     assert tracked.returncode == 0, (
         "the vault copy is not tracked on the vault's main, so `git log -- ` over "
         "it finds nothing and it has no history either: " + tracked.stderr.strip()[:160])
+
+
+# ── #2309: `failure-ledger` is scheduled, and §6 names what it is measured on ──
+#
+# #2079 registered the source without giving it a `workers.sources` block, so
+# `WorkerPool._scheduler_pass` read `{}` for it (`workers/pool.py:1176`) and stepped
+# past it at `:1177` without calling `enqueue_if_due`. Three days passed with the sweep
+# running only inside its own tests, and nothing here could have caught it: the two
+# nodes that touch the roster pin one row per registered source and config ⊆ registry,
+# and BOTH hold for a registered-but-unconfigured source. The rail was missing the
+# other direction, which is the direction the fleet actually fell.
+
+
+def _src_cfg() -> dict:
+    """`workers.sources` from `config.yaml`, parsed from disk.
+
+    Not the live `CONFIG` mapping: nodes in this file compare prose to the file a
+    round commits, and `CONFIG` is mutated in place by the runtime toggles other tests
+    exercise, so a value read off it is a measurement of whichever test ran last.
+    """
+    cfg = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
+    return cfg["workers"]["sources"]
+
+
+def _roster_row(name: str) -> list[str]:
+    """§1's row for `name`, cells stripped. Index: 1 family, 2 prio, 3 cadence,
+    4 inflight, 5 runner, 6 IV, 8 **on**."""
+    text = (ARCH / "workers-jobs.md").read_text(encoding="utf-8")
+    for ln in text.splitlines():
+        if ln.startswith(f"| `{name}` |"):
+            return [c.strip() for c in ln.strip().strip("|").split("|")]
+    raise AssertionError(f"§1 of workers-jobs.md has no `{name}` row")
+
+
+def _failure_ledger_para() -> str:
+    """§6's scheduling block: #2079's closing entry, from its bold lead-in on.
+
+    Spans both paragraphs of the entry — the one that says the block landed and names
+    the denominator, and the one that says what decides the judgement — and stops at
+    the next `### `, if any (this is §6's last entry). Grading one paragraph at a time
+    here would let a claim move between the two and dodge its own node.
+    """
+    six = _section(SEC6)
+    rest = six[six.index("**Registered, and scheduled"):]
+    end = rest.find("\n### ")
+    return rest if end < 0 else rest[:end]
+
+
+def test_the_failure_ledger_source_ships_a_block_the_scheduler_reads():
+    """#2309 clause 1: registered AND configured, at the values pool.py consumes.
+
+    Every key is pinned to the line that reads it, because a block whose keys nothing
+    reads is a comment: `enabled` and `interval_seconds` at `workers/pool.py:1176-1179`
+    (the skip, then the poll), `min_interval_seconds` at
+    `workers/sources/failure_ledger.py:228` (the source's own watermark), `max_inflight`
+    at `workers/pool.py:1333`, `max_duration_seconds` at `:1376`.
+
+    The registry-symmetry half runs on `get_sources_config()` — the live mapping the
+    scheduler iterates — because that is the exact expression the item names as its
+    check. The reverse direction reads the registry against the file, like
+    `test_config_configures_only_registered_sources` above it.
+    """
+    assert not set(sources.SOURCE_REGISTRY) - set(sources.get_sources_config()), (
+        "registered sources with no `workers.sources` block: `_scheduler_pass` reads "
+        "`{}` for each and steps past it without calling `enqueue_if_due` "
+        f"(workers/pool.py:1176-1177) — the #2079 shape: "
+        f"{sorted(set(sources.SOURCE_REGISTRY) - set(sources.get_sources_config()))}")
+
+    blk = dict(_src_cfg().get("failure-ledger") or {})
+    assert blk.get("enabled") is True, (
+        "the block exists but `enabled` is not true, so workers/pool.py:1177 still "
+        f"steps past the source: {blk or 'no block at all'}")
+    assert blk.get("interval_seconds") == 3600, blk
+    assert blk.get("min_interval_seconds") == 86400, blk
+    assert blk.get("max_inflight") == 1, blk
+    assert blk.get("max_duration_seconds") == 900, blk
+    assert blk.get("max_turns") == 12, blk
+    assert "model" not in blk, (
+        f"a `model` key joined the block: {sorted(blk)}. The handler hands its prompt "
+        "to `run_prompt_on_primary`, whose signature takes a prompt, a turn ceiling "
+        "and a source name and no model, so the key would name an engine nothing "
+        "reads — a knob attached to nothing is what this file keeps refusing.")
+
+    body = (ROOT / "workers" / "sources" / "failure_ledger.py").read_text(
+        encoding="utf-8")
+    assert "run_prompt_on_primary" in body, (
+        "the handler no longer goes direct to the primary, which is the only reason "
+        "this block carries no `model` key")
+    assert re.search(r"\bmodel\s*=", body) is None, (
+        "the handler started passing a model, so the absent `model` key is a gap "
+        "rather than a fact about the call")
+    for key in ("min_interval_seconds", "max_turns"):
+        assert f'src_cfg.get("{key}"' in body or f'payload.get("{key}"' in body, (
+            f"nothing reads `{key}` any more, so config.yaml's comment about it is "
+            "the claim and the code is the decoration")
+
+    # Two of the six values restate a module default rather than overriding it, and
+    # config.yaml's comment says so in those words. A default that moves while the
+    # block stands makes that comment the first thing to break, so the pair is pinned
+    # rather than left for the next reader's diff to explain.
+    from workers.sources import failure_ledger as fl
+
+    assert blk["min_interval_seconds"] == fl.DEFAULT_INTERVAL_SECONDS, (
+        f"the block says {blk['min_interval_seconds']}s while "
+        f"DEFAULT_INTERVAL_SECONDS is {fl.DEFAULT_INTERVAL_SECONDS}: whichever drifted "
+        "left the other one lying, and config.yaml claims they are the same number")
+    # `max_turns` is the key that does NOT reach the turn today: `execute` reads it off
+    # the queue payload (`payload.get("max_turns")`) and `sweep_and_dispatch` writes no
+    # such field, so the ceiling in force is the module default. Pinning config to that
+    # default is what stops the key advertising a number that is not what runs; wiring
+    # the key through is recorded on #2309, not done here.
+    assert blk["max_turns"] == fl.DEFAULT_MAX_TURNS == 12, (
+        f"config says max_turns {blk['max_turns']} while the ceiling in force is "
+        f"DEFAULT_MAX_TURNS {fl.DEFAULT_MAX_TURNS}")
+    assert 'payload.get("max_turns")' in body, (
+        "`execute` no longer reads the turn ceiling off the payload, so the comment "
+        "above this assert and the one in config.yaml describe a wire that is not "
+        "there — either wire it or delete the key")
+
+
+def test_the_failure_ledger_roster_row_reads_scheduled():
+    """#2309 clause 2: §1's row, its cadence column, and the prose above it.
+
+    Three surfaces carried the same fact, so three asserts: the **on** column, the
+    cadence column, and the paragraph that explained to a reader WHY the column said
+    **no** — a paragraph that outlives its own reason for existing reads as true to
+    the next person, which is the hardest kind of false to notice.
+
+    The cadence column is compared to the configured poll in SECONDS, because the one
+    thing that must not happen again is the table and the block disagreeing while each
+    looks fine alone. `test_section2_names_the_live_turn_budget_keys` is this file's
+    precedent for the same shape: a doc that names a number is a claim about a file.
+    """
+    one = _section("## 1. The roster")
+    assert "fifteen have a block under" in one, (
+        "§1 no longer states that every registered source has a block, which is what "
+        "is now true: " + one.strip().splitlines()[0][:90])
+    for gone in ("Fourteen of them have a block", "no config block"):
+        assert gone not in one, f"§1 still carries the retired claim {gone!r}"
+    assert "Fifteen sources are registered." in one, (
+        "the count sentence changed its shape, and "
+        "test_workers_jobs_counts_and_rosters_every_registered_source in "
+        "test_automod_doc_claims.py parses it out of §1's first line")
+
+    assert _src_cfg()["failure-ledger"]["enabled"] is True
+    row = _roster_row("failure-ledger")
+    assert row[8] == "yes", (
+        f"the **on** column still says {row[8]!r} for a source config enables. The "
+        "column answers 'does it run on a timer', and it does now")
+    cadence = row[3]
+    assert "no config block" not in cadence and "skips" not in cadence, cadence
+    assert _hours(int(_src_cfg()["failure-ledger"]["interval_seconds"])) in cadence, (
+        f"the cadence column {cadence!r} does not state the configured poll in the "
+        "form every other row uses — §1 and config.yaml disagree about how often the "
+        "pool asks, and each reads fine alone")
+    assert "one sweep a day" in cadence, (
+        f"{cadence!r} lost the half that matters most here: the pool asks hourly and "
+        "`min_interval_seconds` keeps the sweep itself to one a day, so a row stating "
+        "only the poll reads as a 24x increase in ledger re-reads")
+
+
+def test_section6_stops_saying_the_failure_ledger_needs_a_person():
+    """#2309 clause 3, and the replacement for the excuse that was never true.
+
+    The retired paragraph gave three reasons nothing ran the sweep: no block,
+    "`config.yaml` is outside what the automod loop may write", and the guardian not
+    owning the job (#2080). The first is now false on this tree. The second was
+    retired on 2026-10-05 by the `config_value_change` lane, and this round is that
+    lane's first use for a `workers.sources.*` subtree — which made that sentence the
+    falsest one in the file: it told the next reader the work needed a person when the
+    loop had long been allowed to do it.
+
+    The bans therefore run over all of §6, not just the paragraph: a deleted excuse
+    explains nothing either. And the replacement is checked against the fence it says
+    is absent — `spec.py` is read, not quoted.
+    """
+    six = _section(SEC6)
+    assert "**Registered, and scheduled" in _failure_ledger_para(), (
+        "§6 lost the paragraph that says the source runs on a timer")
+    for gone in ("not scheduled", "unscheduled", "no config block", "scheduler skips",
+                 "outside what the automod loop may write", "awaiting a person"):
+        assert gone not in six, f"§6 still says {gone!r}, which this change falsified"
+    para = _failure_ledger_para()
+    assert "config_value_change" in para and "CONFIG_DENIED_KEYS" in para, (
+        "the paragraph no longer names the lane that may write this block and the "
+        "fence it cannot cross, so the retirement left an absence, not a replacement")
+
+    from scripts.automod import spec
+
+    assert "workers.sources.failure-ledger" not in spec.CONFIG_DENIED_KEYS, (
+        "the fence now covers this subtree, so §6's new sentence is the false one")
+    assert spec._config_denied_prefix("workers.sources.failure-ledger.enabled") is None, (
+        f"the prefix fence denies the block's own `enabled` leaf: "
+        f"{spec._config_denied_prefix('workers.sources.failure-ledger.enabled')}")
+    assert "failure-ledger" not in spec.CONFIG_LOOP_SOURCES, (
+        "the source became one of the loop's own three, whose control leaves are "
+        "fenced by LEAF rather than prefix — a different rule than the one §6 states")
+
+
+def test_section6_names_the_runs_table_as_the_effectiveness_denominator():
+    """#2309 clause 4: the denominator, and the literals this edit had to spare.
+
+    #2079 owed entry 4. "How much did the ledger do" has three candidate measures —
+    events counted, queue rows, run rows — and `app/failure_ledger.py` already picks
+    one in `reconcile()`'s own docstring: "`runs_total`: a queue row is an intention, a
+    run row is a thing that happened". §6 promised an effectiveness read while naming
+    no denominator, so the reader reaches for the count a sweep can inflate by running.
+
+    The rest of this node is a keep-list, because §6 is also the file's only measured
+    history: `42%`, `82%` and the literal-at-the-call-site sentence have their own
+    nodes, and restating them here is what makes THIS node the whole clause. The
+    §2/§6 window equality is why `test_section2_and_section6_report_one_measurement`
+    exists — one edit must not move one of the two dates.
+    """
+    six, para = _section(SEC6), _failure_ledger_para()
+    for frag in ("runs_total", "runs.status", "workers.db", "'failure-ledger'"):
+        assert frag in para, f"the denominator paragraph never names {frag}"
+    ledger = (ROOT / "app" / "failure_ledger.py").read_text(encoding="utf-8")
+    assert "FROM runs WHERE source = ? GROUP BY status" in ledger, (
+        "`reconcile()` stopped reading the runs table, so the denominator §6 names is "
+        "no longer the one the code computes")
+    assert '"runs_total"' in ledger, "reconcile() no longer reports runs_total"
+    for keep in ("42%", "82%", "started with a literal at the call site"):
+        assert keep in six, f"§6 lost {keep!r}, which is measured history"
+    # The LATEST window each section quotes, which is the rule
+    # `test_section2_and_section6_report_one_measurement` uses and the only correct
+    # one: §6 is the dated history, so it legitimately quotes several windows (its
+    # earliest is the 7 days to 2026-09-11 that `42%`/`82%` belong to) and a
+    # first-match compare would fail on a doc that is not wrong.
+    win = r"[Dd]ays to (\d{4}-\d{2}-\d{2})"
+    two, sixwin = re.findall(win, _section(SEC2)), re.findall(win, six)
+    assert two and sixwin and max(two) == max(sixwin), (
+        f"§2's table is measured to {max(two) if two else '?'} and §6's current "
+        f"figures to {max(sixwin) if sixwin else 'nothing'}: one doc, two "
+        "measurements — and this edit added a dated sentence to §6, so it is the "
+        "likely cause")
+
+
+def test_workers_md_does_not_restate_the_retired_unscheduled_claim():
+    """The second carrier of the same retired claim, in the second workers doc.
+
+    `architecture/workers.md`'s source table explained `failure-ledger` with "and
+    unscheduled until a person adds its config block" — the same claim §6 carried,
+    falsified by the same block, and the only node that reads that file
+    (`test_workers_md_source_table_is_the_registry`) checks which names are in it, not
+    what the row says about them. Pinned here rather than in a new file because the
+    fact under test is one claim with two homes, and the half that rots is the half
+    nobody reads.
+    """
+    text = (ARCH / "workers.md").read_text(encoding="utf-8")
+    row = next((ln for ln in text.splitlines()
+                if ln.startswith("| `failure-ledger`")), None)
+    assert row is not None, "architecture/workers.md lost its failure-ledger row"
+    for gone in ("unscheduled", "until a person", "no config block"):
+        assert gone not in row, f"the row still says {gone!r}: {row[:120]}"
+    assert "#2309" in row, (
+        "the row no longer says what put the source on a timer, so a reader has no "
+        "record of when it started")

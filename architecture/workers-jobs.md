@@ -39,11 +39,14 @@ the order the pool considers them.
 
 Fifteen sources are registered.
 
-Fourteen of them have a block under `workers.sources`; `failure-ledger` has none
-yet, which is why its **on** column is the only **no** in the table and why its
-cadence is a module constant rather than a configured interval (see §6's last
-entry). Priority is `DEFAULT_PRIORITY` unless config overrides it — `youtube-digest`
-is the only real override (45, not the default 60); `arch-review` and
+All fifteen have a block under `workers.sources`, and none is registered-but-off:
+`failure-ledger` was the last to get one, on 2026-10-06 (#2309). Until that block
+existed `WorkerPool._scheduler_pass` read an empty dict for the source
+(`workers/pool.py:1176`) and stepped past it at `:1177` without calling its
+`enqueue_if_due`, which is why its **on** column was the only **no** in the table and
+why its cadence was a module constant rather than a configured interval (see §6's
+last entry). Priority is `DEFAULT_PRIORITY` unless config overrides it —
+`youtube-digest` is the only real override (45, not the default 60); `arch-review` and
 `board-steward` state 62 and 68 in config, though those equal their defaults — and
 **lower runs sooner**.
 
@@ -69,7 +72,7 @@ the parser as the count sentence being gone.
 | `deep-research` | intake | 70 | 3600 s | 1 | session | **yes** | off | yes |
 | `session-distill` | mining | 70 | 1800 s | 1 | direct (primary) | no | — | yes |
 | `automod-regression` | self-mod | 70 | 900 s | 1 | none (subprocess) | no | — | yes |
-| `failure-ledger` | mining | 75 | 24 h module default — **no config block, so the scheduler skips it** | 1 | direct (primary) | no | — | **no** |
+| `failure-ledger` | mining | 75 | every 1 h poll; **one sweep a day** (`min_interval_seconds`) | 1 | direct (primary) | no | — | yes |
 | `bench-mine` | mining | 80 | 7200 s | 1 | direct (primary) | no | — | yes |
 | `frontend-probe-canary` | self-mod | 80 | 3600 s poll, one run a day | 1 | none (subprocess) | no | — | yes |
 
@@ -1106,13 +1109,39 @@ sqlite file, so forwarding the prompt alone would send a run off to describe row
 it cannot open. `tests/test_failure_ledger_dispatch.py` pins exactly that — the
 sample text it asserts on is in the store and nowhere in the queue payload.
 
-**Registered, not scheduled.** `WorkerPool._scheduler_pass` skips a source with no
-block under `workers.sources`, `config.yaml` is outside what the automod loop may
-write, and the guardian is not this job's owner (#2080), so as of 2026-10-03 nothing
-runs it on a timer: a row enqueued by hand or by a test executes, and
-`DEFAULT_INTERVAL_SECONDS` is a cadence awaiting a person's decision. Before this
-module existed the rows were worse than unscheduled — the pool looked the source
-name up, missed, and marked each one poisoned at `attempts = 0`, which is terminal.
+**Registered, and scheduled as of 2026-10-06.** #2079 is measured on nothing yet, and
+this is the half of the reason: `WorkerPool._scheduler_pass` reaches a source's
+`enqueue_if_due` only through a block under `workers.sources`, and the module shipped
+without one, so between 2026-10-03 and #2309 the sweep ran only inside its own tests.
+Its block is in `config.yaml` now — `enabled: true`, `interval_seconds: 3600`,
+`min_interval_seconds: 86400`, `max_inflight: 1`, `max_duration_seconds: 900` — and
+what the wait cost was measurement, not mechanism: counting was proven against the
+real ledger and the real guard logs before it, and this is what it had done
+(measured 2026-10-03): `reconcile()` over the real store reported 313 events across 30
+families, the top two holding 80 and 41 of them. Counting is what the sweep does
+alone; acting needs the pool. **The denominator is `runs`, not that event count** —
+`app/failure_ledger.py:595` `reconcile()` reports `runs_total` (`:626`) as
+`SELECT status, COUNT(*) FROM runs WHERE source = ? GROUP BY status` run with
+`source='failure-ledger'` against `workers.db` (`:617-621`, its own docstring at `:605`
+already names it "the denominator for 'how much did the ledger actually do?'"), and
+`runs` rows are written only by `workers/queue.py:245` when a worker finishes one. So
+`runs_total` is the one
+figure here the thing being judged cannot produce, `runs.status` splits it into
+outcomes, and `runs_total: 0` is not a quiet ledger: the events say what the sweep
+found, and only a run row says anything read them. Before this module existed the
+rows were worse still — the pool looked the source name up, missed, and marked each
+one poisoned at `attempts = 0`, which is terminal.
+
+**What decides it, and what was never the obstacle.** Seven consecutive days with a
+`runs` row per day, then the before/after count of identical unanswered notices
+against named, dated open issues: owed-check's ruling, read on the daily note and the
+`[guardian]` board rather than the parked morning brief, and the #543 four-week
+delete-or-keep clock for the ledger starts at that first real run, not at this block's
+landing. What kept the loop from scheduling the source was never a fence around
+`config.yaml`: that claim was retired on 2026-10-05 by the `config_value_change` lane
+(`scripts/automod/spec.py:310`), whose denied set (`CONFIG_DENIED_KEYS`, `:231`)
+covers the lock-out, the rollback path, the engine's identity and the loop's own three
+worker sources, and no path under `workers.sources` belonging to anything else.
 
 ---
 
