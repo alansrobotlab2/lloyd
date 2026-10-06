@@ -122,10 +122,6 @@ _GOVERNED: dict[str, tuple[str, str]] = {
         "### Session HH:MM PDT — Title",
         "### Session HH:MM — Title",
     ),
-    "periodic-memory-capture-dee/SKILL.md": (
-        "### Session HH:MM PDT — Title",
-        "### Session HH:MM — Title",
-    ),
     # Report headers: hand-typed local stamp → ISO-8601 UTC from `date -u` (#1080).
     "nightly-reflection-signals/SKILL.md": (
         "generated: YYYY-MM-DD HH:MM PST",
