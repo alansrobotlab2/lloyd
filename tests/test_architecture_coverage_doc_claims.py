@@ -2183,11 +2183,118 @@ def test_the_passage_says_what_each_resolver_consumer_does_on_a_miss():
     assert elsewhere == ["agent_mcp/_tool_sandbox.py"], elsewhere
 
 
+#: The commit that last edited `guard-coverage.md` before #2301's stamp existed
+#: (#2022's landing). A stamped re-run sha must be this commit or a descendant of
+#: it. The comparison is against a named sha and NOT against
+#: `git log -1 -- architecture/guard-coverage.md`, because the commit that writes
+#: a stamp is necessarily newer than any sha it is able to name: measuring "is
+#: the stamp as new as the page" against the log's head is unsatisfiable from
+#: inside the round that stamps. That is the exact defect #2301 exists to break,
+#: and why the owed step after a landing is a reader re-stamping the new HEAD.
+GUARD_COVERAGE_LAST_EDIT = "a0d3cbe4"
+
+
+def _stamp_denominator(stamp: str) -> int:
+    """The block denominator the stamp's own prose states. A re-run that counts
+    nothing cannot age, so #2301 requires the number be written down."""
+    m = re.search(r"\*\*(\d+) fenced blocks\*\*", " ".join(stamp.split()))
+    assert m, "the stamp states no block denominator"
+    return int(m.group(1))
+
+
 def test_the_guard_coverage_stamp_names_a_real_commit_and_the_block_count():
-    """#2022 clause 5: the re-run line names 219e1314, that sha is in this repo's
-    history, and the page carries at least the 18 blocks the line counted then."""
+    """#2022 clause 5, extended by #2301 clauses 1 and 2: the re-run line names
+    `219e1314`, that sha is in this repo's history, and the page now states a
+    block denominator that equals the fenced blocks actually on it — exactly 20,
+    not the open-ended `>= 18` that let a page grow past its own stamp. The
+    #2301 line is the first re-run stamped at a tree containing the page's own
+    last edit; `a03a7300`, the newest sha the stamp carried before it, is an
+    ancestor of that edit, which is what the descendant test can fail on."""
     text = _text("guard-coverage.md")
     how = _section(text, "How to read this page")
     assert "`219e1314` (2026-10-01)" in how and "all 18 blocks still hit" in how
     assert subprocess.run(["git", "cat-file", "-e", "219e1314^{commit}"], cwd=ROOT).returncode == 0
-    assert len(re.findall(r"^```\n.*?^```$", text, re.S | re.M)) >= 18
+    blocks = re.findall(r"^```\n.*?^```$", text, re.S | re.M)
+    assert len(blocks) == 20, f"the page carries {len(blocks)} fenced blocks"
+
+    # Wrap-insensitive: a reflow of the paragraph must not break the extraction.
+    m = re.search(r"Re-run in full on \d{4}-\d{2}-\d{2} at `([0-9a-f]{8})`",
+                  " ".join(how.split()))
+    assert m, "the stamp carries no #2301 full re-run line"
+    stamped = m.group(1)
+    assert subprocess.run(["git", "cat-file", "-e", f"{stamped}^{{commit}}"],
+                          cwd=ROOT).returncode == 0, f"{stamped} is not a commit here"
+    assert subprocess.run(["git", "merge-base", "--is-ancestor",
+                           GUARD_COVERAGE_LAST_EDIT, stamped], cwd=ROOT).returncode == 0, (
+        f"the stamp vouches for {stamped}, which predates the page's own last "
+        f"edit {GUARD_COVERAGE_LAST_EDIT}")
+    assert subprocess.run(["git", "merge-base", "--is-ancestor",
+                           GUARD_COVERAGE_LAST_EDIT, "a03a7300"],
+                          cwd=ROOT).returncode != 0, (
+        "a03a7300 is now a descendant of #2022's landing, so it no longer shows "
+        "what an un-refreshed stamp looks like — pick a genuinely older sha")
+    assert _stamp_denominator(how) == len(blocks), (
+        "the stamp counted a different number of blocks than the page carries")
+    # The extractor reads the prose rather than restating a constant.
+    assert _stamp_denominator("re-run at `abc12345`: **7 fenced blocks**") == 7
+
+
+# --------------------------------------------------------------------------- #
+# guard-coverage.md §4 opener: the family count has to print, and print the set
+# the section names (#2301)
+# --------------------------------------------------------------------------- #
+
+def _guard_coverage_probe_limits() -> tuple[str, list[str]]:
+    """§4's opener block's commands, plus the prose a reader brings to it: the
+    sentence over the block, any comment riding a command, and exclusion 4 — the
+    one whose number the block is read against. Item 4 sits *below* the block, so
+    a helper that stopped at the fence would grade the command against prose that
+    never mentions families at all."""
+    section = _section(_text("guard-coverage.md"), "4. `_injection_probe`'s own exclusions")
+    fence = section.index("```\n")
+    end = section.index("```", fence + 4)
+    cmds, comments = [], []
+    for raw in section[fence + 4:end].splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        code, mark, tail = line.partition("  # ")
+        assert mark or "#" not in code, f"an unquoted '#' in a command: {line}"
+        cmds.append(code.strip())
+        comments.append(tail.strip())
+    assert cmds, "§4's opener block is empty — nothing was extracted"
+    i4 = section.index("Eight regex families")
+    i5 = section.index("Background sessions only")
+    prose = " ".join(section[:fence].split() + comments + section[i4:i5].split())
+    return prose, cmds
+
+
+def test_the_family_count_command_prints_and_names_the_set_it_counts():
+    """#2301 clause 3. `FAMILIES` moved to `agent_mcp/_injection_patterns.py` in
+    #1959 and arrived dict-shaped, so the page's `'^    ("'` grep — the tuple
+    shape the probe's own table used — matched nothing and `git grep -c` printed
+    nothing and exited 1. A command this page presents as "the family count" was
+    silent, and a stamp that only asks whether blocks *hit* cannot see a
+    command/output mismatch. The command now counts the shared table's dict keys
+    (13: the probe's 8 plus the gate's 6, `invisible_chars` read by both), and
+    the prose says the eight belong to `PROBE_FAMILIES`, so the two numbers
+    cannot be read as contradicting each other."""
+    prose, cmds = _guard_coverage_probe_limits()
+    family = next(c for c in cmds if "re.compile" in c)
+    assert "agent_mcp/_injection_patterns.py" in family, family
+    out = _run(family)
+    assert out, f"the family-count command prints nothing: {family}"
+    counts = {l.rsplit(":", 1)[0]: int(l.rsplit(":", 1)[1]) for l in out}
+    assert counts == {"agent_mcp/_injection_patterns.py": 13}, counts
+
+    ids = set(re.findall(r'"([a-z_]+)"',
+                         " ".join(_run("git grep -A4 'PROBE_FAMILIES: tuple' "
+                                      "-- agent_mcp/_injection_probe.py"))))
+    assert len(ids) == 8, ids
+    assert "Eight regex families" in prose, "§4 stopped stating the probe's count"
+    assert "PROBE_FAMILIES" in prose and "thirteen" in prose, (
+        "the prose the command sits under must name which set the 13 counts, or "
+        "the command reads as contradicting 'Eight regex families'")
+    for cmd in cmds:
+        assert cmd.startswith("git grep "), cmd
+        assert _run(cmd), f"a proving command prints nothing: {cmd}"

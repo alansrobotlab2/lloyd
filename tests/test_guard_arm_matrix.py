@@ -8,6 +8,7 @@ reads installer bodies; `scripts/maintenance/guard_arm_matrix.py` prints it.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -17,6 +18,7 @@ from app.harness import outbound_content as OC
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "maintenance" / "guard_arm_matrix.py"
+PAGE = ROOT / "architecture" / "guard-coverage.md"
 INTERACTIVE = "app/routers/turn_options.py"
 
 
@@ -128,6 +130,57 @@ def test_the_script_fails_on_a_tree_with_no_dispatch_path(tmp_path):
     out = subprocess.run([sys.executable, str(SCRIPT), "--root", str(tmp_path)],
                          cwd=str(ROOT), capture_output=True, text=True, timeout=120)
     assert out.returncode == 1 and "no dispatch path" in out.stderr
+
+
+# ── #2301: the page's own command and row count survive a re-run ─────────────
+#
+# `architecture/guard-coverage.md` tells a reader to run this script instead of
+# grepping, and its block spelled the interpreter bare: `python` on this box is
+# 3.14 without the services' packages, so the one command the page offers died on
+# `app/harness/loop.py:26` with `ModuleNotFoundError: No module named 'httpx'`.
+# The paragraph beside it also stated the row count it printed on 2026-10-01, and
+# the roster has grown since (`eval/run_injection_canary.py`,
+# `scripts/autoresearch/bench_runner_sdk.py`). A block that crashes still looks
+# like a block that prints to a reader who never runs it, so both facts are
+# extracted here rather than restated.
+
+def _page_row_count(page: str) -> int | None:
+    """The row count the page's prose states for this script, or None."""
+    m = re.search(r"it prints (\d+) rows", page)
+    return int(m.group(1)) if m else None
+
+
+def test_the_page_names_the_venv_interpreter_and_the_row_count_the_run_prints():
+    """#2301 clause 4: the matrix block names `.venvs/lloyd/bin/python`, the way
+    `architecture/djev.md` spells it, and the sentence beside it states the number
+    of rows this tree prints. `.venvs/` is git-ignored and exists only in the live
+    checkout (`scripts/automod/round.py`'s `live_venv_python`), so this runs the
+    script under `sys.executable` — the interpreter pytest is already using, which
+    is the same venv and resolves in a round worktree too (#692)."""
+    page = PAGE.read_text(encoding="utf-8")
+    blocks = [b for b in re.findall(r"^```\n.*?^```$", page, re.S | re.M)
+              if "guard_arm_matrix.py" in b]
+    assert len(blocks) == 1, f"expected one matrix block on the page, got {len(blocks)}"
+    cmds = [ln.strip() for ln in blocks[0].splitlines()
+            if ln.strip() and ln.strip() != "```"]
+    assert any(c.startswith(".venvs/lloyd/bin/python ") for c in cmds), (
+        f"the matrix block does not name the venv interpreter: {cmds}")
+    assert not any(c.startswith("python ") for c in cmds), (
+        f"the matrix block runs on the system interpreter again: {cmds}")
+
+    out = subprocess.run([sys.executable, str(SCRIPT)], cwd=str(ROOT),
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr[-2000:]
+    rows = [ln for ln in out.stdout.splitlines() if ln.startswith("| `")]
+    assert len(rows) == len(G.guard_arm_matrix(ROOT)), (
+        "the script's rows are not the matrix it derives")
+    stated = _page_row_count(page)
+    assert stated is not None, "the page states no row count for this script"
+    assert stated == len(rows), (
+        f"guard-coverage.md says the matrix prints {stated} rows; this tree "
+        f"prints {len(rows)} — re-run the block and re-state the count")
+    # Proof the extractor reads the sentence rather than restating a constant.
+    assert _page_row_count("it prints 99 rows") == 99
 
 
 # ── #2269: the capability envelope rides the same roster machinery ───────────

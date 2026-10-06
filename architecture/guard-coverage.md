@@ -39,8 +39,23 @@ repository root, and **re-run in full the same day at `b03c6c0b`** — every blo
 still hits, the two guards added on that re-run hit too, and nothing under this
 page moved in between. Re-run in full at `219e1314` (2026-10-01), after #1961
 changed three guards' answer on a resolver miss: all 18 blocks still hit, and
-again at `a03a7300` with §4.5's block widened (#2022). Three conventions keep
-the greps honest:
+again at `a03a7300` with §4.5's block widened (#2022).
+Re-run in full on 2026-10-06 at `ed1cecfd` (#2301) — the first re-run against a
+tree containing this page's own last edit (`a0d3cbe4`, #2022), so every stamp
+above it had been vouching for a tree older than the text it vouches for. The
+denominator is written down from here on, because "all blocks still hit" without
+one cannot age: **20 fenced blocks**. Against the page as repaired here, 19 come
+back clean and one does not: §3's absence grep is the documented zero
+(`text_delta` in `app/harness/action_review.py`, positive control
+`app/harness/events.py` hitting). At `ed1cecfd` itself two commands did not
+survive it, and this commit
+repairs both — the matrix block ran on the system `python`, which has no
+`httpx`, and §4's family count grepped the tuple shape `FAMILIES` had before
+#1959 moved it into `agent_mcp/_injection_patterns.py`. Two notes for whoever
+re-runs next: run every block from the repository root, and the matrix block's
+interpreter resolves only where `.venvs/` exists, which is git-ignored — in a
+round worktree, run that one block through the absolute venv path. Three
+conventions keep the greps honest:
 
 - absence claims use `git grep`, and every absence command is paired with a
   **positive control** — the same pattern against a file where it must hit — so a
@@ -105,7 +120,7 @@ suite run. It covers one guard and runs only from tests.
 For the matrix itself, run the derivation rather than the grep above (#1963):
 
 ```
-python scripts/maintenance/guard_arm_matrix.py
+.venvs/lloyd/bin/python scripts/maintenance/guard_arm_matrix.py
 ```
 
 It prints one row per production dispatch path — the same denominator the gate's
@@ -114,11 +129,13 @@ roster is measured against — and the hook-installed guards each one can arm:
 (`app/harness/guard_arm_matrix.py`). An arm is read from the installer's **body**,
 so `app/routers/turn_options.py` shows the outbound gate although it never names
 it, and a path that calls only the floor is credited with the floor and what the
-floor's body arms, nothing more. On 2026-10-01 it printed twelve rows: the
+floor's body arms, nothing more. On 2026-10-06 it prints 13 rows: the
 interactive builder arming all four; `builtin_task.py` three (no reviewer);
 `app/autonomy.py` and `workers/sources/_common.py` the policy hook and the gate
-and **no** safety hook, which is what §6's dispatch floor is for; the eval and
-bench drivers the floor and the gate. A cell means the path *can* arm the guard —
+and **no** safety hook, which is what §6's dispatch floor is for; eight `eval/`
+drivers and one `scripts/autoresearch/` bench driver the floor and the gate, of
+which `eval/run_injection_canary.py` arms the reviewer as well. A cell means the
+path *can* arm the guard —
 `install_policy_hook` still needs a grant scope and the reviewer a worker stream
 turn. The three guards that refuse from inside a tool handler are not
 hook-installed and are not in it. The prose above is still hand-written; this is
@@ -263,7 +280,7 @@ them, each from the module:
 
 ```
 git grep -n "PROBED_TOOLS = \|SCAN_CHARS = \|if not text or is_error\|^PATTERNS" -- agent_mcp/_injection_probe.py
-git grep -c '^    ("' -- agent_mcp/_injection_probe.py      # the family count
+git grep -c '^    "[a-z_]*": re.compile' -- agent_mcp/_injection_probe.py agent_mcp/_injection_patterns.py   # the shared table's keys
 ```
 
 1. **Five tools.** `Read`, `http_fetch`, `http_request`, `vault_read`,
@@ -276,7 +293,11 @@ git grep -c '^    ("' -- agent_mcp/_injection_probe.py      # the family count
    quoting a page — is never scanned.
 3. **`SCAN_CHARS = 200_000`** of leading text. Content that matters at the tail of
    a large result is outside the scan.
-4. **Eight regex families.** Every one is a spelling, not an intent:
+4. **Eight regex families** — the ids `PROBE_FAMILIES` selects from the thirteen
+   keys the block above counts, which is the shared table in
+   `agent_mcp/_injection_patterns.py`; the 13 is that table, the eight is this
+   reader's selection, and the two numbers are not in conflict. Every family is
+   a spelling, not an intent:
    `role_header`, `ignore_instructions`, `you_must_now`, `run_the_following`,
    `conceal_from_user`, `persona_swap`, `new_system_prompt`, `invisible_chars`. A
    paraphrase of any of them ("first, please re-read the rules below and follow
