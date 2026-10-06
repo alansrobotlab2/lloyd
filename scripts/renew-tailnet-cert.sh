@@ -17,13 +17,26 @@
 #      notAfter is later than the one on disk.
 #   4. Restart the frontend, which is what Vite needs to pick the new pair up —
 #      it reads the cert at startup (SETUP.md:1513-1514).
+#   5. When the mint did NOT produce a replacement and the pair still on disk is
+#      inside CERT_QUARANTINE_WITHIN_SECONDS (24 h by default) of its notAfter,
+#      move that pair out of the cert dir to $CERT_DIR/../.expired-$HOST/ and
+#      restart the frontend once, then exit non-zero anyway. Vite selects the
+#      tailnet pair by `fs.existsSync` alone (web/vite.config.ts:20), so a dead
+#      pair left standing in the cert dir is a dead leaf served tailnet-wide and
+#      the valid `lloyd.crt` fallback is never reached; taking the pair out is
+#      the only lever that selection responds to. The next daily run then lands
+#      in the "no leaf at all" branch below and mints a replacement. (#2209)
 #
-# Failure paths are inert by construction: a refused mint, a zero-byte file, an
+# Failure paths never overwrite a byte: a refused mint, a zero-byte file, an
 # unparseable leaf, or a minted notAfter that is not later than the current one
-# all leave the existing .crt/.key exactly as they were and exit non-zero, which
-# is what makes `systemctl --user --failed` (and the journal, which is where the
-# unit's stderr goes) the read-only surface that says the renewal did not happen.
-# It never deletes, truncates or replaces in place, never re-mints the CA (that
+# all leave the existing .crt/.key bytes exactly as they were and exit non-zero,
+# which is what makes `systemctl --user --failed` (and the journal, which is
+# where the unit's stderr goes) the read-only surface that says the renewal did
+# not happen. The one thing a failed mint may still do is the #2209 quarantine in
+# step 5, and it MOVES rather than deletes: the pair's bytes stay on disk under
+# .expired-$HOST beside the cert dir, for the next run to mint over and for a
+# human to read.
+# It never truncates or replaces in place, never re-mints the CA (that
 # is scripts/gen-cert.sh's job), never writes under /etc/ca-certificates/ and
 # never runs update-ca-trust (#1241's ruling).
 #
@@ -36,7 +49,8 @@
 #
 # Everything the script touches is overridable for the tests in
 # tests/test_renew_tailnet_cert.py: CERT_DIR, TAILNET_CERT_HOST,
-# CERT_RENEW_WINDOW_DAYS, SUPERVISORD_CONF, MC_FRONTEND_PROGRAM.
+# CERT_RENEW_WINDOW_DAYS, CERT_QUARANTINE_WITHIN_SECONDS, SUPERVISORD_CONF,
+# MC_FRONTEND_PROGRAM.
 
 set -euo pipefail
 
@@ -44,6 +58,11 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 CERT_DIR="${CERT_DIR:-$REPO/agent-services/cert}"
 HOST="${TAILNET_CERT_HOST:-goliath.taile37041.ts.net}"
 WINDOW_DAYS="${CERT_RENEW_WINDOW_DAYS:-14}"
+# How close to notAfter a pair this script failed to renew has to be before it is
+# moved out of the cert dir. 24 h, deliberately far tighter than WINDOW_DAYS:
+# inside the window a mint is merely worth attempting, whereas a leaf a day from
+# expiry is one Vite will still be serving when it stops validating.
+QUARANTINE_WITHIN="${CERT_QUARANTINE_WITHIN_SECONDS:-86400}"
 SUPERVISORD_CONF="${SUPERVISORD_CONF:-$REPO/agent-services/supervisor/supervisord.conf}"
 MC_PROGRAM="${MC_FRONTEND_PROGRAM:-lloyd-mc:lloyd-frontend}"
 SUPERVISORCTL="${SUPERVISORCTL:-supervisorctl}"
@@ -70,8 +89,70 @@ not_after_epoch() {
   date -d "$raw" +%s 2>/dev/null || return 1
 }
 
+# The fallback for a mint that did not happen (#2209). Vite selects the tailnet
+# leaf by `fs.existsSync` alone (web/vite.config.ts:20), so while a dead pair sits
+# in the cert dir it keeps being served tailnet-wide and the still-valid
+# `lloyd.crt` is never reached — removing the pair is the only lever Vite responds
+# to. It is MOVED, never deleted, and moved BESIDE the cert dir for the same
+# reason the staging tree is (see STAGE below): a rename across filesystems is a
+# copy, and a half-written key at a live path is worse than the dead leaf. Then
+# the frontend restarts exactly once, because Vite reads the cert at startup and
+# a fallback nobody restarted is still the dead leaf being served. The caller
+# still exits non-zero: the renewal did not happen and the unit has to say so.
+#
+# A pair with more than QUARANTINE_WITHIN left is deliberately not moved — Vite is
+# serving it correctly today and the next daily run gets another chance — and so
+# is an absent pair, which is the case Vite has already fallen back for.
+quarantine_dead_leaf() {
+  if [[ "$HAVE_LEAF" != 1 ]]; then
+    return 0
+  fi
+  if ! (( CURRENT < NOW + QUARANTINE_WITHIN )); then
+    return 0
+  fi
+  local qdir="$CERT_DIR/../.expired-$HOST" moved="" f dest
+  if ! mkdir -p "$qdir"; then
+    warn "cannot create the quarantine dir $qdir; leaving the dead leaf where it is"
+    return 0
+  fi
+  # Resolve it before logging, so the journal names one unambiguous place rather
+  # than a path with `..` in it.
+  qdir="$(cd "$qdir" && pwd -P)" || qdir="$CERT_DIR/../.expired-$HOST"
+  for f in "$CRT" "$KEY"; do
+    [[ -e "$f" ]] || continue
+    dest="$qdir/${f##*/}"
+    if mv -f "$f" "$dest"; then
+      moved="$moved $f -> $dest"
+    else
+      # A half-finished move still has to be reported: one file left behind is
+      # enough for Vite to fall back, so this is not a swallowed failure — the
+      # restart below is what makes the fallback real, and the journal says which
+      # file is still sitting at a live path.
+      warn "cannot move $f to $dest; it is still at the path Vite reads"
+    fi
+  done
+  # Vite requires both to exist (`fs.existsSync(tsCert) && fs.existsSync(tsKey)`,
+  # web/vite.config.ts:20), so a pair with either half gone is a pair it no longer
+  # selects. Nothing left the cert dir then there is no fallback to restart into.
+  if [[ -z "$moved" ]] || { [[ -e "$CRT" ]] && [[ -e "$KEY" ]]; }; then
+    return 0
+  fi
+  warn "quarantined the dead pair so Vite falls back to lloyd.crt:"
+  warn "  moved$moved"
+  warn "  quarantined leaf notAfter $(date -u -d "@$CURRENT" '+%Y-%m-%dT%H:%M:%SZ')"
+  if ! "$SUPERVISORCTL" -c "$SUPERVISORD_CONF" restart "$MC_PROGRAM"; then
+    warn "the dead pair is out of $CERT_DIR but the restart failed; Vite keeps serving it until $MC_PROGRAM restarts"
+  fi
+  return 0
+}
+
+# Whether there is a readable leaf on disk at all. `quarantine_dead_leaf` acts on
+# a pair this script could not replace, and an absent pair is not one: Vite has
+# already fallen back to lloyd.crt for it, and there is nothing to move.
+HAVE_LEAF=1
 CURRENT="$(not_after_epoch "$CRT")" || CURRENT=""
 if [[ -z "$CURRENT" ]]; then
+  HAVE_LEAF=0
   if [[ -e "$CRT" ]]; then
     # Clause 3: an unreadable leaf is not a leaf to replace. The pair stays as
     # it is and the unit goes to failed; a human reads the journal.
@@ -127,13 +208,15 @@ if (( MINT_RC != 0 )); then
   else
     warn "tailscale cert failed (exit $MINT_RC): ${MINT_MSG:-no output}"
   fi
+  quarantine_dead_leaf
   exit 1
 fi
 
-[[ -s "$S_CRT" && -s "$S_KEY" ]] || { warn "minted material is empty; leaving the current pair in place"; exit 1; }
-NEW="$(not_after_epoch "$S_CRT")" || { warn "minted leaf does not parse; leaving the current pair in place"; exit 1; }
+[[ -s "$S_CRT" && -s "$S_KEY" ]] || { warn "minted material is empty; leaving the current pair in place"; quarantine_dead_leaf; exit 1; }
+NEW="$(not_after_epoch "$S_CRT")" || { warn "minted leaf does not parse; leaving the current pair in place"; quarantine_dead_leaf; exit 1; }
 if (( NEW <= CURRENT )); then
   warn "minted notAfter $(date -u -d "@$NEW" '+%Y-%m-%dT%H:%M:%SZ') is not later than the current one; leaving it in place"
+  quarantine_dead_leaf
   exit 1
 fi
 
