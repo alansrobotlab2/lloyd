@@ -15,10 +15,19 @@ The instrument that catches that is a *drift* check, not the path-existence
 check the item originally proposed: both "dead" paths exist (each is an empty
 directory), so existence was never the fault and a check on it passes today.
 
-Every case here runs over fixture copies in `tmp_path`. Nothing reads
-`~/.config/qmd/index.yml`, the repo's own template, or the live index — the
-check is asserted against files this test owns, so it is green on a machine with
-no qmd at all and cannot go red because somebody hand-edited their config.
+Every drift case here runs over fixture copies in `tmp_path`. Nothing reads
+`~/.config/qmd/index.yml` or the live index — the check is asserted against files
+this test owns, so it is green on a machine with no qmd at all and cannot go red
+because somebody hand-edited their config.
+
+The exception is the #2311 pair of doc-preservation nodes, which have no fixture
+to read because what they protect is text: they read tracked source under this
+repository, including `agent-services/conf/qmd-index.yml` itself. Reading the
+template is not the drift check and does not touch a live path; a rule about what
+the template's `sessions:` COMMENT may say lives in
+`tests/test_qmd_index_template.py`, which reads that file as text — so a round
+asked to change the count rule or the background-split sentence goes there, and
+what it must leave alone in THIS file is pinned below.
 """
 from __future__ import annotations
 
@@ -2724,3 +2733,111 @@ def test_a_missing_index_is_reported_as_not_measured_rather_than_raising(tmp_pat
     assert all(p["shared_documents"] is None for p in ov["pairs"]), ov
     assert ov["documents"] is None and ov["duplication_ratio"] is None
     assert ov["by_containing"] == {} and ov["shared_documents"] == 0
+
+
+# --- #2311 clause 5: the ~650 figure survives only as history ----------------
+
+TRACKED_TEMPLATE = ROOT / "agent-services/conf/qmd-index.yml"
+
+# Each sentence that still states the figure, with the file that holds it. Every
+# one is past tense and about the *drift* — what a re-sync from a stale template
+# would have cost — which is what licenses the number staying written at all.
+#
+# Every pattern separates its words with `\s+` rather than a space, for two
+# reasons. Two of the four wrap across a source line, so an exact-substring check
+# would go red on a reformat with nothing wrong; and a pattern written with literal
+# spaces occurs verbatim in this very table, which is a file the node searches.
+# `_history_text` below handles that second hazard directly, so the `\s+` forms are
+# belt-and-braces — but they are also what the first attempt lacked.
+HISTORICAL_650_SENTENCES = [
+    ("tests/test_qmd_index_template.py",
+     r"~650\s+indexed\s+documents\s+were\s+being\s+served"),
+    ("tests/test_qmd_index_maintenance.py",
+     r"silently\s+dropped\s+~650\s+indexed\s+documents"),
+    ("tests/test_qmd_index_maintenance.py",
+     r"would\s+have\s+dropped\s+~650\s+session\s+documents"),
+    ("scripts/maintenance/qmd_index_maintenance.py",
+     r"\(~650\s+indexed\s+documents\)\s+and\s+deleted"),
+]
+
+_SELF_FILE = "tests/test_qmd_index_maintenance.py"
+# Split across two literals deliberately: written as one string, this line would
+# itself hold the marker, and the `count == 1` assert below would fire on the
+# definition rather than on the table it guards. The first attempt hit exactly that.
+_TABLE_MARK = "HISTORICAL_650" "_SENTENCES = ["
+_TABLE_END = "\n]\n"
+
+
+def _history_text(rel: str) -> str:
+    """The text of `rel` as the node may search it: this table cut out of itself.
+
+    One of the four sentences lives in this same file, so the file is both the
+    record and the record's index. On the first attempt the entry was a plain
+    literal and the raw text matched it from the declaration alone — the node stayed
+    green with the historical sentence at :153 deleted, which the review rung proved
+    by a string-deletion probe. An assertion that passes because the thing asserting
+    it contains the words is not an assertion, so the searched text has the table
+    removed and each entry can only be satisfied by the prose it names.
+
+    Both asserts are the denominator: if the table is renamed, if the marker turns
+    up somewhere else, or if the end marker no longer closes a line, the slice
+    silently degrades to the raw text and the self-match returns with nothing red.
+    """
+    raw = (ROOT / rel).read_text()
+    if rel != _SELF_FILE:
+        return raw
+    assert raw.count(_TABLE_MARK) == 1, (
+        f"the marker {_TABLE_MARK!r} is not found exactly once, so the slice below "
+        f"cannot tell the table from whatever else mentions it — and one of those "
+        f"other places is this function's own definition line")
+    start = raw.index(_TABLE_MARK)
+    end = raw.index(_TABLE_END, start) + len(_TABLE_END)
+    cut = raw[:start] + raw[end:]
+    assert _TABLE_MARK not in cut, (
+        "the table cut removed nothing: the entries below are back to matching "
+        "their own declaration")
+    return cut
+
+
+def test_the_650_figure_survives_as_history_in_every_place_that_had_it():
+    """#2311: the count is banned from the template, not from the record.
+
+    The rule #2089 wrote into the template's own comment — no live count, measure
+    it — could be honoured by deleting the figure everywhere, and that would be the
+    wrong fix: the four sentences below are the only surviving explanation of *why*
+    the ban exists, and each is a past-tense account of what a stale template cost
+    (the 2026-09-19 live edit, and the re-sync in the wrong direction that would
+    have dropped the collection from both retrieval legs). Erase them and the next
+    editor inherits a prohibition with no reasoning attached, which is the
+    precondition for re-adding the number.
+
+    So this node pins the ban's counterpart, and it is the pair that does the
+    work: the figure is present in all four historical sentences AND absent from
+    the template, where it would read as a current fact. Either half alone is
+    satisfiable by the laundering this clause is against — deleting the history
+    keeps the template clean, and keeping the history while restoring the number in
+    the template keeps a plausible-looking record.
+
+    The module docstring's promise that this file reads no real config is about the
+    *drift check*, which is asserted against `tmp_path` fixtures so the suite is
+    green on a box with no qmd. A doc-preservation node has no fixture to read:
+    what it holds a rewrite to is the tracked source text, and it touches neither
+    `~/.config/qmd/index.yml` nor the index.
+
+    Two of the four records are in the file holding this node, so each entry is
+    read through `_history_text`, which cuts this node's own table out of the text
+    it searches: an entry satisfied by its own declaration would keep the clause
+    green with the sentence at :153 deleted.
+    """
+    for rel, sentence in HISTORICAL_650_SENTENCES:
+        assert re.search(sentence, _history_text(rel)), (
+            f"{rel} no longer carries the historical sentence /{sentence}/; the "
+            f"~650 figure belongs in that file's account of the 2026-09-19 drift, "
+            f"and deleting the account is how the count ban comes to look like "
+            f"decorum rather than a consequence")
+
+    template_text = TRACKED_TEMPLATE.read_text()
+    assert "650" not in template_text and "651" not in template_text, (
+        "the tracked template states the figure again, which is the exact defect "
+        "#2089 removed: nothing in that file can say how many documents are "
+        "indexed, because the count goes stale before the next reader arrives")

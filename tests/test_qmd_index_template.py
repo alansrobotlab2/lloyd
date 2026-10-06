@@ -250,3 +250,156 @@ def test_the_file_a_round_may_now_rewrite_is_the_one_the_drift_check_reads():
     out = qm.config_drift()
     assert out.get("comparable") is True, out
     assert out["resync_command"].split()[-1] == GRANTED_TEMPLATE, out
+
+
+# --- #2311: the sessions: comment states no count, and says what replaced it --
+
+# A live document count in any spelling an editor reaches for: with or without the
+# `~` that means "approximately", with or without thousands separators, and with or
+# without the word `indexed` — the last one because `~650 indexed documents` is the
+# exact string this template carried until #2089 removed it in `aa47d6ec`, so a
+# pattern that missed it would be a pattern fitted to the wrong crime.
+COUNT_PHRASE = re.compile(r"~?\d[\d,]*\s*(?:indexed\s+)?documents", re.I)
+
+# The removed sentence, byte for byte as it shipped (the deleted line of
+# `aa47d6ec`): the control is the real string, not a paraphrase of it.
+REMOVED_COUNT_SENTENCE = (
+    "    # ~/obsidian/sessions, which exists but is empty. ~650 indexed documents")
+
+
+def _sessions_comment_block() -> str:
+    """The comment lines the template carries under its own `sessions:` key.
+
+    Read as text rather than through `yaml.safe_load`, which discards comments: the
+    object under test is what an operator reads and no other node in this file can
+    see, because every one of them goes through the parser. The block is the run of
+    `#` lines between `  sessions:` and its `path:`, so another collection's comment
+    is not folded into it. The assert inside is the denominator: an extractor
+    returning `""` matches no count phrase and contains no literal either, and would
+    turn all four claims below into passes earned from nothing.
+    """
+    lines = TEMPLATE.read_text().splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.rstrip() == "  sessions:")
+    block = []
+    for ln in lines[start + 1:]:
+        if not ln.lstrip().startswith("#"):
+            break
+        block.append(ln.strip())
+    assert block, (
+        "the `sessions:` collection carries no comment block, so every statement "
+        "below about what it says would be a statement about nothing")
+    return "\n".join(block)
+
+
+def test_the_sessions_comment_states_no_document_count_and_keeps_its_measure():
+    """#2311 clauses 1-3: the count is banned, the query is mandatory, and the
+    refusal is proven on the string that actually shipped.
+
+    WHY A NUMBER MAY NOT BE WRITTEN HERE. The comment asserted `~650 indexed
+    documents` from 2026-09-07 until #2089 took it out (`aa47d6ec`, 2026-10-04); by
+    then #1064 had retracted 514 non-conversation exports on 2026-09-27 and the
+    data-home move had re-rooted the collection under `~/lloyd-data`, so the
+    reassuring figure described a world two changes dead. A stale count is worse
+    than no count: it is what let a reader approve a re-sync from the template
+    without measuring, which is the failure that dropped ~650 session documents in
+    the 2026-09-19 drift. So `:68` ("No count is stated here, because one goes
+    stale") and the query beside it are one device, and this node holds both halves
+    — a ban that keeps the prohibition but loses the query invites the number back,
+    and a query kept beside a re-added number is a contradiction nobody enforces.
+
+    Nothing else in the suite can catch the re-add: `test_the_patched_template_points_sessions_at_the_real_export_directory`
+    and its neighbours assert on parsed paths, SETUP.md prose, the dropped `facts`
+    and the drift seam, and all of them see the file only after `yaml.safe_load`
+    has thrown the comments away.
+    """
+    block = _sessions_comment_block()
+
+    # Control first, and through the same pattern object: `search` answers None
+    # just as quietly for a block that is empty as for a regex that lost its
+    # `documents`, so the pattern's power is shown before its verdict is trusted.
+    control = COUNT_PHRASE.search(REMOVED_COUNT_SENTENCE)
+    assert control, (
+        "the pattern does not reject the sentence the template really carried, "
+        "so the assertion below would pass on a regex that matches nothing")
+    assert control.group().lower().endswith("documents"), control.group()
+
+    stale = COUNT_PHRASE.search(block)
+    assert stale is None, (
+        f"the `sessions:` comment states a live document count ({stale.group()!r}) "
+        f"— that is the defect #2089 removed: measure with the query already in "
+        f"this block instead, and see the 514-export retraction of 2026-09-27 for "
+        f"how fast such a figure decays")
+
+    assert "No count is stated here" in block, (
+        "the sentence that forbids a count here is gone, so the next hand edit has "
+        "no reason written down to argue with")
+    assert "collection='sessions'" in block and "active=1" in block, (
+        f"the block lost the measuring query ({block!r}); no-count without a "
+        f"replacement is how the number comes back")
+
+
+def test_the_sessions_comment_names_the_background_split_it_does_not_show():
+    """#2311 clause 4: the directory an operator counts is not this one.
+
+    `app/paths.py` sends worker and background transcripts to a sibling directory
+    (`VAULT_BACKGROUND_SESSIONS_DIR`) precisely so the qmd watcher does not embed
+    them, and `app/post_capture.py` writes there. The template's `sessions:` block
+    named neither, so the tree read as a leak: the indexed collection is a small
+    minority of what sits under `vault-derived/`, and the only figure a curious
+    reader can compute by counting files is the big one, which makes the corpus
+    look like it lost most of its documents. Naming the split is the fix; naming it
+    with a count would recreate the clause-1 defect, so the count ban is re-run on
+    the same block rather than trusted to intention.
+
+    Both names must be the real ones. `sessions-background` is asserted as
+    `paths.VAULT_BACKGROUND_SESSIONS_DIR.name` and not as a literal, and the two
+    directories must still share a parent, so a future relocation of the constant
+    reddens the comment that describes it instead of leaving the comment to assert
+    a directory that no longer exists.
+    """
+    from app import paths
+
+    block = _sessions_comment_block()
+
+    assert "VAULT_BACKGROUND_SESSIONS_DIR" in block, (
+        "the block does not name app.paths.VAULT_BACKGROUND_SESSIONS_DIR, so a "
+        "reader comparing file counts across the two directories has nothing to "
+        "reconcile them with")
+    background = paths.VAULT_BACKGROUND_SESSIONS_DIR
+    assert background.name in block, (
+        f"the block names a background directory that is not the one the code "
+        f"writes to ({background}) — a comment describing a moved path is worse "
+        f"than no comment")
+    assert background.parent == paths.VAULT_SESSIONS_DIR.parent, (
+        f"{background} is no longer beside the indexed sessions export "
+        f"({paths.VAULT_SESSIONS_DIR}); the block says it is")
+
+    # The comment's central claim is about a shell script, not about Python: the
+    # split exists because `qmd-watcher.sh` embeds one directory and not the other,
+    # and nothing in the AST graph or the YAML parse reaches that line. Read it
+    # here, because a watcher that started watching both directories would retire
+    # the reason for the split while the comment went on asserting it.
+    watcher = (ROOT / "agent-services/scripts/qmd-watcher.sh").read_text()
+    watched = next(ln for ln in watcher.splitlines()
+                   if ln.startswith("SESSIONS="))
+    # Compared as a path tail, not absolutely: `app.paths` re-anchors every
+    # derived-root constant inside a git worktree (it warns about exactly that on
+    # import), so an absolute comparison here would pass on this box and go red in
+    # the gate's throwaway worktree — a failure that describes the harness, not the
+    # seam. The tail is the same string in both trees.
+    tail = "/" + paths.VAULT_SESSIONS_DIR.relative_to(
+        paths.VAULT_DERIVED_ROOT.parent.parent).as_posix() + '"'
+    assert watched.rstrip().endswith(tail), (
+        f"qmd-watcher.sh watches {watched!r}, which no longer ends in the "
+        f"collection's own path tail {tail} — the template comment and the watcher "
+        f"disagree about what is embedded")
+    assert "sessions-background" not in watcher, (
+        f"the watcher gained {background.name}, so background transcripts are "
+        f"embedded after all and this template's comment is now a false account of "
+        f"why they are not")
+
+    stale = COUNT_PHRASE.search(block)
+    assert stale is None, (
+        f"the background split is documented with a document count "
+        f"({stale.group()!r}); the split is the point, and the count is what this "
+        f"file's own history says not to write")

@@ -70,6 +70,15 @@ collections:
     #     "select count(*) from documents where collection='sessions' and active=1"
     # The collection shrank on 2026-09-27 when #1064 retracted the 514
     # non-conversation exports.
+    # What is not here on purpose: worker and background transcripts are exported
+    # to the sibling sessions-background/ (app.paths.VAULT_BACKGROUND_SESSIONS_DIR,
+    # app/paths.py) instead, because the qmd watcher indexes and embeds this
+    # directory on every change and a day of session-backed workers talking to
+    # themselves would drown the corpus that answers questions about what the user
+    # and Lloyd discussed. Those transcripts are still written and still greppable
+    # — outside the watch, never embedded — so counting that directory against this
+    # one is not data loss, and the query above is where this collection's size is
+    # measured rather than remembered.
     path: /home/alansrobotlab/lloyd-data/_pipeline/vault-derived/sessions
     pattern: "**/*.md"
   architecture:
