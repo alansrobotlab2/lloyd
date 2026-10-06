@@ -49,9 +49,9 @@
 #
 # Usage:
 #   # Whole-tree snapshot; the commit says it carries state it cannot attribute:
-#   ~/lloyd/scripts/util/vault-commit.sh "nightly-reflection: pre-flight $(date +%Y-%m-%d)"
+#   ~/lloyd/scripts/util/vault-commit.sh "nightly-reflection: pre-flight $(date -u +%Y-%m-%d)"
 #   # Only what this job wrote:
-#   ~/lloyd/scripts/util/vault-commit.sh "autonomy-data-pipeline: $(date +%Y-%m-%d)" \
+#   ~/lloyd/scripts/util/vault-commit.sh "autonomy-data-pipeline: $(date -u +%Y-%m-%d)" \
 #       -- memory/ backlog/ autonomy/
 #   LLOYD_JOB=nightly-knowledge-write ~/lloyd/scripts/util/vault-commit.sh "nightly: knowledge write 2026-09-20"
 #   # …and the same scope, but reporting anything carried that this job did not write:
