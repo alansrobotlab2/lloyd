@@ -51,6 +51,7 @@ import policy            # noqa: E402
 import poolwatch         # noqa: E402
 import probes            # noqa: E402
 import rollback as rb    # noqa: E402
+import speak             # noqa: E402
 import vaultwatch        # noqa: E402
 import datawatch         # noqa: E402
 import memwatch          # noqa: E402
@@ -497,8 +498,18 @@ class Guardian:
             ok, detail = self.recover_service(program, live_reason)
             if ok:
                 log(f"{program} recovered: {detail}")
+                # One read, then a state derived from it and one cursor write, and the
+                # SAME `loss` record feeds both the re-speak and the sentence below.
+                # Reading it twice would let the alert body and the utterance disagree
+                # about which burst they are describing.
+                loss = speak.read_loss_record(self.gdir) or {}
+                state = speak.loss_replay_state(loss, self.gdir)
+                resaid = (speak.replay_latest_loss(
+                    loss, self.gdir, window=self.notifier.voice_window)
+                    if state == speak.REPLAY_OWED else False)
                 self.alert("info", f"Recovered: {program}",
-                           f"{program} was {live_reason}.\nRestarted; {detail}.",
+                           self._recovery_body(program, live_reason, detail, loss,
+                                               state, resaid),
                            coalesce=True)
                 # The incident note this alert opened is sealed by the retraction pass at
                 # the top of the next tick — which is now reachable, because the program
@@ -516,6 +527,54 @@ class Guardian:
                            f"this guardian can do to a synthesiser, and it has done it.",
                            needs_human=True, coalesce=True)
         return out
+
+    @staticmethod
+    def _recovery_body(program: str, live_reason: str, detail: str,
+                       loss: dict, state: str, resaid: bool) -> str:
+        """The `Recovered:` alert body (#2264).
+
+        With no loss record this is what every recovery row on this box has said since
+        #1904, byte for byte, and `tests/test_guardian_recovery_respeak.py` pins it at
+        that: an uneventful restart must not acquire a paragraph about an outage nobody
+        had, which is the state this box is in nearly always.
+
+        The number is `occurrences`, the burst's own tally, and NOT `len(loss["said"])`.
+        The two differ by design: `_record_loss` keeps only the newest
+        `speak.LOSS_TEXT_KEEP` (5) texts while the counter keeps counting, so on
+        2026-10-05 a burst of five filled the text list exactly and a burst of six would
+        report five texts while six alerts went missing. The sentence's job is the
+        second number, and it is the reason the count and the words are read from one
+        record by the caller rather than looked up twice.
+
+        The body carries the COUNT rather than the lost words themselves, because
+        `utterance_for` truncates the whole spoken text at `max_chars` — 240, from
+        `speak.DEFAULTS`; the live `~/.local/state/lloyd-guardian/voice.json` holds no
+        `max_chars` key, so that default is this box's cap — before the detached worker
+        ever sees it. Quoting one swallowed alert inside a sentence that is then cut
+        mid-word would make the recovery alert the second arbitrary truncation applied to
+        that record, and a count cannot be truncated into meaning something else.
+
+        Every sentence here is true in all three states `loss_replay_state` answers,
+        because this is the record a human reads after the room has already heard or not
+        heard the re-speak: `resaid` reports the utterance this call actually dispatched,
+        `REPLAY_SPOKEN` credits an earlier recovery with a burst this cursor has spent,
+        and only a burst nobody ever said gets "None of them has been said again".
+        """
+        head = f"{program} was {live_reason}.\nRestarted; {detail}."
+        try:
+            lost = int(loss.get("occurrences") or 0)
+        except (TypeError, ValueError):
+            lost = 0
+        if lost < 1:
+            return head
+        if resaid:
+            again = "The newest has just been said again."
+        elif state == speak.REPLAY_SPOKEN:
+            again = "The newest was said again on an earlier recovery."
+        else:
+            again = "None of them has been said again."
+        return (f"{head}\n{lost} spoken alert{'s' if lost != 1 else ''} did not reach the "
+                f"speakers while it was down. {again}")
 
     def _recent_recoveries(self, program: str) -> int:
         """Recovery restarts of `program` inside the flap window. The same ledger read

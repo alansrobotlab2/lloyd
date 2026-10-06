@@ -147,6 +147,16 @@ LOSS_WINDOW = 3600.0
 LOSS_TEXT_KEEP = 5
 LOSS_TEXT_CHARS = 200
 LOSS_HEADING = "# Voice alert lost"
+# Which burst the recovery already re-spoke (#2264). A burst, not a text, because
+# a burst is what `voice-loss.md` is a record OF and the record is a per-burst
+# overwrite: the five losses of 2026-10-05 15:15-16:17 were already gone from the
+# file, replaced by the 18:05/18:13 pair, so there is no backlog to drain later
+# and one burst can only ever be said once. In the guardian state dir rather than
+# in memory because the process that recovers the synthesiser is the one that may
+# be restarting: a cursor a restart forgets re-says the same stale `Landed:` line
+# on the next flap, which is the same "a repeating reader must not re-act" rule
+# `voiceloss.CURSOR_NAME` exists for one file over.
+REPLAY_CURSOR_NAME = "voice_replay_cursor.json"
 
 # The locally-generated attention chirp. Under a second so that
 # `_FALLBACK_PLAY_TIMEOUT` can hold the whole failure path inside the 2.0 s the
@@ -265,6 +275,132 @@ def read_loss_record(state_dir: Path) -> dict | None:
     except (OSError, ValueError):
         return None
     return _parse_loss_body(body)
+
+
+def _read_replay_cursor(state_dir: Path) -> dict:
+    """The last burst the recovery re-spoke, or `{}` when there is no such record.
+
+    Absent, unreadable and unparseable are one answer, and it is the same one
+    `gstate.read_json` gives: nothing has been replayed. That is safe here in the
+    direction that matters — the worst case is a burst said twice, and the file is
+    written atomically below so the torn read that would cause it is not a thing
+    this reader can actually see.
+    """
+    try:
+        cur = json.loads((Path(state_dir) / REPLAY_CURSOR_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return cur if isinstance(cur, dict) else {}
+
+
+def _write_replay_cursor(state_dir: Path, burst_started: float, text: str) -> None:
+    """Record the burst as said, atomically, and never raise.
+
+    One small JSON, tmp-then-`os.replace`, which is `gstate.write_json_atomic`'s shape
+    and deliberately a copy of three lines rather than an import: `speak.py` is pulled
+    in by `eval/speaker_embed_eval.py` and `scripts/voice/tts_bakeoff.py` as a
+    standalone module, and it has never imported a sibling from the guardian directory.
+    """
+    d = Path(state_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "burst_started": float(burst_started),
+        # Local digits with an explicit offset, the %z rule #1808 put on `voice.log`
+        # and #1912 on ALERT.md: this dir's other artefacts stamp UTC, and a reader
+        # that assumed that here would be seven hours wrong about when an alert was
+        # re-said.
+        "replayed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime()),
+        "text": text[:LOSS_TEXT_CHARS],
+    }
+    try:
+        tmp = d / f"{REPLAY_CURSOR_NAME}.tmp{os.getpid()}"
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        os.replace(tmp, d / REPLAY_CURSOR_NAME)
+    except OSError:
+        pass
+
+
+#: What `loss_replay_state` answers, and the only three things that are true about a
+#: burst and the voice that owes it a re-saying.
+REPLAY_OWED, REPLAY_SPOKEN, REPLAY_NONE = "owed", "spoken", "none"
+
+
+def loss_replay_state(record: dict | None, state_dir: Path) -> str:
+    """`owed`, `spoken` or `none` for a loss record already read (#2264).
+
+    One call, one answer, three states rather than a bool, because the recovery has to
+    SAY which of them it is in: a body that promised "none of them has been said again"
+    on the second recovery of a burst the first recovery already re-said would be a
+    false statement about the room, written by the one process that knows the difference.
+
+    * `owed` — the record counts at least one lost utterance, names words to say, and
+      the cursor has not spent its burst. This is the re-speak's cue.
+    * `spoken` — an earlier recovery already re-said this burst. The losses stay facts
+      worth reporting; the speech does not happen twice.
+    * `none` — no re-speak is possible or owed: no record, a count of zero, a record
+      with no words in it, or a burst with no start to bound. A `Recovered:` body that
+      reported `0 spoken alerts` on an uneventful day would be announcing an outage
+      nobody had, and the box is in this state nearly always.
+
+    `spoken` means the CURSOR says this process's predecessors said it, which is the only
+    sense in which the recovery may claim it out loud. A record whose `burst_started` is
+    missing therefore lands in `none`: `_parse_loss_body` allows the field to be absent —
+    such a record "can be read but never refreshed" — and a cursor cannot bound a burst
+    with no start, so the only available guard would be "re-speak on every recovery",
+    which on a flapping `agent-tts` that `tick()` recovers once per tick is the same
+    stale line read out once per flap. `none` is also the honest wording for that case:
+    the count still goes in the body, and "none of them has been said again" is true
+    about it, whereas `spoken` would assert a re-saying that never happened.
+    """
+    if not record or int(record.get("occurrences") or 0) < 1:
+        return REPLAY_NONE
+    if not [s for s in list(record.get("said") or []) if str(s).strip()]:
+        return REPLAY_NONE
+    started = record.get("burst_started")
+    if started is None:
+        return REPLAY_NONE
+    done = _read_replay_cursor(state_dir).get("burst_started")
+    if isinstance(done, (int, float)) and float(started) <= float(done):
+        return REPLAY_SPOKEN
+    return REPLAY_OWED
+
+
+def replay_latest_loss(record: dict, state_dir: Path, *, window: float) -> bool:
+    """Say the newest lost utterance again, and record this burst as said.
+
+    `record` is the one the caller already put to `loss_replay_state`; re-reading the
+    file here would be a second opinion about which burst is live, and that same caller
+    is composing an alert body from this record one line later — the two must be about
+    the same burst.
+
+    Newest is `said[0]` because `_record_loss` prepends, and newest is the right pick on
+    merit too: the oldest thing a burst can name is a `Rolled back` line about a deploy
+    that is now hours stale, and re-saying that is worse than the chirp that already
+    sounded (#2264 owed 2 is Alan's call on whether the whole burst should ever be read
+    out — one alert is the shipped policy).
+
+    The cursor moves ONLY on a successful spawn. Quiet hours and the master mute both
+    return False without saying anything, and stamping a burst that was never re-said
+    would mark a debt paid and lose the alert permanently — the rule #1904's escalator
+    already states from the other side: "the cursor is NOT advanced on that path, so the
+    escalation is still owed".
+
+    `force` is what gets the words out when the store still holds a stamp for them (see
+    `should_speak`), and the slot is the utterance itself, so the re-speak leaves its own
+    mark in `voice_spoken.json` — the artefact a later reader checks to see whether an
+    alert was said twice.
+    """
+    said = [s for s in list(record.get("said") or []) if str(s).strip()]
+    if not said:
+        return False
+    text = said[0]
+    if not dispatch("info", "Re-said after a voice outage", "", state_dir,
+                    window=window, key=text, verbatim=text, force=True):
+        return False
+    started = record.get("burst_started")
+    if started is not None:
+        _write_replay_cursor(state_dir, float(started), text)
+    return True
 
 
 def _record_loss(state_dir: Path, text: str, reason: str) -> None:
@@ -432,12 +568,25 @@ def in_quiet_hours(cfg: dict, now: float | None = None) -> bool:
 
 # ── suppression, shared across processes ──────────────────────────────
 def should_speak(key: str, state_dir: Path, window: float,
-                 now: float | None = None) -> bool:
+                 now: float | None = None, *, force: bool = False) -> bool:
     """True at most once per `window` for a given key, across processes.
 
     Records the decision under an exclusive lock *before* speaking, so the
     daemon and the nag oneshot racing on the same tick produce one utterance
     rather than two overlapping ones.
+
+    `force` speaks anyway inside the window and still takes the stamp. It exists
+    for #2264's replay: the proof that a stored utterance was never heard is the
+    loss record that names it, and the stamp beside that record is the residue of
+    an attempt that made no sound — the same confusion #2256 fixed for a live
+    alert, where a failed synthesis muted the identical text for an hour on the
+    strength of a call that produced nothing. `forget_spoken` is the other answer
+    and is the wrong one here: it presumes a key this code spent, and pre-#2256
+    residue in the live store (`Landed: #2258 round 2: …` stamped 18:05:36 by the
+    OLD guardian, never released) is precisely a key the process now holding it
+    cannot release. Stamping as well is what makes the replay visible in
+    `voice_spoken.json`, which is where a later reader looks to see whether an
+    alert was said twice.
     """
     now = time.time() if now is None else now
     try:
@@ -454,7 +603,7 @@ def should_speak(key: str, state_dir: Path, window: float,
             except Exception:
                 seen = {}
             last = seen.get(key)
-            if isinstance(last, (int, float)) and now - last < window:
+            if not force and isinstance(last, (int, float)) and now - last < window:
                 return False
             seen[key] = now
             # Keep the file from growing without bound; anything outside the
@@ -855,12 +1004,23 @@ def speak_now(text: str, cfg: dict, state_dir: Path,
 
 
 def dispatch(level: str, title: str, body: str, state_dir: Path, *,
-             window: float, key: str | None = None) -> bool:
+             window: float, key: str | None = None,
+             verbatim: str | None = None, force: bool = False) -> bool:
     """Suppression-check, then hand off to a detached worker.
 
     Returns whether an utterance was *dispatched*. False means suppressed or
     un-spawnable, never "the speaker did not work" — nobody is waiting long
     enough to find that out. See `voice.log` for what happened next.
+
+    `verbatim` skips `utterance_for` and hands the worker these exact words. Only
+    #2264's replay uses it: the text is already composed, and the loss record's
+    entire content is the words that were lost, so re-deriving them from a
+    level/title/body triple would be a second opinion about the one thing that has
+    to be reproduced byte for byte. `force` passes the suppression gate and still
+    takes the stamp — see `should_speak`.
+
+    Both new keywords default to the shipped behaviour, so every existing caller
+    (`notify.py::_speak`, the only caller in production) is unchanged.
     """
     if not voice_enabled():
         return False
@@ -878,9 +1038,10 @@ def dispatch(level: str, title: str, body: str, state_dir: Path, *,
         # the process that discovers the synthesiser is dead is not the process that
         # reserved the hour, so without `--key` it cannot know what to give back (#2256).
         slot = key or title or "alert"
-        if not should_speak(slot, state_dir, window):
+        if not should_speak(slot, state_dir, window, force=force):
             return False
-        text = utterance_for(level, title, body, max_chars=int(cfg["max_chars"]))
+        text = (verbatim if verbatim else
+                utterance_for(level, title, body, max_chars=int(cfg["max_chars"])))
         subprocess.Popen(
             [_worker_python(), str(Path(__file__).resolve()),
              "--state-dir", str(state_dir), "--text", text, "--key", slot],
