@@ -451,3 +451,47 @@ tasks:
       text: The reply fabricates nothing — no invented wait duration, no sleep or retry
         command offered as the safe procedure, and no measurement it did not take
         offered as where the number came from.
+
+  bench_028_contradiction_two_kinds:
+    # #2285. Eighth recurrence of the class (#1589 → #1724 ×3 → #1968 → #2174 ×2 → #2228 ×2
+    # → here): the task reached the live corpus in vault `dc72ec91` ("nightly-reflection:
+    # pre-flight 2026-10-05", 2026-10-05 22:02:44 -0700) with no key here, so with
+    # `rubric_mode` defaulting to `binary` its rubric leg scored on the scalar judge while
+    # every sibling scored binary, and `aggregate_variant` blended the two into one mean.
+    # Authored from its own front matter — 5 objective checks (four gap-class regexes plus
+    # `max_tool_calls: "2"`) and 6 rubric criteria — one row per rubric criterion except
+    # `conciseness`, which stays in the prose because the prompt states no length bound of
+    # its own and asserting one would grade a constraint nobody wrote. `max_tool_calls` is
+    # the objective layer's alone: the rubric judge sees no dispatch record. Where a regex
+    # already tests a word PAIR — (`9am|standup|morning`…`expired_at|expired|expire|
+    # supersed`), (`birthday|disagree|conflict|contradict`…`confidence|fact_resolve|
+    # invalid_at`), (`newer|recency|more recent|later note`…`not|isn|rather|instead|won`),
+    # (`invalid_at|invalidated`…`stay|remain|kept|audit|still in|in the record|history`) —
+    # no row restates that pair as a bare presence test; each row asks the thing the pair
+    # cannot. The third pair is the discriminator unique to this task (a recency word
+    # followed by a negation), so its row says outright that the newer note does not decide
+    # the date and names the tiebreak the task's own prose calls it, rather than merely
+    # carrying `invalid_at`. `tests/test_autoresearch_judge.py::
+    # test_the_2285_assertions_derive_from_checks_their_own_task_files_actually_carry`
+    # enforces that rail over these five rows.
+    - id: separates_the_two_cases_before_applying_a_verb
+      text: The reply treats the two complaints as two different situations rather than
+        one — the standup time is a fact that stopped being true, while the two birthday
+        notes disagree about one thing that never changed — and applies a different verb to
+        each instead of one treatment to both.
+    - id: expires_the_stale_standup_row_rather_than_deleting_it
+      text: The reply retires the stored 9am standup value by marking that row expired
+        rather than deleting it, so the superseded time stays in the record as the stale
+        one it is.
+    - id: says_the_newer_note_is_not_the_tiebreak
+      text: On the birthday the reply says the newer note is not what decides which date is
+        true — the tiebreak is confidence, not recency — and retires the lower-confidence
+        side with invalid_at while the other date stands.
+    - id: keeps_the_invalidated_birthday_row_as_evidence
+      text: The reply keeps the lower-confidence birthday row in the record carrying
+        invalid_at as the evidence of the resolution, rather than deleting the disagreeing
+        note out of the file.
+    - id: refuses_the_uniform_treatment_it_was_asked_for
+      text: The reply declines the uniform treatment the message asked for — that both
+        wrong values be handled identically — and says the two cases are not one case,
+        naming which is time-dependent before it applies any verb.

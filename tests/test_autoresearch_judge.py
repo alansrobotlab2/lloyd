@@ -1297,6 +1297,11 @@ TASKS_1724_AUTHORED_ASSERTIONS_FOR = (
     # corpus on 2026-10-04 with no key in the table, exactly as 018-025 did before them.
     "bench_026_contradiction_supersede_chain",
     "bench_027_recall_user_fact_topic_read",
+    # #2285: the eighth recurrence, named by the same live_vault node on 2026-10-06 at
+    # repo HEAD 30fb3232 — `bench_028_contradiction_two_kinds` reached the live corpus in
+    # vault `dc72ec91` (2026-10-05 22:02:44 -0700) with no key here, so its rubric leg
+    # fell back to the scalar judge while its 27 siblings scored binary.
+    "bench_028_contradiction_two_kinds",
 )
 
 #: Which task's authored set was derived from which of its own checks, and how. A
@@ -1391,6 +1396,50 @@ ASSERTION_ANCHORS_BY_TASK = {
     "bench_027_recall_user_fact_topic_read": (
         "95.37", "hook", "n-gram", "in quick succession", "agent-llm-primary",
         "fabricate"),
+    # #2285: the two cases by the words the prompt itself uses, the tiebreak the task
+    # calls load-bearing, the field the retired row keeps, and the ask the reply has to
+    # refuse. All seven are bench_028's own wording, and all seven are carried by some
+    # authored row — `test_those_assertions_are_about_the_clause_their_own_task_states`
+    # reads both files and reds on either side dropping.
+    "bench_028_contradiction_two_kinds": (
+        "standup", "birthday", "confidence", "recency", "invalid_at", "uniform",
+        "never changed"),
+}
+
+#: #2285, same shape as `ASSERTION_SOURCES_2228`: which of the task's own checks each
+#: authored row grades. Eight rows in, this is the first set where no row claims an
+#: `objective_value` token of its own — bench_028's objective layer is four regexes and a
+#: 2-call cap, so every row's second source is the task's own prompt or body prose, and
+#: the pairs are pinned separately in `OBJECTIVE_PAIRS_2285`.
+ASSERTION_SOURCES_2285 = {
+    "bench_028_contradiction_two_kinds": {
+        "separates_the_two_cases_before_applying_a_verb": (
+            ("rubric", "separates_the_time_dependent_fact_from_the_data_disagreement"),
+            ("body", "stopped being true")),
+        "expires_the_stale_standup_row_rather_than_deleting_it": (
+            ("rubric", "expires_the_stale_schedule_row_rather_than_deleting_it"),
+            ("prompt", "9am")),
+        "says_the_newer_note_is_not_the_tiebreak": (
+            ("rubric", "resolves_the_birthday_on_confidence_not_on_recency"),
+            ("body", "tiebreak")),
+        "keeps_the_invalidated_birthday_row_as_evidence": (
+            ("rubric", "keeps_the_retired_row_in_the_record"),
+            ("body", "stays in the record")),
+        "refuses_the_uniform_treatment_it_was_asked_for": (
+            ("rubric", "refuses_the_requested_uniform_treatment"),
+            ("body", "uniform treatment")),
+    },
+}
+
+#: bench_028's parsed check counts and the naive figure that over-counts the objective
+#: layer by one, for the same reason as `BENCH_024_025_CHECK_SHAPES` and
+#: `BENCH_026_027_CHECK_SHAPES`: 4 `type: regex` + 1 `type: max_tool_calls` + the
+#: frontmatter's own `type: note` = 6 lines carrying `type: `, against 5 objective checks.
+#: Its rubric layer is 6 criteria, and the authored set is 5 rows — every criterion but
+#: `conciseness`, which stays in the prose because the prompt sets no length bound.
+BENCH_028_CHECK_SHAPES = {
+    "bench_028_contradiction_two_kinds": {
+        "objective_checks": 5, "rubric_criteria": 6, "naive_type_lines": 6},
 }
 
 #: #2228, same shape as `ASSERTION_SOURCES_2174`: which of the task's own checks each
@@ -1511,6 +1560,78 @@ def quotes_a_pinned_literal_without_a_judgement(text: str, guard: dict):
     return None
 
 LIVE_BENCH_DIR = Path.home() / "obsidian" / "lloyd" / "bench"
+
+#: #2285, the eighth id in this class and the first whose objective layer is four word
+#: PAIRS rather than a bare value. `bench_026`/`bench_027` pinned `6am`, `9pm`, `95.37` as
+#: the literals a row may not restate; `bench_028_contradiction_two_kinds` states no bare
+#: value at all — its four `regex` checks each test a LEFT word within 40-46 characters of
+#: a RIGHT word, so the thing a row can restate is a pair, and this map is those four pairs
+#: transcribed from the task's own check values (the node
+#: `test_the_2285_assertion_set_derives_from_its_own_task_and_restates_no_check` proves
+#: every word below occurs in one of them, so the rail cannot drift off the regexes).
+#: Row 3 of this file's bench is where the rail earns its keep — check 3 is
+#: "a recency word followed by a negation", so a row reading `The reply says the newer note
+#: is not the answer.` quotes that pair exactly and judges nothing beyond it.
+OBJECTIVE_PAIRS_2285 = {
+    "bench_028_contradiction_two_kinds": {
+        "pairs": (
+            ("R1 stale-schedule…expiry",
+             ("9am", "standup", "morning"),
+             ("expired_at", "expired", "expire", "supersed")),
+            ("R2 birthday…resolution",
+             ("birthday", "disagree", "conflict", "contradict"),
+             ("confidence", "fact_resolve", "invalid_at")),
+            ("R3 recency…negation",
+             ("newer", "recency", "more recent", "later note"),
+             ("not", "isn", "rather", "instead", "won")),
+            ("R4 invalidated…kept-in-record",
+             ("invalid_at", "invalidated"),
+             ("stay", "remain", "kept", "audit", "still in", "in the record", "history")),
+        ),
+        # A judgement word names what kind of call the reply is making; none of them is a
+        # member of any pair class above, which is the whole point — `stale` is not one of
+        # the words the regex is prepared to find, it is the reader's word for the row.
+        "qualifiers": ("stale", "evidence", "tiebreak", "uniform", "never changed",
+                       "stopped being true", "which date"),
+        # Word-boundary matched, as in #2228, so the `not` inside `note` cannot count.
+        "contrast": ("not", "never", "rather than", "instead of", "only", "different",
+                     "because", "wrong"),
+    },
+}
+
+#: The rows the rail has to refuse, authored the way an implementer under time pressure
+#: authors them — each quotes one check's pair and adds a verb. Both carry a pair and no
+# contrast, and the second is the exact sentence the item warned about for check 3.
+RAIL_MUTATIONS_2285 = {
+    "bench_028_contradiction_two_kinds": [
+        ("The reply says the 9am standup row was expired.", "R1 stale-schedule…expiry"),
+        ("The reply mentions the stale 9am standup row carrying expired_at.",
+         "R1 stale-schedule…expiry"),
+        ("The reply says the newer note is not the answer.", "R3 recency…negation"),
+    ],
+}
+
+
+def restates_an_objective_pair_without_a_judgement(text: str, guard: dict):
+    """The objective word-pair a row restates bare, or None when the row is ruled in.
+
+    Same rule as `quotes_a_pinned_literal_without_a_judgement`, generalised from a pinned
+    VALUE to a pinned PAIR, because that is what bench_028's objective layer pins. Bare
+    means quoting both halves of one of its regexes without BOTH a judgement word and a
+    contrast beside them. One predicate for the real rows and for
+    `RAIL_MUTATIONS_2285`, so the two cannot drift into agreeing with each other.
+    """
+    low = " ".join(text.split()).lower()
+    for label, left, right in guard["pairs"]:
+        if not any(re.search(rf"\b{re.escape(w)}", low) for w in left):
+            continue
+        if not any(re.search(rf"\b{re.escape(w)}", low) for w in right):
+            continue
+        judged = any(q in low for q in guard["qualifiers"])
+        contrasted = any(re.search(rf"\b{re.escape(c)}\b", low) for c in guard["contrast"])
+        if not (judged and contrasted):
+            return label
+    return None
 
 
 def test_bench_023_resolves_to_authored_checks_and_not_a_graded_marker():
@@ -1757,6 +1878,178 @@ def test_the_2228_assertions_derive_from_checks_their_own_task_files_actually_ca
                 f"presence test, so it has to be ruled out. A rail that only asks "
                 f"whether a judgement WORD appears cannot catch it, because the word is "
                 f"part of the restatement")
+
+
+def test_bench_028_resolves_to_authored_checks_and_not_a_graded_marker():
+    """#2285 clauses 1 and 3: the eighth id in this class resolves to real rows, and the
+    id is named in this module so deleting the key reds a node that says so.
+
+    The same two rails #1968 and #2174 cut for their own ids, aimed at the id the
+    2026-10-06 `live_vault` run named. A `graded: true` mapping here would satisfy
+    `test_every_live_bench_task_has_an_assertion_set` — that node exempts a graded task by
+    design — while leaving bench_028's rubric leg on the scalar judge, which is the
+    fallback the item was filed for and the escape hatch taken silently. And a key with no
+    mention in `TASKS_1724_AUTHORED_ASSERTIONS_FOR` would leave the whole-table nodes
+    deriving their expectation from the table itself, so removing the key later would red
+    nothing that names it.
+    """
+    task_id = "bench_028_contradiction_two_kinds"
+    assert task_id in TASKS_1724_AUTHORED_ASSERTIONS_FOR, (
+        f"{task_id} is not named in the test module, so deleting its table key would "
+        "leave no node that names it")
+    table = judge.load_assertions()
+    entry = table.get(task_id)
+    assert isinstance(entry, list), (
+        f"{task_id} must carry authored checks, got {entry!r}")
+    assertions = judge.assertions_for({"id": task_id}, table)
+    assert assertions and all(a.get("id") and a.get("text") for a in assertions), assertions
+    ids = [a["id"] for a in assertions]
+    assert len(ids) == len(set(ids)), f"{task_id} repeats an assertion id: {ids}"
+
+
+@pytest.mark.skipif(not LIVE_BENCH_DIR.is_dir(), reason=f"no live bench at {LIVE_BENCH_DIR}")
+def test_the_2285_assertion_set_derives_from_its_own_task_and_restates_no_check():
+    """#2285 clause 4: the five rows bench_028 carries are its own rubric criteria minus
+    `conciseness`, they quote no word-pair its four regexes already grade, and each shares
+    the task's own words.
+
+    Four things are pinned, each one the way a previous recurrence of this class went
+    wrong.
+
+    The counts. `bench_028` parses to 5 objective checks and 6 rubric criteria, and the
+    naive `grep -c "type: "` figure is 6 for the same reason #2174 and #2228 recorded — the
+    frontmatter's own `type: note` is not a check. The authored set is exactly
+    `len(criteria) - 1 == 5` rows, and the rubric criteria its rows claim are the six less
+    `conciseness` — so the set is neither one row short (a dropped criterion) nor seven
+    (an invented one, or a row grading a length bound the prompt never states).
+
+    The derivation. Each row names its source and the source resolves: a rubric token is
+    really in `rubric_criteria`, a prompt or body token is really in that task's prompt or
+    file. bench_028 is the first set in this file whose rows claim no `objective_value`
+    token, because its objective layer states no value — four regexes and a 2-call cap.
+
+    The pair rail, which is why this node does not just reuse #2228's helper. bench_028
+    pins no bare literal, so #2228's `literals` list would be empty and the rail would
+    pass vacuously; what it pins is four word PAIRS, and `OBJECTIVE_PAIRS_2285` transcribes
+    them off the check values — with the transcription itself checked, every class word
+    found in the values after folding `9\\s*am` to `9am`, so the rail cannot drift off the
+    regexes. A row quoting both halves of a pair has to carry a judgement word AND a
+    contrast, and `RAIL_MUTATIONS_2285` pins three sentences that quote a pair and do not:
+    the third is the one the item warned about, `The reply says the newer note is not the
+    answer.`, which is check 3 restated as a presence test and grades nothing the objective
+    layer has not already graded.
+
+    The pairing, both ways: every row shares at least one anchor with the task's prose, and
+    every anchor is carried by some row — so no row floats free of the file it grades, and
+    trimming the anchor tuple shrinks nothing silently.
+    """
+    from scripts.autoresearch.common import load_bench_tasks
+    task_id = "bench_028_contradiction_two_kinds"
+    tasks = {t.get("id"): t for t in load_bench_tasks(LIVE_BENCH_DIR)}
+    task = tasks.get(task_id)
+    assert task, f"{task_id} is not in the live bench corpus at {LIVE_BENCH_DIR}"
+    shape = BENCH_028_CHECK_SHAPES[task_id]
+    checks = task.get("objective_checks") or []
+    criteria = task.get("rubric_criteria") or []
+    raw = (LIVE_BENCH_DIR / f"{task_id}.md").read_text(encoding="utf-8")
+    naive = sum(1 for line in raw.splitlines() if "type: " in line)
+    notes = sum(1 for line in raw.splitlines() if line.strip() == "type: note")
+    assert (len(checks), len(criteria)) == (
+        shape["objective_checks"], shape["rubric_criteria"]), (
+        f"{task_id}: parsed to {len(checks)} objective / {len(criteria)} rubric, not "
+        f"{shape['objective_checks']}/{shape['rubric_criteria']} — the row count and the "
+        "criterion-minus-conciseness rule below are authored against that pair")
+    assert naive == shape["naive_type_lines"] == len(checks) + notes and notes == 1, (
+        f"{task_id}: {naive} lines carry `type: ` against {len(checks)} objective checks "
+        f"and {notes} `type: note` — the over-count this class records is one")
+
+    table = judge.load_assertions()
+    sources = ASSERTION_SOURCES_2285[task_id]
+    entry = table.get(task_id)
+    assert isinstance(entry, list), (
+        f"{task_id} is not an authored list in the table: {entry!r}")
+    assert {r["id"] for r in entry} == set(sources), (
+        f"{task_id}: table row ids and ASSERTION_SOURCES_2285 disagree. "
+        f"table-only: {sorted({r['id'] for r in entry} - set(sources))}; "
+        f"map-only: {sorted(set(sources) - {r['id'] for r in entry})}")
+
+    # One row per rubric criterion except `conciseness`, asserted as a set equation in
+    # both directions plus the count, so the row that is not there and the row that is
+    # there for the wrong reason both name themselves.
+    graded = [c for c in criteria if c != "conciseness"]
+    claimed = [tok for row in entry
+               for kind, tok in sources[row["id"]] if kind == "rubric"]
+    assert len(claimed) == len(entry), (
+        f"{task_id}: {len(entry)} rows claim {len(claimed)} rubric criteria — a row "
+        "either grades two criteria or grades none of the task's")
+    assert sorted(claimed) == sorted(graded), (
+        f"{task_id}: rows grade {sorted(claimed)}, the task's rubric criteria less "
+        f"`conciseness` are {sorted(graded)}")
+    assert len(entry) == len(criteria) - 1 == 5, (
+        f"{task_id}: {len(entry)} rows against {len(criteria)} criteria — the rule is one "
+        "row per criterion except `conciseness`, which stays in the prose because the "
+        "prompt states no length bound of its own")
+
+    fold = lambda s: " ".join(str(s).split()).lower()  # noqa: E731
+    prompt = fold(task.get("prompt") or "")
+    for row in entry:
+        text = row["text"]
+        for kind, token in sources[row["id"]]:
+            if kind == "rubric":
+                assert token in criteria, (
+                    f"{task_id}: assertion `{row['id']}` claims to grade `{token}`, which "
+                    f"is not in rubric_criteria: {criteria}")
+            elif kind == "prompt":
+                assert fold(token) in prompt, (
+                    f"{task_id}: assertion `{row['id']}` relies on {token!r} being in this "
+                    f"task's prompt, and it is not")
+            else:
+                assert kind == "body", f"{task_id}/{row['id']}: unknown kind {kind!r}"
+                assert fold(token) in fold(raw), (
+                    f"{task_id}: assertion `{row['id']}` relies on {token!r} being in this "
+                    "task's own file, and it is not")
+        low = fold(text)
+        assert "mcp__" not in low and "tool_called" not in low, (
+            f"{task_id}: assertion `{row['id']}` asks about a tool call, which the judge "
+            "cannot see — it is handed reply text only. bench_028's `max_tool_calls: 2` "
+            "stays the objective layer's alone")
+        restated = restates_an_objective_pair_without_a_judgement(
+            text, OBJECTIVE_PAIRS_2285[task_id])
+        assert restated is None, (
+            f"{task_id}: assertion `{row['id']}` restates the objective pair {restated!r} "
+            "without both a judgement word and a contrast beside it, so the binary judge "
+            "is being asked to confirm a regex the same trial already ran")
+
+    # The rail's own reach, graded through the predicate the real rows go through. Each
+    # pinned sentence quotes one check's pair and carries no contrast, and the second is
+    # #2228's lesson kept for this task: a judgement WORD is not enough on its own.
+    for bad_text, label in RAIL_MUTATIONS_2285[task_id]:
+        assert restates_an_objective_pair_without_a_judgement(
+            bad_text, OBJECTIVE_PAIRS_2285[task_id]) == label, (
+            f"{task_id}: the pair rail let {bad_text!r} through, and it quotes {label} and "
+            "judges nothing beyond it")
+
+    # The transcription, not the prose: every class word in OBJECTIVE_PAIRS_2285 has to be
+    # findable in the task's own check values (with the regex's `9\s*am` folded to `9am`),
+    # so a rewrite of the checks reds the rail's source rather than silently widening it.
+    values = " ".join(str(c.get("value")) for c in checks).replace("\\s*", "").lower()
+    for label, left, right in OBJECTIVE_PAIRS_2285[task_id]["pairs"]:
+        for word in list(left) + list(right):
+            assert word.lower() in values, (
+                f"{task_id}: the pair rail's `{label}` class word {word!r} is not in any "
+                f"of the task's {len(checks)} objective-check values — the regexes moved "
+                "and the rail is now grading a pair this task does not test")
+
+    anchors = ASSERTION_ANCHORS_BY_TASK[task_id]
+    assertions = judge.assertions_for({"id": task_id}, table)
+    for row in assertions:
+        assert any(fold(w) in fold(row["text"]) for w in anchors), (
+            f"{task_id}/{row['id']} shares no anchor word with {task_id}'s own prose "
+            f"({list(anchors)}), so nothing ties that row to the task it grades")
+    used = {w for w in anchors if any(fold(w) in fold(r["text"]) for r in assertions)}
+    assert used == set(anchors), (
+        f"{task_id}: {sorted(set(anchors) - used)} are anchors in the map but in no "
+        "authored row — the prose-to-row pairing has been cut")
 
 
 def test_the_tasks_1724_named_carry_an_assertion_set_and_not_a_bare_key():
