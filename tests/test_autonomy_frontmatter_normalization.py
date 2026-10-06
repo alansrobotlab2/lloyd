@@ -199,3 +199,95 @@ def test_recovered_grants_are_materialisable(tmp_path, task_file):
     live = store.live(scope="autonomy-task:40", now=NOW)
     assert [r["tool_pattern"] for r in live] == ["autonomy_write_task"]
     assert live[0]["expires_at"], "a recovered grant kept its expiry"
+
+
+# ── #2313 clause 3: the scheduler's own path reaches the withdrawal ──────────
+
+def _stub_run_query(events):
+    async def _rq(messages, options):
+        for e in events:
+            yield e
+    return _rq
+
+
+async def test_a_deleted_grants_block_is_withdrawn_on_the_tasks_next_run(
+        tmp_path, monkeypatch, caplog):
+    """The #2093 shape end to end: the block is gone from the file, and the row it
+    minted dies on the next scheduled run — with no code change and no human call.
+
+    This is the seam every node in `tests/unit/test_grant_policy.py` stops short of.
+    Those call `sync_task_grants` directly, so they cannot see the reason the leak
+    survived the mint-side work of #1949/#2021/#2023: `run_task` reached that
+    function only under `if _specs:` (was `app/autonomy.py:4209`), and a file whose
+    `grants:` block was DELETED declares no specs at all. The skip and the
+    withdrawal needed each other — a withdrawal pass that no dispatch path can
+    reach for exactly one task shape, the shape that leaked, would have left every
+    unit node green and #40 still authorised.
+
+    Driven through `run_task` so the assertion crosses the same call the nightly
+    crosses. The pre-existing row is written the way the original mint wrote it
+    (`minted_by='frontmatter:40'`, tool `autonomy_write_task`, unbounded quota),
+    which is the state left behind on 2026-10-06 when vault `420a60b5` deleted the
+    block; the agent turn itself is stubbed, because the clause is about what
+    happens before the model runs.
+    """
+    import logging
+
+    import app.harness as harness
+    from app.harness import policy as P
+
+    caplog.set_level(logging.WARNING, logger="lloyd-harness-policy")
+    caplog.clear()
+
+    # The task file: #40's own frontmatter, no `grants:` key at all.
+    skill = tmp_path / "SKILL.md"
+    skill.write_text("# nightly-reflection-config\nDo the thing.\n")
+    fm = yaml.safe_load(_frontmatter())
+    fm["skill_name"] = str(skill)
+    path = tmp_path / "40-nightly-reflection-config.md"
+    path.write_text(f"---\n{yaml.dump(fm, default_flow_style=False)}---\n"
+                    "\n## Activity Log\n", encoding="utf-8")
+    assert "grants" not in A._parse_task_file(path), (
+        "the file under test still declares a block, so this is not the #2093 shape")
+
+    monkeypatch.setattr(A, "AUTONOMY_DIR", tmp_path)
+    monkeypatch.setattr(A, "AUTONOMY_RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(harness, "run_query", _stub_run_query([
+        {"type": "text_delta", "text": "did the thing"},
+        {"type": "result", "stop_reason": "stop",
+         "usage": {"input_tokens": 10, "output_tokens": 5}, "num_turns": 1},
+    ]))
+    monkeypatch.setattr("app.prompt_builder.build_system_prompt",
+                        lambda **_kw: "sys", raising=False)
+
+    store = GrantStore(tmp_path / "workers.db")
+    row = store.mint(scope="autonomy-task:40", tool_pattern="autonomy_write_task",
+                     arg_predicate="", quota=None, issued_by="alan",
+                     expires_at="2099-01-01T00:00:00+00:00",
+                     minted_by="frontmatter:40")
+    monkeypatch.setattr(P, "default_store", lambda: store)
+
+    out = await A.run_task(40)
+
+    assert store.get(row["id"])["revoked_at"], (
+        f"run_task left the row a deleted block minted live: {out}")
+    assert store.live(scope="autonomy-task:40") == [], (
+        "the scope still holds live authority after the run")
+    denied = P.check_grants(store, scope="autonomy-task:40",
+                            tool_name="autonomy_write_task",
+                            tool_input={"id": 68, "status": "up_next"},
+                            record=False)
+    assert denied.allowed is False, (
+        f"the nightly can still re-arm the parked task after its block was "
+        f"deleted: {denied.reason}")
+    assert "target #68" in denied.reason, denied.reason
+
+    # Scoped to the withdrawal itself, not every policy line the run logged: the
+    # probe's own denial above is a warning too, and a node that counted all of
+    # them would go red for the gate working.
+    warns = [r.getMessage() for r in caplog.records
+             if r.name == "lloyd-harness-policy" and r.levelno >= logging.WARNING
+             and "WITHDREW" in r.getMessage()]
+    assert len(warns) == 1, f"{len(warns)} withdrawal warnings on the run: {warns}"
+    assert f"grant #{row['id']}" in warns[0], warns[0]
+    assert "autonomy_write_task" in warns[0], warns[0]

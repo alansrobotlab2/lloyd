@@ -1422,6 +1422,15 @@ def sync_task_grants(store: GrantStore, *, task_id: Any, scope: str,
     suppresses every re-mint until it expires, whatever the file is edited to
     say. That case mints 0 and warns, naming the row and the route that works
     (`spent_frontmatter_remedy`).
+
+    It also withdraws (#2313): after the mint loop, a live row this file minted
+    whose (`tool_pattern`, `arg_predicate`) the call's specs no longer contain
+    is revoked, one loud line per row. A `grants:` block is the only place this
+    authority is written down, so a row that outlives its declaration is a
+    licence with no author — and `grants: []`, or no block at all, is the file
+    saying it wants none. Idempotence holds in that direction too: a second
+    sync with nothing declared revokes nothing twice, and a row the specs still
+    declare is left alone in any state.
     """
     specs, errors = validate_task_grants(grants)
     if errors:
@@ -1534,4 +1543,59 @@ def sync_task_grants(store: GrantStore, *, task_id: Any, scope: str,
                            "standing shadow: %s", task_id, row["id"],
                            spec["tool"], warn)
         minted += 1
+    # ── withdrawal: a pair the file stopped declaring loses its row (#2313) ──
+    #
+    # Everything above mints, and until now nothing here ever took a row back, so
+    # deleting a `grants:` block left the row it had minted live to its own
+    # expiry. That is measured, not hypothetical: the block #724 clause 4 put in
+    # `40-nightly-reflection-config.md` was deleted for #2093 (vault `420a60b5`),
+    # and `authority_grants` id 1 — scope `autonomy-task:40`, tool
+    # `autonomy_write_task`, `quota NULL`, expiring 2026-12-31, `minted_by
+    # frontmatter:40` — went on answering `check_grants` for
+    # `{"id": 68, "status": "up_next"}`: the re-arm of the task Alan's 2026-09-17
+    # ruling keeps parked. A declaration is a human act; withdrawing it is the
+    # same act pointing the other way, and a mint that outlives its declaration is
+    # authority nobody is standing behind.
+    #
+    # Three things this pass must not do:
+    #   * Match `minted_by` by prefix. The key is EQUALITY with
+    #     `f"{FRONTMATTER_MINTER}{task_id}"` — `frontmatter:4` is a prefix of
+    #     `frontmatter:40`, so `startswith(FRONTMATTER_MINTER)` would let task 4's
+    #     run withdraw task 40's row.
+    #   * Touch anyone else's row. A human's `grant_create` writes
+    #     `minted_by='human'` and a worker identity is refused at mint time;
+    #     neither is this file's to take back, whatever its scope and tool.
+    #   * Spend a row the file still stands behind. The comparison is the pair
+    #     this function mints on — (`tool_pattern`, `arg_predicate`) — and a
+    #     declared pair is skipped whatever state its row is in, which is what
+    #     leaves #2021's spent-row ruling and #1949's covering-row dedupe exactly
+    #     as the tests above pin them.
+    #
+    # `store.live()` rather than `candidates()`: an expired row is not withdrawn
+    # because expiry is not revocation — the same distinction the dedupe reads, and
+    # revoking an expired row would hand #1949's decline rule a revoked row where
+    # the truth is a finished one. And this whole block sits BELOW the `errors`
+    # raise, so a `grants:` block the loader could not read costs no row: that path
+    # already refuses the run, and withdrawing from a block it could not parse
+    # would spend the human's authority on a parse error.
+    declared = {(s["tool"], s["predicate"]) for s in specs}
+    minter = f"{FRONTMATTER_MINTER}{task_id}"
+    for row in store.live(scope=scope, now=at):
+        if str(row.get("minted_by") or "") != minter:
+            continue
+        if (str(row["tool_pattern"]),
+                str(row.get("arg_predicate") or "")) in declared:
+            continue
+        if store.revoke(row["id"], now=at):
+            logger.warning(
+                "[grants] task #%s WITHDREW grant #%s for '%s' in scope '%s': "
+                "its `grants:` block no longer declares that pair, so the row "
+                "the block minted is revoked (it ran to %s). This is the file "
+                "withdrawing its own authority, not a human's grant_revoke. To "
+                "restore it, re-add the entry with an `expires_at:` LATER than "
+                "%s — the same or an earlier one is declined by the rule that a "
+                "revocation is not renewed by re-running the task — or have a "
+                "human `grant_create` it.",
+                task_id, row["id"], row["tool_pattern"], scope,
+                row["expires_at"], row["expires_at"])
     return minted

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import logging
 import sqlite3
 import sys
 import tempfile
@@ -1530,3 +1531,267 @@ def test_a_tier2_bash_grant_does_not_leak_to_another_scope(store):
     _mint(store, scope="autonomy-task:39", tool="Bash")
     d = _bash(store, DURABLE_BASH, scope="autonomy-task:40")
     assert d.allowed is False
+
+
+# ── #2313: a grant the task stopped declaring is withdrawn ──────────────────
+#
+# Everything #1949, #2021 and #2023 above settle is what happens to a row the
+# file STILL declares. None of them settled the other direction, and the answer
+# that came back from the live store is that nothing revoked it: `sync_task_grants`
+# iterated its `specs` and returned, so deleting a `grants:` block withdrew no
+# row. #2093 deleted `40-nightly-reflection-config.md`'s block (vault `420a60b5`)
+# and `authority_grants` id 1 — scope `autonomy-task:40`, tool
+# `autonomy_write_task`, `quota NULL`, expiring 2026-12-31, `minted_by
+# frontmatter:40` — stayed live, still answering `check_grants` for
+# `{"id": 68, "status": "up_next"}`: the re-arm of the task Alan's 2026-09-17
+# ruling keeps parked. The nodes below are that row's shape at unit scale. The
+# dispatch seam that reaches them on a real nightly — `run_task`, whose
+# `if _specs:` used to skip this call for a task declaring nothing — is pinned in
+# `tests/test_autonomy_frontmatter_normalization.py`.
+
+FM40_SCOPE = "autonomy-task:40"
+FM40_TOOL = "autonomy_write_task"
+
+
+def _frontmatter_row(store, *, task=40, scope=None, tool=FM40_TOOL,
+                     predicate="", expires=+24.0):
+    """A live row of the shape `sync_task_grants` writes for task `task`.
+
+    Built with `store.mint` and the file's own `minted_by` rather than through a
+    sync call: a node about withdrawing a row must not also depend on the mint
+    path being upright, or a broken mint turns these red for the wrong reason.
+    """
+    return store.mint(scope=scope or f"autonomy-task:{task}",
+                      tool_pattern=tool, arg_predicate=predicate, quota=None,
+                      issued_by="alan", expires_at=_iso(expires),
+                      minted_by=f"frontmatter:{task}")
+
+
+def _grant_warnings(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records
+            if r.name == "lloyd-harness-policy"
+            and r.levelno >= logging.WARNING]
+
+
+def test_an_undeclared_grants_block_withdraws_the_row_it_minted(store):
+    """#2313 clause 1: the file saying nothing takes the authority back.
+
+    `grants: []` and no `grants:` key at all are the same statement — the
+    scheduler reads an absent key as `None` and `validate_task_grants` turns both
+    into no specs — so both are run here, and both leave the scope with nothing
+    live. The denial that follows is the one the item's acceptance check measures
+    against the real store: the same call for the same target #68.
+    """
+    row = _frontmatter_row(store)
+
+    assert policy.sync_task_grants(store, task_id=40, scope=FM40_SCOPE,
+                                   grants=[], now=NOW) == 0
+    after = store.get(row["id"])
+    assert after["revoked_at"] == _iso(0), (
+        f"the row a file stopped declaring is still unrevoked: {after}")
+    assert store.live(scope=FM40_SCOPE, now=NOW) == [], (
+        "the withdrawn row is still live for its own scope")
+
+    # The absence rather than the empty list: what the shipped #40 file actually
+    # is, read the way `_parse_task_file` hands it over — no `grants` key.
+    assert policy.sync_task_grants(store, task_id=40, scope=FM40_SCOPE,
+                                   grants=None, now=NOW) == 0, (
+        "a task with no `grants:` key at all still mints or still raises; the "
+        "nightly whose block was deleted is exactly this shape")
+    assert store.get(row["id"])["revoked_at"] == _iso(0), (
+        "a second undeclared sync un-revoked the row")
+
+    d = check_grants(store, scope=FM40_SCOPE, tool_name=FM40_TOOL,
+                     tool_input=SCHED_CALL, now=NOW, record=False)
+    assert d.allowed is False, (
+        f"the withdrawn row still pays for the parked re-arm: {d.reason}")
+    assert "target #68" in d.reason, d.reason
+
+
+def test_the_withdrawal_is_announced_once_naming_the_row_and_its_tool(
+        store, caplog):
+    """#2313 clause 2: no authority leaves the books in silence.
+
+    #2021 and #2023 each added a warning because a grant that changed state
+    quietly read as a grant that did not change; a withdrawal that only showed up
+    as a later denial is the same class of defect. One line, naming the grant id,
+    the tool and the scope — and a second sync over the same dead row says
+    nothing new, because `revoke()` matches `revoked_at IS NULL` and a nightly
+    that fires every day must not re-announce one withdrawal 365 times.
+    """
+    row = _frontmatter_row(store)
+    caplog.set_level(logging.WARNING, logger="lloyd-harness-policy")
+    caplog.clear()
+
+    policy.sync_task_grants(store, task_id=40, scope=FM40_SCOPE, grants=[],
+                            now=NOW)
+
+    warns = _grant_warnings(caplog)
+    assert len(warns) == 1, f"{len(warns)} warnings for one withdrawal: {warns}"
+    line = warns[0]
+    assert f"grant #{row['id']}" in line, line
+    assert FM40_TOOL in line, f"the withdrawn row's tool is not named: {line}"
+    assert "task #40" in line and FM40_SCOPE in line, line
+    assert "no longer declares" in line, line
+
+    caplog.clear()
+    policy.sync_task_grants(store, task_id=40, scope=FM40_SCOPE, grants=[],
+                            now=NOW)
+    assert _grant_warnings(caplog) == [], (
+        "the same withdrawal announced twice; a daily task re-runs this sync "
+        "every day and the second line is noise that hides the first")
+
+
+def test_withdrawal_takes_only_this_files_own_row_and_by_id_not_prefix(store):
+    """#2313 clause 4: the key is equality with `frontmatter:<task_id>`.
+
+    Three rows a withdrawal must leave standing, in the one store where the
+    pass runs:
+
+    * a HUMAN row for the very pair being withdrawn (`grant_create` writes
+      `minted_by='human'`) — without the minter filter the empty block would
+      revoke a human's grant, which is the one authority this design says a file
+      may not touch;
+    * a WORKER-minted row, the class `count_worker_minted` exists to hold at
+      zero; its `minted_by` is written straight in, because `store.mint` refuses
+      a worker identity at mint time (policy's own rule). It is asserted off the
+      row itself and not off that counter: `count_worker_minted` selects only
+      `minted_by` and then reads `r["issued_by"]` (app/harness/policy.py:686),
+      which raises `IndexError` on any store holding a non-worker row — recorded
+      on #2313, out of this round's scope;
+    * a row in TASK 4's OWN SCOPE whose `minted_by` names task 40 — the shape a
+      `startswith(FRONTMATTER_MINTER)` implementation would withdraw, since
+      `frontmatter:4` is a prefix of `frontmatter:40`. Task 4's sync withdraws
+      only `frontmatter:4`, which is the sibling row minted below it.
+    """
+    human = _mint(store, scope=FM40_SCOPE, tool=FM40_TOOL)
+    worker = store.mint(scope=FM40_SCOPE, tool_pattern="calendar_create",
+                        arg_predicate="", quota=None, issued_by="alan",
+                        expires_at=_iso(24.0))
+    with store._connect() as conn:
+        conn.execute("UPDATE authority_grants SET minted_by=? WHERE id=?",
+                     ("worker:scheduled-task", worker["id"]))
+    neighbour_in_task4_scope = _frontmatter_row(store, task=40,
+                                                scope="autonomy-task:4")
+    own = _frontmatter_row(store, task=4)
+    # The human and worker rows go into TASK 4's own scope, alongside the row
+    # that sync does withdraw. In `autonomy-task:40` they would be shielded by
+    # `store.live()`'s scope filter no matter what the minter test does, and an
+    # assertion that survives every implementation measures nothing (the
+    # review's finding on the first attempt at this round).
+    human_in_task4_scope = _mint(store, scope="autonomy-task:4",
+                                 tool=FM40_TOOL)
+    worker_in_task4_scope = store.mint(scope="autonomy-task:4",
+                                       tool_pattern="calendar_create",
+                                       arg_predicate="", quota=None,
+                                       issued_by="alan", expires_at=_iso(24.0))
+    with store._connect() as conn:
+        conn.execute("UPDATE authority_grants SET minted_by=? WHERE id=?",
+                     ("worker:scheduled-task", worker_in_task4_scope["id"]))
+
+    policy.sync_task_grants(store, task_id=4, scope="autonomy-task:4",
+                            grants=[], now=NOW)
+
+    assert store.get(own["id"])["revoked_at"] == _iso(0), (
+        "task 4's own row survived its own withdrawal — the pass would be a "
+        "no-op, and every row-sharing-assertion below it would be unmeasured")
+    assert store.get(human_in_task4_scope["id"])["revoked_at"] is None, (
+        "a human's grant for the same (scope, tool) was revoked by a task file "
+        "editing itself — that is only possible if the pass dropped its "
+        "`minted_by` test, which is what this assert is for")
+    assert store.get(worker_in_task4_scope["id"])["revoked_at"] is None, (
+        "a worker-minted row in the withdrawing scope was revoked by a task "
+        "file, so the pass is not testing the minter at all")
+    assert store.get(worker_in_task4_scope["id"])["minted_by"] == \
+        "worker:scheduled-task", (
+        "the row this pass stepped over is not the worker-shaped row the "
+        "fixture wrote, so the assertion above compared nothing")
+    assert store.get(neighbour_in_task4_scope["id"])["revoked_at"] is None, (
+        "task 4 withdrew task 40's row: `frontmatter:4` is a prefix of "
+        "`frontmatter:40`, so this is the startswith bug")
+    # The same two shapes in task 40's own scope, where nothing is withdrawn by
+    # task 4's pass: they are here so the pair above is not the only copy of the
+    # guarantee, and so a `scope`-less pass still has to answer for them.
+    assert store.get(human["id"])["revoked_at"] is None, (
+        "a human row was revoked by a sync over a different scope")
+    assert store.get(worker["id"])["revoked_at"] is None, (
+        "a worker row in another scope was revoked by task 4's sync")
+
+
+def test_a_grants_block_the_loader_cannot_read_costs_no_row(store, aut,
+                                                            caplog):
+    """#2313 clause 5: a parse error must not spend the human's authority.
+
+    The withdrawal is a decision about what the file declares, so it can only
+    run on a file that was understood. `sync_task_grants` raises `GrantError` on
+    validation errors before its mint loop and before the withdrawal below it,
+    and `run_task` refuses the run on the same errors (`app/autonomy.py`,
+    "refusing to run ungated") — the fail-closed pair #534 established. The
+    hazard this pins is the implementation that withdrew first and validated
+    second: `grants: email_send please` would then revoke the row a previous,
+    readable block minted, and the task would be both stopped AND disarmed.
+    """
+    row = _frontmatter_row(store)
+    caplog.set_level(logging.WARNING, logger="lloyd-harness-policy")
+    caplog.clear()
+
+    bad = [{"tool": FM40_TOOL, "expires_at": _iso(24.0)}]  # no issued_by
+    specs, errors = policy.validate_task_grants(bad)
+    assert errors and not specs, (specs, errors)
+    with pytest.raises(GrantError):
+        policy.sync_task_grants(store, task_id=40, scope=FM40_SCOPE,
+                                grants=bad, now=NOW)
+    assert store.get(row["id"])["revoked_at"] is None, (
+        "an unreadable block withdrew the row its readable predecessor minted")
+    assert store.live(scope=FM40_SCOPE, now=NOW), (
+        "the scope lost its authority to a typo")
+    assert _grant_warnings(caplog) == [], (
+        "a call that did not run still announced something")
+
+    # The same block at the loader: not runnable, and no sync attempted.
+    _write_task(aut, 40, grants="email_send please")
+    task = aut._parse_task_file(aut.AUTONOMY_DIR / "40-task.md")
+    assert aut._grant_block_errors(task, aut.AUTONOMY_DIR / "40-task.md"), (
+        "the loader reported no error for a block `validate_task_grants` "
+        "rejects, so the two surfaces disagree about what is readable")
+    assert aut._all_runnable_tasks() == [], (
+        "a task with an unreadable block is runnable, so run_task would reach "
+        "the withdrawal anyway")
+    assert store.get(row["id"])["revoked_at"] is None
+
+
+def test_the_withdrawal_is_visible_to_the_store_the_hook_builds(tmp_path):
+    """The hook's read-after-write, across two `GrantStore` objects on one file.
+
+    The sync runs in the scheduler (`app/autonomy.py`, at dispatch); the
+    pre-tool-use hook reads authority through a store it builds itself
+    (`default_store()`, policy.py:693). Both are named in this round's review as
+    the seam that has to hold, and one `store` fixture cannot show it: with a
+    single object the read is the same object's write. Two instances over one
+    path is the shape the two processes actually have — the store is stateless
+    per call apart from `_schema_applied`, so what is being proved here is the
+    commit landing in the file, not a cache being warm.
+    """
+    db = tmp_path / "workers.db"
+    writer = GrantStore(db)
+    writer.ensure_schema()
+    reader = GrantStore(db)          # the hook's own object, opened before
+    reader.ensure_schema()
+
+    _frontmatter_row(writer)
+    assert check_grants(reader, scope=FM40_SCOPE, tool_name=FM40_TOOL,
+                        tool_input=SCHED_CALL, now=NOW, record=False).allowed, (
+        "the reader never allowed the call in the first place, so the denial "
+        "below would prove nothing")
+
+    policy.sync_task_grants(writer, task_id=40, scope=FM40_SCOPE, grants=[],
+                            now=NOW)
+
+    d = check_grants(reader, scope=FM40_SCOPE, tool_name=FM40_TOOL,
+                     tool_input=SCHED_CALL, now=NOW, record=False)
+    assert d.allowed is False, (
+        "the sync revoked the row and the hook's store still pays for the "
+        f"call: {d.reason}")
+    assert "target #68" in d.reason, d.reason
+    assert d.grant_id is None, (
+        f"the denial still names a paying row: grant #{d.grant_id}")

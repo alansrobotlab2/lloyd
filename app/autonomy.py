@@ -4199,19 +4199,29 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
         )
 
         grant_scope = f"autonomy-task:{task_id}"
-        _specs, _errors = validate_task_grants(task.get("grants"))
+        _, _errors = validate_task_grants(task.get("grants"))
         if _errors:
             return {"success": False, "task_id": task_id,
                     "error": f"Task #{task_id} declares an unreadable grants: "
                              f"block; refusing to run ungated: "
                              + "; ".join(_errors)}
         try:
-            if _specs:
-                _new = sync_task_grants(default_store(), task_id=task_id,
-                                        scope=grant_scope, grants=task["grants"])
-                if _new:
-                    logger.info("Task #%s: materialized %d declared grant(s)",
-                                task_id, _new)
+            # #2313: called unconditionally, where this used to read
+            # `if _specs:`. That guard skipped the whole call for exactly the
+            # task that needs it: a file whose `grants:` block was deleted
+            # declares nothing, so nothing ever revisited the row that block
+            # minted and it stayed live to its own expiry — `authority_grants`
+            # id 1 is that row, the #68 re-arm authority #2093 took out of
+            # #40's file on 2026-10-06 and which still answered for
+            # `{"id": 68, "status": "up_next"}` with the file silent. With
+            # nothing declared `sync_task_grants` mints nothing and runs only
+            # its withdrawal pass, loudly, once per withdrawn row.
+            _new = sync_task_grants(default_store(), task_id=task_id,
+                                    scope=grant_scope,
+                                    grants=task.get("grants"))
+            if _new:
+                logger.info("Task #%s: materialized %d declared grant(s)",
+                            task_id, _new)
         except (GrantError, OSError) as e:
             return {"success": False, "task_id": task_id,
                     "error": f"Task #{task_id} could not materialize its "
