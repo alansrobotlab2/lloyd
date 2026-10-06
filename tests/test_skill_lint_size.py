@@ -204,9 +204,16 @@ def test_record_skill_embed_writes_one_event_per_route(tmp_path, monkeypatch):
                         lambda sid, ev, data, turn_id=None: seen.append((sid, ev, data, turn_id)))
     skill_embed.record_skill_embed("sess-a", route="autonomy_task", skill="deep-research",
                                    embedded_chars=15534, source_chars=15534, turn_id="run_1")
+    # The exact row, stamps included. #2272 added them and this pin moved because the
+    # row grew — 15,534 chars on `autonomy_task` is over `UNCAPPED_EMBED_SOFT_LIMIT`
+    # (6,000), so an uncapped embed of this size now books the line it was judged
+    # against too. WHO gets stamped and who does not is `tests/test_skill_embed.py`'s
+    # business; this node's job is the one-row-per-route-per-turn shape, unchanged.
     assert seen == [("sess-a", "skill.embedded",
                      {"route": "autonomy_task", "skill": "deep-research",
-                      "embedded_chars": 15534, "source_chars": 15534}, "run_1")]
+                      "embedded_chars": 15534, "source_chars": 15534,
+                      "over_soft_limit": True,
+                      "soft_limit": skill_embed.UNCAPPED_EMBED_SOFT_LIMIT}, "run_1")]
 
 
 def test_a_failing_event_log_never_reaches_the_caller(monkeypatch):

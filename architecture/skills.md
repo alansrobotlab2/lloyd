@@ -457,7 +457,7 @@ row (skill, measured body lines, the largest block to spill into) on the
 `vault_land` ledger row — on the refusal and on the passing landing alike. The
 switch is `vault_round.SKILL_BODY_ENFORCE`, on. The scope stops at the sample
 on purpose: library-wide, whether SIZE becomes a lint failure remains a
-person's call, because 106 of 197 skills were over the cap on 2026-10-01.
+person's call, because 106 of 197 skills were over the cap on 2026-10-01. What that ceiling does NOT do is bound the two uncapped routes: the 100-line body count does not bound them, and the pair that proves it is measured, not hypothetical: over the `skill.embedded` rows in `~/lloyd-data/event_logs`, `nightly-reflection-knowledge-write` at 88 body lines embedded 25,856 chars into an autonomy task's prompt while `backlog-triage` at 107 body lines embedded 9,977 — 19 MORE lines for roughly a third of the cost, so no line count can order those two by what they cost a prompt, and a skill that passes the 100-line check is still embedded whole. `app/skill_embed.py` therefore carries `UNCAPPED_EMBED_SOFT_LIMIT`, a char count judged against those two routes only and recorded on the row as `over_soft_limit`, enforced nowhere: whether to cap or spill them is a separate ruling to be made on the traffic that key accumulates (#2272).
 
 A spilled skill is a folder: the body keeps the procedure, every upper-case hard
 rule and a `## Files in this skill` index whose lines name each sibling `.md` by
