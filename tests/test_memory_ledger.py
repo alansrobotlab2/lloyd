@@ -349,12 +349,19 @@ def test_curate_stays_off_while_the_index_has_room_to_append(tmp_path):
     assert rep2["curate"] is True
 
 
-# ── #1996 — the retire step: bounded by lifecycle, the ceiling unmoved ─────
+# ── #1996 — the retire step: bounded by lifecycle, never a way to make room ──
 #
-# A ledger is a topic file under a 32,768 B ceiling and its only bound was the
-# write refusal. `retire` archives a row whose line is no longer loaded — the one
-# retirement that needs no judgement — into `lloyd/reviews/`, and is never a way
-# to make room (#1881).
+# "The ceiling unmoved" was this heading until #2212 moved the number for the two
+# live ledgers: `retire` still archives a row whose line is no longer loaded — the
+# one retirement that needs no judgement — into `lloyd/reviews/`, and it is still
+# never a way to make room (#1881). What #2212 did is change the bound the room is
+# measured against. Before it, a ledger was an ordinary topic file and its only
+# bound was the 32,768 B write refusal; since it, `memory-md-ledger` and
+# `user-md-ledger` are measured at `ledger_ceiling()` — 3 x the ceiling of the file
+# each audits, 76,800 B and 49,152 B — while every other topic file keeps the
+# shared 32,768 B. The node that pins "never a way to make room" below therefore
+# refuses an oversized write against 49,152 B now, and the finding is unchanged:
+# archivable rows in the file buy a write nothing.
 
 GONE = "**A line that was retired** — it is no longer in USER.md at all"
 
@@ -451,9 +458,13 @@ def test_status_reads_one_live_ledger_and_agrees_before_and_after_a_retire(tmp_p
 
 
 def test_retire_is_never_a_way_to_make_room(tmp_path, monkeypatch):
-    """Clause 4: a ledger write that would cross the topic ceiling is still refused
-    while archivable rows sit in the file, the ceiling is the number it was, and the
-    step has no flag that could be used to fit a row."""
+    """Clause 4 (#1996), re-pointed by #2212 at the number the ledger is measured by
+    now. The behaviour this node exists to pin is untouched — a ledger write that
+    would cross the file's bound is refused while archivable rows sit in it, and the
+    retire step has no flag that could be used to fit a row — but the bound is no
+    longer the shared topic ceiling: `user-md-ledger` is measured at 3 x USER.md's
+    16,384 B = 49,152 B since #2212. The shared constant is asserted to stay 32,768
+    two lines below, which is the half this change must NOT move."""
     import inspect
 
     from agent_mcp import session
@@ -468,10 +479,14 @@ def test_retire_is_never_a_way_to_make_room(tmp_path, monkeypatch):
     before = ledger.read_bytes()
     assert ml.status(d)["USER.md"]["orphan_rows"], "the fixture holds an archivable row"
 
+    ledger_bound = ceiling.topic_ceiling("topics/user-md-ledger")
+    assert ledger_bound == 49_152, "the derived ledger bound moved"
     res = session._memory_add({"file": "topics/user-md-ledger",
-                               "entry": "- anchor: " + "y" * ceiling.TOPIC_FILE_CEILING_BYTES})
+                               "entry": "- anchor: " + "y" * (ledger_bound + 1)})
 
-    assert res.get("code") == "INVALID_PARAM" and "topic file ceiling" in res["error"], res
+    assert res.get("code") == "INVALID_PARAM", res
+    assert "49,152" in res["error"], res
+    assert "32,768" not in res["error"], res
     assert ledger.read_bytes() == before, "the refused write retired nothing to fit"
     assert not (d / "reviews").exists(), "and archived nothing"
 

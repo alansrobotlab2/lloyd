@@ -789,3 +789,135 @@ def test_a_long_name_outside_the_topics_directory_is_still_nobody_s_business(
     lookalike.parent.mkdir(parents=True, exist_ok=True)
     assert ceiling.memory_write_error(lookalike, "- detail\n") is None
     assert ceiling.memory_write_error(root / "MEMORY.md", "- [project] hook\n") is None
+
+
+# ── #2212 — a ledger is measured against the file it audits ──────────────────
+#
+# `test_a_topic_file_is_refused_past_its_ceiling_by_every_writer` above is the
+# shared ceiling, and it stays: an ordinary topic is pulled whole by `memory_read`,
+# so 32,768 B is a prompt-budget bound and it still applies. A ledger is a different
+# kind of file — never read into a prompt, one row per loaded index line — and until
+# #2212 it was measured by that same number, which the live arithmetic had already
+# outrun: 90 `MEMORY.md` lines x the ledger's own 675 B mean row is ~60,750 B, and
+# 32,768 B holds ~48 rows. The audit would have stopped mid-file on a night that did
+# nothing wrong. The four nodes below are clauses 1-3 from the caller's side — the
+# acceptance probe, the ordinary topic that must not move, and the two halves of the
+# shrink pair (a write inside the bound, and the trim the escape exists for); the
+# derived number itself, its non-spread, and the prose that must agree with it are in
+# `tests/test_memory_ledger_bound.py`.
+
+
+def test_a_ledger_write_of_40000_bytes_is_allowed_and_78000_names_76800(memories_root):
+    """Clause 1. The exact probe this item was triaged on: before the change,
+    `memory_write_error` answered a 40,000 B prospective `memory-md-ledger` write
+    with "over the 32,768-byte topic file ceiling (7,232 B over)", refusing bytes
+    the file is entitled to hold.
+
+    After it, the same call answers None, and the 78,000 B call refuses naming
+    76,800 — the bound it was actually measured against — while the string 32,768
+    appears nowhere in that message. Naming the wrong bound is the failure that
+    would send a curator to split a live ledger, which `LEDGERS` cannot read back.
+    """
+    _, root = memories_root
+    ledger = root / "memory" / "memory-md-ledger.md"
+
+    assert ceiling.memory_write_error(ledger, "x" * 40_000) is None
+    assert ceiling.ledger_ceiling("memory-md-ledger") == 76_800, "the derived bound moved"
+
+    msg = ceiling.memory_write_error(ledger, "x" * 78_000)
+    assert msg is not None, "a ledger is still bounded, just not at 32,768 B"
+    assert "76,800" in msg, msg
+    assert "32,768" not in msg, f"a ledger refusal must not quote the shared ceiling: {msg}"
+    assert "1,200 B over" in msg, msg
+
+
+def test_an_ordinary_topic_stem_is_still_refused_one_byte_past_32768(memories_root):
+    """Clause 2, from the side the change must not touch.
+
+    One size, two verdicts, both asserted in the same call sequence: 40,000 bytes is
+    legal for `memory-md-ledger` (the node above) and refused for `topics/big`, so
+    the derived bound cannot be a ceiling raised for the directory. And the refusal
+    keeps its pre-#2212 wording byte for byte, because
+    `test_a_topic_file_is_refused_past_its_ceiling_by_every_writer` and
+    `scripts/memory/validate_memory_index.py` both quote it.
+    """
+    _, root = memories_root
+    big = root / "memory" / "big.md"
+
+    assert ceiling.memory_write_error(big, "z" * 32_768) is None
+    msg = ceiling.memory_write_error(big, "z" * 32_769)
+    assert msg is not None and "topic file ceiling" in msg, msg
+    assert "32,768-byte topic file ceiling (1 B over)" in msg, msg
+    assert ceiling.TOPIC_FILE_CEILING_BYTES == 32_768
+
+
+def test_a_ledger_write_inside_its_bound_is_accepted_however_full_the_disk_is(memories_root):
+    """Clause 3's measuring half — NOT the shrink escape, and the previous version of
+    this docstring claimed it was, which the review of round SM_20261006_015104 named:
+    a 70,000 B write sits inside the derived 76,800 B bound, so it passes with no escape
+    in the tree at all. The case the escape exists for is the node below.
+
+    What this node owns is that the guard still measures an over-bound ledger: 80,000
+    bytes on disk, a 70,000 B write accepted, a 90,000 B write refused naming 76,800 —
+    so the derived ceiling cannot read as "this file is unbounded now", and the refusal
+    cannot name the wrong number. The fixture is deliberately an already-over-bound
+    ledger: it is the state a real `memory-md-ledger` reaches the first night its rows
+    outgrow 76,800 B, and the only state where the two guards can be told apart.
+    """
+    _, root = memories_root
+    (root / "memory").mkdir(parents=True, exist_ok=True)
+    ledger = root / "memory" / "memory-md-ledger.md"
+    ledger.write_text("x" * 80_000, encoding="utf-8")
+
+    assert ceiling.ledger_ceiling("memory-md-ledger") == 76_800, "the derived bound moved"
+    assert ceiling.memory_write_error(ledger, "x" * 70_000) is None
+    msg = ceiling.memory_write_error(ledger, "x" * 90_000)
+    assert msg is not None and "76,800" in msg, msg
+    assert "32,768" not in msg, f"a ledger refusal must not quote the shared ceiling: {msg}"
+
+
+def test_an_over_bound_ledger_uses_the_shrink_escape_over_its_own_bound(memories_root):
+    """Clause 3, the case the shrink escape (#2173) exists for — untested anywhere for a
+    ledger until the review of round SM_20261006_015104 named it.
+
+    The escape is #2173's first check — `size < _on_disk_bytes(path)`, STRICTLY smaller
+    than the bytes already on disk, measured before either bound so one rule covers the
+    byte ceiling, the tight limit and the name — so a file over its ceiling can always be
+    rewritten shorter. For a ledger the only interesting instance of that is a write that
+    is BOTH over the derived bound AND shorter than the file: 90,000 B on disk, trimmed to
+    78,000 B — still 1,200 B over its bound, and still the repair the file needs. Without
+    the escape that write is refused, and an over-bound ledger could only ever be
+    repaired by a rewrite that lands under the bound in a single cut: the freeze #2173
+    exists to prevent, moved from the shared ceiling onto the derived one.
+
+    Four calls say where the rule stops. 78,000 and 80,000 both accepted — every strictly
+    smaller write is, so a curator may trim in stages and stop above the bound without the
+    guard blocking the next cut. 90,000, equal to the bytes on disk and therefore not
+    smaller than them, refused naming 76,800 and not 32,768: the escape ends at strictly
+    smaller, and a same-size rewrite keeps the overrun exactly as over as it was. 90,001
+    refused the same way — a growth is measured against the derived bound, which is also
+    the half proving the two acceptances above were the escape firing and not a guard that
+    stopped measuring.
+    """
+    _, root = memories_root
+    (root / "memory").mkdir(parents=True, exist_ok=True)
+    ledger = root / "memory" / "memory-md-ledger.md"
+    ledger.write_text("x" * 90_000, encoding="utf-8")
+
+    bound = ceiling.ledger_ceiling("memory-md-ledger")
+    assert bound == 76_800, "the derived bound moved, and the sizing below with it"
+    trim = 78_000
+    assert trim > bound, (
+        f"the write under test must be OVER the bound ({bound}) or this node is the one "
+        "above again, which is the finding it was written to answer")
+    for smaller in (trim, 80_000):
+        assert ceiling.memory_write_error(ledger, "x" * smaller) is None, (
+            f"the shrink escape did not fire for a {smaller} B write into a 90,000 B "
+            "ledger: an over-bound ledger can now only be repaired by a write that lands "
+            "under the bound in one go")
+
+    for not_smaller in (90_000, 90_001):
+        msg = ceiling.memory_write_error(ledger, "x" * not_smaller)
+        assert msg is not None and "76,800" in msg, (not_smaller, msg)
+        assert "32,768" not in msg, (
+            f"a ledger refusal must not quote the shared ceiling: {msg}")

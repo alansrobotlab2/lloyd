@@ -1,0 +1,73 @@
+---
+segment: skills
+tags:
+- skills
+type: skill
+timestamp: '2026-09-25T18:00:00'
+---
+# Knowledge Write — Step 2a-ter, curate loaded memory for headroom (#1488)
+
+`lloyd/USER.md` and `lloyd/MEMORY.md` are both loaded into every prompt and each has a fixed byte ceiling that the memory tools and `Edit` enforce at the write (§0 for what opens this step, §5 for the `MEMORY.md` half). Without curation, the next addition is either refused or squeezed in by trimming something arbitrary. This step makes room by **selection**: a line leaves when the reason it was loaded no longer holds, and that is shown by a check run tonight, not by a guess.
+
+## 0. When it runs
+`python3 ~/lloyd/scripts/memory/memory_ledger.py status` prints one line per loaded file — `USER.md` and `MEMORY.md` — and appends `-> CURATE` to a file that has less than 1 KiB of headroom left below **its own tight limit** — 80% of its ceiling, so 19,456 B for `MEMORY.md` (20,480 B) and 12,083 B for `USER.md` (13,107 B), and the limit is printed on the same line as `tight limit NNNN` (#1895; the trigger used to sit 1 KiB under the ceiling itself, which is why a 19,918 B index with 562 B of real headroom printed nothing). The marker is what opens this step, and it is per file: read both lines, and note in the completion note which of them carry it.
+
+- `USER.md` prints `CURATE` → curate `USER.md` through §1 → §4.
+- `MEMORY.md` prints `CURATE` → curate `MEMORY.md` through **§5**, whatever `USER.md` prints. §5 is reachable from here; it is not behind the skip below.
+- An addition from the handoff was refused for size → curate the file that refusal was against.
+
+Record `curation: skipped (<bytes> / <ceiling> B)` in the completion note and stop **only when neither `USER.md` nor `MEMORY.md` prints `CURATE` and no addition was refused**. A night where `MEMORY.md` alone prints `CURATE` is not that night: stopping there is what let `MEMORY.md` sit inside its own 1 KiB margin, and past it, unseen (#1789).
+
+## 1. The ledger
+The ledger file is `lloyd/memory/user-md-ledger.md` (`memory_read(file="topics/user-md-ledger")`), and it is never loaded into a prompt. Each loaded line has one row:
+
+```
+- anchor: <first 60 chars of the entry after "- ", copied verbatim> | why: <what future behaviour it changes> | origin: <doc / item / date> | retire_when: <checkable condition> | check: `<one command or file read>` | checked: <YYYY-MM-DD>
+```
+
+- **`anchor`.** Copy the first 60 characters of the entry after `"- "` **verbatim and unwrapped**: no backticks around it, and do not stop at a backtick — an anchor containing a code-span backtick is legal, because the field is delimited by ` | `, not by backticks (#1730: it used to be backtick-delimited, so the capture died at the first backtick and 19 of 54 `USER.md` lines and 24 of 85 `MEMORY.md` lines could never be joined to a row, however many rows were written). A 60-char span containing a `|` cannot be expressed in a row at all: leave that line alone rather than truncating the anchor at the pipe. (`status` prints those as `unrepresentable` once round `SM_20260928_084103` lands; until then such a row simply never matches its line, which is the bug.)
+- **`why`.** Name the behaviour the line changes. A line whose `why` is "records what happened" changes no behaviour: it is a changelog entry and belongs in `memory/learnings/`.
+- **`retire_when`.** Write a concrete condition: a path that stops existing, an item that closes, a config key that flips, or a later ruling. "Never" is allowed for a standing preference of Alan's.
+- **`check`.** Write one read-only command whose output decides `retire_when`: a `grep` of `~/lloyd/config.yaml`, `test -f`, `git -C ~/lloyd log -S`, or `backlog_tasks`.
+- **The ledger has a byte wall, and a cap of its own (#1881, #2212).** A ledger lives in `memory/topics/` but it is NOT measured by the ceiling every other topic file there gets: `app/memory_ceiling.ledger_ceiling()` derives it as 3 x `memory_ceiling()` of the file the ledger audits — **76,800 B for `memory-md-ledger`** (3 x `MEMORY.md`'s 25,600-byte ceiling) and **49,152 B for `user-md-ledger`** (3 x `USER.md`'s 16,384-byte ceiling). A ledger carries one row per loaded index line, and the shared topic ceiling that used to apply here had already been outrun by the arithmetic: 90 lines x a 675 B mean row (measured 2026-10-05) needs ~60,750 B, which the old bound could not hold — the audit would have stopped with lines unrowed. Neither ledger is rendered into a prompt (`app/prompt_surface.py` composes the two loaded files only, and `memory_read` fetches a topic by name), so the bigger bound costs no context. Ask the guard for the number rather than remembering it: `python3 -c "from app import memory_ceiling as mc; print(mc.ledger_ceiling('memory-md-ledger'))"`. `memory_add` refuses a row that would grow a ledger past its cap with `topic_size_error`, and since #2212 that refusal names the ledger's own bound and tells you not to split. On that refusal: write no further ledger rows for that file tonight, leave the rest of §2's 10-row backfill cap unspent, and put `ledger: at ceiling (<bytes> / <that file's cap — 76800 for `memory-md-ledger`, 49152 for `user-md-ledger`>) — ceiling owed-check from #1789` in the §4 completion note. Never make room: do not shorten or re-wrap anchors (that is what orphaned 19 of 54 `USER.md` rows in #1730), do not drop fields, do not rewrite the ledger shorter to fit another row, and do not start a second *live* ledger file (the retire step's archive under `lloyd/reviews/`, §5, is not one: nothing reads it back as a ledger). `scripts/memory/memory_ledger.py`'s `LEDGERS` map reads only `topics/user-md-ledger` and `topics/memory-md-ledger`, so a row anywhere else is invisible to `status`, and a trimmed one no longer joins its line.
+
+## 2. Tonight's work, bounded
+1. **Backfill** at most **10** rows for lines that have none. `status` prints the `no row:` lines.
+2. **Check** the **10** stalest-`checked` rows, which `status` lists. Run each `check` and set `checked:` to today.
+3. **Retire** at most **5** lines, and only where one of these holds:
+   - the check output shows `retire_when` has happened, or the line contradicts the tree;
+   - the line duplicates another loaded line, in which case keep the more specific one;
+   - the line is a changelog or snapshot that changes no behaviour.
+
+   A line whose check cannot be run is **kept**, with the row marked `checked: <date> (check failed: <why>)`. A standing preference or ruling of Alan's is retired only by a later ruling of his.
+4. **Relocate** instead of retiring when the line is true but is detail, not a rule. Write the detail to a topic file with `memory_add(file="topics/<slug>")`. Replace the line with at most one sentence ending `→ topics/<slug>`, or remove it if another line already carries the rule.
+
+## 3. Archive, never delete
+Every retired or relocated line goes into `lloyd/reviews/user-md-retired.md`. Append it verbatim with the date, its ledger row, the check command, the output line that decided it, and the uptake row (per the 2a uptake gate: cite the row, or write `uptake: no row (<why>)`). Then remove the line from `USER.md` with `Edit` or `memory_remove`, and delete its ledger row.
+
+## 4. Report
+The completion note gets a `curation:` block. Its first field is `opened:` — `USER.md`, `MEMORY.md`, or `both`, naming which loaded file's `CURATE` marker (or refused addition) started this step, per §0 — so a reader can tell a night that legitimately skipped from a night that never looked at `MEMORY.md`. It holds bytes before and after, rows backfilled, rows checked, and lines retired and relocated, with the reason for each. It also lists every line that was eligible but was kept because its check failed. Re-run `memory_ledger.py status` after the edits and quote the line of every file this step curated.
+
+## 5. `MEMORY.md`, when its own marker opened the step
+§0 sends a run here as soon as `status` prints `CURATE` on the `MEMORY.md` line, whether or not `USER.md` prints it — `MEMORY.md` is a loaded file with its own ceiling and its own marker, so this section needs no further permission and nothing else in this file withholds it. Apply §1 → §4 to `lloyd/MEMORY.md` exactly as written, with these substitutions:
+
+- **Loaded file and ceiling.** `lloyd/MEMORY.md`, ceiling 25,600 B, so its curation margin begins at 24,576 B (25,600 − 1,024). Retire or relocate from `MEMORY.md` with `Edit`/`memory_remove`; the §2a-bis ban on Bash heredocs, `cat >`, `sed -i` and `tee` for this file still applies.
+- **Ledger.** `lloyd/memory/memory-md-ledger.md`, the file `status` already reads for `MEMORY.md` rows, addressed as `memory_read`/`memory_add(file="topics/memory-md-ledger")`. It exists (first rows written 2026-10-01; 11 rows that day, with `status` printing the live count as `NN ledger rows`), so append to it — never `Write` over it. Every index line `status` lists as `no row:` is backfill owed, and §2's bound of 10 rows a night is that night's work. **Its cap is §1's derived one: 76,800 B — 3 x `MEMORY.md`'s 25,600-byte ceiling (#2212) — not the topic ceiling the directory's other files get.** At the live mean row of 675 B (measured 2026-10-05 over its own rows) that bound holds ~113 rows, so the 90 index lines it must cover fit inside it; the arithmetic on 2026-10-01 (89 lines x a 526 B mean row ~ 47 KB, and a ceiling that could only hold ~48 of them) is precisely what #2212 moved. If a night is nonetheless refused `topic_size_error`, §1's rule applies unchanged: write no further rows to `memory-md-ledger`, leave §2's 10-row cap unspent, record `ledger: at ceiling (<bytes> / 76800 B) — ceiling owed-check from #1789` in the §4 completion note, and do not shorten or re-wrap anchors, drop fields, rewrite the ledger shorter, or open a second *live* ledger file — an ordinary topic file's "split it into two topics … or trim it" advice does not apply here, because `LEDGERS` in `scripts/memory/memory_ledger.py` reads only this file for `MEMORY.md`.
+- **Retire step (#1996) — for both ledgers.** When a live ledger passes 24,576 B (the #1996 housekeeping trigger, set when that was 75% of a ledger's bound and deliberately unchanged by #2212's larger cap; `wc -c` on `lloyd/memory/user-md-ledger.md` and `lloyd/memory/memory-md-ledger.md`), run `python3 ~/lloyd/scripts/memory/memory_ledger.py retire`. It moves, into `lloyd/reviews/<ledger>-archive.md`, only the rows whose anchor no longer joins any line in the loaded file — rows for lines already retired, relocated or rewritten — and prints one line per row moved plus a `kept` count; a row whose line is still loaded is never moved, however full the ledger is. Put `rows archived: <n> (<ledger>)` in the §4 `curation:` block, quoting the script's own lines, including when `<n>` is 0. This step is housekeeping, not room-making: it is never run *because* a write was refused, it takes no size or target, and #1881's stop-and-report rule above stands exactly as written — on `topic_size_error` you still stop writing rows and report `ledger: at ceiling`, whether or not a retire pass would have freed bytes.
+- **Archive.** §3 applies, with retired `MEMORY.md` lines appended to `lloyd/reviews/memory-md-retired.md` (create it with the first retirement, same entry shape: date, line verbatim, its ledger row, the check command, the deciding output line, the uptake row).
+- **A retired index line's topic file stays where it is.** Retire the index line and delete its ledger row; never touch the file under `lloyd/memory/` it points at.
+- **Ownership.** dream-consolidation (#47) still owns the wholesale tightening; this step retires single lines.
+- **Bounds.** Same numbers — at most 10 rows backfilled, 10 rows checked, 5 lines retired — and when both files opened the step, work `USER.md` first and read those numbers per file.
+
+## The `null` is not a zero (#2230)
+
+The reading `SKILL.md` §2a's uptake gate points here for, moved out of the body by #2230 so the index stops paying for prose that is consulted once per number. It presupposes the generation rule at the head of §1: on a generation-1 table `weighted_disputes` is never `null`, so this question cannot arise there and the field must not be quoted at all.
+
+- **A `weighted_disputes` of `null` is no signal, not zero.** It means the entry shares no text with any disputed turn (or the row had no disputed turn at all), so the row supports neither keeping nor pruning. Cite it as `weighted_disputes null (no overlap)` and decide on `present_in_turns` / `disputes` instead. Never coalesce a null to `0` to make a sort work: a null read as zero is an unmeasured row posing as a measured one, and it is the row that sorts *below* everything, which is the direction that gets an entry pruned.
+
+## The USER.md reason ledger (#1488)
+
+Moved verbatim out of `SKILL.md` §2a by #1534. The body keeps the sentence that binds it — every line this run adds to `lloyd/USER.md` gets a row in the same run — and `memory_ledger.py` is the tool that enforces it.
+
+**Every loaded line carries a reason, in a ledger the prompt never loads (#1488).** Each line this run adds to `lloyd/USER.md` gets one row, in the same run, in `lloyd/memory/user-md-ledger.md` via `memory_add(file="topics/user-md-ledger", entry=…)`, in exactly the row format of §1 — `anchor:` first, the 60-char span copied **verbatim and unwrapped**, the fields separated by ` | `. Do not wrap the anchor in backticks and do not re-emit this format inline: the inline copy is where the wrapping came from, and a wrapped anchor silently orphans its row (#1730).
+A removed or relocated line takes its row with it (delete the row, note it in the archive entry). The reason lives in the ledger, not the line: a rationale written into USER.md itself is paid for in every prompt. `python3 ~/lloyd/scripts/memory/memory_ledger.py status` lists lines with no row and rows with no line.

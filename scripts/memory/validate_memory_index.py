@@ -91,9 +91,15 @@ def check(root: Path, *, ceiling: int, mode: str = "full",
         if not mc.TOPIC_SLUG_RE.fullmatch(p.stem):
             errors.append(f"topic file {p.name}: slug is not [a-z0-9-]{{1,48}}")
         tb = p.stat().st_size
-        if tb > mc.TOPIC_FILE_CEILING_BYTES:
+        # #2212: ask for the bound, do not copy it. A ledger is measured at
+        # LEDGER_MULTIPLIER x the ceiling of the file it audits, and this report is
+        # the surface a nightly reads — comparing here against the shared constant
+        # would have flagged red the very ledger this change exists to let finish,
+        # which is #1010's "one constant" rule broken in a second place.
+        topic_bound = mc.topic_ceiling(f"{mc.TOPIC_PREFIX}{p.stem}")
+        if tb > topic_bound:
             errors.append(f"topic file {p.name} is {tb:,} B, over the "
-                          f"{mc.TOPIC_FILE_CEILING_BYTES:,} B topic ceiling")
+                          f"{topic_bound:,} B topic ceiling")
 
     linked = links(text)
     report["links"] = len(linked)

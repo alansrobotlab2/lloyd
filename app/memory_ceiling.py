@@ -148,15 +148,15 @@ def _topic_file_name(path: str | os.PathLike[str]) -> str | None:
 
 
 def topic_size_error(name: str, text: str) -> str | None:
-    """Why `text` is too large to be topic file `name`, or None if it fits."""
+    """Why `text` is too large to be topic file `name`, or None if it fits.
+
+    The bound is `topic_ceiling(name)`, not the shared constant inline: since #2212
+    a live ledger is measured at `ledger_ceiling()`, 3x its audited file's ceiling."""
     size = len(text.encode("utf-8"))
-    if size <= TOPIC_FILE_CEILING_BYTES:
+    ceiling = topic_ceiling(name)
+    if size <= ceiling:
         return None
-    return (
-        f"{name} is {size:,} bytes, over the {TOPIC_FILE_CEILING_BYTES:,}-byte topic "
-        f"file ceiling ({size - TOPIC_FILE_CEILING_BYTES:,} B over). Split it into "
-        f"two topics and point the index line at both, or trim it in the same edit."
-    )
+    return _topic_size_message(name, size, ceiling)
 
 
 def tight_limit(filename: str, tightness: float = MEMORY_TIGHTNESS) -> int | None:
@@ -323,9 +323,11 @@ def memory_write_error(path: str | os.PathLike[str], prospective: str) -> str | 
         topic = _topic_file_name(path)
         if topic is None:
             return topic_slug_error(stem)
-        if size > TOPIC_FILE_CEILING_BYTES:
-            return topic_size_error(topic, prospective)
-        return None
+        # One measurement, one owner: `topic_size_error` compares against
+        # `topic_ceiling(topic)` and answers None when the write fits, so this call
+        # cannot drift from the bound its own refusal quotes. A second `size >`
+        # comparison here is where a ledger's derived bound would be missed.
+        return topic_size_error(topic, prospective)
     ceiling = memory_ceiling(filename) or 0
     size = len(prospective.encode("utf-8"))
     if size < _on_disk_bytes(Path(path)):
@@ -418,4 +420,114 @@ def topic_slug_error(stem: str) -> str:
         f"{TOPIC_SLUG_MAX_CHARS} characters and point the index line at that; a file "
         f"already standing under the bad name is still shrinkable, so write the new "
         f"file first, then trim and retire the old one."
+    )
+
+
+# ── the ledger's OWN bound (#2212) ──────────────────────────────────────────────
+# Below `memory_write_error` on purpose, exactly like the #2173 name-bound block:
+# `lloyd/reviews/2026-09-14-user-md-audit.md` cites `:114`, `:162` and `:262`, and
+# `tests/test_prompt_surface_budget.py::
+# test_every_code_line_the_audit_cites_is_the_line_it_claims` reddens any edit that
+# shifts them. Everything the ledger bound needs therefore lives here and resolves at
+# call time, so the cited lines keep their numbers.
+
+#: How many times the audited file's own ceiling a live ledger may reach.
+#:
+#: Three, because the ledger's cost and the loaded file's cost are different
+#: quantities. A loaded line costs prompt bytes on every turn; a ledger row is never
+#: rendered into a prompt at all — `app/prompt_surface.py` composes the two loaded
+#: files and nothing under `memory/topics/`, and `memory_read` fetches a topic only
+#: when something asks for it. The ledger's own size limit is bookkeeping, not
+#: context, so tying it to the topic ceiling was measuring the wrong thing. The
+#: multiplier is a fixed multiple, not a derivation: 3 x MEMORY.md's ceiling holds
+#: ~113 rows at the ledger's live 675 B mean row, while the same file's ceiling
+#: permits ~127 index lines at its 202 B mean, so past ~113 loaded lines the ledger
+#: runs out first. Whether the multiplier or the index budget moves at that point is
+#: dream-consolidation's (#47) tightening call, deliberately not decided here.
+#:
+#: The input that, if missing, restores 32,768 B is `memory_ceiling(loaded_file)`:
+#: an unknown or renamed audited file answers None, and the branch in
+#: `ledger_ceiling` falls back to `TOPIC_FILE_CEILING_BYTES`. That is also the whole
+#: revert if the multiplier is ever judged too wide — delete the block below and
+#: every topic file is measured as it was before #2212.
+LEDGER_MULTIPLIER = 3
+
+#: ledger-topic stem -> the loaded file whose ceiling it is bounded by. Declared
+#: here, not read from `scripts/memory/memory_ledger.py`, because that module already
+#: imports this one and a reverse import is circular; the two are kept equal by
+#: `tests/test_memory_ledger_bound.py::
+#: test_the_stems_the_guard_treats_as_ledgers_are_the_ones_the_script_reads`, since
+#: an unequal pair means the guard bounds a file nobody audits, or leaves the real
+#: ledger at a bound it will outgrow. `memory-md-ledger` at 76,800 B and
+#: `user-md-ledger` at 49,152 B.
+MEMORY_LEDGERS: dict[str, str] = {
+    "memory-md-ledger": "MEMORY.md",
+    "user-md-ledger": "USER.md",
+}
+
+
+def ledger_ceiling(stem: str) -> int | None:
+    """The byte bound of the live ledger whose topic stem is `stem`, or None if `stem`
+    is not a ledger. Derived, never stored: 3 x `memory_ceiling()` of the loaded file
+    the ledger audits, so changing MEMORY.md's ceiling moves its ledger's bound with
+    it instead of leaving a second number to rot."""
+    audited = MEMORY_LEDGERS.get(stem)
+    if audited is None:
+        return None
+    file_ceiling = memory_ceiling(audited)
+    if file_ceiling is None:
+        # The input that, if missing, restores the shared topic ceiling. A renamed
+        # loaded file must not silently make a ledger unbounded, and must not silently
+        # clamp it to 32,768 B while its audit still writes to it either: the fallback
+        # is the old behaviour, and the test names it.
+        return TOPIC_FILE_CEILING_BYTES
+    return LEDGER_MULTIPLIER * file_ceiling
+
+
+def topic_ceiling(name: str) -> int:
+    """The byte bound that applies to topic file `name` (`topics/<slug>`, `slug.md` or
+    the bare stem): the ledger's derived bound for a live ledger, every other topic
+    file's shared ceiling for everything else. One owner for the question "how big may
+    this topic file be", asked by the write guard, by `topic_size_error`'s message and
+    by `scripts/memory/validate_memory_index.py`; a topic file that is not a ledger
+    gets `TOPIC_FILE_CEILING_BYTES`, unchanged from before #2212."""
+    stem = name[len(TOPIC_PREFIX):] if name.startswith(TOPIC_PREFIX) else name
+    stem = stem[: -len(".md")] if stem.endswith(".md") else stem
+    return ledger_ceiling(stem) or TOPIC_FILE_CEILING_BYTES
+
+
+def _topic_size_message(name: str, size: int, ceiling: int) -> str:
+    """The refusal text for a topic write of `size` bytes against `ceiling`.
+
+    Two messages, because the two files want opposite advice. An ordinary topic is
+    loaded whole by `memory_read`, so splitting it is the right fix and the wording is
+    the one `tests/test_memory_index_cap.py` and `agent_mcp/builtin_fs.py` quote, kept
+    byte-identical to pre-#2212. A ledger's rows are read back by
+    `scripts/memory/memory_ledger.py` from exactly one file per loaded file, so
+    splitting it is the WORST thing a curator could do: rows in a second file are
+    invisible to `status`, and `curate: true` would keep asking for them forever.
+    """
+    stem = name[len(TOPIC_PREFIX):] if name.startswith(TOPIC_PREFIX) else name
+    audited = MEMORY_LEDGERS.get(stem)
+    audited_ceiling = memory_ceiling(audited) if audited is not None else None
+    # `audited_ceiling`, not `audited`: the ledger prose needs the number it quotes to
+    # exist. An audited file that answers None has already had its bound fall back to
+    # TOPIC_FILE_CEILING_BYTES in `ledger_ceiling`, and a refusal that then printed
+    # "3 x MEMORY.md's None-byte ceiling" would be a message no reader could act on —
+    # so a ledger that lost the file it audits is described as the ordinary topic file
+    # the guard is actually measuring it as.
+    if audited_ceiling is None:
+        return (
+            f"{name} is {size:,} bytes, over the {ceiling:,}-byte topic "
+            f"file ceiling ({size - ceiling:,} B over). Split it into "
+            f"two topics and point the index line at both, or trim it in the same edit."
+        )
+    return (
+        f"{name} is {size:,} bytes, over its {ceiling:,}-byte ledger ceiling "
+        f"({LEDGER_MULTIPLIER} x {audited}'s "
+        f"{audited_ceiling:,}-byte ceiling, #2212) "
+        f"({size - ceiling:,} B over). Do not split a live ledger: "
+        f"`scripts/memory/memory_ledger.py` reads only this file for {audited}, so a "
+        f"row in a second file is invisible to `status` and the audit silently stops "
+        f"covering lines. Trim or retire rows against a loaded line that is gone."
     )

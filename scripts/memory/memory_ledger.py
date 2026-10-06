@@ -45,10 +45,15 @@ indistinguishable from the legacy backtick-wrapped row form that
     python3 scripts/memory/memory_ledger.py status            # both files
     python3 scripts/memory/memory_ledger.py status --json
 
-**The retire step (#1996): the ledger is bounded by lifecycle, the ceiling is not
-moved.** A ledger is a topic file, so it sits under the 32,768 B topic-file ceiling
-(`TOPIC_FILE_CEILING_BYTES`, `app/memory_ceiling.py`) and its only bound used to
-be `memory_add`'s `topic_size_error` refusal. `retire` moves a row out of the live
+**The retire step (#1996): the ledger is bounded by lifecycle, and this step makes
+no room.** A ledger lives in the topic directory, but since #2212 it is not measured
+by the topic ceiling every other file there gets: `app/memory_ceiling.ledger_ceiling`
+derives its bound as `LEDGER_MULTIPLIER` times the ceiling of the file it audits
+(76,800 B for `memory-md-ledger`, 49,152 B for `user-md-ledger`), because a row is
+written per loaded line and the old shared bound would have stopped the audit with
+lines still uncovered. Its only bound is still `memory_add`'s `topic_size_error`
+refusal — now a message that names that derived bound and says not to split the
+file. `retire` moves a row out of the live
 ledger into an archive under `lloyd/reviews/` — outside the topic directory, so
 the archive is not ceiling-checked and `LEDGERS` cannot read it — when, and only
 when, that row's anchor no longer joins any line in the loaded file: the line was
