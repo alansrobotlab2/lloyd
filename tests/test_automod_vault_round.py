@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -1343,11 +1344,23 @@ def test_a_refusal_leaves_the_vault_at_its_previous_head_and_is_ledged(
     # the prose a `promotions.jsonl` reader actually reads, not only in `nodes`, and
     # `_guards_row` writes `reason` only when it is non-empty — which on a plain refusal it
     # was not before. The pin moves because the row legitimately grew, not loosely.
+    # #2283 adds the five keys on the second line: `parallel_retry_2` and
+    # `baseline_2` are the second draw of each side, `proposed_runs` and
+    # `baseline_runs` are how many draws each side completed, and `mirror_gap_s` is
+    # how far apart the two vault mirrors' bytes were. Every one of them is what a
+    # refusal's sentence now claims, so every one of them is auditable on the row.
     assert set(g) == {"state", "refuse", "seconds", "candidate", "baseline",
-                      "nodes", "excerpt", "workers", "parallel_retry", "reason"}, g
+                      "nodes", "excerpt", "workers", "parallel_retry", "reason",
+                      "parallel_retry_2", "baseline_2", "proposed_runs",
+                      "baseline_runs", "mirror_gap_s"}, g
     assert "tests/test_guard.py::" in g["reason"], g["reason"]
     assert g["workers"] == 2, g
     assert g["parallel_retry"] == {"ran": 1, "failed": 1, "workers": 1}, g
+    assert g["parallel_retry_2"] == {"ran": 1, "failed": 1, "workers": 1}, g
+    assert (g["baseline_2"]["ran"], g["baseline_2"]["failed"]) == (1, 0), g
+    assert g["baseline_2"]["files"] == 1, g
+    assert g["proposed_runs"] == 2 and g["baseline_runs"] == 2, g
+    assert isinstance(g["mirror_gap_s"], float) and g["mirror_gap_s"] >= 0.0, g
     # #2042: a refusal row now carries its own cost beside its verdict — the seconds
     # each run took and how many vault-reading files it ran over — and the guard
     # output that states the counts. Before this, only the verdict was ledgered.
@@ -4627,3 +4640,400 @@ name: foo
         "clear the rule")
     assert V.uptake_citability_errors(["skills/foo/SKILL.md"]) == [], (
         "the landing route must agree with the rule about a spilled skill")
+
+
+# --------------------------------------------------------------------------- #
+# #2283: the agreement probe may not refuse a land on a node it cannot explain.
+#
+# Four real `vault_land` rows on 2026-10-06 — the last at ts 1791278737 — refused
+# a land whose only path was a file no test in the tree reads, because two nodes
+# of `tests/test_guardian_alert_retraction.py` lost ONE draw of the probe's
+# selection and a single observation was written up as a disagreement with the
+# prose. The refused rows also compared two vault mirrors copied four minutes
+# apart, on a tree the guardian and the reflection writers edit continuously, so
+# the A/B was never a controlled comparison.
+#
+# The shape of the fix, one node per clause: the proposed side is drawn TWICE
+# serially and a node that loses one draw and wins the other goes to
+# `flake_only_failures`; the two mirrors are copied back to back before the first
+# child starts, with the gap between the copies on the report as `mirror_gap_s`;
+# a refusal needs every proposed draw lost and every pre-land draw won, and a
+# node that fails both sides (host `/tmp` inode pressure is the real instance) or
+# a side whose second draw the budget cannot start is not a refusal; and the
+# prose/code accusation appears only when a failing node's own file names a path
+# this land commits.
+# --------------------------------------------------------------------------- #
+
+#: A file holding two flakes of the two different kinds, so one re-ask of one
+#: file produces both dismissal lists. The parallel flaker is the existing
+#: `GUARD_SRC_FLAKES` shape; the second node loses only the FIRST SERIAL DRAW —
+#: the order dependence that broke #2271's land, reproduced deterministically.
+#: It tells a draw from a parallel worker on `PYTEST_XDIST_WORKER`, which
+#: `_run_selection` strips from a serial child's env and xdist sets in a worker,
+#: and it counts draws in the probe's own `LLOYD_DATA`, which every draw of one
+#: probe shares and no draw of the next one inherits.
+DRAW_FLAKER_SRC = '''"""A vault-reading guard that flakes under parallelism and on the first draw."""
+import os
+from pathlib import Path
+
+
+def test_a_guard_that_flakes_only_under_parallelism(request):
+    v = Path(os.environ["LLOYD_VAULT_ROOT"])
+    assert (v / "skills" / "foo" / "SKILL.md").exists()
+    assert not hasattr(request.config, "workerinput"), "lost under xdist, not under this land"
+
+
+def test_a_guard_that_loses_only_the_first_serial_draw():
+    v = Path(os.environ["LLOYD_VAULT_ROOT"])
+    assert (v / "skills" / "foo" / "SKILL.md").exists()
+    if os.environ.get("PYTEST_XDIST_WORKER"):
+        return
+    seen = Path(os.environ["LLOYD_DATA"]) / "first-serial-draw"
+    first = not seen.exists()
+    seen.write_text("drawn\\n")
+    assert not first, "lost on the first serial draw, not under this land"
+'''
+
+DRAW_FLAKER_PARALLEL_NODE = (
+    "tests/test_draw_flaker.py::test_a_guard_that_flakes_only_under_parallelism")
+DRAW_FLAKER_ORDER_NODE = (
+    "tests/test_draw_flaker.py::test_a_guard_that_loses_only_the_first_serial_draw")
+
+#: The prose half of the fake-driven nodes: HEAD states four, the proposal
+#: states five, so a run can tell which side of the A/B it was handed by reading
+#: the vault it was shown, exactly as the real child does.
+SKILL_AT_FIVE = "---\nname: foo\n---\nstores: 5\n"
+
+
+def _add_draw_flaker(tree: Path) -> None:
+    """Commit the two-flake file into a fixture code tree."""
+    (tree / "tests" / "test_draw_flaker.py").write_text(DRAW_FLAKER_SRC, encoding="utf-8")
+    git(tree, "add", "-A")
+    git(tree, "commit", "-q", "-m", "a guard with one parallel flake and one draw-order flake")
+
+
+def _probe_here(tmp_path, tree, vault, **kw):
+    """One probe over fixture trees, called the way `land()` calls it."""
+    return VG.agreement(paths=list(kw.pop("paths", ["skills/foo/SKILL.md"])),
+                        live_root=tree, live_vault=vault,
+                        python=Path(sys.executable),
+                        scratch_parent=tmp_path / "probe-scratch", **kw)
+
+
+def _side_of(vault_root, landed: str = "skills/foo/SKILL.md") -> str:
+    """Which side of the A/B a stood-in run was handed, judged on THIS land's path.
+
+    Not from the directory name — `agreement` may rename its mirrors — and not from
+    some file the land happens not to touch: the two mirrors differ on exactly the
+    paths this land declares, so the answer is read off the landed path itself. Its
+    bytes, where the land modifies a tracked file; its existence, where the land
+    adds one. A detector keyed on anything else would call both mirrors the same
+    side and score a one-sided A/B as a comparison.
+    """
+    p = Path(vault_root) / landed
+    if not p.exists():
+        return "pre-land"
+    if landed == "skills/foo/SKILL.md":
+        text = p.read_text(errors="replace")
+        return "proposed" if "stores: 5" in text else "pre-land"
+    return "proposed"
+
+
+class _SteppedClock:
+    """A `time` module stand-in that only moves when a stood-in run says so.
+
+    The budget nodes need "the second draw could not start inside the remaining
+    budget" to be a fact of arithmetic and not of how long `git worktree add`
+    took on the day the suite ran. Each stood-in run advances it by a fixed
+    amount; nothing else in `vault_guards` reads the clock.
+    """
+
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def time(self) -> float:
+        return self.t
+
+
+def _draw_runs(monkeypatch, *, parallel_failed, proposed_draws, base_draws,
+               clock: _SteppedClock | None = None, step: float = 150.0,
+               landed: str = "skills/foo/SKILL.md", parallel_ran: int = 1,
+               proposed_ran: list[int] | None = None,
+               base_ran: list[int] | None = None,
+               order: list[str] | None = None):
+    """Stand in for pytest and answer each side from the bytes it was handed.
+
+    `proposed_draws[i]` and `base_draws[i]` are the node ids the i-th serial draw of
+    that side fails, and `proposed_ran[i]` / `base_ran[i]` (default 1) are how many
+    nodes that draw reports it collected. A 0 there is a draw that launched and
+    answered nothing, which is the answer no constant could express: the probe has to
+    neither count it in `proposed_runs` nor re-ask into a verdict on it.
+
+    A draw past a script is an assertion, not a silent empty answer: a probe that
+    launched a third draw would otherwise be graded against a fabricated pass.
+
+    `order`, when given, is what the caller's own spies append their labels to as
+    well — the mirror test asserts the copies precede the first run, and that is only
+    an assertion while every writer signs the same list. Returns the worker counts in
+    call order.
+    """
+    counts = {"parallel": 0, "proposed": 0, "pre-land": 0}
+    calls: list[int] = []
+    log = order if order is not None else []
+
+    def fake(python, tree, files, vault_root, data_root, mark, timeout, workers):
+        side = "parallel" if workers > 1 else _side_of(vault_root, landed)
+        counts[side] += 1
+        calls.append(workers)
+        log.append(f"run:{side}")
+        if clock is not None:
+            clock.t += step
+        if side == "parallel":
+            failed = list(parallel_failed)
+            ran = parallel_ran
+        else:
+            script = proposed_draws if side == "proposed" else base_draws
+            ran_script = (proposed_ran or []) if side == "proposed" else (base_ran or [])
+            i = counts[side] - 1
+            assert i < len(script), (
+                f"the probe launched a {side} draw number {i + 1} past its "
+                f"{len(script)} scripted draws")
+            failed = list(script[i])
+            ran = ran_script[i] if i < len(ran_script) else 1
+        return {"ran": ran, "failed": failed,
+                "note": "" if ran else "no tests ran (collection answered nothing)",
+                "seconds": 0.01, "files": list(files), "workers": workers,
+                "excerpt": "", "argv_tail": ""}
+
+    # `tests/conftest.py` sets the probe's nesting flag for the whole suite, and
+    # these nodes ARE the probe.
+    monkeypatch.delenv(VG.NESTING_ENV, raising=False)
+    monkeypatch.setattr(VG, "_run_selection", fake)
+    monkeypatch.setattr(VG, "_parallel_workers", lambda python: (2, ""))
+    return calls
+
+
+def _disagreement_vault(vault) -> None:
+    """Vault at HEAD says four, working tree (the land) says five."""
+    _prose(vault, SKILL_AT_FOUR, commit=True)
+    _prose(vault, SKILL_AT_FIVE)
+
+
+def test_a_node_that_loses_one_serial_draw_and_wins_the_next_is_a_flake_not_a_refusal(
+        tmp_path, vault, guard_tree, monkeypatch):
+    """Clause 1, over real children. One draw lost and one won is a flake.
+
+    The two flakes are in one file so the probe's own re-ask of that file
+    produces both kinds of dismissal: the parallel flaker passes every serial
+    draw and the draw-order flaker loses the first and wins the second. Neither
+    is a disagreement with the prose, so nothing here may reach the pre-land
+    side, and both names have to be on the row.
+    """
+    _two_workers(monkeypatch)
+    monkeypatch.delenv(VG.NESTING_ENV, raising=False)
+    _prose(vault, SKILL_AT_FOUR, commit=True)
+    _add_draw_flaker(guard_tree)
+    _prose(vault, "---\nname: foo\ndescription: the same four stores.\n---\nstores: 4\n")
+    rep = _probe_here(tmp_path, guard_tree, vault,
+                      paths=["skills/foo/SKILL.md"])
+    assert rep["state"] == "checked" and rep["refuse"] is False, rep["reason"]
+    assert rep["flake_only_failures"] == [DRAW_FLAKER_ORDER_NODE], rep
+    assert rep["parallel_only_failures"] == [DRAW_FLAKER_PARALLEL_NODE], rep
+    assert rep["proposed_runs"] == 2, rep
+    assert "baseline" not in rep, (
+        "nothing survived both proposed draws, so the pre-land side never ran")
+    assert DRAW_FLAKER_ORDER_NODE in str(rep["reason"]), rep["reason"]
+    row = V._guards_row(rep)
+    assert row["flake_only_failures"] == [DRAW_FLAKER_ORDER_NODE], row
+    assert row["proposed_runs"] == 2, row
+
+
+def test_the_pre_land_mirror_is_copied_before_the_first_run_and_the_gap_is_ledged(
+        tmp_path, vault, monkeypatch):
+    """Clause 2. The A/B is only a comparison if both sides' bytes are one moment.
+
+    `agreement` mirrored the vault for the proposed run, ran ~222 s of tests on
+    the refused row, and only then copied the "before" mirror — on a tree the
+    guardian and the reflection writers edit continuously, so anything that
+    stopped failing inside those minutes was charged to the land. The order is
+    the whole clause: copy, copy, then launch.
+    """
+    tree = make_guard_tree(tmp_path / "tree")
+    _disagreement_vault(vault)
+    calls: list[str] = []
+    real_copy = VG._copy_vault
+    real_baseline = VG.baseline_vault
+
+    def spy_copy(dest, live_vault):
+        calls.append("copy")
+        return real_copy(dest, live_vault)
+
+    def spy_baseline(dest, live_vault, paths):
+        calls.append("baseline")
+        return real_baseline(dest, live_vault, paths)
+
+    monkeypatch.setattr(VG, "_copy_vault", spy_copy)
+    monkeypatch.setattr(VG, "baseline_vault", spy_baseline)
+    _draw_runs(monkeypatch, parallel_failed=[], proposed_draws=[], base_draws=[],
+               order=calls)
+    rep = _probe_here(tmp_path, tree, vault)
+    # The exact order, from the one list every writer signed: the proposed mirror,
+    # then the pre-land build — whose second `copy` is `baseline_vault` mirroring the
+    # live vault before it puts this land's paths back — and only then the first
+    # child. An assertion about absence in a list only two writers touch would have
+    # passed with the runs first, which is the shape this clause exists to forbid.
+    assert calls == ["copy", "baseline", "copy", "run:parallel"], calls
+    assert rep["state"] == "checked", rep
+    assert isinstance(rep["mirror_gap_s"], float) and rep["mirror_gap_s"] >= 0.0, rep
+    assert V._guards_row(rep)["mirror_gap_s"] == rep["mirror_gap_s"]
+
+
+def test_a_draw_that_collected_nothing_is_not_counted_as_a_draw_and_never_refuses(
+        tmp_path, vault, monkeypatch):
+    """Clause 3's empty-draw half: a draw that ran nothing observed nothing.
+
+    `proposed_runs` counts draws that ANSWERED, so a draw whose collection came back
+    empty is not a pass to be counted and not a verdict to be built on. The 0 has to
+    survive onto the row too: a projection that writes the count only `if count:`
+    would report the key absent, which is what a side that never ran looks like.
+    """
+    tree = make_guard_tree(tmp_path / "tree")
+    _disagreement_vault(vault)
+    _draw_runs(monkeypatch, parallel_failed=[COUNT_NODE],
+               proposed_draws=[[COUNT_NODE]], base_draws=[], proposed_ran=[0])
+    rep = _probe_here(tmp_path, tree, vault)
+    assert rep["refuse"] is False, rep
+    assert rep["proposed_runs"] == 0, rep
+    assert "baseline" not in rep, rep
+    assert "answered nothing" in str(rep["reason"]), rep["reason"]
+    assert "cannot be attributed" in str(rep["reason"]), rep["reason"]
+    assert V._guards_row(rep)["proposed_runs"] == 0, V._guards_row(rep)
+
+
+def test_only_a_node_that_loses_every_draw_of_its_side_refuses_and_the_row_says_how_many(
+        tmp_path, vault, monkeypatch):
+    """Clause 3. Two draws lost, two draws won, and both counts on the row."""
+    tree = make_guard_tree(tmp_path / "tree")
+    _disagreement_vault(vault)
+    calls = _draw_runs(monkeypatch, parallel_failed=[COUNT_NODE],
+                       proposed_draws=[[COUNT_NODE], [COUNT_NODE]],
+                       base_draws=[[], []])
+    rep = _probe_here(tmp_path, tree, vault)
+    assert rep["state"] == "checked" and rep["refuse"] is True, rep["reason"]
+    assert rep["nodes"] == [COUNT_NODE], rep
+    assert rep["proposed_runs"] == 2 and rep["baseline_runs"] == 2, rep
+    assert calls == [2, 1, 1, 1, 1], (
+        f"one parallel run, two proposed draws and two pre-land draws: {calls}")
+    row = V._guards_row(rep)
+    assert row["proposed_runs"] == 2 and row["baseline_runs"] == 2, row
+    assert row["refuse"] is True, row
+
+
+def test_a_node_that_fails_the_pre_land_draws_too_is_the_box_and_not_the_land(
+        tmp_path, vault, monkeypatch):
+    """Clause 3's other half: a node red on BOTH sides cannot be this land's.
+
+    The real instance is host `/tmp` inode pressure — at 81 % used the guardian
+    alert pair fails wherever it runs, and the probe charged it to an unread new
+    file. Naming the ids is not decoration: the owed check reads them off the
+    row.
+    """
+    tree = make_guard_tree(tmp_path / "tree")
+    _disagreement_vault(vault)
+    _draw_runs(monkeypatch, parallel_failed=[COUNT_NODE],
+               proposed_draws=[[COUNT_NODE], [COUNT_NODE]],
+               base_draws=[[COUNT_NODE], [COUNT_NODE]])
+    rep = _probe_here(tmp_path, tree, vault)
+    assert rep["refuse"] is False, rep
+    assert rep["proposed_runs"] == 2 and rep["baseline_runs"] == 2, rep
+    assert "pre-existing" in str(rep["reason"]), rep["reason"]
+    assert rep["pre_existing"] == [COUNT_NODE], rep
+    assert V._guards_row(rep)["pre_existing"] == [COUNT_NODE], rep
+
+
+@pytest.mark.parametrize("side,timeout", [("proposed", 200.0), ("pre-land", 600.0)],
+                         ids=["proposed-draw-2-starved", "pre-land-draw-2-starved"])
+def test_a_second_draw_the_budget_cannot_start_is_never_a_refusal(
+        tmp_path, vault, monkeypatch, side, timeout):
+    """Clause 3's budget half, on each side, with the clock stepped by hand.
+
+    Each stood-in run spends 150 s of the probe's own budget, so at 200 s the
+    proposed side gets one draw and no second, and at 600 s the pre-land side
+    gets one draw and no second. Both are the same non-refusal: the failure
+    could not be attributed, which is the honest answer and not a green light.
+    """
+    tree = make_guard_tree(tmp_path / "tree")
+    _disagreement_vault(vault)
+    clock = _SteppedClock()
+    # Only the side being starved needs a scripted draw past the first.
+    draws = {"proposed": [[COUNT_NODE]] if side == "proposed" else [[COUNT_NODE], [COUNT_NODE]],
+             "pre-land": [[]] if side == "pre-land" else [[COUNT_NODE], [COUNT_NODE]]}
+    monkeypatch.setattr(VG, "time", clock)
+    _draw_runs(monkeypatch, parallel_failed=[COUNT_NODE],
+               proposed_draws=draws["proposed"], base_draws=draws["pre-land"],
+               clock=clock)
+    rep = _probe_here(tmp_path, tree, vault, timeout=timeout)
+    assert rep["refuse"] is False, rep
+    assert "could not be attributed" in str(rep["reason"]), rep["reason"]
+    if side == "proposed":
+        assert rep["proposed_runs"] == 1, rep
+        assert "baseline" not in rep, rep
+    else:
+        assert rep["proposed_runs"] == 2 and rep["baseline_runs"] == 1, rep
+
+
+@pytest.mark.parametrize("landed,explained", [
+    ("skills/foo/SKILL.md", True),
+    ("backlog/data/2026-10-06.probe-canary.md", False),
+], ids=["a-failing-test-reads-the-landed-path", "no-failing-test-reads-it"])
+def test_the_prose_accusation_appears_only_when_a_failing_test_file_names_a_landed_path(
+        tmp_path, vault, monkeypatch, landed, explained):
+    """Clause 4. The four real refusals accused prose nobody had changed.
+
+    `refusal_text` appended "The prose states something the code does not do" to
+    every refusal, including the four that named a guardian-alert pair whose
+    whole world is `tmp_path` and which cannot read a vault path at all. The
+    accusation is now a claim about evidence: a failing node's own file names a
+    path this land commits, or the disagreement is reported as unexplained.
+    """
+    tree = make_guard_tree(tmp_path / "tree")
+    _disagreement_vault(vault)
+    if landed != "skills/foo/SKILL.md":
+        # `land()` is called with the edit already written into the working tree, so
+        # an added path is a file that exists there and nowhere in HEAD — which is
+        # the only difference between the two mirrors for a land like this one.
+        (vault / landed).parent.mkdir(parents=True, exist_ok=True)
+        (vault / landed).write_text("a note no test in the tree reads\n", encoding="utf-8")
+    _draw_runs(monkeypatch, parallel_failed=[COUNT_NODE],
+               proposed_draws=[[COUNT_NODE], [COUNT_NODE]], base_draws=[[], []],
+               landed=landed)
+    rep = _probe_here(tmp_path, tree, vault, paths=[landed])
+    assert rep["refuse"] is True, rep["reason"]
+    accusation = "The prose states something the code does not do"
+    text = VG.refusal_text(rep)
+    if explained:
+        assert accusation in text, text
+    else:
+        assert accusation not in text, text
+        assert "could not be attributed" in text, text
+        assert COUNT_NODE in text, text
+        assert landed in text, text
+
+
+def test_no_comment_in_the_probe_claims_the_tests_lock_makes_the_mirrors_one_moment():
+    """Clause 5. The comment promised a property the lock does not give.
+
+    `agreement` said the tests lock made "the two mirrors … witnesses of one
+    moment"; `_wait_for_tests_slot` holds the gate's `tests` slot, which is about
+    cores, while `~/obsidian` keeps being written by the guardian, the reflection
+    writer and the backlog writers. A comment that names a guarantee the code
+    does not provide is the reason the A/B went unchallenged for four refusals.
+    """
+    src = (repo() / "scripts" / "automod" / "vault_guards.py").read_text(encoding="utf-8")
+    assert "witnesses of one moment" not in src
+    for hit in re.finditer("one moment", src):
+        window = src[max(0, hit.start() - 300):hit.end() + 300].lower()
+        assert "lock" not in window, (
+            f"a sentence about the mirrors being one moment sits inside a sentence "
+            f"about the lock: {window!r}")
+    assert "mirror_gap_s" in src, "the measurement replaced the claim"

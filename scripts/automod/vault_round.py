@@ -899,12 +899,17 @@ def _guards_row(guards: dict) -> dict:
         for k in ("seconds", "files"):
             if cand.get(k) is not None:
                 out["candidate"][k] = cand[k]
-    base = guards.get("baseline") or {}
-    if base:
-        out["baseline"] = {"ran": base.get("ran", 0), "failed": len(base.get("failed") or [])}
+    # `baseline` and `baseline_2` are the two draws of the pre-land side
+    # (`vault_guards.BASELINE_DRAWS`): a refusal is only earned by a node that was
+    # green on BOTH, so the row has to show both or it cannot be audited.
+    for key in ("baseline", "baseline_2"):
+        blk = guards.get(key) or {}
+        if not blk:
+            continue
+        out[key] = {"ran": blk.get("ran", 0), "failed": len(blk.get("failed") or [])}
         for k in ("seconds", "files"):
-            if base.get(k) is not None:
-                out["baseline"][k] = base[k]
+            if blk.get(k) is not None:
+                out[key][k] = blk[k]
     ack_row = guards.get("ack")
     if ack_row and (ack_row.get("requested") or ack_row.get("accepted")
                     or ack_row.get("unmatched")):
@@ -920,21 +925,48 @@ def _guards_row(guards: dict) -> dict:
         # never silent, so a later reader of the ledger can see exactly which code-side
         # guard was told to move with the bytes, and go re-measure it.
         out["excused"] = list(guards["excused"])
-    retry = guards.get("parallel_retry")
-    if retry:
-        # Written only when a re-ask ran, so an absent key means the probe never
-        # re-asked and never "re-asked and reported nothing" — the same convention
-        # as the two run blocks above. `note`, `seconds` and `files` stay off the
-        # row on purpose: the note's content is already in `reason`, and the row is
-        # the shape a clause put there, not a dump of the report.
-        out["parallel_retry"] = {"ran": retry.get("ran", 0),
-                                 "failed": len(retry.get("failed") or []),
-                                 "workers": retry.get("workers") or 1}
-    dismissed = guards.get("parallel_only_failures")
-    if dismissed:
-        out["parallel_only_failures"] = list(dismissed)[:10]
+    # `parallel_retry` and `parallel_retry_2` are the two serial draws against the
+    # proposed vault (`vault_guards.PROPOSED_DRAWS`). Written only when a draw ran,
+    # so an absent key means the probe never re-asked and never "re-asked and
+    # reported nothing" — the same convention as the two run blocks above. `note`,
+    # `seconds` and `files` stay off the row on purpose: the note's content is
+    # already in `reason`, and the row is the shape a clause put there, not a dump
+    # of the report.
+    for key in ("parallel_retry", "parallel_retry_2"):
+        retry = guards.get(key)
+        if not retry:
+            continue
+        out[key] = {"ran": retry.get("ran", 0),
+                    "failed": len(retry.get("failed") or []),
+                    "workers": retry.get("workers") or 1}
+    for key, dismissed in (("parallel_only_failures", guards.get("parallel_only_failures")),
+                           ("flake_only_failures", guards.get("flake_only_failures"))):
+        # Both dismissal lists are the flake record a reader is told to search, so
+        # both go on the row: one name is a number in the ledger, and a dismissal
+        # that only exists in the report is indistinguishable from one that never
+        # happened. `flake_only_failures` is #2283's second kind — a node that lost
+        # some serial draws and won others, which is never a prose disagreement.
+        if not dismissed:
+            continue
+        out[key] = list(dismissed)[:10]
         if len(dismissed) > 10:
-            out["parallel_only_failures_count"] = len(dismissed)
+            out[f"{key}_count"] = len(dismissed)
+    # How many draws each side completed, and the seconds between the two vault
+    # copies. Both are what a refusal's own sentence now claims, so both are on the
+    # row: `proposed_runs`/`baseline_runs` say whether the A/B was a comparison or a
+    # single observation, and `mirror_gap_s` is how far apart the two mirrors' bytes
+    # actually were.
+    if guards.get("pre_existing"):
+        # Named here because these nodes are on NO other part of the row: they do
+        # not refuse, so they never reach `nodes`, and without them a row that
+        # judged a real host condition is indistinguishable from one that judged
+        # nothing. Capped like the two dismissal lists above.
+        out["pre_existing"] = list(guards["pre_existing"])[:10]
+    for key in ("proposed_runs", "baseline_runs"):
+        if guards.get(key) is not None:
+            out[key] = int(guards[key])
+    if guards.get("mirror_gap_s") is not None:
+        out["mirror_gap_s"] = float(guards["mirror_gap_s"])
     if guards.get("nodes"):
         out["nodes"] = list(guards["nodes"])[:10]
     if guards.get("reason"):

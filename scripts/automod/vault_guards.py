@@ -41,9 +41,13 @@ The proposed run goes out on pytest-xdist, on the gate's own worker count
 budget serially. Parallelism is a second thing to get right, not a free speedup:
 eight workers make load, so a node that fails there is re-asked serially against
 the SAME vault — the proposed one — before it is allowed to refuse anything, and
-only a node that survives that re-ask goes to the pre-land baseline. Where xdist
-cannot be had the answer is a `skipped` that says so, never the serial run that
-would spend the budget to report nothing.
+only a node that loses EVERY one of those `PROPOSED_DRAWS` draws goes on to the
+pre-land baseline, which is itself drawn `BASELINE_DRAWS` times. #2283 is why one
+draw of one side is not evidence: four lands were refused on a single lost draw of
+two nodes whose whole world is `tmp_path`, over a file no test in the tree reads.
+A node that loses the pre-land draws too is the box rather than the land, and is
+ledgered as `pre_existing`. Where xdist cannot be had the answer is a `skipped`
+that says so, never the serial run that would spend the budget to report nothing.
 
 Failure to judge is never reported as agreement, and never as a refusal either:
 an unbuildable probe, a timed-out run, or a selection that collected nothing
@@ -671,6 +675,53 @@ def excused_ids(new: list[str], ack_accepted: list[str], tree: Path) -> list[str
     return out
 
 
+def _nodes_naming_a_landed_path(nodes: list[str], tree: Path,
+                                paths: list[str]) -> list[str]:
+    """Which failing nodes live in a test file that NAMES one of the landed paths.
+
+    The same closure `excused_ids` measures, asked for the opposite reason: there it
+    decides which nodes an ack is allowed to speak for, here it decides which nodes a
+    refusal may be written up as a prose/code disagreement at all. A node's own file
+    naming a path this land commits is the only evidence this module can get that the
+    node reads the thing that moved — and a name that never appears in the file is
+    evidence the other way, which is the fact the four #2283 refusals needed stated:
+    `grep -c "nightly-20261005\\|2271-baseline-witness" tests/test_guardian_alert_retraction.py`
+    answers 0, and no ack could ever have spoken for those nodes either.
+
+    Basenames, not vault-relative paths, for the same reason `excused_ids` uses them:
+    a guard builds the path out of its `vault_root()` and literal segments, so the
+    file name is the token that appears in source. A file that cannot be read names
+    nothing — it is never counted as explained.
+    """
+    tokens = {Path(str(p)).name for p in paths if Path(str(p)).name}
+    if not tokens or not nodes:
+        return []
+    out: list[str] = []
+    for node_id in nodes:
+        rel = str(node_id).split("::", 1)[0]
+        try:
+            text = (tree / rel).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if any(tok in text for tok in tokens):
+            out.append(node_id)
+    return out
+
+
+#: How many serial draws each side of the A/B gets before this probe may name a
+#: disagreement. One draw is ONE observation, and the four refused `vault_land`
+#: rows of 2026-10-06 each rested on exactly one: two nodes of
+#: `tests/test_guardian_alert_retraction.py` lost a single proposed-side draw — a
+#: pair that builds its whole world out of `tmp_path` and cannot read a vault path
+#: at all — against a single pre-land draw that passed, and one reproduction of a
+#: flake became a prose accusation. A node that loses one draw and wins the next
+#: is a fact about the box (host `/tmp` inode pressure is the real instance); a
+#: node that loses EVERY proposed draw and wins EVERY pre-land draw is the only
+#: shape that is this land's.
+PROPOSED_DRAWS = 2
+BASELINE_DRAWS = 2
+
+
 def agreement(*, paths: list[str], ack: list[str] | None = None,
               live_root: Path | None = None,
               live_vault: Path | None = None, python: Path | None = None,
@@ -700,16 +751,23 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
     back, and an unacknowledged disagreement still refuses.
 
     `timeout` is the WHOLE probe: the queue for the gate's tests lock and every
-    pytest run together — the proposed-vault run, the serial re-ask of its
-    failures when it ran parallel, and the pre-land run — handed out to each run
-    as it goes. It was per run until #2042, which is the arithmetic that made
-    every real probe a non-answer — a probe could spend 300 s queueing behind a
-    gate `tests` rung and still be refused by its own next 300 s, and the row
-    said only "timed out after 300s".
+    pytest run together — the proposed-vault run, the serial draws of its failing
+    files against the proposed vault, and the draws against the pre-land vault —
+    handed out to each run as it goes. It was per run until #2042, which is the
+    arithmetic that made every real probe a non-answer — a probe could spend 300 s
+    queueing behind a gate `tests` rung and still be refused by its own next
+    300 s, and the row said only "timed out after 300s". Because drawing a side
+    `PROPOSED_DRAWS` or `BASELINE_DRAWS` times costs a run each, a budget too thin
+    for the second draw answers `skipped` with "could not be attributed" instead of
+    refusing: one draw cannot tell a flake from a disagreement.
 
     Every child run happens inside the gate's tests lock (`_wait_for_tests_slot`),
-    taken before the vault is mirrored so both mirrors are witnesses of one moment
-    and released once, in the `finally`.
+    taken before anything is mirrored and released once, in the `finally`. What
+    that lock holds is cores. It does not hold `~/obsidian`, which the guardian,
+    the reflection writer and the backlog writers keep editing while the probe
+    runs — so the two mirrors are made comparable by being copied back to back
+    before the first child starts, and the report carries the seconds between the
+    two copies as `mirror_gap_s` rather than claiming a moment the lock never gave.
 
     The proposed-vault run is the only one that runs parallel (`_parallel_workers`):
     it is the whole selection, and serially the selection does not fit this budget
@@ -720,10 +778,17 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
     arrives at once.
 
     Returns `{"state": "checked" | "skipped", "refuse": bool, "reason": str, ...}`.
-    `refuse` is true only for a node that passed with this land's paths put back
-    and failed with them in place; `reason` says which of the non-answers it was
-    whenever `state` is `skipped`, and each run's own `seconds`, `files` and
-    captured `excerpt` ride along so a non-answer explains itself.
+    `refuse` is true only for a node that failed EVERY serial draw against the
+    vault as proposed and passed EVERY draw with this land's paths put back:
+    `proposed_runs` and `baseline_runs` are how many draws each side completed,
+    and a side that could not complete its `*_DRAWS` is a `skipped` and never a
+    refusal. Nodes dismissed for failing less than the whole proposed side are
+    named by id under `parallel_only_failures` (never failed a serial draw) or
+    `flake_only_failures` (failed some draws and not others), and a node that
+    failed the pre-land side too is pre-existing rather than this land's.
+    `reason` says which of the non-answers it was whenever `state` is `skipped`,
+    and each run's own `seconds`, `files` and captured `excerpt` ride along so a
+    non-answer explains itself.
     """
     started = time.time()
     deadline = started + max(float(timeout), 0.0)
@@ -825,8 +890,14 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
         # file set on one box do not finish in half the time of one, and all three
         # probes that were ever armed spent their entire budget inside that
         # contention and answered nothing. Held from here to the `finally`, so the
-        # two mirrors below are witnesses of one moment rather than of two
-        # separated by whatever the queue costs.
+        # probe's children never run beside the gate's eight workers. What the lock
+        # holds is cores, and nothing more: `~/obsidian` goes on being written by
+        # the guardian, the reflection writer and the backlog writers while this
+        # probe runs, so the two mirrors are made comparable by the order they are
+        # copied in below, and the seconds between the copies go on the report as
+        # `mirror_gap_s`. #2283: this comment used to promise the two copies were
+        # bytes of the same instant, and that promise is how a 222 s gap between
+        # them went unnoticed through four refusals of a file no test reads.
         try:
             slot, waited = _wait_for_tests_slot(left())
         except S.LockHeld as exc:
@@ -841,11 +912,28 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
         # the land is about to `git add`. A guard that writes to its vault — the
         # retention sweep's `--apply` nodes do — would then be an unreviewed
         # second author of the commit, and the route would be judging a vault
-        # while it edited it. The mirror is the same bytes at the same moment,
-        # and a mutation inside it dies with the scratch directory.
+        # while it edited it. The mirror is the same bytes the live tree holds at
+        # the instant it is copied, and a mutation inside it dies with the scratch
+        # directory.
+        mirror_copied = time.time()
         why = _copy_vault(proposed_vault, vault)
         if why:
             return done(reason=f"cannot mirror the vault as proposed: {why}")
+        # The "before" mirror is copied HERE, beside the "after" one and before any
+        # child starts, not after the proposed run finishes. The A/B asks whether
+        # the same tree says something different about two vault states, and every
+        # second the two copies are apart is a second some other writer can move a
+        # byte this land is then charged for. #2283 measured the old order on a real
+        # refusal: the proposed run cost 222.4 s, the pre-land mirror was copied
+        # only after it, and the two nodes the refusal named do not read the vault
+        # at all. The cost of building it up front is one `cp -a` that a clean probe
+        # never spends a second run on.
+        base_build = baseline_vault(base_vault, vault, list(paths))
+        report["baseline_vault"] = {"restored": base_build["restored"],
+                                    "removed": base_build["removed"]}
+        report["mirror_gap_s"] = round(time.time() - mirror_copied, 1)
+        if not base_build["ok"]:
+            return done(reason=f"cannot build the pre-land vault: {base_build['reason']}")
         cand = _run_selection(interp, tree, files, proposed_vault, probe_data,
                               mark_expr or mark, run_budget(), workers)
         report["candidate"] = {"ran": cand["ran"], "failed": cand["failed"],
@@ -870,91 +958,162 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
         # file serially and let THAT run be the verdict. Without the same step here
         # a load flaker would fabricate a refusal against a prose land that agrees
         # with the tree, which is the one thing this check must never do.
-        still_failed = list(cand["failed"])
-        if cand["workers"] > 1:
-            retry_files = _failing_files(cand["failed"])
-            max_files = _parallel_retry_max_files()
-            if not retry_files or len(retry_files) > max_files:
-                # Past the gate's ceiling the failure set is a broken tree, not
-                # load — but `gate.py:1852`'s answer to that (re-run the WHOLE suite
-                # serially) is exactly the ~`SERIAL_SELECTION_COST_S` s run this
-                # probe cannot fit, so what it cannot attribute it says it cannot
-                # attribute. Never a refusal, and never a serial whole-selection
-                # re-run that would answer nothing anyway.
-                report["parallel_failures"] = cand["failed"][:50]
-                return done(reason=(
-                    f"the parallel proposed-vault run's {len(cand['failed'])} failing "
-                    f"node(s) name {len(retry_files)} file(s), past the "
-                    f"{max_files}-file ceiling at which a parallel failure is still "
-                    f"re-askable file by file, and the whole {len(files)}-file "
-                    f"selection re-run serially is the "
-                    f"~{SERIAL_SELECTION_COST_S:.0f}s run this {timeout:.0f}s probe "
-                    f"cannot fit — so they are neither this land's nor the tree's"))
+        #
+        # #2283 widens that step to the serial side as well, because one serial draw
+        # is still exactly one observation: every refusal of 2026-10-06 rested on
+        # one draw of one side, against nodes that never read the landed path. Every
+        # failing file is therefore drawn `PROPOSED_DRAWS` times against the
+        # proposed vault and a node must lose EVERY one of those draws to be a
+        # disagreement. The two dismissal lists say which kind of non-disagreement
+        # each node is: `parallel_only_failures` lost no serial draw at all, and
+        # `flake_only_failures` lost some draws and won others — an order dependence
+        # in that test, or the box, and in neither case a prose/code disagreement.
+        retry_files = _failing_files(cand["failed"])
+        max_files = _parallel_retry_max_files()
+        if not retry_files or len(retry_files) > max_files:
+            # Past the gate's ceiling the failure set is a broken tree, not
+            # load — but `gate.py:1852`'s answer to that (re-run the WHOLE suite
+            # serially) is exactly the ~`SERIAL_SELECTION_COST_S` s run this
+            # probe cannot fit, so what it cannot attribute it says it cannot
+            # attribute. Never a refusal, and never a serial whole-selection
+            # re-run that would answer nothing anyway.
+            report["parallel_failures"] = cand["failed"][:50]
+            return done(reason=(
+                f"the parallel proposed-vault run's {len(cand['failed'])} failing "
+                f"node(s) name {len(retry_files)} file(s), past the "
+                f"{max_files}-file ceiling at which a parallel failure is still "
+                f"re-askable file by file, and the whole {len(files)}-file "
+                f"selection re-run serially is the "
+                f"~{SERIAL_SELECTION_COST_S:.0f}s run this {timeout:.0f}s probe "
+                f"cannot fit — so they are neither this land's nor the tree's"))
+        draws: list[dict] = []
+        while len(draws) < PROPOSED_DRAWS:
             if run_budget() < MIN_RUN_SECONDS:
-                return done(reason=(
-                    f"the serial re-ask of the parallel run's "
-                    f"{len(cand['failed'])} failing node(s) could not start inside the "
-                    f"{timeout:.0f}s probe budget ({left():.1f}s left), so they are "
-                    f"neither this land's nor the tree's"))
-            reask = _run_selection(interp, tree, retry_files, proposed_vault,
-                                   probe_data, mark_expr or mark, run_budget(), 1)
-            report["parallel_retry"] = {"ran": reask["ran"], "failed": reask["failed"],
-                                        "note": reask["note"],
-                                        "seconds": reask["seconds"],
-                                        "files": reask["files"],
-                                        "workers": reask["workers"]}
-            if not reask["ran"]:
-                return done(reason=(f"the serial re-ask of the parallel run's failures "
-                                    f"answered nothing, so they cannot be attributed to "
-                                    f"this land: {reask['note']}"))
-            flinched = [n for n in cand["failed"] if n not in set(reask["failed"])]
-            if flinched:
-                # Named on the report the way `gate.py:1861` names them on the rung's
-                # counts, so a flaker is a number in the ledger and not a mystery.
-                report["parallel_only_failures"] = flinched
-            # The captured output follows the run the verdict came from. The
-            # parallel run's tail still names the nodes that were just dismissed
-            # as load, and `refusal_text` prints what `excerpt` holds — so leaving
-            # it would put a flaker's FAILED line into the prose bug report of a
-            # land that agrees with the tree.
-            report["excerpt"] = reask["excerpt"]
-            still_failed = list(reask["failed"])
-            if not still_failed:
-                n = int(cand["ran"])
-                return done(state="checked", refuse=False,
-                            reason=(f"{n} vault-reading node{'s' if n != 1 else ''} "
-                                    f"{'pass' if n != 1 else 'passes'} against the vault "
-                                    f"as proposed, once the "
-                                    f"{len(flinched)} that failed only under parallelism "
-                                    f"were re-asked serially and pass"))
-        failing_files = _failing_files(still_failed)
+                break
+            draws.append(_run_selection(interp, tree, retry_files, proposed_vault,
+                                        probe_data, mark_expr or mark,
+                                        run_budget(), 1))
+            if not draws[-1]["ran"]:
+                # A draw that launched and answered nothing has bought no answer,
+                # and the budget that just failed to buy one will not buy two.
+                break
+        for i, draw in enumerate(draws):
+            report["parallel_retry" if i == 0 else f"parallel_retry_{i + 1}"] = {
+                "ran": draw["ran"], "failed": draw["failed"], "note": draw["note"],
+                "seconds": draw["seconds"], "files": draw["files"],
+                "workers": draw["workers"]}
+        completed = [d for d in draws if d["ran"]]
+        report["proposed_runs"] = len(completed)
+        if not draws:
+            return done(reason=(
+                f"the serial re-ask of the parallel run's "
+                f"{len(cand['failed'])} failing node(s) could not start inside the "
+                f"{timeout:.0f}s probe budget ({left():.1f}s left), so they are "
+                f"neither this land's nor the tree's"))
+        if not completed:
+            return done(reason=(f"the serial re-ask of the parallel run's failures "
+                                f"answered nothing, so they cannot be attributed to "
+                                f"this land: {draws[0]['note']}"))
+        # The captured output follows the run the verdict came from. The
+        # parallel run's tail still names the nodes that were just dismissed
+        # as load, and `refusal_text` prints what `excerpt` holds — so leaving
+        # it would put a flaker's FAILED line into the prose bug report of a
+        # land that agrees with the tree.
+        report["excerpt"] = draws[-1]["excerpt"]
+        if len(completed) < PROPOSED_DRAWS:
+            return done(reason=(f"only {len(completed)} of the {PROPOSED_DRAWS} draws "
+                                f"against the vault as proposed could run inside the "
+                                f"{timeout:.0f}s probe budget ({left():.1f}s left), and "
+                                f"one draw cannot tell a flake from a disagreement, so "
+                                f"the failure could not be attributed to this land"))
+        sets = [set(d["failed"]) for d in completed]
+        seen: list[str] = []
+        for draw in [cand] + completed:
+            for nid in draw["failed"]:
+                if nid not in seen:
+                    seen.append(nid)
+        confirmed = [nid for nid in seen if all(nid in s for s in sets)]
+        dismissed = [nid for nid in seen if nid not in set(confirmed)]
+        flake_only = [nid for nid in dismissed if any(nid in s for s in sets)]
+        parallel_only = [nid for nid in dismissed if nid not in set(flake_only)]
+        if parallel_only:
+            # Named on the report the way `gate.py:1861` names them on the rung's
+            # counts, so a flaker is a number in the ledger and not a mystery.
+            report["parallel_only_failures"] = parallel_only
+        if flake_only:
+            report["flake_only_failures"] = flake_only
+        if not confirmed:
+            n = int(cand["ran"])
+            bits = []
+            if parallel_only:
+                bits.append(f"{len(parallel_only)} failing under parallelism alone")
+            if flake_only:
+                bits.append(f"{len(flake_only)} losing only some of the "
+                            f"{len(completed)} serial draws")
+            return done(state="checked", refuse=False,
+                        reason=(f"{n} vault-reading node{'s' if n != 1 else ''} "
+                                f"{'pass' if n != 1 else 'passes'} against the vault "
+                                f"as proposed, once the {len(dismissed)} that did not "
+                                f"lose every serial draw were dismissed "
+                                f"({', '.join(bits)}): " + ", ".join(dismissed[:5])))
+        failing_files = _failing_files(confirmed)
         if run_budget() < MIN_RUN_SECONDS:
-            # Asking for the pre-land run here would burn a second vault mirror and
-            # then report nothing, which is the state the three #2042 rows are in.
+            # Asking for the pre-land run here would burn a run on a budget that
+            # cannot report, which is the state the three #2042 rows are in.
             # Refusing on a red node alone is the wider rule the module docstring
             # refuses to adopt, so the honest answer is "could not attribute".
             return done(reason=(f"the pre-land run could not start inside the "
                                 f"{timeout:.0f}s probe budget ({left():.1f}s left), so "
-                                f"the {len(still_failed)} failing node(s) are neither "
+                                f"the {len(confirmed)} failing node(s) are neither "
                                 f"this land's nor the tree's"))
-        why = baseline_vault(base_vault, vault, list(paths))
-        report["baseline_vault"] = {"restored": why["restored"],
-                                    "removed": why["removed"]}
-        if not why["ok"]:
-            return done(reason=f"cannot build the pre-land vault: {why['reason']}")
-        base = _run_selection(interp, tree, failing_files, base_vault, probe_data,
-                              mark_expr or mark, run_budget(), 1)
-        report["baseline"] = {"ran": base["ran"], "failed": base["failed"],
-                              "note": base["note"], "seconds": base["seconds"],
-                              "files": base["files"], "workers": base["workers"]}
-        if not base["ran"]:
+        base_draws: list[dict] = []
+        while len(base_draws) < BASELINE_DRAWS:
+            if run_budget() < MIN_RUN_SECONDS:
+                break
+            base_draws.append(_run_selection(interp, tree, failing_files, base_vault,
+                                             probe_data, mark_expr or mark,
+                                             run_budget(), 1))
+            if not base_draws[-1]["ran"]:
+                break
+        for i, draw in enumerate(base_draws):
+            report["baseline" if i == 0 else f"baseline_{i + 1}"] = {
+                "ran": draw["ran"], "failed": draw["failed"], "note": draw["note"],
+                "seconds": draw["seconds"], "files": draw["files"],
+                "workers": draw["workers"]}
+        completed_base = [d for d in base_draws if d["ran"]]
+        report["baseline_runs"] = len(completed_base)
+        if not completed_base:
             return done(reason=(f"the pre-land run answered nothing, so a failure "
-                                f"cannot be attributed to this land: {base['note']}"))
-        new = [n for n in still_failed if n not in set(base["failed"])]
+                                f"cannot be attributed to this land: "
+                                f"{base_draws[-1]['note']}"))
+        if len(completed_base) < BASELINE_DRAWS:
+            return done(reason=(f"only {len(completed_base)} of the {BASELINE_DRAWS} "
+                                f"draws against the pre-land vault could run inside the "
+                                f"{timeout:.0f}s probe budget ({left():.1f}s left), so "
+                                f"the failure could not be attributed to this land"))
+        # A node that fails here too is red with this land's paths put back as well
+        # as with them in place: the tree and the box are saying it either way. The
+        # ids go into `reason` because the ledger row's `reason` is what a reader of
+        # `promotions.jsonl` actually reads, and an unattributable condition that
+        # names no ids is indistinguishable from a probe that judged nothing.
+        base_failed: set[str] = set()
+        for draw in completed_base:
+            base_failed |= set(draw["failed"])
+        new = [n for n in confirmed if n not in base_failed]
         excused = excused_ids(new, report["ack"]["accepted"], tree)
         if excused:
             report["excused"] = excused
             new = [n for n in new if n not in set(excused)]
+        if new:
+            # Which of these nodes the landed paths can actually be said to have
+            # moved: a node whose own test file never mentions a landed path is a
+            # failure this land did not author, and the prose accusation below is
+            # only ever justified for the nodes that do name one. #2283: the four
+            # refusals of 2026-10-06 accused nodes that build their vault out of
+            # `tmp_path` and read no vault path at all.
+            report["landed_paths"] = list(paths)
+            report["nodes_naming_landed_path"] = _nodes_naming_a_landed_path(
+                new, tree, list(paths))
         if not new:
             if excused:
                 return done(state="checked", refuse=False,
@@ -963,8 +1122,14 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
                                     f"{', '.join(report['ack']['accepted'])} — the nodes "
                                     "read that file and their expected figures move with "
                                     "it, and each id is on this row"))
+            # The ids go on the report as their own key rather than tacked onto
+            # `reason`: a red-everywhere condition that names nothing reads the same
+            # as a probe that judged nothing, and the real instance of this branch
+            # (`/tmp` inode pressure, #2283) is only recognisable in the ledger if
+            # the pair that failed on BOTH sides is on the row.
+            report["pre_existing"] = confirmed
             return done(state="checked", refuse=False,
-                        reason=(f"{len(still_failed)} failing node(s) fail against the "
+                        reason=(f"{len(confirmed)} failing node(s) fail against the "
                                 f"pre-land vault too — pre-existing, not this land"))
         if excused:
             return done(state="checked", refuse=True, nodes=new,
@@ -975,11 +1140,19 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
         # The ids belong in `reason` too, not only in `nodes`: the ledger row's `reason`
         # is the field a reader of `promotions.jsonl` actually reads, and a refusal whose
         # prose says only "3 new failure(s)" sends them back to the run log for the thing
-        # the report already knows.
+        # the report already knows. The SECOND half of the sentence is not free: "a code
+        # assertion disagrees with the change being landed" is a claim about the landed
+        # paths, so it is made only when some failing node's own file names one, and the
+        # rest of the time the row says what is true instead — that the disagreement
+        # could not be attributed to this land.
+        if report.get("nodes_naming_landed_path"):
+            claim = "a code assertion disagrees with the change being landed"
+        else:
+            claim = ("and no failing node's own test file names any path this land "
+                     "commits, so the disagreement could not be attributed to it")
         return done(state="checked", refuse=True, nodes=new,
-                    reason=(f"{len(new)} new failure(s) against the proposed vault; a "
-                            "code assertion disagrees with the change being landed: "
-                            + "; ".join(new)))
+                    reason=(f"{len(new)} new failure(s) against the proposed vault; "
+                            + claim + ": " + "; ".join(new)))
     finally:
         if slot is not None:
             slot.release()
@@ -996,14 +1169,37 @@ def refusal_text(report: dict) -> str:
     refusal quotes it rather than paraphrasing a number this module would have to
     re-derive from prose, which is the trap #2036's own triage names for the
     detection side and this is the reporting side of the same rule.
+
+    #2283 is the other half of that rule, about the DIAGNOSIS rather than the count.
+    "The prose states something the code does not do" was appended to every refusal
+    this module ever wrote, including four that named a guardian-alert pair whose
+    whole world is `tmp_path` — prose nobody had changed, accused in the past tense of
+    a disagreement the probe could not have seen. The accusation is now a claim about
+    evidence and is made only for a node whose own test file names a path this land
+    commits (`nodes_naming_landed_path`); where no node does, the text says the
+    unexplained ids and that the disagreement cannot be attributed to the change.
     """
     tree = report.get("tree") or {}
     nodes = report.get("nodes") or []
-    lines = [f"{n}: fails against the vault as proposed and passes against the vault "
-             f"before this land, in the default selection at {tree.get('root', '?')}"
+    paths = report.get("landed_paths") or []
+    draws = int(report.get("proposed_runs") or 0)
+    base_draws = int(report.get("baseline_runs") or 0)
+    lines = [f"{n}: fails against the vault as proposed"
+             f"{f' (every one of {draws} draws)' if draws > 1 else ''} and passes "
+             f"against the vault before this land"
+             f"{f' (every one of {base_draws} draws)' if base_draws > 1 else ''}, in "
+             f"the default selection at {tree.get('root', '?')}"
              f"@{str(tree.get('commit', ''))[:8]}" for n in nodes]
-    lines.append("The prose states something the code does not do. Land the code half "
-                 "first, or state the count the tree actually has.")
+    explained = set(report.get("nodes_naming_landed_path") or [])
+    if explained:
+        lines.append("The prose states something the code does not do. Land the code "
+                     "half first, or state the count the tree actually has.")
+    named = ("; this land commits " + ", ".join(paths)) if paths else ""
+    unexplained = [n for n in nodes if n not in explained]
+    if unexplained:
+        lines.append("No test file for " + ", ".join(unexplained) + " names any path "
+                     f"this land commits{named}, so the disagreement for those nodes "
+                     "could not be attributed to the change being landed.")
     # 600 chars of output, not 1200: `land()` truncates the whole message at 1200,
     # and cutting the excerpt is how a refusal that names no counts gets written.
     excerpt = str(report.get("excerpt") or "").strip()
