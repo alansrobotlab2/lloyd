@@ -1602,9 +1602,12 @@ def test_the_repoint_question_is_recorded_as_ruled_not_as_owed():
     the next round reads a live question and re-opens a settled one. So the span must carry the
     verdict and its substance, and must not pose the question again.
 
-    Scoped to `_rule_prose()` on purpose. The same four words survive once more further down
-    the page, about a different and still unanswered question (whether the upstream report
-    needs a second independent day), and that one stays open-tense.
+    Scoped to `_rule_prose()` because the span it grades is the rule's own prose. It used to
+    add that the same wording survived once more further down the page about a question that
+    was still open there; #2268 rewrote that instance to its ruled answer, and
+    `test_the_third_day_question_is_recorded_as_ruled_not_as_owed` now bans the phrase over
+    the whole file — so the scoping here is about what this node measures, not about a live
+    question living elsewhere.
     """
     r = _rule_prose()
     assert "owed-check's to rule" not in r, \
@@ -2801,6 +2804,256 @@ def test_the_sixth_paragraph_breaks_neither_the_one_mark_nor_the_one_query_rule(
     assert not _CHAT_QUERY.search(p), (
         "the 10-01 paragraph cites a second read-only population query; the paragraph's own "
         "rule is to quote the extract, as (a)'s bullet holds the query")
+    queries = _CHAT_QUERY.findall(reading)
+    assert len(queries) == 1, (
+        f"positive control: the counted reading carries {len(queries)} queries, not one")
+
+
+# ── #2268: the third-day question is recorded as ruled, not as owed-check's ──────────
+#
+# owed-check's run `20261005_214129_owedcheck_4cc3` (stamped 2026-10-06T04:47:43) settled
+# #2248's owed entry 3 — whether a THIRD qualifying day changes the accepted-loss ruling's
+# stance, i.e. whether the upstream report should be filed at all — and ruled that it does
+# NOT: the condition was already met on the second counted day with its consequence
+# published (report owed, unfiled), a third replication of the same shape adds evidence and
+# not stance, and only the report's EVIDENCE SET changes — three extracts. Filing remains
+# Alan's alone, owned by #2250 Half A. That ruling closed with an order: "The §10 sentence
+# publishing this as owed-check's must be rewritten to the ruled answer so no later pass
+# re-litigates it." The round that landed the day (`e5c97549`) added the day, its figures
+# and its derivation nodes, but never the ruling — so the page kept publishing an answered
+# question, in TWO places: §10's 2026-10-01 paragraph and the Review-log bullet for #2248.
+#
+# `test_the_repoint_question_is_recorded_as_ruled_not_as_owed` (#2008) is the precedent, and
+# the reason this is a node rather than a taste: an ownership citation rots the moment its
+# question is answered, and "left open-tense, the next round reads a live question and
+# re-opens a settled one."
+#
+# Nothing below types the count the ruled stance rests on. It comes out of `_qualifying`
+# over EVERY extract in `tests/fixtures`, so the day a fourth qualifying day is committed
+# the evidence set, the ordinal and the ruled wording stop agreeing, and these nodes are
+# what says so.
+
+#: The Review-log bullet that published the third day, and so the bullet whose owed-clause
+#: the ruling ordered rewritten.
+_REVIEW_2026_10_05 = "- 2026-10-05 — **§10 counts 2026-10-01 (#2248).**"
+
+
+_ORDINALS = "zeroth first second third fourth fifth sixth seventh eighth ninth tenth".split()
+
+
+def _ordinal(n: int) -> str:
+    """`third` for a count of three. §10 counts its qualifying days ORDINALLY ('a third
+    counted day', 'the third counted day on which the condition is met') while `_word` gives
+    the cardinal a list length needs, so the derived ordinal is its own rendering — and it is
+    the one that goes stale first when a fourth qualifying day lands."""
+    return _ORDINALS[n] if 0 <= n < len(_ORDINALS) else f"{n}th"
+
+
+def _said_list(items) -> str:
+    """`2026-09-27, 2026-09-29 and 2026-10-01` — the page's own join for an enumerated
+    set, so a derived list renders the way §10 writes one rather than the way a test would."""
+    items = list(items)
+    if len(items) > 1:
+        return ", ".join(items[:-1]) + f" and {items[-1]}"
+    return items[0]
+
+
+def _tracked_extracts() -> list[Path]:
+    """Every counted-day extract in the tree, enumerated by name family rather than by
+    constant, and cross-checked against what git has.
+
+    The pair is the point and not decoration. A counted day enters this family as a FILE —
+    that is how #1921, #2005 and #2248 each arrived — so a node naming its fixtures by
+    constant would go on passing while leaving the newest day out of the very count the
+    ruling says is the only thing that changed. And `tests/fixtures/.gitignore` negates this
+    family on purpose, which means an extract dropped in without `git add` is invisible: the
+    day is counted, the sentence quotes it, and nothing re-derives it once the rotation
+    moves past it.
+    """
+    on_disk = sorted((ROOT / "tests" / "fixtures").glob("vllm_prefix_miss_*.json"))
+    listed = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "tests/fixtures"],
+        capture_output=True, text=True)
+    in_git = {ROOT / line for line in listed.stdout.split()
+              if Path(line).name.startswith("vllm_prefix_miss_")}
+    assert on_disk and set(on_disk) == in_git, (
+        f"the extracts on disk {sorted(p.name for p in on_disk)} are not the ones in git "
+        f"{sorted(p.name for p in in_git)}: the ruled stance names an evidence set, and an "
+        "untracked extract is a counted day that evidence does not outlive")
+    return on_disk
+
+
+def _qualifying_days(gate: float) -> list[str]:
+    """Every counted day the tracked extracts still carry a filing-condition chat miss for.
+
+    One join with the criteria: `_qualifying` is the same walk the (a)/(b)/(c)/(d) marks and
+    both re-open triggers are read from, so the evidence set can no more be re-cut by hand
+    than a criterion's verdict can.
+    """
+    return sorted(
+        raw["window"][0]
+        for raw in (json.loads(p.read_text(encoding="utf-8")) for p in _tracked_extracts())
+        if _qualifying(raw, gate))
+
+
+def _review_bullet_2026_10_05() -> str:
+    """The Review-log bullet for #2248, whole and collapsed, bounded at the next bullet or
+    heading — and at the end of the page, which is where it currently sits.
+
+    One bullet per span, for the reason every predecessor said so: an owed-clause deleted
+    from THIS bullet must not be answerable by the older bullet above it, which carries its
+    own owed list about a different day. The end is searched for rather than assumed because
+    the Review log grows at the bottom, and a fourth counted-day bullet appended below this
+    one would otherwise widen the span silently and let the new entry's prose answer for the
+    old one's.
+    """
+    raw = DOC.read_text(encoding="utf-8")
+    start = raw.index(_REVIEW_2026_10_05)
+    body = start + len(_REVIEW_2026_10_05)
+    nxt = re.search(r"^- |^## ", raw[body:], re.M)
+    end = body + nxt.start() if nxt else len(raw)
+    return " ".join(raw[start:end].split()).replace("**", "")
+
+
+def test_the_third_day_question_is_recorded_as_ruled_not_as_owed():
+    """#2268 clause 1: §10 states the third-day stance as ruled, and no longer hands the
+    question to a party that answered it.
+
+    The ban is over the WHOLE page rather than one span, which is a deliberate difference
+    from #2008's node: that one scoped itself because a second, genuinely open instance
+    lived further down, and this ruling is that the instance down there is not open. So the
+    page-wide ban is the assertion this item exists for, and it is the file's whole copy of
+    `architecture/vllm.md`, not a slice, that has to be clean.
+    """
+    raw = DOC.read_text(encoding="utf-8")
+    assert "owed-check's to decide" not in raw, (
+        "the page still poses the third-day question as owed-check's to decide, which "
+        "owed-check ruled on 2026-10-06 (#2248's owed entry 3) — left open-tense, the next "
+        "round editing this page reads a live question and re-opens a settled one")
+    p = _sixth_bullet()
+    assert "adds evidence, not stance" in p, (
+        "the paragraph does not carry the ruling's substance: a third replication of the "
+        "same shape is evidence, and evidence is not stance")
+    assert re.search(r"owed-check ruled on \d{4}-\d\d-\d\d", p), (
+        "the ruled stance is not named as owed-check's and dated, so a later pass cannot "
+        "tell a ruling from a preference — the page's other closed rulings are dated too")
+    assert "the accepted-loss ruling and its consequence stand as written" in p, (
+        "the paragraph does not say what the third day did NOT change: the ruling and its "
+        "published consequence")
+    assert "the report is owed and it is not filed" in p, (
+        "the ruled consequence has to be the published one — report owed, and unfiled")
+    assert "#2250 Half A" in p, (
+        "filing stays Alan's alone; the paragraph names the item owning the external write "
+        "rather than leaving it to whoever reads this next")
+
+
+def test_the_review_log_bullet_records_the_ruling_instead_of_an_owed_question():
+    """#2268 clause 2: the Review-log bullet for #2248 no longer prints the ruled question
+    as owed, and is read through a span bounded to that one bullet.
+
+    The bullet is where the day was actually published, and until this node no span read it
+    at all — `grep -n 'Review log' tests/test_vllm_doc_claims.py` was empty — so an owed
+    clause could be edited into or out of it with nothing in the suite able to notice. The
+    two span controls are what make reading it a measurement: the start witness says which
+    bullet was opened, and the ban on the older bullet's own heading says the span did not
+    run upward into the 2026-10-01 (#2005) entry, whose owed list is about another day and is
+    not this ruling's to settle.
+    """
+    b = _review_bullet_2026_10_05()
+    assert b.startswith("- 2026-10-05 — §10 counts 2026-10-01 (#2248)."), (
+        f"the span did not open on the #2248 bullet: {b[:80]!r}")
+    assert "§10 counts 2026-09-27 (#2005)" not in b, (
+        "the span ran upward into the previous Review-log bullet, whose owed list is about "
+        "another day and is not this ruling's to settle")
+    assert not re.search(r"owed: whether a third qualifying day", b), (
+        "the bullet still lists the third-day question as owed")
+    assert "(owed-check)" not in b, (
+        "the bullet still routes the question to owed-check, which has ruled it")
+    assert "adds evidence, not stance" in b, "the bullet does not record the ruling's substance"
+    assert "owed-check ruled on 2026-10-06" in b, (
+        "the bullet does not say who ruled and when, so the entry reads as the reviewer's "
+        "own view rather than a settled ruling")
+    assert "the report stays owed and unfiled" in b, (
+        "the bullet must carry the consequence unchanged: owed, and not filed")
+    assert "#2250 Half A" in b, "the bullet keeps the external write owned by #2250"
+
+
+def test_the_ruled_stance_names_the_evidence_set_the_extract_set_derives(cfg):
+    """#2268 clause 3: the day count behind the ruled sentence is derived from every tracked
+    extract through the criteria's own join, never typed.
+
+    Three things make this a check rather than a caption. The extract set is enumerated by
+    name family, so a fourth counted day entering the tree as a file enters the count with
+    nobody editing a node. The wording is COMPOSED from the derived list, so when that list
+    grows the composed phrase (`the four extracts …`, `fourth counted day …`) simply is not
+    the sentence on the page and both asserts below fail — which is the failure this item
+    wants: a ruled stance about three days has to become false the day the third stops being
+    the last. And the control beside the derivation is that not every tracked extract
+    qualifies — 2026-09-23, 09-25 and 09-28 are counted readings carrying no filing-condition
+    chat miss — so `_qualifying` is discriminating rather than returning the whole directory,
+    which is the failure mode a count-on-nothing has.
+    """
+    gate = float(cfg["workers"]["kv_gate"]["max_kv_usage"])
+    days = _qualifying_days(gate)
+    assert days == ["2026-09-27", "2026-09-29", "2026-10-01"], days
+    assert len(days) < len(_tracked_extracts()), (
+        "every tracked extract now qualifies, so the join selected the whole directory and "
+        "the count below is a restatement of `ls`")
+    evidence = f"the {_word(len(days))} extracts {_said_list(days)}"
+    p = _sixth_bullet()
+    assert evidence in p, (
+        f"§10's 2026-10-01 paragraph does not name its evidence set as the derived one "
+        f"({evidence!r}); a count written into prose by hand is a count nobody re-runs, and "
+        "this one is the whole content of what the third day changed")
+    assert f"{_ordinal(len(days))} counted day on which the condition is met" in p, (
+        f"the paragraph's ordinal is not the derived one: {_word(len(days))} counted days "
+        f"qualify, so 'the {_ordinal(len(days))} counted day' has to move with the fixtures "
+        "rather than with somebody's recollection")
+    assert evidence in _review_bullet_2026_10_05(), (
+        f"the Review-log entry names a different evidence set than the derived {evidence!r} "
+        "— two sentences about one ruling may not rest on two different counts")
+
+
+def test_the_reword_keeps_every_graded_span_bounded_and_both_rails_intact(reading):
+    """#2268 clause 4: re-wording §10's tail broke neither the spans that grade it nor the
+    two counts those spans are capped at.
+
+    The anchor check is not decoration: `_SIXTH_HEADING` and `_REPLICATION_HEADING` are the
+    END of two other graded spans, so a re-word that shifted a heading left `_filing_bullet`
+    and `_replication_bullet` reading a wider slice of the page than their nodes assume —
+    #2248's own finding, 'Adding a §10 bullet moves the end-anchor'. The span controls check
+    that bound from both sides instead of trusting the anchors to resolve, and the rail
+    counts are the same positive controls #1921 and #2248 each re-ran in their own node,
+    because this change is the one editing the paragraph they cap.
+    """
+    raw = DOC.read_text(encoding="utf-8")
+    assert _SIXTH_HEADING in raw and _REPLICATION_HEADING in raw, (
+        "a counted-day bullet's heading moved, so the graded span that ENDS on it now "
+        "silently reads further than its node thinks it does")
+    p = _sixth_bullet()
+    assert "The unannotated draft group" not in p, (
+        "the 2026-10-01 span runs past the next bullet, so a phrase demanded of this day "
+        "could be satisfied by prose about the draft group")
+    assert "2026-09-27 count" not in p, (
+        "the 2026-10-01 span starts before its own heading and would let 09-27's four chat "
+        "misses answer for this day's one")
+    assert "2026-10-01 count" not in _replication_bullet(), (
+        "the 2026-09-27 span now runs into the 10-01 paragraph it is supposed to stop at")
+    assert "it is not filed" in p, (
+        "the ruled consequence survives the re-wording — the report is owed and it is NOT "
+        "filed, and those two sentences are what leave §10 free of an issue URL")
+    assert not re.search(r"github\.com/vllm-project/vllm/issues/\d+", _section(10)), (
+        "§10 names an upstream issue; the 'not filed' sentences must go when it does")
+    assert not re.search(r"\((a|b|c|d)\) (passes|fails)", p), (
+        "the re-worded paragraph marks a criterion pass/fail inside the counted reading's "
+        "span, where _verdict allows exactly one such mark")
+    assert not _CHAT_QUERY.search(p), (
+        "the re-worded paragraph cites a second read-only population query; (a)'s bullet "
+        "holds the only one the span may carry")
+    marks = sum(len(re.findall(rf"\({letter}\) (passes|fails)", reading)) for letter in CRITERIA)
+    assert marks == 4, (
+        f"positive control: the counted reading carries {marks} marks, not one per "
+        "criterion, so the ban above was tested against a span that had already drifted")
     queries = _CHAT_QUERY.findall(reading)
     assert len(queries) == 1, (
         f"positive control: the counted reading carries {len(queries)} queries, not one")
