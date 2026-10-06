@@ -587,13 +587,20 @@ need `server.trusted_networks` widened to the LAN subnet, which is a number only
 a person should choose.
 
 The allowlist did not go away either, and the order matters when reading
-`server.py::ApiPeerGate`. The network rule runs first; then, for a peer
-already inside it, Vite's injected `x-client-fingerprint` (the peer cert's
-sha256, with `x-client-cn` its CN) is checked against `clients.json`, re-read per
-request so a revocation takes effect without a restart, and an unknown or revoked
-fingerprint is refused. A fingerprint is not proof of possession — it is
-copyable out of `clients.json` — so it can take access away but cannot buy
-network reach an untrusted peer does not already have. Loopback
+`server.py::ApiPeerGate`. The network rule runs first; then, for a peer already
+inside it, `_cert_fingerprint` reads a raw `x-client-fingerprint` (the peer
+cert's sha256, with `x-client-cn` its CN) and the allowlist runs **only if that
+header arrived** — `fp = _cert_fingerprint(scope)`, then `if fp:` — re-reading
+`clients.json` per request so a revocation takes effect without a restart, and
+refusing an unknown or revoked fingerprint with 403. Nothing supplies that
+header from a browser today: `httpsConfig` requests no client certificate, so
+`clientCertHeaders()` is wired but inert and injects neither header
+([[mission-control]]). The branch is reachable only by a client that writes the
+header itself, and `agent-services/cert/clients.json` is `{}` — every enrolled
+fingerprint went out with the mechanism — so a request that does arrive carrying
+one fails `fp not in allowlist` and is refused. A fingerprint is not proof of
+possession — it is copyable out of `clients.json` — so it can take access away
+but cannot buy network reach an untrusted peer does not already have. Loopback
 (`127.0.0.1`, `::1`) is trusted outright, because same-host callers — the
 LiveKit worker, the autonomy ticker, every worker source, the self-mod promoter
 — POST straight to `:8080` and never cross Vite's TLS layer. The self-mod drain
@@ -601,7 +608,8 @@ keeps its own loopback-only guard on top of all this
 (`app/routers/automod.py::_is_loopback`), so arming the drain from a browser tab
 stays impossible even from the tailnet.
 `tests/test_api_client_gating.py` is the differential that pins every sentence
-above.
+above, and the paragraph's "nothing sends that header today" half is pinned by
+`tests/test_stale_mtls_comment_claims.py`.
 
 LiveKit advertises the Tailscale address when Tailscale is up and falls back
 to the default route. That resolution happens at boot and is never hardcoded:

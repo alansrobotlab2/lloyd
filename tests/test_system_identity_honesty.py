@@ -8,14 +8,15 @@ Two false claims lived here.
 the caller's own `x-client-fingerprint` header was byte-identical to a value it
 had attested itself. Nothing on this box attests anything any more: no server
 requests a client certificate since `5e1351f3` (2026-06-14 — iOS Chrome cannot
-present a keychain identity), which `web/vite.config.ts:46-51` still records by
-carrying `key`/`cert` only, with no `requestCert` and no `ca`. The absence is
+present a keychain identity), which the `httpsConfig` block in
+`web/vite.config.ts` still records by carrying `key`/`cert` only, with no
+`requestCert` and no `ca`. The absence is
 pinned below against a positive control, because a grep that finds nothing is
-worth nothing until something proves it can find something:
-`grep -rn --include=*.py --include=*.ts --include=*.tsx --exclude-dir=.venvs
---exclude-dir=node_modules --exclude-dir=llama.cpp --exclude-dir=qmd
---exclude-dir=.git requestCert ~/lloyd` → 0 hits, and
-`git grep -n "https: httpsConfig" -- web/vite.config.ts` → `:161`.
+worth nothing until something proves it can find something: `git grep -n
+requestCert -- web/vite.config.ts` lands only inside the `clientCertHeaders`
+docstring that records the absence — the config object itself never carries that
+key — and `git grep -n "https: httpsConfig" -- web/vite.config.ts` resolves the
+symbol to the `server:` block that consumes it.
 So `scope["client_cert"]` is never populated, `server._cert_fingerprint` is the
 only identity writer (`server.py:359-369`), and the name it stores is
 `allowlist[fp]` (`server.py:344`) — a lookup of a header value in a file, not
@@ -278,7 +279,9 @@ async def test_a_forged_client_cn_header_buys_no_identity_and_no_verification(
     """The header the item's body named is not an identity source at all: the
     backend has never read `x-client-cn` (`git grep -n "x-client-cn" -- '*.py'`
     → 0 code hits, `git log -S'x-client-cn' -- server.py` → 0 commits; the only
-    writer is the Vite proxy at `web/vite.config.ts:68`). So a caller that forges
+    writer is the still-wired `clientCertHeaders()` plugin in
+    `web/vite.config.ts`, which sets no header for browser traffic today).
+    So a caller that forges
     it gets a null name — it cannot even become unverified identity, let alone
     verified. Kept as a node because the shape is the one worth pinning: no
     header on this route can produce `verified: true`."""

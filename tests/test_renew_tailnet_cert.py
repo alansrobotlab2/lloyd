@@ -1,7 +1,8 @@
 """#1727 — scripts/renew-tailnet-cert.sh, the owner of the tailnet TLS leaf.
 
 The MC frontend's Vite server picks `agent-services/cert/goliath.taile37041.ts.net.crt`
-by `fs.existsSync`, not by validity (web/vite.config.ts:19), so when that 90-day
+by `fs.existsSync` (the `haveTs` selection in `web/vite.config.ts`), not by
+validity, so when that 90-day
 Let's Encrypt leaf expires it keeps serving the dead one — the valid `lloyd.crt`
 fallback is never reached — and every tailnet client fails TLS. Nothing renewed
 it: 5 user timers and none of them a cert one, no crontab, no supervisor program.

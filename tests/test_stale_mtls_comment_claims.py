@@ -27,6 +27,24 @@ because the true history must stay readable in them: `infrastructure.md`,
 forbidden there is the claim shape — an exemption for loopback, or an origin that
 still has to present a certificate — not the word.
 
+The corpus widened a third time (#2208), in two directions at once. Every
+doc under `architecture/` is now banned from the *claim* that Vite still puts
+the certificate headers on a request — the phrases `still injects` and
+`verified TLS peer`, one hit each repo-wide, both inside one 2026-09-20 Review
+entry of `mission-control.md`, describing a plugin that has been unable to see
+a peer certificate since `5e1351f3` took `ca` and `requestCert` out of
+`httpsConfig`. The ban is on that pair, never on the word mTLS, for the reason
+in the paragraph above: the drop history in these same docs must stay
+findable. And `tests/*.py` is banned from citing `web/vite.config.ts` by line
+range, which is the same rot one file over — four files had pointed at ranges
+that had already slid off what they named while the sentence behind each one
+stayed true: three of them at `5f4d378e`, and a fourth that arrived afterwards
+(`tests/test_system_identity_honesty.py`, `506e250a`, ~2.5 hours after the
+triage sha the other three were measured at), which is the first thing this ban
+caught when it ran against a tree newer than the one it was drafted on. That is
+the proof the pattern is not a museum piece: the range rots faster than a human
+re-reads the prose, and the guard is what notices.
+
 These tests pin the corrected wording and then forbid the stale shape, and the
 corpus is asserted tracked and non-empty before anything is searched, with a
 repo-wide positive control beside it, so a 0-hit result can only mean the
@@ -421,3 +439,359 @@ def test_authority_loopback_bullet_states_the_peer_address_rule():
     assert "loopback" in bullet, "the bullet must cover the loopback case"
     assert "server.trusted_networks" in bullet, (
         "the bullet must name the config key that widens the trusted set")
+
+
+# ── #2208: the cert headers still described as being injected ─────────────────── #
+
+MISSION_CONTROL = "architecture/mission-control.md"
+INFRASTRUCTURE = "architecture/infrastructure.md"
+
+#: The two halves of the false claim, each banned on its own. At `5f4d378e`
+#: `git grep -n "still injects"` and `git grep -n "verified TLS peer"` returned
+#: exactly one line each, both inside the same 2026-09-20 Review entry of
+#: `mission-control.md`, and both describing a plugin that has been unable to
+#: see a peer certificate since `5e1351f3` took `ca` and `requestCert` out of
+#: `httpsConfig`. The ban is the phrase pair, never the word mTLS: `infrastructure.md`
+#: and this file's own docstring both insist the drop history stays readable.
+STALE_INJECTION_PHRASES = (
+    re.compile(r"still\s+injects", re.IGNORECASE),
+    re.compile(r"verified\s+TLS\s+peer", re.IGNORECASE),
+)
+
+#: The entry as it shipped, wrapped exactly as the doc wraps it, so the ban is
+#: proven to fire on the wording that is on the tree and not on a paraphrase of
+#: it. `git grep -n "still injects"` at `5f4d378e` is this sentence.
+STALE_INJECTION_SAMPLE = (
+    "`clientCertHeaders()` still injects\n"
+    "  `x-client-cn`/`x-client-fingerprint` from the verified TLS peer and still\n"
+    "  proxies `/api` with `xfwd: true` (`web/vite.config.ts`)"
+)
+
+#: And a sample of the wording that went in instead — condensed from the two
+#: corrected paragraphs, not quoted from either (the sections themselves are
+#: pinned by name below). It exists so the ban is shown to reject the claim and
+#: not the subject: same plugin, same two headers, same inertness, and neither
+#: banned phrase.
+INERT_WORDING_SAMPLE = (
+    "`clientCertHeaders()` is still wired, and it is inert: `httpsConfig` carries no\n"
+    "  `requestCert`, so it never sees a peer certificate and injects no header —\n"
+    "  neither `x-client-cn` nor `x-client-fingerprint`."
+)
+
+#: `mTLS was dropped on 2026-06-14` in `mission-control.md`, `mTLS itself was
+#: dropped on 2026-06-14` in `infrastructure.md`. One fact, both spellings, and
+#: both have to survive any rewording of the sections that hold them.
+DROP_HISTORY = re.compile(
+    r"mTLS(?:\s+\w+){0,2}\s+was\s+dropped\s+on\s+2026-06-14", re.IGNORECASE)
+
+VITE_CONFIG = "web/vite.config.ts"
+
+#: A `web/vite.config.ts:<digits>` citation — the same rot `LINE_CITATION`
+#: exists for, one file over. All three on the tree sat in docstrings whose
+#: *substance* was correct, which is exactly why the range and not the claim is
+#: what a guard has to catch.
+VITE_LINE_CITATION = re.compile(r"vite\.config\.ts\s*:\s*\d", re.IGNORECASE)
+#: The same pattern in POSIX ERE, for the `git grep` that proves the corpus was
+#: actually searched. Kept as a literal beside the python one so the two cannot
+#: drift apart unnoticed: `test_the_vite_line_citation_pattern_fires_on_the_wording_that_shipped`
+#: cross-checks them on real files.
+VITE_LINE_CITATION_ERE = r"vite\.config\.ts[[:space:]]*:[[:space:]]*[0-9]"
+
+TEST_DESKTOP_FRAME = "tests/test_desktop_frame_mirror.py"
+TEST_API_GATE = "tests/test_api_client_gating.py"
+TEST_RENEW_CERT = "tests/test_renew_tailnet_cert.py"
+
+#: The three citations verbatim as they shipped at `5f4d378e`, kept because the
+#: ban below has to be proven to fire on real wording and not on a paraphrase.
+#: Each one described something still standing — `httpsConfig`, the `xfwd: true`
+#: inside `server.proxy`'s `/api` entry, the `haveTs`/`haveServer` cert
+#: selection — with a range that had already slid off it. That is why the
+#: replacement in each docstring names the symbol and adds no new number: where
+#: those sit today is one `grep -n` away and moves with any unrelated edit.
+VITE_CITATION_SAMPLES = (
+    "2026-06-14 (``web/vite.config.ts:38-49``), so a tab's request carries no",
+    "(`web/vite.config.ts:139-147`), so it hands the backend a loopback socket",
+    "by `fs.existsSync`, not by validity (web/vite.config.ts:19), so when that",
+)
+
+#: Stored frontmatter that a parser test reads as INPUT. It cites three
+#: `vite.config.ts` ranges, and rewriting it would change a fixture rather than
+#: correct a claim — which is why the citation ban below is depth-bounded.
+FRONTMATTER_FIXTURE = "tests/fixtures/frontmatter_locked_items/575-frontmatter.txt"
+
+
+def _architecture_docs() -> set[str]:
+    """Every tracked top-level `architecture/*.md`.
+
+    Depth-bounded so a nested or archived doc cannot join or leave the corpus
+    unnoticed, and asserted to contain the two docs this item corrected — a
+    corpus that came up empty would otherwise turn every absence below green.
+    """
+    out = subprocess.run(
+        ["git", "-C", str(REPO), "ls-files", "architecture"],
+        capture_output=True, text=True,
+    )
+    assert out.returncode == 0, f"`git ls-files architecture` failed: {out.stderr.strip()}"
+    docs = {ln.strip() for ln in out.stdout.splitlines()
+            if ln.strip().endswith(".md")
+            and ln.strip().startswith("architecture/")
+            and "/" not in ln.strip()[len("architecture/"):]}
+    assert len(docs) >= 20, f"only {len(docs)} architecture docs tracked — the corpus moved"
+    for named in (MISSION_CONTROL, INFRASTRUCTURE):
+        assert named in docs, f"{named} is not in the corpus — it moved or was renamed"
+    return docs
+
+
+def _tests_py_corpus() -> set[str]:
+    """Every tracked `tests/*.py`, one directory deep.
+
+    The depth is the whole scope of the citation ban: `tests/fixtures/**` is
+    parser input, not prose, and the locked #575 frontmatter in it keeps its own
+    stale ranges on purpose. The fixture is asserted tracked *and* excluded, so
+    the exclusion is visibly doing work rather than riding on a missing file.
+    """
+    out = subprocess.run(
+        ["git", "-C", str(REPO), "ls-files", "tests"],
+        capture_output=True, text=True,
+    )
+    assert out.returncode == 0, f"`git ls-files tests` failed: {out.stderr.strip()}"
+    paths = {ln.strip() for ln in out.stdout.splitlines() if ln.strip()}
+    corpus = {p for p in paths
+              if p.startswith("tests/") and "/" not in p[len("tests/"):]
+              and p.endswith(".py")}
+    assert len(corpus) > 100, f"only {len(corpus)} files under tests/*.py — the corpus moved"
+    for named in (TEST_DESKTOP_FRAME, TEST_API_GATE, TEST_RENEW_CERT):
+        assert named in corpus, f"{named} is not in the corpus — it moved or was renamed"
+    assert FRONTMATTER_FIXTURE in paths, f"{FRONTMATTER_FIXTURE} is gone: the exclusion below is vacuous"
+    assert FRONTMATTER_FIXTURE not in corpus, "the corpus reached into tests/fixtures/**"
+    return corpus
+
+
+def _top_level_tests(rel_path: str) -> bool:
+    """The same depth rule `_tests_py_corpus` applies, for a `git grep` hit."""
+    return (rel_path.startswith("tests/")
+            and "/" not in rel_path[len("tests/"):]
+            and rel_path.endswith(".py"))
+
+
+def test_the_cert_injection_ban_fires_on_the_wording_that_shipped():
+    """Negative control for the #2208 pair: both phrases must match the shipped
+    Review entry verbatim, and neither may match the wording that replaced it.
+    Without the second half this is a ban that could only ever have been
+    satisfied by deleting the subject rather than the claim."""
+    assert len(STALE_INJECTION_PHRASES) == 2, "the ban is this pair; do not pad it"
+    for rx in STALE_INJECTION_PHRASES:
+        assert rx.search(STALE_INJECTION_SAMPLE), (
+            f"{rx.pattern!r} went vacuous on the shipped entry — the absence below "
+            "would be a silent pattern, not a corrected doc")
+    for rx in STALE_INJECTION_PHRASES:
+        hit = rx.search(INERT_WORDING_SAMPLE)
+        assert not hit, (
+            f"{rx.pattern!r} rejects the corrected wording too ({hit.group(0)!r}) — "
+            "the ban is on the claim, not on talking about the plugin")
+
+
+def test_no_architecture_doc_claims_vite_still_injects_the_cert_headers():
+    """#2208 clause 2, and the acceptance check written down: no doc under
+    `architecture/` may assert that Vite still puts `x-client-cn` or
+    `x-client-fingerprint` on a request from the verified TLS peer. It cannot:
+    `httpsConfig` requests no client certificate, so `clientCertHeaders()` has no
+    peer certificate to read — the only `requestCert` in `web/vite.config.ts` is
+    inside the comment that records its absence, and the block itself is pinned
+    that way by `test_mission_control_states_the_cert_plugin_is_wired_but_inert`
+    — and a doc that says otherwise sends a reader to enforce an allowlist
+    nothing populates.
+
+    The positive control is the half that makes a 0-hit meaningful: the mechanism
+    name must STILL resolve under `architecture/`, and in the two docs that carry
+    the drop history. A sweep that 'fixed' those into silence would leave every
+    phrase ban green and the docs unable to say when the mechanism died.
+    """
+    docs = _architecture_docs()
+    assert docs >= {MISSION_CONTROL, INFRASTRUCTURE}, f"the corpus drifted: {sorted(docs)[:3]}"
+    for rel_path in sorted(docs):
+        text = _tracked_text(rel_path)
+        for rx in STALE_INJECTION_PHRASES:
+            hit = rx.search(text)
+            assert not hit, (
+                f"{rel_path} still says the cert headers are injected from a verified "
+                f"peer: {hit.group(0)!r} — the plugin is wired but inert; say that")
+
+    listing = subprocess.run(
+        ["git", "-C", str(REPO), "grep", "-i", "-l", "mtls", "--", "architecture/"],
+        capture_output=True, text=True,
+    )
+    assert listing.returncode == 0, (
+        "`git grep -i -l mtls -- architecture/` is empty, so the phrase bans above "
+        f"could not be shown to live: {listing.stderr.strip()}")
+    hits = {ln.strip() for ln in listing.stdout.splitlines() if ln.strip()}
+    assert hits <= docs, f"the search reached outside the corpus: {sorted(hits - docs)}"
+    assert {MISSION_CONTROL, INFRASTRUCTURE} <= hits, (
+        f"the docs that record the drop are not among the mTLS hits: {sorted(hits)} — "
+        "a 0-hit corpus is an unread corpus, not a corrected one")
+
+
+def test_mission_control_states_the_cert_plugin_is_wired_but_inert():
+    """#2208 clause 1: the section a reader goes to for "how does a browser
+    reach the backend" has to say what the certificate machinery does today —
+    wired into `plugins`, inert, because `httpsConfig` never asks for a client
+    certificate — rather than leaving the reader to assume the headers arrive.
+    It also has to keep the true half of the sentence the drift sat inside: Vite
+    does still proxy `/api` with `xfwd: true`.
+
+    The causal half of that sentence is checked against the file it describes,
+    not just against the prose: the `httpsConfig` block must still ask for no
+    client certificate while `clientCertHeaders()` stays in `plugins`. That is
+    what makes "wired but inert" a fact a reader can re-derive rather than a
+    claim about a config nobody opens — and if mTLS is ever re-armed, this node
+    fails beside the doc it pins, which is the only honest way for the sentence
+    and the mechanism to move together."""
+    section = " ".join(_section(_tracked_text(MISSION_CONTROL),
+                               "## Remote access").split()).lower()
+    assert "clientcertheaders()" in section, (
+        "the section must name the plugin that would inject the headers")
+    assert "still wired" in section, (
+        "the section must say the plugin is wired up, so the reason it does nothing "
+        "has to be stated rather than assumed")
+    assert "httpsconfig" in section and "requestcert" in section, (
+        "the section must name the mechanism of the inertness: httpsConfig requests "
+        "no client certificate")
+    assert "never asks a connecting browser for a client certificate" in section, (
+        "the section must state what the missing requestCert means for a browser")
+    assert "injects no header" in section, "the section must say nothing is injected"
+    assert "neither" in section and "x-client-cn" in section \
+        and "x-client-fingerprint" in section, (
+        "the section must name both headers and say browser traffic sets neither")
+    assert "xfwd: true" in section, (
+        "the true half of the sentence the drift sat inside must survive the fix")
+
+    vite = _tracked_text(VITE_CONFIG)
+    https_start = vite.index("const httpsConfig")
+    https_block = vite[https_start:vite.index("/**", https_start)]
+    assert "requestCert" not in https_block, (
+        "`httpsConfig` now requests a client certificate, so the sentence this node "
+        "pins is stale in the other direction — the doc and this guard both need "
+        "the new truth, together")
+    assert not re.search(r"\bca\s*:", https_block), (
+        "`httpsConfig` now names a `ca`, the other half of what makes the plugin "
+        "inert — and the thing `5e1351f3` removed")
+    wiring = [ln for ln in vite.splitlines()
+              if "clientCertHeaders()" in ln and "plugins:" in ln]
+    assert wiring, (
+        "the plugin is no longer wired into a `plugins:` array, so 'still wired' is "
+        "false; the section says the plugin is present and does nothing, and both "
+        "halves have to stay true for that to mean anything")
+
+
+def test_infrastructure_states_the_allowlist_check_is_header_conditional():
+    """#2208 clause 3: `infrastructure.md` owns the shape of
+    `server.py::ApiPeerGate`, so it has to say the allowlist runs only when the
+    header arrives, that nothing on this box sends one today, and that
+    `clients.json` is `{}` — which makes the branch unreachable from a browser
+    and fatal to the one request that does carry the header. The section's
+    conclusion is the part that must NOT move: a fingerprint can take access
+    away and cannot buy network reach."""
+    section = " ".join(_section(_tracked_text(INFRASTRUCTURE),
+                               "## Remote access").split()).lower()
+    assert "_cert_fingerprint" in section, "the section must name the reader of the header"
+    assert "only if that header arrived" in section, (
+        "the section must say the allowlist is header-conditional")
+    assert "wired but inert" in section and "injects neither" in section, (
+        "the section must say why no browser supplies the header today")
+    assert "clients.json` is `{}`" in section, (
+        "the section must state the allowlist is empty, which is what refuses a carrier")
+    assert "fp not in allowlist" in section and "403" in section, (
+        "the section must say a request carrying the header is refused, and how")
+    assert "cannot buy network reach" in section, (
+        "the section's security conclusion is what the fix has to leave standing")
+    assert "xfwd" in section, "the rewrite must not lose the live proxy mechanism"
+
+
+def test_the_drop_history_and_the_1759_doc_corpus_survive_the_rewording():
+    """#2208 clause 4: the drift gets fixed by correcting a claim, not by
+    deleting the record that the mechanism ever existed. Both corrected docs keep
+    their drop sentence — in each doc's own existing spelling — and the two docs
+    #1759 set as its own corpus are still the ones that doc pair, still stating
+    the peer-address rule and still the only place the trusted-network default is
+    copied."""
+    for rel_path in (MISSION_CONTROL, INFRASTRUCTURE):
+        flat = " ".join(_tracked_text(rel_path).split())
+        assert DROP_HISTORY.search(flat), (
+            f"{rel_path} no longer states that client-certificate auth was dropped on "
+            "2026-06-14 — rewording the claim is not licence to remove the history")
+
+    assert ARCH_DOCS == (BROWSER_PANEL, AUTHORITY), (
+        "#1759's corpus changed: this item was told to leave it alone")
+    for rel_path in ARCH_DOCS:
+        text = _tracked_text(rel_path).lower()
+        assert "apipeergate" in text and "_is_trusted_peer" in text, (
+            f"{rel_path} no longer names the live control — #1759's sentences moved")
+        assert "peer address" in text, f"{rel_path} no longer states the peer-address rule"
+    assert CIDR.search(_tracked_text(AUTHORITY)), (
+        f"{AUTHORITY} lost the trusted-network default it owns")
+
+
+def test_the_vite_line_citation_pattern_fires_on_the_wording_that_shipped():
+    """#2208 clause 5's control: the pattern matches all three shipped citations
+    verbatim, the ERE used for the corpus search matches real files on this tree,
+    and the two spellings agree on every file the search finds. The proof-of-life
+    carrier is `tests/fixtures/**` — deliberately outside the ban — whose stale
+    ranges stay exactly as they are because that file is a parser's input."""
+    assert len(VITE_CITATION_SAMPLES) == 3, "the fixtures are the three shipped citations"
+    for sample in VITE_CITATION_SAMPLES:
+        assert VITE_LINE_CITATION.search(sample), f"pattern went vacuous on: {sample!r}"
+
+    listing = subprocess.run(
+        ["git", "-C", str(REPO), "grep", "-l", "-E", VITE_LINE_CITATION_ERE],
+        capture_output=True, text=True,
+    )
+    assert listing.returncode == 0, (
+        "the ERE matches nothing anywhere in the repo, so the corpus search below "
+        f"is unfalsifiable: {listing.stderr.strip()}")
+    carriers = {ln.strip() for ln in listing.stdout.splitlines() if ln.strip()}
+    assert FRONTMATTER_FIXTURE in carriers, (
+        f"{FRONTMATTER_FIXTURE} no longer trips the ERE — either the fixture changed "
+        "(it is parser input) or the pattern no longer matches what it is meant to")
+    assert carriers - {f"tests/{Path(__file__).name}"}, (
+        "the only carrier of the pattern is this guard's own fixtures")
+    for rel_path in sorted(carriers):
+        assert VITE_LINE_CITATION.search(_tracked_text(rel_path)), (
+            f"the ERE found a citation in {rel_path} that the python pattern misses")
+
+
+def test_no_test_cites_the_vite_config_with_a_line_range():
+    """#2208 clause 5, the ban: no `tests/*.py` may point at `web/vite.config.ts`
+    by line number. Four did, between them carrying five citations:
+    `test_desktop_frame_mirror.py`, `test_api_client_gating.py` and
+    `test_renew_tailnet_cert.py` (the three `VITE_CITATION_SAMPLES` below cite
+    at `5f4d378e`), and `test_system_identity_honesty.py`, which landed later at
+    `506e250a` carrying two — a module docstring's `46-51` and a node docstring's
+    `:68`. Every one of them named something real, which is the point: the claim survived and
+    the number did not, so the reader is sent to the wrong lines by prose that
+    reads as the most careful kind. Cite `httpsConfig`, `server.proxy`'s
+    `xfwd: true`, or the `fs.existsSync` cert selection by what they are.
+
+    Depth-bounded to `tests/*.py` on purpose: `tests/fixtures/**` holds a stored
+    item's frontmatter whose citations are test input, and `tests/` is the corpus
+    this item's acceptance named. This guard's own file is the one excluded
+    carrier, because a ban has to carry the wording it bans.
+    """
+    corpus = _tests_py_corpus()
+    here = f"tests/{Path(__file__).name}"
+    assert here in corpus, "this guard is not in its own corpus — the corpus moved"
+
+    listing = subprocess.run(
+        ["git", "-C", str(REPO), "grep", "-l", "-E", VITE_LINE_CITATION_ERE,
+         "--", ":(glob)tests/*.py"],
+        capture_output=True, text=True,
+    )
+    assert listing.returncode in (0, 1), (
+        f"`git grep` over tests/*.py failed: {listing.stderr.strip()}")
+    hits = {ln.strip() for ln in listing.stdout.splitlines() if ln.strip()}
+    hits = {h for h in hits if _top_level_tests(h)}
+    assert hits <= {here}, (
+        f"tests cite web/vite.config.ts by line range: {sorted(hits - {here})} — "
+        "name `httpsConfig`, `server.proxy` or the `fs.existsSync` cert selection")
+    for rel_path in sorted(hits):
+        assert VITE_LINE_CITATION.search(_tracked_text(rel_path)), (
+            f"the ERE found a citation in {rel_path} the python pattern misses")

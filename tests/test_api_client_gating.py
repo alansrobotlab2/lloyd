@@ -637,7 +637,7 @@ class TestProducerComposesWithTheGate:
     """The peer the gate decides on is the peer uvicorn computed.
 
     Vite's `/api` proxy runs with `xfwd: true`
-    (`web/vite.config.ts:139-147`), so it hands the backend a loopback socket
+    (`server.proxy` in `web/vite.config.ts`), so it hands the backend a loopback socket
     plus `X-Forwarded-For: <browser address>`; uvicorn honours that because
     loopback is in `forwarded_allow_ips`, and scans the list right-to-left for
     the first address it does not trust (`proxy_headers.py:131-146`,

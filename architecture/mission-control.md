@@ -433,6 +433,19 @@ and falling back to the private `lloyd.crt` signed by the CA that
 `scripts/gen-cert.sh` makes once; `scripts/mint-client-cert.sh <device>`
 enrolls a device into `clients.json`.
 
+**That certificate machinery is still wired, and it is inert.** Vite's
+`plugins` still carry `clientCertHeaders()`, but `httpsConfig` holds `key` and
+`cert` alone — no `requestCert`, no `ca` — so the TLS server never asks a
+connecting browser for a client certificate, the plugin's own
+`if (cert && cert.subject)` guard cannot pass, and browser traffic sets neither
+`x-client-cn` nor `x-client-fingerprint`: it injects no header. Enrolling a
+device therefore changes a file no browser request can populate, and the only
+way a fingerprint still reaches the backend is a client that writes the header
+itself, which `ApiPeerGate` then tests against `clients.json` — empty today,
+`{}` — and refuses with 403. What Vite *does* still do to every proxied request
+is `xfwd: true`; that is the half of the old claim that stayed true. See
+[[infrastructure]] for the exact shape of the check.
+
 **mTLS was dropped on 2026-06-14** because iOS Chrome and the other
 third-party iOS browsers cannot present keychain identities for mutual TLS —
 only Safari can — so Vite no longer requests a client cert and any browser on
@@ -469,9 +482,15 @@ it is accepted. See [[infrastructure]].
 
 - 2026-09-20 — **current for Remote access.** #683 closed the fail-open that
   section described, so its prose is rewritten rather than annotated. What was
-  re-read rather than inherited: `clientCertHeaders()` still injects
-  `x-client-cn`/`x-client-fingerprint` from the verified TLS peer and still
-  proxies `/api` with `xfwd: true` (`web/vite.config.ts`); uvicorn 0.44.0
+  re-read rather than inherited: the `/api` proxy runs with `xfwd: true` and
+  `clientCertHeaders()` is still in `plugins` (`web/vite.config.ts`) — but the
+  claim this entry posted beside them, that the plugin read
+  `x-client-cn`/`x-client-fingerprint` off the peer's TLS certificate and set
+  them on every request, was false the day it was written: `5e1351f3`
+  (2026-06-15) had already taken `ca` and `requestCert` out of `httpsConfig`, so
+  it never receives a peer certificate and sets neither header. #2208 corrected
+  this entry and the section above it; `tests/test_stale_mtls_comment_claims.py`
+  now bans the claim shape outright. uvicorn 0.44.0
   defaults `proxy_headers=True` and `forwarded_allow_ips="127.0.0.1"`, which is
   the mechanism by which the rewrite reaches `request.client`; the drain's
   loopback-only guard is `app/routers/automod.py::_is_loopback`, asserted

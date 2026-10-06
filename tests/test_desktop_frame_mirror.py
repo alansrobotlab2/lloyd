@@ -472,7 +472,8 @@ def test_the_desktop_docs_state_the_peer_boundary_ruling_out_a_device_gate():
 
     The declined sentence rested on a premise that no longer holds, measured
     rather than remembered: the Vite dev server dropped mutual TLS on
-    2026-06-14 (``web/vite.config.ts:38-49``), so a tab's request carries no
+    2026-06-14 (the ``mTLS dropped 2026-06-14`` comment over ``httpsConfig`` in
+    ``web/vite.config.ts``), so a tab's request carries no
     client certificate and the still-wired ``clientCertHeaders()`` there
     injects no ``x-client-fingerprint``; ``agent-services/cert/clients.json``
     is ``{}`` at 3 bytes; and ``ApiPeerGate`` decides on the peer address,
