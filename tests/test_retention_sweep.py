@@ -1726,6 +1726,43 @@ def test_the_bare_invocation_deletes_the_pair_it_resolves(tmp_path):
     assert "0 deleted" in _groundskeeper_line(again.stdout)
 
 
+def _skill_table_rows(text: str) -> dict[str, str]:
+    """The skill's store table as {first cell: the whole row}, header row dropped.
+
+    Keyed by the first cell because that is the cell an operator reads to learn WHICH
+    file a row bounds; the rest of the row is the policy, and the shipped node quotes it
+    field by field. A row whose first cell begins with `store` is the header and names no
+    store, so it is not counted.
+    """
+    return {ln.split("|")[1].strip(): ln
+            for ln in text.splitlines()
+            if ln.startswith("| ") and ln.count("|") >= 3
+            and not ln.split("|")[1].strip().lower().startswith("store")}
+
+
+def _assert_table_rows_match_report(rows: dict[str, str], report: list[str],
+                                    where: str) -> None:
+    """Raise `AssertionError` unless the table carries exactly one row per printed line.
+
+    One comparison, and it is the whole coverage claim: a line the sweep prints with no
+    row is a bound the operator's procedure never mentions, and a row with no line is a
+    bound nothing makes. Both directions are the same event with its sign flipped, so one
+    count check catches them — which is why this is a function the shipped node CALLS
+    rather than an `assert` inside it: a planted table can only prove the guard that the
+    green node actually runs, and #1835's drift survived precisely because the guard that
+    existed was counting a different thing than the node that disagreed with it.
+
+    `where` names the file or fixture in the message, and the message carries the printed
+    labels beside the row keys, because the failing case is a person reading a diff and
+    asking which store lost its row.
+    """
+    if len(rows) != len(report):
+        raise AssertionError(
+            f"{where}: the skill lists {len(rows)} stores against {len(report)} report "
+            f"lines ({[_store_label(line) for line in report]}) — table rows: "
+            f"{sorted(rows)}")
+
+
 def test_the_skill_says_fourteen_stores_and_its_table_has_a_row_per_report_line(
         rs, _store_report):
     """Clause 4: `skills/retention-sweep/SKILL.md` says fourteen, and its table's rows
@@ -1750,16 +1787,11 @@ def test_the_skill_says_fourteen_stores_and_its_table_has_a_row_per_report_line(
     text = skill.read_text(encoding="utf-8")
     flat = " ".join(text.split())
 
-    rows = {ln.split("|")[1].strip(): ln
-            for ln in text.splitlines()
-            if ln.startswith("| ") and ln.count("|") >= 3
-            and not ln.split("|")[1].strip().lower().startswith("store")}
+    rows = _skill_table_rows(text)
 
     report = _store_report
     assert len(report) == 14, f"the sweep prints {len(report)} store lines: {report}"
-    assert len(rows) == len(report), (
-        f"the skill lists {len(rows)} stores against {len(report)} report lines: "
-        f"{sorted(rows)}")
+    _assert_table_rows_match_report(rows, report, "skills/retention-sweep/SKILL.md")
     assert "fourteen unbounded-growth stores" in text, (
         "the skill's description states a store count other than fourteen")
     assert "fourteen in all" in text, "the skill's body states a store count other than fourteen"
@@ -1826,6 +1858,80 @@ def test_the_skill_says_fourteen_stores_and_its_table_has_a_row_per_report_line(
         "the skill never says what a non-production run prints in place of the two rows")
     assert "eleven store lines plus one refusal line" in flat, (
         "the skill does not say that a refusal run reports eleven stores by design")
+
+
+#: A row shaped exactly like the table's own, naming a path the sweep does not print a
+#: line for. The first cell has to be a path because that is the cell the guard keys on,
+#: and the rest of the row is the shape an operator would read as a promise.
+_PHANTOM_ROW = ("| `~/lloyd-data/_pipeline/not-a-store.jsonl` | delete rows >30d old, "
+                "planted by a test |")
+
+
+def test_the_table_guard_refuses_a_row_short_and_a_row_long(rs, _store_report):
+    """#2225 clause 5: the row-per-line comparison can actually fire, both ways.
+
+    The shipped table agrees with the report today, and an agreement proves nothing by
+    itself: the drift #1835 recorded ran nine commits green because the guard in place
+    counted the report through a suffix selector that could not see the two store lines
+    #1644 had just added, so it reconciled two prose surfaces against a report of its own
+    making. Hence two rules about how this node is written. It plants the disagreement in
+    the REAL text and runs it through `_assert_table_rows_match_report`, the guard the
+    green node calls — a planted table proves nothing about a node that never ran the same
+    comparison. And its expected counts come from the same `_store_report` fixture as the
+    green node's, so the two cannot disagree about how many lines there are.
+
+    Two mutations, each the way a real edit gets it wrong, and both cut out of or spliced
+    into the shipped bytes so the expected counts are `len(report) ± 1` and never a
+    hand-copied fourteen:
+
+    (a) store fourteen's row deleted — the code landed the store and the operator's table
+        never heard, which is exactly what a `mixed` item's two halves drift into;
+    (b) a phantom row added — the table promises a bound no line reports, the direction a
+        deleted store leaves behind.
+
+    The unedited text is the control, so a guard that raised on everything would be
+    caught here and not on the green node's next pass.
+    """
+    skill = rs.vault_root() / "skills" / "retention-sweep" / "SKILL.md"
+    if not skill.is_file():
+        pytest.skip(f"the vault skill is not reachable from here: {skill}")
+    text = skill.read_text(encoding="utf-8")
+    # Read off the fixture, never written here. This node's whole claim is that a table
+    # one row off from the printed lines is refused, and a fixture holding its own
+    # hand-copied count goes stale in exactly the direction it exists to catch — which is
+    # how #1835's twelve-line drift reached the fixture of the guard above it. The literal
+    # fourteen belongs to the shipped node alone, and is clause 5's to hold.
+    report = _store_report
+
+    _assert_table_rows_match_report(_skill_table_rows(text), report,
+                                    "control: the shipped skill table")
+
+    prov_row = next(ln for ln in text.splitlines()
+                    if ln.startswith("| ") and "provenance.jsonl" in ln.split("|")[1])
+    dropped = "\n".join(ln for ln in text.splitlines() if ln != prov_row)
+    assert len(_skill_table_rows(dropped)) == len(report) - 1, (
+        "deleting the row did not shorten the table — the fixture proved nothing")
+    with pytest.raises(AssertionError,
+                       match=rf"lists {len(report) - 1} stores against {len(report)}"
+                             rf" report lines") as short:
+        _assert_table_rows_match_report(_skill_table_rows(dropped), report,
+                                        "fixture: store fourteen's row deleted")
+    # The message names the store that lost its row, not merely the two counts: with
+    # fourteen lines and thirteen rows the counts cannot say WHICH store drifted, and the
+    # reader has to be able to answer that from the failure alone.
+    assert "provenance journal" in str(short.value), (
+        f"the refusal does not name the printed line left without a row: {short.value}")
+
+    added = text.replace(prov_row, prov_row + "\n" + _PHANTOM_ROW, 1)
+    assert len(_skill_table_rows(added)) == len(report) + 1, (
+        "the phantom row did not reach the table — the fixture proved nothing")
+    with pytest.raises(AssertionError,
+                       match=rf"lists {len(report) + 1} stores against {len(report)}"
+                             rf" report lines") as long:
+        _assert_table_rows_match_report(_skill_table_rows(added), report,
+                                        "fixture: a phantom row added")
+    assert "not-a-store.jsonl" in str(long.value), (
+        f"the refusal does not name the row with no line behind it: {long.value}")
 
 
 # ---------------------------------------------------------------------------
