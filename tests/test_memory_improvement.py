@@ -1800,6 +1800,213 @@ def test_the_witness_names_every_shared_token_not_the_alphabetically_first():
                              entity="Claude Code") == "metadata.pinned"
 
 
+# ── #2310: a shared token proves aboutness, not opposition ───────────────────
+#
+# #2078 requires a non-lexical pair-level basis — one identifier-shaped token
+# BOTH facts name — before an equal-confidence pair may be expired as
+# `superseded`, and #2199 removed the token that is the entity's own name. Those
+# bars were cleared in order by the pair below and the action was still wrong:
+# `_pipeline/improvement/20261006-210031-dryrun.json` (entity `Claude Code`, 2
+# actions planned, 0 taken) planned to expire `upda-019` as superseded by
+# `upda-024`, on the basis that both rows name `metadata.pinned`. They do, and
+# both rows say the same thing about it — `metadata.pinned is true` /
+# `metadata.pinned re-read as true` — so the pair is one claim measured twice,
+# and the only thing the age basis under it was worth was the plan's own clock.
+#
+# The guard therefore reads the VALUE each text asserts beside the token. What it
+# may not do is invent a disagreement: a value has to be asserted on both sides
+# and be the same literal word, so the pair is withheld only on the narrowest
+# evidence the two sentences offer.
+
+#: `upda-019`, verbatim from `_pipeline/vault-derived/facts/Claude Code/Claude
+#: Code-update.md`, with `upda-024` below it. The pair's own gap is 1.006 days
+#: (written 2026-10-01T09:55:57Z and 2026-10-02T10:05:24Z), both rows at
+#: `confidence: 0.9`, which is what puts them on the equal-confidence age branch
+#: where `MIN_CONFIDENCE_GAP` never applies and #2078's bar is the whole gate.
+#: The `false` that fired `opposing_terms:true/false` sits in
+#: `ms-python.python (pinned false)` — a control clause three clauses away from
+#: this row's own `metadata.pinned is true`, and the reason the value has to be
+#: read from the token rather than from the sentence.
+_LIVE_PIN_OLDER = """\
+The VS Code gallery sweep DOES skip anthropic.claude-code because metadata.pinned \
+is true: sweeps at 2026-09-30T14:10:14Z and 2026-10-01T02:10:15Z named it outdated \
+with 2.1.285 18h43m and 30h43m old (past the 12h auto-update delay) and installed \
+nothing, while ms-python.python (pinned false) beside it installed 1.2s after the \
+09-29 stamp; being named in the sweep line proves the gallery had a newer build. \
+This refutes the 2026-09-30 pass's "timing, not the pin" verdict, which compared a \
+local PDT stamp to a UTC publication time."""
+
+_LIVE_PIN_NEWER = """\
+The VS Code claude-code extension's unattended sweep kept skipping the pinned \
+record through 2026-10-01, measured on one clock: metadata.pinned re-read as true \
+with the record byte-stable at 2.1.284 / installedTimestamp \
+2026-09-29T02:41:13.450Z, and two sweeps named it as outdated without installing \
+- 2026-10-01 07:10:15 PDT = 14:10:15Z, when 2.1.286 was 19 h old, and 2026-10-01 \
+19:10:16 PDT = 2026-10-02T02:10:16Z, when 2.1.287 was only 8 h 10 m old and so \
+inside the 12 h non-trusted-publisher delay, which means the second sweep \
+discriminates on 2.1.286 (31 h old) and not on 2.1.287. Being named in the sweep \
+line is gallery-side evidence. Ceiling per #1814: this supports only "the \
+unattended sweep skips it", never "the channel is held". extensions.json mtime was \
+still 2026-09-29 19:10:17 local after five installing-zero sweeps."""
+
+
+def test_a_token_value_is_read_forward_from_the_token_that_carries_it():
+    """The mechanism unit: which word belongs to which token.
+
+    Forward-only and first-wins, because the live loser's `false` belongs to
+    `ms-python.python` and not to `metadata.pinned`. Both live rows come back
+    `{'true'}`, which is the whole basis for withholding them; a token named
+    without a value comes back empty, which is #2078's answer and not an
+    agreement; and a row asserting two values of one token can never equal the
+    other side, so a text that hedges is never called a re-measurement."""
+    from agent_mcp.fact_improvement import _asserted_predicate_values, _compare_predicates
+
+    assert _asserted_predicate_values(_LIVE_PIN_OLDER, "metadata.pinned") == {"true"}
+    assert _asserted_predicate_values(_LIVE_PIN_NEWER, "metadata.pinned") == {"true"}
+    # The control clause is not the token's value, even though it is in the text.
+    assert _asserted_predicate_values(
+        "ms-python.python is false while metadata.pinned is true", "metadata.pinned"
+    ) == {"true"}
+    # Named but not valued: no evidence either way, so the pair stays admitted.
+    assert _asserted_predicate_values("metadata.pinned decides which build runs",
+                                      "metadata.pinned") == set()
+    assert _compare_predicates("metadata.pinned decides it",
+                               "metadata.pinned is true",
+                               entity="Claude Code").witness == "metadata.pinned"
+    # Two values in one text → both, and a hedge is never an agreement.
+    assert _asserted_predicate_values(
+        "metadata.pinned is true now; metadata.pinned was false on 09-29",
+        "metadata.pinned") == {"true", "false"}
+    assert _compare_predicates(_LIVE_PIN_OLDER, _LIVE_PIN_NEWER,
+                               entity="Claude Code").witness is None
+
+
+def test_the_live_pinned_pair_agrees_so_nothing_is_planned(world):
+    """Clause 1: the two live `Claude Code` rows plan nothing and are reported.
+
+    1 day apart at equal confidence, exactly as the record has them, so the pair
+    still reaches the age branch the way it reached the nightly. It stays a
+    contradiction — the detector's screen found something, and that finding is
+    what is worth reporting — but the expiry is withheld, and nothing is written.
+    """
+    facts_root, st, _ = world
+    _write_facts(facts_root, "Claude Code", "update", [
+        {"fact": _LIVE_PIN_OLDER, "created_at": _days_ago(1), "confidence": 0.9},
+        {"fact": _LIVE_PIN_NEWER, "created_at": _days_ago(0), "confidence": 0.9},
+    ])
+    _reindex(st, facts_root)
+    plan = fi.plan_entity("Claude Code")
+    assert plan["contradictions"] == 1, plan
+    assert plan["actions"] == [], plan
+    assert len(plan["keyword_only_flags"]) == 1, plan
+    assert _active(st, "Claude Code") == 2, "a withheld pair was written anyway"
+
+
+def test_the_write_seam_refuses_the_live_pinned_pair(world):
+    """Clause 2: the writer refuses what the planner now declines.
+
+    The action is assembled by hand carrying the two live texts, so this is the
+    seam on its own grounds and not a plan that agrees with it: a record written
+    by an older revision, or applied from one, must not mark either row."""
+    facts_root, st, _ = world
+    _write_facts(facts_root, "Claude Code", "update", [
+        {"fact": _LIVE_PIN_OLDER, "created_at": _days_ago(1), "confidence": 0.9},
+        {"fact": _LIVE_PIN_NEWER, "created_at": _days_ago(0), "confidence": 0.9},
+    ])
+    _reindex(st, facts_root)
+    hand_built = {
+        "entity": "Claude Code", "category": "update", "kind": "superseded",
+        "loser_fact": _LIVE_PIN_OLDER, "loser_id": "upda-019",
+        "loser_confidence": 0.9, "winner_confidence": 0.9,
+        "winner_fact": _LIVE_PIN_NEWER, "winner_id": "upda-024",
+        "loser_source_file": "Claude Code/Claude Code-update.md",
+        "winner_source_file": "Claude Code/Claude Code-update.md",
+        "reason": "opposing_terms:true/false; written 1.0 days later; both facts "
+                  "name `metadata.pinned`, so the later write is about that predicate",
+    }
+    result = fi.apply_action(hand_built, _days_ago(0))
+    assert result["expired_count"] == 0, result
+    assert result["skipped"], result
+    assert "keyword opposition" in result["skipped"], result
+    assert "`metadata.pinned`" in result["skipped"], result
+    assert _active(st, "Claude Code") == 2, "the write seam expired an agreeing pair"
+
+
+def test_opposite_values_of_the_same_token_still_plan_one_action(world):
+    """Clause 3: only the VALUE differs from clause 1's pair, so the verdict flips.
+
+    Same entity, same token, same gap, same confidence. `metadata.pinned as
+    false` against `metadata.pinned as true` is the correction the guard exists
+    to take, and it must still be taken: this is the pair the value comparison
+    could most easily have destroyed. `test_a_genuine_predicate_admits_the_pair_
+    at_both_seams` (`auto_update.gate` disabled→enabled) and
+    `test_a_later_fact_naming_the_same_predicate_still_supersedes`
+    (`responsiveDenoising` false→true) are the same clause on the two fixtures
+    #2078 shipped with."""
+    facts_root, st, _ = world
+    _write_facts(facts_root, "Claude Code", "update", [
+        {"fact": "claude.code reads metadata.pinned as false in extensions.json.",
+         "created_at": _days_ago(1), "confidence": 0.9},
+        {"fact": "claude.code reads metadata.pinned as true in extensions.json.",
+         "created_at": _days_ago(0), "confidence": 0.9},
+    ])
+    _reindex(st, facts_root)
+    plan = fi.plan_entity("Claude Code")
+    assert plan["keyword_only_flags"] == [], plan
+    assert len(plan["actions"]) == 1, plan
+    action = plan["actions"][0]
+    assert action["kind"] == "superseded", action
+    assert "metadata.pinned" in action["reason"], action
+    assert action["loser_fact"].endswith("as false in extensions.json."), action
+    result = fi.apply_action(action, _days_ago(0))
+    assert result["expired_count"] == 1, result
+    assert _active(st, "Claude Code") == 1, "an opposing-value supersession did not apply"
+
+
+def test_a_pair_withheld_on_agreement_says_what_it_withheld_on(world):
+    """Clause 4: the flag's `basis` names the token and the one value.
+
+    The shipped sentence — that neither fact names an identifier-shaped token the
+    other also names — is FALSE of this pair, which names `metadata.pinned` in
+    both rows and was paired by the detector because of it. A record that
+    publishes the wrong reason for its own refusal cannot be reviewed against the
+    facts beside it, so the agreement case gets its own sentence and the old one
+    stays for the pairs it is true of."""
+    facts_root, st, _ = world
+    _write_facts(facts_root, "Claude Code", "update", [
+        {"fact": _LIVE_PIN_OLDER, "created_at": _days_ago(1), "confidence": 0.9},
+        {"fact": _LIVE_PIN_NEWER, "created_at": _days_ago(0), "confidence": 0.9},
+    ])
+    _reindex(st, facts_root)
+    flag = fi.plan_entity("Claude Code")["keyword_only_flags"][0]
+    assert flag["entity"] == "Claude Code", flag
+    assert flag["trigger"] == "opposing_terms:true/false", flag
+    assert flag["older_fact"] == _LIVE_PIN_OLDER, flag
+    assert flag["newer_fact"] == _LIVE_PIN_NEWER, flag
+    assert "`metadata.pinned` (true)" in flag["basis"], flag
+    assert "assert the same value of it" in flag["basis"], flag
+    assert "neither fact names" not in flag["basis"], flag
+
+
+def test_a_pair_sharing_no_token_keeps_the_no_shared_token_basis(world):
+    """Clause 4's other half: the original wording is not deleted, it is scoped.
+
+    The live TTS pair names no identifier-shaped token at all, and its basis must
+    read exactly the sentence #2078 shipped — otherwise this change would have
+    traded one false claim for another, and the #2078 fixtures that quote the
+    wording verbatim would have moved."""
+    facts_root, st, _ = world
+    _write_facts(facts_root, "TTS", "event", [
+        {"fact": _LIVE_TTS_OLDER, "created_at": _days_ago(3.4), "confidence": 0.95},
+        {"fact": _LIVE_TTS_NEWER, "created_at": _days_ago(0), "confidence": 0.95},
+    ])
+    _reindex(st, facts_root)
+    flag = fi.plan_entity("TTS")["keyword_only_flags"][0]
+    assert flag["basis"] == (
+        "opposing_terms keyword plus created_at order only; neither fact names an "
+        "identifier-shaped predicate token the other also names"), flag
+
+
 def test_planning_and_the_write_seam_refuse_the_entity_name_pair_alike(world):
     """Clause 4: one pair, one verdict, at both seams.
 

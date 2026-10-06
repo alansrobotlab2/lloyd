@@ -53,7 +53,16 @@ detector's pairing:
                 (#2199): a fragment cut out of a longer identifier names nothing,
                 and a token that is the entity's own name — or a prefix of it, or
                 of a known alias for it — is what every pair in that entity's
-                file shares anyway. The `reason` then names EVERY token that
+                file shares anyway.
+                *And the two texts have to value the shared token DIFFERENTLY*
+                (#2310): co-naming `metadata.pinned` says the rows are ABOUT one
+                field, not that they DISAGREE about it, and the pair this cost
+                reads `metadata.pinned is true` against `metadata.pinned re-read
+                as true` — one claim measured twice, 1 day apart, planned for
+                expiry on 2026-10-06. A token both facts assert the SAME boolean
+                value of is dropped from the basis, and the flag then names that
+                token and its value instead of claiming the pair shares no token.
+                The `reason` then names EVERY token that
                 survives, not the alphabetically-first one.
   same day, same confidence → no basis. Reported, never acted on.
 
@@ -84,6 +93,7 @@ import re
 import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
+from typing import NamedTuple
 
 from app import paths as _paths
 from app.gitinfo import head_commit as _head_commit
@@ -212,6 +222,33 @@ _PREDICATE_TOKEN_RE = re.compile(
 #: Shortest token counted. Below this a `.` or `/` in a sentence is more likely
 #: punctuation than part of a name.
 _MIN_PREDICATE_TOKEN_LEN = 4
+# ── What a shared token's VALUE does to the basis (#2310) ───────────────────
+#
+# Co-naming a token says two facts are ABOUT one name; it does not say they
+# DISAGREE, and #2078's bar asked only the first question. The live pair that
+# this gap planned to expire reads `metadata.pinned is true` on one side and
+# `metadata.pinned re-read as true` on the other: one claim, measured twice,
+# admitted because both sentences contain the string `metadata.pinned`. So the
+# token has to carry what each text PREDICATES of it before it can authorise an
+# expiry. These two constants say where a value may be found and which words
+# count as one.
+#
+# The vocabulary is the boolean half of `facts._OPPOSING_PAIRS` and nothing
+# more, deliberately: those are the words the detector's own screen already
+# reads as opposition, so a pair withheld here is a pair whose named predicate
+# the screen and the token read the same way, and no new claim about English is
+# being invented down here. A value outside the vocabulary (`gate = 30`,
+# `mode fast`) reads as "no value asserted", which is #2078's answer — the pair
+# stays admitted. The asymmetry is on purpose: this guard only ever withholds on
+# the narrowest evidence there is, the same literal word on both sides.
+#
+# The window is what keeps a found value ATTACHED to the token it follows. The
+# pair that motivated this all had its `false` three clauses after its own
+# token, inside `ms-python.python (pinned false)` — another subject's control
+# clause, which is exactly the token-with-the-wrong-argument case #2078's
+# docstring said the basis had to rule out.
+_PREDICATE_VALUE_RE = re.compile(r"\b(true|false|enabled|disabled)\b", re.I)
+_PREDICATE_VALUE_WINDOW = 60
 # The two fields that name WHERE a row came from, checked for agreement across a
 # pair (#1941). Both are per-record fields on the fact markdown itself, read
 # through the same YAML parse that produced the rows the plan loop is holding —
@@ -1167,6 +1204,113 @@ def _names_the_entity(token: str, forms: set[str]) -> bool:
     return bool(form) and any(form == f or f.startswith(form) for f in forms)
 
 
+def _asserted_predicate_values(text: str, token: str) -> set[str]:
+    """The value words this text asserts beside `token`, one per occurrence.
+
+    Forward-only from each occurrence, and the FIRST value word in that window
+    is the one attributed to the token. Forward because a flag value follows its
+    name in every witness in this file (`<token> is true`, `<token> re-read as
+    true`, `<token> is disabled`), and first-wins because the next value word
+    along the sentence can belong to a different subject: the live loser's
+    `false` sits in `ms-python.python (pinned false)`, three clauses after its
+    own `metadata.pinned is true`, and a backward or last-wins read would have
+    paired those two subjects.
+
+    An occurrence with no value word in its window contributes nothing, so a
+    token that is NAMED but not VALUED (`metadata.pinned says …`, a bare
+    citation of the field) yields the empty set — which the caller reads as "no
+    value asserted" and treats as no evidence either way, exactly the #2078
+    state. Two occurrences asserting two different values yield both, and a
+    multi-valued side can never equal the other side, so a text that hedges
+    toward disagreement is never called an agreement.
+    """
+    src = text or ""
+    if not token:
+        return set()
+    rx = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])", re.I)
+    out: set[str] = set()
+    for m in rx.finditer(src):
+        found = _PREDICATE_VALUE_RE.search(src, m.end(), m.end() + _PREDICATE_VALUE_WINDOW)
+        if found:
+            out.add(found.group(1).lower())
+    return out
+
+
+class _PredicateBasis(NamedTuple):
+    """What a pair's shared tokens amount to (#2310).
+
+    `witness` is #2078's basis string: the co-named tokens still standing as a
+    basis, or None. `agreement` is what this function withheld, as
+    `(token, value)` pairs in the sorted order the witness would have used.
+    The two are independent, not complements: a pair can share one flag whose
+    values differ and another whose values match, and then it is admitted on the
+    first while the second is named in `agreement` anyway, because the reviewer
+    reading the record is entitled to know which of the co-named tokens the
+    guard looked at and what it found.
+    """
+    witness: str | None
+    agreement: tuple[tuple[str, str], ...] = ()
+
+
+def _compare_predicates(t1: str, t2: str, entity: str | None = None,
+                        aliases: Iterable[str] = ()) -> _PredicateBasis:
+    """The pair's shared tokens, split into basis and agreement.
+
+    Three exclusions decide what a co-named token is worth, and the third is the
+    one #2310 adds. #2078 asked whether the two texts name ONE identifier-shaped
+    thing, which is a property of the pair and not of either side's wording — the
+    live false witness contains its own "flipped … from false to true" and would
+    have authorised its own expiry under a one-sided test. #2199 removed the
+    token that is the pair's own SUBJECT (`_names_the_entity`), since an
+    entity-scoped scan co-naming the entity proves nothing. Neither of those
+    asks what the two texts say ABOUT the token, so a pair that re-measures one
+    claim cleared both: the two `Claude Code` rows below agree that
+    `metadata.pinned` is true, differ by one day, and were planned for expiry.
+
+    So a token whose asserted value is identical on both sides is dropped from
+    the basis and reported in `agreement`. It is not evidence of opposition:
+    `pinned is true` and `pinned re-read as true` are one claim written twice,
+    and the age basis under them is the pair's clock, not a correction. The
+    value has to be asserted on BOTH sides to count as agreement — one side
+    naming the field without a value leaves the pair admitted on the token,
+    because "the older row said nothing checkable" is not a reason to expire it
+    either, and the guard's cost when it is unsure is a reported flag, while the
+    cost when it is wrong in the other direction is a deleted fact.
+    """
+    shared = _predicate_tokens(t1) & _predicate_tokens(t2)
+    forms = _entity_name_forms(entity, aliases)
+    shared = {t for t in shared if not _names_the_entity(t, forms)}
+    admitted: set[str] = set()
+    agreed: list[tuple[str, str]] = []
+    for token in sorted(shared):
+        v1 = _asserted_predicate_values(t1, token)
+        v2 = _asserted_predicate_values(t2, token)
+        if v1 and v2 and v1 == v2:
+            agreed.append((token, ", ".join(sorted(v1))))
+        else:
+            admitted.add(token)
+    return _PredicateBasis(", ".join(sorted(admitted)) if admitted else None,
+                           tuple(agreed))
+
+
+def _agreement_phrase(agreement: tuple[tuple[str, str], ...]) -> str:
+    """Why a co-named pair was withheld, naming the token and the one value.
+
+    The sentence this replaces — "neither fact names an identifier-shaped
+    predicate token the other also names" — is FALSE for a pair withheld on
+    agreement, and it was the only `basis` a flag could carry. A record that
+    publishes the wrong reason for its own refusal cannot be reviewed against
+    the pair: the reader checks the texts, finds `metadata.pinned` in both, and
+    has to conclude the tool is lying about its own guard. So the withheld case
+    says what was withheld on, and the old sentence stays for the pairs it is
+    actually true of (#2310 clause 4).
+    """
+    quoted = ", ".join(f"`{token}` ({value})" for token, value in agreement)
+    pronoun = "it" if len(agreement) == 1 else "them"
+    return (f"both facts name {quoted} and assert the same value of {pronoun}, "
+            f"so the co-naming is one claim measured twice, not a correction")
+
+
 def _shared_predicate_reason(shared: str) -> str:
     """The witness half of an admitted action's `reason`, plural-safe.
 
@@ -1205,6 +1349,13 @@ def _shared_predicate(t1: str, t2: str, entity: str | None = None,
     silencing it: a genuine predicate both facts name about that same entity
     still stands, and is reported beside whatever else they share.
 
+    A THIRD exclusion now applies (#2310), and it is about the token's VALUE
+    rather than its name: a token both texts name AND both texts value
+    identically is a re-measurement, not a contradiction, and does not count. See
+    `_compare_predicates`, which is where all three exclusions live; this is the
+    thin read of its result, kept as the module's basis question because the
+    planner, the flag counter and the write seam all ask exactly that one.
+
     ALL surviving tokens are named, sorted and comma-joined. `sorted(shared)[0]`
     reported `anthropic.claude` for a pair that also shared the real field
     `metadata.pinned`, so the witness a reviewer reads in `reason` was always the
@@ -1212,10 +1363,7 @@ def _shared_predicate(t1: str, t2: str, entity: str | None = None,
     as "name one thing that admitted it", and the alphabet chose it. With exactly
     one token the returned string is that token, unchanged.
     """
-    shared = _predicate_tokens(t1) & _predicate_tokens(t2)
-    forms = _entity_name_forms(entity, aliases)
-    shared = {t for t in shared if not _names_the_entity(t, forms)}
-    return ", ".join(sorted(shared)) if shared else None
+    return _compare_predicates(t1, t2, entity, aliases).witness
 
 
 def _keyword_only_age_flags(entity: str, pairs: list[dict]) -> list[dict]:
@@ -1225,11 +1373,13 @@ def _keyword_only_age_flags(entity: str, pairs: list[dict]) -> list[dict]:
     the two rows carry equal confidence (so the confidence branch, with its own
     floor and vetoes, was never the question), `_loser_by_age` finds an age
     basis (so this is a pair that WAS about to be expired), and
-    `_shared_predicate` finds nothing naming both facts (so the age basis had
-    nothing under it but the trigger string). A pair with no age basis is not
-    flagged: nothing was ever going to happen to it, and calling it a withheld
-    expiry would report a veto that was never exercised — the #1348 lesson about
-    a zero that reads as a clean night.
+    `_compare_predicates` finds nothing left standing as a basis (so the age
+    basis had nothing under it but the trigger string). That third condition has
+    two shapes now, and the flag's `basis` says which: no token named by both
+    facts at all, or only tokens both facts VALUE the same way (#2310). A pair
+    with no age basis is not flagged: nothing was ever going to happen to it, and
+    calling it a withheld expiry would report a veto that was never exercised —
+    the #1348 lesson about a zero that reads as a clean night.
 
     Computed over every actable pair, not over the action loop, so the figure
     does not depend on `max_actions`: an entity whose first five pairs filled
@@ -1251,10 +1401,18 @@ def _keyword_only_age_flags(entity: str, pairs: list[dict]) -> list[dict]:
         # `entity` so a token that is the subject itself cannot count as the
         # predicate (#2199). Same argument, same entity, as the planning site
         # below — the two must decline the SAME pairs or the flag list reports a
-        # withheld expiry that the planner was about to take.
-        if _shared_predicate(str(loser.get("fact") or ""),
-                             str(winner.get("fact") or ""), entity):
+        # withheld expiry that the planner was about to take. `_compare_predicates`
+        # rather than `_shared_predicate` because the refusal needs a REASON, not
+        # just a verdict: a pair declined because both sides assert the same value
+        # of one token is a different fact about the corpus from a pair that shares
+        # no token at all, and both used to print the same sentence (#2310).
+        basis = _compare_predicates(str(loser.get("fact") or ""),
+                                    str(winner.get("fact") or ""), entity)
+        if basis.witness:
             continue
+        withheld = ("neither fact names an identifier-shaped predicate token the "
+                    "other also names" if not basis.agreement
+                    else _agreement_phrase(basis.agreement))
         flags.append({
             "entity": entity,
             "trigger": str(item.get("reason") or "").strip(),
@@ -1262,9 +1420,10 @@ def _keyword_only_age_flags(entity: str, pairs: list[dict]) -> list[dict]:
             "older_created_at": loser.get("created_at"),
             "newer_fact": winner.get("fact", ""),
             "newer_created_at": winner.get("created_at"),
-            "basis": ("opposing_terms keyword plus created_at order only; neither "
-                      "fact names an identifier-shaped predicate token the other "
-                      "also names"),
+            # Byte-identical to the shipped sentence for a pair that shares no
+            # token; names the token and the shared value for a pair declined on
+            # agreement (#2310 clause 4).
+            "basis": f"opposing_terms keyword plus created_at order only; {withheld}",
         })
     return flags
 
@@ -1739,11 +1898,15 @@ def apply_action(action: dict, now_iso: str) -> dict:
     # planner asked (#2199). Without it the two could disagree on one pair: the
     # plan declines a supersession whose only co-naming is the entity's own name
     # or an alias for it, and a record carrying that same pair would be written
-    # here on the strength of the token the plan had just excluded.
-    if not is_confidence and not _shared_predicate(
-            str(action.get("loser_fact") or ""),
-            str(action.get("winner_fact") or ""),
-            str(action.get("entity") or "") or None):
+    # here on the strength of the token the plan had just excluded. The question
+    # is now `_compare_predicates`, the planner's own function including its
+    # same-value exclusion (#2310), so the seam cannot write a pair the plan
+    # would not have planned — whichever of the two refusals it is.
+    basis = _compare_predicates(
+        str(action.get("loser_fact") or ""),
+        str(action.get("winner_fact") or ""),
+        str(action.get("entity") or "") or None) if not is_confidence else None
+    if basis is not None and basis.witness is None:
         # #2078 at the write seam, not only the plan seam. `plan_entity` cannot
         # produce such an action any more, so this refuses the shapes that reach
         # a writer without one: a record written by an older revision and
@@ -1752,10 +1915,14 @@ def apply_action(action: dict, now_iso: str) -> dict:
         # FACT TEXTS the action itself carries rather than re-planning, so it
         # asks the same question the planner asked and cannot be talked out of it
         # by the plan that brought the action here. Fails closed on a missing
-        # `winner_fact`: no second text, no co-naming, no write.
+        # `winner_fact`: no second text, no co-naming, no write — and that
+        # sentence, not the agreement one, because with no second text nothing was
+        # ever compared.
         return {"expired_count": 0,
                 "skipped": ("supersession basis is keyword opposition plus write "
-                            "order only — no predicate token named by both facts"),
+                            "order only — "
+                            + (f"{_agreement_phrase(basis.agreement)}" if basis.agreement
+                               else "no predicate token named by both facts")),
                 "field": field, "traces_written": 0, "traces": [], "untraceable": 0}
     aim = _aim_substring(action["entity"], action)
     if aim is None:
