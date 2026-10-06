@@ -1414,12 +1414,26 @@ automod:
     # re-gate. `first` (the code default) blocks on attempt 1 only; `always`
     # blocks every attempt. Both stay for `review_tools redecide --seams-policy`.
     seams_block: never
-    # `shadow` (#2017, 2026-10-01): the #1903 second reader runs on every
-    # askable block and its vote rides on the review row, while the rung
-    # still refuses and the attempt is still spent. Read the overturn rate
-    # off >= 30 rows with `review_confirm_mode == "shadow"`, then decide
-    # `on` or `off`. An absent or unrecognised value is `off`.
-    confirm: shadow
+    # `off` (#2305, 2026-10-06): the #1903 second reader is not asked on a
+    # block. #2017 armed this key at `shadow` to measure it, the measurement is
+    # over, and the owed-check ruling (2026-10-06) is to stay off — not this
+    # round's choice. Over 307 shadow rows, 2026-10-01T17:04Z→2026-10-06T18:44Z,
+    # the reader overturned 23 of 73 askable blocks (31.5 %), upheld 50, and
+    # `not_asked 234` blocks were never offered a reader. Its 10,570 s across
+    # those 5.06 days is ~0.5 reader-h/day. #2017's ruling adds a rework proxy
+    # (`git diff --shortstat` from the blocked head to the next graded head): 0
+    # of 16 overturns had a zero-rework next attempt, median 144.5 lines
+    # changed, upheld control 168 — an overturned block was not a cheaper next
+    # round. Why `on` is not taken: the second reader grades the same weights as
+    # the first pass, so a 31.5 % overturn rate is indistinguishable from noise,
+    # and 21 of the 23 overturn reasons retire a vault-witness / committed-bytes
+    # obligation no code diff in that round can produce, where the remedy is a
+    # clause amendment rather than a release. Re-arming `on` needs a structurally
+    # different second reader; #2017 settled djev cannot be one (it truncates at
+    # 1200 chars and cannot express per-entry retire/keep). The `shadow` arm and
+    # its ledger fields ship unchanged. An absent or unrecognised value is
+    # `off`.
+    confirm: off
   landing:
     # How long the backend may stay busy with NOTHING of the pool's in flight
     # (a chat turn, a leaked counter) before a landing gives up. While a

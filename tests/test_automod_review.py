@@ -3376,6 +3376,74 @@ def test_shadow_is_its_own_confirm_state_and_nothing_else_resolves_to_it(monkeyp
     assert RV.confirm_policy() == RV.CONFIRM_OFF
 
 
+def _shipped_confirm_line_and_block() -> str:
+    """The tracked `config.yaml`'s `confirm:` line under `automod.review`, with
+    the comment block directly above it, as one string.
+
+    `tests/conftest.py` answers `off` for `confirm` for every node in the suite,
+    "whatever config.yaml carries this week", so a node that wants the shipped
+    state has to parse the tracked file itself. The flip #2305 makes is a value
+    *and* the sentence that records why, so both are read here.
+    """
+    lines = (ROOT / "config.yaml").read_text(encoding="utf-8").splitlines()
+    idxs = [i for i, ln in enumerate(lines) if ln.strip().startswith("confirm:")]
+    assert len(idxs) == 1, f"`confirm:` appears {len(idxs)} times in config.yaml"
+    i = idxs[0]
+    j = i - 1
+    while j >= 0 and lines[j].strip().startswith("#"):
+        j -= 1
+    return "\n".join(lines[j + 1:i + 1])
+
+
+def test_the_shipped_config_resolves_the_confirm_switch_to_off():
+    """#2305 clause 1: the shipped file is `off`, pushed through the same
+    function `confirm_policy()` uses to decide whether to call a reader.
+
+    The shadow measurement is over, so the switch goes back to the state that
+    asks no reader and writes no `review_confirm*` field. This reads the tracked
+    file rather than `CONFIG`, so an overlay in the environment cannot make it
+    green, and resolves the raw value through `confirm_policy_state` rather than
+    comparing strings, so it fails if the spelling ever stops resolving.
+    """
+    cfg = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
+    confirm = cfg["automod"]["review"]["confirm"]
+    assert RV.confirm_policy_state(confirm) == RV.CONFIRM_OFF, confirm
+
+
+def test_the_shipped_confirm_key_survives_with_its_decision_in_the_comment():
+    """#2305 clause 2: the switch is still there, and its comment names the two
+    items that measured it, so the next reader finds a declined arm and not a
+    deleted one.
+
+    An absent key resolves to `off` too, which is exactly why presence is pinned
+    separately: the point of leaving the key is to leave the ruling behind, and a
+    reader who finds no key at all learns only that nobody ever looked.
+    """
+    block = _shipped_confirm_line_and_block()
+    assert block.rstrip().endswith("confirm: off"), block.splitlines()[-1]
+    assert "#1903" in block, "the second reader's own item"
+    assert "#2017" in block, "the shadow pass that measured it"
+
+
+def test_the_shipped_confirm_comment_carries_the_readout_and_no_open_instruction():
+    """#2305 clause 3: the comment states what the shadow pass measured, and no
+    longer orders the next reader to run the measurement.
+
+    The figures are the ledger's own shadow rows: 307 of them from
+    2026-10-01T17:04Z to 2026-10-06T18:44Z, of which 73 were askable — 23
+    overturned (31.5 %), 50 upheld — and 234 never offered a reader. The pending
+    instruction has to go with the measurement it asks for, because it is the one
+    sentence in the file that would send a future session to re-derive a ruling
+    owed-check already made.
+    """
+    block = _shipped_confirm_line_and_block()
+    for want in ("overturned 23", "73 askable", "31.5", "upheld 50", "not_asked 234",
+                 "2026-10-01T17:04Z", "2026-10-06T18:44Z"):
+        assert want in block, want
+    assert "then decide" not in block, "a pending instruction would outlive its measurement"
+    assert ">= 30" not in block and "30 rows" not in block, "no re-measurement order ships"
+
+
 def test_the_second_reader_is_offered_the_entries_the_decision_itself_produced():
     """The entries put to the reader are the entries the refusal is made of.
 

@@ -2402,6 +2402,53 @@ def test_the_on_and_off_states_do_not_gain_the_shadow_fields(tmp_path, monkeypat
         assert not [k for k in data if k.startswith("review_confirm")], (off, data)
 
 
+def test_the_shipped_confirm_value_and_the_shadow_it_replaced_reach_one_row(tmp_path,
+                                                                           monkeypatch):
+    """#2305 clause 4: the flipped value is what the rung obeys, and the `shadow`
+    arm the flip leaves in place still records its vote on the row.
+
+    This is the seam from the shipped bytes to the ledger: the value is read out
+    of the tracked `config.yaml` and pushed through `confirm_policy_state`, the
+    function `confirm_policy()` itself calls, instead of being hardcoded — so the
+    node fails if the file stops saying `off`, and the same node re-points the
+    policy at `shadow` to show the arm is intact. As shipped, a graded block
+    carries no key beginning `review_confirm` at all and asks nobody; in shadow
+    the same block carries `review_confirm_mode` beside its vote. Both neighbour
+    spellings are asserted here too: a round that changed the value must not have
+    moved what `shadow` and `on` resolve to.
+    """
+    import yaml
+    from scripts.automod import review as RV
+
+    shipped_file = Path(__file__).resolve().parents[1] / "config.yaml"
+    raw = yaml.safe_load(shipped_file.read_text(encoding="utf-8"))["automod"]["review"]["confirm"]
+    shipped = RV.confirm_policy_state(raw)
+    assert shipped == RV.CONFIRM_OFF, raw
+    assert RV.confirm_policy_state(RV.CONFIRM_SHADOW) == RV.CONFIRM_SHADOW
+    assert RV.confirm_policy_state(RV.CONFIRM_ON) == RV.CONFIRM_ON
+
+    events, _ = _stub_grader(monkeypatch, tmp_path, _UNMET_ONE)
+    turns = _confirm_reader(monkeypatch)
+
+    monkeypatch.setattr(RV, "confirm_policy", lambda: shipped)
+    ok, detail, data = _ReviewGate(tmp_path).rung_review()
+    ev = events[-1]
+    assert ok is False and "review sent it back" in detail, detail
+    assert turns == [], "the shipped value asks no second reader"
+    assert ev["kind"] == "retry" and ev["blocking"] is True, ev
+    assert not [k for k in ev if k.startswith("review_confirm")], sorted(ev)
+    assert not [k for k in data if k.startswith("review_confirm")], sorted(data)
+
+    monkeypatch.setattr(RV, "confirm_policy", lambda: RV.CONFIRM_SHADOW)
+    ok, detail, data = _ReviewGate(tmp_path).rung_review()
+    ev = events[-1]
+    assert ok is False and "review sent it back" in detail, detail
+    assert len(turns) == 1, "shadow still runs the reader"
+    assert ev["review_confirm_mode"] == "shadow", sorted(ev)
+    assert ev["review_confirm"] == "overturned" and "review_confirm_seconds" in ev, sorted(ev)
+    assert data["review_confirm_mode"] == "shadow", sorted(data)
+
+
 def test_a_review_row_carries_its_blocking_entries_whole(tmp_path, monkeypatch):
     """#2017: the row's own `blocking_entries` is the decision's list, untouched by
     the 2000-character cap on `findings` — 118 of 365 recorded blocks ran past
