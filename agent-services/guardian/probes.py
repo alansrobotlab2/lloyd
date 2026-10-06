@@ -12,13 +12,35 @@ import socket
 import urllib.error
 import urllib.request
 
+import policy
+
+#: The `status` values that mean healthy. Two vocabularies exist on this box and the
+#: probe now talks to endpoints in both: the backend and the aggregator answer `"ok"`,
+#: the synthesiser answers `"healthy"` (and `"initializing"` while it compiles — which
+#: is NOT health, and stays a failing probe so the boot grace in `policy.BOOT_GRACE` is
+#: what judges it, exactly as it judges a RUNNING process whose port is not open yet).
+OK_STATUSES = ("ok", None)
+HEALTHY_OK_STATUSES = ("ok", "healthy")
+
+
+def ok_statuses_for(url: str) -> tuple:
+    """Which `status` words count as healthy for THIS url.
+
+    Per-endpoint rather than one widened rule, because this file's `ok` verdict is what
+    the guardian's rollback decision rests on, and a word those two endpoints have never
+    used should not become acceptable to them because a third endpoint speaks it.
+    """
+    return HEALTHY_OK_STATUSES if url == policy.TTS_HEALTH_URL else OK_STATUSES
+
 
 def probe(url: str, timeout: float) -> dict:
-    """GET `url`. Returns {ok, status, body, error, latency_ms}.
+    """GET `url`. Returns {ok, status, body, error, latency_ms, kind}.
 
     `ok` means HTTP 200 AND, when the body carries a `status` field, that it
-    reads "ok". A 503 from either /health is a real negative: both the backend
-    and the aggregator use 503 to mean degraded.
+    reads healthy for this endpoint — "ok" from the backend and the aggregator,
+    "healthy" from the synthesiser (see `ok_statuses_for`). A 503 from either
+    /health is a real negative: both the backend and the aggregator use 503 to
+    mean degraded.
     """
     import time as _t
     started = _t.monotonic()
@@ -60,7 +82,7 @@ def probe(url: str, timeout: float) -> dict:
     except ValueError:
         out["body"] = None
     body_status = (out["body"] or {}).get("status") if isinstance(out["body"], dict) else None
-    out["ok"] = out["status"] == 200 and (body_status in (None, "ok"))
+    out["ok"] = out["status"] == 200 and (body_status in ok_statuses_for(url))
     out["kind"] = "ok" if out["ok"] else "http_error"
     return out
 

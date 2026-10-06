@@ -1304,3 +1304,95 @@ def test_the_loss_record_offset_marks_the_zone_without_moving_the_clock(tmp_path
             "MARK the zone")
         assert parsed.utcoffset() == want_offset, (
             f"{key}={fields[key]!r} names the wrong offset for this machine")
+
+
+# ── the hour a failed synthesis must not spend (#2256) ────────────────────
+#
+# `should_speak` books the slot BEFORE the words exist, because two processes on one
+# tick must produce one utterance. Until #2256 a synthesis failure left that booking in
+# place, so the alert that was never heard muted itself: the guardian's own retry of the
+# identical text was answered by `_already_spoken` for `VOICE_REPEAT_SECONDS`. The three
+# alerts on 2026-10-05 each spent an hour that way while `agent-tts` sat STOPPED.
+
+def test_a_refused_synthesiser_gives_the_suppression_slot_back(tmp_path, monkeypatch):
+    """Clause 4. The slot is a reservation for an utterance, not a receipt for an
+    attempt: when the endpoint refuses, the utterance does not exist, and the alert has
+    to be speakable again the moment :8090 serves rather than an hour later."""
+    cfg, _ = _refusing(monkeypatch)
+    key = "Guardian alert"
+    assert speak.should_speak(key, tmp_path, window=3600) is True
+    assert speak.should_speak(key, tmp_path, window=3600) is False, \
+        "the reservation must be real before the failure can release it"
+
+    assert speak.speak_now(_ALERT, cfg, tmp_path, key=key) is False
+
+    assert speak.should_speak(key, tmp_path, window=3600) is True, (
+        "a synthesis failure left the slot booked, which is #2256: the alert nobody "
+        "heard muted every later attempt at it for the whole repeat window")
+    assert (tmp_path / speak.LOSS_NAME).is_file(), \
+        "giving the slot back must not un-record the lost utterance"
+
+
+def test_only_a_recorded_loss_gives_the_slot_back(tmp_path, monkeypatch):
+    """The control on the node above: a PLAYBACK failure keeps the booking.
+
+    The words were synthesised and something downstream dropped them, so a retry
+    re-speaks an alert the room may have half-heard — a different bug, and one this
+    round deliberately does not treat as a lost utterance."""
+    monkeypatch.setattr(speak, "synthesize", lambda *a, **k: b"\x01\x02" * 1600)
+    monkeypatch.setattr(speak, "play", lambda *a, **k: False)
+    key = "Guardian alert"
+    assert speak.should_speak(key, tmp_path, window=3600) is True
+
+    assert speak.speak_now(_ALERT, _voice_cfg(), tmp_path, key=key) is False
+    assert speak.should_speak(key, tmp_path, window=3600) is False, (
+        "audio existed and a player refused it; releasing that slot would let one "
+        "half-heard alert be spoken twice inside the repeat window")
+
+
+def test_the_slot_travels_to_the_worker_that_discovers_the_failure(tmp_path, monkeypatch):
+    """The process boundary #2256 actually sits on.
+
+    `dispatch` reserves the hour in the ALERTING process; the synthesiser is contacted
+    by a detached worker, which is the process that learns :8090 is refusing. So the
+    slot has to cross the `Popen` boundary in argv, and the worker has to hand it back
+    — asserted here by running the worker's own `main` on the argv `dispatch` built."""
+    spawned: list[list[str]] = []
+
+    class _Popen:
+        def __init__(self, cmd, **kw):
+            spawned.append(list(cmd))
+
+    monkeypatch.setenv("LLOYD_VOICE_ALERTS", "1")
+    monkeypatch.setattr(speak, "in_quiet_hours", _AWAKE)
+    monkeypatch.setattr(speak.subprocess, "Popen", _Popen)
+    cfg = _voice_cfg(api_url=f"http://127.0.0.1:{_refused_port()}")
+    monkeypatch.setattr(speak, "load_config", lambda sd: cfg)
+    monkeypatch.setattr(speak, "_audible_fallback", lambda *a, **k: False)
+    key = "Guardian alert"
+
+    assert speak.dispatch("warning", key, "the landing broke", tmp_path,
+                          window=3600) is True
+    argv = spawned[0]
+    assert argv[argv.index("--key") + 1] == key, (
+        f"the worker was handed the words but not the reservation, so it cannot give "
+        f"the hour back: {argv}")
+    assert speak.should_speak(key, tmp_path, window=3600) is False, \
+        "dispatch booked the slot before spawning"
+
+    assert speak.main(argv[2:]) == 1, "the worker must still report the failed attempt"
+    assert speak.should_speak(key, tmp_path, window=3600) is True, (
+        "across the real boundary the slot stayed booked — the identical alert would "
+        "have been muted for the rest of the outage that killed it")
+
+
+def test_a_worker_handed_no_key_still_speaks(tmp_path, monkeypatch):
+    """`--key` is optional and has to stay that way: a hand-run worker, or a caller
+    from before this change, must deliver the alert rather than refuse it because it
+    cannot promise to release something it was never given."""
+    cfg, seen = _refusing(monkeypatch)
+    monkeypatch.setattr(speak, "load_config", lambda sd: cfg)
+    monkeypatch.setattr(speak, "_audible_fallback", lambda *a, **k: False)
+
+    assert speak.main(["--state-dir", str(tmp_path), "--text", _ALERT]) == 1
+    assert (tmp_path / speak.LOSS_NAME).is_file(), "the loss is still recorded"

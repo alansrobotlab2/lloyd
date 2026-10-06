@@ -470,6 +470,42 @@ def should_speak(key: str, state_dir: Path, window: float,
         return True
 
 
+def forget_spoken(key: str, state_dir: Path) -> bool:
+    """Undo a `should_speak` reservation for `key`, so the same text is speakable again.
+
+    #2256: `should_speak` records the slot BEFORE the words exist, because two processes
+    on one tick must produce one utterance. When the synthesiser then refuses, the alert
+    was never heard but the hour-long slot is spent, so the guardian's next attempt at the
+    identical text is suppressed by a failed attempt — and on 2026-10-05 that was the
+    difference between an alert spoken once `agent-tts` came back and one never spoken at
+    all. Only a *recorded loss* clears it (see `speak_now`): a playback failure means the
+    words were synthesised and something downstream dropped them, which a retry would
+    likely repeat into a second half-spoken alert.
+
+    Returns whether the key was there to remove. Never raises — a suppression store that
+    cannot be written must not swallow the failure record that got us here, and it must
+    not mute the channel either, which is the same rule `should_speak`'s handler applies.
+    """
+    try:
+        path = Path(state_dir) / SPOKEN_NAME
+        with open(path, "a+", encoding="utf-8") as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            fh.seek(0)
+            try:
+                seen = json.loads(fh.read() or "{}")
+            except Exception:
+                return False
+            if not isinstance(seen, dict) or key not in seen:
+                return False
+            seen.pop(key)
+            fh.seek(0)
+            fh.truncate()
+            fh.write(json.dumps(seen))
+        return True
+    except Exception:
+        return False
+
+
 # ── synthesis ─────────────────────────────────────────────────────────
 # Read granularity on the wire: the size `probes.py:32` already reads at. Big
 # enough that a healthy eight-second utterance arrives in a couple of pieces,
@@ -761,7 +797,19 @@ def _worker_python() -> str:
     return sys.executable
 
 
-def speak_now(text: str, cfg: dict, state_dir: Path) -> bool:
+def _release_slot(key: str | None, state_dir: Path) -> None:
+    """Give back the suppression slot a failed synthesis spent, and log whether that
+    worked. Log-only on failure: the loss record is already written, and a suppression
+    store we cannot write is also a suppression store that cannot suppress."""
+    if not key:
+        return
+    if not forget_spoken(key, state_dir):
+        _log(state_dir, f"could not release the speech slot for {key!r} after a synth "
+                        f"failure — this alert stays suppressed for the repeat window")
+
+
+def speak_now(text: str, cfg: dict, state_dir: Path,
+              key: str | None = None) -> bool:
     """Synthesise and play, blocking. This is what the detached worker runs.
 
     Returns whether the *words* reached a speaker. Two ways to fail at that are
@@ -770,6 +818,15 @@ def speak_now(text: str, cfg: dict, state_dir: Path) -> bool:
     half-alive TTS server is the same dead silence from the room's side. The
     return value stays False in both cases: a chirp is not the alert, and the
     loss record is the report.
+
+    `key` is the suppression slot `dispatch` reserved before spawning this worker.
+    On both recorded-loss paths it is given back (#2256), because the reservation was
+    made for an utterance that never existed: `dispatch` returns True — "dispatched" —
+    and the alerting layer reasonably stops asking, so unless this process releases the
+    slot, the identical alert is muted for `policy.VOICE_REPEAT_SECONDS` (one hour) from
+    an attempt that produced no sound. A playback failure deliberately does NOT release
+    it: the audio was made, something downstream lost it, and re-speaking a
+    half-heard alert is a different bug than a dead synthesiser.
     """
     try:
         pcm = synthesize(text, cfg, state_dir)
@@ -777,11 +834,13 @@ def speak_now(text: str, cfg: dict, state_dir: Path) -> bool:
         reason = f"{type(exc).__name__}: {exc}"
         _log(state_dir, f"synth failed ({reason}) for {text[:60]!r}")
         _record_loss(state_dir, text, reason)
+        _release_slot(key, state_dir)
         _audible_fallback(cfg, state_dir)
         return False
     if not pcm:
         _log(state_dir, f"synth returned nothing for {text[:60]!r}")
         _record_loss(state_dir, text, "synth returned no audio")
+        _release_slot(key, state_dir)
         _audible_fallback(cfg, state_dir)
         return False
     try:
@@ -815,12 +874,16 @@ def dispatch(level: str, title: str, body: str, state_dir: Path, *,
                 level == "critical" and cfg["quiet_hours"].get("allow_critical")):
             _log(state_dir, f"quiet hours — withholding speech for {title!r}")
             return False
-        if not should_speak(key or title or "alert", state_dir, window):
+        # One expression for the slot, and it crosses the worker boundary with the text:
+        # the process that discovers the synthesiser is dead is not the process that
+        # reserved the hour, so without `--key` it cannot know what to give back (#2256).
+        slot = key or title or "alert"
+        if not should_speak(slot, state_dir, window):
             return False
         text = utterance_for(level, title, body, max_chars=int(cfg["max_chars"]))
         subprocess.Popen(
             [_worker_python(), str(Path(__file__).resolve()),
-             "--state-dir", str(state_dir), "--text", text],
+             "--state-dir", str(state_dir), "--text", text, "--key", slot],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, start_new_session=True,
         )
@@ -836,9 +899,15 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Speak one line in Lloyd's voice.")
     ap.add_argument("--state-dir", required=True)
     ap.add_argument("--text", required=True)
+    # Optional, and it has to stay optional: a worker invoked without it (a hand run, an
+    # older caller) still speaks — it just cannot hand the slot back if the endpoint is
+    # dead, which is #2256's bug rather than a reason to refuse the alert.
+    ap.add_argument("--key", default=None,
+                    help="suppression slot to release if synthesis fails")
     args = ap.parse_args(argv)
     state_dir = Path(args.state_dir)
-    return 0 if speak_now(args.text, load_config(state_dir), state_dir) else 1
+    return 0 if speak_now(args.text, load_config(state_dir), state_dir,
+                          key=args.key) else 1
 
 
 if __name__ == "__main__":

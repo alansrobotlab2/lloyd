@@ -3447,3 +3447,225 @@ def test_a_persisted_supervisor_state_in_the_body_is_given_its_age(tmp_path, mon
     assert "3 consecutive liveness tick" in body, (
         f"the age must accumulate over one incident, not reset each tick:\n{body}")
     assert "1 consecutive" not in body, bodies
+
+
+# ── #2256: the voice channel had no watchdog at all ───────────────────────
+#
+# `WATCHED` was the two `lloyd-mc:` group members, so `collect()` never read
+# `agent-tts`, `evaluate_liveness` never judged it, and a `stopProcess` at
+# 2026-10-05 15:08:12 left the box mute: `supervisord.log:2164` has no `spawned:`
+# after `WARN stopped: agent-tts (terminated by SIGTERM)` — unlike the stop→spawn
+# pair at :2089-2092 on 10-04 — because supervisord's own `autorestart=true`
+# covers a process that DIES, and a stop is not a death. `heartbeat.json` read
+# `"tick": 1102, "last_alert": ""` after 45 minutes of three unspoken alerts.
+#
+# The tests below are about the DECISION: is this program's state read, and does
+# the state alone make the call. That they are pure is the point — a `RUNNING`
+# process that answers no request is why `#1816` established the state-before-probe
+# ordering, and the synthesiser is its exact inverse: an endpoint that is down
+# while supervisord has nothing to complain about.
+
+import policy  # noqa: E402  (GUARDIAN_DIR is on sys.path above)
+
+TTS = "agent-tts"
+
+
+def _tts_proc(state: str, started: float, now: float,
+              name: str = "agent-tts", group: str = "agent-tts") -> dict:
+    """One program's row, shaped like `getAllProcessInfo` output the way every other
+    node in this file shapes it.
+
+    `started` is the only age the predicate reads: `is_starting` anchors on `start`
+    alone (detect.py:23-29), so a node that means "booted 60 s ago" sets it — and a
+    STOPPED row gets no age reading at all, because state is decided first.
+    `stop_ts`/`stop_time` are carried because real rows carry them; nothing in
+    detect.py or guardian.py reads them and no assertion here depends on them, which
+    is why they are not parameters.
+
+    `name`/`group` are parameters because the backend and the synthesiser are
+    different programs and a row that says `agent-tts` for all three is a fixture
+    that lies about which row a predicate looked at."""
+    return {"name": name, "group": group, "statename": state,
+            "pid": 8100 if state == "RUNNING" else 0,
+            "spawnerr": "spawn error: Executable not found" if state == "FATAL" else "",
+            "exitstatus": 0 if state in ("RUNNING", "STOPPED") else 1,
+            "notempty": True, "now": now, "utcnow": now,
+            "start": started, "stop_ts": now - 60.0,
+            "stop_time": now - 60.0}
+
+
+def _watchdog(tmp_path, monkeypatch, *, programs=None, tts_state="RUNNING",
+              tts_probe=None, halted=False, tts_started_ago=6000.0):
+    """A Guardian whose only real behaviour is `evaluate_liveness`, reading a
+    snapshot shaped like `collect()`'s: the two `lloyd-mc:` members healthy, and
+    `agent-tts` in the state under test."""
+    import types
+
+    import guardian as G
+
+    args = types.SimpleNamespace(
+        repo=str(tmp_path), state=str(tmp_path / "state"),
+        guardian_state=str(tmp_path / "gstate"), supervisor_sock="/nonexistent",
+        backend_url="http://127.0.0.1:1/health", mcp_url="http://127.0.0.1:2/health",
+        programs=(",".join(programs) if programs else ",".join(policy.WATCHED)),
+        interval=5.0,
+    )
+    g = G.Guardian(args)
+    monkeypatch.setattr(g.state, "is_halted", lambda: halted)
+    procs = {
+        "lloyd-mc:lloyd-backend": _tts_proc("RUNNING", NOW - 6000.0, NOW,
+                                            name="lloyd-backend", group="lloyd-mc"),
+        "lloyd-mc:lloyd-mcp": _tts_proc("RUNNING", NOW - 6000.0, NOW,
+                                        name="lloyd-mcp", group="lloyd-mc"),
+         TTS: _tts_proc(tts_state, NOW - tts_started_ago, NOW),
+    }
+    # Keyed by PROGRAM, because that is the key `collect()` writes
+    # (`guardian.py:404: snap["probes"][program] = ...`) and the key
+    # `evaluate_liveness` reads (:601). A URL-keyed snapshot looks shaped like the
+    # real thing and silently delivers no probe to any program.
+    ok_probe = {"ok": True, "kind": "ok", "status": 200, "body": "ok"}
+    probes = {
+        "lloyd-mc:lloyd-backend": dict(ok_probe),
+        "lloyd-mc:lloyd-mcp": dict(ok_probe),
+    }
+    if tts_probe is not None:
+        probes[TTS] = tts_probe
+    monkeypatch.setattr(G.time, "time", lambda: NOW)
+    return g, {"now": NOW, "supervisord": "ok", "procs": procs, "probes": probes}
+
+
+def _healthy_probe():
+    """A /health that answers `{"status": "healthy"}` — the synthesiser's own
+    vocabulary, which the two `lloyd-mc:` endpoints have never used."""
+    return {"ok": True, "kind": "ok", "status": 200,
+            "body": '{"status": "healthy", "backend": {"ready": true}}'}
+
+
+def test_the_synthesiser_is_in_the_set_read_on_every_tick():
+    """Clause 1. Nothing in the guardian can notice what it never reads, and
+    until #2256 the program that carries every spoken alert was never read."""
+    assert TTS in policy.WATCHED, \
+        f"{policy.WATCHED} does not include the voice channel"
+    # The watched set is also the daemon's own `--programs` default, which is how
+    # it reaches the live box: `lloyd-guardian.service` runs the unit with no
+    # program list, so a name absent from this tuple is a name no tick reads.
+    import guardian as G
+    assert TTS in G.build_parser().parse_args([]).programs.split(",")
+
+
+@pytest.mark.parametrize("state", ["STOPPED", "EXITED", "FATAL"])
+def test_a_dead_synthesiser_is_down_on_the_first_tick_that_reads_it(state, tmp_path,
+                                                                   monkeypatch):
+    """Clause 2. One tick, no corroboration asked for: the predicate reads
+    supervisord's state first, which is `detect.is_down`'s ordering rule from
+    `#1816`, and the reason string names the program so the alert says which
+    channel died rather than that something is down.
+
+    The healthy /health sitting in the same snapshot is not weighed and rejected:
+    state is returned BEFORE any probe is consulted, so for these three rows the
+    probe is never read at all. That is the rule — a stale socket answering :8090
+    while the supervisor holds a STOPPED row must not read as health."""
+    g, snap = _watchdog(tmp_path, monkeypatch, tts_state=state,
+                        tts_probe=_healthy_probe())
+    down, reason = g.evaluate_liveness(snap)
+    assert down is True, f"{state} with a healthy probe was not judged down: {reason}"
+    assert reason.startswith(f"{TTS}: "), reason
+    assert state in reason, \
+        f"the reason does not carry the state a reader would check: {reason}"
+
+
+def test_the_supervisor_state_decides_even_when_the_endpoint_answers(tmp_path,
+                                                                    monkeypatch):
+    """The ordering half of clause 2, run in both directions.
+
+    A `FATAL` synthesiser is down even with a /health that answers 200 `healthy` —
+    a stale socket, or a child that outlived its own supervisor entry, is exactly
+    what `#1816` refused to let a probe overrule."""
+    g, snap = _watchdog(tmp_path, monkeypatch, tts_state="FATAL",
+                        tts_probe=_healthy_probe())
+    assert g.evaluate_liveness(snap)[0] is True
+
+
+def test_the_stop_is_not_excused_by_a_halt_that_was_never_about_it(tmp_path,
+                                                                  monkeypatch):
+    """The exemption flap protection needs (#563) is scoped to the programs the
+    guardian itself stops, which is `RESTART_ORDER` and not this one.
+
+    `is_halted()` is one box-wide flag: an unrelated backend quarantine would
+    otherwise excuse a mute box for as long as it lasted, which is the same class
+    of blindness #2256 is about."""
+    assert TTS not in policy.RESTART_ORDER, \
+        "the scoping below is only meaningful while the guardian can't stop this"
+    g, snap = _watchdog(tmp_path, monkeypatch, tts_state="STOPPED", halted=True)
+    down, reason = g.evaluate_liveness(snap)
+    assert down is True, (
+        f"a halt that was never about the voice channel excused it: {reason}")
+
+
+def test_the_control_the_pin_needs_is_that_a_narrower_watch_sees_nothing(tmp_path,
+                                                                       monkeypatch):
+    """Positive control: the identical snapshot judged against the pre-#2256
+    program set — the two `lloyd-mc:` members only — reports a healthy machine.
+
+    Without this the two nodes above could be satisfied by the backend/mcp rows
+    alone and would say nothing about the voice channel."""
+    g, snap = _watchdog(tmp_path, monkeypatch,
+                        programs=["lloyd-mc:lloyd-backend", "lloyd-mc:lloyd-mcp"],
+                        tts_state="FATAL", tts_probe={"ok": False, "kind": "refused",
+                                                      "status": None, "body": None})
+    down, reason = g.evaluate_liveness(snap)
+    assert down is False, f"the narrow set still noticed it, so the pin is vacuous: {reason}"
+
+
+def test_a_synthesiser_that_is_compiling_is_not_yet_down(tmp_path, monkeypatch):
+    """The grace the new row has to carry: `agent-tts.conf:24-26` says :8090 does
+    not answer `/health` for about four minutes after the process is RUNNING,
+    because the model compiles inside uvicorn's lifespan.
+
+    With `DEFAULT_BOOT_GRACE` (30s) and `PROBE_FAIL_STREAK` (3 x 5s) a cold boot
+    would be judged down and restarted roughly four minutes before it can serve,
+    which is how a watchdog becomes an outage."""
+    assert policy.BOOT_GRACE[TTS] > 240.0, policy.BOOT_GRACE
+    refused = {"ok": False, "kind": "refused", "status": None, "body": None}
+
+    # Inside the grace: RUNNING for 60 s (`start` is what the predicate reads for a
+    # running process), refusing connections.
+    g, snap = _watchdog(tmp_path, monkeypatch, tts_state="RUNNING", tts_probe=refused,
+                        tts_started_ago=60.0)
+    g.probe_fail[TTS] = 2          # two failed ticks, inside PROBE_FAIL_STREAK
+    assert g.evaluate_liveness(snap) == (False, "all watched processes healthy"), (
+        "a synthesiser still compiling was judged down, which is the restart-storm "
+        "failure mode the grace exists to prevent")
+
+    # Past the grace: the same refusals on a process `start`ed 6000 s ago — well
+    # beyond BOOT_GRACE[TTS] — is a dead channel, not a compiling one.
+    g2, snap2 = _watchdog(tmp_path, monkeypatch, tts_state="RUNNING", tts_probe=refused,
+                          tts_started_ago=policy.BOOT_GRACE[TTS] + 400.0)
+    g2.probe_fail[TTS] = policy.PROBE_FAIL_STREAK
+    down, reason = g2.evaluate_liveness(snap2)
+    assert down is True and reason.startswith(f"{TTS}: "), (
+        "after the grace and the refuse streak the voice channel has to be judged "
+        "down: " + reason)
+
+
+def test_healthy_synthesiser_with_a_healthy_endpoint_is_not_down(tmp_path, monkeypatch):
+    """The floor under every node above: a serving TTS must not be judged down, or
+    the guardian would restart the voice channel every tick and call the room's
+    patience a flap."""
+    g, snap = _watchdog(tmp_path, monkeypatch, tts_state="RUNNING",
+                        tts_probe=_healthy_probe())
+    assert g.evaluate_liveness(snap) == (False, "all watched processes healthy"), \
+        "a healthy voice channel with a healthy endpoint must report healthy"
+
+
+def test_the_recovery_route_is_not_the_rollback_route(tmp_path, monkeypatch):
+    """The asymmetry the fix rests on, pinned: a voice outage is never evidence
+    about the promoted tree.
+
+    `RECOVERABLE_INFRA` names the programs the guardian restarts itself; a name in
+    `WATCHED` that is not in it follows the rollback path, where stopping the
+    writers and rewriting main is the only tool that route has."""
+    assert TTS in policy.RECOVERABLE_INFRA
+    assert TTS not in policy.RESTART_ORDER, \
+        "a rollback stops and starts this tuple, and a dead voice channel must " \
+        "not be a reason to revert a landing"

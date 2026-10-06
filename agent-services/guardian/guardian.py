@@ -361,10 +361,23 @@ class Guardian:
 
     # ── probing ────────────────────────────────────────────────────────
     def _url_for(self, program: str) -> str | None:
+        """The endpoint that says whether this program is SERVING, not started.
+
+        `agent-tts` gets one for two reasons #2256 turns on. State cannot be its health
+        signal: the process is RUNNING for about four minutes before :8090 answers
+        anything at all (`agent-tts.conf:24-26`), so "the supervisor says it is up" and
+        "the box can speak" are different claims about it — and a recovery has to be
+        confirmed by the second, not the first, which is `#1816`'s rule applied to a new
+        program. It is also what lets the tick see a port that stopped answering while
+        supervisord had nothing to complain about. The `status` word that counts as
+        healthy is per-endpoint — see `probes.ok_statuses_for`.
+        """
         if program.endswith("lloyd-backend"):
             return self.backend_url
         if program.endswith("lloyd-mcp"):
             return self.mcp_url
+        if program == "agent-tts":
+            return policy.TTS_HEALTH_URL
         return None
 
     def collect(self) -> dict:
@@ -456,6 +469,132 @@ class Guardian:
                     f"(a persisted state, not a live probe of its cause)")
         return reason
 
+    def _recoverable_down(self, live_reason: str) -> list:
+        """The programs this tick's liveness reason names that the guardian may restart
+        itself, rather than report or roll back for.
+
+        Read off the reason with the same helper the retraction uses, because
+        `evaluate_liveness` returns the FIRST failure only: the alert body, the retraction
+        and this dispatch have to agree on one name per tick, and a second derivation from
+        the snapshot is how they would start disagreeing. The one-name-per-tick limit
+        `_down_program_names` documents applies here too — a second recoverable program
+        down in the same tick waits for the tick after the first one serves again.
+        """
+        return [p for p in sorted(self._down_program_names(live_reason))
+                if p in policy.RECOVERABLE_INFRA]
+
+    def _recover_infra(self, live_reason: str) -> str:
+        """Restart the down `RECOVERABLE_INFRA` program(s) and report what happened.
+
+        Two outcomes reach a human. A voice channel that comes back is said out loud as
+        `RECOVERED:` — the same shape the code review asked of an unattended recovery as
+        everywhere else in this file — and a voice channel that cannot be brought back is
+        an error with `needs_human=True`, because at that point the guardian has spent
+        its restart budget on the box's only alert route and cannot fix it again.
+        """
+        out = "recovered"
+        for program in self._recoverable_down(live_reason):
+            ok, detail = self.recover_service(program, live_reason)
+            if ok:
+                log(f"{program} recovered: {detail}")
+                self.alert("info", f"Recovered: {program}",
+                           f"{program} was {live_reason}.\nRestarted; {detail}.",
+                           coalesce=True)
+                # The incident note this alert opened is sealed by the retraction pass at
+                # the top of the next tick — which is now reachable, because the program
+                # serves again — rather than here, where the seal would have to assume the
+                # restart holds.
+            else:
+                out = "needs_human"
+                log(f"{program} NOT recovered: {detail}")
+                self.alert("error", f"Voice alert channel cannot be recovered: {program}",
+                           self._describe_down(live_reason) +
+                           f"\n\nThe guardian restarted {program} and it did not come back: "
+                           f"{detail}\n"
+                           f"Spoken alerts are not reaching the room, so this message is "
+                           f"here rather than out loud. It needs a human — a restart is all "
+                           f"this guardian can do to a synthesiser, and it has done it.",
+                           needs_human=True, coalesce=True)
+        return out
+
+    def _recent_recoveries(self, program: str) -> int:
+        """Recovery restarts of `program` inside the flap window. The same ledger read
+        flap protection uses, counting a different event instead of rollbacks."""
+        cutoff = time.time() - policy.FLAP_WINDOW_SECONDS
+        return sum(
+            1 for ev in gstate.read_events(self.state.ledger, limit=gstate.FLAP_SCAN_ROWS)
+            if ev.get("event") == "service_recovery"
+            and ev.get("program") == program
+            and float(ev.get("ts", 0)) >= cutoff
+        )
+
+    def recover_service(self, program: str, reason: str) -> tuple[bool, str]:
+        """Bring one `RECOVERABLE_INFRA` program back, and confirm it by its endpoint.
+
+        Not `restart_services`: that one stops and starts `RESTART_ORDER`, which is the
+        set a rollback moves, and this program is deliberately not in it (see the
+        `policy.RECOVERABLE_INFRA` comment). What it does share with that path is the
+        rule it ends on — a supervisor state is not health, so a restart counts only
+        once :8090 answers (`supervisor.py`'s docstring says the same about the
+        backend). Stop-then-start rather than `restartctl` because a FATAL or a wedged
+        RUNNING process answers neither, and the box's own 2026-10-05 lesson is that a
+        process supervisord has *stopped* stays stopped until someone owns it.
+
+        Bounded by the same numbers flap protection gives the backend: 
+        `FLAP_HALT_AFTER` restarts inside `FLAP_WINDOW_SECONDS`, and past that this
+        returns False with a reason that names the budget, so the loop never turns a
+        four-minute synthesiser boot into a restart storm on a box where the model
+        genuinely cannot load. The ledger row is written BEFORE the attempt — same
+        reason `recent_rollbacks` counts `rollback_succeeded`: an attempt that hangs is
+        an attempt that must still be counted.
+
+        Blocks for up to `HEALTH_WAIT_TTS`. That is a real cost, so the wait is
+        announced in `heartbeat.json` first — a reader who finds a seven-minute gap in
+        that file should find this program's name in the last row before it — and
+        `on_tick=self._beat` is what keeps `WatchdogSec=90` off the guardian's back
+        while it waits.
+        """
+        spent = self._recent_recoveries(program)
+        if spent >= policy.FLAP_HALT_AFTER:
+            return False, (f"restart budget spent ({spent} of {policy.FLAP_HALT_AFTER} "
+                           f"allowed in "
+                           f"{policy.FLAP_WINDOW_SECONDS / 3600:.0f}h); not restarting again. "
+                           f"The fix is a human's `supervisorctl start {program}` — what the "
+                           f"guardian will not do is keep spawning a process that will not "
+                           f"serve, nor reach for a rollback, whose route acts on "
+                           f"RESTART_ORDER and cannot touch this program.")
+
+        gstate.append_event(self.state.ledger, {
+            "event": "service_recovery", "program": program, "cause": reason[:300]})
+        log(f"recovering {program} ({reason}) — attempt {spent + 1}/"
+            f"{policy.FLAP_HALT_AFTER} in {policy.FLAP_WINDOW_SECONDS / 3600:.0f}h")
+        try:
+            self.sup.stop(program, wait=True)
+        except Exception as exc:                      # already stopped: fine
+            log(f"stop {program}: {type(exc).__name__}: {exc}")
+        self._beat()
+        try:
+            started, msg = self.sup.start(program, wait=False)
+        except Exception as exc:
+            return False, f"supervisord refused to start {program}: {exc}"
+        if not started:
+            return False, f"supervisord could not start {program}: {msg}"
+        log(f"start {program}: {msg} — waiting up to {policy.HEALTH_WAIT_TTS:.0f}s "
+            f"for {policy.TTS_HEALTH_URL}")
+        self.heartbeat("recovering", {
+            "recovering": program,
+            "recovering_until": time.time() + policy.HEALTH_WAIT_TTS,
+            "recovering_reason": reason[:200]})
+        ok, last = probes.wait_healthy(policy.TTS_HEALTH_URL,
+                                       policy.HEALTH_WAIT_TTS,
+                                       policy.PROBE_TIMEOUT_SECONDS,
+                                       on_tick=self._beat)
+        if not ok:
+            return False, (f"started ({msg}) but {policy.TTS_HEALTH_URL} never answered "
+                           f"within {policy.HEALTH_WAIT_TTS:.0f}s "
+                           f"(last: {(last or {}).get('kind', 'no probe')})")
+        return True, f"{msg}; {policy.TTS_HEALTH_URL} answering"
+
     def evaluate_liveness(self, snap: dict) -> tuple[bool, str]:
         for program in self.programs:
             info = snap["procs"].get(program)
@@ -510,7 +649,16 @@ class Guardian:
                 # Reading our own deliberate stop as death produced a "service
                 # down" alert every 15 minutes for as long as the quarantine
                 # lasted. EXITED is never excused this way.
-                intentional_stop=self.state.is_halted(),
+                #
+                # Scoped to the programs this guardian can actually stop —
+                # `RESTART_ORDER`, which is what flap protection and a rollback
+                # stop and nothing else — because the flag means "we stopped this
+                # on purpose" and cannot honestly excuse a program no guardian
+                # path ever touches. #2256: `agent-tts` sat STOPPED unowned for
+                # 45 minutes, and an unqualified flag would have hidden it for as
+                # long as an unrelated backend quarantine happened to last.
+                intentional_stop=(self.state.is_halted()
+                                  and program in policy.RESTART_ORDER),
             )
             if down:
                 return True, f"{program}: {reason}"
@@ -1725,6 +1873,17 @@ class Guardian:
 
         unrestarted = bool(current) and current.get("restart") is False
         if live_down:
+            # #2256: a program a landing cannot have broken gets restarted, not
+            # blamed. Ordered ahead of the rollback route below because that route is
+            # the WRONG tool for it: `do_rollback("crash", ...)` stops and starts
+            # `RESTART_ORDER`, in which `agent-tts` deliberately is not, and it rewrites
+            # main to fix a room that went quiet. On 2026-10-05 the synthesiser sat
+            # STOPPED with nobody owning it for 45 minutes while three alerts went
+            # unspoken, and if a promotion had been under observation the guardian would
+            # have reverted it for a TTS stop it did not cause.
+            if self._recoverable_down(live_reason):
+                return self._recover_infra(live_reason)
+
             # Rollback is only ever appropriate for a commit the LOOP promoted
             # and is still observing. With no `current.json` the tree moved for
             # some other reason — a human commit, a nightly job — and reverting

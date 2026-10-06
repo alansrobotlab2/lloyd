@@ -15,10 +15,13 @@ expensive to get wrong in production:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -1447,3 +1450,349 @@ def test_the_shared_alert_state_default_cannot_be_mutated_through_an_instance():
         f"`self._down_programs op=` at {len(aug_targets)} site(s) mutates the shared "
         "class default in place; the write has to rebind a new set"
     )
+
+
+# ── #2256 clause 3: the dead voice channel gets restarted, by the guardian ─
+#
+# Not a rollback. `do_rollback("crash", …)` was the only thing a liveness failure used
+# to be able to do, and it acts on `policy.RESTART_ORDER` — which `agent-tts` is
+# deliberately NOT in — by stopping the writers and rewriting main. On 2026-10-05 the
+# program carrying every spoken alert sat STOPPED from 15:08:12 with nothing owning it.
+#
+# The bound is flap protection's own numbers, not a new invention: `FLAP_HALT_AFTER`
+# inside `FLAP_WINDOW_SECONDS`, read off the same ledger (`_recent_recoveries` counts
+# `service_recovery` rows for one program where flap protection counts
+# `rollback_succeeded` ones). Attempts rather than successes, because a rollback that
+# succeeds ends its own incident while the third start of a synthesiser that will not
+# serve IS the incident.
+
+class _TtsSup:
+    """supervisord as the recovery path sees it: a `stop` that is best-effort, a
+    `start` that answers `(ok, msg)`, and a record of both. Its own class rather than
+    `_RecordingSup`, because that one is the rollback file's witness for which
+    `RESTART_ORDER` members a rollback touched and must stay free of knobs."""
+
+    def __init__(self, restarts_ok=True):
+        self.calls: list[tuple[str, str]] = []
+        self.restarts_ok = restarts_ok
+
+    def stop(self, program, wait=False):
+        self.calls.append(("stop", program))
+        return True, "stopped"
+
+    def start(self, program, wait=False):
+        self.calls.append(("start", program))
+        if not self.restarts_ok:
+            # `startsecs=30` in agent-tts.conf means a model that cannot load lands
+            # here, not on a silent port.
+            return False, "ERRORED (spawn error)"
+        return True, "started"
+
+    def snapshot(self):
+        return [f"{verb} {program}" for verb, program in self.calls]
+
+    def starts(self):
+        return [program for verb, program in self.calls if verb == "start"]
+
+
+def _tts_recovery_guardian(tmp_path, monkeypatch, *, endpoint_answers, restarts_ok=True):
+    """A Guardian whose only real behaviour is `recover_service`, with supervisord and
+    the endpoint both recorded. `probes.wait_healthy` keeps the real signature —
+    `on_tick=` included — so the confirmation crosses the same seam the backend's
+    post-restart check does."""
+    import types
+
+    import guardian as G
+
+    args = types.SimpleNamespace(
+        repo=str(tmp_path), state=str(tmp_path / "state"),
+        guardian_state=str(tmp_path / "gstate"), supervisor_sock="/nonexistent",
+        backend_url="http://127.0.0.1:1/health", mcp_url="http://127.0.0.1:2/health",
+        programs="agent-tts", interval=5.0,
+    )
+    g = G.Guardian(args)
+    sup = _TtsSup(restarts_ok=restarts_ok)
+    g.sup = sup
+    g.alerts = []
+    g.alert = lambda level, title, body, **kw: g.alerts.append(
+        {"level": level, "title": title, "body": body, **kw})
+    g._beat = lambda: None
+    g.heartbeats: list = []
+    g.heartbeat = lambda state, extra=None: g.heartbeats.append((state, extra or {}))
+    waited: dict = {}
+
+    # The real signature (`probes.py:90`: `interval=1.0, on_tick=None`). A fake
+    # whose extra keyword is named `pause` accepts the caller's `on_tick=` by
+    # accident and would not notice a caller that stopped passing it.
+    def fake_wait(url, timeout_total, probe_timeout, interval=1.0, on_tick=None):
+        waited.update(url=url, timeout_total=timeout_total,
+                      probe_timeout=probe_timeout, on_tick=on_tick)
+        return (endpoint_answers, {"status": 200} if endpoint_answers
+                else {"error": "[Errno 111] Connection refused"})
+
+    monkeypatch.setattr(G.probes, "wait_healthy", fake_wait)
+    return g, sup, waited
+
+
+def test_a_down_synthesiser_is_restarted_and_confirmed_by_its_endpoint(tmp_path,
+                                                                      monkeypatch):
+    """Clause 3, the green path: the supervisor call is addressed to the program's own
+    name and not to a `RESTART_ORDER` member, and the restart is not called recovered
+    until `:8090` answers — the state-does-not-prove-serving rule #1816 settled."""
+    g, sup, waited = _tts_recovery_guardian(tmp_path, monkeypatch, endpoint_answers=True)
+
+    ok, detail = g.recover_service("agent-tts", "agent-tts: STOPPED")
+
+    assert ok is True, detail
+    assert sup.starts() == ["agent-tts"], sup.snapshot()
+    assert waited["url"] == policy.TTS_HEALTH_URL, waited
+    assert waited["timeout_total"] >= 240.0, (
+        f"a four-minute model compile needs a real budget, got "
+        f"{waited['timeout_total']}s")
+    assert waited["on_tick"] is g._beat, (
+        "the wait has to hand control back to the watchdog beat ITSELF: any "
+        "callable would satisfy an `is not None` check while starving the unit")
+
+
+def test_the_recovery_is_scoped_to_the_voice_channel(tmp_path, monkeypatch):
+    """The asymmetry the fix rests on, pinned at the supervisor: recovering the voice
+    channel stops and starts `agent-tts` and nothing else. A rollback's staging stops
+    `RESTART_ORDER` — the writers — and that is precisely what must not happen because
+    the room went quiet."""
+    g, sup, _ = _tts_recovery_guardian(tmp_path, monkeypatch, endpoint_answers=True)
+
+    assert g.recover_service("agent-tts", "agent-tts: STOPPED")[0] is True
+    touched = {program for _verb, program in sup.calls}
+    assert touched == {"agent-tts"}, (
+        f"recovery reached outside the voice channel: {sup.snapshot()}")
+    assert not (touched & set(policy.RESTART_ORDER)), sup.snapshot()
+
+
+def test_the_recovery_wait_is_announced_in_the_heartbeat_before_it_begins(tmp_path,
+                                                                         monkeypatch):
+    """A tick that then blocks for up to seven minutes has to say so in the place a
+    reader looks — `heartbeat.json`, in the row before the silence."""
+    g, _sup, _waited = _tts_recovery_guardian(tmp_path, monkeypatch, endpoint_answers=True)
+
+    assert g.recover_service("agent-tts", "agent-tts: STOPPED")[0] is True
+    assert g.heartbeats, "nothing was written to heartbeat.json before the blocking wait"
+    state, extra = g.heartbeats[0]
+    assert "agent-tts" in state or "agent-tts" in repr(extra), (state, extra)
+
+
+def test_a_restart_that_never_serves_is_reported_failed_and_then_refused(tmp_path,
+                                                                        monkeypatch):
+    """Clause 3's bound, on both halves.
+
+    An endpoint that will not answer is NOT a success: the alert goes out at error
+    level with `needs_human=True`, because a guardian whose speech route is dead
+    cannot hear its own alert. And the attempt is in the ledger BEFORE it ran, so the
+    flap count is real: the third attempt is the one flap protection refuses."""
+    g, sup, _ = _tts_recovery_guardian(tmp_path, monkeypatch, endpoint_answers=False)
+
+    ok, detail = g.recover_service("agent-tts", "agent-tts: STOPPED")
+    assert ok is False, detail
+
+    events = [ev.get("event") for ev in gstate.read_events(g.state.ledger)]
+    assert events.count("service_recovery") == 1, events
+
+    ok2, detail2 = g.recover_service("agent-tts", "agent-tts: STOPPED")
+    assert ok2 is False, detail2
+    assert sup.starts().count("agent-tts") == 2, (
+        f"the second attempt was refused while inside the bound: {sup.snapshot()}")
+
+    ok3, detail3 = g.recover_service("agent-tts", "agent-tts: STOPPED")
+    assert ok3 is False, detail3
+    assert sup.starts().count("agent-tts") == 2, (
+        f"a third restart ran despite the bound: {sup.snapshot()}")
+    assert str(policy.FLAP_HALT_AFTER) in detail3, detail3
+    assert "rollback" in detail3.lower() or "supervisorctl" in detail3.lower(), (
+        "the refusal must say what the guardian will NOT do, or name the human's fix: "
+        + detail3)
+
+
+def test_the_dispatch_announces_both_outcomes_of_a_recovery_attempt(tmp_path, monkeypatch):
+    """Recovery is never silent, in either direction: a channel that came back is said
+    `Recovered:` (the unattended-recovery visibility this file's house rule asks for),
+    and one that could not be brought back is an error with `needs_human=True` — because
+    the route that would have said it out loud is the thing that is down."""
+    up, _sup_up, _w = _tts_recovery_guardian(tmp_path, monkeypatch, endpoint_answers=True)
+    assert up._recover_infra("agent-tts: STOPPED, last stop 900s ago") == "recovered"
+    assert any("Recovered: agent-tts" in a["title"] for a in up.alerts), up.alerts
+
+    down, _sup_dn, _w2 = _tts_recovery_guardian(tmp_path / "d", monkeypatch,
+                                               endpoint_answers=False)
+    assert down._recover_infra("agent-tts: STOPPED, last stop 900s ago") == "needs_human"
+    assert any(a["level"] == "error" and "agent-tts" in a["title"] for a in down.alerts), \
+        down.alerts
+    assert any(a.get("needs_human") is True for a in down.alerts), (
+        "a guardian whose speech route is dead cannot hear its own alert: the failure "
+        "has to be written down for a person to see")
+
+
+def test_a_refused_spawn_is_reported_as_a_spawn_error_not_a_dead_port(tmp_path,
+                                                                     monkeypatch):
+    """supervisord refusing to spawn is a different fact from a port that will not
+    answer, and the reason a reader gets has to name the one to go and look at."""
+    g, _sup, waited = _tts_recovery_guardian(tmp_path, monkeypatch,
+                                            endpoint_answers=False, restarts_ok=False)
+
+    ok, detail = g.recover_service("agent-tts", "agent-tts: STOPPED")
+    assert ok is False
+    assert waited.get("url") is None, (
+        f"supervisord refused the spawn, so :8090 must not be probed at all: a wait "
+        f"recorded here would report the port and hide the spawn error ({waited})")
+    assert "ERRORED" in detail, detail
+
+
+def test_a_voice_outage_is_never_evidence_about_the_promoted_tree(tmp_path, monkeypatch):
+    """The dispatch, not just the tool: with a recoverable program down, `tick` returns
+    from the recovery branch and never reaches the rollback route.
+
+    Before #2256 the two possible outcomes of a dead alert channel were "roll back a
+    landing" and "alert that there is nothing to roll back" — both of which assume the
+    outage is about the code."""
+    import guardian as G
+
+    g, sup, _waited = _tts_recovery_guardian(tmp_path, monkeypatch, endpoint_answers=True)
+    monkeypatch.setattr(g.state, "current", lambda: {"commit": "abc", "state": "observing"})
+    monkeypatch.setattr(g.state, "lkg", lambda: {"commit": "abc"})
+    monkeypatch.setattr(g.state, "rollback_target", lambda: ("abc", "lkg"))
+    monkeypatch.setattr(g.state, "is_broken", lambda: False)
+    monkeypatch.setattr(g.state, "pause_remaining", lambda cap: 0.0)
+    monkeypatch.setattr(G.gstate, "AutomodState.is_quarantine_budget_available",
+                        lambda self: True, raising=False)
+    monkeypatch.setattr(g, "collect", lambda: {
+        "now": time.time(), "supervisord": "ok", "procs": {}, "probes": {}})
+    monkeypatch.setattr(g, "evaluate_liveness",
+                        lambda snap: (True, "agent-tts: STOPPED, last stop 900s ago"))
+    rolled: list = []
+    def _record_rollback(*a):
+        rolled.append(a)
+        return True
+
+    monkeypatch.setattr(g, "do_rollback", _record_rollback)
+    g.notifier = type("N", (), {"alert": lambda *a, **k: None,
+                                "resolve": lambda *a, **k: None})()
+
+    out = g.tick()
+
+    assert rolled == [], f"a voice outage was blamed on the tree: {rolled}"
+    assert sup.starts() == ["agent-tts"], sup.snapshot()
+    assert out == "recovered", (
+        f"`_recover_infra` returns `recovered` or `needs_human`, so any other value "
+        f"means a restart whose outcome nobody recorded: {out!r}")
+
+
+# ── #2256 clause 5: the witness bytes behind the premise, re-derived ───────
+#
+# `tests/fixtures/supervisord.log` is supervisord's own log as of 2026-10-05
+# 15:08:12 — the file `~/lloyd-data/logs/services/supervisord.log`, truncated at line
+# 2164 so that every line number the item cites resolves HERE to the line it cites,
+# and the live file's later growth cannot shift them. The durable copy is the vault's
+# `backlog/data/supervisord.log`; this one is byte-identical, and the digest is
+# compared rather than quoted whenever the vault is reachable — the gate runs with
+# HOME at the round home, where `~/obsidian` does not exist, so a node that only read
+# the vault would pin nothing at all.
+
+WITNESS = Path(__file__).resolve().parent / "fixtures" / "supervisord.log"
+
+#: sha256 of the witness BYTES — a content digest, deliberately NOT a git object id,
+#: so `git cat-file -t` on this value fails and that is the correct answer: nothing in
+#: this repo is identified by it, and nothing should be. It is pinned because the
+#: node below compares the vault's durable copy against it, and a comparison whose
+#: expected side is only ever computed at run time cannot tell a reader, after the
+#: fact, which bytes were checked. Re-derive: `sha256sum tests/fixtures/supervisord.log`.
+WITNESS_SHA256 = ("3d76da99700b111bbbf0c4dd95b2dfa9"
+                  "f2864cae28faa1e8730286f73f07f084")
+
+
+def test_the_witness_log_still_shows_the_stop_with_no_spawn_after_it():
+    """Clause 5. `wc -l < backlog/data/supervisord.log` answers 2164, and this node
+    counts the same thing the same way (`\\n` characters — 2164 of them, the last one
+    terminating line 2164) on bytes committed to this repo — then re-derives the three facts the item
+    quotes from those bytes rather than restating them."""
+    assert WITNESS.is_file(), f"{WITNESS} is missing; the witness has to be committed"
+    raw = WITNESS.read_bytes()
+    text = raw.decode()
+    lines = text.split("\n")
+    assert len(lines) - 1 == 2164, (
+        f"{WITNESS.name} carries {text.count(chr(10))} newlines; `wc -l` on the "
+        f"witness answers 2164")
+
+    # The stop, at the line number the item cites.
+    stopped = lines[2163]
+    assert "2026-10-05 15:08:12,145 WARN stopped: agent-tts (terminated by SIGTERM)" \
+        in stopped, f"line 2164 is not the stop the item cites: {stopped!r}"
+
+    # Nothing spawned it afterwards: the stop is unowned, which is what
+    # `autorestart=true` does not cover.
+    after = lines[2164:]
+    assert not [ln for ln in after
+                if "spawned: 'agent-tts'" in ln], (
+        "a `spawned:` did follow the 15:08:12 stop, so the premise is false and "
+        "supervisord did bring it back")
+
+    # The control the item names: the 2026-10-04 stop at :2089-2092 IS a
+    # stop→spawn restart pair, so the absence above is the difference, not the
+    # log's general shape.
+    pair = "\n".join(lines[2088:2092])
+    assert "waiting for agent-tts to stop" in pair and "WARN stopped: agent-tts" in pair \
+        and "spawned: 'agent-tts' with pid 1034411" in pair \
+        and "entered RUNNING state" in pair, (
+        f"lines 2089-2092 are not the 10-04 restart pair: {pair!r}")
+
+    digest = hashlib.sha256(raw).hexdigest()
+    assert digest == WITNESS_SHA256, (
+        f"the committed witness bytes are no longer the ones the item's figures were "
+        f"re-derived from: sha256 {digest} (a content digest, not a commit)")
+
+    vault = Path.home() / "obsidian" / "backlog" / "data" / "supervisord.log"
+    if vault.is_file():
+        assert hashlib.sha256(vault.read_bytes()).hexdigest() == digest, (
+            "the committed witness and the vault's durable copy have diverged")
+
+
+def test_the_health_vocabulary_is_per_endpoint(monkeypatch):
+    """The seam `probes.ok_statuses_for` opened, crossed with the real verdict.
+
+    The synthesiser answers `{"status": "healthy"}`; the backend and the aggregator
+    answer `"ok"`. Accepting both words everywhere would have widened the `ok` the
+    rollback decision reads from those two, so the accept-set is chosen per URL.
+    Asserted through `probes.probe` over sockets this node serves rather than the
+    table alone: the table is the design, the verdict is what the guardian consumes.
+    """
+    import probes
+
+    def serve(body: str) -> str:
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+
+        def loop():
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            with conn:
+                conn.recv(65536)
+                conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json"
+                             b"\r\nContent-Length: " + str(len(body)).encode()
+                             + b"\r\n\r\n" + body.encode())
+            srv.close()
+
+        threading.Thread(target=loop, daemon=True).start()
+        return f"http://127.0.0.1:{port}/health"
+
+    tts_url = serve('{"status": "healthy"}')
+    other_url = serve('{"status": "healthy"}')      # an endpoint speaking TTS's word
+    monkeypatch.setattr(probes.policy, "TTS_HEALTH_URL", tts_url)
+
+    assert probes.probe(tts_url, 2.0)["ok"] is True, (
+        "the synthesiser's own vocabulary has to count as healthy for the synthesiser")
+    assert probes.probe(other_url, 2.0)["ok"] is False, (
+        "200 + `healthy` must NOT read healthy to an endpoint whose word is `ok`: its "
+        "probe verdict is an input to the rollback decision")
+    assert probes.ok_statuses_for(tts_url) == probes.HEALTHY_OK_STATUSES
+    assert probes.ok_statuses_for("http://127.0.0.1:8080/health") == probes.OK_STATUSES
