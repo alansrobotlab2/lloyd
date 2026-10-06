@@ -124,6 +124,15 @@ def rs(tmp_path, monkeypatch):
         # archive gzips land beside it, so redirecting this one path redirects the
         # whole store — there is no second root to list.
         ("PROVENANCE_JOURNAL", "supply-chain/provenance.jsonl", False),
+        # Store 15, the spoken-turn latency rows (#2273). A FILE, not created: an
+        # absent store is the state of a box that has not spoken yet, and the two
+        # clauses this store is pinned by are that the sweep CREATES no file where none
+        # existed (`test_the_turn_store_is_created_by_the_writer_never_by_the_sweep`)
+        # and that it prunes the file the WRITER writes. The archives land beside it, so
+        # this one path redirects the whole store — `turns_path()` is the writer's own
+        # resolver, and `VOICE_TURNS_FILE` is built from it, so the two cannot name
+        # different files.
+        ("VOICE_TURNS_FILE", "voice/turns.jsonl", False),
     ):
         if hasattr(mod, attr):
             monkeypatch.setattr(mod, attr, tmp_path / sub)
@@ -936,7 +945,8 @@ def test_the_one_resolution_owns_every_directory_the_sweep_touches(tmp_path, mon
              and isinstance(value, Path)}
     assert set(swept) == {"AUTONOMY_RUNS_DIR", "AUTONOMY_TASKS_DIR", "CANDIDATES_DIR",
                           "SESSIONS_DIR", "TASKS_DIR", "TRANSCRIPT_SCRATCH_DIR",
-                          "GROUNDSKEEPER_QUEUE_FILE", "GROUNDSKEEPER_WRITES_FILE"}, \
+                          "GROUNDSKEEPER_QUEUE_FILE", "GROUNDSKEEPER_WRITES_FILE",
+                          "VOICE_TURNS_FILE"}, \
         f"the sweep gained or lost a store dir; update this set deliberately: {sorted(swept)}"
     for name, value in sorted(swept.items()):
         assert value.is_relative_to(root), f"{name} = {value} is outside the root {root}"
@@ -1763,9 +1773,9 @@ def _assert_table_rows_match_report(rows: dict[str, str], report: list[str],
             f"{sorted(rows)}")
 
 
-def test_the_skill_says_fourteen_stores_and_its_table_has_a_row_per_report_line(
+def test_the_skill_says_fifteen_stores_and_its_table_has_a_row_per_report_line(
         rs, _store_report):
-    """Clause 4: `skills/retention-sweep/SKILL.md` says fourteen, and its table's rows
+    """Clause 4: `skills/retention-sweep/SKILL.md` says fifteen, and its table's rows
     are the report's lines.
 
     The table is the operator's list of what the weekly sweep bounds, and it said nine
@@ -1777,7 +1787,7 @@ def test_the_skill_says_fourteen_stores_and_its_table_has_a_row_per_report_line(
     It went stale anyway, in the direction this node was blind to: #1644 added two
     stores and the prose stayed at ten for nine commits, because the count of report
     lines came from the suffix selector that could not see them (`#1835`). The report
-    side of the comparison is now the `_store_report` fixture — the fourteen lines
+    side of the comparison is now the `_store_report` fixture — the fifteen lines
     `main()` prints with all three automod rungs in play — so this node reads one
     measurement, not two.
     """
@@ -1790,11 +1800,11 @@ def test_the_skill_says_fourteen_stores_and_its_table_has_a_row_per_report_line(
     rows = _skill_table_rows(text)
 
     report = _store_report
-    assert len(report) == 14, f"the sweep prints {len(report)} store lines: {report}"
+    assert len(report) == 15, f"the sweep prints {len(report)} store lines: {report}"
     _assert_table_rows_match_report(rows, report, "skills/retention-sweep/SKILL.md")
-    assert "fourteen unbounded-growth stores" in text, (
-        "the skill's description states a store count other than fourteen")
-    assert "fourteen in all" in text, "the skill's body states a store count other than fourteen"
+    assert "fifteen unbounded-growth stores" in text, (
+        "the skill's description states a store count other than fifteen")
+    assert "fifteen in all" in text, "the skill's body states a store count other than fifteen"
 
     pair_row = next((ln for store, ln in rows.items()
                      if "groundskeeper-queue.json" in store), None)
@@ -1856,8 +1866,8 @@ def test_the_skill_says_fourteen_stores_and_its_table_has_a_row_per_report_line(
     # without these two rows in it and has to be able to tell that from a broken sweep.
     assert "automod stores: REFUSED" in flat, (
         "the skill never says what a non-production run prints in place of the two rows")
-    assert "eleven store lines plus one refusal line" in flat, (
-        "the skill does not say that a refusal run reports eleven stores by design")
+    assert "twelve store lines plus one refusal line" in flat, (
+        "the skill does not say that a refusal run reports twelve stores by design")
 
 
 #: A row shaped exactly like the table's own, naming a path the sweep does not print a
@@ -1917,7 +1927,7 @@ def test_the_table_guard_refuses_a_row_short_and_a_row_long(rs, _store_report):
         _assert_table_rows_match_report(_skill_table_rows(dropped), report,
                                         "fixture: store fourteen's row deleted")
     # The message names the store that lost its row, not merely the two counts: with
-    # fourteen lines and thirteen rows the counts cannot say WHICH store drifted, and the
+    # fifteen lines and fourteen rows the counts cannot say WHICH store drifted, and the
     # reader has to be able to answer that from the failure alone.
     assert "provenance journal" in str(short.value), (
         f"the refusal does not name the printed line left without a row: {short.value}")
@@ -1964,7 +1974,7 @@ _STORE_ORDER_ANCHOR = "in this order:"
 _STORE_ORDER_TAIL = "Report all"
 _STORE_COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
                       "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
-                      "twelve": 12, "thirteen": 13, "fourteen": 14, "1": 1, "2": 2, "3": 3, "4": 4,
+                      "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "1": 1, "2": 2, "3": 3, "4": 4,
                       "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10, "11": 11,
                       "12": 12, "13": 13}
 
@@ -2008,7 +2018,7 @@ def _store_report_lines(out: str) -> list[str]:
 
 def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
         rs, _store_report):
-    """#1835 clause 1: the fourteen lines `main()` prints are fourteen stores, and the
+    """#1835 clause 1: the fifteen lines `main()` prints are fifteen stores, and the
     three the loop leaves outside the data root are among them.
 
     This is the acceptance check itself, run against the real `main()`: the count a
@@ -2018,9 +2028,9 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
     twelve lines and the guard said ten for nine commits, agreeing with stale prose
     rather than with the script.
     """
-    assert len(_store_report) == 14, (
-        f"the sweep prints {len(_store_report)} store lines, not the fourteen its report "
-        f"has had since #2225 added the provenance journal: {_store_report}")
+    assert len(_store_report) == 15, (
+        f"the sweep prints {len(_store_report)} store lines, not the fifteen its report "
+        f"has had since #2273 added the spoken-turn store: {_store_report}")
 
     printed = [ln.split(":")[0] for ln in _store_report]
     dirs_line = f"~/lloyd-work round dirs >{rs.WORKTREE_DIR_MAX_AGE_DAYS}d"
@@ -2030,22 +2040,26 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
     assert branch_line in printed, f"the round-branch store is not in the report: {printed}"
 
     # The mechanism of the drift, pinned rather than narrated: the lines the OLD suffix
-    # rule could not see are exactly these four. `len(report) == 14` alone would still
+    # rule could not see are exactly these five. `len(report) == 15` alone would still
     # pass if somebody reintroduced a suffix test alongside a wording change, and it is
     # the coincidence of a store line's wording with a store line's identity that made the
     # count unreadable in the first place. The third is #1975's ledger line, which ends in
-    # a byte count and so is invisible to that selector too — the set grows when a store
-    # is added, which is the point of naming it rather than counting it.
+    # a byte count and so is invisible to that selector too, and #2273's turn-row line
+    # joins it for the same reason — the set grows when a store is added, which is the
+    # point of naming it rather than counting it.
     ledger_line = "promotions ledger"
     assert ledger_line in printed, f"the promotion ledger is not in the report: {printed}"
     prov_line = f"provenance journal >{rs.PROVENANCE_ARCHIVE_AGE_DAYS}d"
     assert prov_line in printed, f"the provenance journal is not in the report: {printed}"
+    turn_line = f"voice turn rows >{rs.VOICE_TURNS_MAX_AGE_DAYS}d"
+    assert turn_line in printed, f"the spoken-turn store is not in the report: {printed}"
     invisible = [ln for ln in _store_report
                  if not ln.endswith(("freed", "candidate", "removed (keep last 200)"))]
     assert sorted(ln.split(":")[0] for ln in invisible) == sorted([dirs_line,
                                                                   branch_line,
                                                                   ledger_line,
-                                                                  prov_line]), (
+                                                                  prov_line,
+                                                                  turn_line]), (
         "these store lines are invisible to an endswith(('freed','candidate',"
         "'removed (keep last 200)')) rule, which is how #1835's drift happened: "
         f"{[ln.split(':')[0] for ln in invisible]}")
@@ -2088,16 +2102,16 @@ def test_an_indented_report_line_is_a_store_whatever_it_ends_in():
         f"the rule counted a line that is not a store: {report}")
 
 
-def test_a_run_outside_the_production_checkout_reports_eleven_stores_and_one_refusal_line(
+def test_a_run_outside_the_production_checkout_reports_twelve_stores_and_one_refusal_line(
         rs, monkeypatch, capsys):
     """The other direction of the same rule: a refused rung prints one refusal line, and
     that line is not a store.
 
     Outside the production checkout all three automod rungs collapse into
-    `  automod stores: REFUSED: …`, so a reader holding that output sees eleven store
-    lines while the skill says fourteen — and SKILL.md now says so in those words. This
+    `  automod stores: REFUSED: …`, so a reader holding that output sees twelve store
+    lines while the skill says fifteen — and SKILL.md now says so in those words. This
     pins the fact that sentence describes, so the note cannot rot into the reassuring half
-    (just "fourteen", which makes every sandbox run look like it lost three stores) or the
+    (just "fifteen", which makes every sandbox run look like it lost three stores) or the
     alarming half ("the sweep is broken"). `test_an_automod_rung_refuses_outside_the_production_checkout`
     owns the predicate itself and the `NOT_PRODUCTION_EXIT` half; what is new here is the
     COUNT, which is the number a report is written from.
@@ -2106,13 +2120,13 @@ def test_a_run_outside_the_production_checkout_reports_eleven_stores_and_one_ref
     the predicate's original reason (a worktree shares the live repo's refs) does not
     literally cover it, but a tree that is not the live checkout has no business deciding
     to compress the loop's own audit trail, and one guard that covers all three stores is
-    the rule. A refused run therefore still prints eleven lines plus one refusal line, not
-    twelve.
+    the rule. A refused run therefore still prints twelve lines plus one refusal line, not
+    thirteen.
     """
     out = _dry_run_report(rs, monkeypatch, capsys, refused=True)
     report = _store_report_lines(out)
 
-    assert len(report) == 11, f"a refusal run should report eleven stores: {report}"
+    assert len(report) == 12, f"a refusal run should report twelve stores: {report}"
     refusal = [ln.strip() for ln in out.splitlines()
                if ln.strip().startswith("automod stores:")]
     assert len(refusal) == 1, f"expected one automod refusal line, got: {refusal}"
@@ -2241,7 +2255,7 @@ def _dry_run_report(rs, monkeypatch, capsys, *, refused: bool = False) -> str:
     all three automod rungs because a round's worktree shares the live repository's refs.
     The plain `rs` fixture already answers that question *yes* — deliberately, over
     redirected constants, so a node about `sessions/*.json` does not end on exit 2 for a
-    branch delete it never asked about — which is what lets the fourteen lines below be
+    branch delete it never asked about — which is what lets the fifteen lines below be
     produced from `tmp_path` alone: `AUTOMOD_WORK_ROOT` is an empty directory,
     `AUTOMOD_REPO` an empty repository, and the ledger trio absent files, so all three
     rungs are reading a machine that has never run the loop, and the ledger rung has no
@@ -2257,7 +2271,7 @@ def _dry_run_report(rs, monkeypatch, capsys, *, refused: bool = False) -> str:
 
 @pytest.fixture()
 def _store_report(rs, monkeypatch, capsys) -> list[str]:
-    """The store lines production `main()` prints: twelve, both automod rungs among them.
+    """The store lines production `main()` prints: thirteen, both automod rungs among them.
 
     The two stores #1644 added print only where a run is allowed to touch them, so the
     count the skill table and the task description are compared against has to come from
@@ -2310,16 +2324,19 @@ def test_the_task_description_names_every_store_the_sweep_prints(
 
     items = _assert_description_names_the_reported_stores(description, _store_report,
                                                           "autonomy/79-retention-sweep.md")
-    assert len(items) == len(_store_report) == 14, (
+    assert len(items) == len(_store_report) == 15, (
         f"the guard compared {len(items)} items against {len(_store_report)} lines")
 
     # Clause 5 of #1835: the two stores the self-modification loop leaves behind it are
     # enumerated LAST because they print last, and each item carries the words the
     # printed line uses for it — `~/lloyd-work` + `dirs`, `automod/*` + `branches` —
-    # since the guard matches item i against the i-th line by first and last word.
-    assert "~/lloyd-work" in items[11][1] and "dirs" in items[11][1], items[11]
-    assert "automod/*" in items[12][1] and "branches" in items[12][1], items[12]
-    assert items[10][0] == 11 and items[11][0] == 12, items[10:]
+    # since the guard matches item i against the i-th line by first and last word. They
+    # sit at items 13 and 14 (0-based 12 and 13) because #2273's turn-row store joined
+    # the data-root group as store 12, ahead of everything the loop leaves behind it.
+    assert "voice" in items[11][1] and "rows" in items[11][1], items[11]
+    assert "~/lloyd-work" in items[12][1] and "dirs" in items[12][1], items[12]
+    assert "automod/*" in items[13][1] and "branches" in items[13][1], items[13]
+    assert items[11][0] == 12 and items[12][0] == 13, items[11:]
 
     # Clause 2, on the tenth store's own terms: the groundskeeper pair sits where the
     # sweep prints it, between the session spill dirs and `workers.db runs`, and names
@@ -5806,3 +5823,251 @@ def test_the_committed_provenance_witness_reproduces_the_quoted_report(rs):
     assert out["bytes"] == len(raw), (
         "with every row past the window the byte count the line reports must be the whole "
         f"file: {out['bytes']} of {len(raw)}")
+
+
+
+# ── store 15: the spoken-turn latency rows (#2273) ──────────────────────────
+#
+# `<data root>/voice/turns.jsonl` is the store #2273 created so a voice latency claim
+# has a denominator: one row per spoken reply, appended by the LiveKit worker through
+# `app.voice_turns.append_turn`, read whole by `scripts/maintenance/voice_turn_trend.py`
+# every night. Two things make it this sweep's problem rather than a file: a reader that
+# parses the entire history to answer a question about the last stretch of it, and a row
+# that must be aged by its OWN stamp, because mtime on an append-only file is the age of
+# the newest turn in it and would make every row as young as tonight's.
+
+#: The measured fill rate, from `~/lloyd-data/logs/lloyd-agent-worker.log` on
+#: 2026-10-06: 8 `[latency]` lines over 2026-09-22 → 2026-10-05 (13 days). The trend's
+#: verdict floor is 30 rows, so this is the number the window is measured against — see
+#: `test_the_window_outlives_the_readers_floor_at_the_measured_fill_rate`.
+_TURNS_ROWS_PER_DAY = 8 / 13
+
+
+def _turn_row(days_ago: float, *, turn_id: str = "a1b2c3d4e5f6", label: str = "voice",
+              epoch="default", at="default"):
+    """One row as `app.voice_turns.turn_row()` builds it from a timeline.
+
+    The field set is the worker's (`ReplySpeaker._turn_row`), assembled here without
+    importing LiveKit. The sweep only reads `epoch` and `at`, but the age it reads has to
+    be the age the real writer emits — otherwise a row-format change turns this store's
+    window into a no-op that still prints a number.
+    """
+    row = {"v": 1, "turn_id": turn_id, "room": "lloyd-20261006_063000",
+           "interrupted": False, "queued_behind": False, "tools_ran": True,
+           "spoken_chars": 212, "capped": False, "label": label,
+           "stages": {"speech_end": 0.0, "vad_close": 0.137, "asr_done": 0.274,
+                      "inject_sent": 0.411, "first_delta": 0.548,
+                      "first_clause": 0.685, "first_tts_byte": 0.822,
+                      "first_pushed": 0.959, "first_played": 0.05},
+           "eos_to_audio": 1.009, "max_gap_s": 6.0}
+    if epoch == "default":
+        row["epoch"] = time.time() - days_ago * 86400
+    elif epoch is not None:
+        row["epoch"] = epoch
+    if at == "default":
+        row["at"] = "2026-10-06T06:30:00.500Z"
+    elif at is not None:
+        row["at"] = at
+    return row
+
+
+def _seed_turn_rows(path: Path, rows) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+
+def _gz_lines(path: Path) -> list[str]:
+    return gzip.open(path, "rt").read().splitlines()
+
+
+def _turn_line(stdout: str) -> str:
+    lines = [ln for ln in stdout.splitlines() if "voice turn rows" in ln]
+    assert len(lines) == 1, f"expected exactly one turn-store line, got {lines}"
+    return lines[0]
+
+
+def test_turn_rows_past_the_window_archive_into_their_month_and_younger_keep_their_bytes(
+        rs):
+    path = rs.VOICE_TURNS_FILE
+    old1, old2, fresh = _turn_row(120), _turn_row(95), _turn_row(1)
+    _seed_turn_rows(path, [old1, old2, fresh])
+    before = len(path.read_bytes())
+    m1 = time.strftime("%Y%m", time.gmtime(old1["epoch"]))
+    m2 = time.strftime("%Y%m", time.gmtime(old2["epoch"]))
+
+    out = rs.sweep_voice_turns(True, time.time(), path=path)
+    assert out["moved"] == 2 and out["archived"] == 2 and out["undated"] == 0
+    assert out["before"] == before and out["after"] == len(json.dumps(fresh) + "\n"), \
+        "the line reports both sizes, so an operator can see what the pass cost"
+    assert out["bytes"] == len(json.dumps(old1)) + len(json.dumps(old2)) + 2
+    # The rows leave the live file and arrive in the archive byte for byte, bucketed by
+    # the month of their OWN stamps.
+    assert [json.loads(ln) for ln in _gz_lines(path.parent / f"turns-archive-{m1}.jsonl.gz")] == [old1]
+    assert [json.loads(ln) for ln in _gz_lines(path.parent / f"turns-archive-{m2}.jsonl.gz")] == [old2]
+    assert path.read_text(encoding="utf-8") == json.dumps(fresh) + "\n"
+
+
+def test_a_dry_run_reports_the_turn_store_and_leaves_every_byte(rs, capsys, monkeypatch):
+    path = rs.VOICE_TURNS_FILE
+    _seed_turn_rows(path, [_turn_row(120), _turn_row(1)])
+    before = path.read_bytes()
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py"])
+    assert rs.main() == 0
+    assert "1 would archive" in _turn_line(capsys.readouterr().out)
+    assert path.read_bytes() == before
+    assert not list(path.parent.glob("turns-archive-*.jsonl.gz")), \
+        "a dry run archives nothing: no row has left the box, so none is gone"
+
+
+def test_the_turn_store_is_created_by_the_writer_never_by_the_sweep(rs, capsys,
+                                                                    monkeypatch):
+    # An absent store is a box that has not spoken yet — `voice_turns.read_rows` reads it
+    # as `0 row(s)`, `append_turn` mkdirs on the first row — and a sweep that "helpfully"
+    # created one would make a never-spoken machine look like an empty-but-used store.
+    assert not rs.VOICE_TURNS_FILE.exists()
+    for argv in (["retention-sweep.py"], ["retention-sweep.py", "--apply"]):
+        monkeypatch.setattr("sys.argv", argv)
+        assert rs.main() == 0
+        assert "no store yet" in _turn_line(capsys.readouterr().out), argv
+        assert not rs.VOICE_TURNS_FILE.exists(), argv
+
+
+def test_an_undated_turn_line_is_kept_and_counted_apart(rs):
+    # A write killed mid-append leaves exactly this line. Such a row has no age, and a
+    # delete justified by a field the row does not have is a delete of a row nobody can
+    # prove was old.
+    path = rs.VOICE_TURNS_FILE
+    old = _turn_row(200)
+    _seed_turn_rows(path, [old, '{"v":1,"st', "[1,2,3]"])
+    out = rs.sweep_voice_turns(True, time.time(), path=path)
+    assert out["moved"] == 1 and out["undated"] == 2
+    live = path.read_text(encoding="utf-8")
+    assert json.dumps(old) not in live
+    assert '"st' in live and "[1,2,3]" in live
+
+
+def test_no_archive_is_written_when_every_turn_row_is_younger(rs):
+    path = rs.VOICE_TURNS_FILE
+    young = _turn_row(1)
+    _seed_turn_rows(path, [young])
+    out = rs.sweep_voice_turns(True, time.time(), path=path)
+    assert out["moved"] == 0 and out["archived"] == 0
+    assert path.read_bytes() == (json.dumps(young) + "\n").encode(), \
+        "a young row's bytes are not rewritten by a pass that archives nothing"
+    assert not list(path.parent.glob("turns-archive-*"))
+
+
+def test_a_turn_row_stamped_only_in_iso_is_aged_by_that_stamp(rs):
+    import datetime as dt
+    path = rs.VOICE_TURNS_FILE
+    old_at = (dt.datetime.now(dt.timezone.utc)
+              - dt.timedelta(days=120)).isoformat(timespec="seconds").replace("+00:00", "Z")
+    old = _turn_row(0, epoch=None, at=old_at)
+    bogus = _turn_row(0, epoch=None, at="the night of the incident")
+    _seed_turn_rows(path, [old, bogus])
+
+    out = rs.sweep_voice_turns(True, time.time(), path=path)
+    assert out["moved"] == 1, "the ISO half of the stamp is a real age"
+    assert out["undated"] == 1, "an unparseable stamp is no age, and the row is kept"
+    assert json.dumps(bogus) in path.read_text(encoding="utf-8")
+
+
+def test_the_sweep_prints_a_turn_line_in_both_modes(rs, capsys, monkeypatch):
+    path = rs.VOICE_TURNS_FILE
+    _seed_turn_rows(path, [_turn_row(120), _turn_row(1)])
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py"])
+    assert rs.main() == 0
+    dry = _turn_line(capsys.readouterr().out)
+    assert f">{rs.VOICE_TURNS_MAX_AGE_DAYS}d" in dry and "1 would archive" in dry
+    assert "bytes live" in dry
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py", "--apply"])
+    assert rs.main() == 0
+    applied = _turn_line(capsys.readouterr().out)
+    assert "1 archived" in applied and "would" not in applied
+
+
+def test_the_window_outlives_the_readers_floor_at_the_measured_fill_rate(rs):
+    # Why this store is NOT on the file stores' uniform 30 days. The reader withholds a
+    # verdict below its own floor, so a window that caps the file under that number
+    # bounds the store into a state where it can never be graded: a green report line
+    # over a metric that is now permanently `abstain`.
+    spec = importlib.util.spec_from_file_location(
+        "voice_turn_trend",
+        Path(__file__).resolve().parents[1] / "scripts" / "maintenance" / "voice_turn_trend.py")
+    trend = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(trend)
+
+    assert rs.VOICE_TURNS_MAX_AGE_DAYS == 90
+    assert trend.MIN_ROWS_FOR_VERDICT == 30
+    held = rs.VOICE_TURNS_MAX_AGE_DAYS * _TURNS_ROWS_PER_DAY
+    assert held >= trend.MIN_ROWS_FOR_VERDICT, (
+        f"a {rs.VOICE_TURNS_MAX_AGE_DAYS}-day window at the measured "
+        f"{_TURNS_ROWS_PER_DAY:.2f} rows/day holds {held:.0f} rows — under the "
+        f"{trend.MIN_ROWS_FOR_VERDICT} the reader needs, so the bound would starve it")
+    assert rs.VOICE_TURNS_MAX_AGE_DAYS < 365, "and it is still a bound"
+
+
+def test_the_sweep_bounds_the_store_the_writer_writes_into(rs):
+    # The one coupling that decides whether this store is bounded at all. Two spellings
+    # of a path is how #1444 happened: a writer moved the corpus, the readers and the
+    # bound stayed where they were, and the store read as bounded while nothing pruned
+    # it. So the constant is BUILT FROM the writer's own resolver, not restated here.
+    from app import voice_turns
+    src = (Path(__file__).resolve().parents[1] / "scripts" / "groundskeeper"
+           / "retention-sweep.py").read_text(encoding="utf-8")
+    assert "VOICE_TURNS_FILE = _VOICE_TURNS_MODULE.turns_path(DATA_ROOT)" in src, \
+        "the store is imported from the module that writes it, not spelled out here"
+    assert rs._VOICE_TURNS_MODULE is voice_turns, \
+        "the sweep and the writer hold one module, so one edit moves both"
+    assert voice_turns.TURNS_RELATIVE == Path("voice") / "turns.jsonl"
+    # Fed the same root, the writer's resolver and the fixture's redirect agree exactly:
+    # the sweep's constant is `turns_path(DATA_ROOT)`, so this is the layout it prunes.
+    root = rs.VOICE_TURNS_FILE.parent.parent
+    assert voice_turns.turns_path(root) == rs.VOICE_TURNS_FILE
+
+
+def test_a_row_the_writer_appended_is_a_row_the_sweep_can_age(rs):
+    # End to end across the boundary the two programs actually share: the writer's own
+    # `append_turn` (its real signature, into the sweep's own path), then the sweeper's
+    # prune of what it wrote. A row format the sweeper cannot age would leave every other
+    # node in this file still passing.
+    from app import voice_turns
+    assert voice_turns.append_turn(_turn_row(120, turn_id="w1"),
+                                   path=rs.VOICE_TURNS_FILE) is True
+    assert voice_turns.append_turn(_turn_row(1, turn_id="w2"),
+                                   path=rs.VOICE_TURNS_FILE) is True
+    out = rs.sweep_voice_turns(True, time.time(), path=rs.VOICE_TURNS_FILE)
+    assert out["moved"] == 1 and out["undated"] == 0
+    kept = [json.loads(ln)["turn_id"]
+            for ln in rs.VOICE_TURNS_FILE.read_text(encoding="utf-8").splitlines()]
+    assert kept == ["w2"]
+    month = time.strftime("%Y%m", time.gmtime(time.time() - 120 * 86400))
+    archived = [json.loads(ln)["turn_id"] for ln in _gz_lines(
+        rs.VOICE_TURNS_FILE.parent / f"turns-archive-{month}.jsonl.gz")]
+    assert archived == ["w1"]
+
+
+def test_a_turn_row_written_during_the_archive_is_never_frozen_out(rs):
+    path = rs.VOICE_TURNS_FILE
+    _seed_turn_rows(path, [_turn_row(120)])
+    before = path.read_bytes()
+
+    def append_during_build(attempt=None):
+        path.write_bytes(before + (json.dumps(_turn_row(0, turn_id="LIVE"))
+                                 + "\n").encode())
+
+    assert rs.sweep_voice_turns(True, time.time(), path=path,
+                                on_attempt=append_during_build)["refused"] is None
+    assert [json.loads(ln)["turn_id"]
+            for ln in path.read_text(encoding="utf-8").splitlines()] == ["LIVE"], \
+        "the turn spoken while the sweep ran must still be in the store"
+
+
+def test_a_turn_row_is_small_enough_that_the_window_bounds_what_it_claims(rs):
+    # The comment above store 15's constants says a row is ~600 bytes. The window's
+    # reasoning is about the parse every reader pays, not the bytes, but the size is what
+    # makes "this store is small" true, so it is re-derived here from a real row.
+    line = json.dumps(_turn_row(1), separators=(",", ":"), default=str)
+    assert 400 < len(line) < 900, len(line)
+    assert 365 * _TURNS_ROWS_PER_DAY * len(line) < 200_000, \
+        "unbounded, a year of rows is a parse every nightly run pays for"

@@ -143,6 +143,19 @@ the transcript scratch home from backlog #566:
     `state.append_event` appends and fsyncs under no lock and an unconditional rename
     would rename a live audit row out of existence.
 
+15. ~/lloyd-data/voice/turns.jsonl — the per-spoken-turn latency rows #2273 started
+    keeping: one row per spoken reply, appended by the LiveKit worker through
+    `app.voice_turns.append_turn`, read whole by `scripts/maintenance/voice_turn_trend.py`
+    on every run. ARCHIVE OUT into `turns-archive-<YYYYMM>.jsonl.gz` past the row's own
+    stamp (`epoch`, else `at` — never mtime, which on an append-only file is the age of
+    the newest turn), byte-for-byte and by store 14's routine, at
+    VOICE_TURNS_MAX_AGE_DAYS (90, NOT this file's uniform 30: the reader withholds a
+    verdict below 30 rows per population and the store fills at ~0.6 rows a day, so a
+    30-day window would bound it below the population it exists to measure). The path is
+    imported from `app.voice_turns`, the writer's own module, so the bound cannot drift
+    off the file. Undated lines (a write killed mid-append is exactly that) are kept and
+    counted apart. The file itself is never removed and never created.
+
 Stores 11, 12 and 13 are the three the loop leaves behind, and 13 is the one the other two
 read. None of the three is under `DATA_ROOT`, and store 12 is not even on the filesystem:
 it is the live repo's refs. That is the hazard the production-checkout guard exists for —
@@ -248,6 +261,15 @@ try:
     from app import data_root as _DATA_ROOT_MODULE
 except ModuleNotFoundError:  # pragma: no cover - same fallback as above
     import data_root as _DATA_ROOT_MODULE
+try:
+    # Store 15's layout, imported rather than restated: `app.voice_turns` is who owns
+    # where the spoken-turn rows live (the worker writes through it), so the file this
+    # rung prunes is the file the writer writes, by construction. Restating the path
+    # here is how a bounded store turns into an unbounded one — the window would apply
+    # to a file nothing opens, and the report line would still print a number.
+    from app import voice_turns as _VOICE_TURNS_MODULE
+except ModuleNotFoundError:  # pragma: no cover - same fallback as above
+    import voice_turns as _VOICE_TURNS_MODULE
 
 # The runtime data root — `app.paths.DATA_ROOT`'s three rules, read from the one
 # copy of them (#1415). It used to be restated here as
@@ -2187,6 +2209,175 @@ def _provenance_line(p: dict) -> str:
             f"{p['bytes']} B out)" + tail)
 
 
+# ── 15. spoken-turn latency rows (backlog #2273) ──────────────────────────────
+#
+# `<data root>/voice/turns.jsonl` is the store #2273 created so a voice latency claim
+# has a denominator. `agent-services/livekit_worker.py::ReplySpeaker._record_turn`
+# appends one row per spoken reply through `app.voice_turns.append_turn`, and
+# `scripts/maintenance/voice_turn_trend.py` opens the file and parses EVERY line on
+# every run — the same coupling that made the promotions ledger store 13 (#1975) and
+# the provenance journal store 14 (#2225) stores rather than files: a reader that
+# reads whole pays for all of history to answer a question about the last stretch of
+# it. The shape is copied from store 14 for that reason; the two differences are that
+# a turn row carries its age twice (`epoch` and `at`) and that the window is not 30.
+#
+# The volume, measured 2026-10-06 from `~/lloyd-data/logs/lloyd-agent-worker.log`
+# before a single row existed: 8 `[latency]` lines over the log's whole span
+# (2026-09-22 → 2026-10-05, 13 days), i.e. ~0.6 spoken replies a day. A row is ~600
+# bytes — 574 for the row `tests/test_retention_sweep.py` builds out of
+# `TurnTimeline.as_dict()` plus the eight identity fields the worker adds, twelve stage
+# deltas and two stamps — so the size is not what this window is for: the parse that
+# every reader pays for is.
+VOICE_TURNS_FILE = _VOICE_TURNS_MODULE.turns_path(DATA_ROOT)
+
+#: Window for the store, in days. NOT the 30 this sweep uses for its file stores, and
+#: the reason is the reader's own floor rather than a different appetite for history:
+#: `voice_turn_trend.py` refuses to grade a population below
+#: `MIN_ROWS_FOR_VERDICT` (30 rows), and at ~0.6 rows a day a 30-day horizon caps the
+#: file at ~18 rows — the bound would then guarantee the store can never hold a
+#: population the trend is allowed to verdict, and the nightly job would print
+#: `abstain` forever while a green report line said the store was bounded. 90 days
+#: holds ~54 rows and is the horizon this file already uses for the one store a person
+#: may come back to months later (`SESSION_ARCHIVE_AGE_DAYS`).
+#: `tests/test_retention_sweep.py` asserts the window against the trend's floor and
+#: the measured daily rate, so a re-windowed sweep that would starve the reader reddens
+#: a test instead of quietly making the trend unusable.
+VOICE_TURNS_MAX_AGE_DAYS = 90
+VOICE_TURNS_ARCHIVE_PREFIX = "turns-archive-"
+
+
+def _turn_row_seconds(line: bytes) -> float | None:
+    """The age a turn row carries in its own stamp, or None if it carries no readable one.
+
+    Read from the row, not the file: mtime is the age of the LAST spoken turn on a
+    file the writer only ever appends to, which would make every row in it as young as
+    tonight's. `epoch` (float seconds, written by `TurnTimeline.as_dict`) is the field
+    the writer controls and wins when it is a usable number; `at` (ISO-8601 with an
+    explicit `Z`) is the fallback through `_iso_seconds`, the same tolerant parser the
+    promotions ledger and the provenance journal age on, so one stamped instant means
+    one age in all three stores.
+
+    None — kept, counted apart, never aged — is returned for a line that is not JSON
+    (a write killed mid-append leaves exactly this), for a JSON value that is not an
+    object, and for an object with neither field. Such a row has no age, and a delete
+    justified by a field the row does not have is a delete of a row nobody can prove
+    was old.
+    """
+    try:
+        row = json.loads(line)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(row, dict):
+        return None
+    epoch = row.get("epoch")
+    if (isinstance(epoch, (int, float)) and not isinstance(epoch, bool)
+            and epoch > 0):
+        return float(epoch)
+    return _iso_seconds(row.get("at"))
+
+
+def sweep_voice_turns(apply: bool, now: float, *, path: Path | None = None,
+                      on_attempt=None) -> dict:
+    """Fold the turn rows past their own stamp into a month gzip beside the live file.
+
+    Store 14's routine with store 15's window, including the two things that make it
+    more than a `grep -v`: rows are copied VERBATIM into
+    `turns-archive-<YYYYMM>.jsonl.gz` and the live file is rewritten as the
+    concatenation of the kept lines, so a row taken out of the store comes back out of
+    the archive byte for byte — and a row is in the archive BEFORE it leaves the live
+    file, so a refused rewrite duplicates rather than loses. The append race is the
+    same shape (the worker appends under no lock while this builds its replacement), so
+    `_rewrite_live_ledger` grafts whatever landed since the snapshot and only renames
+    once the size agrees, and refuses rather than step over a turn someone just spoke.
+
+    It never removes the live file and never creates one: an absent store is a box that
+    has not spoken yet, `voice_turns.read_rows` reads it as `0 row(s)`, and
+    `append_turn` mkdirs on the first row. When every row is archived the file stays,
+    empty — the same reason store 14 never unlinks its journal.
+    """
+    path = Path(path) if path is not None else VOICE_TURNS_FILE
+    out = {"apply": apply, "present": False, "before": 0, "after": 0, "bytes": 0,
+           "moved": 0, "archived": 0, "undated": 0, "refused": None}
+    try:
+        raw = path.read_bytes()
+    except OSError:               # no store yet — nothing to bound, and none is created
+        return out
+    out["present"] = True
+    out["before"] = out["after"] = len(raw)
+
+    kept: list[bytes] = []
+    buckets: dict[str, list[bytes]] = {}
+    for line in raw.splitlines(keepends=True):
+        seconds = _turn_row_seconds(line)
+        if seconds is None:
+            out["undated"] += 1            # no age: kept, and named apart on the report
+            kept.append(line)
+            continue
+        if now - seconds <= VOICE_TURNS_MAX_AGE_DAYS * 86400:
+            kept.append(line)
+            continue
+        buckets.setdefault(time.strftime("%Y%m", time.gmtime(seconds)), []).append(line)
+
+    out["moved"] = sum(len(lines) for lines in buckets.values())
+    out["bytes"] = sum(len(ln) for lines in buckets.values() for ln in lines)
+    if not buckets or not apply:
+        # The count a dry run prints is the count the run would write, so the numbers
+        # an operator approves `--apply` from and the numbers the apply prints differ
+        # in the verb alone.
+        return out
+
+    def target_for(month: str) -> Path:
+        return path.parent / f"{VOICE_TURNS_ARCHIVE_PREFIX}{month}.jsonl.gz"
+
+    def read_size() -> int:
+        return len(path.read_bytes()) if path.is_file() else -1
+
+    try:
+        for month, lines in buckets.items():
+            _archive_append(target_for(month), lines)
+    except OSError as exc:
+        out["refused"] = (f"archive append failed ({type(exc).__name__}: {exc}); "
+                          "live turn file intact")
+        return out
+
+    # The snapshot's OWN end (`len(raw)`), not the file's size now — see the same
+    # comment in `sweep_provenance_journal`: a re-read here moves the graft point past
+    # any row appended during the archive loop and loses it from both files.
+    settled, refusal = _rewrite_live_ledger(path, b"".join(kept), len(raw),
+                                           on_attempt=on_attempt, noun="turn file")
+    if not settled:
+        out["refused"] = refusal
+        return out
+    out["after"] = read_size()
+    out["archived"] = out["moved"]
+    return out
+
+
+def _voice_turns_line(p: dict) -> str:
+    """One store line, and one number per mode: what would move, or what did.
+
+    Shaped like the provenance line beside it: an absent store says so rather than
+    printing 0 bytes (a box that has never spoken and a box whose rows all left are
+    different facts), a refusal says what is intact, and the `undated` tail is its own
+    bucket — never folded into the archived count, never hidden behind a 0.
+    """
+    label = f"  voice turn rows >{VOICE_TURNS_MAX_AGE_DAYS}d"
+    tail = ("" if not p["undated"] else
+            f" — {p['undated']} undated line(s) kept (no readable stamp)")
+    if not p["present"]:
+        return f"{label}: no store yet — nothing to bound"
+    if p["refused"]:
+        return f"{label}: REFUSED ({p['refused']}) — live turn file intact"
+    verb = "would archive" if not p["apply"] else "archived"
+    if p["moved"] == 0:
+        return f"{label}: 0 {verb} ({p['before']} bytes live)" + tail
+    if not p["apply"]:
+        return (f"{label}: {p['moved']} {verb} ({p['before']} bytes live, "
+                f"{p['bytes']} B of it)" + tail)
+    return (f"{label}: {p['moved']} {verb} ({p['before']} → {p['after']} bytes live, "
+            f"{p['bytes']} B out)" + tail)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--apply", action="store_true",
@@ -2236,6 +2427,7 @@ def main() -> int:
     wr_n, wr_b, wr_skip = sweep_worker_runs(args.apply, now)
     wq_n, wq_b, wq_skip = sweep_queue_rows(args.apply, now)
     prov = sweep_provenance_journal(args.apply, now)
+    turns = sweep_voice_turns(args.apply, now)
 
     print(f"  task logs >{TASK_LOG_MAX_AGE_DAYS}d:  "
           f"{logs_n} deleted, {logs_b / 1024:.0f} KiB freed")
@@ -2286,6 +2478,10 @@ def main() -> int:
     # both modes like every line above it — the operator approves `--apply` from these
     # numbers, and only the verb differs (#2225 clause 3).
     print(_provenance_line(prov))
+    # Fifteenth store, and the last of the data-root ones: same line shape in both
+    # modes, same `would archive` verb in the dry run an operator approves `--apply`
+    # from (#2273 clause 5).
+    print(_voice_turns_line(turns))
     # Last, so the two lines that can name a production ref are the last thing an
     # operator reads before deciding whether the run did what they asked.
     if refusal:

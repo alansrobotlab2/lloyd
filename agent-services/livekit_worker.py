@@ -81,6 +81,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 from app.ww_diag import diag_dir as _ww_diag_dir  # noqa: E402
+# The per-spoken-turn latency store, for the same #1444 reason: one module owns
+# where `<data root>/voice/turns.jsonl` is, and this unit is only one of its
+# three users. Imported as the module, not the function, so a test can swap
+# `append_turn` on the module and this unit sees the swap at call time.
+from app import voice_turns  # noqa: E402
 
 CONFIG_PATH = REPO_ROOT / "config.yaml"
 ENV_PATH = REPO_ROOT / ".env"
@@ -2982,6 +2987,11 @@ class ReplySpeaker:
         #: The turn is running (its `session` frame arrived), not queued.
         self.started = False
         self.queued_behind = False
+        #: At least one tool ran on this turn, and it stays true once set.
+        #: `tool_phase` is the opposite of a latch — the first text delta clears
+        #: it — and a row has to say whether the turn did tool work, because the
+        #: silence during that work is the stage #1163-class fixes move.
+        self.tools_ran = False
         self.tool_phase = False
         self.captions: list[str] = []
         self.caption_i = 0
@@ -3120,6 +3130,7 @@ class ReplySpeaker:
                 await self.say(clause)
             await self.filler("tool")
             self.tool_phase = True
+            self.tools_ran = True
             cap = str(data.get("summary") or "").strip()
             if cap:
                 self.captions.append(cap)
@@ -3157,14 +3168,58 @@ class ReplySpeaker:
             except RuntimeError:
                 pass
 
+    def _turn_row(self) -> dict:
+        """The kept half of the latency breakdown: this turn, as one row of the store.
+
+        `app/voice_turns.turn_row` owns the row's shape and where it goes; this method
+        hands it the worker's own state. `turn_id` is the join the item asked for and is
+        NOT invented here: the backend mints it in the `voice_turn` SSE head
+        (`app/routers/voice.py`) beside `queued_behind`, the worker stores both, and the
+        session's turn record carries the same id — so a row joins to a turn without a
+        timestamp fuzzy-match. `tools_ran` is a latch, not `tool_phase`, which the first
+        text delta has already cleared by the time the row is built.
+
+        One row per turn that spoke is the contract; `app/voice_turns.py`'s docstring is
+        the field list, and `tests/test_voice_duplex.py` pins it against the real store.
+        """
+        return voice_turns.turn_row(
+            self.tl, turn_id=self.turn_id, room=self.b.room_name,
+            interrupted=self.interrupted, queued_behind=self.queued_behind,
+            tools_ran=self.tools_ran, spoken_chars=self.said,
+            capped=self.capped)
+
+    def _record_turn(self) -> None:
+        """Append the row beside the log line, and never disturb the turn.
+
+        `append_turn` swallows its own failures; the try here is for the row's
+        *construction* and for a store module that raises from somewhere else —
+        either way the reply has already finished speaking, and the last thing
+        this path may do is propagate an exception into an asyncio task nobody
+        is awaiting, where it becomes a "Task exception was never retrieved"
+        and no turn at all is recorded.
+        """
+        try:
+            voice_turns.append_turn(self._turn_row())
+        except Exception as e:  # noqa: BLE001 — a measurement never cuts off a reply
+            LOG.warning("[%s] turn row not recorded: %s", self.b.room_name, e)
+
     async def _log_latency(self) -> None:
         """The breakdown, once the reply has finished playing (so the gap
-        figure covers all of it)."""
+        figure covers all of it): logged, and kept (#2273).
+
+        Both halves sit after the wait, and in this order. The `[latency]` line
+        stays because `scripts/voice/e2e_voice.py`'s `latency_lines()` greps it out
+        of a canary rig's `worker.log`, so the row is additive and the rig keeps
+        working unchanged; the row goes second because a row that never landed is
+        a missing row in the trend's N, and the log line is the half that has to
+        survive to tell the story either way.
+        """
         for _ in range(600):
             if not self.tts.is_speaking or self.interrupted:
                 break
             await asyncio.sleep(0.5)
         LOG.info("[%s][latency] %s %s", self.b.room_name, self.label, self.tl.summary())
+        self._record_turn()
 
 
 async def _iter_sse(resp):

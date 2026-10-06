@@ -1196,7 +1196,10 @@ RETENTION_NODES = (
     # tripwire holds is that each guard is PRESENT, undecorated and RUN by the gate's
     # own mark expr — not that its spelling is frozen. The second name needs no edit
     # for the same change, which is the difference between the two entries.
-    "test_the_skill_says_fourteen_stores_and_its_table_has_a_row_per_report_line",
+    # #2273's turn-row store is the fourth store line to move a name: `…fourteen_stores…`
+    # → `…fifteen_stores…`, for the same reason #2225 moved it once and the sentence above
+    # rules it.
+    "test_the_skill_says_fifteen_stores_and_its_table_has_a_row_per_report_line",
     "test_the_task_description_names_every_store_the_sweep_prints",
 )
 

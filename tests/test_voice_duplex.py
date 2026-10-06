@@ -876,3 +876,294 @@ def test_a_stop_word_stops_lloyd_for_his_speaker_only():
         asyncio.run(go())
         assert b.tts.interrupts == stopped, who
         assert b.http.cancels == (["t-old"] if stopped else []), who
+
+
+# ── the latency row: kept, not just logged (#2273) ──────────────────────────
+#
+# The breakdown above used to exist only as one LOG.info and a grep in
+# scripts/voice/e2e_voice.py, so every latency number this project ever quoted came
+# from a synthetic rig. These are the tests for the other half: the same turn leaves
+# a machine-readable row on disk, and the row's failures are never the reason a
+# reply stops being spoken.
+
+from app import voice_turns  # noqa: E402  the SAME module the worker writes through
+from voice.timeline import STAGES  # noqa: E402  the order the row must be in
+
+
+def _rows(store):
+    """The rows in `store`, malformed lines dropped — the reader's own view of it."""
+    return [row for _number, row in voice_turns.read_rows(store)]
+
+
+def test_the_row_shape_carries_every_stage_and_the_turn_in_both_clocks():
+    tl = TurnTimeline("voice")
+    base = 100.0
+    for i, stage in enumerate(["speech_end", "vad_close", "asr_done",
+                               "inject_sent", "first_delta", "first_clause"]):
+        tl.mark(stage, base + i * 0.1)
+    tl.audio_pushed(base + 0.7, base + 0.75, 0.1)     # the reply starts playing 750 ms in
+    tl.audio_pushed(base + 2.0, base + 2.0, 0.1)      # then the next frame goes out cold
+    # ...which is the tool-turn silence the gap figure exists to catch: 1.15 s between
+    # the end of the first frame's audio (base + 0.85) and the start of the second.
+    # `first_pushed`/`first_played` stay the FIRST frame's marks, so this does not
+    # move the total — the gap is the second thing the row carries about the audio.
+
+    row = voice_turns.turn_row(tl, room="lloyd-x", epoch=1759732200.5)
+    assert row["label"] == "voice"
+    # In STAGES order, restricted to the marks this turn has. `contributions()` omits
+    # the first recorded stage for want of an earlier one to measure from; a row that
+    # omitted it too would read as though `speech_end` never happened.
+    assert list(row["stages"]) == ["speech_end", "vad_close", "asr_done",
+                                   "inject_sent", "first_delta", "first_clause",
+                                   "first_pushed", "first_played"]
+    assert row["stages"]["speech_end"] == 0.0, "the origin costs nothing"
+    assert row["stages"]["vad_close"] == pytest.approx(0.1)
+    assert row["stages"]["first_pushed"] == pytest.approx(0.2)
+    assert row["stages"]["first_played"] == pytest.approx(0.05)
+    assert sum(row["stages"].values()) == pytest.approx(0.75) == pytest.approx(
+        row["eos_to_audio"]), "the stages are a decomposition of the total, not a second measurement"
+    assert row["max_gap_s"] == pytest.approx(1.15)
+    # The wall clock is one instant spelled twice: the sortable half a join needs,
+    # and the half a human can read with its timezone written on it.
+    assert row["epoch"] == pytest.approx(1759732200.5)
+    assert row["at"].endswith("Z")
+    from datetime import datetime
+    assert datetime.fromisoformat(
+        row["at"].replace("Z", "+00:00")).timestamp() == pytest.approx(
+        row["epoch"]), "at and epoch must never be two different measurements"
+
+
+def test_eos_to_audio_is_null_and_never_zero_when_either_end_is_missing():
+    # A typed turn spoken out loud has no end of speech; a turn cancelled before any
+    # audio has no first played. A 0.0 there would be counted by the trend as the
+    # fastest turn on the box, so `None` is the only acceptable answer.
+    typed = TurnTimeline("typed:user")
+    typed.mark("first_clause", 5.0)
+    typed.audio_pushed(5.1, 5.2, 0.5)
+    row = voice_turns.turn_row(typed, room="lloyd-x", epoch=0.0)
+    assert row["eos_to_audio"] is None
+    assert row["stages"]["first_clause"] == 0.0, "the origin of a partial turn is still its first mark"
+    assert row["stages"]["first_pushed"] == pytest.approx(0.1)
+    assert row["max_gap_s"] == 0.0, "one frame cannot contain a silence in it"
+
+    cancelled = TurnTimeline("voice")
+    cancelled.mark("speech_end", 10.0)
+    cancelled.mark("vad_close", 10.1)
+    partial = voice_turns.turn_row(cancelled, room="lloyd-x", epoch=0.0)
+    assert partial["eos_to_audio"] is None
+    assert partial["stages"] == {"speech_end": 0.0, "vad_close": pytest.approx(0.1)}
+
+
+def test_a_row_the_worker_stamps_lands_on_the_instant_it_was_built():
+    # The worker passes no epoch, so the stamp is the clock at the
+    # moment the row is made. `+00:00` spelled as `Z` is what keeps a later reader
+    # from reading a naive local time as UTC (the 2026-09-21 class rule).
+    import time as _time
+    from datetime import datetime, timezone
+    before = _time.time()
+    row = voice_turns.turn_row(TurnTimeline("voice"), room="lloyd-x")
+    after = _time.time()
+    assert before <= row["epoch"] <= after
+    assert row["at"] == datetime.fromtimestamp(
+        row["epoch"], timezone.utc).isoformat(timespec="milliseconds").replace(
+        "+00:00", "Z")
+
+
+def test_the_rows_measurement_half_is_the_timelines_own_as_dict():
+    """Clause 1's home: `as_dict` is on `TurnTimeline`, and the store copies it verbatim.
+
+    The alternative this deliberately is not: the store restating the stage order, or
+    computing deltas from `marks` itself. Either would put the row's numbers where the
+    marks are not, and a stage added to `STAGES` would then drop out of every row's
+    ordering silently — the trend would read a missing stage rather than a new one. So
+    the order asserted here is `STAGES` itself, filtered to what this turn reached, and
+    the store's row is checked to carry the timeline's dict unchanged.
+    """
+    tl = TurnTimeline("voice")
+    tl.mark("speech_end", 10.0)
+    tl.mark("vad_close", 10.2)
+    tl.audio_pushed(10.6, 10.7, 0.4)
+
+    payload = tl.as_dict(epoch=1759732200.5)
+    assert sorted(payload) == ["at", "eos_to_audio", "epoch", "label", "max_gap_s",
+                               "stages"], "the keys are the documented six, no more"
+    assert payload["label"] == "voice"
+    assert list(payload["stages"]) == [s for s in STAGES if s in tl.marks], (
+        f"as_dict ordered {list(payload['stages'])}, STAGES orders "
+        f"{[s for s in STAGES if s in tl.marks]}")
+    assert payload["stages"]["speech_end"] == 0.0, "the origin is recorded, not omitted"
+    assert payload["at"].endswith("Z") and payload["epoch"] == 1759732200.5
+
+    row = voice_turns.turn_row(tl, turn_id="abc123def456", room="lloyd-1",
+                               epoch=1759732200.5)
+    for key, value in payload.items():
+        assert row[key] == value, f"the store changed the timeline's own {key!r}"
+    assert row["turn_id"] == "abc123def456" and row["room"] == "lloyd-1"
+
+
+def test_the_row_shape_is_read_off_the_real_timeline():
+    # The row's measurement half comes from the timeline, not from anything the store
+    # invents: the keys are the documented set, the stage numbers are the timeline's own
+    # contributions plus its origin, and `eos_to_audio`/`max_gap_s` are the same two
+    # numbers `summary()` prints. If the store started naming a stage it had not measured,
+    # or a bound keyed on a field that never appears, this is what notices.
+    tl = TurnTimeline("voice")
+    tl.mark("speech_end", 10.0)
+    tl.mark("first_clause", 11.0)
+    tl.audio_pushed(11.4, 11.5, 0.3)
+    row = voice_turns.turn_row(tl, turn_id="abc123def456", room="lloyd-1",
+                               interrupted=True, queued_behind=True, tools_ran=True,
+                               spoken_chars=42, epoch=1759732200.5)
+    assert row.pop("at") == "2025-10-06T06:30:00.500Z"
+    assert row == {
+        "v": voice_turns.SCHEMA_VERSION, "turn_id": "abc123def456",
+        "room": "lloyd-1", "interrupted": True, "queued_behind": True,
+        "tools_ran": True, "spoken_chars": 42, "capped": False, "label": "voice",
+        "epoch": 1759732200.5,
+        # Monotonic differences are exact to the float and approximated to the reader.
+        "stages": {"speech_end": 0.0, "first_clause": pytest.approx(1.0),
+                   "first_pushed": pytest.approx(0.4),
+                   "first_played": pytest.approx(0.1)},
+        "eos_to_audio": pytest.approx(1.5), "max_gap_s": 0.0}
+
+
+def test_a_completed_spoken_turn_appends_exactly_one_row(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLOYD_DATA", str(tmp_path))
+
+    b, rs = _speaker()
+
+    async def go():
+        rs.start()
+        await rs.on_event("voice_turn", {"turn_id": "t7"})
+        await rs.on_event("session", {})
+        await rs.on_event("text_delta", {"text": "It is noon. "})
+        await rs.finish()
+        await asyncio.sleep(0.05)   # the record task runs once the reply stops playing
+        return b
+    b = asyncio.run(go())
+
+    assert b.tts.said == ["It is noon."], "the reply was spoken"
+    store = voice_turns.turns_path()
+    assert store == tmp_path / "voice" / "turns.jsonl", \
+        "the store is under the data root, never the checkout"
+    assert store.is_file(), "the writer creates the store's directory on the first row"
+    assert store.read_text().count("\n") == 1, "one JSON object per line"
+    rows = _rows(store)
+    assert len(rows) == 1, f"one spoken turn, one row: {rows}"
+    row = rows[0]
+    assert row["v"] == voice_turns.SCHEMA_VERSION
+    # The join to the session's turn record: the id the backend minted in the
+    # `voice_turn` head, with the room beside it. Not invented for the row.
+    assert row["turn_id"] == "t7"
+    assert row["room"] == b.room_name
+    assert row["label"] == "voice"
+    assert row["interrupted"] is False
+    assert row["queued_behind"] is False
+    assert row["tools_ran"] is False
+    assert row["spoken_chars"] == len("It is noon.")
+    assert row["capped"] is False
+    assert row["stages"]["voice_turn"] == 0.0, "this turn's first mark is its origin"
+    assert "first_clause" in row["stages"]
+    assert "asr_done" not in row["stages"], \
+        "a turn that never went through the microphone has no ASR stage to report"
+    assert row["eos_to_audio"] is None, "and no end of speech to measure from"
+
+
+def test_a_turn_that_ran_a_tool_is_recorded_as_running_tools(tmp_path, monkeypatch):
+    # The gap during tool work is the stage a #1163-class fix claims to move, so the
+    # row has to say which turns did that work. `tool_phase` cannot answer it: the
+    # first text delta clears that flag, and by the time the row is built it is False.
+    monkeypatch.setenv("LLOYD_DATA", str(tmp_path))
+
+    b, rs = _speaker(filler={"after_seconds": 99})
+
+    async def go():
+        await rs.on_event("voice_turn", {"turn_id": "t8", "queued_behind": True})
+        await rs.on_event("tool_start", {"summary": "Checking supervisor status"})
+        await rs.on_event("text_delta", {"text": "Supervisor is up. "})
+        await rs.finish()
+        await asyncio.sleep(0.05)
+        return b
+    asyncio.run(go())
+
+    row = _rows(voice_turns.turns_path())[0]
+    assert row["tools_ran"] is True
+    assert row["queued_behind"] is True, "running behind another turn is its own explanation"
+    assert row["turn_id"] == "t8"
+
+
+def test_a_reply_a_barge_in_cancelled_still_leaves_one_row(tmp_path, monkeypatch):
+    # The cancelled turn is what the missing-stage rate is for: a store that only
+    # kept the turns that replied would compute every percentile over its own
+    # survivors and call the result a trend.
+    monkeypatch.setenv("LLOYD_DATA", str(tmp_path))
+
+    b, rs = _speaker()
+
+    async def go():
+        rs.start()
+        await rs.on_event("voice_turn", {"turn_id": "t9"})
+        await rs.on_event("text_delta", {"text": "The supervisor is. "})
+        b.tts.generation += 1        # a barge-in took the generation: this reply is over
+        await rs.finish()
+        await asyncio.sleep(0.05)
+    asyncio.run(go())
+
+    rows = _rows(voice_turns.turns_path())
+    assert len(rows) == 1
+    assert rows[0]["interrupted"] is True
+
+
+def test_a_store_that_raises_still_leaves_the_reply_spoken(tmp_path, monkeypatch):
+    # Clause 3. The row is a measurement of a turn, never a participant in one: the
+    # failure has to die here rather than travel out of an asyncio task nobody is
+    # awaiting, where it would become an unretrieved exception and no turn at all.
+    monkeypatch.setenv("LLOYD_DATA", str(tmp_path))
+
+    def boom(row):
+        raise RuntimeError("the disk is gone")
+    monkeypatch.setattr(voice_turns, "append_turn", boom)
+
+    b, rs = _speaker()
+
+    async def go():
+        rs.start()
+        await rs.on_event("voice_turn", {"turn_id": "t10"})
+        await rs.on_event("text_delta", {"text": "It is noon. "})
+        await rs.finish()
+        await asyncio.sleep(0.05)
+        return b
+    b = asyncio.run(go())                      # must not raise
+    assert b.tts.said == ["It is noon."], "every clause still spoke"
+    assert not voice_turns.turns_path().exists(), "and nothing was half-written"
+
+
+def test_a_store_path_that_is_not_a_directory_is_swallowed_too(tmp_path, monkeypatch):
+    # The other shape of the same clause: the write itself fails, not a monkeypatch.
+    # `mkdir` raises FileExistsError on a file in the way, and `append_turn` owns the
+    # swallow so no caller has to remember it.
+    monkeypatch.setenv("LLOYD_DATA", str(tmp_path))
+    (tmp_path / "voice").write_text("not a directory")
+    assert voice_turns.append_turn({"v": 1, "epoch": time.time()}) is False
+
+
+def test_the_latency_log_line_still_fires_beside_the_row(tmp_path, monkeypatch, caplog):
+    # e2e_voice.py's latency_lines() greps `[latency] ` out of a canary rig's
+    # worker.log. The row is additive: if this line ever goes, the rig goes blind and
+    # nothing in this file would notice.
+    import logging
+    monkeypatch.setenv("LLOYD_DATA", str(tmp_path))
+
+    b, rs = _speaker()
+
+    async def go():
+        rs.start()
+        await rs.on_event("voice_turn", {"turn_id": "t11"})
+        await rs.on_event("text_delta", {"text": "It is noon. "})
+        await rs.finish()
+        await asyncio.sleep(0.05)
+    with caplog.at_level(logging.INFO, logger="lloyd-agent-worker"):
+        asyncio.run(go())
+
+    assert "[latency]" in caplog.text, "the grep consumer this row has to coexist with"
+    assert len(_rows(voice_turns.turns_path())) == 1, "and the kept half, in the same breath"
