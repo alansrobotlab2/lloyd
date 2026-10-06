@@ -274,3 +274,50 @@ def test_a_contract_with_room_ends_at_or_below_the_cap(tmp_path, isolated):
     # to in order to hold them all.
     assert len(graded) == B.MAX_CLAUSES == 6 and len(graded) != 7, graded
     assert "backlog/data/iv-metrics.jsonl" in graded[-1], graded[-1]
+
+
+def test_the_cap_holds_against_a_body_that_would_otherwise_fire(tmp_path, isolated):
+    """#2267 clause 5: the brake is tested against a TRIGGERING body, and the
+    caller's list comes back unmutated.
+
+    The node above hands the generator the same body in both halves, which proves
+    the budget declines the clause. It cannot prove the budget is what declined it
+    for a body whose witness is small and uncollided — so this one passes the
+    caller's own list object at `MAX_CLAUSES`, over a body that does fire one slot
+    lower, and asserts three separate things the older node leaves open: the
+    returned list equals the input clause for clause in the same order (no
+    generated clause displaces or reorders an authored one), the input list OBJECT
+    is still what it was (the generator copies, never appends in place, so a
+    caller's list cannot gain a clause behind its back), and the same helper with
+    one slot spare does fire — the positive control that keeps an unchanged list
+    from being read as a broken trigger.
+
+    The witness is 17 short lines: under `WITNESS_MAX_BYTES`, so it is the cap
+    doing the work here and not the new size bound.
+    """
+    witness = _witness_under(tmp_path)
+    assert witness.stat().st_size < B.WITNESS_MAX_BYTES, (
+        "otherwise the size bound, not the budget, would be why nothing was added")
+    body = (f"Live run 2026-09-30 over `{witness}` printed 17 rows with "
+            "`miss_rate` null in 9.")
+    authored = NINE[:B.MAX_CLAUSES]
+
+    spare = B.add_witness_artifact_clause(authored[:B.MAX_CLAUSES - 1], body)
+    assert len(spare) == B.MAX_CLAUSES and "backlog/data/" in spare[-1], (
+        "positive control: this body fires when a slot is free", spare)
+
+    out = B.add_witness_artifact_clause(authored, body)
+    assert out == authored, "a full contract is returned clause for clause, in order"
+    assert not any("backlog/data/" in c for c in out), out
+    assert authored == NINE[:B.MAX_CLAUSES], (
+        "the caller's list object was appended to in place")
+    assert out is not authored, "the caller gets a copy, not the list it handed in"
+    assert out[0] == NINE[0] and out[-1] == NINE[B.MAX_CLAUSES - 1], (
+        "no authored clause was displaced from either end")
+    # The same thing through the writer: nine authored clauses cap to six and the
+    # witness clause is absent, with the cap's own drop record left as the only
+    # account of what went.
+    p = write_item(isolated, 24, body=body)
+    B.record_verdict(B.item_by_id(24), "confirmed", f"`{witness}` re-measured",
+                     acceptance="x", acceptance_clauses=list(NINE))
+    assert _fm(p)["acceptance_clauses"] == NINE[:B.MAX_CLAUSES], _fm(p)

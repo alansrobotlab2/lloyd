@@ -81,6 +81,24 @@ def _git_repo(tmp_path: Path) -> Path:
     return repo
 
 
+def _git_commit(repo: Path, *rel_paths: str) -> None:
+    """Put `rel_paths` under history for real, so a test may call them tracked.
+
+    `in_git_tree` answers about a repository's WORKING TREE (`git rev-parse
+    --show-toplevel`), which a bare `git init` plus one written file already
+    satisfies — so a fixture that calls its copy "committed" while only writing
+    it has pinned less than its prose claims. The witness rule's premise is that
+    no history covers the bytes, so the in-tree copy here is committed and the
+    caller asserts it with `git ls-files`.
+    """
+    subprocess.run(["git", "-C", str(repo), "add", "--", *rel_paths],
+                   check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo),
+                    "-c", "user.email=tests@lloyd.local", "-c", "user.name=Lloyd Tests",
+                    "commit", "-q", "-m", "test fixture: pin the witness bytes"],
+                   check=True, capture_output=True)
+
+
 # The item as triage writes it: the witness path is in the body, and no clause
 # says where its bytes go.
 _BODY_1869 = ("Live run 2026-09-30 over `{witness}` printed 17 rows with "
@@ -109,9 +127,10 @@ def test_a_witness_in_no_git_tree_gains_one_clause_with_a_path_and_a_command(tmp
     artifact = f"{B.WITNESS_ARTIFACT_DIR}/{witness.name}"
     assert artifact == "backlog/data/iv-metrics.jsonl", artifact
     assert artifact in added, added
-    assert f"`wc -l < {artifact}`" in added, (
+    assert f"`wc -l -c < {artifact}`" in added, (
         f"the clause must carry a shell command over the COMMITTED bytes, not a "
-        f"promise to re-measure: {added}")
+        f"promise to re-measure, and it must be the byte-varying form (#2267): "
+        f"{added}")
     assert str(witness) in added, "and it names the witness it is archiving"
     assert len(added) <= B.CLAUSE_MAX_CHARS, "it survives clean_clauses intact"
 
@@ -204,6 +223,315 @@ def test_the_real_probe_follows_a_tilde_witness_to_whatever_tree_home_is(tmp_pat
         "the same path text under a home that is a tree must not fire")
 
 
+#: #2248's real shape: the sweep's row lives in the data root, and a canonical
+#: extract of the SAME basename is already committed in the repo's fixtures.
+#: Both facts were in the item, and the generator asked for a third copy anyway.
+_PREFIX_MISS = "vllm_prefix_miss_2026-10-01.json"
+_IN_TREE_DIR = "tests/fixtures"
+
+
+def _prefix_miss_shape(tmp_path, monkeypatch):
+    """Lay out #2248's shape on disk and return the two path strings.
+
+    The in-tree half is a fixture committed inside a real `git init` repository
+    (`_git_commit` runs `git add`/`git commit`, and the callers assert it through
+    `git ls-files`), so the default `probe=in_git_tree` is the shipped predicate
+    answering about a real tree and the word "committed" here means under
+    history. Committing is not what makes the probe answer — it reads the working
+    tree — but the rule's premise is that no HISTORY covers the witness bytes, so
+    a fixture that calls its pinned copy committed has to have committed it. The
+    out-of-tree half is under `$HOME/lloyd-data`, which is not a tree, and both
+    files exist so only the basename comparison can be what stops the clause.
+    """
+    home = tmp_path / "home"
+    live = home / "lloyd-data" / "vllm-prefix-miss"
+    live.mkdir(parents=True)
+    (live / _PREFIX_MISS).write_text('{"date": "2026-10-01", "miss_rate": 0.063}\n')
+    monkeypatch.setenv("HOME", str(home))
+    repo = _git_repo(tmp_path)
+    (repo / _IN_TREE_DIR).mkdir(parents=True)
+    committed = repo / _IN_TREE_DIR / _PREFIX_MISS
+    committed.write_text('{"date": "2026-10-01", "miss_rate": 0.063}\n')
+    _git_commit(repo, f"{_IN_TREE_DIR}/{_PREFIX_MISS}")
+    return repo, str(committed), f"~/lloyd-data/vllm-prefix-miss/{_PREFIX_MISS}"
+
+
+def _is_tracked(repo: Path, rel: str) -> bool:
+    """True when `git ls-files` in `repo` lists `rel` — the word 'tracked'."""
+    return rel in subprocess.run(
+        ["git", "-C", str(repo), "ls-files"], check=True,
+        capture_output=True, text=True).stdout.split()
+
+
+#: A basename no checkout on this box can contain, so the temp repository below
+#: is the ONLY tree that can supply the pin. The #2248 fixture name cannot carry
+#: that claim: `_pinned_candidates` tries a relative citation against the CWD and
+#: then against the repository root of the module (backlog.py:1245), so inside a
+#: real checkout `tests/fixtures/vllm_prefix_miss_2026-10-01.json` also resolves
+#: to this repo's own committed fixture, and the skip would fire with or without
+#: the temp tree. The control node below uses this name instead, which is what
+#: makes the temp tree load-bearing.
+_CONTROL_PIN = "witness_pin_control.jsonl"
+
+
+def test_the_temporary_tree_is_what_pins_the_bytes_a_control_shows(tmp_path, monkeypatch):
+    """The temp repo is load-bearing: with a basename no other tree holds.
+
+    Same skip, same default probe, one difference — `witness_pin_control.jsonl`
+    exists in the temp repository and nowhere else on the fallback path, so if the
+    clause still does not fire then the accepted in-tree path was the temp repo's,
+    not the checkout the suite happens to run inside. Without this node the #2248
+    shape below would pass in a checkout that carries its own fixture of that name
+    and fail in one that does not, while reading as though it had proved the same
+    thing both times.
+    """
+    live_root = Path(B.__file__).resolve().parents[2]
+    assert not (live_root / _IN_TREE_DIR / _CONTROL_PIN).exists(), (
+        f"positive control: {live_root} must not hold the control basename, or the "
+        "fallback candidate, not the temp repo, would be supplying the pin")
+    home = tmp_path / "home"
+    (home / "lloyd-data" / "_pipeline" / "reflection").mkdir(parents=True)
+    (home / "lloyd-data" / "_pipeline" / "reflection" / _CONTROL_PIN).write_text(
+        '{"rows": 17}\n' * 3)
+    monkeypatch.setenv("HOME", str(home))
+    repo = _git_repo(tmp_path)                    # holds data/report.jsonl only
+    (repo / _IN_TREE_DIR).mkdir(parents=True)
+    pin = repo / _IN_TREE_DIR / _CONTROL_PIN
+    pin.write_text('{"rows": 17}\n' * 3)
+    _git_commit(repo, f"{_IN_TREE_DIR}/{_CONTROL_PIN}")
+    monkeypatch.chdir(repo)
+    assert _is_tracked(repo, f"{_IN_TREE_DIR}/{_CONTROL_PIN}")
+
+    clauses = [f"the sweep's real row is in {_IN_TREE_DIR}/{_CONTROL_PIN}"]
+    body = _BODY_1869.format(witness=f"~/lloyd-data/_pipeline/reflection/{_CONTROL_PIN}")
+    assert B._tree_basenames("\n".join([*clauses, body]), B.in_git_tree) == {_CONTROL_PIN}, (
+        "the control basename must be pinned, and by exactly one path")
+    assert B.add_witness_artifact_clause(clauses, body) == clauses, (
+        "the temp tree's committed copy is what suppressed the clause")
+    # And the same witness with the pin removed from the haystack does fire, so
+    # the suppression above is the pin's doing rather than the witness's shape.
+    assert len(B.add_witness_artifact_clause(_AUTHORED, body)) == 2, (
+        "drop the in-tree citation and the very same bytes gain a clause")
+
+
+def test_a_basename_already_pinned_inside_a_git_tree_gains_no_clause(tmp_path,
+                                                                     monkeypatch):
+    """#2267 clause 1: bytes pinned by a tracked path are not a missing witness.
+
+    The generator's own premise is "no history covers these bytes". Once a clause
+    or the item text names a path `in_git_tree` accepts whose basename is the
+    candidate's, that premise is false for this witness, and the clause ordering a
+    copy asks a round to add a second, competing home for the same figures — which
+    is what #2248 survived only because the grader marked the demand
+    `unsatisfiable` and an amendment was ratified.
+
+    Which tree answers here is #2248's real ambiguity, not this file's: the
+    relative citation resolves against the CWD (the temp repo, chdir'd below) and,
+    through `_pinned_candidates`' second candidate, against the checkout the suite
+    runs in — which has its own committed `tests/fixtures/vllm_prefix_miss_*.json`.
+    Both are committed copies, so the claim below holds either way. The node that
+    isolates the temp tree, by naming a basename no other tree holds, is
+    `test_the_temporary_tree_is_what_pins_the_bytes_a_control_shows` above, and it
+    is what stops this one from passing for a reason it does not name.
+
+    Named in the clause and named only in the body are the same case to this
+    generator (both go through `_all_text`), and both are asserted: the re-triage
+    stamp that let it fire in #2248 cleared the front matter, so the citation
+    living in the body is not a hypothetical.
+    """
+    repo, committed, out_of_tree = _prefix_miss_shape(tmp_path, monkeypatch)
+
+    in_clause = f"the sweep's real row is in {_IN_TREE_DIR}/{_PREFIX_MISS}"
+    monkeypatch.chdir(repo)
+    assert B._witness_target(f"{_IN_TREE_DIR}/{_PREFIX_MISS}").is_file(), (
+        "positive control: the relative citation resolves from the repo root, so "
+        "the skip is reading a real path and not an absent one")
+    assert _is_tracked(repo, f"{_IN_TREE_DIR}/{_PREFIX_MISS}"), (
+        "and the cited copy is under history, not merely written into a directory "
+        "that happens to be a repository — `in_git_tree` cannot tell those apart, "
+        "so the fixture has to")
+    body = _BODY_1869.format(witness=out_of_tree)
+    assert B.add_witness_artifact_clause([in_clause], body) == [in_clause], (
+        "the demand re-fired over bytes a tracked fixture already pins")
+
+    body_names_both = (_BODY_1869.format(witness=out_of_tree)
+                       + f" The canonical extract sits at {committed}.")
+    assert B.add_witness_artifact_clause(_AUTHORED, body_names_both) == _AUTHORED, (
+        "the same basename named only in the body must skip too — the re-triage "
+        "stamp that fired in #2248 had cleared the front matter")
+    assert B._witness_target(out_of_tree).is_file() and not B.in_git_tree(
+        B._witness_target(out_of_tree)), (
+        "and the candidate really is the un-historied half, or this proves nothing")
+
+
+def test_a_witness_whose_basename_no_tree_path_names_still_gains_one_clause(
+        tmp_path, monkeypatch):
+    """#2267 clause 2: the skip is a basename test, never a blanket skip.
+
+    The same layout with the fixture's basename changed by one character must
+    still produce exactly one clause naming where the bytes go — otherwise the
+    guard would silence every witness demand in a `tests/fixtures`-heavy repo and
+    read as a corpus with no un-archived evidence at all.
+
+    The renamed copy is then CITED, by a clause, which is the whole point of the
+    node: with nothing in the haystack naming an in-tree path, the generator
+    would fire because its pin set is empty and this would pin "no in-tree token
+    present" rather than the comparison. The positive control asserts the pin set
+    is populated — one basename, and it is not the witness's — so the clause that
+    comes out is the skip running against a real pinned copy and declining on the
+    difference.
+    """
+    repo, _, out_of_tree = _prefix_miss_shape(tmp_path, monkeypatch)
+    other = "vllm_prefix_miss_2026-09-23.json"
+    (repo / _IN_TREE_DIR / _PREFIX_MISS).rename(repo / _IN_TREE_DIR / other)
+    _git_commit(repo, f"{_IN_TREE_DIR}/{_PREFIX_MISS}", f"{_IN_TREE_DIR}/{other}")
+    monkeypatch.chdir(repo)
+    assert _is_tracked(repo, f"{_IN_TREE_DIR}/{other}"), (
+        "the different-basename copy is under history too, or the control below "
+        "is asserting a tree that holds nothing")
+
+    pin_clause = f"the canonical extract is committed at {_IN_TREE_DIR}/{other}"
+    authored = [_AUTHORED[0], pin_clause]
+    body = _BODY_1869.format(witness=out_of_tree)
+    pins = B._tree_basenames("\n".join([*authored, body]), B.in_git_tree)
+    assert pins == {other}, (
+        f"the generator must see exactly one pinned basename, the cited copy's: {pins}")
+
+    out = B.add_witness_artifact_clause(authored, body)
+    assert len(out) == 3, out
+    assert f"backlog/data/{_PREFIX_MISS}" in out[2], out[2]
+    assert out[:2] == authored, "the authored clauses are never displaced"
+
+
+def test_a_witness_beyond_the_size_bound_is_skipped_like_an_absent_one(tmp_path,
+                                                                      monkeypatch):
+    """#2267 clause 3: a bound named as a constant, applied as a skip.
+
+    A live probe today picks `~/lloyd-data/logs/services/agent-llm-primary.log` —
+    3,138,311 bytes when triage measured it, 6,179,560 at this round's own probe
+    run, growing and rotating daily — and asks a round to copy all
+    of it into a vault directory that already holds 108 MB. The canonical extracts
+    this convention actually commits are 169-263 KB, so the bound is 1 MiB: over
+    it, the token is skipped exactly as an absent file is skipped — no clause, and
+    the list returned as it came in.
+
+    A size that cannot be read is a skip too, never a pass: `_witness_within_size_bound`
+    answers False on `OSError`, because bytes the generator cannot measure are
+    bytes it must not order copied. The node below asserts that branch through a
+    dangling symlink, the shape a rotation leaves behind. (End to end the same
+    path is already stopped one guard earlier by `_witness_is_on_disk`, so the
+    branch has to be asked directly to be pinned at all.)
+    """
+    assert B.WITNESS_MAX_BYTES == 1_048_576, "the bound is a named constant"
+    home = tmp_path / "home"
+    services = home / "lloyd-data" / "logs" / "services"
+    services.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    body = _BODY_1869.format(witness="~/lloyd-data/logs/services/agent-llm-primary.log")
+    big = services / "agent-llm-primary.log"
+    big.write_bytes(b"line\n" * (B.WITNESS_MAX_BYTES // 5 + 1))
+    assert big.stat().st_size > B.WITNESS_MAX_BYTES, (
+        "positive control: the fixture is over the bound, so the skip is what "
+        "produced the unchanged list")
+    assert B.add_witness_artifact_clause(_AUTHORED, body) == _AUTHORED, (
+        "a 3 MB rotating log must not become a copy-this demand")
+
+    big.write_bytes(b"line\n" * 200)
+    assert big.stat().st_size < B.WITNESS_MAX_BYTES
+    out = B.add_witness_artifact_clause(_AUTHORED, body)
+    assert len(out) == 2 and "backlog/data/agent-llm-primary.log" in out[1], (
+        "under the bound the same token still fires, so the bound is not a "
+        f"blanket skip either: {out}")
+
+    # The unreadable-size branch, asserted as the skip it is. A rotation leaves a
+    # name that resolves to nothing behind; `stat()` raises, and the answer must
+    # be "not within the bound", because bytes the generator cannot measure are
+    # bytes it must not order copied. Asserting True here instead would have the
+    # generator ask a round to copy a file no one has ever sized.
+    rotated = services / "agent-llm-primary.log.1"
+    rotated.symlink_to(services / "agent-llm-primary.log.2026-10-05")
+    assert not rotated.is_file(), "positive control: the target really is absent"
+    assert B._witness_within_size_bound(rotated) is False, (
+        "an unreadable size is a skip, not a pass")
+    assert B._witness_within_size_bound(big) is True, (
+        "and the readable under-bound case is the one answering True")
+
+
+def test_the_rederive_command_varies_with_the_committed_bytes(tmp_path):
+    """#2267 clause 4: a proving command that can actually disagree.
+
+    Every canonical extract is ONE line — `wc -l` printed 1 for all six
+    `tests/fixtures/vllm_prefix_miss_*.json` while their bytes ranged 169,348 to
+    263,748 — so the clause's "that output is the figure the item quotes" pinned
+    nothing at all: any two extracts passed. The emitted command must therefore
+    produce different output for two one-line extracts with different contents,
+    which the line count alone never will. Line count is kept beside the byte
+    count so the multi-line witnesses that legitimately quote a line figure
+    (`session_witness_*.json`, whose own line count IS its figure) keep it.
+    """
+    a = tmp_path / "extract-a.json"
+    b = tmp_path / "extract-b.json"
+    a.write_text('{"date": "2026-10-01", "miss_rate": 0.063}\n')
+    b.write_text('{"date": "2026-10-01", "miss_rate": 0.063, "window": "7d", '
+                 '"calls": 1016}\n')
+    for one_line in (a, b):
+        assert one_line.read_text().count("\n") == 1, "both are one-line extracts"
+    assert subprocess.run(f"wc -l < {a}", shell=True, capture_output=True,
+                          text=True).stdout == \
+        subprocess.run(f"wc -l < {b}", shell=True, capture_output=True,
+                       text=True).stdout == "1\n", (
+        "the vacuity this replaces: line count cannot tell these apart")
+
+    out = [subprocess.run(B._rederive_command(str(p), "json"), shell=True,
+                          capture_output=True, text=True).stdout
+           for p in (a, b)]
+    assert out[0] != out[1], f"the command is still vacuous: both printed {out[0]!r}"
+    assert out[0].split() == ["1", str(a.stat().st_size)], (
+        f"the figure must be readable, not a hash: {out[0]!r}")
+
+
+def test_no_format_the_convention_archives_is_handed_a_vacuous_proving(tmp_path):
+    """#2267 clause 6 as amended for this round: no archived format gets a
+    line-count-only demand.
+
+    The original clause ordered a copy of
+    `~/lloyd-data/logs/services/agent-llm-primary.log` into `backlog/data`, to be
+    re-derived with the vacuous `wc -l` this item exists to retire. The review
+    called that unsatisfiable twice — the log grows daily (3,138,311 bytes at
+    triage, 6,179,560 at this round's probe, 6,244,939 at the review's own read),
+    so no figure a clause names for it survives the round that carries it — and
+    this round amended the clause to the property below (ratification is the next
+    review's). Both halves of the retired demand are already refused by the
+    generator itself: the bytes are over `WITNESS_MAX_BYTES`, and the command it
+    would have carried is the one clause 4 removed. What is left to pin is the
+    property one format cannot establish alone — that the fix reaches every
+    extension the convention takes, not just the json triage happened to cite —
+    because a `.jsonl` quoted from its line count and a `.parquet` whose real
+    report command the item never quoted both pass on a table of one.
+
+    So: every format in `WITNESS_EXTS` is asked through the real generator here. A
+    file format's clause must carry `wc -l -c`, and must NOT carry the bare
+    `wc -l < artifact`; the three store formats keep the `sqlite_master` count,
+    which varies with the bytes by construction.
+    """
+    d = tmp_path / "lloyd-data" / "_pipeline" / "reflection"
+    d.mkdir(parents=True)
+    for ext in sorted(set(B.WITNESS_EXTS)):
+        witness = d / f"run.{ext}"
+        witness.write_text('{"rows": 17}\n')
+        assert B.in_git_tree(witness) is False, (ext, "fixture must be out of tree")
+        out = B.add_witness_artifact_clause(_AUTHORED, _BODY_1869.format(witness=witness))
+        assert len(out) == 2, (ext, out)
+        artifact = f"{B.WITNESS_ARTIFACT_DIR}/run.{ext}"
+        clause = out[1]
+        if ext in B._SQL_WITNESS_EXTS:
+            assert "sqlite_master" in clause, (ext, clause)
+        else:
+            assert f"`wc -l -c < {artifact}`" in clause, (ext, clause)
+            assert f"`wc -l < {artifact}`" not in clause, (
+                f"a .{ext} witness was handed the vacuous single-figure form: {clause}")
+
+
 def test_a_clause_that_already_names_an_archive_adds_no_second_one(tmp_path):
     """The de-dup half of the trigger: the rule is one clause per item, and an
     item whose contract already routes the bytes (the `backlog/data/`
@@ -239,7 +567,8 @@ def test_the_generated_clause_reaches_the_graded_contract(tmp_path, isolated):
     graded = fm["acceptance_clauses"]
     assert len(graded) == 2, graded
     generated = graded[1]
-    assert "backlog/data/iv-metrics.jsonl" in generated and "`wc -l < " in generated
+    assert ("backlog/data/iv-metrics.jsonl" in generated
+            and "`wc -l -c < " in generated), generated
     assert not fm.get("human_clauses"), fm.get("human_clauses")
     assert "Moved to human clauses" not in p.read_text(), p.read_text()[-400:]
     assert B.split_post_landing_clauses([generated])[0] == [generated], (

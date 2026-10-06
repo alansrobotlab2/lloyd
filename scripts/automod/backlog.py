@@ -1093,6 +1093,22 @@ WITNESS_EXTS = ("jsonl", "json", "csv", "ndjson", "db", "sqlite", "sqlite3",
 WITNESS_PATH_RX = re.compile(
     r"(?:(?:~|\$HOME)|(?<![\w.\-\[\]+/:]))"
     r"/(?:[\w.\-\[\]+]*/)*[\w.\-\[\]+]+\.(?:%s)\b" % "|".join(WITNESS_EXTS))
+#: Paths in a clause or body that could be a PINNED copy — the same bytes under
+#: history somewhere. Deliberately wider than `WITNESS_PATH_RX`, which refuses a
+#: relative tail on purpose (#1886: a relative fragment must never become a
+#: witness we order copied). The asymmetry is the point and is safe in only one
+#: direction: this regex can never choose the witness or emit a clause, it can only
+#: name a basename whose bytes already sit in a tree, and every token it produces
+#: still has to be on disk and inside a git tree before it suppresses anything.
+#: Repo-relative spellings are exactly what a clause cites — #2248's bytes were
+#: pinned as `tests/fixtures/vllm_prefix_miss_2026-10-01.json`, which the narrow
+#: regex cannot see at all. A URL's tail can slip through this wider pattern, and
+#: that is survivable here in a way it is not for the witness pattern: the token
+#: still has to be a file on this disk inside a git tree before it suppresses
+#: anything, and its only power is to make the generator NOT fire.
+_PINNED_PATH_RX = re.compile(
+    r"(?:(?:~|\$HOME)|[\w.\-\[\]+]*)"
+    r"(?:/[\w.\-\[\]+]+)+\.(?:%s)\b" % "|".join(WITNESS_EXTS))
 #: A clause that already says where the bytes go. The two shapes that claim
 #: takes here: the archive convention below, or an explicit vault path. Missing
 #: one and adding a second clause is the safe direction; skipping the clause
@@ -1104,6 +1120,22 @@ WITNESS_ARTIFACT_DIR = "backlog/data"
 #: Formats one line per record, so a line count IS the quoted report.
 _LINE_WITNESS_EXTS = frozenset({"jsonl", "ndjson", "csv", "tsv", "txt", "log"})
 _SQL_WITNESS_EXTS = frozenset({"db", "sqlite", "sqlite3"})
+#: The largest witness this clause may order copied into the vault: 1 MiB.
+#:
+#: The archive is for the small canonical extract, and the convention's own
+#: committed files say what "small" means: `tests/fixtures/vllm_prefix_miss_*.json`
+#: run 169-263 KB. What a live probe asks for without a bound is
+#: `~/lloyd-data/logs/services/agent-llm-primary.log` — 3,138,311 bytes today and
+#: rotated daily — into `~/obsidian/backlog/data`, which already holds 108 MB.
+#: A demand that orders a multi-megabyte daily-rotating log into a git tree is a
+#: demand no round can execute once, let alone re-check nightly.
+#:
+#: Over the bound the token is skipped the way an absent file is skipped: no
+#: clause, the list as it came in. Whether a load-bearing witness legitimately
+#: larger than this (a whole-store `~/lloyd-data` database) should be served by an
+#: extract under the bound rather than skipped outright is owed #2 on #2267, and
+#: stays open until a real item hits the bound.
+WITNESS_MAX_BYTES = 1_048_576
 
 
 def _witness_target(path) -> Path:
@@ -1150,11 +1182,79 @@ def in_git_tree(path) -> bool:
 
 
 def _rederive_command(artifact: str, ext: str) -> str:
-    """A shell command that recomputes the report from the COMMITTED bytes."""
+    """A shell command that recomputes the report from the COMMITTED bytes.
+
+    For a file witness that is a line count AND a byte count, not the line count
+    alone. Every canonical extract in this convention is ONE line —
+    `wc -l` printed `1` for all six `tests/fixtures/vllm_prefix_miss_*.json` while
+    their bytes ranged 169,348 to 263,748 — so a clause ending "that output is the
+    figure the item quotes" pinned nothing: any two extracts passed it, and the
+    demand could be satisfied by committing anything. `wc -l -c` keeps the line
+    figure the multi-line witnesses legitimately quote (`session_witness_*.json`
+    uses its own line count as its figure) and adds the count that varies with the
+    bytes, so disagreeing content can no longer agree on the answer.
+    """
     if ext in _SQL_WITNESS_EXTS:
         return (f"python3 -c \"import sqlite3;print(sqlite3.connect('{artifact}')"
                 f".execute('select count(*) from sqlite_master').fetchone()[0])\"")
-    return f"wc -l < {artifact}"
+    return f"wc -l -c < {artifact}"
+
+
+def _witness_within_size_bound(path) -> bool:
+    """True when the named witness is small enough to be asked for by name.
+
+    Skipped exactly the way an absent file is — no clause, the list as it came in —
+    because the demand is what is wrong, not the evidence: a clause ordering 3 MB
+    of a daily-rotating service log into `backlog/data` cannot be executed once, let
+    alone re-checked every time the item is re-triaged. A stat that fails between
+    the on-disk probe and here (rotated away, unlinked) is a file that is no longer
+    on disk, and answers "no" for the same reason `_witness_is_on_disk` does.
+    """
+    try:
+        return _witness_target(path).stat().st_size <= WITNESS_MAX_BYTES
+    except OSError:
+        return False
+
+
+def _tree_basenames(haystack, probe) -> "set[str]":
+    """Basenames of every path in `haystack` that the probe places IN a git tree.
+
+    The comparison the basename skip needs, kept separate so the rule sits in one
+    place: an item's bytes are pinned when some path the item names is inside a
+    tree's history, and the only thing two spellings of the same evidence have in
+    common is the basename. Note what makes this not a blanket skip: the candidate
+    itself can never reach the result through the probe — it was just told "outside
+    every tree" — and any other path must be on disk AND inside a tree to suppress
+    anything, so a mention of a name that does not exist pins nothing.
+
+    `haystack` is the clauses joined with the item text, and every token in it is
+    asked rather than only the ones already examined: the clause that cites the
+    pinned copy is the case #2267 clause 1 is about, and a clause can sit on either
+    side of the body's reference to the live file.
+    """
+    out: "set[str]" = set()
+    for tok in _PINNED_PATH_RX.findall(str(haystack or "")):
+        for target in _pinned_candidates(tok):
+            if not _witness_is_on_disk(target) or not probe(target):
+                continue
+            out.add(target.name)
+            break
+    return out
+
+
+def _pinned_candidates(tok: str):
+    """The spellings of a cited path worth probing: as given, then repo-relative.
+
+    A clause cites what it pinned the way a test file cites it — `tests/fixtures/
+    x.json`, no leading home and no leading slash — which resolves only against the
+    repository, not against whatever directory triage happened to be invoked from.
+    The absolute/home spellings are still tried first so a token that means what it
+    says is never shadowed by an accident of CWD.
+    """
+    raw = str(tok)
+    yield _witness_target(raw)
+    if raw.startswith(("./", "../")) or not raw.startswith(("/", "~", "$")):
+        yield Path(__file__).resolve().parents[2] / raw.lstrip("./")
 
 
 def add_witness_artifact_clause(clauses, text, *, probe=in_git_tree,
@@ -1174,17 +1274,37 @@ def add_witness_artifact_clause(clauses, text, *, probe=in_git_tree,
         path does not exist;
       * `probe` says such a path is in no git tree — those bytes exist in no
         history anywhere;
+      * the file is no larger than `WITNESS_MAX_BYTES` (#2267 clause 3): a token
+        whose bytes are over the bound is skipped exactly as an absent file is, so
+        the generator stops ordering 3 MB of a daily-rotating service log into a
+        vault directory that already holds 108 MB;
+      * its basename is not shared by some other path in the clauses or the body
+        that `probe` places IN a git tree (#2267 clause 1, `_tree_basenames`).
+        Those bytes are pinned under this very name already — #2248's row was
+        tracked at `tests/fixtures/vllm_prefix_miss_2026-10-01.json` while the
+        clause still ordered a copy of the same name out of `~/lloyd-data`, and the
+        re-triage stamp that did it had cleared the front matter, so no cap was in
+        the way. Compared across paths by basename, never by substring, and never
+        against the candidate itself;
       * the contract has room: at `MAX_CLAUSES` the list comes back UNCHANGED,
         because a generated clause must never evict, truncate or reorder one
         that was authored.
 
+    The two new skips are per-token and neither may become a blanket skip: each
+    leaves every other token in the text eligible. The opposite direction — a
+    witness that must still get its clause — is pinned by
+    `test_a_witness_whose_basename_no_tree_path_names_still_gains_one_clause` for
+    the basename, and by the under-bound control inside
+    `test_a_witness_beyond_the_size_bound_is_skipped_like_an_absent_one` for size.
+
     Exactly one clause goes on, for the first out-of-tree path in reading
     order, worded over committed bytes with no time shape — `POST_LANDING_RX`
     would otherwise move it out of the graded contract, where it does no good.
-    Its command is `wc -l` for a line format (the report a jsonl is quoted
-    from), a sqlite count for a store, and `wc -l` for anything else, which
-    names the artifact honestly while a parquet's real report command stays
-    whatever the item itself quoted.
+    Its command is `wc -l -c` for a file witness — the line count a jsonl's report
+    is quoted from, plus the byte count, because every canonical extract in this
+    convention is ONE line and `wc -l` alone printed `1` for all six
+    `tests/fixtures/vllm_prefix_miss_*.json` whose bytes ranged 169,348 to 263,748,
+    pinning nothing (#2267 clause 4) — and a sqlite count for a store.
 
     What this function cannot do is undo a clause it already emitted. A
     `vault`-surface item has no amendment route: `amend_clause` resolves the
@@ -1200,13 +1320,27 @@ def add_witness_artifact_clause(clauses, text, *, probe=in_git_tree,
         return every
     seen: set[str] = set()
     witness = ""
+    # Where a pinned copy may be cited: the contract's own clauses AND the item
+    # text. #2267 clause 1 is precisely the case where the clause is the only place
+    # the tracked path appears, so scanning the body alone would miss it.
+    pinned_haystack = "\n".join([*[str(c) for c in every], str(text or "")])
+    # Basenames of the paths in that haystack that the probe says ARE in a git
+    # tree. Resolved lazily, only once a candidate needs the question, because the
+    # probe walks the filesystem and the common case is no candidate at all.
+    tree_basenames: "set[str] | None" = None
     for tok in WITNESS_PATH_RX.findall(str(text or "")):
         if tok in seen:
             continue
         seen.add(tok)
         if not _witness_is_on_disk(tok):
             continue
+        if not _witness_within_size_bound(tok):
+            continue
         if not probe(tok):
+            if tree_basenames is None:
+                tree_basenames = _tree_basenames(pinned_haystack, probe)
+            if Path(_witness_target(tok)).name in tree_basenames:
+                continue
             witness = tok
             break
     if not witness or len(every) >= MAX_CLAUSES:
