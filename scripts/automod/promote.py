@@ -621,17 +621,15 @@ def promotion_announcement(title: str, n_files: int,
                            window_s: float | None = None) -> tuple[str, str]:
     """The toast head and body for a landing. Pure, so it can be pinned.
 
-    Never the round id: it is in the `promoted` ledger row for anyone who
-    needs it, and read aloud it is a date one digit at a time. The title is
-    the item's name — the one thing a person in the room can act on.
+    Never the round id, which is in the `promoted` ledger row and on a toast
+    is a date spelled one digit at a time; the title is the item's name.
 
-    `window_s` is the window this promotion actually got, which since
-    2026-09-20 is one of two and is read from config. Formatting the constant
-    instead is how the announcement comes to state a number nothing used —
-    the same defect as the `errors_window_s` key that sat unread in
-    config.yaml. Always minutes, one decimal only when it does not divide
-    evenly: this line is read aloud as well as shown, and mixed units across
-    consecutive landings are worse to listen to than a fraction.
+    `window_s` is the window this promotion actually got, one of two since
+    2026-09-20 and read from config; formatting the constant instead is how
+    an announcement states a number nothing used — the `errors_window_s`
+    defect again. Always minutes, one decimal only when it does not divide
+    evenly: consecutive landings sit side by side on the desktop, and mixed
+    units read as two policies.
     """
     seconds = float(ERRORS_WINDOW if window_s is None else window_s)
     watching = (f"{int(seconds // 60)} minutes" if seconds % 60 == 0
@@ -643,13 +641,13 @@ def promotion_announcement(title: str, n_files: int,
 
 def _announce_promoted(round_id: str, commit: str, changed: list, title: str = "",
                        window_s: float | None = None) -> None:
-    """Say out loud that the loop just landed code on itself.
+    """Put on the desktop that the loop just landed code on itself.
 
-    Until now the self-modification loop only ever spoke when it *failed*:
-    every notify-send in the tree hung off a guardian alert. A loop that can
-    rewrite the running system in the background and is silent when it works
-    is the wrong way round — the successful landings are the ones nobody is
-    watching a terminal for.
+    The loop used to speak only when it *failed*: every notify-send hung off
+    a guardian alert, and a loop that rewrites the running system with
+    nobody watching a terminal has it backwards if it is silent on success.
+    So it announces — but toasted and journalled, never spoken (#2297): a
+    landing every few minutes behind an alert's lead reads as a failure.
 
     Routed through the guardian's `Notifier.announce` rather than a private
     notify-send so it shares the one fan-out, and guarded end to end: an
@@ -661,9 +659,9 @@ def _announce_promoted(round_id: str, commit: str, changed: list, title: str = "
 
 
 def announce(head: str, body: str) -> None:
-    """News through the guardian's one fan-out (journal, toast, voice), never
-    an `alert` — no ledger row, no backlog task. Guarded end to end: an
-    announcement must never fail the thing it announces."""
+    """News through the guardian's one fan-out — journal, desktop toast — never
+    an `alert` and never spoken (#2297): no ledger row, no backlog task. Guarded
+    end to end: an announcement must never fail the thing it announces."""
     try:
         import sys
         gdir = Path(__file__).resolve().parents[2] / "agent-services" / "guardian"
@@ -676,6 +674,8 @@ def announce(head: str, body: str) -> None:
             ledger=gstate.AutomodState(Path(policy.AUTOMOD_STATE)).ledger,
             state_dir=Path(policy.GUARDIAN_STATE),
             vault_root=policy.VAULT_ROOT,
+            # caller-side silence (#2297); notify.py's default still speaks
+            voice=False,
             voice_window=policy.VOICE_REPEAT_SECONDS,
         )
         notifier.announce(head, body)

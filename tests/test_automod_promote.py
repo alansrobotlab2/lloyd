@@ -887,9 +887,8 @@ def test_an_unanswered_health_on_a_running_backend_is_still_waited_on(monkeypatc
 # ---------------------------------------------------------------------------
 
 def test_the_announcement_carries_the_title_and_never_the_round_id():
-    """"Promoted SM_20260909_160856" read aloud is a date one digit at a time.
-    The round id is in the ledger row; the toast and the spoken line get the
-    item's name."""
+    """"Promoted SM_20260909_160856" on a toast is a date one digit at a time.
+    The round id is in the ledger row; the toast gets the item's name."""
     head, body = P.promotion_announcement(
         "Give deferred tool descriptions trigger conditions", 8, 900)
     assert head == "Landed: Give deferred tool descriptions trigger conditions"
@@ -911,6 +910,183 @@ def test_the_announcement_states_the_window_this_promotion_actually_got():
     assert P.promotion_announcement("x", 1, 600)[1].endswith("Watching for 10 minutes.")
     # No argument falls back to the restarted default rather than to silence.
     assert "Watching for" in P.promotion_announcement("x", 1)[1]
+
+
+# ---------------------------------------------------------------------------
+# Automod news reaches the room as a toast and a journal line. It does not
+# speak (#2297): every one of those channels except speech is still wanted.
+# ---------------------------------------------------------------------------
+
+_LANDING = "Landed: Remove TTS from automod toasts"
+_LANDING_BODY = "1 file changed. Watching for 10 minutes."
+
+
+def _guardian():
+    """`notify`, `speak` and `policy` exactly as `promote.announce` imports them.
+
+    `announce()` stages the guardian directory on `sys.path` and does a plain
+    `import notify`, so the class it builds is the one in `sys.modules["notify"]`
+    — the same import `test_the_guardian_ignores_a_landing_record` goes through
+    above. A test that loaded `notify.py` by path would patch a second copy of
+    the module and pin nothing at all.
+    """
+    import importlib
+    import sys
+    from pathlib import Path
+    gdir = Path(__file__).resolve().parent.parent / "agent-services" / "guardian"
+    if str(gdir) not in sys.path:
+        sys.path.insert(0, str(gdir))
+    return (importlib.import_module("notify"),
+            importlib.import_module("speak"),
+            importlib.import_module("policy"))
+
+
+def _real_fanout(monkeypatch, tmp_path):
+    """Instrument the real fan-out; hand back one way to fire an announcement.
+
+    `run(head, body)` calls the real `promote.announce` and returns what each
+    channel did. `run(head, body, speak_anyway=True)` builds the same
+    `Notifier` with the channel forced back on instead — the control that says
+    the spies below are live, because a harness that could not reach the
+    speakers "proves" silence just as convincingly as a silenced caller does.
+
+    Everything above the two process boundaries is production code: the real
+    `Notifier.announce`, the real `_speak`, `_journal`, `_desktop`. Only the
+    boundaries are replaced, and each records what it was handed —
+    `speak.dispatch`, which otherwise spawns a detached player that outlives
+    the test, and `notify._run`, which otherwise executes `notify-send` and
+    `systemd-cat` for real.
+    """
+    notify, speak, policy = _guardian()
+    seen = {"kwargs": None, "receipt": None, "spoken": [], "cmds": []}
+
+    real_init, real_announce = notify.Notifier.__init__, notify.Notifier.announce
+
+    def spy_init(self, **kw):
+        seen["kwargs"] = kw
+        real_init(self, **kw)
+
+    def spy_announce(self, title, body="", level="info"):
+        seen["receipt"] = real_announce(self, title, body, level=level)
+        return seen["receipt"]
+
+    def spy_dispatch(level, title, body, state_dir, window=None):
+        seen["spoken"].append(title)
+        return True
+
+    def spy_run(cmd, timeout=5.0):
+        seen["cmds"].append(list(cmd))
+        return True
+
+    monkeypatch.setattr(notify.Notifier, "__init__", spy_init)
+    monkeypatch.setattr(notify.Notifier, "announce", spy_announce)
+    monkeypatch.setattr(speak, "dispatch", spy_dispatch)
+    monkeypatch.setattr(notify, "_run", spy_run)
+    # conftest mutes all three room-facing channels suite-wide, so a toast that
+    # is asserted to fire has to be un-muted here, on purpose.
+    for var in ("LLOYD_VOICE_ALERTS", "LLOYD_DESKTOP_ALERTS", "LLOYD_JOURNAL_ALERTS"):
+        monkeypatch.setenv(var, "1")
+    monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/test/bus")
+    # Nothing in this file may touch the live automod or guardian state dirs.
+    monkeypatch.setattr(policy, "AUTOMOD_STATE", str(tmp_path / "automod"))
+    monkeypatch.setattr(policy, "GUARDIAN_STATE", str(tmp_path))
+    monkeypatch.setattr(policy, "VAULT_ROOT", str(tmp_path / "obsidian"))
+
+    def run(head, body, *, speak_anyway=False):
+        seen.update(kwargs=None, receipt=None, spoken=[], cmds=[])
+        if speak_anyway:
+            notify.Notifier(ledger=tmp_path / "promotions.jsonl",
+                            state_dir=tmp_path, vault_root=str(tmp_path / "obsidian"),
+                            voice=True, voice_window=policy.VOICE_REPEAT_SECONDS,
+                            ).announce(head, body)
+        else:
+            P.announce(head, body)
+        return seen
+
+    return run
+
+
+def test_an_automod_announcement_builds_its_notifier_with_speech_off(monkeypatch, tmp_path):
+    """One keyword, at the one place every automod toast is built (#2297).
+
+    `Notifier`'s `voice` defaults to True, so an unpassed keyword is a speaking
+    toast — and a landing speaks roughly every time the loop promotes, which is
+    349 recorded utterances in the guardian's voice log, 17 of them actually
+    dispatched and the rest stopped only by the clock, not the code.
+    """
+    _, _, policy = _guardian()
+    seen = _real_fanout(monkeypatch, tmp_path)(_LANDING, _LANDING_BODY)
+    assert seen["kwargs"] is not None, "announce() never reached the guardian fan-out"
+    assert seen["kwargs"]["voice"] is False, seen["kwargs"]
+    assert seen["kwargs"]["voice_window"] == policy.VOICE_REPEAT_SECONDS, (
+        "only the channel is switched off; the repeat window is left as it was")
+
+
+def test_an_automod_announcement_dispatches_no_speech(monkeypatch, tmp_path):
+    """The channel result says False and the speaker subprocess is never asked."""
+    run = _real_fanout(monkeypatch, tmp_path)
+    seen = run(_LANDING, _LANDING_BODY)
+    assert seen["spoken"] == [], f"the landing announced itself out loud: {seen['spoken']}"
+    assert seen["receipt"]["voice"] is False, seen["receipt"]
+
+    control = run(_LANDING, _LANDING_BODY, speak_anyway=True)
+    assert control["spoken"] == [_LANDING], (
+        "the dispatch spy cannot fire, so the assertion above proves nothing")
+    assert control["receipt"]["voice"] is True, control["receipt"]
+
+
+def test_silencing_the_voice_never_silences_the_toast(monkeypatch, tmp_path):
+    """`voice=False` suppresses one channel of the receipt, not the fan-out.
+
+    A toast nobody hears is still a toast; a toast that silently stopped
+    firing because its sibling was muted would leave the loop invisible in the
+    room, which is the opposite half of what #2297 asked for.
+    """
+    seen = _real_fanout(monkeypatch, tmp_path)(_LANDING, _LANDING_BODY)
+    receipt = seen["receipt"]
+    assert receipt is not None, "announce() never reached the guardian fan-out"
+    assert set(receipt) == {"journal", "desktop", "voice"}, receipt
+    assert receipt["desktop"] is True and receipt["journal"] is True, receipt
+    tools = [cmd[0] for cmd in seen["cmds"]]
+    assert "notify-send" in tools, f"no toast command was run: {seen['cmds']}"
+    assert "systemd-cat" in tools, f"no journal line was written: {seen['cmds']}"
+
+
+def test_the_promoter_no_longer_documents_a_channel_it_does_not_use():
+    """Prose that states a behaviour the code dropped is worse than no prose.
+
+    Three docstrings promised the room would hear the landing: the toast
+    builder ("read aloud"), `_announce_promoted` ("Say out loud"), and
+    `announce`'s own channel list. Each is now silence the next reader would
+    have to read `announce()` to disbelieve.
+    """
+    assert "read aloud" not in P.promotion_announcement.__doc__.lower()
+    assert "say out loud" not in P._announce_promoted.__doc__.lower()
+    assert "voice" not in P.announce.__doc__.lower(), P.announce.__doc__
+    assert "journal" in P.announce.__doc__ and "toast" in P.announce.__doc__, (
+        "the channels that DO fire are still named")
+
+
+def test_no_second_notifier_in_the_automod_tree_can_inherit_the_speaking_default():
+    """The fix is one keyword only because every automod toast funnels through
+    `promote.announce`. That funnel is a fact about the tree, and a tree grows
+    new callers: a second `Notifier(...)` beside this one would speak again by
+    default, and nothing in the tests above would notice.
+    """
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+    builders = [str(p.relative_to(root))
+                for d in ("scripts/automod", "workers")
+                for p in (root / d).rglob("*.py")
+                if "Notifier(" in p.read_text(encoding="utf-8")]
+    # `workers/service_probe.py` is the fleet watchdog's own toast, out of
+    # scope for #2297, and it already passes `voice=False` itself.
+    assert sorted(builders) == ["scripts/automod/promote.py",
+                                "workers/service_probe.py"], (
+        "a guardian `Notifier(` appeared in the automod tree outside "
+        f"`promote.announce`: {sorted(builders)}. Automod news must speak no "
+        "channel, so a new one has to funnel through `promote.announce` or "
+        "state its own `voice=False`")
 
 
 def test_the_promotion_record_and_result_carry_the_title(monkeypatch, tmp_path):

@@ -882,6 +882,39 @@ def test_announce_is_suppressible_like_every_external_channel(tmp_path):
     assert _notifier(tmp_path, external=False).announce("x", "y") == {}
 
 
+def test_a_notifier_built_without_the_voice_keyword_still_speaks(tmp_path, monkeypatch):
+    """#2297 silenced automod at its own caller, so this default stays True.
+
+    `voice` is the only lever a caller has, and `promote.announce` now pulls it
+    (`voice=False`). Had the silence instead been applied here — the default
+    flipped — the rollback alert and the 15-minute nag would have gone quiet
+    with the landings, which is the opposite of what was asked. Both spoken
+    routes are pinned: `alert`, which the rollback takes, and `announce`, which
+    the nag re-announces through. And the caller-side lever is pinned from this
+    side too, so the two files cannot disagree about what `voice=False` means.
+    """
+    import inspect
+    import notify
+    monkeypatch.setenv("LLOYD_VOICE_ALERTS", "1")
+    spoken = []
+
+    def spy(level, title, body, state_dir, window=None):
+        spoken.append(title)
+        return True
+
+    monkeypatch.setattr(speak, "dispatch", spy)
+
+    assert inspect.signature(notify.Notifier).parameters["voice"].default is True
+
+    assert _notifier(tmp_path).alert("warn", "real rollback", "body")["voice"] is True
+    assert _notifier(tmp_path).announce("STILL BROKEN", "body",
+                                        level="critical")["voice"] is True
+    assert spoken == ["real rollback", "STILL BROKEN"], spoken
+
+    assert _notifier(tmp_path, voice=False).announce("STILL BROKEN", "body")["voice"] is False
+    assert spoken == ["real rollback", "STILL BROKEN"], "a muted caller still reached the speaker"
+
+
 # ── the nag ───────────────────────────────────────────────────────────
 
 def _run_nag(tmp_path, broken: str | None):
@@ -931,11 +964,12 @@ def test_nag_reads_the_marker_file_not_the_incident_directory(tmp_path):
 # ── promotion announcements ───────────────────────────────────────────
 
 def test_a_successful_promotion_is_announced(monkeypatch):
-    """Until now the loop only ever spoke when it *failed* — every
+    """The self-mod loop used to announce itself only when it *failed* — every
     notify-send in the tree hung off a guardian alert. A system that can
     rewrite itself in the background and is silent when it works has it
-    backwards: the successful landings are the ones nobody is watching a
-    terminal for."""
+    backwards, so a landing is announced. Since #2297 it is announced to the
+    desktop and the journal, not to the speakers: the channel assertion below
+    is that silence."""
     import notify
     from scripts.automod import promote as promote_mod
 
@@ -947,7 +981,7 @@ def test_a_successful_promotion_is_announced(monkeypatch):
 
         def announce(self, title, body="", level="info"):
             seen.update(title=title, body=body, level=level)
-            return {"voice": True}
+            return {"voice": False}       # what the caller's voice=False yields
 
     monkeypatch.setattr(notify, "Notifier", FakeNotifier)
     promote_mod._announce_promoted("SM_20260906_a1b2", "a" * 40,
@@ -959,10 +993,14 @@ def test_a_successful_promotion_is_announced(monkeypatch):
         "the round id is bookkeeping; the toast names the work")
     assert "2 files" in seen["body"]
     assert seen["level"] == "info", "a success must not read as an incident"
-    # And it must survive being read aloud: the round id keeps its date.
+    assert seen["init"]["voice"] is False, "#2297: a landing must not reach the speakers"
+    # Promotion text is still shaped the guardian's way — the item's name in
+    # the words, no round id spelled out digit by digit — even though automod
+    # no longer asks for it to be spoken (#2297). Shaping is shared, this is
+    # the one place promotion text meets it.
     spoken = speak.utterance_for("info", seen["title"], seen["body"])
     assert "deferred tool descriptions" in spoken
-    assert "20260906" not in spoken, "read aloud, a round id is a date one digit at a time"
+    assert "20260906" not in spoken, "a round id is a date one digit at a time"
 
 
 def test_one_changed_file_is_not_announced_as_1_files(monkeypatch):
