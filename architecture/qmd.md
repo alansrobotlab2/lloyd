@@ -231,9 +231,29 @@ pins both through the door, `tests/test_qmd_query_shape.py` the sanitizing.
   the watcher and the daemon, renames the live database with its `-wal`/`-shm` to
   `index.sqlite.bak-<stamp>`, moves the side copy in, starts both and runs one
   retrieval. `--dry-run` prints the commands and runs none. No scheduled run
-  passes either flag. Not yet run for real: the embed lock is per directory, so
-  the side embed and the watcher exclude each other (the route retries), and a
-  swap's backup joins the `.bak` series the nightly retention bounds to its newest.
+  passes either flag, and no clock window applies either: nothing in
+  `scripts/maintenance/qmd_index_maintenance.py` branches on the hour, so the
+  route is refused by a failed verification or a busy embed lock, never by the
+  time of day. It has been run for real since the route landed, twice. The
+  2026-10-04 invocation built a side copy and verified it but stopped short of
+  swapping (`$LLOYD_DATA/_pipeline/reflection/qmd-side-copy-rebuild-20261004-2026-10-04T113501.json`);
+  the 2026-10-05 one rebuilt and swapped
+  (`$LLOYD_DATA/_pipeline/reflection/qmd-side-copy-rebuild-20261005-2026-10-05T072250.json`),
+  and its report says `swapped` and `retrieval_ok` true with 5 hits, the replaced
+  database left behind as `index.sqlite.bak-20261005-075912`. What the swap
+  reclaimed is legible in the nightly series' `before` snapshots rather than in
+  the route report: vec0 dead 445.3 MiB at occupancy 0.2723 in
+  `$LLOYD_DATA/_pipeline/reflection/qmd-index-maintenance-2026-10-05.json`, run
+  before the swap, and 37.0 MiB at 0.822 in
+  `$LLOYD_DATA/_pipeline/reflection/qmd-index-maintenance-2026-10-06.json`, the
+  morning after it. (The route report's own `live_before` is 444.4 MiB at 0.2786:
+  the same index read two hours after the nightly one, with 1,275 more live rows
+  in it.) Both caveats survived the run and both are still the mechanism. The
+  embed lock is per directory, so the side embed and the watcher exclude each
+  other and the route retries — each of the two runs logged `embed` twice, 1801 s
+  then 272-297 s — and a swap's backup joins the `.bak` series the nightly
+  retention bounds to its newest, which is where
+  `index.sqlite.bak-20261005-075912` now sits.
 - **A rerank that could not run says so.** No VRAM for a ranking context used to
   be an HTTP 200 with fusion-order results; `meta.reranked` is false, the daemon
   counts it and never caches a fallback score, and `app/qmd_health.py` logs and

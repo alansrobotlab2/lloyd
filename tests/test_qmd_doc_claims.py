@@ -16,14 +16,33 @@ the code's cannot drift apart.
 
 from __future__ import annotations
 
+import json
+import os
+import pwd
 import re
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 DOC = ROOT / "architecture" / "qmd.md"
 SCRIPT = ROOT / "scripts" / "maintenance" / "qmd_index_maintenance.py"
+
+#: The runtime record the #1992 paragraph cites as `$LLOYD_DATA/_pipeline/reflection/`.
+#: Reached through the account's passwd entry, not `$HOME`: the gate runs the suite
+#: with `$HOME` pointed at a round home where `~/lloyd-data` does not exist, which is
+#: why `tests/conftest.py::_production_tree` reads the same anchor. The reports are
+#: dated filenames, so the bytes a citation names do not move under a later reader.
+REFLECTION = Path(pwd.getpwuid(os.getuid()).pw_dir) / "lloyd-data" / "_pipeline" / "reflection"
+
+#: The one invocation that swapped, the one that verified without swapping, and the
+#: two nightly before-snapshots either side of the swap.
+SWAP_REPORT = "qmd-side-copy-rebuild-20261005-2026-10-05T072250.json"
+REHEARSAL_REPORT = "qmd-side-copy-rebuild-20261004-2026-10-04T113501.json"
+MAINTENANCE_BEFORE = "qmd-index-maintenance-2026-10-05.json"
+MAINTENANCE_AFTER = "qmd-index-maintenance-2026-10-06.json"
+SWAPPED_BACKUP = "index.sqlite.bak-20261005-075912"
 
 #: The module constant the doc is allowed to name, and the only place the
 #: threshold is defined. Read from the source text rather than imported so this
@@ -145,3 +164,137 @@ def test_the_embed_model_the_live_config_template_names_still_parses_the_way_the
         (ROOT / "agent-services" / "conf" / "qmd-index.yml").read_text(encoding="utf-8"))
     models = cfg["models"]
     assert isinstance(models, dict) and isinstance(models.get("embed"), str) and models["embed"]
+
+
+# --- the #1992 route is described by what it did, not by what was owed --------
+#
+# "Not yet run for real" was true the day #1992 landed the route and stayed in the
+# doc for five days after a real invocation swapped a live index, because the
+# sentence was written beside the code and nothing re-read it against the reports
+# the route itself writes. So the paragraph's facts are not restated as constants
+# here: each one is read out of the report the citation names, and the citation is
+# resolved on disk.
+
+def _flat(text: str) -> str:
+    """Prose with its line wraps folded to single spaces, so an assertion is about
+    the sentence and not about where the file happened to break it."""
+    return " ".join(text.split())
+
+
+def _task81_bullet() -> str:
+    """§5's `Task #81` bullet — the list item that carries the #1992 account.
+
+    Splitting on `"\\n- "` works because the bullet's continuation lines are
+    indented, so one item is one chunk; the assertion is the node's own absence
+    check, so a reworded heading fails here with a reason instead of at an index.
+    """
+    hits = [b for b in _doc().split("\n- ") if "**Task #81**" in b]
+    assert len(hits) == 1, f"expected exactly one Task #81 bullet, got {len(hits)}"
+    return hits[0]
+
+
+def _report(name: str) -> dict:
+    """One report from the runtime record the doc cites.
+
+    Skips with the missing path when there is no history to read — a checkout with
+    no `_pipeline/reflection/` cannot re-derive a figure, and passing there would
+    be the false green this file exists to avoid.
+    """
+    path = REFLECTION / name
+    if not path.is_file():
+        pytest.skip(f"no runtime record at {path}, so the cited figure cannot be re-derived")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_the_doc_no_longer_says_the_route_was_never_run_for_real():
+    """#2302 clause 1: the stale claim is gone over the whole file.
+
+    Checked file-wide, review log included, because a dated entry is re-read as a
+    description of the job as often as it is read as history — and it is the
+    sentence an architecture review re-files this item from.
+    """
+    bullet = _task81_bullet()
+    assert "Not yet run for real" not in _doc(), (
+        "the doc still says the rebuild-and-swap route has never been run, which "
+        "the 2026-10-05 report contradicts")
+    # Positive control: the passage is still there and still about the same
+    # question, so the absence above is a rewrite and not a deletion.
+    assert "**Task #81**" in bullet and "1801" in bullet
+
+
+def test_the_paragraph_reports_the_swap_and_cites_the_report_behind_it():
+    """#2302 clause 2: the run that happened is stated, with its citation.
+
+    The seam is prose to runtime record: the paragraph is only checked if the
+    report it points at exists and still says `swapped` and `retrieval_ok`.
+    """
+    swap = _report(SWAP_REPORT)
+    flat = _flat(_task81_bullet())
+    cites = re.findall(
+        r"\$LLOYD_DATA/(_pipeline/reflection/qmd-side-copy-rebuild-2026[^` ]+)", flat)
+    assert cites, "the paragraph cites no report under _pipeline/reflection/"
+    assert any(c.endswith(SWAP_REPORT) for c in cites), cites
+    for cite in cites:
+        assert (REFLECTION.parent.parent / cite).is_file(), f"cited report is not on disk: {cite}"
+    assert swap["swap"]["swapped"] is True and swap["swap"]["retrieval_ok"] is True, swap["swap"]
+    assert swap["name"] == "rebuild-20261005" and "2026-10-05" in flat
+    assert "swapped" in flat and "retrieval_ok" in flat, (
+        "the paragraph no longer states what the swap report records")
+    assert SWAPPED_BACKUP in flat, "the backup the swap left is not named"
+
+
+def test_the_reclaim_figures_are_the_ones_the_nightly_series_measured():
+    """#2302 clause 3: 445.3 MiB dead at 0.2723 became 37.0 MiB at 0.822.
+
+    Both pairs are read out of the two nightly before-snapshots the paragraph
+    attributes them to, in that order, and the direction is checked too — a
+    paragraph that reported the two mornings the wrong way round would still
+    contain all four numbers. The route report's own `live_before` pair and the
+    live-row gap between the two reads are pinned beside them.
+    """
+    before = _report(MAINTENANCE_BEFORE)["before"]["vec0"]
+    after = _report(MAINTENANCE_AFTER)["before"]["vec0"]
+    live_before = _report(SWAP_REPORT)["live_before"]["vec0"]
+    flat = _flat(_task81_bullet())
+    assert before["dead_mib"] > after["dead_mib"], "the swap did not reclaim anything"
+    assert before["occupancy"] < after["occupancy"], "occupancy did not rise"
+    for fig in (before["dead_mib"], before["occupancy"],
+                after["dead_mib"], after["occupancy"],
+                live_before["dead_mib"], live_before["occupancy"]):
+        assert repr(fig) in flat, f"the doc does not state the measured {fig}"
+    assert MAINTENANCE_BEFORE in flat and MAINTENANCE_AFTER in flat, (
+        "the four figures are not attributed to the two nightly reports")
+    assert flat.index(MAINTENANCE_BEFORE) < flat.index(MAINTENANCE_AFTER), (
+        "the before/after pair is presented in the wrong order")
+    gap = live_before["live_rows"] - before["live_rows"]
+    assert f"{gap:,} more live rows" in flat, f"the two reads are {gap} rows apart"
+
+
+def test_the_paragraph_keeps_both_caveats_and_says_no_clock_window_applies():
+    """#2302 clause 4: the two mechanisms that survived the first real run, and
+    the absence of any hour-of-day rule.
+
+    The retry is pinned to the script's own constants and to the two embed passes
+    each run logged, so the sentence cannot outlive the mechanism; the `.bak`
+    claim is pinned to the retention series, which must still hold the swap's
+    backup as its newest member; and the clock-window sentence is pinned against
+    the one thing that would contradict it — a branch on the hour in the script.
+    """
+    flat = _flat(_task81_bullet())
+    assert "embed lock is per directory" in flat and "exclude each other" in flat
+    assert "the route retries" in flat, "the retry caveat was dropped"
+    src = SCRIPT.read_text(encoding="utf-8")
+    assert "SIDE_EMBED_ATTEMPTS" in src and "SIDE_EMBED_RETRY_SLEEP_S" in src, (
+        "the retry the paragraph describes is no longer a constant in the script")
+    for name in (REHEARSAL_REPORT, SWAP_REPORT):
+        passes = [a for a in _report(name)["actions"] if a.startswith("embed #")]
+        assert len(passes) == 2, f"{name} logged {len(passes)} embed passes"
+    assert "`.bak` series" in flat and "bounds to its newest" in flat, (
+        "the backup-retention caveat was dropped")
+    series = _report(MAINTENANCE_AFTER)["stray_retention"]["bak_series"]
+    assert series[0] == SWAPPED_BACKUP, f"the swap's backup is not the series' newest: {series}"
+    assert "no clock window applies" in flat, "the paragraph stopped saying the route has no window"
+    assert "22:00" not in flat and "04:00" not in flat, "a clock window is implied again"
+    assert ".hour" not in src, (
+        "qmd_index_maintenance.py now branches on the hour, and the paragraph's "
+        "'no clock window applies' has to be rewritten in the same change")
