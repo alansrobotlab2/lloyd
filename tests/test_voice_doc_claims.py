@@ -1,7 +1,7 @@
-"""What `architecture/voice.md` may say about the TTS eager-load knob.
+"""What the tracked prose may claim about the TTS server.
 
 `tests/test_qwen3_tts_launcher.py` pins what `start-qwen3-tts.sh` does. This
-file pins what the doc is allowed to claim about it, because the doc is where
+file pins what the docs are allowed to claim about it, because the docs are where
 #1446 came from: the 2026-09-24 architecture review wrote "The knob is not
 exported by the launch script, so hand-running `start-qwen3-tts.sh` is the lazy
 path and reproduces that incident" into the TTS-server section and filed the
@@ -13,6 +13,18 @@ negative has to go, and the two assertions here are the two directions of that:
 the stale claim must be gone, and its replacement must still carry the
 measurements that justify the default, so this file cannot be satisfied by
 deleting the paragraph.
+
+#2300 extends the same rule to a second claim that was live in three files at
+once: that a built-in voice "still works" and "just triggers the swap on the
+request that asks for one" (`architecture/voice.md`), that falling back to one is
+a thing to do by checking `/v1/voices` (`SETUP.md`), and that `Ryan` "still works
+as a fallback" (`config.yaml`). No swap exists —
+`_customvoice_model_key` appears nowhere in the vendored `optimized_backend.py`,
+and both generation paths load `self._base_model_key()` — so the default
+`1.7B-Base` served no built-in speaker at all and answered one with a 500 (or, on
+`stream:true`, a 200 with zero bytes). Those three sentences are the nodes below,
+each with the same positive control as #1446's: the measurements and the
+load-bearing ordering rules have to survive the correction.
 """
 
 from __future__ import annotations
@@ -23,6 +35,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DOC = ROOT / "architecture" / "voice.md"
 LAUNCHER = ROOT / "agent-services" / "bin" / "start-qwen3-tts.sh"
+SETUP = ROOT / "SETUP.md"
+CONFIG = ROOT / "config.yaml"
 
 
 def _para(marker: str) -> str:
@@ -110,3 +124,80 @@ def test_the_doc_describes_the_launcher_that_actually_exists():
     launcher = LAUNCHER.read_text()
     for token in quoted:
         assert token in launcher, f"voice.md quotes {token}, which the launcher lacks"
+
+
+# ── #2300: no tracked prose may promise a built-in voice the default model cannot serve ──
+# `_para` above is the existing paragraph scoper; these nodes reuse it rather than
+# adding a second reader of the same file.
+
+def _setup_section(marker: str) -> str:
+    """The SETUP.md passage from the bold heading `marker` to the next bold heading.
+
+    Scoped to a section rather than a paragraph because the fallback advice is a
+    heading, prose and two code fences, and the stale claim spans all three.
+    """
+    text = SETUP.read_text(encoding="utf-8")
+    i = text.find(marker)
+    assert i >= 0, f"marker not found in SETUP.md: {marker!r}"
+    j = text.find("\n**", i + len(marker))
+    return text[i:j if j > 0 else len(text)]
+
+
+def _livekit_voice_comment() -> tuple[str, str]:
+    """The comment block above `livekit.tts.voice` and the voice line itself.
+
+    Returned separately so a node can prove the *value* is untouched while only its
+    comment changed — the item rules the model/voice choice out of scope, so a
+    rewrite that also moved `voice:` would be a scope breach this assertion catches.
+    """
+    lines = CONFIG.read_text(encoding="utf-8").splitlines()
+    at = next(i for i, ln in enumerate(lines)
+              if ln.strip().startswith("voice: clone:dave_cullen"))
+    start = at
+    while start > 0 and lines[start - 1].lstrip().startswith("#"):
+        start -= 1
+    return "\n".join(lines[start:at]), lines[at]
+
+
+def test_voice_md_no_longer_promises_a_swap_for_a_builtin_voice():
+    """The claim that the default model serves built-ins, corrected without losing its numbers."""
+    para = _para("**Two models, and which one is default is a latency decision.**")
+    assert "Built-in voices still work" not in para, (
+        "voice.md still says a built-in voice works; the vendored server carries no "
+        "model-swap machinery, so that promise is what sent a reader to `Ryan`")
+    assert "just trigger the swap" not in para
+    for required in ("no swap", "_customvoice_model_key", "_base_model_key()",
+                     "400", "/v1/voices", "#2300"):
+        assert required in para, f"correction lost {required!r}: {para}"
+    # Positive control: the correction has to keep the facts that justify the default,
+    # so it cannot be satisfied by amputing the paragraph.
+    for measurement in ("~20 s measured", "1.7B-Base", "_base_model_key()"):
+        assert measurement in para, f"{measurement!r} lost from the paragraph"
+    assert "must stay the first" in para, (
+        "the load-bearing ordering rule left with the false claim")
+
+
+def test_setup_md_no_longer_offers_a_builtin_voice_as_a_fallback():
+    """SETUP.md's built-in-fallback section now states what a Base model refuses."""
+    section = _setup_section("**A built-in voice is not served by the default model")
+    for stale in ("Male built-ins are", "a bad voice still returns HTTP 200",
+                  "Falling back to a built-in voice"):
+        assert stale not in section, f"SETUP.md still says {stale!r}"
+    for required in ("HTTP 400", "stream:true", "zero bytes", "clone:dave_cullen",
+                     "CustomVoice"):
+        assert required in section, f"corrected section lost {required!r}"
+    assert "curl -s localhost:8090/v1/voices" in section, (
+        "the section must still tell a reader to ask the running service")
+    assert "~20 s" in section, (
+        "the cost of switching to CustomVoice belongs beside the instruction to do it")
+
+
+def test_config_yaml_voice_comment_no_longer_promises_a_fallback():
+    """The voice-mode comment states the Base refusal, and the voice value is untouched."""
+    comment, voice_line = _livekit_voice_comment()
+    for stale in ("still works as a fallback", "swaps models on the next request"):
+        assert stale not in comment, f"config.yaml comment still says {stale!r}"
+    for required in ("no model swap", "400", "CustomVoice", "#2300"):
+        assert required in comment, f"corrected comment lost {required!r}: {comment}"
+    # The item rules the voice/model choice out of scope: comment-only, by construction.
+    assert voice_line.strip() == "voice: clone:dave_cullen", voice_line

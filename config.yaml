@@ -1026,8 +1026,14 @@ livekit:
     # Profile: agent-services/services/tts/qwen3-tts/voice_library/profiles/dave_cullen/
     # Provenance + measurements: ~/obsidian/projects/lloyd/voice/voice-source-dave-cullen.md
     # Was `Ryan` (built-in) after the 08-22 rebuild destroyed the old clone:cullen
-    # profile.  `Ryan` still works as a fallback, but needs the CustomVoice model —
-    # switching back to it means the backend swaps models on the next request.
+    # profile.  Do not switch back to it expecting a fallback: the TTS server loads a
+    # `type: base` model (`1.7B-Base`) and that model serves no built-in speaker at
+    # all — there is no model swap in the vendored server, so a built-in name is
+    # refused with HTTP 400 before synthesis (#2300), and `/v1/voices` on this server
+    # lists only `clone:` profiles.  A built-in voice needs the TTS server's own
+    # `default_model` (`agent-services/services/tts/qwen3-tts/config.yaml`) pointed at
+    # a CustomVoice model and `agent-tts` restarted, which then costs every later
+    # `clone:` request an unload+load+warmup cycle.
     voice: clone:dave_cullen
     # Set by ear, not by the words/second match.  Matching Dave's 2.06 w/s put
     # this at 0.70 and that is audibly too slow — the metric is misleading

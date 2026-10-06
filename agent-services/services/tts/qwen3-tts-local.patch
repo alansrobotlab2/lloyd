@@ -259,10 +259,135 @@ index 8b527c3..a067f86 100644
      # ------------------------------------------------------------------
      # TTSBackend interface — metadata / introspection
 diff --git i/api/routers/openai_compatible.py w/api/routers/openai_compatible.py
-index c24a149..5107e92 100644
+index c24a149..31086de 100644
 --- i/api/routers/openai_compatible.py
 +++ w/api/routers/openai_compatible.py
-@@ -822,6 +822,9 @@ async def create_speech(
+@@ -349,6 +349,105 @@ def get_voice_name(voice: str) -> str:
+     return voice
+ 
+ 
++# ---------------------------------------------------------------------------
++# Voice capability (#2300): a Base model cannot synthesize a built-in speaker.
++# ---------------------------------------------------------------------------
++
++#: What `get_model_type()` answers for a model loaded from a `type: base` entry, and
++#: the answer it gives before any model is loaded (`optimized_backend.py:678-682`).
++BASE_MODEL_TYPE = "base"
++UNKNOWN_MODEL_TYPE = "unknown"
++
++#: The model types that can synthesize a non-`clone:` voice.  Every entry of
++#: `config.yaml`'s `models:` section is `customvoice` or `base`, so this is the
++#: complete set of affirmative answers, and a type not named here is a capability
++#: this server has no business advertising.
++BUILTIN_SPEAKER_MODEL_TYPES = ("customvoice",)
++
++
++def _serves_builtin_speakers(model_type: "str | None") -> bool:
++    """Whether a model of this type can synthesize a built-in (non-`clone:`) voice.
++
++    Deliberately not the mirror image of the refusal in
++    `_voice_capability_rejection`: the two differ on `unknown`, because the two
++    mistakes are not equally bad.  Falsely advertising a voice is the defect being
++    fixed — the live 500 on a stock name was read by an alert path as an outage —
++    while falsely refusing a request would break a deployment this file cannot
++    judge.  So a listing requires a type named in `BUILTIN_SPEAKER_MODEL_TYPES`,
++    and a generation request is refused only for a type known to fail.
++    """
++    return str(model_type or "") in BUILTIN_SPEAKER_MODEL_TYPES
++
++
++def _model_type_of(backend) -> str:
++    """The loaded model's declared type, or `unknown` for a backend that does not say.
++
++    `get_model_type` is the optimized backend's; a backend without it is not a
++    capability failure, so this never raises and never guesses.
++    """
++    getter = getattr(backend, "get_model_type", None)
++    if getter is None:
++        return UNKNOWN_MODEL_TYPE
++    try:
++        return str(getter())
++    except Exception:
++        return UNKNOWN_MODEL_TYPE
++
++
++def _voice_capability_rejection(voice: str, model_type: "str | None"):
++    """The 400 for a built-in voice this model cannot make, or None to proceed.
++
++    The route calls this before it branches on `stream` (#2300).  The streaming path
++    calls `generate_speech_streaming` directly and never enters `generate_speech`, so
++    the vendored `ValueError: model with tts_model_type=base does not support
++    stream_generate_custom_voice` surfaces inside the generator — after the response
++    headers are already out — and the live service answered a stock voice with HTTP
++    200 and zero bytes.  Refused here, both paths return a 400 and no stream starts.
++
++    The refusal keys on the loaded model type, not on the voice name, so an
++    advertised speaker (`Vivian`) and an unlisted name (`Nope`) are refused alike on
++    a Base model and accepted alike on a CustomVoice one.
++    """
++    voice_str = str(voice or "")
++    if voice_str.lower().startswith("clone:"):
++        return None
++    if str(model_type or "") != BASE_MODEL_TYPE:
++        return None
++    logger.warning(
++        f"Rejecting speech request: voice {voice_str!r} is a built-in speaker and the "
++        f"loaded model type is {model_type!r}, which serves none "
++        "(built-in speakers need a CustomVoice model)"
++    )
++    return HTTPException(
++        status_code=400,
++        detail={
++            "error": "invalid_voice",
++            "message": (
++                f"The loaded model type is {model_type!r}, which cannot synthesize a "
++                f"built-in speaker like {voice_str!r}: built-in speakers need a "
++                "CustomVoice model. Run GET /v1/voices to list the voices this server "
++                "actually serves — on a Base model those are the 'clone:<profile>' "
++                "voices from the voice library."
++            ),
++            "type": "invalid_request_error",
++        },
++    )
++
++
++def _visible_builtin_voices(voices: "List[dict]",
++                            model_type: "str | None") -> "List[dict]":
++    """The listing entries this model can actually synthesize.
++
++    A `clone:`-prefixed profile survives every filter: a Base model is exactly what
++    serves it (`_base_model_key()`, `optimized_backend.py:155`), so the prefix the
++    listing prints is the prefix the caller has to send back.
++    """
++    if _serves_builtin_speakers(model_type):
++        return list(voices)
++    return [v for v in voices
++            if str(v.get("id", "")).lower().startswith("clone:")]
++
++
+ def _method_accepts_kwarg(method, kwarg: str) -> bool:
+     """Return True if a callable accepts a given keyword argument."""
+     try:
+@@ -701,6 +800,18 @@ async def create_speech(
+                     },
+                 )
+ 
++        # ----------------------------------------------------------------
++        # Built-in speakers need a CustomVoice model (#2300) — refuse here, above
++        # the `stream` branch below.  A check inside `generate_speech`, or the
++        # blanket `except` at the foot of this route, cannot cover the streaming
++        # path: it never enters `generate_speech`, and the model's refusal arrives
++        # inside the generator, after the 200 headers are already sent.
++        # ----------------------------------------------------------------
++        _model_type = _model_type_of(await get_tts_backend())
++        _capability_rejection = _voice_capability_rejection(request.voice, _model_type)
++        if _capability_rejection is not None:
++            raise _capability_rejection
++
+         # ----------------------------------------------------------------
+         # Real-time streaming for built-in voices (optimized backend only)
+         # ----------------------------------------------------------------
+@@ -822,6 +933,9 @@ async def create_speech(
              )
  
          # Encode audio to requested format (offloaded – pydub MP3 encoding is CPU-heavy)
@@ -272,6 +397,43 @@ index c24a149..5107e92 100644
          audio_bytes = await asyncio.to_thread(encode_audio, audio, request.response_format, sample_rate)
  
          # Return audio response
+@@ -960,8 +1074,14 @@ async def list_voices():
+         else:
+             voices = [v.model_dump() for v in default_voices]
+         
+-        # OpenAI aliases map to built-in speakers; skip them on Base models
+-        if backend.get_model_type() != "base":
++        # #2300: none of the names above is synthesizable on a Base model, so none
++        # of them may be listed — the endpoint exists to answer "what can I ask this
++        # server for", and it was answering with nine speakers it cannot voice.
++        _loaded_type = _model_type_of(backend)
++        voices = _visible_builtin_voices(voices, _loaded_type)
++
++        # OpenAI aliases map to built-in speakers, so they follow the same rule.
++        if _serves_builtin_speakers(_loaded_type):
+             voices += [v.model_dump() for v in openai_voices]
+ 
+         return {
+@@ -971,11 +1091,16 @@ async def list_voices():
+         
+     except Exception as e:
+         logger.warning(f"Could not get voices from backend: {e}")
+-        # Return default voices if backend is not loaded
++        # With no backend there is no model type to ask, and an unconfirmed
++        # capability is not advertised (#2300).  The clone profiles are the only
++        # voices this branch can name without a loaded model, because they are files
++        # on disk rather than a property of a model that failed to load.
+         return {
+             "voices": (
+-                [v.model_dump() for v in default_voices]
+-                + [v.model_dump() for v in openai_voices]
++                _visible_builtin_voices(
++                    [v.model_dump() for v in default_voices]
++                    + [v.model_dump() for v in openai_voices],
++                    UNKNOWN_MODEL_TYPE)
+                 + clone_voices
+             ),
+             "languages": default_languages,
 diff --git i/config.yaml w/config.yaml
 index a913ded..8ca84f6 100644
 --- i/config.yaml

@@ -1076,8 +1076,16 @@ export in the launcher would clobber a value supervisor injected, and the conf's
 is `1.7B-Base` because voice mode always clones — leaving it on CustomVoice made
 the first cloned utterance after every restart pay an unload+load+warmup cycle
 (~20 s measured, against a normal ~5 s) and churned two 3–4 GB models through
-VRAM whenever a built-in voice was requested. Built-in voices still work; they
-just trigger the swap on the request that asks for one. Two ordering rules in
+VRAM whenever a built-in voice was requested. **There is no swap to trigger:** the
+vendored server carries no second-model key (`_customvoice_model_key` appears nowhere
+in `api/backends/optimized_backend.py`) and both generation paths load
+`self._base_model_key()` (`:543`, `:609`), so with the default Base model a built-in
+voice is not served — as of #2300 the server refuses a non-`clone:` voice with HTTP
+400 and a reason naming the loaded model type, ahead of both the streaming and the
+non-streaming route, and `GET /v1/voices` lists only the `clone:` profiles it can
+actually speak. Serving `Vivian` or `Ryan` means running a CustomVoice model as the
+default, which is the trade this paragraph is about — a ruling to make, not a
+behaviour to document as if it were live. Two ordering rules in
 that file are load-bearing and commented there: `1.7B-Base` must stay the first
 `type: base` entry because `_base_model_key()` returns the first it finds, and
 its `hf_id` is an **absolute local path** because the HF cache holds only the

@@ -987,26 +987,40 @@ that).
 `voice_library/profiles/dave_cullen/`. Without it, TTS starts but every synthesis
 request for that voice fails.
 
-**Falling back to a built-in voice — check `/v1/voices`, not the source.**
-`api/routers/openai_compatible.py` defines a `VOICE_MAPPING` of OpenAI aliases
-(`alloy echo fable nova onyx shimmer`) onto Qwen speakers, but **that table lists
-speakers the served model does not necessarily expose** — `onyx` maps to `Evan`,
-which is absent from the current 12Hz-1.7B-Base build, so setting either fails at
-synthesis time while looking valid. Ask the running service instead:
+**A built-in voice is not served by the default model at all — `clone:` is the only
+voice this deployment speaks.** `api/routers/openai_compatible.py` ships a
+`VOICE_MAPPING` of OpenAI aliases (`alloy echo fable nova onyx shimmer`) onto Qwen
+speakers, and the nine built-in names (`Vivian Serena Uncle_Fu Dylan Eric Ryan Aiden
+Ono_Anna Sohee`) come from `config.yaml`'s `voices:` section, but **none of them is
+synthesizable while the TTS server's `default_model` is a `type: base` model**, which
+is the case here — `1.7B-Base`, because voice mode always clones. There is no swap on
+a built-in request (#2300): the server refuses a non-`clone:` voice with **HTTP 400**
+and a reason naming the loaded model type, on the non-streaming route *and* on
+`stream:true`, and `GET /v1/voices` lists only the `clone:` profiles:
 
 ```bash
 curl -s localhost:8090/v1/voices | jq -r '.voices[].id'
-# Vivian Serena Uncle_Fu Dylan Eric Ryan Aiden Ono_Anna Sohee alloy echo fable nova onyx shimmer
+# clone:dave_cullen
 ```
 
-Male built-ins are `Uncle_Fu, Dylan, Eric, Ryan, Aiden`. Verify any change with a
-real round-trip rather than trusting the list — a bad voice still returns HTTP 200
-in some paths:
+Before #2300 a built-in name answered `500 processing_error` in ~1 ms while `/health`
+said `ready:true`, and on `stream:true` it answered `200` with **zero bytes** — which
+is exactly how a capability mismatch gets read as an outage. Verify against the
+running service rather than a mapping table in the source:
 
 ```bash
 curl -s -X POST localhost:8090/v1/audio/speech -H 'Content-Type: application/json' \
   -d '{"model":"qwen3-tts","voice":"Ryan","input":"test"}' -o /tmp/v.wav -w '%{http_code} %{size_download}\n'
+# 400, typed `invalid_request_error` — on `tts-1` and `qwen3-tts` alike, and never a
+# 200 with an empty body
 ```
+
+The built-in speakers are not missing from the build; they need a **CustomVoice**
+model. Serving them means pointing the TTS server's own
+`agent-services/services/tts/qwen3-tts/config.yaml` at `default_model:
+1.7B-CustomVoice` and restarting `agent-tts`, which then makes every later `clone:`
+request pay the unload+load+warmup cycle `architecture/voice.md` measures at ~20 s —
+the trade that put `1.7B-Base` in the first place.
 
 First boot is slow in two different regimes, and the Triton / torch-inductor
 compile cache (`~/.triton/cache` and `/tmp/torchinductor_alansrobotlab`) decides
