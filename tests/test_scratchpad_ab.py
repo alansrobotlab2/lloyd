@@ -83,7 +83,13 @@ def test_extra_prompt_text_in_one_arm_is_refused(catalog, shared):
 
     arms = _arms(shared)
     off = arms["control"]
-    block = build_denied_tools_block(off.disallowed_tools)
+    # The block is whatever the builder appended, which since #2269 is the
+    # refusals plus the capability sentence on an envelope-compiled source.
+    # Rebuilding it with only one of the two arguments would splice the tampered
+    # text into the middle of the turn's own statement rather than in front of
+    # it, and the arm check would then refuse for the wrong reason.
+    block = build_denied_tools_block(off.disallowed_tools,
+                                     allowed=off.allowed_tools)
     tampered = dataclasses.replace(
         off, system_prompt=off.system_prompt[:-len(block)] + "\nOne more rule.\n" + block)
     with pytest.raises(ab.ArmMismatch, match="outside the denied-tools block"):

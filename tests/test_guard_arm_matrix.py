@@ -128,3 +128,77 @@ def test_the_script_fails_on_a_tree_with_no_dispatch_path(tmp_path):
     out = subprocess.run([sys.executable, str(SCRIPT), "--root", str(tmp_path)],
                          cwd=str(ROOT), capture_output=True, text=True, timeout=120)
     assert out.returncode == 1 and "no dispatch path" in out.stderr
+
+
+# ── #2269: the capability envelope rides the same roster machinery ───────────
+#
+# A source's tool envelope is the other per-dispatch-path fact this module
+# exists to keep honest, and the risk is the same one #1828 was written about:
+# a fact held in a hand-maintained table reads as clean for the row nobody
+# added. So the denominator below is `workers/sources/__init__.py`'s own import
+# list read from the AST, and the two nodes that follow are one positive and one
+# forged negative — the negative exists because "no source trips the finding" is
+# equally true of a check that can never fire.
+
+def test_the_capability_report_enumerates_the_source_roster():
+    m = G.capability_matrix(ROOT)
+    assert set(m) == G.worker_source_names(ROOT), (
+        "the capability report and the roster's import list disagree: a source "
+        "exists that the report never looked at")
+    assert len(m) >= 10, f"only {len(m)} sources enumerated"
+    # The AST read is the whole drift mechanism, so it is checked against the
+    # package the tests already import, rather than trusted.
+    from workers.sources import SOURCE_REGISTRY
+    assert set(m) == set(SOURCE_REGISTRY), (
+        f"AST {sorted(set(m) ^ set(SOURCE_REGISTRY))} vs the live registry")
+    # Every un-narrowed source is a row, named, not an absent line.
+    found = {f.target for f in G.capability_findings(ROOT)
+             if f.reason == G.FINDING_UNDECLARED_ENVELOPE}
+    assert found == {s for s, c in m.items() if not c["declared"]}
+    assert found, "no source is undeclared, which means this column stopped "  \
+                  "being a denominator and became a decoration"
+
+
+def test_the_report_prints_reach_and_names_a_declaration_that_grants_a_sender(
+        monkeypatch):
+    m = G.capability_matrix(ROOT)
+    text = G.render_capabilities(m)
+    for source in ("youtube-digest", "deep-research", "session-distill"):
+        row = next(ln for ln in text.splitlines() if f"`{source}`" in ln)
+        assert m[source]["declared"] and m[source]["durable_reach"] == []
+        assert "| none |" in row, row
+    # The un-narrowed rows print `—`, not `0`: a cell that reads as zero reach
+    # for a source whose reach was never measured is the lie `_counting` and
+    # `_completeness` above exist to prevent.
+    assert "— |" in text
+    # The forged negative is the node: "no source trips the finding" is equally
+    # true of a check that can never fire, and this whole file exists because of
+    # a guard whose denominator could be empty (#1828). One declared name added,
+    # one durable sender, and the report has to name the source AND the name.
+    import app.harness.capabilities as caps
+    monkeypatch.setitem(caps.SOURCE_CAPABILITIES, "deep-research",
+                        tuple(caps.SOURCE_CAPABILITIES["deep-research"])
+                        + ("email_send",))
+    hits = [f for f in G.capability_findings(ROOT)
+            if f.reason == G.FINDING_INGEST_REACHES_DURABLE]
+    assert [f.target for f in hits] == ["deep-research"], hits
+    assert "email_send" in hits[0].extra
+
+
+def test_the_report_surface_prints_the_envelopes_on_demand():
+    """The run command a cold reader is told to run, run.
+
+    The default output is unchanged on purpose — `architecture/guard-coverage.md`
+    and the node above pin it — so the capability table is opt-in, and this is
+    what makes it reachable rather than a function nothing calls.
+    """
+    out = subprocess.run([sys.executable, str(SCRIPT), "--capabilities"],
+                         cwd=str(ROOT), capture_output=True, text=True, timeout=180)
+    assert out.returncode == 0, out.stderr[-2000:]
+    assert "worker sources with a capability envelope" in out.stdout
+    assert "`youtube-digest`" in out.stdout
+    assert "worker sources with a capability envelope: 15" in out.stdout
+    assert "| 24 durable-external reach" not in out.stdout
+    # Every un-narrowed source is named in the findings block, once.
+    assert "capability findings" in out.stdout
+    assert out.stdout.count("worker-source-declares-no-capability-set") >= 10

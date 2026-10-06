@@ -272,6 +272,24 @@ def build_turn_options(snapshot: SessionSnapshot, body: dict, kind: TurnKind, *,
         extra["allowed_tools"] = list(cfg.get("tools") or _mf.DEFAULT_TOOLS)
     else:
         extra["disallowed_tools_refresh"] = _refresh_disallowed
+        # #2269: a worker source's declared capability envelope, compiled in the
+        # worker pool by `app.harness.capabilities.envelope_for` and carried
+        # across the loopback POST by `run_prompt_in_session`. This is where it
+        # lands on the turn, because a session-backed source's `RunOptions` are
+        # built here and nowhere else — `youtube-digest` and `deep-research`,
+        # the two sources whose entire input is somebody else's text, arrive
+        # through this branch. Read from `body` for the same reason
+        # `extra_disallowed` is: the two turn shapes are built in two processes
+        # and this dict is the only thing between them.
+        #
+        # BREAK-GLASS, and deliberately keyed on the surface rather than on the
+        # body: a chat or voice turn ignores the key completely, so a request
+        # that names a session and sends `allowed_tools` cannot clip a human's
+        # own turn. An interactive session reaches an envelope only by being a
+        # worker session, and a worker session is created by the pool
+        # (`_common.new_worker_session`), not by a browser.
+        if platform == "worker" and body.get("allowed_tools"):
+            extra["allowed_tools"] = [str(t) for t in body["allowed_tools"]]
     if kind == "voice":
         from app.routers.voice import _voice_extra_body
         extra["extra_body"] = _voice_extra_body()

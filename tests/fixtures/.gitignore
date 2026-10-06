@@ -139,3 +139,16 @@
 # `~/lloyd-data/_pipeline/memory-graph/` and is what the sweep is writing right now, so the
 # negation must never reach one — only this witness somebody deliberately placed here.
 !entity-merges-applied-2026-10-05-20261005T142239Z.json
+
+# The tenth family is a measurement of the tree rather than a witness of an
+# incident: the before/after capability table #2269's step-1 artifact is. It is
+# committed because the acceptance is graded against it — "durable-external reach
+# is 0 for every untrusted-ingest source, re-measure the digest baseline" is a
+# claim about a number, and a reader who cannot see the number before the change
+# cannot check the number after it. `test_the_step_1_artifact_is_committed_and_
+# current` re-derives it from the compile on every run, so the committed copy
+# cannot go stale against the code without the suite going red; it is committed
+# rather than generated at test time so the diff of a round that widens or
+# narrows a source is reviewable. Scoped to this one filename, not to `*.json`:
+# a runtime dump dropped here by accident stays ignored.
+!worker_capability_baseline.json

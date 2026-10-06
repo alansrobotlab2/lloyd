@@ -57,6 +57,12 @@ POOL_TIMEOUT_MARGIN_SECONDS = 60
 # aggregator can read them without importing this package; re-exported here
 # because every source and a dozen tests import them from this module.
 from app.tool_bans import WORKER_AUTOMOD_BAN, WORKER_GRANT_MINT_BAN  # noqa: E402,F401
+# #2269: a source's capability envelope is derived from its declared output, and
+# both worker turn shapes read it from here so neither can drift from the other.
+# `app.harness.capabilities` imports nothing from `workers.*`, so this edge is
+# one-way, and it validates its own declarations against the tool roster at
+# import — a source that names a tool no server serves fails at boot, naming it.
+from app.harness.capabilities import envelope_for  # noqa: E402
 # #2087: the step count a turn reports is noted for the run record here, at the
 # one place the terminal event is read, rather than being carried back by every
 # source. `sessions_io` is where the pool-bound collector lives, next to the
@@ -101,7 +107,15 @@ def build_skill_prompt(skill_text: str, *, job: str, task_block: str) -> str:
 DENIED_TOOLS_HEADING = "Tools this turn may not call"
 
 
-def build_denied_tools_block(disallowed) -> str:
+#: Heading of the block that names a turn's whole tool surface to the turn
+#: itself, on an allow-listed turn only (#2269). The deny block above says what
+#: is refused; on an envelope compiled from a declared set that is the wrong
+#: question to leave the turn with, because the answer to "what may I use" is
+#: then a closed list rather than "everything except these 57".
+CAPABILITY_HEADING = "The only tools this turn has"
+
+
+def build_denied_tools_block(disallowed, allowed=None) -> str:
     """Name the calls dispatch will refuse, to the turn they are refused on.
 
     `extra_disallowed` reaches `RunOptions.disallowed_tools` in
@@ -123,18 +137,38 @@ def build_denied_tools_block(disallowed) -> str:
     Returns "" for a turn with no list, which is the chat and ambient path:
     nothing is appended, so a per-worker restriction has no way to leak onto
     the turn that owns every tool.
+
+    `allowed` (#2269) is the same value handed to `RunOptions.allowed_tools`,
+    and is stated beside the deny list rather than instead of it: a turn whose
+    envelope came from a declared set is told which tools it has as a closed
+    list, which is the question an allow-list actually answers, and keeps the
+    named refusals that #1066 exists for. Two sentences, one value each, both
+    read from the compile — neither can go stale against the other.
     """
     names = sorted({str(t).strip() for t in (disallowed or []) if str(t).strip()})
-    if not names:
+    allowed_names = (sorted({str(t).strip() for t in allowed if str(t).strip()})
+                     if allowed is not None else [])
+    if not names and not allowed_names:
         return ""
-    return (
-        f"\n\n{DENIED_TOOLS_HEADING}: {', '.join(names)}.\n"
-        "They are refused before anything runs, whatever the arguments, and a "
-        "refusal is not a transient failure — retrying the same tool is not a "
-        "recovery. The tools this job left available are the ones that work "
-        "here; if none of them can do the step, drop the step and say why in "
-        "the output."
-    )
+    out = ""
+    if names:
+        out += (
+            f"\n\n{DENIED_TOOLS_HEADING}: {', '.join(names)}.\n"
+            "They are refused before anything runs, whatever the arguments, and a "
+            "refusal is not a transient failure — retrying the same tool is not a "
+            "recovery. The tools this job left available are the ones that work "
+            "here; if none of them can do the step, drop the step and say why in "
+            "the output."
+        )
+    if allowed_names:
+        out += (
+            f"\n\n{CAPABILITY_HEADING}: {', '.join(allowed_names)}. Everything "
+            "else is refused before it runs, including a tool you have used "
+            "before on another job — this turn's surface is that list and "
+            "nothing else, so a tool absent from it is not a thing to retry or "
+            "route around."
+        )
+    return out
 
 
 def parse_confidence(response: str, default: float = 0.5) -> float:
@@ -464,13 +498,33 @@ def _worker_run_options(max_turns: int, *, source: str | None = None,
 
     disallowed.extend(extra_disallowed)
 
+    # #2269: the envelope above is the *floor*, and this is the ceiling. A
+    # source that declared a capability set gets `allowed = pool − declared`:
+    # the reachable set is derived from what that source's own RESULT block can
+    # use, and everything else — the Thunderbird senders, the contacts and
+    # calendar mutators, the task scheduler — is unreachable because nobody put
+    # it in, not because someone thought to list it. A source that declared
+    # nothing gets None, which means today's compile byte for byte: the floor
+    # and nothing else, never the whole pool.
+    #
+    # One call, shared with `run_prompt_in_session` below, because the two
+    # shapes of worker turn have to disagree about nothing here: this value goes
+    # onto `RunOptions.allowed_tools`, that one crosses the loopback POST and is
+    # applied by `app/routers/turn_options.py`.
+    allowed = envelope_for(source, extra_disallowed)
+
     # The list is now stated to the turn that carries it, from the same value
     # that lands on `RunOptions` below. The `if "Task" in disallowed` clause in
     # the tool description a few lines down is the reason this belongs after the
     # list is final rather than near `system_prompt`: an instruction written for
     # one banned tool already had to read the list to know whether to speak, so
     # a turn banned from six things was told about one of them.
-    system_prompt += build_denied_tools_block(disallowed)
+    #
+    # `allowed` rides along so the turn is told the set it is dispatched under.
+    # Naming only the deny list on an allow-listed turn would be a promise with
+    # the wrong shape: 57 refused names, and no answer to "then what may I use",
+    # which is the question that makes a model retry a tool it never had.
+    system_prompt += build_denied_tools_block(disallowed, allowed=allowed)
 
     # Every non-interactive turn is built here, and until #534 every one of
     # them ran with `hooks=None` — no safety hook, no grant gate, so
@@ -504,6 +558,13 @@ def _worker_run_options(max_turns: int, *, source: str | None = None,
         max_turns=max_turns,
         mcp_servers=DEFAULT_LLOYD_MCP_SERVERS,
         disallowed_tools=disallowed,
+        # #2269: the declared envelope, None for a source that declared nothing.
+        # This is the field the harness already enforces twice — folded into the
+        # advertised catalog by `loop._allow_list_hidden` and refused again in
+        # `_pre_dispatch` for a name no server discovered — and that until today
+        # only the memory-flush turn ever set. Nothing here gates a call; the
+        # enforcement layer is the one that was already there.
+        allowed_tools=allowed,
         # A direct worker turn has nobody at Mission Control; see
         # agent_mcp.annotations.hidden_on_surface.
         surface="worker",
@@ -1000,8 +1061,25 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
     # it may not call, which is why 22 refusals in four days all came from the
     # two sources that pass a list and none from a source that passes none
     # (#1066).
+    #
+    # `allowed` is the #2269 envelope, compiled by the same `envelope_for` the
+    # direct shape calls above, and it rides the POST for the same reason
+    # `grant_scope` and `effect_scope` do: a session-backed source's
+    # `RunOptions` are built in the backend, in another process, from this body
+    # and nothing else. `youtube-digest` and `deep-research` — the two sources
+    # whose entire input is somebody else's text — run on this path, so a change
+    # that stopped at `_worker_run_options` would leave them exactly as reachable
+    # as they were.
+    #
+    # SEAM(http): worker pool -> backend `POST /api/message/stream`, the body key
+    # `allowed_tools`. Crossed by
+    # test_worker_capability_allowlist.py::
+    # test_the_loopback_post_carries_the_envelope_the_backend_applies, which
+    # drives the real `_stream` body into the real `build_turn_options`.
+    allowed = envelope_for(source, extra_disallowed or ())
     payload = {"session_id": session_id,
-               "text": prompt + build_denied_tools_block(extra_disallowed),
+               "text": prompt + build_denied_tools_block(extra_disallowed,
+                                                         allowed=allowed),
                "model": model,
                # Also read by the endpoint's lazy create
                # (`sessions_io._save_session_meta`), the only writer of a
@@ -1028,6 +1106,8 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
                "deadline_seconds": float(timeout_seconds)}
     if extra_disallowed:
         payload["extra_disallowed"] = list(extra_disallowed)
+    if allowed is not None:
+        payload["allowed_tools"] = allowed
     if final_schema:
         payload["final_schema"] = final_schema
         if final_schema_prompt:

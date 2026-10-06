@@ -1866,6 +1866,12 @@ async def test_the_digest_turn_is_told_its_own_list_and_not_the_research_one(
 
     text = worker_turn_post[0]["text"]
     _, heading, block = text.partition(C.DENIED_TOOLS_HEADING)
+    # #2269 bounds the object of this assertion: an envelope-compiled turn is
+    # told its capability set in a sentence beside the refusals, and that
+    # sentence names exactly the tools the loop below requires to be ABSENT from
+    # the deny block. The refusal statement is what the assertion is about, so it
+    # ends where the capability sentence begins.
+    block = block.split(C.CAPABILITY_HEADING)[0]
     assert block, "the digest turn was never told its deny list"
     for name in ("Bash", "Edit", "Task", "http_request", "browser_click"):
         assert name in block, name

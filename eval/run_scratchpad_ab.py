@@ -27,6 +27,7 @@ and `eval/run_memory_index_ab.py`, on a worker turn instead of a bench turn):
   stays silent because its file never exists. `check_arms` builds both arms'
   `RunOptions` through the production builder and refuses to run unless every
   option matches, the deny lists differ by exactly `SCRATCHPAD_DENY`, the
+  capability envelopes differ by exactly the scratchpad's own name (#2269), the
   advertised catalogs differ by exactly the one tool, and the assembled
   position-0 system message (builder prompt + denied-tools block + the
   deferred-tool catalog reminder the loop appends) differs by exactly the
@@ -118,7 +119,16 @@ ZERO_TALLY = {"writes": 0, "bytes": 0, "sessions": 0}
 #: `system_prompt` and `disallowed_tools` carry the affordance (checked
 #: separately, to the byte); the rest are per-run identity or live objects
 #: compared by type (see `_same_option`).
-_OPTION_FIELDS_CHECKED_ELSEWHERE = frozenset({"system_prompt", "disallowed_tools"})
+# `allowed_tools` joined this set with #2269: the affordance is now switched on
+# three surfaces at once, because the turn's tool set is compiled from a declared
+# capability envelope as well as a deny list, and denying `Scratchpad` on the
+# control removes it from the envelope too (`envelope_for` subtracts the call
+# site's denials so the sentence in the prompt never names a refused tool). It is
+# checked below by name for the same reason the deny list is: an arm that lost
+# some *other* tool would otherwise be an unmeasured difference reported as a
+# measurement of the scratchpad.
+_OPTION_FIELDS_CHECKED_ELSEWHERE = frozenset(
+    {"system_prompt", "disallowed_tools", "allowed_tools"})
 
 
 class ArmMismatch(RuntimeError):
@@ -285,6 +295,15 @@ def check_arms(on, off, discovered) -> dict[str, Any]:
     if not on_deny <= off_deny or off_deny - on_deny != set(SCRATCHPAD_DENY):
         raise ArmMismatch(f"deny lists differ by {sorted(off_deny ^ on_deny)}, "
                           f"not exactly {list(SCRATCHPAD_DENY)}")
+    # The same property on the other side of the compile (#2269): the control may
+    # lose the scratchpad from its envelope and nothing else may move.
+    if on.allowed_tools is None or off.allowed_tools is None:
+        raise ArmMismatch("an arm compiled no capability envelope, so the "
+                          "advertised set is not the declared one")
+    on_allow, off_allow = set(on.allowed_tools), set(off.allowed_tools)
+    if not off_allow <= on_allow or on_allow - off_allow != {SCRATCHPAD_TOOL}:
+        raise ArmMismatch(f"envelopes differ by {sorted(on_allow ^ off_allow)}, "
+                          f"not exactly ['{SCRATCHPAD_TOOL}']")
     if [t for t in cat_on if t["function"]["name"] != SCRATCHPAD_TOOL] != cat_off:
         raise ArmMismatch("advertised catalogs differ by more than the scratchpad tool")
 
@@ -293,8 +312,14 @@ def check_arms(on, off, discovered) -> dict[str, Any]:
     # is left must be the control's system message exactly.
     sys_on = assemble_position_zero(on, cat_on)
     sys_off = assemble_position_zero(off, cat_off)
-    block_on = build_denied_tools_block(on.disallowed_tools)
-    block_off = build_denied_tools_block(off.disallowed_tools)
+    # The block is the whole statement the builder appended — refusals and, on an
+    # envelope-compiled source, the capability sentence — so it is rebuilt with
+    # the same two values the builder passed, or `endswith` below compares the
+    # turn against half of what it was told (#2269).
+    block_on = build_denied_tools_block(on.disallowed_tools,
+                                        allowed=on.allowed_tools)
+    block_off = build_denied_tools_block(off.disallowed_tools,
+                                         allowed=off.allowed_tools)
     if not block_on or not on.system_prompt.endswith(block_on) \
             or not off.system_prompt.endswith(block_off):
         raise ArmMismatch("a builder prompt does not end with its denied-tools block")
@@ -307,7 +332,8 @@ def check_arms(on, off, discovered) -> dict[str, Any]:
         expected = expected.replace("\n" + line, "", 1)
     if expected != sys_off:
         raise ArmMismatch("assembled system prompts differ by more than the scratchpad "
-                          "in the denied-tools block and the catalog reminder")
+                          "in the denied-tools/capability block and the catalog "
+                          "reminder")
     return {"system_chars": {"scratchpad": len(sys_on), "control": len(sys_off)},
             "tools": {"scratchpad": len(names_on), "control": len(names_off)},
             "shared_deny": len(on_deny), "catalog_line": bool(line)}
