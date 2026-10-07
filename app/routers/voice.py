@@ -381,7 +381,8 @@ async def _prewarm(session_id: str) -> None:
     """
     import time
 
-    from app.compaction import load_and_compact_session
+    from app.compaction import (load_and_compact_session,
+                                  microcompact_sidecar_for)
     from app.harness import run_query
     from app.routers._messages_harness_adapter import _prepare_messages_for_harness
 
@@ -392,7 +393,9 @@ async def _prewarm(session_id: str) -> None:
         history: list[dict] = []
         if meta_path.exists():
             comp = await load_and_compact_session(
-                meta_path, model=setup["model"], mode_override="truncate")
+                meta_path, model=setup["model"], mode_override="truncate",
+                # #2348 clause 3: the same switch the chat route uses.
+                microcompact_sidecar=microcompact_sidecar_for(options))
             if comp.get("truncated"):
                 logger.info("voice prewarm %s: skipped (over the compaction "
                             "threshold — the turn will summarize)", session_id)

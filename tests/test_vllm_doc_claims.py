@@ -366,7 +366,7 @@ _PRE_FIX_IV_CLAUSE = (
     "The two mints whose ids land in the 23 cover the conversations this engine serves: "
     "an Inner-Voice-on chat takes the three-part `<ts>_iv<hex>` shape from "
     "`app/routers/sessions.py:724` (`suffix = \"iv\" + secrets.token_hex(2)`), and a plain "
-    "one `<ts>_<6 hex>` from `app/routers/messages.py:2113` — three parts each, so neither "
+    "one `<ts>_<6 hex>` from `app/routers/messages.py:2117` — three parts each, so neither "
     "is mistaken for a producer's.")
 
 #: Ways the bullet can point at the id prefix itself.
@@ -410,12 +410,12 @@ def test_criterion_a_names_create_session_as_the_mint_that_ignores_the_flag(read
     """Clause 1: what the bullet says INSTEAD, checked against the code it cites.
 
     Not just "the false phrase is absent": the bullet has to state the mint, its
-    unconditionality, and the fallback's role. `messages.py:2113` stays qualitative —
+    unconditionality, and the fallback's role. `messages.py:2117` stays qualitative —
     the fallback's share of the record is a `usage.db` figure, and this page's rule is
     to cite the query rather than hand-copy the number.
     """
     b = _criterion_bullet(reading, "a")
-    assert "`app/routers/sessions.py:724`" in b and "`app/routers/messages.py:2113`" in b, \
+    assert "`app/routers/sessions.py:724`" in b and "`app/routers/messages.py:2117`" in b, \
         "(a) must carry both chat mints by path and line: " \
         "test_criterion_a_cites_both_chat_mints_and_no_four_part_one asserts the SET of " \
         "cited paths and checks each line against the code; this pins neither was dropped"

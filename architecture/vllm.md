@@ -794,7 +794,7 @@ has still not been run as of 2026-09-11.
   `inner_voice` body flag is read later in that same handler and picks what a session does,
   never what it is called — the association this bullet used to state the wrong way round,
   and the reason no chat population can be read back out of an id's prefix. The other mint
-  is the message path's fallback (`app/routers/messages.py:2113`), reached only by a
+  is the message path's fallback (`app/routers/messages.py:2117`), reached only by a
   `POST /message` arriving with no session id to append to; in ordinary operation the chats
   this engine serves come through the mint above, so these are not two equally-weighted
   sources of the 23. Three parts each, so neither is mistaken for a producer's. 23 is

@@ -1090,6 +1090,12 @@ def test_the_sidecar_arm_is_the_one_that_writes_the_sidecar_beside_the_session(
     assert opts_by_arm["tool_clear"].microcompact_reduction_sidecar is False
 
     sess = tmp_path / "d" / "sessions"
+    # #2348 gave the TURN-START pass its own writer of this file (the sticky
+    # `cleared_call_ids` list), so a run_one row can create it before relief ever
+    # runs. Start from an empty directory so the diff below measures relief's
+    # writer alone, which is what this node is about.
+    for stale in sess.glob("*.microcompact-reduced.json"):
+        stale.unlink()
     for arm in ("tool_clear", "sidecar"):
         opts = opts_by_arm[arm]
         msgs = [{"role": "user", "content": "read these"}]

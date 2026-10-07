@@ -117,6 +117,15 @@ def turn_start_record(comp: Mapping[str, Any]) -> dict[str, Any] | None:
         # P3: a memory flush finished in this compaction cycle before this
         # rewrite (app/memory_flush.py). Always false with the flush off.
         "flushed_before_summary": bool(comp.get("flushed_before_summary")),
+        # #2348 clause 1: `microcompact_reduced` is how many rows the
+        # read-time sidecar APPLIED this turn — absent-zero like
+        # `restored_files`, so a session with no sidecar reads as 0 rather
+        # than NULL — and `microcompact_sidecar` says whether the pass was
+        # consulted at all. The two together are what separates "knob on and
+        # firing" (1, True) from "on and inert" (0, True) from "off"
+        # (0, False) in one turn's record.
+        "microcompact_reduced": int(comp.get("microcompact_reduced") or 0),
+        "microcompact_sidecar": bool(comp.get("microcompact_sidecar")),
     }
 
 

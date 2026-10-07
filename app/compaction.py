@@ -409,6 +409,20 @@ def _record_turn_start(session_id: str, result: dict[str, Any]) -> None:
         logger.warning("compaction: turn_start event write failed: %s", e)
 
 
+def microcompact_sidecar_for(options) -> "bool | None":
+    """The one switch value a turn's read-time pass should use (#2348 clause 3).
+
+    Relief's writer reads the caller's `RunOptions` INSTANCE
+    (`app/harness/loop.py:2068-2069`). This is the matching read for the
+    read-time half, so a caller that arms one half arms both: the INSTANCE's
+    value decides, not the dataclass default. `None` when there is no caller's
+    instance to ask, which sends `load_and_compact_session` to the shipped
+    default — what every non-router caller does today.
+    """
+    if options is None:
+        return None
+    return bool(getattr(options, "microcompact_reduction_sidecar", False))
+
 async def _persisted_summary_layer(
     convo: list[dict],
     data: dict,
@@ -647,6 +661,16 @@ async def load_and_compact_session(
 
     # ---- Layer B: microcompaction pre-pass ----------------------------
     micro_cleared = 0
+    # #2348: what the read-time sidecar APPLIED, and which rows THIS pass cleared.
+    # The applied count used to be bound to `sidecar_applied` below and then
+    # overwritten by the `microcompact()` call without ever being read, so a reader
+    # could not tell the knob being ON from the knob FIRING — and that difference is
+    # what #2168's ship-on ruling needs to be readable. The ids are what makes
+    # clearing sticky from one turn to the next.
+    sidecar_applied = 0
+    cleared_this_pass: list[str] = []
+    already_cleared: tuple[str, ...] = ()
+    sidecar_on = False
     if cfg["microcompact"].get("enabled", True):
         # Lazy import — keeps app.compaction importable without the
         # harness module tree (e.g. for unit tests of truncation alone).
@@ -655,16 +679,34 @@ async def load_and_compact_session(
                 DEFAULT_COMPACTABLE_TOOLS,
                 apply_reduction_sidecar,
                 microcompact,
+                read_cleared_calls,
+                record_cleared_calls,
             )
+            # ONE switch source (#2348 clause 3), resolved ONCE here so the two
+            # halves cannot disagree. Relief's writer reads the caller's RunOptions
+            # INSTANCE (`loop.py:2068-2069`); this pass used to re-read the CLASS
+            # default whenever it was handed None, so arming relief armed nothing at
+            # read time and a naive enable yielded a false flat. An explicit value
+            # still wins; only None falls back to the shipped dataclass default,
+            # which is what keeps real traffic untouched until
+            # `app/harness/options.py:287` is flipped.
             if microcompact_sidecar is None:
-                # The shipped default lives in RunOptions, which is where the
-                # harness's own relief knobs live, so turning the feature on is
-                # one default there and not a second switch to keep in step.
+                # The knob decides on its own — read the dataclass default
+                # directly instead of building a throwaway RunOptions.
                 from app.harness.options import RunOptions as _RunOptions
-                microcompact_sidecar = bool(
+                sidecar_on = bool(
                     _RunOptions.__dataclass_fields__[
                         "microcompact_reduction_sidecar"].default)
-            if microcompact_sidecar:
+            else:
+                sidecar_on = bool(microcompact_sidecar)
+            if sidecar_on:
+                # Rows a previous turn-start pass already cleared, read ONCE for the
+                # whole pass. They are still RE-RENDERED below — the session file is
+                # never rewritten by the read path, so a row left at full size here
+                # would grow its content back into the next prompt, which is the
+                # prefix-cache break #2168's reducible-not-merely-cleared rule exists
+                # to prevent — and what they are excluded from is the COUNT.
+                already_cleared = read_cleared_calls(path.stem)
                 # #2168: relief reduced these rows during the turn that wrote
                 # them and the reduction died with `chat_messages`, so the row
                 # came off disk carrying a preview the pre-pass was about to
@@ -674,7 +716,7 @@ async def load_and_compact_session(
                 # rewritten — the row on disk keeps the full block the UI
                 # renders and `Read` can reopen. Keyed by this session's own
                 # id, so a sidecar belonging to another session is inert here.
-                convo, _sidecar_applied = apply_reduction_sidecar(
+                convo, sidecar_applied = apply_reduction_sidecar(
                     convo, path.stem)
             mc_cfg = cfg["microcompact"]
             tools: Iterable[str] = (
@@ -690,7 +732,7 @@ async def load_and_compact_session(
             # spill module names its directory after. Without it,
             # spill-before-clear is skipped and nothing is cleared that
             # was not already on disk.
-            convo, micro_cleared = microcompact(
+            convo, pass_cleared = microcompact(
                 convo,
                 keep_recent_tools=int(mc_cfg.get("keep_recent_tools", 15)),
                 count_threshold=int(mc_cfg.get("count_threshold", 20)),
@@ -712,7 +754,18 @@ async def load_and_compact_session(
                 observation_stubs=bool(mc_cfg.get("observation_stubs", False)),
                 observation_head_chars=int(mc_cfg.get("observation_head_chars", 400)),
                 name_session_record=bool(mc_cfg.get("name_session_record", False)),
+                # #2348 clause 2/4: both are passed only with the knob on, so a
+                # turn-start pass on the shipped default makes the exact call it
+                # makes today — no skip set, no collector, no file.
+                already_cleared=(already_cleared if sidecar_on else ()),
+                cleared_calls_out=(cleared_this_pass if sidecar_on else None),
             )
+            micro_cleared += pass_cleared
+            if sidecar_on and cleared_this_pass:
+                # Sticky clearing's write half, behind the SAME gate as the read
+                # half: with the shipped default False no sidecar file is created at
+                # all, so nothing reaches real traffic before #2168's ruling.
+                record_cleared_calls(path.stem, cleared_this_pass)
         except Exception as e:  # noqa: BLE001
             logger.warning("microcompact pre-pass failed: %s", e)
 
@@ -888,6 +941,14 @@ async def load_and_compact_session(
         "truncated": dropped > 0,
         "summarized": summarized,
         "microcompacted": micro_cleared,
+        # #2348 clause 1: how many rows the read-time sidecar APPLIED, and
+        # whether it was consulted at all. Before this the count was bound to
+        # `_sidecar_applied` and read by nothing, so "knob on and firing" and
+        # "knob on and inert" produced byte-identical records — the one
+        # distinction #2168's ship-on ruling has to be able to make from one
+        # turn's log.
+        "microcompact_reduced": sidecar_applied,
+        "microcompact_sidecar": bool(sidecar_on),
         "restored_files": restored_count,
         "context_window": context_window,
         "threshold": threshold,

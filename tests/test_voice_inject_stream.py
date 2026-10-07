@@ -195,8 +195,10 @@ def test_prewarm_skips_a_session_that_will_summarize(prewarm, tmp_path, monkeypa
     (tmp_path / "s5.json").write_text(json.dumps({"messages": []}))
     seen = {}
 
-    async def fake_load(path, model="", system_prompt="", *, mode_override=None):
+    async def fake_load(path, model="", system_prompt="", *, mode_override=None,
+                    microcompact_sidecar=None):
         seen["mode"] = mode_override
+        seen["sidecar"] = microcompact_sidecar
         return {"history": [], "truncated": True}
 
     import app.compaction as compaction
@@ -204,4 +206,7 @@ def test_prewarm_skips_a_session_that_will_summarize(prewarm, tmp_path, monkeypa
     client().post("/api/voice/prewarm", json={"session_key": "s5"})
     _drain_tasks()
     assert seen["mode"] == "truncate"
+    # #2348: the prewarm forwards the caller's switch, which with the shipped
+    # dataclass default is False — the same value relief's writer sees.
+    assert seen["sidecar"] is False
     assert runs == []

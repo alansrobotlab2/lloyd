@@ -57,7 +57,8 @@ from app.sessions_io import (
 from app.post_capture import _post_session_capture, _maybe_extract_focus
 from app.session_titles import maybe_title_session
 from app.prefetch import prefetch_context_async, log_turn_prompt_budget
-from app.compaction import load_and_compact_session
+from app.compaction import (load_and_compact_session,
+                              microcompact_sidecar_for)
 from app import event_log as _event_log  # Inner Voice — agent-side event capture
 from app import compaction_record as _compaction_record  # which context policy fired
 from app import prefix_miss as _prefix_miss
@@ -1058,6 +1059,9 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
         # spill notices are in its history, and one that points at `Read`
         # orders a call this turn's policy refuses (#1066).
         disallowed_tools=list(options.disallowed_tools or []),
+        # #2348 clause 3: the read-time half asks the SAME object relief's
+        # writer asks, so one RunOptions arms both halves.
+        microcompact_sidecar=microcompact_sidecar_for(options),
     )
     # Booked whether or not it rewrote anything: the decision is the datum that
     # makes `compaction.mode: summarize` decidable, and a history that was left

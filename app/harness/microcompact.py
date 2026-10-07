@@ -320,24 +320,76 @@ def reduction_sidecar_path(session_id: str):
     return _trs.SESSIONS_DIR / f"{session_id}{REDUCTION_SIDECAR_SUFFIX}"
 
 
+def _sidecar_payload(session_id: str) -> dict | None:
+    """The sidecar JSON object for `session_id`, or None when there is nothing to read.
+
+    One read for both lists the file holds, so the two can never disagree about
+    whether it parsed. A missing id, an absent file and a file that does not parse
+    all read as None: the sidecar is an optimisation over today's behaviour, never
+    a source of content, so its worst failure is a re-clear — not a lost row and
+    not a failed turn.
+    """
+    path = reduction_sidecar_path(session_id)
+    if path is None:
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _sidecar_list(data: "dict | None", key: str) -> tuple[str, ...]:
+    """`data[key]` as a tuple of non-empty strings, tolerating any shape."""
+    if not isinstance(data, dict):
+        return ()
+    ids = data.get(key)
+    if not isinstance(ids, list):
+        return ()
+    return tuple(str(cid) for cid in ids if isinstance(cid, str) and cid)
+
+
+def _write_sidecar(path, **lists: list[str]) -> None:
+    """Rewrite the sidecar from the parsed file plus the lists being changed.
+
+    The file holds two independent lists (#2348), written by two different passes
+    that run at different moments, so every writer states the WHOLE payload built
+    from what it just read — a writer that emitted only its own key would silently
+    erase its sibling's work the first time it ran.
+    """
+    payload = {"schema": 1}
+    payload.update({k: list(v) for k, v in lists.items()})
+    path.write_text(json.dumps(payload))
+
+
 def read_reduced_calls(session_id: str) -> tuple[str, ...]:
-    """The call_ids recorded for `session_id`, in the order they were written.
+    """The call_ids relief recorded for `session_id`, in the order they were written.
 
     Anything unreadable or oddly shaped reads as *nothing recorded*. The sidecar
     is an optimisation over today's behaviour, never a source of content, so the
     cost of a corrupt one is a re-clear — not a lost row and not a failed turn.
     """
-    path = reduction_sidecar_path(session_id)
-    if path is None:
-        return ()
-    try:
-        data = json.loads(path.read_text())
-    except (OSError, ValueError):
-        return ()
-    ids = data.get("reduced_call_ids") if isinstance(data, dict) else None
-    if not isinstance(ids, list):
-        return ()
-    return tuple(str(cid) for cid in ids if isinstance(cid, str) and cid)
+    return _sidecar_list(_sidecar_payload(session_id), "reduced_call_ids")
+
+
+def read_cleared_calls(session_id: str) -> tuple[str, ...]:
+    """The call_ids the turn-start pre-pass cleared on this session (#2348).
+
+    The second list in the same sidecar file, under its own key and with its own
+    meaning, because it must NOT be merged into `read_reduced_calls`. The read-time
+    pass may replay only what it can emit byte-for-byte, and a pre-pass clear is a
+    marker-with-path stub, an observation stub, or a routed-block notice — none of
+    which `apply_reduction_sidecar` can regenerate from a call_id alone. Reading
+    these ids back as reductions would emit text the engine never saw, which is the
+    prefix-cache break the `header_only` rule inside `microcompact()` exists to
+    prevent. So this list is consulted by the clearing pass and nobody else: it is
+    what makes a clear sticky across turns, so a row cleared at turn N is not
+    cleared again at N+1.
+
+    A file written before this key existed reads as empty, which is exactly today's
+    behaviour for every sidecar that can currently be on disk.
+    """
+    return _sidecar_list(_sidecar_payload(session_id), "cleared_call_ids")
 
 
 def record_reduced_calls(session_id: str, call_ids: Iterable[str]) -> int:
@@ -354,18 +406,57 @@ def record_reduced_calls(session_id: str, call_ids: Iterable[str]) -> int:
     new = [cid for cid in call_ids if cid]
     if path is None or not new:
         return 0
+    data = _sidecar_payload(session_id)
     try:
-        merged = list(read_reduced_calls(session_id))
+        merged = list(_sidecar_list(data, "reduced_call_ids"))
         for cid in new:
             if cid not in merged:
                 merged.append(cid)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"schema": 1, "reduced_call_ids": merged}))
+        _write_sidecar(
+            path,
+            reduced_call_ids=merged,
+            cleared_call_ids=list(_sidecar_list(data, "cleared_call_ids")))
         return len(merged)
     except OSError as exc:  # noqa: BLE001 — an unwritten sidecar costs a re-clear
         logger.debug(
             "microcompact: reduction sidecar not written for %s: %s", session_id, exc)
         return len(read_reduced_calls(session_id))
+
+
+def record_cleared_calls(session_id: str, call_ids: Iterable[str]) -> int:
+    """Merge the pre-pass's cleared call_ids into the sidecar; return the new total.
+
+    The write half of sticky clearing (#2348): without it the file is only ever
+    written by relief, so a row the turn-start pass clears at turn N is a live row
+    again when the session is re-read at N+1 and the pass clears it a second time,
+    with the same rows re-counted into every turn's attribution.
+
+    Same file as `record_reduced_calls`, same gate, and deliberately a different
+    key: the ids written here are ones the read-time pass must never replay. Read
+    the two docstrings together before merging them.
+    """
+    path = reduction_sidecar_path(session_id)
+    new = [cid for cid in call_ids if cid]
+    if path is None or not new:
+        return 0
+    data = _sidecar_payload(session_id)
+    try:
+        merged = list(_sidecar_list(data, "cleared_call_ids"))
+        for cid in new:
+            if cid not in merged:
+                merged.append(cid)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_sidecar(
+            path,
+            reduced_call_ids=list(_sidecar_list(data, "reduced_call_ids")),
+            cleared_call_ids=merged)
+        return len(merged)
+    except OSError as exc:  # noqa: BLE001 — an unwritten sidecar costs a re-clear
+        logger.debug(
+            "microcompact: cleared-call sidecar not written for %s: %s",
+            session_id, exc)
+        return len(read_cleared_calls(session_id))
 
 
 def apply_reduction_sidecar(
@@ -543,6 +634,8 @@ def microcompact(
     observation_head_chars: int = DEFAULT_OBSERVATION_HEAD_CHARS,
     name_session_record: bool = False,
     reduced_calls_out: list[str] | None = None,
+    cleared_calls_out: list[str] | None = None,
+    already_cleared: Iterable[str] = (),
 ) -> tuple[list[dict], int]:
     """Replace stale compactable tool results with a cleared marker.
 
@@ -714,6 +807,17 @@ def microcompact(
     if not to_clear:
         return list(messages), 0
 
+    # #2348: rows a previous turn-start pass already cleared. They stay in
+    # `to_clear` — the session file is never rewritten by the read path, so a row
+    # left out here grows back to full size in next turn's prompt — but they are
+    # not counted as cleared by THIS pass, because re-rendering the same marker
+    # over a row that is already a marker freed nothing. That re-clear, not a
+    # fresh one, is what made the `turn_start:microcompact` bucket unattributable:
+    # the same rows were booked every turn forever. Selection and the budget
+    # arithmetic are untouched, so the bytes emitted for a row are exactly what
+    # they would be with the set empty; only `cleared` sees the difference.
+    already_cleared_set = {str(c) for c in already_cleared if c}
+
     # Pass 3: build the output list, persisting each result before its
     # content leaves the prompt.
     out: list[dict] = []
@@ -761,9 +865,21 @@ def microcompact(
                 out.append(msg)
                 continue
             out.append(_replace_tool_content(msg, new_text))
-            cleared += 1
+            sticky = cid not in already_cleared_set
+            if sticky:
+                cleared += 1
             if header_only and cid and reduced_calls_out is not None:
                 reduced_calls_out.append(cid)
+            # #2348 clause 2: every row this pass took content out of, so the
+            # next turn-start pass does not book the same clear a second time.
+            # A row whose marker is a spill pointer is in that set too, and
+            # recording it is byte-safe: `_reduced_preview_by_call_id` rebuilds
+            # a listed row from the pointer IN THE SESSION ROW, so the pointer and
+            # its recovery sentence survive the replay — which is why this list
+            # can be the honest "what I cleared" set rather than only the rows
+            # with a spill file behind them.
+            if sticky and cid and cleared_calls_out is not None:
+                cleared_calls_out.append(cid)
             continue
 
         path = None
@@ -791,7 +907,10 @@ def microcompact(
                 tool_name, tc_id_to_args.get(cid), len(text), path,
                 read_denied=read_denied, route=route)
         out.append(_replace_tool_content(msg, new_text))
-        cleared += 1
+        if cid not in already_cleared_set:
+            cleared += 1
+            if cid and cleared_calls_out is not None:
+                cleared_calls_out.append(cid)
 
     if cleared:
         logger.info(

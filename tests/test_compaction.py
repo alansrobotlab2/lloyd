@@ -697,6 +697,12 @@ def test_the_sidecar_is_keyed_by_session_id(tmp_path, monkeypatch):
 
     off = _run(load_and_compact_session(
         p, model="qwen", mode_override="truncate", microcompact_sidecar=False))
+    # The node compares exactly two states of ONE variable, which is which
+    # session's replayable list exists, so it resets the sidecar before
+    # `with_it` — #2348 put a SECOND list in that same file (the rows a pass
+    # cleared), and the reset has to clear the whole file or the comparison is
+    # reading three variables and reporting two.
+    reduction_sidecar_path(sid).unlink(missing_ok=True)
     _record_reduced(sid, ["call_000", "call_001"])
     with_it = _run(load_and_compact_session(
         p, model="qwen", mode_override="truncate", microcompact_sidecar=True))
@@ -1868,36 +1874,34 @@ def test_turning_the_knob_on_is_what_the_shipped_default_is_not(tmp_path, monkey
 
 def test_a_second_turn_start_pass_books_no_re_clear_for_the_ids_the_sidecar_named(
         tmp_path, monkeypatch):
-    """#2168, the seam the last review asked to see run twice: load → pass → load →
+    """#2168, the seam the last review asked to see run twice: load -> pass -> load ->
     pass over ONE persisted session, with the knob on.
 
-    The item's harm is a repeat, so the witness has to be a repeat too. Clause 1 pins
-    that a sidecar named by the previous turn arrives pre-reduced; that is one round
-    trip. What the pass does on its SECOND read of the same file is what a session
-    actually lives in, and it has to answer three things at once:
+    The harm #2168 names is a repeat, so the witness has to be a repeat too. Clause 1
+    pins that a sidecar named by the previous turn arrives pre-reduced; that is one
+    round trip. What the pass does on its SECOND read of the same file is what a
+    session actually lives in, and it has to answer three things at once:
+      * the rows named by the previous turn arrive at `microcompact()` already reduced,
+        so the prefix cache is spared what a fresh turn from the session file would cost;
+      * the rows it clears are byte-for-byte the rows today's pass produces from the same
+        session — a replay is an optimisation, never a different prompt;
+      * #2348 REVERSED the ruling this node used to make about the second pass, on
+        purpose. The pre-pass now records the ids IT cleared into the same knob-gated
+        sidecar, so the second pass books 0 clears for them instead of the same 3 over
+        again. That repeat is most of why the `turn_start:microcompact` bucket could not
+        be attributed: the same rows were booked every turn, forever. The emitted bytes
+        are untouched by it — those rows stay in the pass's clear set and are re-rendered
+        identically — so what changed is the bookkeeping, and the byte comparison below
+        is what proves it did not also change the prompt.
 
-      * the second load still hands both named rows in reduced shape — the sidecar was
-        not consumed by being read;
-      * the second pass books the same 3 clears, none of them for `call_000`/`call_001`
-        — no re-clear, which is the whole point of the sidecar;
-      * the sidecar's own bytes are unchanged across both runs, so a read-time
-        instrument cannot quietly become a writer and start owning state relief did
-        not ask it to own.
-
-    The falsifier is the same session and the same sidecar read with the knob off:
-    5 clears, because the read that would have spared two of them never happened. Two
-    mutations, each run over the whole file, turn this node red along with the other
-    six sidecar nodes: the pre-pass's knob read at `app/compaction.py:667` replaced by
-    a literal `False`, and `apply_reduction_sidecar` returning its input untouched.
+    #2168 is a behaviour change wearing a measurement coat, so the byte comparison stays
+    the load-bearing assertion of this node and the count is the new one beside it.
     """
-    from app.harness.microcompact import (
-        read_reduced_calls, reduction_sidecar_path)
     import app.harness.microcompact as mc_mod
-
+    from app.harness.microcompact import read_cleared_calls, read_reduced_calls
     p, sid, _ = _pointer_session(tmp_path, monkeypatch, 20)
     _record_reduced(sid, ["call_000", "call_001"])
-    sidecar = reduction_sidecar_path(sid)
-    before = sidecar.read_bytes()
+    seeded = read_reduced_calls(sid)
     real_apply = mc_mod.apply_reduction_sidecar
     calls: list[str] = []
 
@@ -1914,20 +1918,180 @@ def test_a_second_turn_start_pass_books_no_re_clear_for_the_ids_the_sidecar_name
                                           microcompact_sidecar=True))
 
     assert calls == [sid, sid], calls
-    assert first["microcompacted"] == second["microcompacted"] == 3, (first, second)
+    # Pass one clears three rows and the sidecar replays two; pass two, reading the
+    # file pass one wrote, books NONE of them (#2348 clause 2). The replay still fires
+    # on pass two, so its `microcompact_reduced` is the same 2 — the replay is not what
+    # went to zero, and both numbers reach the record (clause 1).
+    assert first["microcompacted"] == 3, first
+    assert first["microcompact_reduced"] == 2, first
+    assert second["microcompacted"] == 0, (
+        "the ids the first pass cleared were booked again: "
+        f"{second['microcompacted']}")
+    assert second["microcompact_reduced"] == 2, second
+    assert read_cleared_calls(sid) == ("call_002", "call_003", "call_004"), (
+        f"the pre-pass recorded the wrong ids as its own: {read_cleared_calls(sid)}")
     for run in (0, 1):
         both_reduced = all("preview dropped" in text
                            for text in (handed[run]["call_000"],
                                         handed[run]["call_001"]))
         assert both_reduced, (
             f"run {run + 1} did not receive the two named rows pre-reduced")
-    assert sidecar.read_bytes() == before, (
-        "the read-time pass rewrote the sidecar: an instrument that only reads has no "
-        "business becoming this session's writer of reduction state")
-    assert read_reduced_calls(sid) == ("call_000", "call_001")
+    # The pass that READS the reduction state must not become its writer of reduction
+    # state. Compared list by list rather than by whole file bytes, because #2348 added a
+    # second list to this file: whole-byte equality with the seed would now contradict
+    # clause 2 instead of stating this invariant.
+    assert read_reduced_calls(sid) == seeded, (
+        f"the read-time pass rewrote the replayable list: held {seeded}, now holds "
+        f"{read_reduced_calls(sid)}")
 
     off = _run(load_and_compact_session(p, model="qwen", mode_override="truncate",
                                         microcompact_sidecar=False))
     assert off["microcompacted"] == 5, (
-        "with nothing recorded the same session clears all five again, which is the "
-        "number the sidecar exists to take off the next turn")
+        "with the switch off the same session clears all five again, which is the "
+        "number the sticky list exists to take off the next turn")
+
+
+# --- #2348: the read-time sidecar is measurable and single-knobbed -------------
+
+
+def test_one_runs_options_value_arms_the_read_time_half_too(tmp_path, monkeypatch):
+    """#2348 clause 3: one switch source. Relief's writer asks the caller's
+    `RunOptions` INSTANCE; before this round the turn-start read-time pass asked the
+    dataclass CLASS default whenever a caller left the parameter at None, so a caller
+    that armed relief armed nothing at read time and a naive enable read as a flat
+    line. `microcompact_sidecar_for` is the matching read, and with the shipped default
+    still False a caller's True is what makes the difference visible here.
+    """
+    from app.compaction import microcompact_sidecar_for
+    from app.harness.options import RunOptions
+
+    assert RunOptions.__dataclass_fields__[
+        "microcompact_reduction_sidecar"].default is False, (
+        "this node measures the flipped case only while the shipped default is off")
+    armed = RunOptions(model="primary", session_id="x",
+                          microcompact_reduction_sidecar=True)
+    plain = RunOptions(model="primary", session_id="x")
+    assert microcompact_sidecar_for(armed) is True
+    assert microcompact_sidecar_for(plain) is False, (
+        "a caller that did not arm the knob must not have it forced on")
+    assert microcompact_sidecar_for(None) is None, (
+        "no caller's instance means the shipped default decides, not a guess")
+
+    p, sid, _ = _pointer_session(tmp_path, monkeypatch, 20)
+    _record_reduced(sid, ["call_000", "call_001"])
+    # The two halves driven from the SAME object, the way the routers do it.
+    on = _run(load_and_compact_session(
+        p, model="qwen", mode_override="truncate",
+        microcompact_sidecar=microcompact_sidecar_for(armed)))
+    off = _run(load_and_compact_session(
+        p, model="qwen", mode_override="truncate",
+        microcompact_sidecar=microcompact_sidecar_for(plain)))
+    assert on["microcompact_reduced"] == 2 and on["microcompacted"] == 3, on
+    assert off["microcompact_reduced"] == 0 and off["microcompacted"] == 5, off
+
+
+def test_a_turns_record_and_event_say_whether_the_sidecar_fired(tmp_path, monkeypatch):
+    """#2348 clause 1: a reader of ONE turn can tell "knob on and firing" from "knob on
+    and inert".
+
+    Before this round `app/compaction.py` bound the applied count to `_sidecar_applied`
+    and read it nowhere, and `turn_start_record` had no field for it, so the two states
+    produced byte-identical records — which is exactly why #2168's ship-on ruling could
+    not be made from live traffic. The event is projected from the same record by
+    `_record_turn_start`, so both surfaces are pinned: the stored dict by equality, the
+    emitted event by catching the `log_event` call.
+    """
+    from app.compaction_record import turn_start_record
+
+    events = []
+    import app.event_log as el
+    monkeypatch.setattr(el, "log_event",
+                        lambda sid, kind, payload: events.append((kind, payload)))
+
+    p, sid, _ = _pointer_session(tmp_path, monkeypatch, 20)
+    _record_reduced(sid, ["call_000", "call_001"])
+    firing = _run(load_and_compact_session(
+        p, model="qwen", mode_override="truncate", microcompact_sidecar=True))
+    inert = _run(load_and_compact_session(
+        p, model="qwen", mode_override="truncate", microcompact_sidecar=False))
+
+    assert turn_start_record(firing)["microcompact_reduced"] == 2, firing
+    assert turn_start_record(firing)["microcompact_sidecar"] is True
+    assert turn_start_record(inert)["microcompact_reduced"] == 0, inert
+    assert turn_start_record(inert)["microcompact_sidecar"] is False
+    assert (turn_start_record(firing)["microcompact_reduced"]
+            != turn_start_record(inert)["microcompact_reduced"]), (
+        "the two states are still indistinguishable in one turn's record")
+    turn_events = [pl for kind, pl in events if kind == "compaction.turn_start"]
+    assert len(turn_events) == 2, events
+    assert turn_events[0]["microcompact_reduced"] == 2, turn_events[0]
+    assert turn_events[1]["microcompact_reduced"] == 0, turn_events[1]
+
+
+def test_the_shipped_default_writes_no_sidecar_and_counts_what_it_always_did(
+        tmp_path, monkeypatch):
+    """#2348 clause 4: nothing reaches real traffic before #2168's ship-on ruling.
+
+    The owed step is a flip of `app/harness/options.py:287`, and until it happens a
+    turn-start pass must create no file at all — not an empty one, not one holding the
+    sticky list — and must report the same `microcompacted` number it reports today. Both
+    halves of the new behaviour sit behind the resolved switch for that reason, and the
+    denominator beside the first assertion is what says the session WOULD have written
+    one: the same session with the knob on does.
+    """
+    from app.harness.microcompact import reduction_sidecar_path
+
+    p, sid, _ = _pointer_session(tmp_path, monkeypatch, 20)
+    _record_reduced(sid, ["call_000", "call_001"])
+    sidecar = reduction_sidecar_path(sid)
+
+    shipped = _run(load_and_compact_session(p, model="qwen", mode_override="truncate"))
+    assert shipped["microcompacted"] == 5, shipped
+    assert shipped["microcompact_reduced"] == 0, shipped
+    assert shipped["microcompact_sidecar"] is False, shipped
+
+    armed = _run(load_and_compact_session(
+        p, model="qwen", mode_override="truncate", microcompact_sidecar=True))
+    assert sidecar.exists(), (
+        "the control arm wrote no file, so the absence above proves nothing")
+    sidecar.unlink()
+    assert not sidecar.exists()
+    again = _run(load_and_compact_session(p, model="qwen", mode_override="truncate"))
+    assert not sidecar.exists(), "the shipped default created a sidecar file"
+    assert again["microcompacted"] == 5, again
+    assert armed["microcompacted"] == 3
+
+
+def test_relief_writing_reductions_keeps_the_pre_pass_cleared_list(
+        tmp_path, monkeypatch):
+    """#2348: one file, two writers, and neither may erase the other.
+
+    The replayable list is written in-turn by relief and the sticky list at turn
+    start by the pre-pass, at different moments, so each writer has to state the
+    whole payload. A writer that emitted only its own key would silently delete its
+    sibling's work on the first turn it ran — the sticky list vanishing would
+    restore the exact repeat-clear this round exists to end, and would do it with
+    every record still reading healthy.
+    """
+    from app.harness.microcompact import (
+        record_cleared_calls, record_reduced_calls, read_cleared_calls,
+        read_reduced_calls, reduction_sidecar_path)
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("app.harness.tool_result_spill.SESSIONS_DIR", tmp_path)
+    sid = "20260101_000000_two_writers_2348"
+
+    assert record_cleared_calls(sid, ["call_002", "call_003"]) == 2
+    assert record_reduced_calls(sid, ["call_000"]) == 1, (
+        "relief's write failed, so the preservation below is vacuous")
+    assert read_cleared_calls(sid) == ("call_002", "call_003"), (
+        "relief erased the pre-pass's sticky list")
+    assert read_reduced_calls(sid) == ("call_000",)
+    assert record_cleared_calls(sid, ["call_004"]) == 3
+    assert read_reduced_calls(sid) == ("call_000",), (
+        "the pre-pass erased relief's replayable list")
+    # Both lists in one file, and the file is the one name the read path opens.
+    import json
+    payload = json.loads(reduction_sidecar_path(sid).read_text())
+    assert payload["cleared_call_ids"] == ["call_002", "call_003", "call_004"]
+    assert payload["reduced_call_ids"] == ["call_000"]
