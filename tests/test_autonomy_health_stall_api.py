@@ -308,3 +308,62 @@ def test_an_idle_task_is_marked_unobserved_rather_than_clean(client, autonomy_di
     assert idle["never_run"] is False and idle["last_run"], (
         "the task's own stamps are the reason this row is interesting; they "
         "must survive the change")
+
+
+def test_the_shared_gap_predicate_keeps_its_strict_bound_and_its_numbers():
+    """#2342 clause 5: the fix belongs in the watchdog's reporting, not here.
+
+    `next_run_gap` is the ONE predicate the `next_run` stall scan and
+    `compute_health` have shared since #1121 — a board cannot be healthy in one
+    surface and stalled in the other — and the strict `> one interval` bound is
+    what keeps the #421 alarm quiet on an on-cadence nightly job (measured
+    2026-09-18: healthy #51 reads 1.01 on the `last_run` reference, #68 reads
+    169.4). #2342's disagreement is between a row and its run records, and the
+    record cross-check therefore goes in `workers/fleet_watchdog.py`; widening
+    this bound to catch an unstamped row would make the alarm the noisy one all
+    over again and would move the numbers `compute_health` reports.
+
+    So this node pins the whole returned dict at three shapes, which is the
+    tightest available statement of "unchanged": exactly one period past is NOT a
+    stall (strict), one second more IS, a measured row returns these six keys with
+    these values, and a row with neither stamp returns no verdict. The key set is
+    asserted because a field added here is a field `compute_health` and
+    `/api/autonomy/health` start carrying.
+    """
+    keys = {"expected_interval_seconds", "hours_since_last_run",
+            "hours_past_next_run", "gap_ratio", "never_run", "past_next_run"}
+
+    day = dt.timedelta(days=1)
+    measured = A.next_run_gap({"frequency": "daily",
+                               "last_run": (PIN - day).isoformat(),
+                               "next_run": (PIN - day).isoformat()}, now=PIN)
+    assert set(measured) == keys, f"the shared predicate's shape moved: {sorted(measured)}"
+    assert measured == {"expected_interval_seconds": 86400.0,
+                        "hours_since_last_run": 24.0,
+                        "hours_past_next_run": 24.0,
+                        "gap_ratio": 1.0,
+                        "never_run": False,
+                        # Strict, as #421 shipped it: exactly one period is not
+                        # MORE than one period.
+                        "past_next_run": False}, (
+        f"the bound or the numbers moved: {measured}")
+
+    over = A.next_run_gap({"frequency": "daily",
+                           "last_run": (PIN - day - dt.timedelta(seconds=1)).isoformat(),
+                           "next_run": (PIN - day - dt.timedelta(seconds=1)).isoformat()},
+                          now=PIN)
+    assert over["past_next_run"] is True, (
+        f"one second past one period must flag, or the bound became >=: {over}")
+    assert over["gap_ratio"] == 1.0, (
+        f"gap_ratio is elapsed over the declared period, not over the run: {over}")
+
+    # The #96 shape, from this predicate's side: no stamps is no verdict, which is
+    # exactly why the watchdog, not this function, has to notice it.
+    unstamped = A.next_run_gap({"frequency": "weekly"}, now=PIN)
+    assert unstamped == {"expected_interval_seconds": 604800.0,
+                         "hours_since_last_run": None,
+                         "hours_past_next_run": None,
+                         "gap_ratio": None,
+                         "never_run": True,
+                         "past_next_run": False}, (
+        f"a row with no stamps started answering like a healthy one: {unstamped}")

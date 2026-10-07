@@ -214,6 +214,63 @@ def _grossly_overdue(queue: WorkQueue) -> list:
     return overdue
 
 
+def _row_vs_records(task: dict) -> dict:
+    """What a task's own run records claim, set beside what its row's stamps claim.
+
+    The watchdog's "did it actually run" half, asked of the records (#2342). This is
+    the file's only read of them, and it is a recent one: before this function
+    existed the scan reasoned from the row alone — `hours` from
+    `autonomy.next_run_gap`, `hold` from `autonomy.hold_reason`, `queued` from live
+    queue rows — and a search of this file for the run-record tree, its database or
+    a run listing answered with one hit, prose in `_last_nextrun_alert`'s docstring
+    warning against raw SQL. So `last_run`, a field in a vault file another writer
+    may never have advanced, was the only account this alarm had, and a row that lost
+    a completion produced a cause claim about dispatch that the run's own record on
+    disk contradicted: `run_79_20261006_051105.md` finished at
+    `2026-10-06T05:17:08+00:00` while the alert at 22:00:28 that evening read a
+    `next_run: 2026-10-06T05:00:00` as 24 h of silence.
+
+    Four fields, and what each is for:
+
+    * `record_at` / `record_run` — the newest `success` record's finished instant and
+      its id, quoted into the alert so a reader can open the file. `''` when the
+      records answer nothing, which covers "no directory", "unreadable front matter"
+      and "no success" alike: `app.autonomy.newest_successful_run` cannot tell those
+      apart and neither can a sentence, because inventing a claim about records this
+      reader did not read is the same defect pointed the other way. Such a task keeps
+      the wording it has always had, and still alerts.
+    * `row_last` — the row's own `last_run`, echoed so the alert can show BOTH sides
+      of a disagreement instead of asserting one.
+    * `lost_completion` — a success the row never recorded. Strictly newer than
+      `last_run`, because `last_run` tracks the last SUCCESS (#86): a record from
+      before the row's own stamp is the two accounts agreeing.
+
+    The shape this function cannot describe — a row with no `next_run` at all, which
+    `past_next_run` can never flag because the bound requires
+    `hours_past_next is not None` — is admitted by the scan itself and shows up here
+    as `row_last: ''` beside a real `record_at`. That is #96, unalerted on both
+    alarms since before this file existed while its 2026-10-05 success record sat on
+    disk.
+
+    Cost, measured on the live board the evening this landed rather than estimated:
+    38 rows in the resolution set, 2 shortlisted for a record walk (#68, 499 h past
+    its `next_run`, and #96 with no stamp at all), so 2 walks of one small directory
+    per tick. That is not a new kind of cost here: `_is_task_due` and `hold_reason`
+    each walk one of these same directories for any task everything else called due
+    (`app/autonomy.py:2282`, `:2407`, `:2419`), on the scheduler's own 60 s tick.
+    """
+    from app import autonomy
+    at, run_id = autonomy.newest_successful_run(task.get("id"))
+    row_last = autonomy._parse_iso(task.get("last_run"))
+    return {
+        "record_at": at.isoformat() if at else "",
+        "record_run": run_id,
+        "row_last": row_last.isoformat() if row_last else "",
+        "lost_completion": bool(at is not None
+                                and (row_last is None or at > row_last)),
+    }
+
+
 def _next_run_stalled(queue: WorkQueue) -> list[dict]:
     """Tasks of ANY status sitting more than one period past their OWN `next_run`.
 
@@ -250,6 +307,15 @@ def _next_run_stalled(queue: WorkQueue) -> list[dict]:
     The bound is unchanged and strict (> one interval), and it comes from
     `autonomy.next_run_gap`, the same predicate `compute_health` reads, so the
     alert and the fleet report cannot call the same board two different things.
+    Since #2342 the predicate still decides which stamped rows are listed, and the
+    one row it structurally cannot see — no `next_run` key — is admitted beside it
+    and then judged by its run records, because widening the shared bound is what
+    #421 was filed against. So each entry also carries what the RECORDS say, from
+    `_row_vs_records`: `record_at`, `record_run`, `row_last` and `lost_completion`.
+    `hours` is None exactly on the admitted-without-a-stamp shape,
+    and the return drops such an entry when its records are empty too — a row with
+    no stamps and no record has never run, and is the noise this alarm's budget is
+    spent avoiding.
 
     The instant is `autonomy._utcnow()`, like the alarm beside it, so one clock
     pin moves both.
@@ -276,7 +342,21 @@ def _next_run_stalled(queue: WorkQueue) -> list[dict]:
     stalled = []
     for t in resolution:
         gap = autonomy.next_run_gap(t, now=now)
-        if not gap["past_next_run"]:
+        # Two doors. The first is the predicate, untouched by #2342. The second is the
+        # row with NO `next_run` key at all: such a row fails `past_next_run` on its
+        # own `hours_past_next is not None` guard, so #96 was invisible HERE exactly as
+        # it is to the due-ness alarm, and the only thing that knew it had run is its
+        # own record. `gap` is not consulted for it — there is nothing to measure.
+        # `next_run_gap` itself is unchanged (clause 5): this is a reporter noticing a
+        # shape the predicate is built not to see, not a widening of the bound.
+        #
+        # Cost stays bounded because the door is keyed on a missing field, not on a
+        # slow one: `grep -L '^next_run:' ~/obsidian/autonomy/[0-9]*-*.md` names #96
+        # alone fleet-wide, so the record walk below runs for the flagged rows plus
+        # that one, not for all 38. Whether the unstamped row is reportable is then
+        # answered by the records themselves, in the filter on the return.
+        if not (gap["past_next_run"]
+                or autonomy._parse_iso(t.get("next_run")) is None):
             continue
         stalled.append({
             "id": t.get("id"),
@@ -287,8 +367,13 @@ def _next_run_stalled(queue: WorkQueue) -> list[dict]:
             "hold": autonomy.hold_reason(t, resolution, now=now),
             "queued": str(t.get("id")) in active,
             "parked": autonomy.parked_declaration(t),
+            # Read AFTER the shortlist, so the record walk costs what it claims to
+            # cost in `_row_vs_records`: the flagged rows, 0 or 1 on a healthy board,
+            # not all 38 of them every tick.
+            **_row_vs_records(t),
         })
-    return stalled
+    return [e for e in stalled
+            if e["hours"] is not None or e["record_at"]]
 
 
 def _parked_note(entry: dict) -> str:
@@ -319,27 +404,85 @@ def _nextrun_alert_message(stalled: list[dict]) -> str:
     list, not on this string's arithmetic, which is what lets that case be said at
     all. The names behind the count stay in the task files: a park is a decision
     somebody wrote down, and the reader needs proof the scan looked, not a rerun of
-    a ruling they made."""
+    a ruling they made.
+
+    The head carries a second count since #2342, for the entries the predicate cannot
+    measure at all (no `next_run` key), and the first count covers only the rows it
+    did measure. That split is the same rule as the status one two paragraphs up: a
+    line that says "N tasks more than one period past their own next_run" may only
+    count tasks that are. On a board where every flagged row has its stamps — the
+    shape every test of the legacy alarm seeds — the string is byte-identical."""
     suppressed = [e for e in stalled if _parked_note(e)]
     late = [e for e in stalled if not _parked_note(e)]
+    # The head sentence claims "more than one period past their own next_run", and a
+    # row with no `next_run` is not that — it is the row with nothing to measure
+    # against. Counting it in that clause would reproduce, one level up, the exact
+    # defect #1121 was filed about: an alert that misdescribes its own contents. So
+    # the count covers the measured entries and the unstamped ones get their own
+    # clause, which also keeps the legacy string byte-identical on a board where
+    # every flagged row has its stamps.
+    measured = [e for e in late if e.get("hours") is not None]
+    unstamped = [e for e in late if e.get("hours") is None]
     statuses = sorted({str(e.get("status") or "unknown") for e in late})
     # `up_next task(s)` alone reproduces the pre-widening string byte for byte,
     # so anything that matches on the old alert text keeps matching.
     scope = f"{'/'.join(statuses)} task(s)" if late else "task(s)"
-    lines = "; ".join(
-        f"#{e['id']} ({e['name']}) is {e['hours']:.1f}h past its next_run"
-        f" — {_hold_note(e)}"
-        for e in late[:15])
-    head = (f"{len(late)} {scope} more than one period past "
+    lines = "; ".join(_stall_line(e) for e in late[:15])
+    head = (f"{len(measured)} {scope} more than one period past "
             f"their own next_run, which the due-ness stall alarm cannot see")
+    if unstamped:
+        head += (f" | {len(unstamped)} task(s) whose row carries no next_run stamp "
+                 f"at all, which that predicate cannot see either")
     tail = (f" | {len(suppressed)} task(s) suppressed as declared parked in "
             f"their own file (`parked:`) and not counted above"
             if suppressed else "")
     return f"{head}: {lines}{tail}" if lines else f"{head}{tail}"
 
 
+def _stall_line(entry: dict) -> str:
+    """One flagged task, in the sentence the alert actually shows.
+
+    Three shapes, chosen by what the scan could prove rather than by what it wishes.
+    The middle one is the whole point of #2342: the row being late AND a run record
+    having completed after the row's own `last_run` is a BOOKKEEPING miss, and
+    reporting that as a dispatch failure costs the same attention as a real stall
+    while teaching the reader to ignore this alarm.
+
+    `hours` is None on the unstamped shape only, so the two measured branches never
+    guard their `:.1f`; a caller that handed an unstamped entry with an elapsed
+    figure attached would raise here rather than print `Noneh`.
+    """
+    if entry.get("hours") is None:
+        missing = ("no next_run and no last_run" if not entry.get("row_last")
+                   else "no next_run")
+        said = (f"run record {entry['record_run']} says it succeeded at "
+                f"{entry['record_at']}" if entry.get("record_at")
+                else "its run records answer nothing")
+        return (
+            f"#{entry['id']} ({entry['name']}) has {missing} on its row while {said} "
+            f"— a row with no stamps can never satisfy the past_next_run predicate, "
+            f"so no other alarm can see it")
+    if entry.get("lost_completion"):
+        return (
+            f"#{entry['id']} ({entry['name']}) row bookkeeping lost a completion: "
+            f"run record {entry.get('record_run') or '?'} succeeded at "
+            f"{entry.get('record_at')}, after the row's last_run "
+            f"{entry.get('row_last') or '(absent)'}, and the row is still "
+            f"{entry['hours']:.1f}h past its next_run — that elapsed figure is "
+            f"measured from a stamp the task's own records contradict")
+    return (f"#{entry['id']} ({entry['name']}) is {entry['hours']:.1f}h past its "
+            f"next_run — {_hold_note(entry)}")
+
+
 def _hold_note(entry: dict) -> str:
-    """Why a flagged task has not dispatched, in dispatch's own words."""
+    """Why a flagged task has not dispatched, in dispatch's own words.
+
+    Reached only for an entry the run records do NOT contradict. Since #2342 the
+    caller asks `_row_vs_records` first, because this function reasons from the row
+    alone, and a row that lost a completion turns 'dispatch did not enqueue it' into
+    a claim the run record on disk refutes — the sentence that fired at 2026-10-06
+    22:00:28 about #79, whose run had finished at 05:17:08 that same morning.
+    """
     if entry["hold"]:
         return f"held: {entry['hold']}"
     if entry["queued"]:

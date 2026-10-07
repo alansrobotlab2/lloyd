@@ -1345,65 +1345,65 @@ def _run_period_start(task: dict, *, now: datetime.datetime) -> Optional[datetim
     return now - datetime.timedelta(seconds=max(1.0, interval - _due_slack_seconds(task)))
 
 
-def _successful_run_this_period(
-    task_id, *, period_start: datetime.datetime, holds=None,
-) -> tuple[bool, str]:
-    """Did a run record for this task report success inside the current period?
+def newest_successful_run(task_id, *, not_before=None,
+                          accept=None) -> tuple:
+    """(instant, run_id) of this task's newest `success` record; (None, "") else.
 
-    Returns ``(succeeded, run_id)``; `run_id` is the record that answered, empty
-    when nothing did, so a caller can name the run it refused to re-dispatch.
-
-    Why due-ness needs a second account of what already ran (#1296). The front
-    matter `last_run` is the ONLY thing `_is_task_due` measured, and it is a
-    file in the vault — a tree other writers sweep. On 2026-09-20 an arch-review
-    turn ended 48 s after task #82 (Nightly Retrieval Eval, `daily`,
-    `preferred_hours: [6]`) completed at 13:07:04Z and reverted that task file
-    to HEAD, restoring `last_run: 2026-09-19T13:07:31Z`. Elapsed was a whole
-    24 h again on the next tick (13:08:17Z, 27 s after the run finished), the
-    task dispatched a second time, and that dispatch spent 259 s and
-    2,254,592 tokens of a primary-engine turn reaching
-    "Today's baseline already exists — this is a duplicate dispatch". The run
-    record it refused to re-run is gitignored and was untouched by the sweep.
-
-    Reads are bounded to the task's own directory and to records that completed
-    inside the period, so a weekly job's month-old successes cost nothing and a
-    nightly job pays for one directory of ~17 files.
+    The module's ONE reader of what the run records say about SUCCESS (#2342), so
+    the two questions asked of them are not answered twice and diverge: the veto
+    below passes `not_before` and `accept` and asks "did it run THIS period", the
+    stall alarm passes neither and asks "did it ever". The shapes that answer
+    nothing — no directory, unparseable front matter, no success — all return the
+    same (None, ""), because a caller that cannot read its input must fall back,
+    not invent. A filename's stamp names a run's START while every comparison below
+    is against a completion-derived window, so `started_at` is only the fallback for
+    a missing `completed_at`. `yaml.YAMLError` descends from Exception, NOT
+    ValueError: catching it is why a truncated record no longer raises out of here.
     """
     task_dir = AUTONOMY_RUNS_DIR / str(task_id)
     if not task_dir.is_dir():
-        return False, ""
-    newest = None
+        return None, ""
     try:
         paths = sorted(task_dir.glob("run_*.md"))
     except OSError:
-        return False, ""
+        return None, ""
+    newest = None
     for path in paths:
         try:
             parts = path.read_text(encoding="utf-8").split("---\n", 2)
             if len(parts) < 2:
                 continue
             fm = yaml.safe_load(parts[1])
-        except (OSError, ValueError):
+        except (OSError, ValueError, yaml.YAMLError):
             continue
         if not isinstance(fm, dict) or not isinstance(fm.get("status"), str):
             continue
         if fm.get("status").strip().lower() != RUN_STATUS_SUCCESS:
             continue
-        # Prefer the instant the work FINISHED; `started_at` is the fallback so a
-        # record missing `completed_at` still counts. The stamp in the filename
-        # names the run's start, not its end, and the sort here is a comparison
-        # against a completion-derived window — so the content decides, not the
-        # path.
         when = _parse_iso(fm.get("completed_at")) or _parse_iso(fm.get("started_at"))
-        if when is None or when < period_start:
+        if when is None or (not_before is not None and when < not_before):
             continue
-        if holds is not None and not holds(when):
+        if accept is not None and not accept(when):
             continue
         if newest is None or when > newest[0]:
             newest = (when, str(fm.get("run_id") or path.stem))
-    if newest is None:
-        return False, ""
-    return True, newest[1]
+    return newest if newest is not None else (None, "")
+
+
+def _successful_run_this_period(
+    task_id, *, period_start: datetime.datetime, holds=None,
+) -> tuple[bool, str]:
+    """Did a run record report success inside this task's own period? (#1296)
+
+    `newest_successful_run` with the veto's two bounds. The veto exists because
+    `last_run`, the only thing `_is_task_due` measured, is a file in a tree other
+    writers sweep: on 2026-09-20 an arch-review turn reverted #82's file to HEAD 48
+    s after its 13:07:04Z success, so elapsed read 24 h again 27 s later and the task
+    re-dispatched — 259 s and 2,254,592 tokens to reach "duplicate dispatch".
+    """
+    when, run_id = newest_successful_run(
+        task_id, not_before=period_start, accept=holds)
+    return when is not None, run_id
 
 
 #: The hold reason the board shows when the run record vetoes a dispatch. One
