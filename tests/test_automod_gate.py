@@ -19,6 +19,7 @@ import pytest
 
 from scripts.automod import frontend_layout as FL
 from scripts.automod import gate as G
+from scripts.automod.layout_fixture import API_STUB
 
 
 # ---------------------------------------------------------------------------
@@ -713,6 +714,115 @@ def test_a_landing_whose_load_probe_failed_holds_the_baseline_and_says_so(
     assert "other checks did not pass" in res["probe"]["layout"]["baseline_held"]
     assert not (tmp_path / "state" / "frontend_layout" / "baseline.json").exists(), (
         "the failed landing stored nothing, so the previous baseline still stands")
+
+
+# ── #2327: the rung's probe has to load the same document the leg fingerprints ─
+#
+# `maybe_advance` holds the baseline whenever the load probe did not pass
+# (`advanced=bool(verdict.get("ok"))`), and the probe as wired until now was
+# handed no API stub — so it loaded `Dashboard unavailable:` and reported
+# `ok: false` on a build with nothing wrong with it. The six artifacts under
+# `frontend_layout/` all read `baseline: "absent"`, and
+# `SM_20261006_161018.json` says why: `baseline_held: "held: the frontend rung's
+# other checks did not pass"` with `checks: []` and `captured: true`. The leg was
+# measuring a populated dashboard two lines away (`FP.serve_build(out_dir,
+# api_stub=API_STUB)`) while the probe beside it measured a hollow one. These two
+# nodes pin the two halves of that: the same frozen fixture going into the probe,
+# and the bless edge that only opens when the probe comes back green.
+
+def test_the_rungs_load_probe_is_handed_the_legs_own_frozen_fixture(
+        live_repo, tmp_path, monkeypatch):
+    """Clause 2: the `frontend_probe.run` call made by `_frontend_probe` carries
+    `api_stub=layout_fixture.API_STUB`, so the rung's probe and the layout leg load
+    the same document.
+
+    Identity, not equality: `is` is what says the probe was handed the one frozen
+    snapshot rather than a copy of it that a later edit could move apart from the
+    leg's. A stub that merely LOOKS like the leg's would let the two drift, which
+    is the asymmetry this item exists to close.
+    """
+    g, wt = _frontend_gate(live_repo, tmp_path, monkeypatch, changed=["web/src/App.tsx"],
+                           head={}, base={})
+    monkeypatch.setattr(G, "_vite_build", _fake_build())
+    monkeypatch.setattr(G.S, "STATE_DIR", tmp_path / "state")
+    seen: dict = {}
+
+    def fake_probe_run(built_dir, **kw):
+        seen.update(kw)
+        seen["built_dir"] = Path(built_dir)
+        return _probe_verdict()
+
+    monkeypatch.setattr(G._fe_probe, "run", fake_probe_run)
+    monkeypatch.setattr(G._fe_layout, "run", lambda *a, **k: _layout_report())
+    ok, detail, res = g.rung_frontend()
+    assert ok, detail
+    assert "built_dir" in seen, "the rung never probed the build it just made"
+    assert "api_stub" in seen, (
+        "the rung probes with no API stub, so its page is the shell and its verdict "
+        "is `Dashboard unavailable:` — the state that held the baseline for six rounds")
+    assert seen["api_stub"] is API_STUB, (
+        "the rung's probe must load the frozen fixture itself, not a look-alike")
+    assert seen["api_stub"] is G._fe_layout.API_STUB, (
+        "the leg's own default is where the probe's stub has to come from, or the "
+        "two checks are reading two different pages")
+
+
+def _dashboard_view(width: int = 1280):
+    """One width's capture, built by the leg's own projection so the numbers below
+    are the leg's, not a literal that could drift from what it returns."""
+    return FL.fingerprint_of(
+        {"pageOverflow": 0,
+         "sections": [{"head": h, "cw": 728, "sw": 728, "overflow": 0,
+                       "tag": "panel", "tags": ["panel"], "kidsTotal": 2,
+                       "panels": [["p", 340, 340]], "pills": [], "clipped": []}
+                      for h in ("System", "Services", "Tokens", "vLLM engines",
+                                "Lloyd agent", "Subagents & background tasks",
+                                "Automation & work")]},
+        width=width)
+
+
+def test_the_first_green_landing_blesses_the_baseline_the_next_round_reads(
+        live_repo, tmp_path, monkeypatch):
+    """Clause 5: the bless edge end to end, through the rung.
+
+    Only two things are stubbed here — the browser (`capture_build`) and the load
+    probe's verdict. `frontend_layout.run` is the REAL leg, so `baseline:` in the
+    second round's report is the leg's own reading of the file the first round
+    stored, not a value a mock was handed; and the file it reads is written by the
+    real `store_baseline` behind the real `maybe_advance`. That chain is the item:
+    an `ok` from the probe is the only thing that has ever stood between a green
+    frontend landing and a baseline, and while the probe was red on a hollow page
+    nothing downstream of it could run.
+    """
+    g, wt = _frontend_gate(live_repo, tmp_path, monkeypatch, changed=["web/src/App.tsx"],
+                           head={}, base={})
+    monkeypatch.setattr(G, "_vite_build", _fake_build())
+    monkeypatch.setattr(G.S, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(G._fe_probe, "run", lambda *a, **k: _probe_verdict())
+    monkeypatch.setattr(G._fe_layout, "capture_build",
+                        lambda out_dir, **kw: {"views": {"1280": _dashboard_view()}})
+    baseline = tmp_path / "state" / "frontend_layout" / "baseline.json"
+    assert not baseline.exists(), "the state dir starts with no baseline, as every round to date"
+
+    ok1, detail1, res1 = g.rung_frontend()
+    assert ok1, detail1
+    assert res1["probe"]["layout"]["baseline"] == "absent", res1["probe"]["layout"]
+    assert res1["probe"]["layout"]["baseline_held"] == "", (
+        "a green probe plus a clean capture is the one combination that stores", res1)
+    assert baseline.is_file(), "the fingerprint was not stored at the leg's baseline path"
+    assert FL.baseline_path() == baseline, (
+        "the rung wrote somewhere the next round will not read")
+    assert json.loads(baseline.read_text())["round_id"] == "SM_T"
+    assert "LAYOUT BASELINE ABSENT" in detail1, detail1
+
+    ok2, detail2, res2 = g.rung_frontend()
+    assert ok2, detail2
+    assert res2["probe"]["layout"]["baseline"] == "present", (
+        "the round after a bless must read a baseline, or the leg has no comparator",
+        res2["probe"]["layout"])
+    assert res2["probe"]["layout"]["baseline_held"] == "", res2["probe"]["layout"]
+    assert res2["probe"]["layout"]["sections_compared"] == 7, res2["probe"]["layout"]
+    assert "LAYOUT ok (7 section(s) stable" in detail2, detail2
 
 
 def test_the_rung_records_a_healthy_probe_verdict_in_the_detail(live_repo, tmp_path, monkeypatch):

@@ -77,10 +77,29 @@ SETTLE_MS = 1500
 #: which binary ran, and `unavailable()` turns a missing one into a named skip.
 CHROMIUM = "/usr/bin/chromium"
 
+#: `/api/...` paths the real server answers as a server-sent event stream rather
+#: than as a JSON document, so a stub must not answer them with JSON.
+#: `app/routers/mc_ui.py` returns `StreamingResponse(..., media_type=
+#: "text/event-stream")` for `/api/mc/events`, and
+#: `web/src/hooks/useMcNavigationEvents.ts` opens it with
+#: `new EventSource('/api/mc/events')`. The MIME type is not cosmetic: chromium
+#: refuses the connection and logs it as a console ERROR —
+#: `EventSource's response has a MIME type ("text/html") that is not
+#: "text/event-stream". Aborting the connection.` — which is one of the three
+#: console errors in the gate artifact `frontend_probe/SM_20261006_161018.json`,
+#: where every one of them is a consequence of there being no server, not of the
+#: build (that verdict carried `pageerrors: []` and no boundary fallback). So
+#: an API stub that answers this route from its `"*"` JSON default does not merely
+#: differ from production: it keeps the load probe red, and through
+#: `frontend_layout.maybe_advance` it keeps the layout baseline from ever being
+#: blessed.
+SSE_PATHS: frozenset[str] = frozenset({"/api/mc/events"})
+
 
 def probe_build(out_dir: Path, *, chromium: str | None = None,
                 settle_ms: int = SETTLE_MS, shots_dir: Path | None = None,
-                load_budget_s: float = LOAD_BUDGET_S) -> dict[str, Any]:
+                load_budget_s: float = LOAD_BUDGET_S,
+                api_stub: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Load `out_dir` (a `vite build` output) headless and return a verdict.
 
     `{"skipped": "<why>"}` when the browser or the build is not there; otherwise
@@ -92,6 +111,15 @@ def probe_build(out_dir: Path, *, chromium: str | None = None,
     `load_budget_s` and `settle_ms` are parameters for the same reason a test
     wants them: the shipped budgets are tuned for a real app, and a fixture that
     never finishes loading would otherwise cost 30 seconds to prove the branch.
+
+    `api_stub` is handed straight to `serve_build` (#2327). Left None the page
+    boots with no server behind it and Mission Control renders
+    `Dashboard unavailable:` — a `console-error` verdict about this probe's own
+    server, which is what has held the layout baseline on every frontend round so
+    far (`maybe_advance` only stores when the probe passed). A caller that
+    wants a verdict about the APP passes the frozen fixture
+    (`layout_fixture.API_STUB`) — the same object `gate._frontend_probe` passes and
+    the one the layout leg beside this probe serves by default.
     """
     why = unavailable(out_dir, chromium)
     if why:
@@ -112,7 +140,7 @@ def probe_build(out_dir: Path, *, chromium: str | None = None,
 
     with contextlib.ExitStack() as stack:
         try:
-            base_url = stack.enter_context(serve_build(out_dir))
+            base_url = stack.enter_context(serve_build(out_dir, api_stub=api_stub))
             pw = stack.enter_context(sync_playwright())
             browser = pw.chromium.launch(
                 executable_path=exe, headless=True,
@@ -357,6 +385,9 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         `sort_keys` so the bytes a page sees are a function of the stub alone: a
         dict literal's own order is not part of its value, and a response whose
         bytes moved because a key was re-ordered is a diff with no cause.
+
+        An event-stream route (`SSE_PATHS`) is the one path the stub does not
+        answer from its own mapping — see `_answer_sse`.
         """
         stub = self.api_stub
         if stub is None:
@@ -367,6 +398,8 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         if length:                              # drain the body or keep-alive stalls
             self.rfile.read(length)
+        if path in SSE_PATHS and self.command == "GET":
+            return self._answer_sse()
         key = path if path in stub else ("*" if "*" in stub else None)
         payload = b"{}" if key is None else json.dumps(stub[key], sort_keys=True).encode()
         self.send_response(200)
@@ -374,6 +407,36 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
+        return True
+
+    def _answer_sse(self) -> bool:
+        """Answer an EventSource poll the way the real route does: as an event stream.
+
+        `Content-Type: text/event-stream` is the entire substance of this method.
+        Answering `/api/mc/events` from the stub's `"*"` JSON default instead makes
+        chromium log a console ERROR and abort the connection, so the probe would
+        report a broken page over a page that only disagreed with the stub about a
+        MIME type — and `gate._frontend_probe` keys the layout baseline's bless off
+        this verdict passing, so the wrong header was starving a check that has
+        never once run with a baseline to compare against.
+
+        One unnamed `data:` frame, then the response is finished. Unnamed because a
+        named one would be believed: the hook dispatches `event: navigate` straight
+        into `setCurrentTab`, so a frame carrying a real tab would move the rendered
+        page and the layout leg would fingerprint wherever it had been sent. No
+        listener is attached to the nameless `message` event, so this frame reaches
+        the page and changes nothing. Finished rather than held open because
+        `BaseHTTPRequestHandler` speaks HTTP/1.0: an ended response is a complete
+        body to the client, the hook's `onerror` reconnects and gets the same
+        single-frame stream, and no handler thread is left parked inside a server
+        the probe has already shut down.
+        """
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(b"data: {}\n\n")
+        self.wfile.flush()
         return True
 
     def do_GET(self) -> None:                   # noqa: N802 - stdlib name
@@ -408,6 +471,9 @@ def serve_build(out_dir: Path, *, api_stub: Mapping[str, Any] | None = None):
     JSON — POST included, because the app reports its own tab with one and a
     `501 Unsupported method` there becomes a console error the caller did not ask
     for. Keys are request paths (`/api/dashboard`); values are JSON documents.
+    The exception is `SSE_PATHS`, which answer as an event stream whatever the
+    mapping says, because that shape is a property of the route and not of the
+    data behind it (`_answer_sse`).
     """
     out_dir = Path(out_dir).resolve()
     with socket.socket() as probe:
@@ -453,15 +519,21 @@ def summary(verdict: dict[str, Any]) -> str:
     return f"probe FAILED: {len(checks)} check(s) [{named}{more}] — {checks[0]['problem'][:180]}"
 
 
-def run(out_dir: Path, **kw: Any) -> dict[str, Any]:
+def run(out_dir: Path, *, api_stub: Mapping[str, Any] | None = None,
+        **kw: Any) -> dict[str, Any]:
     """`probe_build` with any exception turned into a skip.
 
     A probe that can raise cannot be observe-only: an unexpected failure inside
     it would fail the rung, which is precisely the flakiness risk the recorded
     first week exists to measure before this check is allowed to stall a landing.
+
+    `api_stub` is spelled out rather than left to `**kw` because it is the one
+    keyword the gate passes (#2327): a caller of this signature can see that the
+    rung's probe is given data, and a typo in it is a `TypeError` at the call site
+    instead of a probe that quietly loads the app shell and calls it a verdict.
     """
     try:
-        return probe_build(out_dir, **kw)
+        return probe_build(out_dir, api_stub=api_stub, **kw)
     except Exception as exc:  # noqa: BLE001 — an instrument that breaks says so, it does not fail the build
         return {"skipped": f"probe raised {exc.__class__.__name__}: {str(exc)[:180]}"}
 

@@ -542,3 +542,219 @@ def _code_only(src: str) -> str:
             continue
         out.append(tok.string)
     return "".join(out)
+
+
+# ── #2327: the probe's server has to be able to answer the API ──────────────
+#
+# Every node above runs against a build with nothing behind `/api/`, which is what
+# `probe_build` has always handed `serve_build`: no `api_stub`, so the SPA shell
+# answers a dashboard poll. That is a HOLLOW page, and the gate's own artifact for
+# round SM_20261006_161018 shows what it costs — `ok: false` with three console
+# errors and no page errors at all:
+#
+#     Failed to load sessions: SyntaxError: Unexpected token '<', "<!doctype "…
+#     EventSource's response has a MIME type ("text/html") that is not
+#         "text/event-stream". Aborting the connection.
+#     Failed to load resource: the server responded with a status of 501
+#         (Unsupported method ('POST'))
+#
+# All three are server absence, not the round's diff, and the rendered text opens
+# `Dashboard unavailable:`. The layout leg beside this probe already fingerprints a
+# POPULATED page (`frontend_layout._served` → `FP.serve_build(out_dir,
+# api_stub=API_STUB)`), so the leg was reading the app while the load probe next to
+# it read an error message — and because the rung's bless keys off `verdict["ok"]`
+# (`gate._frontend_probe` → `maybe_advance(advanced=bool(verdict.get("ok")))`), a
+# probe that is red on server absence also holds the layout baseline forever.
+# These nodes pin the stub being wired through, and pin that the detection above
+# still fires when the data is there.
+
+#: A stub whose marker cannot appear in an `index.html`: the only way the string
+#: reaches the rendered text is the stub's JSON being fetched and parsed by the
+#: page. A green verdict that could also come from the shell would prove nothing.
+PROBE_STUB: dict = {"/api/dashboard": {"marker": "stub-dashboard-9f2c"}, "*": {}}
+
+#: What Mission Control actually does on boot, in the two channels that decide
+#: this item: a `fetch('/api/dashboard')` whose failure it logs, and
+#: `new EventSource('/api/mc/events')` (`useMcNavigationEvents.ts:38`). The real
+#: server answers that second one as a stream (`app/routers/mc_ui.py:233`,
+#: `StreamingResponse(..., media_type="text/event-stream")`).
+API_CONSUMER = """
+  fetch('/api/dashboard').then(r => r.json()).then(j => {
+    const root = document.getElementById('root');
+    const panel = document.createElement('div');
+    panel.className = 'panel';
+    panel.textContent = 'Dashboard marker=' + j.marker;
+    root.appendChild(panel);
+  }, e => console.error('Failed to load dashboard: ' + e));
+  new EventSource('/api/mc/events');
+"""
+
+# The event stream on its own, mount done synchronously: the one thing this node
+# is asking is whether chromium aborts the connection, so nothing else may be in
+# flight while it answers.
+EVENTS_ONLY = """
+  new EventSource('/api/mc/events');
+  const root = document.getElementById('root');
+  const panel = document.createElement('div');
+  panel.className = 'panel';
+  panel.textContent = 'Mission Control — event stream opened';
+  root.appendChild(panel);
+"""
+
+# A component that fails inside the app, logged the way the app logs it.
+SEEDED_CONSOLE_ERROR = """
+  console.error('TypeError: cannot read properties of undefined (reading volume)');
+"""
+
+
+def test_the_probe_hands_its_api_stub_to_the_page_it_loads(tmp_path):
+    """Clause 1: `probe_build` and `run` take an `api_stub` and pass it to
+    `serve_build`, so a build that fetches `/api/dashboard` renders the stub's JSON
+    rather than the SPA's `index.html`.
+
+    The assertion is about content only the stub can put on screen, because the
+    failure this thread (line 115 of the probe) shipped with is a green-looking
+    load of a page that never got its data: an HTTP-level check on `serve_build`
+    would have passed while the probe kept calling it with no stub at all.
+    """
+    _require_browser()
+    v = FP.run(_build(tmp_path, API_CONSUMER, name="stubbed"),
+               shots_dir=_shots(tmp_path), chromium=FP.CHROMIUM, settle_ms=800,
+               api_stub=PROBE_STUB)
+    assert v["ok"] is True, v
+    assert v["checks"] == [], v["checks"]
+    assert "stub-dashboard-9f2c" in v["metrics"]["visible_text"], (
+        "the page did not render the stub's JSON — which is the whole of the "
+        f"`Dashboard unavailable:` artifact this item is about: {v['metrics']}")
+    assert v["pageerrors"] == [] and v["console_errors"] == [], v
+
+
+def test_the_same_build_without_a_stub_is_red_on_the_fetch_the_stub_answers(tmp_path):
+    """The control the node above is measured against — and it is the gate's
+    verdict today: `serve_build(out_dir)` with no stub answers `/api/dashboard`
+    with the app shell, `r.json()` chokes on `<!doctype`, and the probe reports a
+    `console-error` for an app that is not broken.
+
+    If this node ever goes green, the probe has stopped reporting absence as
+    absence, and the green verdict above stops proving anything.
+    """
+    _require_browser()
+    v = FP.run(_build(tmp_path, API_CONSUMER, name="unstubbed"),
+               shots_dir=_shots(tmp_path), chromium=FP.CHROMIUM, settle_ms=800)
+    assert v["ok"] is False, v
+    assert "console-error" in [c["check"] for c in v["checks"]], v["checks"]
+    assert "stub-dashboard-9f2c" not in v["metrics"]["visible_text"], v["metrics"]
+
+
+def test_the_stub_serves_the_event_route_as_an_event_stream_not_json(tmp_path):
+    """Clause 3, at the HTTP level and with no browser: `/api/mc/events` answers
+    `text/event-stream` with at least one `data:` frame.
+
+    Before this change the `"*"` catch-all answered it `application/json`, and
+    chromium's EventSource refused the MIME type — a console ERROR, which is why
+    threading the stub alone would not have unblocked anything. The two sibling
+    assertions are the same answer not spreading where it should not: a dashboard
+    poll is still JSON, and a path the fixture does not name is still the `"*"`
+    JSON default. The POST assertion is the artifact's third error — the same stub
+    turned that `501 Unsupported method` into a 200.
+    """
+    build = tmp_path / "served"
+    (build / "assets").mkdir(parents=True)
+    (build / "index.html").write_text('<!doctype html><div id="root">shell</div>')
+    with FP.serve_build(build, api_stub=PROBE_STUB) as url:
+        events = _request(url, "/api/mc/events")
+        assert events.status == 200, events
+        assert events.content_type.startswith("text/event-stream"), (
+            f"an EventSource client aborts on anything else: {events}")
+        assert "data:" in events.body, f"the stream carried no frame: {events}"
+        dashboard = _request(url, "/api/dashboard")
+        assert dashboard.content_type.startswith("application/json"), dashboard
+        assert "stub-dashboard-9f2c" in dashboard.body, dashboard
+        other = _request(url, "/api/sessions")
+        assert other.content_type.startswith("application/json"), other
+        assert other.body.strip() == "{}", f"`*` is the default: {other}"
+        post = _request(url, "/api/mc/navigation", method="POST")
+        assert post.status == 200, f"the app posts its own tab; 501 became an error: {post}"
+
+
+def test_the_pages_eventsource_does_not_abort_on_the_stub(tmp_path):
+    """Clause 3, in the browser that has to believe it: opening
+    `new EventSource('/api/mc/events')` against the stub-served build logs NO
+    console error.
+
+    This is the node that fails on a JSON answer, which is the half of the item
+    that the plumbing alone cannot fix: the MIME abort was one of the three console
+    errors in the gate artifact, and it survives every correct-looking `api_stub`
+    that keeps answering the route with JSON.
+    """
+    _require_browser()
+    v = FP.run(_build(tmp_path, EVENTS_ONLY, name="events-stubbed"),
+               shots_dir=_shots(tmp_path), chromium=FP.CHROMIUM, settle_ms=800,
+               api_stub=PROBE_STUB)
+    assert v["console_errors"] == [], (
+        "a stream answered with the wrong MIME type makes chromium log an ERROR and "
+        f"abort the connection — that message, not the app: {v['console_errors']}")
+    assert v["ok"] is True, v
+
+
+def test_a_logged_console_error_still_fails_the_probe_with_the_stub_served(tmp_path):
+    """Clause 4: the stub must not buy a green verdict over a broken app. The
+    marker in the rendered text proves the data arrived; the named `console-error`
+    proves the seeded failure was still seen.
+    """
+    _require_browser()
+    v = FP.run(_build(tmp_path, API_CONSUMER + SEEDED_CONSOLE_ERROR,
+                      name="stubbed-but-broken"),
+               shots_dir=_shots(tmp_path), chromium=FP.CHROMIUM, settle_ms=800,
+               api_stub=PROBE_STUB)
+    assert v["ok"] is False, v
+    names = [c["check"] for c in v["checks"]]
+    assert "console-error" in names, names
+    assert "reading volume" in " | ".join(c["problem"] for c in v["checks"]), v["checks"]
+    assert "stub-dashboard-9f2c" in v["metrics"]["visible_text"], (
+        "the stub was served, so this failure is the app's and not the missing "
+        f"server: {v['metrics']}")
+
+
+def test_a_rendered_error_boundary_still_fails_the_probe_with_the_stub_served(tmp_path):
+    """Clause 4, the check that only the boundary can make, with data on screen.
+    `#root` is full, the dashboard JSON is rendered below it, and the fallback copy
+    is what decides the verdict.
+    """
+    _require_browser()
+    caught = ("const root = document.getElementById('root');"
+              "root.innerHTML = '<h2>Something went wrong</h2>';"
+              "try { null.boom; } catch (e) { console.warn('boundary caught it'); }")
+    v = FP.run(_build(tmp_path, caught + API_CONSUMER, name="stubbed-boundary"),
+               shots_dir=_shots(tmp_path), chromium=FP.CHROMIUM, settle_ms=800,
+               api_stub=PROBE_STUB)
+    assert v["ok"] is False, v
+    names = [c["check"] for c in v["checks"]]
+    assert "boundary-fallback" in names, names
+    assert "stub-dashboard-9f2c" in v["metrics"]["visible_text"], (
+        f"the stub was served under the boundary: {v['metrics']}")
+
+
+def _request(url: str, path: str, *, method: str = "GET"):
+    """A request that reports headers, not just a body, and never raises.
+
+    The content type IS the thing under test in clause 3, and `urlopen` hides it
+    behind a case-insensitive mapping while also raising on a 4xx/5xx — which is
+    exactly the status the stub used to answer a POST with.
+    """
+    import http.client
+    from urllib.parse import urlsplit
+
+    s = urlsplit(url)
+    conn = http.client.HTTPConnection(s.hostname, s.port, timeout=10)
+    try:
+        conn.request(method, path,
+                     body=b"{}" if method == "POST" else None,
+                     headers={"Content-Type": "application/json"}
+                     if method == "POST" else {})
+        r = conn.getresponse()
+        return SimpleNamespace(status=r.status,
+                               content_type=r.getheader("Content-Type") or "",
+                               body=r.read().decode("utf-8", "replace"))
+    finally:
+        conn.close()

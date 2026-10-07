@@ -71,6 +71,7 @@ from scripts.automod import canary as C
 from scripts.automod import canary_smoke as CS
 from scripts.automod import frontend_layout as _fe_layout
 from scripts.automod import frontend_probe as _fe_probe
+from scripts.automod import layout_fixture as _layout_fixture
 from scripts.automod import spec, state as S, testpaths as TP, vet as V, worktree as W
 
 LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -1725,7 +1726,16 @@ class Gate:
         # can open). `gate.json` is copied at landing and then dies with the
         # worktree, so the artifact file is what survives beside the ledger.
         shots = S.STATE_DIR / "frontend_probe"
-        verdict = _fe_probe.run(built_dir, shots_dir=shots)
+        # The frozen dashboard, not an empty `/api/` (#2327). Without it the page
+        # boots into `Dashboard unavailable:` — three console errors, none of them
+        # the round's — and `maybe_advance` below refuses to store a baseline
+        # because `advanced=bool(verdict.get("ok"))` was never true. The layout leg
+        # underneath this call fingerprints a stub-served page (`frontend_layout
+        # ._served`), so the two checks beside each other were reading two different
+        # documents. One object, passed to both, is what says they still are —
+        # pinned by `test_the_rungs_load_probe_is_handed_the_legs_own_frozen_fixture`.
+        verdict = _fe_probe.run(built_dir, shots_dir=shots,
+                               api_stub=_layout_fixture.API_STUB)
         if not verdict.get("ok") and not verdict.get("skipped"):
             verdict["artifact"] = str(_fe_probe.write_artifact(self.round_id, verdict))
         # The layout leg (#2130), record-only like the probe above and for the same
