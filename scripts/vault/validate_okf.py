@@ -38,10 +38,19 @@ gate FAILED a spec-conformant index — "no parseable frontmatter block" — whi
 PASSING `projects/inner-voice-paper/index.md`, which is conformant-looking to
 the gate only because it disobeys §8 by carrying frontmatter.
 
-A subtree can be out of scope the same way: `EXCLUDE_PATHS` skips `backlog/data/`
-by vault-relative path prefix (#1934), the witness-extract directory an item's
-owed-witness clause writes into. `segment_scan.py` imports `iter_md`, so one
-exemption settles both this gate and the `segment:`/`tags:` scan.
+A subtree can be out of scope the same way, and `EXCLUDE_PATHS` is where every such
+ruling lives, by vault-relative path prefix: `backlog/data/`, the witness-extract
+directory an item's owed-witness clause writes into (#1934); `lloyd/memory/`, the
+loaded-memory topic files a nightly writes whole (#2340); and `plans/`, the
+`ExitPlanMode` handoffs (#2340). That list is the complete one — a ruling kept only in a
+comment below, or in a test, reads as scope the gate has not agreed to, so a new one goes
+in the tuple AND on this line. `.pytest_cache` is the same kind of ruling in
+`EXCLUDE_DIRS`, where a directory NAME is right for a tool artifact and wrong for a
+subtree an OKF segment shares a name with.
+
+`segment_scan.py` imports `iter_md`, so one exemption settles both this gate and the
+`segment:`/`tags:` scan; `okf_migrate.py` imports `EXCLUDE_PATHS` for the same reason,
+because that one WRITES.
 
 Run in CI / a healthcheck / the nightly conformance task, and before any bulk
 vault edit.
@@ -71,7 +80,12 @@ from app.paths import VAULT_ROOT  # noqa: E402
 #: path may itself contain a colon; the prefix before it is the file.
 UNKNOWN_DOMAIN_WARNING = re.compile(r": unknown domain '(?P<value>[^']*)'$")
 
-EXCLUDE_DIRS = {"templates", "images", ".git", ".obsidian", ".trash"}
+# `.pytest_cache` joins the tool directories because a pytest run rooted in the vault
+# leaves a `README.md` with no frontmatter INSIDE the vault root, and the vault's copy is
+# git-IGNORED (`~/obsidian/.pytest_cache/.gitignore` is `*`): deleting it reports a clean
+# vault until the next run recreates it (#2340). A cleanup pass cannot fix an artifact
+# that a tool owns, so the gate declines to treat it as a document.
+EXCLUDE_DIRS = {"templates", "images", ".git", ".obsidian", ".trash", ".pytest_cache"}
 # `index.md` / `log.md` are OKF-reserved at any depth (§3.1) and §8 forbids
 # frontmatter in them, so they can never be concept documents — matching on
 # filename is what "at any depth" means here, the same rule as `tags.md`. #450.
@@ -88,17 +102,47 @@ EXCLUDE_FILES = {"tags.md", "index.md", "log.md"}
 # not concept documents. Not a defect to be repaired after the fact by a
 # nightly that edits bytes whose provenance is their checksum.
 #
-# A prefix, deliberately NOT an entry in EXCLUDE_DIRS: that set is matched
-# against each path COMPONENT below (:94), so a bare `"data"` there would also
-# take a future `knowledge/x/data/` out of the gate. `iter_md` applies this one
-# to the path relative to the scan root, which is the vault root, so it is
-# anchored at `backlog/data/` and nowhere else.
+# A prefix, deliberately NOT an entry in EXCLUDE_DIRS: that set is matched against each
+# path COMPONENT in `iter_md` below, so a bare `"data"` there would also take a future
+# `knowledge/x/data/` out of the gate. `iter_md` applies this one to the path relative to
+# the scan root, which is the vault root, so it is anchored at `backlog/data/` and
+# nowhere else. (Cited by function name rather than `file:line`: adding a ruling to this
+# tuple moves the walk below it, and a number written here would be a claim nobody
+# re-checks.)
 #
 # One skip, both gates: `segment_scan.py:54` imports `iter_md` from here, so
 # the OKF gate and the `segment:`/`tags:` scan clear on the same exemption.
-# `okf_migrate.iter_md` keeps its own copies of the two sets above
-# (okf_migrate.py:79-80) and does NOT carry this one — recorded on #1934.
-EXCLUDE_PATHS = ("backlog/data/",)
+# `okf_migrate.py` imports THIS tuple rather than copying it, so the gate's leniency
+# and the migrator's reach cannot diverge — for the memory topic files that
+# divergence was not cosmetic: `--apply` would have backfilled a `type:` fence into
+# the 39 files the gate had just been told to leave alone, editing the bytes the
+# memory system reads (#2339's ruling was made only on the gate; #2340 closed the
+# second surface with it).
+#
+# `lloyd/memory/` is the loaded-memory detail the index lines in `lloyd/MEMORY.md`
+# point at — the nightly reflection job writes these whole, and 39 of the 40 files
+# there had no fence when #2340 measured the vault (the 40th was written fenced, so
+# "39 of 40" is the shape of the class, not its count). A topic file is not an OKF
+# concept document: §3 asks a `type` of a CONCEPT, and this is the detail half of a
+# memory index, pulled on demand by `memory_read(file="topics/<slug>")`. Not, as
+# #2340 first argued, a prompt-budget saving — only the index line is spliced every
+# turn, so the token claim is refutable from the loaded prompt and the class does not
+# need it. The prefix rather than an edit for two reasons: hand-adding a fence is
+# reverted by the reflection job's next write of the same file (#1488/#1500/#1789 own
+# that surface), and a bare `"memory"` in EXCLUDE_DIRS would take the vault's
+# `memory/` daily-note segment — which IS in the OKF taxonomy, and which
+# `segment_scan.py` counts through this same `iter_md` — out of both gates with it.
+#
+# `plans/` is `ExitPlanMode`'s output: plan bodies and session-named handoffs, an
+# open-set population only that tool writes, so a per-file fix has no stopping rule —
+# the argument #1934 used for the sidecar directory, and the vault's copy holds four
+# `.md` files of which two came out fenced and two did not.
+#
+# What is NOT here, so the next reader can tell a narrowed gate from a satisfied one:
+# #2340 closed 42 of the live vault's 48 §3 violations and left 6 in scope BY RULING —
+# the 4 `autonomy/referential-integrity*.md` outputs await #2326's generator fix, and
+# the 2 `lloyd/reviews/` archives are a named two-file vault write, not a class.
+EXCLUDE_PATHS = ("backlog/data/", "lloyd/memory/", "plans/")
 STRICT_FM_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
 
 # The vocabulary is #370's 12 canonical values plus what already exists on disk

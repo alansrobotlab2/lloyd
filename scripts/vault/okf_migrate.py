@@ -69,6 +69,14 @@ from app.paths import VAULT_ROOT  # noqa: E402
 # The same detector `validate_okf.py` runs, so the gate and this repairer can
 # never disagree about which files have a second block (#960).
 from scripts.vault.okf_stranded import find_stranded_frontmatter  # noqa: E402
+# The gate's subtree rulings, imported rather than copied: this tool WRITES, so an
+# exemption the gate holds and this walk lacks is this tool editing bytes the gate has
+# just agreed are not concept documents. `backlog/data/` could live with that gap
+# (#1934 recorded it and left it), `lloyd/memory/` cannot — `--apply` over the live
+# vault would have backfilled `type: note` front matter into the 39 loaded-memory topic
+# files, the bytes the memory system reads, while the nightly reported a clean vault
+# (#2340).
+from scripts.vault.validate_okf import EXCLUDE_PATHS  # noqa: E402
 
 # Dirs/files that are utility-only or OKF-reserved — never treated as concept docs.
 # `index.md` / `log.md` are reserved at any depth (§3.1) and §8 forbids frontmatter
@@ -76,7 +84,9 @@ from scripts.vault.okf_stranded import find_stranded_frontmatter  # noqa: E402
 # write: a dry run over a tree holding only a conformant index and log proposed
 # `created index.md [type=note]` / `created log.md [type=note]` before #450. Kept
 # identical to EXCLUDE_FILES in validate_okf.py — the two scripts must agree.
-EXCLUDE_DIRS = {"templates", "images", ".git", ".obsidian", ".trash"}
+# `.pytest_cache` is a tool artifact a pytest run rooted in the vault recreates, and
+# it is git-ignored there, so it joins the other tool directories on both walks.
+EXCLUDE_DIRS = {"templates", "images", ".git", ".obsidian", ".trash", ".pytest_cache"}
 EXCLUDE_FILES = {"tags.md", "index.md", "log.md"}
 STRICT_FM_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
 
@@ -478,6 +488,17 @@ def process(path: Path, *, repair_only: bool, root: Path | None = None):
 
 
 def iter_md(root: Path, only_dir: str | None):
+    """Every `.md` this tool may read or write, in the same scope the OKF gate uses.
+
+    Three rulings, all imported or mirrored from `validate_okf.py`: a directory
+    component in `EXCLUDE_DIRS`, a filename in `EXCLUDE_FILES` or leading `_`, and a
+    vault-relative prefix in `EXCLUDE_PATHS`. The last one is the one this walk did not
+    have before #2340, and the only one whose absence was destructive rather than
+    cosmetic: `--apply` writes, so an exempt subtree here is a subtree this tool edits
+    while the gate reports it clean. `rel` is relative to `root` — the vault root, or a
+    fixture root — so a prefix cannot be dodged by scanning one directory at a time:
+    `--dir lloyd` still yields `lloyd/memory/foo.md` as the relative path.
+    """
     base = root / only_dir if only_dir else root
     for p in sorted(base.rglob("*.md")):
         if not p.is_file():
@@ -486,6 +507,8 @@ def iter_md(root: Path, only_dir: str | None):
         if any(part in EXCLUDE_DIRS for part in rel.parts):
             continue
         if p.name in EXCLUDE_FILES or p.name.startswith("_"):
+            continue
+        if any(str(rel).startswith(prefix) for prefix in EXCLUDE_PATHS):
             continue
         yield p
 
