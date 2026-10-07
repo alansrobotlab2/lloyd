@@ -390,3 +390,83 @@ def test_a_contract_at_the_cap_gains_no_witness_clause_on_either_list(
         "and the demand is owed, which is what proves the at-cap half is a brake and "
         f"not a generator that stopped firing: {fm2.get('human_clauses')}")
 
+
+# ── #2382: the cap gates the over-bound note as hard as it gates the clause ─────
+
+def _witness_over(tmp_path: Path) -> Path:
+    """An on-disk witness over `WITNESS_MAX_BYTES` in no git tree: the #2382 shape.
+
+    Same relation to the bound as the corpus's own example —
+    `~/.local/state/lloyd-automod/promotions.jsonl`, 30,785,438 bytes against
+    `WITNESS_MAX_BYTES = 1_048_576` — at a size a test may write.
+    """
+    d = tmp_path / "state" / "lloyd-automod"
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / "promotions.jsonl"
+    p.write_bytes(b'{"row": 1}\n' * (B.WITNESS_MAX_BYTES // 10 + 1))
+    assert p.stat().st_size > B.WITNESS_MAX_BYTES, "the fixture is over the bound"
+    assert B.in_git_tree(p) is False, p
+    return p
+
+
+def test_the_cap_gates_the_over_bound_note_as_hard_as_the_clause(tmp_path, isolated):
+    """#2382 clause 5: a note gathered inside the token loop may not escape the cap.
+
+    This is the trap the new note walks straight into. `MAX_CLAUSES` was checked AFTER
+    the loop, on the strength of a loop that only ever produced one candidate; a note
+    accumulated per-token and appended before that line would have restarted exactly
+    the quiet growth past an item's own prose that the budget exists to stop (#1909),
+    and it would have done it on the list nobody grades, which is worse — #2289
+    clause 4 already closed that door for the copy demand, and a second destination
+    discovered later is precisely how such a gate stops being a gate.
+
+    So: at `MAX_CLAUSES`, over a body that genuinely cites an over-bound store, the
+    call returns the contract clause for clause AND the caller's own list object
+    unmutated, and `owed` is empty — no note. One slot spare, the same body does gain
+    the note: without that control an empty `owed` reads as a trigger that broke.
+
+    The writer halves matter because the cap the round is actually protected by is the
+    one applied there: `cap_new_clauses` brings nine authored clauses to six, and the
+    note must not arrive afterwards into `human_clauses` to re-grow what the cap just
+    trimmed. The at-cap item gains nothing on either list; the one-short item gains
+    the note owed, which is the same positive control one level up.
+    """
+    big = _witness_over(tmp_path)
+    body = f"the row came from `{big}`, and nothing here names where those bytes go"
+    at_cap = [f"route {i}: the mechanism is pinned by a test — tests/test_x{i}.py"
+              for i in range(B.MAX_CLAUSES)]
+    assert len(at_cap) == B.MAX_CLAUSES == 6
+    before = list(at_cap)
+
+    clauses, owed = B.add_witness_artifact_clause(at_cap, body, route_to_owed=True)
+    assert clauses == before, (
+        f"at the cap the contract is returned clause for clause, in order: {clauses}")
+    assert at_cap == before, "the caller's list object was appended to in place"
+    assert not any("backlog/data/" in c for c in clauses), clauses
+    assert owed == [], (
+        f"the cap gates the note too, so nothing is owed at all: {owed}")
+
+    short = at_cap[:B.MAX_CLAUSES - 1]
+    clauses2, owed2 = B.add_witness_artifact_clause(list(short), body,
+                                                    route_to_owed=True)
+    assert clauses2 == short, clauses2
+    assert len(owed2) == 1 and "byte ceiling" in owed2[0] and str(big) in owed2[0], (
+        f"positive control: one slot spare, the same body gains the note: {owed2}")
+
+    p = write_item(isolated, 66115, body=body)
+    B.record_verdict(B.item_by_id(66115), "confirmed", "re-measured, unchanged",
+                     acceptance="x", acceptance_clauses=list(at_cap))
+    fm = _fm(p)
+    assert list(fm["acceptance_clauses"]) == at_cap, fm
+    assert not any("WITNESS_MAX_BYTES" in c for c in (fm.get("human_clauses") or [])), (
+        f"an item at its cap is owed no note either: {fm.get('human_clauses')}")
+
+    q = write_item(isolated, 66116, body=body)
+    B.record_verdict(B.item_by_id(66116), "confirmed", "re-measured, unchanged",
+                     acceptance="x", acceptance_clauses=list(short))
+    fm2 = _fm(q)
+    assert list(fm2["acceptance_clauses"]) == short, fm2
+    assert any("WITNESS_MAX_BYTES" in c for c in (fm2.get("human_clauses") or [])), (
+        f"and with a slot free the note is owed, so the at-cap half is a brake: "
+        f"{fm2.get('human_clauses')}")
+

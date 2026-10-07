@@ -1130,11 +1130,16 @@ _SQL_WITNESS_EXTS = frozenset({"db", "sqlite", "sqlite3"})
 #: A demand that orders a multi-megabyte daily-rotating log into a git tree is a
 #: demand no round can execute once, let alone re-check nightly.
 #:
-#: Over the bound the token is skipped the way an absent file is skipped: no
-#: clause, the list as it came in. Whether a load-bearing witness legitimately
-#: larger than this (a whole-store `~/lloyd-data` database) should be served by an
-#: extract under the bound rather than skipped outright is owed #2 on #2267, and
-#: stays open until a real item hits the bound.
+#: Over the bound nothing is GRADED: no clause goes on, and the graded list comes
+#: back as it came in — that half of #2267 clause 3 stands. What #2267 left open
+#: (its owed #2: is a load-bearing witness legitimately larger than this — a
+#: whole-store `~/lloyd-data` database — served by an extract under the bound
+#: rather than skipped outright?) is now ruled, because a real item hit the bound:
+#: an over-bound token is no longer silent. Under the owed route it publishes ONE
+#: extract demand — the subset reproducing the item's own quoted figure, with this
+#: constant as the ceiling on what may be demanded and an explicit
+#: "say so rather than ordering the store" fallback — and that note goes to the
+#: item's owed list only, never into the contract a round is graded on (#2382).
 WITNESS_MAX_BYTES = 1_048_576
 
 
@@ -1200,20 +1205,87 @@ def _rederive_command(artifact: str, ext: str) -> str:
     return f"wc -l -c < {artifact}"
 
 
+def _witness_size(path) -> "int | None":
+    """The witness's byte count, or None when no byte count can be read.
+
+    Separate from the bound test below because the two answers are asked for
+    different reasons: the bound needs a yes/no, and the over-bound owed note
+    (#2382) states a figure against this ceiling, so it may only be written when
+    a real measurement backs it. A rotation that leaves a name resolving to
+    nothing is `OSError` here, and None, and no note.
+    """
+    try:
+        return _witness_target(path).stat().st_size
+    except OSError:
+        return None
+
+
 def _witness_within_size_bound(path) -> bool:
     """True when the named witness is small enough to be asked for by name.
 
-    Skipped exactly the way an absent file is — no clause, the list as it came in —
-    because the demand is what is wrong, not the evidence: a clause ordering 3 MB
-    of a daily-rotating service log into `backlog/data` cannot be executed once, let
-    alone re-checked every time the item is re-triaged. A stat that fails between
-    the on-disk probe and here (rotated away, unlinked) is a file that is no longer
-    on disk, and answers "no" for the same reason `_witness_is_on_disk` does.
+    Generates no clause, because the demand is what is wrong, not the evidence: a
+    clause ordering 3 MB of a daily-rotating service log into `backlog/data` cannot
+    be executed once, let alone re-checked every time the item is re-triaged. It is
+    no longer indistinguishable from an absent file, though: an over-bound token
+    that is on disk and in no tree publishes one extract demand to the owed list
+    under `route_to_owed` (#2382 — see `_over_bound_extract_demand`), while the
+    graded list still comes back as it came in. A stat that fails between the
+    on-disk probe and here (rotated away, unlinked) is a file that is no longer on
+    disk, and answers "no" for the same reason `_witness_is_on_disk` does.
     """
-    try:
-        return _witness_target(path).stat().st_size <= WITNESS_MAX_BYTES
-    except OSError:
-        return False
+    size = _witness_size(path)
+    return size is not None and size <= WITNESS_MAX_BYTES
+
+
+def _over_bound_extract_demand(path, artifact_dir: str = WITNESS_ARTIFACT_DIR) -> str:
+    """The owed note for a witness too large to be asked for whole (#2382).
+
+    What #2267 ruled out is ordering the STORE: bytes over `WITNESS_MAX_BYTES` into
+    `backlog/data`, which already holds 108 MB, on an item that will be re-triaged
+    more than once. What #2267 owed, and this delivers, is the other reading — serve
+    the claim, not the file. So the note asks for an EXTRACT: the subset of that
+    store which reproduces the figure the item quotes, committed under the same
+    convention, and proved by the same re-derive command the under-bound clause
+    carries. It states the ceiling as the constant and as a number, because the
+    reader has to know what "under" means without opening this file, and it closes
+    with the fallback that keeps the bound a bound: when the figure cannot be
+    reproduced under it, say so — do not order the store anyway.
+
+    Two wordings, chosen by budget, because the property has to hold over path
+    lengths this rule cannot enumerate: `clean_clauses` truncates an owed entry at
+    `CLAUSE_MAX_CHARS` FROM THE END, so on a long path the sentence that disappears is
+    the fallback — the one instruction that stops a round ordering the store anyway.
+    The roomy form is what a normal path gets; when it will not fit, the cheap
+    characters go first (the artifact needs no separate mention once the deriving
+    command carries it, and the ceiling reads as well without its noun phrase) and the
+    mandatory halves — source path, ceiling by constant and by number, the subset, the
+    command, the fallback — are what survive. Both forms end on the same sentence, so
+    which one was chosen never changes what the item asks for.
+
+    Deliberately absent from both: the store's own byte count. `~/lloyd-data`
+    witnesses rotate and grow, so a size written into the item's front matter is a
+    figure that goes stale on purpose, and the demand does not need it — the ceiling is
+    the number that governs the work.
+    """
+    target = _witness_target(path)
+    artifact = f"{artifact_dir}/{target.name}"
+    ext = target.suffix.lower().lstrip(".")
+    cmd = _rederive_command(artifact, ext)
+    limit = f"{WITNESS_MAX_BYTES:,}"
+    # Identical tail in both forms, and it is last in both: the sentence that must
+    # survive the budget is the sentence the budget is for.
+    fallback = ("Prefer an extract under it; if the figure cannot be reproduced "
+                "under it, say so rather than ordering the store.")
+    full = (f"`{path}` is over the WITNESS_MAX_BYTES = {limit} byte ceiling on what "
+            f"this rule may demand: do not order it whole. What is owed is an extract "
+            f"of it — the subset that reproduces the figure the item quotes — "
+            f"committed to `{artifact}` and re-derived from it with `{cmd}`. "
+            f"{fallback}")
+    if len(full) <= CLAUSE_MAX_CHARS:
+        return full
+    return (f"`{path}`: over the WITNESS_MAX_BYTES = {limit} byte ceiling, so do not "
+            f"order it whole. Publish an extract of the subset reproducing the figure "
+            f"the item quotes, proved by `{cmd}`. {fallback}")
 
 
 def _tree_basenames(haystack, probe) -> "set[str]":
@@ -1275,10 +1347,12 @@ def add_witness_artifact_clause(clauses, text, *, probe=in_git_tree,
         path does not exist;
       * `probe` says such a path is in no git tree — those bytes exist in no
         history anywhere;
-      * the file is no larger than `WITNESS_MAX_BYTES` (#2267 clause 3): a token
-        whose bytes are over the bound is skipped exactly as an absent file is, so
-        the generator stops ordering 3 MB of a daily-rotating service log into a
-        vault directory that already holds 108 MB;
+      * the file is no larger than `WITNESS_MAX_BYTES` (#2267 clause 3): no CLAUSE
+        is generated for a token over the bound, so the generator stops ordering
+        3 MB of a daily-rotating service log into a vault directory that already
+        holds 108 MB. It is not skipped into silence the way an absent file is: an
+        over-bound token that clears the two probes above publishes one extract
+        demand to `owed` under `route_to_owed` (#2382), and never a clause;
       * its basename is not shared by some other path in the clauses or the body
         that `probe` places IN a git tree (#2267 clause 1, `_tree_basenames`).
         Those bytes are pinned under this very name already — #2248's row was
@@ -1308,6 +1382,15 @@ def add_witness_artifact_clause(clauses, text, *, probe=in_git_tree,
     `tests/fixtures/vllm_prefix_miss_*.json` whose bytes ranged 169,348 to 263,748,
     pinning nothing (#2267 clause 4) — and a sqlite count for a store.
 
+    At most ONE over-bound note goes out per call, for the first such token in
+    reading order, and independently of whether a clause also went out: a body
+    citing a 30 MB ledger and a 200 KB jsonl gets the jsonl's clause AND the
+    ledger's extract note, because the two claims are served by different bytes
+    and the silence #2382 is about was the ledger's half. The note is owed-only and
+    never joins `every` — it asks for a vault commit like the clause does, and it
+    is capped by `MAX_CLAUSES` exactly like the clause is, since an item whose
+    contract is at its budget has spent it on both lists (#2289 clause 4).
+
     `route_to_owed=True` changes only the DESTINATION, and that is the whole of
     #2289. The demand orders a commit on the vault, and a code round's diff never
     contains the vault (`vault_round.py:1161`): its only validated route is
@@ -1315,10 +1398,12 @@ def add_witness_artifact_clause(clauses, text, *, probe=in_git_tree,
     `acceptance_clauses` asked a round to land the change it was still proposing —
     #2283's round SM_20261006_102005 was refused twice on one such clause while the
     rail it exists to repair was what refused it. With the flag the function returns
-    `(clauses, [demand])`, the caller owes it, and every other rule here — trigger,
-    wording, the two #2267 skips, `_ARCHIVE_MENTION_RX`, the on-disk gate and the
-    cap — applies unchanged. With the flag off (the default, every other caller) the
-    answer is the plain list, as before.
+    `(clauses, owed)`, where `owed` holds the copy demand and/or the one over-bound
+    extract note (#2382) and nothing else; the caller owes them, and every other
+    rule here — trigger, wording, the two #2267 skips, `_ARCHIVE_MENTION_RX`, the
+    on-disk gate and the cap — applies unchanged. With the flag off (the default,
+    every other caller) there is no owed destination, so neither demand is
+    generated and the answer is the plain list, as before.
 
     What this function cannot do is undo a clause it already emitted. A
     `vault`-surface item has no amendment route: `amend_clause` resolves the
@@ -1333,7 +1418,7 @@ def add_witness_artifact_clause(clauses, text, *, probe=in_git_tree,
     owed: list[str] = []
 
     def _answer():
-        """The list, or `(list, demand)` when the caller asked for the owed route.
+        """The list, or `(list, owed)` when the caller asked for the owed route.
 
         Two shapes rather than always a tuple because the other callers are triage
         passes holding a clause list, and rewriting every one of them to unpack a
@@ -1346,6 +1431,12 @@ def add_witness_artifact_clause(clauses, text, *, probe=in_git_tree,
         return _answer()
     seen: set[str] = set()
     witness = ""
+    # The first token, in reading order, that is on disk, over the size bound and in
+    # no tree — the one the owed extract note is about (#2382). Kept apart from
+    # `witness` because the two demands are not alternatives: a body can cite a big
+    # store and a small one, and the clause for the small one does not answer for the
+    # big one. Recorded only once, so three over-bound tokens still yield one note.
+    over_bound = ""
     # Where a pinned copy may be cited: the contract's own clauses AND the item
     # text. #2267 clause 1 is precisely the case where the clause is the only place
     # the tracked path appears, so scanning the body alone would miss it.
@@ -1360,25 +1451,44 @@ def add_witness_artifact_clause(clauses, text, *, probe=in_git_tree,
         seen.add(tok)
         if not _witness_is_on_disk(tok):
             continue
-        if not _witness_within_size_bound(tok):
-            continue
+        # Asked before the tree probe, because it decides WHICH of the two demands
+        # this token is eligible for, not whether the token is eligible at all.
+        too_big = not _witness_within_size_bound(tok)
         if not probe(tok):
             if tree_basenames is None:
                 tree_basenames = _tree_basenames(pinned_haystack, probe)
             if Path(_witness_target(tok)).name in tree_basenames:
                 continue
-            witness = tok
+            if too_big:
+                # Bytes no round may be asked to copy whole, and bytes whose byte
+                # count could not be read at all are not "over the bound" — they are
+                # unmeasurable, and an unmeasurable witness is owed no note claiming a
+                # figure about it. Hence the second look at `_witness_size`.
+                if not over_bound and _witness_size(tok) is not None:
+                    over_bound = tok
+                continue
+            if not witness:
+                # No `break`: the loop keeps going so an over-bound token LATER in
+                # reading order is still seen, and stops on its own once both
+                # destinations have a candidate.
+                witness = tok
+        if witness and over_bound:
             break
-    if not witness or len(every) >= MAX_CLAUSES:
+    # The cap gates BOTH destinations, and now literally so: a note accumulated
+    # inside the loop that escaped this line would restart exactly the quiet growth
+    # past the item's own prose that the budget exists to stop (#1909, #2289
+    # clause 4, and #2382 clause 5 for the note).
+    if len(every) >= MAX_CLAUSES:
+        return _answer()
+    if over_bound and route_to_owed:
+        owed.append(_over_bound_extract_demand(over_bound, artifact_dir))
+    if not witness:
         return _answer()
     artifact = f"{artifact_dir}/{Path(witness).name}"
     ext = Path(witness).suffix.lower().lstrip(".")
-    # The cap gates BOTH destinations. An item whose contract is already at
-    # `MAX_CLAUSES` has spent its whole budget — the clauses that fell off it are
-    # published in the item, unnumbered, precisely so the item does not quietly grow
-    # past what its own prose says it holds (#1909) — and a demand that fires only
-    # once it stopped being graded would restart exactly the growth the cap exists to
-    # stop. #2289 clause 4.
+    # Past the `MAX_CLAUSES` check above, which is where both destinations are
+    # gated. #2289 clause 4 pinned that gate for the copy demand; #2382 clause 5
+    # pins it for the note.
     (owed if route_to_owed else every).append(
         f"The witness bytes have no history: copy `{witness}` to `{artifact}` in "
         f"the vault (an extract reproducing the same numbers is fine) and "
@@ -5736,9 +5846,12 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
             fm["status"] = IMPLEMENT_POOL_STATUS
     clauses, past_cap = cap_new_clauses(acceptance_clauses)
     past_cap = list(dropped_clauses) + past_cap
-    # #2289: the witness demand this verdict generates, which goes to the owed list
-    # rather than the graded contract. Empty for any other verdict, so the one place
-    # it can be non-empty is the block below.
+    # #2289: the witness demands this verdict generates, which go to the owed list
+    # rather than the graded contract. A list because #2382 put a second demand on the
+    # same route — the copy demand for a small witness and the extract note for an
+    # over-bound one are answers about different bytes, and an item citing both is owed
+    # both. Empty for any other verdict, so the one place it can be non-empty is the
+    # block below.
     witness_owed: list[str] = []
     # Backstop for the rule the prompt states: a clause whose evidence only
     # arrives with time cannot be graded before landing, and holding a round
@@ -5763,6 +5876,13 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
         # catches an authored time-shaped clause, and this demand reaches
         # `human_clauses` because the rule put it there, not because the split moved
         # it.
+        #
+        # #2382 is the one thing that did change about the rule, and it changed the
+        # SILENCE and not the destination: an over-bound witness used to be dropped by
+        # a bare `continue`, so the ruling that such a store is served by an extract
+        # under `WITNESS_MAX_BYTES` reached nobody. It now publishes one extract demand,
+        # on this same route and into this same owed list, gated by the same cap, and
+        # still never into `acceptance_clauses`.
         clauses, witness_owed = add_witness_artifact_clause(
             clauses, f"{body}\n{evidence}\n{acceptance}", route_to_owed=True)
     clauses, moved_later = split_post_landing_clauses(clauses)

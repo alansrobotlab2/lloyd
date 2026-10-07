@@ -18,7 +18,11 @@ Since #2289 that path writes the demand to the item's OWED list, not its graded
 diff can contain. Everything else here is unchanged by that move — the trigger,
 the wording, the skips and the cap are the same rules #1869 filed, and #2267
 bounded them — and where the destination is what a node is about, the node says
-so and cites #2289.
+so and cites #2289. #2382 closed the gap that move left behind: a witness whose
+bytes are over `WITNESS_MAX_BYTES` was dropped by a bare `continue`, so nothing said
+what such a store IS owed — one extract demand under the bound, owed rather than
+graded. Those nodes are the section at the foot of this file, and the cap that gates
+the new note is pinned in `test_clause_budget.py`.
 
 Magnitude at filing: 6 open items under `~/obsidian/backlog/*.md` cite an
 out-of-tree bytes path and 0 of them name a vault artifact, so the rule is
@@ -419,8 +423,13 @@ def test_a_witness_beyond_the_size_bound_is_skipped_like_an_absent_one(tmp_path,
     run, growing and rotating daily — and asks a round to copy all
     of it into a vault directory that already holds 108 MB. The canonical extracts
     this convention actually commits are 169-263 KB, so the bound is 1 MiB: over
-    it, the token is skipped exactly as an absent file is skipped — no clause, and
-    the list returned as it came in.
+    it, no clause is generated and the list comes back as it came in — which is what
+    this node can still pin at the DEFAULT route, where there is no owed destination
+    and nothing at all can be said. It is no longer the whole rule: under
+    `route_to_owed` the same token publishes one extract demand, and
+    `test_an_over_bound_witness_publishes_one_owed_note_and_no_clause` (#2382) is
+    what pins that. What belongs to this node is the graded list staying untouched
+    over the bound, and an unreadable size never becoming a pass.
 
     A size that cannot be read is a skip too, never a pass: `_witness_within_size_bound`
     answers False on `OSError`, because bytes the generator cannot measure are
@@ -963,3 +972,288 @@ def test_the_docstring_carries_no_dated_ledger_count_about_the_vault_route():
     assert "0 of " + "291" not in doc
     assert "no per-clause verdicts" not in doc
     assert "VAULT_NO_AMENDMENT_ROUTE" in doc
+
+
+# ── #2382: an over-bound witness is owed an extract, not silence ───────────────
+#
+# #2267 clause 3 bounded the demand, #2289 moved it to the owed list, and the
+# over-bound token itself stayed a bare `continue` — the ruling that such a witness
+# is served by an EXTRACT under the bound (owed #2 on #2267) was never said to
+# anyone, while 492 items under `~/obsidian/backlog/*.md` cited an over-bound token
+# (re-measured at triage, 2026-10-07; the largest were `~/.cache/qmd/index.sqlite`
+# at 652,136,448 B and a 387,677,342 B request-manifest ndjson). The five clauses of
+# #2382 are pinned here and in `test_clause_budget.py`: one note, its wording, its
+# one-per-item shape, its owed-only destination, and the cap that gates it.
+
+#: The substring that tells the two owed demands apart: only the over-bound note
+#: states a ceiling, so a node can assert "no size note" without asserting the
+#: absence of the copy demand the same call may legitimately owe.
+_SIZE_NOTE_MARK = "byte ceiling"
+
+
+def _over_bound(tmp_path: Path, name: str = "promotions.jsonl",
+                sub: str = "lloyd-automod") -> Path:
+    """A real store whose bytes are over `WITNESS_MAX_BYTES`, on disk, in no tree.
+
+    The shape the item names is `~/.local/state/lloyd-automod/promotions.jsonl` at
+    30,785,438 bytes against the 1 MiB bound; this is the same relation to the bound
+    at a size a test may write, in a fresh subdirectory so several stores coexist.
+    """
+    d = tmp_path / "state" / sub
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / name
+    p.write_bytes(b'{"row": 1}\n' * (B.WITNESS_MAX_BYTES // 10 + 1))
+    assert p.stat().st_size > B.WITNESS_MAX_BYTES, "the fixture is over the bound"
+    assert B.in_git_tree(p) is False, f"and outside every tree: {p}"
+    return p
+
+
+def test_an_over_bound_witness_publishes_one_owed_note_and_no_clause(tmp_path):
+    """#2382 clause 1: the skip stops being silent, and the graded list is untouched.
+
+    `route_to_owed=True` over text citing one on-disk over-bound token: the owed list
+    gains ONE note naming that source path and the extract recipe, and the clause
+    list comes back byte-for-byte as it came in. Neither destination may hold a
+    demand for the store's whole bytes — that is the half #2267 clause 3 exists for,
+    and it is why this is a different note rather than the same clause with a warning
+    bolted on.
+
+    What separates this from the node above it: `test_a_witness_beyond_the_size_bound_is_skipped_like_an_absent_one`
+    pins the graded list at the DEFAULT route, where there is no owed destination and
+    so nothing can be said at all. Only this route can carry the ruling, which is why
+    the sentence that used to promise silence lived in the same file as a route that
+    could not keep it.
+    """
+    witness = _over_bound(tmp_path)
+    body = _BODY_1869.format(witness=witness)
+    before = list(_AUTHORED)
+
+    clauses, owed = B.add_witness_artifact_clause(list(_AUTHORED), body,
+                                                  route_to_owed=True)
+
+    assert clauses == before, f"the graded list is unchanged, clause for clause: {clauses}"
+    assert _AUTHORED == before, "the caller's list object is never mutated in place"
+    assert len(owed) == 1, f"exactly one note, got {owed}"
+    note = owed[0]
+    assert str(witness) in note, f"the note names the source path it is about: {note}"
+    assert "extract" in note.lower(), f"the recipe is an extract: {note}"
+    assert _SIZE_NOTE_MARK in note, note
+    assert not any("witness bytes have no history" in c for c in clauses), clauses
+    assert f"copy `{witness}`" not in note, (
+        f"no demand for the store's whole bytes reaches either destination: {note}")
+
+
+def test_the_over_bound_note_states_the_ceiling_the_subset_and_the_fallback(tmp_path):
+    """#2382 clause 2: enough in the note to do the work without opening the source.
+
+    A fresh session reads the owed entry off the item and has to know three things
+    with no other context: the ceiling, numerically and by constant name, on what may
+    be demanded; which subset of the store to publish, and the one command that
+    proves it reproduces the figure the item quotes; and what to do when the figure
+    cannot be reproduced under the bound — say so, do not order the store anyway.
+
+    The length assertion is part of the clause, not decoration: `clean_clauses`
+    truncates every entry at `CLAUSE_MAX_CHARS`, so a note longer than the ceiling it
+    is quoting would arrive at the item cut off mid-sentence — with the fallback
+    instruction, the last sentence, gone.
+    """
+    witness = _over_bound(tmp_path)
+    body = _BODY_1869.format(witness=witness)
+    _, owed = B.add_witness_artifact_clause(list(_AUTHORED), body, route_to_owed=True)
+    assert len(owed) == 1, owed
+    note = owed[0]
+
+    limit = f"{B.WITNESS_MAX_BYTES:,}"
+    assert B.WITNESS_MAX_BYTES == 1_048_576, "the bound is a named constant"
+    assert limit == "1,048,576", limit
+    assert "WITNESS_MAX_BYTES" in note, f"the ceiling by name: {note}"
+    assert limit in note, f"the ceiling as a number a reader can compare against: {note}"
+
+    artifact = f"{B.WITNESS_ARTIFACT_DIR}/{witness.name}"
+    assert artifact in note, f"where the subset goes: {note}"
+    assert f"`{B._rederive_command(artifact, 'jsonl')}`" in note, (
+        f"the command that reproduces the quoted figure from the committed subset "
+        f"(the same byte-varying one the clause carries): {note}")
+    assert ("if the figure cannot be reproduced under it, say so rather than "
+            "ordering the store") in note, f"the fallback, as an instruction: {note}"
+    assert len(note) <= B.CLAUSE_MAX_CHARS, (
+        f"the note must survive `clean_clauses` whole, or the fallback is the part "
+        f"that gets truncated: {len(note)} > {B.CLAUSE_MAX_CHARS}")
+
+    # And over the two shapes that spend the most characters: a long corpus-shaped
+    # absolute path (the builder never stats, so real names can be asked for
+    # directly), and a store, whose deriving command is a sqlite one-liner rather than
+    # a `wc`. `clean_clauses` cuts an entry at `CLAUSE_MAX_CHARS` from the END, so the
+    # first casualty of a long path is the fallback — the one sentence that stops a
+    # round ordering the store anyway. The builder answers with a shorter wording when
+    # the roomy one will not fit, and the mandatory halves have to survive the swap:
+    # the source path, the ceiling by constant and by number, an extract, the command,
+    # and the fallback last.
+    for worst in ("~/.local/state/lloyd-request-manifests/manifests/"
+                  "2026-09-30-deeply-nested-request-manifest-export.ndjson",
+                  "~/lloyd-data/_pipeline/reflection/"
+                  "a-quite-long-live-store-name-that-keeps-going.sqlite"):
+        long_note = B._over_bound_extract_demand(worst)
+        assert len(long_note) <= B.CLAUSE_MAX_CHARS, (
+            f"{len(long_note)} chars over {B.CLAUSE_MAX_CHARS} for {worst}: "
+            f"{long_note}")
+        assert long_note.rstrip(".").endswith("rather than ordering the store"), (
+            f"cut before the fallback could be read: {long_note}")
+        assert worst in long_note, long_note
+        assert "WITNESS_MAX_BYTES" in long_note and limit in long_note, long_note
+        assert "extract" in long_note.lower(), long_note
+        assert f"{B.WITNESS_ARTIFACT_DIR}/{Path(worst).name}" in long_note, (
+            f"the artifact the subset goes to is still named, inside the command: "
+            f"{long_note}")
+
+    # The roomy wording is not retired, only bought when the budget allows: a normal
+    # path still spells out where the extract is committed to.
+    assert ("committed to `backlog/data/index.sqlite`"
+            in B._over_bound_extract_demand("~/.cache/qmd/index.sqlite")), (
+        "a short path lost its roomy wording")
+
+    # The store shape gets the store's command: the corpus's largest cited token is
+    # a sqlite file, and `wc -l -c` over a db reproduces nothing.
+    db = _over_bound(tmp_path, "index.db", "qmd")
+    _, owed_db = B.add_witness_artifact_clause(
+        list(_AUTHORED), _BODY_1869.format(witness=db), route_to_owed=True)
+    assert len(owed_db) == 1, owed_db
+    assert B._rederive_command("backlog/data/index.db", "db") in owed_db[0], owed_db[0]
+    assert "backlog/data/index.db" in owed_db[0], owed_db[0]
+
+
+def test_three_over_bound_tokens_yield_one_note_for_the_first_and_reach_only_owed(
+        tmp_path, isolated):
+    """#2382 clause 3: one note per item, first in reading order, owed only.
+
+    Three distinct over-bound stores in one body, and the generator owes ONE note —
+    an item is not asked for three extracts by one triage stamp — naming the first of
+    them as the body reads them. Then the same body through the real writer: the note
+    appears under `human_clauses` and never in `acceptance_clauses`, which is the
+    destination #2289 settled and the reason this demand can never be what a code
+    round is refused on.
+
+    The verbatim comparison is against the generator's own output rather than a
+    re-wording, so the routing cannot quietly paraphrase the ceiling or drop the
+    fallback on the way into the front matter.
+    """
+    first = _over_bound(tmp_path, "promotions.jsonl", "lloyd-automod")
+    second = _over_bound(tmp_path, "2026-09-30.ndjson", "manifests")
+    third = _over_bound(tmp_path, "index.db", "qmd")
+    body = (f"Row counts came from `{first}`, cross-checked against `{second}` and "
+            f"again against `{third}`; `miss_rate` was null in 9.")
+    tokens = B.WITNESS_PATH_RX.findall(body)
+    assert tokens == [str(first), str(second), str(third)], (
+        f"the body really cites three, in this order: {tokens}")
+
+    clauses, owed = B.add_witness_artifact_clause(list(_AUTHORED), body,
+                                                  route_to_owed=True)
+    assert clauses == list(_AUTHORED), clauses
+    assert len(owed) == 1, f"three over-bound tokens, one note: {owed}"
+    assert str(first) in owed[0], f"the first in reading order: {owed[0]}"
+    assert str(second) not in owed[0] and str(third) not in owed[0], owed[0]
+
+    p = write_item(isolated, 31, body=body)
+    B.record_verdict(B.item_by_id(31), "confirmed", "all three stores re-measured",
+                     acceptance="the report re-derives from committed bytes",
+                     acceptance_clauses=list(_AUTHORED))
+
+    fm = _fm(p)
+    assert list(fm.get("acceptance_clauses") or []) == list(_AUTHORED), (
+        f"the graded contract is what triage authored: {fm.get('acceptance_clauses')}")
+    graded_owed = list(fm.get("human_clauses") or [])
+    assert graded_owed and graded_owed[-1] == owed[0], (
+        f"the note reaches `human_clauses` verbatim: {graded_owed}")
+    assert str(first) in graded_owed[-1], graded_owed[-1]
+    assert not any(_SIZE_NOTE_MARK in c for c in (fm.get("acceptance_clauses") or [])), (
+        f"no size note in the graded contract: {fm.get('acceptance_clauses')}")
+
+
+def test_the_two_skips_stay_silent_with_the_note_route_on(tmp_path):
+    """#2382 clause 4: the note changes nothing about when a demand is owed at all.
+
+    Three things have to hold once the note path exists, because a note is exactly
+    the kind of thing that leaks into the cases the skips were built to silence:
+
+      * an under-bound, out-of-tree, unpinned witness still gains EXACTLY ONE clause
+        at the default route, and under the owed route what it owes is the copy
+        demand — not a size note. The `WITNESS_MAX_BYTES` marker is what tells those
+        two apart, and it is asserted absent;
+      * the absent-file skip stays a skip with the route on: bytes that are not there
+        are owed no extract recipe either;
+      * the basename-already-pinned skip stays a skip even when the candidate is an
+        OVER-bound store — which is the case this round could have got wrong, since
+        the size branch used to sit ahead of the tree probe and the tree probe is
+        what establishes "no history covers these bytes". Bytes under history are owed
+        neither a copy nor an extract (#2289 clause 3's phantom obligation, one list
+        over).
+
+    The positive control is the last block: the same over-bound store with a basename
+    no tree holds, under the same route, does get the note — so an empty owed list
+    above is a skip doing its work and not a generator that stopped firing.
+    """
+    witness = _witness(tmp_path)
+    assert witness.stat().st_size < B.WITNESS_MAX_BYTES, "the under-bound control"
+    body = _BODY_1869.format(witness=witness)
+
+    out = B.add_witness_artifact_clause(_AUTHORED, body)
+    assert len(out) == 2 and "backlog/data/iv-metrics.jsonl" in out[1], out
+    clauses, owed = B.add_witness_artifact_clause(list(_AUTHORED), body,
+                                                 route_to_owed=True)
+    assert clauses == list(_AUTHORED), clauses
+    assert len(owed) == 1 and "have no history" in owed[0], owed
+    assert "WITNESS_MAX_BYTES" not in owed[0], (
+        f"an under-bound witness is owed no size note: {owed[0]}")
+
+    gone = tmp_path / "state" / "never-written" / "report.jsonl"
+    assert not gone.exists(), "positive control: the absent case really is absent"
+    clauses, owed = B.add_witness_artifact_clause(list(_AUTHORED),
+                                                 _BODY_1869.format(witness=gone),
+                                                 route_to_owed=True)
+    assert clauses == list(_AUTHORED) and owed == [], (
+        f"the absent-file skip must not gain a note: {clauses} {owed}")
+
+    repo = _git_repo(tmp_path)
+    _git_commit(repo, "data/report.jsonl")
+    assert _is_tracked(repo, "data/report.jsonl"), "the pinned copy is under history"
+    pinned = _over_bound(tmp_path, "report.jsonl", "lloyd-data")
+    assert pinned.name == "report.jsonl", "same basename as the tracked copy"
+    cited = (f"The 44 rows are in `{pinned}`, and the canonical copy sits at "
+             f"{repo}/data/report.jsonl.")
+    clauses, owed = B.add_witness_artifact_clause(list(_AUTHORED), cited,
+                                                 route_to_owed=True)
+    assert clauses == list(_AUTHORED) and owed == [], (
+        f"bytes a tracked path already pins are owed neither clause nor note: "
+        f"{clauses} {owed}")
+
+    uncollected = _over_bound(tmp_path, "report-not-pinned.jsonl", "lloyd-data")
+    _, owed2 = B.add_witness_artifact_clause(
+        list(_AUTHORED), f"The 44 rows are in `{uncollected}`.", route_to_owed=True)
+    assert len(owed2) == 1 and str(uncollected) in owed2[0], (
+        f"positive control: the same store, unpinned basename, does get the note: "
+        f"{owed2}")
+
+
+def test_the_size_bound_prose_no_longer_promises_silence():
+    """#2382: the two sentences that published the silence are rewritten, not kept.
+
+    Both stated, as the rule's behaviour, that an over-bound token is dropped exactly
+    like an absent one. They are the prose the next reader cites — the constant's own
+    comment block, and the bullet in the emitter's docstring the gate's reviewer
+    reads — so the diff that publishes the note has to retire them, and this node is
+    what stops either sentence coming back behind the new behaviour.
+    """
+    src = Path(B.__file__).read_text(encoding="utf-8")
+    assert "stays open until a real item hits the bound" not in src, (
+        "the comment still defers the ruling this item made")
+    assert "skipped exactly as an absent file is" not in src, (
+        "the emitter's bullet still promises the skip is silent")
+    assert "the way an absent file is skipped" not in src, (
+        "the constant's comment still promises the skip is silent")
+    assert "_over_bound_extract_demand" in src, "the note has a named builder"
+
+    doc = " ".join(B.add_witness_artifact_clause.__doc__.split())
+    assert "#2382" in doc, "the docstring names the ruling it now implements"
+    assert "extract demand" in doc, doc[:400]
+    assert "At most ONE over-bound note" in doc, (
+        "the one-per-item shape is part of the contract the docstring states")
