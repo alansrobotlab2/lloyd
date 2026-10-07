@@ -10,6 +10,8 @@
 
     # the secondary slot, as a control on a different engine
     ... --base-url http://127.0.0.1:8091 --model secondary
+    # Runs only once `secondary_enabled` is set true in config.yaml, and that slot
+    # shares GPU 2 with djev, so arming it takes `djev.enabled: false` first.
 
 Every request is the SAME prompt: one `role="system"` message carrying
 `FIXED_SYSTEM_PROMPT` plus one `role="user"` turn carrying `FIXED_USER_TURN`.

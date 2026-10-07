@@ -1046,3 +1046,27 @@ def test_the_probe_docstring_describes_the_prompt_and_examples_it_ships():
         == argvs, argvs
     for argv in argvs:
         parser.parse_args(argv)          # SystemExit on any flag the CLI lacks
+
+    # #2337 clauses 1, 2 and 4: the fourth example is conditional, and the
+    # docstring has to say so where a reader is about to paste it. The sentence
+    # sits with the example it qualifies, names the two config keys that decide
+    # whether anything answers on :8091, and is NOT one of the lines the filter
+    # above collects — so the pinned 4-argv list cannot silently gain a fifth.
+    doc_lines = doc.splitlines()
+    at = next(i for i, line in enumerate(doc_lines) if "--model secondary" in line)
+    tail = []
+    for line in doc_lines[at + 1:]:
+        if not line.strip():
+            break
+        tail.append(line)
+    precondition = " ".join(tail)
+    assert precondition, (
+        "nothing follows the secondary example: its precondition has gone, and the "
+        "example reads as unconditional again")
+    assert "secondary_enabled" in precondition, precondition
+    assert "config.yaml" in precondition, precondition
+    assert "GPU 2" in precondition, precondition
+    assert "djev.enabled: false" in precondition, precondition
+    assert not any(line in examples for line in tail), (
+        f"the precondition line is collected as an example, which moves the pinned "
+        f"argv list: {tail}")
