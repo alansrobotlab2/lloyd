@@ -127,6 +127,30 @@ def test_event_date_becomes_valid_at(extractor):
     assert f["valid_at"] == "2026-05-01" and f["created_at"] != "2026-05-01"
 
 
+def test_a_carried_created_at_is_never_replaced_by_a_source_note_date(extractor):
+    """#2350 clause 4: the two dates are different facts about the fact.
+
+    `created_at` is when the claim was first recorded; `valid_at` is when it was
+    true, and a source note that dates the event supplies only the second. That
+    rule already holds for a fact stamped with the run date (above); this pins it
+    for the new third case — a fact whose recording date came back from a
+    `--clean` capture — so a re-derivation cannot re-date the first from the
+    second and quietly make a claim older, or newer, than it was recorded."""
+    e = extractor
+    e.created_at_archive = {
+        fx.fact_identity("Lloyd", "event", "shipped"): "2026-01-05T03:04:05+00:00",
+    }
+
+    e.write_fact_file("Lloyd", "event", {"facts": [
+        _fact("shipped", category="event", event_date="2026-05-01")]})
+
+    f = _read(e.facts_dir / "Lloyd" / "Lloyd-event.md")["facts"][0]
+    assert f["valid_at"] == "2026-05-01", f
+    assert f["created_at"] == "2026-01-05T03:04:05+00:00", (
+        f"the source note's event_date reached created_at: {f}"
+    )
+
+
 # ── merge / dedupe ───────────────────────────────────────────────────────────
 
 def test_merge_facts_dedupes_by_text(extractor):

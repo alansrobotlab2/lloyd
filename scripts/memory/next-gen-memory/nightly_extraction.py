@@ -181,11 +181,56 @@ class NightlyExtraction:
             print(f"  → Backed up {', '.join(saved)} to {dest}")
         return dest if saved else None
 
+    def _fact_files_to_delete(self) -> list:
+        """Every markdown file this clean is about to delete, same walk.
+
+        Read off `_is_protected` — the one predicate the delete loop honours —
+        so the capture covers exactly the tree that goes and nothing that stays
+        (#2350). A capture that walked `FACTS_DIR` wholesale would index dates
+        out of `memory-graph/` and the `.bak` copies no re-derivation can ask
+        for, and a capture that missed a directory would restamp it in silence.
+        """
+        files: list = []
+        for item in FACTS_DIR.iterdir():
+            if self._is_protected(item):
+                continue
+            if item.is_dir():
+                files.extend(sorted(item.rglob("*.md")))
+            elif item.suffix == ".md":
+                files.append(item)
+        return files
+
     def clean_facts_directory(self):
-        """Wipe the entity tree, preserving the graph and its backups."""
+        """Wipe the entity tree, preserving the graph, its backups and the dates.
+
+        The dates are the new half (#2350). The tree's `created_at` values are
+        read out of it BEFORE the delete, into the extractor's carry-forward
+        archive, because a `--clean` rebuild writes every fact again from the
+        source documents and the only record of "when was this first recorded"
+        was the file being unlinked. Nothing else holds them: this tree is
+        gitignored, and `backup_graph_state` snapshots the edge graph — that is
+        the 2026-08-22 loss, not this one.
+        """
         if not FACTS_DIR.exists():
             print("  → Facts directory does not exist, skipping clean")
             return
+
+        # `getattr`, not `self.extractor`: the clean is exercised against an
+        # instance built without `__init__` (tests/test_nightly_extraction_guard.py).
+        # No extractor means nowhere to hand the dates, and the clean says that
+        # out loud rather than printing a carry-forward it cannot perform.
+        extractor = getattr(self, "extractor", None)
+        to_delete = self._fact_files_to_delete()
+        capture = None
+        if to_delete and extractor is not None:
+            try:
+                capture = extractor.capture_created_at(to_delete)
+            except Exception as e:  # noqa: BLE001 — a clean still has to clean
+                print(f"  ⚠ created_at capture failed ({e}); every re-derived fact "
+                      f"will be stamped with the run date")
+        elif to_delete:
+            print(f"  ⚠ no extractor attached: the created_at values in these "
+                  f"{len(to_delete)} fact file(s) cannot be carried forward")
 
         self.backup_graph_state()
 
@@ -203,6 +248,14 @@ class NightlyExtraction:
 
         print(f"  → Facts directory cleaned ({removed} removed, "
               f"{kept} protected entries kept)")
+        if capture is not None:
+            print(f"  → created_at carry-forward: {capture['identities']} recorded "
+                  f"date(s) carried, {capture['undated']} fact(s) with no recorded "
+                  f"date will be stamped with the run date "
+                  f"({capture['scanned']} file(s), {capture['facts']} fact row(s) read)")
+            if capture["unreadable"]:
+                print(f"  ⚠ {capture['unreadable']} fact file(s) would not parse; "
+                      f"their facts will be stamped with the run date")
     
     def run_full_extraction(self, full_mode=False, workers=1, clean=False, limit=0, force=False):
         """Run complete nightly extraction pipeline."""

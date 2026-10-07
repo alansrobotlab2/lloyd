@@ -38,6 +38,7 @@ from app.atomic_io import atomic_write_text, locked_file
 from app.frontmatter import split_frontmatter
 from app.fact_ids import assign_ids as _assign_fact_ids
 from app.kg_store import StoreUnavailable, text_hash, store as _kg_store
+from app.kg_store import parse_fact_file as _parse_fact_file
 
 # The seven fallback classes that used to sit here (a hand-rolled YAML parser,
 # a pass-through entity normaliser, a never-junk predicate) each turned a
@@ -144,6 +145,34 @@ def normalize_category(raw: str | None) -> str:
             best, best_score = cat, score
     return best if best_score >= 0.3 else "general"
 
+
+def fact_identity(entity, category, fact_text) -> tuple:
+    """The key that says "this row IS that row": (entity, category, text_hash).
+
+    One key, deliberately shared by the two places that must agree on it (#2350)
+    — the clean that captures a recording date off a fact tree it is about to
+    delete, and the write that carries that date forward instead of stamping the
+    run date. Its shape is the store's own: `_rows_for_file` keys a `facts_idx`
+    row on the row's `entity`/`category` with the file's frontmatter as the
+    fallback (`app/kg_store.py:1242-1243`), and `_merge_facts` folds on the same
+    `text_hash`. A second, local spelling of this triple is how a carry-forward
+    starts missing the facts it was written to save.
+
+    Public for that reason: private to this module, the caller on the nightly
+    side would have to re-derive it and the two derivations would drift.
+
+    Not canonicalised through the alias table. Both sides read a name that has
+    already been through `_sanitize_entity` (the writer) or was written by a
+    writer that had (the file on disk), and an identity MISS only costs the
+    carried date — the fact is still written, stamped with the run date, exactly
+    as it was before #2350. Missing toward the old behaviour is the safe
+    direction for a lookup whose whole job is to preserve a date.
+    """
+    return (str(entity or "").strip(),
+            normalize_category(str(category or "")),
+            text_hash(str(fact_text or "")))
+
+
 EXTRACTION_PROMPT = """You are a fact extraction engine. Analyze the following content and extract
 atomic facts about entities mentioned.
 
@@ -220,6 +249,13 @@ class FactExtractor:
         # verdict was already live on them (#1246). Neither is a PIPELINE_RESULT
         # key; the grep-able line keeps its shape.
         self.link_stats = {"mentions_linked": 0, "mentions_skipped_typed": 0}
+        # #2350: the `created_at` values `capture_created_at` read off a fact
+        # tree that is about to be wiped, keyed by `fact_identity`. A `--clean`
+        # re-derivation takes its first-recorded dates from here instead of
+        # stamping the run date. Empty on every incremental run, where the
+        # on-disk row is still there to keep its own date — which is why the
+        # stamp site treats an empty archive as "this fact is new".
+        self.created_at_archive: dict = {}
     
     def _chunk_content(self, content: str, start: int = 0) -> list:
         """Window ONE pass over a document.
@@ -508,6 +544,78 @@ class FactExtractor:
                                           enforce=enforce)
         return name if verdict not in ("junk", "candidate") else ""
 
+    def capture_created_at(self, fact_files) -> dict:
+        """Read the recording dates off a fact tree, before anything deletes it.
+
+        A `--clean` full re-derivation wipes the entity tree and writes every
+        fact again from its source document, so the date a fact was FIRST
+        recorded is gone before the writer runs and `write_fact_file` stamps the
+        run date over it. Measured on the live store 2026-10-07: 100,046 of
+        ~138,197 fact rows (72%) carry one date, 2026-09-23, which is one rebuild
+        pretending to be the whole store's history. #2179's monitor reads that
+        cohort and arms on it, but a monitor recovers no date, and the tree that
+        held them is gitignored and copied by nothing — `backup_graph_state`
+        snapshots the edge graph only, and the edge graph was the 2026-08-22 loss,
+        not this one. So this runs on the files, over exactly the entries the
+        clean is about to delete, and it is the last moment the dates exist.
+
+        The EARLIEST value wins per identity, because 708 live files hold one
+        claim twice (#499) and the later copy's stamp is not the fact's first
+        date. The value carried is the original string verbatim — this preserves
+        a date, it does not re-format one.
+
+        Keyed by `fact_identity`, never by path: a re-derivation re-files a fact
+        wherever the current category vocabulary puts it, so a per-file
+        carry-forward would restamp precisely the facts whose file moved.
+
+        Returns the counts the clean prints as its witness. `unreadable` is
+        frontmatter that would not parse through the store's own reader; those
+        rows land in `undated` and get the run date, which is what happens today
+        to every fact, so a capture failure costs a date and not a fact.
+        """
+        archive: dict = {}
+        # `facts` and `undated` count ROWS; `identities` counts distinct
+        # identities that carry a date, which is what the next rebuild can put
+        # back. Both units are named in the line that prints them, because a
+        # count whose unit is implicit is a count someone will later double-count.
+        stats = {"scanned": 0, "unreadable": 0, "facts": 0, "undated": 0}
+        for path in fact_files:
+            stats["scanned"] += 1
+            frontmatter, facts = _parse_fact_file(Path(path))
+            if not frontmatter:
+                stats["unreadable"] += 1
+                continue
+            file_entity = frontmatter.get("entity") or Path(path).parent.name
+            file_category = frontmatter.get("category")
+            for f in facts:
+                stats["facts"] += 1
+                created = f.get("created_at")
+                if not created:
+                    stats["undated"] += 1
+                    continue
+                key = fact_identity(f.get("entity") or file_entity,
+                                    f.get("category") or file_category,
+                                    f.get("fact"))
+                previous = archive.get(key)
+                # Compared as strings: every writer here emits an ISO-8601
+                # UTC stamp, and same-offset ISO strings order as dates. The
+                # value stored stays the original, not the comparison form.
+                if previous is None or str(created) < previous:
+                    archive[key] = str(created)
+                # A second copy of the same identity lands in no bucket at all:
+                # `identities` counts the date once however many files hold it,
+                # and only a row with no date is a row that will be stamped.
+        self.created_at_archive = archive
+        stats["identities"] = len(archive)
+        return stats
+
+    def _carried_created_at(self, entity, category, fact_text) -> str:
+        """The date this claim was first recorded, or "" to stamp the run date."""
+        if not self.created_at_archive:
+            return ""
+        return self.created_at_archive.get(
+            fact_identity(entity, category, fact_text), "")
+
     def write_fact_file(self, entity: str, category: str, facts_data: dict,
                         *, source_doc: str | None = None,
                         source_hash: str | None = None) -> Path | None:
@@ -548,7 +656,24 @@ class FactExtractor:
             if not isinstance(nf, dict):
                 continue
             nf.setdefault("provenance", "EXTRACTED")
-            nf.setdefault("created_at", now_iso)
+            if "created_at" not in nf:
+                # `setdefault` semantics are kept exactly: a caller that brings
+                # its own recording date still beats both branches below.
+                #
+                # The lookup, not a stamp, is the new half (#2350). After a
+                # `--clean` wipe the tree that recorded this claim's first date
+                # is deleted, so `now_iso` used to be the only date available and
+                # every rebuild restamped the whole store — 100,046 of ~138,197
+                # rows on 2026-09-23 alone. `capture_created_at` read those dates
+                # out during the clean; an empty archive (every incremental run,
+                # where the on-disk row still carries its own date and
+                # `_merge_facts` keeps it) falls through to `now_iso`, which is
+                # correct for a genuinely new fact.
+                carried = self._carried_created_at(
+                    nf.get("entity") or entity,
+                    nf.get("category") or category,
+                    nf.get("fact"))
+                nf["created_at"] = carried or now_iso
             if source_doc:
                 nf.setdefault("source_doc", source_doc)
             if source_hash:
