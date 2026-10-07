@@ -104,7 +104,7 @@ to `eval/*` in both directions is exactly what refuses one, so a reader who puts
 a preset there gets a red test where they meant to write an answer.
 
 `eval/run_compaction_recall_eval.py` is the runner two shipped-off `compaction`
-flags lean on. Its `ARMS` dict holds fifteen presets; the `--arms` default runs
+flags lean on. Its `ARMS` dict holds sixteen presets; the `--arms` default runs
 the threshold family (`none`, `production`, `tool_clear`, `raised`, `trigger90`)
 and the summary family is `summary_legacy`, `summary_persisted` and
 `memory_flush`. The middle column is counted over the tracked baselines — the
@@ -118,6 +118,7 @@ preset added to the dict, turns this table red until somebody reads it again:
 | `none` | yes (26 kept) | no compaction beyond the window — the floor |
 | `production` | yes (26 kept) | `config.yaml` as it is, both passes; the threshold family's paired baseline |
 | `tool_clear` | yes (26 kept) | tool-output clearing only, trigger/target 0.2/0.1 |
+| `sidecar` | no | `tool_clear` plus #2168's read-time reduction of previews relief already made; no baseline artifact has run it |
 | `raised` | yes (10 of 20 kept) | 0.9/0.7 at both passes: fire later, keep more |
 | `trigger90` | yes (10 of 20 kept) | trigger 0.9, target 0.52 |
 | `self_record` | no | #1514's free route: clearing plus a clause naming the session's own record |

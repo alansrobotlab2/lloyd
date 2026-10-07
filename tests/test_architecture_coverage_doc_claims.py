@@ -869,9 +869,15 @@ def test_the_compared_column_is_the_baselines_and_the_quoted_numbers_are_theirs(
                 assert total == have_rows, (
                     f"{preset}: the doc says {total} rows, the artifacts have "
                     f"{have_rows}")
+    # `sidecar` joined the set on 2026-10-07 with #2349, which built the arm and
+    # could not run it: the figure it exists to produce needs the real primary
+    # engine, so no `compaction*.json` has ever held a `sidecar` row. The rail
+    # above re-derives every `no` from the tracked artifacts, so this literal is
+    # the only thing that can be stale here — and the row it names says so too.
     assert {name for name, (mark, _k, _t) in rows.items() if mark == "no"} == {
         "self_record", "observation", "production_self_record",
-        "production_observation", "rung4", "rung4_lossy", "rung4_self_record"}, (
+        "production_observation", "rung4", "rung4_lossy", "rung4_self_record",
+        "sidecar"}, (
         "the never-run set changed shape; the doc's 'not yet run anywhere' "
         "sentence and the baselines have to be read together again")
 

@@ -952,3 +952,190 @@ def test_the_cli_pointer_run_prints_retention_beside_correctness(tmp_path, monke
                                                   "call_pointer": "pointer"}
     assert doc["rows"][0]["oracle_survived"] == {"call_planted": True,
                                                  "call_pointer": True}
+
+
+# --- #2349: the sidecar arm (#2168's read-time reduction) ---------------------
+
+def _arms_doc_entry(arm: str) -> str:
+    """The module docstring's ARMS entry for `arm`: its name line plus every
+    continuation line, up to the next arm's name line."""
+    block = R.__doc__.split("ARMS\n----\n")[1]
+    lines: list[str] = []
+    for line in block.splitlines():
+        if not lines:
+            if line.startswith(f"  {arm}"):
+                lines.append(line)
+            continue
+        if line.startswith("  ") and not line.startswith("   "):
+            break                                   # the next arm's name line
+        lines.append(line)
+    return "\n".join(lines).rstrip()
+
+
+def test_the_sidecar_arm_is_tool_clear_plus_the_reduction_switch():
+    """#2349 clause 1: the arm exists, and against its stated baseline it differs
+    by exactly one switch — the write half of #2168's reduction."""
+    base, arm = R.ARMS["tool_clear"], R.ARMS["sidecar"]
+    assert arm["compaction"] == base["compaction"], (
+        "the read-time reduction is one variable, not a re-tuned threshold")
+    assert arm["options"] == {**base["options"],
+                              "microcompact_reduction_sidecar": True}
+    assert {k: v for k, v in arm.items() if k != "options"} == \
+        {k: v for k, v in base.items() if k != "options"}
+
+
+def test_the_sidecar_arm_is_selectable_via_arms(tmp_path, monkeypatch):
+    """#2349 clause 1, the CLI seam: `--arms tool_clear,sidecar` clears the
+    runner's own validation and dispatches one row per arm. The bogus name is the
+    control that says it was the validator that accepted `sidecar`."""
+    snap = tmp_path / "tools.json"
+    snap.write_text(json.dumps([["lloyd-mcp", [{"name": n, "description": n,
+                                                "inputSchema": {"type": "object",
+                                                                "properties": {}}}
+                                               for n in ("Read", "Grep", "Bash")]]]))
+    root = tmp_path / "data"
+    monkeypatch.setenv("LLOYD_DATA", str(root))
+
+    def argv(arms):
+        return ["--sessions", "1", "--sizes", "12000", "--depths", "0.5",
+                "--arms", arms, "--seed", "600", "--dry",
+                "--data-root", str(root), "--tools-snapshot", str(snap),
+                "--out", str(tmp_path / "out.json")]
+
+    assert R.main(argv("tool_clear,sidecar")) == 0
+    doc = json.loads((tmp_path / "out.json").read_text())
+    assert {r["arm"] for r in doc["rows"]} == {"tool_clear", "sidecar"}
+    assert all(r["status"] in ("dry", "dropped") for r in doc["rows"]), doc["rows"]
+    assert R.main(argv("sidecar_not_an_arm")) == 2
+
+
+def _stub_the_loop(corpus, tmp_path, monkeypatch, spy_sidecar=False):
+    """`run_one` over both arms with the engine cut at `run_query`, which is also
+    where the row's `RunOptions` are handed to the loop — the same instance relief
+    reads. Returns the arm -> row and arm -> options maps."""
+    import app.harness.loop as L
+    root, files = corpus
+    s = R.build_session(3, 50_000, 0.5, root=root, corpus=files)
+    monkeypatch.setattr(R, "_metrics", lambda base_url: {})
+    monkeypatch.setenv("LLOYD_DATA", str(tmp_path / "d"))
+    monkeypatch.setattr("app.harness.tool_result_spill.SESSIONS_DIR",
+                        tmp_path / "d" / "sessions")
+    if spy_sidecar:
+        import app.harness.microcompact as mc
+        reached: list[str] = []
+        real = mc.apply_reduction_sidecar
+
+        def _spy(msgs, session_id):
+            reached.append(session_id)
+            return real(msgs, session_id)
+        monkeypatch.setattr(mc, "apply_reduction_sidecar", _spy)
+
+    options: dict[str, object] = {}
+
+    async def fake_run_query(history, opts):
+        options[opts.session_id] = opts
+        yield {"type": "result",
+               "response_text": f"CODENAME: {s.planted.passphrase}\n"
+                                f"PORT: {s.planted.port}",
+               "stop_reason": "stop"}
+    monkeypatch.setattr(L, "run_query", fake_run_query)
+
+    rows = {}
+    for arm in ("tool_clear", "sidecar"):
+        rows[arm] = asyncio.run(R.run_one(
+            s, arm, discovered=[("lloyd-mcp", [{"name": n, "description": n,
+                                                "inputSchema": {"type": "object",
+                                                                "properties": {}}}
+                                               for n in ("Read", "Grep", "Bash")])],
+            system_prompt="sys", data_root=tmp_path / "d", base_url="http://stub",
+            max_turns=2))
+        assert rows[arm]["status"] == "ok", rows[arm].get("reason")
+        assert rows[arm]["fired"]["turn_start_freed"] > 0
+    by_arm = {opts.session_id.rsplit("-", 1)[-1]: opts for opts in options.values()}
+    return s, rows, by_arm, reached if spy_sidecar else None
+
+
+def test_the_sidecar_arm_reaches_the_read_time_reduction_and_tool_clear_does_not(
+        corpus, tmp_path, monkeypatch):
+    """#2349 clause 2: the arm's switch has to arrive at `load_and_compact_session`
+    through `run_one`, because that parameter falls back to the RunOptions CLASS
+    default when it is handed None — the options dict alone cannot open it. The
+    spy is `app.harness.microcompact.apply_reduction_sidecar`, the helper
+    `app.compaction` lazy-imports inside the pre-pass, so this is the read-time
+    pass itself: reached once, under `sidecar`, with the row's own session id, and
+    not reached at all under `tool_clear`."""
+    s, rows, _opts, reached = _stub_the_loop(corpus, tmp_path, monkeypatch,
+                                             spy_sidecar=True)
+    assert reached == [f"pt-eval-c600-{s.key}-sidecar"], (
+        "the read-time pass must be reached under `sidecar` and never under "
+        f"`tool_clear`; saw {reached}")
+    assert rows["sidecar"]["fired"]["turn_start_freed"] > 0, (
+        "the arm still has to be a firing arm, or the row measures nothing")
+
+
+def test_the_sidecar_arm_is_the_one_that_writes_the_sidecar_beside_the_session(
+        corpus, tmp_path, monkeypatch):
+    """#2349 clause 3: relief's writer reads the RunOptions INSTANCE, so the
+    question this arm has to answer is whether the instance `run_one` actually
+    handed the loop carries the switch. Driven through the real relief rung with
+    nothing but that instance and 20 spilled Read rows, the `sidecar` arm's
+    options produce `<sid>.microcompact-reduced.json` in the scratch sessions dir
+    and `tool_clear`'s leave it without one — with relief relieving in both, so
+    the difference is the writer's and not relief's."""
+    import app.harness.loop as L
+    from app import transcript_entries as te
+
+    s, _rows, opts_by_arm, _ = _stub_the_loop(corpus, tmp_path, monkeypatch)
+    assert opts_by_arm["sidecar"].microcompact_reduction_sidecar is True
+    assert opts_by_arm["tool_clear"].microcompact_reduction_sidecar is False
+
+    sess = tmp_path / "d" / "sessions"
+    for arm in ("tool_clear", "sidecar"):
+        opts = opts_by_arm[arm]
+        msgs = [{"role": "user", "content": "read these"}]
+        for i in range(20):
+            cid = f"call_{i:03d}"
+            full = "".join(f"file {i} line {j}\n" for j in range(400))
+            tc = te.build_tool_call(cid, "Read", json.dumps({"file_path": f"/f{i}.py"}))
+            msgs.append({"role": "assistant", "content": "", "tool_calls": [tc]})
+            msgs.append({"role": "tool", "tool_call_id": cid,
+                         "content": te.shape_tool_result_for_transcript(
+                             full, call_id=cid, session_id=opts.session_id,
+                             tool_name="Read")})
+        # The arm's trigger is a FRACTION of the window, and at the primary's real
+        # 262144 the 0.2 wall sits at 42k tokens while these 20 pointer rows
+        # estimate at ~12k — relief would decline on pressure that is not what this
+        # test is about. Shrinking the window leaves the arm's own arithmetic
+        # (0.2 trigger, 0.1 target) in charge and just moves the wall below this
+        # fixture; which ids get recorded does not depend on where it is.
+        monkeypatch.setattr("app.compaction.get_context_window",
+                            lambda model=None: 20_000)
+        before = sorted(p.name for p in sess.glob("*.microcompact-reduced.json"))
+        cleared = L._intra_turn_microcompact(
+            msgs, options=opts, meter=None, keep_recent=15, tool_count=20,
+            iteration=20)
+        after = sorted(p.name for p in sess.glob("*.microcompact-reduced.json"))
+        assert cleared > 0, f"relief freed nothing under {arm}, so it proved nothing"
+        wrote = [n for n in after if n not in before]
+        expected = [f"{opts.session_id}.microcompact-reduced.json"]
+        if arm == "sidecar":
+            assert wrote == expected, (
+                f"the sidecar arm relieved {cleared} rows and recorded none of "
+                f"them: {wrote}")
+        else:
+            assert wrote == [], (
+                "tool_clear wrote a sidecar, so the two arms are not one switch "
+                f"apart: {wrote}")
+        assert any("preview dropped" in (m.get("content") or "")
+                   for m in msgs if m.get("role") == "tool"), (
+            f"nothing was reduced under {arm}, so the writer had nothing to name")
+
+
+def test_the_docstring_documents_the_sidecar_arm_and_its_baseline():
+    """#2349 clause 4: the arm list a future operator reads has to say the arm
+    exists, what it is for (#2168) and which arm it is scored against."""
+    entry = _arms_doc_entry("sidecar")
+    assert entry.startswith("  sidecar"), entry
+    assert "#2168" in entry, entry
+    assert "tool_clear" in entry, entry
+    assert "microcompact_reduction_sidecar" in entry, entry

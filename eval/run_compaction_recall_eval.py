@@ -89,6 +89,19 @@ ARMS
               trigger/target 0.2/0.1 at turn start and in turn, no
               summarize (`mode: truncate`), the rest of the relief ladder
               off. The video's blunt preset.
+  sidecar     #2168: `tool_clear` at the same thresholds plus the read-time
+              reduction of previews relief already made in memory. Both halves
+              need wiring: relief collects the call_ids it reduced only when
+              its own RunOptions instance carries
+              `microcompact_reduction_sidecar: True` (the arm's `options`
+              supplies that), and the read-time pass is reached only when
+              `run_one` forwards `microcompact_sidecar=` to
+              `load_and_compact_session` — that parameter reads the RunOptions
+              CLASS default when handed None, never the arm's live instance, so
+              the options dict alone cannot open it. The arm it is compared
+              against is `tool_clear`, which is `sidecar` minus that one
+              switch. Read the single-row caveat below before running the pair:
+              the reduction has to exist on disk before the row that applies it.
   self_record #1514's FREE route: `tool_clear` plus one clause in every
               cleared-result marker naming the session's own record
               (`sessions/<sid>.json`, `sessions/<sid>.tool-results/`). No new
@@ -120,6 +133,28 @@ ARMS
               says which planted facts the flush wrote down; recall against
               `summary_legacy` says whether that helped. A summary arm too:
               same shape, sizes and gate (below).
+
+THE SIDECAR ARM'S ONE ROW
+-------------------------
+A row is one turn: `run_one` compacts once, then probes, and relief — the only
+writer of `sessions/<sid>.microcompact-reduced.json` — runs inside the probe,
+AFTER the compaction that would read it. Three things follow, and they decide
+how a run of `--arms tool_clear,sidecar` has to be read:
+
+  * on a clean `--data-root` the `sidecar` row applies nothing, so the pair
+    reads equal by construction and that tie is not an answer;
+  * the reduction is applied only by a LATER row with the same id
+    (`pt-eval-c600-<key>-sidecar`), which is what re-running the grid over the
+    SAME root does — that run replays what the previous run's relief recorded,
+    the production pattern one turn later;
+  * relief records an id only for a row already carrying a `<persisted-output>`
+    pointer, and this generator's filler is 60-260-line slices, far under
+    `tool_result_spill.SPILL_THRESHOLD_CHARS` (50,000), so a turn that spills
+    nothing leaves nothing for the next row to replay.
+
+Pricing the read-time pass inside a single row needs a row that reloads its own
+session after its turn, which this runner does not do; #2349 carries that as the
+open finding behind the owed measurement.
 
 SUMMARY ARMS
 ------------
@@ -272,6 +307,26 @@ ARMS: dict[str, dict[str, Any]] = {
         # in a probe turn of plain Reads.
         "options": {"intra_turn_microcompact_trigger_fraction": 0.2,
                     "intra_turn_microcompact_target_fraction": 0.1},
+        "expects_fire": True,
+    },
+    # #2168: `tool_clear` exactly, plus the read-time reduction of the previews
+    # relief already made in memory. The switch has to reach TWO places, and an
+    # arm's `options` dict only reaches one of them: relief's writer reads the
+    # RunOptions INSTANCE (`loop._intra_turn_microcompact` ->
+    # `microcompact.record_reduced_calls`), which `hk.update(spec["options"])`
+    # below does build, while the read-time pass in `app.compaction` re-reads
+    # the RunOptions CLASS default whenever `load_and_compact_session` is handed
+    # `microcompact_sidecar=None` — never the arm's instance. So `run_one`
+    # forwards the arm's own value at that call. Compared against `tool_clear`,
+    # which is this arm minus that one switch; see THE SIDECAR ARM'S ONE ROW in
+    # the header for what a run of the pair can and cannot show.
+    "sidecar": {
+        "compaction": {"mode": "truncate",
+                       "microcompact": {"trigger_fraction": 0.2,
+                                        "target_fraction": 0.1}},
+        "options": {"intra_turn_microcompact_trigger_fraction": 0.2,
+                    "intra_turn_microcompact_target_fraction": 0.1,
+                    "microcompact_reduction_sidecar": True},
         "expects_fire": True,
     },
     # #1514: the FREE route. `tool_clear` exactly, plus one clause in every
@@ -1703,7 +1758,17 @@ async def run_one(session: Session, arm: str, *, discovered: list, system_prompt
                     system_prompt = f"{system_prompt}\n\n{memory_block}"
         t_ts = time.monotonic()
         with summarizer_probe(dry) as sum_calls:
-            comp = await load_and_compact_session(path, model="primary")
+            # #2168: the read-time half of the `sidecar` arm. `spec["options"]`
+            # alone cannot open it — it only feeds `RunOptions(...)` further
+            # down, and this parameter falls back to the RunOptions CLASS
+            # default, not the arm's instance, when handed None. So the arm's
+            # own switch is forwarded here, and an arm that does not name one
+            # still forwards None and follows the shipped default, exactly as
+            # before this arm existed.
+            comp = await load_and_compact_session(
+                path, model="primary",
+                microcompact_sidecar=spec["options"].get(
+                    "microcompact_reduction_sidecar"))
         row["turn_start_wall_s"] = round(time.monotonic() - t_ts, 2)
         row["summarizer"] = summarizer_cost(sum_calls)
         stext = summary_text(comp.get("history") or [])
