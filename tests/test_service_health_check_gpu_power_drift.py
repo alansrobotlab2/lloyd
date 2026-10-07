@@ -193,10 +193,14 @@ LIVE_275_450_275 = {0: 275.0, 1: 450.0, 2: 275.0}
 #: driven `main()` yields the power rows alone.
 # Everything the power row would otherwise share the default run with. `main`
 # builds its service rows out of `supervisor_fleet()` / `declared_programs()`, so an
-# empty fleet empties that whole branch; the other three are the checks that shell
-# out or read disk, each of which would put a row of its own in the payload.
+# empty fleet empties that whole branch; the rest are the checks that shell out, read
+# disk or make one HTTP call, each of which would put a row of its own in the payload.
+# `check_path_sandbox` is on this list from #2320 onward: clause 5 of that item puts the
+# substrate row on the DEFAULT run, so a driven `main()` here would otherwise carry it and
+# the exact row-name lists below would be a claim about the power rows that one new
+# sibling had quietly falsified.
 SIBLING_CHECKS = ("check_deployed_copies", "check_ca_trust",
-                  "check_unit_enabledness")
+                  "check_unit_enabledness", "check_path_sandbox")
 
 
 def _fresh():

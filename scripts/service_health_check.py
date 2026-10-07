@@ -12,6 +12,7 @@ import os
 import re
 import socket
 import subprocess
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -489,6 +490,31 @@ GPU_POWER_FALLBACK = re.compile(r"\bGPU_POWER_LIMIT_W=(\d+)\b")
 #: `275` reports drift on a card that is exactly where the unit put it.
 GPU_POWER_LIVE_ROW = re.compile(r"^\s*(\d+)\s*,\s*([0-9]+(?:\.[0-9]+)?)\s*W?\s*$")
 
+# ---------------------------------------------------------------------------------------------
+# The protected-path substrate (#2320). `agent_mcp/_path_sandbox.py` knows whether the Bash
+# tool's bind-read-only sandbox is actually being built, and `agent_mcp/main.py` serves that
+# answer on `/state` as `protected_path_sandbox` — `enforcing`, `fallback`, `bwrap`, `entries`,
+# `error`. Nothing read it: `git grep -n "protected_path_sandbox" -- scripts/` returned a
+# fixture and this file had no HTTP client at all (`http_check` below is a TCP connect that
+# never reads a body), so a box whose bwrap cannot unshare a namespace ran every Bash call
+# UNSANDBOXED — the deliberately fail-open branch whose only signal is a `logger.warning` no
+# monitor greps — while this script printed `Overall: 23/23 services healthy`. The absence of a
+# guard was indistinguishable from a guard that works, which is the failure this row closes.
+#
+# It reports the state and takes no position on #2109's still-open ruling (whether a fallback
+# should refuse Bash outright the way `_tool_sandbox.refusal` does, or keep failing open with a
+# warning): whichever way that goes, "is it enforcing" is the question this row answers, and
+# only its wording may move afterwards.
+PATH_SANDBOX_CATEGORY = "path-sandbox"
+#: The key `/state` carries the answer under — named to READ it, never to copy out of it. The
+#: PASS row's count is `len()` of the payload's own `entries`, so the bound list, the port and
+#: the token each keep exactly one definition in this repo.
+PATH_SANDBOX_KEY = "protected_path_sandbox"
+#: A loopback GET of a process that answers in milliseconds. The bound exists because this
+#: script is what an operator runs WHEN the box is broken: a hung aggregator must not become a
+#: hung health check. A timeout is an unreadable `/state`, which is a graded FAIL naming itself.
+PATH_SANDBOX_TIMEOUT_S = 10.0
+
 # install-ca.sh's three verdict words, and the two fingerprints it prints beside
 # them. Parsing the WORD rather than the exit code is the whole grade: exit 1 is
 # also what `ERROR: no CA certificate at ...` returns, before the store has been
@@ -728,6 +754,9 @@ CATEGORIES = {
     # heading rather than a member of `deploy` for the #1726 reason recorded on
     # GPU_POWER_CATEGORY.
     GPU_POWER_CATEGORY: [],
+    # And again: `main` answers it from `check_path_sandbox`, which reads the aggregator's
+    # /state rather than a supervisor program, a deployed file, a certificate or a wattage.
+    PATH_SANDBOX_CATEGORY: [],
     "all": list(SERVICES.keys()),
 }
 
@@ -939,6 +968,145 @@ def check_gpu_power_limit(declared=None, live=None):
             "declared_source": source,
         })
     return results
+
+
+
+
+def _aggregator_config():
+    """`app.aggregator_config`, imported from the tree this script lives in.
+
+    Lazy, exactly like `_switched_off`'s import of `app.llm_slots`: this file's own imports stay
+    stdlib so it still runs under `/usr/bin/python3`, which is what `python3
+    scripts/service_health_check.py` means on a machine where the venv is the broken part.
+    """
+    import sys
+    tree = str(_TREE)
+    if tree not in sys.path:
+        sys.path.insert(0, tree)
+    from app import aggregator_config
+    return aggregator_config
+
+
+def _state_url_and_headers() -> tuple:
+    """(`route("state")`, `auth_headers_for(that url)`) — the pairing, from one module.
+
+    `/state` is credential-bearing (#1053): an uncredentialed GET answers 401 with a body naming
+    the `X-Lloyd-Aggregator-Token` header. Both halves come from `app.aggregator_config` rather
+    than from constants here, because a check that hard-codes a port or a header name is a second
+    definition that silently diverges from the server's own route table.
+    """
+    cfg = _aggregator_config()
+    url = cfg.route("state")
+    return url, cfg.auth_headers_for(url)
+
+
+def _state_payload() -> dict:
+    """One authenticated GET of `/state`, parsed. stdlib, because httpx is not available here.
+
+    `python3 -c "import httpx"` is a ModuleNotFoundError under both `/usr/bin/python3` and the
+    bare `python3` on PATH — the interpreter the fleet watchdog actually uses — so a row built on
+    a third-party client would raise on every run and grade a false FAIL about the substrate from
+    inside a missing dependency.
+    """
+    url, headers = _state_url_and_headers()
+    request = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(request, timeout=PATH_SANDBOX_TIMEOUT_S) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _path_sandbox_row(healthy: bool, status: str, exit_code: int = 0,
+                      enforcing=None, fallback=None, entry_count=None,
+                      error=None, output: str = "") -> dict:
+    return {
+        "name": "path-sandbox",
+        "status": status,
+        # No `advisory` key, on purpose — following `_units_row` rather than `_ca_row`. An
+        # advisory row is dropped by `_scored_rows` before `format_text` and `format_json` count
+        # anything, so a fallback reported as advisory would print under a separate `Advisory:`
+        # heading and leave `Overall: 23/23` green: the exact blindness this item was filed
+        # against. A substrate that is not enforcing is a live fault, not latent drift — every
+        # Bash call on the box is running against protected paths unconfined.
+        "healthy": healthy,
+        "exit_code": exit_code,
+        "output": output,
+        "category": PATH_SANDBOX_CATEGORY,
+        "enforcing": enforcing,
+        "fallback": fallback,
+        "entry_count": entry_count,
+        "error": error,
+    }
+
+
+def check_path_sandbox(fetcher=None) -> list:
+    """One graded row: is the protected-path Bash sandbox actually being enforced?
+
+    The verdict is `/state`'s own `protected_path_sandbox` key, and nothing else — no second
+    constant, no re-derived entry list, no local copy of what the serving process binds. The
+    fetcher is a parameter for the reason `check_ca_trust(runner=...)` and
+    `check_gpu_power_limit(declared=, live=)` are parameters, and resolved at CALL time rather
+    than as a default argument: a test hands this function a payload and pins the red row with no
+    live aggregator anywhere in the suite.
+
+    Three answers, all of them graded:
+
+      * `enforcing: true` — PASS, naming the count of the payload's own `entries` list. An
+        enforcing answer with no entry list is a FAIL instead: a check whose denominator went
+        missing is not a check (the standing rule #1726 states for a zero denominator).
+      * `enforcing: false` — FAIL naming `.error`, the probe's own reason.
+      * no usable answer at all — FAIL naming why. Connection refused, the 401 an uncredentialed
+        request gets, a body that is not JSON, and a body without the key all land here. A row
+        that went quietly is what this item exists to remove: silence read as health before, and
+        would again.
+
+    `exit_code` is 0 when the aggregator answered, -1 when the read itself could not be made —
+    the same -1 `_units_row` carries for a guard that could not be run.
+    """
+    fetch = fetcher or _state_payload
+    try:
+        body = fetch()
+    except Exception as exc:  # noqa: BLE001 — any failure to read is a FAIL naming its reason
+        return [_path_sandbox_row(
+            False,
+            f"unknown: {PATH_SANDBOX_KEY} could not be read from /state "
+            f"({type(exc).__name__}: {str(exc)[:180]}) — nothing was checked, so the "
+            f"protected-path substrate is unverified",
+            exit_code=-1)]
+
+    sandbox = body.get(PATH_SANDBOX_KEY) if isinstance(body, dict) else None
+    if not isinstance(sandbox, dict):
+        return [_path_sandbox_row(
+            False,
+            f"unknown: the /state body carried no {PATH_SANDBOX_KEY} answer — nothing was "
+            f"checked, so the protected-path substrate is unverified")]
+
+    entries = sandbox.get("entries")
+    count = len(entries) if isinstance(entries, list) else None
+    error = sandbox.get("error")
+    bwrap = "present" if sandbox.get("bwrap") else "absent"
+    fallback = bool(sandbox.get("fallback"))
+    shown = json.dumps(sandbox, sort_keys=True)[:400]
+
+    if sandbox.get("enforcing") is True:
+        if count is None:
+            return [_path_sandbox_row(
+                False,
+                f"unknown: /state reports the substrate enforcing but the payload has no "
+                f"entries list, so there is no denominator to print (bwrap {bwrap})",
+                enforcing=True, fallback=fallback, error=None, output=shown)]
+        return [_path_sandbox_row(
+            True,
+            f"enforcing — {count} protected path(s) bound read-only by bwrap "
+            f"(bwrap {bwrap}, fallback={fallback})",
+            enforcing=True, fallback=fallback, entry_count=count, output=shown)]
+
+    reason = str(error) if error else "the payload named no error"
+    denom = (f"{count} path(s) listed by the payload, none of them enforced"
+             if count is not None else "the payload listed no entries")
+    return [_path_sandbox_row(
+        False,
+        f"NOT enforcing — {reason} (bwrap {bwrap}, fallback={fallback}, {denom})",
+        enforcing=bool(sandbox.get("enforcing")), fallback=fallback,
+        entry_count=count, error=str(error) if error else None, output=shown)]
 
 
 def _probe_targets(host: str, port: int) -> list:
@@ -1206,6 +1374,12 @@ def main():
     # unknown row that changes no verdict (#2135).
     if not args.services and args.category in (None, GPU_POWER_CATEGORY):
         results.extend(check_gpu_power_limit())
+    # The protected-path substrate guard, on the same rule a fourth time: whole-fleet run or its
+    # own category, never a `--services` ask. It is one authenticated loopback GET of /state, and
+    # an unreadable /state is a graded FAIL — a box that cannot say whether Bash is sandboxed is
+    # not a healthy box (#2320).
+    if not args.services and args.category in (None, PATH_SANDBOX_CATEGORY):
+        results.extend(check_path_sandbox())
 
     # Calculate summary
     summary = {}
