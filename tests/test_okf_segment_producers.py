@@ -407,3 +407,82 @@ def test_scan_exits_0_on_the_live_vault(capsys):
     out = capsys.readouterr().out
     assert "backlog/data/" not in out, out
     assert "total missing: 0" in out, out
+
+
+# ── clause 4: the scan names its own denominator (#2326) ─────────────────────
+
+KEYLESS = "# Just a heading\n\nNo frontmatter block at all.\n"
+
+
+def test_the_scan_prints_its_denominator_before_the_total_it_sums(capsys, tmp_path):
+    """`total missing: 0` must not be readable as a vault-wide verdict.
+
+    On 2026-10-07 an autonomy run read `total missing: 0` from this scan as the vault's
+    frontmatter state while `autonomy/` held four non-conformant reports — the
+    `referential_integrity.py` output this item is about. The scan was correct: it covers the
+    extractor allow-list's seven directories and its exclusion list names `/autonomy/` and
+    `/skills/` outright. So the stdout itself now says what it summed, in the same output a
+    reader pastes into a report, and the total line carries the qualifier on its own.
+
+    The exclusions come from `pipeline_config.yaml`, so the assertion reads them through
+    `scan_dirs()` rather than hard-coding the list: a node that names `/autonomy/` in prose
+    only would pass on a machine where the config changed and fail on the vault that matters.
+    """
+    # A conformant seven-directory tree, so the exit code below is 0 for the reason the
+    # note describes rather than for an empty tree.
+    _conformant_vault(tmp_path)
+    # …plus one keyless file in a directory the scan excludes, making the excluded half a
+    # real part of the tree rather than an abstraction: this is the shape that fooled the
+    # reader on 2026-10-07.
+    (tmp_path / "autonomy").mkdir()
+    (tmp_path / "autonomy" / "referential-integrity-latest.md").write_text(KEYLESS,
+                                                                           encoding="utf-8")
+
+    assert segment_scan.main(["--root", str(tmp_path), "--list"]) == 0
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+
+    total_at = next(i for i, ln in enumerate(lines) if "total missing:" in ln)
+    denom_at = next((i for i, ln in enumerate(lines) if "not scanned" in ln), None)
+    assert denom_at is not None, f"the scan still prints no denominator: {out}"
+    assert denom_at < total_at, "the note must precede the total it qualifies"
+
+    dirs, excludes = segment_scan.scan_dirs()
+    walked = [d for d in dirs if (tmp_path / d).is_dir()]
+    counted = re.search(r"scanned: (\d+) of (\d+) configured", out)
+    assert counted and counted.group(1) == str(len(walked)) == str(len(dirs)), out
+    # `/autonomy/` only, not every excluded segment: this fixture has no `skills/`
+    # directory, so a `/skills/` assertion here would be grading a name the code
+    # pattern-matched out of a config file rather than anything about this tree. The live
+    # vault asserts both, in the node below.
+    assert "/autonomy/" in lines[denom_at], (
+        f"an excluded segment this fixture actually holds is unnamed: {lines[denom_at]}")
+    assert "autonomy" in lines[denom_at + 1], (
+        "the note must also say which excluded segments exist in this vault — "
+        f"on the live vault that is the one holding the reports: {lines[denom_at + 1]}")
+    assert "not the vault" in lines[total_at], lines[total_at]
+    assert "autonomy/referential-integrity-latest.md" not in out, (
+        "the excluded file leaked into the listing the denominator says it does not cover")
+
+
+@pytest.mark.live_vault
+def test_the_live_scan_names_both_real_excluded_segments(capsys):
+    """On the tree the note is written for, the two segments are `autonomy/` and `skills/`.
+
+    The fixture node above can only prove what a seven-directory temporary tree shows. This
+    is the one that says the sentence is true where it is read: both directories exist in
+    `~/obsidian`, both are excluded by `pipeline_config.yaml`, and both appear in the note —
+    which is the half a reader needs, because `autonomy/` is exactly where
+    `referential_integrity.py` writes and `skills/` is where every SKILL.md lives.
+    """
+    vault = Path.home() / "obsidian"
+    assert segment_scan.main(["--root", str(vault)]) == 0
+    out = capsys.readouterr().out
+    denom = next(ln for ln in out.splitlines() if "not scanned" in ln)
+    present = next(ln for ln in out.splitlines() if "present in this vault" in ln)
+    for seg in ("/autonomy/", "/skills/"):
+        assert seg in denom, out
+        assert seg in present, f"{seg} exists in the live vault but the note omits it: {present}"
+    assert (vault / "autonomy" / "referential-integrity-latest.md").is_file(), (
+        "the file whose non-conformance filed #2326 is gone, so this node is guarding a "
+        "tree that no longer has the case")

@@ -2,14 +2,20 @@
 from __future__ import annotations
 
 import hashlib
+import re
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.maintenance import referential_integrity as ri  # noqa: E402
+from scripts.vault import validate_okf as okf  # noqa: E402
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 MEMORY = """\
 # Memory
@@ -154,3 +160,103 @@ def test_a_run_writes_only_its_report_and_counts_new_dangling(world):
     assert "- dangling: 4" in text
     assert "- newly dangling since the previous report: 1" in text
     assert "`knowledge/software/present.md` — " in text and "**(new)**" in text
+
+
+def _run_gate(root: Path, dir_name: str) -> subprocess.CompletedProcess:
+    """The weekly OKF gate over one directory of a fixture vault, as a subprocess.
+
+    Crossed as a process boundary on purpose: `scripts/vault/validate_okf.py` is the thing
+    that decides whether a note is conformant, and it is run as a command line by the
+    nightly and by the `okf-conformance-check` skill. Importing a helper here would let
+    this node agree with a private function while the gate that actually reports the
+    violation to a human kept saying `no parseable frontmatter block`, which is exactly the
+    disagreement #2326 was filed about: four of this script's own reports sat under a green
+    scan because nothing between the writer and the reader checked the bytes.
+    """
+    return subprocess.run(
+        [sys.executable, "-m", "scripts.vault.validate_okf",
+         "--root", str(root), "--dir", dir_name],
+        cwd=REPO_ROOT, capture_output=True, text=True)
+
+
+def test_the_report_the_script_writes_opens_with_a_frontmatter_block_the_gate_accepts(world):
+    """The generator owns its frontmatter: `--report` bytes pass the real OKF gate.
+
+    Four files under `~/obsidian/autonomy/` — `referential-integrity-latest.md` and its
+    three dated copies — were non-conformant by construction on 2026-10-07, because
+    `render_report` started its output at an H1. `validate_okf.py --dir autonomy` reported
+    all four as `no parseable frontmatter block` and exited 1 while the seven-segment
+    `segment_scan` said `total missing: 0`. The two scanners disagreed, and the one that
+    was right scans a directory the other one never walks — which is the denominator half
+    of the same item.
+
+    The keys are asserted on the parsed block, not on the text: a `segment:` that is a
+    list, or a `tags:` written as a bare string, would satisfy a `read_text().count("---")`
+    check and still be rejected by the gate. `generated_at` is tied to the run stamp in the
+    body rather than to a fresh `utcnow()` — two timestamps in one file drift apart, and a
+    dated copy made by autonomy task #94's `cp` step then disagrees with its own header.
+    """
+    vault = world["vault"]
+    report = vault / "autonomy" / "referential-integrity-latest.md"
+    ri.main(_args(world) + ["--report", str(report)])
+    text = report.read_text()
+
+    block = okf.STRICT_FM_RE.match(text)
+    assert block, f"no frontmatter fence at offset 0: {text[:80]!r}"
+    fm = yaml.safe_load(block.group(1))
+    assert isinstance(fm, dict), fm
+    assert fm["segment"] == "autonomy", fm
+    assert isinstance(fm["tags"], list) and len(fm["tags"]) >= 1, fm
+    assert isinstance(fm["summary"], str) and fm["summary"].strip(), fm
+    assert fm["generated_at"] == re.search(r"^Run (\S+) by", text, re.M).group(1), (
+        "the frontmatter stamp and the body's run stamp are two different times")
+    assert set(fm) == {"type", "segment", "tags", "generated_at", "summary"}, (
+        "the block declares no counts of its own: a `dangling:` key here would be a second "
+        "source of truth for a number the body already carries")
+    assert text.count("---\n") == 2, "exactly one fence pair: an inner one breaks the regex"
+    assert "# Referential integrity — loaded memory" in text, "the H1 was displaced, not prefixed"
+
+    checked = _run_gate(vault, "autonomy")
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    assert "referential-integrity-latest.md" not in checked.stdout, checked.stdout
+
+    # The control that says the gate is grading these bytes and not agreeing vacuously: the
+    # same report with its fence cut off must come back as the violation the nightly
+    # reported on each of 2026-10-04, 10-05 and 10-06.
+    stripped = text[text.index("\n---\n") + len("\n---\n"):]
+    assert stripped.startswith("\n# Referential integrity"), stripped[:40]
+    report.write_text(stripped)
+    assert not okf.STRICT_FM_RE.match(stripped), "the control must fail the fence check itself"
+    refused = _run_gate(vault, "autonomy")
+    assert refused.returncode == 1, refused.stdout + refused.stderr
+    assert "no parseable frontmatter block" in refused.stdout, refused.stdout
+
+
+def test_the_fence_sits_in_front_of_the_marker_the_new_dangling_memory_reads(world):
+    """Two runs over one path still report only the newly-dangling cite, with the fence in place.
+
+    The previous run's cite list is read back out of the report file itself, from the
+    `<!-- ri:dangling [...] -->` state marker `render_report` closes with — there is no side
+    file. A fence is exactly the kind of edit that breaks that quietly: had the marker been
+    moved or a second one introduced, `_STATE_RE` would find the wrong list (or nothing) and
+    every dangling cite in the second run would read as newly dangling, which looks like a
+    healthy report. So this pins the fence and one marker of the right shape, and that the
+    second run names one new cite rather than four.
+    """
+    vault = world["vault"]
+    report = vault / "autonomy" / "referential-integrity-latest.md"
+    ri.main(_args(world) + ["--report", str(report)])
+    first = report.read_text()
+    assert first.startswith("---\n"), "run one must already carry the fence"
+    assert first.count("<!-- ri:dangling ") == 1, "exactly one state marker per report"
+
+    (vault / "knowledge" / "software" / "present.md").unlink()
+    ri.main(_args(world) + ["--report", str(report)])
+    second = report.read_text()
+    assert second.startswith("---\n"), "run two must carry it too"
+    assert second.count("<!-- ri:dangling ") == 1, (
+        "a duplicated marker makes the state read ambiguous")
+    assert "no previous report" not in second, (
+        "the fence hid the previous run's marker, so nothing carried over")
+    assert "- newly dangling since the previous report: 1" in second, (
+        "every dangling cite reading as new is the symptom of an unread marker")

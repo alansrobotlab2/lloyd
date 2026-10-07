@@ -249,6 +249,52 @@ def previous_dangling(report: Path) -> set[str] | None:
         return None
 
 
+#: Where a report of this sweep lives, and what its frontmatter says. The file is a vault
+#: file like any other, so `scripts/vault/validate_okf.py` walks it: on 2026-10-07 that
+#: gate was RED on exactly four files — `autonomy/referential-integrity-latest.md` and the
+#: three dated copies autonomy task #94 `cp`s from it — solely because this generator
+#: emitted no `---` block at all (#2326). `scripts/skill_lint.py` already carries its own
+#: report for the same reason; this is that precedent, one edit, reaching `latest` and
+#: every future dated copy together because the copies are a `cp` of these bytes.
+#:
+#: The keys are the ones the gate reads plus the two a reader needs: `segment` is the only
+#: value that can say where this sits, and `generated_at` is the run's UTC stamp, quoted so
+#: it stays a string rather than PyYAML's `datetime` resolver turning it into an object a
+#: later timestamp check has to special-case. `type: note` is a value the gate already
+#: accepts — `okf_taxonomy.KNOWN_TYPES` has `note` and no `report`, so `type: report` would
+#: be the unknown-type warning that `--strict` turns into exit 2 — and it does not make this
+#: a task either way: the Mission Control autonomy tab keys on the `NN-` filename through
+#: `autonomy_task_files()` (#1594), which `tests/test_mc_summarize_autonomy_gate.py` pins
+#: against these very bytes.
+REPORT_SEGMENT = "autonomy"
+REPORT_TAGS = ["referential-integrity", "loaded-memory", "dangling-cites"]
+
+
+def render_frontmatter(stamp: str, total: int, dangling: int) -> str:
+    """The `---` block `render_report` puts on top of every report it writes.
+
+    The gate `yaml.safe_load`s this block whole (`validate_okf.py:184-191`: `STRICT_FM_RE`
+    match, then a parse whose failure is itself a violation), so the shapes here are chosen
+    against what a YAML resolver does to them rather than against a text count. `segment`
+    and `type` are plain scalars. `generated_at` is quoted because PyYAML resolves a bare
+    `2026-10-07T03:07:45Z` to a `datetime`, which makes `json.dumps(frontmatter)` raise
+    `TypeError` for any reader that serialises the block; the vault's own generated notes
+    quote it the same way. `tags` is flow style so it parses to a list on one line, and
+    `summary` is quoted because it contains a colon.
+    """
+    return "\n".join([
+        "---",
+        "type: note",
+        f"segment: {REPORT_SEGMENT}",
+        f"tags: [{', '.join(REPORT_TAGS)}]",
+        f'generated_at: "{stamp}"',
+        f'summary: "Referential-integrity sweep over loaded memory: {total} cites, '
+        f'{dangling} dangling. Generated, do not hand-edit."',
+        "---",
+        "",
+    ])
+
+
 def render_report(records: list[dict], previous: set[str] | None) -> str:
     dangling = [r for r in records if r["verdict"] == "dangling"]
     exempt = [r for r in records if r["verdict"] == "exempt"]
@@ -256,6 +302,8 @@ def render_report(records: list[dict], previous: set[str] | None) -> str:
     new = keys if previous is None else [k for k in keys if k not in previous]
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     lines = [
+        render_frontmatter(stamp, len(records), len(dangling)).rstrip("\n"),
+        "",
         "# Referential integrity — loaded memory",
         "",
         f"Run {stamp} by `scripts/maintenance/referential_integrity.py` (#882). "

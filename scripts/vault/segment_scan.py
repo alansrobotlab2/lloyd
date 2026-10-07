@@ -165,9 +165,31 @@ def main(argv: list[str] | None = None) -> int:
         if args.list or len(tag) <= 10:
             for rel in tag[:200]:
                 print(f"    {rel}")
+    # The denominator, printed before the totals. `total missing: 0` below is a verdict
+    # over the directories named on the per-segment lines above and nothing else, and
+    # until #2326 said so a reader could — and did — take it vault-wide: on 2026-10-07 a
+    # maintenance run read `total missing: 0` as the vault's frontmatter state while
+    # `autonomy/` held four non-conformant files (scripts/maintenance/referential_integrity.py's
+    # report and its dated copies), which this scan never walks. The exclusions are not
+    # an oversight: they are the extractor's allow-list scope, so extending them would be
+    # a scope decision, not a bug fix — hence naming the denominator rather than widening
+    # it. `inside` keeps the two kinds of exclusion apart: a pattern like
+    # `/memory/vault-maintenance/` prunes *within* a scanned tree, while `/skills/` and
+    # `/autonomy/` name a top-level segment that is never walked at all — only the second
+    # kind belongs in the note, and `seen` says which of those actually exist here.
+    walked = [d for d in dirs if d in result]
+    inside = {pat for d in walked for pat in set(excludes) if f"/{d}/" in pat}
+    outside = sorted(set(excludes) - inside - {".git/", "__pycache__/", "node_modules/"})
+    seen = [pat for pat in outside if (root / pat.strip("/")).is_dir()]
+    print(f"  scanned: {len(walked)} of {len(dirs)} configured directories"
+          + (f" ({', '.join(d + '/' for d in dirs if d not in result)} absent)"
+             if len(walked) != len(dirs) else ""))
+    print(f"  not scanned, by configured exclusion: {', '.join(outside)}")
+    print(f"    present in this vault but excluded: {', '.join(seen) if seen else 'nothing'}")
     print(f"  total missing segment: {seg_total}")
     print(f"  total missing tags: {tag_total}")
-    print(f"  total missing: {seg_total + tag_total}")
+    print(f"  total missing: {seg_total + tag_total}"
+          f"  (over the {len(walked)} scanned directories only, not the vault)")
     return 1 if (seg_total or tag_total) else 0
 
 

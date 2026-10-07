@@ -204,3 +204,44 @@ def test_task_whose_frontmatter_closes_past_byte_2000_is_counted(autonomy_tree):
     )
     assert out["by_status"] == {"up_next": 1, "in_progress": 1}
     assert out["total"] == len(_route_tasks())
+
+
+def test_the_frontmatter_2326_added_to_the_referential_integrity_report_keeps_it_out_of_the_tab(
+        autonomy_tree):
+    """#2326's own output, fed through the name gate: a conformant report is still not a task.
+
+    The item's hazard was that the two fixes had to land together — #1594's UI gate and the
+    generator's new fence — because a report under `autonomy/` that carries frontmatter used
+    to be counted by a `head.startswith("---")` test. The gate moved to
+    `_TASK_NAME_RE` first, so this node is not the discriminator: it is the cross-boundary
+    check that the *specific bytes the generator now emits* — `render_report`'s real string,
+    not a hand-written report-shaped constant — still fail the name test. The hand-written
+    `REPORT_WITH_LEGAL_FRONTMATTER` above covers the shape; only the generator's own text
+    covers a key that could confuse the parser (`type: note`, `segment: autonomy`, a quoted
+    `generated_at`) or a dated copy landing in the `referential-integrity/` subdirectory that
+    autonomy task #94's `cp` step makes each night and the glob never walks.
+    """
+    from scripts.maintenance import referential_integrity as ri
+
+    text = ri.render_report([
+        {"file": "autonomy/9-x.md", "line": 3, "target": "knowledge/gone.md",
+         "verdict": "dangling", "why": "no file", "how_checked": "is_file"},
+    ], None)
+    assert text.startswith("---\n"), "the generator's fence is what this node is about"
+    _write(autonomy_tree, **{"referential-integrity-latest.md": text})
+    dated = autonomy_tree / "referential-integrity"      # task #94's `cp` destination
+    dated.mkdir()
+    (dated / "2026-10-07.md").write_text(text, encoding="utf-8")
+
+    files = ROUTER.autonomy_task_files()
+    assert [f.name for f in files] == [], (
+        f"the report, or its dated copy, was enumerated as a task: {[f.name for f in files]}")
+    assert mc_ui._summarize_autonomy()["total"] == 0, (
+        "the tab counted the report even though the route did not — the two surfaces "
+        "diverged back into the #1594 shape")
+
+    # A real task beside it still counts, so the empty result above is the name gate and not
+    # an enumeration that never reached the directory.
+    _write(autonomy_tree, **{"43-corpus-shape-trend.md": TASK_WITHOUT_STATUS_KEY})
+    assert [f.name for f in ROUTER.autonomy_task_files()] == ["43-corpus-shape-trend.md"], (
+        "positive control: with the report present the gate stopped returning the one task")
