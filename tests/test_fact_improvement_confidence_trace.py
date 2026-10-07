@@ -579,9 +579,9 @@ def _planned_superseded_action(tmp_path, monkeypatch):
     root, st = _fresh_tree(tmp_path, monkeypatch)
     _write(root, [
         {"file": "Aged/Aged-state.md", "id": "fact-001",
-         "fact": "The indexer is disabled (aged.indexer.state).", "confidence": 0.9, "age_days": 40},
+         "fact": "The indexer is disabled (aged.indexer.state disabled).", "confidence": 0.9, "age_days": 40},
         {"file": "Aged/Aged-state.md", "id": "fact-002",
-         "fact": "The indexer is enabled (aged.indexer.state).", "confidence": 0.9, "age_days": 3},
+         "fact": "The indexer is enabled (aged.indexer.state enabled).", "confidence": 0.9, "age_days": 3},
     ])
     st.facts_idx.reindex(root=root)
     planned = fi.plan_entity("Aged")

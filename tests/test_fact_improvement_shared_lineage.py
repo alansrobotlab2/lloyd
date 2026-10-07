@@ -95,14 +95,23 @@ _DOC_B = "projects/lloyd/channel-eval/prefetch-cost.md"
 _HASH_A = "a" * 64
 _HASH_B = "b" * 64
 
-# The pair, in the shape the detector really pairs on: the `active`/`inactive`
+# The pair, in the shape the detector really pairs on: the daemon-state
 # opposition from the `Idcol` fixture in
 # tests/test_fact_improvement_confidence_trace.py, whose `confidence` action is
 # proven green on this tree. An invented pair does not pair — that file records
 # `_detect_contradictions_sync` returning `contradictions: 0` for two
 # same-subject numeric texts, and a fixture like that plans nothing and proves
 # nothing.
-_LOSER_TEXT, _WINNER_TEXT = ("The daemon lld.indexerd is inactive.", "The daemon lld.indexerd is active.")
+#
+# #2366 moved the two words. The pair is the same shape and still pairs, but the
+# state has to be a word `_asserted_predicate_values` can read —
+# `_PREDICATE_VALUE_RE` is `true|false|enabled|disabled`, and `active`/`inactive`
+# are in `_OPPOSING_PAIRS` yet not in it — so a row that said only "is inactive"
+# NAMES `lld.indexerd` without valuing it. Since #2366 a co-named token valued by
+# neither side is no longer a supersession basis, which would have left this
+# file's clause-4 node (the write-order basis is untouched) planning nothing and
+# asserting a differential that was never running.
+_LOSER_TEXT, _WINNER_TEXT = ("The daemon lld.indexerd is disabled.", "The daemon lld.indexerd is enabled.")
 _GAP_LOSER_CONF, _GAP_WINNER_CONF = 0.3, 0.9
 # Ages that would be a write-order story if the confidences were equal: 37 days
 # apart, four times over MIN_STALE_GAP_DAYS. They are not the basis for these
@@ -395,7 +404,10 @@ def test_a_same_document_pair_still_supersedes_on_write_order(tmp_path, monkeypa
 
     Equal confidences and 37 days between the writes, both rows on
     `_DOC_A`, and both rows naming `lld.indexerd` — the predicate both facts
-    co-name, which since #2078 is what the age basis stands on.
+    co-name, which since #2078 is what the age basis stands on. Since #2366 the
+    two rows also have to VALUE it (`disabled` then `enabled`): a token neither
+    text values names no assertion to correct and admits nothing, so this node
+    would otherwise be asserting a differential it never ran.
     `MIN_CONFIDENCE_GAP` cannot fire on equal confidences, so the basis here is
     `_loser_by_age` plus that co-named predicate, and a later write inside one
     document is the whole evidentiary value of write order. A pair-level veto
