@@ -90,8 +90,10 @@ listed words. It does not say v2's golds are well-chosen — nothing here does.
 
 ## What is owed against these numbers
 
-Shortening the 73 long golds and re-stating the 35 overlapping anti values are
-the repairs these counts point at, and both move the frozen set's `set_sha` off
+Shortening the 70 long-gold items and re-stating the 26 overlapping anti values
+— item counts over the same 264 dev items as the table, under the definitions
+this file states above, and `--list` names the dev items behind each — are the
+repairs these counts point at, and both move the frozen set's `set_sha` off
 `16ec1ae14c046c61`, so they need their own re-freeze decision rather than
 happening as a side effect of an audit. That decision, the 264 judgements and
 the second reader are what #2353 leaves open; the counts above are the shape of

@@ -1173,6 +1173,128 @@ def test_v2s_audit_file_is_a_v2_document_and_not_the_v1_copy():
     assert "judged verdicts: none of the 264" in flat, flat[:400]
 
 
+# ── #2356: v2/AUDIT.md's owed section quotes this file's own counts, and says so
+
+def _audit_dev_counts() -> dict[str, int]:
+    """The mechanical pass's dev-leg figures as the CLI prints them, read out of
+    the tool rather than out of the document quoting them — the seam between a
+    number in prose and the measurement it is supposed to report. `eval/` is
+    already on `sys.path`; the imports are local because only these tests pay for
+    running the pass."""
+    import io
+    from contextlib import redirect_stdout
+
+    import label_audit as LA
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        assert LA.main(["--set", "v2"]) == 0, "label_audit exited non-zero"
+    body = buf.getvalue().split("## leg: dev —", 1)[1].split("## leg:", 1)[0]
+    rows = re.findall(r"^\s+(\S+)\s+(\d+) / (\d+)$", body, re.M)
+    assert {d for d, _, _n in rows} == set(LA.DEFECTS), rows
+    denoms = {int(cap) for _d, _n, cap in rows}
+    assert len(denoms) == 1, f"one denominator expected, got {denoms}"
+    return {**{d: int(n) for d, n, _cap in rows}, "n": denoms.pop()}
+
+
+def _v2_owed_section() -> str:
+    """The `## What is owed against these numbers` section of v2's audit
+    document, whitespace-collapsed. Markdown wraps a sentence across lines and
+    the sentence — not the line — is the unit that has to be true."""
+    text = (M.SET_ROOT / "v2" / "AUDIT.md").read_text(encoding="utf-8")
+    parts = text.split("## What is owed against these numbers", 1)
+    assert len(parts) > 1, "v2/AUDIT.md has no owed section to check"
+    return " ".join(parts[1].split("\n## ", 1)[0].split())
+
+
+def test_v2s_owed_section_quotes_the_counts_the_mechanical_pass_prints():
+    """#2356 clause 1. The owed section named triage's superseded pair — "the 73
+    long golds and re-stating the 35 overlapping anti values" — inside the one
+    document whose stated purpose is that a count travels with the rule that
+    produced it, while its own table (`**70 / 264**`, `**26 / 264**`), its own
+    prose ("70 of 264", "26 of 264") and `eval/label_audit.py` all report 70 and
+    26 over 264. Two sets of counts in one audit document is the defect, and the
+    sentence was the wrong pair: 73 / 0 / 35 is triage's independent pass under
+    definitions it never wrote down, so the table and the tool were right.
+
+    The corrected figures are pinned to the pass and not to a literal: this test
+    parses the sentence, then asks the tool for its own dev counts, so prose and
+    measurement cannot drift apart again without going red here. Absence of the
+    superseded pair is checked on word boundaries — `#2353`, the filing this
+    section cites as the owner of the open decisions, contains "35" as a
+    substring and is an item id, not a count.
+    """
+    owed = _v2_owed_section()
+    m = re.search(r"Shortening the (\d+) long-gold items and re-stating the (\d+) "
+                  r"overlapping anti values", owed)
+    assert m, f"no repairs sentence naming both repair classes: {owed[:300]}"
+
+    import label_audit as LA
+
+    counts = _audit_dev_counts()
+    quoted = (int(m.group(1)), int(m.group(2)))
+    printed = (counts[LA.DEFECTS[0]], counts[LA.DEFECTS[2]])
+    assert quoted == printed == (70, 26), (
+        f"the owed section quotes {quoted} while the pass prints {printed} over {counts['n']}")
+
+    stale = re.search(r"\b(73|35)\b", owed)
+    assert stale is None, f"superseded figure {stale.group(0)} still in the owed section"
+    for phrase in ("73 long", "35 overlapping", "73 / 0 / 35"):
+        assert phrase not in owed, phrase
+
+
+def test_v2s_owed_repairs_sentence_carries_its_rule_and_the_id_list_with_it():
+    """#2356 clause 2. Swapping 73/35 for 70/26 is only half the fix. Three
+    passes over this one frozen YAML produced three different sets — 61 / 2 / 24,
+    73 / 0 / 35, 70 / 0 / 26 — because "a gold value" and "a common English word"
+    were undefined, not because anybody's arithmetic differed, so a bare
+    corrected number is exactly what the next reader will re-litigate. The
+    sentence that quotes the two figures therefore has to say they are item
+    counts over the table's own 264 dev items, produced under the definitions
+    this file states, and point at `--list` for the ids behind them."""
+    owed = _v2_owed_section()
+    start = owed.find("Shortening the")
+    assert start >= 0, f"no repairs sentence to read: {owed[:200]}"
+    stop = owed[start:].find(". ")
+    assert stop > 0, f"the repairs sentence runs off the section: {owed[start:start + 200]}"
+    sentence = owed[start:start + stop]
+    assert "264 dev items" in sentence, sentence
+    assert "definitions this file states" in sentence, sentence
+    assert "`--list` names" in sentence, sentence
+
+
+def test_the_three_disagreeing_passes_stay_on_the_record_after_the_correction():
+    """#2356 clause 3. The fix corrects one section and must not launder the
+    disagreement it resolves: the pass-history sentence keeps naming the #2170
+    filing's 61 / 2 / 24 and triage's 73 / 0 / 35 beside this run's 70 / 0 / 26,
+    because "three passes over one frozen YAML produced three sets of figures" is
+    the file's whole argument for printing definitions with its counts. Erasing
+    the record would leave one authoritative-looking pair and no reason for a
+    reader to re-run anything — and the count the owed section now quotes is the
+    one this pass produced, which is only defensible while the disagreement is
+    still visible next to it."""
+    text = (M.SET_ROOT / "v2" / "AUDIT.md").read_text(encoding="utf-8")
+    hist = " ".join(text.split("## Mechanical pass", 1)[1]
+                    .split("## Reading the counts", 1)[0].split())
+    for quoted in ("61 / 2 / 24", "73 / 0 / 35", "70 / 0 / 26"):
+        assert quoted in hist, f"{quoted} no longer in the pass history: {hist[:400]}"
+    assert "three passes" in hist, hist[:200]
+    # And the two records have to disagree the way they did: the history keeps
+    # the superseded pair, the owed section must not quote it in any shape. A fix
+    # that reconciled the file the other way round fails here — dropping
+    # triage's pair from the history trips the loop above, restating the owed
+    # section to it trips the boundary check below — and restating the TABLE is
+    # what `test_v2s_audit_file_is_a_v2_document_and_not_the_v1_copy` catches,
+    # since it pins that table's six figures.
+    owed = _v2_owed_section()
+    for superseded in ("73 / 0 / 35", "61 / 2 / 24"):
+        assert superseded not in owed, superseded
+    stale = re.search(r"\b(73|35)\b", owed)
+    assert stale is None, (
+        f"the owed section quotes {stale.group(0)} while the history above names it a "
+        f"superseded pass: {owed[:200]}")
+
+
 def test_a_mechanical_pass_leaves_the_audited_record_and_the_frozen_set_alone(capsys):
     """#2353 clause 5: counting gold SHAPES earns no coverage, so the mechanical
     pass must not move the audited record. `verify` on the frozen set prints what
