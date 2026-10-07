@@ -553,18 +553,33 @@ def added_test_denials(parsed: dict, *, added_tests: int) -> list[str]:
 # text, a mock that deletes an API's error modes) needs to understand what the
 # code means, which is the grader's job and stays its job.
 #
-# Advisory severity, and the question of whether it earns a refusal has now been
-# ANSWERED rather than deferred: promotion to `blocking` was refused on
-# 2026-09-29 at 1/3 precision — 3 firings across 78 graded rounds
-# (SM_20260928_231348, SM_20260929_050729, SM_20260929_065906), and both misses
-# were a constant the file itself hands to a setup call as fixture seed data,
-# which is the class `_constants_handed_in` now removes. #866 and #1204 are what
-# a `blocking` one costs. That denominator is small because the traffic window
-# was one day: the detector landed 2026-09-28T21:58Z and was measured
-# 2026-09-29T21:52Z. #1864 carries the longer-window re-measure as a fact about
-# how thin this one is, not as this comment still waiting on an answer. The
-# finding has had a structured home on the ledger event since `gate.py` persists
-# `prechecks`.
+# Advisory severity, and the question of whether it earns a refusal has now
+# been ANSWERED on two windows rather than deferred to a third. The first,
+# 2026-09-29, refused promotion to `blocking` at 1/3 precision: 3 firings
+# across 78 graded rounds (SM_20260928_231348, SM_20260929_050729,
+# SM_20260929_065906), both misses a constant the file itself hands to a setup
+# call as fixture seed data, which is the class `_constants_handed_in` now
+# removes. That window was one day — the detector landed 2026-09-28T21:58Z and
+# was measured 2026-09-29T21:52Z — so a longer one was worth taking, and it
+# confirmed the direction instead of overturning it, measured again on
+# 2026-10-07 over a 7-day window: 308 graded rounds and 11 firing rounds, of
+# which 2 of the 11 were the input-and-expectation tautology (a constant both
+# handed into a call and compared as the expectation, each written from one
+# reading of the code) and the other 9 were legitimate pins. None of the 11 was
+# the fixture-seed class — both fixture files are silent at HEAD, and the
+# never-written control still fires — so escalating would have refused 11
+# rounds (16 review events, 6 of them the same finding re-raised on a second
+# attempt) to catch 2 tautologies concentrated in one file, where the only
+# available fix was deleting a legitimate pin. #866 and #1204 are what a
+# `blocking` one costs.
+#
+# Promotion is therefore refused on the long window too, and the deferred
+# question retires: any future re-examination is of the residual noise class,
+# not of promotion — the expectation-side constants: a bound, a count, a
+# golden digest, a hand-written expected output. It stays noise by design,
+# because an advisory finding costs one printed line while narrowing the
+# predicate has no measured gain to pay for it. The finding has had a
+# structured home on the ledger event since `gate.py` persists `prechecks`.
 _CONSTANT_MIRROR_SEVERITY = "advisory"
 _CONSTANT_ASSIGN_RX = re.compile(r"^(?P<name>[A-Z][A-Z0-9_]*)\s*(?::[^=]+)?=(?!=)")
 _IMPORT_STMT_RX = re.compile(r"^(?:from\s[\w.]+\s)?import\b")

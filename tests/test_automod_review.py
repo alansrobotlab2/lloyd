@@ -1109,11 +1109,20 @@ def test_prose_that_spells_a_write_buys_the_constant_no_exclusion(tmp_path):
 
 
 def test_the_severity_ruling_is_written_where_the_constant_lives():
-    """#1864 clause 4: the comment above `_CONSTANT_MIRROR_SEVERITY` used to
-    defer the question to "a week of real rounds" and no round ever came to
-    answer it. The measurement was made on 2026-09-29 and the block has to carry
-    its result: 1/3 precision, 3 firings, 78 graded rounds, the fixture-seed
-    class, and that the window was one day rather than the week it asked for.
+    """The comment above `_CONSTANT_MIRROR_SEVERITY` must carry BOTH severity
+    rulings, and none of the pointers that used to stand in for them.
+
+    The first ruling (measured 2026-09-29: 1/3 precision, 3 firings across 78
+    graded rounds, both misses the fixture-seed class, over a window of one day)
+    was itself only half an answer, because the block ended by pointing the reader
+    at a longer window that had not been taken yet. That window has now been taken
+    — measured again on 2026-10-07, 308 graded rounds and 11 firing rounds, of
+    which 2 of the 11 were the input-and-expectation tautology and the other 9
+    legitimate expectation-side pins — and promotion to `blocking` was refused on
+    it too. So the block owes three things now: the numbers of both measurements,
+    the name of the constant class the residual noise belongs to, and the removal
+    of the pointer that routed a reader to an item's owed list instead of to the
+    answer.
 
     A prose pin, deliberately, because the artefact under test IS prose: it is
     the sentence the next reader consults about whether to promote the severity,
@@ -1130,6 +1139,27 @@ def test_the_severity_ruling_is_written_where_the_constant_lives():
         assert fact in block, (fact, block)
     assert "one day" in block.lower(), "the window it actually measured is named"
     assert '_CONSTANT_MIRROR_SEVERITY = "advisory"' in src
+    # Clause 1: the closed long-window measurement, named beside the one-day
+    # baseline rather than in place of it — the second window confirmed the first,
+    # so a block that kept only the new numbers would hide which is which.
+    for fact in ("2026-10-07", "7-day", "308 graded rounds", "11 firing rounds",
+                 "2 of the 11", "tautology"):
+        assert fact in block, (fact, block)
+    # Clause 2: nothing left that sends a reader somewhere else for the answer.
+    assert "#1864" not in block, (
+        "the item that pointer named is status: done with its owed entry settled; "
+        "a dead pointer reads as a question still open")
+    assert "still waiting" not in block, block
+    assert "re-measur" not in block.lower(), (
+        "a sentence about a measurement still to come is the deferral this block "
+        f"has now retired twice: {block}")
+    # Clause 3: the class the noise belongs to, and that a future look targets the
+    # class and not the promotion decision.
+    assert "expectation-side" in block, block
+    for member in ("bound", "count", "golden digest",
+                   "hand-written expected output"):
+        assert member in block, (member, block)
+    assert "not of promotion" in block, block
 
 
 def test_a_constant_mirror_the_base_already_carried_is_not_blamed(tmp_path):
