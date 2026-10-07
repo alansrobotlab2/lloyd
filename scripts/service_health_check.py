@@ -480,7 +480,7 @@ GPU_POWER_SCRIPT = "/usr/local/sbin/set-gpu-power-limit.sh"
 #: (#1951's rail, quoted on `_declared_power_limits`). `UNIT_ENABLEDNESS` above is the
 #: same shape for the same reason.
 GPU_POWER_GUARD = _TREE / "scripts" / "maintenance" / "read-gpu-power-limit.sh"
-#: `GPU_POWER_LIMIT_W_0=275` names one card; bare `GPU_POWER_LIMIT_W=300` is the
+#: `GPU_POWER_LIMIT_W_1=450` names one card; bare `GPU_POWER_LIMIT_W=275` is the
 #: fallback the script applies to every card without a per-index line.
 GPU_POWER_PER_INDEX = re.compile(r"\bGPU_POWER_LIMIT_W_(\d+)=(\d+)\b")
 GPU_POWER_FALLBACK = re.compile(r"\bGPU_POWER_LIMIT_W=(\d+)\b")

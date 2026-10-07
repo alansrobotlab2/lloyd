@@ -8,8 +8,9 @@ Wants=nvidia-persistenced.service
 Type=oneshot
 RemainAfterExit=yes
 # Per-GPU board power clamps (knob names: see set-gpu-power-limit.sh).
-#   GPU 0, 2 — RTX 3090                    -> 275 W
-#   GPU 1    — RTX PRO 6000 Blackwell      -> 450 W   (the Xid 79 card, RMA open)
+#   every RTX 3090 (GPU 0, 2, 3, 4)       -> 275 W   (the fallback, so a card
+#                                                    added later gets it too)
+#   GPU 1 — RTX PRO 6000 Blackwell         -> 450 W   (the Xid 79 card, RMA open)
 # 450 W since 2026-09-17, Alan's call (#1107). It was 400 W from 2026-09-11 and
 # 300 W flat before that. GPU 1 had already been raised to 450 W by hand twice,
 # on 09-11 and again after the 09-15 boot reset it to 400 W, and the kernel
@@ -20,10 +21,8 @@ RemainAfterExit=yes
 # 2632 MHz on 2026-09-11), so 450 W runs further from that pairing than 400 W
 # did, and that is a deliberate choice. If Xid 79/154 comes back on GPU 1, drop
 # this value before suspecting anything else.
-Environment=GPU_POWER_LIMIT_W=300
-Environment=GPU_POWER_LIMIT_W_0=275
+Environment=GPU_POWER_LIMIT_W=275
 Environment=GPU_POWER_LIMIT_W_1=450
-Environment=GPU_POWER_LIMIT_W_2=275
 # Root-executed, so it deliberately runs from a root-owned system path rather
 # than the repo checkout. Reinstall from ~/lloyd after editing either file:
 #   install -m 0755 agent-services/bin/set-gpu-power-limit.sh /usr/local/sbin/

@@ -180,13 +180,19 @@ sudo systemctl daemon-reload && sudo systemctl restart nvidia-power-limit.servic
 |---|---|---|---|---|
 | 0 | RTX 3090 (01:00.0) | 275 W | 350 W | 100–375 W |
 | 1 | RTX PRO 6000 Blackwell (41:00.0) | **450 W** | 600 W | 150–600 W |
-| 2 | RTX 3090 (61:00.0) | 275 W | 350 W | 100–375 W |
+| 2 | RTX 3090 (42:00.0) | 275 W | 350 W | 100–375 W |
+| 3 | RTX 3090 (61:00.0) | 275 W | 350 W | 100–375 W |
+| 4 | RTX 3090 (62:00.0) | 275 W | 350 W | 100–375 W |
 
-`GPU_POWER_LIMIT_W` (300 W) is the fallback for any index without its own
-`GPU_POWER_LIMIT_W_<n>`. The numbers have moved three times: **500 W** flat
+`GPU_POWER_LIMIT_W` (275 W) is the fallback for any index without its own
+`GPU_POWER_LIMIT_W_<n>`, and since 2026-10-07 it is what clamps every 3090:
+only GPU 1 keeps an override, so a 3090 added later is clamped without an
+edit. The numbers have moved three times: **500 W** flat
 while the report was being written (it is the figure in the report's own
 system table), **300 W** flat from 2026-08-22, per-card **275/400/275** from
-2026-09-11 (`bb0dbca`), and **275/450/275** since 2026-09-17 (#1107).
+2026-09-11 (`bb0dbca`), **275/450/275** from 2026-09-17 (#1107), and 275 W on all four 3090s
+with 450 W on GPU 1 since 2026-10-07, when the box went from three cards to
+five (the two new 3090s had been sitting on the old 300 W fallback).
 
 **GPU 1 runs above the only pairing ever described as stable.** That pairing
 was 400 W with a **≤2400 MHz** graphics clock, and no clock cap is set

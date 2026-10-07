@@ -8,7 +8,7 @@
 # the clamp has to be reapplied at startup or the card comes back at its default
 # limit (600 W on the PRO 6000, 350 W on each 3090).
 #
-# Limits are keyed by GPU index so the two 3090s and the PRO 6000 can differ:
+# Limits are keyed by GPU index so the 3090s and the PRO 6000 can differ:
 #   GPU_POWER_LIMIT_W        default for any index without its own override
 #   GPU_POWER_LIMIT_W_<n>    override for GPU index <n>, e.g. ..._1=400
 # The values in force live in nvidia-power-limit.service, not here.
