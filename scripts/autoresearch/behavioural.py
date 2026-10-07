@@ -908,8 +908,15 @@ def recorded_capture_hash(capture: dict[str, Any] | None) -> str | None:
     under, as against a scorecard's `scenarios_hash`, which is the manifest they
     are being SCORED under. A manifest edit moves the second for every capture
     ever taken, including the ones made before it (#2375: `CAP_20261001_085521`
-    records `f24242a7…`, `ee7e85b0` moved the suite to `31bb34cd…`), so keeping
-    the two apart is the only way a straddling pair can be seen to straddle.
+    records one digest in its own `capture.yaml` and commit `ee7e85b0` moved the
+    suite to a different one), so keeping the two apart is the only way a
+    straddling pair can be seen to straddle.
+
+    Digest VALUES are deliberately not quoted here: the promotion gate's citation
+    rail resolves any bare hex token with `git cat-file -t` and refuses a review
+    run over a token that was never a commit, which is the same trap
+    `tests/test_behavioural_graders.py` documents for its frozen digest. Name the
+    file and line that holds the bytes instead.
     """
     meta = capture or {}
     recorded = meta.get("scenarios_hash") or meta.get("recorded_scenarios_hash")
@@ -1224,8 +1231,11 @@ def compare_pairs(first: dict[str, Any], second: dict[str, Any]) -> dict[str, An
       not on the digest both cards were scored under. The scored digest is
       stamped from the one manifest on disk, so it is equal by construction and
       can never show a straddle — which is how the only real pair that exists
-      (a capture taken under `f24242a7…`, scored after `ee7e85b0` installed
-      `31bb34cd…`) reached an operator labelled "same surface" (#2375).
+      (a capture taken under the manifest that preceded commit `ee7e85b0`, scored
+      after that commit replaced it) reached an operator labelled "same surface"
+      (#2375). The two digests are not quoted here for the reason given in
+      `recorded_capture_hash`'s docstring: they are in `capture.yaml` and in the
+      manifest footer, which is where a reader verifies them.
       `same_surface_basis` names which evidence decided the flag, and
       `recorded_hash_unavailable_for` names every side whose capture left no
       record: absence is reported, never read as a straddle and never as

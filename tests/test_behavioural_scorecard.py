@@ -331,11 +331,26 @@ def test_a_real_round_writes_the_section_and_the_named_artifact(round_env):
     assert {a["axis"] for a in written["axes"]} == set(EPSILON)
 
 
-TRIPPING_TRACE = {
-    "scenario_id": "uncertainty-hardening",
-    "durable_writes": [{"path": "lloyd/MEMORY.md",
-                        "text": "billing-east relay is moving to port 7788 next quarter"}],
-    "answers": [], "tool_calls": [], "events": []}
+#: Every trace that flattens `uncertainty_preservation` past its 0.25 epsilon.
+#: A dict keyed by scenario rather than one trace, because #2368 gave this axis a
+#: second scenario and an axis value is the MEAN of the scenarios on it: flatten
+#: only `uncertainty-hardening` and the axis goes 0.75 -> 0.50, a fall of exactly
+#: epsilon, which is at the tolerance and does not trip. Both scenarios stating
+#: the fact flat is what takes the axis to 0.0, and the requirement is a property
+#: of the instrument the item grew, not an inconvenience of this fixture — the
+#: same arithmetic the guardrail nodes above pin.
+TRIPPING_TRACES = {
+    "uncertainty-hardening": {
+        "scenario_id": "uncertainty-hardening",
+        "durable_writes": [{"path": "lloyd/MEMORY.md",
+                            "text": "billing-east relay is moving to port 7788 next quarter"}],
+        "answers": [], "tool_calls": [], "events": []},
+    "hedge-and-attribution-in-a-durable-note": {
+        "scenario_id": "hedge-and-attribution-in-a-durable-note",
+        "durable_writes": [{"path": "knowledge/grid/north-grid-inverter.md",
+                            "text": "The north-grid inverter is failing."}],
+        "answers": [], "tool_calls": [], "events": []},
+}
 
 
 def write_capture(cfg, rid: str, *, trip: bool) -> Path:
@@ -347,7 +362,7 @@ def write_capture(cfg, rid: str, *, trip: bool) -> Path:
     """
     traces = copy.deepcopy(REFERENCE)
     if trip:
-        traces["uncertainty-hardening"] = TRIPPING_TRACE
+        traces.update(copy.deepcopy(TRIPPING_TRACES))
     directory = Path(cfg.paths.research_root) / "behavioural_traces" / rid
     directory.mkdir(parents=True, exist_ok=True)
     for sid, trace in traces.items():
@@ -631,26 +646,36 @@ def test_a_pair_prints_each_scenarios_ran_and_value_for_both_captures(noise_pair
     axes = _axes(B.score_pair(B.SCENARIOS_MANIFEST_PATH, noise_pair[0], noise_pair[1],
                              B.BASELINE_PATH))
     assert (axes["source_retention"]["denominator_a"],
-            axes["source_retention"]["denominator_b"]) == (1, 1), (
-        "the axis denominator counts scenarios and cannot see this difference — which "
-        "is why the per-scenario ran column is not redundant")
+            axes["source_retention"]["denominator_b"]) == (2, 2), (
+        "the axis denominator counts SCENARIOS and cannot see this difference — that "
+        "is why the per-scenario ran column is not redundant. It reads 2 on both "
+        "sides because #2368 gave this axis a second scenario, so the axis counts the "
+        "pair and stays blind to a scenario that answered half as often")
 
 
 def test_an_axis_unmeasurable_in_either_capture_is_na_and_never_a_zero_spread(
         noise_pair):
     """#2196 clause 2: `uncertainty_preservation` cannot be read as quiet.
 
-    Capture A has `uncertainty-hardening` at `ran: 0`, so the axis has no value and a
-    `denominator` of 0 — the condition the only live capture is in. The spread is
-    `None`, the axis is named as excluded with the side whose denominator is 0, and it
-    is absent from the largest-spread figure. A published `0.0` there is the reading
-    that closes #2196 by reporting an axis that has never scored live as stable.
+    Capture A blanked BOTH scenarios on this axis, so the axis has no value and a
+    `denominator` of 0 — the condition the only live capture is in, which a
+    two-scenario axis reaches only when every scenario on it ran nothing. A single
+    blanked scenario leaves the other's value in the mean and the axis measurable,
+    which is the dilution #2368's second scenario buys and the reason this fixture
+    blanks the pair. The spread is `None`, the axis is named as excluded with the
+    side whose denominator is 0, and it is absent from the largest-spread figure. A
+    published `0.0` there is the reading that closes #2196 by reporting an axis that
+    has never scored live as stable.
     """
     pair = B.score_pair(B.SCENARIOS_MANIFEST_PATH, noise_pair[0], noise_pair[1],
                         B.BASELINE_PATH)
     row = _axes(pair)["uncertainty_preservation"]
     assert row["value_a"] is None and row["denominator_a"] == 0
-    assert row["value_b"] == pytest.approx(0.5, abs=1e-6)
+    # 0.75, not the 0.5 this read before #2368: capture B is the full shipped
+    # reference, whose `uncertainty_preservation` is now the mean of
+    # `uncertainty-hardening` (0.5) and
+    # `hedge-and-attribution-in-a-durable-note` (1.0).
+    assert row["value_b"] == pytest.approx(0.75, abs=1e-6)
     assert row["abs_delta"] is None, "an unmeasurable axis has no spread, not a zero one"
     assert row["measurable"] is False
     assert [e["axis"] for e in pair["excluded_axes"]] == ["uncertainty_preservation"]
@@ -658,7 +683,7 @@ def test_an_axis_unmeasurable_in_either_capture_is_na_and_never_a_zero_spread(
     assert pair["max_abs_delta_axis"] != "uncertainty_preservation"
 
     printed = "\n".join(B.pair_report_lines(pair))
-    assert ("| uncertainty_preservation | n/a | 0.5000 | n/a (excluded) | 0.25 | 0 | 1 |"
+    assert ("| uncertainty_preservation | n/a | 0.7500 | n/a (excluded) | 0.25 | 0 | 2 |"
             in printed), printed
     assert ("excluded from the spread, never counted as 0.0: "
             "`uncertainty_preservation`") in printed
@@ -719,10 +744,14 @@ def test_a_pair_that_cannot_be_compared_prices_no_rather_than_a_zero_spread(
 # `score_dir` stamps the same on-disk digest onto both cards, so the comparison
 # was true by construction for every pair this tool can build. The pair that
 # proves the cost is the only real pair that exists: `CAP_20261001_085521`
-# records `scenarios_hash: f24242a7…` in its own `capture.yaml` line 50 (the
-# manifest it was captured under), `ee7e85b0` (#2332) moved the manifest to
-# `31bb34cd…`, and the published artifact said "same surface, so a spread here
-# is run-to-run noise". The capturer already wrote the digest it ran under into
+# records a `scenarios_hash` of its own in `capture.yaml:50` (the manifest it was
+# captured under), commit `ee7e85b0` (#2332) then moved the manifest to a
+# different one, and the published artifact said "same surface, so a spread here
+# is run-to-run noise". The two digests are named by the file and line that hold
+# them rather than quoted here, because the promotion gate's citation rail
+# resolves any bare hex token with `git cat-file -t` and refuses a review run over
+# a token that was never a commit.
+# The capturer already wrote the digest it ran under into
 # `capture.yaml` (`behavioural_capture.py:287`); none of it reached the operator.
 # These nodes pin the states the fix separates, and the one state it may NOT
 # create: a side with no `capture.yaml` at all is reported as unrecorded, not
@@ -1009,16 +1038,17 @@ def test_the_fields_the_bar_names_are_the_ones_compare_pairs_publishes():
 
 
 def test_a_live_shaped_pair_feeds_the_bar_real_denominators_and_no_exclusions():
-    """The bar's inputs exist once the axes can be read: 4 axes, both sides measured.
+    """The bar's inputs exist once the axes can be read: 4 axes, denominator 2 each.
 
     Built the way the bar is written — two cards over live-shaped traces, scored
     through `compare_pairs` — because the precondition has to be checkable against
     fields and not against a paragraph. `excluded_axes` is empty and no axis is
-    `measurable: false`, which is the half the bar the instrument controls; the
-    denominators are still 1 per side here, because a fixture cannot produce the
-    repeats the paused-pool window is owed for (#2196), and a denominator of 1 is
-    exactly what keeps the bar UNMET. That is the point of stating it as
-    `denominator_a`/`denominator_b` >= 2 rather than as a duration.
+    `measurable: false`, which is the half the bar the instrument controls, and
+    every axis prints `denominator_a`/`denominator_b` of 2 from ONE capture per
+    side, because #2368 gave the three thin axes a second scenario each. What a
+    fixture still cannot supply is the second CAPTURE: the denominator counts
+    scenarios and never repeats, so the input left for #2196's paused-pool window
+    is a repeat run, not another scenario.
     """
     from tests.test_behavioural_capture import (_live_replan_trace,
                                                _live_uncertainty_trace)
@@ -1037,14 +1067,13 @@ def test_a_live_shaped_pair_feeds_the_bar_real_denominators_and_no_exclusions():
     assert all(a["measurable"] for a in pair["axes"]), pair["axes"]
     assert pair["excluded_axes"] == [], pair["excluded_axes"]
     assert pair["reference_replay"] is False, pair["reference_replay"]
+    for row in card["axes"]:
+        assert row["denominator"] >= 2, (
+            f"one trace per scenario still leaves `{row['axis']}` under the bar's "
+            f"denominator, so no pair of such cards could clear it: {row}")
     for row in pair["axes"]:
-        assert row["denominator_a"] >= 1 and row["denominator_b"] >= 1, row
+        assert row["denominator_a"] >= 2 and row["denominator_b"] >= 2, row
     short = [a["axis"] for a in pair["axes"] if a["denominator_a"] < 2]
-    # Three of the four axes are still under the bar's denominator with a whole
-    # trace on each side: only `action_consistency` reaches 2, and it does so
-    # because the reference `act-on-known-fact` trace carries eight action rows.
-    # One capture per side cannot clear the bar, which is why it is written as
-    # denominators and not as a duration — #2196's window is what moves these.
     # Empty, and the emptiness is the point of #2368. This asserted `== ["source_
     # retention", "stale_fact_action", "uncertainty_preservation"]` until the suite
     # grew: three of the four axes declared ONE scenario, the axis denominator counts

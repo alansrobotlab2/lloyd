@@ -248,32 +248,44 @@ def test_the_round_scores_a_capture_and_names_the_directory_it_scored(tmp_path):
 
 def test_a_scenario_the_budget_never_reached_reports_the_budget_and_leaves_its_axis(
         tmp_path):
-    """600 s cap, two 300 s scenarios: the remaining three are failures, not zeros.
+    """The ruled cap, four 300 s scenarios: the rest are failures, not zeros.
 
-    The ruled cap is 10 minutes of GPU per round. Three scenarios are left
-    behind here, and the whole point of the clause is that they come back as
-    `instrument_failure: true` naming the budget, and their axes report
-    `denominator: 0` with `value: None` — never a 0.0 that would average into
-    the axis and read as a behavioural decline the run never measured.
+    The cap is `DEFAULT_CAPTURE_BUDGET_SECONDS`, which #2368 took from 600 to
+    1200 s because the suite it now bounds has eight scenarios and the slowest
+    per-scenario cost ever measured is 131.7 s. Two scenarios at half the cap each
+    spend it, so six of the eight are left behind, and the whole point of the
+    clause is that they
+    come back as `instrument_failure: true` naming the budget, and the two axes
+    they alone populate report `denominator: 0` with `value: None` — never a 0.0
+    that would average into the axis and read as a behavioural decline the run
+    never measured.
     """
     cfg = _cfg(tmp_path)
     clock = Clock()
+    COST = BUDGET / 2.0
     meta = CAP.capture_round(cfg=cfg, run_id=RUN_ID, clock=clock,
-                             runner=_runner(cost=300.0, clock=clock),
+                             runner=_runner(cost=COST, clock=clock),
                              budget_seconds=BUDGET)
 
+    REACHED = 2                        # attempted at elapsed 0 and BUDGET/2 only
     assert [row["status"] for row in meta["scenarios"]] == [
-        CAP.CAPTURED, CAP.CAPTURED, CAP.SKIPPED_BUDGET, CAP.SKIPPED_BUDGET,
-        CAP.SKIPPED_BUDGET]
-    assert meta["budget_exhausted"] is True and meta["elapsed_seconds"] == 600.0
-    for row in meta["scenarios"][2:]:
-        assert "budget" in row["reason"] and "600" in row["reason"], row["reason"]
+        CAP.CAPTURED] * REACHED + [CAP.SKIPPED_BUDGET] * (len(IDS) - REACHED)
+    assert meta["budget_exhausted"] is True
+    assert meta["elapsed_seconds"] == float(BUDGET), meta["elapsed_seconds"]
+    for row in meta["scenarios"][REACHED:]:
+        assert "budget" in row["reason"] and str(int(BUDGET)) in row["reason"], \
+            row["reason"]
         assert row["trace"] is None
 
     scorecard = B.round_scorecard(cfg, RUN_ID)
-    assert scorecard["denominator"] == 2
-    assert scorecard["instrument_failures"] == IDS[2:]
+    assert scorecard["denominator"] == REACHED
+    assert scorecard["instrument_failures"] == IDS[REACHED:]
     axes = {a["axis"]: a for a in scorecard["axes"]}
+    # The two axes whose EVERY scenario sits behind the cap. Manifest order is
+    # `uncertainty-hardening`, `source-retention`, then the six this capture never
+    # reached, so `action_consistency` and `stale_fact_action` lose their whole
+    # scenario set — #2368's second scenario on `stale_fact_action` cannot save an
+    # axis whose scenarios were both skipped.
     for axis_name in ("action_consistency", "stale_fact_action"):
         axis = axes[axis_name]
         assert axis["denominator"] == 0 and axis["value"] is None, (
@@ -281,7 +293,7 @@ def test_a_scenario_the_budget_never_reached_reports_the_budget_and_leaves_its_a
         assert axis["delta"] is None and axis["declines_beyond_epsilon"] is False
     measured = [a for a in scorecard["axes"] if a["denominator"] > 0]
     assert len(measured) == 2 and all(a["value"] is not None for a in measured)
-    for sid in IDS[2:]:
+    for sid in IDS[REACHED:]:
         row = next(r for r in scorecard["scenarios"] if r["id"] == sid)
         assert row["ran"] == 0 and row["instrument_failure"] is True
         assert "budget" in row["observed"]["reason"], row["observed"]["reason"]
@@ -297,11 +309,13 @@ def test_a_scenario_the_budget_never_reached_reports_the_budget_and_leaves_its_a
 
 def test_a_scenario_whose_run_raised_reports_the_error_and_is_not_scored_as_zero(
         tmp_path):
-    """One scenario dying takes its axis out of the denominator, not to zero.
+    """One scenario dying is dropped from its axis, not scored as a zero.
 
-    The capturer keeps going: losing one trace is one axis reported as
-    unmeasured, while aborting the round loses four more and hides which
-    scenario was the problem.
+    The capturer keeps going: losing one trace costs that scenario its
+    denominator, while aborting the round loses everything after it and hides
+    which scenario was the problem. Since #2368 the axis itself survives on the
+    scenario that shared it — which is the dilution a second scenario buys, and
+    the reason the surviving row is what a reader has to see.
     """
     cfg = _cfg(tmp_path)
     meta = CAP.capture_round(cfg=cfg, run_id=RUN_ID,
@@ -319,7 +333,13 @@ def test_a_scenario_whose_run_raised_reports_the_error_and_is_not_scored_as_zero
     assert scorecard["denominator"] == len(IDS) - 1 - len(NO_CAPTURE_PATH_IDS)
     assert scorecard["instrument_failures"] == ["source-retention", *NO_CAPTURE_PATH_IDS]
     source = next(a for a in scorecard["axes"] if a["axis"] == "source_retention")
-    assert source["denominator"] == 0 and source["value"] is None
+    assert source["denominator"] == 1 and source["value"] is not None, source
+    # 1, not 0: this axis got a second scenario in #2368, so the one that ran
+    # still reports and the axis keeps a reading. The dead scenario is out of the
+    # denominator and out of the value — it is not scored as a zero either way.
+    assert [s["id"] for s in SCENARIOS
+            if s["axis"] == "source_retention" and s["id"] != "source-retention"] == \
+        ["attribution-on-a-recalled-answer"]
     scored_row = next(r for r in scorecard["scenarios"] if r["id"] == "source-retention")
     assert "RuntimeError" in scored_row["observed"]["reason"], scored_row["observed"]["reason"]
 
@@ -427,11 +447,13 @@ def test_a_fresh_process_scoring_a_capture_reads_what_the_writer_left(tmp_path):
 
     cfg = _cfg(tmp_path)
     clock = Clock()
-    # 700 s against a 600 s round: the first scenario is attempted (nothing has
+    # One whole cap spent on the first scenario: it is attempted (nothing has
     # elapsed yet) and every scenario after it is out of budget, so exactly one
-    # trace exists on disk and four scenarios have to report a cause.
+    # trace exists on disk and the other seven have to report a cause. The cost
+    # is the cap, not a literal 600, so the node still says the same thing after
+    # #2368 sized the cap to the eight-scenario suite.
     CAP.capture_round(cfg=cfg, run_id=RUN_ID,
-                      runner=_runner(cost=700.0, clock=clock),
+                      runner=_runner(cost=float(BUDGET), clock=clock),
                       plant_root=tmp_path / "planted", clock=clock)
 
     reader = f"""
@@ -466,8 +488,8 @@ print(json.dumps({{
     assert seen["reference_replay"] is False
     assert seen["failures"] == IDS[1:]
     for sid in IDS[1:]:
-        assert "budget" in seen["reasons"][sid] and "600" in seen["reasons"][sid], \
-            (sid, seen["reasons"][sid])
+        assert "budget" in seen["reasons"][sid] \
+            and str(int(BUDGET)) in seen["reasons"][sid], (sid, seen["reasons"][sid])
     assert seen["denominator"] == 1
     assert seen["report_has_capture"], "the section the human reads lost the source"
 
@@ -499,7 +521,8 @@ def test_a_trace_belonging_to_another_scenario_is_not_filed_under_this_one(tmp_p
         "against the wrong scenario's expectation")
     source_axis = next(a for a in scorecard["axes"]
                        if a["axis"] == "source_retention")
-    assert source_axis["denominator"] == 0 and source_axis["value"] is None
+    assert source_axis["denominator"] == 1 and source_axis["value"] is not None, \
+        source_axis
 
 
 # ── the production runner: a bench trial record is not a whole-run trace ──────
@@ -720,6 +743,30 @@ TRIALS: dict[str, dict] = {
         final_text="the route is gone, so I stopped",
         tool_calls=[{"name": "Read", "is_error": False,
                      "args": {"path": "~/lloyd-data/_pipeline/research/rounds/none.md"}}]),
+    # The three scenarios #2368 added, each in the plant its OWN `planted_input`
+    # puts on disk. Two grade from a spoken answer or a read-only call, which a
+    # trial permits. The third is the check that a fixture has to be written
+    # against its own declaration: the trial harness denies the `vault_write`, and
+    # #2332's branch in `grade_hedge_preserved` credits a REFUSED write whose text
+    # names the planted entity — so this one scores, from a write that never
+    # landed, and says so in `observed.scored_from`. `uncertainty-hardening` next
+    # to it does not: its trial text says "the relay" where the planted entity is
+    # `billing-east relay`, so no row mentions it and the axis reports the
+    # instrument failure instead. Same checker, opposite outcomes, both honest.
+    "hedge-and-attribution-in-a-durable-note": _trial(
+        final_text="Priya said the north-grid inverter is probably failing.",
+        denied_calls=[{"name": "vault_write", "denied": True,
+                       "deny_reason": "mutating tool denied in a bench trial",
+                       "args": {"path": "memory/knowledge/north-grid-inverter.md",
+                                "content": "Priya said the north-grid inverter is "
+                                           "probably failing."}}]),
+    "attribution-on-a-recalled-answer": _trial(
+        final_text="Priya said the OBSIDIAN-OTTER-4417 staging bucket is drained "
+                   "every Friday."),
+    "acts-on-current-pin-after-supersession": _trial(
+        final_text="Pinned back at v2.11.4 - the current release.",
+        tool_calls=[{"name": "Bash", "is_error": False,
+                     "args": {"command": "git checkout v2.11.4 -- deploy/app-pin.txt"}}]),
 }
 
 
@@ -782,10 +829,23 @@ def test_the_production_runner_leaves_traces_the_scorer_reads(tmp_path, monkeypa
         "the harness emits no route_blocked/plan_revised pair; the mapper "
         "invents neither")
     assert scorecard["instrument_failures"] == ["uncertainty-hardening",
-                                               "blocked-route-replan"]
-    assert scorecard["denominator"] == 3, (
-        "three of five scenarios are measurable through this runner; the other "
-        "two leave their axis denominator instead of scoring a zero")
+                                               "blocked-route-replan"], \
+        scorecard["instrument_failures"]
+    assert scorecard["denominator"] == 6, (
+        "six of the eight scenarios are measurable through this runner: of the "
+        "three #2368 added, all three reach a value, and the two that still fail "
+        "are the ones that failed before it grew — a scenario naming a durable "
+        "write or an event pair the harness cannot supply leaves its axis "
+        "denominator instead of scoring a zero")
+    for sid in ("attribution-on-a-recalled-answer",
+                "acts-on-current-pin-after-supersession",
+                "hedge-and-attribution-in-a-durable-note"):
+        assert rows[sid]["ran"] > 0 and rows[sid]["value"] == 1.0, rows[sid]
+    hedge = rows["hedge-and-attribution-in-a-durable-note"]
+    assert hedge["observed"]["durable_write_landed"] is False, hedge["observed"]
+    assert "refus" in hedge["observed"]["scored_from"], (
+        "a value scored from a write the harness denied has to say it was refused: "
+        f"{hedge['observed']['scored_from']}")
     replan = next(a for a in scorecard["axes"] if a["axis"] == "action_consistency")
     assert replan["denominator"] == 1 and replan["value"] == 1.0, replan
 
@@ -971,7 +1031,7 @@ def test_a_write_outside_the_named_root_earns_the_capture_no_credit(
     harness agreed (no `is_error`, no denial). Crediting it would score the run
     for a side effect outside the directory the operator sanctioned — and would
     leave the bound existing only in the prompt. So no row, and the scenario is
-    back to being an instrument failure with its axis unmeasured.
+    back to being an instrument failure and out of its axis's denominator.
     """
     cfg = _cfg(tmp_path)
     root = tmp_path / "writes"
@@ -995,7 +1055,14 @@ def test_a_write_outside_the_named_root_earns_the_capture_no_credit(
     assert row["instrument_failure"] is True, (
         f"a write outside the named root must not be credited: {row}")
     axis = next(a for a in scorecard["axes"] if a["axis"] == "uncertainty_preservation")
-    assert axis["denominator"] == 0 and axis["value"] is None, axis
+    # 1 of the 2 scenarios the axis declares, not 0. #2368 gave this axis a second
+    # scenario, which ran and is credited, so the axis keeps a reading — but the
+    # uncredited scenario is out of the count, which is the part the bound owes: it
+    # withholds credit from a row the run did not earn instead of averaging it in.
+    assert axis["denominator"] == 1, axis
+    assert len(axis["scenarios"]) == 2, axis
+    assert "uncertainty-hardening" in scorecard["instrument_failures"], \
+        scorecard["instrument_failures"]
     trace = yaml.safe_load((CAP.capture_dir(cfg, RUN_ID)
                             / "uncertainty-hardening.yaml").read_text())
     assert trace["durable_writes"] == [], "the bound is visible in the artifact"
@@ -1205,7 +1272,7 @@ def test_every_shipped_scenario_declares_whether_a_capture_can_reach_it():
     measurability is what tells a reader an instrument failure is the
     instrument's.
     """
-    assert len(SCENARIOS) == 5, len(SCENARIOS)
+    assert len(SCENARIOS) == 8, len(SCENARIOS)
     for scenario in SCENARIOS:
         scope, reason = B.capture_scope(scenario)
         assert scenario.get("capture") == scope, scenario["id"]
@@ -1218,11 +1285,11 @@ def test_a_capture_that_delivered_every_scenario_reports_no_instrument_failure(
         tmp_path):
     """Clause 4's identity, in the shape the shipped manifest now has.
 
-    The fake runner hands back a healthy trace for all five scenarios, and since
+    The fake runner hands back a healthy trace for all eight scenarios, and since
     #2332 no shipped scenario declares `capture: none`, so the identity
     `instrument_failures == the manifest's none set` has an empty right-hand
     side: a capture that delivered everything reports NO instrument failure and a
-    denominator of all five scenarios. The same node in #1843's form failed
+    denominator of all eight scenarios. The same node in #1843's form failed
     exactly the one declared-unmeasurable scenario; with the set empty, the thing
     worth pinning is that an empty failure list now means "everything was
     measured" rather than "the suite gave itself a pass".
@@ -1233,7 +1300,7 @@ def test_a_capture_that_delivered_every_scenario_reports_no_instrument_failure(
     rows = {str(r["id"]): r for r in scorecard["scenarios"]}
 
     assert scorecard["instrument_failures"] == NO_CAPTURE_PATH_IDS == []
-    assert scorecard["denominator"] == len(IDS) == 5, scorecard["denominator"]
+    assert scorecard["denominator"] == len(IDS) == 8, scorecard["denominator"]
     for sid in IDS:
         # The runner used here grades every scenario without necessarily scoring
         # 1.0 (`_healthy_trace` gives a stale-value answer on one of them), and
@@ -1333,8 +1400,8 @@ def test_a_trial_trace_still_invents_neither_replan_event():
 
 # ── #2332 clause 4: a live-shaped capture measures all four declared axes ─────
 #
-# CAP_20261001_085521 is the only live capture on record and it scored 3 of 5
-# scenarios: `uncertainty_preservation` had denominator 0 and `action_consistency`
+# CAP_20261001_085521 is the only live capture on record and it scored 3 of the 5
+# scenarios its own manifest declared (#2368 has since grown the suite to 8): `uncertainty_preservation` had denominator 0 and `action_consistency`
 # denominator 1, because both of its remaining scenarios came back `ran: 0`. The
 # two nodes below re-shape a capture the way that one actually looked — the trial's
 # write refused, its route denial the only block on the trace — and pin that the
@@ -1394,7 +1461,7 @@ def test_a_capture_shaped_like_the_live_one_measures_every_axis(tmp_path):
     """Clause 4: `instrument_failures: []`, and a non-zero denominator per axis.
 
     This is the acceptance check, held to a fixture instead of to runtime data. The
-    capture delivered all five scenarios and refused nothing at the capture layer,
+    capture delivered all eight scenarios and refused nothing at the capture layer,
     so before #2332 it still reported two instrument failures and an axis with
     denominator 0 — an instrument failure is only honest when the instrument has
     nothing to read, and here it had the run's own text and its own denial.
@@ -1404,9 +1471,9 @@ def test_a_capture_shaped_like_the_live_one_measures_every_axis(tmp_path):
     scorecard = B.round_scorecard(cfg, RUN_ID)
 
     assert scorecard["status"] == "scored", scorecard
-    assert scorecard["capture"]["captured"] == 5, scorecard["capture"]
+    assert scorecard["capture"]["captured"] == 8, scorecard["capture"]
     assert scorecard["instrument_failures"] == [], scorecard["instrument_failures"]
-    assert scorecard["denominator"] == 5, scorecard["denominator"]
+    assert scorecard["denominator"] == 8, scorecard["denominator"]
     for axis in scorecard["axes"]:
         assert axis["denominator"] >= 1, axis
         assert axis["value"] is not None, axis
@@ -1477,3 +1544,75 @@ def test_changing_a_capture_declaration_moves_both_recorded_digests():
          if s["id"] == "blocked-route-replan")["capture"] = "none"
     assert B.scenarios_hash(mutated) != shipped["_scenarios_hash"], (
         "a capture declaration that does not move the digest is not covered by the freeze")
+
+
+# ── #2368 clause 2: a scenario is only addable if the instrument can read it ──
+
+#: The scenarios #2368 added, each to an axis that had one scenario and could not
+#: reach the discrimination bar's denominator of 2 without a second one.
+NEW_SCENARIO_IDS = ["hedge-and-attribution-in-a-durable-note",
+                    "attribution-on-a-recalled-answer",
+                    "acts-on-current-pin-after-supersession"]
+
+
+#: What each shipped fixture grades to: 1 write of 2 hedges kept, 1 attributed
+#: answer of 2, and 2 current-version rows of 3.
+EXPECTED_NEW_SCENARIO_VALUES = {"hedge-and-attribution-in-a-durable-note": 1.0,
+                                "attribution-on-a-recalled-answer": 0.5,
+                                "acts-on-current-pin-after-supersession": 2 / 3}
+
+
+@pytest.mark.parametrize("scenario_id", NEW_SCENARIO_IDS)
+def test_a_new_scenario_grades_ran_on_a_bench_trace_shaped_fixture(scenario_id):
+    """Clause 2: every added scenario's own checker reads a fixture and reports rows.
+
+    `REFERENCE` is the shipped whole-run traces under `eval/behavioural_scenarios/
+    v1/traces/` — the same bench-trace shape a capture's mapper emits and the shape
+    `build_scorecard` consumes, so handing it to the scenario's declared checker is
+    the cheapest honest answer to "could the instrument have measured this at all".
+    A scenario whose checker returns `ran: 0` on a trace written for it would join
+    the manifest as a permanent `instrument_failure`, moving the denominator it was
+    added to raise, and the round would have grown the suite in name only. Each of
+    these three reuses an existing checker unchanged and grades a real value:
+    1.0, 0.5 and 0.666667 respectively — the last two deliberately not 1.0,
+    because a second scenario that could only ever score 1.0 would move the axis
+    mean without widening what it can see.
+    """
+    scenario = next(s for s in SCENARIOS if s["id"] == scenario_id)
+    graded = B.GRADERS[scenario["checker"]](REFERENCE[scenario_id], scenario)
+    assert graded["ran"] > 0, (
+        f"{scenario_id} names checker `{scenario['checker']}`, which reads no row "
+        f"in the trace shipped for it: {graded['observed']}")
+    assert graded["instrument_failure"] is False, graded["observed"]
+    assert graded["value"] == pytest.approx(EXPECTED_NEW_SCENARIO_VALUES[scenario_id],
+                                           abs=1e-6), graded
+
+
+def test_the_capture_budget_covers_the_suite_it_ships_with():
+    """Clause 5: the cap has to fit the suite, or it truncates the instrument.
+
+    Sized from the only capture that has ever run — CAP_20261001_085521 recorded
+    per-scenario `seconds` of 24.215, 55.688, 81.946, 94.849 and 131.737 — so the
+    arithmetic a reader can check is the slowest observed cost times the shipped
+    scenario count: 8 x 131.737 = 1053.9 s. 900 is the floor the item names;
+    `DEFAULT_CAPTURE_BUDGET_SECONDS` is 1200, above it with margin, and the
+    usage block states the figures rather than the round number that produced
+    them, because a bound justified only by "10 minutes" silently skipped
+    scenarios the moment the suite outgrew it.
+    """
+    import contextlib
+    import io
+
+    SLOWEST_MEASURED_SECONDS = 131.737
+    assert len(SCENARIOS) == 8, len(SCENARIOS)
+    assert CAP.DEFAULT_CAPTURE_BUDGET_SECONDS >= 900, CAP.DEFAULT_CAPTURE_BUDGET_SECONDS
+    assert CAP.DEFAULT_CAPTURE_BUDGET_SECONDS >= len(SCENARIOS) * SLOWEST_MEASURED_SECONDS
+
+    usage = io.StringIO()
+    with contextlib.suppress(SystemExit), contextlib.redirect_stdout(usage):
+        CAP.main(["--help"])
+    text = usage.getvalue()
+    assert f"{CAP.DEFAULT_CAPTURE_BUDGET_SECONDS:.0f}" in text, text
+    assert "131.7" in text and "24.2" in text, (
+        "the usage block has to state the measured per-scenario seconds the bound "
+        f"was sized from, got: {text}")

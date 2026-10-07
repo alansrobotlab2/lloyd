@@ -137,6 +137,42 @@ def test_an_axis_no_scenario_is_scored_on_is_still_a_refusal(tmp_path):
     assert "vibes" in str(exc.value)
 
 
+#: What each axis must declare for the discrimination bar to be reachable at all.
+#: The bar needs `denominator_a` AND `denominator_b` >= 2 on every axis, and an
+#: axis's denominator is the number of scenarios declaring it, so 2 per axis is
+#: the smallest suite that can ever clear it.
+MIN_SCENARIOS_PER_AXIS = 2
+
+
+def test_every_declared_axis_carries_at_least_two_scenarios():
+    """#2368: one scenario per axis makes the bar unreachable, not merely unrun.
+
+    `build_scorecard` appends exactly one value per scenario onto its axis, so the
+    axis `denominator` is a count of SCENARIOS and never a count of rows: a
+    one-scenario axis prints 1 through one capture or twenty, and the bar at
+    `scripts/autoresearch/behavioural.py` needs 2 on both sides of EVERY declared
+    axis. Before this node the suite declared `uncertainty_preservation`,
+    `source_retention` and `stale_fact_action` at one scenario each, so no repeat
+    pair — including the paused-pool window #2196 is owed — could have cleared it.
+    Pinned here rather than only at a scorecard because this is where a scenario is
+    added: an edit that drops an axis back to one scenario fails with that axis
+    named, instead of three files away inside a pair comparison that merely prints
+    a smaller number.
+
+    The exact counts, not just the floor: 2/2/2/2 over the four axes is the whole
+    shipped suite, so this also fails if a scenario is silently repointed to an
+    axis that already had two and a thin one is left thin-looking-but-unequal.
+    """
+    per_axis = Counter(str(s["axis"]) for s in B.load_manifest()["scenarios"])
+    assert per_axis == {"uncertainty_preservation": 2, "source_retention": 2,
+                        "action_consistency": 2, "stale_fact_action": 2}, dict(per_axis)
+    for axis, count in sorted(per_axis.items()):
+        assert count >= MIN_SCENARIOS_PER_AXIS, (
+            f"`{axis}` declares {count} scenario(s), so its axis denominator is "
+            f"{count} however many captures run, and the discrimination bar's "
+            f"`denominator >= {MIN_SCENARIOS_PER_AXIS}` can never be met on it")
+
+
 # ── clause 2: the hash is recomputed, and never trusted ─────────────────────
 
 def test_the_manifest_is_tracked_not_ignored():
