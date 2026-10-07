@@ -36,9 +36,28 @@ its canary drill (`scripts/automod/rehearse.py`, gate rung 7).
 
 The drill refuses while a self-mod round holds the live pool (read from
 ``/api/workers/status``'s ``round_hold``, the pool's own state), so it never
-adds load while a round or the landing behind it wants the box.
+adds load while a round or the landing behind it wants the box. On this box that
+hold is engaged most of the day — 84%, 94% and 73% of the minutes on
+2026-10-04/05/06 — so a caller that fires once a day is refused most days it
+tries, and the reading series never accumulates. ``--wait-free-window SECONDS``
+is for that caller: re-read the status every ``FREE_WINDOW_POLL_S`` seconds and
+fire the moment the hold releases, instead of exiting 2 on the first look (#2333).
+
+The hold is consulted ONCE, before any surface runs, and never re-checked after
+the drill has started. That is not an oversight: of the 61 free gaps the hold
+left across 2026-10-03..06, 31 were under five minutes, and two of the three that
+opened after a scheduled 13:02Z fire were 0.7 and 0.6 minutes — shorter than the
+drill itself takes. A caller that confirmed the hold was still released after the
+surfaces began would throw away most of the windows it waited for, and a hold
+that re-engages mid-drill is harmless here because both surfaces are in-process
+and offline and the state-file merge is additive.
 
     .venvs/lloyd/bin/python -m scripts.mitigation_drill        # JSON, exit 1 on a failed surface
+    .venvs/lloyd/bin/python -m scripts.mitigation_drill --wait-free-window 3600
+
+The pool's maintenance seat launches the second form at most once an hour
+(``workers.maintenance.mitigation_drill``, ``workers/maintenance.py``), which is
+what lets the series grow without spending engine tokens on the attempt.
 """
 
 from __future__ import annotations
@@ -59,6 +78,17 @@ from typing import Any, Awaitable, Callable, Optional
 SYNTHETIC_SOURCE = "mitigation-drill"
 DECISION_POINT_S = 0.02
 STATUS_URL = "http://127.0.0.1:8080/api/workers/status"
+
+#: How often `--wait-free-window` re-reads the pool status while it waits.
+#: Sixty-one free gaps across 2026-10-03..06, 31 of them under five minutes: a
+#: coarser poll sits through the short ones, a finer one is a tighter loop on a
+#: route the dashboard is already polling.
+FREE_WINDOW_POLL_S = 15.0
+
+#: Test seams. `main` reaches the nap and the clock through these two names, so
+#: a test can run a whole wait window — an hour of them — without waiting.
+_sleep = time.sleep
+_monotonic = time.monotonic
 
 
 def refusal(status: Optional[dict]) -> Optional[str]:
@@ -84,6 +114,43 @@ def live_status(url: str = STATUS_URL, timeout: float = 3.0) -> Optional[dict]:
             return json.loads(r.read().decode("utf-8"))
     except Exception:
         return None
+
+
+def wait_for_free_window(url: str = STATUS_URL, window_s: float = 0.0, *,
+                         poll_s: float = FREE_WINDOW_POLL_S,
+                         status_fn: Optional[Callable[[str], Optional[dict]]] = None,
+                         sleep: Optional[Callable[[float], Any]] = None,
+                         clock: Optional[Callable[[], float]] = None,
+                         ) -> tuple[Optional[dict], Optional[str]]:
+    """Wait up to `window_s` for the round hold to release. (#2333)
+
+    Returns `(status, None)` at the first read `refusal()` calls clean, and
+    `(last_status, reason)` when the window expires with the hold still engaged —
+    `reason` being the very sentence `refusal()` returned, so the caller's exit-2
+    text does not change shape.
+
+    The status payload returned on the clean read is the one the caller hands to
+    `run()`: the hold is judged off that one read and never re-read, which is how
+    a window shorter than the drill's own runtime still produces a reading.
+
+    `status_fn`, `sleep` and `clock` default to the module's own readers — looked
+    up at call time, so patching `live_status`, `_sleep` or `_monotonic` on this
+    module is what a test does rather than an alternative to it.
+    """
+    read = status_fn or live_status
+    nap = sleep or _sleep
+    now = clock or _monotonic
+
+    deadline = now() + window_s
+    while True:
+        status = read(url)
+        reason = refusal(status)
+        if reason is None:
+            return status, None
+        remaining = deadline - now()
+        if remaining <= 0:
+            return status, reason
+        nap(min(poll_s, remaining))
 
 
 def _result(surface: str, classification: str, seconds: Optional[float],
@@ -262,8 +329,28 @@ async def run(status: Optional[dict] = None, *, state_path: Optional[Path] = Non
 def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--status-url", default=STATUS_URL)
+    ap.add_argument("--wait-free-window", dest="wait_free_window", type=int,
+                    default=0, metavar="SECONDS",
+                    help=f"wait up to SECONDS for the round hold to release, polling "
+                         f"every {FREE_WINDOW_POLL_S:g}s, instead of refusing on the "
+                         f"first look (0 = one status read and exit 2, the default)")
     args = ap.parse_args(argv)
-    report = asyncio.run(run(live_status(args.status_url)))
+
+    if args.wait_free_window > 0:
+        # The hold is judged once here, and the payload the wait returned on its
+        # clean read is the one `run()` is handed: nothing re-reads the status
+        # after the surfaces start, so a gap narrower than the drill still yields
+        # a reading instead of a second refusal (#2333).
+        status, reason = wait_for_free_window(args.status_url,
+                                              args.wait_free_window)
+        if reason:
+            print(json.dumps({"refused": reason, "surfaces": [], "ok": False,
+                              "waited_seconds": args.wait_free_window}, indent=2))
+            print(f"refused: {reason}", file=sys.stderr)
+            return 2
+    else:
+        status = live_status(args.status_url)
+    report = asyncio.run(run(status))
     print(json.dumps(report, indent=2))
     if report["refused"]:
         print(f"refused: {report['refused']}", file=sys.stderr)

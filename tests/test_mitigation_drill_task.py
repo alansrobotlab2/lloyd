@@ -131,11 +131,15 @@ def test_the_rendered_prompt_runs_the_drill_and_reports_the_exit_code():
 def test_the_prompt_names_a_round_hold_refusal_as_valid_outcome_not_a_failure():
     """#2153 clause 5's exit-2 half, and the reason it is worth a node.
 
-    `scripts/mitigation_drill.py:268-270` returns 2 when `round_hold` is engaged,
-    and on this box a round or a landing holds the pool often enough that a daily
-    job which called that a failure would be red most weeks. A red the task
-    itself says to ignore is how the one red that matters — exit 1, a control
-    that stopped stopping — gets ignored too.
+    `scripts/mitigation_drill.py`'s `main()` returns 2 when `round_hold` is
+    engaged and no `--wait-free-window` was given — the branch this task's
+    verbatim command takes — and on this box a round or a landing holds the pool
+    often enough that a daily job which called that a failure would be red most
+    weeks. A red the task itself says to ignore is how the one red that matters —
+    exit 1, a control that stopped stopping — gets ignored too.
+
+    (Cited by name, not `file:line`: #2333 added the wait branch to `main()` and
+    any number written here would have moved with it.)
     """
     task, prompt = _render(TASK_FIXTURE, SKILL_FIXTURE)
 

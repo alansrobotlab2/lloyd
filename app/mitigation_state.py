@@ -1,4 +1,4 @@
-"""The mitigation drill's readings per surface, on disk (#703, history #2153).
+"""The mitigation drill's readings per surface, on disk (#703, history #2153, #2333).
 
 `scripts/mitigation_drill.py` measures what each stop control actually stops;
 this file keeps those measurements so `GET /api/workers/status` can say which
@@ -11,10 +11,11 @@ Each reading is also APPENDED to that surface's history, capped at
 of that history (`median_seconds`, beside its count `n`) next to the latest
 reading (`classification`, `seconds`, `at`). Before #2153 the file held only the
 newest reading, so the status page quoted one drill's stop-time as the control's
-stop-time and no aggregate over the series a daily drill produces was computable
-from anything on disk. The cap is what makes keeping the readings affordable for
-a job that runs daily: 20 readings per surface is the whole file, and the oldest
-one is the least interesting.
+stop-time and no aggregate over a series of drills was computable from anything
+on disk. The cap is what makes keeping a series affordable: `HISTORY_CAP`
+readings per surface is the whole file, and the oldest one is the least
+interesting. What the number is sized *for* has moved since it was written — the
+comment on the constant carries the window it now means.
 
 The reader never raises: a status route is most useful when something is wrong,
 so a missing or unreadable file is reported as a never-run marker.
@@ -32,8 +33,26 @@ from app.atomic_io import atomic_write_text
 
 NEVER_RUN = {"state": "never-run"}
 
-#: Readings kept per surface. The drill is scheduled daily, so 20 is roughly
-#: three weeks of medians and the file stays that size forever.
+#: Readings kept per surface — which is to say, the window `median_seconds` is
+#: the median OF. The number is unchanged at 20; what moved is what 20 means.
+#:
+#: #703 sized it for a drill that fired once a day, and the comment said so: 20
+#: readings was roughly three weeks of medians. #2333 moved the trigger onto the
+#: pool's maintenance seat, which spawns one at most once an hour
+#: (`workers.maintenance.MITIGATION_DRILL_DEFAULTS["interval_seconds"]`), because
+#: the once-a-day caller — a scheduled task — was refused by the round hold on
+#: every day it tried and wrote no reading at all. So 20 readings is now about
+#: 20 HOURS of firings: `median_seconds` answers "what did this control do in its
+#: last day of firings", which is the question a stop-time is asked, and the
+#: three-weeks window is gone with the trigger that produced it.
+#:
+#: The number itself must not be raised without the prose that quotes it: the
+#: mitigation-drill skill tells its runner to "keep the most recent 20 readings",
+#: and `tests/fixtures/mitigation_drill/SKILL.md` plus
+#: `tests/test_mitigation_drill_task.py` are the shipped instruction and its
+#: enforcement — a constant moved out from under a sentence that quotes it is how
+#: a documented number stops being true (#1217). Raise the cap there too, or not
+#: here.
 HISTORY_CAP = 20
 
 

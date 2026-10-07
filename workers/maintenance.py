@@ -63,9 +63,11 @@ import hashlib
 import json
 import logging
 import re
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from workers.queue import WorkQueue, new_run_id
 
@@ -79,6 +81,22 @@ _TALLY_PREFIX = "sig:"
 _LAST_SWEEP_AT = "last_sweep_at"
 _LAST_SWEEP = "last_sweep"
 
+#: Watermark for the mitigation-drill tick (#2333). NOT `last_sweep_at`, and not
+#: merely for tidiness: the sweep fires every 900 s and the drill at most once an
+#: hour, so one shared key would let the faster tenant hold the stamp and starve
+#: the slower one for as long as the queue keeps poisoning.
+_LAST_DRILL_AT = "last_drill_at"
+
+#: The drill's own seat settings, a sub-config beside the sweep's flat keys
+#: because it gates a SUBPROCESS rather than a sweep of this queue. Default
+#: OFF — the pool spawns a drill only where the config asks for the series;
+#: `config.yaml` is what turns it on in production.
+MITIGATION_DRILL_DEFAULTS = {
+    "enabled": False,
+    "interval_seconds": 3600,
+    "wait_free_window_seconds": 3600,
+}
+
 DEFAULTS = {
     "enabled": True,
     "interval_seconds": 900,
@@ -87,6 +105,7 @@ DEFAULTS = {
     "repeat_threshold": 3,
     "tally_retention_days": 14,
     "scan_limit": 200,
+    "mitigation_drill": dict(MITIGATION_DRILL_DEFAULTS),
 }
 
 
@@ -499,3 +518,114 @@ def last_sweep(queue: WorkQueue) -> Optional[dict]:
     except (TypeError, ValueError):
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+# ── Mitigation drill trigger (#2333) ──────────────────────────────────────
+#
+# The drill itself refuses while a self-mod round holds the pool, which is right
+# for a caller that is happy to be refused and is exactly why task #95 exited 2 on
+# three days running while the hold sat engaged 73–94% of each of them. This seat
+# is the caller that is not: it spawns the drill with `--wait-free-window`, so the
+# drill waits for the first released moment inside the hold instead of reporting
+# the hold as a result. It costs an interpreter boot and a loopback GET every 15 s
+# against the ~52,600 input tokens a scheduled-task attempt spent to be refused,
+# which is why the trigger moved here and #95 stayed the reporter.
+
+#: The drill subprocess this process spawned and has not reaped. Process-local on
+#: purpose: `poll()` is the only honest liveness check for a child we own, and a
+#: watermark cannot say whether a pid is still alive without going looking. After
+#: a backend restart the handle is gone and the child is an orphan, but it was
+#: stamped when it spawned, so the interval gate below holds the next spawn off
+#: until the orphan's own wait window is nearly spent.
+_drill_proc: Optional[subprocess.Popen] = None
+
+#: The checkout this module runs from, which is the cwd a `-m scripts.…` argv
+#: needs — the module's own tree, so a candidate venv run from a worktree spawns
+#: the drill out of that same worktree and never out of production's.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def mitigation_drill_argv(cfg: Optional[dict] = None, *,
+                          python: Optional[str] = None) -> list[str]:
+    """The argv for one drill, as a SUBPROCESS. Never import the drill to call it.
+
+    `drill_pool_pause` points `workers.sources.SOURCE_REGISTRY` at a synthetic
+    source for its duration (`scripts/mitigation_drill.py`, `_synthetic_registry`),
+    process-globally. In a test process that is contained; in the backend it would
+    swap the live fleet's source table out from under the scheduler loop that is
+    dispatching from it — the same loop that hosts this tick. A subprocess pays an
+    interpreter boot instead of trading the pool's correctness for it.
+    """
+    settings = {**MITIGATION_DRILL_DEFAULTS, **(cfg or {})}
+    return [
+        python or sys.executable,
+        "-m", "scripts.mitigation_drill",
+        "--wait-free-window", str(int(settings["wait_free_window_seconds"])),
+    ]
+
+
+def maybe_run_mitigation_drill(queue: WorkQueue, cfg: Optional[dict] = None, *,
+                               now: Optional[Callable[[], datetime]] = None,
+                               popen: Any = None) -> dict[str, Any]:
+    """Spawn one mitigation drill if the seat's gate says it is due (#2333).
+
+    Returns `{"spawned": argv, "pid": n}` or `{"skipped": <why>}` — a value for
+    the caller's log line, never an exception: this runs on the scheduler loop's
+    seat, and a tick that raises takes every source's enqueue pass with it.
+
+    Four gates, in the order a reader needs them:
+    `workers.maintenance.mitigation_drill.enabled` (off unless config says
+    otherwise), the hourly `interval_seconds` against its OWN `_LAST_DRILL_AT`
+    watermark, no drill subprocess of ours still running, and the subprocess
+    route itself.
+
+    The watermark is stamped BEFORE the spawn, not after: a failed spawn costs an
+    hour, while a successful spawn whose stamp failed costs a second drill running
+    beside the first, and the second is the failure the gate exists to prevent.
+    """
+    global _drill_proc
+
+    settings = {**MITIGATION_DRILL_DEFAULTS, **((cfg or {}).get("mitigation_drill") or {})}
+    if not settings["enabled"]:
+        return {"skipped": "disabled"}
+
+    if _drill_proc is not None:
+        rc = _drill_proc.poll()
+        if rc is None:
+            return {"skipped": "drill-already-running", "pid": _drill_proc.pid}
+        logger.info("Mitigation drill exited with rc=%s", rc)
+        _drill_proc = None
+
+    stamp = now() if now else datetime.now(timezone.utc)
+    interval = int(settings["interval_seconds"])
+    last = queue.wm_get(SOURCE, _LAST_DRILL_AT)
+    if last:
+        try:
+            elapsed = (stamp - datetime.fromisoformat(last)).total_seconds()
+        except ValueError:
+            elapsed = interval  # unparseable watermark: treat as due and rewrite it
+        if elapsed < interval:
+            return {"skipped": "not-due", "seconds_left": round(interval - elapsed)}
+
+    queue.wm_set(SOURCE, _LAST_DRILL_AT, stamp.isoformat())
+    argv = mitigation_drill_argv(settings)
+    try:
+        _drill_proc = (popen or subprocess.Popen)(
+            argv,
+            cwd=str(repo_root()),
+            # The JSON report is a machine payload with a file already holding it
+            # (`app.paths.MITIGATION_DRILL_STATE`), so stdout does not need a
+            # listener — but a refusal reason or a lost state write does, and
+            # inheriting stderr puts those in `logs/server.err`, where the round
+            # hold's own lines already are and where a reader looks first.
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        )
+    except OSError as e:
+        logger.warning("Mitigation drill spawn failed: %s", e)
+        return {"skipped": f"spawn-failed: {type(e).__name__}: {e}"}
+    return {"spawned": argv, "pid": _drill_proc.pid}
+
+
+def repo_root() -> Path:
+    """The checkout this module runs from — the cwd a `-m scripts.…` needs."""
+    return Path(__file__).resolve().parents[1]

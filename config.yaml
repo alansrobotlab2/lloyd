@@ -1669,6 +1669,27 @@ workers:
     repeat_threshold: 3
     tally_retention_days: 14
     scan_limit: 200
+    # The mitigation drill's trigger (#2333). The drill refuses while a self-mod
+    # round holds the pool, and on this box the hold is engaged 73-94% of the
+    # minutes on a busy day, so autonomy task #95 — armed daily — exited 2 on
+    # 2026-10-04, -05 and -06 in a row and `mitigation_drill.json` was never
+    # written: the stop controls the drill measures have had no reading at all
+    # since #703 shipped it. This seat is the caller that waits instead: hourly,
+    # it spawns `python -m scripts.mitigation_drill --wait-free-window N` as a
+    # SUBPROCESS, which fires at the first released moment inside a hold rather
+    # than reporting the hold as its result. Subprocess because the drill's pause
+    # surface patches `workers.sources.SOURCE_REGISTRY` process-globally, and this
+    # is the loop that dispatches off that registry. #95 keeps the reporting.
+    # `enabled` is off in the code (`workers/maintenance.py`'s
+    # MITIGATION_DRILL_DEFAULTS); this file is what turns it on here, and an
+    # operator turns it off by flipping this one line back.
+    mitigation_drill:
+      enabled: true
+      interval_seconds: 3600
+      # Longest the drill waits for a gap. Measured, not chosen: from each 13:02Z
+      # fire a free gap opened inside the hour on all three days above (0.7, 0.6 and
+      # 47.1 min), out of 61 gaps across Oct 3-6 of which exactly one reached 60.
+      wait_free_window_seconds: 3600
   sources:
     # Cut 3 of senses-not-supervision: one steward turn instead of the
     # backlog state machine (`desired_statuses`, `reconcile_statuses`,

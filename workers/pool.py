@@ -1137,6 +1137,9 @@ class WorkerPool:
         interval = 60
         while self._running:
             await self._maybe_sweep_poisoned()
+            # Its own interval inside the seat's 60 s tick, so a drill spawn is
+            # hourly no matter how often this loop turns (#2333).
+            await self._maybe_mitigation_drill()
             await self._probe_services()
             # Before the pass, and outside its try. This is the reader that has to
             # survive every source raising at once, so it cannot sit on the far
@@ -1249,6 +1252,38 @@ class WorkerPool:
             )
         except Exception as e:
             logger.error("Poison sweep failed: %s", e, exc_info=True)
+
+    async def _maybe_mitigation_drill(self) -> None:
+        """Fire the mitigation drill from this seat, as a subprocess (#2333).
+
+        Another tenant of the maintenance seat, for the standing reason: it has to
+        run whether or not a worker slot is free. It lives here rather than being
+        left to autonomy task #95 because the drill refuses while a self-mod round
+        holds the pool, that hold is engaged 73–94% of the minutes on a busy day,
+        and a scheduled attempt that comes back refused still spent ~52,600 input
+        tokens of the primary engine the hold exists to protect. The seat spawns
+        `--wait-free-window` instead: the attempt costs an interpreter boot and a
+        loopback GET, and it fires at the first released moment inside the hold
+        instead of reporting the hold as its result. #95 keeps the reporting.
+
+        Subprocess only, never in-process: `drill_pool_pause` patches
+        `workers.sources.SOURCE_REGISTRY` process-globally for its duration, and
+        this is the loop that dispatches from that registry.
+
+        Never raises — the same rule the sweep beside it keeps.
+        """
+        try:
+            from app.config import CONFIG
+            from workers import maintenance
+
+            cfg = (CONFIG.get("workers") or {}).get("maintenance") or {}
+            outcome = await asyncio.to_thread(
+                maintenance.maybe_run_mitigation_drill, self.queue, cfg)
+            if outcome.get("spawned"):
+                logger.info("Mitigation drill spawned: %s",
+                            " ".join(outcome["spawned"][1:]))
+        except Exception as e:
+            logger.warning("Mitigation drill tick failed: %s", e, exc_info=True)
 
     async def _probe_services(self) -> None:
         """Announce a supervised program whose port never opens (#1359).
