@@ -1601,3 +1601,229 @@ def test_the_unobserved_pin_count_is_no_verdict_when_nothing_was_pinned(capsys):
     line2 = next((ln for ln in capsys.readouterr().out.splitlines()
                   if "counterfactual:" in ln), None)
     assert line2 is not None and "unobserved=null" in line2, line2
+
+
+# ── #2358: the pair audit reaches the nightly baseline, reported and never gated ─
+#
+# Everything above audits the plan from the CLI. What follows is the OTHER reader
+# #2358 added: `run_eval` writes two counts into `summary.overall` on every nightly,
+# so a rebuild that prunes a canonical the frozen plan names shows up in the baseline
+# instead of waiting for someone to think of `--verify`. That wait is the reason: in
+# August 2026 fourteen of the thirty-nine entity-axis pairs went unfair and every
+# automated surface stayed silent for 12 days, because the one surface that could see
+# it was manual by default and had no caller.
+#
+# Same rule as the section above — a real seeded store, never an injected dict — and
+# the caller's scope is the ruling that authorised it (#2187 owed entry 2): a REPORTED
+# number. These nodes pin what the nightly writes and prints. The half about what it
+# cannot do to a promotion is pinned where the gate lives, in
+# `tests/test_automod_regression.py`, not here.
+
+
+class _CorpusOnlyStore:
+    """The corpus-count seams of a store, for a run that is not here to test recall.
+
+    Only `ev.store`'s four callers see this: stats, resolve, active_edges,
+    neighbours. The pair audit deliberately does NOT read it — it goes to
+    `app.kg_store.store()` the way `--verify` does — which is why this fake can
+    stand in for the corpus while a seeded real store answers the audit.
+    """
+
+    def stats(self):
+        return {"entities_total": 1, "edges_total": 1, "edges_active": 1,
+                "aliases": 0, "facts": 1}
+
+    def resolve(self, text):
+        return text
+
+    def active_edges(self):
+        return []
+
+    def neighbours(self, *a, **k):
+        return {}
+
+
+def _run_nightly(tmp_path, monkeypatch, *, label):
+    """One real `ev.main()` over a one-query fixture, plus the artifact it wrote.
+
+    Four patches — the retrieval seam, the corpus store, the baselines directory,
+    the code root — and then the CLI runs for real and its JSON is read back off
+    disk, the same shape `tests/test_eval_scorer.py:246-290` uses to drive `main`
+    in-process. So a failure below is about the two fields, not about the harness.
+    """
+    import json  # local by design: this file otherwise reads no eval artifact
+
+    gold = "Nightly Retrieval Eval"
+    monkeypatch.setattr(ev, "_recall_seeds", lambda q, k: [gold])
+    monkeypatch.setattr(ev, "_semantic_seed_k", lambda: 1)
+    monkeypatch.setattr(ev, "_vault_recall", lambda params, **kw: {
+        "entities": [],
+        "facts": [{"entity": gold, "text": "t", "source": "memory/x.md"}],
+        "documents": [{"path": "memory/daily/2026-09-26.md"}],
+        "graph_expanded_facts": [], "graph_neighbors_used": [],
+        "fact_read_coverage": {"attempted": 1, "read": 1}, "graph_expansion": {}})
+    monkeypatch.setattr(ev, "store", _CorpusOnlyStore)
+    out = tmp_path / "baselines"
+    monkeypatch.setattr(ev, "EVAL_BASELINES_DIR", out)
+    monkeypatch.setattr(ev, "LLOYD_CODE_ROOT", tmp_path)
+    qf = tmp_path / "q.yaml"
+    qf.write_text(
+        "queries:\n"
+        "  - id: pair-audit-probe\n"
+        "    query: what did the nightly eval find\n"
+        "    category: entity\n"
+        f"    expect_entities: [{gold}]\n"
+        "    expect_docs: [memory/daily/2026-09-26.md]\n")
+    monkeypatch.setattr(sys, "argv", ["run_eval.py", "--queries", str(qf),
+                                      "--label", label, "--allow-empty-corpus"])
+    rc = ev.main()
+    written = sorted(out.glob(f"{label}-*.json"))
+    assert written, f"main wrote no artifact into {out}"
+    return rc, json.loads(written[-1].read_text())
+
+
+def test_the_nightly_baseline_carries_the_pair_audit_it_audited(tmp_path, monkeypatch):
+    """`summary.overall` carries both keys, and the count IS the store's answer.
+
+    A store seeded so that only two of the swaps certify (`_verify_store`: one alias
+    surface and one bare canonical) means most of the thirty-nine entity-axis pairs
+    come back unverified, so the asserted number is non-zero and the node cannot pass
+    by reading an empty list. The expected value is recomputed here through
+    `cf.verify_siblings` over `cf._resolver_from_map(store.aliases.all_lower())` —
+    the resolver production builds — because the point of the field is that the
+    baseline and `--verify` cannot disagree, and a test that reused the function
+    under test to predict itself would prove nothing about that.
+
+    Both keys are declared by `summarize` so they are always present in the artifact,
+    and filled by `main`, which is the only caller that can reach a store.
+    """
+    db = _verify_store(tmp_path)
+    expected = cf.verify_siblings(list(cf.load_records(RECORDS).values()),
+                                  cf._resolver_from_map(db.aliases.all_lower()))
+    assert expected, "fixture: this store certifies only two swaps, so many are bad"
+
+    rc, blob = _run_nightly(tmp_path, monkeypatch, label="pair-audit")
+    assert rc == 0, "the audit is reported, so it never fails a run"
+    overall = blob["summary"]["overall"]
+    assert overall[cf.UNVERIFIED_PAIRS_FIELD] == len(expected)
+    assert overall[cf.AXIS_SIZE_FIELD] == len(_entity_axis_records()) == 39
+    assert overall[cf.UNVERIFIED_PAIRS_FIELD] is not None
+    assert "counterfactual_pair_audit_note" not in overall, (
+        "a note belongs to an audit that could not run; this one ran\n"
+        f"{overall.get('counterfactual_pair_audit_note')}")
+    # The field names are the artifact's contract with the nightly reporter: the
+    # two spellings a person reads out of `82-nightly-retrieval-eval.md`.
+    assert cf.UNVERIFIED_PAIRS_FIELD == "counterfactual_unverified_pairs"
+    assert cf.AXIS_SIZE_FIELD == "counterfactual_axis_size"
+    # And a caller that never reaches a store — the CI backtest, the automod
+    # baseline arm, every fixture in this file — gets both keys as null rather
+    # than a KeyError or a zero.
+    bare = ev.summarize([])["overall"]
+    assert bare[cf.UNVERIFIED_PAIRS_FIELD] is None
+    assert bare[cf.AXIS_SIZE_FIELD] is None
+
+
+def test_an_unreachable_store_gives_no_count_and_still_exits_zero(tmp_path, monkeypatch,
+                                                                  capsys):
+    """No alias table ⇒ both keys null, exit 0, and the page says ABSENT.
+
+    The automod worktree case, and the case that decides whether this field is
+    worth having: `store()` raises `StoreUnavailable` whenever the derived store was
+    never built, so the nightly has to distinguish "the rebuild kept every pair"
+    (0 of 39) from "there was no table to ask" (null). A zero written for the second
+    case is the 12-day blind spot rebuilt smaller — it is the reading that let
+    fourteen unfair pairs look like a clean audit. So: null in the artifact, the word
+    `absent` on the page, no `unverified=0` anywhere in the printed block, and no
+    traceback: the run that cannot audit still runs.
+    """
+    from app import kg_store
+
+    def refuse():
+        raise kg_store.StoreUnavailable("no knowledge-graph database (test)")
+
+    monkeypatch.setattr(kg_store, "store", refuse)
+    rc, blob = _run_nightly(tmp_path, monkeypatch, label="pair-audit-absent")
+    page = capsys.readouterr().out
+    assert rc == 0, "an unmeasurable audit is not a failed run"
+    overall = blob["summary"]["overall"]
+    assert overall[cf.UNVERIFIED_PAIRS_FIELD] is None
+    assert overall[cf.AXIS_SIZE_FIELD] is None
+    assert "counterfactual_pair_audit_note" in overall
+    cf_line = next(ln for ln in page.splitlines()
+                   if ln.strip().startswith("counterfactual:"))
+    assert "unverified=absent" in cf_line, cf_line
+    assert "unverified=0" not in page, page
+    assert "Traceback" not in page
+
+
+def test_the_two_manual_only_docstrings_now_say_reported_nightly():
+    """The prose that made `--verify` manual-only is now prose about a reported field.
+
+    `eval/counterfactual.py`'s module docstring said the audit was "run by hand, not
+    by the nightly path", and `verify_siblings` repeated it — two places documenting
+    an absence, which is how a deliberate decision survives as the only description
+    of a mechanism that has since changed. Both now say what is true after #2358: the
+    COUNT is reported nightly, the PAIRS stay frozen on purpose. That distinction is
+    the whole ruling, so it is asserted in both directions — the old sentence gone
+    from both, `nightly` present in both, `frozen` present in both.
+
+    The `--check` half of this clause — `records match the generator`, exit 0 — is
+    `test_cli_check_reports_no_drift` above, which runs the same CLI a person runs;
+    it is not re-run here.
+    """
+    module_doc = cf.__doc__ or ""
+    verify_doc = cf.verify_siblings.__doc__ or ""
+    for name, doc in (("module", module_doc), ("verify_siblings", verify_doc)):
+        assert "not by the nightly path" not in doc, f"{name} still disclaims nightly"
+        assert "nightly" in doc, f"{name} never says the count is nightly-reported"
+        assert "frozen" in doc, f"{name} dropped why the pairs stay frozen"
+    assert "counterfactual_unverified_pairs" in module_doc, (
+        "the docstring should name the field a reader goes looking for")
+    assert "counterfactual_unverified_pairs" in verify_doc
+
+
+def test_both_readers_of_the_audit_ask_the_same_question(monkeypatch, tmp_path):
+    """One audit behind two readers: the CLI and the nightly cannot drift apart.
+
+    `--verify` prints a count and exits non-zero; `run_eval` writes the same count
+    into the baseline. Two call sites that each built their own resolver would agree
+    until the day they didn't — which is the failure mode this whole field exists to
+    close, and the reason `sibling_audit` owns the resolver (`store().aliases.all_lower()`,
+    the map the scored run itself resolves through) and both readers call it. The
+    nightly writer also never opens a database: `kg.sqlite` is reachable only through
+    `app.kg_store`, whose `StoreUnavailable` is what turns the field into null.
+
+    Asserted at the seam: with the audit stubbed to a counter, the CLI's `--verify`
+    branch and `cf_pair_audit_fields` each route through it exactly once. A reader
+    that went around it — re-reading the YAML and resolving by hand, or opening the
+    sqlite file — would take the count from somewhere else, and this node would see
+    the missing call.
+    """
+    calls: list[str] = []
+    real = cf.sibling_audit
+    # A store seeded FROM the plan, so every swapped-in value resolves to its own
+    # canonical and the honest verdict on this corpus is zero — the CLI branch has to
+    # be able to reach its exit-0 path for its call to be comparable.
+    _store_where_every_swap_resolves(tmp_path)
+
+    def counting_audit():
+        calls.append("audit")
+        return real()
+
+    monkeypatch.setattr(cf, "sibling_audit", counting_audit)
+
+    fields, note = ev.cf_pair_audit_fields()
+    assert calls == ["audit"] and note is None
+    assert fields[cf.UNVERIFIED_PAIRS_FIELD] == 0
+    assert fields[cf.AXIS_SIZE_FIELD] == 39, (
+        "the frozen plan holds 39 entity-axis swaps, and the writer reports that "
+        "denominator whatever the run's query count is")
+
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = cf.main(["--verify"])
+    assert calls == ["audit", "audit"], f"--verify did not share the audit: {calls}"
+    assert rc == 0, buf.getvalue()
+    assert "0 of 39 entity-axis pairs unverified" in buf.getvalue(), buf.getvalue()

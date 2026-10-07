@@ -2231,3 +2231,63 @@ def test_the_refresh_runs_only_from_a_drained_run_holding_the_lock(monkeypatch):
     out = R.run_pending()
     assert out and out[-1]["regressed"] is True
     assert "refresh" not in trace, "a requested rollback precedes the floor refresh"
+
+
+# ── #2358: the two counterfactual audit keys cannot reach a promotion ──────────
+#
+# `eval/run_eval.py` now writes `counterfactual_unverified_pairs` and
+# `counterfactual_axis_size` into `summary.overall` on every nightly. The ruling that
+# let them in (#2187 owed entry 2, 2026-10-07) was "a REPORTED, non-gating field
+# only", so what has to be true is not that someone remembered to ignore them but
+# that the comparison cannot see them. It cannot structurally: the promotion gate
+# compares an explicit allowlist — `FACT_LAYER_METRICS`, three names — not the keys an
+# artifact happens to carry, so a new key of any name is outside the comparison
+# whatever its value. That is what these two nodes pin, at the seam where the gate
+# lives rather than in the file that writes the fields.
+
+def test_the_fact_layer_allowlist_is_still_exactly_three_names():
+    """The allowlist #2358's non-gating ruling leans on: three metrics, no more.
+
+    `counterfactual_unverified_pairs` and `counterfactual_axis_size` are absent by
+    construction, and a run carrying them is scored on `entity_hit_rate`,
+    `entity_recall_avg` and `fact_entity_recall_avg` — the same three it was scored
+    on before either key existed. Pinned as a set equality on purpose: an allowlist
+    this a report can add to is not a bound, and the first metric added for its
+    name rather than for what it measures is the day "reported, not gated" stops
+    being a property of the code.
+    """
+    assert set(R.FACT_LAYER_METRICS) == {
+        "entity_hit_rate", "entity_recall_avg", "fact_entity_recall_avg"}
+    for key in ("counterfactual_unverified_pairs", "counterfactual_axis_size",
+                "counterfactual_moved_rate", "counterfactual_pinned_rate"):
+        assert key not in R.FACT_LAYER_METRICS, key
+        assert key not in R.ARMED_METRICS, key
+
+
+def test_a_run_reporting_39_unverified_pairs_gates_nothing():
+    """The worst value the new field can hold moves no verdict at all.
+
+    Baseline reports a clean audit (0 of 39), the candidate reports every one of the
+    39 entity-axis swaps unverified against a graph that pruned the canonicals the
+    frozen plan names — the August 2026 state that cost 12 days of silent eval — and
+    every armed metric is identical, so the ONLY difference between the two summaries
+    is the audit. `evaluate` must not call that a regression: the pairs are frozen,
+    so this reading indicts the graph, not the diff under test, and a gate that
+    blocked on it would block every round until a human re-pointed the plan.
+    Reporting it is #2358; letting it decide anything is owed ruling 1, not this diff.
+    """
+    clean = base(**{"counterfactual_unverified_pairs": 0,
+                    "counterfactual_axis_size": 39})
+    broken = base(**{"counterfactual_unverified_pairs": 39,
+                     "counterfactual_axis_size": 39})
+    regressed, reasons, _ = R.evaluate(broken, clean, ZERO_NOISE)
+    assert not regressed, reasons
+    assert reasons == []
+    # Control: the same two summaries, differing now in one ALLOWED metric, do
+    # regress — so the node above passes because the field is unread, not because
+    # `evaluate` never flags anything.
+    regressed, _, _ = R.evaluate(base(**{"counterfactual_unverified_pairs": 0,
+                                         "counterfactual_axis_size": 39,
+                                         "entity_hit_rate": 0.45}),
+                                 clean, ZERO_NOISE)
+    assert regressed

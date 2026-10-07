@@ -1333,3 +1333,66 @@ def test_the_artifact_and_the_page_name_the_menu_builder(capsys):
     legacy = {k: v for k, v in art.items() if k != "menu_builder"}
     old = _printed(legacy, capsys)
     assert "menu builder: unrecorded" in old and "query-token-overlap/v1" in old, old
+
+
+# ── #2358: the pair audit on the counterfactual line, out of the query total ──
+
+def _cf_page(overall_extra: dict, capsys, *, n: int = 4) -> str:
+    """The printed `counterfactual:` line for a page carrying `overall_extra`."""
+    records, summary = _printed_summary(overall_extra, n=n)
+    ev.print_table(records, summary)
+    return next(ln for ln in capsys.readouterr().out.splitlines()
+                if ln.strip().startswith("counterfactual:"))
+
+
+def test_the_pair_audit_prints_beside_moved_pinned_over_its_own_denominator(capsys):
+    """`unverified=x/M` shares the counterfactual line but not its denominator.
+
+    `moved` and `pinned` divide over this run's queries (4 here); the audit divides
+    over the 39 entity-axis swaps in the COMMITTED plan, a number no query count
+    changes. Rendering it as `2/4` would fold a property of the instrument into the
+    run's population — the exact `POPULATION_MISMATCH` shape this file exists to
+    police, and the reason the ceiling block puts both n's on the metric's own line
+    instead of dividing across two populations. So 4 and 39 both appear on the line,
+    39 only beside `unverified=`, and no `x/4` form of the count exists anywhere.
+    """
+    fields = ev._ceiling_absent_fields("unused")
+    fields.update({"counterfactual_moved_rate": 0.5, "counterfactual_n_moved": 2,
+                   "counterfactual_pinned_rate": 0.25, "counterfactual_n_pinned": 1,
+                   "counterfactual_n_unobserved_pins": 0,
+                   "counterfactual_unverified_pairs": 2,
+                   "counterfactual_axis_size": 39})
+    line = _cf_page(fields, capsys, n=4)
+    assert "moved=" in line and "pinned=" in line, line
+    assert "unverified=2/39" in line, line
+    assert line.index("pinned=") < line.index("unverified="), (
+        f"the audit belongs beside the two rates, not on a line of its own: {line}")
+    # The run's own denominator on this page is 4, and the audit never borrows it:
+    # `moved`'s `n=2/4` is over queries, the audit's `/39` is over frozen pairs.
+    assert "(n=2/4)" in line, f"fixture: this page's query total is 4: {line}"
+    assert line.count("/39") == 1, line
+    assert "unverified=2/4" not in line, line
+
+
+def test_an_unaudited_pair_count_prints_absent_and_never_zero(capsys):
+    """Both keys null ⇒ the page says `unverified=absent`, never `0/…`.
+
+    Null means the alias table could not be opened — the automod-worktree case, and
+    any machine whose derived store was never built. `0/0` on that page would read
+    as a rebuild that kept every pair, which is the reading that let fourteen unfair
+    swaps sit unseen for 12 days in August 2026, so the absence gets its own word and
+    a zero is never reachable from a null. A MISSING key (a baseline written before
+    #2358, an artifact from the field's own history) takes the same rendering: no
+    field is not a measurement of zero either.
+    """
+    fields = ev._ceiling_absent_fields("unused")
+    fields.update({"counterfactual_moved_rate": 0.5, "counterfactual_n_moved": 2,
+                   "counterfactual_pinned_rate": 0.25, "counterfactual_n_pinned": 1,
+                   "counterfactual_n_unobserved_pins": 0})
+    null_line = _cf_page(dict(fields, counterfactual_unverified_pairs=None,
+                              counterfactual_axis_size=None), capsys, n=4)
+    assert "unverified=absent" in null_line, null_line
+    assert "unverified=0" not in null_line and "0/0" not in null_line, null_line
+
+    missing_line = _cf_page(fields, capsys, n=4)
+    assert "unverified=absent" in missing_line, missing_line

@@ -1576,6 +1576,64 @@ def _normalize_against_ceiling(fields: dict, overall: dict) -> None:
         fields[f"{metric}_normalized"] = round(score / cap, 4)
 
 
+def cf_pair_audit_fields() -> tuple[dict, str | None]:
+    """The #2358 pair: how many frozen swap pairs the live alias table no longer
+    verifies, and the denominator they are read against.
+
+    Returns (the two `summary.overall` fields, a note or None). This is the nightly
+    caller `counterfactual.py` documented `--verify` as NOT having: the 14 pairs
+    that quietly stopped being fair in August were invisible to every automated
+    surface for 12 days, and the mechanism — a kg rebuild pruning a canonical the
+    frozen plan names — recurs with every rebuild.
+
+    The audit is `cf.sibling_audit()`, the same function the `--verify` CLI branch
+    reads, over `app.kg_store.store().aliases.all_lower()`. Neither side opens
+    `kg.sqlite` itself, and neither can now report a different count from the other.
+
+    Reported, never enforced, which is what the ruling that authorised this caller
+    (#2187 owed entry 2, 2026-10-07) scoped it to: the pairs stay frozen by design,
+    so a non-zero count asks a person to re-point one. It is structural rather than
+    a promise — the promotion gate compares the allowlist `FACT_LAYER_METRICS`, three
+    metric names, and a key that is not in it cannot reach a verdict whatever its
+    name — and `tests/test_automod_regression.py` pins exactly that.
+
+    A store that cannot be opened gives both fields None, never a zero. That is the
+    whole difference between "the rebuild kept every pair" (`0/39`) and "this tree
+    had no alias table to ask" (null), and printing a zero for the second case would
+    be the 12-day blind spot rebuilt smaller. `StoreUnavailable` is what an automod
+    worktree raises; any other failure is equally an unmeasured count, so it reports
+    the same nulls but names its type in the note, because those are bugs and bugs
+    should leave evidence.
+    """
+    try:
+        bad, entity_axis, _store = cf.sibling_audit()
+    except StoreUnavailable as exc:
+        return ({cf.UNVERIFIED_PAIRS_FIELD: None, cf.AXIS_SIZE_FIELD: None},
+                "no alias table to audit the frozen pairs against, so no pair count "
+                f"was measured (null, not 0): {exc}")
+    except Exception as exc:  # noqa: BLE001 — reported, never fatal
+        return ({cf.UNVERIFIED_PAIRS_FIELD: None, cf.AXIS_SIZE_FIELD: None},
+                f"pair audit failed and reported no count ({type(exc).__name__}): "
+                f"{exc}")
+    return ({cf.UNVERIFIED_PAIRS_FIELD: len(bad),
+             cf.AXIS_SIZE_FIELD: len(entity_axis)}, None)
+
+
+def _cf_unverified_text(overall: dict) -> str:
+    """The audit clause of the printed counterfactual line (#2358).
+
+    A count and its denominator, never a percentage: 39 frozen pairs are not 25
+    queries, and a share would read as though it belonged to `moved=4% (1/25)`'s
+    family. Absent is spelled `unverified=absent`, not `unverified=0/0`, because
+    "the alias table was unreachable" and "the audit found nothing wrong" are
+    different facts and only one of them is a pass.
+    """
+    if overall.get(cf.UNVERIFIED_PAIRS_FIELD) is None:
+        return "unverified=absent (no alias table was reachable to audit against)"
+    return (f"unverified={overall[cf.UNVERIFIED_PAIRS_FIELD]}"
+            f"/{overall.get(cf.AXIS_SIZE_FIELD)} entity-axis pairs")
+
+
 def summarize(records: list[dict], *,
               collections: list[dict] | None = None) -> dict:
     """Aggregate one run's records. `summarize` stays a function of its records plus
@@ -1676,6 +1734,17 @@ def summarize(records: list[dict], *,
         # `gold_doc_*` fields already hold.
         "counterfactual_n_unobserved_pins": (None if n_pinned == 0
                                              else pins_unobserved),
+        # #2358's sibling audit, declared here so the keys are ALWAYS present and
+        # filled by `main` beside the ceiling block: counting the frozen pairs the
+        # live alias table no longer verifies means opening `app.kg_store`, which
+        # this function deliberately never does — the CI backtest, the automod
+        # baseline arm and every fixture caller summarize a record list, and a
+        # record list cannot tell you what the store says today. None here is
+        # "not measured", which is exactly what it means until `main` replaces it,
+        # and the same null is what a worktree leaves behind. Never defaulted to 0:
+        # an unasked audit is not a passed audit.
+        cf.UNVERIFIED_PAIRS_FIELD: None,
+        cf.AXIS_SIZE_FIELD: None,
     }
     # No `<metric>_gold_bearing` companion is emitted any more (#1663). #1600 added
     # those six keys to publish the gold-bearing reading beside a headline that
@@ -1986,10 +2055,18 @@ def print_table(records: list[dict], summary: dict) -> None:
     n_pinned = o.get("counterfactual_n_pinned", 0)
     unobserved = o.get("counterfactual_n_unobserved_pins")
     unobserved_txt = "null" if unobserved is None else f"{unobserved}/{n_pinned}"
+    # #2358's audit, and it is out of the query total for a different reason than
+    # `unobserved` is: its denominator is the FROZEN PLAN's entity-axis pair count, a
+    # property of the committed records, not of this run's queries — 39 pairs against
+    # a 25-query run are two populations, and `2/39` printed as a share would read
+    # like `moved`'s family. `unverified=absent` when the alias table could not be
+    # opened; never `0/0`, which would print "the rebuild kept every pair" for a
+    # tree that had no table to ask, the blind spot this field exists to close.
     print(f"         counterfactual: moved={_fmt_rate(mv)} "
           f"(n={o.get('counterfactual_n_moved', 0)}/{total})  "
           f"pinned={_fmt_rate(pn)} (n={n_pinned}/{total})  "
-          f"unobserved={unobserved_txt}")
+          f"unobserved={unobserved_txt}  "
+          f"{_cf_unverified_text(o)}")
     print("\nBy category:")
     for cat, s in summary["by_category"].items():
         # `_fmt_rate`/`_fmt_rate3`, not a bare `:.2f`. A category is a run inside the
@@ -2309,6 +2386,19 @@ def main() -> int:
         scored_ids=[r["id"] for r in records if not r.get("error")])
     _normalize_against_ceiling(_ceiling_fields, summary["overall"])
     summary["overall"].update(_ceiling_fields)
+    # #2358, filled here for the same reason the ceiling block is: the audit has to
+    # open the live alias table, which `summarize` never does. Two numbers, both
+    # reported and neither of them a gate — `workers/sources/automod_regression.py`
+    # compares only `FACT_LAYER_METRICS`, so a run carrying these keys is scored on
+    # the same three metrics it was scored on before they existed. A run whose store
+    # is unreachable (`StoreUnavailable`, e.g. every automod worktree) still writes
+    # nulls and still exits 0: the nightly's job here is to make drift VISIBLE, and a
+    # nightly that failed whenever the graph was missing would be disabled inside a
+    # week, which is how `--verify` ended up with no caller for 12 days.
+    _cf_audit_fields, _cf_audit_note = cf_pair_audit_fields()
+    summary["overall"].update(_cf_audit_fields)
+    if _cf_audit_note:
+        summary["overall"]["counterfactual_pair_audit_note"] = _cf_audit_note
     # #1250: a fact leg that read NOTHING is not a fact score of zero. Every
     # per-entity read can fail — `agent_mcp/vault.py:_collect` used to discard
     # each failure with `except Exception: continue`, no log, no counter — and

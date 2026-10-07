@@ -22,8 +22,14 @@ were drawn once, by hand, from pairs already known to be normalization
 artifacts, and then frozen into ``counterfactual_perturbations.yaml``. If the
 live table picked the pairs every night the measurement would change underneath
 the trend line — the defect the nightly compare step already guards against for
-the query set. ``verify_siblings`` is the audit against the live table, run by
-hand, not by the nightly path.
+the query set. ``verify_siblings`` is the audit against the live table, and the
+audit is REPORTED by the nightly path (#2358): ``run_eval`` writes
+``counterfactual_unverified_pairs`` over ``counterfactual_axis_size`` into
+``summary.overall`` so a rebuild that prunes a canonical the frozen plan names
+shows up in the baseline instead of waiting for someone to run ``--verify`` by
+hand. What is reported is the count, never the pairs: choosing the swaps is
+still a hand edit, and the number reaching the nightly does not unfreeze one
+record or gate anything on its own.
 
 The metrics are **entity/fact-level only**. The doc corpus is the same vault in
 both arms, so any doc-level comparison reads as spurious success (risk 3). The
@@ -35,6 +41,7 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -566,8 +573,12 @@ def verify_siblings(records: list[dict], resolve) -> list[dict]:
 
     old_value resolving to nothing is fine and expected: it is the surface the
     query happens to use ('vLLM' is an entity name that was never registered as
-    an alias surface). Run by hand after editing the plan, not from the nightly
-    path — the alias table is live data and the records are frozen on purpose.
+    an alias surface). Run it by hand after editing the plan, and since #2358 the
+    nightly path counts it too — `run_eval` reports
+    `counterfactual_unverified_pairs` over `counterfactual_axis_size` in
+    `summary.overall`, through `sibling_audit` below. Reported, and reported only:
+    the alias table is live data, the records are frozen on purpose, and no count
+    this function returns re-picks a pair or gates a promotion.
     """
     bad: list[dict] = []
     for rec in records:
@@ -641,6 +652,35 @@ def alias_resolver() -> callable:
     guardian's read-only row count (#1525); an audit script is not that.
     """
     return _resolver_from_map(_kg_store_module().store().aliases.all_lower())
+
+
+#: The two `summary.overall` keys #2358 added, named here so the nightly writer
+#: (`eval/run_eval.py`) and this file's own `--verify` agree on one spelling. A
+#: key written from a literal on both sides is a key that drifts on one of them.
+UNVERIFIED_PAIRS_FIELD = "counterfactual_unverified_pairs"
+AXIS_SIZE_FIELD = "counterfactual_axis_size"
+
+
+def sibling_audit() -> tuple[list[dict], list[dict], Any]:
+    """(unverified pairs, the entity-axis records, the store) for the frozen plan.
+
+    One audit behind two readers: the `--verify` CLI branch prints its detail and
+    exits non-zero, and `run_eval` writes the two counts into the nightly baseline.
+    Both therefore ask the same question of the same resolver —
+    `_resolver_from_map(store().aliases.all_lower())` — rather than running two
+    instruments that can disagree about whether the plan is fair.
+
+    Raises whatever `app.kg_store.store()` raises (`StoreUnavailable` on a tree
+    with no derived store, which includes every automod worktree). It does not
+    swallow that into a zero: an audit that could not run has no count, and
+    `run_eval` records it as null. Callers that print get the store back so they
+    can name which file they audited against.
+    """
+    kg = _kg_store_module().store()
+    records = list(load_records().values())
+    entity_axis = [r for r in records if r.get("axis_changed") == ENTITY_AXIS]
+    bad = verify_siblings(records, _resolver_from_map(kg.aliases.all_lower()))
+    return bad, entity_axis, kg
 
 
 # ── scoring ──────────────────────────────────────────────────────────────────
@@ -827,13 +867,13 @@ def main(argv: list[str]) -> int:
             # process default over `app.paths.VAULT_KG_DB`, the same
             # ``VAULT_KG_DB`` run_eval records in corpus_provenance, so an audit
             # never runs against a different graph than the numbers it checks.
-            kg = kg_store.store()
+            # `sibling_audit` is also the call `run_eval` makes for the two
+            # `summary.overall` keys it has written nightly since #2358, so the
+            # number in the baseline and the number on this line are one reading.
+            bad, entity_axis, kg = sibling_audit()
         except kg_store.StoreUnavailable as exc:
             print(f"no alias table to audit the siblings against: {exc}")
             return 2
-        recs = list(load_records().values())
-        entity_axis = [r for r in recs if r.get("axis_changed") == ENTITY_AXIS]
-        bad = verify_siblings(recs, _resolver_from_map(kg.aliases.all_lower()))
         for rec in bad:
             print(f"  UNVERIFIED {rec['id']}: {rec['old_value']!r} -> "
                   f"{rec['new_value']!r} — the swapped-in value is not a "
