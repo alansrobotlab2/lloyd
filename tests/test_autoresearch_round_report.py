@@ -346,3 +346,90 @@ def test_a_round_without_the_arm_says_the_leg_was_not_run(round_env):
     assert "reachable: not-evaluated" in report
     assert "unreachable: not-evaluated" in report
     assert "reachable: 0" not in report and "unreachable: 0" not in report
+
+
+def test_a_standalone_coverage_report_counts_the_submission_draw_zero(tmp_path, monkeypatch,
+                                                                      capsys):
+    """#2357 end to end through the leg's own CLI: the split is about draw 0, not draw fast.
+
+    A standalone `coverage_leg.py` run has no round baseline, so `main` feeds the
+    report its own draw 0 (`per_task` built from `draw_zero_objective`), and the
+    printed section is the only place the mislabel reaches a reader today: every
+    round report on this box takes the `leg not run` branch because the round asks
+    for its harness route and the only artifact on disk is the direct one.
+
+    The arm is drawn for real through `run_coverage`, with the runner sleeping
+    `0.02 * (4 - draw_index)` so completion order is the reverse of submission
+    order, and its four tasks are the four shapes the counts are made of:
+
+      `bench_d0_flaky`   0,0,1,1 → 2/4, pass@1 0.500 → `reachable`,   draw 0 FAILED
+      `bench_d0_clean`   1,1,1,0 → 3/4, pass@1 0.750 → `reliable`,    draw 0 passed
+      `bench_d0_clean2`  1,1,1,0 → 3/4, pass@1 0.750 → `reliable`,    draw 0 passed
+      `bench_d0_never`   0,0,0,0 → 0/4              → `unreachable`, draw 0 FAILED
+
+    So today's single draw fails on 2 tasks, one of which the N draws do reach.
+    Reading "draw 0" as the first draw home instead flips both numbers: the two
+    `reliable` tasks are the ones whose draw 3 failed, and the one `reachable` task
+    is the one that stops being a failure at all — `graded failures today: 3` and
+    `reachable ... 0`, which is what this test printed before the fix.
+
+    What is patched is what the CLI injects at its own boundaries: the config file,
+    the corpus, the engine's served-model probe, the trial runner and the judge's
+    rubric call. The gather, the collapse, the artifact write and the renderer are
+    the real ones.
+    """
+    from scripts.autoresearch import coverage_leg as cov
+
+    scores = {
+        "bench_d0_flaky": {0: 0.0, 1: 0.0, 2: 1.0, 3: 1.0},
+        "bench_d0_clean": {0: 1.0, 1: 1.0, 2: 1.0, 3: 0.0},
+        "bench_d0_clean2": {0: 1.0, 1: 1.0, 2: 1.0, 3: 0.0},
+        "bench_d0_never": {0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0},
+    }
+    tasks = [{"id": tid} for tid in scores]
+    cfg = make_cfg(tmp_path)
+
+    def runner(task, draw_index):
+        import time
+        time.sleep(0.02 * (4 - draw_index))
+        return {"status": "success",
+                "final_text": "PASSED" if scores[task["id"]][draw_index] == 1.0 else "FAILED",
+                "prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}
+
+    def fake_judge(task, trace, *a, **kw):
+        return {"objective_score": 1.0 if trace["final_text"] == "PASSED" else 0.0,
+                "composite_score": 0.5}
+
+    monkeypatch.setattr(cov, "load_config", lambda: cfg)
+    monkeypatch.setattr(cov, "corpus_tasks", lambda cfg_: list(tasks))
+    monkeypatch.setattr(cov, "resolve_served_model", lambda alias: "lloyd-nova2-9b")
+    monkeypatch.setattr(cov, "direct_trial_runner", lambda **kw: runner)
+    monkeypatch.setattr(judge, "judge_trace", fake_judge)
+
+    cov.main(["--n", "4", "--parallel", "4", "--model", "primary"])
+    out = capsys.readouterr().out
+
+    assert "draw 0 of this arm, at the same settings" in out, \
+        "the standalone arm is the single draw, so these counts are its draw 0's"
+    assert "- graded failures today: 2" in out, \
+        "submission draw 0 failed on `bench_d0_flaky` and `bench_d0_never`, and on those two"
+    assert "reachable (today's failure, pass@4 passes): 1" in out, \
+        "the one reached failure is `bench_d0_flaky`; read off the first draw home, the " \
+        "reached count is 0 because the two failures left are `reliable`"
+    assert "unreachable (today's failure, pass@4 never passes): 1" in out
+    assert "LEG CUT" not in out, "reachable and unreachable are both present, so it splits"
+    assert "| bench_d0_flaky | 0.500 | 1.000 | reachable |" in out
+    assert "| bench_d0_never | 0.000 | 0.000 | unreachable |" in out
+    assert "| bench_d0_clean | 0.750 | 1.000 | reliable |" in out
+
+    # The counts the report printed are the counts `summarize` returns over the same
+    # set of tasks: the submission-draw-0 failures, no more and no fewer.
+    loaded = cov.load_coverage(cfg, model_alias="primary", route=cov.ROUTE_DIRECT, n=4)
+    assert {r["task_id"]: r["draw_zero_objective"] for r in loaded["records"]} == {
+        tid: by_draw[0] for tid, by_draw in scores.items()}, \
+        "every record's draw 0 came back off the artifact as the submission draw 0 figure"
+    census = cov.summarize(loaded, ["bench_d0_flaky", "bench_d0_never"])
+    assert census["graded_failures"] == 2
+    assert census["disagreement_reachable"] == 1
+    assert census["disagreement_unreachable"] == 1
+    assert census["not_evaluated_failures"] == 0

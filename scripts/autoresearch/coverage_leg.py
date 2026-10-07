@@ -323,6 +323,22 @@ def draw_record(*, task_id: str, objective_score: Any, status: str,
     }
 
 
+def draw_zero_objective(draws: list[dict[str, Any]]) -> Any:
+    """The objective score of the draw the arm numbered 0, not of the draw that finished first.
+
+    `run_coverage` appends draws in completion order under the semaphore, so
+    `draws[0]` is simply the fastest draw, and a figure taken from it is a draw the
+    arm never declared. A list carrying no index at all — a hand-built record, or a
+    caller predating the field — has no numbered draw to find and falls back to its
+    first entry rather than to nothing: that caller chose the order, so the order is
+    its claim. Empty is None, which is what the record prints for an unmeasured draw.
+    """
+    for draw in draws:
+        if draw.get("draw_index") == 0:
+            return draw["objective_score"]
+    return draws[0]["objective_score"] if draws else None
+
+
 def task_record(draws: list[dict[str, Any]], *, n_requested: int,
                 context: dict[str, Any]) -> dict[str, Any]:
     """Collapse N draws of one task into the record the artifact stores.
@@ -366,11 +382,13 @@ def task_record(draws: list[dict[str, Any]], *, n_requested: int,
         "mechanically_checkable": mechanically_checkable,
         "pass_at_1": round(passes / len(scored), 4) if scored else None,
         "pass_at_n": pass_at_k(len(scored), passes, n_requested),
-        # The first draw's own objective score: "what today's single draw would
-        # have said", under the arm's own settings. A standalone run has no round
-        # baseline to compare against, and this is the only single-draw figure it
-        # is honest about — draw 0, not a re-picked favourable one.
-        "draw_zero_objective": draws[0]["objective_score"] if draws else None,
+        # The objective score of the draw the arm NUMBERED 0: "what today's single
+        # draw would have said", under the arm's own settings. A standalone run has
+        # no round baseline to compare against, and this is the only single-draw
+        # figure it is honest about — draw 0, not the fastest draw, and not a
+        # re-picked favourable one. `draw_zero_objective` finds it by index because
+        # `run_coverage` appends draws in completion order.
+        "draw_zero_objective": draw_zero_objective(draws),
         "verdict": verdict,
         "verdict_reason": reason,
         # The answer draws only. The judge's own rubric call is a second request
@@ -745,9 +763,14 @@ async def run_coverage(tasks: list[dict[str, Any]], *, n: int = DEFAULT_N,
                 logger.warning("coverage draw %d of %s failed: %s", draw_index, task_id, exc)
                 objective = None
                 trace = {}
+            # `draw_index` travels with the record, not only with the log line below:
+            # this list is appended in COMPLETION order inside the semaphore, so a
+            # draw that never says which draw it was leaves the record no way to
+            # find the one the arm numbered 0. See `draw_record`.
             draws_by_task.setdefault(task_id, []).append(
                 draw_record(task_id=task_id, objective_score=objective,
-                            status=trace.get("status", "error"), trace=trace))
+                            status=trace.get("status", "error"), trace=trace,
+                            draw_index=draw_index))
 
     await asyncio.gather(*(_one(t, i) for t in tasks for i in range(n)))
     return build_coverage(draws_by_task, n_requested=n, context=context, round_id=round_id)

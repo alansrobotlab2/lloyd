@@ -41,6 +41,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
+import time
 
 import pytest
 
@@ -602,3 +604,98 @@ def test_a_runtime_harness_report_reads_only_the_runtime_arm(tmp_path):
     assert "temperature=0.3" not in text, \
         "the direct arm's sampler never appears on the runtime arm's report"
     assert cov.comparable(loaded, direct) is False
+
+
+# ── #2357: which draw is "draw 0" ────────────────────────────────────────────
+#
+# `run_coverage` gathers its draws through a semaphore and appends each finished
+# draw to a per-task list, so that list is in COMPLETION order. The record's
+# `draw_zero_objective` is the figure a standalone run prints as "today's single
+# draw" (`coverage_leg.py` `main`, via `report_lines`), and `draw_record`'s own
+# docstring says it has to be the draw the arm numbered 0, "not whichever thread
+# finished first". These two tests are that claim: one over the real gather, one
+# over the collapse alone.
+#
+# They pin the SELECTION, not a field in the artifact: `build_coverage` persists one
+# collapsed record per task and never the per-draw records, so an artifact carries no
+# per-draw `draw_index` to read back. Making it do so would be an artifact-schema
+# change, which #2357 explicitly does not ask for.
+
+
+def test_the_records_draw_zero_is_the_draw_the_arm_numbered_not_the_one_that_finished_first(tmp_path):
+    """Draws completing in the REVERSE of submission order: "draw 0" is still draw 0.
+
+    n=4, `max_parallel=4`, so all four draws are in flight together, and the runner
+    sleeps `0.05 * (4 - draw_index)` — submission draw 0 sleeps 0.20 s and draw 3
+    0.05 s, so draw 3 is home first. Submission draw 0 answers failing (objective
+    0.0) and draws 1..3 answer passing (1.0), which makes the two readings differ:
+    the record's `draw_zero_objective` is 0.0 for the numbered draw and 1.0 for the
+    first-completed one. Before the fix this test read 1.0.
+
+    The order-independent figures are asserted unchanged in the same breath —
+    3 passes, pass@1 0.750, pass@4 1.000, `reliable` — because the fix moves exactly
+    one field, and a test that let them drift would not say which one moved.
+    """
+    completed: list[int] = []
+    lock = threading.Lock()
+    task = {"id": "bench_draw_zero_order", "prompt": "z"}
+
+    def reverse_completing_runner(task_, draw_index):
+        time.sleep(0.05 * (4 - draw_index))
+        with lock:
+            completed.append(draw_index)
+        return {"status": "success",
+                "final_text": NEVER if draw_index == 0 else ALWAYS,
+                "prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}
+
+    coverage = asyncio.run(cov.run_coverage(
+        [task], n=4, run_trial=reverse_completing_runner, score=_fake_score,
+        context=_context([task], n=4), max_parallel=4, round_id="R_TEST"))
+
+    assert len(completed) == 4, "all four draws ran"
+    assert completed[0] != 0, (
+        f"positive control: completion order must not already be submission order; "
+        f"it came back {completed}, so a record reading the first entry would be "
+        "reading the same draw as the numbered one and this test would pin nothing")
+
+    record = coverage["records"][0]
+    assert record["draw_zero_objective"] == 0.0, \
+        "the record's draw 0 is the draw the arm numbered 0, which answered failing"
+    assert record["passes"] == 3
+    assert record["pass_at_1"] == 0.75
+    assert record["pass_at_n"] == 1.0
+    assert record["verdict"] == "reliable"
+
+
+def test_the_collapse_reads_the_draw_numbered_zero_whatever_order_the_draws_arrive():
+    """`task_record` finds draw 0 by index, and an unindexed list keeps its first entry.
+
+    The four draws arrive 3, 1, 0, 2, and the numbered draw 0 scores 0.25 — a
+    partial, so it is neither the pass a first-entry read would have returned (1.0)
+    nor a zero, and no other single figure in the record equals it.
+
+    The second half is what keeps the hand-built records honest: every record built
+    by hand in this file, in `tests/test_autoresearch_round_report.py`'s
+    `_coverage_artifact` and in `tests/test_autoresearch_promotion.py`'s
+    `_coverage_arm_over_the_live_corpus` — those two at their `cov.draw_record`
+    call sites — carries what it lists, in the order it lists it, so a list with no
+    index at all still reports its first entry and none of those tests' numbers move.
+    """
+    def indexed(draw_index, score):
+        return cov.draw_record(task_id="bench_collapse", objective_score=score,
+                               status="success", trace={}, draw_index=draw_index)
+
+    out_of_order = [indexed(3, 1.0), indexed(1, 1.0), indexed(0, 0.25), indexed(2, 1.0)]
+    record = cov.task_record(out_of_order, n_requested=4, context=_context(n=4))
+    assert record["draw_zero_objective"] == 0.25, \
+        "draw 0 is the third entry here, and 0.25 is its own score"
+    assert record["passes"] == 3 and record["pass_at_1"] == 0.75, \
+        "the count-side figures never consult draw order, so they are unchanged"
+
+    unindexed = [cov.draw_record(task_id="bench_collapse", objective_score=score,
+                                 status="success", trace={})
+                 for score in (1.0, 0.0, 0.0, 0.0)]
+    assert unindexed[0]["draw_index"] is None, "the shape a hand-built record has"
+    assert cov.task_record(unindexed, n_requested=4,
+                           context=_context(n=4))["draw_zero_objective"] == 1.0, \
+        "with no numbered draw to find, the first entry is the caller's own claim"
