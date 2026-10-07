@@ -34,6 +34,29 @@ git worktree remove --force ~/lloyd-work/check-$$   # after
 `LLOYD_ALLOW_LIVE_TREE_TESTS=1` exists for a human who means it. A round must
 never set it.
 
+### 2026-10-07: the guard stays absolute — `live_vault` gets no in-tree path (#2189, owed to #1537)
+
+`live_vault` marks the tests that read the live vault, and the gate deselects them
+(`TESTS_MARK_EXPR`, further down). The question that kept coming back was whether a
+run that genuinely needs one of those tests should be handed a way through the guard
+that keeps it running inside `~/lloyd`. The ruling, settled on #2189's owed entry:
+**no such in-tree path exists, and none is planned.** `_refuse_the_production_tree`
+runs at conftest import and is
+not conditional on the selection — naming one file, or passing `-m live_vault`,
+buys nothing, because a single file is the same fixtures with the same teardowns.
+`LLOYD_ALLOW_LIVE_TREE_TESTS` remains a human-only opt-in and nothing in this tree
+sets it: the two code sites are `tests/conftest.py`, which reads it, and
+`tests/test_live_tree_isolation.py`, which clears it before asserting the refusal.
+
+What the runs do instead is the route above. **Every scheduled run that reads the
+vault reaches the suite through a detached on-disk worktree under `~/lloyd-work/`**
+— the same shape the gate uses to ask "is this failure pre-existing?"
+(`scripts/automod/gate.py::_failures_at_base`). Measured on the three nightly
+`live_vault` runs after that routing landed, 2026-10-05, -06 and -07: each returned
+a pytest summary line and exit 1, 1 and 0, never the guard's exit 4, and each tore
+its checkout down clean. So the in-tree alternative would buy no measured gain, and
+what it would cost is the 2026-09-22 exposure this section exists to close.
+
 ## 2026-09-29: the gate deleted the tree, and the cause was a full `/tmp`
 
 The production tree went a second time, at 15:01:42 PDT, seventeen seconds into
