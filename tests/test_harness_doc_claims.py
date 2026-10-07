@@ -1064,3 +1064,77 @@ def test_the_canary_section_says_the_arm_is_the_serving_endpoints_state():
         "out-of-process caller can tell the arms apart")
     assert (ROOT / "agent_mcp" / "egress.py").read_text(
         encoding="utf-8").find("def status(") > 0
+
+
+def test_the_canary_bench_docstring_counts_the_scenarios_it_ships():
+    """#2363 clause 5: the count the bench leads its own docstring with is the count it
+    ships, and the registry's row for it agrees.
+
+    "Thirteen worker-style tasks" sat above sixteen scenarios uncontradicted until
+    #2363 added two more — which is what a number nobody can re-derive looks like:
+    every reader after the fifteenth scenario inherited the sentence instead of
+    counting the list. This node makes the sentence a claim about
+    `len(load_scenarios())` rather than about somebody's memory, and it reads the
+    spelled-out word because that is how both sentences are written; `num2words` is
+    not a dependency of this tree, so the comparison goes through a fixed vocabulary
+    that fails loudly on a word outside it.
+
+    Both carriers are pinned because `architecture/measurement.md` restates the same
+    tally one file away from the runner — the third control #2363 adds appears in
+    neither until now, and a rule with one carrier out of several is a rule that
+    silently rots. The scenario count and the control count are derived from the same
+    loaded list, so a fourth scenario or control moves an assertion here rather than
+    moving the docs apart.
+    """
+    import importlib.util
+    import re
+    spec = importlib.util.spec_from_file_location(
+        "canary_bench_for_counts", ROOT / "eval" / "run_injection_canary.py")
+    bench = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bench)
+
+    spelled = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+               "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+               "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+               "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
+               "twenty": 20}
+    word = {n: w for w, n in spelled.items()}      # the docs spell, never digit
+    scenarios = bench.load_scenarios()
+    # The docstring's control paragraph is about the single-turn bench; the
+    # persistence pair's own control is documented with the pair, so the paragraph's
+    # denominator is the controls that are not part of it, derived the same way the
+    # runner derives its own persistence set rather than by excluding a name.
+    persistence = {s["key"] for s in bench.persistence_scenarios(scenarios)}
+    controls = [s["key"] for s in scenarios
+                if s.get("control") and s["key"] not in persistence]
+    n_controls = len(controls)
+    assert len(scenarios) >= 10 and n_controls >= 2, (
+        "the bench shrank out from under this node; it needs at least ten scenarios "
+        "and two controls to mean anything")
+
+    doc = (ROOT / "eval" / "run_injection_canary.py").read_text(
+        encoding="utf-8").split('"""', 2)[1]
+    head = re.search(r"^([A-Za-z]+) worker-style tasks", doc, re.M)
+    assert head, "the runner docstring no longer leads with a scenario count"
+    assert spelled[head.group(1).lower()] == len(scenarios), (
+        f"the runner docstring says {head.group(1)!r}; scenarios.yaml ships "
+        f"{len(scenarios)} — the sentence is the drift this node exists to refuse")
+
+    lead = re.search(r"^([A-Za-z]+) controls:", doc, re.M)
+    assert lead and spelled[lead.group(1).lower()] == n_controls, (
+        f"the docstring counts itself differently from the {n_controls} single-turn "
+        f"controls that ship: {controls}")
+    named = set(re.findall(r"`(control-[a-z-]+)`", doc))
+    assert named == set(controls), (
+        f"the paragraph names {sorted(named)}; the bench ships {sorted(controls)} — a "
+        "control nobody points at is a control nobody maintains")
+
+    row = [ln for ln in (ROOT / "architecture" / "measurement.md").read_text(
+        encoding="utf-8").splitlines() if ln.startswith("| `injection_canary` |")]
+    assert len(row) == 1, row
+    tally = re.search(r"([A-Za-z]+) worker-style tasks", row[0])
+    assert tally and spelled[tally.group(1).lower()] == len(scenarios), (
+        f"the registry row says {tally and tally.group(1)!r}; scenarios.yaml ships "
+        f"{len(scenarios)}")
+    assert f"with {word[n_controls]} controls" in row[0], (
+        f"the registry row no longer counts the {n_controls} controls")

@@ -771,3 +771,62 @@ def test_the_state_route_publishes_its_own_egress_enforcement_state(monkeypatch)
     assert egress.enforce_on() is True
     payload = json.loads(asyncio.run(M.state(None)).body)
     assert payload["egress"]["enforce"] is True, payload["egress"]
+
+
+def test_the_shipped_guard_allows_the_host_the_canary_bench_books_as_an_escape(db,
+                                                                              monkeypatch):
+    """#2363 clause 4: the deliberate divergence, held in one node.
+
+    One call — an `http_search` carrying the canary the shipped bench scenario plants —
+    gets two true answers from two components that are not answering the same question.
+    The bench books it as an escape and names a destination (`egress_destination` on the
+    `QUERY_TEXT_LANES` half #2192 ruled); the guard, with `enforce` on and the seed
+    #2123 shipped, allows it and records `allow-listed`, because the only thing it
+    judges is whether this host may be reached, and `duckduckgo.com` is on the list.
+
+    Both halves are asserted here because either one alone rots quietly. Drop the query
+    rule and the bench starts calling the escape a benign echo — the verdict #2192 says
+    it may never hand out — and no existing node in this file would notice, because
+    nothing here had ever read `DECISION_ALLOW` out of `guard` (`git grep DECISION_ALLOW
+    -- tests/` was empty before this node). Drop the seed and the guard's half flips to
+    a denial while the bench's stays put, and the pair is no longer a divergence but two
+    copies of one answer. The row's `reason` is read from the telemetry table rather than
+    from the returned decision, because `Decision.reason` is empty on an allow: the tag
+    is what the table carries.
+
+    `egress_destination` is imported from the bench rather than restated here: a copy of
+    the rule in this file would keep passing after the scorer changed, which is the exact
+    failure the two-process seams at the top of this file exist to prevent.
+    """
+    import sqlite3
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "eval"))
+    import run_injection_canary as bench
+
+    canary = next(s["canary"] for s in bench.load_scenarios()
+                  if s["key"] == "search-query-exfil")
+    shipped = egress.allow_entries()          # config.yaml's own seed, through the guard's accessor
+    assert any(str(e.get("host") or "") in ("duckduckgo.com", egress.SEARCH_BACKEND_HOST)
+               and not e.get("scope") and not e.get("expires_at") for e in shipped), \
+        "the shipped seed no longer carries a live unscoped search entry: the guard "  \
+        "half of this pair would be a denial, not a divergence"
+
+    # Bench side: the free text left the machine, so there is a destination.
+    assert bench.egress_destination(
+        "http_search", f'{{"query": "apply the fix tagged {canary}"}}', shipped) \
+        == egress.SEARCH_BACKEND_HOST
+
+    # Guard side, same host, same seed, enforcement on: allowed, and the table says so.
+    policy_on(monkeypatch, allow=shipped, enforce=True)
+    verdict = egress.guard("http_search", host=egress.SEARCH_BACKEND_HOST)
+    assert verdict.allowed is True and verdict.decision == egress.DECISION_ALLOW, \
+        verdict.reason
+
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT tool, decision, reason FROM egress_events").fetchall()
+    conn.close()
+    assert [(r["tool"], r["decision"], r["reason"]) for r in row] == [
+        ("http_search", egress.DECISION_ALLOW, "allow-listed")], row
