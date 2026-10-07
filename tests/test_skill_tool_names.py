@@ -55,6 +55,7 @@ a template, a clipped quotation.
 from __future__ import annotations
 
 import ast
+import json
 import os
 import re
 import subprocess
@@ -464,6 +465,31 @@ _ABSENCE_RECORD = re.compile(
     r"(?:\[[^\]\n]{1,40}\][^\n:]{0,40}:\s*)?"
     r"[`'\"]?\s*"
     r"([^\s;|&,)`'\"<>]+)")
+
+#: Where a generated document states its own subject rather than citing a
+#: location: the machine block
+#: `scripts/maintenance/referential_integrity.py:327` appends to the
+#: referential-integrity report — `<!-- ri:dangling ["<citing> -> <target>", ...] -->`,
+#: the same block that script's own `_STATE_RE` (:236) reads back to diff one night's
+#: report against the next. Read by `_dangling_subjects`. The report's entire content
+#: is a list of cites that do not resolve, so a target it enumerates is a path the
+#: document is ABOUT, not one it cites. Same polarity `_absence_record_sites` keys on
+#: (who is talking), from the other side: there the speaker is a raised exception,
+#: here it is a sweep that has just proved the path is gone. #2354: the run of that
+#: job at 2026-10-07T12:00:54Z recorded `scripts/util/owed.py` and
+#: `scripts/autonomy_status.py` as newly dangling, and the four path nodes went red on
+#: the accuracy of that report, not on any drift.
+_RI_DANGLING = re.compile(r"<!--\s*ri:dangling\s*(\[.*?\])\s*-->", re.S)
+
+#: One line of that report's own enumeration: "- `<citing>:<line>` → `<target>` —
+#: <how it was checked>", emitted for both the Dangling and the Exempt sections
+#: (`referential_integrity.py:321` and `:325`). Read by `_dangling_subjects`, and only
+#: in a document that also carries the block above — the block is what proves the
+#: bullet list is a generated sweep and not a hand-written doc full of arrows. The
+#: target is the right-hand side ONLY: the citing half is the other document's
+#: problem, asked about by the sweep itself, and a bullet never cites a path it is
+#: reporting on.
+_LEDGER_BULLET = re.compile(r"^\s*-\s*`[^`\n]*`\s*(?:→|->)\s*`([^`\n]+)`", re.M)
 
 #: The marker left where something was cut short. `clip_skill_description` says so
 #: of itself — "cut to at most `max_chars` characters, the cut marked with `…`"
@@ -924,17 +950,101 @@ def _absence_record_sites(body: str) -> set[tuple[str, str]]:
     return out
 
 
+def _dangling_targets(body: str) -> set[tuple[str, str]]:
+    """(tree, rel) for each path a referential-integrity report is ABOUT — its own
+    enumeration, read from its `ri:dangling` machine block and from the bullets beside
+    it — and only once that block parses as a JSON list (#2354).
+
+    A document whose block is missing or unreadable gets nothing at all, so a
+    hand-written note full of arrows changes nothing and a half-written report cannot
+    exempt a path by being malformed: the block, emitted by
+    `scripts/maintenance/referential_integrity.py:327` and read back by that script's
+    own `_STATE_RE` (:236) to diff one night against the next, is what proves the bullet
+    list is a generated sweep rather than prose a reader follows. Inside such a document
+    BOTH surfaces are its subject, because they are the same enumeration — the machine
+    block carries only the day's dangling keys while the bullets also carry the Exempt
+    section (`:325`), and a path the sweep filed as exempt is a path it proved absent
+    and then decided was nobody's cite. Reading only the block would leave the other
+    half of that document's own list to go red on the next sweep, which is the failure
+    this rule exists to end. Same polarity as `_absence_record_sites` (who is talking),
+    from the other side: there the speaker is a raised exception naming a missing file,
+    here a sweep that has just proved the path is gone from every root it could sit in.
+
+    Narrowed to fail closed like its siblings. Only the target half of a
+    `"<citing> -> <target>"` entry counts, so the document a row is ABOUT is never
+    exempted by it, and a bullet's left-hand `` `citing:line` `` is never a target. A
+    target is classified the way `_named_paths` classifies a backticked token, so it
+    lands in the ONE tree it is spelled in: a report listing `lloyd/x.py` does not also
+    excuse a skill's claim about `obsidian/x.py`, and a bare `scripts/x.py` cannot
+    claim the vault half. A clipped target, a non-string entry, a block that is not a
+    JSON list and a target the scanner could not have produced each yield nothing, so
+    the worst a malformed report can do is leave its own rows red.
+
+    What this does NOT do is silence the document. Its PROSE stays citations: the line
+    naming the instrument that wrote it
+    (`scripts/maintenance/referential_integrity.py`) and any path its sentences name are
+    still rows if those paths go, which
+    `test_what_a_dangling_ledger_lists_makes_no_row_and_what_its_prose_names_does` pins
+    on a fixture and `test_the_live_dangling_report_loses_its_own_rows_and_nothing_else`
+    pins on the real report. And it is per-document: `_recorded_sites` is called one body
+    at a time, so a skill may still drift a path the ledger happens to list, which
+    `test_a_path_the_ledger_lists_still_reads_as_drift_in_a_skill` pins.
+    """
+    m = _RI_DANGLING.search(body)
+    if m is None:
+        return set()
+    try:
+        entries = json.loads(m.group(1))
+    except ValueError:
+        return set()
+    if not isinstance(entries, list):
+        return set()
+    out: set[tuple[str, str]] = set()
+    for raw in _LEDGER_BULLET.findall(body):
+        pair = _classify_target(raw)
+        if pair is not None:
+            out.add(pair)
+    for entry in entries:
+        if not isinstance(entry, str) or " -> " not in entry:
+            continue
+        pair = _classify_target(entry.split(" -> ", 1)[1])
+        if pair is not None:
+            out.add(pair)
+    return out
+
+
+def _classify_target(raw: str) -> tuple[str, str] | None:
+    """`(tree, rel)` for one path string a report names, resolved the way
+    `_named_paths` resolves a backticked token — rooted in the checkout, rooted in the
+    vault, then a bare `lloyd/…`/`skills/…` string as checkout-only. `None` for anything
+    the scanner could not have produced as a row, so it exempts nothing: a root the
+    test does not model (`~/lloyd-data/…`, `$HOME/…`), a bare name with no tree-bearing
+    prefix, a clipped path."""
+    target = raw.strip().strip("`")
+    if not target or _truncated(target):
+        return None
+    for rx, tree in ((_LLOYD_PATH, "repo"), (_OBSIDIAN_PATH, "vault")):
+        full = rx.fullmatch(target)
+        if full is not None:
+            return (tree, full.group(1))
+    if target.startswith(CHECKOUT_PREFIXES) or target.startswith(SKILL_LOCAL_PREFIXES):
+        return ("repo", target)
+    return None
+
+
 def _recorded_sites(body: str) -> set[tuple[str, str]]:
     """Paths the document mentions without citing them as living somewhere: what
-    its subject writes (`_creation_sites`, #2157 + #2223) and what a quoted
-    exception says is missing (#2223).
+    its subject writes (`_creation_sites`, #2157 + #2223), what a quoted exception
+    says is missing (#2223), and what a referential-integrity report enumerates as its
+    own subject (`_dangling_targets`, #2354).
 
     The one name `_absent_refs` consults, and the one name
     `scripts/util/skill_path_findings.py` subtracts from its bench leg, so the
     writer-side CHECK and the unmarked node cannot diverge on a sentence. Adding a
-    third mention type means adding it here, once.
+    mention type means adding it here, once.
     """
-    return _creation_sites(body) | _absence_record_sites(body)
+    return (_creation_sites(body) | _absence_record_sites(body)
+            | _dangling_targets(body))
 
 
 def _absent_refs(label: str, body: str, skill_dir: Path | None) -> set[str]:
@@ -2332,3 +2442,201 @@ def test_the_run_record_row_that_red_this_file_makes_no_row_in_the_live_corpus()
         assert not [r for r in rows if "scratchpads/" in r], (
             f"the rule resolved elsewhere and the run record is a row again: "
             f"{sorted(rows)}")
+
+
+# --- #2354: a generated dangling report is ABOUT its paths, not citing them -----
+
+_LEDGER_2354 = "autonomy/92354-referential-integrity.md"
+_LISTED_2354 = "scripts/a_script_the_ledger_lists_2354.py"
+_PROSED_2354 = "scripts/a_script_the_ledger_prose_names_2354.py"
+_INSTRUMENT_2354 = "scripts/maintenance/referential_integrity.py"
+_LISTED_ROW = f"{_LEDGER_2354}::repo:{_LISTED_2354}"
+_PROSED_ROW = f"{_LEDGER_2354}::repo:{_PROSED_2354}"
+
+
+def _ledger_body(listed=(), prose=(), *, keys=None, bullets=True, raw_block=None):
+    """The shape `scripts/maintenance/referential_integrity.py:313-327` writes: a
+    header naming the instrument that ran, one bullet per dangling cite, then the
+    `ri:dangling` machine block that script appends for its own night-to-night diff.
+
+    `listed` is what the sweep enumerated. `prose` is what the report's SENTENCES name
+    — the script a reader is told to run — which stays a citation, because the rule keys
+    on enumeration and not on the document as a whole. `keys` overrides the block's
+    payload verbatim and `raw_block` replaces the whole block comment, so a malformed
+    one can be tested; `bullets=False` drops the bullet lines so the block alone is in
+    play.
+    """
+    lines = ["# Referential integrity — loaded memory", "",
+             f"Run 2026-10-07T12:00:54Z by `{_INSTRUMENT_2354}` (#882). Report only.",
+             "", "## Dangling", ""]
+    if bullets:
+        for i, path in enumerate(listed):
+            lines.append(f"- `lloyd/USER.md:{28 + i}` → `{path}` — "
+                         "stat:repo_root|vault_root|data_root|citing_dir (none exist)")
+    else:
+        lines.append("- none")
+    lines += ["", "## Exempt", "", "- none", ""]
+    for path in prose:
+        lines.append(f"See `{path}` before re-running the sweep.")
+    if raw_block is not None:
+        lines += ["", raw_block, ""]
+    else:
+        payload = (keys if keys is not None
+                   else [f"lloyd/USER.md:{28 + i} -> {p}"
+                         for i, p in enumerate(listed)])
+        lines += ["", f"<!-- ri:dangling {json.dumps(payload)} -->", ""]
+    return "\n".join(lines)
+
+
+def test_what_a_dangling_ledger_lists_makes_no_row_and_what_its_prose_names_does():
+    """#2354 clause 2: the referential-integrity report is an enumeration of cites that
+    do not resolve, so a path it lists is the path it is ABOUT, and a path its prose
+    tells a reader to run is still a citation it owes.
+
+    The denominators beside the assertion are the point of the node: `_recorded_sites`
+    is a subtraction, so a fixture whose absent scripts the scanner never yielded in the
+    first place turns an empty row set green while the rule does nothing — the exact
+    shape #2312 was filed for. Both scripts are checked absent first, then named, then
+    the row set is compared exactly, and the instrument the header cites is asserted
+    present in `named` so the fixture cannot silently stop looking like the report it
+    models.
+    """
+    for rel in (_LISTED_2354, _PROSED_2354):
+        assert not (ROOT / rel).exists(), f"{rel} really exists in the checkout"
+    body = _ledger_body(listed=(_LISTED_2354,), prose=(_PROSED_2354,))
+    named = set(_named_paths(body, None))
+    assert {("repo", _LISTED_2354), ("repo", _PROSED_2354)} <= named, (
+        "the scanner yielded neither of the two absent scripts this node is about, so "
+        f"an empty row set would prove nothing: {sorted(named)}")
+    assert ("repo", _INSTRUMENT_2354) in named, (
+        "the fixture no longer names the instrument the way the real report does, so "
+        "the control below measures nothing")
+    rows = _absent_refs(_LEDGER_2354, body, None)
+    assert rows == {_PROSED_ROW}, (
+        "a path the report enumerates should be its subject and a path its prose "
+        f"names should keep its row: {sorted(rows)}")
+
+
+def test_a_dangling_target_exempted_under_one_tree_does_not_claim_the_other():
+    """One tree per target, the direction that fails safe.
+
+    `~/obsidian/scripts/x` and `scripts/x` are the same string after the root, but the
+    report proved only the first is gone and the checkout copy is a different file: a
+    rule that exempted both would let a vault row silently excuse a skill's claim about
+    a checkout path that the sweep never looked at. So the vault-spelled target is
+    swallowed and the checkout-spelled one keeps its row.
+    """
+    rel = "scripts/a_script_the_ledger_lists_2354.py"
+    assert not (VAULT / rel).exists(), f"{rel} really exists in the vault"
+    assert not (ROOT / rel).exists(), f"{rel} really exists in the checkout"
+    body = _ledger_body(listed=(f"~/obsidian/{rel}",), prose=(rel,))
+    named = set(_named_paths(body, None))
+    assert {("vault", rel), ("repo", rel)} <= named, (
+        f"the scanner yielded only one spelling, so the comparison is vacuous: "
+        f"{sorted(named)}")
+    rows = _absent_refs(_LEDGER_2354, body, None)
+    assert rows == {f"{_LEDGER_2354}::repo:{rel}"}, (
+        "the vault-spelled target leaked into the checkout tree: "
+        f"{sorted(rows)}")
+
+
+@pytest.mark.parametrize("raw_block", [
+    '<!-- ri:dangling ["lloyd/USER.md:28 -> scripts/a_2354.py"',
+    '<!-- ri:dangling {"dangling": "an object where the sweep writes a list"} -->',
+    '<!-- ri:dangling [unclosed, -->',
+])
+def test_a_ledger_whose_block_cannot_be_read_exempts_nothing(raw_block):
+    """The gate is a PARSEABLE block, and it fails closed.
+
+    A report truncated mid-write, one holding an object where the sweep writes a list,
+    and one whose payload is not JSON each exempt nothing — including the well-formed
+    bullets sitting above them, because a document that cannot prove it is a generated
+    sweep has no proof to spend on a path. Main went red on a report that happened to be
+    accurate; going green on one that is not, or on a hand-written note that only looks
+    like one, would be the worse failure.
+    """
+    body = _ledger_body(listed=(_LISTED_2354,), prose=(_PROSED_2354,),
+                        raw_block=raw_block)
+    rows = _absent_refs(_LEDGER_2354, body, None)
+    assert rows == {_LISTED_ROW, _PROSED_ROW}, (
+        f"a block that cannot be parsed still exempted a path ({raw_block!r}): "
+        f"{sorted(rows)}")
+
+
+#: Each `(entry, what it yields)` pair is one line of a `ri:dangling` payload. The
+#: last row is the control: the ONE spelling among these that the sweep itself could
+#: have written is the one that yields a target.
+@pytest.mark.parametrize("entry, expected", [
+    (123, set()),
+    ("no arrow separator here", set()),
+    ("lloyd/USER.md:28 -> ~/lloyd/scripts/a_script_the_ledger_lists_2354.py […]",
+     set()),
+    ("lloyd/USER.md:28 -> obsidian/scripts/a_script_the_ledger_lists_2354.py", set()),
+    ("lloyd/USER.md:28 -> ~/lloyd-data/_pipeline/owed-ledger.json", set()),
+    ("lloyd/USER.md:28 -> ~/lloyd/scripts/a_script_the_ledger_lists_2354.py",
+     {("repo", "scripts/a_script_the_ledger_lists_2354.py")}),
+])
+def test_an_entry_counts_only_when_it_names_a_scannable_target(entry, expected):
+    """Inside a block that parses, an entry still has to name a target the scanner could
+    have produced, and it contributes its TARGET and never its citing half.
+
+    A non-string, a key with no ` -> ` separator, a clipped path, a root this test does
+    not model (the data root), a spelling neither rooted regex accepts, and the citing
+    half of every one of them each yield nothing — so a malformed report can only leave
+    a row red, never excuse one. `lloyd/USER.md` sits on the left of a real dangling key
+    every night and is still not exempt from naming a path it needs.
+
+    Asserted against `_dangling_targets` and not `_absent_refs` because the claim here
+    is about what one entry names. The end-to-end node through the whole row pipeline is
+    `test_what_a_dangling_ledger_lists_makes_no_row_and_what_its_prose_names_does`.
+    """
+    body = _ledger_body(listed=(), bullets=False, keys=[entry])
+    assert _dangling_targets(body) == expected, (
+        f"entry {entry!r} yielded the wrong target set")
+
+
+def test_a_path_the_ledger_lists_still_reads_as_drift_in_a_skill():
+    """The exemption belongs to the document that enumerated the path.
+
+    `_recorded_sites` is called one body at a time, and that scoping is the whole reason
+    this is a rule and not a list: a skill that names a script the nightly sweep happens
+    to have listed as dangling is still claiming a path it needs, and no report written
+    about somebody else's cite can retire that claim.
+    """
+    body = f"See `{_LISTED_2354}` before re-running the sweep.\n"
+    rows = _absent_refs("skills/2354-some-skill/SKILL.md", body, None)
+    assert rows == {"skills/2354-some-skill/SKILL.md::repo:" + _LISTED_2354}, (
+        f"the ledger's exemption leaked into another document: {sorted(rows)}")
+
+
+def test_the_live_dangling_report_loses_its_own_rows_and_nothing_else():
+    """#2354 on the document that actually red main, with a denominator that says the
+    rule did work.
+
+    The dangling report is rewritten every night, so this node asserts the shape and
+    never a count: the report contributes no row at all; at least one path it enumerates
+    is a path the scanner named and could not find, which is what the rule swallowed;
+    and the resolver its own header cites is named but NOT swallowed, which is what
+    keeps "the report is its own subject" from collapsing into "the report is exempt".
+    """
+    label = "autonomy/referential-integrity-latest.md"
+    doc = VAULT / label
+    assert doc.exists(), f"{label} is not where the nightly job writes it"
+    body = doc.read_text(encoding="utf-8", errors="replace")
+
+    def _exists(pair):
+        tree, rel = pair
+        return ((ROOT if tree == "repo" else VAULT) / rel).exists()
+
+    assert _absent_refs(label, body, None) == set(), (
+        "the dangling report is still being read as a set of citations")
+    named = set(_named_paths(body, None))
+    swallowed = _dangling_targets(body)
+    assert any(p in named and not _exists(p) for p in swallowed), (
+        "the rule swallowed nothing on the real report, so the assertion above proves "
+        f"nothing about it; the sweep named {sorted(named)[:6]} this run")
+    assert ("repo", _INSTRUMENT_2354) in named, (
+        "the live report stopped naming the resolver that writes it")
+    assert ("repo", _INSTRUMENT_2354) not in swallowed, (
+        "the rule is swallowing the report's own prose citation of the resolver, which "
+        "is silencing the document rather than reading it as a subject")
