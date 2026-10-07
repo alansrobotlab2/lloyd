@@ -1140,6 +1140,57 @@ def test_v2_label_audit_is_derived_from_v1s_and_cannot_claim_gold():
     assert M.require_label_audit(ms) is None
 
 
+def test_v2s_audit_file_is_a_v2_document_and_not_the_v1_copy():
+    """#2353 clause 4. `v2/AUDIT.md` was a byte-identical copy of `v1/AUDIT.md`
+    (same md5, first line naming v1, its table describing 35 of v1's 333 items),
+    which made the only audit document inside v2 a document about a DIFFERENT set.
+    It is a v2 document now: it names v2 in its first line, records both legs'
+    mechanical counts over their own denominators (264 dev, 66 holdout) with the
+    command and date that produced them, and states that v2's 264 per-item
+    verdicts have not been judged — the sentence the v1 copy could not say."""
+    p = M.SET_ROOT / "v2" / "AUDIT.md"
+    v2_audit = p.read_text(encoding="utf-8")
+    v1_audit = (M.SET_ROOT / "v1" / "AUDIT.md").read_text(encoding="utf-8")
+
+    assert v2_audit != v1_audit, "v2/AUDIT.md is still the byte-identical v1 copy"
+    first = v2_audit.splitlines()[0]
+    assert "v2" in first and "v1" not in first, first
+
+    # Both legs' mechanical counts, over the legs' own denominators — the figures
+    # `eval/label_audit.py --set v2 --holdout` prints for this frozen set.
+    for expected in ("70 / 264", "0 / 264", "26 / 264", "19 / 66", "0 / 66", "4 / 66"):
+        assert expected in v2_audit, f"{expected} missing from v2/AUDIT.md"
+    # With the command and the date, so the file can be re-checked and re-dated.
+    assert "eval/label_audit.py --set v2" in v2_audit, "no command to reproduce it"
+    assert "2026-10-07" in v2_audit, "no date beside the counts"
+
+    # And the half that is NOT done has to be said, not implied: a reader who
+    # mistakes 330 counted shapes for 330 audited labels is what this clause is
+    # against. Checked on whitespace-collapsed text, because markdown wraps a
+    # sentence across lines and the sentence is what has to be there.
+    flat = " ".join(v2_audit.split()).lower()
+    assert "verdicts for v2's 264 dev items have not been made" in flat, flat[:400]
+    assert "judged verdicts: none of the 264" in flat, flat[:400]
+
+
+def test_a_mechanical_pass_leaves_the_audited_record_and_the_frozen_set_alone(capsys):
+    """#2353 clause 5: counting gold SHAPES earns no coverage, so the mechanical
+    pass must not move the audited record. `verify` on the frozen set prints what
+    it printed before the pass existed — set_sha 16ec1ae14c046c61, label_status
+    pilot — and `label_quality` still hands the gate v1's 32 audited items at
+    coverage 0.097 with gold_eligible False. The pass adds counts; the 10%
+    pilot/gold ceiling still waits on a person judging the 264."""
+    rc = M.main(["verify", "--set", str(M.SET_ROOT / "v2")])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "set_sha=16ec1ae14c046c61" in out, out
+    assert "label_status=pilot" in out, out
+
+    lq = M.label_quality(M.load_set(M.SET_ROOT / "v2", view="all"))
+    assert (lq["audited"], lq["defective"], lq["clean"], lq["brittle"]) == (32, 0, 24, 8)
+    assert lq["coverage"] == 0.097 and lq["gold_eligible"] is False
+
+
 def test_the_recall_retrieval_report_also_carries_label_status_beside_set_sha(tmp_path,
                                                                               monkeypatch):
     """Clause 2's third producer. #1485's retrieval half runs with no model and no
