@@ -852,6 +852,122 @@ def test_the_finalizer_budget_stays_8192_on_both_sides_of_the_reader():
         "config.yaml no longer reaches the option the loop reads")
 
 
+# ── #2370: a diverged tick is drawn twice, and the row says which draw failed ─
+#
+# Only the HTTP leg is faked below: the tick runs the real `_maybe_finalize`
+# against the real `STEWARD_SCHEMA`, so the error the steward publishes is the
+# one the loop produced, attempt count included. `_fake_engine` cannot serve
+# these — it returns the SAME response to every POST, and the whole question is
+# how many posts a tick made.
+
+def _drive_steward_tick(board, monkeypatch, responses):
+    """One board-steward tick over a queued engine; returns the row and the bodies.
+
+    `run_prompt_in_session` is replaced by a call into the REAL
+    `loop._maybe_finalize`, which is where the re-sample lives: faking it with a
+    canned dict would let this file assert an `attempts=2` string no code wrote.
+    The returned list is every finalizer request body in order, so a count of
+    re-samples is a count of requests on the wire.
+    """
+    from app.harness import finalizer as F
+    from app.harness import loop as L
+    from app.harness.options import RunOptions
+    from workers.sources import _common as C
+
+    posted: list[dict] = []
+    left = list(responses)
+
+    class _Cli:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            posted.append(json)
+            assert left, "the tick issued more finalizer requests than were queued"
+            return left.pop(0)
+
+    monkeypatch.setattr(F.httpx, "AsyncClient", _Cli)
+
+    async def turn(prompt, **kw):
+        parsed, error = await L._maybe_finalize(
+            options=RunOptions(model="primary", final_schema=W.STEWARD_SCHEMA,
+                               finalizer_max_tokens=8192),
+            stop_reason="stop",
+            chat_messages=[{"role": "user", "content": prompt}],
+            tools=None, total_usage={})
+        return {"text": "", "session_id": "s", "stop_reason": "stop",
+                "num_turns": 1, "structured": parsed, "structured_error": error}
+
+    monkeypatch.setattr(C, "run_prompt_in_session", turn)
+    _ten_item_board(board)
+    return asyncio.run(W.execute(SimpleNamespace(payload={"apply": False}))), posted
+
+
+_DIVERGED_TICK = _Resp(_CAPTURED_TRAILING_WHITESPACE, "length", 8192)
+
+
+def test_a_tick_that_fails_after_the_re_sample_publishes_attempts_2(board, monkeypatch):
+    """Clause 5. Both draws ended at the cap inside a capped grammar, so the row
+    has to say the tick was drawn twice AND keep saying the token budget is not
+    the reason — the phrase #1706 put there is what tells the next reader not to
+    raise `harness.finalizer.max_tokens`.
+
+    `attempts=2` is asserted inside the first 500 characters on purpose: that is
+    the `runs.summary` column, and the message ends in 200 characters of
+    captured completion, so a marker after them is the first thing a real row
+    drops."""
+    out, posted = _drive_steward_tick(board, monkeypatch, [_DIVERGED_TICK,
+                                                           _DIVERGED_TICK])
+    assert out["status"] == "failed", out
+    assert len(posted) == 2, f"one re-sample expected, {len(posted)} requests made"
+    assert "not a budget" in out["summary"], out["summary"]
+    assert "diverged at 8192 tokens" in out["summary"], out["summary"]
+    assert "attempts=2" in out["summary"][:500], (
+        "the attempt count did not survive the column: " + repr(out["summary"]))
+    assert [b["max_tokens"] for b in posted] == [8192, 8192], (
+        "the re-sample asked for a different budget than the attempt it replaced")
+
+
+def test_a_tick_that_did_not_need_the_re_sample_publishes_no_attempt_count(
+        board, monkeypatch):
+    """Clause 5's other shape, and the exclusion holding end to end: the first
+    draw never left thinking, which is the BUDGET under a capped grammar
+    (#1431), so no re-sample is issued and the row says nothing about
+    attempts — one request, and the advice is still `raise
+    harness.finalizer.max_tokens`."""
+    out, posted = _drive_steward_tick(
+        board, monkeypatch,
+        [_Resp(content=None, finish_reason="length", completion_tokens=8192)])
+    assert out["status"] == "failed", out
+    assert len(posted) == 1, "a budget truncation must not be re-drawn"
+    assert "raise harness.finalizer.max_tokens" in out["summary"], out["summary"]
+    assert "attempts" not in out["summary"], out["summary"]
+
+
+def test_a_tick_the_re_sample_recovers_publishes_no_failure_at_all(board, monkeypatch):
+    """The payoff, at the seam that writes the row. The second draw parses, so
+    the tick succeeds and there is no `no structured answer` row to read: 6 of
+    the 10 divergences of 2026-10-04→10-07 got this recovery on the NEXT
+    scheduled tick, ~15 minutes late and with the watermark un-advanced so the
+    window re-read whole; the re-sample gets it in the same tick, and `moves`
+    and `next_pick` reach the ledger of the run that drew them."""
+    out, posted = _drive_steward_tick(
+        board, monkeypatch,
+        [_DIVERGED_TICK,
+         _Resp(json.dumps({"moves": [], "next_pick": 0, "next_pick_reason": "",
+                           "summary": "nothing to move this pass"}), "stop", 180)])
+    assert len(posted) == 2, out
+    assert out["status"] == "success", out
+    assert "no structured answer" not in out["summary"], out["summary"]
+    assert "attempts" not in out["summary"], out["summary"]
+
+
 # ── #2197 clause 5: the failure counts have committed bytes behind them ──────
 
 #: The extract of the queue store's `runs` rows for board-steward since 2026-10-01,

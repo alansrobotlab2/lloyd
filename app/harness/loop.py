@@ -1363,68 +1363,103 @@ async def _maybe_finalize(
 
     Never raises. A caller asking for structure keeps whatever fallback it
     had; a turn is not worth failing over its transcription.
+
+    **One re-sample on a divergence (#2370).** A completion that runs past a
+    grammar capping every field is the model emitting inter-token whitespace
+    inside one value, not content — the same prefix re-sent drew a legal reply
+    on the next scheduled tick 6 times out of 10 in the board-steward ledger.
+    So a divergence under a bounded schema is drawn once more, over the
+    identical message prefix, the identical `tools` array and the identical
+    `max_tokens`, before it is reported. Only the shape of the failure decides
+    this (`finalizer.should_resample_divergence`), never its frequency: the cap
+    is 2 requests per turn and a second failure is the answer that goes back to
+    the caller, marked with the attempt count so a reader can tell a tick that
+    was re-drawn from one that was not.
     """
-    from app.harness.finalizer import run_finalizer, should_finalize
+    from app.harness.finalizer import (run_finalizer, should_finalize,
+                                       should_resample_divergence)
 
     run, skip_reason = should_finalize(stop_reason, options.final_schema)
     if not run:
         return None, skip_reason
 
-    try:
-        parsed, error, usage = await run_finalizer(
-            base_url=options.base_url,
-            model=options.model,
-            chat_messages=chat_messages,
-            tools=tools,
-            schema=options.final_schema,
-            prompt=options.final_schema_prompt,
-            api_key=options.api_key,
-            max_tokens=options.finalizer_max_tokens,
-            timeout_s=options.finalizer_timeout_s,
-            priority=options.priority,
-            cancel_event=options.cancel_event,
-            session_id=options.session_id,
-            # No extra_body, and no no-thinking default (#1431): on the
-            # primary either spelling rewrites the system message's first
-            # sentence and re-prefills the turn. finalizer.py's docstring.
-        )
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
-        logger.warning("loop: finalizer raised: %s", exc)
-        return None, f"finalizer failed: {type(exc).__name__}: {exc}"
+    async def _attempt() -> tuple[dict | None, str, dict[str, int]]:
+        """One guided-decoding request, and its tokens folded into the turn."""
+        try:
+            parsed, error, usage = await run_finalizer(
+                base_url=options.base_url,
+                model=options.model,
+                chat_messages=chat_messages,
+                tools=tools,
+                schema=options.final_schema,
+                prompt=options.final_schema_prompt,
+                api_key=options.api_key,
+                max_tokens=options.finalizer_max_tokens,
+                timeout_s=options.finalizer_timeout_s,
+                priority=options.priority,
+                cancel_event=options.cancel_event,
+                session_id=options.session_id,
+                # No extra_body, and no no-thinking default (#1431): on the
+                # primary either spelling rewrites the system message's first
+                # sentence and re-prefills the turn. finalizer.py's docstring.
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("loop: finalizer raised: %s", exc)
+            return None, f"finalizer failed: {type(exc).__name__}: {exc}", {}
 
-    # The extra completion's tokens are real tokens; fold them in so usage
-    # accounting does not quietly under-report every worker verdict.
-    #
-    # `input_tokens` deliberately does NOT go into the same accumulator: for
-    # every other consumer in the tree it is the PEAK single prompt (see
-    # _accumulate_iteration_usage), and adding this request's prompt to the peak
-    # would make every number downstream mean something different depending on
-    # whether a finalizer ran. It gets its own key because until now its prompt
-    # was dropped entirely — a turn that asked for three structured verdicts
-    # reported the same prompt cost as one that asked for none, which is exactly
-    # the direction of error that makes a re-prefill look free. #529's replay
-    # needs the sum, and needs it not to lie.
-    for key in ("output_tokens", "total_tokens"):
-        if usage.get(key):
-            total_usage[key] = total_usage.get(key, 0) + usage[key]
-    # Its own key as well as the fold: the ledger records it per verdict so
-    # a budget that is too tight shows up as a number, not as a regex rate.
-    if usage.get("output_tokens"):
-        total_usage["finalizer_output_tokens"] = (
-            total_usage.get("finalizer_output_tokens", 0)
-            + int(usage["output_tokens"]))
-    if usage.get("input_tokens"):
-        total_usage["finalizer_input_tokens"] = (
-            total_usage.get("finalizer_input_tokens", 0)
-            + int(usage["input_tokens"]))
-    # The reasoning share of that output (#1431). A subset of
-    # finalizer_output_tokens, so it is reported beside it, never folded again.
-    if usage.get("reasoning_tokens"):
-        total_usage["finalizer_reasoning_tokens"] = (
-            total_usage.get("finalizer_reasoning_tokens", 0)
-            + int(usage["reasoning_tokens"]))
+        # The extra completion's tokens are real tokens; fold them in so usage
+        # accounting does not quietly under-report every worker verdict. The
+        # re-sample above makes this loop over attempts, so it lives here: a
+        # second divergence that folded only its own draw would under-report
+        # the turn by a full 8192-token completion.
+        #
+        # `input_tokens` deliberately does NOT go into the same accumulator: for
+        # every other consumer in the tree it is the PEAK single prompt (see
+        # _accumulate_iteration_usage), and adding this request's prompt to the peak
+        # would make every number downstream mean something different depending on
+        # whether a finalizer ran. It gets its own key because until now its prompt
+        # was dropped entirely — a turn that asked for three structured verdicts
+        # reported the same prompt cost as one that asked for none, which is exactly
+        # the direction of error that makes a re-prefill look free. #529's replay
+        # needs the sum, and needs it not to lie.
+        for key in ("output_tokens", "total_tokens"):
+            if usage.get(key):
+                total_usage[key] = total_usage.get(key, 0) + usage[key]
+        # Its own key as well as the fold: the ledger records it per verdict so
+        # a budget that is too tight shows up as a number, not as a regex rate.
+        if usage.get("output_tokens"):
+            total_usage["finalizer_output_tokens"] = (
+                total_usage.get("finalizer_output_tokens", 0)
+                + int(usage["output_tokens"]))
+        if usage.get("input_tokens"):
+            total_usage["finalizer_input_tokens"] = (
+                total_usage.get("finalizer_input_tokens", 0)
+                + int(usage["input_tokens"]))
+        # The reasoning share of that output (#1431). A subset of
+        # finalizer_output_tokens, so it is reported beside it, never folded again.
+        if usage.get("reasoning_tokens"):
+            total_usage["finalizer_reasoning_tokens"] = (
+                total_usage.get("finalizer_reasoning_tokens", 0)
+                + int(usage["reasoning_tokens"]))
+        return parsed, error, usage
+
+    attempts = 1
+    parsed, error, _usage = await _attempt()
+
+    if error and should_resample_divergence(error, options.final_schema):
+        attempts = 2
+        logger.warning(
+            "loop: finalizer diverged under a capped schema; re-sampling once "
+            "session=%s", options.session_id or "-")
+        parsed, error, _usage = await _attempt()
+
+    if attempts > 1 and error:
+        # At the HEAD, not the tail: `runs.summary` is capped at 500 characters
+        # and this message ends in 200 characters of captured completion, so a
+        # marker appended after it is the first thing a real row loses.
+        error = f"[attempts={attempts}] {error}"
     return parsed, error
 
 

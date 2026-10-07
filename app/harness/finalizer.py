@@ -152,6 +152,47 @@ def _schema_is_bounded(schema: dict) -> bool:
     return all(_node_is_bounded(v) for v in props.values())
 
 
+#: The phrase that separates "the generation diverged" from "the budget was too
+#: small" in the message built below. It is a constant because a caller now
+#: branches on it, and a branch that silently stopped matching a reworded
+#: message would stop re-sampling without anything failing.
+DIVERGENCE_MARKER = "not a budget"
+
+
+def should_resample_divergence(error: str, schema: dict) -> bool:
+    """Worth one further draw? Only a divergence under a bounded grammar.
+
+    The failure #2370 is about is a completion that runs to the cap while the
+    schema caps every field: the bytes are inter-token whitespace inside one
+    value (`"moves":[],"next_pick":` then CR and nothing else), which the
+    grammar admits, so nothing about the request was wrong and a second draw of
+    the same prefix is the cheapest fix there is. 6 of the 10 board-steward
+    divergences of 10-04→10-07 were followed by a parseable tick at the very
+    next scheduled turn, which is the same evidence read one way round.
+
+    Two exclusions, both load-bearing:
+
+    * a **budget** truncation (`raise harness.finalizer.max_tokens`) is a
+      request that was legitimately out of room. Drawing it again spends
+      another 8192 tokens on the same answer, so the retry does not fire — and
+      it must not fire even if a caller's error string happens to carry the
+      divergence phrase as well.
+    * an **unbounded** schema can diverge because the field it was building
+      genuinely needed room, which re-drawing cannot supply. `_schema_is_bounded`
+      is the same test that chose the two messages in the first place, so the
+      retry fires on exactly the failures that message calls malformed.
+
+    Anything else — an HTTP error, a transport failure, prose instead of JSON,
+    a raised exception — is a stable failure whose shape the retry cannot
+    change, so the phrase has to be in the message, not merely any error.
+    """
+    if not error or DIVERGENCE_MARKER not in error:
+        return False
+    if "raise harness.finalizer.max_tokens" in error:
+        return False
+    return _schema_is_bounded(schema)
+
+
 async def run_finalizer(
     *,
     base_url: str,
@@ -275,7 +316,7 @@ async def run_finalizer(
                                   f"{usage.get('output_tokens', '?')} tokens — "
                                   f"every field this schema admits is capped, so "
                                   f"the object running past them is malformed "
-                                  f"output, not a budget "
+                                  f"output, {DIVERGENCE_MARKER} "
                                   f"({content[:200]!r})"), usage
                 return None, (f"finalizer failed: output truncated at "
                               f"{usage.get('output_tokens', '?')} tokens — "

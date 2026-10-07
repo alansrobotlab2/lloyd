@@ -597,3 +597,165 @@ async def test_the_finalizer_sends_no_thinking_knob_in_either_spelling(_client):
     for body in _client.posted:
         for key in _THINKING_KEYS:
             assert key not in body, key
+
+
+# ── #2370: one re-sample when a capped schema diverges ────────────────────────
+#
+# The 10 board-steward ticks that died naming "not a budget" between
+# 2026-10-04T23:51Z and 2026-10-07T15:12Z each spent the full 8192 output tokens
+# on `{"moves":[],"next_pick":` followed by CR and nothing else — whitespace the
+# grammar admits, so nothing about the REQUEST was wrong. 6 of those 10 were
+# followed by a parseable tick at the very next scheduled turn (~15 min later),
+# which is what a re-sample buys: one further draw of the same prefix, for free
+# of the 8192-token budget advice that cannot help. These nodes drive
+# `loop._maybe_finalize` over the fake engine, so what is counted is requests on
+# the wire — the same unit the ledger counts.
+
+BOUNDED_OK = ('{"result": "written", "note": "n", "duplicate_of": "", '
+              '"facts": "f", "sources": "s"}')
+
+
+def _diverged(draws: int = 2):
+    """`draws` copies of the captured divergence: junk after `"facts": ` at the
+    8192-token cap, the shape of `run_deep-research_20260928_032533_df61c0`."""
+    return [_ok(DEGENERATE, usage={"completion_tokens": 8192,
+                                   "prompt_tokens": 5_000,
+                                   "total_tokens": 13_192},
+                finish_reason="length") for _ in range(draws)]
+
+
+async def _via_loop(client, responses, *, schema=BOUNDED, **opt_kw):
+    """One turn's `_close_turn` leg, over the real finalizer and the fake engine."""
+    from app.harness import loop as L
+    from app.harness.options import RunOptions
+
+    client.posted = []
+    client.responses = list(responses)
+    total: dict[str, int] = {}
+    parsed, error = await L._maybe_finalize(
+        options=RunOptions(model="primary", final_schema=schema, **opt_kw),
+        stop_reason="stop", chat_messages=MESSAGES, tools=TOOLS, total_usage=total)
+    return parsed, error, total
+
+
+async def test_a_divergence_under_a_capped_schema_is_drawn_once_more(_client):
+    """Clause 1. A divergence is a bad draw, not a bad request, so the loop
+    draws again before it reports — over the identical message prefix and the
+    identical `tools` array, because a tools array that differs re-prefills the
+    whole conversation (the load-bearing assertion at the top of this file).
+    And a second failure is still a failure: the caller gets the SECOND error,
+    never a silent pass and never an empty verdict."""
+    parsed, error, _total = await _via_loop(_client, _diverged(2))
+
+    assert len(_client.posted) == 2, (
+        f"expected exactly one re-sample, got {len(_client.posted)} requests")
+    first, second = _client.posted
+    assert second["messages"] == first["messages"], (
+        "the re-sample changed the prefix, which re-prefills the turn")
+    assert second["tools"] == first["tools"] == TOOLS, (
+        "a re-sample with a different tools array is the most expensive thing "
+        "this feature could do")
+    assert second["tool_choice"] == first["tool_choice"] == "none"
+    assert second["response_format"] == first["response_format"]
+
+    assert parsed is None, "a second divergence must not read as a verdict"
+    assert "generation diverged" in error and "not a budget" in error, error
+    assert error.startswith("[attempts=2] "), (
+        "the published failure has to distinguish a tick that was re-drawn "
+        "from one that was not, and the marker is the only place it can say so: " + error)
+
+
+async def test_the_re_sample_s_verdict_is_the_one_the_caller_gets(_client):
+    """Clause 1's recovery half, and the whole point of the change: the second
+    draw parses, and the turn reports success — the 6-in-10 case in the
+    ledger, in which the next attempt was fine."""
+    parsed, error, _total = await _via_loop(
+        _client, [_diverged()[0], _ok(BOUNDED_OK)])
+    assert len(_client.posted) == 2
+    assert error == "", error
+    assert parsed == json.loads(BOUNDED_OK)
+
+
+async def test_the_re_sample_skips_the_budget_branch_and_an_uncapped_schema(_client):
+    """Clause 2. Two exclusions, counted in requests.
+
+    (a) an uncapped schema whose completion ran out of room: the budget IS the
+    answer there, and a re-draw spends another 8192 tokens buying the same
+    truncation. (b) the empty-content case under a BOUNDED grammar — thinking
+    ate the budget (#1431), which is the budget whatever the grammar says, so
+    boundedness alone must not license the retry. (c) prose instead of JSON
+    under a bounded grammar: not a divergence either."""
+    parsed, error, _ = await _via_loop(
+        _client, [_ok('{"result": "written", "note": "a very long note that ra',
+                      usage={"completion_tokens": 8192}, finish_reason="length")],
+        schema=UNBOUNDED)
+    assert len(_client.posted) == 1, "a budget truncation is not re-drawn"
+    assert "raise harness.finalizer.max_tokens" in error, error
+    assert "attempts" not in error
+
+    parsed, error, _ = await _via_loop(
+        _client, [_ok(None, usage={"completion_tokens": 200,
+                                   "completion_tokens_details":
+                                       {"reasoning_tokens": 200}},
+                      finish_reason="length")], schema=BOUNDED)
+    assert len(_client.posted) == 1, (
+        "content that never left thinking is the budget under a capped schema "
+        "too — see test_a_completion_that_never_left_thinking_is_still_the_budget")
+    assert "raise harness.finalizer.max_tokens" in error and "attempts" not in error
+
+    parsed, error, _ = await _via_loop(_client, [_ok("I think it is written.")],
+                                       schema=BOUNDED)
+    assert len(_client.posted) == 1, "prose is a model-behaviour failure, not a draw"
+    assert "not JSON" in error and "attempts" not in error
+
+    # Positive control, so the three counts above cannot mean "nothing in this
+    # file ever re-samples": one bounded divergence, same fake, two requests.
+    await _via_loop(_client, _diverged(2))
+    assert len(_client.posted) == 2, "the counting fake has stopped counting"
+
+
+
+def test_the_resample_predicate_reads_the_message_and_the_grammar():
+    """Clause 2's branch, directly: the two phrases decide it, and where an
+    error somehow carries both the budget wins — re-drawing a request that was
+    legitimately out of room is the one thing this must never do."""
+    assert F.should_resample_divergence(
+        "finalizer failed: generation diverged at 8192 tokens — malformed "
+        "output, not a budget ('…')", BOUNDED) is True
+    assert F.should_resample_divergence(
+        "finalizer failed: generation diverged at 8192 tokens — malformed "
+        "output, not a budget ('…')", UNBOUNDED) is False
+    assert F.should_resample_divergence(
+        "finalizer failed: output truncated at 8192 tokens — raise "
+        "harness.finalizer.max_tokens ('…')", BOUNDED) is False
+    assert F.should_resample_divergence(
+        "not a budget … and raise harness.finalizer.max_tokens", BOUNDED) is False
+    assert F.should_resample_divergence("", BOUNDED) is False
+    assert F.should_resample_divergence(
+        "finalizer failed: HTTP 500 boom", BOUNDED) is False
+
+
+async def test_two_diverged_draws_is_the_most_one_turn_spends(_client):
+    """Clause 3. Five junk answers queued, two requests made: the retry is a
+    rung, not a loop. The usage figures are the second half of the pin — both
+    draws' 8192 tokens are folded, and a third draw would have made it 24576."""
+    parsed, error, total = await _via_loop(_client, _diverged(5))
+    assert len(_client.posted) == 2, "the retry became a loop"
+    assert parsed is None and error.startswith("[attempts=2] "), error
+    assert total["finalizer_output_tokens"] == 16_384, total
+    assert total["finalizer_input_tokens"] == 10_000, total
+
+
+async def test_the_re_sample_asks_for_the_max_tokens_it_was_given(_client):
+    """Clause 4. The retry re-sends the budget it was handed, unchanged: 8192 on
+    both requests, the shipped `harness.finalizer.max_tokens`. A re-sample that
+    quietly asked for more would reintroduce exactly the advice #1706 removed —
+    and would make the recovery depend on a cap this item forbids touching."""
+    parsed, error, _total = await _via_loop(_client, _diverged(2),
+                                            finalizer_max_tokens=8192)
+    assert len(_client.posted) == 2
+    assert [b["max_tokens"] for b in _client.posted] == [8192, 8192], (
+        "the re-sample changed the budget: "
+        + repr([b["max_tokens"] for b in _client.posted]))
+    assert "raise harness.finalizer.max_tokens" not in error, error
+
