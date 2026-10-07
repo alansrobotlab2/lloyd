@@ -507,57 +507,16 @@ def skill_body_findings(paths: list[str]) -> list[dict]:
 def _front_matter_map(text: str) -> dict | None:
     """The front matter of `text` as a mapping, or None (never raises).
 
-    #2190: the dispatch-field check below needs the parsed VALUES, where
-    `frontmatter_error` above answers only "does this parse". Recovery is the
-    scheduler's own (`parse_frontmatter_text`, which is what
-    `app.autonomy._parse_task_file` calls), so a file whose YAML is corrupt but
-    field-recoverable is judged on the fields the scheduler would actually read
-    instead of being waved through as "unparseable, not my business".
+    One definition, in `app.harness.policy`, shared with the `vault_write` lane
+    (#2362) — this route and that one refuse the same move or they do not refuse
+    it at all. #2190: the dispatch-field check needs the parsed VALUES, where
+    `frontmatter_error` above answers only "does this parse", and recovery is the
+    scheduler's own so a file whose YAML is corrupt but field-recoverable is
+    judged on the fields the scheduler would actually read.
     """
-    if not text.startswith("---"):
-        return None
-    lines = text.splitlines()
-    end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
-    if end is None:
-        return None
-    try:
-        from agent_mcp._shared import AUTONOMY_TASK_FIELDS, parse_frontmatter_text
-        fm = parse_frontmatter_text("\n".join(lines[1:end]),
-                                    fallback_fields=AUTONOMY_TASK_FIELDS,
-                                    log_label="vault_round:#2190")
-    except Exception:  # noqa: BLE001 - a reader that cannot read is not a refusal
-        return None
-    return fm if isinstance(fm, dict) else None
+    from app.harness.policy import front_matter_map  # function-local: see #2190 below
 
-
-def _same_dispatch_value(old, new) -> bool:
-    """Whether two front-matter values are the same value, YAML spellings aside.
-
-    PyYAML resolves an unquoted ISO timestamp to `datetime`, so quoting a
-    `scheduled_at` that HEAD holds unquoted is a reformat, not a schedule change.
-    Comparing serialized YAML instead of values is exactly what the owed-after-
-    landing measurement on #2190 watches for: it would refuse the nightly writer's
-    own rewrites.
-    """
-    import datetime  # local: a top-of-file import would shift a cited line
-
-    if old == new:
-        return True
-    # `datetime.date` on purpose: `datetime.datetime` is its subclass, and a
-    # `scheduled_at` of `2026-10-06` resolves to the date, not the datetime.
-    for a, b in ((old, new), (new, old)):
-        if isinstance(a, (datetime.date, datetime.time)) and isinstance(b, str):
-            if a.isoformat() == b.strip():
-                return True
-    return False
-
-
-def _shown(value) -> str:
-    """A value as it appears in a refusal. Total: a `datetime` front matter value
-    (`scheduled_at` unquoted) must not raise on the way to being refused."""
-    return "absent" if value is None else (
-        value if isinstance(value, str)
-        else json.dumps(value, sort_keys=True, default=str))
+    return front_matter_map(text)
 
 
 def schedule_state_errors(paths: list[str]) -> list[str]:
@@ -602,7 +561,12 @@ def schedule_state_errors(paths: list[str]) -> list[str]:
     # the same reason `app.autonomy` is imported locally elsewhere in this module:
     # a loaded memory note cites `vault_round.py:237` by line number, and
     # test_prompt_surface_budget.py fails the round whose diff moves it.
-    from app.harness.policy import DISPATCHING_STATUS, SCHEDULE_STATE_FIELDS
+    # #2362: the diff itself (`schedule_value_moves`), its YAML-spelling rule
+    # (`same_schedule_value`, reached through it) and its renderer are the same
+    # module's, shared with the `vault_write` lane so the two file-reading lanes
+    # cannot drift apart one re-quote at a time.
+    from app.harness.policy import (DISPATCHING_STATUS, schedule_value_moves,
+                                    shown_schedule_value)
 
     errors: list[str] = []
     for p in sorted(set(paths)):
@@ -626,13 +590,11 @@ def schedule_state_errors(paths: list[str]) -> list[str]:
                     f"the #724 grant rail refuses unattended on autonomy_write_task — "
                     f"create it `status: draft` and let a human, or a granted call, arm it")
             continue
-        old_fm = _front_matter_map(shown.stdout) or {}
-        for field in sorted(SCHEDULE_STATE_FIELDS):
-            old, new = old_fm.get(field), new_fm.get(field)
-            if _same_dispatch_value(old, new):
-                continue
+        old_fm = _front_matter_map(shown.stdout)
+        for field, old, new in schedule_value_moves(old_fm, new_fm):
             errors.append(
-                f"{p}: `{field}` moved {_shown(old)} -> {_shown(new)}: a dispatch-affecting "
+                f"{p}: `{field}` moved {shown_schedule_value(old)} -> "
+                f"{shown_schedule_value(new)}: a dispatch-affecting "
                 f"field, which the #724 grant rail refuses unattended on "
                 f"autonomy_write_task, and this route holds to the same rule — land the "
                 f"rest, and let a human or a granted call move `{field}`")

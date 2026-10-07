@@ -622,12 +622,14 @@ rebuilding it from that list, which is what it used to do — so every key not
 named there was silently destroyed by any UI edit or task-write call. `tags`
 was never in the list at all, and neither were the fields added later.
 
-### The dispatch-affecting fields, and the two surfaces that write them
+### The dispatch-affecting fields, and the three surfaces that write them
 
 Seven front-matter fields decide whether a task runs: `SCHEDULE_STATE_FIELDS` =
 `status`, `scheduled_at`, `depends_on`, `auto_advance`, `frequency`, `skill_name`,
-`preferred_hours` (`app/harness/policy.py:313`). **#724's rail holds both surfaces
-that can write them, not one.** The first is the tool: `effective_tier` demotes an
+`preferred_hours` (`app/harness/policy.py:313`). **#724's rail holds `vault_write`
+too, the third of the three surfaces that can write them** — with
+`autonomy_write_task` and the vault-round landing route — **and the page names the
+lanes it does not reach.** The first is the tool: `effective_tier` demotes an
 `autonomy_write_task` call that moves none of them back to tier 1, so re-arming or
 parking a task needs a grant and appending an activity note does not. The second is
 the landing route an unattended turn can use instead of the tool —
@@ -652,6 +654,51 @@ and #777 is what a lander made unable to retire anything does. The tool gate, by
 contrast, cannot see the disk and so denies a *resend* of `up_next` to a task that is
 already armed; the vault route reads HEAD and lets an unchanged value through, which
 is the difference between guarding a field and refusing to write the file.
+
+The **third** surface is `vault_write` (#2362), and it is the one that proves the rail
+had a hole rather than a design: it is tier 1 and consults only the protected-path
+deny-set, whose entries do not include `~/obsidian/autonomy/`, so a call the rail denied
+could be spelled one tool later and land in the same file. On 2026-10-05 a turn whose
+`autonomy_write_task` was refused at 06:38:16Z had already created
+`autonomy/96-djev-name-prior-probe.md` with `status: up_next` through `vault_write` at
+06:27:38Z, and `run_scheduled-task_20261005_062825_b3ceb1` started 47 seconds after that
+write — armed through the open door, refused through the closed one. It is not a rare
+shape either: 17 of the 2514 rows in `~/obsidian/memory/audit/writes.jsonl` are
+`vault_write` onto `autonomy/`, across 7 sessions. `agent_mcp/vault.py`,
+`_autonomy_schedule_refusal`, now refuses it, and it shares its rule rather than
+restating it: `policy.front_matter_map`, `policy.schedule_value_moves` and
+`policy.create_arms_a_task` are one definition read by both file lanes, so widening
+`SCHEDULE_STATE_FIELDS` widens every lane with no edit to a lane, and both fail closed on
+a front matter they cannot parse and on a rail they cannot import.
+
+**The gate is on the file, not on the spelling of its path.** The first version of
+this lane tested `path.startswith("autonomy/")` on the string
+`_normalize_vault_path` returned, and that function validated `Path(p).parts` —
+where a `./` is already gone — while handing back the caller's dots.
+`VAULT / './autonomy/96-x.md'` is the same file as `VAULT / 'autonomy/96-x.md'`, so
+one leading dot-segment reached a live task file with both phases returning `None`:
+the bypass this section documents, rebuilt inside the guard written to close it.
+`_normalize_vault_path` now returns the reduced path (`Path(*parts).as_posix()`),
+and that is the root fix rather than a second prefix test, because the value it
+returns is the choke point for everything downstream — the two `knowledge/`-only OKF
+guards, the `path` field of the row appended to `memory/audit/writes.jsonl` (which is
+what the owed-after-landing check on this item greps for), and the `path` in the
+success result. `_is_autonomy_task_path` is the second line, so a phase reached
+through another caller cannot reintroduce it. Pinned by
+`tests/test_vault_write_schedule_guard.py::test_the_normalizer_hands_every_guard_one_spelling_of_a_path`
+and the two spelling-parametrised nodes beside it.
+
+**What the rail does not reach, stated rather than implied.** `memory_add` /
+`memory_replace` / `memory_remove` are not lanes at all: that tool's `file` argument is
+grammar-bound to `MEMORY.md|USER.md|topics/<slug>` (`app/memory_ceiling.py`,
+`agent_mcp/session.py`), so it cannot name a task file. What stays open after #2362 is
+`Write`/`Edit` (`agent_mcp/builtin_fs.py` carries no reference to `autonomy`) and a Bash
+child, which `agent_mcp/_path_sandbox.py` sandboxes with one read-only bind per
+`PROTECTED_WRITE_ROOTS` entry — and `~/obsidian/autonomy/` is not one of those entries, so
+closing it that way would also refuse the sanctioned nightly writers of these very files.
+That is a scope ruling, recorded as owed on #2362, not something a guard can quietly
+assume. The asymmetry above still stands with it: a task file that leaves the live set is
+retired, not refused, and none of these three surfaces can delete one.
 
 ### The parser can never drop a task
 

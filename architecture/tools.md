@@ -241,10 +241,11 @@ advertising has three consequences in `app/harness/tool_schema.py::build_tool_li
    `effective_tier()`, which demotes an `autonomy_write_task` call that moves
    no dispatch-affecting field back to tier 1, so an unattended turn needs a
    grant to re-arm or park a task and does not need one to write an activity
-   note. Those seven fields are held on one more surface than this paragraph
-   used to imply: the vault-round landing route enforces the same frozenset
-   (#2190), and `architecture/autonomy.md` § *The dispatch-affecting fields, and
-   the two surfaces that write them* is the sentence that says so. It is
+   note. Those seven fields are held on two more surfaces than this paragraph
+   used to imply: the vault-round landing route (#2190) and `vault_write` (#2362)
+   enforce the same frozenset from the same definition, and
+   `architecture/autonomy.md` § *The dispatch-affecting fields, and the three
+   surfaces that write them* is the section that says so. It is
    installed for worker sources (`workers/sources/_common.py`),
    autonomy task turns (`app/autonomy.py`), and the ambient and sync dispatch
    paths — not only "background". Every hook here keys on the bare tool name,

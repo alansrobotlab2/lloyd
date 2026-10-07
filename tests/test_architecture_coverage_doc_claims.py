@@ -2435,3 +2435,73 @@ def test_arch_review_states_the_archive_directory_is_absent_here():
         assert command in text, (
             f"arch-review.md no longer offers {command}; saying the copies are gone "
             "without a way back leaves the reader exactly where the old sentence did")
+
+
+#: #2362 clause 5: the rail's own page has to say how many surfaces it holds. The
+#: heading and the bold sentence beneath it are the two places a reader looks, and
+#: the lane census is the part that stops the next reader re-filing `memory_add`
+#: as an open door: that tool's `file` argument is grammar-bound and cannot name a
+#: task file, while Write/Edit and a Bash child genuinely can.
+_AUTONOMY_SURFACE_HEADING = (
+    "### The dispatch-affecting fields, and the three surfaces that write them")
+_GRAMMAR_BOUND = "MEMORY.md|USER.md|topics/<slug>"
+
+
+def test_the_dispatch_fields_page_names_every_surface_the_rail_holds():
+    """source: architecture/autonomy.md § The dispatch-affecting fields.
+    claim: the heading says "three surfaces", the sentence under it names
+           `vault_write`, and the page records that `Write`/`Edit` and a Bash child
+           stay open while `memory_add` is not a lane at all.
+    verdict: #2362 closed the third door and rewrote both places; the census is
+             what keeps "the rail holds them all" from meaning "nothing else can
+             write a task file", which is not true and was never claimed.
+
+    The count in the heading is load-bearing in a way a normal heading is not: a
+    page that says "two surfaces" is a page that tells the next reader there are
+    exactly two, and the two it named are the two that were already shut.
+    """
+    text = (ARCH / "autonomy.md").read_text(encoding="utf-8")
+    assert _AUTONOMY_SURFACE_HEADING in text, (
+        "the heading still counts two surfaces, so the page re-opens the question "
+        "#2362 closed by answering it")
+    assert "and the two surfaces that write them" not in text, (
+        "a second heading or cross-reference still claims two surfaces")
+
+    heading = text.index(_AUTONOMY_SURFACE_HEADING)
+    paragraph = text[heading:heading + 1600]
+    assert "`vault_write`" in paragraph, (
+        "the sentence under the heading must name the surface #2362 added, not "
+        "just raise the number in the heading")
+    assert "autonomy_write_task" in paragraph and "vault-round landing route" in paragraph
+
+    census = text[text.index("**What the rail does not reach"):]
+    assert "`Write`/`Edit`" in census, census[:200]
+    assert "agent_mcp/builtin_fs.py" in census, (
+        "the open lane must be named by the module that carries no autonomy guard")
+    assert "_path_sandbox.py" in census and "PROTECTED_WRITE_ROOTS" in census, (
+        "the Bash child is open because its read-only bind list omits the autonomy "
+        "dir; the census has to say which list, or the next reader re-derives it")
+    assert _GRAMMAR_BOUND in census, (
+        "naming memory_add as an open lane is the error this clause exists to "
+        "stop; the census must show why it cannot reach a task file")
+    assert "cannot name a task file" in census, census[:200]
+
+
+def test_the_tools_page_points_at_the_renamed_heading():
+    """source: architecture/tools.md § the dispatch guard cross-reference.
+    claim: tools.md's pointer to the autonomy page says two more surfaces and
+           quotes the heading as it now reads.
+    verdict: #2362 renamed the heading, so a page that quotes its old wording
+             points at a section that does not exist.
+
+    A cross-reference is graded here rather than left to a human because it fails
+    silently: nothing in the vault breaks, and the reader who follows it finds a
+    heading three surfaces away from the one the pointer promised.
+    """
+    text = (ARCH / "tools.md").read_text(encoding="utf-8")
+    start = text.index("`autonomy_write_task` call that moves")
+    window = text[start:start + 900]
+    assert "the three\n   surfaces that write them" in window, (
+        "the pointer still quotes the two-surfaces heading that no longer exists")
+    assert "vault_write" in window and "(#2362)" in window, (
+        "the pointer still says one more surface than the tool, not two")

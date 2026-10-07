@@ -362,6 +362,110 @@ def changes_schedule_state(name: Any, tool_input: Any) -> bool:
     return bool(schedule_fields_changed(tool_input))
 
 
+# ── the same rule over a TASK FILE's front matter (#2190, #2362) ────────────
+# `changes_schedule_state` above answers a TOOL CALL: it reads the arguments and
+# never the disk, so it must deny even a resend of an armed task's own `up_next`.
+# The lanes that hold the FILE — the vault-round landing route (#2190) and
+# `vault_write` (#2362) — can read what is already on disk, so they ask a
+# different question: does the value MOVE? These four helpers are the one answer
+# to that question, imported by both lanes and copied by neither; a field added
+# to `SCHEDULE_STATE_FIELDS` above is refused by every lane with no edit to the
+# lane's own module, which is what tests/test_vault_write_schedule_guard.py
+# parametrises over the frozenset itself to pin.
+
+#: The frozenset lives in this module; every consumer imports it, none restates it.
+#: (This block sits below the frozenset's own definition and below
+#: `changes_schedule_state` on purpose: `architecture/autonomy.md` cites
+#: `app/harness/policy.py:313` for the set, and
+#: tests/test_prompt_surface_budget.py fails a diff that moves a cited line.)
+
+
+def front_matter_map(text: str) -> dict | None:
+    """The front matter of `text` as a mapping, or None (never raises).
+
+    #2190: the dispatch-field check needs the parsed VALUES, where a
+    "does this parse" answer is not enough. Recovery is the scheduler's own
+    (`parse_frontmatter_text`, which is what `app.autonomy._parse_task_file`
+    calls), so a file whose YAML is corrupt but field-recoverable is judged on
+    the fields the scheduler would actually read instead of being waved through
+    as "unparseable, not my business". None means this reader could not get a
+    mapping at all — which a caller must treat as a refusal, not a pass.
+    """
+    if not text.startswith("---"):
+        return None
+    lines = text.splitlines()
+    end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
+    if end is None:
+        return None
+    try:
+        from agent_mcp._shared import AUTONOMY_TASK_FIELDS, parse_frontmatter_text
+        fm = parse_frontmatter_text("\n".join(lines[1:end]),
+                                    fallback_fields=AUTONOMY_TASK_FIELDS,
+                                    log_label="schedule_rail:#2190")
+    except Exception:  # noqa: BLE001 - a reader that cannot read is not a pass
+        return None
+    return fm if isinstance(fm, dict) else None
+
+
+def same_schedule_value(old, new) -> bool:
+    """Whether two front-matter values are the same value, YAML spellings aside.
+
+    PyYAML resolves an unquoted ISO timestamp to `datetime`, so quoting a
+    `scheduled_at` that HEAD holds unquoted is a reformat, not a schedule change.
+    Comparing serialized YAML instead of values is exactly what the owed-after-
+    landing measurement on #2190 watches for: it would refuse the nightly writer's
+    own rewrites.
+    """
+    import datetime  # local: a top-of-file import would shift a cited line
+
+    if old == new:
+        return True
+    # `datetime.date` on purpose: `datetime.datetime` is its subclass, and a
+    # `scheduled_at` of `2026-10-06` resolves to the date, not the datetime.
+    for a, b in ((old, new), (new, old)):
+        if isinstance(a, (datetime.date, datetime.time)) and isinstance(b, str):
+            if a.isoformat() == b.strip():
+                return True
+    return False
+
+
+def shown_schedule_value(value) -> str:
+    """A value as it appears in a refusal. Total: a `datetime` front matter value
+    (`scheduled_at` unquoted) must not raise on the way to being refused."""
+    import json
+
+    return "absent" if value is None else (
+        value if isinstance(value, str)
+        else json.dumps(value, sort_keys=True, default=str))
+
+
+def schedule_value_moves(old_map: dict | None,
+                         new_map: dict | None) -> list[tuple[str, object, object]]:
+    """Every dispatch field whose VALUE differs, as `(field, old, new)`, sorted.
+
+    Empty means nothing this rule cares about moved: a body rewrite, a new
+    Activity Log line, a re-quoted timestamp and a reordered front matter all
+    return nothing here. Absent on one side is a move (`status` added to a file
+    that never had one can arm a task), which is why this does not skip `None`.
+    """
+    old_map = old_map or {}
+    new_map = new_map or {}
+    return [(field, old_map.get(field), new_map.get(field))
+            for field in sorted(SCHEDULE_STATE_FIELDS)
+            if not same_schedule_value(old_map.get(field), new_map.get(field))]
+
+
+def create_arms_a_task(new_map: dict | None) -> bool:
+    """True when a CREATED task file would be dispatchable the moment it lands.
+
+    Mirrors `schedule_fields_changed`'s create branch: of the dispatch fields,
+    only `status: up_next` dispatches anything, so a new task written `draft`
+    with its `skill_name` and window set is the nightly chain's documented
+    hand-down shape and must stay accepted.
+    """
+    return str((new_map or {}).get("status") or "").strip() == DISPATCHING_STATUS
+
+
 #: The one tool whose reversibility is not a property of its name. Every other
 #: name in the ladder means the same thing whatever it is handed; this one is
 #: `ls` in one call and a service restart in the next.

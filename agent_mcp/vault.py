@@ -1396,12 +1396,27 @@ def _normalize_vault_path(path: str) -> tuple[str | None, str | None]:
         # (e.g. ~/lloyd/...). These are never valid vault targets.
         return None, f"path must be vault-relative or under {vault_str}, got {raw!r}"
     p = p.lstrip("/")
-    if not p:
-        return None, "path resolves to the vault root, not a file"
     parts = Path(p).parts
     if "~" in parts or ".." in parts:
         return None, f"invalid path segment in {raw!r}"
-    return p, None
+    if not parts:
+        # "", "." and "./." — dot segments carry no path, so this address is the
+        # vault root itself, which is not a file to write. Before this reduction
+        # existed, the `if not p` form of this check was the only one, and `./.`
+        # walked past it.
+        return None, "path resolves to the vault root, not a file"
+    # Return the REDUCED form, not the caller's string. The `parts` just validated
+    # has already dropped `./` and empty segments, so until #2362 this function's
+    # own escape test looked at a path with the dots gone while the value it handed
+    # back kept them: `./autonomy/96-x.md` came through unchanged,
+    # `VAULT / './autonomy/96-x.md'` is the same file as `VAULT / 'autonomy/96-x.md'`,
+    # and every consumer that classifies by string prefix — both phases of the
+    # schedule rail, the two `knowledge/` OKF guards, the path recorded in the audit
+    # row — classified the spelling instead of the target. One leading `./` reached a
+    # live task file with the rail skipped, which is the failure #2362 exists to
+    # close. `parts` is non-empty here, so `as_posix()` is always a real path.
+    # tests/test_vault_write_schedule_guard.py::test_the_normalizer_hands_every_guard_one_spelling_of_a_path
+    return Path(*parts).as_posix(), None
 
 
 def _sha256_bytes(data: bytes) -> str:
@@ -1700,6 +1715,200 @@ def _bench_assertion_refusal(path: str, content: str) -> dict | None:
     return _err(f"vault_write refused: {defect}", ErrorCode.PROTECTED_PATH)
 
 
+def _is_autonomy_task_path(path: str) -> bool:
+    """True when this path addresses a file the scheduler could dispatch.
+
+    A predicate, not a string test, and it reduces before it compares:
+    `Path("./autonomy/96-x.md").parts` is `('autonomy', '96-x.md')` while
+    `"./autonomy/96-x.md".startswith("autonomy/")` is False, and `VAULT /` either
+    spelling is the SAME file. The first round of #2362 gated both phases on that
+    prefix over the string `_normalize_vault_path` handed back — which, until the
+    reduction added in this round's fixup, still carried the caller's dots — so one
+    leading `./` reached a live task file with both phases returning None. The
+    normalizer is now the root fix; this is the second line, so a phase reached
+    through any other caller, or a path that never went through the normalizer,
+    cannot reintroduce the bypass.
+
+    The subtree counts, not just the live directory: `AUTONOMY_DIR.glob("*.md")` is
+    non-recursive (`app/autonomy.py:101`), which is how retirement works — the 14
+    files in `autonomy/_archived/` are invisible to that walk while still carrying
+    `status: up_next` on disk, so restoring one is a write of the same bytes one
+    level up. A prefix rule over the subtree covers that; a name list over the live
+    directory would be a second decision, made here, about what dispatches.
+    """
+    try:
+        parts = Path(path).parts
+    except (TypeError, ValueError):  # a path this cannot even name is not a pass
+        return True
+    return bool(parts) and parts[0] == "autonomy" and path.endswith(".md")
+
+
+def _record_schedule_refusal(path: str, reason: str) -> None:
+    """One durable row per schedule-rail refusal; never a decision of its own.
+
+    Same convention as the protected-path and bench refusals in this module
+    (`app/harness/denial_journal.py`): the journal is how anyone finds out a writer
+    was stopped, and a journal that is down must not become a second verdict.
+    """
+    try:
+        from app.harness import denial_journal
+        from agent_mcp._shared import get_bound_session
+        denial_journal.record(guard="autonomy_schedule_rail", where="dispatch",
+                              session_id=get_bound_session() or "", tool="vault_write",
+                              reason=reason[:600], excerpt=str(path),
+                              label="dispatch-affecting field on an autonomy task file")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _autonomy_schedule_refusal(path: str, content: str) -> dict | None:
+    """Refuse a `vault_write` that would ARM a task by creating it (#2362), phase A.
+
+    The rail was written for the tool that asks (#724, `app/harness/policy.py`: an
+    unattended `autonomy_write_task` may not move a field the scheduler dispatches
+    on) and #2190 extended it to the vault round's landing route. The third lane
+    onto the same files was left open, and it is the one with nothing in front of
+    it: `vault_write` is tier 1 and consults only the protected-path deny-set,
+    whose five entries (`app/harness/protected_paths.py`) do not include
+    `~/obsidian/autonomy/`, the directory the scheduler reads
+    (`app.autonomy.AUTONOMY_DIR`). So a call the rail denied could be spelled one
+    tool later and land in the same file: on 2026-10-05 a turn created
+    `autonomy/96-djev-name-prior-probe.md` `status: up_next` through here at
+    06:27:38.866Z and `run_scheduled-task_20261005_062825_b3ceb1` started 47
+    seconds later, while the same turn's `autonomy_write_task` for that target was
+    refused at 06:38:16Z. 17 of the 2514 rows in `memory/audit/writes.jsonl` are
+    `vault_write` onto `autonomy/`, across 7 sessions.
+
+    The rule is the landing route's rule, read from the rail's own frozenset and
+    its helpers in `app/harness/policy.py`, never copied: a write that moves a
+    VALUE is refused, one that rewrites the body, the description or an Activity
+    Log line is not, a re-quoted timestamp is not, and a CREATE is judged only on
+    whether it arms. Fail-closed in both directions: front matter this cannot turn
+    into a mapping is a refusal, and a rail that cannot be imported stops the
+    write.
+
+    SPLIT ACROSS THE LOCK, BECAUSE THE WRITER'S OWN INVARIANT SAYS SO. Reading a
+    target outside `commit_lock` is what
+    `tests/test_memory_writer_lane.py::test_commit_site_writes_atomically_under_the_shared_lock`
+    refuses for this function, and `_vault_write` reads its pre-image only inside
+    the lock — so the diff against existing bytes happens in
+    `_autonomy_schedule_move_refusal`, in that critical section, while this phase
+    handles what needs no pre-image: a create, which has none by definition, and
+    the rail's health. A file that appears between the two is judged by phase B on
+    the bytes the commit block actually read, which is the narrower window phase A
+    would have opened itself.
+
+    Because phase A runs before `_vault_write`'s `mkdir`, a refusal on the create
+    path returns before any directory is made — the wart `_vault_edit`'s comment
+    avoids by checking ahead of its `mkdir` is not present here, and
+    `test_an_up_next_create_is_refused_wherever_the_directory_already_sits` pins it
+    on the two shapes that make it non-obvious: a box whose `autonomy/` does not
+    exist yet, and a create one level down inside the task dir. That second shape is
+    covered because the test is on the PREFIX, not on one filename — and it is
+    deliberate depth, not a claim about what runs: the scheduler's walk is
+    `AUTONOMY_DIR.glob("*.md")`, non-recursive (`app/autonomy.py:101`), so a file in
+    `autonomy/_archived/` is invisible to it today. What a subdir create still is, is
+    the half-step of a RESTORE: retirement moves a file into `_archived/` without
+    changing its `status` (`_archived/25-memory-capture.md:27` still reads
+    `up_next`), so bringing a retired task back is a create of those same bytes one
+    level up, and that is arming.
+    """
+    if not _is_autonomy_task_path(path):
+        return None  # `status` is a backlog item's field too; the scheduler reads only these
+    try:
+        # The field set is read here for the refusal text: a lane that cannot load
+        # the rule says WHICH fields it could not verify, spelled from the set
+        # rather than from a sentence this module maintains.
+        from app.harness.policy import (DISPATCHING_STATUS, SCHEDULE_STATE_FIELDS,
+                                       create_arms_a_task, front_matter_map)
+    except Exception as exc:  # noqa: BLE001 — an unloadable rail is not a rail that passed
+        _record_schedule_refusal(path, f"the rail itself could not run ({exc})")
+        return _err("vault_write refused: the autonomy schedule rail could not run, "
+                    f"so {path} is not being written. Report this rather than working "
+                    "around it.", ErrorCode.PROTECTED_PATH)
+    held = ", ".join(f"`{f}`" for f in sorted(SCHEDULE_STATE_FIELDS))
+    if (VAULT / path).is_file():
+        return None  # phase B has the diff, under the lock, on the writer's pre-image
+    new_fm = front_matter_map(content)
+    if new_fm is None:
+        _record_schedule_refusal(path, "no parseable front matter on a create")
+        return _err(f"vault_write refused: {path} would be created with no front "
+                    f"matter this rail can read, so none of the dispatch fields the "
+                    f"scheduler reads ({held}) can be checked. Refusing rather than "
+                    "guessing.", ErrorCode.PROTECTED_PATH)
+    if create_arms_a_task(new_fm):
+        _record_schedule_refusal(path, f"create with status: {DISPATCHING_STATUS}")
+        return _err(f"vault_write refused: {path} would be created `status: "
+                    f"{DISPATCHING_STATUS}`, which arms a task — the #724 grant rail "
+                    "refuses that unattended on autonomy_write_task and this lane "
+                    "holds to the same rule. Create it `status: draft` and let a "
+                    "human, or a granted call, arm it.", ErrorCode.PROTECTED_PATH)
+    return None
+
+
+def _autonomy_schedule_move_refusal(path: str, content: str,
+                                    pre_bytes: "bytes | None") -> dict | None:
+    """Refuse a `vault_write` that MOVES a dispatch field (#2362), phase B.
+
+    Called from inside `_vault_write`'s `commit_lock` block on the same pre-image
+    bytes the change ledger is about to record, before that entry is opened and
+    before the write: a refusal here changes no bytes, records no ledger entry and
+    appends no audit row, and it cannot be overtaken by a concurrent write to the
+    same file, because the read and the replace are one critical section.
+
+    Same rule, same frozenset, same fail-closed as phase A. An existing file whose
+    bytes could not be read is a refusal: a rail that cannot see the value it
+    protects cannot say nothing moved.
+    """
+    if not _is_autonomy_task_path(path):
+        return None
+    try:
+        from app.harness.policy import (SCHEDULE_STATE_FIELDS, front_matter_map,
+                                       schedule_value_moves, shown_schedule_value)
+    except Exception as exc:  # noqa: BLE001 — see phase A
+        _record_schedule_refusal(path, f"the rail itself could not run ({exc})")
+        return _err("vault_write refused: the autonomy schedule rail could not run, "
+                    f"so {path} is not being written. Report this rather than working "
+                    "around it.", ErrorCode.PROTECTED_PATH)
+    held = ", ".join(f"`{f}`" for f in sorted(SCHEDULE_STATE_FIELDS))
+    if pre_bytes is None:
+        if not (VAULT / path).is_file():
+            # No pre-image and no file: it is a CREATE, so judge it as one — do not
+            # assume phase A did. Phase A returns None for an existing file precisely
+            # so this section holds the diff, and if that file went away between the
+            # two phases (a retirement moving it out of the live set does exactly
+            # that), the assumption would wave an armed create through the one branch
+            # with no pre-image to compare against. Re-running phase A costs one
+            # front-matter parse and is the same rule, not a second copy of it.
+            return _autonomy_schedule_refusal(path, content)
+        _record_schedule_refusal(path, "the on-disk task file could not be read")
+        return _err(f"vault_write refused: {path} exists and could not be read to "
+                    "compare its dispatch state, so nothing is being written.",
+                    ErrorCode.PROTECTED_PATH)
+    old_fm = front_matter_map(pre_bytes.decode("utf-8", errors="replace"))
+    new_fm = front_matter_map(content)
+    if old_fm is None or new_fm is None:
+        which = "the incoming" if new_fm is None else "the on-disk"
+        _record_schedule_refusal(path, "front matter unreadable on one side")
+        return _err(f"vault_write refused: {which} front matter of {path} cannot be "
+                    f"read as a mapping, so none of the dispatch fields ({held}) can "
+                    "be checked against it. Repair the front matter rather than "
+                    "writing past it.", ErrorCode.PROTECTED_PATH)
+    moves = schedule_value_moves(old_fm, new_fm)
+    if not moves:
+        return None
+    field, old, new = moves[0]
+    _record_schedule_refusal(path, f"{field}: {old!r} -> {new!r}")
+    return _err(
+        f"vault_write refused: {path} would move `{field}` "
+        f"{shown_schedule_value(old)} -> {shown_schedule_value(new)}"
+        + (f" (and {len(moves) - 1} other dispatch field(s): "
+           f"{', '.join(f for f, _, _ in moves[1:])}" if len(moves) > 1 else "")
+        + f" — a dispatch-affecting field, which the #724 grant rail refuses unattended "
+        f"on autonomy_write_task, and this lane holds to the same rule. Land the rest, "
+        f"and let a human or a granted call move `{field}`.", ErrorCode.PROTECTED_PATH)
+
+
 def _vault_write(params: dict) -> dict:
     path, norm_err = _normalize_vault_path(params.get("path", ""))
     if norm_err:
@@ -1709,6 +1918,11 @@ def _vault_write(params: dict) -> dict:
         return refusal
     content = params.get("content", "")
     refusal = _bench_assertion_refusal(path, content)
+    if refusal is not None:
+        return refusal
+    # The #724 dispatch-field rail's third lane (#2362), phase A: the create rule,
+    # beside the other pre-lock guards. The diff rule is phase B, inside the lock.
+    refusal = _autonomy_schedule_refusal(path, content)
     if refusal is not None:
         return refusal
     try:
@@ -1739,6 +1953,15 @@ def _vault_write(params: dict) -> dict:
         try:
             with commit_lock(target):
                 pre_bytes = _read_pre_bytes(target)
+                # #2362 phase B: the diff against the file being replaced, on the
+                # same bytes the ledger is about to record and inside the same
+                # critical section — ahead of the write, so a refusal changes no
+                # bytes and never reaches `_ledger_record` or `_audit_write`, and
+                # after the read, so no concurrent writer can overtake it between
+                # the comparison and the replace.
+                refusal = _autonomy_schedule_move_refusal(path, content, pre_bytes)
+                if refusal is not None:
+                    return refusal
                 write_text_durable(target, content)
         except TimeoutError as exc:
             return _err(str(exc), ErrorCode.LOCK_TIMEOUT, path=path)
