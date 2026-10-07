@@ -203,6 +203,67 @@ Z_80 = 0.8416212335729143  # one-sided power 0.8
 RESERVE_RULE = ("only a run with --holdout reads the holdout leg; it reports aggregates, "
                 "never per-question rows or ids; no tuning comparison reads it")
 
+#: #2344: where a fact-snapshot tree keeps its two stores. The builder
+#: (`eval/fact_write_gate_snapshot.py`) and this reader both name the layout
+#: through those module constants, so the two cannot drift on where a tree's
+#: store sits.
+FACT_SNAPSHOT_FACTS_SUBDIR = "facts"
+FACT_SNAPSHOT_KG_DB_NAME = "kg.sqlite"
+
+
+def point_facts_at_snapshot(ap, snapshot: str) -> str:
+    """Point the fact readers at a supplied snapshot tree, and return that tree.
+
+    Two seams, because the eval reaches the store two ways. The environment is
+    what `app.paths` resolves at import, so it is what a child process or a fresh
+    invocation needs; but `app.paths.VAULT_FACTS_ROOT` and the `kg_store` default
+    are bound ONCE at import, so in the single process that is already rendering
+    the arms, setting the variables alone would leave the `<facts>` block coming
+    from whatever store the run opened at boot while the artifact named the
+    snapshot. Both are moved here: the variables, the three reader roots
+    (`_shared`/`facts`/`retrieval` — the same three
+    `eval/fact_write_gate_snapshot.isolated_tree` moves), and the store default.
+    Nothing is restored, which is correct for a run: after this line the whole
+    process reads the tree it was given.
+
+    `--corpus` already names a facts tree, but through `os.environ.setdefault`,
+    which is right for a default and wrong for a paired run: an inherited
+    `LLOYD_FACTS_ROOT` wins over the flag, so the second leg of a pair can render
+    the first leg's store while its artifact says otherwise. `--fact-snapshot` is
+    the paired-run spelling and it overwrites, because naming a tree here IS the
+    measurement's subject: which store the `<facts>` block came from.
+
+    A tree with no `facts/` is refused rather than rendered: an absent store
+    selects no facts, every prefetch score comes out 0.0, and 0.0 is the number a
+    reader meets first — a typo'd path would publish as a result about a corpus.
+    """
+    root = Path(snapshot).expanduser()
+    facts_root = root / FACT_SNAPSHOT_FACTS_SUBDIR
+    db = root / FACT_SNAPSHOT_KG_DB_NAME
+    if not facts_root.is_dir():
+        ap.error(
+            f"--fact-snapshot {root} has no `{FACT_SNAPSHOT_FACTS_SUBDIR}/` "
+            f"directory (a tree holds `{FACT_SNAPSHOT_FACTS_SUBDIR}/` and "
+            f"`{FACT_SNAPSHOT_KG_DB_NAME}`, built by "
+            f"eval/fact_write_gate_snapshot.py); rendering an absent tree would "
+            f"score 0.0 and read as a result about a corpus")
+    if not db.exists():
+        ap.error(f"--fact-snapshot {root} has no `{FACT_SNAPSHOT_KG_DB_NAME}`; "
+                 f"the prefetch arm's entity lookup reads it")
+    os.environ["LLOYD_FACTS_ROOT"] = str(facts_root)
+    os.environ["LLOYD_KG_DB"] = str(db)
+    from agent_mcp import _shared, facts as facts_mod, retrieval as retrieval_mod
+    from app import kg_store as kg_store_mod
+    _shared.FACTS_ROOT = facts_root
+    facts_mod.FACTS_ROOT = facts_root
+    retrieval_mod.FACTS_ROOT = facts_root
+    _shared._invalidate_entity_dirs_cache()
+    retrieval_mod._entity_index_cache = None
+    retrieval_mod._alias_surface_cache = None
+    retrieval_mod._fact_file_cache.clear()
+    kg_store_mod.configure(db)
+    return str(root)
+
 
 def parse_arms(spec: str) -> list[str]:
     """Split and validate `--arms`, the one rule every command that takes it uses.
@@ -1347,6 +1408,16 @@ def run(argv: list[str] | None = None, *, complete=None, djev_ask=None, primary=
     ap.add_argument("--out-dir", default=str(DEFAULT_OUT))
     ap.add_argument("--corpus", default=str(DEFAULT_CORPUS),
                     help="facts snapshot the prefetch arms read (LLOYD_FACTS_ROOT/LLOYD_KG_DB)")
+    # #2344 clause 5: the SAME arm, one tree per leg. `--corpus` is a default and
+    # yields to an inherited LLOYD_FACTS_ROOT; this names the tree and overwrites.
+    # No new arm id: the comparison is which store the `<facts>` block was read
+    # from, and a second arm name would make the two legs differ in two ways.
+    ap.add_argument("--fact-snapshot", default=None,
+                    help="DIR built by eval/fact_write_gate_snapshot.py "
+                         "(DIR/facts + DIR/kg.sqlite): render the prefetch arms' "
+                         "`<facts>` block from that tree instead of the live "
+                         "store, overriding any inherited LLOYD_FACTS_ROOT. Run "
+                         "it once per gate mode for a paired run.")
     args = ap.parse_args(argv)
     arms = parse_arms(args.arms)
     ms = load_set(Path(args.set), view="all" if args.holdout else "tuning")
@@ -1358,7 +1429,15 @@ def run(argv: list[str] | None = None, *, complete=None, djev_ask=None, primary=
     # refused for a stronger reason and that refusal should still be the one heard.
     require_label_audit(ms)
     want_facts = any(a.startswith("prefetch") for a in arms) or SLEEP_NOTES_ARM in arms
+    fact_snapshot = None
     if want_facts and blocks_fn is None:
+        # The override goes first so the setdefaults below cannot shadow it. It is
+        # not only the environment: the `<facts>` block is built in-process by
+        # `app.prefetch`, and `app.paths` bound `VAULT_FACTS_ROOT`/`VAULT_KG_DB`
+        # once at import, so a process already past that import needs the bound
+        # values moved too — which is what `point_facts_at_snapshot` does.
+        fact_snapshot = (point_facts_at_snapshot(ap, args.fact_snapshot)
+                         if args.fact_snapshot else None)
         os.environ.setdefault("LLOYD_FACTS_ROOT", str(Path(args.corpus) / "facts"))
         os.environ.setdefault("LLOYD_KG_DB", str(Path(args.corpus) / "kg.sqlite"))
     blocks_fn = blocks_fn or prefetch_blocks
@@ -1452,6 +1531,10 @@ def run(argv: list[str] | None = None, *, complete=None, djev_ask=None, primary=
         # header, above the scores computed FROM those labels, so a reader quoting
         # a rate has to pass the bound on its way to it.
         "label_quality": label_quality(ms),
+        # #2344: which facts tree the `<facts>` block was rendered from, so the
+        # two legs of a gate-mode pair are tellable apart after the run. None is
+        # the pre-#2344 shape: `--corpus`/inherited env, i.e. one tree for both.
+        "fact_snapshot": fact_snapshot,
         "answerer": {"model": model, "base_url": base_url, "thinking": "on (engine default)",
                      "temperature": 0.6, "top_p": 0.95, "seed": "sha256(question id)",
                      "max_tokens": args.max_tokens},
@@ -1598,6 +1681,15 @@ def prefetch_retrieval(argv: list[str] | None = None, *, select=None) -> dict:
     ap = argparse.ArgumentParser()
     ap.add_argument("--set", default=str(SET_ROOT / DEFAULT_VERSION))
     ap.add_argument("--corpus", default=str(DEFAULT_CORPUS))
+    # #2344 clause 5: the gate-mode pair is read here, because this command costs
+    # no model call, `knowledge_update` is a category of this set, and the metric
+    # it moves (`anti_hit`) is exactly the failure an expired-but-still-surfaced
+    # fact causes. Same arm, two trees, one per gate mode — no new arm id.
+    ap.add_argument("--fact-snapshot", default=None,
+                    help="DIR built by eval/fact_write_gate_snapshot.py "
+                         "(DIR/facts + DIR/kg.sqlite): render the `<facts>` "
+                         "block from that tree instead of the live store, "
+                         "overriding any inherited LLOYD_FACTS_ROOT")
     ap.add_argument("--arms", default=",".join(("prefetch", "prefetch_rel", PREFETCH_RAWSPAN_ARM)))
     ap.add_argument("--holdout", action="store_true")
     ap.add_argument("--out-dir", default=str(DEFAULT_OUT))
@@ -1624,6 +1716,11 @@ def prefetch_retrieval(argv: list[str] | None = None, *, select=None) -> dict:
     budget_suffix = "" if budget == FACTS_RENDER_CHAR_BUDGET else f"-budget{budget}"
     arms = parse_arms(args.arms)
     label = args.label or "-".join(arms)
+    # Before the `--corpus` setdefaults, so a named snapshot wins over both an
+    # inherited `LLOYD_FACTS_ROOT` and the corpus default — the two legs of a
+    # gate-mode pair must not be able to render the same store.
+    fact_snapshot = (point_facts_at_snapshot(ap, args.fact_snapshot)
+                     if args.fact_snapshot else None)
     os.environ.setdefault("LLOYD_FACTS_ROOT", str(Path(args.corpus) / "facts"))
     os.environ.setdefault("LLOYD_KG_DB", str(Path(args.corpus) / "kg.sqlite"))
     if select is None:
@@ -1739,6 +1836,11 @@ def prefetch_retrieval(argv: list[str] | None = None, *, select=None) -> dict:
     # indistinguishable until opened. At the shipped default the suffix is empty, so
     # an unflagged run still writes the file every existing reference names.
     path = out_dir / f"prefetch-retrieval-{label}{budget_suffix}.json"
+    # #2344: which tree the `<facts>` block was rendered from, in the report as
+    # well as the file. Two legs of a gate-mode pair differ in a score otherwise
+    # and are indistinguishable once written; `facts_root` below is the environment
+    # either way, which is exactly the field a stale inherited root can lie in.
+    out["fact_snapshot"] = fact_snapshot
     written = {"argv": list(argv), "generated_at": _dt.datetime.now().isoformat(timespec="seconds"),
                "arms": arms, "facts_root": os.environ.get("LLOYD_FACTS_ROOT"), **out}
     path.write_text(json.dumps(written, indent=1, default=str) + "\n")

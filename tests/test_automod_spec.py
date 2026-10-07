@@ -489,6 +489,71 @@ def test_the_real_file_with_one_value_flipped_is_denied():
     assert not ok and "mcp_servers.lloyd-mcp.disabled_tools" in reason, reason
 
 
+def test_a_round_cannot_arm_the_fact_write_gate():
+    """#2344 clause 1, on the real file. `config.yaml` reserves
+    `knowledge_graph.write_gate.mode: "on"` for "an explicit decision from Alan
+    plus a measured LloydMemEval `knowledge_update` gain" (#1487) — and until this
+    fence, that reservation was a comment: `agent_mcp/fact_write_gate.py`'s `mode()`
+    takes the config key with no guard behind it, so a round editing one value
+    could start it stamping `expired_at` on facts. The refusal has to name BOTH the
+    path a reviewer would look for and the prefix that refused it."""
+    before = _CFG.read_text(encoding="utf-8")
+    cfg = yaml.safe_load(before)
+    gate_cfg = cfg["knowledge_graph"]["write_gate"]
+    assert gate_cfg["mode"] == "noop", \
+        "positive control: the file ships noop, so the flip below is an arming"
+
+    # Replace EVERY occurrence, the spelling of the item's CHECK. `mode: "noop"`
+    # appears twice in the file — once inside the reservation comment at :2362 and
+    # once as the value at :2369 — and a count-limited replace lands on the
+    # comment, which the diff cannot see: the answer comes back "no value changed"
+    # and the test passes for the wrong reason.
+    after = before.replace('mode: "noop"', 'mode: "on"')
+    assert after != before, "positive control: the mode line was found to flip"
+    ok, fence_reason, paths = spec.config_value_change(before, after)
+    assert not ok, "arming the gate read as an ordinary value change"
+    assert paths == ["knowledge_graph.write_gate.mode"], paths
+    assert "`knowledge_graph.write_gate.mode` is under the denied key " \
+           "`knowledge_graph.write_gate`" in fence_reason, fence_reason
+    # The fence's own line names ONE path and ONE prefix. `knowledge_graph` carries
+    # exactly two keys in the real file, and naming the other one here would be the
+    # over-freeze the sibling test below refuses. (`check_scope`'s reason is not
+    # asserted for this: it quotes the rule back at the round, "denied keys" and
+    # all, so counting phrases in it measures the prose.)
+    assert "knowledge_graph.write_enabled" not in fence_reason, fence_reason
+    assert fence_reason.count("denied key") == 1, fence_reason
+    ok, reason, buckets = _scope_with(before, after)
+    assert not ok and buckets["denied"] == ["config.yaml"] and \
+        buckets["config_value"] == [], (reason, buckets)
+
+
+def test_the_write_gate_fence_stops_at_arming():
+    """#2344 clause 2: the denied prefix is the dotted `knowledge_graph.write_gate`,
+    NOT `knowledge_graph`. Fencing the section whole would look safer and freeze a
+    tunable the loop is allowed to change — `write_enabled`, whose false is the
+    kill switch #1236 shipped and whose value a round may legitimately move. If
+    this goes red, someone widened the fence and the loop lost a knob it never
+    needed to lose."""
+    before = _CFG.read_text(encoding="utf-8")
+    cfg = yaml.safe_load(before)
+    assert cfg["knowledge_graph"]["write_enabled"] is True, \
+        "positive control: writes are enabled on the live tree"
+    assert cfg["knowledge_graph"]["write_gate"]["mode"] == "noop"
+
+    after = before.replace("write_enabled: true", "write_enabled: false", 1)
+    assert after != before, "positive control: the sibling line was found to flip"
+    ok, reason, paths = spec.config_value_change(before, after)
+    assert ok, f"a sibling of the armed key was refused: {reason}"
+    assert paths == ["knowledge_graph.write_enabled"], paths
+    ok, reason, buckets = _scope_with(before, after)
+    assert ok and buckets["config_value"] == ["config.yaml"] and \
+        buckets["denied"] == [], (reason, buckets)
+    # And the fence matches on a dotted PREFIX, not a substring: a key that merely
+    # starts with the denied name's characters is not under it.
+    assert spec._config_denied_prefix("knowledge_graph.write_gate_mode") is None, \
+        "a sibling named `write_gate_mode` would have been frozen by a substring rule"
+
+
 # --- the fence around the value lane -----------------------------------------
 
 def test_a_denied_prefix_is_refused_with_the_key_named():
@@ -641,6 +706,11 @@ def test_the_denied_key_set_is_the_one_landed():
         "mcp_servers", "models", "model", "subagents", "server", "services",
         "guardian", "automod.enabled", "automod.landing", "workers.enabled",
         "workers.slots",
+        # #2344: arming the fact-expiring write gate, which `mode()` in
+        # agent_mcp/fact_write_gate.py reads with no guard of its own. The dotted
+        # `write_gate`, not `knowledge_graph` — the sibling tunable stays editable,
+        # pinned by test_the_write_gate_fence_stops_at_arming.
+        "knowledge_graph.write_gate",
     )
     assert spec.CONFIG_LOOP_SOURCES == ("autocode", "autotriage", "owed-check")
     assert spec.CONFIG_LOOP_SOURCE_LEAVES == {

@@ -51,7 +51,10 @@ goes with its own recommendation unless a step is physical. So
 changed key paths all fall outside `CONFIG_DENIED_KEYS` (prefixes: the tool
 pool and `disabled_tools`, the engine slots, the services and ports a
 rollback has to reach, the guardian, the loop's own switch and landing block,
-and the control leaves of its three worker sources, `CONFIG_LOOP_SOURCE_LEAVES`
+the arming switch of the fact-expiring write gate (`knowledge_graph.write_gate`,
+#2344 — `mode()` reads that key with no guard, so the fence is what keeps a
+round from arming it), and the control leaves of its three worker sources,
+`CONFIG_LOOP_SOURCE_LEAVES`
 — the config half of what `PROTECTED_GLOBS` is for code), whose changed leaves are none of `CONFIG_DENIED_LEAVES` (an
 endpoint, a device, a credential, anywhere in the tree) and carry no `${`
 placeholder (secrets reach the file only that way), and which removes no
@@ -240,6 +243,13 @@ CONFIG_DENIED_KEYS: tuple[str, ...] = (
     "automod.landing",                # restart/drain/squash: how a landing happens — the rollback path
     "workers.enabled",                # the pool that runs the loop
     "workers.slots",                  # the pool's depth: rounds + triages + 1, a restart-sized change
+    # #2344: arming the fact-expiring write gate. `mode()` in agent_mcp/
+    # fact_write_gate.py reads this key with no guard, so until now the only
+    # thing reserving `mode: "on"` was config.yaml's own comment. Arming it is
+    # Alan's call plus a measured `knowledge_update` gain (#1487). Dotted
+    # `write_gate`, NOT `knowledge_graph`: `knowledge_graph.write_enabled` is a
+    # tunable a round may change — see the test of the same shape.
+    "knowledge_graph.write_gate",
 )
 
 # The loop's own three worker sources are fenced by LEAF, not by prefix. The

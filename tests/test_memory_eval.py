@@ -1437,3 +1437,176 @@ def test_the_measurement_doc_prices_the_budget_and_retires_the_gpu_leg():
     assert "flip" in text and "must not be quoted" in text
     assert "no model call" in text or "without a model call" in text or \
         "modelled leg" in text, "the doc must say the run touched no engine"
+
+
+# ── #2344 clause 5: the same arm, one builder tree per leg ───────────────────
+#
+# `--fact-snapshot DIR` is not a new arm and adds no arm id. The arming bar
+# `config.yaml` names for `knowledge_graph.write_gate.mode: "on"` is a measured
+# `knowledge_update` gain, and a paired gain needs the SAME arm run against two
+# trees that differ by one gate mode. What these tests pin is that the flag moves
+# which store the `<facts>` block is read from, that the artifact says which, and
+# that `ARMS` did not grow: a second prefetch arm would make the legs differ in
+# two ways at once, and the comparison would be measuring the arm. The file's
+# hermetic claim holds — no engine, no live djev (the classifier seam is stubbed
+# exactly as `tests/test_fact_write_gate.py` stubs it), and the only store read is
+# a throwaway tree under `tmp_path`.
+
+from agent_mcp import _shared  # noqa: E402
+from agent_mcp import facts as _facts_mod, retrieval as _retrieval_mod  # noqa: E402
+from app import djev as _djev, kg_store as _kg_mod  # noqa: E402
+from eval import fact_write_gate_snapshot as _fwgs  # noqa: E402
+from tests.test_fact_write_gate import SUPERSEDED, Djev  # noqa: E402
+
+
+@pytest.fixture
+def restore_fact_readers():
+    """Hand the process's fact readers back after a leg.
+
+    `point_facts_at_snapshot` deliberately does not restore what it moves: inside
+    a run, a process reading the tree it was given is the whole point. Inside a
+    suite it would leave every later test reading a throwaway tree, so a test that
+    asks for the flag asks for this too.
+    """
+    before = (_shared.FACTS_ROOT, _facts_mod.FACTS_ROOT, _retrieval_mod.FACTS_ROOT,
+              _kg_mod._default_path,
+              os.environ.get("LLOYD_FACTS_ROOT"), os.environ.get("LLOYD_KG_DB"))
+    yield
+    _shared.FACTS_ROOT, _facts_mod.FACTS_ROOT, _retrieval_mod.FACTS_ROOT = before[:3]
+    _kg_mod._default_path = before[3]
+    _kg_mod.reset()
+    for key, val in zip(("LLOYD_FACTS_ROOT", "LLOYD_KG_DB"), before[4:]):
+        os.environ.pop(key, None) if val is None else os.environ.__setitem__(key, val)
+    _shared._invalidate_entity_dirs_cache()
+    _retrieval_mod._entity_index_cache = None
+    _retrieval_mod._alias_surface_cache = None
+    _retrieval_mod._fact_file_cache.clear()
+
+
+@pytest.fixture
+def gate_pair(tmp_path, monkeypatch):
+    """The noop/on pair, with the classifier seam answered so one write is an
+    applied UPDATE. What djev is asked is `tests/test_fact_write_gate_snapshot.py`'s
+    subject; here the pair only has to hold a fact that one tree expired, and a
+    unit test is not a live model call."""
+    # The seam is `djev.ask_sync`, which is the ONLY way a verdict is produced:
+    # `gate_write` passes no decider and no mode. `tests/test_fact_write_gate.py`
+    # answers with the same stub and the same SUPERSEDED probabilities.
+    monkeypatch.setattr(_djev, "ask_sync", Djev(SUPERSEDED))
+    manifest = _fwgs.build(tmp_path / "pair", now_iso="2026-10-07T00:00:00+00:00")
+    assert manifest["shows_expiry_differential"], "the fixture pair must differ"
+    return manifest
+
+
+def _leg(gate_pair, root, tmp_path, mode):
+    """Run the `prefetch` arm against one leg of the pair and capture the records
+    its own selector handed the renderer.
+
+    The real `app.prefetch` selector, wrapped and not replaced: the artifact keeps
+    only the gold-in-block flag, and saying which tree a line came from needs the
+    line."""
+    from app import prefetch as pf
+    seen: list[list[str]] = []
+
+    def spy(query, rank=None):
+        records = pf._search_fact_records(query, rank)
+        seen.append([r["line"] for r in records])
+        return records
+
+    out = M.prefetch_retrieval(
+        ["--set", str(root), "--arms", "prefetch",
+         "--out-dir", str(tmp_path / "runs"), "--label", f"snap-{mode}",
+         "--fact-snapshot", str(gate_pair["snapshots"][mode])], select=spy)
+    return out, [line for lines in seen for line in lines]
+
+
+def test_the_arm_renders_the_snapshot_it_was_given(gate_pair, tmp_path,
+                                                   restore_fact_readers):
+    """noop leaves the superseded statement live, so its block still carries that
+    sentence; on has it stamped `expired_at`, and the same arm on the same question
+    no longer selects it. One arm, two trees, one field."""
+    root = make_set(tmp_path / "set", {"knowledge_update": 2})
+    _, lines_noop = _leg(gate_pair, root, tmp_path, "noop")
+    _, lines_on = _leg(gate_pair, root, tmp_path, "on")
+    flat_noop, flat_on = "\n".join(lines_noop), "\n".join(lines_on)
+    assert "8182" in flat_noop and "8182" in flat_on, \
+        "both legs render the surviving statement, or neither proves anything"
+    assert "behind the bastion." in flat_noop, \
+        "the noop tree still surfaces the superseded sentence"
+    assert "behind the bastion." not in flat_on, \
+        "the on tree expired it and the arm read the expiry"
+
+
+def test_the_artifact_names_the_tree_it_rendered(gate_pair, tmp_path,
+                                                 restore_fact_readers):
+    """Two artifacts differing only in a score are not a paired run: each leg says
+    in its header which store its `<facts>` block came from, and the corpus field
+    is that tree's own facts dir rather than the default."""
+    root = make_set(tmp_path / "set", {"knowledge_update": 2})
+    art_noop, _ = _leg(gate_pair, root, tmp_path, "noop")
+    art_on, _ = _leg(gate_pair, root, tmp_path, "on")
+    assert art_noop["fact_snapshot"] == gate_pair["snapshots"]["noop"]
+    assert art_on["fact_snapshot"] == gate_pair["snapshots"]["on"]
+    # The written artifact carries the environment it read under as well: same tree,
+    # spelled as a path, so a reader without the manifest can still tell the legs.
+    written = json.loads(Path(art_noop["_path"]).read_text(encoding="utf-8"))
+    assert written["facts_root"] == str(Path(gate_pair["snapshots"]["noop"]) / "facts"), \
+        written["facts_root"]
+
+
+def test_the_pair_runs_on_the_arm_that_already_existed(gate_pair, tmp_path,
+                                                       restore_fact_readers):
+    """No new arm id, in either direction: both legs report the one arm, and no arm
+    named after this instrument exists to report."""
+    root = make_set(tmp_path / "set", {"knowledge_update": 2})
+    art_noop, _ = _leg(gate_pair, root, tmp_path, "noop")
+    art_on, _ = _leg(gate_pair, root, tmp_path, "on")
+    assert art_noop["arms"] == art_on["arms"] == ["prefetch"]
+    assert "prefetch" in M.ARMS
+    assert not [a for a in M.ARMS if "snapshot" in a or "gate" in a], M.ARMS
+
+
+def test_the_snapshot_overrides_an_inherited_facts_root(gate_pair, tmp_path,
+                                                        restore_fact_readers,
+                                                        monkeypatch):
+    """Why the flag exists beside `--corpus`: an inherited `LLOYD_FACTS_ROOT`
+    outranks a `setdefault`, so without an override the second leg of a pair
+    silently renders the first leg's store and its artifact says otherwise."""
+    monkeypatch.setenv("LLOYD_FACTS_ROOT", str(tmp_path / "someone-elses-tree"))
+    monkeypatch.setenv("LLOYD_KG_DB", str(tmp_path / "someone-elses-kg.sqlite"))
+    root = make_set(tmp_path / "set", {"knowledge_update": 2})
+    out, lines = _leg(gate_pair, root, tmp_path, "on")
+    assert os.environ["LLOYD_FACTS_ROOT"] == str(
+        Path(gate_pair["snapshots"]["on"]) / "facts"), \
+        "the flag yielded to an inherited root"
+    assert out["fact_snapshot"] == gate_pair["snapshots"]["on"]
+    assert "8182" in "\n".join(lines)
+
+
+def test_a_tree_with_no_facts_dir_is_refused_before_it_could_score_zero(
+        tmp_path, restore_fact_readers):
+    """A typo'd snapshot selects no facts, and 0.0 is the number a reader meets
+    first: refused at the flag, naming the layout, rather than published as a
+    result about a corpus."""
+    root = make_set(tmp_path / "set", {"knowledge_update": 1})
+    empty = tmp_path / "not-a-tree"
+    empty.mkdir()
+    with pytest.raises(SystemExit) as raised:
+        M.prefetch_retrieval(["--set", str(root), "--arms", "prefetch",
+                              "--fact-snapshot", str(empty),
+                              "--out-dir", str(tmp_path / "runs")])
+    assert raised.value.code == 2
+
+
+def test_a_run_without_the_flag_still_uses_the_corpus_default(tmp_path,
+                                                             restore_fact_readers):
+    """The flag is additive: with no `--fact-snapshot` the `--corpus` setdefaults
+    are untouched and the artifact records no snapshot — the shape every artifact
+    predating #2344 has. If this goes red the override became unconditional and
+    every existing arm run is reading a tree nobody named."""
+    root = make_set(tmp_path / "set", {"knowledge_update": 1})
+    out = M.prefetch_retrieval(["--set", str(root), "--arms", "prefetch",
+                                "--out-dir", str(tmp_path / "runs"),
+                                "--label", "no-snapshot"])
+    assert out["fact_snapshot"] is None
+    assert out["arms"] == ["prefetch"]
