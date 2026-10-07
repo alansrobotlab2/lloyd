@@ -2613,17 +2613,29 @@ def cmd_audit(args: argparse.Namespace) -> int:
     decided before `candidate_body_defect` for that reason, and it enters the exit code by name so
     excluding a row from one figure cannot quietly buy a green audit.
 
-    Then the tallies, and their order is load-bearing: `stranded:
+    Then the tallies, and their order is load-bearing: `exit_drivers:`, then
+    `candidate_body_scoping: whole_file N dead_strip N input_lost N`, then `stranded:
     case_sensitive_grep N`, then `denominators: empty_input N undeclared M`, then
     `keys: N unrunnable: M` as the LAST line — `check`'s shape, so a reader that takes
     `splitlines()[-1]` gets the ledger tally and one that takes `[-2]` gets the denominator
     tally it has been reading since #2048. The new count enters ABOVE those two rather than
     between them, because displacing a published line to make room for a new one is how a
-    reader that is not looking for the change silently reads the wrong figure; five tests
-    pin those two positions. Exit 1 when `unrunnable:` > 0 or ANY count above it does —
-    `whole_file`, `dead_strip` and `input_lost` included, each by name in the expression rather
-    than by inheriting another's — so an unverifiable ledger fails a run instead of printing into a
-    log nobody re-reads.
+    reader that is not looking for the change silently reads the wrong figure; the tests pin
+    those positions by index. Exit 1 when `unrunnable:` > 0 or ANY count above it does —
+    `whole_file`, `dead_strip` and `input_lost` included, each counted in the same six-term
+    rule rather than by inheriting another's — so an unverifiable ledger fails a run instead of
+    printing into a log nobody re-reads.
+
+    `exit_drivers:` exists because those two facts were printed separately and the reader was left
+    to join them. The exit is driven by six figures, but the two the nightly runbooks carry into
+    their report are `unrunnable:` and `empty_input`, so #2343 measured a run publishing
+    `keys: 116 unrunnable: 0` and `denominators: empty_input 0 undeclared 102` beside exit 1 with
+    nothing anywhere on stdout naming the term that fired (`input_lost 6`). This line names every
+    term whose count is non-zero as `<term> <count>` pairs, spelled with the tokens the tally lines
+    already publish — `input_lost`, never `lost_rows` — so it ties to a line the reader already has,
+    and reads `exit_drivers: none` on a run that exits 0, because a tally that only appears with
+    findings cannot tell a clean night from an audit nobody ran. It is the first line of the block
+    and the exit reads the same six counts: the pair can never disagree.
 
     The stranded line exists because the ledger's own worst silent failure is not a command
     that cannot run. A falsifier that greps an installed `SKILL.md` for a literal string
@@ -2705,6 +2717,28 @@ def cmd_audit(args: argparse.Namespace) -> int:
                 (whole if leak[0] == "whole_file" else dead_strip).append(key)
                 print(f"{'WHOLE_CANDIDATE_COUNT' if leak[0] == 'whole_file' else 'DEAD_FRONT_MATTER_STRIP'}"
                       f" {key} :: {leak[1]}")
+    # The exit has SIX terms and only two of them are figures the nightly runbooks carry: a run that
+    # reports `ledger_unrunnable: 0` beside a non-zero exit has nothing on stdout saying what fired.
+    # #2343 measured it live — `keys: 116 unrunnable: 0`, `denominators: empty_input 0 undeclared 102`
+    # and exit 1, driven entirely by `input_lost 6`. So the drivers name themselves, one line per run,
+    # spelled with the tokens the tally lines ABOVE and BELOW this one already publish (`input_lost`,
+    # not `lost_rows`; `unrunnable`, not `dead`), because a reader who has the scoping line can tie
+    # `input_lost 6` to the figure in it without knowing this function's local names.
+    # ABOVE `candidate_body_scoping:` is the only legal slot. The lines a nightly parses are pinned by
+    # INDEX, not by search: `keys:` at `splitlines()[-1]`, `denominators:` at `-2`, `stranded:` at
+    # `-3`. A new tally therefore enters at the top of the block — displacing nothing below `-3` and
+    # moving `candidate_body_scoping:` to `-5` — which is the same rule #2103 and #2166 arrived at.
+    # This tuple and the return at the end are ONE fact, not two lists kept in step by hand: a ledger
+    # cannot exit 1 on a term this line does not name, and cannot name a driver on a green run.
+    # `undeclared` is absent on purpose — published, but never a reason to fail a run (#2052).
+    exit_terms = (("unrunnable", len(dead)),
+                  ("empty_input", len(empty_input)),
+                  ("case_sensitive_grep", len(stranded)),
+                  ("whole_file", len(whole)),
+                  ("dead_strip", len(dead_strip)),
+                  ("input_lost", len(lost_rows)))
+    drivers = " ".join(f"{token} {count}" for token, count in exit_terms if count)
+    print(f"exit_drivers: {drivers or 'none'}")
     # ABOVE `stranded:`, not below it: #2103's test pins `splitlines()[-3]` to that line, and
     # the rule that lands in #2166's own test is that a new tally arrives above the published
     # figure without moving any of the ones below it. `input_lost` is APPENDED to this line rather
@@ -2715,12 +2749,15 @@ def cmd_audit(args: argparse.Namespace) -> int:
     print(f"stranded: case_sensitive_grep {len(stranded)}")
     print(f"denominators: empty_input {len(empty_input)} undeclared {undeclared}")
     print(f"keys: {len(table)} unrunnable: {len(dead)}")
-    # `lost_rows` is in this expression because the change that removed those four rows from `whole`
-    # is the same change that would otherwise have flipped tonight's audit from exit 1 to exit 0:
-    # excluded from one figure and absent from the rest is a ledger that reports `unrunnable: 0` over
-    # falsifiers which can no longer see their input, which is the exact sentence #2048 was raised to
-    # make impossible. A ledger whose ONLY defect is input-lost falsifiers has to stay red.
-    return 1 if (dead or empty_input or stranded or whole or dead_strip or lost_rows) else 0
+    # Still the six-term rule of #2048/#2166/#2339, read off `exit_terms`: `lost_rows` is one of the
+    # six because the change that removed those four rows from `whole` is the same change that would
+    # otherwise have flipped tonight's audit from exit 1 to exit 0 — excluded from one figure and
+    # absent from the rest is a ledger that reports `unrunnable: 0` over falsifiers which can no
+    # longer see their input, which is the exact sentence #2048 was raised to make impossible. A
+    # ledger whose ONLY defect is input-lost falsifiers has to stay red, and since #2343 it also has
+    # to SAY so: reading the exit and the driver line off the one tuple is what keeps a term from
+    # entering the expression and being forgotten on stdout, which is the gap #2343 was filed for.
+    return 1 if drivers else 0
 
 
 def _read_reanchors(path: str | None) -> dict[str, str]:

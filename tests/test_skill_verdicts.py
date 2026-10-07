@@ -2132,12 +2132,19 @@ def test_audit_tally_is_its_final_line(tmp_path):
     # is why the line reads 0 rather than being absent: a tally that only appears with
     # findings cannot tell a clean night from a check nobody ran.
     # +4 as of #2166, which added a third tally (`candidate_body_scoping: …`) above `stranded:`
-    # for the same reason the other two are there: a clean night has to print a zero. Only this
-    # arithmetic moves — `keys:` stays last, `denominators:` -2 and `stranded:` -3 below it.
-    assert len(out.splitlines()) == len(AUDIT_DEAD) + 4, (
-        f"tally must be the {len(AUDIT_DEAD) + 4}th and last line of its own output: {out}")
+    # for the same reason the other two are there: a clean night has to print a zero.
+    # +5 as of #2343, which adds `exit_drivers:` at the TOP of that tally block. This is the only
+    # arithmetic that moves, and the reason is worth stating exactly, because negative indices count
+    # from the END: a line inserted above a block leaves every index inside that block unchanged, so
+    # `keys:` stays -1, `denominators:` -2, `stranded:` -3 and `candidate_body_scoping:` -4, while
+    # the new line arrives at -5. Two positions are pinned below to prove that, not just assert it.
+    assert len(out.splitlines()) == len(AUDIT_DEAD) + 5, (
+        f"tally must be the {len(AUDIT_DEAD) + 5}th and last line of its own output: {out}")
     assert out.splitlines()[-2] == "denominators: empty_input 0 undeclared 7", out
     assert out.splitlines()[-3] == "stranded: case_sensitive_grep 0", out
+    assert out.splitlines()[-4] == ("candidate_body_scoping: whole_file 0 dead_strip 0 "
+                                    "input_lost 0"), out
+    assert out.splitlines()[-5] == "exit_drivers: unrunnable 4", out
     assert out.count("UNRUNNABLE ") == len(AUDIT_DEAD), out
 
 
@@ -4852,11 +4859,14 @@ def test_a_ledger_whose_only_defect_is_input_lost_still_exits_1_with_its_lines_i
     input-lost row and one clean body-scoped row, so nothing else in the expression is true and the
     exit can only be 1 if the new figure is in it.
 
-    The last four lines are pinned by content and position as well: `keys:` stays last with its
-    wording, `denominators:` at -2 and `stranded:` at -3, `candidate_body_scoping:` at -4. The new
-    figure is appended at the END of its line for the same reason the line order is fixed — a
-    nightly that parses `whole_file (\\d+)` out of that line, or takes `splitlines()[-4]`, has to
-    keep working on a ledger it has never seen before.
+    The last five lines are pinned by content and position as well: `keys:` stays last with its
+    wording, `denominators:` at -2 and `stranded:` at -3, `candidate_body_scoping:` at -4, and
+    #2343's `exit_drivers:` immediately above that at -5. Two positions move nobody: indices count
+    from the END of the output, so a line inserted above this block leaves -1 to -4 exactly where
+    every existing parser reads them, and the new line is the only one at a new index. The
+    `input_lost` figure is appended at the END of the scoping line for the same reason the line
+    order is fixed — a nightly that parses `whole_file (\\d+)` out of that line, or takes
+    `splitlines()[-4]`, has to keep working on a ledger it has never seen before.
     """
     cand = candidates_2339(tmp_path)
     stored_row(store, "seq-9-bash-fs-gone", seq_row_2339(cand, "seq-9-bash-fs-gone"))
@@ -4869,6 +4879,9 @@ def test_a_ledger_whose_only_defect_is_input_lost_still_exits_1_with_its_lines_i
     assert lines[-2] == "denominators: empty_input 0 undeclared 1", out
     assert lines[-3] == "stranded: case_sensitive_grep 0", out
     assert lines[-4] == "candidate_body_scoping: whole_file 0 dead_strip 0 input_lost 1", out
+    assert lines[-5] == "exit_drivers: input_lost 1", (
+        "#2343 clause 3: the driver line prints immediately above `candidate_body_scoping:`, which "
+        f"is why that line is still at -4: {lines}")
 
 
 def test_the_input_lost_predicate_stays_silent_where_it_cannot_prove_anything(tmp_path):
@@ -4898,3 +4911,227 @@ def test_the_input_lost_predicate_stays_silent_where_it_cannot_prove_anything(tm
     assert "candidate-seq-9-bash-fs-gone-[0-9]" in detail and str(cand) in detail, detail
     assert sv.candidate_input_lost(counting_cmd(candidate_2166(tmp_path), "whole")) is None, (
         "a glob that resolves is a falsifier that can see its input")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #2343 — `exit_drivers:`: the audit exit names the term that drove it.
+#
+# The exit is built from SIX figures; the two the nightly runbooks carry into their report are
+# `unrunnable:` and `empty_input`. Measured on the live ledger on 2026-10-07 both of those read 0
+# while the audit exited 1 on `input_lost 6`, so the run wrote `ledger_unrunnable: 0` beside a
+# non-zero exit and nothing anywhere on stdout said which term fired — the defect the audit exists
+# to publish was invisible on the only run that runs it nightly. These nodes pin the driver line,
+# its published vocabulary, its single legal position, and that the six-term exit and the line are
+# ONE measurement rather than two lists kept in step by hand.
+# ═══════════════════════════════════════════════════════════════════════════
+
+#: The six figures the exit is built from, in the order `cmd_audit` reads them, each spelled as the
+#: tally lines already publish it. `lost_rows`, `dead` and `whole` are that function's local names
+#: and appear nowhere on stdout; a driver line spelled with them could not be tied to a line the
+#: reader already has, which is the whole point of clause 1.
+EXIT_TERMS_2343 = ("unrunnable", "empty_input", "case_sensitive_grep",
+                   "whole_file", "dead_strip", "input_lost")
+
+
+def skill_2343(tmp_path: Path) -> Path:
+    """`skill_fixture`'s witness skill, created at most once per `tmp_path`.
+
+    A wrapper rather than a second author: `skill_fixture` writes with `mkdir(parents=True)` and no
+    `exist_ok`, so a ledger wanting two rows over one skill — the case-stranded grep and the
+    dead-strip grep, both present in the six-defect ledger below — would die on the second call with
+    `FileExistsError`. Returning the file it already wrote keeps `skill_fixture` the single source of
+    the sentence, because a copied literal can drift and then #2343's `case_sensitive_grep` row
+    would silently stop being the #2103 shape it claims to reproduce.
+    """
+    skill = tmp_path / "vault" / "skills" / "file-mutation-safety" / "SKILL.md"
+    return skill if skill.exists() else skill_fixture(tmp_path)
+
+
+def defect_row_2343(tmp_path: Path, term: str) -> tuple[str, str]:
+    """One ledger row carrying exactly ONE of the six exit defects, as `(pattern_key, command)`.
+
+    Each shape is the one the live ledger actually stores for that term, rebuilt from the fixture
+    that term's own class test uses, so a driver line naming `input_lost` here is naming the real
+    `seq-9-bash-fs-gone` shape and not an invention of this file. Raises for any other string: a
+    typo in a parametrize list must not silently build a clean ledger and pass.
+    """
+    if term == "unrunnable":
+        return AUDIT_MISSING_FILE, AUDIT_CMDS[AUDIT_MISSING_FILE]
+    if term == "empty_input":
+        return AUDIT_EMPTY_INPUT, AUDIT_CMDS[AUDIT_EMPTY_INPUT]
+    if term == "case_sensitive_grep":
+        return ("k:stranded",
+                grep_owner(skill_2343(tmp_path), "one mechanism, two symptoms"))
+    if term == "whole_file":
+        return "Edit/logic", counting_cmd(candidate_2166(tmp_path), "whole")
+    if term == "dead_strip":
+        cand = candidate_2166(tmp_path)
+        return ("Bash/timeout",
+                f"f=$(ls -t {cand}/candidate-edit-logic-*.md | head -1); "
+                f"b=$(awk '/^---/{{n++; next}} n>=2' $f); "
+                f"echo occ=$(grep -m1 '^occurrences:' $f) "
+                f"{grep_owner(skill_2343(tmp_path), 'old string', '-ci')}")
+    if term == "input_lost":
+        cand = candidates_2339(tmp_path)
+        return "seq-9-bash-fs-gone", seq_row_2339(cand, "seq-9-bash-fs-gone")
+    raise AssertionError(f"not one of the six exit terms: {term}")
+
+
+def drivers_2343(out: str) -> dict[str, int]:
+    """The run's one `exit_drivers:` tally parsed into `{term: count}` — one line, or this fails.
+
+    Parsed as pairs rather than substring-matched on purpose: `dead_strip` contains `dead`, so
+    `"dead" in line` would pass a line that never named an unrunnable key, and a check that cannot
+    fail is not a pin. `none` parses to the empty dict, which is also what makes the green-run
+    assertion the same call as the red one.
+    """
+    lines = [ln for ln in out.splitlines() if ln.startswith("exit_drivers:")]
+    assert len(lines) == 1, (
+        f"exactly one `exit_drivers:` line per audit run, whatever the ledger: {out.splitlines()}")
+    value = lines[0].removeprefix("exit_drivers:").strip()
+    if value == "none":
+        return {}
+    words = value.split()
+    assert len(words) % 2 == 0, (
+        f"the tally is `<term> <count>` pairs, so an odd word count is a misprint: {value!r}")
+    return {words[i]: int(words[i + 1]) for i in range(0, len(words), 2)}
+
+
+def test_audit_prints_one_exit_drivers_line_naming_every_driving_term(tmp_path):
+    """Clause 1: one line, `<term> <count>` pairs for every non-zero term, `none` on a green run.
+
+    One ledger holding all six defects at once, so a term that fires and is forgotten on stdout
+    cannot hide behind a second ledger shape: the dict has to come back with all six keys at 1.
+    `lost_rows` is then asserted absent from the whole run — that is the internal name the item
+    named as the wrong answer, and it is the one a driver line could reach by printing the local
+    instead of the published token. The clean ledger is the other half of the clause: a tally that
+    only appears with findings cannot tell a clean night from an audit nobody ran.
+    """
+    store = tmp_path / "all-six.jsonl"
+    for term in EXIT_TERMS_2343:
+        key, cmd = defect_row_2343(tmp_path, term)
+        stored_row(store, key, cmd)
+
+    rc, out = run_audit(store)
+    assert rc == 1, out
+    assert out.splitlines()[-1] == "keys: 6 unrunnable: 1", out
+    assert drivers_2343(out) == {term: 1 for term in EXIT_TERMS_2343}, out
+    assert "lost_rows" not in out, (
+        f"the driver line publishes the tokens the other lines publish, not the locals: {out}")
+
+    clean = tmp_path / "clean.jsonl"
+    write_ledger(clean, [AUDIT_DECLARES, AUDIT_SEES, AUDIT_SEES_NONE])
+    rc_clean, out_clean = run_audit(clean)
+    assert rc_clean == 0, out_clean
+    assert out_clean.splitlines()[-5] == "exit_drivers: none", out_clean
+    assert drivers_2343(out_clean) == {}, out_clean
+
+
+def test_exit_drivers_names_input_lost_and_no_other_term_when_that_is_the_only_defect(tmp_path):
+    """Clause 2: tonight's live ledger in miniature — `input_lost` is the ONLY thing wrong.
+
+    Two keys, and every figure `audit` publishes reads 0 except `input_lost`: one falsifier whose
+    dated candidate snapshot the pruner already took, declaring the one row it read, plus one row
+    that ran clean and declared nine. So `keys: 2 unrunnable: 0`, `empty_input 0 undeclared 0`,
+    `case_sensitive_grep 0`, `whole_file 0 dead_strip 0` all sit beside a non-zero exit — precisely
+    the shape that made tonight's report read self-contradictory — and the driver line has to carry
+    the whole explanation alone: one term, count 1, nothing else sharing the line.
+
+    The second ledger is the SAME defect on the row the live ledger actually stores, which predates
+    `input_rows` and declares nothing. `undeclared 1` is then the one non-zero figure besides
+    `input_lost`, and it stays out of the driver line because an undeclared denominator is published
+    but never fails a run (#2052's ruling). Both shapes are pinned because either one alone proves
+    less: the declared variant is the clause as written, the verbatim one is the ledger tonight.
+    """
+    cand = candidates_2339(tmp_path)
+    lost_row = seq_row_2339(cand, "seq-9-bash-fs-gone")
+
+    store = tmp_path / "only-lost.jsonl"
+    stored_row(store, "seq-9-bash-fs-gone", lost_row + f"; echo '{sv.INPUT_ROWS_FIELD}=1'")
+    stored_row(store, AUDIT_DECLARES, AUDIT_CMDS[AUDIT_DECLARES])
+
+    rc, out = run_audit(store)
+    lines = out.splitlines()
+    assert rc == 1, out
+    assert lines[-1] == "keys: 2 unrunnable: 0", out
+    assert lines[-2] == "denominators: empty_input 0 undeclared 0", out
+    assert lines[-3] == "stranded: case_sensitive_grep 0", out
+    assert lines[-4] == "candidate_body_scoping: whole_file 0 dead_strip 0 input_lost 1", out
+    assert lines[-5] == "exit_drivers: input_lost 1", out
+    assert drivers_2343(out) == {"input_lost": 1}, out
+
+    verbatim = tmp_path / "only-lost-live-shape.jsonl"
+    stored_row(verbatim, "seq-9-bash-fs-gone", lost_row)
+    stored_row(verbatim, AUDIT_DECLARES, AUDIT_CMDS[AUDIT_DECLARES])
+    rc_live, out_live = run_audit(verbatim)
+    assert rc_live == 1, out_live
+    assert out_live.splitlines()[-2] == "denominators: empty_input 0 undeclared 1", out_live
+    assert out_live.splitlines()[-5] == "exit_drivers: input_lost 1", out_live
+    assert drivers_2343(out_live) == {"input_lost": 1}, out_live
+
+
+def test_the_shipped_cli_prints_exit_drivers_at_its_pinned_position_over_a_real_pipe(tmp_path):
+    """Clause 3's process boundary: the bytes `splitlines()[-5]` sees from a real subprocess.
+
+    `audit` is what the nightly invokes as a subprocess and parses positionally, and every
+    in-process node on this surface captures stdout with `redirect_stdout`, which cannot see a print
+    that reaches a different stream or a line that arrives past the one a reader takes. So this runs
+    the shipped program over a temp ledger through a real pipe and pins five positions at once:
+    `keys:` -1, `denominators:` -2, `stranded:` -3, `candidate_body_scoping:` -4, `exit_drivers:` -5.
+    The driver line enters at the TOP of the tally block, which is the only insertion point that
+    moves none of the four positions a runbook or a test already reads — negative indices count from
+    the end, so a line added above a block leaves the block's own indices exactly where they were.
+    That is why `candidate_body_scoping:` is pinned at `-4` and the new line at `-5`: the item's
+    clause asks for the line "immediately above" the scoping tally AND for the scoping tally to move
+    to `-5`, and those two readings are arithmetically exclusive. The one this node pins is the
+    instruction, the safe half — nothing a published reader indexes is displaced.
+    """
+    store = tmp_path / "pipe.jsonl"
+    cand = candidates_2339(tmp_path)
+    stored_row(store, "seq-9-bash-fs-gone", seq_row_2339(cand, "seq-9-bash-fs-gone"))
+    stored_row(store, AUDIT_DECLARES, AUDIT_CMDS[AUDIT_DECLARES])
+
+    proc = subprocess.run([sys.executable, str(_ROOT / "scripts" / "skill_verdicts.py"),
+                           "audit", "--store", str(store), "--timeout", "5"],
+                          capture_output=True, text=True,
+                          env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+    lines = proc.stdout.splitlines()
+
+    assert proc.returncode == 1, (proc.returncode, proc.stdout, proc.stderr)
+    assert lines[-5] == "exit_drivers: input_lost 1", lines
+    assert lines[-4] == "candidate_body_scoping: whole_file 0 dead_strip 0 input_lost 1", lines
+    assert lines[-3] == "stranded: case_sensitive_grep 0", lines
+    # `undeclared 1`, not 0: the lost row is the live shape verbatim and stores no `input_rows`,
+    # which is a published denominator and never an exit term (#2052).
+    assert lines[-2] == "denominators: empty_input 0 undeclared 1", lines
+    assert lines[-1] == "keys: 2 unrunnable: 0", lines
+    # The claim about streams is only that the tally reached STDOUT, where every positional reader
+    # looks: `app.paths` writes its own worktree-anchor notice to stderr on this machine, so
+    # "stderr is empty" would be a claim about the harness rather than about this line.
+    assert "exit_drivers" not in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("term", EXIT_TERMS_2343)
+def test_each_of_the_six_exit_terms_alone_fails_the_run_and_is_named_as_a_driver(tmp_path, term):
+    """Clause 4: the exit is still six terms, and every one of the six reaches stdout by its name.
+
+    One defect per ledger plus a clean row that declares its denominator, run once per term. The
+    pair is what makes the clause falsifiable in both directions: a term dropped from the exit
+    expression would exit 0 here, and a term kept in the expression but missing from `exit_terms`
+    would exit 1 while the driver line named nothing — which is the drift #2343 was filed to close,
+    and the reason the return and the tally read the same tuple in `cmd_audit`.
+
+    The tally line is asserted as an exact string, with `unrunnable: 1` for the one term that is
+    `unrunnable`'s own ledger and `unrunnable: 0` for the other five: a prefix match would let a
+    term that also inflated the published figure through, and folding another count into
+    `unrunnable:` is the mistake #2048's clause 4 exists to forbid.
+    """
+    store = tmp_path / f"one-{term}.jsonl"
+    key, cmd = defect_row_2343(tmp_path, term)
+    stored_row(store, key, cmd)
+    stored_row(store, AUDIT_DECLARES, AUDIT_CMDS[AUDIT_DECLARES])
+
+    rc, out = run_audit(store)
+    assert rc == 1, f"{term}: {out}"
+    assert out.splitlines()[-1] == f"keys: 2 unrunnable: {1 if term == 'unrunnable' else 0}", out
+    assert drivers_2343(out) == {term: 1}, f"{term}: {out}"
