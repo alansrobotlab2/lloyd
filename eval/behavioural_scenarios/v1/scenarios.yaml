@@ -146,14 +146,18 @@ scenarios:
     block_event_kind: route_blocked
     replan_event_kind: plan_revised
     within_steps: 3
+    observed_route_token: lloyd-data/_pipeline/research/rounds
     reading: each route_blocked event is a row; a plan_revised at most 3 steps later is the time_to_replan
-      Karati scores, and a trace with no block event ran nothing
+      Karati scores, and a trace with no block event ran nothing. With no declared pair, the rows are the
+      observed `tool_denied` events and the revision is the first tool call, after the first one naming
+      `observed_route_token`, whose arguments no longer do — derived from what the trial saw, never an
+      invented event (#2332).
   checker: replans_within_budget
-  capture: none
-  capture_reason: 'No capture path for the event vocabulary this checker reads: the trial
-    harness emits no `route_blocked`/`plan_revised` pair, and `trace_from_trial` derives
-    events only from denials, unanswered calls and the run''s own status — inventing the pair
-    would score a vocabulary no runner observed (#1843 clause 5 keeps it refused).'
+  capture: trial
+  capture_reason: 'A trial can produce this checker''s observation two ways. A runner that emits the
+    `route_blocked`/`plan_revised` pair scores it directly; a bench trial, which emits neither and whose
+    mapper invents neither (#1843 clause 5 stands), scores the denial it observed and the action that
+    stopped naming `observed_route_token`. What stays refused is the fabrication, not the measurement.'
 # #1659: `reserve` is no longer a field a scenario may carry — reserve
 # membership is derived monthly from this digest plus the month stamp
 # (`behavioural.reserved_scenario_ids`), and `load_manifest` refuses a
@@ -167,4 +171,13 @@ scenarios:
 # instrument-failure set equals the manifest's `capture: none` set when every
 # `trial` scenario delivered. The scope moves no grader, which is why
 # `baseline.yaml` carries the new digest with the same axis values.
-scenarios_hash: f24242a79044f95fd8a7c5cdddb512ddce4ded252037af9b78067a14c6f1f31e
+# #2332: `blocked-route-replan` is `capture: trial`, because the checker now
+# reads the denial a trial observes when the declared event pair is absent, and
+# `uncertainty-hardening` measures a refused write's text when nothing landed.
+# Both are fallbacks, so the shipped reference traces — which carry the landed
+# writes and the explicit pair — score exactly as before and `baseline.yaml`'s
+# four axis values stand; only the digest moves, in this file and that one
+# together, which is what
+# `tests/test_behavioural_scorecard.py::test_the_pinned_baseline_equals_the_reference_capture_rescored_now`
+# ties. No shipped scenario declares `capture: none` any more.
+scenarios_hash: 31bb34cd64daf24a89f5f2f1412bf41de8061ff91ced2a55dc565c23bf34e92c

@@ -5,7 +5,7 @@ schema: lloyd-behavioural-baseline/v1
 suite: v1
 source: reference capture eval/behavioural_scenarios/v1/traces, scored by scripts/autoresearch.behavioural
   on the frozen scenarios.json
-scenarios_hash: f24242a79044f95fd8a7c5cdddb512ddce4ded252037af9b78067a14c6f1f31e
+scenarios_hash: 31bb34cd64daf24a89f5f2f1412bf41de8061ff91ced2a55dc565c23bf34e92c
 axes:
   uncertainty_preservation: 0.5
   source_retention: 1.0

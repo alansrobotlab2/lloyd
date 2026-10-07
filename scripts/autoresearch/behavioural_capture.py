@@ -483,11 +483,19 @@ def sdk_runner(cfg: Any, *, model: str | None = None,
     `final_text`/`denied_calls` rather than `answers`/`tool_calls`. Through this
     runner a capture measures the scenarios whose evidence is an argument list or
     an answer — `act-on-known-fact`, `source-retention`, `stale-fact-action` — and
-    the manifest says which of the rest no capture can reach: `blocked-route-replan`
-    is declared `capture: none` because the harness emits no
-    `route_blocked`/`plan_revised` pair and `trace_from_trial` invents neither.
-    `uncertainty-hardening` is `capture: trial` only against a named root: its
-    evidence is a durable write, and a write is credited only inside `writes_into`.
+    since #2332 it also measures the other two from what the trial observed rather
+    than from a vocabulary nothing emitted: `blocked-route-replan` reads the denial
+    this mapper files as a `tool_denied` event plus the later call that stopped
+    naming the blocked route, and `uncertainty-hardening` reads the refused write's
+    own text. What stays refused is inventing events — the harness emits no
+    `route_blocked`/`plan_revised` pair and `trace_from_trial` invents neither — and
+    no shipped scenario declares `capture: none` any more.
+
+    None of that moves a credit rule. A write is still credited only inside
+    `writes_into` (#1843 clause 3), only when it landed, and only through this
+    mapper's `durable_writes`; a refused call never becomes a durable-write row.
+    The grader reading one is the scorecard reporting what the machine refused, and
+    it says so (`durable_write_landed: false`).
 
     What `writes_into` (#1843) does, precisely, and what it does not. It bounds
     the credit, in `durable_write_row`, and it bounds the trial's own write

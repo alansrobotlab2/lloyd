@@ -652,3 +652,141 @@ def test_a_pair_that_cannot_be_compared_prices_no_rather_than_a_zero_spread(
                    "--compare-trace-dir", str(tmp_path / "CAP_ALSO_MISSING")]) == 2
     printed = capsys.readouterr().out
     assert "must not be recorded as a zero spread" in printed, printed
+
+
+# ── #2332: step 5's precondition is a measurement, not a calendar ────────────
+#
+# #1549 step 5 — wiring this report-only artifact into `promote.evaluate_promotion`
+# as a behavioural second condition — has always been gated on a precondition, and
+# the precondition used to be written as a duration ("waits until ~2 weeks of
+# report-only rungs have caught or cleared real promotions"). A duration is not
+# evidence: 61 report-only rungs have since published, 51 of them a reference
+# replay with every paired delta 0.0 by construction, and none of them showed the
+# instrument moves less between two runs of an unchanged surface than the
+# regression it would be asked to catch. #2332 replaces the duration with the bar
+# that measurement IS, in the field names `compare_pairs` publishes, in BOTH
+# places the precondition is stated — a restatement that left one of them would
+# leave the tree holding two mutually exclusive rulings.
+
+REPO = Path(__file__).resolve().parents[1]
+BEHAVIOURAL_SOURCE = REPO / "scripts" / "autoresearch" / "behavioural.py"
+RUN_ROUND_SOURCE = REPO / "scripts" / "autoresearch" / "run_round.py"
+
+#: The fields the bar is priced on, all of them keys `compare_pairs` really
+#: emits. Naming them is what makes the bar checkable by a reader who disagrees
+#: with it: the pair either scores that way or it does not.
+BAR_FIELDS = ("compare_pairs", "abs_delta", "epsilon", "denominator_a",
+              "denominator_b", "measurable", "excluded_axes")
+
+
+def _step5_statement(path: Path) -> str:
+    """The block that states step 5's precondition, lifted out of the module.
+
+    Scoped to the block — the docstring paragraph in `behavioural.py`, the comment
+    in `run_round.py` — rather than to the whole file, because `compare_pairs` and
+    its field names appear in this repo's source for other reasons too and a
+    containment check over a 1,300-line module could be satisfied by a sentence
+    that has nothing to do with the precondition.
+    """
+    lines = path.read_text(encoding="utf-8").splitlines()
+    at = next(i for i, line in enumerate(lines)
+              if "discrimination bar" in line.lower())
+    if lines[at].lstrip().startswith("#"):
+        keep = lambda line: line.lstrip().startswith("#")      # noqa: E731
+    else:
+        keep = lambda line: bool(line.strip())                  # noqa: E731
+    start = at
+    while start > 0 and keep(lines[start - 1]):
+        start -= 1
+    end = at
+    while end + 1 < len(lines) and keep(lines[end + 1]):
+        end += 1
+    return "\n".join(lines[start:end + 1])
+
+
+@pytest.mark.parametrize("path", [BEHAVIOURAL_SOURCE, RUN_ROUND_SOURCE],
+                         ids=["behavioural.py", "run_round.py"])
+def test_step_5s_precondition_states_the_discrimination_bar(path: Path):
+    """Clause 5: both statements price the bar, and neither waits on a calendar."""
+    text = path.read_text(encoding="utf-8")
+    statement = _step5_statement(path)
+
+    assert "discrimination bar" in statement, path.name
+    for field in BAR_FIELDS:
+        assert field in statement, f"{path.name}: the bar never names `{field}`"
+    # The bar is a live PAIR. A single capture is one side of a spread and cannot
+    # price noise at all, which is why 61 rungs and one capture proved nothing.
+    assert "live pair" in statement, path.name
+    assert ">= 2" in statement, path.name
+    # The retired precondition must be gone from the file, not merely superseded
+    # by a paragraph beside it: a reader who finds the sentence follows it.
+    assert "~2 weeks" not in text, path.name
+    assert "2 weeks" not in text, path.name
+    assert "two weeks" not in text, path.name
+
+
+def test_the_fields_the_bar_names_are_the_ones_compare_pairs_publishes():
+    """The bar is stated against keys the function really returns.
+
+    Prose naming a field that does not exist is how a precondition becomes
+    unfalsifiable again, so the names are checked against a real pair scored from
+    the shipped traces: the per-axis keys on every axis row, `excluded_axes` at the
+    top. The pair itself is a reference replay — two cards off one manifest — and
+    stays exactly what #2196's ruling says it is: a pair whose spread prices
+    nothing, and never the pair that satisfies the bar.
+    """
+    card = B.build_scorecard(manifest=B.load_manifest(), traces=REFERENCE,
+                             baseline=B.load_pinned_baseline(),
+                             scenarios_digest=B.load_manifest()["_scenarios_hash"],
+                             trace_source="reference", reference_replay=True)
+    pair = B.compare_pairs(card, copy.deepcopy(card))
+
+    assert pair["status"] == "compared", pair
+    assert "excluded_axes" in pair, sorted(pair)
+    for row in pair["axes"]:
+        for field in ("abs_delta", "epsilon", "denominator_a", "denominator_b",
+                      "measurable"):
+            assert field in row, (row["axis"], sorted(row))
+    assert pair["reference_replay"] is True, (
+        "a pair of one manifest's own card is a replay, and the bar excludes it")
+
+
+def test_a_live_shaped_pair_feeds_the_bar_real_denominators_and_no_exclusions():
+    """The bar's inputs exist once the axes can be read: 4 axes, both sides measured.
+
+    Built the way the bar is written — two cards over live-shaped traces, scored
+    through `compare_pairs` — because the precondition has to be checkable against
+    fields and not against a paragraph. `excluded_axes` is empty and no axis is
+    `measurable: false`, which is the half the bar the instrument controls; the
+    denominators are still 1 per side here, because a fixture cannot produce the
+    repeats the paused-pool window is owed for (#2196), and a denominator of 1 is
+    exactly what keeps the bar UNMET. That is the point of stating it as
+    `denominator_a`/`denominator_b` >= 2 rather than as a duration.
+    """
+    from tests.test_behavioural_capture import (_live_replan_trace,
+                                               _live_uncertainty_trace)
+    traces = {sid: copy.deepcopy(trace) for sid, trace in REFERENCE.items()}
+    traces["uncertainty-hardening"] = _live_uncertainty_trace()
+    traces["blocked-route-replan"] = _live_replan_trace()
+    manifest = B.load_manifest()
+    card = B.build_scorecard(manifest=manifest, traces=traces,
+                             baseline=B.load_pinned_baseline(),
+                             scenarios_digest=manifest["_scenarios_hash"],
+                             trace_source="live-shaped capture",
+                             reference_replay=False)
+    pair = B.compare_pairs(card, copy.deepcopy(card))
+
+    assert [a["axis"] for a in card["axes"]] == list(B.load_pinned_baseline()["axes"])
+    assert all(a["measurable"] for a in pair["axes"]), pair["axes"]
+    assert pair["excluded_axes"] == [], pair["excluded_axes"]
+    assert pair["reference_replay"] is False, pair["reference_replay"]
+    for row in pair["axes"]:
+        assert row["denominator_a"] >= 1 and row["denominator_b"] >= 1, row
+    short = [a["axis"] for a in pair["axes"] if a["denominator_a"] < 2]
+    # Three of the four axes are still under the bar's denominator with a whole
+    # trace on each side: only `action_consistency` reaches 2, and it does so
+    # because the reference `act-on-known-fact` trace carries eight action rows.
+    # One capture per side cannot clear the bar, which is why it is written as
+    # denominators and not as a duration — #2196's window is what moves these.
+    assert short == ["source_retention", "stale_fact_action",
+                     "uncertainty_preservation"], short

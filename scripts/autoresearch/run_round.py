@@ -1763,8 +1763,15 @@ async def run(
     # #1549: the behavioural scorecard, REPORT-ONLY. Nothing here feeds a verdict —
     # `evaluate_promotion` is called above and never sees this artifact, so a
     # `guardrail_hit: true` changes no decision and no reason on this page. Wiring it
-    # in as the behavioural second condition is item step 5 and waits until ~2 weeks
-    # of report-only rungs have caught or cleared real promotions.
+    # in as the behavioural second condition is item step 5, and its precondition is
+    # the discrimination bar, not a term of weeks (#2332): ONE live pair of captures
+    # scored through `behavioural.compare_pairs` in which every declared axis is
+    # `measurable`, with `denominator_a` and `denominator_b` both >= 2, `excluded_axes`
+    # empty, and each axis's `abs_delta` under its own `epsilon` (0.25 on all four
+    # today). Until a pair scores that way the section has not shown that it moves
+    # less between two runs of an unchanged surface than the regression it would be
+    # asked to catch, so nothing may be gated on it — and report-only rungs accumulating
+    # without such a pair changes nothing (#2196 owns producing the pair).
     # No scenario runs inside this body either: #1546 kills every round at the 1800 s
     # pool cap, so a suite that ran here would inherit that death. The section scores
     # whole-run traces an out-of-band capture left under

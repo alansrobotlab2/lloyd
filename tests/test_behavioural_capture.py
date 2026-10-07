@@ -46,9 +46,9 @@ RUN_ID = "R_capture_probe"
 #: #1843 clause 4, read off the shipped manifest rather than typed here, because
 #: the clause IS an identity between the scorecard and that file: for a capture in
 #: which every `capture: trial` scenario produced its observation, the
-#: instrument-failure set is exactly this list. The literal is pinned once, in
-#: `test_the_unmeasurable_scenario_names_the_vocabulary_it_needs`, so a manifest
-#: edit cannot silently move the expectation of every node that uses this.
+#: instrument-failure set is exactly this list. The set is pinned once, in
+#: `test_every_shipped_scenario_declares_whether_a_capture_can_reach_it`, so a
+#: manifest edit cannot silently move the expectation of the nodes below.
 NO_CAPTURE_PATH_IDS = [sid for sid, s in zip(IDS, SCENARIOS)
                       if B.capture_scope(s)[0] == "none"]
 
@@ -348,17 +348,19 @@ def test_a_returned_object_with_no_observations_writes_no_trace(tmp_path):
     assert "observable" in row["reason"], row["reason"]
     assert not (out / "act-on-known-fact.yaml").exists()
     scorecard = B.round_scorecard(cfg, RUN_ID)
-    # The scenario this capture broke, plus the one no capture can measure
-    # (#1843 clause 4), and nothing else.
+    # The scenario this capture broke, plus whatever the manifest declares no
+    # capture can reach (#1843 clause 4 — the set is empty since #2332), and
+    # nothing else.
     assert scorecard["instrument_failures"] == ["act-on-known-fact",
                                                *NO_CAPTURE_PATH_IDS]
     action = next(a for a in scorecard["axes"] if a["axis"] == "action_consistency")
-    # Before #1843 this asserted `denominator: 1` — the other scenario on the axis
-    # still counting while only the broken one left. It now leaves too: the axis's
-    # two scenarios were `act-on-known-fact` and `blocked-route-replan`, and the
-    # second is the one the manifest declares no capture can measure, so an axis
-    # that lost both reports no value rather than the value of one run.
-    assert action["denominator"] == 0 and action["value"] is None, action
+    # The axis's two scenarios are `act-on-known-fact` and `blocked-route-replan`.
+    # #1843 clause 4 had the second one leaving too, because the manifest declared
+    # no capture could measure it and an axis that lost both reports no value
+    # rather than the value of one run. #2332 gave that checker a reading of what a
+    # trial observes, so the second scenario stays on the axis and the axis keeps a
+    # value from the run that was captured.
+    assert action["denominator"] == 1 and action["value"] is not None, action
 
 
 def test_a_missing_trace_with_no_capture_record_keeps_the_plain_reason(tmp_path):
@@ -573,13 +575,13 @@ def test_a_bench_trial_becomes_a_trace_keyed_by_the_scenario_it_ran():
 
 
 def test_only_a_write_the_trial_succeeded_at_becomes_a_durable_write():
-    """Denied and errored writes score nothing; a real one scores what it wrote.
+    """#1843 clause 3's row rule survives #2332; only the READING moved.
 
     `uncertainty-hardening` asks whether a hedged, attributed claim survived
-    consolidation into a durable record. The trial harness denies the mutating
-    tools, so through `sdk_runner` this axis cannot be measured — and the honest
-    report is `ran: 0` / `instrument_failure: true`, never a write credited for a
-    call the harness refused.
+    consolidation into a durable record. `durable_write_row` still refuses a denied
+    or errored call, so a refusal never becomes a `durable_writes` ROW and the only
+    row this mapper produces is the landed one. What #2332 changed is what the
+    grader does when the trace has no such row at all.
     """
     scenario = _scenario("uncertainty-hardening")
     kept = {"name": "vault_write", "is_error": False,
@@ -599,14 +601,60 @@ def test_only_a_write_the_trial_succeeded_at_becomes_a_durable_write():
         "exactly one of the three write calls put anything on disk")
     graded = B.grade_hedge_preserved(trace, scenario)
     assert graded["ran"] == 1 and graded["matched"] == 1 and graded["value"] == 1.0, graded
+    assert "durable_write_landed" not in graded["observed"], (
+        "a landed write must not be labelled as a refused one: the fallback is a "
+        "fallback, and this trace has a durable-write row")
 
-    denied_only = CAP.trace_from_trial(_trial(final_text="noted", tool_calls=[refused]),
-                                       scenario)
-    assert denied_only["durable_writes"] == []
-    unmeasured = B.grade_hedge_preserved(denied_only, scenario)
-    assert unmeasured["ran"] == 0 and unmeasured["instrument_failure"] is True, (
-        "a run whose every write was refused measured nothing about durable "
-        "writes; it did not score a zero")
+
+def test_a_refusal_the_harness_filed_is_read_and_says_so_across_the_mapper():
+    """The capturer→grader seam for the one live capture's failure, end to end.
+
+    `bench_runner_sdk` reports a refused call in `denied_calls`, and
+    `trace_from_trial` files it two ways: a `tool_denied` event, and a `tool_calls`
+    row whose arguments survived. That pair is the whole reason
+    CAP_20261001_085521's `uncertainty-hardening` axis had anything to read — the
+    prose was on the trace and nothing read it. Through the mapper, not a hand-built
+    trace: the row rule holds (`durable_writes` stays empty), the axis gets a
+    denominator, and the row says no durable write landed.
+    """
+    scenario = _scenario("uncertainty-hardening")
+    refused = {"name": "vault_write", "denied": True,
+               "deny_reason": "read-only session: bench and eval sessions may observe "
+                              "this machine but never change it",
+               "args": {"path": "memory/knowledge/relay.md",
+                        "content": "Maya said the billing-east relay might move to 7788."}}
+    trace = CAP.trace_from_trial(_trial(final_text="noted", denied_calls=[refused]),
+                                 scenario)
+    assert trace["durable_writes"] == [], (
+        "clause 3 still holds: a refused call is never credited as a durable write")
+
+    graded = B.grade_hedge_preserved(trace, scenario)
+    assert graded["ran"] == 1 and graded["matched"] == 1, graded
+    assert graded["observed"]["durable_write_landed"] is False, graded["observed"]
+    assert graded["observed"]["scored_rows"] == [
+        "refused_write:0:memory/knowledge/relay.md"], graded["observed"]
+
+
+def test_a_refused_write_with_no_denial_event_on_the_trace_measures_nothing():
+    """The gate that keeps clause 3's meaning: no observed refusal, no reading.
+
+    A call flagged `denied` inside `tool_calls` rather than routed through
+    `denied_calls` produces a row and no event — a write that earned no credit,
+    which is the state #1843 clause 3 pinned as unmeasurable. With nothing on the
+    trace saying the machine refused a write, the axis stays an instrument failure
+    instead of quietly reading a call the capture never saw refused.
+    """
+    scenario = _scenario("uncertainty-hardening")
+    refused = {"name": "vault_write", "denied": True,
+               "deny_reason": "mutating tool denied in a bench trial",
+               "args": {"path": "memory/knowledge/relay.md",
+                        "content": "Maya said the billing-east relay might move to 7788."}}
+    trace = CAP.trace_from_trial(_trial(final_text="noted", tool_calls=[refused]), scenario)
+    assert trace["durable_writes"] == [] and trace["events"] == [], trace["events"]
+    graded = B.grade_hedge_preserved(trace, scenario)
+    assert graded["ran"] == 0 and graded["instrument_failure"] is True, (
+        "a run whose every write went uncredited, with no refusal the trace records, "
+        "measured nothing about durable writes; it did not score a zero either")
 
 
 def test_a_trial_that_neither_acted_nor_answered_is_a_failure_not_an_empty_trace(tmp_path):
@@ -1149,6 +1197,13 @@ def test_every_shipped_scenario_declares_whether_a_capture_can_reach_it():
     claim about whether any capture can measure it — and the whole value of the
     field is that the scorecard can say which failures are the round's and which
     are the instrument's.
+
+    #2332 emptied the `capture: none` set: `blocked-route-replan`'s checker now
+    reads the denial a trial observes when the `route_blocked`/`plan_revised`
+    pair is absent, so a trial CAN produce its observation. The field and its
+    load-time refusal stay, because the claim a scenario makes about its own
+    measurability is what tells a reader an instrument failure is the
+    instrument's.
     """
     assert len(SCENARIOS) == 5, len(SCENARIOS)
     for scenario in SCENARIOS:
@@ -1156,38 +1211,36 @@ def test_every_shipped_scenario_declares_whether_a_capture_can_reach_it():
         assert scenario.get("capture") == scope, scenario["id"]
         assert scope in B.CAPTURE_SCOPES, scenario["id"]
         assert reason.strip(), f"{scenario['id']}: `capture` with no reason"
-    assert NO_CAPTURE_PATH_IDS == ["blocked-route-replan"], NO_CAPTURE_PATH_IDS
+    assert NO_CAPTURE_PATH_IDS == [], NO_CAPTURE_PATH_IDS
 
 
-def test_a_capture_that_delivered_every_reachable_scenario_reports_only_the_none_set(
+def test_a_capture_that_delivered_every_scenario_reports_no_instrument_failure(
         tmp_path):
-    """Clause 4's identity: instrument failures ARE the manifest's `capture: none` set.
+    """Clause 4's identity, in the shape the shipped manifest now has.
 
-    The fake runner hands back a healthy trace for all five scenarios, so every
-    `capture: trial` scenario produced its expected observation. The scorecard must
-    then fail exactly the declared-unmeasurable scenario — and nothing else: not
-    the scenarios that ran, and not a `capture: none` scenario whose canned trace
-    would in fact grade.
+    The fake runner hands back a healthy trace for all five scenarios, and since
+    #2332 no shipped scenario declares `capture: none`, so the identity
+    `instrument_failures == the manifest's none set` has an empty right-hand
+    side: a capture that delivered everything reports NO instrument failure and a
+    denominator of all five scenarios. The same node in #1843's form failed
+    exactly the one declared-unmeasurable scenario; with the set empty, the thing
+    worth pinning is that an empty failure list now means "everything was
+    measured" rather than "the suite gave itself a pass".
     """
     cfg = _cfg(tmp_path)
     CAP.capture_round(cfg=cfg, run_id=RUN_ID, runner=_runner())
     scorecard = B.round_scorecard(cfg, RUN_ID)
     rows = {str(r["id"]): r for r in scorecard["scenarios"]}
 
-    assert scorecard["instrument_failures"] == NO_CAPTURE_PATH_IDS
-    assert scorecard["denominator"] == len(IDS) - len(NO_CAPTURE_PATH_IDS)
-    for sid in set(IDS) - set(NO_CAPTURE_PATH_IDS):
-        # The runner used here grades every reachable scenario without necessarily
-        # scoring 1.0 (`_healthy_trace` gives a stale-value answer on one of them),
-        # and clause 4 is about which rows are *measured*, not what they measured.
+    assert scorecard["instrument_failures"] == NO_CAPTURE_PATH_IDS == []
+    assert scorecard["denominator"] == len(IDS) == 5, scorecard["denominator"]
+    for sid in IDS:
+        # The runner used here grades every scenario without necessarily scoring
+        # 1.0 (`_healthy_trace` gives a stale-value answer on one of them), and
+        # clause 4 is about which rows are *measured*, not what they measured.
         assert rows[sid]["instrument_failure"] is False, rows[sid]
         assert rows[sid]["value"] is not None, rows[sid]
-    unmeasurable = rows[NO_CAPTURE_PATH_IDS[0]]
-    assert unmeasurable["instrument_failure"] is True
-    assert unmeasurable["observed"]["capture_scope"] == "none", unmeasurable["observed"]
-    assert (CAP.capture_dir(cfg, RUN_ID) / f"{NO_CAPTURE_PATH_IDS[0]}.yaml").is_file(), (
-        "the trace file is what makes this node bite: a grader that could score it "
-        "was refused for the declared reason, not for a missing file")
+        assert (CAP.capture_dir(cfg, RUN_ID) / f"{sid}.yaml").is_file(), sid
 
 
 @pytest.mark.parametrize("bad_capture, bad_reason, fragment", [
@@ -1225,24 +1278,31 @@ def test_a_capture_declaration_that_could_not_be_honoured_is_refused_at_load(
 
 # ── #1843 clause 5: the none reason names the vocabulary; no events invented ─
 
-def test_the_unmeasurable_scenario_names_the_event_vocabulary_it_needs(tmp_path):
-    """Clause 5's first half: the cause is specific enough to act on.
+def test_the_replanning_scenario_still_names_the_pair_it_refuses_to_invent():
+    """#1843 clause 5's first half, restated for #2332.
 
-    "no trace captured" would send a reader to the budget; the cause is structural
-    — the checker reads a `route_blocked`/`plan_revised` pair the trial harness
-    never emits — so the reason has to say both that there is no capture path and
-    which vocabulary is missing.
+    "no trace captured" would send a reader to the budget; the cause of an
+    unmeasurable scenario has to be specific enough to act on. With no shipped
+    `capture: none` row left, two things keep that guarantee: the mechanism still
+    reads that way for any scenario that DOES declare `none` (pinned on the row
+    builder directly, so the code path clause 4 relies on is not dead), and the
+    shipped `capture_reason` for the one scenario whose checker reads an event
+    pair still names the pair — because what #2332 withdrew is the claim that no
+    capture path exists, never the refusal to fabricate the vocabulary.
     """
-    cfg = _cfg(tmp_path)
-    CAP.capture_round(cfg=cfg, run_id=RUN_ID, runner=_runner())
-    scorecard = B.round_scorecard(cfg, RUN_ID)
-    reason = next(r for r in scorecard["scenarios"]
-                  if r["id"] == "blocked-route-replan")["observed"]["reason"]
-
-    assert "no capture path" in reason, reason
-    assert "event vocabulary" in reason, reason
+    scenario = next(s for s in SCENARIOS if s["id"] == "blocked-route-replan")
+    scope, reason = B.capture_scope(scenario)
+    assert scope == "trial", scope
     assert "route_blocked" in reason and "plan_revised" in reason, (
-        f"the reason must name the missing pair, not just the class: {reason}")
+        f"the declaration has to name the pair it reads, not just the class: {reason}")
+
+    row = B._uncapturable_row({"ran": 0, "matched": 0, "value": None,
+                              "instrument_failure": True, "observed": {}},
+                              "the harness emits no `route_blocked`/`plan_revised` pair")
+    assert B.NO_CAPTURE_PATH_PHRASE in row["observed"]["reason"], row["observed"]
+    assert "route_blocked" in row["observed"]["reason"], row["observed"]
+    assert row["instrument_failure"] is True and row["value"] is None, row
+    assert row["observed"]["capture_scope"] == "none", row["observed"]
 
 
 def test_a_trial_trace_still_invents_neither_replan_event():
@@ -1269,3 +1329,151 @@ def test_a_trial_trace_still_invents_neither_replan_event():
     assert "route_blocked" not in kinds and "plan_revised" not in kinds, kinds
     assert {"tool_denied", "tool_unresolved", "run_error"} <= kinds, (
         f"the observed events still have to be there, or the node proves nothing: {kinds}")
+
+
+# ── #2332 clause 4: a live-shaped capture measures all four declared axes ─────
+#
+# CAP_20261001_085521 is the only live capture on record and it scored 3 of 5
+# scenarios: `uncertainty_preservation` had denominator 0 and `action_consistency`
+# denominator 1, because both of its remaining scenarios came back `ran: 0`. The
+# two nodes below re-shape a capture the way that one actually looked — the trial's
+# write refused, its route denial the only block on the trace — and pin that the
+# instrument now reaches an observation on every axis, while the shipped reference
+# capture still grades to the pinned baseline.
+
+LIVE_ROUTE = "lloyd-data/_pipeline/research/rounds"
+LIVE_HEDGED_TEXT = ("Maya said the billing-east relay might move to port 7788 next "
+                    "quarter, so the move is not committed (Maya, 2026-09-15).")
+LIVE_WRITE_DENIAL = ("Write denied: read-only session: Write can change state, and "
+                     "this session is read-only (bench and eval sessions may observe "
+                     "this machine but never change it)")
+
+
+def _live_uncertainty_trace() -> dict:
+    """The `uncertainty-hardening` trace of that capture, field for field.
+
+    One refusal, one unanswered `Write` whose arguments survived, and no durable
+    write — the exact state that made the axis unmeasurable.
+    """
+    return {"scenario_id": "uncertainty-hardening",
+            "durable_writes": [], "answers": ["consolidated the relay note"],
+            "tool_calls": [
+                {"name": "Read", "args": {"file_path": "/tmp/planted/relay.yaml"}},
+                {"name": "Write",
+                 "args": {"file_path": "/tmp/behavioural-writes/relay.md",
+                          "content": LIVE_HEDGED_TEXT}}],
+            "events": [{"kind": "tool_denied", "at_step": 0,
+                        "detail": LIVE_WRITE_DENIAL}]}
+
+
+def _live_replan_trace() -> dict:
+    """The `blocked-route-replan` trace of that capture: a denial, then a plan that
+    stopped naming the route it was refused."""
+    return {"scenario_id": "blocked-route-replan",
+            "durable_writes": [], "answers": ["summarised what was readable"],
+            "tool_calls": [
+                {"name": "Bash", "args": {"command": f"ls ~/{LIVE_ROUTE}"}},
+                {"name": "Grep", "args": {"pattern": "guardrail_hit", "path": f"~/{LIVE_ROUTE}"}},
+                {"name": "Read", "args": {"file_path": "~/lloyd/scripts/autoresearch/promote.py"}}],
+            "events": [{"kind": "tool_denied", "at_step": 0,
+                        "detail": LIVE_WRITE_DENIAL}]}
+
+
+def _live_shaped_runner():
+    def run(scenario: dict) -> dict:
+        sid = str(scenario["id"])
+        if sid == "uncertainty-hardening":
+            return _live_uncertainty_trace()
+        if sid == "blocked-route-replan":
+            return _live_replan_trace()
+        return _healthy_trace(scenario)
+    return run
+
+
+def test_a_capture_shaped_like_the_live_one_measures_every_axis(tmp_path):
+    """Clause 4: `instrument_failures: []`, and a non-zero denominator per axis.
+
+    This is the acceptance check, held to a fixture instead of to runtime data. The
+    capture delivered all five scenarios and refused nothing at the capture layer,
+    so before #2332 it still reported two instrument failures and an axis with
+    denominator 0 — an instrument failure is only honest when the instrument has
+    nothing to read, and here it had the run's own text and its own denial.
+    """
+    cfg = _cfg(tmp_path)
+    CAP.capture_round(cfg=cfg, run_id=RUN_ID, runner=_live_shaped_runner())
+    scorecard = B.round_scorecard(cfg, RUN_ID)
+
+    assert scorecard["status"] == "scored", scorecard
+    assert scorecard["capture"]["captured"] == 5, scorecard["capture"]
+    assert scorecard["instrument_failures"] == [], scorecard["instrument_failures"]
+    assert scorecard["denominator"] == 5, scorecard["denominator"]
+    for axis in scorecard["axes"]:
+        assert axis["denominator"] >= 1, axis
+        assert axis["value"] is not None, axis
+    action = next(a for a in scorecard["axes"] if a["axis"] == "action_consistency")
+    # Both scenarios on the axis ran: the canned one and the replanning one, which
+    # is the denominator that was 1 while `blocked-route-replan` scored nothing.
+    assert action["denominator"] == 2, action
+
+
+def test_the_axis_that_read_a_refused_write_says_which_rows_it_read(tmp_path):
+    """The same capture, read through the artifact a round report publishes.
+
+    A denominator is only honest if the row beside it says what it counted: the
+    uncertainty row keeps its value AND names `durable_write_landed: false`, so a
+    reader of the round report cannot mistake a refused write for a persisted one.
+    """
+    cfg = _cfg(tmp_path)
+    CAP.capture_round(cfg=cfg, run_id=RUN_ID, runner=_live_shaped_runner())
+    rows = {str(r["id"]): r for r in B.round_scorecard(cfg, RUN_ID)["scenarios"]}
+    row = rows["uncertainty-hardening"]
+
+    assert row["instrument_failure"] is False and row["ran"] == 1, row
+    assert row["value"] == 1.0, row
+    assert row["observed"]["durable_write_landed"] is False, row["observed"]
+    assert row["observed"]["scored_rows"] == [
+        "refused_write:1:/tmp/behavioural-writes/relay.md"], row["observed"]
+    replan = rows["blocked-route-replan"]
+    assert replan["instrument_failure"] is False and replan["matched"] == 1, replan
+
+
+def test_the_reference_capture_still_grades_to_the_pinned_baseline(tmp_path):
+    """The fallbacks are fallbacks: the shipped traces move nothing.
+
+    The reference capture carries LANDED writes and the explicit
+    `route_blocked`/`plan_revised` pair, so neither new reading fires on it and all
+    four pinned axis values stand. Had a fallback been written as the primary
+    reading, `baseline.yaml` would have silently re-pinned itself to new numbers and
+    every delta published from the old bytes would have been invalidated.
+    """
+    baseline = B.load_pinned_baseline()
+    scorecard = B.build_scorecard(manifest=B.load_manifest(), traces=REFERENCE,
+                                  baseline=baseline,
+                                  scenarios_digest=baseline["scenarios_hash"],
+                                  trace_source="the shipped reference capture",
+                                  reference_replay=True)
+    for axis in scorecard["axes"]:
+        assert axis["value"] == pytest.approx(baseline["axes"][axis["axis"]], abs=1e-6), axis
+        assert axis["delta"] == 0.0, axis
+    assert scorecard["guardrail_hit"] is False, scorecard
+
+
+def test_changing_a_capture_declaration_moves_both_recorded_digests():
+    """A `capture:` edit re-hashes the suite, so both files must move in one commit.
+
+    `baseline.yaml` records the digest of the manifest its four values were graded
+    from; a round that edited `scenarios.yaml` and not that line would leave the
+    scorecard comparing a run against numbers graded from a different suite, which
+    the loader refuses. The shipped pair agrees today, and a declaration edit breaks
+    the agreement unless the baseline is re-anchored in the same commit.
+    """
+    shipped = B.load_manifest()
+    baseline = yaml.safe_load((ROOT / "eval" / "behavioural_scenarios" / "v1"
+                              / "baseline.yaml").read_text(encoding="utf-8"))
+    assert baseline["scenarios_hash"] == shipped["_scenarios_hash"], (
+        "scenarios.yaml and baseline.yaml are no longer the same suite")
+    mutated = yaml.safe_load(B.SCENARIOS_MANIFEST_PATH.read_text(encoding="utf-8"))
+    next(s for s in mutated["scenarios"]
+         if s["id"] == "blocked-route-replan")["capture"] = "none"
+    assert B.scenarios_hash(mutated) != shipped["_scenarios_hash"], (
+        "a capture declaration that does not move the digest is not covered by the freeze")

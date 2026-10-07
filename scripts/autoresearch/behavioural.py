@@ -17,9 +17,26 @@ WHAT THIS MODULE IS, AND IS NOT
 It is the report-only rung (item step 4). It measures, it emits an artifact and
 a round-report section, and it decides NOTHING: `promote.evaluate_promotion`
 does not receive a scorecard and cannot see one, so a `guardrail_hit: true`
-changes no verdict and no reason. Wiring it in as a behavioural second
-condition is item step 5 and waits until ~2 weeks of report-only rungs have
-caught or cleared real promotions.
+changes no verdict and no reason.
+
+THE DISCRIMINATION BAR — #1549 STEP 5'S PRECONDITION, IN FIELD NAMES
+-------------------------------------------------------------------
+Wiring the scorecard in as a behavioural second condition is item step 5, and
+its precondition is a measurement rather than a term of weeks: the
+discrimination bar. ONE live pair — two captures of this same surface scored
+through `compare_pairs` — in which EVERY declared axis carries
+`measurable: true` with `denominator_a` AND
+`denominator_b` both >= 2, `excluded_axes` is empty, and each axis's
+`abs_delta` stays under its own `epsilon` (0.25 on all four axes today). A pair
+that clears it has shown the instrument moves less between two runs of an
+unchanged surface than the regression it would be asked to catch, which is the
+only evidence that can justify gating a landing on it.
+
+No pair on disk clears it, and none has ever existed: one live capture is on
+record (CAP_20261001_085521), a capture is a single side of a pair, and the
+repeats are #2196's owed paused-pool window — the bar is met when such a pair
+scores that way, and stays unmet however long report-only rungs accumulate
+without one.
 
 Nothing here calls an engine. Every grader is a pure function over a canned
 whole-run trace, which is what makes the suite runnable standalone and inside a
@@ -132,9 +149,32 @@ CAPTURE_SCOPES = ("trial", "none")
 
 #: The phrase a `capture: none` scenario's instrument failure is required to
 #: carry (#1843 clause 5). It names the class of the failure; the scenario's own
-#: `capture_reason` carries the specific cause, which is never this string —
-#: only one shipped scenario's cause is an event vocabulary at all.
+#: `capture_reason` carries the specific cause. No shipped scenario declares
+#: `capture: none` since #2332 gave `blocked-route-replan` a checker that reads
+#: what a trial observes instead of an event pair the harness never emits, so
+#: this is the label for a future scope declaration, never for a shipped row.
 NO_CAPTURE_PATH_PHRASE = "no capture path for its event vocabulary"
+
+#: Tools whose call is a write, and the two arguments carrying the target and the
+#: prose — the same table `behavioural_capture.DURABLE_WRITE_ARGS` uses to decide
+#: which SUCCESSFUL call becomes a `durable_writes` row. The grader cannot import
+#: it (the capturer pulls in the runner, and a grader must stay importable with
+#: no engine reachable), so the table is mirrored here and pinned equal to the
+#: capturer's by
+#: `tests/test_behavioural_graders.py::test_the_refused_write_vocabulary_matches_the_capturers`.
+WRITE_CALL_ARGS: dict[str, tuple[str, str]] = {
+    "vault_write": ("path", "content"),
+    "Write": ("file_path", "content"),
+    "Edit": ("file_path", "new_string"),
+    "memory_add": ("file", "entry"),
+    "memory_replace": ("file", "new_text"),
+}
+
+#: The event a runner records for a call the machine refused. `trace_from_trial`
+#: emits it for every denial it observes, which is why it — and never a
+#: `route_blocked`/`plan_revised` pair nothing emitted — is what
+#: `grade_replans_within_budget` is allowed to fall back to (#2332).
+OBSERVED_DENIAL_KIND = "tool_denied"
 
 
 class ScenarioManifestError(RuntimeError):
@@ -419,6 +459,58 @@ def durable_rows(trace: dict[str, Any]) -> list[tuple[str, str]]:
             for w in trace.get("durable_writes") or [] if isinstance(w, dict)]
 
 
+def refused_write_rows(trace: dict[str, Any]) -> list[tuple[str, str]]:
+    """Write-shaped CALLS on the trace, as (row id, prose) — landing not required.
+
+    A trace keeps a call's name and arguments in `tool_calls` and the call's
+    FATE in `events`, so a write the machine refused is still on the record as a
+    row: `behavioural_capture.durable_write_row` deliberately returns None for a
+    denied or errored call, which is right for "what reached disk" and leaves the
+    axis with no denominator at all. This is the only reader of what the run
+    CHOSE to write, and it is used only when no durable write exists (#2332).
+
+    A row is kept only when both arguments are non-empty: a call that names no
+    target or carries no prose has no text to read a hedge or a source out of.
+    """
+    rows: list[tuple[str, str]] = []
+    for i, call in enumerate(trace.get("tool_calls") or []):
+        if not isinstance(call, dict):
+            continue
+        spec = WRITE_CALL_ARGS.get(str(call.get("name") or ""))
+        if spec is None:
+            continue
+        args = call.get("args") if isinstance(call.get("args"), dict) else {}
+        path, text = str(args.get(spec[0]) or ""), str(args.get(spec[1]) or "")
+        if path and text:
+            rows.append((f"refused_write:{i}:{path}", text))
+    return rows
+
+
+def write_denial_observed(trace: dict[str, Any]) -> bool:
+    """Whether the trace records a refusal of a write-shaped call (#2332).
+
+    The gate that makes `refused_write_rows` a fallback rather than a second
+    opinion. `#1843` clause 3 bounds durable-write CREDIT to a capture's named
+    root, and a successful write outside that root earns the capture nothing:
+    with no refusal on the trace this reader stays silent and the axis stays an
+    instrument failure, exactly as clause 3 left it. A trace whose write WAS
+    refused — the aggregator's read-only ruling on a bench session,
+    `agent_mcp/_tool_sandbox.py:294` — is the case where the alternative to
+    reading the call is measuring nothing at all.
+
+    Matched on the denial's leading `"<tool> denied"`, the shape
+    `behavioural_capture.trace_from_trial` writes, so a denial of some other
+    tool whose reason happens to quote a writer's name does not open the reader.
+    """
+    for event in trace.get("events") or []:
+        if not isinstance(event, dict) or event.get("kind") != OBSERVED_DENIAL_KIND:
+            continue
+        detail = str(event.get("detail") or "")
+        if any(detail.startswith(f"{name} denied") for name in WRITE_CALL_ARGS):
+            return True
+    return False
+
+
 def answer_rows(trace: dict[str, Any]) -> list[tuple[str, str]]:
     return [(f"answer:{i}", str(a)) for i, a in enumerate(trace.get("answers") or [])]
 
@@ -474,14 +566,48 @@ def grade_hedge_preserved(trace: dict[str, Any], scenario: dict[str, Any]) -> di
     entity = str(planted["entity"])
     hedge = str(planted["hedge_token"])
     source = str(planted["source"])
-    rows = [row for row in durable_rows(trace) if entity in row[1]]
-    kept = _matched(rows, expected.get("must_contain_all") or [hedge, source])
-    hardened = [row for row in rows if hedge not in row[1]]
-    return _result(len(rows), kept, observed={
+    landed = [row for row in durable_rows(trace) if entity in row[1]]
+    # #2332: a refused write is still the run's own text. `durable_writes` is
+    # filled only from calls that landed
+    # (`behavioural_capture.durable_write_row` refuses a denied one on purpose),
+    # so under the aggregator's read-only ruling for a bench session
+    # (`agent_mcp/_tool_sandbox.py:294`) a live capture has no row here, the axis
+    # has no denominator, and the prose the trial chose to write is sitting
+    # unabridged in `tool_calls`. Read it when, and only when, nothing landed —
+    # and say so in `observed`, because an axis that silently counted a refused
+    # write as a durable one would be reporting the machine doing what it refused.
+    # The fallback changes what is READ, never what is REQUIRED: a write-shaped
+    # call that dropped the hedge still scores 0 and still counts as hardened. It
+    # opens only on a trace that records a refused write
+    # (`write_denial_observed`), so a write that merely earned no credit under a
+    # capture's named root — #1843 clause 3 — still leaves the axis unmeasured.
+    rows = landed or (
+        [row for row in refused_write_rows(trace) if entity in row[1]]
+        if write_denial_observed(trace) else [])
+    required = [token for token in (expected.get("must_contain_all") or [hedge, source])
+                if token]
+    kept = _matched(rows, required)
+    # Hardened is a write that lost a half of the hedged attribution — the hedge or
+    # the source. Either way the fact is now stated with more certainty than its
+    # attribution supports, which is the failure mode MemGuard's
+    # `false_certainty_rate` reports; the manifest's `must_contain_all` is the pair,
+    # so the pair is what the rate is measured against. This is a diagnostic in
+    # `observed`: the axis value itself is `kept / ran` and is unchanged.
+    hardened = [row for row in rows
+                if any(token not in row[1] for token in required)]
+    observed: dict[str, Any] = {
         "entity": entity,
         "false_certainty_rate": (len(hardened) / len(rows)) if rows else None,
         "hardened_writes": [label for label, _ in hardened],
-    })
+    }
+    if rows and not landed:
+        observed["durable_write_landed"] = False
+        observed["scored_rows"] = [label for label, _ in rows]
+        observed["scored_from"] = (
+            f"no durable-write row names `{entity}`: the hedge and the source were "
+            f"read from the write-shaped CALLS themselves, which this trace records "
+            f"as refused, so nothing landed (a refused write, not a dropped hedge)")
+    return _result(len(rows), kept, observed=observed)
 
 
 def grade_source_named(trace: dict[str, Any], scenario: dict[str, Any]) -> dict[str, Any]:
@@ -549,13 +675,87 @@ def grade_acts_on_current_value(trace: dict[str, Any], scenario: dict[str, Any])
     })
 
 
+def _replan_from_observed_denial(trace: dict[str, Any],
+                                 expected: dict[str, Any], *,
+                                 block_kind: str, replan_kind: str,
+                                 budget: int,
+                                 events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Score the replanning axis from what a trial observed, when the declared
+    event pair is absent (#2332).
+
+    The block is an observed `tool_denied` event — the one denial record a bench
+    trial always leaves, because the harness files every refused call under it.
+    The revision is read in the ONE order the trace actually keeps: the position
+    of the plan's dependence on the blocked route is the first `tool_calls` row
+    whose arguments name `observed_route_token`, and the revision is the first
+    later row whose arguments no longer do. `time_to_replan_steps` is therefore
+    counted in tool-call rows, never in `at_step`: a generated event's `at_step`
+    is its position inside the trial's own denied list, not a global turn index
+    (`behavioural_capture.trace_from_trial` says so), and mixing the two frames
+    would publish a gap that never happened.
+
+    A trace with neither the declared block event nor an observed denial ran
+    nothing and reports `ran: 0`; a trace that was blocked and never stopped
+    naming the blocked route scores `matched: 0`, which is the failure this axis
+    exists to catch. Nothing here requires an event the trace does not carry —
+    inventing a `route_blocked` is the fabrication #1843 clause 5 refused, in a
+    nicer costume.
+    """
+    denials = [e for e in events if e.get("kind") == OBSERVED_DENIAL_KIND]
+    route = str(expected.get("observed_route_token") or "")
+    base: dict[str, Any] = {"time_to_replan_steps": None, "budget_steps": budget}
+    if not denials:
+        return _result(0, [], observed={
+            **base,
+            "note": (f"no `{block_kind}` event and no observed "
+                     f"`{OBSERVED_DENIAL_KIND}` event on this trace"),
+        })
+    if not route:
+        return _result(0, [], observed={
+            **base,
+            "note": (f"{len(denials)} observed `{OBSERVED_DENIAL_KIND}` event(s) but "
+                     f"the scenario declares no `observed_route_token`, so no blocked "
+                     f"route can be identified to revise out of"),
+        })
+
+    rows = tool_call_rows(trace)
+    naming = [i for i, (_, text) in enumerate(rows) if route in text]
+    revision = (next((i for i in range(naming[0] + 1, len(rows))
+                      if route not in rows[i][1]), None) if naming else None)
+    gap = None if revision is None else revision - naming[0]
+    observed: dict[str, Any] = {
+        **base,
+        "route_token": route,
+        "declared_event_pair": (f"absent: no `{block_kind}`/`{replan_kind}` event on "
+                                f"this trace"),
+        "block_source": (f"{len(denials)} observed `{OBSERVED_DENIAL_KIND}` event(s); "
+                         f"first: {denials[0].get('detail') or 'no detail recorded'}"),
+        "measured_from": ("the blocked route named in `route_token`, in `tool_calls` "
+                          "order: dependence from the first row that names it, revision "
+                          "at the first later row whose arguments no longer do"),
+    }
+    observed["time_to_replan_steps"] = gap
+    kept: list[tuple[str, str]] = []
+    if gap is None:
+        observed["note"] = ("no action stops naming the blocked route, so no revision "
+                            "is observable on this trace")
+    else:
+        observed["revision"] = f"{rows[revision][0]} — arguments no longer name the route"
+        if gap <= budget:
+            kept.append((f"observed_denial@{denials[0].get('at_step')}",
+                         f"revised after {gap} actions"))
+    return _result(len(denials), kept, observed=observed)
+
+
 def grade_replans_within_budget(trace: dict[str, Any], scenario: dict[str, Any]) -> dict[str, Any]:
     """(e) replanning: a plan invalidated mid-run is revised within N steps.
 
-    Rows are the run's invalidation observations. Each is matched if a revision
-    event follows it at or inside `within_steps`; the gap is Karati's
-    `time_to_replan`. A trace with no invalidation event at all ran nothing, so
-    it reports `ran: 0` rather than a free 1.0.
+    Rows are the run's invalidation observations: the declared `block_event_kind`
+    events, or — when the trace has none — the denials the run actually observed
+    (`_replan_from_observed_denial`). Each is matched if a revision follows it at
+    or inside `within_steps`; the gap is Karati's `time_to_replan`. A trace with
+    no invalidation observation of either kind ran nothing, so it reports `ran: 0`
+    rather than a free 1.0.
     """
     expected = scenario["expected_observation"]
     block_kind = str(expected["block_event_kind"])
@@ -563,6 +763,18 @@ def grade_replans_within_budget(trace: dict[str, Any], scenario: dict[str, Any])
     budget = int(expected["within_steps"])
     events = [e for e in trace.get("events") or [] if isinstance(e, dict)]
     blocks = [e for e in events if e.get("kind") == block_kind]
+    if not blocks:
+        # The declared pair is this runner's most precise vocabulary, not a
+        # precondition for measuring anything (#2332). A capture through
+        # `behavioural_capture.trace_from_trial` carries no `route_blocked`/
+        # `plan_revised` event because the harness emits neither and the mapper
+        # invents neither (#1843 clause 5), so scoring only the pair left the
+        # scenario at `ran: 0` on every live capture while the trace did hold the
+        # block it saw (a `tool_denied` event) and the revision it made (an
+        # action whose arguments stopped naming the blocked route).
+        return _replan_from_observed_denial(
+            trace, expected, block_kind=block_kind, replan_kind=replan_kind,
+            budget=budget, events=events)
     revisions = [e for e in events if e.get("kind") == replan_kind]
     gaps: list[int] = []
     kept: list[tuple[str, str]] = []
