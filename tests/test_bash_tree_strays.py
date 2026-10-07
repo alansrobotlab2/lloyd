@@ -855,3 +855,202 @@ def test_the_architecture_page_names_all_three_kinds_and_the_state_that_decides_
     assert kinds == {"appeared", "removed", "present"}, (
         f"the module can emit {sorted(kinds)} but the page describes three; one of them is "
         "undocumented or dead")
+
+
+
+# ── #2318: the journal-only ruling for removals lives in watched()'s docstring ─
+#
+# #2110's owed check decided this on 2026-10-07 and the decision had nowhere to live
+# but a backlog item: `watched()` said only which sessions are measured, so the next
+# author reading this bracket to ask "or should a deletion be refused?" found no answer
+# and would re-open the question. These nodes keep the answer where the question is
+# asked. They read the docstring OFF THE FUNCTION (`inspect.getdoc`), not off the file:
+# a second copy in a comment, or the text moved out of `watched()`, reads green here
+# and teaches nobody.
+#
+# Clause 5 of #2318 is deliberately NOT restated here — it is
+# `test_the_call_that_removes_a_seen_stray_journals_the_removal`, untouched by this
+# round, which is the behaviour these words describe. Re-asserting it in prose would
+# pin the docstring twice and the code zero times.
+
+import inspect
+
+
+def _watched_doc() -> str:
+    """`watched()`'s docstring collapsed to one line.
+
+    Whitespace collapsed on purpose: this is prose, and a sentence that wraps
+    mid-phrase in the source is the same sentence. Collapsing lets the nodes below
+    assert phrases without pinning where the author happened to wrap, and cannot hide
+    a missing phrase — every phrase asserted here is a run of words. The one phrase
+    that must survive as ONE LINE is `never refused`, and clause 1 checks that against
+    the raw file, because the item's check is a `git grep`.
+    """
+    return " ".join((inspect.getdoc(_bash_tree_strays.watched) or "").split())
+
+
+def test_watched_states_that_a_removal_is_journaled_and_never_refused():
+    """Clause 1: the ruling line, and `git grep` finds it inside `watched()`.
+
+    Asserted twice on purpose, differently: the phrase must be in the docstring, AND
+    the single line carrying it must fall inside `watched()`'s own line range in the
+    file — because the item's check is `git grep -n 'never refused'` against the whole
+    file, which would also be satisfied by the phrase appearing in a module comment
+    ten functions away.
+    """
+    doc = _watched_doc()
+    assert "JOURNALED, never refused" in doc, doc
+
+    src = Path(inspect.getsourcefile(_bash_tree_strays.watched)).read_text(encoding="utf-8")
+    lines = src.splitlines()
+    hits = [i for i, ln in enumerate(lines, 1) if "never refused" in ln]
+    assert len(hits) == 1, f"the phrase must appear exactly once: {hits}"
+    body, first = inspect.getsourcelines(_bash_tree_strays.watched)
+    last = first + len(body) - 1
+    assert first <= hits[0] <= last, (
+        f"the only hit is line {hits[0]} but `watched()` spans {first}..{last}: "
+        "the item's grep would point at a ruling that is not this function's")
+    assert not lines[hits[0] - 1].lstrip().startswith("#"), (
+        "a comment line is not a docstring; the grep has to land on the prose")
+
+
+def test_watched_names_the_guardian_as_the_only_mover_and_the_route_outside_as_its():
+    """Clause 2: the guardian owns the moving, and an unwatched route is its to find.
+
+    One node because it is one ruling — "not mine to stop" is only tolerable because
+    someone does move strays. The node also asserts the constant's VALUE is what the
+    prose quotes, so the sentence cannot outlive `GUARDIAN_STRAYS` being renamed, and
+    the `stray_in_tree` name is checked against the guardian module that defines it
+    rather than against a string this test could only hope was spelled right.
+    """
+    doc = _watched_doc()
+    assert "only mover" in doc, doc
+    assert "guardian" in doc.lower(), doc
+    assert "stray_in_tree" in doc, "the outside-bracket route must name where it lands"
+    assert _bash_tree_strays.GUARDIAN_STRAYS in doc, (
+        f"the prose and the value the row carries "
+        f"({_bash_tree_strays.GUARDIAN_STRAYS!r}) have come apart")
+
+    # `_actionable_by` is what stamps the label, so the prose naming it must name a
+    # function that exists and can return the label it is quoted as returning.
+    src = Path(inspect.getsourcefile(_bash_tree_strays.watched)).read_text(encoding="utf-8")
+    assert "_actionable_by" in doc and "_actionable_by" in src, doc
+    guard = (Path(inspect.getsourcefile(_bash_tree_strays))
+             .parents[1] / "agent-services" / "guardian" / "datawatch.py")
+    assert "def stray_in_tree" in guard.read_text(encoding="utf-8"), (
+        "the docstring sends a reader to a guardian check that is not there")
+
+
+def test_watched_gives_the_reason_a_refusal_would_have_blocked_real_work():
+    """Clause 3: both halves of the reason, and NOT the one triage refuted.
+
+    The item's own draft attributed both journalled removals to "#2061/#2065
+    prescribed" ops. Triage measured the journal and found that false: #2065 was
+    closed stale as a duplicate of #2061 and its prescribed `mv` never ran, and the
+    second removal is the #2220 cleanup of a `Write`-created file. So this node pins
+    the corrected sentence AND the absence of the false one — an "improvement" that
+    restored the original attribution would go red here instead of shipping into a
+    docstring that outlives this item.
+    """
+    doc = _watched_doc()
+    low = doc.lower()
+    assert "reaches no lloyd code" in low, doc
+    assert "terminal" in low, "the unreachable route has to be named, not just implied"
+    assert "workers.db" in doc and "#2061" in doc, "the first journaled removal, named"
+    assert "#2220" in doc, "the second is #2220's cleanup, not #2065's"
+    assert "blocked" in low, "the reason says what a refusal would have cost"
+    assert "#2065" not in doc, (
+        "#2065 was closed stale as a duplicate of #2061 and its `mv` never ran — naming "
+        "it here is the false attribution triage removed")
+def test_the_ruling_names_no_runtime_path_in_a_retired_layout(tmp_path, monkeypatch):
+    """Clause 4: the added prose is cleared by the sweep's OWN rule, and the diff is in scope.
+
+    The grader refused the first draft on both halves of this clause. It cleared the
+    prose by concatenating a home prefix onto the whole docstring — which exercises the
+    concatenation, not the rule — and it pinned nothing about "the diff touches the
+    docstring and tests only". So the deciding check here is not a pattern list of
+    mine at all: it imports `tests/test_no_runtime_paths_in_code.py` and runs ITS test
+    function against a fabricated tree holding one synthetic file whose entire body is
+    the ruling, with that module's `ROOT` and its `git ls-files` rebound to the fixture.
+    Real `PATTERNS`, real allowlist, real line-skip rule, deciding over text this round
+    wrote.
+
+    Two runs, opposite verdicts, one line apart in the fixture — which is also what
+    makes the green run a measurement rather than an absence: the dirty run can only go
+    red if the sweep read this file. The retired location reaches the fixture as a
+    whole path on one line — the sweep matches a path within a line, so an expression
+    assembled INSIDE the fixture is a mutation that fails to mutate, which is how the
+    first draft's dirty half passed. It is split in this source (`'"~' + '/lloyd/…'``)
+    the way `tests/test_data_home.py::BANNED_SPELLING` splits its own forbidden string,
+    so no tracked `.py` carries the retired layout by the act of testing for it.
+    """
+    import importlib.util
+
+    import pytest as _pytest
+
+    here = Path(__file__).resolve().parent
+    spec = importlib.util.spec_from_file_location(
+        "_sweep_module", here / "test_no_runtime_paths_in_code.py")
+    sweep = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sweep)
+
+    tree = tmp_path / "tree"
+    (tree / "agent_mcp").mkdir(parents=True)
+    target = tree / "agent_mcp" / "synthetic_ruling.py"
+    rel = "agent_mcp/synthetic_ruling.py"
+
+    class _Git:
+        """Stands in for the `git ls-files` the sweep shells out for."""
+
+        @staticmethod
+        def run(*a, **kw):
+            return collections.namedtuple("R", "stdout")(stdout=rel)
+
+    monkeypatch.setattr(sweep, "ROOT", tree)
+    monkeypatch.setattr(sweep, "subprocess", _Git)
+
+    def _body(text: str) -> str:
+        # One function, one docstring: the sweep skips lines that START with `#` and
+        # nothing else, so a docstring is exactly the surface it reads.
+        target.write_text(f'def f():\n    """{text}"""\n', encoding="utf-8")
+
+    # Split in THIS source so no tracked `.py` carries the retired layout, and written
+    # into the fixture as ONE line, which is what the sweep matches — an assembled
+    # expression inside the fixture would be a mutation that fails to mutate. That
+    # failure is how the first draft of this node looked green.
+    retired = '"~' + '/lloyd/usage.db"'
+    doc = _watched_doc()
+
+    _body(doc)
+    sweep.test_no_tracked_code_builds_a_runtime_path_off_the_tree()
+
+    _body(doc + f"\n    DB = {retired}\n")
+    with _pytest.raises(AssertionError) as e:
+        sweep.test_no_tracked_code_builds_a_runtime_path_off_the_tree()
+    assert rel in str(e.value), (
+        "the sweep went red, but not on the synthetic file — so the pass above would "
+        f"have said nothing about this prose either: {str(e.value)[:300]}")
+
+    # The clause's other half — "no refusal is added to the Bash tool" — as a property
+    # of the bracket rather than of a commit. A check against `git show HEAD` would be
+    # true at the gate and false forever after, because HEAD is whatever lands next;
+    # this stays true exactly as long as the ruling is.
+    #
+    # The shape being asserted is the one that matters: `after` hands back the text and
+    # the caller REASSIGNS to it (`text = await ...after(text, ...)`), so the tool result
+    # is the tool's own. A refusal would have to branch on the return or raise, and
+    # neither is a reassignment. The regex needs a positive control too, or it clears
+    # the file by matching nothing at all.
+    tool = (Path(inspect.getsourcefile(_bash_tree_strays)).parents[1]
+            / "agent_mcp" / "builtin_bash.py").read_text(encoding="utf-8")
+    after = re.search(r"(\w+) = await _bash_tree_strays\.after\(\n?\s*\1,", tool)
+    assert after, (
+        "the Bash tool no longer reassigns its own result through "
+        "`_bash_tree_strays.after`, which is the shape the ruling describes — either "
+        "the call moved, or something now branches on what it returns")
+    assert tool.count("= await _bash_tree_strays.after(") == 1, (
+        "more than one caller consumes `after`'s text; this node reads only one of them")
+    assert 'if _bash_tree_strays.' not in tool and 'raise' not in [
+        ln.strip() for ln in tool.splitlines()
+        if "_bash_tree_strays" in ln], (
+        "the bracket now gates on the stray guard, i.e. a refusal was added")

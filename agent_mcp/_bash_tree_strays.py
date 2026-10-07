@@ -87,7 +87,37 @@ def _parent_of(session_id: str) -> str | None:
 
 def watched(session_id: str | None) -> bool:
     """Whether this session's Bash calls are measured: an unattended turn, or a
-    subagent of one."""
+    subagent of one.
+
+    **What this bracket does when a measured session deletes a stray** — the ruling
+    #2110's owed check decided on 2026-10-07, written here so the next author reading
+    this bracket to ask "or should a deletion be refused?" does not re-open it:
+    removing an in-tree runtime path is JOURNALED, never refused. `after` records the
+    disappearance to `safety/tree-strays.jsonl` as a `kind: "removed"` row and hands
+    the tool result back untouched, exactly as an appearance is reported unblocked.
+
+    **The guardian is the only mover.** When a stray is meant to leave the tree, the
+    moving is the guardian's: `_actionable_by` answers `GUARDIAN_STRAYS`
+    ("guardian-strays") for a path only the guardian can reach, and stamps that on the
+    row when the writer was not the mover. So a removal route outside this bracket — a
+    human terminal, or an attended chat session, where `watched` is false and nothing
+    here runs at all — is not this guard's to stop. It is the guardian's
+    `stray_in_tree` to find, which is the same sentence the module header ends on for
+    strays this bracket cannot see an origin for.
+
+    **Why refusing here would have cost real work and enforced nothing.** Both removals
+    on the journal are work a refusal would have blocked: the `workers.db` row, which is
+    #2061's prescribed cleanup run by the watched session whose own tool result had just
+    named that path, and the #2220 `knowledge/` cleanup of a file a `Write` had laid —
+    journalled as a removal at all only because no origin row can exist for a non-Bash
+    write. And a refusal would be hollow where it matters most: a `rm` typed in a
+    terminal reaches no Lloyd code, so this function is not on the path of the very
+    route a refusal is meant to deter.
+
+    Stray paths are named here by BASENAME, never as a full retired-layout path:
+    `tests/test_no_runtime_paths_in_code.py` sweeps every non-comment line of every
+    tracked `.py` for such a path, and a docstring is a non-comment line.
+    """
     if not session_id:
         return False
     try:
