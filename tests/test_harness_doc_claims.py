@@ -1029,3 +1029,38 @@ def test_the_canary_section_says_a_search_query_is_an_escape_whatever_the_seed_n
                    "app/harness/safety.py", "wilson_ci", "webpage-egress-fetch",
                    "no `config.yaml` edit", "`enforce: false`"):
         assert pinned in arm, f"the #2192 rewrite dropped a string the pair nodes pin: {pinned}"
+
+
+def test_the_canary_section_says_the_arm_is_the_serving_endpoints_state():
+    """#2338: the section may not describe an arm the runner picks for itself.
+
+    Until this change the passage said the arm was selected "*only* by the runner's
+    environment" — true of the label, false of the guard: the episode's tools are
+    dispatched to the aggregator, whose `guard()` reads `enforce_on()` in ITS process,
+    and the shared daemon answers `enforce: false` however the shell is set up. The
+    result was an A/B whose two arms were the same arm. So the section has to name
+    where the label now comes from (the serving endpoint's `/state` key), what a run
+    does when the endpoint will not honour the request (refuses, before appending), and
+    how the on arm is served at all (`--mcp-url`).
+
+    Asserted against the code as well as the prose, the rule of this file: the state key
+    and the reader exist, the refusal path returns non-zero, and `grade` can name a row
+    whose two states disagree.
+    """
+    arm = " ".join(_section(DOC_TEXT, "## The injection canary bench").split())
+    for phrase in ("/state", "guard_egress_enforce", "--mcp-url"):
+        assert phrase in arm, f"the section no longer names {phrase}"
+    assert "refuse" in arm.lower(), "the section must say the run refuses, not relabels"
+
+    runner = (ROOT / "eval" / "run_injection_canary.py").read_text(encoding="utf-8")
+    for symbol in ("def verified_arm(", "def read_guard_egress(",
+                   "def arm_conflicts(", '"--mcp-url"'):
+        assert symbol in runner, f"`{symbol}` is gone from the runner the section cites"
+    assert "return 2" in runner, "the refusal has to be a non-zero exit, not a warning"
+
+    aggregator = (ROOT / "agent_mcp" / "main.py").read_text(encoding="utf-8")
+    assert '"egress":' in aggregator, (
+        "`GET /state` stopped publishing the egress key, which is the only way an "
+        "out-of-process caller can tell the arms apart")
+    assert (ROOT / "agent_mcp" / "egress.py").read_text(
+        encoding="utf-8").find("def status(") > 0

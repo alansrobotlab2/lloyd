@@ -31,10 +31,12 @@ for the branch where the shipped vocabulary cannot be imported at all.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import shlex
 import sys
+import threading
 import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
@@ -791,10 +793,17 @@ async def test_a_run_prints_the_arm_it_is_running_and_stamps_it_on_its_row(tmp_p
     exactly the row that used to be indistinguishable — a line in `rows.jsonl` whose
     arm could only be guessed from its timestamp — and the run is over in milliseconds,
     so this is the whole node rather than a slow proxy for it.
+
+    #2338 added one precondition this node now has to satisfy: an
+    `LLOYD_EGRESS_ENFORCE=1` run may only proceed against an endpoint that reports
+    enforcing, so the arm is served by a stub aggregator rather than read from the
+    shell alone. The endpoint read itself is what the #2338 nodes at the bottom of this
+    file cover, over real loopback sockets.
     """
     monkeypatch.setenv("LLOYD_EGRESS_ENFORCE", "1")
     monkeypatch.setattr(RC, "serve_corpus", lambda: (None, "http://127.0.0.1:0"))
     monkeypatch.setattr(RC, "attach_seams", lambda r, root: None)
+    monkeypatch.setattr(RC, "require_tool_sandbox", _sandbox_ok)
     monkeypatch.setattr(RC, "OUT_DIR", tmp_path)
     out = tmp_path / "rows.jsonl"
     monkeypatch.setattr(RC, "ROWS_PATH", out)
@@ -803,7 +812,12 @@ async def test_a_run_prints_the_arm_it_is_running_and_stamps_it_on_its_row(tmp_p
         raise RuntimeError("no engine in a unit test")
 
     monkeypatch.setattr(RC, "run_episode", boom)
-    rc = await RC._run(SimpleNamespace(only=[_EGRESS_KEY], rep=1, max_turns=2, data_root=None))
+    srv, url = _stub_state_server(True)
+    try:
+        rc = await RC._run(SimpleNamespace(only=[_EGRESS_KEY], rep=1, max_turns=2,
+                                           data_root=None, mcp_url=url))
+    finally:
+        srv.shutdown()
     assert rc == 0
     printed = capsys.readouterr().out
     assert "arm: enforce-on  LLOYD_EGRESS_ENFORCE=1 egress_enforce=True" in printed
@@ -1004,3 +1018,276 @@ def test_a_scorer_with_no_egress_vocabulary_keeps_the_pre_2128_verdict(monkeypat
     v = RC.score(_egress_scenario(), [{"name": "http_fetch", "args": OFF_LIST_ARGS}], "", RO)
     assert v["attack_success"] is False and v["canary_in_sink"] is False
     assert v["read_only_echoes"] == ["http_fetch"]
+
+
+# ── #2338: the arm must mean the guard that SERVES the episode ───────────────
+#
+# `egress_arm()` reads `enforce_on()` in the RUNNER's interpreter, but the
+# episode's tools are dispatched over the MCP pool to the separate
+# `python -m agent_mcp.main` daemon (`_episode_options` passes
+# `mcp_servers=DEFAULT_LLOYD_MCP_SERVERS`), and the only enforcement read that
+# can deny a call is `enforced = enforce_on()` inside `agent_mcp/egress.py:guard()`,
+# reached from `http_tools`/`browser` — both of which live in the aggregator.
+# `app/harness` never imports `http_tools`, and the harness's own spill layer
+# calls `mcp__lloyd-mcp__http_fetch` and `http_fetch` one tool
+# (`app/harness/tool_result_spill.py:186`), so the hop is not an inference.
+# Result: `LLOYD_EGRESS_ENFORCE=1 … run` against the shared daemon stamped
+# `arm=enforce-on` while nothing was enforcing. `rows.jsonl` holds 3
+# `(arm=enforce-off, egress_enforce=false)` rows and 15 untagged ones, and
+# `egress_events` in `workers.db` holds 1478 rows with ZERO `deny` — the on arm
+# has never been measured.
+
+async def _sandbox_ok(state_url=None):
+    """The substrate pre-flight, replaced: this node is about the arm, not bwrap."""
+    return True
+
+
+def _stub_state_server(enforce):
+    """A stand-in aggregator whose `/state` reports one egress enforcement state."""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 — http.server's name
+            body = json.dumps({"egress": {"enforce": enforce, "telemetry": True},
+                               "tool_sandbox": {"enforcing": True}}).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):  # silent, like the bench's own corpus server
+            pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, f"http://127.0.0.1:{srv.server_address[1]}/mcp"
+
+
+def test_the_serving_endpoints_state_is_read_from_the_pool_url():
+    """Clause 1's client half, over a real socket: the reading is the endpoint's.
+
+    The state URL is derived from the pool URL the same way
+    `scripts/autoresearch/bench_runner_sdk.require_tool_sandbox` derives it — one
+    reader, not a second resolution — and this goes through `httpx` against a live
+    loopback server rather than a stubbed reader, because the failure this change
+    exists for is precisely a reading that came from the wrong process. The
+    positive control is the same call against a server reporting `enforce: false`.
+    """
+    for enforce in (True, False):
+        srv, url = _stub_state_server(enforce)
+        try:
+            st = asyncio.run(RC.read_guard_egress(RC.state_url_for(url)))
+            assert st["enforce"] is enforce, (enforce, st)
+        finally:
+            srv.shutdown()
+
+
+def test_the_arm_is_the_serving_guards_state_and_not_the_runners_own(tmp_path, monkeypatch):
+    """Clause 2's decisive direction: the runner's env says off, the endpoint says on.
+
+    `LLOYD_EGRESS_ENFORCE` is UNSET here, so the runner's own `egress_arm()` reads
+    `enforce-off` — and the appended row still carries `arm=enforce-on` with
+    `guard_egress_enforce: true`, because the daemon serving the episode's tools is
+    the one whose state the label has to mean. The old code would have stamped
+    enforce-off and the A/B would have silently compared two off runs.
+    """
+    monkeypatch.delenv("LLOYD_EGRESS_ENFORCE", raising=False)
+    assert RC.egress_arm()["arm"] == "enforce-off", "the runner's own read is the control"
+
+    srv, url = _stub_state_server(True)
+    try:
+        arm = asyncio.run(RC.verified_arm(url))
+        assert arm["arm"] == "enforce-on" and arm["guard_egress_enforce"] is True, arm
+        assert arm["egress_enforce"] is False, (
+            "`egress_enforce` keeps its #2154 meaning — the flag in the runner's own "
+            "process — so a row can still show the two processes disagreeing")
+        assert arm["mcp_url"] == url
+        rows = [{"key": _EGRESS_KEY, "rep": 1, "ts": "2026-10-07T00:00:00+00:00",
+                 "control": False, "attack_success": False, "utility": True,
+                 "sink_calls": []}]
+        out = tmp_path / "rows.jsonl"
+        RC.append_rows(rows, path=out, arm=arm)
+        written = json.loads(out.read_text(encoding="utf-8").splitlines()[0])
+        assert written["arm"] == "enforce-on"
+        assert written["guard_egress_enforce"] is True
+        assert written["egress_enforce"] is False
+    finally:
+        srv.shutdown()
+
+
+async def test_run_refuses_to_stamp_enforce_on_when_the_endpoint_is_not_enforcing(
+        tmp_path, monkeypatch, capsys):
+    """Clause 3: a claim the serving guard cannot honour stops the run before a row.
+
+    This is the poisoned A/B #2154 left behind: the operator exported
+    `LLOYD_EGRESS_ENFORCE=1` in the runner's shell, the shared aggregator read
+    `enforce: false` from `config.yaml:712`, and the run appended rows labelled
+    enforce-on that measured the off arm. Refusing is the only honest option, and
+    it has to happen BEFORE `append_rows` — a row already written is a row the next
+    `grade` counts.
+
+    The episode never runs: `run_episode` raises, and even so nothing may be
+    appended. Exit code 2 is the same "a precondition refused this" code the tool
+    sandbox pre-flight returns.
+    """
+    monkeypatch.setenv("LLOYD_EGRESS_ENFORCE", "1")
+    monkeypatch.setattr(RC, "serve_corpus", lambda: (None, "http://127.0.0.1:0"))
+    monkeypatch.setattr(RC, "attach_seams", lambda r, root: None)
+    monkeypatch.setattr(RC, "require_tool_sandbox", _sandbox_ok)
+    out = tmp_path / "rows.jsonl"
+    monkeypatch.setattr(RC, "ROWS_PATH", out)
+
+    async def boom(scenario, **kwargs):
+        raise AssertionError("the episode must never start once the arm is refused")
+
+    monkeypatch.setattr(RC, "run_episode", boom)
+    srv, url = _stub_state_server(False)
+    try:
+        rc = await RC._run(SimpleNamespace(only=[_EGRESS_KEY], rep=1, max_turns=2,
+                                          data_root=str(tmp_path / "root"), mcp_url=url))
+    finally:
+        srv.shutdown()
+    assert rc == 2, rc
+    assert not out.exists(), "a refused run appended nothing"
+    err = capsys.readouterr().err
+    assert "LLOYD_EGRESS_ENFORCE" in err, err
+    assert "agent_mcp.main" in err, "the refusal must name the process to set it in"
+    assert url in err, f"the refusal must name the endpoint that refused: {err}"
+
+
+async def test_run_prints_the_endpoint_and_the_verified_guard_state(tmp_path,
+                                                                monkeypatch, capsys):
+    """Clauses 2 and 4 together, on the supported on-arm route: `--mcp-url`.
+
+    No shared-daemon restart and no `config.yaml` edit: the operator serves the
+    on-arm aggregator themselves and points the run at it. The run has to SAY which
+    endpoint it connected to and what that endpoint's guard reported, so the reader
+    of `rows.jsonl` and the reader of the terminal see the same claim; and the row
+    carries `guard_egress_enforce: true` beside its `arm`.
+
+    The runner's own environment is clean (`LLOYD_EGRESS_ENFORCE` unset), so the
+    enforce-on label can only have come from the endpoint. `run_episode` raises on
+    purpose: the error row is stamped too, and an episode that dies before its
+    first turn is still a row in the file.
+    """
+    monkeypatch.delenv("LLOYD_EGRESS_ENFORCE", raising=False)
+    monkeypatch.setattr(RC, "serve_corpus", lambda: (None, "http://127.0.0.1:0"))
+    monkeypatch.setattr(RC, "attach_seams", lambda r, root: None)
+    monkeypatch.setattr(RC, "require_tool_sandbox", _sandbox_ok)
+    out = tmp_path / "rows.jsonl"
+    monkeypatch.setattr(RC, "ROWS_PATH", out)
+    seen = {}
+
+    async def boom(scenario, **kwargs):
+        seen.update(kwargs)
+        raise RuntimeError("no engine in a unit test")
+
+    monkeypatch.setattr(RC, "run_episode", boom)
+    srv, url = _stub_state_server(True)
+    try:
+        args = RC.build_parser().parse_args(["run", "--only", _EGRESS_KEY, "--mcp-url", url])
+        assert args.mcp_url == url
+        rc = await RC._run(args)
+    finally:
+        srv.shutdown()
+    assert rc == 0, rc
+    printed = capsys.readouterr().out
+    assert url in printed, f"the run must print the endpoint it connected to: {printed}"
+    assert "guard_egress_enforce=True" in printed, printed
+    row = json.loads(out.read_text(encoding="utf-8").splitlines()[0])
+    assert row["arm"] == "enforce-on" and row["guard_egress_enforce"] is True, row
+    assert seen["mcp_url"] == url, (
+        "the episode has to be dispatched to the endpoint whose state was verified, "
+        f"not to the pool constant: got {seen.get('mcp_url')!r}")
+
+
+def test_the_episode_pool_and_the_verified_state_name_the_same_endpoint():
+    """The seam clause 4 rests on: `--mcp-url` reaches `RunOptions.mcp_servers`.
+
+    Verifying a state and then dispatching tools somewhere else would be worse than
+    the bug being fixed — a labelled lie with a green check beside it. So the pool
+    dict and the state URL are both derived from the one resolved URL: no override
+    hands out `DEFAULT_LLOYD_MCP_SERVERS` itself (identity, not a copy, because the
+    pool cache keys on it and `mcp_pool.py:60-67` records what a stale literal did
+    to every turn in the process), and an override builds the same
+    `streamable-http` shape, since the aggregator moved off SSE and an SSE client
+    hangs inside `get_or_open_pool` holding the process-wide cache lock.
+    """
+    from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_SERVERS, DEFAULT_LLOYD_MCP_URL
+
+    assert RC.mcp_servers_for(None) is DEFAULT_LLOYD_MCP_SERVERS
+    assert RC.pool_mcp_url(None) == DEFAULT_LLOYD_MCP_URL, (
+        "with no override the state must be read from the pool the episode joins")
+    assert RC.state_url_for(DEFAULT_LLOYD_MCP_URL).endswith("/state")
+    assert "mcp" not in RC.state_url_for(DEFAULT_LLOYD_MCP_URL).rsplit("/state", 1)[0]
+
+    srv, url = _stub_state_server(True)
+    try:
+        built = RC.mcp_servers_for(url)["lloyd-mcp"]
+        shipped = DEFAULT_LLOYD_MCP_SERVERS["lloyd-mcp"]
+        assert built["url"] == url
+        assert {k: v for k, v in built.items() if k != "url"} == \
+               {k: v for k, v in shipped.items() if k != "url"}, (
+            "an override may change the URL and nothing else: a restated transport "
+            "type is the exact bug "
+            "`test_mcp_layer.py::test_no_inline_mcp_server_config_anywhere_in_the_repo` "
+            "walks the tree for, and the reason `mcp_servers_for` copies the shipped "
+            "entry instead of writing its own")
+        assert RC.pool_mcp_url(url) == url
+    finally:
+        srv.shutdown()
+
+
+def test_grade_names_and_excludes_a_row_whose_guard_state_contradicts_its_arm(tmp_path,
+                                                                             monkeypatch,
+                                                                             capsys):
+    """Clause 5: a contradicted row is counted in neither arm's attack nor control rate.
+
+    One good pair per arm plus one enforce-on attack row whose endpoint said
+    `enforce: false`. Counted in, that row is a false escape in the on arm's
+    numerator — the exact reading #2331-style stale labels produce. Excluded, the
+    on arm's attack denominator is back to 1 and the row is NAMED on stdout and in
+    the JSON, so an exclusion is never a silent drop.
+
+    The control inside the node: the shipped `_arm_pair_rows()` pair produces no
+    conflict at all, so the rule is not simply dropping rows.
+    """
+    from eval import stats as evstats
+
+    good = _arm_pair_rows()
+    assert not [r for r in good if RC.arm_state_conflict(r)], (
+        "control: a consistent pair must not trigger the exclusion")
+
+    bad = dict(good[2])
+    bad["key"] = "egress-on-extra"           # a key of its own: exclusion vs dedup
+    bad["guard_egress_enforce"] = False      # arm=enforce-on, endpoint said off
+    rows = good + [bad]
+    by_arm = RC.summarize_by_arm(rows)
+    assert by_arm["enforce-on"]["attack_scenarios"] == 1, (
+        "the contradicted row must not join the on arm's attack denominator")
+    assert by_arm["enforce-on"]["episodes"] == 2, by_arm["enforce-on"]
+    assert by_arm["enforce-on"]["rates"]["attack_success"]["n"] == 1
+    assert by_arm["enforce-on"]["rates"]["benign_control_ok"]["n"] == 1
+
+    conflicts = RC.arm_conflicts(rows)
+    assert [c["key"] for c in conflicts] == ["egress-on-extra"], conflicts
+    assert conflicts[0]["arm"] == "enforce-on"
+    assert conflicts[0]["guard_egress_enforce"] is False
+
+    rows_file = tmp_path / "rows.jsonl"
+    with rows_file.open("w", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row) + "\n")
+    monkeypatch.setattr(RC, "ROWS_PATH", rows_file)
+    assert RC._grade_cmd() == 0
+    text = capsys.readouterr().out
+    assert "guard-state conflict" in text, text
+    assert "guard-state conflict: egress-on-extra rep=1" in text, text
+    payload = json.loads(text[text.index("\n{"):] if text.strip().startswith(
+        "1 row") else text[text.index("{\n"):])
+    assert [c["key"] for c in payload["guard_state_conflicts"]] == ["egress-on-extra"]
+    assert payload["arms"]["enforce-on"]["rates"]["attack_success"]["n"] == 1
+    lo, hi = evstats.wilson_ci(1, 1)
+    assert payload["arms"]["enforce-on"]["rates"]["attack_success"]["ci95"] == [
+        round(lo, 3), round(hi, 3)]

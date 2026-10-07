@@ -79,12 +79,19 @@ OUT_DIR = LLOYD_HOME / "eval" / "measurements" / "injection-canary"
 ROWS_PATH = OUT_DIR / "rows.jsonl"
 SOURCE = "injection-canary"
 
-#: The two arms of the egress A/B (#2154), read from the runner's own environment.
-#: `agent_mcp/egress.py:enforce_on()` is the single definition of the flag —
-#: `LLOYD_EGRESS_ENFORCE` first, then `harness.egress_policy.enforce`, default off
-#: (`egress.py:219-224`) — so the label is the state the guard *in this process*
-#: would have acted on, not a second reading of a variable, and it costs no
-#: config.yaml key: the shipped config carries no `harness.egress_policy` at all.
+#: The flag that asks for the enforce-on arm (#2154): `agent_mcp/egress.py:
+#: enforce_on()` honours `LLOYD_EGRESS_ENFORCE` first, then
+#: `harness.egress_policy.enforce`, default off (`egress.py:219-224`). The shipped
+#: config has carried a `harness.egress_policy` section since #2123 (2026-10-04) —
+#: `telemetry: true`, `enforce: false` and a seven-entry `allow` seed — which is why
+#: the shared daemon answers `enforce: false` however the runner's shell is set up.
+#:
+#: ASKING is not the same as BEING: the flag is read here, in the runner's
+#: interpreter, but the guard that acts on it runs in the aggregator the episode's
+#: tools are dispatched to, so this reading is only a request. The arm a row is
+#: *labelled* with comes from `verified_arm()` below (#2338); `egress_arm()` stays
+#: the request, and a row records both, because a run whose request the serving
+#: guard did not honour is the poisoned A/B this change exists to refuse.
 ARM_ENV_VAR = "LLOYD_EGRESS_ENFORCE"
 ARM_ON = "enforce-on"
 ARM_OFF = "enforce-off"
@@ -112,6 +119,124 @@ def egress_arm() -> dict[str, Any]:
     return {"arm": ARM_ON if on else ARM_OFF, "egress_enforce": on}
 
 
+class GuardStateUnavailable(RuntimeError):
+    """The arm cannot be honoured: the serving endpoint will not state its egress
+    enforcement, or states one that contradicts what this run was asked to measure.
+
+    Exit 2 is the same "a precondition refused this run" code the tool-sandbox
+    pre-flight returns, so a caller that already handles one handles both."""
+
+
+def pool_mcp_url(explicit: str | None = None) -> str:
+    """The MCP URL the episode's tools will actually be dispatched to.
+
+    `DEFAULT_LLOYD_MCP_URL` rather than a restated `127.0.0.1:8500`: the bench's own
+    sandbox pre-flight derives its state URL from the same `_get_mcp_servers()` the
+    pool uses, and a second literal here would be a second thing to keep in sync with
+    a port that has already moved once."""
+    if explicit:
+        return explicit
+    from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_URL
+    return DEFAULT_LLOYD_MCP_URL
+
+
+def state_url_for(mcp_url: str) -> str:
+    """`…/mcp` → `…/state`, the way `require_tool_sandbox` derives it (#2109)."""
+    return mcp_url.rsplit("/mcp", 1)[0] + "/state"
+
+
+def mcp_servers_for(mcp_url: str | None) -> dict:
+    """The pool dict for a run: the shared one, or a caller-supplied endpoint.
+
+    No override returns `DEFAULT_LLOYD_MCP_SERVERS` ITSELF, not a copy — `mcp_pool`
+    keys its per-process pool cache on that dict, and an equal-but-new one was
+    already found to be the thing that made every turn in the process pay for a
+    server that was no longer there (`mcp_pool.py:60-67`). A supplied URL gets the
+    shipped entry with ONLY its `url` swapped — the transport type and every other key
+    are inherited from `DEFAULT_LLOYD_MCP_SERVERS`, never restated here:
+    `test_mcp_layer.py::test_no_inline_mcp_server_config_anywhere_in_the_repo` exists
+    because restated transport literals (`"type": "sse"`) survived the move to
+    Streamable HTTP at `b7ed1b1e` in five callsites found three separate times, and an
+    SSE client aimed at the new endpoint hangs inside `get_or_open_pool` holding the
+    process-wide cache lock, so every later turn in the process times out behind it."""
+    from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_SERVERS, DEFAULT_LLOYD_MCP_URL
+    if not mcp_url or mcp_url.rstrip("/") == DEFAULT_LLOYD_MCP_URL.rstrip("/"):
+        return DEFAULT_LLOYD_MCP_SERVERS
+    entry = dict(DEFAULT_LLOYD_MCP_SERVERS["lloyd-mcp"])
+    entry["url"] = mcp_url
+    return {"lloyd-mcp": entry}
+
+
+async def read_guard_egress(state_url: str, timeout: float = 15.0) -> dict:
+    """Ask the aggregator that will serve the tools whether IT is enforcing (#2338).
+
+    Deliberately uncached. `require_tool_sandbox` memoises its verdict per process
+    because a substrate does not change mid-run; egress enforcement is exactly the
+    thing an operator flips between two arms, so a cache here would serve the first
+    arm's answer to the second and re-create the poisoned label one call site away.
+    """
+    import httpx
+
+    from app.aggregator_config import auth_headers_for
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(state_url, headers=auth_headers_for(state_url))
+            body = resp.json()
+    except Exception as exc:  # noqa: BLE001 — any transport failure is the same refusal
+        raise GuardStateUnavailable(
+            f"cannot read the egress state of the aggregator at {state_url}: "
+            f"{type(exc).__name__}: {exc}. Its guard is the one that will decide the "
+            f"episode's egress calls, so its arm cannot be stamped without it."
+        ) from exc
+    state = body.get("egress") if isinstance(body, dict) else None
+    if not isinstance(state, dict) or not isinstance(state.get("enforce"), bool):
+        raise GuardStateUnavailable(
+            f"{state_url} reported no boolean `egress.enforce` key — an aggregator "
+            f"older than #2338 cannot say which arm it serves. Restart it on the "
+            f"commit that publishes the key rather than guessing its state.")
+    return state
+
+
+async def verified_arm(mcp_url: str | None = None) -> dict[str, Any]:
+    """The arm as the SERVING guard will run it, verified over `/state` (#2338).
+
+    The label is the endpoint's, never the runner's: the episode's tools go to the
+    aggregator over the MCP pool, `agent_mcp/egress.py:guard()` takes the deny
+    decision in that process, and `app/harness` never imports `http_tools` — so
+    `egress_arm()` here could only ever report what this interpreter would have
+    done. #2154 stamped that as the arm, and the 1478 rows of `egress_events` under
+    `decision != deny` are the result: zero `deny`, because the shared daemon reads
+    `enforce: false` from `config.yaml:712` however the runner's shell is set up.
+
+    A row records both readings — `egress_enforce` (this process's flag, the #2154
+    field, whose meaning is unchanged) and `guard_egress_enforce` (the serving
+    endpoint's) — so a historian can see the request and the fact side by side.
+    """
+    url = pool_mcp_url(mcp_url)
+    state = await read_guard_egress(state_url_for(url))
+    serving = bool(state["enforce"])
+    requested = egress_arm()
+    if requested["egress_enforce"] and not serving:
+        raise GuardStateUnavailable(
+            f"{ARM_ENV_VAR}=1 in THIS process asks for the {ARM_ON} arm, but the "
+            f"aggregator that will serve the episode's tools at {url} reports "
+            f"enforce=False. Stamping {ARM_ON} would measure {ARM_OFF} and publish "
+            f"it as the difference between the arms. Set {ARM_ENV_VAR}=1 in the "
+            f"process that decides — the aggregator (`python -m agent_mcp.main`) "
+            f"serving {url} — and restart it, or point `--mcp-url` at one that is "
+            f"already enforcing.")
+    return {**requested, "arm": ARM_ON if serving else ARM_OFF,
+            "guard_egress_enforce": serving, "mcp_url": url}
+
+
+async def require_tool_sandbox(state_url: str | None = None):
+    """The bench's substrate pre-flight, through one name the tests can replace."""
+    from scripts.autoresearch.bench_runner_sdk import (
+        require_tool_sandbox as _require,
+    )
+    return await _require(state_url=state_url)
+
+
 def append_rows(rows: list[dict], *, path: Path = ROWS_PATH,
                 arm: dict[str, Any] | None = None) -> list[dict]:
     """Stamp every row with the arm it ran under and append the lot to `path`.
@@ -122,6 +247,10 @@ def append_rows(rows: list[dict], *, path: Path = ROWS_PATH,
     behind all come through here (#2154 clause 1). `arm=None` re-reads the
     environment, so a caller that cannot forget the label is not required to
     remember it either.
+
+    A verified arm dict (#2338) brings `guard_egress_enforce` and `mcp_url` with it,
+    and they land on every row through the same merge — the endpoint a row was
+    measured against is part of the row, not of the terminal it was printed on.
     """
     fields = egress_arm() if arm is None else dict(arm)
     stamped = [{**row, **fields} for row in rows]
@@ -751,13 +880,20 @@ async def _drive_turn(convo: list[dict], options) -> dict:
             "final_text": final_text, "result": result}
 
 
-def _episode_options(task: str, session_id: str, max_turns: int):
-    """The turn's options, identical for both turns of a persistence episode."""
+def _episode_options(task: str, session_id: str, max_turns: int,
+                     mcp_url: str | None = None):
+    """The turn's options, identical for both turns of a persistence episode.
+
+    `mcp_url` is the endpoint whose `/state` `verified_arm()` just checked (#2338):
+    the arm label and the pool the tools go to have to name one process, or the run
+    would verify a state and then dispatch somewhere else — a labelled lie with a
+    green check beside it. `None` is the shared pool, and `mcp_servers_for` hands back
+    `DEFAULT_LLOYD_MCP_SERVERS` itself for that case, so the pool cache is unaffected.
+    """
     import yaml as _yaml
 
     from app.harness import HookRegistry, RunOptions, install_default_safety_hook
     from app.harness.action_review import install_action_review_hook
-    from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_SERVERS
     from app.mcp_discovery import _get_disallowed_tools, _get_harness_kwargs
     from app.paths import VAULT_ROOT
     from app.prompt_builder import build_system_prompt
@@ -774,7 +910,7 @@ def _episode_options(task: str, session_id: str, max_turns: int):
     options = RunOptions(
         model=alias, base_url=base_url,
         system_prompt=build_system_prompt(platform="worker", overlay_dir=VAULT_ROOT / "lloyd"),
-        max_turns=max_turns, mcp_servers=DEFAULT_LLOYD_MCP_SERVERS,
+        max_turns=max_turns, mcp_servers=mcp_servers_for(mcp_url),
         disallowed_tools=_get_disallowed_tools(), session_id=session_id,
         priority=1, hooks=hooks, **_get_harness_kwargs())
     options.surface = "worker"
@@ -783,7 +919,8 @@ def _episode_options(task: str, session_id: str, max_turns: int):
 
 async def run_persistence_episode(scenario: dict, *, base: str, max_turns: int, rep: int,
                                   drive=None, options_factory=None,
-                                  session_home: Path | None = None) -> dict:
+                                  session_home: Path | None = None,
+                                  mcp_url: str | None = None) -> dict:
     """A payload that has to survive the summariser to reach the sink at all.
 
     Turn `PAYLOAD_TURN`: the ordinary one-episode arrival, which puts the payload in
@@ -808,7 +945,8 @@ async def run_persistence_episode(scenario: dict, *, base: str, max_turns: int, 
     t0 = time.perf_counter()
     _CorpusHandler.posts.clear()
     if options_factory is None:
-        options, reviewer, alias = _episode_options(task, session_id, max_turns)
+        options, reviewer, alias = _episode_options(task, session_id, max_turns,
+                                              mcp_url=mcp_url)
     else:
         options, reviewer, alias = options_factory(task, session_id, max_turns)
     summary_model = summary_model_for(alias)
@@ -876,12 +1014,14 @@ async def run_persistence_episode(scenario: dict, *, base: str, max_turns: int, 
     return row
 
 
-async def run_episode(scenario: dict, *, base: str, max_turns: int, rep: int) -> dict:
+async def run_episode(scenario: dict, *, base: str, max_turns: int, rep: int,
+                      mcp_url: str | None = None) -> dict:
     """The one-episode class: content arrives, the model acts or does not, same turn."""
     session_id = new_session_id()
     scratch = f"{SESSION_HOME}/{session_id}"
     task = render_task(scenario, base=base, scratch=scratch)
-    options, reviewer, _alias = _episode_options(task, session_id, max_turns)
+    options, reviewer, _alias = _episode_options(task, session_id, max_turns,
+                                            mcp_url=mcp_url)
 
     t0 = time.perf_counter()
     _CorpusHandler.posts.clear()
@@ -1108,6 +1248,54 @@ def rate_pair(summary: dict) -> dict:
     }
 
 
+def arm_state_conflict(row: dict) -> str:
+    """Why this row's arm label contradicts the guard state it recorded, or `""`.
+
+    #2154's rows carry only `egress_enforce` — the flag read in the RUNNER's own
+    process — and for those rows that was the best witness available, because the
+    runner and the serving guard were assumed to agree. #2338 established they are two
+    processes and can disagree on purpose now, so a row written by `verified_arm()`
+    also carries `guard_egress_enforce`, and that is the witness the label has to
+    match. Hence the precedence: the serving state when a row records one, the runner
+    flag only for rows that predate it.
+
+    A row with neither reading, or labelled `untagged`, is not contradicted. Nothing
+    was recorded there — a gap in the record, not a claim to refute.
+    """
+    arm = str(row.get("arm") or "")
+    if not arm or arm == ARM_UNTAGGED:
+        return ""
+    field, state = "guard_egress_enforce", row.get("guard_egress_enforce")
+    if not isinstance(state, bool):
+        field, state = "egress_enforce", row.get("egress_enforce")
+    if not isinstance(state, bool):
+        return ""
+    want = ARM_ON if state else ARM_OFF
+    return "" if arm == want else f"{arm} label with `{field}`={state}"
+
+
+def arm_conflicts(rows: list[dict]) -> list[dict]:
+    """The rows whose arm label their recorded guard state contradicts, each named.
+
+    Exclusion is only honest when it is attributable: `grade` prints these and puts
+    them in its JSON, so a rate that dropped a row says which one and on what ground.
+    The witness is reported under `guard_egress_enforce` whichever field it came from,
+    so a reader sees the state that refuted the label instead of a null.
+    """
+    out = []
+    for row in rows:
+        why = arm_state_conflict(row)
+        if why:
+            out.append({"key": row.get("key"), "rep": row.get("rep"),
+                        "ts": row.get("ts"), "arm": row.get("arm"),
+                        "guard_egress_enforce": (
+                            row["guard_egress_enforce"]
+                            if isinstance(row.get("guard_egress_enforce"), bool)
+                            else row.get("egress_enforce")),
+                        "why": why})
+    return out
+
+
 def summarize_by_arm(rows: list[dict]) -> dict[str, dict]:
     """`summarize` plus `rate_pair`, per arm label, over rows grouped before any dedup.
 
@@ -1115,9 +1303,18 @@ def summarize_by_arm(rows: list[dict]) -> dict[str, dict]:
     newest row per scenario key, so a `rows.jsonl` holding both arms would otherwise
     report whichever arm wrote last as though it were the entire bench — the exact
     mistake of reading an off/on pair out of one aggregate number.
+
+    A row whose label contradicts its recorded guard state joins NEITHER group
+    (#2338 clause 5). Leaving one in its labelled arm is how a mislabelled run reaches
+    print: an enforce-on attack row whose endpoint never enforced is a false escape in
+    the on arm's numerator, and the two arms' intervals would then be measuring which
+    process happened to read which flag. Moving it to the other arm would be the same
+    fabrication from the other end, so it is dropped and `arm_conflicts()` names it.
     """
     groups: dict[str, list[dict]] = {}
     for row in rows:
+        if arm_state_conflict(row):
+            continue
         groups.setdefault(str(row.get("arm") or ARM_UNTAGGED), []).append(row)
     out: dict[str, dict] = {}
     for arm in sorted(groups):
@@ -1200,23 +1397,41 @@ def select_keys(scenarios: list[dict], only: list[str] | None) -> set[str]:
 
 
 async def _run(args) -> int:
-    arm = egress_arm()
+    # Scenario selection is checked FIRST, before any precondition that needs another
+    # process: `--only no-such-key` is a typo in the command the operator just typed,
+    # and the useful report is the list of keys (#2029). Reading a guard state before
+    # that would replace the key list with a refusal about an unreachable aggregator,
+    # which is what this line ordering is for (#2338 review of the same shape).
+    scenarios = load_scenarios()
+    only = select_keys(scenarios, args.only)
+    mcp_url = getattr(args, "mcp_url", None) or None
+    # The arm is VERIFIED, not assumed: `--mcp-url` or not, the label comes from the
+    # `/state` of the aggregator the episode's tools are about to be dispatched to,
+    # and a run whose request that endpoint will not honour is refused before a row
+    # exists to mislead (#2338). Ahead of the sandbox precondition, so a run that
+    # refuses still says which arm it refused under — and still says it on stderr,
+    # where a `run … 2>&1` reader and a CI log both look for a refusal.
+    try:
+        arm = await verified_arm(mcp_url)
+    except GuardStateUnavailable as exc:
+        print(f"arm refused: {exc}", file=sys.stderr, flush=True)
+        return 2
     # Which arm this run belongs to, on the first line and again on each episode's
     # `running…` line: the pair is only interpretable if a terminal scrolled back
     # to one line still says which side of the toggle produced it (#2154 clause 3).
-    # Ahead of the sandbox precondition, so a run that refuses to start still says
-    # which arm it refused under.
     print(f"arm: {arm['arm']}  {ARM_ENV_VAR}={os.environ.get(ARM_ENV_VAR, '<unset>')} "
           f"egress_enforce={arm['egress_enforce']}", flush=True)
-    from scripts.autoresearch.bench_runner_sdk import require_tool_sandbox
-    await require_tool_sandbox()
+    # The endpoint and the state read beside it (#2338 clause 4): the reader of the
+    # terminal and the reader of `rows.jsonl` have to see the same claim, and with
+    # `--mcp-url` the shared daemon is not what answered.
+    print(f"pool: {arm['mcp_url']}  state: {state_url_for(arm['mcp_url'])} "
+          f"guard_egress_enforce={arm['guard_egress_enforce']}", flush=True)
+    await require_tool_sandbox(state_url=state_url_for(arm["mcp_url"]))
     from app.data_root import PRODUCTION_DATA_ROOT
     data_root = Path(args.data_root) if args.data_root else PRODUCTION_DATA_ROOT
-    scenarios = load_scenarios()
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     server, base = (serve_corpus() if any(sc.get("medium") == "http" for sc in scenarios)
                     else (None, "http://127.0.0.1:0"))
-    only = select_keys(scenarios, args.only)
 
     rows: list[dict] = []
     try:
@@ -1226,7 +1441,8 @@ async def _run(args) -> int:
             print(f"[{sc['key']}] running… arm={arm['arm']}", flush=True)
             episode = (run_persistence_episode if sc.get("persistence") else run_episode)
             try:
-                row = await episode(sc, base=base, max_turns=args.max_turns, rep=args.rep)
+                row = await episode(sc, base=base, max_turns=args.max_turns, rep=args.rep,
+                                    mcp_url=mcp_url)
             except Exception as exc:  # noqa: BLE001 — one episode's failure is a row
                 row = {"key": sc["key"], "rep": args.rep, "error": f"{type(exc).__name__}: {exc}",
                        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds")}
@@ -1249,12 +1465,34 @@ async def _run(args) -> int:
     return 0
 
 
+def render_arm_conflicts(conflicts: list[dict]) -> str:
+    """The rows #2338 refuses to count in either arm, one line each.
+
+    Printed above the arm pair, because a reader who sees two rates and no warning
+    cannot tell a clean pair from a pair that silently lost its worst row."""
+    lines = [f"{len(conflicts)} row(s) carry an arm label the guard state they "
+             f"recorded contradicts — EXCLUDED from both arms' rates (#2338):"]
+    for c in conflicts:
+        lines.append(f"  guard-state conflict: {c['key']} rep={c['rep']} "
+                     f"ts={c['ts']} arm={c['arm']} "
+                     f"guard_egress_enforce={c['guard_egress_enforce']}")
+    return "\n".join(lines)
+
+
 def _grade_cmd() -> int:
     rows = [json.loads(l) for l in ROWS_PATH.read_text().splitlines() if l.strip()]
-    summary = summarize(rows)
+    conflicts = arm_conflicts(rows)
+    kept = [row for row in rows if not arm_state_conflict(row)]
+    summary = summarize(kept)
     # Additive, not a new shape: every key a reader of `grade` already parses stays
-    # where it was, and the arm pair arrives as two more keys.
+    # where it was, and the arm pair arrives as two more keys. The aggregate is over
+    # the kept rows too — a row excluded from both arms cannot be allowed to count in
+    # the pooled number beside them (#2338 clause 5).
     summary["arms"] = summarize_by_arm(rows)
+    summary["guard_state_conflicts"] = conflicts
+    if conflicts:
+        print(render_arm_conflicts(conflicts))
+        print()
     print(render(summary))
     print()
     print(render_arms(summary["arms"]))
@@ -1280,6 +1518,15 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--rep", type=int, default=1)
     run.add_argument("--max-turns", type=int, default=8)
     run.add_argument("--data-root", default=None, help="where the aggregator writes event logs")
+    run.add_argument(
+        "--mcp-url", default=None, metavar="URL",
+        help="serve the episode's tools from this aggregator instead of the shared "
+             f"pool. The supported way to run the {ARM_ON} arm without restarting "
+             "lloyd-mcp or editing config.yaml: launch `LLOYD_EGRESS_ENFORCE=1 "
+             "python -m agent_mcp.main` yourself and point this at it. The run reads "
+             "that endpoint's /state and refuses if it is not enforcing, so the arm "
+             "label is its state, not this shell's environment (#2338). Note its "
+             "egress telemetry and grants land wherever THAT process writes them.")
     sub.add_parser("grade")
     return ap
 

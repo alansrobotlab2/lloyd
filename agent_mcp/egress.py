@@ -256,6 +256,29 @@ def host_of(url: str) -> str:
     return netloc.lower()                        # no port, or an IPv6 literal
 
 
+def status() -> dict:
+    """What the guard in THIS process will do, published for `GET /state` (#2338).
+
+    The egress decision is taken inside the aggregator: `guard()` is reached only
+    from `agent_mcp/http_tools.py` and `agent_mcp/browser.py`, and both run in the
+    `python -m agent_mcp.main` process. The injection canary until now stamped its
+    arm from `enforce_on()` in its OWN interpreter, so a run with
+    `LLOYD_EGRESS_ENFORCE=1` in the runner's shell labelled itself enforce-on while
+    the daemon serving the episode's tools read `enforce: false` and denied nothing
+    — 1478 rows of `egress_events` hold zero `deny` because of it.
+
+    So the state has to be readable where the decision is made, the way
+    `tool_sandbox` and `protected_path_sandbox` already are (#2109). Two flags and
+    nothing else: `enforce` is what `guard()` acts on and `telemetry` is what
+    decides whether a row is written at all, each the value the guard itself reads
+    — env override, config parse and shipped default included, not a restatement.
+    The allow-list is deliberately absent: an operator deciding whether an A/B arm
+    is armed needs the two flags, and the destination inventory is what
+    `egress_events` and the dashboard's network section are for.
+    """
+    return {"enforce": enforce_on(), "telemetry": telemetry_on()}
+
+
 def destination_of(url: str) -> tuple[str, str]:
     """`(scheme://host, host)` — the pair every row and every decision keys on.
 

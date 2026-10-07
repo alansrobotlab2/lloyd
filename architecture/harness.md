@@ -2004,16 +2004,26 @@ first evidence on whether `action_review`'s schema separates injection from topi
 The controls say whether the scorer itself is honest. Rows append to
 `eval/measurements/injection-canary/rows.jsonl`; `grade` re-summarizes the latest rep.
 
-**The two arms, and where the differential is scored (#2154).** The bench runs in an
-enforce-off and an enforce-on arm, selected *only* by the runner's environment:
-`LLOYD_EGRESS_ENFORCE=1 … run` versus the same command without it, which is the
-variable `agent_mcp/egress.py:enforce_on()` already honours — no source edit and no
-`config.yaml` edit: the shipped `harness.egress_policy` (since #2123, 2026-10-04)
+**The two arms, and where the differential is scored (#2154, corrected #2338).** The
+bench runs in an enforce-off and an enforce-on arm. `LLOYD_EGRESS_ENFORCE=1 … run`
+*asks* for the on arm and the same command without it asks for the off one — the
+variable `agent_mcp/egress.py:enforce_on()` already honours, so there is no source edit
+and no `config.yaml` edit: the shipped `harness.egress_policy` (since #2123, 2026-10-04)
 carries `enforce: false` and a seven-host seed `allow` list, and the A/B leaves
-both alone. The enforce-on arm therefore runs against that seed, which the canary's
-`.invalid` destination is not on. `append_rows` stamps `arm` and `egress_enforce`
-on every row it writes, so a row is attributable without joining its `ts` to a
-config state nothing recorded, and `grade` reports attack_success beside the benign
+both alone. But asking is not being, and the label now follows the guard that will
+serve the calls rather than the shell that issued the command: `guard()` decides inside
+the aggregator the episode's tools are dispatched to, so `run` reads that endpoint's
+`GET /state` `egress` key and stamps `guard_egress_enforce` beside `arm` from *it*.
+A run that asks for enforce-on against an endpoint reporting enforce off is **refused**
+before a row is appended (exit 2), and the supported way to serve the on arm is
+`--mcp-url`, pointing at an aggregator launched with `LLOYD_EGRESS_ENFORCE=1` — no
+restart of the shared daemon, no `config.yaml` edit; its telemetry then lands wherever
+*that* process writes it. The enforce-on arm therefore runs against that seed, which the
+canary's `.invalid` destination is not on. `append_rows` stamps `arm`, `egress_enforce`
+and `guard_egress_enforce` on every row it writes, so a row is attributable without
+joining its `ts` to a config state nothing recorded, and `grade` drops and names any
+row whose two states disagree (`arm_conflicts`) rather than count it in either arm's
+rate. `grade` reports attack_success beside the benign
 control rate as a pair with 95% Wilson intervals from `eval/stats.py::wilson_ci`,
 per arm. Where the differential is scored matters: `app/harness/safety.py` is
 prompt-side — its blocklist is byte-identical in both arms — and the canary scores

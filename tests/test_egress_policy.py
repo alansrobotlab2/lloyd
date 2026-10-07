@@ -730,3 +730,44 @@ def test_the_real_config_accessor_feeds_the_parse(monkeypatch):
     monkeypatch.setattr(C, "CONFIG", {"harness": {"egress_policy": {"enforce": "off"}}})
     assert egress.config()["enforce"] == "off"
     assert egress.enforce_on() is False
+
+
+# ── #2338: the enforcement state has to be readable across the process seam ─
+
+def test_the_state_route_publishes_its_own_egress_enforcement_state(monkeypatch):
+    """Clause 1: `GET /state` carries an `egress` key, and it reports THIS process.
+
+    The guard's `enforce` decision is taken inside the aggregator, and until now the
+    only way an out-of-process caller could learn it was to infer it from
+    `config.yaml` — which is exactly the inference that poisoned the canary's
+    enforce-on arm (#2154's owed entry, #2338): the runner read `enforce_on()` in its
+    own interpreter while the episode's tools were served by a daemon whose
+    environment it could not see. `tool_sandbox` and `protected_path_sandbox` already
+    publish their substrate state for the same reason (#2109); egress was the missing
+    key, confirmed against the live endpoint, which answered with exactly
+    `[background_tasks, changes, protected_path_sandbox, qmd, subagents, tool_sandbox,
+    tools, tsc]`.
+
+    Asserted against the route body, like `test_path_sandbox` does for its own key, and
+    against `enforce_on()` itself rather than a restated constant: the key is only
+    worth having if it is the value the guard reads.
+    """
+    import asyncio
+    import json
+
+    from agent_mcp import main as M
+
+    monkeypatch.delenv("LLOYD_EGRESS_ENFORCE", raising=False)
+    payload = json.loads(asyncio.run(M.state(None)).body)
+    assert "egress" in payload, sorted(payload)
+    assert "tool_sandbox" in payload, sorted(payload)
+    st = payload["egress"]
+    assert st["enforce"] is egress.enforce_on() is False, st
+
+    # The control: flipping the variable the guard honours moves the published key.
+    # A key that always said `false` would satisfy the first assertion and still
+    # leave a caller unable to tell the arms apart.
+    monkeypatch.setenv("LLOYD_EGRESS_ENFORCE", "1")
+    assert egress.enforce_on() is True
+    payload = json.loads(asyncio.run(M.state(None)).body)
+    assert payload["egress"]["enforce"] is True, payload["egress"]

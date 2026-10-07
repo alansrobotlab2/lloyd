@@ -78,6 +78,7 @@ from agent_mcp import (
     desktop,
     discord_bot,
     djev,
+    egress,
     facts,
     http_tools,
     ide,
@@ -912,6 +913,13 @@ async def state(request):
         # string guard: #2109 asks for this key precisely so that state is a
         # reading, not an inference from a green `/health`.
         "protected_path_sandbox": await asyncio.to_thread(_path_sandbox.status),
+        # The egress guard's own state, from the process that runs it. The
+        # injection canary's enforce-on arm was being stamped from `enforce_on()`
+        # read in the RUNNER's interpreter while the episode's tools were served
+        # here, so the A/B compared two enforce-off runs and nobody could see it
+        # (#2338). Same reason the two sandbox keys are here: an out-of-process
+        # caller reads a state rather than inferring one from `config.yaml`.
+        "egress": await asyncio.to_thread(egress.status),
     })
 
 
