@@ -5037,3 +5037,106 @@ def test_no_comment_in_the_probe_claims_the_tests_lock_makes_the_mirrors_one_mom
             f"a sentence about the mirrors being one moment sits inside a sentence "
             f"about the lock: {window!r}")
     assert "mirror_gap_s" in src, "the measurement replaced the claim"
+
+
+# ── #2317: an autonomy description quoting a constant's old value ────────────
+#
+# `autonomy/79-retention-sweep.md` quotes `LEDGER_ARCHIVE_AGE_DAYS` from
+# `scripts/groundskeeper/retention-sweep.py` by hand. `01dea8bc` moved that constant
+# from 30 to 14 and the description went on saying the old number for three weeks,
+# repaired only under #2098 — the third fix of that one file's prose after #1573 and
+# #1734. `VG.agreement` could not have refused it: a pytest-delta probe refuses a
+# land only when some node already reads BOTH sides, and no node read the
+# description's numbers (which is the sentence in `vault_guards.py` that names why
+# this rail exists at all).
+
+#: The constant these three nodes move, named exactly as the real script spells it
+#: so a rename of the real one cannot leave these nodes quietly asserting nothing.
+WINDOW = "LEDGER_ARCHIVE_AGE_DAYS"
+
+TASK_CLEAN = f"""---
+id: 1
+status: up_next
+description: Sweep the ledger; {WINDOW} (14) is the window.
+---
+# task
+"""
+
+TASK_STALE = f"""---
+id: 1
+status: up_next
+description: Sweep the ledger; {WINDOW} (90) is the window.
+---
+# task
+"""
+
+
+def _tree_stub(tmp_path, monkeypatch, value: int) -> Path:
+    """A checkout whose only `^NAME = <int>` is `WINDOW = value`, as `LLOYD_HOME`.
+
+    Hermetic on purpose (#1750): a node that scraped the live `~/lloyd` would pass or
+    fail with whoever currently held `LEDGER_ARCHIVE_AGE_DAYS` at what value, and a
+    round that moved the real constant would see the pre-move tree instead of itself.
+    No `.git`, so `tree_constants` takes its walk branch on a directory this test
+    owns.
+    """
+    root = tmp_path / "stub-checkout"
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts" / "retention-sweep.py").write_text(f"{WINDOW} = {value}\n")
+    monkeypatch.setattr(V, "LLOYD_HOME", root)
+    return root
+
+
+def test_a_land_whose_description_quotes_a_stale_constant_is_refused(vault, tmp_path,
+                                                                     monkeypatch):
+    """The refusal names the constant and BOTH numbers, and reverts the tree.
+
+    The tree here is the fixture's 14 and the prose says 90 — the shape #2043 left
+    behind, with the two sides the other way round. Naming only "disagrees" would
+    send the author to grep the script for a number the refusal already had.
+    """
+    _tree_stub(tmp_path, monkeypatch, 14)
+    (vault / "autonomy" / "1-task.md").write_text(TASK_STALE)
+    with pytest.raises(V.VaultRoundError, match="validation failed") as e:
+        V.land(["autonomy/1-task.md"], "stale window")
+    assert WINDOW in str(e.value) and "90" in str(e.value) and "14" in str(e.value)
+    # Reverted: the tree is back at the base commit's text, and the refusal is on
+    # the row rather than only in the raised message.
+    assert (vault / "autonomy" / "1-task.md").read_text() == (
+        "---\nid: 1\nstatus: up_next\n---\n# task\n")
+    row = _events("vault_land")[-1]
+    assert row["ok"] is False and any(WINDOW in x for x in row["errors"]), row
+
+
+def test_the_same_description_naming_the_trees_value_lands(vault, tmp_path, monkeypatch):
+    """Green half: 14 in the prose against 14 in the tree is not a finding.
+
+    Pinned beside the red one because a rail that refuses every land is indistinguishable
+    from this one at the top of a nightly run, and the writers who route around it are
+    the failure mode this module's own docstrings keep naming.
+    """
+    _tree_stub(tmp_path, monkeypatch, 14)
+    (vault / "autonomy" / "1-task.md").write_text(TASK_CLEAN)
+    res = V.land(["autonomy/1-task.md"], "correct window")
+    assert res["ok"] is True and res["commit"], res
+    assert f"{WINDOW} (14)" in (vault / "autonomy" / "1-task.md").read_text()
+
+
+def test_an_activity_log_land_that_keeps_the_description_correct_is_not_refused(
+        vault, tmp_path, monkeypatch):
+    """The description is the only input, so a body change cannot trigger the rail.
+
+    The appended line quotes the constant as 90 — a number the tree does not have — in
+    the Activity Log, where it is history rather than a claim about the window: exactly
+    what a nightly run did, not what the task is prompted to do. `app/autonomy
+    ._build_task_prompt` hands the model the front-matter `description`, so that is the
+    only text this check reads, and `status:` (which this land does not change) is run
+    state the same argument covers.
+    """
+    _tree_stub(tmp_path, monkeypatch, 14)
+    (vault / "autonomy" / "1-task.md").write_text(TASK_CLEAN)
+    assert V.land(["autonomy/1-task.md"], "correct window")["ok"] is True
+    (vault / "autonomy" / "1-task.md").write_text(
+        TASK_CLEAN + f"\n## Activity Log\n\n- ran with {WINDOW} (90) and deleted 11\n")
+    res = V.land(["autonomy/1-task.md"], "activity note")
+    assert res["ok"] is True and res["commit"], res["errors"]

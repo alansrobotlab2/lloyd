@@ -653,6 +653,13 @@ def validate(paths: list[str]) -> tuple[list[str], dict[str, list[str]]]:
         # unchanged: the #724 rail's second door closes here (#2190).
         errors.extend(schedule_state_errors(paths))
     if not errors:
+        # And a description that parses is not a description whose numbers the tree
+        # still has: #2317's state-side read, judgement handed to the same checkout
+        # the code-agreement probe below judges (`LLOYD_HOME`, not the vault), so the
+        # prose cannot be made to agree with a tree this land also moved.
+        errors.extend(VG.autonomy_description_errors(paths=paths, vault=VAULT,
+                                                     tree_root=LLOYD_HOME))
+    if not errors:
         errors.extend(contract_errors(paths) + reflection_archive_errors(paths)
                       + skill_timezone_errors(paths)
                       + uptake_citability_errors(paths))

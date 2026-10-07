@@ -3724,3 +3724,175 @@ def test_the_vault_prompt_offers_the_reviewer_a_marker_the_rails_accept(isolated
     assert p.index(marker) > anchor, "the marker belongs beside the evidence rule"
     removed = [w for w in ("removed", "deletes", "delete", "gone") if w in p[anchor:]]
     assert removed, "the sentence has to say when the marker is the right citation"
+
+
+# ── #2317: a moved constant, and the autonomy prose left quoting the old one ─
+#
+# The other write edge of the same drift. `01dea8bc` moved
+# `LEDGER_ARCHIVE_AGE_DAYS` from 30 to 14 in `scripts/groundskeeper/retention-sweep.py`
+# and nothing said that `autonomy/79-retention-sweep.md` was now wrong — the vault
+# probe could not (no node read the description's numbers), and no rung on the code
+# side looked either. These nodes pin the advisory that names it at the moment of the
+# move. The land-side refusal is `test_automod_vault_round.py`'s three; this family is
+# deliberately advisory, for the reason spelled out on `_CONSTANT_STALE_SEVERITY`.
+
+#: The two shapes of prose the move is tested against: one file whose description
+#: quotes the value this round leaves behind, one that has already been updated.
+STALE_TASK = """---
+id: 79
+status: up_next
+description: Sweep the ledger; LEDGER_ARCHIVE_AGE_DAYS (30) is the window.
+---
+# Retention sweep
+"""
+
+FRESH_TASK = """---
+id: 76
+status: up_next
+description: Queue age over QUEUE_AGE_HOURS (6) is escalated.
+---
+# Queue health
+"""
+
+
+@pytest.fixture
+def move_repo(tmp_path):
+    """A round whose only change is one module constant, 30 -> 14."""
+    r = tmp_path / "r"
+    (r / "scripts").mkdir(parents=True)
+    git(tmp_path, "init", "-q", "-b", "main", str(r))
+    git(r, "config", "user.email", "t@e.com"); git(r, "config", "user.name", "t")
+    (r / "scripts" / "retention-sweep.py").write_text("LEDGER_ARCHIVE_AGE_DAYS = 30\n")
+    git(r, "add", "-A"); git(r, "commit", "-q", "-m", "base")
+    base = git(r, "rev-parse", "HEAD").stdout.strip()
+    v = tmp_path / "obsidian"
+    (v / "autonomy").mkdir(parents=True)
+    (v / "autonomy" / "79-retention-sweep.md").write_text(STALE_TASK)
+    (v / "autonomy" / "76-queue-health.md").write_text(FRESH_TASK)
+    return r, base, v
+
+
+def _move_the_constant(r: Path) -> None:
+    (r / "scripts" / "retention-sweep.py").write_text("LEDGER_ARCHIVE_AGE_DAYS = 14\n")
+    git(r, "commit", "-qam", "shorten the ledger window")
+
+
+def test_a_moved_constant_names_the_description_quoting_the_old_value(move_repo):
+    """Clause 4's finding: the file, the constant, and BOTH numbers.
+
+    `76-queue-health.md` quotes a different constant that this round did not move, so
+    it must not be named: a finding list padded with files that are fine is how a
+    advisory becomes noise the next author skims past.
+    """
+    r, base, v = move_repo
+    _move_the_constant(r)
+    out = RV.stale_constant_quotes(r, base, ["scripts/retention-sweep.py"], vault=v)
+    assert len(out) == 1, out
+    assert out[0]["file"] == "autonomy/79-retention-sweep.md"
+    problem = out[0]["problem"]
+    assert "LEDGER_ARCHIVE_AGE_DAYS" in problem and "30" in problem and "14" in problem
+    assert out[0]["severity"] == "advisory"
+
+
+def test_a_move_that_leaves_no_description_stale_makes_no_finding(move_repo):
+    """Green half: prose already naming the new value is not a finding.
+
+    Without this the check would be indistinguishable from one that names every
+    autonomy file on any code change, which is the shape that gets skimmed.
+    """
+    r, base, v = move_repo
+    (v / "autonomy" / "79-retention-sweep.md").write_text(
+        STALE_TASK.replace("(30)", "(14)"))
+    _move_the_constant(r)
+    assert RV.stale_constant_quotes(r, base, ["scripts/retention-sweep.py"], vault=v) == []
+
+
+def test_a_constant_this_round_did_not_move_is_not_reported(move_repo):
+    """The delta, from the other side: the same stale prose, and no finding.
+
+    Nothing in this diff moved the constant, so this is a pre-existing disagreement
+    between the vault and the tree — the vault edge's business (`autonomy_description_errors`
+    refuses a land that re-publishes it), not a claim about this round. A precheck that
+    reported the tree's general state would name every round for a drift no round
+    caused, which is the mistake #1019 records for the honesty prechecks.
+    """
+    r, base, v = move_repo
+    (r / "scripts" / "retention-sweep.py").write_text(
+        "# comment only; the constant did not move\nLEDGER_ARCHIVE_AGE_DAYS = 30\n")
+    git(r, "commit", "-qam", "comment")
+    assert RV.stale_constant_quotes(r, base, ["scripts/retention-sweep.py"], vault=v) == []
+    assert RV.moved_int_constants(r, base, ["scripts/retention-sweep.py"]) == []
+
+
+def test_a_non_integer_change_is_not_a_move(move_repo):
+    """`NAME = <int>` is the only spelling a description can quote, so it is the only
+    one that counts: a `str` or a formula has no number for prose to disagree with.
+    """
+    r, base, v = move_repo
+    (r / "scripts" / "retention-sweep.py").write_text(
+        "LEDGER_ARCHIVE_AGE_DAYS = 14 * 2\n")
+    git(r, "commit", "-qam", "derived, not literal")
+    assert RV.moved_int_constants(r, base, ["scripts/retention-sweep.py"]) == []
+    assert RV.stale_constant_quotes(r, base, ["scripts/retention-sweep.py"], vault=v) == []
+
+
+def test_the_stale_quote_finding_rides_the_prechecks_the_gate_records(move_repo):
+    """The wiring, through the real funnel rather than a stub of it.
+
+    `honesty_prechecks` is the list the gate writes onto the review event
+    (`scripts/automod/gate.py`) and `review_tools.grade_commit` re-uses for historical
+    commits, so a finding that only `stale_constant_quotes` produces, and that nothing
+    appends, would exist in no report at all.
+    """
+    r, base, v = move_repo
+    _move_the_constant(r)
+    out = RV.honesty_prechecks(r, base, ["scripts/retention-sweep.py"], vault=v)
+    hits = [o for o in out if "LEDGER_ARCHIVE_AGE_DAYS" in o["problem"]]
+    assert len(hits) == 1, out
+    assert hits[0]["severity"] == "advisory"
+
+
+def test_an_advisory_stale_quote_never_refuses_the_round(move_repo):
+    """Clause 4's other half, checked at the one place severity becomes a decision.
+
+    `_grade_entries` splits prechecks on `severity == "advisory"` alone, so this is
+    not prose about the design — it is the branch. With a clean grader object the
+    round must PASS with the finding in the returned text, not retry: the fix is a
+    vault edit the round's own diff cannot contain.
+    """
+    r, base, v = move_repo
+    _move_the_constant(r)
+    pre = RV.honesty_prechecks(r, base, ["scripts/retention-sweep.py"], vault=v)
+    assert pre, "the fixture stopped producing the finding this decides on"
+    parsed = {"premise": "sound", "summary": "ok", "test_honesty": [],
+              "seams_unverified": [], "downgraded": [],
+              "clauses": [{"clause": 1, "verdict": "met", "note": ""}]}
+    kind, text = RV.decide(parsed, pre, policy="never")
+    assert kind == "pass", (kind, text)
+    assert "advisory autonomy/79-retention-sweep.md" in text, text
+
+
+def test_the_direction_of_the_reported_move_is_pinned(move_repo):
+    """`(name, file, line, old, new)` in that order, with the real move's numbers.
+
+    The finding's sentence is "was X, now Y", and the review rung's own `_mirror_gap`
+    history shows how much a swapped pair costs: the mirror detector above unpacked
+    this same pair under the name `new` for the BASE value, which is how a reversed
+    (old, new) can reach a finding text while every count still looks right. A node
+    that asserted only `len(out) == 1` and the name would pass that inversion, so
+    this one asserts the two numbers by position — 30 was the tree's window before
+    `01dea8bc`, 14 after, in that order.
+    """
+    r, base, v = move_repo
+    _move_the_constant(r)
+    out = RV.moved_int_constants(r, base, ["scripts/retention-sweep.py"])
+    assert len(out) == 1, out
+    name, path, line, old, new = out[0]
+    assert (name, str(path)) == ("LEDGER_ARCHIVE_AGE_DAYS", "scripts/retention-sweep.py")
+    assert (old, new) == (30, 14), f"reported the move backwards: was {new}, now {old}"
+    assert line == 1
+    # And the finding sentence carries the pair in the same order the tuple does, so a
+    # reader can tell which of the two numbers the description is stale against.
+    problem = RV.stale_constant_quotes(r, base, ["scripts/retention-sweep.py"],
+                                       vault=v)[0]["problem"]
+    assert f"as {old};" in problem and f"moves it {old} -> {new}" in problem, problem

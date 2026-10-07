@@ -1206,3 +1206,75 @@ def refusal_text(report: dict) -> str:
     if excerpt:
         lines.append("guard output: " + excerpt[-600:])
     return "\n".join(lines)
+
+
+def autonomy_description_errors(*, paths: list[str], vault: Path,
+                                tree_root: Path) -> list[str]:
+    """#2317: does a landed autonomy task description still quote a stale constant?
+
+    `agreement()` above answers "does some node already read both sides and now
+    disagree" — and for a task description quoting a script's window it could only
+    ever answer no, because no node read the description's numbers at all. That is
+    how `01dea8bc` moved `LEDGER_ARCHIVE_AGE_DAYS` from 30 to 14 and left
+    `autonomy/79-retention-sweep.md` saying 30 for three weeks, which is the drift
+    #1573 and #1734 had each already repaired once on that one file. This is the
+    state-side check the delta probe structurally cannot be: it reads the number in
+    the prose and the number in the tree and compares them directly.
+
+    **Input is the front-matter `description` and nothing else** — the same
+    YAML-parsed field `app/autonomy._build_task_prompt` hands the model, read through
+    the scheduler's own recovery parser (`constant_quotes.front_matter_description`).
+    Not the body, not an Activity Log line, not `status:` or any other run-state
+    field. A land that appends an activity note or reformats the body therefore
+    cannot be refused here, and neither can an engine's own state write: the only
+    thing that can disagree is a quoted number in the text the task is prompted with.
+
+    The refusal names the constant and BOTH numbers, because the fix is to type one
+    of them and a refusal that said only "disagrees" would send the author back to
+    grep the script.
+
+    **The rule is the state of the landed file, not the delta this land carried**, and
+    that is deliberate even though the neighbouring rail one function over is a delta
+    one: #2190 refuses a CHANGED schedule value precisely so the nightly writers can
+    keep rewriting task files, whereas the defect here is the prose sitting in the
+    vault. A check that fired only when a land edited the description would survive
+    exactly the way #2043's drift did — the code moved, nobody edited the description,
+    and the next writer to touch that file was a nightly job three weeks later. So a
+    land that changes only the body or an Activity Log line on a task whose description
+    AGREES with the tree is waved through (`test_an_activity_log_land_that_keeps_the_
+    description_correct_is_not_refused`), and one on a task whose description already
+    disagrees is refused with the number to fix. The second is the cost of this design
+    and is stated in the refusal; the first is what "the description is the only
+    input" means.
+
+    Zero mismatches is not automatically a pass: a description that names no tree
+    constant resolves zero pairs and produces no error for the same reason a correct
+    one does. The denominator is `constant_quotes.Report.resolved`, and the corpus
+    count is what the `@live_vault` witness node in `tests/test_constant_quotes.py`
+    prints; this function returns only the refusals, since it has no report row of
+    its own to put a count on and inventing a refusal out of a thin corpus would
+    refuse ordinary task files.
+    """
+    from scripts.automod import constant_quotes as CQ
+
+    # The same path filter `vault_round.schedule_state_errors` uses, so the two
+    # rails that read a task file's front matter agree on which files they read.
+    wanted = sorted(p for p in set(paths)
+                    if p.startswith("autonomy/") and p.endswith(".md"))
+    if not wanted:
+        return []
+    tree = CQ.tree_constants(Path(tree_root))
+    errors: list[str] = []
+    for rel in wanted:
+        f = Path(vault) / rel
+        if not f.exists():
+            continue  # a deletion retires the prose with the file
+        report = CQ.mismatches(CQ.front_matter_description(
+            f.read_text(encoding="utf-8", errors="replace")), tree)
+        errors.extend(
+            f"{rel}: its description quotes {name} as {quoted}; the tree says "
+            f"{actual}. Land the description saying {actual}, or land the code "
+            f"that moves {name} back to {quoted} — the prose is what the task is "
+            f"prompted with."
+            for name, quoted, actual in report.found)
+    return errors

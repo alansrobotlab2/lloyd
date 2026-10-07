@@ -876,8 +876,109 @@ def _constant_mirror_findings(rel: str, post_code: str, pre_code: str) -> list[d
     return out
 
 
+#: The severity of a stale constant quote found on the CODE side (#2317). Advisory
+#: is not a hedge here, it is the design: `decide` refuses only on `severity
+#: == "blocking"` (`_grade_entries`), and the fix for this finding is usually a vault
+#: edit the round cannot make — its own diff never contains `~/obsidian`. Refusing a
+#: code round because prose somewhere else in another tree still has the old number
+#: would hold every window change hostage to a landing route it does not own. The
+#: vault side of the same drift IS enforced (`vault_guards
+#: .autonomy_description_errors`), so the direction that actually broke (#2043's code
+#: move, prose left stale three weeks) is now named at the moment it happens even
+#: though it is not refused there; escalating it to a refusal is the scope call
+#: #2317's owed list carries, and the shape it would take already exists at
+#: `vault_round.py:1215` (`VG.agreement(paths=…)` as a probe, not a pytest node).
+_CONSTANT_STALE_SEVERITY = "advisory"
+
+#: A module-level constant with a bare integer for its value — the only line whose
+#: value a task description can quote, and the spelling `constant_quotes` compares.
+_INT_CONST_RX = re.compile(r"^(?P<name>[A-Z][A-Z0-9_]*) = (?P<value>-?\d+)$")
+
+
+def _int_constants(code: str) -> dict[str, tuple[int, int]]:
+    """`{NAME: (line, value)}` for each indent-zero `NAME = <int>` in blanked code.
+
+    Blanked, so a `WINDOW = 30` written inside a docstring or a test fixture string
+    is not read as a constant the round moved — the same reason the mirror detector
+    above reads `_code_only` rather than the raw file.
+    """
+    out: dict[str, tuple[int, int]] = {}
+    for i, ln in enumerate(code.splitlines(), 1):
+        m = _INT_CONST_RX.match(ln)
+        if m:
+            out.setdefault(m.group("name"), (i, int(m.group("value"))))
+    return out
+
+
+def moved_int_constants(worktree: Path, base: str,
+                        changed_paths: list[str]) -> list[tuple[str, Path, int, int, int]]:
+    """`(name, file, line, old, new)` for every `^NAME = <int>` this round moved.
+
+    Both images come from `_post_and_base`, so a constant that only MOVED lines, or
+    whose file this round never touched, is not reported: the delta is what makes
+    this a finding about this diff and not a survey of the tree. A name that appears
+    in only one image is skipped too — with no old value there is no stale quote to
+    name.
+    """
+    out = []
+    for rel in changed_paths:
+        if not rel.endswith(".py"):
+            continue
+        post, pre = _post_and_base(worktree, base, rel)
+        post_consts = _int_constants(_code_only(post)[0])
+        # `old` is read out of the BASE image and `here[1]` out of the round's own,
+        # in that order in the returned tuple. The mirror detector above unpacks the
+        # same pair under the name `new`, which is how an inverted (old, new) once
+        # reached a finding text; `stale_constant_quotes` formats the pair as
+        # "moves it {old} -> {new}", and pins that order by position in
+        # `tests/test_automod_review.py::test_the_direction_of_the_reported_move_is_pinned`.
+        for name, (pre_line, old) in _int_constants(_code_only(pre)[0]).items():
+            here = post_consts.get(name)
+            if here and here[1] != old:
+                out.append((name, Path(rel), here[0], old, here[1]))
+    return out
+
+
+def stale_constant_quotes(worktree: Path, base: str, changed_paths: list[str],
+                          *, vault: Path | None = None) -> list[dict]:
+    """#2317: this round moved a constant — which autonomy task description still
+    quotes a number that is not the new one?
+
+    Advisory, on purpose, and named here so nobody has to re-derive it from
+    `_CONSTANT_STALE_SEVERITY`: see that constant's comment for why the code edge
+    does not refuse and which edge does.
+
+    `vault` defaults to the live vault the landing route reads
+    (`vault_round.VAULT`, which honours `LLOYD_VAULT`), which for the gate's rung is
+    the real `~/obsidian`: the point is to name the prose a human or a later round
+    has to fix, so a copy of the vault would name files that are not the ones that
+    need changing. `review_tools.grade_commit` re-runs this over historical commits,
+    where the live vault is the WRONG vault — those findings describe today's prose
+    against yesterday's code, which is information, not a verdict.
+    """
+    from scripts.automod import constant_quotes as CQ
+    from scripts.automod import vault_round as VR
+
+    moved = moved_int_constants(worktree, base, changed_paths)
+    if not moved:
+        return []
+    descriptions = CQ.task_descriptions(Path(vault or VR.VAULT) / "autonomy")
+    out: list[dict] = []
+    for name, src, line, old, new in moved:
+        for rel, desc in sorted(descriptions.items()):
+            for quoted_name, quoted, actual in CQ.mismatches(desc, {name: new}):
+                out.append({
+                    "file": rel, "line": 1,
+                    "problem": (f"it quotes {quoted_name} as {quoted}; this round "
+                                f"moves it {old} -> {new} in {src}:{line}, and this "
+                                f"description is what the task is prompted with"),
+                    "severity": _CONSTANT_STALE_SEVERITY})
+    return out
+
+
 def honesty_prechecks(worktree: Path, base: str, changed_paths: list[str],
-                      *, n_clauses: int = 0) -> list[dict]:
+                      *, n_clauses: int = 0,
+                      vault: Path | None = None) -> list[dict]:
     """Findings no model is needed for, on the round's changed test files.
 
     Each pattern is counted in the post-image and in the base version and only
@@ -885,6 +986,16 @@ def honesty_prechecks(worktree: Path, base: str, changed_paths: list[str],
     this round's. The same delta arithmetic covers the constant-mirroring
     detector. The `def test_` delta is checked when the item has clauses —
     a change to code under a contract that adds no test cannot have pinned it.
+
+    The last family is not about the round's tests at all: a constant this round
+    moved out from under an autonomy task's description is reported too
+    (`stale_constant_quotes`), because that is the one prose↔code drift the vault
+    probe structurally cannot see and this is the only rung standing on the code
+    side when it happens. It is advisory, so it cannot refuse the round it names.
+
+    `vault` is the corpus root, for a test to hand a fixture of task files; every
+    caller in the engine passes nothing and gets the live vault, which is the tree
+    whose prose a human has to edit.
     """
     out: list[dict] = []
     tests = TP.pick_test_files(changed_paths, worktree)
@@ -929,6 +1040,13 @@ def honesty_prechecks(worktree: Path, base: str, changed_paths: list[str],
                     "problem": ("test files changed but no test function was added while "
                                 "the item has acceptance clauses to pin"),
                     "severity": _NO_NEW_TEST_SEVERITY})
+    # Not a test-honesty finding, and not about this round's test files: the one
+    # place the code side of #2317's drift can be named while it is happening. Goes
+    # through the same funnel because this list is what `decide` reads its
+    # prechecks from, and rides at advisory severity so it can never be the reason a
+    # code round is refused. `vault` exists for a test to hand a fixture corpus;
+    # the gate passes nothing and gets the live vault.
+    out.extend(stale_constant_quotes(worktree, base, changed_paths, vault=vault))
     return out
 
 
