@@ -10,9 +10,14 @@ date: 2026-09-12
 
 `architecture/` was hand-curated on 2026-09-11: 22 top-level docs then, **23
 now** — this doc joined the picklist the day it landed, so the pass reviews
-itself — and 17 docs retired, of which **12 are still in the gitignored
-`.archive/`**: five were deleted outright in `f80c9d0` rather than kept. An
-[[index]] lists what is left. Nothing
+itself — and 17 docs retired, **none of them readable in this checkout**:
+architecture/.archive/ does not exist here. Five retired copies were tracked in
+git at all, and `f80c9d00` is the commit that untracked all five; the rest were
+deleted from `architecture/` with no tracked copy made at any point. So what
+survives of each is the commit's parent — for those five,
+`git show f80c9d00^:architecture/.archive/<slug>.md`; for the others,
+`git show b94be171^:architecture/<slug>.md`. An [[index]] lists what is left,
+and its Retired section names every one of them. Nothing
 kept it honest from there. Three `tests/test_*_doc_claims.py` pin numbers in
 three of them; `agent_mcp/memory_ops.py:12` cited a doc that no longer
 existed; the measured tables in [[autonomy-jobs]] and [[workers-jobs]] are

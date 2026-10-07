@@ -173,3 +173,64 @@ def test_the_retirement_check_fires_on_a_retired_name_that_is_live_again(tmp_pat
         _retirement_problems("## Retired\n\nnothing named here\n")
     with pytest.raises(AssertionError, match="no Retired section"):
         _retirement_problems("# index\n\nno retired section at all\n")
+
+
+#: The eleven docs `b94be171` retired, typed rather than read out of index.md.
+#: The section under test is the only place in the repo that lists them, so a node
+#: that asked that section what it names would be asking it the same question twice
+#: and could not notice a rewrite that quietly dropped one.
+RETIRED_ROSTER = (
+    "agents", "background-monitoring", "evaluation-engine", "exploration-engine",
+    "harness-comparison", "improvement-planner", "intelligence-pipeline",
+    "nightly-vault-maintenance", "staged-pipeline", "usage-tracking",
+    "verification-system",
+)
+
+
+def test_the_retired_section_says_git_history_is_the_only_copy_left():
+    """#2329 clauses 3 and 4. The heading used to read
+    `## Retired (in `.archive/`, or in git history alone)`, which offered a
+    directory as the first option, and the section's own closing sentence said the
+    twelfth name was "not in `.archive/` either". `architecture/.archive/` is not in
+    this checkout and `git ls-files` shows nothing tracked under it, so the heading
+    named a place a reader cannot go.
+
+    The section now says the eleven are in git history alone and names the commit
+    whose parent holds them. Pinned as a set of facts about the section, because
+    `test_a_retired_doc_is_named_under_retired_and_linked_from_no_table` is about
+    the *convention* (a name in backticks, never a `[[link]]`) and stays green no
+    matter where the section claims the files are — which is the gap this round
+    could otherwise have walked straight through.
+    """
+    text = INDEX.read_text(encoding="utf-8")
+    section = _retired_section(text)
+    heading = section.splitlines()[0]
+    assert heading.startswith(_RETIRED_HEADING), (
+        f"the section no longer opens with {_RETIRED_HEADING!r}, so the parity "
+        f"check above has nothing to find: {heading!r}")
+    assert ".archive" not in heading, (
+        f"the heading offers .archive/ as a place the retired docs live again: "
+        f"{heading!r} — the directory is not in this checkout")
+    for name in RETIRED_ROSTER:
+        assert f"`{name}`" in section, (
+            f"{name} is no longer named in backticks under Retired; the roster is "
+            "what a reader searches when looking for a doc that has gone missing")
+    assert ".archive" not in section, (
+        "the Retired section still mentions .archive/ somewhere besides its "
+        "heading — the claim is what misleads, not only the heading")
+    assert "b94be171" in section, (
+        "the section names no commit, so a reader is told the text is in history "
+        "with no way of finding which commit's parent holds it")
+    assert "`git show b94be171^:architecture/<slug>.md`" in section, (
+        "the section does not give the recovery command in the one form a reader "
+        "can copy, with <slug> as the only variable part")
+    assert text.count(".archive") == 2, (
+        f"index.md mentions .archive {text.count('.archive')} times, not 2: the two "
+        "that belong here are the standing retirement convention above the tables "
+        "and the dated Review-log line that records the old claims being measured. "
+        "A third is a live claim about where files are; a lost one is history "
+        "erased rather than corrected")
+    log = text[text.index("## Review log"):]
+    assert "`.archive/` claims" in log, (
+        "the Review-log entry that records how the .archive claims were measured "
+        "has been edited; a correction may not rewrite the record of the error")

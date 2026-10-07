@@ -50,6 +50,7 @@ which already owns the root-move rule (`architecture/data-home.md:33-34`).
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -2170,3 +2171,67 @@ def test_the_corpus_shape_task_description_says_at_most_one_row_per_day():
     assert "not gap handling" in body.lower(), (
         "the task body reads as 'one row per day therefore no gaps', which the guard "
         "does not deliver")
+
+
+#: The four docs this one absorbed on 2026-09-11, and the commit that last left a
+#: tracked copy of each in `architecture/.archive/` before untracking it. Both are
+#: fixed history, so the pair is typed here rather than derived: a node that read
+#: the roster out of the doc it is grading would pass on a doc that named none.
+FOLDED_DOCS = ("nightly-reflection", "nightly-skills-management",
+               "morning-briefing", "groundskeeper")
+ARCHIVE_RECOVERY_SHA = "f80c9d00"
+
+
+def test_the_folded_away_docs_are_recorded_as_gone_from_the_tree():
+    """#2329 clause 1. The paragraph under `## Related` used to send a reader to
+    `architecture/.archive/` for the four absorbed docs, and that directory is not
+    in the tree and not in git (`git ls-files architecture/.archive/` is empty;
+    `f80c9d00` untracked the five copies it ever held), so following the pointer
+    found nothing at all. It now says the text is gone from the tree, recoverable
+    only from history, and names the command that gets it back.
+
+    The named command is resolved, not admired: each of the four paths must exist
+    at `f80c9d00^`, because a doc that trades one dead pointer for another has not
+    been fixed, and the commit whose parent it names is the half a reader cannot
+    check by eye while reading.
+    """
+    text = _text()
+    assert "retired to `architecture/.archive/`" not in text, (
+        "the paragraph points the reader at architecture/.archive/ again, which "
+        "is neither on disk nor tracked in git")
+    for slug in FOLDED_DOCS:
+        assert f"`{slug}`" in text, f"{slug} is no longer named as a folded doc"
+    flat = _flat(text)
+    assert "taken out of the tree" in flat, (
+        "the paragraph no longer says plainly that the four are gone from the tree")
+    assert "recoverable only from history" in flat, (
+        "the paragraph does not say the only copy left is in git history")
+    recovery = f"git show {ARCHIVE_RECOVERY_SHA}^:architecture/.archive/<slug>.md"
+    assert recovery in flat, (
+        f"the paragraph names no recovery command of the shape "
+        f"{recovery!r} — an absent directory with no way back is not a fix")
+    for slug in FOLDED_DOCS:
+        probe = subprocess.run(
+            ["git", "cat-file", "-e",
+             f"{ARCHIVE_RECOVERY_SHA}^:architecture/.archive/{slug}.md"],
+            cwd=ROOT, capture_output=True)
+        assert probe.returncode == 0, (
+            f"the command the doc names does not resolve for {slug}: "
+            f"git cat-file -e {ARCHIVE_RECOVERY_SHA}^:architecture/.archive/"
+            f"{slug}.md exits {probe.returncode}")
+
+
+def test_the_numbering_note_survives_the_archive_pointer_being_fixed():
+    """#2329 clause 1's second half, pinned as its own node because the two edits
+    sit in one file and the failure mode is collision, not correctness: rewriting
+    the retirement paragraph at line 1041 of this 1,100-line doc must not disturb
+    the id-range sentence at line 42, which is what
+    `test_no_second_fleet_bound_appears_anywhere_in_architecture` depends on for
+    its floor wording, its numbering-note anchor and its dated-range requirement."""
+    flat = _flat(_text())
+    note = ("ids run 24 through 90 or beyond, with gaps where tasks were retired")
+    assert note in flat, (
+        "the numbering note moved or was reworded, and the node that reads the "
+        "range as a floor rather than a ceiling loses its anchor")
+    assert re.search(re.escape(note) + r" \(\d{4}-\d{2}-\d{2}\)", flat), (
+        "the note lost the date that travels with the range")

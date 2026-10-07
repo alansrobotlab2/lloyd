@@ -1041,7 +1041,11 @@ window with no task file behind them.
 `nightly-reflection`, `nightly-skills-management`, `morning-briefing` and
 `groundskeeper` were four separate docs until 2026-09-11. They covered 8 of the
 fleet's 32 jobs between them and left 24 undescribed, so they were folded in here
-and retired to `architecture/.archive/`. Their incident history is carried above;
+and taken out of the tree. There is no architecture/.archive/ in this checkout —
+the copies git last carried were untracked by `f80c9d00` — so their text is
+recoverable only from history, at
+`git show f80c9d00^:architecture/.archive/<slug>.md` for any of the four.
+Their incident history is carried above;
 what was dropped was the retired two-loop groundskeeper architecture, the
 per-line source citations, and every restatement of a schedule that lives in the
 task file.

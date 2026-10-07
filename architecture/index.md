@@ -91,7 +91,7 @@ already uses; arch-review refreshes that one).
 | 1 | RTX PRO 6000 96 GB | primary LLM (vLLM) |
 | 2 | RTX 3090 24 GB | secondary LLM (llama.cpp) |
 
-## Retired (in `.archive/`, or in git history alone)
+## Retired (in git history alone)
 
 `agents`, `background-monitoring`, `evaluation-engine`, `exploration-engine`,
 `harness-comparison`, `improvement-planner`, `intelligence-pipeline`,
@@ -99,6 +99,11 @@ already uses; arch-review refreshes that one).
 `verification-system` — the OpenClaw-era agent roster and gateway, a daemon
 that no longer exists, and five 2026-03 plans (#177–#183) whose ideas landed
 later as [[automod]], [[workers]] and the research pipeline.
+
+None of those eleven is readable in this checkout: `b94be171` deleted the files
+from this directory and left no tracked copy behind anywhere, so what survives of
+each is that commit's parent —
+`git show b94be171^:architecture/<slug>.md`.
 
 Three retirements on 2026-09-11 were folds rather than obsolescence, and the
 distinction is worth keeping: nothing in any of them was wrong, it was in the
@@ -131,9 +136,9 @@ the literature says, the proposals filed from it, what was not proposed and why
 pass describes a day's reading, not the running system this directory
 documents. Nothing in it was lost by the move: the sixteen proposals are
 #1480–#1495 on the board, and the measurements it made are recorded where they
-belong, in [[retrieval]] and [[subliminal]]. Unlike the names above it is not in
-`.archive/` either — the file is gone from the tree, so its text is only in git
-history at `git show 4a6cdd54^:architecture/recall-research-2026-09-24.md`.
+belong, in [[retrieval]] and [[subliminal]]. Like the names above it is gone from
+the tree, and its text is recoverable from git history alone, at
+`git show 4a6cdd54^:architecture/recall-research-2026-09-24.md`.
 
 ## Review log
 

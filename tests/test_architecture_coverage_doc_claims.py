@@ -2298,3 +2298,134 @@ def test_the_family_count_command_prints_and_names_the_set_it_counts():
     for cmd in cmds:
         assert cmd.startswith("git grep "), cmd
         assert _run(cmd), f"a proving command prints nothing: {cmd}"
+
+
+#: The three docs #2329 reworded, and the recovery-command shape they now name. A
+#: fixed historical set, typed here rather than harvested from the docs: a node that
+#: read the commands out of the prose it is grading would pass on docs that named
+#: none, which is exactly the state the round started in.
+RECOVERY_DOCS = ("autonomy-jobs.md", "arch-review.md", "index.md")
+RECOVERY_CMD = re.compile(r"`git show ([0-9a-f]{7,40})\^:(architecture/[^`]*)`")
+
+
+def _git_lines(*args: str) -> list[str]:
+    out = subprocess.run(["git", "-C", str(ROOT), *args],
+                         capture_output=True, text=True)
+    assert out.returncode == 0, f"git {' '.join(args)} exited {out.returncode}"
+    return [ln.strip() for ln in out.stdout.splitlines() if ln.strip()]
+
+
+def test_every_archive_recovery_command_the_docs_name_resolves():
+    """#2329 clause 5. Each of the three docs now tells a reader how to get a
+    retired doc back, and a recovery command that does not resolve is a second dead
+    pointer wearing the clothes of a fix — the failure this whole item exists to
+    close, since the sentence it replaced pointed at a directory that is not in the
+    tree.
+
+    So every backticked `git show <rev>^:architecture/…` the three docs carry is
+    run, not admired. A `<slug>` template is expanded over the roster git itself
+    records for that retirement — the copies tracked at that commit's parent for
+    the `.archive/` one, the files that commit deleted from `architecture/` for the
+    other — so the check proves the command works for every doc it is offered for,
+    not just for the one name someone happened to try.
+    """
+    found: dict[tuple[str, str], None] = {}
+    for slug in RECOVERY_DOCS:
+        found.update({m: None for m in RECOVERY_CMD.findall(_text(slug))})
+    assert len(found) >= 3, (
+        f"only {len(found)} recovery command(s) named across {RECOVERY_DOCS}; the "
+        "docs are supposed to name a way back for each retirement, so a thin "
+        "harvest means the pointers went away rather than getting fixed")
+    archive_roster = [Path(p).stem for p in
+                      _git_lines("ls-tree", "--name-only", "f80c9d00^",
+                                 "architecture/.archive/")]
+    # Stems, not paths: a doc offers the command as
+    # `git show b94be171^:architecture/<slug>.md`, so the thing being substituted
+    # into `<slug>` is the doc name with its directory and extension already taken
+    # off — which is also how the Retired section lists the same eleven.
+    deleted_roster = [Path(ln.split("\t")[1]).stem for ln in
+                      _git_lines("show", "--name-status", "--format=", "b94be171")
+                      if ln.startswith("D\tarchitecture/")]
+    assert len(archive_roster) == 5, archive_roster
+    assert len(deleted_roster) == 11, deleted_roster
+    for sha, path in found:
+        if "<slug>" not in path:
+            targets = [path]
+        elif ".archive/" in path:
+            targets = [path.replace("<slug>", s) for s in archive_roster]
+        else:
+            targets = [path.replace("<slug>", s) for s in deleted_roster]
+        for target in targets:
+            probe = subprocess.run(
+                ["git", "cat-file", "-e", f"{sha}^:{target}"],
+                cwd=ROOT, capture_output=True)
+            assert probe.returncode == 0, (
+                f"a doc names `git show {sha}^:{target}` and it does not resolve: "
+                f"{probe.stderr.strip() or 'no such path at that rev'}")
+
+
+def test_the_reworded_docs_gain_no_unresolvable_path_citation():
+    """#2329 clause 2's mechanical half. These three docs are in the corpus the
+    citation check above grades, and its exemption list is `git_ignored()` — which
+    is precisely why `architecture/.archive/` never went red there even while it was
+    being asserted as current (`.gitignore` carries `/architecture/.archive/`). That
+    exemption must not become a licence for the fix.
+
+    Measured as a delta against `ad6ab9f4`, the commit this round started from: a
+    reworded doc may cite fewer resolvable paths than it did (the dead ones are the
+    point of the change) and may never cite more, so a sentence that sends a reader
+    at a file which does not exist fails here whatever `.gitignore` says about the
+    directory it mentions.
+    """
+    base = "ad6ab9f4"
+    for slug in RECOVERY_DOCS:
+        before = subprocess.run(["git", "-C", str(ROOT), "show", f"{base}:architecture/{slug}"],
+                                capture_output=True, text=True)
+        assert before.returncode == 0, f"{base}:architecture/{slug} does not exist"
+        unres_now = {str(p) for p in unresolved_citations(cited_paths(_text(slug)))}
+        unres_base = {str(p) for p in unresolved_citations(cited_paths(before.stdout))}
+        assert len(unres_now) <= len(unres_base), (
+            f"architecture/{slug} cites {len(unres_now)} unresolvable paths against "
+            f"{len(unres_base)} at {base}: the reword added a pointer instead of "
+            f"removing one — new: {sorted(unres_now - unres_base)}")
+
+
+def test_arch_review_states_the_archive_directory_is_absent_here():
+    """#2329 clause 2. The opening paragraph used to say 17 docs were retired, "of
+    which **12 are still in the gitignored `.archive/`**" — present tense, and the
+    box has no such directory (`ls -d architecture/.archive` is a `No such file`
+    error), so the sentence sent a reader to a path that is not there while the
+    number in it was already stale: only five retired copies were ever tracked, and
+    the commit the same paragraph cites for deleting five is the one that untracked
+    all five.
+
+    Pinned against git's own record rather than against a second copy of the
+    paragraph: the five `D` lines `f80c9d00` carries under `.archive/` are the
+    denominator the sentence now states, so the prose cannot drift from the commit
+    it names without this failing.
+    """
+    text = _text("arch-review.md")
+    flat = _flat(text)
+    assert "still in the gitignored" not in flat, (
+        "the paragraph asserts retired docs are still sitting in .archive/, which "
+        "is not in this checkout and holds nothing tracked")
+    assert "are still in" not in flat, (
+        "some sentence in arch-review.md again puts the retired docs in a place a "
+        "reader can open")
+    assert "does not exist here" in flat, (
+        "the paragraph no longer says outright that architecture/.archive/ is "
+        "absent, which is the fact a reader needs before the recovery commands")
+    assert "`f80c9d00` is the commit that untracked all five" in flat, (
+        "the paragraph must name which commit ended the tracked copies, or the "
+        "five it counts have no owner and the count is folklore")
+    deletions = [ln for ln in _git_lines("show", "--name-status", "--format=",
+                                         "f80c9d00")
+                 if ln.startswith("D\tarchitecture/.archive/")]
+    assert len(deletions) == 5, (
+        f"f80c9d00 carries {len(deletions)} deletions under architecture/.archive/, "
+        "not the five the paragraph counts")
+    for command in ("`git show f80c9d00^:architecture/.archive/<slug>.md`",
+                    "`git show b94be171^:architecture/<slug>.md`"):
+        assert command in text, (
+            f"arch-review.md no longer offers {command}; saying the copies are gone "
+            "without a way back leaves the reader exactly where the old sentence did")
