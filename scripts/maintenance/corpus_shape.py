@@ -97,8 +97,17 @@ STAMP_FMT = "%Y%m%dT%H%M%SZ"
 #   self_reference_rate    0.0361 abs  skills 2026-09-30->10-01 (0.0833 -> 0.1194)
 # user_memory's deltas are zero except n (<= 0.0216) and len_mean (<= 0.038), so the
 # whole floor here is daily, skills and trajectories — which is also why one global
-# table ends up wide where the frozen corpus needs nothing at all; whether the table
-# should split per corpus is owed, and is not settled by this constant.
+# table ends up wide where the frozen corpus needs nothing at all. RULING (#2200):
+# keep ONE global per-metric table — the per-corpus split is DEFERRED, not adopted.
+# Re-derived with this same rule per corpus, the bounds change zero verdicts on every
+# night the instrument has seen (daily reproduces the table above exactly; skills,
+# trajectories and user_memory all land UNDER the old #761 floors), so a nested table
+# plus its _moved()/diff_lines() and test re-pinning is a rewrite with zero avoided
+# false positives and zero newly caught regressions. REOPEN TRIGGER, cheap to
+# re-measure from the same rows: the first nightly row where a non-daily corpus's
+# day-over-day delta exceeds its old #761 floor (n 0.5 rel, len_mean 0.25, len_p95
+# 0.5, distinct_key_ratio 0.05, duplicate_rate 0.02, self_reference_rate 0.05) while
+# staying inside the bound below — that is a night the global table hid.
 # Under the table this replaced, 6 of these 8 nights printed a MOVED line, which is
 # what `duplicate_rate` leaving abs 0.02 and `distinct_key_ratio` leaving abs 0.05
 # is for: both sat below an ordinary night. Every bound is asserted against these

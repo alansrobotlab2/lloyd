@@ -2173,6 +2173,56 @@ def test_the_corpus_shape_task_description_says_at_most_one_row_per_day():
         "does not deliver")
 
 
+@live_vault
+def test_the_corpus_shape_task_file_says_the_bounds_are_measured_not_provisional():
+    """#2373 clause 3, against the live task file — the third carrier that
+    `test_the_bound_provenance_replaces_provisional_in_both_prose_carriers` names in
+    its own docstring but cannot read, because `~/obsidian/autonomy/90-corpus-shape-trend.md`
+    is not in the tree that node runs against.
+
+    Same claim, same retirement, different tree. The front-matter `description` is
+    what `_build_task_prompt` (`app/autonomy.py:2487`, appended verbatim at
+    `:2504-2506`) hands every #90 run, so the worker was told its bounds were
+    "provisional" three days after #2200 measured them, while the body excused them
+    "until a week of series exists (a human clause on #761)". The vault is not a tree
+    this round controls (`pytest.ini:14-19`), so that half landed as its own sha
+    (`b25fef3f`, 2026-10-07) and this node is the reporting copy the gate never
+    executes. Run it by hand from a worktree with
+
+        ~/lloyd/.venvs/lloyd/bin/python -m pytest \\
+            tests/test_autonomy_jobs_doc_claims.py::test_the_corpus_shape_task_file_says_the_bounds_are_measured_not_provisional -q
+
+    Both halves are graded, as in the two repo carriers: the excuse gone AND the
+    measurement it stood in for named — the largest day-over-day delta per metric over
+    the 8 clean UTC dates 2026-09-27 to 2026-10-04 — since a file that only drops the
+    word leaves the next reader no way to re-derive a bound. Checked on the PARSED
+    description through `app.autonomy._parse_task_file`, the call the scheduler makes:
+    a claim the loader cannot reach never reaches the worker, and the raw body is
+    checked beside it because that is where the #761 clause was standing.
+    """
+    from app import autonomy
+
+    task = autonomy._parse_task_file(TASK_90_FILE)
+    assert task, f"{TASK_90_FILE} does not parse as an autonomy task"
+    desc = _flat(task.get("description") or "")
+    body = _flat(TASK_90_FILE.read_text())
+    assert desc, f"{TASK_90_FILE.name} has no description to check"
+
+    for where, text in (("the parsed description", desc),
+                        ("the raw task file", body)):
+        assert BOUND_PROVISIONAL_CLAIM not in text.lower(), (
+            f"{where} still calls the corpus-shape bounds provisional; #2200 measured "
+            f"them, and the description is the text every #90 run is handed")
+        assert BOUND_DERIVATION_CLAIM.search(text), (
+            f"{where} no longer says the bounds come from day-over-day deltas, so a "
+            f"runner cannot tell what the bound it reports was derived from")
+        assert BOUND_SAMPLE_CLAIM.search(text), (
+            f"{where} no longer says how many dates the bounds were derived from")
+        assert BOUND_SAMPLE_DATES.search(text), (
+            f"{where} does not name the sampled dates 2026-09-27..2026-10-04, the "
+            f"sample a later reader re-measures")
+
+
 #: The four docs this one absorbed on 2026-09-11, and the commit that last left a
 #: tracked copy of each in `architecture/.archive/` before untracking it. Both are
 #: fixed history, so the pair is typed here rather than derived: a node that read
