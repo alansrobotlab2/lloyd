@@ -1,0 +1,83 @@
+{
+  "route": "rebuild-side-copy",
+  "name": "rebuild-20261005",
+  "side_index": "/home/alansrobotlab/.cache/qmd/rebuild-20261005.sqlite",
+  "actions": [
+    "config: /home/alansrobotlab/.config/qmd/index.yml -> /home/alansrobotlab/.config/qmd/rebuild-20261005.yml",
+    "update rc=0 in 47s :: Run 'qmd embed' to update embeddings (7040 unique hashes need vectors)",
+    "embed #1 rc=0 in 1801s :: \u001b[?25h",
+    "embed #2 rc=0 in 297s :: \u001b[?25l\u001b[?25h"
+  ],
+  "live_before": {
+    "index_bytes": 1978977112,
+    "footprint": {
+      "total": 1978977112,
+      "main": 990035968,
+      "wal": 987007832,
+      "shm": 1933312
+    },
+    "vectors_total": 43941,
+    "vectors_orphaned": 1287,
+    "documents": 13547,
+    "vec0": {
+      "chunks": 154,
+      "allocated_slots": 157696,
+      "live_rows": 43941,
+      "occupancy": 0.2786,
+      "allocated_mib": 616.0,
+      "dead_mib": 444.4
+    },
+    "vectors_live": 42654,
+    "orphan_ratio": 0.0293
+  },
+  "side_after": {
+    "index_bytes": 519204864,
+    "footprint": {
+      "total": 519204864,
+      "main": 519204864,
+      "wal": 0,
+      "shm": 0
+    },
+    "vectors_total": 42712,
+    "vectors_orphaned": 0,
+    "documents": 13547,
+    "vec0": {
+      "chunks": 42,
+      "allocated_slots": 43008,
+      "live_rows": 42712,
+      "occupancy": 0.9931,
+      "allocated_mib": 168.0,
+      "dead_mib": 1.2
+    },
+    "vectors_live": 42712,
+    "orphan_ratio": 0.0
+  },
+  "verification": {
+    "passed": true,
+    "name": "rebuild-20261005",
+    "side_live_rows": 42712,
+    "floor_vectors_live": 42654,
+    "live_vec0_live_rows": 43941,
+    "pending_embeddings": 0,
+    "vsearch_hits": 5,
+    "failed": []
+  },
+  "side_bytes": 519204864,
+  "side_occupancy": 0.9931,
+  "live_occupancy": 0.2786,
+  "swap": {
+    "backup": "/home/alansrobotlab/.cache/qmd/index.sqlite.bak-20261005-075912",
+    "actions": [
+      "stop agent-qmd-watcher rc=0",
+      "stop agent-qmd-daemon rc=0",
+      "index.sqlite -> index.sqlite.bak-20261005-075912; rebuild-20261005.sqlite -> index.sqlite",
+      "start agent-qmd-daemon rc=0",
+      "start agent-qmd-watcher rc=0"
+    ],
+    "swapped": true,
+    "daemon_healthy": true,
+    "retrieval_hits": 5,
+    "retrieval_ok": true
+  },
+  "elapsed_s": 2197.0
+}

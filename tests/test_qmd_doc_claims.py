@@ -20,6 +20,7 @@ import json
 import os
 import pwd
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -42,7 +43,33 @@ SWAP_REPORT = "qmd-side-copy-rebuild-20261005-2026-10-05T072250.json"
 REHEARSAL_REPORT = "qmd-side-copy-rebuild-20261004-2026-10-04T113501.json"
 MAINTENANCE_BEFORE = "qmd-index-maintenance-2026-10-05.json"
 MAINTENANCE_AFTER = "qmd-index-maintenance-2026-10-06.json"
-SWAPPED_BACKUP = "index.sqlite.bak-20261005-075912"
+
+#: The committed copy of the swap report, and the only place this file's backup name comes
+#: from (#2323). A real `index.sqlite.bak-<stamp>` written into a scanned `.py` is a code
+#: reference under `code_reference_hits`, and a code reference is a hold on the reclaim
+#: list: on 2026-10-06 prose in this tree was keeping 2,577,506,304 B of retired backups
+#: on disk, and a literal like the one this replaces was one of the namers — harmless only
+#: while the file it named happened to be the newest copy in the directory, and a hold on
+#: its own 990,171,136 B the moment a newer swap landed. `*.json` is outside
+#: `CODE_REF_SUFFIXES`, so
+#: the report that measured the name is where it lives, and the negation in
+#: `tests/fixtures/.gitignore` is what admits these bytes past the root `*.json` rule.
+SWAP_FIXTURE = ROOT / "tests" / "fixtures" / SWAP_REPORT
+
+#: A sibling name with no negation of its own, the positive control for
+#: `test_the_swap_fixture_is_admissible_and_tracked`: it must resolve to the root rule.
+SWAP_FIXTURE_CONTROL = "tests/fixtures/side-copy-rebuild-no-negation-control.json"
+
+
+def _swapped_backup() -> str:
+    """The name of the database the 2026-10-05 swap moved aside.
+
+    Read out of `SWAP_FIXTURE`'s bytes at call time rather than at import: an unreadable or
+    untracked fixture has to fail a node with a reason, not turn this module into a
+    collection error that the gate reports as a green suite whose nodes never ran (#2282).
+    """
+    return Path(json.loads(SWAP_FIXTURE.read_text(encoding="utf-8"))
+                ["swap"]["backup"]).name
 
 #: The module constant the doc is allowed to name, and the only place the
 #: threshold is defined. Read from the source text rather than imported so this
@@ -240,7 +267,14 @@ def test_the_paragraph_reports_the_swap_and_cites_the_report_behind_it():
     assert swap["name"] == "rebuild-20261005" and "2026-10-05" in flat
     assert "swapped" in flat and "retrieval_ok" in flat, (
         "the paragraph no longer states what the swap report records")
-    assert SWAPPED_BACKUP in flat, "the backup the swap left is not named"
+    # The name comes out of the committed copy of the report, and the runtime report the
+    # paragraph cites has to agree with it: the fixture cannot be allowed to drift into
+    # naming some other backup while the doc's claim is checked against that one instead.
+    committed = _swapped_backup()
+    assert committed == Path(swap["swap"]["backup"]).name, (
+        "the committed swap report and the runtime report the doc cites disagree about "
+        "which database was moved aside")
+    assert committed in flat, "the backup the swap left is not named"
 
 
 def test_the_reclaim_figures_are_the_ones_the_nightly_series_measured():
@@ -292,9 +326,63 @@ def test_the_paragraph_keeps_both_caveats_and_says_no_clock_window_applies():
     assert "`.bak` series" in flat and "bounds to its newest" in flat, (
         "the backup-retention caveat was dropped")
     series = _report(MAINTENANCE_AFTER)["stray_retention"]["bak_series"]
-    assert series[0] == SWAPPED_BACKUP, f"the swap's backup is not the series' newest: {series}"
+    assert series[0] == _swapped_backup(), (
+        f"the swap's backup is not the series' newest: {series}")
     assert "no clock window applies" in flat, "the paragraph stopped saying the route has no window"
     assert "22:00" not in flat and "04:00" not in flat, "a clock window is implied again"
     assert ".hour" not in src, (
         "qmd_index_maintenance.py now branches on the hour, and the paragraph's "
         "'no clock window applies' has to be rewritten in the same change")
+
+
+def test_the_swap_fixture_is_admissible_and_tracked():
+    """The bytes this file's backup name comes from are really in the index.
+
+    Root `.gitignore` ends `*.json`, so a fixture under `tests/fixtures/` is admissible only
+    through one scoped negation in `tests/fixtures/.gitignore` — and `git add` of an ignored
+    path is SILENT: it exits 0, stages nothing, and a round believes it committed the
+    witness. #2282 lost two review attempts exactly that way, and the shape of the failure
+    is what makes a node like this necessary rather than paranoid: an absent file read at
+    import is a collection error, and the suite stays green with the file's nodes never
+    executed. `_swapped_backup()` is a call rather than a constant so the failure lands on a
+    node with a reason instead of on collection.
+
+    Ask the real mechanism, and read what it actually reports: `git check-ignore
+    --no-index -v` exits 0 for ANY matching rule, a negation included, and prints the winner
+    as `source:line:pattern` — so the pattern half is the verdict, not the exit status. The
+    control sibling has no negation of its own and must come back with the root rule, or a
+    clean answer for the fixture would mean nothing.
+    """
+    def rule(rel: str) -> tuple[int, str, str]:
+        p = subprocess.run(
+            ["git", "-C", str(ROOT), "check-ignore", "--no-index", "-v", rel],
+            capture_output=True, text=True)
+        line = p.stdout.strip().split("\t")[0]
+        source, _, pattern = line.rpartition(":")
+        return p.returncode, source, pattern
+
+    code, source, pattern = rule(SWAP_FIXTURE_CONTROL)
+    assert code == 0 and pattern == "*.json" and not source.startswith("tests/fixtures/"), (
+        f"positive control broken: a sibling name with no negation resolved to "
+        f"{source!r} / {pattern!r} (exit {code}), so the root rule is not what is being "
+        "beaten and a clean answer below would prove nothing")
+
+    rel = SWAP_FIXTURE.relative_to(ROOT).as_posix()
+    code, source, pattern = rule(rel)
+    assert code == 0 and source.startswith("tests/fixtures/.gitignore") \
+        and pattern == "!qmd-side-copy-rebuild-*.json", (
+        f"{rel} resolves to {source!r} / {pattern!r} (exit {code}): the scoped negation is "
+        "not the last matching rule, so `git add` would stage nothing and the report this "
+        "file reads its name from would be missing from every gate tree")
+
+    tracked = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "--error-unmatch", rel],
+        capture_output=True, text=True)
+    assert tracked.returncode == 0, (
+        f"{rel} is admissible but not in the index: {tracked.stderr.strip()} — the name the "
+        "doc claim depends on has no committed source")
+
+    raw = SWAP_FIXTURE.read_text(encoding="utf-8")
+    assert raw.count("\n") == 82 and len(raw.encode()) == 2250, (
+        "the committed swap report is not the bytes the 2026-10-05 invocation wrote "
+        f"({raw.count(chr(10))} lines, {len(raw.encode())} B)")

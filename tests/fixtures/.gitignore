@@ -170,3 +170,22 @@
 # mechanism (`git check-ignore`) on every run, because a negation that does not
 # fire is invisible until the round that needed it is refused.
 !tts_speech_probe_calibration.json
+
+# The twelfth family is a report of the same job's, committed so that a name this file
+# must never carry can live somewhere it is allowed. #2323's premise is that
+# `code_reference_hits` substring-matches a candidate's whole filename against every
+# `*.py`/`*.ts`/`*.sh`/`*.yml` in the tree, so a `.py` that spells out one real
+# `index.sqlite.bak-<stamp>` name holds that file off the delete list — prose mistaken
+# for a reader. On 2026-10-06 that cost 2,577,506,304 B across two backups, one of them
+# held by a docstring in this job's own script. The names therefore move out of the
+# Python and into the bytes of the report that measured them, because `*.json` is
+# outside `CODE_REF_SUFFIXES` and a fixture may say what a `.py` may not:
+# `tests/test_qmd_doc_claims.py` reads the swapped backup's name out of these bytes
+# instead of a literal, and `tests/test_qmd_index_maintenance.py` proves no scanned file
+# names any name taken out of them. Byte-identical to
+# `~/lloyd-data/_pipeline/reflection/qmd-side-copy-rebuild-20261005-2026-10-05T072250.json`
+# (md5 8af93f34848086e3b974cd5719bff0af, 82 lines, 2,250 B), which is retention-swept
+# where this is not. Scoped to this one report family, not to all JSON: a live report of
+# this name belongs to `_pipeline/reflection/`, never here, so the negation only ever
+# reaches a witness somebody deliberately placed here.
+!qmd-side-copy-rebuild-*.json

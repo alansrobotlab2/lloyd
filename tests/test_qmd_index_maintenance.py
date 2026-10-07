@@ -1310,10 +1310,13 @@ def test_a_candidate_whose_sidecar_is_newer_than_its_own_main_file_is_held(
         monkeypatch, tmp_path):
     """A `-wal`/`-shm` newer than the database means something opened it read-write.
 
-    Measured on the 2026-09-27 pile: `index.sqlite.bak-gemma-20260921-wal` is
-    2026-09-24 13:36 and both `-shm` files 2026-09-24 14:07, against main files from
-    09-19 and 09-21 — and no filename grep can see whoever did it, because a grep
-    cannot match a path built at runtime. Report and hold; do not delete.
+    Measured on the 2026-09-27 pile: the 09-21 copy's `-wal` is 2026-09-24 13:36 and
+    both `-shm` files 2026-09-24 14:07, against main files from 09-19 and 09-21 — and
+    no filename grep can see whoever did it, because a grep cannot match a path built
+    at runtime. Report and hold; do not delete. (No concrete backup name is spelled out
+    here: this file is scanned by the same `code_reference_hits`, so naming one would
+    hold the file this node is about — see
+    `test_no_scanned_file_in_our_own_tree_names_a_measured_backup`.)
     """
     d = _qmd_dir(tmp_path, LIVE_TRIO + [
         ("index.sqlite.bak-a", 3000, 1.0),
@@ -1704,27 +1707,43 @@ def test_the_held_backup_witness_bytes_still_carry_the_measured_hold():
     assert len(pile) == 6 and sum(e["bytes"] for e in pile.values()) == rep["stray_bytes"], (
         "the pile the report measured is not the pile its total quotes")
 
+    sr = rep["stray_retention"]
+    assert sr["dry_run"] is False, "the hold was reported by an acting run, not a rehearsal"
+    assert len(sr["held"]) == 1, sr
+    (held,) = sr["held"]
+    # Every candidate and sidecar name below is read out of these bytes rather than typed
+    # into this body (#2323): a real candidate's name written in a scanned `.py` is a code
+    # reference, and the code reference is the hold — which is how the two candidates this
+    # report measured were still on disk on 2026-10-06 for want of a sentence. What the
+    # node asserts is the pile's *relations and figures*, all of which survive a name being
+    # sourced instead of spelled.
+    held_name = held["name"]
+    main = pile[held_name]
+    wal, shm = pile[held_name + "-wal"], pile[held_name + "-shm"]
+
     # The two release-relations, computed from the report's own `stray` block rather than
     # from the item's prose: at the report's one-second resolution the `-wal` carries its
     # main file's mtime exactly, so the copy window excuses it outright, and the `-shm` is
     # older than the `ran_at` of the very run that held it, so the previous-run bound
     # excuses it too. Both legs of the hold in these bytes are legs the fix releases.
-    main, wal = pile["index.sqlite.bak-20260919-203417"], pile[
-        "index.sqlite.bak-20260919-203417-wal"]
-    shm = pile["index.sqlite.bak-20260919-203417-shm"]
     assert wal["mtime"] == main["mtime"] == "2026-09-19T20:34:17", (main, wal)
     assert wal["bytes"] == 0, "the held pile's wal is empty: nothing was ever written to it"
     assert shm["mtime"] == "2026-10-02T19:12:39", shm
     assert (datetime.fromisoformat(shm["mtime"])
             < datetime.fromisoformat(ran_at)), "the shm predates the run that held the file"
 
-    sr = rep["stray_retention"]
-    assert sr["dry_run"] is False, "the hold was reported by an acting run, not a rehearsal"
-    assert sr["kept"] == ["index.sqlite.bak-gemma-20260921"], sr
     assert sr["planned"] == [] and sr["deleted"] == [] and sr["deleted_bytes"] == 0, sr
-    assert len(sr["held"]) == 1, sr
-    (held,) = sr["held"]
-    assert held["name"] == "index.sqlite.bak-20260919-203417", held
+    assert len(sr["kept"]) == 1, sr
+    (kept,) = sr["kept"]
+    assert kept != held_name and kept in pile, (kept, sorted(pile))
+    assert kept not in {h["name"] for h in sr["held"]}, (
+        "the copy the job keeps must not also be on the held list")
+    # Which copy is kept is not a name to restate but a rule to re-derive: the newest by
+    # mtime, in that order in `bak_series`. Read straight off the pile's own mtimes, so a
+    # witness that swapped which copy was newest would fail here.
+    assert sr["bak_series"] == [kept, held_name], sr
+    assert pile[kept]["mtime"] > pile[held_name]["mtime"], (pile[kept], pile[held_name])
+    assert pile[kept]["bytes"] == 1_327_300_608, pile[kept]
     assert held["bytes"] == 1_250_205_696 == main["bytes"], (held, main)
     assert held["code_references"] == [], "neither leg of this hold was a code reference"
     assert len(held["because"]) == 2, held
@@ -1771,6 +1790,107 @@ def test_the_code_reference_walk_finds_a_real_reader_and_a_real_absence():
     # way, on its own sentinel.
     absent = "index.sqlite.bak-" + "19700101T000000Z-never-written"
     assert m.code_reference_hits([absent], m.REPO_ROOT)[absent] == []
+
+
+#: The one side-copy rebuild that swapped, committed under `tests/fixtures/` for the
+#: reason its `stray_retention` twin above was: it carries the name of a real backup, and
+#: after #2323 a scanned `.py` may not. `tests/test_qmd_doc_claims.py` reads the name out
+#: of these bytes rather than restating it.
+SWAP_WITNESS = (ROOT / "tests" / "fixtures"
+                / "qmd-side-copy-rebuild-20261005-2026-10-05T072250.json")
+
+
+def _measured_backup_names() -> set[str]:
+    """Every `index.sqlite.bak*` name a committed report measured, mains and sidecars.
+
+    Read out of the reports' bytes, never typed into this file. That is the whole point of
+    #2323: `code_reference_hits` substring-matches a candidate's whole filename against
+    every `*.py`/`*.ts`/`*.sh`/`*.yml`, so this file — which is part of that tree — is the
+    last place one of these names may be written. `*.json` is outside `CODE_REF_SUFFIXES`,
+    so the report that measured a name is the one place it is allowed to appear.
+    """
+    names: set[str] = set()
+    for path in (WITNESS, SWAP_WITNESS):
+        rep = json.loads(path.read_text(encoding="utf-8"))
+        names |= {e["name"] for e in rep.get("stray", [])}
+        sr = rep.get("stray_retention") or {}
+        names |= set(sr.get("bak_series", [])) | set(sr.get("kept", []))
+        names |= {h["name"] for h in sr.get("held", [])}
+        backup = (rep.get("swap") or {}).get("backup")
+        if backup:
+            names.add(Path(backup).name)
+    return {n for n in names if n.startswith("index.sqlite.bak")}
+
+
+def test_no_scanned_file_in_our_own_tree_names_a_measured_backup():
+    """#2323 clause 1: the tree that decides a candidate's fate names no candidate.
+
+    A hold that cites `code_references` is the job declining to free a file because
+    somebody wrote its name in a sentence, and on 2026-10-06 that cost 2,577,506,304 B
+    across two candidates: the 1,327,300,608 B one was named by a docstring in the script
+    that was deciding its fate as well as by this file, the 1,250,205,696 B one by this
+    file alone. The pile renews itself, so this is a standing property rather than a
+    one-off cleanup: every real swap leaves a newer
+    `bak-<stamp>` behind, and the day a documented backup stops being the newest, any
+    literal naming it in scanned source becomes a permanent hold on 1 GB-plus of prose.
+
+    The names come from the committed reports (see `_measured_backup_names`), including
+    the `-wal`/`-shm` sidecars: `plan_stray_retention` asks about main files only, but
+    `if n in text` matches a candidate inside its own sidecar's name, which is exactly how
+    the module's own docstring held a file it never mentioned by that name.
+    """
+    assert m.REPO_ROOT == ROOT, "the walk has to be over the tree this node lives in"
+    names = sorted(_measured_backup_names())
+    assert len(names) >= 7, f"too few names to be the pile: {names}"
+    assert any(n.endswith(("-wal", "-shm")) for n in names), (
+        "the sidecar names have to be in scope, or the substring trap is untested")
+    offenders = {n: f for n, f in m.code_reference_hits(names, m.REPO_ROOT).items() if f}
+    assert offenders == {}, f"these scanned files name a live backup candidate: {offenders}"
+    # Positive control on the same walk: `bak-z` is the synthetic name this file's own
+    # guard tests build under `tmp_path`, so it is present here by construction and an
+    # empty answer means the walk is not reading this file rather than that the names are
+    # clear. Assembled at runtime so this node adds no fresh literal of its own.
+    control = "index.sqlite.bak-" + "z"
+    assert control not in names, "the control must not be one of the names under test"
+    assert m.code_reference_hits([control], m.REPO_ROOT)[control], (
+        "the walk found nothing for a name this file really does contain")
+
+
+#: What the module's own comment promises, as the pattern it means: this job's backup
+#: prefix followed by anything that is not a placeholder. `<date>`, `<something>` and
+#: `<stamp>` are how that file refers to the series generically, and those are the only
+#: forms it is allowed — a digit or a word after the dash is a concrete file, and a
+#: concrete file named here is a file the job is holding because of a sentence.
+CONCRETE_BAK_REF = re.compile(r"index\.sqlite\.bak-(?!<)[\w-]")
+
+#: The module whose comment makes the claim, read as text. Imported for its behaviour and
+#: read for its prose: an absence can only be checked against the bytes that carry it.
+SCRIPT = ROOT / "scripts" / "maintenance" / "qmd_index_maintenance.py"
+
+
+def test_the_retention_module_names_no_concrete_backup_it_is_deciding():
+    """#2323 clause 3: that file's claim about itself is true of that file.
+
+    The block above `LIVE_SIDECARS` states that no concrete `index.sqlite.bak-<date>` name
+    is spelled out anywhere in the file, and that it is deliberate. Until #2323 the
+    sentence sat four lines from a docstring spelling one, and the `-wal` form of it
+    substring-matched the base name the hold asks about — so the file declaring the rule
+    was the file breaking it, and the candidate that docstring named was 1,327,300,608 B.
+
+    The tree-wide absence above cannot stand in for this one: that is a claim about the
+    names in today's pile, this is a claim about one file's own prose, and prose is what
+    the comment is talking about. The positive half is pinned too, because an assertion of
+    absence is satisfiable by deleting the sentence that made the promise.
+    """
+    src = SCRIPT.read_text(encoding="utf-8")
+    offenders = [ln for ln in src.splitlines() if CONCRETE_BAK_REF.search(ln)]
+    assert offenders == [], f"concrete backup names in the module that holds on them: {offenders}"
+    assert "No concrete" in src and "spelled out" in src, (
+        "the module no longer states the rule this node enforces, so the node is vacuous")
+    assert "Sidecars are excluded" in src, (
+        "the docstring that explains the sidecar/prefix relation is gone, and it is what "
+        "the concrete name used to stand in for")
+    assert "code_reference_hits" in src, "the hold this rule exists to feed is gone"
 
 
 def test_a_stray_outside_the_backup_series_is_held_for_a_person_and_never_deleted(

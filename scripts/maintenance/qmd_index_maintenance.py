@@ -345,7 +345,12 @@ def index_footprint(index: Path) -> dict:
 # and that is deliberate: `code_reference_hits` below matches a candidate's exact
 # filename against the text of every `*.py`/`*.ts`/`*.sh`/`*.yml` in this tree, so a
 # mention of one here would "find a reader" in the file that is deciding its fate —
-# prose mistaken for a program, and a hold nobody could justify afterwards.
+# prose mistaken for a program, and a hold nobody could justify afterwards. That is not
+# hypothetical: on 2026-10-06 two candidates totalling 2,577,506,304 B were held by
+# prose in this tree, one of them by a docstring in this very file that substring-matched
+# the base name through its `-wal`. A measured name belongs in the report that measured
+# it (`tests/fixtures/*.json`, which `CODE_REF_SUFFIXES` does not read), never in scanned
+# source, and `tests/test_qmd_index_maintenance.py` re-derives both halves of that rule.
 #
 # LIVE_SIDECARS are sqlite's own companions, not separate copies of anything.
 LIVE_SIDECARS = ("-wal", "-shm")
@@ -359,7 +364,7 @@ BACKUP_INFIX = ".bak"
 #: 1,250,205,696 B unreclaimable across every run from 2026-09-28 to 2026-10-03, on a
 #: reason ("something has opened it read-write since") that was false on its face. The
 #: touches that *do* mean a reader are days wide: the 2026-09-27 pile had
-#: `bak-gemma`'s `-wal` at 09-24 13:36 and both `-shm` files at 09-24 14:07 against
+#: the 09-21 copy's `-wal` at 09-24 13:36 and both `-shm` files at 09-24 14:07 against
 #: main files from 09-19 and 09-21, and both `-shm` files were stamped again
 #: 2026-10-02 19:11:48 and 19:12:39 — 51 s apart, the evening before that night's run.
 #: 60 seconds leaves the 2 ms artifact four orders of magnitude below it and the
@@ -441,11 +446,13 @@ def code_reference_hits(names: list[str] | set[str],
 def bak_series(index: Path | None = None) -> list[Path]:
     """The `index.sqlite.bak*` main files, newest mtime first.
 
-    Sidecars are excluded even though `index.sqlite.bak-gemma-20260921-wal` matches
-    the prefix as a string: it is not a copy of anything, it belongs to the database
-    beside it, and counting it would let a 0-byte WAL be "the newest backup" and put
-    the real copy on the delete list. Name order is not the key — the date inside a
-    name is whoever made it, so mtime is what decides which copy is newest.
+    Sidecars are excluded even though a copy's own `-wal` or `-shm` matches the same
+    prefix as a string — the file suffixes in `LIVE_SIDECARS` are what say so, and no
+    concrete backup name is spelled out here to show it, for the reason the block above
+    `LIVE_SIDECARS` gives. A sidecar is not a copy of anything: it belongs to the
+    database beside it, and counting it would let a 0-byte WAL be "the newest backup"
+    and put the real copy on the delete list. Name order is not the key — the date
+    inside a name is whoever made it, so mtime is what decides which copy is newest.
     """
     index = INDEX if index is None else index
     d = index.parent
