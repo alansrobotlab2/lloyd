@@ -528,6 +528,101 @@ def test_standing_problem_5_records_the_656_rejection_and_its_bar():
     assert "re-proposing" in low, "the condition no longer reads as a bar on a re-proposal"
 
 
+# ── clause (#2331): a standing problem names a metric, never a frozen figure ─
+#
+# Bullet 1 has read "(0.55 hit rate)" since 2026-09-08 (`2db8a25f`, and `git
+# log -S` finds no other commit touching that string), while the nightly it
+# describes moved twice: the dated snapshot further down this file carries
+# `entity_hit_rate` 0.37 for the 2026-09-23 run, and the newest baseline on
+# disk (`nightly-20261006-20261006-060353.json`) reads 0.652. Nothing went red
+# for any of it, because no rung owns a figure written into prose with no run
+# beside it — so the stale number kept telling the idea generator how bad
+# entity identification was. The retrieval snapshot is the copy of that metric
+# this document may carry numbers for, because
+# `test_metric_snapshot_numbers_match_the_file_they_name` re-reads it from the
+# baseline file it names. The standing-problems list has no such owner, so it
+# carries none: it names the metric and sends the reader to *Live measurements*.
+
+_BARE_DECIMAL_FIGURE = re.compile(r"(?<![\d.])[0-9]+\.[0-9]+(?![\d.])")
+
+
+def _bare_decimal_figures(text: str) -> list[str]:
+    """Every bare decimal figure in `text`, e.g. a hit rate written as `0.55`.
+
+    Deliberately broad: any decimal in the standing-problems section is a
+    measurement restated in prose with no run named beside it, which is the
+    class #2331 is about. Figures that belong in the document — the dated
+    snapshot re-read from its baseline JSON, the counters read at runtime — sit
+    in other sections and are untouched by this.
+    """
+    return _BARE_DECIMAL_FIGURE.findall(text)
+
+
+def test_standing_problem_1_names_the_metric_instead_of_a_frozen_hit_rate():
+    """Clause 1: the stale figure is gone and what replaces it is the metric
+    name plus the route to its current value.
+    """
+    bullet = _numbered_problem(1)
+    assert bullet.startswith("1. Entity identification in retrieval"), (
+        "standing problem #1 is the entity-identification one; the nine-item "
+        "count alone would not notice it being replaced by another bullet"
+    )
+    assert "entity_hit_rate" in bullet, (
+        "the bullet no longer names the metric it is about, so a reader has no "
+        "route to the current figure"
+    )
+    assert not _bare_decimal_figures(bullet), (
+        f"standing problem #1 carries {sorted(set(_bare_decimal_figures(bullet)))}: "
+        "a rate written into this list has no run behind it and no rung that "
+        "re-reads it, which is how the figure #2331 removed outlived every "
+        "nightly that still supported it"
+    )
+    assert "## Live measurements" in PROFILE.read_text(), (
+        "bullet 1 defers to *Live measurements* for the current value, so that "
+        "pointer has to resolve in this document"
+    )
+
+
+def test_no_standing_problem_carries_a_bare_decimal_figure():
+    """Clause 2: the rule is the whole section, not one bullet.
+
+    The nine is the same nine `test_standing_problems_list_still_has_its_nine_items`
+    pins; if that count is ever revised, this range is revised with it, or the
+    new bullet escapes the rule.
+    """
+    offenders = {n: _bare_decimal_figures(_numbered_problem(n)) for n in range(1, 10)}
+    offenders = {n: f for n, f in offenders.items() if f}
+    assert not offenders, (
+        f"standing problems {offenders} carry a bare decimal figure. A number "
+        "in this list goes stale silently: name the metric and where its "
+        "current value lives instead (*Live measurements* below), and keep "
+        "dated figures in the retrieval snapshot, which "
+        "`test_metric_snapshot_numbers_match_the_file_they_name` owns"
+    )
+
+
+def test_the_bare_decimal_rule_fires_on_a_planted_hit_rate():
+    """Clause 2's positive control: `0.652` planted in bullet 1 has to trip the
+    detector, and the real bullet must not. Without this, the node above passes
+    on a pattern that matches nothing at all — the exact way a doc-claim test
+    goes decorative.
+    """
+    bullet = _numbered_problem(1)
+    assert not _bare_decimal_figures(bullet), (
+        "the control proves nothing while the real bullet already carries a "
+        "figure: planted and real would fire identically"
+    )
+    planted = bullet.replace("in retrieval", "in retrieval (0.652 hit rate)", 1)
+    assert planted != bullet, (
+        "the control no longer matches bullet 1's wording, so it plants nothing "
+        "and the detector is being graded against an empty input"
+    )
+    assert _bare_decimal_figures(planted) == ["0.652"], (
+        f"planting `0.652` in bullet 1 did not fire the detector "
+        f"(got {_bare_decimal_figures(planted)})"
+    )
+
+
 def test_every_arm_path_the_surfaces_section_names_resolves():
     """Clause 5: this section is where a proposing session checks what already
     exists, so every path in it is a pointer a reader is sent to — the same

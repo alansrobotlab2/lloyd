@@ -173,8 +173,10 @@ projects. It also modifies its own code through a gated loop.
 
 ## Standing problems worth solving (an idea that hits one of these is more valuable)
 
-1. Entity identification in retrieval (0.55 hit rate): synonyms, oblique
-   references, sibling entities with thin facts.
+1. Entity identification in retrieval — the metric is `entity_hit_rate`, and
+   its current value is the newest nightly baseline under *Live measurements*
+   below, never a number frozen here: synonyms, oblique references, sibling
+   entities with thin facts.
 2. Long-turn context management: 50+ iteration turns, compaction is
    truncation-shaped; no learned summarisation or working-memory scratchpad
    beyond todos.
