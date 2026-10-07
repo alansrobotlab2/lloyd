@@ -1693,6 +1693,36 @@ def _clause_index(raw: dict) -> int | None:
     return idx if idx >= 1 else None
 
 
+def clause_answer_gaps(chunk: list[int], obj: dict) -> tuple[list[int], list[int]]:
+    """`(missing, repeated)` contract indices in ONE call's answer.
+
+    The very test `merge_grading_chunks` applies to the whole contract, computed for
+    one slice, so `grade_vault` can re-ask exactly the indices a call skipped
+    (#2341) instead of discarding the verdicts it did get: item #2335's first
+    grading answered clause 1 of "clause(s) 1, 2, 3" and the whole call was thrown
+    away, because the merge could only report the whole. One computation shared by
+    both readers is the point — a second copy would be a second definition of what
+    "answered" means, which is how a slice gets graded twice on one side and not on
+    the other. An entry naming a clause OUTSIDE `chunk` is not a gap either way:
+    the merge drops it as over-eagerness, and re-asking it would be a fourth verdict.
+    """
+    wanted = set(chunk)
+    counts: dict[int, int] = {}
+    for raw in (obj.get("clauses") if isinstance(obj.get("clauses"), list) else []):
+        if not isinstance(raw, dict):
+            continue
+        idx = _clause_index(raw)
+        if idx in wanted:
+            counts[idx] = counts.get(idx, 0) + 1
+    return (sorted(wanted - set(counts)),
+            sorted(idx for idx, seen in counts.items() if seen > 1))
+
+
+def _per_call_phrase(size: int) -> str:
+    """`3 clauses per call` / `1 clause per call` — the size a call reached."""
+    return f"{int(size)} clause{'s' if int(size) != 1 else ''} per call"
+
+
 def merge_grading_chunks(chunks: list[list[int]], answers: list[dict]) -> tuple[dict | None, str]:
     """One object for `parse_review`, joined from the per-call grader answers.
 
@@ -1721,18 +1751,7 @@ def merge_grading_chunks(chunks: list[list[int]], answers: list[dict]) -> tuple[
         src = obj if isinstance(obj, dict) else {}
         if str(src.get("premise") or "").strip().lower() == "unsound":
             merged["premise"] = "unsound"
-        wanted = set(chunk)
-        counts: dict[int, int] = {}
-        for raw in (src.get("clauses") if isinstance(src.get("clauses"), list) else []):
-            if not isinstance(raw, dict):
-                continue
-            idx = _clause_index(raw)
-            if idx not in wanted:
-                continue
-            counts[idx] = counts.get(idx, 0) + 1
-            merged["clauses"].append(raw)
-        missing = sorted(wanted - set(counts))
-        repeated = sorted(idx for idx, seen in counts.items() if seen > 1)
+        missing, repeated = clause_answer_gaps(chunk, src)
         if missing or repeated:
             bits = []
             if missing:
@@ -1741,6 +1760,10 @@ def merge_grading_chunks(chunks: list[list[int]], answers: list[dict]) -> tuple[
                 bits.append("two verdicts for clause(s) " + _idx_text(repeated))
             return None, (f"{'; '.join(bits)} in the answer for clause(s) "
                           f"{_idx_text(chunk)} (call {n} of {len(chunks)})")
+        wanted = set(chunk)
+        for raw in (src.get("clauses") if isinstance(src.get("clauses"), list) else []):
+            if isinstance(raw, dict) and _clause_index(raw) in wanted:
+                merged["clauses"].append(raw)
         for key in ("test_honesty", "seams_unverified"):
             got = src.get(key)
             merged[key].extend(got if isinstance(got, list) else [])
@@ -1766,6 +1789,19 @@ def grade_vault(*, item_id: int, paths: list[str], diff: str,
     contract clause ungraded or grades one twice. Those two are the abstentions
     with a mechanism behind them, and `vault_round.land` records them
     `blocking: true` rather than as another `skipped` the landing went ahead on.
+
+    Neither of those two is reported until the failing clauses have been re-asked
+    smaller (#2341). A generation that diverges or leaves some of its slice
+    unanswered is retried for exactly those indices at half the clauses per call,
+    down to one clause per call, inside this one call to `grade_vault`; a contract
+    that only comes back after such a shrink is an ordinary grading, so
+    `vault_round.land` writes no blocking row and `_vault_review_attempts` does not
+    move. Only a failure that survives shrinking reaches `diverged`/`incomplete`,
+    because a row of either kind is one of the item's two review attempts and the
+    grader's inability to finish a 3-clause chunk is not a verdict on the change.
+    The generations are bounded by the contract, not by a retry counter: each re-ask
+    covers strictly fewer clause indices than the call that failed, so at most
+    `2 * n - 1` issue for an n-clause contract, and shrinking stops at one per call.
 
     `clauses` is `[{clause, verdict}]` after `parse_review`'s downgrades, one
     per clause the grader judged, and `[]` whenever it did not grade. It rides
@@ -1813,9 +1849,27 @@ def grade_vault(*, item_id: int, paths: list[str], diff: str,
     # contract. `CLAUSES_PER_CALL` is why a 6-clause item is two 3-clause answers
     # rather than one answer that runs past the finalizer's 8192 tokens and
     # records nothing — the failure #2240 capped the leaves of and did not stop.
-    chunks = clause_chunks(len(contract["clauses"]))
-    answers: list[dict] = []
-    for n, chunk in enumerate(chunks, 1):
+    # #2341: a slice the generation cannot hold is RE-ASKED smaller, down to one
+    # clause per call, before any failure is reported. Reporting the first diverged
+    # call instead — which is all this ever did — spends one of the item's two
+    # review attempts on a grading that never happened: item #2335 burned both of
+    # its attempts on the identical 3-clause chunk (`attempt: 1 kind: incomplete`
+    # at 2026-10-07T07:34:24Z, `attempt: 2 kind: diverged` at 07:35:58Z, both
+    # counted by `vault_round._vault_review_attempts` against `VAULT_REVIEW_MAX`),
+    # which is #2240's "permanently unlandable" shape reborn on the vault route.
+    # The re-ask is bounded by the contract, not by a counter: every recursive call
+    # covers strictly fewer of its clause indices than the call that failed, so the
+    # generations one `grade_vault` issues are at most `2 * n - 1` for an n-clause
+    # contract, and shrinking stops at one clause per call.
+    n_clauses = len(contract["clauses"])
+    answered: list[list[int]] = []          # slices that came back clean, in ask order
+    objs: list[dict] = []                   # the answer object for each of those slices
+    generations: list[list[int]] = []       # every generation this grading issued
+
+    def ask(chunk: list[int]) -> tuple[dict | None, list[int], tuple[str, str] | None]:
+        """One generation over `chunk`: its answer, the clause indices it earned,
+        and the failure it produced (`None` when there was none)."""
+        generations.append(list(chunk))
         prompt = build_vault_prompt(contract=contract, paths=paths, diff=diff, vault=vault,
                                     landing_clauses=[i for i in landing if i in chunk],
                                     clause_indices=chunk)
@@ -1826,21 +1880,102 @@ def grade_vault(*, item_id: int, paths: list[str], diff: str,
             if generation_diverged(res.get("error")):
                 # Not `skipped`. A diverged grading is this item's named failure,
                 # and `vault_round.land` writes it `blocking: true` so a second
-                # one refuses the land rather than committing a verdict-less row.
-                return (GRADER_DIVERGED,
-                        f"grader generation diverged answering clause(s) "
-                        f"{_idx_text(chunk)} (call {n} of {len(chunks)}): "
-                        f"{res.get('error')}", [])
-            return "skipped", f"grader did not answer: {res.get('error')}", []
+                # one refuses the land rather than committing a verdict-less row —
+                # but only once `answer` has tried a smaller call for it.
+                return None, [], (GRADER_DIVERGED,
+                                  f"grader generation diverged answering clause(s) "
+                                  f"{_idx_text(chunk)} ({_per_call_phrase(len(chunk))}): "
+                                  f"{res.get('error')}")
+            return None, [], ("skipped", f"grader did not answer: {res.get('error')}")
         obj = res["structured"] if isinstance(res["structured"], dict) else {}
         if str(obj.get("premise") or "").strip().lower() not in ("sound", "unsound"):
             # #955's six wordings stay six wordings: an object that is not a
             # review at all is a different abstention from a review that left a
             # clause out, and collapsing them is what that test exists to stop.
-            return "skipped", "grader returned an unusable object", []
-        answers.append(obj)
-    merged, why = merge_grading_chunks(chunks, answers)
+            return None, [], ("skipped", "grader returned an unusable object")
+        missing, repeated = clause_answer_gaps(chunk, obj)
+        ungraded = sorted(set(missing) | set(repeated))
+        ok = [i for i in chunk if i not in set(ungraded)]
+        if ungraded:
+            bits = []
+            if missing:
+                bits.append("no verdict for clause(s) " + _idx_text(missing))
+            if repeated:
+                bits.append("two verdicts for clause(s) " + _idx_text(repeated))
+            return obj, ok, (GRADER_INCOMPLETE,
+                             f"{'; '.join(bits)} in the answer for clause(s) "
+                             f"{_idx_text(chunk)} ({_per_call_phrase(len(chunk))})")
+        return obj, list(chunk), None
+
+    def answer(chunk: list[int]) -> tuple[str, str] | None:
+        """Grade `chunk`, re-asking what it could not answer at a smaller size.
+
+        `None` once every index is answered; the `(kind, why)` of the failure that
+        survived shrinking otherwise. A `skipped` is returned at once and never
+        shrinks: a backend that 503s says nothing about the contract's size, and
+        issuing more generations against it is #955's unlabelled abstention repeated
+        N times over. A partially answered call KEEPS its verdicts — #2335's first
+        grading earned clause 1 of three and that verdict was thrown away, which is
+        both a lost grade and a re-ask that re-bills a clause already graded.
+        """
+        obj, ok, failure = ask(chunk)
+        if failure is not None and failure[0] == "skipped":
+            return failure
+        if obj is not None and ok:
+            answered.append(list(ok))
+            objs.append(obj)
+        if failure is None:
+            return None
+        remaining = [i for i in chunk if i not in set(ok)]
+        # Half the clauses PER CALL of the slice that failed, floored at one: a
+        # 3-clause slice comes back as three single-clause asks, a 6-clause one as
+        # three pairs. Floor-halving of the FAILED slice's size (not of the
+        # remaining count) is what makes each re-ask strictly smaller than the call
+        # it replaces, which is the only reason a second generation is worth
+        # billing: #2240 capped what the schema ADMITS, #2263's `CLAUSES_PER_CALL`
+        # bounded the PLANNED call, and item #2335 still diverged at 3 clauses per
+        # call on 2026-10-07T07:35:58Z with clause 1's own fields unclosed at 8192
+        # tokens. One clause per call is the last size worth trying, and a slice of
+        # one is the fixed point where this returns the failure.
+        size = max(1, min(len(chunk) // 2, len(remaining) or 1))
+        subs = [remaining[i:i + size] for i in range(0, len(remaining), size)]
+        if len(subs) == 1 and subs[0] == list(chunk):
+            # One clause per call, and it still failed: shrinking has nothing left
+            # to give, so this is the failure `vault_round.land` may record blocking.
+            return failure
+        for sub in subs:
+            sub_failure = answer(sub)
+            if sub_failure is not None:
+                # The trail FIRST, because `vault_round.land` truncates this to 800
+                # characters for the refusal and the divergence error behind it runs
+                # to several hundred: the clause indices left ungraded and the
+                # per-call size reached have to survive that cut.
+                return (sub_failure[0],
+                        f"[clause(s) {_idx_text(chunk)} asked at "
+                        f"{_per_call_phrase(len(chunk))} shrank to "
+                        f"{_per_call_phrase(size)}] {sub_failure[1]}")
+        return None
+
+    for planned in clause_chunks(n_clauses):
+        failure = answer(planned)
+        if failure is not None:
+            kind, why = failure
+            if len(generations) > 1:
+                # How many generations it took to fail, so the ledger row says
+                # whether shrinking was tried at all: `grep -c "grading generations
+                # issued"` over the `vault_review` rows is what separates "the
+                # shrink did not help" from "the shrink never ran", which is the
+                # measurement #2341 leaves owed.
+                why = f"{why} [{len(generations)} grading generations issued]"
+            return kind, why, []
+    merged, why = merge_grading_chunks(answered, objs)
     if merged is None:
+        # Unreachable while every slice was gap-checked by the same helper the merge
+        # applies — kept because the merge is the single reader of a grading, and a
+        # future caller that appends without checking must not land a partial
+        # contract. `tests/test_automod_review.py::
+        # test_merge_grading_chunks_is_the_single_reader_of_both_sides` pins the
+        # check itself.
         return (GRADER_INCOMPLETE, f"grader returned no verdict for every clause: {why}", [])
     # `paths` IS the lander's list — `vault_round._vault_review` passes `land()`'s own
     # normalised argument — and it is the only witness a deletion clause has: the file it

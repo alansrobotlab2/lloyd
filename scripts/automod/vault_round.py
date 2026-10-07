@@ -1276,12 +1276,20 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
                                 "reverted": undone, "review": kind,
                                 "review_reason": findings[:600],
                                 "review_clauses": [], "landing_clauses": []})
+            # #2341: the non-final sentence used to end "land again, whose next
+            # attempt grades the contract in smaller pieces" while nothing about the
+            # chunking was attempt-dependent — every re-plan lives inside one
+            # `grade_vault` call, so the instruction reproduced the identical
+            # 3-clause chunk that had just spent the previous attempt (item #2335's
+            # two rows both name "clause(s) 1, 2, 3 (call 1 of 2)"). The shrinking
+            # now happens before this row is ever written, and `findings` above names
+            # the clause indices left ungraded and the per-call size reached. What
+            # remains is the only promise this route can keep: the edits stand.
             raise VaultRoundError(
                 f"review: grader could not grade the contract ({attempts}/"
                 f"{VAULT_REVIEW_MAX}): {findings[:800]}"
-                + ("; the edits were reverted" if undone else
-                   "; the edits are still in place — land again, whose next attempt grades "
-                   "the contract in smaller pieces"))
+                + ("; the edits were reverted" if undone
+                   else "; the edits are still in place — land again"))
         # #2263 clause 4: once the retries are spent, an item-bound land needs a
         # verdict, not a land row. `review: skipped` with `landing_clauses: []`
         # used to be committable, and `backlog.vault_review_outcome` correctly

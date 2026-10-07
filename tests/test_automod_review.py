@@ -4011,11 +4011,17 @@ def test_a_grading_call_names_only_the_clauses_it_is_answering(isolated, monkeyp
     translation and a grader cannot renumber its way into a gap."""
     _six_clause_item(isolated, 602, tmp_path)
     prompts = []
-    monkeypatch.setattr(RV, "run_grader",
-                        lambda **kw: (prompts.append(kw["prompt"]), _met_answer([4, 5, 6]))[1])
+
+    def answer_what_is_asked(**kw):
+        prompts.append(kw["prompt"])
+        return _met_answer(_asked_clauses(kw["prompt"]))
+    monkeypatch.setattr(RV, "run_grader", answer_what_is_asked)
     RV.grade_vault(item_id=602, paths=["skills/x/SKILL.md"], diff="+x", vault=isolated,
                    attempt=1)
-    # `grade_vault` issues two calls; the second is the one that asks for 4-6.
+    # Nothing fails here, so the two PLANNED calls are the whole transcript (#2341
+    # added a re-ask, and a re-ask needs a failure to be about), and the second is
+    # the one that asks for 4-6.
+    assert len(prompts) == 2, "a grading that fails nothing issues only planned calls"
     last = prompts[-1]
     for i in (4, 5, 6):
         assert f"{i}. {SIX_CLAUSES[i - 1]}" in last
@@ -4040,31 +4046,60 @@ def test_a_merged_grading_that_leaves_a_clause_unanswered_is_no_verdict(
     """#2263 clause 2. A grader that answers 4 of 6 did not grade the contract;
     before this it arrived as a `retry` refusal carrying a synthesized `partial`
     for the clause nobody looked at, which is a verdict on the change invented
-    from the grader's silence."""
+    from the grader's silence.
+
+    The stub now answers every generation the same way — clause 5 is the one it
+    cannot answer, at any size — because #2341 clause 1 made `grade_vault` re-ask
+    the skipped index at one clause per call before it may report anything. The
+    assertion this test exists for is unchanged: a contract with an unanswerable
+    clause comes back `incomplete` with NO verdicts, and the refusal now names the
+    shrink it tried first."""
     _six_clause_item(isolated, 603, tmp_path)
-    answers = [_met_answer([1, 2, 3]), _met_answer([4, 6])]
-    calls = iter(answers)
-    monkeypatch.setattr(RV, "run_grader", lambda **kw: next(calls))
+    asked = []
+
+    def never_clause_5(**kw):
+        slice_ = _asked_clauses(kw["prompt"])
+        asked.append(slice_)
+        return _met_answer([i for i in slice_ if i != 5])
+    monkeypatch.setattr(RV, "run_grader", never_clause_5)
     kind, why, clauses = RV.grade_vault(item_id=603, paths=["skills/x/SKILL.md"], diff="+x",
                                        vault=isolated)
     assert kind == RV.GRADER_INCOMPLETE
     assert clauses == [], "an unanswered clause must not be answered for the grader"
-    assert "no verdict for clause(s) 5" in why and "call 2 of 2" in why, why
+    assert "no verdict for clause(s) 5" in why, why
+    # The skipped index was re-asked alone, not merely reported: 1-3, then 4-6,
+    # then clause 5 by itself at the smallest chunk there is.
+    assert asked == [[1, 2, 3], [4, 5, 6], [5]], asked
+    assert "shrank to 1 clause per call" in why, why
 
 
 def test_a_merged_grading_that_grades_one_clause_twice_is_no_verdict(
         isolated, monkeypatch, tmp_path):
     """The same failure in the other direction: two verdicts for clause 5 mean one
     of them is about something else, and `vault_review_outcome` counts rows, so a
-    duplicate is how a five-row verdict passes for a six-clause contract."""
+    duplicate is how a five-row verdict passes for a six-clause contract. The
+    duplicate survives the re-ask here, which is what lets this report at all
+    (#2341 clause 3): a failure that shrinking could not fix is the one that may
+    be recorded."""
     _six_clause_item(isolated, 604, tmp_path)
-    answers = [_met_answer([1, 2, 3]), _met_answer([4, 5, 5])]
-    calls = iter(answers)
-    monkeypatch.setattr(RV, "run_grader", lambda **kw: next(calls))
+    asked = []
+
+    def duplicates_clause_5(**kw):
+        slice_ = _asked_clauses(kw["prompt"])
+        asked.append(slice_)
+        if slice_ == [1, 2, 3]:
+            return _met_answer([1, 2, 3])
+        if slice_ == [5]:
+            return _met_answer([5, 5])
+        return _met_answer([4, 5, 5])
+    monkeypatch.setattr(RV, "run_grader", duplicates_clause_5)
     kind, why, clauses = RV.grade_vault(item_id=604, paths=["skills/x/SKILL.md"], diff="+x",
                                        vault=isolated)
     assert kind == RV.GRADER_INCOMPLETE and clauses == []
     assert "two verdicts for clause(s) 5" in why, why
+    # 5 and 6 are the indices the second call left unusable, and re-asking stops at
+    # the first one that fails again: clause 6 is never billed a generation.
+    assert asked == [[1, 2, 3], [4, 5, 6], [5]], asked
 
 
 def test_a_grader_that_answers_every_call_at_once_still_merges(
@@ -4104,16 +4139,28 @@ def test_a_grader_cut_off_mid_generation_answers_diverged_not_skipped(
     """The `#2260` error verbatim, out of the ledger row at 2026-10-06T01:31:39Z.
     `skipped` is what `land()` used to receive, and it is the word that let the
     land commit with `review: skipped`; `diverged` is a named mechanism with a
-    measured denominator, so `land` can make it blocking."""
+    measured denominator, so `land` can make it blocking.
+
+    The assertions about the text changed with #2341: this stub diverges at EVERY
+    size, so the reported failure is now the one that survived shrinking — clause 1
+    alone at one clause per call, after the 3-clause chunk — and it names the size
+    it reached rather than which call of a fixed plan it was. A divergence the
+    shrink could not get past is still `diverged` with no clauses."""
     _six_clause_item(isolated, 606, tmp_path)
     err = ('finalizer failed: generation diverged at 8192 tokens — every field this schema '
            'admits is capped, so the object running past them is malformed output, not a '
            'budget (\'{"premise":"sound","clauses":[{"clause":1,"verdict":"met"')
-    monkeypatch.setattr(RV, "run_grader", lambda **kw: {"ok": False, "error": err})
+    asked = []
+    monkeypatch.setattr(RV, "run_grader",
+                        lambda **kw: (asked.append(_asked_clauses(kw["prompt"])),
+                                      {"ok": False, "error": err})[1])
     kind, why, clauses = RV.grade_vault(item_id=606, paths=["skills/x/SKILL.md"], diff="+x",
                                        vault=isolated)
     assert kind == RV.GRADER_DIVERGED and clauses == []
-    assert "clause(s) 1, 2, 3" in why and "call 1 of 2" in why, why
+    assert asked == [[1, 2, 3], [1]], f"one re-ask, at one clause: {asked}"
+    assert "clause(s) 1, 2, 3 asked at 3 clauses per call shrank to 1 clause per call" in why, why
+    assert "answering clause(s) 1 (1 clause per call)" in why, why
+    assert "[2 grading generations issued]" in why, why
     assert RV.generation_diverged(err) is True
     # The abstentions that are NOT this item's: a backend that 503s says nothing
     # about the contract's size, and stays a `skipped` the land can still make.
@@ -4122,3 +4169,152 @@ def test_a_grader_cut_off_mid_generation_answers_diverged_not_skipped(
                         lambda **kw: {"ok": False, "error": "engine unavailable: 503"})
     assert RV.grade_vault(item_id=606, paths=["skills/x/SKILL.md"], diff="+x",
                           vault=isolated)[0] == "skipped"
+
+
+# ── #2341: a slice the generation cannot hold is re-asked smaller, not reported ──
+#
+# Item #2335 (two paragraphs added to `skills/youtube-digest/SKILL.md`, five
+# acceptance clauses) was refused twice in a row by `automod_vault_land` on
+# 2026-10-07 with the grader producing no verdict at all, and the second refusal
+# reverted the edits. Both of its ledger rows name the SAME chunk:
+# `attempt: 1 kind: incomplete` at 07:34:24Z and `attempt: 2 kind: diverged` at
+# 07:35:58Z, each "call 1 of 2" on "clause(s) 1, 2, 3", because chunking was
+# attempt-independent and `VAULT_REVIEW_MAX = 2` counts a grader failure as one of
+# the item's two attempts. What follows pins the re-ask that has to happen inside
+# ONE `grade_vault` call so a grading the grader could not finish is never the
+# thing that spends an attempt.
+
+FIVE = [f"clause {i} of a five-clause vault contract" for i in range(1, 6)]
+
+
+def _five_clause_item(isolated, item_id, tmp_path, clauses=None):
+    """A #2335-shaped contract: five clauses, so the plan is [1,2,3] then [4,5]."""
+    texts = list(clauses or FIVE)
+    write_item(isolated, item_id, clauses=texts)
+    _confirm(item_id, acceptance="; ".join(texts), clauses=texts, surface="vault")
+    (isolated / "skills" / "x").mkdir(parents=True, exist_ok=True)
+    (isolated / "skills" / "x" / "SKILL.md").write_text("x\n", encoding="utf-8")
+    return texts
+
+
+def _asked_from(texts):
+    """A detector for which clauses ONE prompt names, for an arbitrary contract."""
+    def detect(prompt):
+        return [i for i, t in enumerate(texts, 1) if f"{i}. {t}" in prompt]
+    return detect
+
+
+def test_a_chunk_that_diverges_is_re_asked_one_clause_per_call_and_graded(
+        isolated, monkeypatch, tmp_path):
+    """#2341 clause 1 on #2335's own shape: a 3-clause chunk that cannot finish at
+    8192 tokens is re-asked as single clauses INSTEAD of being reported, and the
+    contract comes back complete — an ordinary review, five verdicts, no failure
+    kind for a grader that merely needed a smaller question."""
+    texts = _five_clause_item(isolated, 607, tmp_path)
+    asked = []
+    detect = _asked_from(texts)
+
+    def diverges_on_three_clauses_only(**kw):
+        slice_ = detect(kw["prompt"])
+        asked.append(slice_)
+        if len(slice_) == 3:
+            return {"ok": False, "error": "finalizer failed: generation diverged at 8192 tokens"}
+        return _met_answer(slice_)
+    monkeypatch.setattr(RV, "run_grader", diverges_on_three_clauses_only)
+    kind, why, clauses = RV.grade_vault(item_id=607, paths=["skills/x/SKILL.md"], diff="+x",
+                                       vault=isolated)
+    assert kind == "pass", why
+    assert [c["clause"] for c in clauses] == [1, 2, 3, 4, 5], clauses
+    assert all(c["verdict"] == "met" for c in clauses), clauses
+    # The 3-clause slice diverged and came back as three single-clause asks; the
+    # 2-clause slice never diverged, so it is asked once, at its planned size.
+    assert asked == [[1, 2, 3], [1], [2], [3], [4, 5]], asked
+
+
+def test_a_partially_answered_chunk_keeps_its_verdicts_and_asks_only_the_rest(
+        isolated, monkeypatch, tmp_path):
+    """#2341's own finding: `merge_grading_chunks` already KNEW which indices were
+    skipped (`missing`), yet `grade_vault` threw the whole call away — #2335's first
+    attempt graded clause 1 of "clause(s) 1, 2, 3" and lost it. The re-ask is of the
+    indices with no verdict, so a graded clause is never billed twice."""
+    texts = _five_clause_item(isolated, 608, tmp_path)
+    asked = []
+    detect = _asked_from(texts)
+
+    def drops_the_tail_of_a_three_clause_answer(**kw):
+        slice_ = detect(kw["prompt"])
+        asked.append(slice_)
+        return _met_answer(slice_[:1] if len(slice_) == 3 else slice_)
+    monkeypatch.setattr(RV, "run_grader", drops_the_tail_of_a_three_clause_answer)
+    kind, why, clauses = RV.grade_vault(item_id=608, paths=["skills/x/SKILL.md"], diff="+x",
+                                       vault=isolated)
+    assert kind == "pass", why
+    assert [c["clause"] for c in clauses] == [1, 2, 3, 4, 5], clauses
+    # Clause 1 is asked ONCE and never appears in the re-ask list: only 2 and 3 had
+    # no verdict, and the 2-clause slice came back complete at its planned size.
+    assert asked == [[1, 2, 3], [2], [3], [4, 5]], asked
+
+
+def test_shrinking_terminates_bounded_by_the_contract_size(isolated, monkeypatch, tmp_path):
+    """#2341 clause 4's bound, measured rather than asserted in prose: the re-ask
+    tree splits a failing slice into strictly smaller disjoint ones, so the
+    generations one `grade_vault` issues are at most `2 * n - 1` for an n-clause
+    contract, and shrinking stops dead at one clause per call. The stub is the
+    worst case the tree admits — every multi-clause ask diverges, and the LAST
+    clause of the contract also diverges alone, so every sibling is asked first."""
+    for n in range(1, 13):
+        item_id = 620 + n
+        texts = [f"clause {i} of a {n}-clause vault contract" for i in range(1, n + 1)]
+        _five_clause_item(isolated, item_id, tmp_path, clauses=texts)
+        asked = []
+        detect = _asked_from(texts)
+
+        def worst_case(last=n, **kw):
+            slice_ = detect(kw["prompt"])
+            asked.append(slice_)
+            if len(slice_) > 1 or slice_ == [last]:
+                return {"ok": False,
+                        "error": "finalizer failed: generation diverged at 8192 tokens"}
+            return _met_answer(slice_)
+        monkeypatch.setattr(RV, "run_grader", worst_case)
+        kind, why, clauses = RV.grade_vault(item_id=item_id, paths=["skills/x/SKILL.md"],
+                                            diff="+x", vault=isolated)
+        assert kind in RV.GRADER_FAILURE_KINDS, f"{n}: {kind} — {why}"
+        assert clauses == []
+        assert len(asked) <= 2 * n - 1, f"{n}-clause contract issued {len(asked)}: {asked}"
+        assert all(len(slice_) >= 1 for slice_ in asked)
+
+
+def test_a_single_clause_chunk_that_diverges_is_the_end_of_shrinking(
+        isolated, monkeypatch, tmp_path):
+    """One clause per call is the last size there is, so a one-clause contract gets
+    exactly one generation and its divergence is reported, not retried forever. A
+    3-clause contract is the same story one level up: the plan is already one call,
+    the shrink splits it into three, and the second of those to fail ends it."""
+    texts = _five_clause_item(isolated, 609, tmp_path, clauses=["the only clause"])
+    asked = []
+    detect = _asked_from(texts)
+
+    def always_diverges(**kw):
+        asked.append(detect(kw["prompt"]))
+        return {"ok": False, "error": "finalizer failed: generation diverged at 8192 tokens"}
+    monkeypatch.setattr(RV, "run_grader", always_diverges)
+    kind, why, clauses = RV.grade_vault(item_id=609, paths=["skills/x/SKILL.md"], diff="+x",
+                                       vault=isolated)
+    assert kind == RV.GRADER_DIVERGED and clauses == []
+    assert asked == [[1]], f"one clause per call is the fixed point: {asked}"
+    assert "1 clause per call" in why, why
+    # A clause the plan already sizes at one is not re-asked: three clauses are one
+    # planned call, and after the split the first failing single ends the grading.
+    asked.clear()
+    _five_clause_item(isolated, 610, tmp_path, clauses=["one", "two", "three"])
+    detect3 = _asked_from(["one", "two", "three"])
+    monkeypatch.setattr(RV, "run_grader", lambda **kw: (asked.append(detect3(kw["prompt"])),
+                                                        {"ok": False, "error":
+                                                         "finalizer failed: generation "
+                                                         "diverged at 8192 tokens"})[1])
+    kind, why, _ = RV.grade_vault(item_id=610, paths=["skills/x/SKILL.md"], diff="+x",
+                                  vault=isolated)
+    assert kind == RV.GRADER_DIVERGED
+    assert asked == [[1, 2, 3], [1]], asked
+    assert "[2 grading generations issued]" in why, why

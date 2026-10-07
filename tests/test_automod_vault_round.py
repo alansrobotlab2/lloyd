@@ -5236,6 +5236,167 @@ def test_a_spent_diverged_vault_review_refuses_the_land_with_a_row(vault, items,
     assert V._git("status", "--porcelain").stdout.strip() == ""
 
 
+# ── #2341: a grading the grader could not finish may not spend an attempt ─────
+#
+# Item #2335 (two paragraphs in `skills/youtube-digest/SKILL.md`, a five-clause
+# contract) was refused twice by `automod_vault_land` on 2026-10-07: `attempt: 1
+# kind: incomplete` at 07:34:24Z and `attempt: 2 kind: diverged` at 07:35:58Z,
+# every row `blocking: true`, `review_grader_failed: true`, `clauses: []`, and
+# BOTH naming "clause(s) 1, 2, 3 (call 1 of 2)". The second reverted the file.
+# Two graders that graded nothing had exhausted the item's review budget, because
+# `_vault_review_attempts` sums exactly these rows against `VAULT_REVIEW_MAX = 2`.
+# `review.grade_vault` now re-asks the failing indices at a smaller chunk INSIDE
+# one call, so the attempt is only ever spent by a failure that shrinking could
+# not get past. These three tests drive the real `land()` with the real
+# `grade_vault` and replace only `run_grader`, the backend seam.
+
+FIVE = [f"clause {i} of a five-clause vault contract" for i in range(1, 6)]
+DIVERGED_AT_8192 = ("finalizer failed: generation diverged at 8192 tokens — every field "
+                    "this schema admits is capped, so the object running past them is "
+                    "malformed output, not a budget")
+
+
+def _five_clause_asked(prompt: str) -> list[int]:
+    """Which of the five clauses ONE grading prompt asks for, read off the prompt."""
+    return [i for i, t in enumerate(FIVE, 1) if f"{i}. {t}" in prompt]
+
+
+# `_scratch_vault` commits `skills/foo/SKILL.md` as exactly COMMITTED_SKILL, so a
+# test that writes those bytes back has staged a NO-OP: `revert_paths` reports every
+# tracked path it checks out, so "reverted" and an empty `git status` would hold even
+# with nothing to undo, and "the edits are still in place" could not fail. The review
+# rung caught exactly that on this round's first attempt, so the two failure tests
+# below stage a real edit and assert the BYTES either side of the revert.
+COMMITTED_SKILL = "---\nname: foo\n---\n# foo\n"
+EDITED_SKILL = "---\nname: foo\n---\n# foo\n\n## The convention paragraph under review\n"
+
+
+def _met_vault_answer(indices: list[int]) -> dict:
+    """A `run_grader` result grading exactly those clauses `met`."""
+    return {"ok": True, "structured": {
+        "premise": "sound", "summary": "each clause read off disk", "test_honesty": [],
+        "seams_unverified": [],
+        "clauses": [{"clause": i, "verdict": "met", "evidence_path": "skills/foo/SKILL.md",
+                     "evidence_line": 1, "test_node_id": "", "how_verified": "read",
+                     "note": f"read line 1 for clause {i}"} for i in indices]}}
+
+
+def test_a_review_that_only_comes_back_after_shrinking_spends_no_attempt(vault, items,
+                                                                        monkeypatch):
+    """#2341 clause 2, on #2335's own contract. The planned 3-clause chunk
+    diverges; the same clauses answered one at a time come back fine. That is an
+    ORDINARY review — `pass`, one verdict per clause, one non-blocking row — the
+    land commits, and `_vault_review_attempts` does not move across the shrunk
+    calls, which is the whole point: #2335 is unlandable because that count moved
+    twice on a grader that never graded a single clause."""
+    write_item(items, 630, FIVE)
+    monkeypatch.setattr(V, "GRADER", RV.grade_vault)
+    asked = []
+
+    def diverge_on_a_three_clause_chunk(**kw):
+        slice_ = _five_clause_asked(kw["prompt"])
+        asked.append(slice_)
+        return ({"ok": False, "error": DIVERGED_AT_8192} if len(slice_) == 3
+                else _met_vault_answer(slice_))
+    monkeypatch.setattr(RV, "run_grader", diverge_on_a_three_clause_chunk)
+    (vault / "skills" / "foo" / "SKILL.md").write_text("---\nname: foo\n---\n# foo measured\n")
+    before = V._vault_review_attempts(630)
+    out = V.land(["skills/foo/SKILL.md"], "skill: foo names the measured convention (#630)",
+                 item_id=630)
+    assert out["review"] == "pass", out
+    # 1-3 diverged and came back as three single-clause asks; 4-5 answered at its
+    # planned size, so the shrink stops as soon as the grader can hold the question.
+    assert asked == [[1, 2, 3], [1], [2], [3], [4, 5]], asked
+    rows = _rows("vault_review", 630)
+    assert len(rows) == 1, rows
+    assert rows[0]["kind"] == "pass" and rows[0]["blocking"] is False, rows[0]
+    assert not rows[0].get("review_grader_failed"), rows[0]
+    assert [c["clause"] for c in rows[0]["clauses"]] == [1, 2, 3, 4, 5], rows[0]["clauses"]
+    lands = _rows("vault_land", 630)
+    assert len(lands) == 1 and lands[0]["ok"] is True, lands
+    assert [c["clause"] for c in lands[0]["review_clauses"]] == [1, 2, 3, 4, 5], lands[0]
+    assert V._vault_review_attempts(630) == before == 0, "the shrunk calls spent no attempt"
+
+
+def test_a_divergence_that_survives_shrinking_still_spends_an_attempt(vault, items,
+                                                                     monkeypatch):
+    """#2341 clause 3: shrinking must not become a way to land verdict-less
+    reviews for ever. This stub diverges at EVERY size, so the failure stands after
+    the shrink to one clause per call, and the rail #2240/#2260 exists for still
+    fires — attempt 1 records `diverged` with `blocking: true`, attempt 2 reverts
+    and writes the `ok: false` land row with `landing_clauses: []`, never a clean
+    `review: skipped` beside an empty clause list."""
+    write_item(items, 631, FIVE)
+    monkeypatch.setattr(V, "GRADER", RV.grade_vault)
+    monkeypatch.setattr(RV, "run_grader",
+                        lambda **kw: {"ok": False, "error": DIVERGED_AT_8192})
+    (vault / "skills" / "foo" / "SKILL.md").write_text(EDITED_SKILL)
+    # `.strip()` eats porcelain's leading status column, so the expected value has
+    # no space before the M.
+    assert V._git("status", "--porcelain").stdout.strip() == "M skills/foo/SKILL.md", \
+        "the edit under review must be a real diff, or the revert asserts nothing"
+    assert V._vault_review_attempts(631) == 0
+    with pytest.raises(V.VaultRoundError):
+        V.land(["skills/foo/SKILL.md"], "skill: foo (#631)", item_id=631)
+    rows = _rows("vault_review", 631)
+    assert len(rows) == 1, rows
+    assert rows[0]["kind"] == "diverged" and rows[0]["blocking"] is True, rows[0]
+    assert rows[0]["review_grader_failed"] is True and rows[0]["clauses"] == [], rows[0]
+    assert rows[0]["attempt"] == 1
+    assert V._vault_review_attempts(631) == 1, "a failure past the shrink IS an attempt"
+    assert _rows("vault_land", 631) == [], "attempt 1 must not write a land row"
+    head_before = _vault_head(vault)
+    with pytest.raises(V.VaultRoundError) as ei:
+        V.land(["skills/foo/SKILL.md"], "skill: foo again (#631)", item_id=631)
+    assert "reverted" in str(ei.value)
+    assert V._vault_review_attempts(631) == 2
+    lands = _rows("vault_land", 631)
+    assert len(lands) == 1 and lands[0]["ok"] is False, lands
+    assert lands[0]["review"] == "diverged"
+    assert lands[0]["landing_clauses"] == [] and lands[0]["review_clauses"] == []
+    assert _rows("vault_review", 631)[-1]["attempt"] == 2
+    assert _vault_head(vault) == _head(vault) == head_before
+    assert (vault / "skills" / "foo" / "SKILL.md").read_text() == COMMITTED_SKILL, \
+        "the revert undid a real edit, which is what makes the assertions above mean it"
+    assert V._git("status", "--porcelain").stdout.strip() == ""
+
+
+def test_the_grader_failure_refusal_names_the_indices_and_the_size_reached(
+        vault, items, monkeypatch):
+    """#2341 clause 4's prose half, on the `incomplete` survivor. The non-final
+    refusal used to end "land again, whose next attempt grades the contract in
+    smaller pieces" while nothing about the chunking was attempt-dependent — so it
+    told the author to do precisely the thing that reproduced the identical
+    3-clause chunk (#2335's two refusals both name clauses 1, 2, 3). That sentence
+    is gone, and what the refusal carries instead is the clause index left ungraded
+    and the per-call size the grading reached, ahead of the long finalizer text that
+    the 800-character cut would otherwise drop."""
+    write_item(items, 632, FIVE)
+    monkeypatch.setattr(V, "GRADER", RV.grade_vault)
+    asked = []
+
+    def answers_no_clauses(**kw):
+        asked.append(_five_clause_asked(kw["prompt"]))
+        return _met_vault_answer([])
+    monkeypatch.setattr(RV, "run_grader", answers_no_clauses)
+    (vault / "skills" / "foo" / "SKILL.md").write_text(EDITED_SKILL)
+    with pytest.raises(V.VaultRoundError) as ei:
+        V.land(["skills/foo/SKILL.md"], "skill: foo (#632)", item_id=632)
+    msg = str(ei.value)
+    assert "smaller pieces" not in msg, msg
+    assert "the edits are still in place — land again" in msg, msg
+    assert "for clause(s) 1 (1 clause per call)" in msg, msg
+    assert "asked at 3 clauses per call shrank to 1 clause per call" in msg, msg
+    assert "[2 grading generations issued]" in msg, msg
+    assert asked == [[1, 2, 3], [1]], asked
+    rows = _rows("vault_review", 632)
+    assert rows[0]["kind"] == "incomplete" and rows[0]["blocking"] is True, rows[0]
+    assert (vault / "skills" / "foo" / "SKILL.md").read_text() == EDITED_SKILL, \
+        "a first-attempt grader failure leaves the edit it refused to grade in place"
+    assert V._git("status", "--porcelain").stdout.strip() == "M skills/foo/SKILL.md", \
+        "and the working tree still carries the diff, which the no-op could not show"
+
+
 def test_a_review_that_grades_only_some_clauses_cannot_be_landed_as_pass(
         vault, items, monkeypatch):
     """#2263 clause 4 on the shape #2325 landed with: a `pass` carrying five

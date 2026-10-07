@@ -2411,6 +2411,30 @@ The day also showed three dead ends the loop could only escalate:
   saying ungraded rather than refused. Census:
   `grep -c 'generation diverged' ~/.local/state/lloyd-automod/promotions.jsonl`.
 
+  **A chunk the grader cannot hold is re-asked smaller before it is reported
+  (2026-10-07, #2341).** The paragraph above makes a grading that did not happen
+  blocking on the first attempt, and that is how item #2335 became unlandable: two
+  `vault_review` rows — `incomplete` at 07:34:24Z, `diverged` at 07:35:58Z — both
+  naming the same `clause(s) 1, 2, 3 (call 1 of 2)`, because nothing about the
+  chunking depended on the attempt, and `vault_round._vault_review_attempts` counts
+  either row against `vault_round.VAULT_REVIEW_MAX`. The retry therefore lives
+  inside one `review.grade_vault` call, not in the next attempt: a slice whose
+  generation diverges or leaves some of its indices unanswered is re-asked for
+  exactly those indices at half the clauses per call, floored at one clause per
+  call, and a contract that comes back only after such a shrink is an ordinary
+  `pass` with one verdict per clause and no blocking row. `review.clause_answer_gaps`
+  is the single gap test shared by the re-ask and `merge_grading_chunks`, so a
+  clause already graded is neither re-billed nor lost. The generations are bounded by
+  the contract, not by a counter — each re-ask covers strictly fewer indices, so at
+  most `2 * n - 1` for an n-clause contract. A failure that survives the shrink is
+  still `GRADER_DIVERGED`/`GRADER_INCOMPLETE` and still blocking, and since `land`
+  cuts `findings` at 800 characters the re-ask's trail (the indices left ungraded,
+  the per-call size reached) is written FIRST, ahead of the finalizer's own text; the
+  non-final refusal now says only that the edits are still in place, having dropped
+  the sentence that promised a next attempt in smaller pieces. Census: rows written
+  after this shipped read `grading generations issued` — zero such lines today is
+  expected until a vault land meets a divergence.
+
   **A check that can only run after the change lands is `unsatisfiable`
   before it, never `partial`** — a day of traffic, a nightly run, a number
   only production produces, a script over live data. No diff can carry that
