@@ -2,7 +2,8 @@
 
 Two separate refusals, and the difference matters. Clause 1 is about SHAPE —
 a scenario that declares no planted input cannot be scored, and a loader that
-quietly skipped it would report a suite of four when the file holds five.
+quietly skipped it would report a suite one scenario short of the one the file
+actually holds.
 Clause 2 is about IDENTITY — a manifest edited after the fact would score a
 run against scenarios nobody froze, and the scorecard would carry a hash that
 described a different file than the one that produced it.
@@ -16,6 +17,7 @@ the bytes on disk and compare, rather than re-reading the field the loader wrote
 from __future__ import annotations
 
 import copy
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -239,7 +241,8 @@ def test_the_seat_is_ceil_twenty_percent_and_never_empty(count, expected):
 
     The floor is the load-bearing half at this suite's size: 20% of 5 rounds to
     one, and a rule that produced zero would quietly retire the hold-out. The
-    ceiling is what stops the shipped manifest's 2-of-5 (40%) coming back.
+    ceiling is what stopped the 2-of-5 (40%) seat #1843 found and retired; at the
+    8 scenarios #2368 shipped the seat is 2 again, which is 25% and inside it.
     """
     manifest = _synthetic(count)
     digest = B.scenarios_hash(manifest)
@@ -252,17 +255,33 @@ def test_the_seat_is_ceil_twenty_percent_and_never_empty(count, expected):
         assert set(seat) <= {s["id"] for s in manifest["scenarios"]}
 
 
+#: The window the rotation is judged over: one calendar month per declared
+#: scenario, starting at the first month the seat existed (2026-08). Derived from
+#: the manifest rather than spelled out, because with a two-scenario seat a cycle
+#: is NOT five months any more — see the node below.
+def _convention_months(count: int) -> list[str]:
+    return [f"{2026 + (8 + i - 1) // 12:04d}-{(8 + i - 1) % 12 + 1:02d}"
+            for i in range(1, count + 1)]
+
+
 def test_the_seat_rotates_every_month_across_the_whole_suite():
-    """Five consecutive months hold out five different scenarios.
+    """Every scenario is held out exactly once inside one cycle of the rotation.
 
     Rotation is the reason a seat exists: a fixed 20% is a scenario that stops
     being measured, not one measured out of sight of whoever proposes changes.
-    With five scenarios and a one-scenario seat, one full cycle has to cover the
-    suite exactly once — and the same month has to give the same answer twice.
+
+    One cycle is `len(ids)` MONTHS, not `len(ids)` scenarios — and that is the
+    arithmetic #2368 moved when it took the suite from 5 to 8. A seat is
+    `reserve_count(n)` = ceil(20%), so a 5-scenario suite had a one-scenario seat
+    and five months covered it exactly; an 8-scenario suite has a TWO-scenario
+    seat, so five months hold out at most ten slots of a different shape and, with
+    the digest's ordering, miss scenarios entirely. Counting months off the
+    scenario count is what makes the cycle the right length at any size, and the
+    same month has to give the same answer twice.
     """
     manifest = B.load_manifest()
     ids = [str(s["id"]) for s in manifest["scenarios"]]
-    months = ["2026-08", "2026-09", "2026-10", "2026-11", "2026-12"]
+    months = _convention_months(len(ids))
     seats = [frozenset(B.reserved_scenario_ids(manifest["scenarios"],
                                                manifest_hash=DIGEST, stamp=m))
              for m in months]
@@ -272,6 +291,22 @@ def test_the_seat_rotates_every_month_across_the_whole_suite():
     assert set().union(*seats) == set(ids), (
         "one full cycle of the rotation did not cover the suite: "
         f"{sorted(set(ids) - set().union(*seats))} were never held out")
+    held = [len(s) for s in seats]
+    assert set(held) == {B.reserve_seat_count(len(ids))}, (
+        f"months of this cycle held out {sorted(set(held))} scenarios, not the "
+        f"one seat size ceil({len(ids)}/{B.RESERVE_ONE_IN}) = "
+        f"{B.reserve_seat_count(len(ids))}")
+    # Coverage means UNIFORM, not merely non-empty. Eight months of a
+    # two-scenario seat is sixteen slots over eight scenarios, so every scenario
+    # sits out exactly two months of the cycle — a rotation that held one
+    # scenario out eight times and another once would pass the union above.
+    seat_size = B.reserve_seat_count(len(ids))
+    held_by = Counter(sid for seat in seats for sid in seat)
+    assert set(held_by) == set(ids), f"a non-scenario was held out: {sorted(held_by)}"
+    assert set(held_by.values()) == {seat_size}, (
+        f"over the {len(months)}-month cycle the suite was not covered evenly: "
+        f"{dict(sorted(held_by.items()))}, expected every scenario held out "
+        f"{seat_size} times")
     assert B.reserved_scenario_ids(manifest["scenarios"], manifest_hash=DIGEST,
                                     stamp="2026-10") == \
         B.reserved_scenario_ids(manifest["scenarios"], manifest_hash=DIGEST,

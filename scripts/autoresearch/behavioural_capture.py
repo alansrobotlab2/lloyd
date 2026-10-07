@@ -24,14 +24,23 @@ same budget arithmetic, the same statuses and the same capture record, with no
 engine and no GPU. Everything this module is for — where files land, what a
 scenario that never ran is *called* — is therefore measured without a model.
 
-The bound: `DEFAULT_CAPTURE_BUDGET_SECONDS` is 600 s of wall clock per capture
-round, the ruled "cap scenarios at 10 min GPU a round". It is measured as elapsed
-wall clock because that is the only thing the capturer can observe while it
-runs; the true GPU cost of a capture round is #1659's owed item 3 and will be
+The bound: `DEFAULT_CAPTURE_BUDGET_SECONDS` is 1200 s of wall clock per capture
+round. It was 600 (the ruled "cap scenarios at 10 min GPU a round") for a
+five-scenario suite, and #2368 took the suite to eight, so the bound is now sized
+from the only capture that has ever run rather than from the round number:
+CAP_20261001_085521 finished 5 scenarios in 388.436 s with per-scenario `seconds`
+of 24.215, 55.688, 81.946, 94.849 and 131.737. Eight scenarios at that run's mean
+(77.7 s) is ~621 s, already past the old bound, and at its slowest observed
+scenario (131.7 s) eight is 1053.6 s — so 600 would have cut the suite this item
+just enlarged, and 1200 leaves margin over the slowest measured cost without
+pretending to a precision the single sample cannot support. It is measured as
+elapsed wall clock because that is the only thing the capturer can observe while
+it runs; the true GPU cost of a capture round is #1659's owed item 3 and will be
 read off the first live capture rather than asserted here. The budget is checked
 at scenario boundaries, and a scenario already in flight is allowed to finish —
 aborting a live engine run mid-call is a worse instrument than one that starts
-two scenarios instead of three.
+two scenarios instead of three, and a bound the suite cannot fit inside is not a
+budget but a silent truncation of the instrument.
 
 Reserve note: a capture runs every scenario, including the ones in this month's
 reserve. The hold-out's teeth are in the proposer never being shown a reserved
@@ -58,8 +67,15 @@ if str(Path(__file__).resolve().parents[2]) not in sys.path:
 
 from scripts.autoresearch import behavioural  # noqa: E402
 
-#: The ruled 10 minutes. Per capture round, wall clock, not per scenario.
-DEFAULT_CAPTURE_BUDGET_SECONDS = 600
+#: Wall clock per capture round, not per scenario. Was the ruled 10 minutes for a
+#: five-scenario suite; #2368 grew the suite to eight, and the bound has to fit the
+#: suite or it truncates the instrument instead of budgeting it. Sized from the only
+#: capture that has run: CAP_20261001_085521 measured per-scenario `seconds` of
+#: 24.215 / 55.688 / 81.946 / 94.849 / 131.737, so eight scenarios cost between
+#: ~621 s at that run's mean and 1053.6 s if every one ran at its slowest. 1200 s
+#: covers the second with ~14% margin. `tests/test_behavioural_capture.py::
+#: test_the_capture_budget_covers_the_suite_it_ships_with` pins the arithmetic.
+DEFAULT_CAPTURE_BUDGET_SECONDS = 1200
 
 # Statuses, and what each one obliges the scorecard to do with the scenario.
 # Anything but CAPTURED leaves the scenario unscored, and the reason recorded
@@ -565,7 +581,13 @@ def main(argv: list[str] | None = None) -> None:
                          "`round_scorecard` reads behavioural_traces/<run-id>/")
     ap.add_argument("--budget-seconds", type=float,
                     default=DEFAULT_CAPTURE_BUDGET_SECONDS,
-                    help="Wall clock for the whole capture (ruled: 600 = 10 min)")
+                    help="Wall clock for the whole capture. Default "
+                         f"{DEFAULT_CAPTURE_BUDGET_SECONDS:.0f} s: the suite ships "
+                         "8 scenarios and the only capture ever run "
+                         "(CAP_20261001_085521) measured 24.2-131.7 s per scenario, "
+                         "so 8 x the slowest is 1053.6 s. The ruled 600 s fitted the "
+                         "5-scenario suite this grew out of and would skip "
+                         "scenarios on a full run.")
     ap.add_argument("--model", default=None, help="Defaults to autoresearch.default_model")
     ap.add_argument("--engine", default="claude-sdk")
     ap.add_argument("--writes-into", default=None, metavar="DIR",

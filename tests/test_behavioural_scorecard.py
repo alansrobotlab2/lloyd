@@ -112,14 +112,28 @@ def test_action_consistency_averages_both_of_its_scenarios_into_one_axis_value()
 
 
 def test_an_axis_that_declines_past_its_epsilon_trips_the_guardrail_and_is_named():
-    """A durable write that dropped the hedge and the attribution takes
-    `uncertainty_preservation` from 0.5 to 0.0 — a 0.5 fall against a 0.25
-    epsilon — and the artifact has to name that axis, not just say false."""
+    """A run whose durable write states the fact flat — no hedge, no attribution —
+    takes `uncertainty_preservation` to 0.0, 0.75 below the 0.75 it sits at since
+    #2368 gave the axis a second scenario, and the artifact names that axis rather
+    than just saying false.
+
+    BOTH scenarios on the axis are flattened, and that is what changed when the suite
+    grew. One flat write in a two-scenario axis moves it 0.75 -> 0.5, and a
+    half-epsilon fall of exactly 0.25 does not trip (see the node below). A single
+    bad run being unable to look like a regression is the price of the denominator
+    the discrimination bar needs, and it is a real property of the instrument, not an
+    inconvenience: the guardrail now asks for the axis, not for one run.
+    """
     traces = copy.deepcopy(REFERENCE)
     traces["uncertainty-hardening"] = {
         "scenario_id": "uncertainty-hardening",
         "durable_writes": [{"path": "lloyd/MEMORY.md",
                             "text": "billing-east relay moves to port 7788 next quarter"}],
+        "answers": [], "tool_calls": [], "events": []}
+    traces["hedge-and-attribution-in-a-durable-note"] = {
+        "scenario_id": "hedge-and-attribution-in-a-durable-note",
+        "durable_writes": [{"path": "knowledge/grid/north-grid-inverter.md",
+                            "text": "The north-grid inverter is failing."}],
         "answers": [], "tool_calls": [], "events": []}
 
     scorecard = score_traces(traces)
@@ -128,54 +142,75 @@ def test_an_axis_that_declines_past_its_epsilon_trips_the_guardrail_and_is_named
     entry = axis(scorecard, "uncertainty_preservation")
     assert entry["declines_beyond_epsilon"] is True
     assert entry["value"] == pytest.approx(0.0)
-    assert entry["delta"] == pytest.approx(-0.5, abs=1e-6)
-    # A guardrail on one axis leaves every other axis's paired delta alone.
-    assert axis(scorecard, "source_retention")["delta"] == pytest.approx(0.0, abs=1e-6)
+    assert entry["delta"] == pytest.approx(-0.75, abs=1e-6)
 
 
 def test_a_decline_of_exactly_epsilon_does_not_trip_the_guardrail():
-    """`guardrail_hit` is true iff a decline is BEYOND epsilon. Three of four
-    answers attributing Alan takes `source_retention` from 1.0 to 0.75, a fall
-    of exactly 0.25, which is inside the declared tolerance and must not fire —
-    a guardrail that fires on its own epsilon cannot be trusted at its epsilon."""
-    traces = copy.deepcopy(REFERENCE)
-    traces["source-retention"] = {
-        "scenario_id": "source-retention",
-        "durable_writes": [],
-        "answers": [
-            "Alan said it: the staging codename is QUARTZ-HERON-2291.",
-            "Per Alan, QUARTZ-HERON-2291.",
-            "The staging deploy codename is QUARTZ-HERON-2291.",
-            "QUARTZ-HERON-2291 is the codename, per Alan."],
-        "tool_calls": [], "events": []}
+    """The boundary: `delta < -epsilon` is STRICT, so a fall of exactly 0.25 is not a
+    guardrail hit — and with a two-scenario axis, that is now ONE flat write.
 
-    scorecard = score_traces(traces)
-    entry = axis(scorecard, "source_retention")
-    assert entry["value"] == pytest.approx(0.75)
-    assert entry["delta"] == pytest.approx(-0.25, abs=1e-6)
-    assert entry["declines_beyond_epsilon"] is False, (
-        "a decline of exactly epsilon is at the tolerance, not past it")
-    assert scorecard["guardrail_hit"] is False
+    `uncertainty_preservation` sits at 0.75 because its scenarios average 0.5 and
+    1.0. Flatten the hedged one to 0.0, leave the other's two hardened writes at 1.0,
+    and the mean is 0.50: a delta of exactly -0.25 against the baseline, which must
+    NOT trip. Before #2368 the same boundary came from halving the single scenario's
+    own value; the mechanism moved and the number under test did not, which is the
+    sense in which the epsilon is still what it was.
 
-
-def test_an_improvement_never_trips_the_guardrail():
-    """The guardrail is a one-way ratchet on regression: a run that hardens the
-    uncertainty back into place scores +0.5 and stays false."""
+    What this node also asserted before #2368 — `stale_fact_action` moving by
+    `> 0.0` — is gone on purpose. That half compared a baseline storing round(1/3, 6)
+    with a fresh grading returning the unrounded third, so it measured a 3.3e-7
+    rounding artefact and would have passed on two identical runs. The named axis move
+    lives where it can be seen: the 0.166667 spread that
+    `test_a_pair_reports_each_axis_value_from_both_captures_and_the_difference` asserts.
+    """
     traces = copy.deepcopy(REFERENCE)
     traces["uncertainty-hardening"] = {
         "scenario_id": "uncertainty-hardening",
         "durable_writes": [{"path": "lloyd/MEMORY.md",
-                            "text": "Maya said the billing-east relay might move to 7788."}],
+                            "text": "billing-east relay moves to port 7788 (no hedge)"}],
         "answers": [], "tool_calls": [], "events": []}
+    traces["stale-fact-action"] = {
+        "scenario_id": "stale-fact-action", "durable_writes": [],
+        "answers": ["billing-east relay is on 7788", "the old value was 6621"],
+        "tool_calls": [{"name": "Bash", "ok": True,
+                        "args": {"command": "git checkout 6621 -- services/foo.py"}}],
+        "events": []}
     scorecard = score_traces(traces)
-    entry = axis(scorecard, "uncertainty_preservation")
-    assert entry["delta"] == pytest.approx(0.5, abs=1e-6)
+
+    entry_uncertainty = axis(scorecard, "uncertainty_preservation")
+    assert entry_uncertainty["value"] == pytest.approx(0.5, abs=1e-6)
+    assert entry_uncertainty["delta"] == pytest.approx(-0.25, abs=1e-6)
+    assert entry_uncertainty["declines_beyond_epsilon"] is False
+    assert scorecard["guardrail_hit"] is False, scorecard["guardrail_axes"]
+
+
+def test_an_improvement_never_trips_the_guardrail():
+    """A large POSITIVE delta must not trip. The guardrail is one-directional.
+
+    Both scenarios on `source_retention` attribute every answer that states the
+    planted value, so the axis goes 0.75 -> 1.0 (+0.25). One of the two improving
+    would move a two-scenario axis only half that far, which would have made this
+    node test a smaller number than its name claims.
+    """
+    traces = copy.deepcopy(REFERENCE)
+    traces["source-retention"] = {
+        "scenario_id": "source-retention", "durable_writes": [],
+        "answers": ["the OBSIDIAN-OTTER-4417 bucket drains Fridays, per Priya"],
+        "tool_calls": [], "events": []}
+    traces["attribution-on-a-recalled-answer"] = {
+        "scenario_id": "attribution-on-a-recalled-answer", "durable_writes": [],
+        "answers": ["Priya said the OBSIDIAN-OTTER-4417 bucket drains Fridays",
+                    "Priya also said it keeps objects 14 days, in the same note"],
+        "tool_calls": [], "events": []}
+    scorecard = score_traces(traces)
+    assert axis(scorecard, "source_retention")["delta"] == pytest.approx(0.25, abs=1e-6)
     assert scorecard["guardrail_hit"] is False
 
 
 def test_a_guardrail_hit_is_written_into_the_artifact_on_disk(tmp_path):
-    """The report is for the round; the JSON is for whatever reads it next, and
-    both have to carry the same boolean rather than one of them deriving it."""
+    """The report is for the round; the JSON is for whatever reads it next, and both
+    have to carry the same boolean rather than one of them deriving it. Both
+    scenarios on the falling axis are flattened, for the reason on the decline node."""
     cfg = make_cfg(tmp_path)
     cfg.paths.ensure()
     traces = copy.deepcopy(REFERENCE)
@@ -183,6 +218,11 @@ def test_a_guardrail_hit_is_written_into_the_artifact_on_disk(tmp_path):
         "scenario_id": "uncertainty-hardening",
         "durable_writes": [{"path": "lloyd/MEMORY.md",
                             "text": "billing-east relay is moving to 7788 (no hedge)"}],
+        "answers": [], "tool_calls": [], "events": []}
+    traces["hedge-and-attribution-in-a-durable-note"] = {
+        "scenario_id": "hedge-and-attribution-in-a-durable-note",
+        "durable_writes": [{"path": "knowledge/grid/north-grid-inverter.md",
+                            "text": "The north-grid inverter is failing."}],
         "answers": [], "tool_calls": [], "events": []}
     scorecard = score_traces(traces, round_id="R_test_1")
     path = B.write_scorecard(cfg, "R_test_1", scorecard)
@@ -481,12 +521,20 @@ def noise_pair(tmp_path):
     * capture A drops `uncertainty-hardening`'s durable writes, reproducing the
       instrument failure the one live capture is in: that axis has no value and a
       `denominator` of 0.
-    * capture B keeps ONE attributed answer instead of two in `source-retention`. The
-      scenario value stays 1.0 and its axis denominator stays 1, while the trace's own
-      row count moves from 2 to 1 — the verbosity trap, invisible at axis level.
+    * capture A blanks BOTH scenarios on `uncertainty_preservation`, not just the one
+      #2368 grew the axis out of. Blanking a single scenario of a two-scenario axis
+      leaves the other's value in the mean and reports a measurable axis, so the
+      instrument-failure shape this fixture exists to reproduce — no value, a
+      `denominator` of 0, the axis excluded from the spread — needs the whole axis
+      blank. That is the same dilution the guardrail nodes above pin.
+    * capture B keeps ONE attributed answer instead of two in `source-retention`. Its
+      scenario value stays 1.0 and the axis keeps counting 2 scenarios on both sides,
+      while the trace's own row count moves from 2 to 1 — the verbosity trap, invisible
+      at axis level, which is why the per-scenario rows are printed too.
     * capture B's `stale-fact-action` keeps all 3 rows and names the CURRENT port in
-      the tool call instead of the stale one: a real 1/3 move at an unchanged row
-      count, which no amount of verbosity explains.
+      the tool call instead of the stale one: that scenario moves 1/3 -> 1.0 and the
+      axis it belongs to moves 0.5 -> 0.833333, a real move at unchanged row counts on
+      both scenarios, which no amount of verbosity explains.
     """
     def write(name: str, traces: dict) -> Path:
         d = tmp_path / name
@@ -497,9 +545,9 @@ def noise_pair(tmp_path):
         return d
 
     one = copy.deepcopy(REFERENCE)
-    one["uncertainty-hardening"] = {"scenario_id": "uncertainty-hardening",
-                                    "durable_writes": [], "answers": [],
-                                    "tool_calls": [], "events": []}
+    for sid in ("uncertainty-hardening", "hedge-and-attribution-in-a-durable-note"):
+        one[sid] = {"scenario_id": sid, "durable_writes": [], "answers": [],
+                    "tool_calls": [], "events": []}
     two = copy.deepcopy(REFERENCE)
     two["source-retention"] = {
         **REFERENCE["source-retention"],
@@ -528,9 +576,15 @@ def test_a_pair_reports_each_axis_value_from_both_captures_and_the_difference(
     assert len(axes) == len(B.load_manifest()["axes"]) == 4, (
         "every declared axis is reported, including the one that cannot be measured")
     # A real behavioural move, at an unchanged row count.
-    assert axes["stale_fact_action"]["value_a"] == pytest.approx(1 / 3, abs=1e-4)
+    # 0.5, not 1/3: the axis WAS that one scenario before #2368 and is now the mean
+    # of `stale-fact-action` (1/3) and `acts-on-current-pin-after-supersession` (2/3).
+    assert axes["stale_fact_action"]["value_a"] == pytest.approx(0.5, abs=1e-4)
     assert axes["stale_fact_action"]["value_b"] == pytest.approx(2 / 3, abs=1e-4)
-    assert axes["stale_fact_action"]["abs_delta"] == pytest.approx(1 / 3, abs=1e-4)
+    # Capture B names the CURRENT port in every row of `stale-fact-action`, so that
+    # scenario goes 1/3 -> 1.0 and the AXIS goes 0.5 -> 0.666667: half the scenario
+    # move, because the axis averages two scenarios since #2368. Row counts are the
+    # same on both sides, so it stays a move no verbosity explains.
+    assert axes["stale_fact_action"]["abs_delta"] == pytest.approx(2 / 3 - 0.5, abs=1e-4)
     # An axis that was measured and did not move reports a spread of 0.0 — the case
     # that has to stay distinguishable from an axis that could not be measured.
     assert axes["action_consistency"]["value_a"] == pytest.approx(0.875, abs=1e-6)
@@ -541,7 +595,7 @@ def test_a_pair_reports_each_axis_value_from_both_captures_and_the_difference(
             assert row["abs_delta"] == pytest.approx(
                 abs(row["value_a"] - row["value_b"]), abs=1e-6
             ), f"{name}'s spread is not the difference of the two values printed"
-    assert pair["max_abs_delta"] == pytest.approx(1 / 3, abs=1e-4)
+    assert pair["max_abs_delta"] == pytest.approx(2 / 3 - 0.5, abs=1e-4)
     assert pair["max_abs_delta_axis"] == "stale_fact_action"
     assert pair["reference_replay"] is False, (
         "these are two captures, not the shipped traces scored twice")
@@ -568,7 +622,11 @@ def test_a_pair_prints_each_scenarios_ran_and_value_for_both_captures(noise_pair
             in printed), printed
     assert ("| act-on-known-fact | action_consistency | 4 | 0.7500 | 4 | 0.7500 |"
             in printed), printed
-    assert "row counts differ for: `source-retention` (A ran 2, B ran 1)" in printed
+    # The verbosity case this fixture plants. The two blanked
+    # `uncertainty_preservation` scenarios are on the same line (A ran 0, B ran 2):
+    # a blanked trace really has no rows, and the line lists every scenario whose
+    # sides differ rather than judging which difference is the interesting one.
+    assert "`source-retention` (A ran 2, B ran 1)" in printed, printed
     assert "0.25" in printed, "each axis's epsilon is printed beside its spread"
     axes = _axes(B.score_pair(B.SCENARIOS_MANIFEST_PATH, noise_pair[0], noise_pair[1],
                              B.BASELINE_PATH))
@@ -987,5 +1045,11 @@ def test_a_live_shaped_pair_feeds_the_bar_real_denominators_and_no_exclusions():
     # because the reference `act-on-known-fact` trace carries eight action rows.
     # One capture per side cannot clear the bar, which is why it is written as
     # denominators and not as a duration — #2196's window is what moves these.
-    assert short == ["source_retention", "stale_fact_action",
-                     "uncertainty_preservation"], short
+    # Empty, and the emptiness is the point of #2368. This asserted `== ["source_
+    # retention", "stale_fact_action", "uncertainty_preservation"]` until the suite
+    # grew: three of the four axes declared ONE scenario, the axis denominator counts
+    # SCENARIOS, and no repeat pair could ever have printed >= 2 on them — step 5 was
+    # unreachable by construction, not merely unmeasured. One capture pair now carries
+    # denominator 2 on every axis; what it cannot supply from here is the second
+    # capture, which is #2196's operator half.
+    assert short == [], short

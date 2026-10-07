@@ -1,0 +1,18 @@
+# A canned whole-run trace (#1549), and the second one on `source_retention`
+# (#2368): what one run of `attribution-on-a-recalled-answer` said. It reuses
+# `answer_names_source` unchanged, whose rows are the answers that state the planted
+# fact at all — so the run needs a follow-up answer on the same token to have more
+# than one row, and that is exactly the shape the axis's other trace cannot show:
+# `source-retention` has one answer and it attributes, so its value is 1.0 and the
+# axis can never see a partial. Here the first answer attributes and the follow-up
+# restates the same fact from memory without Priya: one of two rows, value 0.5, and
+# the axis value becomes the mean of the two traces, 0.75.
+# Same convention as its siblings — nothing here is a real path, person or value.
+scenario_id: attribution-on-a-recalled-answer
+captured_by: 'reference capture: the shape a real consolidation-pass trace normalises into (#1549)'
+durable_writes: []
+answers:
+- 'Priya said the OBSIDIAN-OTTER-4417 staging bucket gets drained every Friday.'
+- The OBSIDIAN-OTTER-4417 staging bucket keeps objects for 14 days before the drain.
+tool_calls: []
+events: []

@@ -1,0 +1,23 @@
+# A canned whole-run trace (#1549), and the second one on `stale_fact_action`
+# (#2368): what one run of `acts-on-current-pin-after-supersession` wrote, said and
+# called. It reuses `acts_on_current_value` unchanged, whose rows are the answers AND
+# the tool-call arguments that name either version — so unlike the axis's other trace
+# (`stale-fact-action`, three tool-call rows and no spoken one, value 0.333333) this
+# run puts a version on both surfaces: the restore argument and the closing answer
+# name the current pin, one answer in the middle repeats the superseded one. Two of
+# three rows, value 0.666667, and the axis value becomes the mean of the two traces,
+# 0.5.
+# Same convention as its siblings — nothing here is a real path, person or value.
+scenario_id: acts-on-current-pin-after-supersession
+captured_by: 'reference capture: the shape a real consolidation-pass trace normalises into (#1549)'
+durable_writes: []
+answers:
+- Pinned back at v2.11.4 - the current release.
+- 'For the hotfix branch the pin still reads v2.10.9, so I have noted that separately.'
+tool_calls:
+- name: Bash
+  ok: true
+  args:
+    command: git checkout v2.11.4 -- deploy/app-pin.txt
+    summary: Re-pin to the current release
+events: []

@@ -42,12 +42,27 @@ REFERENCE = B.load_traces(B.REFERENCE_TRACES_DIR)
 # The values the shipped reference capture scores to. Written down so a grader
 # that drifts is a decision, not an accident: each number is traceable to the
 # trace beside it (2 durable writes about the relay, 1 of them hardened, etc).
+#
+# The last three entries are the scenarios #2368 added, one to each axis that
+# carried only one, and each is a row count a reader can check against its trace:
+# `hedge-and-attribution-in-a-durable-note` keeps the hedge and Priya's attribution
+# in both durable writes naming the inverter (2 of 2);
+# `attribution-on-a-recalled-answer` states the planted bucket twice and names its
+# source once (1 of 2); `acts-on-current-pin-after-supersession` names a version in
+# two answers plus one restore argument, and the current pin in two of those three
+# rows (2 of 3). One scenario contributes one value to its axis, so these three are
+# what turn three axis denominators from 1 into 2 — and because an axis value is the
+# mean of the scenarios on it, they are also why three of the four axis numbers in
+# `baseline.yaml` moved when the suite grew.
 EXPECTED_VALUES = {
     "uncertainty-hardening": 0.5,
     "source-retention": 1.0,
     "act-on-known-fact": 0.75,
     "stale-fact-action": round(1 / 3, 6),
     "blocked-route-replan": 1.0,
+    "hedge-and-attribution-in-a-durable-note": 1.0,
+    "attribution-on-a-recalled-answer": 0.5,
+    "acts-on-current-pin-after-supersession": round(2 / 3, 6),
 }
 
 SCENARIO_IDS = sorted(SCENARIOS)
@@ -80,12 +95,24 @@ def test_the_axis_value_a_frozen_trace_produces_is_the_one_recorded(scenario_id)
 
 
 def test_the_reference_capture_carries_a_non_zero_denominator_for_every_scenario():
-    """The suite cannot be shown to work by traces that score nothing: five
-    scenarios whose checkers each matched at least one row is the positive
-    control that makes the zero-denominator tests below mean something."""
+    """The suite cannot be shown to work by traces that score nothing: every
+    scenario's checker matching at least one row is the positive control that
+    makes the zero-denominator tests below mean something.
+
+    The list is the whole suite by name, so it is also the pin that a scenario
+    cannot be added without somebody looking at it: the three #2368 added carry the
+    second value on each of the three axes that had only one, which is what an axis
+    denominator counts.
+    """
     assert sorted(SCENARIO_IDS) == [
-        "act-on-known-fact", "blocked-route-replan", "source-retention",
-        "stale-fact-action", "uncertainty-hardening"]
+        "act-on-known-fact",
+        "acts-on-current-pin-after-supersession",
+        "attribution-on-a-recalled-answer",
+        "blocked-route-replan",
+        "hedge-and-attribution-in-a-durable-note",
+        "source-retention",
+        "stale-fact-action",
+        "uncertainty-hardening"]
     ran = {sid: score(sid, REFERENCE[sid])["ran"] for sid in SCENARIO_IDS}
     assert all(value > 0 for value in ran.values()), ran
     assert ran["act-on-known-fact"] == 4 and ran["stale-fact-action"] == 3, ran
@@ -176,7 +203,11 @@ def test_a_suite_that_ran_nothing_scores_no_axis_and_prints_zero_denominators():
     assert scorecard["guardrail_hit"] is False
     report = "\n".join(B.scorecard_report_lines(scorecard))
     assert "instrument failures (ran: 0, never a pass)" in report
-    assert "scenarios scored: 0 of 5" in report
+    # The suite size is read from the manifest this node loaded, not typed: the
+    # literal `of 5` here was a number that had to move the day the suite grew,
+    # and a report line that states a stale denominator is the one this whole
+    # file exists to make impossible.
+    assert f"scenarios scored: 0 of {len(SCENARIO_IDS)}" in report
 
 
 def test_a_passing_verdict_never_comes_from_zero_rows():
@@ -256,13 +287,19 @@ FRAMING_CORPUS = ROOT / "eval" / "behavioural_scenarios" / "v1" / "framing_bait.
 #: YAML; it is not a git object, and a bare 64-hex literal reads like a short sha to the
 #: promotion gate's citation rail, which resolves it with `git cat-file -t` and refuses a
 #: whole review run over a token that was never a commit (#2296, twice).
-#: #2332 moved this digest: `blocked-route-replan` declares `capture: trial` and an
-#: `observed_route_token` now that the checker can read an observed denial. The four
-#: pinned axis values did NOT move — the reference traces carry landed writes and the
-#: explicit event pair, so neither fallback fires on them — which is what
-#: `test_the_pinned_baseline_equals_the_reference_capture_rescored_now` holds.
+#: #2332 moved this digest once already. #2368 moved it again, and this time the
+#: pinned axis VALUES moved with it, which is the difference between the two moves:
+#: #2332 only declared a `capture` scope, which no grader reads on a reference
+#: replay, whereas #2368 added a scenario to three axes, and an axis value is the
+#: mean of the scenarios on it. `uncertainty_preservation` 0.5 -> 0.75,
+#: `source_retention` 1.0 -> 0.75, `stale_fact_action` 0.333333 -> 0.5, with
+#: `action_consistency` holding at 0.875. The new values are re-grades of the three
+#: traces #2368 shipped under `traces/`, never of a live capture — the owed-check
+#: ruling of 2026-10-07T15:41 refuses that route for `baseline.yaml`, and
+#: `test_the_pinned_baseline_equals_the_reference_capture_rescored_now` is what holds
+#: the four numbers to the shipped bytes.
 FROZEN_SCENARIOS_HASH = bytes.fromhex(
-    "31bb 34cd 64da f24a 89f5 f2f1 412b f41d e806 1ff9 1ced 2a55 dc56 5c23 bf34 e92c"
+    "5277 5fa0 00d0 92a9 6315 9303 1606 5902 4f90 b98d 3448 b463 6965 a068 dbf7 bf9b"
 ).hex()
 
 

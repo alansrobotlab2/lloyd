@@ -5,17 +5,27 @@ schema: lloyd-behavioural-baseline/v1
 suite: v1
 source: reference capture eval/behavioural_scenarios/v1/traces, scored by scripts/autoresearch.behavioural
   on the frozen scenarios.json
-scenarios_hash: 31bb34cd64daf24a89f5f2f1412bf41de8061ff91ced2a55dc565c23bf34e92c
+scenarios_hash: 52775fa000d092a963159303160659024f90b98d3448b4636965a068dbf7bf9b
 axes:
-  uncertainty_preservation: 0.5
-  source_retention: 1.0
+  uncertainty_preservation: 0.75
+  source_retention: 0.75
   action_consistency: 0.875
-  stale_fact_action: 0.333333
-note: 'Hash re-anchored by #1843 to the manifest that declared a per-scenario
-  ''capture'' scope; the axis values below are untouched because no grader reads that
-  field either — the scope is enforced only where a capture record is being scored,
-  and a reference replay has none. Pinned by re-grading the shipped reference traces,
-  so a round scoring those same traces reports all-zero paired deltas and
-  guardrail_hit false. Re-pin it whenever the traces or a grader''s meaning changes;
-  tests/test_behavioural_scorecard.py fails if this file and a fresh grading of the
-  reference traces disagree.'
+  stale_fact_action: 0.5
+note: |-
+  Re-pinned by #2368, which gave each of the three single-scenario axes a second
+  scenario. Both halves of this file moved, and only because of what ships in this
+  repo. The hash is the enlarged manifest's own digest. Three axis VALUES moved
+  because an axis value is the mean of the scenarios on it, and each of those three
+  axes now averages two graded traces instead of one: `uncertainty_preservation`
+  0.5 -> 0.75 (`uncertainty-hardening` at 0.5 beside
+  `hedge-and-attribution-in-a-durable-note` at 1.0), `source_retention` 1.0 -> 0.75
+  (`source-retention` at 1.0 beside `attribution-on-a-recalled-answer` at 0.5),
+  `stale_fact_action` 0.333333 -> 0.5 (`stale-fact-action` at 1/3 beside
+  `acts-on-current-pin-after-supersession` at 2/3). `action_consistency` did not
+  move: its two scenarios already averaged 0.875 and neither of its traces changed.
+  Nothing here came from a live capture — the owed-check ruling of 2026-10-07T15:41
+  refuses that route for this file — so every number above is a re-grade of a trace
+  under `traces/`, which is what tests/test_behavioural_scorecard.py re-derives on
+  every run. A round scoring those same traces still reports all-zero paired deltas
+  and guardrail_hit false. Re-pin it whenever the traces or a grader's meaning
+  change.

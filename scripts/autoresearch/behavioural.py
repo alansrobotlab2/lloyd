@@ -38,6 +38,18 @@ repeats are #2196's owed paused-pool window — the bar is met when such a pair
 scores that way, and stays unmet however long report-only rungs accumulate
 without one.
 
+Until #2368 the bar was unreachable for a second and structural reason, which is
+the one worth knowing before anyone re-pairs captures: three of the four axes
+declared ONE scenario, and the axis denominator is the number of SCENARIOS an axis
+declares, not the number of rows one trace carries — `per_axis` appends exactly one
+value per scenario inside the per-scenario loop. A one-scenario axis therefore
+reports `denominator` 1 through one capture or twenty, so no repeat pair could ever
+have printed >= 2 on `uncertainty_preservation`, `source_retention` or
+`stale_fact_action`. Every axis now declares at least two scenarios, so the only
+thing still standing between the instrument and this bar is the pair itself. A
+scenario added to a thin axis buys the denominator; a second capture of a thin axis
+never could, which is why the suite grows before the pool gets paused.
+
 Nothing here calls an engine. Every grader is a pure function over a canned
 whole-run trace, which is what makes the suite runnable standalone and inside a
 round cheaply. Producing a trace is a separate job and lives in
@@ -49,8 +61,9 @@ round only *scores* a capture somebody produced out of band, and the only way to
 produce one is for a human to invoke the capturer. The CLI below scores traces;
 it never captures one.
 
-Four scenarios is a floor, not a behavioural benchmark, and it is labelled as
-such in the artifact. Diffusion and privacy axes degrade in meaning without a
+The suite is a floor, not a behavioural benchmark, and it is labelled as such in
+the artifact — five scenarios when #1549 filed it, eight since #2368 gave every
+thin axis its second. Diffusion and privacy axes degrade in meaning without a
 society of tellers, so the axes kept here are the four a single agent can
 actually be scored on: `uncertainty_preservation`, `source_retention`,
 `action_consistency` and `stale_fact_action`.
@@ -1110,8 +1123,14 @@ def build_scorecard(*, manifest: dict[str, Any], traces: dict[str, dict[str, Any
             "taken_under_a_different_manifest": (
                 captured_digest is not None and captured_digest != scenarios_digest),
         },
-        "label": ("4 scenarios is a floor, not a behavioural benchmark: it is "
-                  "report-only until it has discriminated on real promotions"),
+        # Counted, never written down. The label used to read "4 scenarios"
+        # literally, which was already a year and two suite-growth events out of
+        # date, and an artifact that states a stale count is worse than one that
+        # states none: it is the number a reader trusts. Same reason the axis
+        # denominators beside it are computed.
+        "label": (f"{len(manifest.get('scenarios') or [])} scenarios is a floor, "
+                  "not a behavioural benchmark: it is report-only until it has "
+                  "discriminated on real promotions"),
     }
 
 
