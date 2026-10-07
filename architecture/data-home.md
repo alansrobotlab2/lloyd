@@ -255,6 +255,31 @@ Three layers, in the order a turn meets them:
    attribution between two sessions writing in the same second (the note says "appeared
    during this call"), and a path that entered the tree before the acknowledgement file
    existed at all — the guardian's hourly check is the backstop for those.
+
+   Two instruments write nothing to this journal but judge what is in it differently,
+   so every row carries a third field, `actionable_by`, and it takes exactly two
+   values: `guardian-strays` when one of the row's paths is within reach of the
+   guardian's hourly `datawatch.stray_in_tree` — the check that can raise
+   `RUNTIME DATA INSIDE THE CODE TREE` and move inert residue — and `bracket-only`
+   when none is. `_actionable_by` computes it by asking the guardian's own
+   `reachable_by_stray_check`, never a copy of its exclusion sets, because a drift
+   between the two would make the label an accusation. It is the field a reader filters
+   on, and **a `bracket-only` row is not evidence of a silent or un-actioned alert**:
+   it says no alert was owed on that path. The ruling that settled this (#2169,
+   2026-10-03) is the misreading worth avoiding — nightly reflection read four rows
+   sitting under an `ALERT.md` `cleared:` stamp, three of them a 0-byte `workers.db`
+   that stood for 15 seconds against an hourly poll (`STRAY_CHECK_SECONDS = 3600.0`)
+   and one `web/tsconfig.node.tsbuildinfo`, ignored by `.gitignore` under the tracked
+   `web/`, so unreachable by the alert by construction, and filed the journal's silence
+   as a high-priority alerting gap that `6bf40361` had closed about 23 hours earlier.
+   Reader-side policy, therefore: filter on the label, and the bracket keeps writing
+   every row — a `bracket-only` row is excluded from `ALERT.md` `cleared:` reasoning,
+   not suppressed from the journal, since the journal is also the record of what the
+   bracket saw and suppression would make the next such question unanswerable. The one
+   row that can arrive without the label is the fail-open one: when the guardian's
+   reach rule cannot be read, the row is journalled without `actionable_by` and the
+   note stands, so a missing label is an unknown reach — never read it as
+   `bracket-only`.
 3. **The guardian moves provably inert residue instead of alerting on it**
    (`datawatch.quarantine_inert`, called from `_runtime_data_incident`). A stray is
    moved to `$DATA_ROOT/quarantine/tree-strays/` and announced as news only when every

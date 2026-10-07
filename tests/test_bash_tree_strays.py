@@ -858,6 +858,237 @@ def test_the_architecture_page_names_all_three_kinds_and_the_state_that_decides_
 
 
 
+# ── #2345: what a bracket-only row IS NOT, on the journal's own two documents ───
+#
+# `actionable_by` shipped with #2172 and the reader-side ruling was made on
+# 2026-10-07, and neither document a reader of `safety/tree-strays.jsonl` consults said
+# the field existed. That silence is not decorative: on 2026-10-03 nightly reflection
+# read four journalled rows — three a 0-byte `workers.db` that stood 15 seconds, one
+# `web/tsconfig.node.tsbuildinfo` — under an `ALERT.md` `cleared:` stamp, could not tell
+# that none of them was reachable by the alert, and filed #2169 at priority high as a
+# silent-clear gap `6bf40361` had closed some 23 hours earlier. These nodes keep the
+# sentence that answers "is this row an alert that got missed?" where the reader is
+# already looking.
+#
+# Every node reads the bytes of the REAL file at its repo path. No fixture, no copy in
+# this file standing in for the page: the reader is a human or the reflection job
+# opening `architecture/data-home.md`, and prose pinned to a copy can go green while the
+# document a person reads stays wrong. `label_gap` is what proves that, by deleting the
+# field name from the page's own bytes and showing the same predicate goes red.
+
+#: The two documents a journal reader consults, at their repo paths.
+ARCH_PAGE = REPO / "architecture" / "data-home.md"
+ROOT_DOC = REPO / "CLAUDE.md"
+
+#: One phrase per claim, as the page and the root doc spell it. Whitespace is collapsed
+#: before these are matched, so an author may re-wrap a sentence without breaking a pin;
+#: none of them may be paraphrased away, which is the point of pinning a phrase rather
+#: than a topic.
+NOT_AN_UNACTIONED_ALERT = "not evidence of a silent or un-actioned alert"
+FILTERS_NOT_SUPPRESSES = ("filter on the label", "keeps writing every row",
+                          "not suppressed from the journal")
+CLEARED_EXCLUSION = "`ALERT.md` `cleared:` reasoning"
+FAIL_OPEN_EXCEPTION = "journalled without"
+
+#: The kinds of file a fixture copy could be: text someone authors. Bytecode is not on this
+#: list because the suite compiles THIS file into `tests/__pycache__/`, and a `.pyc` carries
+#: every string literal in it — including the ruling's sentence and the assert message that
+#: quotes it. That copy is this file's own bytes re-encoded, updated by the interpreter
+#: whenever the prose changes, so it cannot go stale against the page; a fixture is a second
+#: authored copy that can. Excluding it is a statement about what a copy is, not a way to
+#: make the sweep come back empty — the scan below still has to find this file or it fails.
+AUTHORED_DOC_SUFFIXES = {".py", ".md", ".rst", ".txt", ".json", ".jsonl", ".yaml", ".yml",
+                         ".toml"}
+
+
+def _label_field() -> str:
+    """The row's label field name, read off the writer rather than typed in here.
+
+    `actionable_by` is not a module constant — `_journal` assigns `row["actionable_by"]`
+    as a literal — so the name is taken from that assignment. Typed here as a string it
+    would survive a rename on both sides of the pair and keep the page green over a
+    journal whose rows no longer carry what the page promises, which is the drift the
+    node above exists to catch for the three kinds.
+    """
+    src = (REPO / "agent_mcp" / "_bash_tree_strays.py").read_text(encoding="utf-8")
+    found = set(re.findall(r'row\["(\w+)"\] = _actionable_by\(', src))
+    assert found == {"actionable_by"}, (
+        "the stamp site no longer assigns the field this prose promises "
+        f"(no `row[\"actionable_by\"] = _actionable_by(...)`): {sorted(found)}")
+    return found.pop()
+
+
+def _flat(text: str) -> str:
+    """The document with line-wrapping collapsed — the same sentence, one line."""
+    return " ".join(text.split())
+
+
+def label_gap(text: str) -> str | None:
+    """Why these bytes would mislead a journal reader, or None when they would not.
+
+    One predicate shared by the nodes that read the two documents and by the node that
+    mutates them, so the sensitivity check cannot be a weaker rule than the one the real
+    assertions run. It takes text rather than a path, which is what lets it be pointed at
+    bytes that were never written anywhere.
+    """
+    flat = _flat(text)
+    field = _label_field()
+    if f"`{field}`" not in text:
+        return f"the document stopped naming `{field}`, so a reader has no field to read"
+    if _bash_tree_strays.GUARDIAN_STRAYS not in text:
+        return (f"`{field}` is named but the value {_bash_tree_strays.GUARDIAN_STRAYS!r} "
+                "is not: half a two-valued field documented as whole")
+    if _bash_tree_strays.BRACKET_ONLY not in text:
+        return (f"`{field}` is named but the value {_bash_tree_strays.BRACKET_ONLY!r} "
+                "is not: half a two-valued field documented as whole")
+    if NOT_AN_UNACTIONED_ALERT not in flat:
+        return (f"nothing says a {_bash_tree_strays.BRACKET_ONLY} row is "
+                f"{NOT_AN_UNACTIONED_ALERT} — the misreading that filed #2169 at "
+                "priority high")
+    return None
+
+
+def test_the_architecture_page_names_the_label_field_and_its_two_values():
+    """Clause 1: the page names `actionable_by` and both values, off the real file.
+
+    The two values are asserted against `_bash_tree_strays.GUARDIAN_STRAYS` /
+    `.BRACKET_ONLY` and the field name against the writer's own stamp site (see
+    `_label_field`), so renaming either constant or the field turns this node red instead
+    of leaving the page quoting a value no row ever carries. The page is read at its repo
+    path — the copy a reader opens — not from anything under `tests/`.
+    """
+    page = ARCH_PAGE.read_text(encoding="utf-8")
+    assert label_gap(page) is None, label_gap(page)
+    assert f"`{_label_field()}`" in page, "the page must name the field in code font"
+    assert "reachable_by_stray_check" in page, (
+        "the page says the label asks the guardian's own reach rule; that name is how a "
+        "reader checks the label has not drifted from the alert")
+
+
+def test_the_architecture_page_says_a_bracket_only_row_is_not_a_missed_alert():
+    """Clause 2: the ruling sentence itself, and the #2169 evidence beside it.
+
+    The phrase is asserted as one run of words in the page's own bytes. The evidence half
+    — that the misreading was actually paid for — is pinned by the incident number and the
+    path that proves out of reach, because a bare prohibition reads as caution rather than
+    as a ruling, and the last assert keeps the page honest about the ONE row that carries
+    no label at all: three nodes in this file already prove that row is written
+    (`test_a_tree_with_no_staged_guardian_still_gets_its_row_without_the_label`,
+    `test_a_reach_rule_that_raises_costs_the_label_not_the_note`,
+    `test_a_reach_rule_that_raises_costs_the_label_not_the_present_row`), and a page that
+    promised the label on every row unconditionally would be the same kind of lie.
+    """
+    page = _flat(ARCH_PAGE.read_text(encoding="utf-8"))
+    assert NOT_AN_UNACTIONED_ALERT in page, (
+        f"the page must state that a {_bash_tree_strays.BRACKET_ONLY} row is "
+        f"{NOT_AN_UNACTIONED_ALERT}")
+    assert "#2169" in page, "the ruling names the incident it settles, or it reads as taste"
+    assert "tsconfig.node.tsbuildinfo" in page, (
+        "the page keeps the example that shows WHY out of reach is not the same as ignored")
+    assert FAIL_OPEN_EXCEPTION in page, (
+        "the page must also name the fail-open row that arrives without a label, or a "
+        "reader takes a missing label for the safe value")
+
+
+def test_the_architecture_page_states_the_reader_policy_filter_never_suppress():
+    """Clause 3: readers filter on the label; the bracket keeps writing every row.
+
+    Three phrases, one node, because they are one ruling the owed-check job made on
+    2026-10-07: filter, do not suppress, and the exclusion is from `ALERT.md`'s `cleared:`
+    reasoning rather than from the journal. Suppression was the smaller-sounding change
+    and would have destroyed the record of what the bracket saw, which is why the page has
+    to carry all three clauses and not only the first.
+    """
+    page = _flat(ARCH_PAGE.read_text(encoding="utf-8"))
+    for phrase in FILTERS_NOT_SUPPRESSES:
+        assert phrase in page, f"the reader-side policy stopped saying it: {phrase!r}"
+    assert CLEARED_EXCLUSION in page, (
+        "the page must say where a bracket-only row is excluded FROM, or 'not an alert' "
+        "invites the reader to drop the row entirely")
+    assert "STRAY_CHECK_SECONDS = 3600.0" in page, (
+        "the sub-poll-lifetime half of the #2169 misreading needs the number that makes "
+        "15 seconds obviously unreachable, or the example is anecdote")
+
+
+def test_claude_md_names_the_label_field_on_the_stray_bullet():
+    """Clause 4: the root doc's three-places bullet names `actionable_by`.
+
+    Read from disk at the repo path, the shape `test_automod_doc_claims.py` already uses
+    for the root doc. Scoped to the bullet that names the journal: the field mentioned
+    anywhere else in a two-thousand-line file would satisfy a whole-file grep and teach
+    the person asking about strays nothing, so every assert runs on the bullet's own line.
+    """
+    lines = ROOT_DOC.read_text(encoding="utf-8").splitlines()
+    hits = [ln for ln in lines if "caught in three places" in ln]
+    assert len(hits) == 1, f"the bullet must be findable and unique: {len(hits)} hits"
+    bullet = " ".join(hits[0].split())
+
+    assert f"`{_label_field()}`" in bullet, (
+        "the stray bullet is where a reader learns the journal exists; it has to name "
+        "the field they then filter on")
+    assert _bash_tree_strays.GUARDIAN_STRAYS in bullet, (
+        f"and both values it takes, not just the field: missing "
+        f"{_bash_tree_strays.GUARDIAN_STRAYS!r}")
+    assert _bash_tree_strays.BRACKET_ONLY in bullet, f"missing {_bash_tree_strays.BRACKET_ONLY!r}"
+    assert NOT_AN_UNACTIONED_ALERT in bullet, (
+        "the bullet carries the ruling in one clause too, because this is the doc an "
+        "agent's own prompt is assembled from")
+    assert "safety/tree-strays.jsonl" in bullet, "it still names the journal itself"
+
+
+def test_both_documents_are_read_from_the_repo_not_a_fixture_and_the_pin_is_live(tmp_path):
+    """Clause 5: no fixture copy exists, and deleting the field name breaks the pin.
+
+    The clause's real demand is negative — a fixture would let the page go missing while
+    the test stayed green — and a negative is not proved by reading the two files. So three
+    checks: (a) the only authored file under `tests/` carrying the ruling's sentence is THIS
+    one; (b) the SAME `label_gap` predicate the four nodes above run goes red on the page's
+    own bytes with the field name deleted, and on the root doc's, which proves the assertion
+    tracks the document rather than a string this file owns; (c) the nodes read `ARCH_PAGE` /
+    `ROOT_DOC`, both anchored at the repo, so the temp directory passed here is the thing
+    they demonstrably do NOT read.
+
+    (a) is an equality that counts this file in, not a "no other file" filter: an earlier
+    version excluded this file and asserted an empty list, which is exactly the shape that
+    passes when the scan matches nothing at all — a 0-hit grep is an answer only beside a
+    positive control, and here the control is this file's own sentence. So the scan includes
+    it, and the node fails if the walk finds nothing (empty list), finds only bytecode (a
+    `__pycache__` hit is excluded from the list it builds, so that case comes back empty
+    too), or finds a second authored copy. The one thing it must come back with is this
+    file's path.
+    """
+    page = ARCH_PAGE.read_text(encoding="utf-8")
+    root = ROOT_DOC.read_text(encoding="utf-8")
+    assert ARCH_PAGE.is_file() and ROOT_DOC.is_file()
+    assert REPO in ARCH_PAGE.parents and REPO in ROOT_DOC.parents
+    assert str(tmp_path) not in str(ARCH_PAGE)
+
+    authored = [p for p in (REPO / "tests").rglob("*")
+                if p.is_file() and p.suffix in AUTHORED_DOC_SUFFIXES
+                and "__pycache__" not in p.parts and p.stat().st_size < 2_000_000]
+    assert len(authored) > 100, (
+        f"the walk found {len(authored)} authored files under tests/, which is not a real "
+        "scan of this directory — an empty walk would make the equality below vacuous")
+    copies = sorted(str(p.relative_to(REPO)) for p in authored
+                    if NOT_AN_UNACTIONED_ALERT in p.read_text(encoding="utf-8",
+                                                              errors="replace"))
+    assert copies == [str(Path(__file__).resolve().relative_to(REPO))], (
+        "this file is the one place the ruling's sentence may be written down: an empty list "
+        "means the scan matched nothing and proves nothing, and any second path is a copy "
+        f"that can stay green while the page goes wrong — {copies}")
+
+    field = _label_field()
+    assert label_gap(page) is None and label_gap(root) is None
+    assert label_gap(page.replace(f"`{field}`", "`safety_label`")), (
+        "deleting the field name from the page left the predicate green, so the node is "
+        "not reading what it claims to read")
+    assert label_gap(root.replace(f"`{field}`", "`safety_label`")), (
+        "the root doc's bullet went green without the field name")
+    assert label_gap(page.replace(_bash_tree_strays.BRACKET_ONLY, "bracketed")), (
+        "dropping one of the two values from the page went green: half a two-valued "
+        "field documented as whole")
+
+
 # ── #2318: the journal-only ruling for removals lives in watched()'s docstring ─
 #
 # #2110's owed check decided this on 2026-10-07 and the decision had nowhere to live
