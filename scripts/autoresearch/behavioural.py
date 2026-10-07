@@ -871,6 +871,63 @@ def capture_failure_causes(meta: dict[str, Any] | None) -> dict[str, str]:
     return causes
 
 
+#: How `compare_pairs` reached `same_surface` (#2375). A pair's two cards carry
+#: the SAME scored digest whatever happens — `score_dir` stamps the manifest on
+#: disk onto both of them — so the flag can only be decided on the digest each
+#: capture recorded for itself, and a side that recorded nothing has to be named
+#: rather than silently counted as agreement.
+SAME_SURFACE_RECORDED = "recorded_capture_digests"
+SAME_SURFACE_RECORDED_VS_SCORED = "recorded_vs_scored_digest"
+SAME_SURFACE_SCORED_ONLY = "scored_digest_only_no_capture_record"
+SAME_SURFACE_SCORED_DIFFER = "cards_scored_under_different_manifests"
+
+
+def recorded_capture_hash(capture: dict[str, Any] | None) -> str | None:
+    """The manifest digest the CAPTURE recorded for itself, or None.
+
+    Reads either spelling of one fact: `scenarios_hash`, the key
+    `behavioural_capture` writes into `capture.yaml` from the manifest its own run
+    loaded (#1659), and `recorded_scenarios_hash`, the key `build_scorecard`
+    republishes it under inside the scorecard's `capture` block — which is the
+    form `compare_pairs` has in hand.
+
+    The recorded value is the only witness to the manifest the traces were MADE
+    under, as against a scorecard's `scenarios_hash`, which is the manifest they
+    are being SCORED under. A manifest edit moves the second for every capture
+    ever taken, including the ones made before it (#2375: `CAP_20261001_085521`
+    records `f24242a7…`, `ee7e85b0` moved the suite to `31bb34cd…`), so keeping
+    the two apart is the only way a straddling pair can be seen to straddle.
+    """
+    meta = capture or {}
+    recorded = meta.get("scenarios_hash") or meta.get("recorded_scenarios_hash")
+    return str(recorded) if recorded else None
+
+
+def _same_surface(scored_a: str | None, scored_b: str | None,
+                  recorded_a: str | None,
+                  recorded_b: str | None) -> tuple[bool, str]:
+    """Decide `same_surface` and say what the decision rested on.
+
+    The recorded digests are the evidence when both sides have them. When only
+    one side does, its digest is compared with the manifest the pair was scored
+    under: if it matches, nothing in either capture evidences two surfaces; if
+    it does not, the recording side demonstrably ran somewhere else and the
+    silent side cannot testify that it did not. When neither side has a
+    `capture.yaml` — the shipped reference replay, and every hand-made trace
+    directory — there is no recorded digest to compare at all, so the flag
+    reports what it can (the two scored digests, which `score_dir` makes equal
+    by construction) and `same_surface_basis` says it was scored-only. Absence
+    is a reported state here, never a straddle.
+    """
+    if scored_a != scored_b:
+        return False, SAME_SURFACE_SCORED_DIFFER
+    if recorded_a and recorded_b:
+        return (recorded_a == recorded_b), SAME_SURFACE_RECORDED
+    if recorded_a or recorded_b:
+        return (recorded_a or recorded_b) == scored_a, SAME_SURFACE_RECORDED_VS_SCORED
+    return True, SAME_SURFACE_SCORED_ONLY
+
+
 def load_pinned_baseline(path: Path = BASELINE_PATH) -> dict[str, Any]:
     if not path.exists():
         raise ScenarioManifestError(f"pinned behavioural baseline not found at {path}")
@@ -939,8 +996,16 @@ def build_scorecard(*, manifest: dict[str, Any], traces: dict[str, dict[str, Any
     membership is derived for the month, never read from the manifest, and
     `reference_replay` says in the artifact whether these deltas compare a run
     against itself.
+
+    The `capture` block reports two digests and keeps them apart: the one the
+    capture recorded for itself and the one this card is scoring it under
+    (`recorded_capture_hash`). Collapsing them is what let a capture taken under
+    a since-replaced manifest publish as a current-surface one (#2375), so a
+    card names both and flags the mismatch rather than leaving a reader to diff
+    two hex strings.
     """
     causes = capture_failure_causes(capture)
+    captured_digest = recorded_capture_hash(capture)
     # #1843 clause 4: a declared `capture: none` is a claim about CAPTURES, so it
     # is enforced only where a capture record is being scored. The shipped
     # reference directory and any hand-made trace dir carry no `capture.yaml`, and
@@ -1035,6 +1100,15 @@ def build_scorecard(*, manifest: dict[str, Any], traces: dict[str, dict[str, Any
             "not_captured": [str(r.get("id")) for r in capture.get("scenarios") or []
                              if isinstance(r, dict)
                              and str(r.get("status")) != "captured"],
+            # #2375: WHICH manifest this capture ran under, kept distinct from
+            # the manifest this card is scoring it under. The capturer recorded
+            # it and the artifact dropped it, so a capture taken before a
+            # manifest edit looked exactly like one taken after it — and the
+            # pair flag `compare_pairs` publishes is decided on this value.
+            "recorded_scenarios_hash": captured_digest,
+            "scored_under_scenarios_hash": scenarios_digest,
+            "taken_under_a_different_manifest": (
+                captured_digest is not None and captured_digest != scenarios_digest),
         },
         "label": ("4 scenarios is a floor, not a behavioural benchmark: it is "
                   "report-only until it has discriminated on real promotions"),
@@ -1127,6 +1201,16 @@ def compare_pairs(first: dict[str, Any], second: dict[str, Any]) -> dict[str, An
       `ran` and `value` for BOTH captures beside each other, and `ran_mismatch`
       names the scenarios where they differ: that is where a spread is partly
       verbosity, and it has to be visible next to the number rather than inside it.
+    * `same_surface` is decided on the digest each capture RECORDED for itself,
+      not on the digest both cards were scored under. The scored digest is
+      stamped from the one manifest on disk, so it is equal by construction and
+      can never show a straddle — which is how the only real pair that exists
+      (a capture taken under `f24242a7…`, scored after `ee7e85b0` installed
+      `31bb34cd…`) reached an operator labelled "same surface" (#2375).
+      `same_surface_basis` names which evidence decided the flag, and
+      `recorded_hash_unavailable_for` names every side whose capture left no
+      record: absence is reported, never read as a straddle and never as
+      agreement.
     """
     if first.get("status") != "scored" or second.get("status") != "scored":
         # The side's own named cause travels with the refusal: `status='refused'`
@@ -1188,16 +1272,36 @@ def compare_pairs(first: dict[str, Any], second: dict[str, Any]) -> dict[str, An
 
     scored_axes = [r for r in axes if r["abs_delta"] is not None]
     loudest = max(scored_axes, key=lambda r: r["abs_delta"]) if scored_axes else None
+    scored_a, scored_b = first.get("scenarios_hash"), second.get("scenarios_hash")
+    recorded_a = recorded_capture_hash(first.get("capture"))
+    recorded_b = recorded_capture_hash(second.get("capture"))
+    same_surface, same_surface_basis = _same_surface(scored_a, scored_b,
+                                                     recorded_a, recorded_b)
+    unrecorded = [tag for tag, rec in (("A", recorded_a), ("B", recorded_b))
+                  if rec is None]
     return {
         "schema": PAIR_SCHEMA,
         "status": "compared",
         "sources": [first.get("trace_source"), second.get("trace_source")],
-        "scenarios_hash_a": first.get("scenarios_hash"),
-        "scenarios_hash_b": second.get("scenarios_hash"),
+        "scenarios_hash_a": scored_a,
+        "scenarios_hash_b": scored_b,
+        # The digest each capture recorded in its OWN `capture.yaml` (#2375): the
+        # manifest its run was made under, which the scored digest above can
+        # never show because `score_dir` stamps the same on-disk digest onto
+        # both cards. None = that side has no `capture.yaml` at all (the shipped
+        # reference replay never had one), listed in `recorded_hash_unavailable_for`.
+        "recorded_scenarios_hash_a": recorded_a,
+        "recorded_scenarios_hash_b": recorded_b,
+        "recorded_hash_unavailable_for": unrecorded,
         # Two cards off different manifests are not the same surface, and a spread
         # measured across a suite change is not a noise floor. Reported, not
         # refused: the reader still needs the numbers, and needs to be told loudly.
-        "same_surface": (first.get("scenarios_hash") == second.get("scenarios_hash")),
+        # Decided by `_same_surface` on the capture-time digests — comparing the
+        # two scored digests, as this line used to, was an equality guaranteed by
+        # construction, so the flag could never be false and the only real pair
+        # that exists published its straddle as "run-to-run noise".
+        "same_surface": same_surface,
+        "same_surface_basis": same_surface_basis,
         "axes": axes,
         "excluded_axes": excluded,
         "scenarios": scenarios,
@@ -1302,6 +1406,22 @@ def scorecard_report_lines(scorecard: dict[str, Any]) -> list[str]:
               f"- traces: {scorecard['trace_source']}",
               f"- pinned baseline: `{scorecard['baseline_source']}`",
               f"- scenarios scored: {scorecard['denominator']} of {scorecard['scenarios_total']}"]
+    capture_block = scorecard.get("capture") or {}
+    if capture_block.get("recorded_scenarios_hash"):
+        # The digest the capture ran under, which is not the one printed above
+        # unless the suite has not moved since (#2375). Said here because the
+        # round report is the surface a human reads, and a moved manifest is the
+        # one fact that changes how every number below it is to be read.
+        lines.append(
+            f"- captured under scenarios_hash: "
+            f"`{capture_block['recorded_scenarios_hash'][:16]}…`"
+            + (" — DIFFERENT from the manifest scored above "
+               f"(`{capture_block['scored_under_scenarios_hash'][:16]}…`): this "
+               "capture ran under a suite that has since moved, so its deltas "
+               "straddle a manifest change and are not same-surface readings "
+               "(#2375)"
+               if capture_block.get("taken_under_a_different_manifest")
+               else " — the same manifest this card is scored under"))
     if scorecard["instrument_failures"]:
         lines.append(f"- instrument failures (ran: 0, never a pass): "
                      f"{', '.join(scorecard['instrument_failures'])}")
@@ -1352,7 +1472,12 @@ def pair_report_lines(pair: dict[str, Any]) -> list[str]:
                 "- spread: n/a — nothing was compared, so this prices no noise "
                 "floor and must not be recorded as a zero spread"]
 
-    lines = ["behavioural pair comparison (#2196) — same surface, two captures",
+    # The header used to assert "same surface" on every compared pair whatever the
+    # flag said below it, which put the artifact's opening line in contradiction
+    # with its own verdict (#2375). It now states the verdict.
+    title = ("same surface, two captures" if pair["same_surface"]
+             else "two captures, NOT the same surface")
+    lines = [f"behavioural pair comparison (#2196) — {title}",
              "Report-only: this measures how much the instrument moves when nothing",
              "about the agent changed. It is not a verdict on either run.",
              f"- A: {pair['sources'][0]}",
@@ -1364,6 +1489,33 @@ def pair_report_lines(pair: dict[str, Any]) -> list[str]:
         lines.append(f"- scenarios_hash: A `{pair['scenarios_hash_a']}` vs B "
                      f"`{pair['scenarios_hash_b']}` — NOT the same surface: a spread "
                      "across a suite change is not a noise floor")
+    # #2375: the scored digests above are the same string whatever the two
+    # captures ran under, so what each capture recorded in its own `capture.yaml`
+    # is the only evidence a straddle leaves. Printed beside the flag it decides,
+    # with a side that recorded nothing named as such rather than left out.
+    recorded_a = pair.get("recorded_scenarios_hash_a")
+    recorded_b = pair.get("recorded_scenarios_hash_b")
+    if recorded_a and recorded_b:
+        verdict = ("identical, so both captures ran under one manifest"
+                   if recorded_a == recorded_b else
+                   "DIFFER — this pair straddles a manifest change, so the spread "
+                   "below is not a noise floor")
+        lines.append(f"- captured under: A `{recorded_a[:16]}…` vs B "
+                     f"`{recorded_b[:16]}…` — the digest each capture recorded for "
+                     f"itself: {verdict}")
+    elif recorded_a or recorded_b:
+        got, recorded = ("A", recorded_a) if recorded_a else ("B", recorded_b)
+        other = "B" if got == "A" else "A"
+        lines.append(
+            f"- captured under: {got} recorded `{recorded[:16]}…` in its own "
+            f"`capture.yaml`, {other} recorded nothing (no `capture.yaml`) — the "
+            f"flag above was decided on that one recorded digest against the "
+            "manifest this comparison was scored under")
+    else:
+        lines.append("- captured under: no `capture.yaml` on either side, so no "
+                     "capture-time digest existed to compare — the flag above rests "
+                     "on the manifest this comparison was scored under, instead of "
+                     "what each capture recorded")
     lines += ["", "| axis | A value | B value | abs delta | epsilon | A denom | B denom |",
               "|---|---|---|---|---|---|---|"]
     for row in pair["axes"]:

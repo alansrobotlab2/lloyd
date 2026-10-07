@@ -654,6 +654,205 @@ def test_a_pair_that_cannot_be_compared_prices_no_rather_than_a_zero_spread(
     assert "must not be recorded as a zero spread" in printed, printed
 
 
+# ── #2375: `same_surface` is decided on what each CAPTURE recorded ───────────
+#
+# A scorecard's `scenarios_hash` is the digest of the manifest the card was
+# SCORED under, and `compare_pairs` read that one field off both cards — but
+# `score_dir` stamps the same on-disk digest onto both cards, so the comparison
+# was true by construction for every pair this tool can build. The pair that
+# proves the cost is the only real pair that exists: `CAP_20261001_085521`
+# records `scenarios_hash: f24242a7…` in its own `capture.yaml` line 50 (the
+# manifest it was captured under), `ee7e85b0` (#2332) moved the manifest to
+# `31bb34cd…`, and the published artifact said "same surface, so a spread here
+# is run-to-run noise". The capturer already wrote the digest it ran under into
+# `capture.yaml` (`behavioural_capture.py:287`); none of it reached the operator.
+# These nodes pin the states the fix separates, and the one state it may NOT
+# create: a side with no `capture.yaml` at all is reported as unrecorded, not
+# read as a straddle — the shipped reference replay and `noise_pair` above are
+# both in that case and `test_a_pair_reports_each_axis_value_from_both_captures_
+# and_the_difference` keeps its `same_surface is True`.
+
+#: The digest the one live capture recorded for itself, copied verbatim from
+#: `~/lloyd-data/_pipeline/research/behavioural_traces/CAP_20261001_085521/
+#: capture.yaml:50`. Runtime data, so it is a literal here rather than a read:
+#: the test must not depend on a directory outside the repo existing.
+FOREIGN_CAPTURE_DIGEST = ("f24242a79044f95fd8a7c5cdddb512dd"
+                          "ce4ded252037af9b78067a14c6f1f31e")
+
+
+def _capture_dir(directory: Path, *, recorded_hash: str | None) -> Path:
+    """A capture directory as the capturer leaves one: traces plus `capture.yaml`.
+
+    The traces are the shipped reference ones re-written as files, so every value
+    the scorecard derives from them is a number another reader can re-derive from
+    `eval/behavioural_scenarios/v1/`. The only thing varied is the digest the
+    capture recorded for the manifest its own RUN was made under — the field the
+    pair flag is now decided on.
+    """
+    directory.mkdir()
+    for sid, trace in copy.deepcopy(REFERENCE).items():
+        (directory / f"{sid}.yaml").write_text(yaml.safe_dump(trace, sort_keys=False),
+                                               encoding="utf-8")
+    meta: dict = {"schema": B.CAPTURE_SCHEMA, "run_id": directory.name,
+                  "budget_seconds": 600, "elapsed_seconds": 100.0,
+                  "scenarios": [{"id": sid, "status": "captured"}
+                                for sid in REFERENCE]}
+    if recorded_hash is not None:
+        meta["scenarios_hash"] = recorded_hash
+    (directory / B.CAPTURE_META_FILENAME).write_text(
+        yaml.safe_dump(meta, sort_keys=True), encoding="utf-8")
+    return directory
+
+
+def test_a_capture_that_recorded_its_manifest_reports_it_beside_the_one_it_scores(
+        tmp_path):
+    """Clause 1: the recorded digest is ON the scorecard, in its `capture` block.
+
+    Both digests, side by side: the one the capture ran under and the one the
+    card is scoring it under. Grepping the artifact published from the live
+    capture for `f24242a7` found nothing at all before this, which is why
+    #2372's pair could only be certified same-surface by a human reading raw
+    traces.
+    """
+    on_disk = MANIFEST_FRESH["_scenarios_hash"]
+    assert FOREIGN_CAPTURE_DIGEST != on_disk, (
+        "the fixture's point is that the live capture's manifest is not the "
+        "current one; if this fails the manifest moved back and the straddle is "
+        "no longer reproducible — re-derive the literal from capture.yaml:50")
+
+    straddling = _capture_dir(tmp_path / "CAP_STRADDLE",
+                              recorded_hash=FOREIGN_CAPTURE_DIGEST)
+    card = B.score_dir(B.SCENARIOS_MANIFEST_PATH, straddling, B.BASELINE_PATH)
+    assert card["status"] == "scored", card["refusal"]
+    cap = card["capture"]
+    assert cap["recorded_scenarios_hash"] == FOREIGN_CAPTURE_DIGEST, (
+        "the digest the capture wrote down for itself has to reach the artifact")
+    assert cap["scored_under_scenarios_hash"] == on_disk == card["scenarios_hash"], (
+        "and it must be named beside, not confused with, the digest the card is "
+        "being scored under")
+    assert cap["taken_under_a_different_manifest"] is True
+    assert FOREIGN_CAPTURE_DIGEST in json.dumps(card), (
+        "an operator has to be able to find the recorded digest in the artifact "
+        "they were given")
+    # The round report is the surface a human actually reads (#1549: every prior
+    # section of it is parsed back off disk), so the moved manifest is on it too.
+    assert FOREIGN_CAPTURE_DIGEST[:16] in _section(card), _section(card)
+
+    current = _capture_dir(tmp_path / "CAP_CURRENT", recorded_hash=on_disk)
+    same = B.score_dir(B.SCENARIOS_MANIFEST_PATH, current, B.BASELINE_PATH)
+    assert same["capture"]["recorded_scenarios_hash"] == on_disk
+    assert same["capture"]["taken_under_a_different_manifest"] is False, (
+        "a capture taken under the manifest it is scored under is not a straddle")
+
+
+def test_a_pair_whose_captures_recorded_different_manifests_is_not_same_surface(
+        tmp_path):
+    """Clause 2: two recorded digests that differ report false and name both.
+
+    The scored digests are equal here — that equality was the whole defect — so
+    the only thing that can flip the flag is what each capture recorded.
+    """
+    on_disk = MANIFEST_FRESH["_scenarios_hash"]
+    a = _capture_dir(tmp_path / "CAP_OLD", recorded_hash=FOREIGN_CAPTURE_DIGEST)
+    b = _capture_dir(tmp_path / "CAP_NEW", recorded_hash=on_disk)
+    pair = B.score_pair(B.SCENARIOS_MANIFEST_PATH, a, b, B.BASELINE_PATH)
+    assert pair["status"] == "compared", pair["refusal"]
+    assert pair["scenarios_hash_a"] == pair["scenarios_hash_b"] == on_disk, (
+        "the scored digest is identical by construction, which is exactly why it "
+        "can never carry this distinction")
+    assert pair["same_surface"] is False, (
+        "one capture ran under a manifest that no longer exists; a spread across "
+        "that change is not a noise floor")
+    assert pair["recorded_scenarios_hash_a"] == FOREIGN_CAPTURE_DIGEST
+    assert pair["recorded_scenarios_hash_b"] == on_disk
+    assert pair["same_surface_basis"] == "recorded_capture_digests"
+    printed = "\n".join(B.pair_report_lines(pair))
+    assert FOREIGN_CAPTURE_DIGEST[:16] in printed, printed
+    assert on_disk[:16] in printed, printed
+    assert "NOT the same surface" in printed, printed
+    assert ("behavioural pair comparison (#2196) — two captures, NOT the same "
+            "surface" in printed), printed
+
+
+def test_a_pair_with_no_capture_record_on_either_side_says_so_and_keeps_its_flag(
+        noise_pair):
+    """Clause 3: an absent `capture.yaml` is a reported state, never a straddle.
+
+    The `noise_pair` fixture writes scenario YAMLs only, and the shipped
+    reference replay under `eval/behavioural_scenarios/v1/traces` has no
+    `capture.yaml` either — so treating "no record" as disagreement would make
+    `same_surface` unsayable for every pair involving the reference traces and
+    would break the #2196 clause-1 node above. The flag stays on the manifest
+    both cards were scored under, and the artifact says it rested on that.
+    """
+    pair = B.score_pair(B.SCENARIOS_MANIFEST_PATH, noise_pair[0], noise_pair[1],
+                        B.BASELINE_PATH)
+    assert pair["status"] == "compared", pair["refusal"]
+    assert pair["same_surface"] is True, (
+        "neither side recorded a manifest digest, so nothing evidences two "
+        "manifests; the flag falls back to the one manifest both cards scored "
+        "under — and says it did")
+    assert pair["recorded_scenarios_hash_a"] is None
+    assert pair["recorded_scenarios_hash_b"] is None
+    assert pair["recorded_hash_unavailable_for"] == ["A", "B"]
+    assert pair["same_surface_basis"] == "scored_digest_only_no_capture_record"
+    printed = "\n".join(B.pair_report_lines(pair))
+    assert "no `capture.yaml`" in printed, printed
+    assert "instead of what each capture recorded" in printed, printed
+    assert ("behavioural pair comparison (#2196) — same surface, two captures"
+            in printed), printed
+
+    replay = B.score_pair(B.SCENARIOS_MANIFEST_PATH, B.REFERENCE_TRACES_DIR,
+                          B.REFERENCE_TRACES_DIR, B.BASELINE_PATH)
+    assert replay["same_surface"] is True, (
+        "the shipped replay is the case in production: its directory has never "
+        "had a capture.yaml")
+    assert replay["recorded_hash_unavailable_for"] == ["A", "B"]
+    assert replay["reference_replay"] is True
+
+
+def test_a_recorded_capture_paired_with_an_unrecorded_replay_straddles(tmp_path):
+    """The exact shape of #2375's own check: one side recorded, the replay never did.
+
+    A capture whose recorded digest is not the manifest on disk cannot have run
+    under the manifest the other side was scored under, so the pair is not
+    same-surface even though the other side recorded nothing — and the artifact
+    says which side was evidence and which was silence.
+    """
+    on_disk = MANIFEST_FRESH["_scenarios_hash"]
+    a = _capture_dir(tmp_path / "CAP_STRADDLE", recorded_hash=FOREIGN_CAPTURE_DIGEST)
+    pair = B.score_pair(B.SCENARIOS_MANIFEST_PATH, a, B.REFERENCE_TRACES_DIR,
+                        B.BASELINE_PATH)
+    assert pair["status"] == "compared", pair["refusal"]
+    assert FOREIGN_CAPTURE_DIGEST != on_disk
+    assert pair["same_surface"] is False, (
+        "A ran under a digest that is not the manifest B was scored under; an "
+        "unrecorded B is not evidence that it did")
+    assert pair["recorded_scenarios_hash_a"] == FOREIGN_CAPTURE_DIGEST
+    assert pair["recorded_scenarios_hash_b"] is None
+    assert pair["recorded_hash_unavailable_for"] == ["B"]
+    assert pair["same_surface_basis"] == "recorded_vs_scored_digest"
+    printed = "\n".join(B.pair_report_lines(pair))
+    assert "NOT the same surface" in printed, printed
+    assert FOREIGN_CAPTURE_DIGEST[:16] in printed, printed
+
+    # The operator's own boundary: argv in, artifact on disk out. This is the
+    # command #2375's check is written as, so the flag has to survive the JSON
+    # round trip that an operator actually reads — not just the function return.
+    out = tmp_path / "pairA.json"
+    assert B.main(["--manifest", str(B.SCENARIOS_MANIFEST_PATH),
+                   "--baseline", str(B.BASELINE_PATH),
+                   "--trace-dir", str(a),
+                   "--compare-trace-dir", str(B.REFERENCE_TRACES_DIR),
+                   "--out", str(out)]) == 0
+    written = json.loads(out.read_text(encoding="utf-8"))
+    assert written["same_surface"] is False, written
+    assert written["recorded_scenarios_hash_a"] == FOREIGN_CAPTURE_DIGEST
+    assert FOREIGN_CAPTURE_DIGEST in out.read_text(encoding="utf-8"), (
+        "the recorded digest must be findable in the published artifact, which is "
+        "the thing grepping the live pair's artifact could not do before #2375")
+
+
 # ── #2332: step 5's precondition is a measurement, not a calendar ────────────
 #
 # #1549 step 5 — wiring this report-only artifact into `promote.evaluate_promotion`
