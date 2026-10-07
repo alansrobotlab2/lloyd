@@ -457,7 +457,20 @@ row (skill, measured body lines, the largest block to spill into) on the
 `vault_land` ledger row — on the refusal and on the passing landing alike. The
 switch is `vault_round.SKILL_BODY_ENFORCE`, on. The scope stops at the sample
 on purpose: library-wide, whether SIZE becomes a lint failure remains a
-person's call, because 106 of 197 skills were over the cap on 2026-10-01. What that ceiling does NOT do is bound the two uncapped routes: the 100-line body count does not bound them, and the pair that proves it is measured, not hypothetical: over the `skill.embedded` rows in `~/lloyd-data/event_logs`, `nightly-reflection-knowledge-write` at 88 body lines embedded 25,856 chars into an autonomy task's prompt while `backlog-triage` at 107 body lines embedded 9,977 — 19 MORE lines for roughly a third of the cost, so no line count can order those two by what they cost a prompt, and a skill that passes the 100-line check is still embedded whole. `app/skill_embed.py` therefore carries `UNCAPPED_EMBED_SOFT_LIMIT`, a char count judged against those two routes only and recorded on the row as `over_soft_limit`, enforced nowhere: whether to cap or spill them is a separate ruling to be made on the traffic that key accumulates (#2272).
+person's call, and #2334 is the open item that owns that ruling along with the
+ceiling itself — `skill_lint.MAX_BODY_LINES` now says in its own comment that the
+100 it counts against is borrowed, not ruled. The number this page used to carry
+as the reason — 106 of 197 skills over the cap, measured on 2026-10-01 — is a
+DATED measurement and not a current count: the same sweep re-run on 2026-10-07
+reports 104 of 197, so a figure copied here stops being true the day it is
+written. What the ruling is made on is printed, not quoted: the `### SIZE` summary
+line of `~/obsidian/autonomy/skill-lint-report.md` carries the live over-cap count
+and the p50/p90/max body lines of every skill scanned, that line is rendered by
+`scripts/skill_lint.py`'s `render_size` — which also prints the cap it counted
+against in the same heading — and the report's own title names the instant it was
+generated. So the pair is re-derivable by running `scripts/skill_lint.py` (advisory:
+it exits 0 whatever it finds), and `tests/test_skill_embed.py` pins that this
+paragraph keeps pointing at the sweep rather than at a number parked in prose. What that ceiling does NOT do is bound the two uncapped routes: the 100-line body count does not bound them, and the pair that proves it is measured, not hypothetical: over the `skill.embedded` rows in `~/lloyd-data/event_logs`, `nightly-reflection-knowledge-write` at 88 body lines embedded 25,856 chars into an autonomy task's prompt while `backlog-triage` at 107 body lines embedded 9,977 — 19 MORE lines for roughly a third of the cost, so no line count can order those two by what they cost a prompt, and a skill that passes the 100-line check is still embedded whole. `app/skill_embed.py` therefore carries `UNCAPPED_EMBED_SOFT_LIMIT`, a char count judged against those two routes only and recorded on the row as `over_soft_limit`, enforced nowhere: whether to cap or spill them is a separate ruling to be made on the traffic that key accumulates (#2272).
 
 A spilled skill is a folder: the body keeps the procedure, every upper-case hard
 rule and a `## Files in this skill` index whose lines name each sibling `.md` by

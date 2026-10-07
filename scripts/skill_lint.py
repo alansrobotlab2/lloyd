@@ -795,10 +795,24 @@ def check_dead_units(content: str,
 # nothing extra — it loses its tail instead, which is why `past_chat_cut` is
 # reported. The autonomy task prompt and the worker prompt splice the whole file
 # in uncapped, so there the size is the cost (`app/skill_embed.py` records which
-# route paid what per run). Advisory: the 100-line figure is one team's
-# heuristic, and the ceiling is to be set from the measured curve, by a person.
+# route paid what per run). Advisory, and borrowed: the 100 below is another team's
+# heuristic that this lint was seeded with, never measured against this corpus, so
+# every count this script prints is a count "over 100", not "over the ceiling". The
+# ceiling is measurable here and has been on every run since #624: `render_size`'s
+# summary line prints the over-cap count and the p50/p90/max body lines of the live
+# corpus, and a ceiling set from that curve is the number this constant should one
+# day hold. Naming that number and deciding whether SIZE leaves advisory is #2334's
+# ruling — owed to a person, which is what #624's owed entry reserves it to — and it
+# is not this file's to pre-empt: #2158 ruled only the five `SPILL_SAMPLE` skills
+# enforced on vault landings. What stood here before was an undated instruction to
+# set the ceiling from a curve, with no item attached to it, which read as though
+# nobody had the data yet — they do, and the missing half is the ruling.
 
 #: The body-length ceiling the SIZE bucket counts against (front matter excluded).
+#: BORROWED, not ruled — see the section comment: the number to replace it with is
+#: the p90 this script measures and prints, and picking it is #2334's ruling, not a
+#: round's edit. `tests/test_skill_lint_size.py` pins both the value and the
+#: ownership, so the constant cannot drift in either direction unowned.
 MAX_BODY_LINES = 100
 
 #: `prefetch.SKILL_BODY_MAX`, restated because this script runs by path and

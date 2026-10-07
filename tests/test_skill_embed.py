@@ -539,3 +539,43 @@ def test_the_size_paragraph_says_the_line_ceiling_does_not_bound_the_uncapped_ro
     assert "does not bound" in para, para
     assert "100" in para and "line" in para, (
         f"the sentence has to name the 100-line ceiling it is limiting: {para}")
+
+
+def test_the_size_paragraph_carries_its_counts_as_dated_and_points_at_the_sweep():
+    """#2334 clause 2: the deferral stays a person's, and its EVIDENCE stays live.
+
+    The sentence that deferred the library-wide ceiling also froze a count in prose —
+    "106 of 197 skills were over the cap on 2026-10-01" — and nothing re-checks a
+    sentence, so by the sweep re-run on 2026-10-07 the page was two counts wrong while
+    reading as the authority for a ruling that has to be made on current numbers. The
+    same pair sat quoted in `vault_round`'s comment and in
+    `tests/test_vault_round_skill_gate.py`'s docstring: three frozen quotations, one
+    measurement. This node holds the two halves of the fix. The paragraph must still
+    DEFER to a person — #624's owed entry reserves the ceiling to one, and the node
+    below the rail in `test_vault_round_skill_gate.py` refuses a round that deletes
+    the sentence without a ruling — and it must send the reader to where the pair is
+    PRINTED rather than carrying it: the `### SIZE` summary line of the skill-lint
+    report, written by `skill_lint.render_size`, which prints the cap it counted
+    against in its own heading. And any count it does keep has to arrive dated, because
+    an undated count is a claim nobody will re-run.
+    """
+    text = (_REPO_ROOT / "architecture" / "skills.md").read_text(encoding="utf-8")
+    i = text.find("library-wide, whether SIZE becomes a lint failure")
+    assert i >= 0, "the library-wide SIZE deferral has left the SIZE paragraph entirely"
+    seg = text[i:text.find("What that ceiling does NOT do", i)]
+    assert "person's call" in seg, (
+        "the ceiling is a person's ruling; the paragraph may not quietly take it: " + seg)
+    assert "#2334" in seg, "the open item that owns the ruling has to be named: " + seg
+    assert "MAX_BODY_LINES" in seg, (
+        "the paragraph has to say which constant the ruling would move: " + seg)
+    assert "autonomy/skill-lint-report.md" in seg and "### SIZE" in seg, (
+        f"it must name where the live over-cap count and p90 are printed: {seg}")
+    assert "render_size" in seg, "and the function that prints them: " + seg
+    # The 2026-10-01 figure survives as a DATED measurement, not as the state of the
+    # corpus, and the date it was overtaken by is named beside it.
+    assert "2026-10-01" in seg and "2026-10-07" in seg, (
+        f"the frozen count must read as dated and superseded: {seg}")
+    assert "DATED" in seg.upper(), f"say of the figure that it is dated: {seg}"
+    j = seg.find("106 of 197")
+    assert j >= 0 and "2026-10-01" in seg[j:j + 260], (
+        f"the 2026-10-01 count must carry its own date beside it: {seg[j - 80:j + 260]}")

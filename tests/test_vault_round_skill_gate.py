@@ -518,3 +518,51 @@ def test_the_knowledge_write_skill_carries_a_memory_index_pre_flight():
     # goes to the detail file rather than into the line.
     assert "~/lloyd/tests/" in step, step
     assert "BYTE-IDENTICAL" in step and "lloyd/memory/<slug>.md" in step, step
+
+
+def test_the_enforce_comment_names_the_doc_by_the_path_this_file_resolves():
+    """#2334 clause 3: a citation two files answer to is a citation to neither.
+
+    The comment above `SKILL_BODY_ENFORCE` recorded the ruling as standing in
+    "`architecture/skills.md`", meaning the repo copy this file's own deferral rail
+    opens as `ROOT / "architecture" / "skills.md"`. The bare name also matches the
+    vault's `~/obsidian/architecture/skills.md`, and a reader who followed it there
+    landed on 113 lines whose front matter still claims "34 current custom skills"
+    against 197 live ones and which contain no SIZE section, no spill paragraph and
+    no `MAX_BODY_LINES` at all — so the sentence that says "the doc records the
+    ruling" was true of one file and false of the file the name reaches from the
+    vault. #1985 and #2148 already cite that bare path with line numbers (":411",
+    ":441") which exist only in the repo copy; naming the tree is the whole fix, so
+    the comment has to keep naming it.
+    """
+    src = (ROOT / "scripts" / "automod" / "vault_round.py").read_text(encoding="utf-8")
+    cut = src.find("SKILL_BODY_ENFORCE = True")
+    assert cut > 0, "the switch is still on, which the node above is the ruling for"
+    head = src[:cut]
+    comment = head[head.rfind("# #1985 shipped"):]
+    assert comment.lstrip().startswith("#"), "the citation lives in the comment above it"
+    flat = " ".join(comment.split())
+    assert 'ROOT / "architecture" / "skills.md"' in flat, (
+        "the comment must name the doc by the expression the test that checks it uses: "
+        + flat)
+    assert "REPO-root" in flat or "repo-root" in flat or "repo root" in flat, flat
+    assert "obsidian" in flat.lower(), (
+        f"it must say which other file the bare name also reaches: {flat}")
+    assert "#2334" in flat and "#2158" in flat, (
+        "the narrow ruling and the open library-wide question stay distinguishable: " + flat)
+
+    # The path it names resolves, and is the page that actually carries both halves.
+    doc = (ROOT / "architecture" / "skills.md").read_text(encoding="utf-8")
+    assert "cap is enforced on vault landings" in doc and "person's call" in doc, (
+        "the repo copy must keep both halves of the #2158 ruling the comment cites")
+
+    # And the ambiguity the comment warns about is real rather than invented: the same
+    # relative path exists in the vault and is NOT that page. If the vault arch-doc
+    # cleanup (#2330's family) ever moves the SIZE ruling into the vault copy, this
+    # fails and the comment gets updated — it does not silently go stale.
+    twin = Path.home() / "obsidian" / "architecture" / "skills.md"
+    if twin.exists():
+        twin_text = twin.read_text(encoding="utf-8")
+        assert "person's call" not in twin_text and "MAX_BODY_LINES" not in twin_text, (
+            "the vault copy now carries the SIZE ruling too, so the comment's claim "
+            "that only the repo copy does is stale: rewrite the comment, do not delete it")

@@ -65,6 +65,51 @@ def test_the_threshold_is_a_named_constant_of_100_lines():
     assert sl.MAX_BODY_LINES == 100
 
 
+def test_the_comment_above_the_ceiling_owns_it_as_borrowed_and_names_the_ruling(library):
+    """#2334 clause 1: the constant is pinned by the test above, and its EXCUSE by
+    this one.
+
+    Until #2334 the comment read that the ceiling was "to be set from the measured
+    curve, by a person" — undated, naming no item, and false in the half a reader
+    acts on: the curve this script is asked to wait for has been printed on every
+    sweep since #624, on `render_size`'s summary line (over-cap count, then p50, p90
+    and max body lines). So that sentence sent the next session back to measure what
+    it could read, and #2334 exists because owed-check had to re-derive it. The
+    comment now owes three things to whoever finally rules: that the 100 is a borrowed
+    figure rather than a measured one, which open item owns replacing it, and where
+    the number to replace it with is printed. It still may not pick the number —
+    `MAX_BODY_LINES == 100` above is the half of this that must stay true until a
+    person's ruling says otherwise.
+    """
+    src = (ROOT / "scripts" / "skill_lint.py").read_text(encoding="utf-8")
+    cut = src.find("MAX_BODY_LINES = 100")
+    assert cut > 0, "the ceiling is still the literal 100; no round has ruled it"
+    head = src[:cut]
+    comment = head[head.rfind("# ── size"):]
+    assert comment.strip().startswith("#"), "the text above the constant is the comment"
+    flat = " ".join(comment.split())
+    assert "to be set from the measured curve" not in flat, \
+        "the undated instruction that made the ceiling look unmeasured is back: " + flat
+    assert "borrowed" in flat.lower(), "the 100 has to say it is not a ruled number"
+    assert "#2334" in flat, "the open item that owns the ceiling decision is named: " + flat
+    assert "#624" in flat and "#2158" in flat, \
+        "the comment separates the narrow five-skill ruling from the library-wide one"
+    assert "render_size" in flat and "p90" in flat and "over-cap" in flat, \
+        "it names the measured alternative this same script prints: " + flat
+    # ...and the numbers it points at are real output, not prose it hopes for: one
+    # scan feeds both the dict and the rendered line, so the two cannot disagree. The
+    # fixture corpus is built to have skills over the cap in it, so both fields are
+    # non-zero here and neither assertion can pass on an empty scan.
+    _, _, records = library
+    scan = sl.lint(skill_records=records)
+    size = scan["size"]
+    assert size["over_cap"] > 0 and size["count"] > size["over_cap"], size
+    rendered = " ".join(" ".join(sl.render_size(scan)).split())
+    assert f"Over the cap: **{size['over_cap']}** of {size['count']}" in rendered, rendered[:300]
+    assert f"p90 **{size['p90_lines']}**" in rendered, \
+        "the p90 the comment sends the ruling to is on the same summary line"
+
+
 def test_chat_cut_matches_the_injector():
     from app import prefetch
     assert sl.CHAT_SKILL_CUT == prefetch.SKILL_BODY_MAX

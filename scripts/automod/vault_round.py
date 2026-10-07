@@ -434,7 +434,15 @@ def skill_activation_findings(paths: list[str]) -> list[dict]:
 # landed anyway; hand-fixed by 9b7b8986) and #1534 at 116 lines whose only red
 # node was a `live_vault` check the gate deselects. The scope is
 # `skill_lint.SPILL_SAMPLE` only: library-wide enforcement stays a person's
-# call, and `architecture/skills.md` records both halves of that ruling.
+# call — that question is #2334's, and the ceiling it would set lives in
+# `skill_lint.MAX_BODY_LINES`, borrowed there. The doc that records both halves of
+# the #2158 ruling is the repo-root architecture/skills.md — the file
+# tests/test_vault_round_skill_gate.py opens as `ROOT / "architecture" / "skills.md"`
+# — NOT the vault's ~/obsidian/architecture/skills.md, which answers to the same
+# bare name and has no SIZE section, no spill paragraph and no `MAX_BODY_LINES` in it
+# at all. Citing the bare name is what #1985 and #2148 did, at line numbers (":411",
+# ":441") that exist only in the repo copy; follow the name from the vault and you
+# land on a page that cannot answer the question this comment is pointing at.
 SKILL_BODY_ENFORCE = True
 
 
