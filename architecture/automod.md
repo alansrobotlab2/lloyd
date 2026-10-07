@@ -2390,6 +2390,27 @@ The day also showed three dead ends the loop could only escalate:
   `decide()` wording that names `automod_amend_clause` in a vault refusal's
   findings is left as it is; changing it is a separate ruling.
 
+  **A vault grading is bounded per call, and a grading that did not happen is a
+  blocking outcome (2026-10-07, #2263).** #2240 capped every string leaf the review
+  schema admits; the vault reviews that diverged afterwards were all 5- or 6-clause
+  contracts and none were 4, because a leaf cap bounds what the schema accepts and
+  not what the finalizer writes. So `review.CLAUSES_PER_CALL` bounds the CALL:
+  `review._vault_generation_slices` cuts a contract into runs of that length,
+  `build_vault_prompt` shows one run under the contract's own clause numbers, and
+  `review.merge_grading_chunks` merges the answers into one per-clause list. An
+  answer that leaves a clause index ungraded or grades one twice is
+  `review.GRADER_INCOMPLETE`; a completion cut off at the finalizer's token budget is
+  `review.GRADER_DIVERGED`; neither yields a verdict, and both are in
+  `review.GRADER_FAILURE_KINDS`. `vault_round.land` treats either as blocking on the
+  first attempt, and treats a `pass` that leaves a contract clause ungraded as
+  blocking once `vault_round._vault_review_attempts` has spent the retries: the land
+  is refused with an `ok: false` row instead of committing a short clause list. The
+  other half is the close — a vault landing opens no round, so a grader that answered
+  nothing leaves no per-clause evidence, and `backlog.ungraded_vault_outcome` keeps
+  the turn's own `met` out of `backlog.settled_landings`, with the sweep's note
+  saying ungraded rather than refused. Census:
+  `grep -c 'generation diverged' ~/.local/state/lloyd-automod/promotions.jsonl`.
+
   **A check that can only run after the change lands is `unsatisfiable`
   before it, never `partial`** — a day of traffic, a nightly run, a number
   only production produces, a script over live data. No diff can carry that

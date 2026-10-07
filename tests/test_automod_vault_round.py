@@ -1019,7 +1019,10 @@ def test_the_round_tells_the_grader_which_attempt_this_is(vault, items, monkeypa
 
     def _grader(**kw):
         seen.append(kw["attempt"])
-        return ("pass", "content met, no advisories", [])
+        # A verdict row for the item's one clause: a `pass` that carried none is a
+        # grading that did not exist, and #2263 refuses the land on that at
+        # attempt 2 — this test is about the kwarg, so it has to grade.
+        return ("pass", "content met, no advisories", [{"clause": 1, "verdict": "met"}])
 
     monkeypatch.setattr(V, "GRADER", _grader)
     write_item(items, 412, ["the skill names the retry rule"])
@@ -5140,3 +5143,200 @@ def test_an_activity_log_land_that_keeps_the_description_correct_is_not_refused(
         TASK_CLEAN + f"\n## Activity Log\n\n- ran with {WINDOW} (90) and deleted 11\n")
     res = V.land(["autonomy/1-task.md"], "activity note")
     assert res["ok"] is True and res["commit"], res["errors"]
+
+
+# ── #2263: a grader that could not grade is a verdict-shaped failure ─────────
+#
+# Three `vault_review` rows diverged after #2240's string caps went live on
+# 2026-10-05T17:55Z — item 2260 at 2026-10-06T01:31:39Z, 2287 at 2026-10-06T13:39:20Z,
+# 2325 at 2026-10-07T02:59:59Z — each recorded `kind: skipped` with `clauses: []`
+# and `blocking: false`, and each land then committed with `review: skipped` and
+# `landing_clauses: []` and `ok: true`. Item 2260's vault half reached main at
+# `ea9be106` with no verdict recorded, and the item closed on the turn's own
+# self-report six minutes later. These tests pin the two seams that let that
+# happen: what `_vault_review` passes through, and what `land` refuses.
+
+from scripts.automod import review as RV
+
+
+def _vault_head(v) -> str:
+    """HEAD of the vault fixture GIVEN — the `vault` fixture monkeypatches
+    `vault_round.VAULT_DIR` to a tmp dir, so a module-level path here would be
+    the real vault."""
+    return subprocess.run(["git", "-C", str(v), "rev-parse", "HEAD"],
+                          capture_output=True, text=True).stdout.strip()
+
+
+def _ev(**kw) -> None:
+    """A ledger row the way triage writes one: `item_contract` reads the SURFACE
+    from the confirmed verdict, and `write_item` writes only the clauses."""
+    S.append_event({"event": "backlog_triage", **kw})
+
+
+DIVERGED_2260 = ("grader generation diverged answering clause(s) 1, 2, 3 "
+                 "(call 1 of 2): finalizer failed: generation diverged at 8192 tokens "
+                 "— every field this schema admits is capped")
+MIXED_ABSTENTION = "item #613 is a `mixed` surface; its clauses are the code gate's"
+SIX = [f"clause {i} of a six-clause vault contract" for i in range(1, 7)]
+
+
+def _write_six_clause_item(items, item_id: int = 610) -> None:
+    write_item(items, item_id, SIX)
+
+
+def _rows(event: str, item_id: int) -> list[dict]:
+    return [e for e in _events(event) if e.get("item_id") == item_id]
+
+
+def test_a_diverged_vault_review_is_recorded_blocking(vault, items, monkeypatch):
+    """#2263 clause 3, on the `#2260` answer verbatim. Before this, the row that
+    divergence wrote was indistinguishable from a caller with no grader wired:
+    `kind: skipped`, `blocking: false`, and a land that went ahead beside it."""
+    _write_six_clause_item(items)
+    monkeypatch.setattr(V, "GRADER", lambda **kw: (RV.GRADER_DIVERGED, DIVERGED_2260, []))
+    (vault / "skills" / "foo" / "SKILL.md").write_text("---\nname: foo\n---\n# foo\n")
+    with pytest.raises(V.VaultRoundError) as ei:
+        V.land(["skills/foo/SKILL.md"], "skill: foo (#610)", item_id=610)
+    assert "diverged" in str(ei.value)
+    rows = _rows("vault_review", 610)
+    assert len(rows) == 1, rows
+    assert rows[0]["kind"] == "diverged" and rows[0]["blocking"] is True
+    assert rows[0]["clauses"] == []
+    assert "generation diverged at 8192 tokens" in rows[0]["findings"]
+    # The change is untouched: a grading that ran out of room says nothing about
+    # the diff, so there is no defect to revert and the next attempt re-grades it.
+    assert (vault / "skills" / "foo" / "SKILL.md").read_text().startswith("---\nname: foo")
+    assert _rows("vault_land", 610) == [], "attempt 1 must not write a land row"
+
+
+def test_a_spent_diverged_vault_review_refuses_the_land_with_a_row(vault, items, monkeypatch):
+    """#2263 clause 4 on the divergence path. `retry` and `unsound` only go
+    blocking on the SECOND review (#975), because those name a defect an author
+    can fix; a divergence names a grading that does not exist and cannot be fixed
+    by landing, so at attempt 2 it refuses — and writes the `ok: false` land row
+    that #2260's ledger never got."""
+    _write_six_clause_item(items)
+    monkeypatch.setattr(V, "GRADER", lambda **kw: (RV.GRADER_DIVERGED, DIVERGED_2260, []))
+    (vault / "skills" / "foo" / "SKILL.md").write_text("---\nname: foo\n---\n# foo\n")
+    with pytest.raises(V.VaultRoundError):
+        V.land(["skills/foo/SKILL.md"], "skill: foo (#610)", item_id=610)
+    head_before = _vault_head(vault)
+    with pytest.raises(V.VaultRoundError) as ei:
+        V.land(["skills/foo/SKILL.md"], "skill: foo again (#610)", item_id=610)
+    assert "reverted" in str(ei.value)
+    lands = _rows("vault_land", 610)
+    assert len(lands) == 1 and lands[0]["ok"] is False
+    assert lands[0]["review"] == "diverged"
+    assert lands[0]["landing_clauses"] == [] and lands[0]["review_clauses"] == []
+    assert "generation diverged" in lands[0]["review_reason"]
+    assert _rows("vault_review", 610)[-1]["attempt"] == 2
+    # Nothing was committed and the edit is gone, which is #975's shape kept for a
+    # failure no author can fix by landing.
+    assert _vault_head(vault) == _head(vault) == head_before
+    assert V._git("status", "--porcelain").stdout.strip() == ""
+
+
+def test_a_review_that_grades_only_some_clauses_cannot_be_landed_as_pass(
+        vault, items, monkeypatch):
+    """#2263 clause 4 on the shape #2325 landed with: a `pass` carrying five
+    verdict rows for a six-clause contract. `landing_clauses` covers what `land()`
+    grades from the commit itself, so the gap here is a plain ungraded clause —
+    and with a prior refusal in the ledger (attempt 2) it is a refusal, not a
+    `review: pass` carrying a silently short clause list.
+
+    The attempt is seeded the way the #412 and #546 tests seed it, because
+    `_vault_review_attempts` counts this item's rows since its implement turn
+    started and the count is not what this test is about."""
+    _write_six_clause_item(items, 611)
+    monkeypatch.setattr(V, "GRADER", lambda **kw: (
+        "pass", "five of six", [{"clause": i, "verdict": "met"} for i in range(1, 6)]))
+    S.append_event({"event": "vault_review", "item_id": 611, "kind": "retry",
+                    "blocking": True, "attempt": 1, "findings": "seam unverified: x"})
+    (vault / "memory").mkdir(exist_ok=True)
+    (vault / "memory" / "one.md").write_text("# first edit\n")
+    with pytest.raises(V.VaultRoundError) as ei:
+        V.land(["memory/one.md"], "note (#611)", item_id=611)
+    assert "no verdict for clause(s) 6 of 6" in str(ei.value), str(ei.value)
+    lands = _rows("vault_land", 611)
+    assert len(lands) == 1 and lands[0]["ok"] is False
+    assert lands[0]["review"] == "pass", "the refusal is the short verdict, not the kind"
+    assert "clause(s) 6" in lands[0]["review_reason"]
+    # The refusal is recorded where a refusal belongs — on the LAND row — and the
+    # review row beside it says which clause went ungraded, so a reader of either
+    # row alone can tell this was a grading that stopped five clauses short.
+    rows = _rows("vault_review", 611)
+    assert [r["blocking"] for r in rows] == [True, False], rows
+    assert rows[-1]["verdict_shortfall"].startswith("no verdict for clause"), rows[-1]
+    assert _head(vault) == _vault_head(vault), "and the edits were reverted"
+    # The same verdict is complete once the sixth clause is the landing's own, so
+    # the gate measures the gap and not the row count.
+    assert V._vault_verdict_shortfall(
+        611, "pass", [{"clause": i, "verdict": "met"} for i in range(1, 6)], []) == \
+        "no verdict for clause(s) 6 of 6"
+    assert V._vault_verdict_shortfall(
+        611, "pass", [{"clause": i, "verdict": "met"} for i in range(1, 6)], [6]) == ""
+
+
+def test_a_landing_clause_closes_the_gap_a_short_verdict_leaves(vault, items, monkeypatch):
+    """The refusal must not bite the shape #955 built: five clauses graded and the
+    sixth IS the landing, which `land()` fills in from the commit. The verdict is
+    complete by the time anyone reads the row, so there is nothing to refuse."""
+    write_item(items, 612, SIX[:5] + [
+        "The change is submitted through `automod_vault_land` as one call naming exactly "
+        "the paths above, and no path under ~/lloyd changes."])
+    monkeypatch.setattr(V, "GRADER", lambda **kw: (
+        "pass", "five graded, sixth is the landing",
+        [{"clause": i, "verdict": "met"} for i in range(1, 6)]
+        + [{"clause": 6, "verdict": "post_landing", "subject": "landing"}]))
+    (vault / "memory").mkdir(exist_ok=True)
+    (vault / "memory" / "first.md").write_text("# first edit\n")
+    out = V.land(["memory/first.md"], "note (#612)", item_id=612)
+    assert out["ok"] is True, out["errors"]
+    assert out["landing_clauses"] == [{"clause": 6, "verdict": "met", "commit": out["commit"]}]
+    assert _rows("vault_review", 612)[-1]["blocking"] is False
+    # Now ON the refusal gate: a prior blocking review makes this attempt 2, where
+    # the gap check runs. Five graded clauses plus the landing's own sixth is a
+    # complete verdict, so the land goes through — the gap test must count
+    # `landing_clauses`, or every #955 round in the pool gets refused.
+    S.append_event({"event": "vault_review", "item_id": 612, "kind": "retry", "blocking": True})
+    (vault / "memory").mkdir(exist_ok=True)
+    (vault / "memory" / "thing.md").write_text("# second edit\n")
+    out = V.land(["memory/thing.md"], "note retried (#612)", item_id=612)
+    assert out["ok"] is True, out["errors"]
+    # The gate that let it through, read directly: five graded clauses plus the
+    # landing's own sixth leaves no gap, so there is nothing to refuse.
+    assert V._vault_verdict_shortfall(
+        612, "pass", [{"clause": i, "verdict": "met"} for i in range(1, 6)], [6]) == ""
+    assert V._vault_verdict_shortfall(
+        612, "pass", [{"clause": i, "verdict": "met"} for i in range(1, 6)], []) == \
+        "no verdict for clause(s) 6 of 6"
+
+
+def test_an_unbound_or_non_vault_surface_land_is_still_landed(vault, items, monkeypatch):
+    """The two refusals the bound must NOT make. An unbound land has no contract to
+    be ungraded against (every path in this file up to #955, and the whole
+    consolidation sweeper). And a `mixed` item's vault half: `grade_vault` abstains
+    on that surface by policy, so a verdict there never exists and the refusal
+    would be permanent — `backlog.vault_review_outcome` reads vault verdicts for
+    `vault` items only, and this is the same boundary."""
+    monkeypatch.setattr(V, "GRADER", lambda **kw: (RV.GRADER_DIVERGED, DIVERGED_2260, []))
+    (vault / "memory").mkdir(exist_ok=True)
+    (vault / "memory" / "unbound.md").write_text("# unbound edit\n")
+    out = V.land(["memory/unbound.md"], "unbound note edit")
+    assert out["ok"] is True and out["review"] == "skipped", "no contract, no review"
+    # Mixed surface, already ON its second attempt: `grade_vault` abstains there by
+    # policy, so this is what the seam really receives for #551's shape — a
+    # six-clause contract, no verdict rows, and no vault verdict it is ever going
+    # to get. Refusing it would strand every mixed item's vault half.
+    write_item(items, 613, SIX)
+    _ev(event="backlog_triage", item_id=613, verdict="confirmed", surface="mixed",
+        acceptance="x", acceptance_clauses=SIX)
+    monkeypatch.setattr(V, "GRADER", lambda **kw: ("skipped", MIXED_ABSTENTION, []))
+    S.append_event({"event": "vault_review", "item_id": 613, "kind": "retry", "blocking": True})
+    (vault / "memory").mkdir(exist_ok=True)
+    (vault / "memory" / "mixed.md").write_text("# mixed half\n")
+    out = V.land(["memory/mixed.md"], "mixed half, attempt 2 (#613)", item_id=613)
+    assert out["ok"] is True, out["errors"]
+    assert out["review"] == "skipped"
+    assert _rows("vault_review", 613)[-1]["blocking"] is False
+    assert _rows("vault_land", 613)[-1]["ok"] is True

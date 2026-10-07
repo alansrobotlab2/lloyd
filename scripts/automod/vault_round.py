@@ -756,7 +756,15 @@ def _vault_review(norm: list[str], item_id: int,
     `clauses` is the grader's per-clause verdicts (`review.grade_vault`). A
     grader answering the older two-element shape reads as none graded; a row
     marked `subject: landing` says the clause is about the commit this landing
-    is about to produce, which is `land()`'s to grade."""
+    is about to produce, which is `land()`'s to grade.
+
+    A `skipped` here is a grader that was never consulted, raised, or declined on
+    policy. A grader that WAS consulted and produced no grading of the contract
+    answers `diverged` or `incomplete` instead (#2263, `review.GRADER_FAILURE_KINDS`)
+    and this function passes that through unchanged: collapsing it into `skipped`
+    is what let a completion cut off at 8192 tokens look identical to a caller that
+    had no grader wired, on both the land row and the review row, with
+    `blocking: false` on each."""
     if GRADER is None:
         # "not consulted", spelled so it cannot be read as a grader that failed.
         # The module CLI and `scripts/autoresearch/promote.py` are the callers
@@ -835,15 +843,23 @@ def _landing_clause_indices(item_id: int) -> list[int]:
 
 
 def _vault_review_attempts(item_id: int) -> int:
-    """Blocking vault reviews for this item since its implement turn started."""
+    """Blocking vault reviews for this item since its implement turn started.
+
+    A review row carrying `verdict_shortfall` counts too (#2263): that is a `pass`
+    whose clause list left a contract clause ungraded, which the land let through
+    with a warning on the first time and must not let through for ever. Counting
+    only `blocking` rows would leave it at attempt 1 for the whole life of the
+    item, so the refusal below could never arrive for the shape #2325 landed."""
     events = S.read_events(limit=500)
     started = 0.0
     for e in events:
         if (e.get("event") == "backlog_implement" and e.get("phase") == "started"
                 and e.get("item_id") == item_id):
             started = float(e.get("ts") or 0)
-    return sum(1 for e in events if e.get("event") == "vault_review" and e.get("blocking")
-               and e.get("item_id") == item_id and float(e.get("ts") or 0) >= started)
+    return sum(1 for e in events
+               if e.get("event") == "vault_review" and e.get("item_id") == item_id
+               and (e.get("blocking") or e.get("verdict_shortfall"))
+               and float(e.get("ts") or 0) >= started)
 
 
 def _guards_row(guards: dict) -> dict:
@@ -1044,6 +1060,61 @@ def _no_change_refusal(norm: list[str], held: dict[str, str]) -> str:
                if lacking else ""))
 
 
+def _vault_verdict_shortfall(item_id: int, kind: str, clauses: list,
+                             landing_indices: list) -> str:
+    """Why this item's newest vault review is NOT a verdict on its contract;
+    `""` when it is one — a `pass` carrying a verdict row for every clause.
+
+    #2263 clause 4. `land()` asks once the grader's retries are spent, and a
+    non-empty answer refuses the land rather than committing `review: skipped`
+    with `landing_clauses: []` — the row shape that let item 2260's vault change
+    reach `main` at `ea9be106` with no verdict recorded at all, and then close on
+    a self-report at 2026-10-06T01:37:55Z.
+
+    Two cases have no answer, and neither is an abstention:
+
+      * an item with no acceptance clauses has no contract to leave ungraded.
+        Refusing there would refuse every land on an item nobody wrote clauses
+        for, which is not what the review rung is for;
+      * a NON-vault surface. `grade_vault` abstains by policy on a `code` or
+        `mixed` item — its clauses are the code gate's — so a mixed item's vault
+        half could never satisfy a vault verdict and its second land would be
+        refused forever. `backlog.vault_review_outcome` reads a vault verdict for
+        a `vault` item only, and this is the same boundary.
+
+    An item whose triage line carried no surface at all is treated as vault,
+    exactly as `grade_vault` treats it (`review.py`: `if surface and surface !=
+    "vault"`): the label was made optional in #1984 and items predating it have
+    none, and a gate that demanded the label would strand them.
+
+    `landing_indices` counts as answered because `land()` grades those itself,
+    from the commit's own file list, after this point — the question here is
+    whether a verdict will exist for every clause, not whose verdict it is.
+    """
+    from scripts.automod import backlog as B, review as RV, state as ST
+    try:
+        contract = RV.item_contract(int(item_id))
+        surface = str((B.confirmed_verdicts(ST.LEDGER_PATH).get(int(item_id))
+                       or {}).get("surface") or "").strip().lower()
+    except Exception:
+        return ""
+    n = len(contract.get("clauses") or [])
+    if not n or (surface and surface != "vault"):
+        return ""
+    graded = {int(c.get("clause") or 0) for c in clauses if isinstance(c, dict)}
+    graded |= {int(i) for i in (landing_indices or [])}
+    gap = [i for i in range(1, n + 1) if i not in graded]
+    if kind == "pass" and not gap:
+        return ""
+    bits = []
+    if kind != "pass":
+        bits.append(f"its newest vault review is {kind}, not pass")
+    if gap:
+        bits.append("no verdict for clause(s) " + ", ".join(str(i) for i in gap)
+                    + f" of {n}")
+    return "; ".join(bits)
+
+
 def land(paths: list[str], message: str, *, item_id: int | None = None,
          session_id: str | None = None, ack: list[str] | None = None) -> dict:
     """Validate these paths, commit exactly them on the vault's main, ledger it.
@@ -1142,6 +1213,7 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
         # #1621 was refused twice under a policy that permits neither (#1868).
         attempts = _vault_review_attempts(int(item_id)) + 1
         kind, findings, clauses = _vault_review(norm, int(item_id), attempts)
+        from scripts.automod import review as _RV
         review = kind
         # The grader marks the clauses it refused to grade because they are about
         # this commit; the contract read is the belt to that brace, for the
@@ -1180,14 +1252,67 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
                 ("review: premise unsound — " if kind == "unsound" else
                  f"review sent it back ({attempts}/{VAULT_REVIEW_MAX}): ") + findings[:800]
                 + ("; the edits were reverted" if undone else "; the edits are still in place — fix and land again"))
+        # #2263: `diverged` and `incomplete` are the two ways the grader was
+        # asked and produced no grading OF THIS CONTRACT at all, and they are
+        # blocking from the FIRST attempt — where `retry`/`unsound` only go
+        # blocking on the second, because those name a defect an author can fix
+        # and these name a grading that does not exist. #2240 capped every string
+        # leaf the schema admits and the 6-clause vault grading still ran past the
+        # 8192-token completion (`harness.finalizer.max_tokens`); what it recorded
+        # each time was `kind: skipped` with `blocking: false` (item 2260 at
+        # 2026-10-06T01:31:39Z, 2287 at 2026-10-06T13:39:20Z, 2325 at
+        # 2026-10-07T02:59:59Z), which the land then wrote up as a clean review.
+        if kind in _RV.GRADER_FAILURE_KINDS:
+            final = attempts >= VAULT_REVIEW_MAX
+            undone = revert_paths(norm) if final else []
+            S.append_event({"event": "vault_review", "item_id": item_id, "paths": norm,
+                            "kind": kind, "blocking": True, "attempt": attempts,
+                            "findings": findings[:2000], "reverted": undone,
+                            "clauses": clauses, "review_grader_failed": True,
+                            "review_reason": findings[:600]})
+            if final:
+                S.append_event({"event": "vault_land", "ok": False, "item_id": item_id,
+                                "paths": norm, "errors": [f"vault review: {kind}"],
+                                "reverted": undone, "review": kind,
+                                "review_reason": findings[:600],
+                                "review_clauses": [], "landing_clauses": []})
+            raise VaultRoundError(
+                f"review: grader could not grade the contract ({attempts}/"
+                f"{VAULT_REVIEW_MAX}): {findings[:800]}"
+                + ("; the edits were reverted" if undone else
+                   "; the edits are still in place — land again, whose next attempt grades "
+                   "the contract in smaller pieces"))
+        # #2263 clause 4: once the retries are spent, an item-bound land needs a
+        # verdict, not a land row. `review: skipped` with `landing_clauses: []`
+        # used to be committable, and `backlog.vault_review_outcome` correctly
+        # refuses to judge it — which left the implementing turn's own self-report
+        # as the only record that the acceptance clauses were ever examined. That
+        # is how #2260 (`acceptance: met, clause_outcomes: []`) and #2325
+        # (five self-reported clauses beside a `skipped` grader row) both reached
+        # `status: done`.
+        shortfall = (_vault_verdict_shortfall(int(item_id), kind, clauses, list(landing))
+                     if attempts >= VAULT_REVIEW_MAX else "")
         # Every non-blocking outcome is recorded, an abstention included: before
         # #955 the reason for a skip was discarded here and the only trace was
         # the bare word `skipped` on the landing, which could not distinguish
         # "not consulted" from "the grader 503'd".
         S.append_event({"event": "vault_review", "item_id": item_id, "paths": norm,
                         "kind": kind, "blocking": False, "findings": findings[:600],
+                        "verdict_shortfall": shortfall,
                         "review_reason": findings[:600] if kind == "skipped" else "",
-                        "clauses": clauses})
+                        "clauses": clauses,
+                        **({"verdict_shortfall": shortfall} if shortfall else {})})
+        if shortfall:
+            undone = revert_paths(norm)
+            S.append_event({"event": "vault_land", "ok": False, "item_id": item_id,
+                            "paths": norm, "errors": [f"vault review: {shortfall}"[:300]],
+                            "reverted": undone, "review": kind,
+                            "review_reason": shortfall[:600],
+                            "review_clauses": [], "landing_clauses": []})
+            raise VaultRoundError(
+                f"review never graded this item's contract ({shortfall}); the review retries "
+                f"are spent, so the edits were reverted and the land is refused rather than "
+                f"committed with review: {kind} and no clause verdicts")
 
     # #2036: does the code tree's own vault-reading selection still agree with the
     # vault as proposed? Validation above proves the prose PARSES, and that is its

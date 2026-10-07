@@ -184,6 +184,69 @@ SEAM_MAX = 300
 SUMMARY_MAX = 600
 AMENDMENTS_NOTE_MAX = 600
 
+#: #2263 — how many acceptance clauses ONE grading generation is asked to answer.
+#: The caps above bound what the schema *accepts*; they do not bound what the
+#: model *writes*, which is what #2240 got wrong: measured over the promotion
+#: ledger, every post-cap `vault_review` divergence is a 5- or 6-clause contract
+#: (items 2260 at 2026-10-06T01:31:39Z, 2287 at 13:39:20Z, 2325 at
+#: 2026-10-07T02:59:59Z) and no 4-clause review diverged at all (3 passed). The
+#: failure scales with clauses per call, so the only bound that holds is on the
+#: call: `grade_vault` grades at most this many clauses per request and merges the
+#: answers, which makes a 6-clause contract two generations of three clauses
+#: instead of one that overruns `harness.finalizer.max_tokens` (config.yaml:744,
+#: 8192, thinking included). Three, not four or five, because the observed
+#: boundary in that census is between 4 (0 of 3 diverged) and 5 (2 of 9
+#: diverged), and a cap set at the first size that ever failed is a cap that
+#: pins a flaky threshold rather than clearing it.
+CLAUSES_PER_CALL = 3
+
+#: The two ways `grade_vault` answers when the grader was asked and no grading of
+#: this contract came back (#2263). Neither is a verdict on the change, and
+#: `vault_round.land` refuses to treat either as a clean review: it records the
+#: row `blocking: true` and, once the review retries are spent, refuses the land
+#: with `ok: false` instead of committing `review: skipped, landing_clauses: []`.
+#:
+#: `diverged` is the #2260 shape: the finalizer ran the completion past its token
+#: budget and returned nothing parsable. `incomplete` is the merged answer missing
+#: a contract clause index or repeating one — the same abstention in a different
+#: disguise, and the reason the census's 9 `not addressed by the grader` rows used
+#: to arrive as a `retry` refusal on a diff no clause had actually been graded.
+GRADER_DIVERGED = "diverged"
+GRADER_INCOMPLETE = "incomplete"
+GRADER_FAILURE_KINDS = (GRADER_DIVERGED, GRADER_INCOMPLETE)
+
+#: What `app.harness.finalizer` says when the completion ran out of room
+#: (`finalizer.py:274` and `:280`). Matched on the substring, not a prefix,
+#: because `grade_vault` sees the whole `finalizer failed: …` sentence inside
+#: `run_grader`'s error field.
+DIVERGENCE_MARKS = ("generation diverged", "output truncated at")
+
+
+def generation_diverged(error: object) -> bool:
+    """Whether a `run_grader` error is the finalizer running out of room.
+
+    This is the one grader failure #2263 makes blocking, because it is the one
+    with a named mechanism and a measured denominator: a backend that 503s or a
+    turn that times out says nothing about the contract's size, and the vault
+    route has always let those abstentions land.
+    """
+    e = str(error or "").lower()
+    return any(m in e for m in DIVERGENCE_MARKS)
+
+
+def clause_chunks(n_clauses: int, per_call: int = CLAUSES_PER_CALL) -> list[list[int]]:
+    """1-based clause indices of an N-clause contract, grouped into calls of
+    `per_call`: `ceil(n/per_call)` groups, every index 1..N in exactly one.
+
+    Empty for an empty contract, so a caller that has nothing to grade issues no
+    generation rather than one asking for nothing.
+    """
+    n = max(int(n_clauses or 0), 0)
+    size = max(int(per_call or 1), 1)
+    return [list(range(start, min(start + size, n + 1)))
+            for start in range(1, n + 1, size)]
+
+
 # Every string leaf above carries a positive `maxLength`, and that is the whole
 # point of #2240. `app.harness.finalizer` reads a schema with an open string as
 # "this completion could need more room", so when the review grader's object ran
@@ -1528,8 +1591,31 @@ def landing_clause_indices(clauses) -> list[int]:
 
 
 def build_vault_prompt(*, contract: dict, paths: list[str], diff: str, vault: Path,
-                       landing_clauses: list[int] | None = None) -> str:
-    clauses = "\n".join(f"{i}. {c}" for i, c in enumerate(contract["clauses"], 1))
+                       landing_clauses: list[int] | None = None,
+                       clause_indices: list[int] | None = None) -> str:
+    """The grading prompt for one generation.
+
+    `clause_indices` (#2263) restricts it to those acceptance clauses OF this
+    contract, keeping their contract numbering: a chunk of a 6-clause item is
+    shown as clauses 4, 5 and 6, so its answer's `clause` values are indices into
+    the contract and the chunks merge without a translation table. `None` grades
+    every clause, which is what the code surface and any single-call caller do.
+    """
+    all_clauses = list(contract["clauses"])
+    wanted = ([i for i in range(1, len(all_clauses) + 1)] if clause_indices is None
+              else [i for i in clause_indices if 1 <= i <= len(all_clauses)])
+    clauses = "\n".join(f"{i}. {all_clauses[i - 1]}" for i in wanted)
+    batch_note = ""
+    if clause_indices is not None and len(all_clauses) > len(wanted):
+        other = [i for i in range(1, len(all_clauses) + 1) if i not in set(wanted)]
+        batch_note = (
+            f"\n<which_clauses_to_grade>\nThis is one of several grading calls over the SAME "
+            f"change. Grade ONLY clauses {', '.join(str(i) for i in wanted)} — one entry each, "
+            f"and exactly one entry each. Clauses {', '.join(str(i) for i in other)} are graded "
+            f"by another call and an entry for them is discarded here, so answering them wastes "
+            f"the room this answer needs and can cut a real verdict off mid-sentence. The clause "
+            f"numbers below are already the item's own; do not renumber them.\n"
+            f"</which_clauses_to_grade>\n")
     landing = list(landing_clauses or [])
     landing_note = ""
     if landing:
@@ -1574,7 +1660,7 @@ absence of a commit as an unmet clause.
 <acceptance_clauses>
 {clauses}
 </acceptance_clauses>
-
+{batch_note}
 Paths changed: {', '.join(paths)}.
 {landing_note}
 <diff>
@@ -1593,12 +1679,93 @@ asked to restate the review as one JSON object.
 """
 
 
+def _idx_text(chunk: list[int]) -> str:
+    """`[4, 5, 6]` as `4, 5, 6` — for prose that names the clauses it means."""
+    return ", ".join(str(i) for i in chunk)
+
+
+def _clause_index(raw: dict) -> int | None:
+    """The 1-based contract index one clause entry claims, or None."""
+    try:
+        idx = int(raw.get("clause") or 0)
+    except (TypeError, ValueError):
+        return None
+    return idx if idx >= 1 else None
+
+
+def merge_grading_chunks(chunks: list[list[int]], answers: list[dict]) -> tuple[dict | None, str]:
+    """One object for `parse_review`, joined from the per-call grader answers.
+
+    Each call was asked for its own slice of the contract and answers in the
+    contract's own numbering, so the join is a concatenation with a completeness
+    check standing behind it: every index 1..N answered exactly once, no gap and
+    no duplicate. A slice answered twice or not at all returns `(None, why)` —
+    #2263 clause 2, because a contract clause the grader skipped is a grader that
+    did not grade, and reading it as the synthesized `partial` it used to be
+    refused a diff on a verdict that was never about the diff.
+
+    An entry naming a clause OUTSIDE the slice that call was asked for is dropped,
+    not merged: a grader that answers the whole contract in every call still comes
+    back complete (each call contributes its own slice), and counting its
+    redundant answers as a duplicate would refuse a round for the grader being
+    over-eager. `premise` is unsound if any call said so — one unsound reading of
+    the item is a finding about the item. `test_honesty` and `seams_unverified`
+    are the union of every call's, because a finding one call saw and another did
+    not ask about is still a finding; `amendments_ok` is the AND for the same
+    reason in the refusing direction.
+    """
+    merged: dict = {"premise": "sound", "clauses": [], "test_honesty": [],
+                    "seams_unverified": [], "amendments_ok": True,
+                    "amendments_note": "", "summary": ""}
+    for n, (chunk, obj) in enumerate(zip(chunks, answers), 1):
+        src = obj if isinstance(obj, dict) else {}
+        if str(src.get("premise") or "").strip().lower() == "unsound":
+            merged["premise"] = "unsound"
+        wanted = set(chunk)
+        counts: dict[int, int] = {}
+        for raw in (src.get("clauses") if isinstance(src.get("clauses"), list) else []):
+            if not isinstance(raw, dict):
+                continue
+            idx = _clause_index(raw)
+            if idx not in wanted:
+                continue
+            counts[idx] = counts.get(idx, 0) + 1
+            merged["clauses"].append(raw)
+        missing = sorted(wanted - set(counts))
+        repeated = sorted(idx for idx, seen in counts.items() if seen > 1)
+        if missing or repeated:
+            bits = []
+            if missing:
+                bits.append("no verdict for clause(s) " + _idx_text(missing))
+            if repeated:
+                bits.append("two verdicts for clause(s) " + _idx_text(repeated))
+            return None, (f"{'; '.join(bits)} in the answer for clause(s) "
+                          f"{_idx_text(chunk)} (call {n} of {len(chunks)})")
+        for key in ("test_honesty", "seams_unverified"):
+            got = src.get(key)
+            merged[key].extend(got if isinstance(got, list) else [])
+        if src.get("amendments_ok") is False:
+            merged["amendments_ok"] = False
+        merged["amendments_note"] = (merged["amendments_note"]
+                                     or str(src.get("amendments_note") or ""))
+        merged["summary"] = merged["summary"] or str(src.get("summary") or "")
+    merged["clauses"].sort(key=lambda c: _clause_index(c) or 0)
+    return merged, ""
+
+
 def grade_vault(*, item_id: int, paths: list[str], diff: str,
                 vault: Path | None = None, backend: str | None = None,
                 sessions_dir: Path | None = None, timeout: float = REVIEW_TIMEOUT_S,
                 model: str = "primary", attempt: int = 1) -> tuple[str, str, list[dict]]:
     """`(kind, findings, clauses)` for a vault round's staged edit — the
     `vault_round.GRADER` contract. `skipped` when the grader cannot run.
+
+    The `kind` is `pass`, `retry`, `unsound`, `skipped` — and, since #2263,
+    `diverged` or `incomplete` (`GRADER_FAILURE_KINDS`): the finalizer running
+    its completion past its token budget, and a merged answer that leaves a
+    contract clause ungraded or grades one twice. Those two are the abstentions
+    with a mechanism behind them, and `vault_round.land` records them
+    `blocking: true` rather than as another `skipped` the landing went ahead on.
 
     `clauses` is `[{clause, verdict}]` after `parse_review`'s downgrades, one
     per clause the grader judged, and `[]` whenever it did not grade. It rides
@@ -1642,12 +1809,39 @@ def grade_vault(*, item_id: int, paths: list[str], diff: str,
     if not contract["clauses"]:
         return "skipped", f"item #{item_id} has no acceptance clauses", []
     landing = landing_clause_indices(contract["clauses"])
-    prompt = build_vault_prompt(contract=contract, paths=paths, diff=diff, vault=vault,
-                                landing_clauses=landing)
-    res = run_grader(prompt=prompt, item_id=int(item_id), round_id="vault",
-                     backend=backend, sessions_dir=sessions_dir, timeout=timeout, model=model)
-    if not res["ok"]:
-        return "skipped", f"grader did not answer: {res.get('error')}", []
+    # #2263: one generation per slice of the contract, never one generation per
+    # contract. `CLAUSES_PER_CALL` is why a 6-clause item is two 3-clause answers
+    # rather than one answer that runs past the finalizer's 8192 tokens and
+    # records nothing — the failure #2240 capped the leaves of and did not stop.
+    chunks = clause_chunks(len(contract["clauses"]))
+    answers: list[dict] = []
+    for n, chunk in enumerate(chunks, 1):
+        prompt = build_vault_prompt(contract=contract, paths=paths, diff=diff, vault=vault,
+                                    landing_clauses=[i for i in landing if i in chunk],
+                                    clause_indices=chunk)
+        res = run_grader(prompt=prompt, item_id=int(item_id), round_id="vault",
+                         backend=backend, sessions_dir=sessions_dir, timeout=timeout,
+                         model=model)
+        if not res["ok"]:
+            if generation_diverged(res.get("error")):
+                # Not `skipped`. A diverged grading is this item's named failure,
+                # and `vault_round.land` writes it `blocking: true` so a second
+                # one refuses the land rather than committing a verdict-less row.
+                return (GRADER_DIVERGED,
+                        f"grader generation diverged answering clause(s) "
+                        f"{_idx_text(chunk)} (call {n} of {len(chunks)}): "
+                        f"{res.get('error')}", [])
+            return "skipped", f"grader did not answer: {res.get('error')}", []
+        obj = res["structured"] if isinstance(res["structured"], dict) else {}
+        if str(obj.get("premise") or "").strip().lower() not in ("sound", "unsound"):
+            # #955's six wordings stay six wordings: an object that is not a
+            # review at all is a different abstention from a review that left a
+            # clause out, and collapsing them is what that test exists to stop.
+            return "skipped", "grader returned an unusable object", []
+        answers.append(obj)
+    merged, why = merge_grading_chunks(chunks, answers)
+    if merged is None:
+        return (GRADER_INCOMPLETE, f"grader returned no verdict for every clause: {why}", [])
     # `paths` IS the lander's list — `vault_round._vault_review` passes `land()`'s own
     # normalised argument — and it is the only witness a deletion clause has: the file it
     # cites is off disk because this very edit is removing it. Left at `parse_review`'s
@@ -1655,7 +1849,7 @@ def grade_vault(*, item_id: int, paths: list[str], diff: str,
     # surface while `gate.py` and `review_tools.py` both pass the list, and #2038 spent
     # both attempts on clauses [1,2] downgraded for citing paths its own `paths` array
     # carried. See tests/fixtures/promotions_vault_review_rows_2026-10-01-item2038.jsonl.
-    parsed = parse_review(res["structured"], worktree=vault, changed_tests=[],
+    parsed = parse_review(merged, worktree=vault, changed_tests=[],
                           n_clauses=len(contract["clauses"]), require_tests=False,
                           changed_paths=list(paths))
     if parsed is None:

@@ -3148,6 +3148,38 @@ def outcome_carries_no_claim(outcome) -> bool:
     return outcome.get("acceptance") == "not_met"
 
 
+#: Names the abstention on the row so the settle sweep's note can say WHICH one:
+#: a vault landing whose grader never returned a verdict row per clause.
+UNGRADED_VAULT_REVIEW = "vault review returned no clause verdicts"
+
+
+def ungraded_vault_outcome(outcome) -> dict:
+    """The outcome a `vault` landing is recorded with when the grader abstained.
+
+    #2263 clause 5. The turn's own word is `met`; it is not taken, because on the
+    vault surface there is no other reader — a vault turn opens no code round, so
+    the review rung never sees the diff, and `vault_review_outcome` is the one
+    per-clause record that the contract was examined. With it empty, `met` is the
+    turn grading its own homework after the grader was cut off mid-sentence, which
+    is what closed #2260 (`acceptance: met, clause_outcomes: []` at
+    2026-10-06T01:37:55Z, grader row `kind: skipped`) and #2325 (five
+    self-reported clauses, grader row `kind: skipped`, 2026-10-07T03:06:21Z).
+
+    `acceptance` is `not_met` rather than absent so the item is left open by the
+    branch that re-offers a `not_met`, and `acceptance_ungraded` is what tells the
+    sweep's note that this is an ungraded landing and not a refusal — the round
+    did not report `not_met`, and the note must not say it did. The turn's summary
+    rides along: what it thought it did is still the only description of the
+    change, and the human reading the item wants it.
+    """
+    src = outcome if isinstance(outcome, dict) else {}
+    return {"acceptance": "not_met", "landed": bool(src.get("landed", True)),
+            "clause_outcomes": [], "deferred_to": [], "spawned": list(src.get("spawned") or []),
+            "summary": str(src.get("summary") or ""),
+            "source": "vault_review", "acceptance_ungraded": UNGRADED_VAULT_REVIEW,
+            "item_verdict_refused": "met_without_grader_clauses"}
+
+
 def ungated_rescued_rounds(ledger: Path) -> set[str]:
     """Rounds the reaper gated because their implement turn ended without
     gating (`autocode._gate_if_ungated`, a `gate_rescued` row of kind
@@ -3312,9 +3344,25 @@ def settled_landings(ledger: Path) -> list[dict]:
         # non-claim — left open on a note naming no clause, its one unattended
         # attempt spent, its recorded post-landing checks never written.
         if not rid:
+            # #2263 clause 5: on a `vault` item the grader's rows are the only
+            # per-clause evidence that the acceptance contract was examined at
+            # all, because a vault turn opens no round and so has no review rung.
+            # Reported `met` therefore cannot outrank their absence — the shape
+            # that closed #2260 at 2026-10-06T01:37:55Z with `clause_outcomes: []`
+            # and #2325 at 2026-10-07T03:06:21Z on five self-reported clauses
+            # beside a grader row that was `kind: skipped` with `clauses: []`.
+            # A non-vault surface is out of scope here: its clauses belong to the
+            # code gate, and `graded_for` abstains on it by policy, so refusing
+            # its vault half would refuse a verdict that surface never issues.
+            graded = graded_for(d, vault)
+            if usable and reported == "met" and graded is None and surface_of(d) == "vault":
+                out.append({"item_id": int(d["item_id"]), "round_id": "", "commit": vault[-1],
+                            "settled_at": d.get("created_at"), "landed_ts": d.get("ts"),
+                            "outcome": ungraded_vault_outcome(outcome), "vault": True})
+                continue
             out.append({"item_id": int(d["item_id"]), "round_id": "", "commit": vault[-1],
                         "settled_at": d.get("created_at"), "landed_ts": d.get("ts"),
-                        "outcome": outcome if usable else (graded_for(d, vault) or outcome),
+                        "outcome": outcome if usable else (graded or outcome),
                         "vault": True})
             continue
         # Only a substantiated non-`met` verdict suppresses this row. A claim-less
@@ -3687,6 +3735,14 @@ def _close_settled_items(ledger: Path, boards: tuple[str, ...] | None, *,
             ids = ", ".join(f"#{i}" for i in outcome.get("deferred_to") or []) or "an unnamed follow-up"
             close, why = False, (f"the round deferred the acceptance check to {ids}; "
                                  f"close this when that closes")
+        elif acc == "not_met" and (ungraded := outcome.get("acceptance_ungraded")):
+            # #2263 clause 5. Not the round's refusal — nobody graded the
+            # contract, so the sweep wrote `not_met` itself rather than take a
+            # `met` backed by no clause rows. The note has to say that, or the
+            # item comes back with a refusal nobody made.
+            close, why = False, (f"the acceptance check was never graded ({ungraded}), so the "
+                                 f"turn's `met` was not taken; the item stays open for a "
+                                 f"landing that records a verdict per clause")
         elif acc == "not_met":
             unmet = unmet_clauses(outcome)
             close, why = False, ("the round landed but reported the acceptance check not met"

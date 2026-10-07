@@ -3926,3 +3926,199 @@ def test_the_direction_of_the_reported_move_is_pinned(move_repo):
     problem = RV.stale_constant_quotes(r, base, ["scripts/retention-sweep.py"],
                                        vault=v)[0]["problem"]
     assert f"as {old};" in problem and f"moves it {old} -> {new}" in problem, problem
+
+
+# ── #2263: a grading is bounded per call, and no grading is a failure ────────
+#
+# #2240 capped every string leaf the review schema admits on the theory that an
+# uncapped `note` was what let a grading run past `harness.finalizer.max_tokens`
+# (8192, config.yaml:744). The theory was right about the earlier failures and
+# wrong about the ceiling: three `vault_review` rows diverged AFTER those caps
+# went live on 2026-10-05T17:55Z — item 2260 at 2026-10-06T01:31:39Z, 2287 at
+# 13:39:20Z, 2325 at 2026-10-07T02:59:59Z — all `kind: skipped`, `clauses: []`,
+# `blocking: false`. Every one is a 5- or 6-clause contract and no 4-clause
+# review diverged, so the bound has to sit on the CALL. A cap of 3 is a structural
+# property, not a flaky threshold: `CLAUSES_PER_CALL` is what the tests below
+# measure against, and the census is `grep -c 'generation diverged'
+# ~/.local/state/lloyd-automod/promotions.jsonl` = 21 as this was written.
+
+SIX_CLAUSES = [f"clause {i} of six is satisfied on disk" for i in range(1, 7)]
+
+
+def _met_answer(indices):
+    """A grader answer with one `met` row for each of `indices`, evidence real."""
+    return {"ok": True, "structured": {
+        "premise": "sound", "summary": "each clause read off disk", "test_honesty": [],
+        "seams_unverified": [],
+        "clauses": [{"clause": i, "verdict": "met", "evidence_path": "skills/x/SKILL.md",
+                     "evidence_line": 1, "test_node_id": "", "how_verified": "read",
+                     "note": f"read line 1 for clause {i}"} for i in indices]}}
+
+
+def _six_clause_item(isolated, item_id, tmp_path):
+    write_item(isolated, item_id, clauses=SIX_CLAUSES)
+    _confirm(item_id, acceptance="; ".join(SIX_CLAUSES), clauses=SIX_CLAUSES, surface="vault")
+    (isolated / "skills" / "x").mkdir(parents=True, exist_ok=True)
+    (isolated / "skills" / "x" / "SKILL.md").write_text("x\n", encoding="utf-8")
+
+
+def _asked_clauses(prompt):
+    """Which of the six clauses THIS prompt names, by its rendering in
+    `<acceptance_clauses>`. Detecting what was asked rather than trusting the
+    caller's chunk is what makes the next test a measurement."""
+    return [i for i in range(1, 7) if f"{i}. {SIX_CLAUSES[i - 1]}" in prompt]
+
+
+def test_clause_chunks_cover_the_contract_in_calls_of_three():
+    """The structural bound: `ceil(n/3)` calls, every index 1..n in exactly one."""
+    assert RV.CLAUSES_PER_CALL <= 3, "the bound #2263 pins is at most three clauses a call"
+    assert RV.clause_chunks(6) == [[1, 2, 3], [4, 5, 6]]
+    assert RV.clause_chunks(7) == [[1, 2, 3], [4, 5, 6], [7]]
+    assert RV.clause_chunks(3) == [[1, 2, 3]] and RV.clause_chunks(4) == [[1, 2, 3], [4]]
+    assert RV.clause_chunks(0) == [] and RV.clause_chunks(None) == []
+    for n in range(1, 21):
+        chunks = RV.clause_chunks(n)
+        flat = [i for chunk in chunks for i in chunk]
+        assert flat == list(range(1, n + 1)), f"{n}: gap or duplicate in {chunks}"
+        assert len(chunks) == -(-n // RV.CLAUSES_PER_CALL)
+        assert all(len(c) <= RV.CLAUSES_PER_CALL for c in chunks)
+
+
+def test_a_six_clause_vault_contract_is_graded_in_two_calls_of_three_clauses(
+        isolated, monkeypatch, tmp_path):
+    """#2260's contract, end to end through `grade_vault` with only the network
+    seam replaced. One generation over six clauses is what overran 8192 tokens at
+    2026-10-06T01:31:39Z and left `ea9be106` with no verdict; six clauses are the
+    common case, not the tail."""
+    _six_clause_item(isolated, 601, tmp_path)
+    seen = []
+
+    def fake(**kw):
+        asked = _asked_clauses(kw["prompt"])
+        seen.append(asked)
+        return _met_answer(asked)
+    monkeypatch.setattr(RV, "run_grader", fake)
+    kind, why, clauses = RV.grade_vault(item_id=601, paths=["skills/x/SKILL.md"], diff="+x",
+                                       vault=isolated)
+    assert seen == [[1, 2, 3], [4, 5, 6]], f"one call per slice, in contract order: {seen}"
+    assert kind == "pass", why
+    assert [c["clause"] for c in clauses] == [1, 2, 3, 4, 5, 6]
+    assert all(c["verdict"] == "met" for c in clauses), clauses
+
+
+def test_a_grading_call_names_only_the_clauses_it_is_answering(isolated, monkeypatch, tmp_path):
+    """The chunk keeps the CONTRACT's numbering, so the merged rows need no
+    translation and a grader cannot renumber its way into a gap."""
+    _six_clause_item(isolated, 602, tmp_path)
+    prompts = []
+    monkeypatch.setattr(RV, "run_grader",
+                        lambda **kw: (prompts.append(kw["prompt"]), _met_answer([4, 5, 6]))[1])
+    RV.grade_vault(item_id=602, paths=["skills/x/SKILL.md"], diff="+x", vault=isolated,
+                   attempt=1)
+    # `grade_vault` issues two calls; the second is the one that asks for 4-6.
+    last = prompts[-1]
+    for i in (4, 5, 6):
+        assert f"{i}. {SIX_CLAUSES[i - 1]}" in last
+    for i in (1, 2, 3):
+        assert f"{i}. {SIX_CLAUSES[i - 1]}" not in last, "clause 1 is not this call to grade"
+    assert "Grade ONLY clauses 4, 5, 6" in last
+    assert "already the item's own; do not renumber" in last
+    # The whole-contract call asks for clauses 1-3 and says nothing about 4-6's
+    # texts, so nothing outside the slice can be answered from it.
+    first = prompts[0]
+    assert "Grade ONLY clauses 1, 2, 3" in first
+    assert SIX_CLAUSES[5] not in first
+    # A contract that fits one call is prompted exactly as before #2263.
+    single = RV.build_vault_prompt(contract=_vault_contract(["only clause"]),
+                                   paths=["a.md"], diff="+a", vault=isolated,
+                                   clause_indices=[1])
+    assert "<which_clauses_to_grade>" not in single, "no batch note when nothing is batched"
+
+
+def test_a_merged_grading_that_leaves_a_clause_unanswered_is_no_verdict(
+        isolated, monkeypatch, tmp_path):
+    """#2263 clause 2. A grader that answers 4 of 6 did not grade the contract;
+    before this it arrived as a `retry` refusal carrying a synthesized `partial`
+    for the clause nobody looked at, which is a verdict on the change invented
+    from the grader's silence."""
+    _six_clause_item(isolated, 603, tmp_path)
+    answers = [_met_answer([1, 2, 3]), _met_answer([4, 6])]
+    calls = iter(answers)
+    monkeypatch.setattr(RV, "run_grader", lambda **kw: next(calls))
+    kind, why, clauses = RV.grade_vault(item_id=603, paths=["skills/x/SKILL.md"], diff="+x",
+                                       vault=isolated)
+    assert kind == RV.GRADER_INCOMPLETE
+    assert clauses == [], "an unanswered clause must not be answered for the grader"
+    assert "no verdict for clause(s) 5" in why and "call 2 of 2" in why, why
+
+
+def test_a_merged_grading_that_grades_one_clause_twice_is_no_verdict(
+        isolated, monkeypatch, tmp_path):
+    """The same failure in the other direction: two verdicts for clause 5 mean one
+    of them is about something else, and `vault_review_outcome` counts rows, so a
+    duplicate is how a five-row verdict passes for a six-clause contract."""
+    _six_clause_item(isolated, 604, tmp_path)
+    answers = [_met_answer([1, 2, 3]), _met_answer([4, 5, 5])]
+    calls = iter(answers)
+    monkeypatch.setattr(RV, "run_grader", lambda **kw: next(calls))
+    kind, why, clauses = RV.grade_vault(item_id=604, paths=["skills/x/SKILL.md"], diff="+x",
+                                       vault=isolated)
+    assert kind == RV.GRADER_INCOMPLETE and clauses == []
+    assert "two verdicts for clause(s) 5" in why, why
+
+
+def test_a_grader_that_answers_every_call_at_once_still_merges(
+        isolated, monkeypatch, tmp_path):
+    """Redundant answers are dropped, not counted as duplicates: a grader that
+    grades all six in both calls still lands a complete contract. Refusing it
+    would refuse the round for the grader being over-eager."""
+    _six_clause_item(isolated, 605, tmp_path)
+    monkeypatch.setattr(RV, "run_grader", lambda **kw: _met_answer([1, 2, 3, 4, 5, 6]))
+    kind, why, clauses = RV.grade_vault(item_id=605, paths=["skills/x/SKILL.md"], diff="+x",
+                                       vault=isolated)
+    assert kind == "pass", why
+    assert [c["clause"] for c in clauses] == [1, 2, 3, 4, 5, 6]
+
+
+def test_merge_grading_chunks_is_the_single_reader_of_both_sides():
+    """The merge is a pure function so the bound and the completeness check are
+    one measurement, not a prompt-side claim and a reader-side hope."""
+    ok, why = RV.merge_grading_chunks([[1, 2], [3]],
+                                      [{"clauses": [{"clause": 1}, {"clause": 2}]},
+                                       {"clauses": [{"clause": 3}]}])
+    assert why == "" and [c["clause"] for c in ok["clauses"]] == [1, 2, 3]
+    # An unsound premise in any call is unsound overall, and a refused amendment
+    # in any call is refused: one call's finding is a finding.
+    merged, _ = RV.merge_grading_chunks(
+        [[1], [2]], [{"premise": "sound", "clauses": [{"clause": 1}], "amendments_ok": True},
+                     {"premise": "unsound", "clauses": [{"clause": 2}], "amendments_ok": False,
+                      "amendments_note": "clause 2 asks for an amendment"}])
+    assert merged["premise"] == "unsound" and merged["amendments_ok"] is False
+    assert merged["amendments_note"] == "clause 2 asks for an amendment"
+    bad, why = RV.merge_grading_chunks([[1], [2]], [{"clauses": []}, {"clauses": [{"clause": 2}]}])
+    assert bad is None and "no verdict for clause(s) 1" in why, why
+
+
+def test_a_grader_cut_off_mid_generation_answers_diverged_not_skipped(
+        isolated, monkeypatch, tmp_path):
+    """The `#2260` error verbatim, out of the ledger row at 2026-10-06T01:31:39Z.
+    `skipped` is what `land()` used to receive, and it is the word that let the
+    land commit with `review: skipped`; `diverged` is a named mechanism with a
+    measured denominator, so `land` can make it blocking."""
+    _six_clause_item(isolated, 606, tmp_path)
+    err = ('finalizer failed: generation diverged at 8192 tokens — every field this schema '
+           'admits is capped, so the object running past them is malformed output, not a '
+           'budget (\'{"premise":"sound","clauses":[{"clause":1,"verdict":"met"')
+    monkeypatch.setattr(RV, "run_grader", lambda **kw: {"ok": False, "error": err})
+    kind, why, clauses = RV.grade_vault(item_id=606, paths=["skills/x/SKILL.md"], diff="+x",
+                                       vault=isolated)
+    assert kind == RV.GRADER_DIVERGED and clauses == []
+    assert "clause(s) 1, 2, 3" in why and "call 1 of 2" in why, why
+    assert RV.generation_diverged(err) is True
+    # The abstentions that are NOT this item's: a backend that 503s says nothing
+    # about the contract's size, and stays a `skipped` the land can still make.
+    assert RV.generation_diverged("engine unavailable: 503") is False
+    monkeypatch.setattr(RV, "run_grader",
+                        lambda **kw: {"ok": False, "error": "engine unavailable: 503"})
+    assert RV.grade_vault(item_id=606, paths=["skills/x/SKILL.md"], diff="+x",
+                          vault=isolated)[0] == "skipped"

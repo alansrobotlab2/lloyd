@@ -396,9 +396,19 @@ def test_a_skipped_review_records_no_verdicts_even_if_handed_some(vault, monkeyp
 
 def test_grade_vault_returns_one_row_per_contract_clause(isolated, monkeypatch, tmp_path):
     """After `parse_review`'s downgrades — a `met` whose evidence is not on disk
-    reads `partial`, and so does a clause the grader never reached — one row
-    per clause, so a reader counts against the contract as it stood when it
-    was graded."""
+    reads `partial`, and so does a clause the grader itself judged `partial` —
+    one row per clause, so a reader counts against the contract as it stood when
+    it was graded.
+
+    Re-pointed by #2263. The fixture used to answer TWO of three clauses and
+    assert the third came back as a synthesized `partial`, which is what a clause
+    the grader never reached used to look like: a verdict on the change, on a
+    clause nobody read, that read as a `retry` refusal and spent the item's two
+    attempts. The census of those refusals is the 9 `vault_review` rows reading
+    "not addressed by the grader". A skipped clause is a grader failure now —
+    `tests/test_automod_review.py::test_a_merged_grading_that_leaves_a_clause_unanswered_is_no_verdict`
+    pins that — and what this node keeps pinning is that the grader's own `met`
+    does not survive a file that is not there."""
     write_item(isolated, 590, clauses=["a", "b", "c"])
     _ev(event="backlog_triage", item_id=590, verdict="confirmed", surface="vault",
         acceptance="a", acceptance_clauses=["a", "b", "c"])
@@ -410,6 +420,8 @@ def test_grade_vault_returns_one_row_per_contract_clause(isolated, monkeypatch, 
             {"clause": 1, "verdict": "met", "evidence_path": "skills/x/SKILL.md",
              "evidence_line": 1, "test_node_id": "", "how_verified": "read", "note": ""},
             {"clause": 2, "verdict": "met", "evidence_path": "skills/nope.md",
+             "evidence_line": 1, "test_node_id": "", "how_verified": "read", "note": ""},
+            {"clause": 3, "verdict": "partial", "evidence_path": "skills/x/SKILL.md",
              "evidence_line": 1, "test_node_id": "", "how_verified": "read", "note": ""}]}})
     kind, _, clauses = RV.grade_vault(item_id=590, paths=["skills/x/SKILL.md"], diff="+x",
                                       vault=tmp_path)
@@ -547,3 +559,107 @@ def test_triage_does_not_write_a_test_file_into_a_vault_contract():
     assert "the vault path that shows it (`— skills/<name>/SKILL.md`)" in single
     assert "for a `vault` umbrella, the vault path that shows it instead, never a test" in group
     assert "for a `vault` surface the vault path that shows it, never a test" in desc
+
+
+# ── #2263 clause 5: a vault close cannot outrank the absence of grader rows ──
+#
+# The failure this pins is not the skipped land, it is what came after it. Item
+# 2260: grader row `kind: skipped`, `clauses: []`, `blocking: false` at
+# 2026-10-06T01:31:39Z; six minutes later its `backlog_implement` row recorded
+# `{'landed': True, 'acceptance': 'met', 'clause_outcomes': []}` and the item went
+# to `status: done`. Item 2325 on 2026-10-07T03:06:21Z: `acceptance: met` with
+# five SELF-REPORTED `clause_outcomes` beside a grader row of `skipped`/`[]`.
+# #2240's comment claimed `backlog.py` "refuses to judge them and the item stays
+# open" — that half was true of `vault_review_outcome` and untrue of the close.
+
+
+def _ungraded_vault_landing(item_id: int, clause_outcomes=(), surface="vault"):
+    """The row shape both items left behind: a vault land with no clause verdicts
+    and an implement report that says `met` anyway."""
+    _ev(event="vault_land", ok=True, commit="aaa1", item_id=item_id,
+        paths=["skills/x/SKILL.md"], review="skipped",
+        review_reason="grader did not answer: generation diverged at 8192 tokens",
+        landing_clauses=[])
+    _ev(event="backlog_implement", phase="finished", item_id=item_id, round_id="",
+        surface=surface, vault_commits=["aaa1"],
+        outcome={"landed": True, "acceptance": "met", "clause_outcomes": list(clause_outcomes),
+                 "deferred_to": [], "spawned": [], "summary": "the ruling is in the skill"})
+
+
+def test_a_vault_landing_with_no_grader_clauses_cannot_report_acceptance_met(isolated):
+    """#2260 verbatim: `acceptance: met`, `clause_outcomes: []`, no grader row.
+    On the vault surface there is no code review rung behind a no-round landing,
+    so the grader's rows are the ONLY per-clause evidence — a `met` with none is
+    the turn grading its own homework."""
+    write_item(isolated, 900, clauses=["the ruling is in the skill", "the witness is on disk",
+                                       "no interval job is scheduled"])
+    _ev(event="backlog_triage", item_id=900, verdict="confirmed", surface="vault",
+        acceptance="the ruling is on disk", acceptance_clauses=["the ruling is in the skill",
+                                                                "the witness is on disk",
+                                                                "no interval job is scheduled"])
+    _ungraded_vault_landing(900)
+    landed = {d["item_id"]: d for d in B.settled_landings(S.LEDGER_PATH)}
+    out = landed[900]["outcome"]
+    assert out["acceptance"] == "not_met", f"a met with zero grader rows: {out}"
+    assert out["clause_outcomes"] == []
+    assert out["acceptance_ungraded"], "the close must say it was UNGRADED, not refused"
+    assert out["landed"] is True and out["summary"] == "the ruling is in the skill"
+    got = {g["item_id"]: g for g in B.close_settled_items(S.LEDGER_PATH, dry_run=True)}
+    assert got[900]["closed"] is False, got[900]
+    assert "never graded" in got[900]["reason"], got[900]["reason"]
+
+
+def test_self_reported_clause_rows_do_not_satisfy_a_contract_the_grader_skipped(isolated):
+    """#2325's shape, which is the worse one: five `clause_outcomes` the turn wrote
+    itself, beside a grader row that answered nothing. What is on the row is not
+    evidence — the reader that counts clauses reads the grader's."""
+    write_item(isolated, 901, clauses=[f"clause {i}" for i in range(1, 6)])
+    _ev(event="backlog_triage", item_id=901, verdict="confirmed", surface="vault",
+        acceptance="x", acceptance_clauses=[f"clause {i}" for i in range(1, 6)])
+    _ungraded_vault_landing(901, clause_outcomes=[
+        {"clause": i, "outcome": "met", "evidence": "skills/x/SKILL.md", "test_node_id": "",
+         "how_verified": "read", "note": f"self-reported {i}"} for i in range(1, 6)])
+    landed = {d["item_id"]: d for d in B.settled_landings(S.LEDGER_PATH)}
+    assert landed[901]["outcome"]["acceptance"] == "not_met", landed[901]["outcome"]
+    assert landed[901]["outcome"]["clause_outcomes"] == [], \
+        "the turn's own rows must not ride along as the grader's grading"
+
+
+def test_a_grader_that_answered_per_clause_still_closes_the_vault_item(isolated):
+    """The boundary, from the other side: the same item with a `pass` review
+    carrying a row per clause, matched by commit, is a graded `met` and closes.
+    Without this the check above would just be a refusal to land vault items."""
+    write_item(isolated, 902, clauses=["a", "b", "c"])
+    _ev(event="backlog_triage", item_id=902, verdict="confirmed", surface="vault",
+        acceptance="a;b;c", acceptance_clauses=["a", "b", "c"])
+    _ev(event="vault_review", item_id=902, kind="pass", blocking=False,
+        clauses=[{"clause": i, "verdict": "met"} for i in range(1, 4)])
+    _ev(event="vault_land", ok=True, commit="bbb2", item_id=902,
+        paths=["skills/x/SK.md"], review="pass",
+        # `land()` writes the grader's rows and the landing's own onto the LAND row
+        # under `review_clauses`, and that is what `vault_review_outcome` counts.
+        review_clauses=[{"clause": i, "verdict": "met"} for i in range(1, 4)],
+        landing_clauses=[{"clause": 3, "verdict": "met", "commit": "bbb2"}])
+    _ev(event="backlog_implement", phase="finished", item_id=902, round_id="",
+        surface="vault", vault_commits=["bbb2"],
+        outcome={"landed": True, "acceptance": "met", "clause_outcomes": [],
+                 "deferred_to": [], "spawned": [], "summary": "all three"})
+    landed = {d["item_id"]: d for d in B.settled_landings(S.LEDGER_PATH)}
+    assert landed[902]["outcome"]["acceptance"] == "met", landed[902]["outcome"]
+    got = {g["item_id"]: g for g in B.close_settled_items(S.LEDGER_PATH)}
+    assert got[902]["closed"] is True, got[902]
+
+
+def test_a_mixed_surface_landing_is_left_to_the_code_rung(isolated):
+    """#551's boundary, unchanged: a `mixed` item's clauses belong to the code
+    gate, so its vault half is never going to carry a vault verdict and the close
+    must not wait for one. The check is scoped to the surface the grader answers."""
+    write_item(isolated, 903, clauses=["the skill names it", "tests/test_x.py::t passes"])
+    _ev(event="backlog_triage", item_id=903, verdict="confirmed", surface="mixed",
+        acceptance="x", acceptance_clauses=["the skill names it", "tests/test_x.py::t passes"])
+    _ungraded_vault_landing(903, surface="mixed")
+    landed = {d["item_id"]: d for d in B.settled_landings(S.LEDGER_PATH)}
+    assert landed[903]["outcome"]["acceptance"] == "met", "the mixed half is not ungraded"
+    got = {g["item_id"]: g for g in B.close_settled_items(S.LEDGER_PATH)}
+    assert got[903]["closed"] is True, \
+        "closing on the turn's word is wrong for a vault item and right for this one"
