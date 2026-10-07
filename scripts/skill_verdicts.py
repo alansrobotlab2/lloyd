@@ -131,6 +131,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
 import re
@@ -1645,6 +1646,143 @@ def _reads_a_candidate(text: str, cand_vars: set[str]) -> bool:
     return False
 
 
+#: The candidate-input question `cmd_audit` answers from the row text alone (#2339).
+#:
+#: `_CANDIDATE_PATH_RE` already finds a `candidate-…md` token anywhere in a stored command; what it
+#: cannot say is whether that token still NAMES a file. The dated-snapshot pruning in the candidate
+#: directory does exactly that to a row: the pattern a key was recorded against stays in the ledger
+#: after the file it was recorded against is gone, and the command that counts it then expands
+#: `$C/$N` to the bare directory, prints `grep: …: Is a directory`, emits the count `0` and exits 0
+#: through its trailing `echo`. `unrunnable: 0` is true of such a ledger and tells nobody anything,
+#: so only the row and the directory can answer, and they answer here.
+#:
+#: Nothing at mint time consults this, deliberately: a command recorded while its snapshot exists is
+#: honest, and the pruning that removes the snapshot later is not something its writer could have been
+#: refused for, and 25 of the ledger's 116 current rows name a candidate file by path, glob or dated
+#: pattern: a mint-time rule keyed on that would refuse a large slice of the ledger to prevent
+#: something that only happens to a row later. #2333 rejects the mint-time half of itself on the same
+#: grounds and asks for this half only.
+#:
+#: A token with none of `_CAND_META_RE`'s characters is a LITERAL filename, and a literal that has
+#: gone is loud: `grep` prints `No such file or directory` and `UNRUNNABLE` decides it by executing.
+#: This class exists for the silent death — a GLOB or a dated ERE that keeps its exact shape while
+#: every file it ever named is pruned, which is the `$C/$N`-expands-to-the-directory case no
+#: execution can see because the compound command still ends in `echo`.
+_CAND_META_RE = re.compile(r"[*?\[{(|+]")
+_CAND_DIR_FROM_TEXT_RE = re.compile(r"(/[^\s'\"`;|&()<>$]*)$")
+
+
+def _candidate_dirs_assigned_in(cmd: str) -> list[str]:
+    r"""Absolute directories this command assigns that ARE a candidates directory.
+
+    The seq-shaped rows keep the directory in a variable (`C=/…/skills/candidates`) and reach the
+    file only through `$C/$N`, so a bare pattern like `candidate-<key>-[0-9]{8}\.md` has nowhere to
+    be resolved except the assignment the same command makes. `skills/candidates` is recognised by
+    the existing `_CANDIDATE_DIR_RE`; the leading `/` is required because a relative `candidates` in
+    a command whose cwd nobody knows is not a claim about any directory on this box.
+    """
+    out: list[str] = []
+    for name, (start, end) in _shell_assignments(cmd).items():
+        value = cmd[start:end]
+        if value.startswith("/") and _CANDIDATE_DIR_RE.search(value) and value not in out:
+            out.append(value)
+    return out
+
+
+def _candidate_listing(directory: str) -> list[str] | None:
+    """The file names in `directory`, or None when it cannot be listed (missing, or not one)."""
+    try:
+        return sorted(p.name for p in Path(directory).expanduser().iterdir())
+    except OSError:
+        return None
+
+
+def _pattern_names_any(pattern: str, listing: list[str]) -> bool | None:
+    r"""Does one stored candidate NAME pattern name any file in `listing`? None if it cannot be said.
+
+    A ledger pattern arrives in whichever dialect it was written in: a glob for `grep -E`/`ls`
+    (`candidate-*-20260920.md`), an ERE for `grep -xE` (`candidate-…-[0-9]{8}\.md`), or a literal
+    dated file, and `^`/`$` anchors appear on some of them. A pattern that mixes glob and regex
+    metacharacters is left UNDECIDED rather than guessed at: translating `[0-9]{8}` as an fnmatch
+    character class plus a literal `{8}` would answer "no files match" for a directory full of
+    files that do, and a detector that manufactures the fabricated zero it exists to report is
+    worse than the blind spot it closes.
+    """
+    pattern = pattern.lstrip("^").rstrip("$")
+    if "$" in pattern or "`" in pattern:
+        return None                      # still holds a variable: no file is being claimed
+    globby = "*" in pattern or "?" in pattern
+    if globby and "[" in pattern:
+        return None
+    if globby:
+        return any(fnmatch.fnmatch(n, pattern) for n in listing)
+    try:
+        rx = re.compile(pattern)
+    except re.error:
+        return None
+    return any(rx.fullmatch(n) for n in listing)
+
+
+def candidate_input_lost(evidence_cmd: str) -> str | None:
+    """A sentence naming what resolves to nothing, when a row's candidate input is off the disk.
+
+    Decided from the stored command and a directory listing, because the execution cannot say it: a
+    row whose dated snapshot has been pruned runs clean, prints a zero it did not earn, and exits 0.
+    None — no claim — whenever the command leaves the question open, which is every shape where the
+    answer would otherwise be a guess:
+
+    * it names no `candidate-…md` token at all (an owner-skill grep: no input to have lost);
+    * the only directory the name could resolve in is itself a variable (`$C/candidate-x-*.md` with
+      no `C=` to ground it), or the pattern's own name still holds one (`candidate-$k-*.md`, which
+      `ledger/falsifier_input_lost_for_non_error_seq_keys` stores tonight — resolving that token
+      means matching the literal `$k` against a filename, finding nothing, and calling the result a
+      finding);
+    * the pattern is undecidable by `_pattern_names_any`, or any candidate token in the command DOES
+      resolve — a command with three globs and one live snapshot is reading its input.
+
+    A literal dated path that no longer exists is not answered here either: that one prints `No such
+    file or directory` and belongs to `UNRUNNABLE`, which decides it by executing.
+    """
+    specs = list(_CANDIDATE_PATH_RE.finditer(evidence_cmd))
+    if not specs:
+        return None
+    assigned_dirs = _candidate_dirs_assigned_in(evidence_cmd)
+    listings: dict[str, list[str] | None] = {}
+
+    def listing_of(directory: str) -> list[str] | None:
+        if directory not in listings:
+            listings[directory] = _candidate_listing(directory)
+        return listings[directory]
+
+    for match in specs:
+        pattern = match.group(0)
+        if "$" in pattern or "`" in pattern:
+            return None                       # undecidable name: the whole command is unprovable
+        if not _CAND_META_RE.search(pattern):
+            continue     # a literal dated path is UNRUNNABLE's, decided by running it
+        head = _CAND_DIR_FROM_TEXT_RE.search(evidence_cmd[:match.start()])
+        own_dir = head.group(1) if head and len(head.group(1)) > 1 else None
+        where = [own_dir] if own_dir else assigned_dirs
+        if not where:
+            return None
+        why: list[str] = []
+        for directory in where:
+            listing = listing_of(directory)
+            if listing is None:
+                why.append(f"{pattern} in {directory} (no such directory)")
+                continue
+            named = _pattern_names_any(pattern, listing)
+            if named is None:
+                return None
+            if named:
+                break                         # this token resolves: its input is on the disk
+            why.append(f"{pattern} in {directory} "
+                       f"({len(listing)} files there, none matching)")
+        else:
+            return "; ".join(why)
+    return None
+
+
 def candidate_body_defect(evidence_cmd: str) -> tuple[str, str] | None:
     """`(kind, detail)` for a falsifier whose candidate-file counts are not body-scoped, or None.
 
@@ -2458,17 +2596,34 @@ def cmd_audit(args: argparse.Namespace) -> int:
     `UNRUNNABLE <pattern_key> :: <detail>` line per dead key, one
     `EMPTY_INPUT <pattern_key> :: <detail>` line per key whose rc-0 check declared
     `input_rows=0`, and one `STRANDED_CASE <pattern_key> :: <detail>` line per key whose
-    case-sensitive literal grep read absent while the same command with `-i` matches — all
-    three in key order, since they interleave and a reader greps for the class, not the
-    position. Then the tallies, and their order is load-bearing: `stranded:
+    case-sensitive literal grep read absent while the same command with `-i` matches, and one
+    `INPUT_LOST <pattern_key> :: <detail>` line per key whose stored command still names a
+    candidate snapshot by glob or dated pattern while no file on disk matches it any more (#2339)
+    — all four in key order, since they interleave and a reader greps for the class, not the
+    position.
+
+    `INPUT_LOST` is the fourth shape of the candidate-scoping trio and the only one decided from the
+    row and the directory rather than from the row alone or the execution. It exists because the
+    candidate directory is pruned: the pattern a key was recorded against outlives the dated snapshot
+    it was recorded against, `$C/$N` then expands to the bare directory, `grep` prints `Is a
+    directory` and emits `0`, the trailing `echo` exits 0, and the ledger reports `unrunnable: 0` over
+    four falsifiers that can no longer see their input. Those rows are NOT counted in `whole_file`:
+    a falsifier reading nothing is not counting a candidate whole, and naming it
+    `WHOLE_CANDIDATE_COUNT` sends the repair to a missing `awk` when the repair is a re-mint. It is
+    decided before `candidate_body_defect` for that reason, and it enters the exit code by name so
+    excluding a row from one figure cannot quietly buy a green audit.
+
+    Then the tallies, and their order is load-bearing: `stranded:
     case_sensitive_grep N`, then `denominators: empty_input N undeclared M`, then
     `keys: N unrunnable: M` as the LAST line — `check`'s shape, so a reader that takes
     `splitlines()[-1]` gets the ledger tally and one that takes `[-2]` gets the denominator
     tally it has been reading since #2048. The new count enters ABOVE those two rather than
     between them, because displacing a published line to make room for a new one is how a
     reader that is not looking for the change silently reads the wrong figure; five tests
-    pin those two positions. Exit 1 when `unrunnable:` > 0 or either count above does, so an
-    unverifiable ledger fails a run instead of printing into a log nobody re-reads.
+    pin those two positions. Exit 1 when `unrunnable:` > 0 or ANY count above it does —
+    `whole_file`, `dead_strip` and `input_lost` included, each by name in the expression rather
+    than by inheriting another's — so an unverifiable ledger fails a run instead of printing into a
+    log nobody re-reads.
 
     The stranded line exists because the ledger's own worst silent failure is not a command
     that cannot run. A falsifier that greps an installed `SKILL.md` for a literal string
@@ -2510,6 +2665,10 @@ def cmd_audit(args: argparse.Namespace) -> int:
     # falsifier counts a candidate file whole has been inflating all along and reported rc 0
     # doing it, so no execution-based tally in this function can ever reach it.
     whole, dead_strip = [], []
+    # #2339's third shape on the same stored text: the row still names its candidate file, and the
+    # file is gone. Kept out of `whole` by the order in the loop below — a falsifier that cannot see
+    # its input is not inflating a count — and put into the exit code by the line at the end.
+    lost_rows: list[str] = []
     for key in sorted(table):
         # The three-value form, so one audit still runs each stored command once: the
         # denominator comes off the same execution that decided runnability, never from a
@@ -2528,21 +2687,40 @@ def cmd_audit(args: argparse.Namespace) -> int:
         elif state == STRANDED_CASE:
             stranded.append(key)
             print(f"STRANDED_CASE {key} :: {detail}")
-        # Named from the row text, before the `if state` chain and independent of it: a key can
-        # be unrunnable AND leak prose, and the two facts need different fixes.
-        leak = candidate_body_defect(table[key].get("evidence_cmd") or "")
-        if leak is not None:
-            (whole if leak[0] == "whole_file" else dead_strip).append(key)
-            print(f"{'WHOLE_CANDIDATE_COUNT' if leak[0] == 'whole_file' else 'DEAD_FRONT_MATTER_STRIP'}"
-                  f" {key} :: {leak[1]}")
+        # Both named from the row text, before and independent of the `if state` chain: a key can be
+        # unrunnable AND leak prose, and the two facts need different fixes.
+        stored_cmd = table[key].get("evidence_cmd") or ""
+        # Input-lost is decided FIRST, and the two are then mutually exclusive by that order rather
+        # than by luck (#2339): a row whose candidate pattern names no file is not counting a
+        # candidate whole, it is counting nothing, and printing `WHOLE_CANDIDATE_COUNT` for it points
+        # the repair at a missing `awk` when the repair is a re-mint. The one fact that must not
+        # follow the other silently is the exit code — see the tail of this function.
+        lost = candidate_input_lost(stored_cmd)
+        if lost is not None:
+            lost_rows.append(key)
+            print(f"INPUT_LOST {key} :: {lost}")
+        else:
+            leak = candidate_body_defect(stored_cmd)
+            if leak is not None:
+                (whole if leak[0] == "whole_file" else dead_strip).append(key)
+                print(f"{'WHOLE_CANDIDATE_COUNT' if leak[0] == 'whole_file' else 'DEAD_FRONT_MATTER_STRIP'}"
+                      f" {key} :: {leak[1]}")
     # ABOVE `stranded:`, not below it: #2103's test pins `splitlines()[-3]` to that line, and
     # the rule that lands in #2166's own test is that a new tally arrives above the published
-    # figure without moving any of the ones below it.
-    print(f"candidate_body_scoping: whole_file {len(whole)} dead_strip {len(dead_strip)}")
+    # figure without moving any of the ones below it. `input_lost` is APPENDED to this line rather
+    # than inserted into it for the same reason: a nightly that parses `whole_file (\d+)` out of it
+    # keeps parsing it over a ledger where the third figure appeared.
+    print(f"candidate_body_scoping: whole_file {len(whole)} dead_strip {len(dead_strip)} "
+          f"input_lost {len(lost_rows)}")
     print(f"stranded: case_sensitive_grep {len(stranded)}")
     print(f"denominators: empty_input {len(empty_input)} undeclared {undeclared}")
     print(f"keys: {len(table)} unrunnable: {len(dead)}")
-    return 1 if (dead or empty_input or stranded or whole or dead_strip) else 0
+    # `lost_rows` is in this expression because the change that removed those four rows from `whole`
+    # is the same change that would otherwise have flipped tonight's audit from exit 1 to exit 0:
+    # excluded from one figure and absent from the rest is a ledger that reports `unrunnable: 0` over
+    # falsifiers which can no longer see their input, which is the exact sentence #2048 was raised to
+    # make impossible. A ledger whose ONLY defect is input-lost falsifiers has to stay red.
+    return 1 if (dead or empty_input or stranded or whole or dead_strip or lost_rows) else 0
 
 
 def _read_reanchors(path: str | None) -> dict[str, str]:

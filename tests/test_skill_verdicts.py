@@ -4732,3 +4732,169 @@ def test_a_double_quoted_candidate_substitution_is_not_read_as_inert(tmp_path):
     assert sv.candidate_body_defect(inert) is None, (
         "a single-quoted substitution is never expanded, so `grep` opens a file literally named "
         "that and finds none: UNRUNNABLE's class, decided by running it, not this rule's")
+
+
+# ── #2339: a falsifier whose candidate snapshot has been pruned is input-lost ──────────────
+
+def candidates_2339(tmp_path: Path) -> Path:
+    """An EMPTY candidates directory under the path shape the ledger's `$C` variable holds.
+
+    `candidate_2166` writes `tmp_path/candidates` with one snapshot in it. This writes
+    `tmp_path/skills/candidates` with nothing, for two reasons. `skills/candidates` is the spelling
+    `_CANDIDATE_DIR_RE` recognises, and the four keys this item is about name their snapshot by a
+    bare DATED PATTERN (`ls $C | grep -xE "candidate-<key>-[0-9]{8}\\.md"`) looked up against a
+    directory VARIABLE — the shape where the directory has to come out of the row's own `C=`
+    assignment before the pattern can be resolved at all. And it is empty on purpose: every row
+    stored below is one whose dated snapshot the pruning has already taken.
+    """
+    cand = tmp_path / "skills" / "candidates"
+    cand.mkdir(parents=True, exist_ok=True)
+    return cand
+
+
+def seq_row_2339(cand: Path, key: str) -> str:
+    """The live `seq-2-bash-fs-edit` falsifier, verbatim in shape, on a temp candidates dir.
+
+    All four of the ledger's #2166 keys read like this: `C=<dir>`; then `N=$(ls $C | grep -xE
+    "candidate-<key>-[0-9]{8}\\.md" | sort | tail -1)`; then `grep -c "\\[ERROR\\]" $C/$N`. Once the
+    dated snapshot is pruned `N` is empty, so `$C/$N` expands to the bare directory: grep prints
+    `Is a directory`, emits the count `0`, the compound command still ends in `echo` so it exits 0,
+    and `_run_stored_check` reports a clean run. That is the fabricated zero this class is for, and
+    it is why no amount of executing the stored command can find it.
+    """
+    return (f'C={cand}; N=$(ls $C | grep -xE "candidate-{key}-[0-9]{{8}}\\.md" | sort | tail -1); '
+            f'echo "snapshot=$N snapshots=$(ls $C | grep -cE "^candidate-{key}-[0-9]{{8}}\\.md$") '
+            f'err_steps=$(grep -c "\\[ERROR\\]" $C/$N) sessions=$(grep -m1 "^sessions:" $C/$N)"')
+
+
+def test_a_row_whose_candidate_glob_matches_no_file_is_input_lost_not_whole_file(tmp_path, store):
+    """Clause 1: `input_lost` takes the row OUT of `whole_file`, because it is not a scoping defect.
+
+    The row is the live shape verbatim, so `candidate_body_defect` on its own does classify it as
+    `whole_file` — a `grep -c` reading the candidate directory with no front-matter strip between —
+    and the first assertion pins that, so the exclusion below is a decision and not a non-detection.
+    What the change adds is the decision that comes BEFORE it: a falsifier that can no longer see
+    its input is not inflating a count, it is reading nothing, and calling that a scoping defect
+    points the fix at the missing `awk` when the fix is a re-mint against a snapshot that exists.
+    Hence `whole_file 0 input_lost 1`, and no `WHOLE_CANDIDATE_COUNT` line for the key the old
+    tally named.
+    """
+    cand = candidates_2339(tmp_path)
+    cmd = seq_row_2339(cand, "seq-9-bash-fs-gone")
+    defect = sv.candidate_body_defect(cmd)
+    assert defect is not None and defect[0] == "whole_file", defect
+    stored_row(store, "seq-9-bash-fs-gone", cmd)
+
+    rc, out = run_audit(store)
+    assert rc == 1, out
+    tally = next(ln for ln in out.splitlines() if ln.startswith("candidate_body_scoping:"))
+    assert "whole_file 0" in tally, out
+    assert "input_lost 1" in tally, out
+    assert not any(ln.startswith("WHOLE_CANDIDATE_COUNT") for ln in out.splitlines()), out
+
+
+def test_audit_prints_one_input_lost_line_per_row_above_the_tally_naming_what_is_gone(tmp_path,
+                                                                                      store):
+    """Clause 2: `INPUT_LOST <pattern_key> :: <detail>`, one per row, above the tally line.
+
+    The detail has to carry the pattern the row itself stores and the directory it was resolved
+    in, because the repair is a re-mint against a snapshot that exists and a reader told only
+    `input_lost` cannot tell which of a command's two or three dated globs went stale. Two rows
+    here, named in key order like every other audit line, both above `candidate_body_scoping:`
+    because that line summarises the lines printed before it.
+    """
+    cand = candidates_2339(tmp_path)
+    keys = ("seq-9-bash-fs-gone", "seq-9-read-edit-gone")
+    for key in keys:
+        stored_row(store, key, seq_row_2339(cand, key))
+
+    rc, out = run_audit(store)
+    lines = [ln for ln in out.splitlines() if ln.startswith("INPUT_LOST ")]
+    assert len(lines) == 2, out
+    assert [ln.split(" ")[1] for ln in lines] == list(keys), out
+    for key, ln in zip(keys, lines):
+        assert " :: " in ln, ln
+        assert f"candidate-{key}-[0-9]" in ln, ln
+        assert str(cand) in ln, ln
+    assert out.index("INPUT_LOST seq-9-bash-fs-gone") < out.index("candidate_body_scoping:"), out
+    assert "input_lost 2" in out, out
+    assert rc == 1, out
+
+
+def test_a_row_counting_a_present_candidate_file_is_still_whole_file(tmp_path, store):
+    """Clause 3: the new class narrows nothing #2166 already caught.
+
+    `Edit/logic`'s pre-#2166 falsifier over a snapshot that IS on disk: the glob resolves, so the
+    prose leak is the only fact about the row and it stays `whole_file 1` with its
+    `WHOLE_CANDIDATE_COUNT` line intact. The predicate and the published tally are both asserted,
+    because the failure mode of a class decided by "did the glob resolve" is that it resolves for
+    nobody and every scoping finding silently reappears as an input finding.
+    """
+    cand = candidate_2166(tmp_path)
+    stored_row(store, "Edit/logic", counting_cmd(cand, "whole"))
+
+    rc, out = run_audit(store)
+    assert rc == 1, out
+    assert "candidate_body_scoping: whole_file 1 dead_strip 0 input_lost 0" in out, out
+    assert any(ln.startswith("WHOLE_CANDIDATE_COUNT Edit/logic")
+               for ln in out.splitlines()), out
+    assert not any(ln.startswith("INPUT_LOST ") for ln in out.splitlines()), out
+
+
+def test_a_ledger_whose_only_defect_is_input_lost_still_exits_1_with_its_lines_in_place(tmp_path,
+                                                                                        store):
+    """Clause 4: moving those rows out of `whole_file` must not silently buy a green audit.
+
+    Those four keys are what holds today's audit at exit 1 *through* `whole`, so a change that
+    re-labelled them without adding `input_lost` to the same expression would print
+    `keys: 116 unrunnable: 0` and exit 0 over a ledger whose falsifiers cannot see their own input —
+    #2048's named failure arriving as a regression rather than a discovery. This ledger holds one
+    input-lost row and one clean body-scoped row, so nothing else in the expression is true and the
+    exit can only be 1 if the new figure is in it.
+
+    The last four lines are pinned by content and position as well: `keys:` stays last with its
+    wording, `denominators:` at -2 and `stranded:` at -3, `candidate_body_scoping:` at -4. The new
+    figure is appended at the END of its line for the same reason the line order is fixed — a
+    nightly that parses `whole_file (\\d+)` out of that line, or takes `splitlines()[-4]`, has to
+    keep working on a ledger it has never seen before.
+    """
+    cand = candidates_2339(tmp_path)
+    stored_row(store, "seq-9-bash-fs-gone", seq_row_2339(cand, "seq-9-bash-fs-gone"))
+    stored_row(store, "Edit/logic", counting_cmd(candidate_2166(tmp_path), "body"))
+
+    rc, out = run_audit(store)
+    assert rc == 1, out
+    lines = out.splitlines()
+    assert lines[-1] == "keys: 2 unrunnable: 0", out
+    assert lines[-2] == "denominators: empty_input 0 undeclared 1", out
+    assert lines[-3] == "stranded: case_sensitive_grep 0", out
+    assert lines[-4] == "candidate_body_scoping: whole_file 0 dead_strip 0 input_lost 1", out
+
+
+def test_the_input_lost_predicate_stays_silent_where_it_cannot_prove_anything(tmp_path):
+    """The predicate behind all four clauses, isolated — including the three places it must say nothing.
+
+    Shapes the live ledger really contains that the class must NOT claim: a command that names no
+    candidate file at all (an owner-skill grep, `input_lost` has no input to have lost), and a
+    candidate pattern whose own name still holds a shell variable — `candidate-$k-*.md`, which
+    `ledger/falsifier_input_lost_for_non_error_seq_keys` stores tonight. Resolving that token means
+    matching the literal `$k` against a filename, which finds nothing, and reporting the result
+    would manufacture the very fabricated zero this class exists to catch. And a literal dated path
+    that is gone is left to `UNRUNNABLE`: that one already prints `No such file or directory`, so a
+    second verdict on it would be a second label on one fact.
+    """
+    cand = candidates_2339(tmp_path)
+    skill = skill_fixture(tmp_path)
+    assert sv.candidate_input_lost(f"grep -c 'old string' {skill}; echo 'input_rows=1'") is None
+    assert sv.candidate_input_lost(
+        f"for k in a b; do grep -c ERROR $(ls {cand}/candidate-$k-*.md | head -1); done") is None, (
+        "a name still holding `$k` is not a claim about any file")
+    assert sv.candidate_input_lost(
+        f"grep -c 'Error' {cand}/candidate-seq-9-bash-fs-gone-20260901.md; echo 'input_rows=1'"
+    ) is None, "a literal path that is gone is UNRUNNABLE's, decided by running it"
+
+    detail = sv.candidate_input_lost(seq_row_2339(cand, "seq-9-bash-fs-gone"))
+    assert detail is not None, "the live shape has to be decided, not merely asked about"
+    assert "candidate-seq-9-bash-fs-gone-[0-9]" in detail and str(cand) in detail, detail
+    assert sv.candidate_input_lost(counting_cmd(candidate_2166(tmp_path), "whole")) is None, (
+        "a glob that resolves is a falsifier that can see its input")
