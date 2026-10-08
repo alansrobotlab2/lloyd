@@ -166,6 +166,83 @@ def _refuse_broken(exc: Exception) -> str:
     return json.dumps({"error": str(exc), "yaml_broken": True})
 
 
+#: #2408: a task's `description` is the text the scheduler prompts the model with
+#: (`app/autonomy.py::_build_task_prompt`), so every number in it is a claim about a
+#: constant in this checkout. `scripts/automod/vault_round.py:630` has compared those
+#: claims since #2317 — at a vault LAND, on the state of the landed file. The route the
+#: prose actually travels is this module, and no commit had ever guarded it
+#: (`git log -S'constant_quotes' -- agent_mcp/` is empty at #2408's base), so the
+#: afternoon `01dea8bc` moved `LEDGER_ARCHIVE_AGE_DAYS` from 30 to 14 an
+#: `autonomy_write_task(description=…)` could have gone on publishing 30.
+def _stale_description_error(description) -> str | None:
+    """Refuse a description quoting a tree constant at a value the tree does not have.
+
+    Returns the tool-protocol refusal — the module's plain `{"error": ...}` string, the
+    shape every other refusal here uses — or None when the description may be published.
+    Never raised: a caller has to read this the way it reads the `slot_arm_block`
+    refusal inside `_handle_write`. `_refuse_broken` is deliberately NOT reused, because
+    its `yaml_broken: True` means "front matter only parsed by the regex fallback"
+    everywhere on this box (`agent_mcp/_shared.py`, `app/routers/autonomy.py`,
+    `tests/test_autonomy_write_refuses_broken_frontmatter.py`) and would send the caller
+    off to fix YAML that is fine.
+
+    The refusal names the constant and BOTH numbers, for the reason
+    `vault_guards.autonomy_description_errors` gives: the fix is to type one of them, and
+    a refusal that said only "disagrees" sends the author back to grep the script.
+
+    **Judged on the caller's argument, never on the record.** `_write_task_file` is the
+    one writer all three callers pass through — the right place for the `updated` stamp —
+    but `_handle_write`'s update branch hands it the whole parsed record, description
+    included, so checking the record there would refuse every write that parks a task
+    whose prose is already stale. `draft`/`paused` are never dispatched, so that write is
+    how a job gets stopped from this tool. The vault-side rail can afford to read the
+    state of the file because a land is not how the engine stops a job; this half is the
+    delta, and being a delta is what makes refusing cheap — the caller fixes the number in
+    the retry it is already making, so it cannot deadlock.
+
+    A resolver that cannot run (no git, a timeout) returns None rather than stopping the
+    engine, and the number is still judged at the land. Zero resolved pairs also yields no
+    refusal, which `constant_quotes.Report.resolved` exists to make visible on the
+    vault-side witness and which this path deliberately does not police: most task
+    descriptions legitimately name no constant, and refusing those would block ordinary
+    writes on an instrument that had nothing to say.
+
+    **Fail-open, and it cannot swallow anyone's error.** The item's stated failure mode is
+    a guard that RAISES into the dispatcher, so everything the resolver does is inside the
+    `try`, and the tuple covers what that work can actually raise: `OSError` walking the
+    tree, `UnicodeDecodeError` reading a file, `subprocess.SubprocessError` if a harvest
+    shells out, and `ValueError` because `mismatches` is the code that converts numbers
+    here. Nothing in this module parses a caller's JSON — `grep -n json.loads
+    agent_mcp/autonomy.py` returns only this sentence — so no exception class named in
+    that tuple is ever raised on a caller's behalf, and no branch of it re-raises: a
+    resolver that cannot answer yields None and the write proceeds, which is also what
+    keeps a broken instrument from blocking the `status: draft` park that stops a job. The
+    number is still judged at the land either way.
+    """
+    text = str(description or "")
+    if not text.strip():
+        return None
+    import subprocess
+
+    from app.paths import LLOYD_HOME
+    from scripts.automod import constant_quotes as CQ
+
+    try:
+        found = CQ.mismatches(text, CQ.tree_constants(LLOYD_HOME)).found
+    except (OSError, UnicodeDecodeError, subprocess.SubprocessError, ValueError):
+        return None
+    if not found:
+        return None
+    # The same sentence `vault_guards.autonomy_description_errors` refuses a land with,
+    # so the two rails that police one number read alike to whoever gets refused.
+    detail = "; ".join(f"its description quotes {name} as {quoted}; the tree says "
+                       f"{actual}" for name, quoted, actual in found)
+    return json.dumps({"error": (
+        f"refusing to publish this description: {detail}. Retry with the tree's number, "
+        "or land the code that moves it first — the description is what the task is "
+        "prompted with, and the task file was not written.")})
+
+
 def _write_task_file(task_dict: dict) -> Path:
     if task_dict.get("_yaml_broken"):
         raise BrokenFrontmatterError(
@@ -587,6 +664,12 @@ def _handle_write(params: dict) -> str:
         name = params.get("name", "")
         if not name:
             return json.dumps({"error": "name is required when creating a task"})
+        # Ahead of `_next_task_id` so the refusal is the first thing a bad create can do:
+        # the id is derived from the highest one on disk, so writing nothing here leaves
+        # the same id available, and a stale description never reaches the file at all.
+        refusal = _stale_description_error(params.get("description", ""))
+        if refusal:
+            return refusal
         new_id = _next_task_id()
         task_dict = {
             "id": new_id,
@@ -628,6 +711,16 @@ def _handle_write(params: dict) -> str:
                 f"task #{task_id} frontmatter only parsed by regex fallback; "
                 "refusing to rewrite it (fix the file's YAML first)"))
         prior_status = task_dict.get("status")
+        # The same rule on the update path, and on the ARGUMENT only. `task_dict` above
+        # is the parsed file, so its `description` is what is already on disk: judging
+        # that here would refuse every later write to a file whose prose went stale, and
+        # `draft`/`paused` are never dispatched — this branch is how a job gets stopped.
+        # The truthiness test mirrors the loop below, so an empty description is ignored
+        # here exactly as it is ignored there.
+        if params.get("description"):
+            refusal = _stale_description_error(params["description"])
+            if refusal:
+                return refusal
         for key in ("status", "priority", "frequency", "skill_name", "agent_id", "model",
                      "scheduled_at", "pipeline", "description"):
             if params.get(key):

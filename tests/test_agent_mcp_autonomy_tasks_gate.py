@@ -452,3 +452,274 @@ def test_the_architecture_paragraph_about_alerts_names_where_they_land():
     assert (REPO / "agent-services" / "guardian" / "daily_note.py").exists()
     assert (REPO / "app" / "daily_note.py").exists()
 
+
+# ── #2408: a description's quoted constant is checked before the write, not at land ──
+
+#: The constant these nodes quote, read live rather than hard-coded so the numbers in
+#: this section cannot rot. `MAX_BODY_LINES` is `scripts/skill_lint.py:816`'s ceiling on
+#: a SKILL.md body — the number `scripts/automod/vault_round.py` refuses a vault land
+#: against, and the kind of figure an autonomy task description legitimately states.
+STALE_PROBE_CONSTANT = "MAX_BODY_LINES"
+
+
+def _tree_value() -> int:
+    """The live value of `STALE_PROBE_CONSTANT`, with the control this section needs.
+
+    `constant_quotes.mismatches()` resolves zero pairs for a name the tree does not
+    carry exactly as it does for a quote that is correct, and zero pairs produces no
+    refusal for either reason. A section that only asserted "no refusal" would
+    therefore pass on a deleted or ambiguous constant, so every node here calls this
+    first and an absent name is an instrument failure, loudly.
+    """
+    from scripts.automod import constant_quotes as CQ
+
+    value = CQ.tree_constants(REPO).get(STALE_PROBE_CONSTANT)
+    assert value is not None, (
+        f"{STALE_PROBE_CONSTANT} is no longer a single-valued integer constant in this "
+        "tree, so the quotes below resolve nothing and the assertions here would pass "
+        "without the guard ever being consulted"
+    )
+    return int(value)
+
+
+def _quote(value: int) -> str:
+    """A task description stating `STALE_PROBE_CONSTANT` as `value`.
+
+    `NAME (n)` is the spelling the resolver binds (`constant_quotes._AFTER_NAME_RX`),
+    and the sentence carries no other ALL-CAPS token, so exactly one pair resolves —
+    which is what makes a refusal here a verdict on the number rather than on prose
+    shape.
+    """
+    return f"Reconcile the ledger window against {STALE_PROBE_CONSTANT} ({value})."
+
+
+def _write_via_mcp(params: dict) -> dict:
+    """`autonomy_write_task` across the seam a caller crosses, parsed.
+
+    Same reason `_tasks_via_mcp_seam` exists above: `call_tool` is what
+    `agent_mcp.main` routes into, so this is the refusal a caller actually receives.
+    """
+    result = asyncio.run(MCP.call_tool("autonomy_write_task", params))
+    return json.loads(result.content[0].text)
+
+
+def test_a_description_quoting_a_stale_constant_is_refused_and_nothing_is_written(
+        autonomy_tree):
+    """Clause 1: the create path refuses, names both numbers, and writes no file.
+
+    #2317 put the quoted-number check on the vault-land route
+    (`scripts/automod/vault_round.py:630`), which is where a human lands a description
+    — but the description of an autonomy task is written most often by an agent
+    through this tool, and `git log -S'constant_quotes' -- agent_mcp/` is empty at the
+    base of this round: no commit had ever put the guard on that route. The failure it
+    is fixed against is #2317's own: `01dea8bc` moved `LEDGER_ARCHIVE_AGE_DAYS` from 30
+    to 14 and `autonomy/79-retention-sweep.md` went on saying 30 for three weeks — the
+    drift #1573 and #1734 had each already repaired once by hand on that one file.
+    """
+    value = _tree_value()
+
+    out = _write_via_mcp({"name": "Ledger reconciliation",
+                          "description": _quote(value + 7),
+                          "frequency": "daily"})
+
+    assert "error" in out, (
+        f"a description quoting {STALE_PROBE_CONSTANT} at {value + 7} was published "
+        f"into a tree that says {value}: {out}"
+    )
+    assert list(autonomy_tree.glob("*.md")) == [], (
+        "the tool refused and wrote the task file anyway, so the refusal is a message "
+        "and not a refusal")
+
+    err = out["error"]
+    assert STALE_PROBE_CONSTANT in err, f"the refusal does not name the constant: {err}"
+    assert str(value + 7) in err, f"the refusal does not name the quoted number: {err}"
+    assert str(value) in err, f"the refusal does not name the tree's number: {err}"
+
+
+def test_the_corrected_retry_writes_and_so_does_a_description_naming_no_constant(
+        autonomy_tree):
+    """Clause 2: the same call succeeds once the number is the tree's, and ordinary
+    descriptions are untouched.
+
+    The retry half is what makes this a guard rather than a veto — the caller fixes it
+    by typing one digit, in the same call it was making. The no-constant half is the
+    cost side: most task descriptions state no constant at all, and a write-path
+    refusal that fired on those would be the engine's own nightly writers blocked by
+    an instrument that resolved zero pairs.
+    """
+    value = _tree_value()
+
+    stale = _write_via_mcp({"name": "Ledger reconciliation",
+                            "description": _quote(value + 7)})
+    assert "error" in stale, "the control half: the stale quote stopped refusing"
+
+    fixed = _write_via_mcp({"name": "Ledger reconciliation",
+                            "description": _quote(value)})
+    assert "error" not in fixed, f"the corrected retry was refused: {fixed}"
+    on_disk = sorted(autonomy_tree.glob("*.md"))
+    assert len(on_disk) == 1, (
+        f"the corrected retry wrote {len(on_disk)} files instead of one task")
+    assert _quote(value) in on_disk[0].read_text(encoding="utf-8"), (
+        "the retry wrote a file whose description is not the one that was passed")
+
+    plain = _write_via_mcp({"name": "Queue sweep",
+                            "description": "Sweep the queue nightly and log the count."})
+    assert "error" not in plain, f"a description naming no constant was refused: {plain}"
+    assert len(list(autonomy_tree.glob("*.md"))) == 2, (
+        "the description-free create did not land beside the first one")
+
+
+def test_a_status_only_update_on_a_file_whose_description_is_still_stale_writes(
+        autonomy_tree):
+    """Clause 3: the refusal sits on the delta, driven through the UPDATE path.
+
+    This is the clause that decides where the guard can live. `_handle_write`'s update
+    branch parses the existing file and hands `_write_task_file` the whole record,
+    description included, so a check inside the writer would refuse every engine state
+    write against a file whose prose is already stale — which is the routine
+    `draft`/`paused` parking that must never be blocked. Here the file on disk carries
+    the stale quote, so any check that reads the file rather than the call is refusing
+    the park.
+
+    The last block is the control that keeps this node from passing by being unhooked:
+    the SAME call shape on the SAME file, with the stale description *supplied*, must
+    still refuse. Without it, "status writes work" would also be satisfied by a guard
+    that never fires at all.
+    """
+    value = _tree_value()
+    stale_on_disk = f"""---
+id: 42
+name: Ledger reconciliation
+status: up_next
+frequency: daily
+description: Reconcile the ledger window against {STALE_PROBE_CONSTANT} ({value + 7}).
+---
+
+# body
+
+## Activity Log
+
+- 2026-10-01T00:00:00Z: run completed
+"""
+    _write(autonomy_tree, **{"42-ledger.md": stale_on_disk})
+
+    parked = _write_via_mcp({"id": 42, "status": "draft"})
+    assert "error" not in parked, (
+        f"parking a task was refused because of prose the call never touched: {parked}")
+    text = (autonomy_tree / "42-ledger.md").read_text(encoding="utf-8")
+    assert "status: draft" in text, "the park did not reach disk"
+    assert f"{STALE_PROBE_CONSTANT} ({value + 7})" in text, (
+        "the write silently corrected the stale description, so this node is no "
+        "longer testing a stale file")
+
+    noted = _write_via_mcp({"id": 42, "activity_note": "checked the queue"})
+    assert "error" not in noted, f"an Activity Log line was refused: {noted}"
+    assert "checked the queue" in (autonomy_tree / "42-ledger.md").read_text(
+        encoding="utf-8")
+
+    supplied = _write_via_mcp({"id": 42, "description": _quote(value + 7)})
+    assert "error" in supplied, (
+        "the update path stopped refusing a supplied stale description, so the two "
+        "assertions above are measuring a guard that is not connected")
+    assert "status: draft" in (autonomy_tree / "42-ledger.md").read_text(
+        encoding="utf-8"), "the refused update changed the file anyway"
+
+
+def test_the_constant_refusal_is_plain_error_json_and_not_the_broken_yaml_one(
+        autonomy_tree):
+    """Clause 4: one key, `error`, and it is returned rather than raised.
+
+    `_refuse_broken` (`agent_mcp/autonomy.py:163`) is the other refusal this module
+    can return, and its `yaml_broken: True` key means exactly one thing on this box —
+    front matter that only parsed by the regex fallback (`app/routers/autonomy.py`
+    turns that key into the Mission Control warning) — so reusing it here would send a
+    caller off to fix YAML that is fine. The broken half of the pin is the sibling
+    record below, which must STILL carry the marker: the two shapes are only
+    distinguishable if both keep their own key set.
+
+    "Never raised" is checked by the `call_tool` drive: an exception would leave
+    `asyncio.run` and error this node with a traceback instead of a refusal, which is
+    the failure mode `_refuse_broken` exists to avoid for the dispatcher.
+    """
+    value = _tree_value()
+    stale = {"name": "Ledger reconciliation", "description": _quote(value + 7)}
+
+    raw = MCP._handle_write(dict(stale))
+    assert isinstance(raw, str), (
+        f"the refusal is a {type(raw).__name__}, not the module's error-JSON string")
+    parsed = json.loads(raw)
+    assert set(parsed) == {"error"}, (
+        f"the constant refusal carries keys beyond `error`: {sorted(parsed)} — "
+        "`yaml_broken` on this box means broken front matter and nothing else")
+    assert "yaml_broken" not in raw
+
+    across_seam = _write_via_mcp(stale)
+    assert "error" in across_seam, "the refusal did not survive call_tool"
+
+    _write(autonomy_tree, **{"45-malformed.md": TASK_WITH_MALFORMED_YAML})
+    broken = json.loads(MCP._handle_write({"id": 45, "status": "draft"}))
+    assert broken.get("yaml_broken") is True, (
+        "the broken-frontmatter refusal lost its marker, so a caller can no longer "
+        "tell the two refusals apart: " + json.dumps(broken))
+
+
+@pytest.mark.parametrize("boom", [OSError("no git here"), ValueError("bad number")],
+                         ids=["oserror", "valueerror"])
+def test_a_resolver_that_cannot_answer_still_lets_the_write_through(autonomy_tree,
+                                                                   monkeypatch, boom):
+    """The guard's own half of "never raised": a broken instrument must not stop writes.
+
+    `constant_quotes.Report.resolved` exists because "0 mismatches" and "nothing to
+    compare" look identical, and the vault-side rail logs its count for the `@live_vault`
+    witness in `tests/test_constant_quotes.py`. This route records nothing when it has
+    nothing to say, so the only thing standing between a failing harvest and a stopped
+    engine is the `except` tuple in `_stale_description_error`. Both classes named here
+    are ones that tuple has to answer for — walking the tree, and converting a number —
+    and `ValueError` is the one a guard on a write path can least afford to let escape,
+    because the write it would block may be the `status: draft` that stops a job.
+    """
+    import scripts.automod.constant_quotes as CQ
+
+    # Read the number first: `_tree_value` harvests the tree itself, so patching before it
+    # would have this node fail in its own fixture rather than in the guard.
+    value = _tree_value()
+
+    def _raise(*a, **k):
+        raise boom
+
+    monkeypatch.setattr(CQ, "tree_constants", _raise)
+
+    out = _write_via_mcp({"name": "Ledger reconciliation", "description": _quote(value + 7)})
+    assert "error" not in out, (
+        f"with the resolver raising {type(boom).__name__} the write was refused, so a "
+        "failing instrument has become an outage for task writes: " + json.dumps(out))
+    assert len(list(autonomy_tree.glob("*.md"))) == 1, (
+        "the write claimed success without writing the file")
+
+
+def test_a_malformed_call_leaves_the_next_write_working(autonomy_tree):
+    """A refused or malformed call cannot poison the writes that follow it.
+
+    This module never decodes a caller's JSON — `grep -n json.loads
+    agent_mcp/autonomy.py` finds only this node's prose and the helper's — so an argument
+    payload that was never parsed reaches the create path as a dict with no `name`, which
+    is an error answer rather than an exception. It is pinned because the guard now sits
+    on that same first branch: whatever the branch returns for a call with no name, the
+    next well-formed create has to succeed, and a refusal that left state behind would
+    show up here rather than in a nightly run three days later.
+    """
+    value = _tree_value()
+
+    junk = _write_via_mcp({"args": "not-a-json-object"})
+    assert "error" in junk, (
+        f"a call with no `name` returned {json.dumps(junk)}; the create path is expected "
+        "to answer with an error, not to invent a task")
+    assert list(autonomy_tree.glob("*.md")) == [], (
+        "the nameless call wrote a task file, so a malformed request is a write")
+
+    good = _write_via_mcp({"name": "Ledger reconciliation", "description": _quote(value)})
+    assert "error" not in good, (
+        f"the write after a malformed call was refused: {json.dumps(good)}")
+    assert len(list(autonomy_tree.glob("*.md"))) == 1, (
+        "the write after a malformed call did not land")
+
