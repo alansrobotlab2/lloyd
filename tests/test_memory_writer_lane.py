@@ -2436,3 +2436,137 @@ def test_the_served_memory_tool_schemas_still_leave_file_optional():
         assert "file" not in schema["required"], (
             f"{name} started requiring `file`, which #1729 ruled against")
         assert not _OWED_RULING_RE.search(served[name].description), name
+
+
+# ── #2407: the advertised schema names `file_path` as the wrong key ───────────
+#
+# The refusal above is correct and stays, but it only arrives after the call is
+# already made. The 2026-10-07 trajectories hold 26 memory-tool "Unknown
+# argument" refusals across 19 sessions, 25 of them passing `file_path` — which
+# IS the destination key of `Read`/`Write`/`Edit`, the tools a caller had been
+# using moments earlier. The recovery is leaky, not complete: of those 26, 16
+# were followed by a successful memory_* call, 7 by the same refusal again, and
+# 3 by no later memory call at all. So a refusal costs a round-trip that does
+# not always buy back the call, and a caller reads the advertised schema before
+# it emits one — the contrast belongs there as well as in the error.
+#
+# Deliberately not an alias: `97eedc4f` (#1729, 2026-09-28) made refusing
+# mis-named destination keys the contract and #1796 re-affirmed it on
+# 2026-09-30, because accepting the wrong key blesses the confusion instead of
+# routing it. Clause 3 below is the rail that keeps this item's prose fix from
+# sliding into that.
+
+MEMORY_TOOLS = ("memory_read", "memory_add", "memory_replace", "memory_remove")
+
+
+def _served_memory_schemas() -> dict:
+    """Each memory tool's served `input_schema`, keyed by tool name.
+
+    `list_tools()` is the call `lloyd-mcp` answers `tools/list` with, so what
+    comes back is the schema a caller's sampler reads before it emits the call —
+    the thing #2407 is about — not a literal in `agent_mcp/session.py`.
+    """
+    served = {t.name: t for t in asyncio.run(SESSION.list_tools())}
+    assert set(MEMORY_TOOLS) <= set(served), sorted(set(MEMORY_TOOLS) - set(served))
+    return {name: served[name].input_schema for name in MEMORY_TOOLS}
+
+
+def _served_file_descriptions() -> dict[str, str]:
+    """The advertised description of each memory tool's `file` parameter."""
+    return {name: schema["properties"]["file"]["description"]
+            for name, schema in _served_memory_schemas().items()}
+
+
+def _file_path_sentence(text: str) -> str:
+    """The sentence in `text` that names `file_path`, or "" when there is none.
+
+    Extracted from the served description rather than compared to a literal
+    kept in this file, so the pin is on the description saying the thing and not
+    on one exact string being reproduced twice.
+    """
+    return next((s.strip() for s in text.split(".") if "file_path" in s), "")
+
+
+def test_memory_read_advertises_file_path_as_the_wrong_destination_key():
+    """#2407 clause 1: memory_read warns before the call, not only in the refusal.
+
+    Three things, each named because its absence is a different failure: the
+    wrong key itself (`file_path`), the adjacent tools that own it (`Read`,
+    `Write`, `Edit` — without them "not `file_path`" is a prohibition with no
+    reason, and the sampler that never touches those tools has nothing to
+    re-map), and the key to send instead. The refusal text is what the 2026-10-07
+    callers saw too, and 7 of 26 came back with the same key anyway.
+    """
+    desc = _served_file_descriptions()["memory_read"]
+    assert "file_path" in desc, (
+        f"memory_read's advertised `file` description never names the key 25 of "
+        f"the 26 refusals used: {desc!r}")
+    sentence = _file_path_sentence(desc)
+    assert sentence, f"no sentence of memory_read's `file` description names file_path: {desc!r}"
+    for adjacent in ("Read", "Write", "Edit"):
+        assert adjacent in sentence, (
+            f"the contrast sentence does not name {adjacent} as an owner of "
+            f"`file_path`, so a caller cannot re-map: {sentence!r}")
+    assert "`file`" in sentence, (
+        f"the contrast sentence does not say which key to send instead: {sentence!r}")
+
+
+def test_the_three_memory_writers_advertise_the_identical_contrast_sentence():
+    """#2407 clause 2: one sentence, present on all three writers, unchanged between them.
+
+    Identity rather than presence-with-variations: `_FILE_PARAM` is shared by
+    `memory_add`, `memory_replace` and `memory_remove` while `memory_read` has
+    its own `_FILE_PARAM_READ`, so the fork is exactly where a fix applied to
+    one of the two could quietly stop being true of the other three — and the
+    26 refusals came from writers as well as reads. `memory_read` is the
+    reference because clause 1 pins its wording; a paraphrase here fires.
+    """
+    descs = _served_file_descriptions()
+    reference = _file_path_sentence(descs["memory_read"])
+    assert reference, "clause 1's reference sentence is absent, so this comparison is vacuous"
+    for name in ("memory_add", "memory_replace", "memory_remove"):
+        sentence = _file_path_sentence(descs[name])
+        assert sentence, (
+            f"{name}'s advertised `file` description names neither `file_path` nor "
+            f"the contrast: {descs[name]!r}")
+        assert sentence == reference, (
+            f"{name} carries a different contrast sentence from memory_read:\n"
+            f"  {name}: {sentence!r}\n  memory_read: {reference!r}")
+
+
+def test_the_schema_warning_changes_no_refusal_and_no_call_that_uses_file():
+    """#2407 clause 3: prose in the schema, and the shipped contract behind it unmoved.
+
+    Both halves are load-bearing. Without the first, this item's tempting fix is
+    to accept `file_path` as an alias — which `97eedc4f` (#1729) refused exactly
+    because a silent alias blesses the mis-route — so `file_path` must stay a
+    refusal naming `file` on all four tools and must not appear as an advertised
+    property. Without the second, an edit to the description that mangled the
+    real key would still satisfy clauses 1 and 2 on prose alone, so `file` has to
+    be shown reading and writing the named file again here.
+    """
+    schemas = _served_memory_schemas()
+    mem = _index_file(INDEX_BEFORE)
+    for name in MEMORY_TOOLS:
+        assert "file_path" not in schemas[name]["properties"], (
+            f"{name} started advertising `file_path` as a parameter — the alias "
+            f"#1729 ruled against, and #2407's acceptance says refusal stays")
+        extra: dict = {}
+        if name in ("memory_add", "memory_remove"):
+            extra["entry"] = "because"
+        elif name == "memory_replace":
+            extra.update({"old_text": "because", "new_text": "since it was ruled"})
+        res = getattr(SESSION, "_" + name)({
+            "file_path": "topics/user-md-ledger", **extra})
+        assert res.get("code") == "INVALID_PARAM", (name, res)
+        assert "`file`" in res["error"], (name, res)
+    assert mem.read_text(encoding="utf-8") == INDEX_BEFORE, (
+        "a refused call wrote the loaded index — the #1729 mis-route is back")
+    assert not (SESSION.MEMORIES_ROOT / "memory" / "user-md-ledger.md").exists()
+
+    assert SESSION._memory_add({"file": "topics/user-md-ledger",
+                                "entry": f"- {ZORKMID} warned-and-routed row"})["success"]
+    got = SESSION._memory_read({"file": "topics/user-md-ledger"})
+    assert f"- {ZORKMID} warned-and-routed row" in got["content"], got
+    assert got["path"] == str(SESSION.MEMORIES_ROOT / "memory" / "user-md-ledger.md"), got
+    _assert_live_memory_files_clean(ZORKMID)

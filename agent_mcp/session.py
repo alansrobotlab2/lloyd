@@ -795,16 +795,49 @@ def _session_recall(params: dict) -> dict:
 # No `enum` since P4: `topics/<slug>` is open-ended. The pattern states the same
 # grammar `_resolve_file` enforces; the handler is what refuses.
 _FILE_PATTERN = r"^(MEMORY\.md|USER\.md|topics/[a-z0-9-]{1,48}(\.md)?)$"
+
+# #2407: the `file`/`file_path` contrast is stated in the advertised schema, not
+# only in the refusal. On 2026-10-07 the memory tools answered 26 "Unknown
+# argument" refusals across 19 sessions, 25 of them passing `file_path` — which
+# IS the destination key of `Read`/`Write`/`Edit`, the file tools a caller had
+# been using moments before. The refusal routes that mistake, but only after the
+# call is made and not always successfully: of those 26, 16 were followed by a
+# successful memory_* call, 7 by the same refusal again, 3 by no later memory
+# call at all. The schema is what a sampler reads before it emits the call, so
+# the warning has to be there too. One constant shared by both descriptions:
+# `memory_add`/`memory_replace`/`memory_remove` take `_FILE_PARAM` while
+# `memory_read` has its own `_FILE_PARAM_READ`, and the four must say the same
+# sentence. Still no alias — `file_path` stays in `_DESTINATION_ALIASES`, which
+# #1729 (`97eedc4f`) made the contract and #1796 re-affirmed on 2026-09-30.
+#
+# The wording is short because it is billed. `test_advertised_catalog_stays_under_
+# its_token_ceiling` caps the whole advertised catalog at 22,500 estimated tokens
+# and stood at 22,498 before this sentence existed, so four copies of the warning
+# are paid for, not added: this sentence is 68 tokens, and the 42 it does not cover
+# come out of the prose the same four tools were already saying twice — the three
+# writers' `file` base text below, and the file-by-file gloss `memory_read` carried
+# in both its tool description and its parameter. That is the #1571 currency (its
+# own comment in that test records 172 tokens taken back out of descriptions to pay
+# for one tool); raising `INTERNAL_CATALOG_TOKEN_CEILING` is the other way to pay
+# and the comment above it says that call is a human's, recorded on #1555. If a
+# future round re-inflates either trimmed description, the ceiling test, not this
+# comment, is what will say so.
+_FILE_KEY_CONTRAST = ("Never `file_path`: Read/Write/Edit take that key; "
+                      "send it as `file`.")
 _FILE_PARAM = {"type": "string", "pattern": _FILE_PATTERN,
-               "description": "MEMORY.md for durable working notes, USER.md for facts "
-                              "about the user, topics/<slug> for a topic file's detail "
-                              "(default MEMORY.md)"}
+               "description": "Which memory file: MEMORY.md, USER.md, or "
+                              "topics/<slug> (default MEMORY.md). " + _FILE_KEY_CONTRAST}
 _FILE_PARAM_READ = {**_FILE_PARAM, "description": "Which file to read: MEMORY.md, "
-                    "USER.md, or topics/<slug> (default MEMORY.md)"}
+                    "USER.md, or topics/<slug> (default MEMORY.md). " + _FILE_KEY_CONTRAST}
 
 async def list_tools():
     return [
-        Tool(name="memory_read", description="Use to check what is already remembered before memory_add; to search past chats use session_recall. Read the cross-session memory files. MEMORY.md holds durable working notes; USER.md holds standing facts about the user; topics/<slug> is a topic file an index line points at (`→ topics/<slug>`), holding the detail that line summarises. Returns the whole file.", inputSchema={
+        # #2407: the file-by-file gloss this carried ("MEMORY.md holds durable
+        # working notes; USER.md holds standing facts …") is what the `file`
+        # parameter says, in the same payload, in fewer words — the duplicate is
+        # what paid for the contrast sentence. What only this line carried is
+        # kept: the index-line route into a topic file.
+        Tool(name="memory_read", description="Use to check what is already remembered before memory_add; to search past chats use session_recall. A topics/<slug> file holds the detail its MEMORY.md index line summarises. Returns the whole file.", inputSchema={
             "type": "object", "properties": {"file": _FILE_PARAM_READ}, "required": []}),
         Tool(name="memory_add", description="Use to record a durable note or user fact; to change an existing entry use memory_replace instead. Append one entry to a cross-session memory file. Appends only — use memory_replace to change an existing line and memory_remove to drop one.", inputSchema={
             "type": "object", "properties": {"file": _FILE_PARAM, "entry": {"type": "string", "description": "Text to append"}, "type": {"type": "string", "enum": list(ENTRY_TYPES), "description": "What kind of entry: feedback (a ruling or correction from the user), user (a fact about the user), project (working state; default for MEMORY.md and topics), reference (where something lives). Default user for USER.md."}}, "required": ["entry"]}),
