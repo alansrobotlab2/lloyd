@@ -6084,3 +6084,335 @@ def test_a_row_that_ran_both_sides_carries_the_derived_budget_and_every_draw_cos
     # The failure WAS attributed — red on both proposed draws, green on both pre-land
     # draws — which is a refusal, and a refusal never has anything left unadjudicated.
     assert "unadjudicated" not in row and row["nodes"] == [SEEN_A], row
+
+
+# ── #2421: a grader the transport lost is not a verdict on the change ────────
+#
+# Item #2410's vault edit was written, every clause verified against the working
+# tree, and then a `finalizer failed: ReadTimeout` from the grading turn was recorded
+# `kind: skipped`, `blocking: false` — which fell through to `git commit` for a
+# contract the grader had not read, and on the item's second such row reverted the
+# edit. `grep -c 'Annotated 2026-10-08 (#2410)' memory/mental-models.md` was still 0
+# the day this was filed. The clauses below pin the four properties that were missing
+# (a marker, an unspent attempt, no revert, no commit) plus the bound that keeps a
+# re-offer from becoming an endless retry against dead transport.
+#
+# Every node here fakes the transport at `review.run_grader`, the one function that
+# POSTs to the live backend, and runs the REAL `grade_vault` and the REAL `land()` on
+# top of it. The fault this item is about arrives off the wire, through
+# `grade_vault`'s classifier, into `land()`'s ledger write: stubbing either module
+# would pin a call graph instead of the behaviour.
+#
+#: The incident verbatim. Ledger row 21830 at 2026-10-08T13:03:02Z carries
+#: `findings: "[…] grader did not answer: finalizer failed: ReadTimeout:  [2 grading
+#: generations issued]"`, transcribed on item #2421 from promotions.jsonl line 21830 —
+#: the store itself is over `WITNESS_MAX_BYTES`, so it is quoted here, never opened.
+READ_TIMEOUT_2421 = "finalizer failed: ReadTimeout: "
+
+#: Three more spellings out of `app.autonomy._INFRA_EXC_NAMES`, because the rule is
+#: over that FAMILY: a name added there has to be an outage here with no edit to
+#: `review.py`, which is what reading the set through the same door buys (#1807).
+OTHER_INFRA_ERRORS = [
+    "finalizer failed: ConnectError: [Errno 111] Connection refused",
+    "finalizer failed: PoolTimeout: ",
+    "finalizer failed: StreamStalledError: stream produced nothing for 120.0s",
+]
+
+
+def _edit_skill(vault: Path, tag: str) -> str:
+    """Stage a REAL edit of `skills/foo/SKILL.md` and return the bytes it should hold.
+
+    Each call names a different heading, so the working tree always differs from
+    whatever the vault last committed. That matters here for the same reason
+    `COMMITTED_SKILL` matters to the revert tests above: a re-landed node that wrote
+    the same bytes again would be staging a no-op, and `revert_paths` reports every
+    tracked path it checks out, so 'the edits are still in place' and an empty
+    `git status --porcelain` could both hold with none of my bytes at stake.
+    """
+    body = COMMITTED_SKILL + f"\n## {tag}\n"
+    (vault / "skills" / "foo" / "SKILL.md").write_text(body, encoding="utf-8")
+    return body
+
+
+@pytest.mark.parametrize("error", [READ_TIMEOUT_2421] + OTHER_INFRA_ERRORS,
+                         ids=["read-timeout-verbatim", "connect-error", "pool-timeout",
+                              "stream-stalled"])
+def test_a_transport_fault_on_the_grader_is_recorded_as_an_outage(vault, items, monkeypatch,
+                                                                  error):
+    """Clause 1, positive half: the marker, and nothing that reads as a judgement.
+
+    `grader_outage: true` beside `clauses: []` and `blocking: false` is the
+    machine-readable form of 'the wire failed, not the change' — the fact the
+    2026-10-08 rows could not express. `review_grader_failed: true` is #2263's mark
+    for a grading the grader WAS given and could not hold, and borrowing that for a
+    timeout is precisely how the two came to spend one item's budget.
+    """
+    write_item(items, 640, FIVE)
+    monkeypatch.setattr(V, "GRADER", RV.grade_vault)
+    monkeypatch.setattr(RV, "run_grader", lambda **kw: {"ok": False, "error": error})
+    _edit_skill(vault, "under review")
+    with pytest.raises(V.VaultRoundError):
+        V.land(["skills/foo/SKILL.md"], "skill: foo (#640)", item_id=640)
+    rows = _rows("vault_review", 640)
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row["kind"] == RV.GRADER_OUTAGE and row["grader_outage"] is True, row
+    assert row["blocking"] is False and row["clauses"] == [], row
+    assert row["reverted"] == [], row
+    assert "review_grader_failed" not in row, (
+        "an outage is not a divergence: the #2263 mark stays with the shape it names")
+    assert error in row["review_reason"], row["review_reason"]
+    assert "clause(s) 1, 2, 3" in row["review_reason"], (
+        "the row has to name which clauses went ungraded, or the next reader cannot "
+        f"tell a partial grading from a lost one: {row['review_reason']}")
+
+
+@pytest.mark.parametrize("key", ["bare-503", "503-after-wait", "unusable-object",
+                                 "diverged-is-not-an-outage"])
+def test_the_abstentions_and_the_divergence_carry_no_outage_marker(vault, items, monkeypatch,
+                                                                   key):
+    """Clause 1, negative half: the marker is a class, not a synonym for 'no answer'.
+
+    A bare `backend 503` is the one that looks most like a transport fault and is
+    deliberately NOT one: `run_grader` already waits out an unavailable backend
+    before it reports, that case is owned by its own retry loop and #1736's
+    fail-fast, and no exception name appears in the sentence. `diverged` runs the
+    other way — a grading the grader was given and could not hold, blocking per
+    #2263/#2341 — and it belongs in this list because the new classifier is checked
+    AFTER it, so a divergence can never be re-labelled into an un-spent outage and
+    quietly land a verdict-less contract.
+    """
+    stubs = {
+        "bare-503": lambda: {"ok": False, "error": "backend 503"},
+        "503-after-wait": lambda: {"ok": False,
+                                   "error": "backend 503 (backend still unavailable "
+                                            "after 900.0s of 900.0s)"},
+        "unusable-object": lambda: {"ok": True, "structured": {"premise": "?"}},
+        "diverged-is-not-an-outage": lambda: {"ok": False, "error": DIVERGED_AT_8192},
+    }
+    write_item(items, 641, FIVE)
+    monkeypatch.setattr(V, "GRADER", RV.grade_vault)
+    monkeypatch.setattr(RV, "run_grader", lambda **kw: stubs[key]())
+    _edit_skill(vault, "under review")
+    try:
+        V.land(["skills/foo/SKILL.md"], "skill: foo (#641)", item_id=641)
+    except V.VaultRoundError:
+        pass                              # `diverged` refuses at attempt 1; the rest land
+    rows = _rows("vault_review", 641)
+    assert len(rows) == 1, rows
+    assert "grader_outage" not in rows[0], rows[0]
+    if key == "diverged-is-not-an-outage":
+        assert rows[0]["kind"] == RV.GRADER_DIVERGED and rows[0]["blocking"] is True
+        assert rows[0]["review_grader_failed"] is True, "the #2341 rail is unchanged"
+    else:
+        assert rows[0]["kind"] == "skipped" and rows[0]["blocking"] is False, rows[0]
+
+
+def test_an_abstention_before_the_grader_is_called_carries_no_outage_marker(vault, items,
+                                                                           monkeypatch):
+    """Clause 1's remaining abstentions: none of them ever reaches the wire.
+
+    `GRADER is None` (the module CLI and `autoresearch promote`), an item whose file
+    carries no acceptance clauses, and a land bound to no item at all. The first two
+    return their own #955 wordings before `run_grader` runs and the third writes no
+    review row whatsoever, so `run_grader` is patched to RAISE here: that makes
+    'these never touch the transport' a measured fact rather than a reading of the
+    source, and any of the three acquiring the marker would mean the outage class had
+    swallowed an abstention nobody asked it about.
+    """
+    monkeypatch.setattr(RV, "run_grader",
+                        lambda **kw: (_ for _ in ()).throw(AssertionError("hit the wire")))
+    monkeypatch.setattr(V, "GRADER", None)
+    _edit_skill(vault, "cli land")
+    out = V.land(["skills/foo/SKILL.md"], "skill: foo (#643)", item_id=643)
+    assert out["ok"] is True and out["review"] == "skipped", out
+    row = _rows("vault_review", 643)[-1]
+    assert row["kind"] == "skipped" and "grader_outage" not in row, row
+
+    write_item(items, 644, [])
+    monkeypatch.setattr(V, "GRADER", RV.grade_vault)
+    _edit_skill(vault, "no clauses")
+    out = V.land(["skills/foo/SKILL.md"], "skill: foo (#644)", item_id=644)
+    assert out["ok"] is True and out["review"] == "skipped", out
+    row = _rows("vault_review", 644)[-1]
+    assert "item #644 has no acceptance clauses" in row["review_reason"], row
+    assert "grader_outage" not in row, row
+
+    _edit_skill(vault, "unbound land")
+    out = V.land(["skills/foo/SKILL.md"], "skill: foo, no item bound")
+    assert out["ok"] is True, out
+    assert [r for r in _rows("vault_review", 0) if r.get("grader_outage")] == []
+
+
+def test_a_grader_outage_spends_no_review_attempt_even_behind_a_spent_one(vault, items,
+                                                                          monkeypatch):
+    """Clause 2: the attempt budget is about the change, and the transport spent none.
+
+    The item first spends one attempt the honest way — a divergence that survives
+    shrinking, which `test_a_divergence_that_survives_shrinking_still_spends_an_attempt`
+    pins at 1 and then 2. Three outage lands on top of that have to leave the number
+    at exactly 1. `VAULT_REVIEW_MAX` is 2, so a fourth event of either class decides
+    the item's fate, and the whole cost of the 2026-10-08 incident is that two
+    timeouts were two of those events. The ordinal `attempt` each outage row carries
+    therefore stays at 2 — one spent divergence plus this review — through all three
+    lands, where on the 2026-10-08 shape it went 1 then 2 and the second one reverted.
+    """
+    write_item(items, 642, FIVE)
+    monkeypatch.setattr(V, "GRADER", RV.grade_vault)
+    monkeypatch.setattr(RV, "run_grader", lambda **kw: {"ok": False, "error": DIVERGED_AT_8192})
+    _edit_skill(vault, "diverged first")
+    with pytest.raises(V.VaultRoundError):
+        V.land(["skills/foo/SKILL.md"], "skill: foo (#642)", item_id=642)
+    assert V._vault_review_attempts(642) == 1, "the divergence still spends an attempt"
+    assert V._vault_review_outages(642) == 0, "…and does not feed the outage streak"
+    monkeypatch.setattr(RV, "run_grader", lambda **kw: {"ok": False, "error": READ_TIMEOUT_2421})
+    for n in (1, 2, 3):
+        _edit_skill(vault, f"outage {n}")
+        with pytest.raises(V.VaultRoundError):
+            V.land(["skills/foo/SKILL.md"], f"skill: foo again ({n}) (#642)", item_id=642)
+        assert V._vault_review_attempts(642) == 1, (
+            f"outage {n} spent an attempt: {V._vault_review_attempts(642)}")
+        assert _rows("vault_review", 642)[-1]["attempt"] == 2, (
+            f"outage {n} moved the item's attempt ordinal: "
+            f"{_rows('vault_review', 642)[-1]['attempt']}")
+    assert V._vault_review_outages(642) == 3, "…while the outage streak did count them"
+
+
+def test_a_grader_outage_leaves_the_staged_edit_and_says_so(vault, items, monkeypatch):
+    """Clause 3: the bytes the transport could not judge stay exactly where they are.
+
+    Three consecutive outage lands. What moves is the streak (1, 2, 3); what must not
+    move is anything about the edit — the file still holds the edited bytes,
+    `git status --porcelain` still lists the path as modified, `reverted` is empty on
+    the row, and the refusal the caller sees says the edits are in place. The second
+    half of the 2026-10-08 loss was not the timeout, it was `reverted:
+    ["memory/mental-models.md"]` on a row whose grader had never read a clause. The
+    attempt number cannot rise here (clause 2 pins that), so the axis this varies is
+    the outage count, and each of the three is asserted.
+    """
+    write_item(items, 645, FIVE)
+    monkeypatch.setattr(V, "GRADER", RV.grade_vault)
+    monkeypatch.setattr(RV, "run_grader", lambda **kw: {"ok": False, "error": READ_TIMEOUT_2421})
+    for n in (1, 2, 3):
+        want = _edit_skill(vault, f"verified edit {n}")
+        assert V._git("status", "--porcelain").stdout.strip() == "M skills/foo/SKILL.md", n
+        with pytest.raises(V.VaultRoundError) as ei:
+            V.land(["skills/foo/SKILL.md"], f"skill: foo ({n}) (#645)", item_id=645)
+        row = _rows("vault_review", 645)[-1]
+        assert row["grader_outage_streak"] == n, row
+        assert row["reverted"] == [], row
+        assert (vault / "skills" / "foo" / "SKILL.md").read_text() == want, n
+        assert V._git("status", "--porcelain").stdout.strip() == "M skills/foo/SKILL.md", n
+        assert "the edits are still in place" in str(ei.value), ei.value
+        assert "nothing was committed or reverted" in str(ei.value), ei.value
+
+
+def test_a_grader_outage_never_commits_where_a_mixed_surface_abstention_still_does(vault,
+                                                                                   items,
+                                                                                   monkeypatch):
+    """Clause 4: the fall-through that made an outage committable is closed, and only it.
+
+    Same `kind` family, same `blocking: false`, opposite outcome — because the two
+    facts are opposite. A `skipped` on policy (mixed surface) means a vault verdict
+    for this item will never exist, and refusing it would strand the vault half of
+    every mixed item, so that route keeps landing: item #2415's `skipped` at ledger
+    row 21817 became a `vault_land ok: true` at 21825, and that was right. A
+    `grader_outage` means the grader was asked and the wire dropped the answer, so the
+    land raises before `_git("commit", …)` and the only rows written are review rows:
+    no `ok: true` for the outage item, and its HEAD unchanged from the moment the land
+    began — which is exactly the first-attempt route #2421's triage found live at
+    `vault_round.py:1321-1322`, where `verdict_shortfall` was computed only once the
+    cap was reached.
+    """
+    from scripts.automod import backlog as B
+    write_item(items, 646, FIVE)
+    monkeypatch.setattr(V, "GRADER", RV.grade_vault)
+    monkeypatch.setattr(RV, "run_grader", lambda **kw: {"ok": False, "error": READ_TIMEOUT_2421})
+    _edit_skill(vault, "must not commit")
+    head = _vault_head(vault)
+    with pytest.raises(V.VaultRoundError):
+        V.land(["skills/foo/SKILL.md"], "skill: foo (#646)", item_id=646)
+    assert _vault_head(vault) == head, "an outage landed the edit it could not grade"
+    assert _rows("vault_land", 646) == [], "an outage owes no land row of any kind"
+    # Across the ledger seam: the finalizer that CLOSES a vault item reads only
+    # `ok` land rows (`backlog.vault_review_outcome`), so with no land row at all the
+    # item cannot be marked done on the strength of a grading that never happened.
+    # `test_vault_surface_churn.py::…` pins the same reader for a sha with no row;
+    # this is that reader facing the row shape #2421 introduced.
+    assert B.vault_review_outcome(S.LEDGER_PATH, [head]) is None, (
+        "an ungraded outage closed the item it failed to grade")
+
+    write_item(items, 647, SIX)
+    _ev(event="backlog_triage", item_id=647, verdict="confirmed", surface="mixed",
+        acceptance="x", acceptance_clauses=SIX)
+    monkeypatch.setattr(V, "GRADER", lambda **kw: ("skipped", MIXED_ABSTENTION, []))
+    _edit_skill(vault, "mixed surface half")
+    out = V.land(["skills/foo/SKILL.md"], "skill: foo (#647)", item_id=647)
+    assert out["ok"] is True and out["review"] == "skipped", out
+    assert _vault_head(vault) != head, "the mixed-surface abstention stopped committing"
+    land = _rows("vault_land", 647)[-1]
+    assert land["ok"] is True and land["review"] == "skipped", land
+    assert "grader_outage" not in _rows("vault_review", 647)[-1]
+
+
+def test_grader_outages_are_re_offered_three_deep_and_the_fourth_refuses_the_land(vault,
+                                                                                 items,
+                                                                                 monkeypatch):
+    """Clause 5: re-offer is bounded, and the bound is on CONSECUTIVE outages.
+
+    Three outage lands leave nothing but review rows. The fourth writes the one
+    `vault_land ok: false`, names the outage as the cause, and still does not revert —
+    the refusal is the record and the bytes stay for the next implement turn or for a
+    person. Then the half that makes `consecutive` the right word: two outages, a
+    grader that answers, three more outages, and the item is STILL re-offerable,
+    because a transport that flapped three times over a month is not an item that has
+    exhausted anything. Six lands, one `ok: true` (the pass), zero refusals.
+    """
+    write_item(items, 648, FIVE)
+    monkeypatch.setattr(V, "GRADER", RV.grade_vault)
+    monkeypatch.setattr(RV, "run_grader", lambda **kw: {"ok": False, "error": READ_TIMEOUT_2421})
+    for n in (1, 2, 3):
+        _edit_skill(vault, f"re-offer {n}")
+        with pytest.raises(V.VaultRoundError) as ei:
+            V.land(["skills/foo/SKILL.md"], f"skill: foo ({n}) (#648)", item_id=648)
+        assert f"{n}/3 consecutive outages" in str(ei.value), ei.value
+    assert _rows("vault_land", 648) == [], "three deep must not refuse the land yet"
+
+    _edit_skill(vault, "fourth outage")
+    with pytest.raises(V.VaultRoundError) as ei:
+        V.land(["skills/foo/SKILL.md"], "skill: foo (4) (#648)", item_id=648)
+    assert "4/3 consecutive outages" in str(ei.value), ei.value
+    assert "still in place" in str(ei.value), ei.value
+    lands = _rows("vault_land", 648)
+    assert len(lands) == 1 and lands[0]["ok"] is False, lands
+    assert lands[0]["review"] == RV.GRADER_OUTAGE
+    assert READ_TIMEOUT_2421 in lands[0]["review_reason"], lands[0]["review_reason"]
+    assert "grader unreachable 4 times running" in lands[0]["errors"][0], lands[0]["errors"]
+    assert lands[0]["reverted"] == [] and lands[0]["landing_clauses"] == [], lands[0]
+    assert (vault / "skills" / "foo" / "SKILL.md").read_text().endswith("fourth outage\n")
+    assert V._vault_review_attempts(648) == 0, "hitting the bound spent no attempt either"
+
+    # …and the half that makes `consecutive` the operative word, measured on the SAME
+    # item that just exhausted its streak: the grader answers, the pass lands, and
+    # three fresh outages have to start the count at 1 again. Totalling instead of
+    # streaking would read 5, 6, 7 here and refuse all three — a backend that flapped
+    # three times in a month permanently refusing an item whose grader now answers,
+    # which is the failure mode a bound must not introduce.
+    monkeypatch.setattr(RV, "run_grader",
+                        lambda **kw: _met_vault_answer(_five_clause_asked(kw["prompt"])))
+    _edit_skill(vault, "the grader answers")
+    out = V.land(["skills/foo/SKILL.md"], "skill: foo, graded (#648)", item_id=648)
+    assert out["ok"] is True and out["review"] == "pass", out
+    assert V._vault_review_outages(648) == 0, "a real grading ends the streak"
+    # Two land rows exist for this item now: the refusal above, and this commit.
+    assert [r["ok"] for r in _rows("vault_land", 648)] == [False, True], _rows("vault_land", 648)
+    monkeypatch.setattr(RV, "run_grader", lambda **kw: {"ok": False, "error": READ_TIMEOUT_2421})
+    for n in (1, 2, 3):
+        _edit_skill(vault, f"after the pass {n}")
+        with pytest.raises(V.VaultRoundError) as ei:
+            V.land(["skills/foo/SKILL.md"], f"skill: foo ({n}) (#648)", item_id=648)
+        assert f"{n}/3 consecutive outages" in str(ei.value), (
+            f"outage {n} after a real grading did not restart the count: {ei.value}")
+    assert V._vault_review_outages(648) == 3
+    assert [r["ok"] for r in _rows("vault_land", 648)] == [False, True], (
+        "a streak broken by a real grading must not carry over into a second refusal")

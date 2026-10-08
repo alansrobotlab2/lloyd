@@ -234,6 +234,43 @@ def generation_diverged(error: object) -> bool:
     return any(m in e for m in DIVERGENCE_MARKS)
 
 
+#: #2421: the transport family. `run_grader` posts a grading turn to the live
+#: backend, and a completion the backend never delivered — a read that timed out,
+#: a refused connection, a pool that never handed over a slot — is a fault of the
+#: wire, not of the contract or the diff. The set is `app.autonomy._INFRA_EXC_NAMES`
+#: read through the same door `_failure_kind_of` uses (`app/autonomy.py:399`), for
+#: the same reason #1807 made that a function: the only other way to reach the
+#: decision in a test was to duplicate the expression there, which proves nothing
+#: about the set. A name added there is an outage here with no edit to this file.
+#:
+#: `vault_round.land` treats this kind as neither an attempt spent, a revert, nor a
+#: commit: the grading never happened, so nothing about the change has been judged,
+#: and the 2026-10-08T13:03Z incident shows what the alternative costs — a
+#: `finalizer failed: ReadTimeout` was written `kind: skipped`, the land ran on to
+#: `git commit` for a clause the grader had not read, and on the item's SECOND such
+#: row the same fault reverted a verified edit (#2410, `memory/mental-models.md`,
+#: still absent from the vault as this ships).
+GRADER_OUTAGE = "grader_outage"
+
+
+def grader_outage(error: object) -> bool:
+    """Whether a `run_grader` error is the transport, not the grader's judgement.
+
+    Matched on the spelling of each exception name and CASE-SENSITIVELY, which is
+    the opposite of `generation_diverged` and on purpose: this set is proper names
+    (`ReadTimeout`, `PoolTimeout`), and lower-casing it would make the word
+    "readerror" in a sentence match a fault that never happened. A bare
+    `backend 503` is deliberately NOT an outage — no exception name is in it, the
+    retry loop in `run_grader` already waited out the ones it can reach, and
+    #955's six labelled abstentions are pinned verbatim by
+    `test_a_skipped_vault_review_records_which_abstention_it_was`, which this
+    function must leave six.
+    """
+    from app.autonomy import _INFRA_EXC_NAMES  # noqa: PLC0415 — see the note above
+    e = str(error or "")
+    return any(n in e for n in _INFRA_EXC_NAMES)
+
+
 def clause_chunks(n_clauses: int, per_call: int = CLAUSES_PER_CALL) -> list[list[int]]:
     """1-based clause indices of an N-clause contract, grouped into calls of
     `per_call`: `ceil(n/per_call)` groups, every index 1..N in exactly one.
@@ -1886,6 +1923,17 @@ def grade_vault(*, item_id: int, paths: list[str], diff: str,
                                   f"grader generation diverged answering clause(s) "
                                   f"{_idx_text(chunk)} ({_per_call_phrase(len(chunk))}): "
                                   f"{res.get('error')}")
+            if grader_outage(res.get("error")):
+                # Checked AFTER divergence and BEFORE the catch-all below, so the only
+                # rows this can change are the ones that today collapse into
+                # `skipped`: #2341's post-shrink divergence rail and #955's six
+                # labelled abstentions are untouched by this branch. The incident
+                # row reads `finalizer failed: ReadTimeout: ` — a transport name with
+                # no judgement attached to it, which is what the classifier keys on.
+                return None, [], (GRADER_OUTAGE,
+                                  f"grader unreachable answering clause(s) "
+                                  f"{_idx_text(chunk)} ({_per_call_phrase(len(chunk))}): "
+                                  f"{res.get('error')}")
             return None, [], ("skipped", f"grader did not answer: {res.get('error')}")
         obj = res["structured"] if isinstance(res["structured"], dict) else {}
         if str(obj.get("premise") or "").strip().lower() not in ("sound", "unsound"):
@@ -1914,12 +1962,16 @@ def grade_vault(*, item_id: int, paths: list[str], diff: str,
         survived shrinking otherwise. A `skipped` is returned at once and never
         shrinks: a backend that 503s says nothing about the contract's size, and
         issuing more generations against it is #955's unlabelled abstention repeated
-        N times over. A partially answered call KEEPS its verdicts — #2335's first
+        N times over. A `grader_outage` is returned at once for the same reason
+        (#2421) — shrinking exists to fit an answer inside the finalizer's token
+        budget, and no chunk size recovers a completion the backend never
+        delivered; re-asking a timeout only re-bills it. A partially answered call
+        KEEPS its verdicts — #2335's first
         grading earned clause 1 of three and that verdict was thrown away, which is
         both a lost grade and a re-ask that re-bills a clause already graded.
         """
         obj, ok, failure = ask(chunk)
-        if failure is not None and failure[0] == "skipped":
+        if failure is not None and failure[0] in ("skipped", GRADER_OUTAGE):
             return failure
         if obj is not None and ok:
             answered.append(list(ok))

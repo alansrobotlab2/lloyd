@@ -680,6 +680,20 @@ def _ensure_main() -> None:
 GRADER = None
 VAULT_REVIEW_MAX = 2
 
+#: #2421: how many CONSECUTIVE grader outages one item may be re-offered past.
+#: `VAULT_REVIEW_MAX` is a budget about the CHANGE — a refusal names a defect an
+#: author can fix, a surviving divergence names a contract the grader cannot hold.
+#: An outage names neither: the backend did not answer, so nothing about this diff
+#: was judged and no attempt is spent (see `_vault_review_outages`). Without a bound
+#: that is an infinite retry loop against dead transport, whose only output is
+#: ledger rows, so the fourth consecutive outage refuses the land with `ok: false`
+#: naming the outage — and still does not revert, because the edit beside it is
+#: exactly what a person wants the moment the grader answers again. This is the
+#: distinction #2421 exists for: on 2026-10-08T13:03Z a `ReadTimeout` and a
+#: duplicate-verdict answer consumed both of item #2410's attempts and the second
+#: one REVERTED an edit every clause of had been verified against.
+GRADER_OUTAGE_MAX = 3
+
 
 def _ledger_clause(c: dict) -> dict:
     """One graded clause, as the promotions ledger records it.
@@ -812,6 +826,22 @@ def _landing_clause_indices(item_id: int) -> list[int]:
         return []
 
 
+def _implement_start_ts(events: list[dict], item_id: int) -> float:
+    """The ts of this item's newest `backlog_implement phase=started` row, or 0.0.
+
+    Both vault review counters anchor here rather than on the item's whole life, so
+    a fresh implement turn starts a fresh budget (#2341). Sharing ONE reader is the
+    point: the attempt budget and the outage bound are two different rules over the
+    SAME window, and if they disagreed about where the window opens then a re-offer
+    could clear one counter and not the other."""
+    started = 0.0
+    for e in events:
+        if (e.get("event") == "backlog_implement" and e.get("phase") == "started"
+                and e.get("item_id") == item_id):
+            started = float(e.get("ts") or 0)
+    return started
+
+
 def _vault_review_attempts(item_id: int) -> int:
     """Blocking vault reviews for this item since its implement turn started.
 
@@ -819,17 +849,42 @@ def _vault_review_attempts(item_id: int) -> int:
     whose clause list left a contract clause ungraded, which the land let through
     with a warning on the first time and must not let through for ever. Counting
     only `blocking` rows would leave it at attempt 1 for the whole life of the
-    item, so the refusal below could never arrive for the shape #2325 landed."""
+    item, so the refusal below could never arrive for the shape #2325 landed.
+
+    A `grader_outage` row (#2421) is NOT counted, and that is the whole of the
+    fix: it carries `blocking: false` and no `verdict_shortfall`, because a
+    transport fault that never reached a clause is not a judgement about the diff.
+    Item #2410's verified edit died because its ReadTimeout row moved this number."""
     events = S.read_events(limit=500)
-    started = 0.0
-    for e in events:
-        if (e.get("event") == "backlog_implement" and e.get("phase") == "started"
-                and e.get("item_id") == item_id):
-            started = float(e.get("ts") or 0)
+    started = _implement_start_ts(events, item_id)
     return sum(1 for e in events
                if e.get("event") == "vault_review" and e.get("item_id") == item_id
                and (e.get("blocking") or e.get("verdict_shortfall"))
                and float(e.get("ts") or 0) >= started)
+
+
+def _vault_review_outages(item_id: int) -> int:
+    """How MANY CONSECUTIVE grader outages this item has just been through.
+
+    The trailing run, not the total, and that is what makes the bound safe to
+    re-arm: one review that reached a verdict — a `pass`, a `retry`, even a
+    legitimate abstention — means the transport worked, and the streak starts
+    again. Counting totals instead would let a backend that flapped three times
+    over a month permanently refuse an item whose grader is now answering fine.
+
+    Bounded at `GRADER_OUTAGE_MAX` by the caller: this returns how many outages are
+    BEHIND this grading, so the call that sees three already written is the fourth
+    and refuses the land.
+    """
+    events = S.read_events(limit=500)
+    started = _implement_start_ts(events, item_id)
+    streak = 0
+    for e in events:
+        if (e.get("event") != "vault_review" or e.get("item_id") != item_id
+                or float(e.get("ts") or 0) < started):
+            continue
+        streak = streak + 1 if e.get("grader_outage") else 0
+    return streak
 
 
 def _guards_row(guards: dict) -> dict:
@@ -1272,6 +1327,44 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
                 ("review: premise unsound — " if kind == "unsound" else
                  f"review sent it back ({attempts}/{VAULT_REVIEW_MAX}): ") + findings[:800]
                 + ("; the edits were reverted" if undone else "; the edits are still in place — fix and land again"))
+        # #2421: the transport fault, charged to the transport. Nothing below this
+        # branch may run for it: no attempt spent, no revert, and — the half the
+        # ledger shows was missing — no commit. Before this, `finalizer failed:
+        # ReadTimeout` arrived as `kind: skipped`, `blocking: false`, fell through to
+        # `_git("commit", …)` and wrote `vault_land ok: true` with `landing_clauses:
+        # []` beside an ungraded contract (route witnessed by rows 21817→21825, where
+        # the same fall-through was legitimate because THAT skip was the mixed-surface
+        # abstention), while the item's second such row reverted a verified edit.
+        if kind == _RV.GRADER_OUTAGE:
+            streak = _vault_review_outages(int(item_id))
+            final = streak >= GRADER_OUTAGE_MAX
+            S.append_event({"event": "vault_review", "item_id": item_id, "paths": norm,
+                            "kind": kind, "blocking": False, "attempt": attempts,
+                            "findings": findings[:2000], "reverted": [],
+                            "clauses": [], "grader_outage": True,
+                            "grader_outage_streak": streak + 1,
+                            "review_reason": findings[:600]})
+            if final:
+                S.append_event({"event": "vault_land", "ok": False, "item_id": item_id,
+                                "paths": norm,
+                                "errors": [f"vault review: grader unreachable "
+                                           f"{streak + 1} times running: {findings[:200]}"],
+                                # NOT reverted: an outage is not a verdict on the
+                                # diff, and destroying the bytes the transport could
+                                # not judge is the exact loss this branch exists to
+                                # stop. The refusal is the record; the edit stays for
+                                # the next implement turn, or for a person.
+                                "reverted": [], "review": kind,
+                                "review_reason": findings[:600],
+                                "review_clauses": [], "landing_clauses": []})
+            raise VaultRoundError(
+                f"review: grader could not be reached ({streak + 1}/{GRADER_OUTAGE_MAX} "
+                f"consecutive outages, attempt {attempts} unspent): {findings[:600]}"
+                + ("; the land is refused until the grader answers, and the edits are "
+                   "still in place — nothing was committed or reverted"
+                   if final else
+                   "; the edits are still in place — nothing was committed or reverted, "
+                   "and this item spent no review attempt"))
         # #2263: `diverged` and `incomplete` are the two ways the grader was
         # asked and produced no grading OF THIS CONTRACT at all, and they are
         # blocking from the FIRST attempt — where `retry`/`unsound` only go
