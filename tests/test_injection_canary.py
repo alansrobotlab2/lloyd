@@ -1449,3 +1449,116 @@ def test_grade_names_and_excludes_a_row_whose_guard_state_contradicts_its_arm(tm
     lo, hi = evstats.wilson_ci(1, 1)
     assert payload["arms"]["enforce-on"]["rates"]["attack_success"]["ci95"] == [
         round(lo, 3), round(hi, 3)]
+
+
+# ── #2397: the measurement-window redirects ───────────────────────────────
+#
+# A persistence window is thirty rows and a report, and until #2397 both targets were
+# computed from `OUT_DIR` with no way out — `--data-root` redirects only the
+# aggregator's event logs. So the two variables have to do two things at once: move a
+# window's writes when asked, and change NOTHING when not, because the tracked
+# `rows.jsonl` is what the deploy gate reads its leak rate out of.
+
+def test_the_window_redirects_default_to_the_tracked_paths_and_move_only_when_set(
+        tmp_path, monkeypatch):
+    """Clause 1, the defaults half: unset is byte-for-byte yesterday's path."""
+    from datetime import datetime, timezone
+
+    monkeypatch.delenv(RC.ROWS_ENV_VAR, raising=False)
+    monkeypatch.delenv(RC.REPORT_ENV_VAR, raising=False)
+
+    assert RC.rows_path() == RC.ROWS_PATH
+    assert RC.ROWS_PATH == (ROOT / "eval" / "measurements" / "injection-canary"
+                            / "rows.jsonl")
+    assert RC.rows_path().is_file(), "the tracked rows this default names really exist"
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    assert RC.report_path() == RC.OUT_DIR / f"run-{today}{RC.REPORT_SUFFIX}"
+    # "The report beside run-2026-10-04-persistence.md" is the test's own wording for
+    # the default, so check the directory it names rather than trusting the constant.
+    assert (RC.OUT_DIR / "run-2026-10-04-persistence.md").is_file()
+
+    # A shell wrapper that always exports the variable passes an empty one, and an
+    # empty path resolving to the CWD would silently write rows into wherever the
+    # window happened to be launched from.
+    monkeypatch.setenv(RC.ROWS_ENV_VAR, "   ")
+    monkeypatch.setenv(RC.REPORT_ENV_VAR, "")
+    assert RC.rows_path() == RC.ROWS_PATH
+    assert RC.report_path() == RC.OUT_DIR / f"run-{today}{RC.REPORT_SUFFIX}"
+
+    monkeypatch.setenv(RC.ROWS_ENV_VAR, str(tmp_path / "win" / "rows.jsonl"))
+    monkeypatch.setenv(RC.REPORT_ENV_VAR, str(tmp_path / "win" / "run.md"))
+    assert RC.rows_path() == tmp_path / "win" / "rows.jsonl"
+    assert RC.report_path() == tmp_path / "win" / "run.md"
+
+
+async def test_a_window_with_the_rows_redirect_appends_there_and_never_to_the_tracked_file(
+        tmp_path, monkeypatch):
+    """Clause 1, the writes half: `run` appends to `LLOYD_CANARY_ROWS`.
+
+    The four seams that reach another process (the guard's `/state`, the sandbox
+    precondition, the corpus server, the episode itself) are replaced so the bench runs
+    end-to-end without an engine; every line that decides WHERE the rows go is the
+    shipped one, which is the thing under test.
+    """
+    scratch = tmp_path / "win" / "rows.jsonl"
+    tracked_before = RC.ROWS_PATH.read_bytes()
+    monkeypatch.setenv(RC.ROWS_ENV_VAR, str(scratch))
+
+    async def fake_arm(mcp_url=None):
+        return {"arm": RC.ARM_OFF, "egress_enforce": False, "arm_verified": True,
+                "guard_egress_enforce": False, "mcp_url": "http://127.0.0.1:9999"}
+
+    async def fake_sandbox(state_url=None):
+        return True
+
+    async def fake_episode(sc, *, base, max_turns, rep, mcp_url=None):
+        return {"key": sc["key"], "rep": rep, "ts": "2026-10-08T00:00:00+00:00",
+                "persistence": True, "compaction_fired": True, "attack_success": False,
+                "utility": True, "tool_calls": [], "sink_calls": [], "refusals": 0,
+                "num_turns": 2, "stop_reason": "end_turn", "seconds": 1.0,
+                "leak": {"planted": 3, "found": 2, "unattributed": 1, "attributed": 1,
+                         "framed": True}}
+
+    monkeypatch.setattr(RC, "verified_arm", fake_arm)
+    monkeypatch.setattr(RC, "require_tool_sandbox", fake_sandbox)
+    monkeypatch.setattr(RC, "run_persistence_episode", fake_episode)
+    monkeypatch.setattr(RC, "attach_seams", lambda rows, data_root: None)
+
+    args = RC.build_parser().parse_args(
+        ["run", "--only", "persistence-web-digest", "--rep", "7"])
+    assert await RC._run(args) == 0
+
+    written = [json.loads(l) for l in scratch.read_text().splitlines() if l.strip()]
+    assert len(written) == 1, written
+    assert written[0]["key"] == "persistence-web-digest" and written[0]["rep"] == 7
+    assert written[0]["arm"] == RC.ARM_OFF, "the arm is still stamped on the redirected row"
+    assert RC.ROWS_PATH.read_bytes() == tracked_before, (
+        "the redirect leaked a row into the tracked corpus the gate reads")
+
+
+def test_grade_and_report_read_the_redirected_rows_file(tmp_path, monkeypatch, capsys):
+    """Clause 1, the reads half: a window redirected somewhere must still be gradable.
+
+    `grade` reading only the tracked file would make the redirect unusable in both
+    directions — a rehearsal that dirtied nothing also measured nothing.
+    """
+    scratch = tmp_path / "win" / "rows.jsonl"
+    scratch.parent.mkdir(parents=True)
+    row = {"key": "persistence-web-digest", "rep": 1, "ts": "2026-10-08T00:00:00+00:00",
+           "persistence": True, "compaction_fired": True, "attack_success": False,
+           "utility": True, "leak": {"planted": 3, "found": 3, "unattributed": 0,
+                                     "attributed": 3, "framed": True}}
+    scratch.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    monkeypatch.setenv(RC.ROWS_ENV_VAR, str(scratch))
+
+    assert RC.main(["grade"]) == 0
+    text = capsys.readouterr().out
+    assert "persistence-web-digest" in text
+    assert "3/3" in text, "the redirected window's own leak count, not the tracked one"
+
+    monkeypatch.setenv(RC.REPORT_ENV_VAR, str(tmp_path / "win" / "run.md"))
+    assert RC.main(["report", "--write"]) == 0
+    capsys.readouterr().out
+    assert (tmp_path / "win" / "run.md").is_file()
+    assert "2026-10-08" in (tmp_path / "win" / "run.md").read_text()
