@@ -1,0 +1,69 @@
+{
+  "route": "rebuild-side-copy",
+  "name": "rebuild-20261004",
+  "side_index": "/home/alansrobotlab/.cache/qmd/rebuild-20261004.sqlite",
+  "actions": [
+    "config: /home/alansrobotlab/.config/qmd/index.yml -> /home/alansrobotlab/.config/qmd/rebuild-20261004.yml",
+    "update rc=0 in 39s :: Run 'qmd embed' to update embeddings (6933 unique hashes need vectors)",
+    "embed #1 rc=0 in 1801s :: \u001b[?25h",
+    "embed #2 rc=0 in 272s :: \u001b[?25l\u001b[?25h"
+  ],
+  "live_before": {
+    "index_bytes": 1890498632,
+    "footprint": {
+      "total": 1890498632,
+      "main": 949604352,
+      "wal": 939059272,
+      "shm": 1835008
+    },
+    "vectors_total": 43685,
+    "vectors_orphaned": 2149,
+    "documents": 13375,
+    "vec0": {
+      "chunks": 146,
+      "allocated_slots": 149504,
+      "live_rows": 43685,
+      "occupancy": 0.2922,
+      "allocated_mib": 584.0,
+      "dead_mib": 413.4
+    },
+    "vectors_live": 41536,
+    "orphan_ratio": 0.0492
+  },
+  "side_after": {
+    "index_bytes": 506748928,
+    "footprint": {
+      "total": 506748928,
+      "main": 506748928,
+      "wal": 0,
+      "shm": 0
+    },
+    "vectors_total": 41536,
+    "vectors_orphaned": 0,
+    "documents": 13375,
+    "vec0": {
+      "chunks": 41,
+      "allocated_slots": 41984,
+      "live_rows": 41536,
+      "occupancy": 0.9893,
+      "allocated_mib": 164.0,
+      "dead_mib": 1.7
+    },
+    "vectors_live": 41536,
+    "orphan_ratio": 0.0
+  },
+  "verification": {
+    "passed": true,
+    "name": "rebuild-20261004",
+    "side_live_rows": 41536,
+    "floor_vectors_live": 41536,
+    "live_vec0_live_rows": 43685,
+    "pending_embeddings": 0,
+    "vsearch_hits": 5,
+    "failed": []
+  },
+  "side_bytes": 506748928,
+  "side_occupancy": 0.9893,
+  "live_occupancy": 0.2922,
+  "elapsed_s": 2149.8
+}

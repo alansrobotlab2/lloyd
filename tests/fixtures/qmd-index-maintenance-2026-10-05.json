@@ -1,0 +1,227 @@
+{
+  "ran_at": "2026-10-05T05:01:11.471813",
+  "actions": [
+    "stray files: 8 file(s), 3.08 GB beside the live index; kept newest index.sqlite.bak-gemma-20260921; deleted 0 (0.00 GB), 0 planned on an acting run, 1 .bak held + 2 outside the series"
+  ],
+  "before": {
+    "index_bytes": 1970756440,
+    "footprint": {
+      "total": 1970756440,
+      "main": 981815296,
+      "wal": 987007832,
+      "shm": 1933312
+    },
+    "vectors_total": 42666,
+    "vectors_orphaned": 105,
+    "documents": 13536,
+    "vec0": {
+      "chunks": 153,
+      "allocated_slots": 156672,
+      "live_rows": 42666,
+      "occupancy": 0.2723,
+      "allocated_mib": 612.0,
+      "dead_mib": 445.3
+    },
+    "vectors_live": 42561,
+    "orphan_ratio": 0.0025
+  },
+  "stray": [
+    {
+      "name": "index.sqlite.bak-20260919-203417",
+      "bytes": 1250205696,
+      "mtime": "2026-09-19T20:34:17"
+    },
+    {
+      "name": "index.sqlite.bak-20260919-203417-shm",
+      "bytes": 32768,
+      "mtime": "2026-10-02T19:12:39"
+    },
+    {
+      "name": "index.sqlite.bak-20260919-203417-wal",
+      "bytes": 0,
+      "mtime": "2026-09-19T20:34:17"
+    },
+    {
+      "name": "index.sqlite.bak-gemma-20260921",
+      "bytes": 1327300608,
+      "mtime": "2026-09-21T16:26:55"
+    },
+    {
+      "name": "index.sqlite.bak-gemma-20260921-shm",
+      "bytes": 32768,
+      "mtime": "2026-10-02T19:11:48"
+    },
+    {
+      "name": "index.sqlite.bak-gemma-20260921-wal",
+      "bytes": 0,
+      "mtime": "2026-09-24T13:36:55"
+    },
+    {
+      "name": "rebuild-20261004.sqlite",
+      "bytes": 506748928,
+      "mtime": "2026-10-04T12:10:50"
+    },
+    {
+      "name": "rebuild-20261004.sqlite.rebuild.json",
+      "bytes": 98,
+      "mtime": "2026-10-04T11:35:01"
+    }
+  ],
+  "stray_bytes": 3084320866,
+  "stray_retention": {
+    "bak_series": [
+      "index.sqlite.bak-gemma-20260921",
+      "index.sqlite.bak-20260919-203417"
+    ],
+    "kept": [
+      "index.sqlite.bak-gemma-20260921"
+    ],
+    "planned": [],
+    "deleted": [],
+    "deleted_bytes": 0,
+    "held": [
+      {
+        "name": "index.sqlite.bak-20260919-203417",
+        "bytes": 1250205696,
+        "code_references": [
+          "tests/test_qmd_index_maintenance.py"
+        ],
+        "because": [
+          "a code reference in Lloyd's own tree names it: tests/test_qmd_index_maintenance.py"
+        ]
+      }
+    ],
+    "held_for_person": [
+      {
+        "name": "rebuild-20261004.sqlite",
+        "bytes": 506748928,
+        "because": "outside the index.sqlite.bak* series, so not this job's to delete: this directory is shared with live eval side-indexes, and #844:141-142 ruled that deleting someone's backup database is not a code round's call"
+      },
+      {
+        "name": "rebuild-20261004.sqlite.rebuild.json",
+        "bytes": 98,
+        "because": "outside the index.sqlite.bak* series, so not this job's to delete: this directory is shared with live eval side-indexes, and #844:141-142 ruled that deleting someone's backup database is not a code round's call"
+      }
+    ],
+    "errors": [],
+    "dry_run": false
+  },
+  "pending_embeddings": 0,
+  "config_drift": {
+    "template": "/home/alansrobotlab/lloyd/agent-services/conf/qmd-index.yml",
+    "live": "/home/alansrobotlab/.config/qmd/index.yml",
+    "drift": [],
+    "drift_count": 0,
+    "resync_command": "cp ~/.config/qmd/index.yml agent-services/conf/qmd-index.yml",
+    "resync_direction": "live -> template (the file the daemon reads is the truth)",
+    "comparable": true,
+    "in_sync": true
+  },
+  "collection_overlap": {
+    "live_config": "/home/alansrobotlab/.config/qmd/index.yml",
+    "index": "/home/alansrobotlab/.cache/qmd/index.sqlite",
+    "pairs": [
+      {
+        "containing": "subliminal",
+        "contained": "architecture",
+        "containing_root": "/home/alansrobotlab/obsidian",
+        "contained_root": "/home/alansrobotlab/obsidian/architecture",
+        "shared_documents": 36
+      },
+      {
+        "containing": "subliminal",
+        "contained": "autonomy",
+        "containing_root": "/home/alansrobotlab/obsidian",
+        "contained_root": "/home/alansrobotlab/obsidian/autonomy",
+        "shared_documents": 43
+      },
+      {
+        "containing": "subliminal",
+        "contained": "backlog",
+        "containing_root": "/home/alansrobotlab/obsidian",
+        "contained_root": "/home/alansrobotlab/obsidian/backlog",
+        "shared_documents": 2203
+      },
+      {
+        "containing": "subliminal",
+        "contained": "knowledge",
+        "containing_root": "/home/alansrobotlab/obsidian",
+        "contained_root": "/home/alansrobotlab/obsidian/knowledge",
+        "shared_documents": 2837
+      },
+      {
+        "containing": "subliminal",
+        "contained": "lloyd",
+        "containing_root": "/home/alansrobotlab/obsidian",
+        "contained_root": "/home/alansrobotlab/obsidian/lloyd",
+        "shared_documents": 82
+      },
+      {
+        "containing": "subliminal",
+        "contained": "memory",
+        "containing_root": "/home/alansrobotlab/obsidian",
+        "contained_root": "/home/alansrobotlab/obsidian/memory",
+        "shared_documents": 685
+      },
+      {
+        "containing": "subliminal",
+        "contained": "people",
+        "containing_root": "/home/alansrobotlab/obsidian",
+        "contained_root": "/home/alansrobotlab/obsidian/people",
+        "shared_documents": 31
+      },
+      {
+        "containing": "subliminal",
+        "contained": "personal",
+        "containing_root": "/home/alansrobotlab/obsidian",
+        "contained_root": "/home/alansrobotlab/obsidian/personal",
+        "shared_documents": 31
+      },
+      {
+        "containing": "subliminal",
+        "contained": "projects",
+        "containing_root": "/home/alansrobotlab/obsidian",
+        "contained_root": "/home/alansrobotlab/obsidian/projects",
+        "shared_documents": 196
+      },
+      {
+        "containing": "subliminal",
+        "contained": "skills",
+        "containing_root": "/home/alansrobotlab/obsidian",
+        "contained_root": "/home/alansrobotlab/obsidian/skills",
+        "shared_documents": 274
+      },
+      {
+        "containing": "subliminal",
+        "contained": "work",
+        "containing_root": "/home/alansrobotlab/obsidian",
+        "contained_root": "/home/alansrobotlab/obsidian/work",
+        "shared_documents": 57
+      }
+    ],
+    "overlap_count": 11,
+    "by_containing": {
+      "subliminal": 6475
+    },
+    "shared_documents": 6475,
+    "documents": 13536,
+    "distinct_hashes": 7028,
+    "redundant_rows": 6508,
+    "duplication_ratio": 1.926
+  },
+  "embed_guard": {
+    "pending_embeddings": 0,
+    "denominator": "documents (rows in the `documents` table, from inspect_index)",
+    "denominator_value": 13536,
+    "ratio": 0.0,
+    "threshold_fraction": 0.25,
+    "max_pending": 3384,
+    "configured_embed_model": "hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf",
+    "tripped": false
+  },
+  "need_prune": false,
+  "need_embed": false,
+  "need_capacity": false,
+  "vec0_rebuild": "ruled out as an unattended action: the one measured rebuild (2026-09-21 model switch) was a side copy re-embedded in full and swapped in, 1.25 GB -> 481 MB, 56% occupancy after; an in-place drop would leave the serving daemon with no vector leg for the whole re-embed. A fired need_capacity means rebuild a side copy and swap it, by hand.",
+  "daemon_healthy": true
+}

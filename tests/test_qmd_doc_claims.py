@@ -16,11 +16,13 @@ the code's cannot drift apart.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import pwd
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -44,6 +46,49 @@ REHEARSAL_REPORT = "qmd-side-copy-rebuild-20261004-2026-10-04T113501.json"
 MAINTENANCE_BEFORE = "qmd-index-maintenance-2026-10-05.json"
 MAINTENANCE_AFTER = "qmd-index-maintenance-2026-10-06.json"
 
+#: The committed home of every report cited below. Before #2396 this file read all four
+#: out of `REFLECTION` alone, which is not hermetic in either direction: the gate graded
+#: the paragraph against bytes that are in no repository, and a plain clone, a second
+#: account, or any host with no `_pipeline/reflection/` SKIPPED all three #2302 pins and
+#: still reported a green suite — the shape #2282 was lost to, where the nodes never ran
+#: and nothing between a pytest summary line and the rung's ceiling noticed. The runtime
+#: record is now the control on these bytes, never their source.
+FIXTURES = ROOT / "tests" / "fixtures"
+
+#: Each cited report and the one scoped negation in `tests/fixtures/.gitignore` that
+#: admits it past the root `*.json` rule. Both negations pre-date this change; an
+#: `git add` of a name that no negation rescues exits 0 while staging NOTHING, so
+#: `_ignore_rule` asks the real mechanism on every run (#2282 spent two review attempts
+#: learning that).
+CITED_REPORTS = {
+    REHEARSAL_REPORT: "!qmd-side-copy-rebuild-*.json",
+    SWAP_REPORT: "!qmd-side-copy-rebuild-*.json",
+    MAINTENANCE_BEFORE: "!qmd-index-maintenance-*.json",
+    MAINTENANCE_AFTER: "!qmd-index-maintenance-*.json",
+}
+
+# Provenance of the four committed witnesses, each copied byte-for-byte out of
+# `$LLOYD_DATA/_pipeline/reflection/` on 2026-10-08, the day HEAD was `f3809a69`.
+# Lines and bytes as `wc -l -c` prints them, then the md5:
+#
+#   rebuild-20261004-2026-10-04T113501   68 lines, 1,783 B  2957114779d1a5a7f7a9e6dc1b1a652c
+#   rebuild-20261005-2026-10-05T072250   82 lines, 2,250 B  8af93f34848086e3b974cd5719bff0af
+#   index-maintenance-2026-10-05        226 lines, 7,408 B  fc110dcbd5b248b5e4ccf0a7f3c9a175
+#   index-maintenance-2026-10-06        243 lines, 7,989 B  9db5937166170b9cb342c1d0fff21b10
+#
+# Each name above is the tail of a constant in this file: the two rebuild reports are
+# `REHEARSAL_REPORT` and `SWAP_REPORT`, the two nightlies `MAINTENANCE_BEFORE` and
+# `MAINTENANCE_AFTER`.
+#
+# Those digests are bookkeeping, not an assertion. `_assert_matches_runtime` compares the
+# committed bytes with the runtime copy whenever it can reach one, which is the
+# family-7/family-9 convention in `tests/fixtures/.gitignore`: a compared byte is a better
+# witness than a claimed one. The line and byte counts ARE asserted, by
+# `test_the_three_new_cited_reports_are_exact_tracked_and_admissible`. The 10-04 report has
+# one further copy, in the vault at `backlog/data/` under its own name (vault commit
+# `53f68eaa`), as the human-facing witness clause 5 names; NO node opens it, and
+# `test_no_node_of_this_file_reaches_the_vault_copy` keeps it that way.
+
 #: The committed copy of the swap report, and the only place this file's backup name comes
 #: from (#2323). A real `index.sqlite.bak-<stamp>` written into a scanned `.py` is a code
 #: reference under `code_reference_hits`, and a code reference is a hold on the reclaim
@@ -54,11 +99,44 @@ MAINTENANCE_AFTER = "qmd-index-maintenance-2026-10-06.json"
 #: `CODE_REF_SUFFIXES`, so
 #: the report that measured the name is where it lives, and the negation in
 #: `tests/fixtures/.gitignore` is what admits these bytes past the root `*.json` rule.
-SWAP_FIXTURE = ROOT / "tests" / "fixtures" / SWAP_REPORT
+SWAP_FIXTURE = FIXTURES / SWAP_REPORT
 
 #: A sibling name with no negation of its own, the positive control for
 #: `test_the_swap_fixture_is_admissible_and_tracked`: it must resolve to the root rule.
 SWAP_FIXTURE_CONTROL = "tests/fixtures/side-copy-rebuild-no-negation-control.json"
+
+
+def _fixture(name: str) -> Path:
+    """A cited report's committed witness, resolved at call time.
+
+    A function rather than four constants so a node can point `FIXTURES` at a directory
+    one witness short and watch the resolution fail with a reason:
+    `test_removing_a_witness_fails_the_three_pins_naming_the_missing_file` is the proof
+    that these pins can fail at all, and a path baked in at import cannot be shown that.
+    """
+    return FIXTURES / name
+
+
+def _sha(payload: bytes) -> str:
+    """A short digest, for a failure message that has to tell two files apart."""
+    return hashlib.sha256(payload).hexdigest()[:12]
+
+
+def _ignore_rule(rel: str) -> tuple[int, str, str]:
+    """Ask `git check-ignore` which rule wins for one repo-relative path.
+
+    `--no-index -v` exits 0 for ANY matching rule, a negation included, and prints the
+    winner as `source:line:pattern` — so the pattern half is the verdict and the exit
+    status proves only that the walk ran. Hoisted out of
+    `test_the_swap_fixture_is_admissible_and_tracked`, which #2323 wrote, so every
+    witness in `CITED_REPORTS` is asked the same question the same way.
+    """
+    p = subprocess.run(
+        ["git", "-C", str(ROOT), "check-ignore", "--no-index", "-v", rel],
+        capture_output=True, text=True)
+    line = p.stdout.strip().split("\t")[0]
+    source, _, pattern = line.rpartition(":")
+    return p.returncode, source, pattern
 
 
 def _swapped_backup() -> str:
@@ -68,7 +146,7 @@ def _swapped_backup() -> str:
     untracked fixture has to fail a node with a reason, not turn this module into a
     collection error that the gate reports as a green suite whose nodes never ran (#2282).
     """
-    return Path(json.loads(SWAP_FIXTURE.read_text(encoding="utf-8"))
+    return Path(json.loads(_fixture(SWAP_REPORT).read_text(encoding="utf-8"))
                 ["swap"]["backup"]).name
 
 #: The module constant the doc is allowed to name, and the only place the
@@ -220,17 +298,57 @@ def _task81_bullet() -> str:
     return hits[0]
 
 
-def _report(name: str) -> dict:
-    """One report from the runtime record the doc cites.
+def _assert_matches_runtime(name: str, fixture: Path) -> None:
+    """Establish the witness's provenance by comparison, when the runtime copy is reachable.
 
-    Skips with the missing path when there is no history to read — a checkout with
-    no `_pipeline/reflection/` cannot re-derive a figure, and passing there would
-    be the false green this file exists to avoid.
+    The `SWAP_FIXTURE` idea of #2323 generalised to the whole cited set: those bytes are
+    the only place in this tree allowed to carry a real `index.sqlite.bak-<stamp>` name,
+    and the four figures the paragraph quotes are only the figures the invocations measured
+    if the committed copy is the report itself. The runtime record is the machine's other
+    copy of the same invocation and the only one that can say so, so agreement is asserted
+    rather than a digest quoted — that is what makes the md5s in the comment above
+    bookkeeping instead of a claim. A dated report is immutable, so the two can only
+    disagree if one of them has been edited, moved, or truncated: exactly the moment the
+    pins stop meaning anything.
+
+    An unreachable runtime copy returns quietly. It is not a skip and not a failure: the
+    committed bytes are the witness, and a host without this box's `_pipeline/reflection/`
+    still has to be able to grade the paragraph, which is the whole reason #2396 exists.
     """
-    path = REFLECTION / name
-    if not path.is_file():
-        pytest.skip(f"no runtime record at {path}, so the cited figure cannot be re-derived")
-    return json.loads(path.read_text(encoding="utf-8"))
+    runtime = REFLECTION / name
+    if not runtime.is_file():
+        return
+    committed, live = fixture.read_bytes(), runtime.read_bytes()
+    if committed == live:
+        return
+    raise AssertionError(
+        f"the committed witness {fixture} (sha256 {_sha(committed)}, {len(committed)} B) "
+        f"and the runtime report {runtime} (sha256 {_sha(live)}, {len(live)} B) disagree, "
+        f"so neither one is the bytes the `{name}` invocation wrote and no figure quoted "
+        "from either re-derives anything")
+
+
+def _report(name: str) -> dict:
+    """One cited report, read from its committed bytes.
+
+    The witness is the fixture in `tests/fixtures/`; the runtime record the doc's citation
+    points at is its control, checked by `_assert_matches_runtime`. This function used to
+    open `REFLECTION / name` and SKIPPED when it was absent, which graded the paragraph
+    against bytes in no repository on a box that had them and asserted nothing on a box
+    that did not — three of the four cited reports had no committed copy at all until
+    #2396. A missing witness now FAILS with its own path: the figure would then be in
+    nothing, and a pin that skips instead of saying so is the false green this file exists
+    to avoid.
+    """
+    fixture = _fixture(name)
+    if not fixture.is_file():
+        pytest.fail(
+            f"no committed witness at {fixture}. The figure the paragraph cites would then "
+            "live only in one machine's `_pipeline/reflection/`, so the clause cannot be "
+            "re-derived: restore the dated report (immutable since the invocation that wrote "
+            "it) — skipping here is how all three #2302 clauses read as satisfied on a clone.")
+    _assert_matches_runtime(name, fixture)
+    return json.loads(fixture.read_text(encoding="utf-8"))
 
 
 def test_the_doc_no_longer_says_the_route_was_never_run_for_real():
@@ -252,8 +370,12 @@ def test_the_doc_no_longer_says_the_route_was_never_run_for_real():
 def test_the_paragraph_reports_the_swap_and_cites_the_report_behind_it():
     """#2302 clause 2: the run that happened is stated, with its citation.
 
-    The seam is prose to runtime record: the paragraph is only checked if the
-    report it points at exists and still says `swapped` and `retrieval_ok`.
+    The seam is prose to witness record: the paragraph is checked against the committed
+    copy of the report it points at, which #2323 chose as the one place in this tree
+    allowed to name a real backup, and `_report` has just proved that copy agrees with the
+    runtime one on any machine that still has it. A citation the repository cannot resolve
+    is the failure mode being closed here: `wc -l` of a directory nobody commits is not a
+    check a later reader can run.
     """
     swap = _report(SWAP_REPORT)
     flat = _flat(_task81_bullet())
@@ -262,18 +384,21 @@ def test_the_paragraph_reports_the_swap_and_cites_the_report_behind_it():
     assert cites, "the paragraph cites no report under _pipeline/reflection/"
     assert any(c.endswith(SWAP_REPORT) for c in cites), cites
     for cite in cites:
-        assert (REFLECTION.parent.parent / cite).is_file(), f"cited report is not on disk: {cite}"
+        assert _fixture(Path(cite).name).is_file(), (
+            f"the paragraph cites {cite}, which has no committed witness under "
+            f"{FIXTURES}: the claim is then checkable only on a box with that runtime "
+            "directory, and a reader with the repository alone cannot re-derive it")
     assert swap["swap"]["swapped"] is True and swap["swap"]["retrieval_ok"] is True, swap["swap"]
     assert swap["name"] == "rebuild-20261005" and "2026-10-05" in flat
     assert "swapped" in flat and "retrieval_ok" in flat, (
         "the paragraph no longer states what the swap report records")
-    # The name comes out of the committed copy of the report, and the runtime report the
-    # paragraph cites has to agree with it: the fixture cannot be allowed to drift into
-    # naming some other backup while the doc's claim is checked against that one instead.
+    # The backup name comes out of the committed bytes, and the agreement between those
+    # bytes and the runtime report the citation names is now asserted where the report is
+    # resolved (`_assert_matches_runtime`, #2396 clause 4) rather than re-derived field by
+    # field here: comparing the whole payload says everything a single field compared did,
+    # and says it for all four cited reports instead of the one that happened to be read
+    # first. What is this node's own is the prose: the name has to be in the paragraph.
     committed = _swapped_backup()
-    assert committed == Path(swap["swap"]["backup"]).name, (
-        "the committed swap report and the runtime report the doc cites disagree about "
-        "which database was moved aside")
     assert committed in flat, "the backup the swap left is not named"
 
 
@@ -353,22 +478,14 @@ def test_the_swap_fixture_is_admissible_and_tracked():
     control sibling has no negation of its own and must come back with the root rule, or a
     clean answer for the fixture would mean nothing.
     """
-    def rule(rel: str) -> tuple[int, str, str]:
-        p = subprocess.run(
-            ["git", "-C", str(ROOT), "check-ignore", "--no-index", "-v", rel],
-            capture_output=True, text=True)
-        line = p.stdout.strip().split("\t")[0]
-        source, _, pattern = line.rpartition(":")
-        return p.returncode, source, pattern
-
-    code, source, pattern = rule(SWAP_FIXTURE_CONTROL)
+    code, source, pattern = _ignore_rule(SWAP_FIXTURE_CONTROL)
     assert code == 0 and pattern == "*.json" and not source.startswith("tests/fixtures/"), (
         f"positive control broken: a sibling name with no negation resolved to "
         f"{source!r} / {pattern!r} (exit {code}), so the root rule is not what is being "
         "beaten and a clean answer below would prove nothing")
 
     rel = SWAP_FIXTURE.relative_to(ROOT).as_posix()
-    code, source, pattern = rule(rel)
+    code, source, pattern = _ignore_rule(rel)
     assert code == 0 and source.startswith("tests/fixtures/.gitignore") \
         and pattern == "!qmd-side-copy-rebuild-*.json", (
         f"{rel} resolves to {source!r} / {pattern!r} (exit {code}): the scoped negation is "
@@ -386,3 +503,256 @@ def test_the_swap_fixture_is_admissible_and_tracked():
     assert raw.count("\n") == 82 and len(raw.encode()) == 2250, (
         "the committed swap report is not the bytes the 2026-10-05 invocation wrote "
         f"({raw.count(chr(10))} lines, {len(raw.encode())} B)")
+
+
+def test_the_three_new_cited_reports_are_exact_tracked_and_admissible():
+    """#2396 clauses 1 and 2: three more witnesses are the bytes, in the index, admitted
+    by rules that already existed.
+
+    Until #2396 only the swap report of the four the paragraph cites was committed, so
+    `_report` was reading three reports out of a directory that is in no repository while
+    looking like a passing pin. Byte counts are the cheap half and they are pinned anyway:
+    a dated report is immutable, so `wc -l -c` of the runtime file is a figure a later
+    reader can re-derive, and the agreement of the whole payload is asserted by
+    `_assert_matches_runtime` on any machine holding the runtime copy. The expensive half
+    is admission — root `.gitignore` ends `*.json`, and `git add` of a name no negation
+    rescues exits 0 having staged nothing, which is the silent failure #2282 spent two
+    review attempts on. So each new name goes through `_ignore_rule` with the control
+    sibling beside it, and the whole tracked family is counted, because "5" is the number
+    `git ls-files tests/fixtures | grep -c qmd` prints once all four witnesses and the
+    #2119 one are in the index.
+    """
+    exact = {  # name -> (lines, bytes), as `wc -l -c` of the runtime report prints them
+        REHEARSAL_REPORT: (68, 1783),
+        MAINTENANCE_BEFORE: (226, 7408),
+        MAINTENANCE_AFTER: (243, 7989),
+    }
+    for name, (lines, size) in exact.items():
+        fixture = _fixture(name)
+        raw = fixture.read_text(encoding="utf-8")
+        assert raw.count("\n") == lines and len(raw.encode()) == size, (
+            f"the committed {name} is {raw.count(chr(10))} lines / {len(raw.encode())} B, "
+            f"not the {lines} lines / {size} B that "
+            f"`wc -l -c $LLOYD_DATA/_pipeline/reflection/{name}` prints")
+
+        rel = fixture.relative_to(ROOT).as_posix()
+        code, source, pattern = _ignore_rule(rel)
+        assert code == 0 and source.startswith("tests/fixtures/.gitignore") \
+            and pattern == CITED_REPORTS[name], (
+            f"{rel} resolves to {source!r} / {pattern!r} (exit {code}) instead of the "
+            f"pre-existing negation {CITED_REPORTS[name]!r}: `git add` would have staged "
+            "nothing here, and the witness the paragraph's figures come from would be "
+            "absent from every gate tree while the suite stayed green about it")
+
+        tracked = subprocess.run(
+            ["git", "-C", str(ROOT), "ls-files", "--error-unmatch", rel],
+            capture_output=True, text=True)
+        assert tracked.returncode == 0, (
+            f"{rel} is admissible but not in the index: {tracked.stderr.strip()} — an "
+            "untracked witness is a file only this worktree has")
+
+    code, source, pattern = _ignore_rule(SWAP_FIXTURE_CONTROL)
+    assert code == 0 and pattern == "*.json" and not source.startswith("tests/fixtures/"), (
+        f"positive control broken: a sibling with no negation of its own resolved to "
+        f"{source!r} / {pattern!r} (exit {code}), so the root rule is not what the four "
+        "negations above are beating and their clean answers prove nothing")
+
+    listed = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "tests/fixtures"],
+        capture_output=True, text=True)
+    qmd = sorted(ln for ln in listed.stdout.split("\n") if "qmd" in ln)
+    assert len(qmd) == 5, (
+        f"`git ls-files tests/fixtures | grep -c qmd` prints {len(qmd)} ({qmd}), not 5: "
+        "four cited reports plus #2119's nightly witness is the whole committed family, "
+        "and one fewer means a figure the paragraph quotes is in no repository")
+
+    spec = (ROOT / "scripts" / "automod" / "spec.py").read_text(encoding="utf-8")
+    denied = spec.split("DENIED_GLOBS", 1)[1].split(")", 1)[0]
+    assert '".gitignore"' in denied, (
+        "the round's scope check no longer refuses `.gitignore` outright. That refusal is "
+        "what makes 'no ignore file was edited to admit these bytes' a standing property "
+        "rather than a promise about this one diff: both negations above are pre-existing "
+        "lines, and a round wanting a third rule would have to change a file it cannot.")
+
+
+def test_the_cited_reports_resolve_to_committed_bytes_and_nothing_in_this_file_skips(
+        monkeypatch, tmp_path):
+    """#2396 clause 3: the four names come out of the repository, and no node may skip.
+
+    Pointing `REFLECTION` at an empty directory is not a hypothetical here — it is exactly
+    what a plain clone, a second account, or any host that has never run the rebuild route
+    is. Every cited figure still has to resolve, or the pin was only ever as durable as one
+    machine's `_pipeline/reflection/`. The file-level absence is pinned with it because
+    `pytest`'s own ceiling is not a floor: `scripts/automod/gate.py::PYTEST_MAX_SKIPPED`
+    allows 40 skips against a suite already sitting near 31, so a fourth silent-green shape
+    fits inside the budget permanently. Assembled at call time so this node adds no fresh
+    copy of the token it is looking for.
+    """
+    src = Path(__file__).read_text(encoding="utf-8")
+    skip_call = "pytest." + "skip"
+    assert skip_call not in src, (
+        f"a {skip_call} call is back in this file. A node that skips grades nothing, and "
+        "on a host without the runtime record that is how all four #2302 clauses read as "
+        "satisfied while asserting nothing.")
+    assert "skip" in src.lower(), (
+        "the word is gone from this file entirely, which is how the absence above would "
+        "also be satisfied by deleting the record of what it retires")
+
+    unreachable = tmp_path / "no-runtime-record"
+    unreachable.mkdir()
+    monkeypatch.setattr(sys.modules[__name__], "REFLECTION", unreachable)
+    for name in CITED_REPORTS:
+        resolved = _report(name)
+        assert resolved == json.loads(_fixture(name).read_text(encoding="utf-8")), (
+            f"_report({name!r}) did not return the committed witness with the runtime "
+            "record unreachable, so it is still reading the machine rather than the tree")
+    assert _report(MAINTENANCE_BEFORE)["before"]["vec0"]["dead_mib"] == 445.3, (
+        "the 10-05 nightly's measured dead figure is not what the paragraph quotes")
+
+
+#: The three #2302 pins, in file order: the whole set the failure-half node below runs
+#: against a witness directory that is one file short. Named explicitly rather than
+#: collected from this module's globals, so the denominator is the three clauses of #2302
+#: and not whatever nodes happen to exist the day someone adds a fourth.
+_PINS = (
+    test_the_paragraph_reports_the_swap_and_cites_the_report_behind_it,
+    test_the_reclaim_figures_are_the_ones_the_nightly_series_measured,
+    test_the_paragraph_keeps_both_caveats_and_says_no_clock_window_applies,
+)
+
+
+def test_removing_a_witness_fails_the_three_pins_naming_the_missing_file(monkeypatch, tmp_path):
+    """#2396 clause 3, the failure half: a pin that cannot fail is not a pin.
+
+    Each of the three #2302 pins is called directly against a fixture directory holding the
+    other three witnesses and missing exactly the one that pin resolves — which is what a
+    tree where `git add` silently refused to stage one file is. Each has to fail with the
+    missing path in its reason, and none may SKIPPED instead: that substitution is the whole
+    defect #2396 closes, since skipping on a box with no runtime record is how clauses 2, 3
+    and 4 reported green for a month without reading anything.
+
+    Which pin has to fall for which witness is the pairing clause 3 states; the rest is
+    observed rather than assumed, because the three pins share witnesses (the reclaim pin
+    also reads the swap report's own `live_before`, the caveats pin both rebuild reports) and
+    a hand-written map of who reads what would be one more claim nobody re-runs. So every
+    pin is run against every partial directory: none may SKIP, the named pin must fail with
+    the removed path in its reason, and any other pin that fails must fail about that same
+    file. At least one pin must still pass somewhere — the redirected `FIXTURES` is doing the
+    failing here, and a redirect that broke every pin in every case would say so by leaving
+    no pass at all.
+    """
+    must_fail = {  # the witness, and the pin clause 3 names for it
+        SWAP_REPORT: test_the_paragraph_reports_the_swap_and_cites_the_report_behind_it,
+        MAINTENANCE_BEFORE: test_the_reclaim_figures_are_the_ones_the_nightly_series_measured,
+        REHEARSAL_REPORT:
+            test_the_paragraph_keeps_both_caveats_and_says_no_clock_window_applies,
+    }
+    assert len(must_fail) == 3 and set(must_fail.values()) <= set(_PINS), (
+        "the clause-3 pairings are not the three pins of #2302")
+    # Assembled so this node adds no fresh copy of the token the node above is looking
+    # for: `pytest` + `.skip` is a reference, writing it out is the string itself.
+    skip_exception = getattr(pytest, "skip").Exception
+    # Read before the first redirect: `FIXTURES` is the module attribute the loop below
+    # rebinds, so resolving the copies through `_fixture()` from the second iteration on
+    # would read them out of the previous case's one-file-short directory.
+    committed = FIXTURES
+    passes = 0
+    for missing, required in must_fail.items():
+        partial = tmp_path / f"fixtures-without-{missing}"
+        partial.mkdir()
+        for other in CITED_REPORTS:
+            if other != missing:
+                (partial / other).write_bytes((committed / other).read_bytes())
+        assert len(list(partial.iterdir())) == len(CITED_REPORTS) - 1, (
+            "the witness directory was not built one file short of the cited set, so the "
+            "failure below could have any cause")
+        monkeypatch.setattr(sys.modules[__name__], "FIXTURES", partial)
+        seen = {}
+        for node in _PINS:
+            try:
+                node()
+            except BaseException as exc:        # noqa: BLE001 - the outcome IS the data
+                seen[node.__name__] = exc
+            else:
+                passes += 1
+        skipped = [n for n, exc in seen.items() if isinstance(exc, skip_exception)]
+        assert not skipped, (
+            f"{skipped} skipped with `{missing}` absent instead of failing it: a skip is "
+            "exactly the substitution #2396 exists to close")
+        assert missing in str(seen), (
+            f"no pin failed about the removed witness ({missing}); they failed about "
+            f"{[str(exc)[:120] for exc in seen.values()]}")
+        assert isinstance(seen.get(required.__name__),
+                          (pytest.fail.Exception, AssertionError)), (
+            f"{required.__name__} did not fail on an absent `{missing}`: "
+            f"{seen.get(required.__name__, 'it passed')}")
+        assert str(partial / missing) in str(seen[required.__name__]), (
+            f"{required.__name__} failed without naming the witness it could not read "
+            f"({partial / missing}): {seen[required.__name__]}")
+    assert passes, (
+        "no pin passed in any of the four one-witness-short trees, so what is failing is "
+        "the redirected FIXTURES and not the missing bytes")
+
+
+def test_a_reachable_runtime_copy_has_to_agree_with_the_committed_witness(
+        monkeypatch, tmp_path):
+    """#2396 clause 4: provenance is a comparison, not a quoted digest.
+
+    Three cases, because the code path has to be seen to run. The identical copy resolves
+    (the positive control — without it, an `if runtime.is_file():` that never fired would
+    look identical to one that always passed); a copy with one quoted figure changed fails,
+    naming both files; and an absent copy is NOT a skip, because the committed witness is
+    the durable one and a host without this box's runtime history still has to grade the
+    paragraph. The digest pairs go into the failure message and nowhere else, so the md5s
+    in the provenance comment above stay bookkeeping: a claimed digest proves only that a
+    file is itself.
+    """
+    live = tmp_path / "reflection"
+    live.mkdir()
+    monkeypatch.setattr(sys.modules[__name__], "REFLECTION", live)
+    target = _fixture(MAINTENANCE_BEFORE)
+
+    (live / MAINTENANCE_BEFORE).write_bytes(target.read_bytes())
+    assert _report(MAINTENANCE_BEFORE) == json.loads(target.read_text(encoding="utf-8")), (
+        "an agreeing runtime copy did not resolve to the committed witness")
+
+    mutated = json.loads((live / MAINTENANCE_BEFORE).read_text(encoding="utf-8"))
+    mutated["before"]["vec0"]["dead_mib"] = 445.4
+    (live / MAINTENANCE_BEFORE).write_text(
+        json.dumps(mutated, indent=2), encoding="utf-8")
+    with pytest.raises(AssertionError) as excinfo:
+        _report(MAINTENANCE_BEFORE)
+    reason = str(excinfo.value)
+    assert str(live / MAINTENANCE_BEFORE) in reason and str(target) in reason, (
+        f"a disagreeing runtime copy failed without naming both files: {reason}")
+    assert "445.3" not in reason, (
+        "the failure quoted the committed figure as though it were the measured one: "
+        f"{reason}")
+
+    (live / MAINTENANCE_BEFORE).unlink()
+    assert _report(MAINTENANCE_BEFORE)["before"]["vec0"]["dead_mib"] == 445.3, (
+        "an unreachable runtime record stopped meaning 'no control available' and became a "
+        "skip or a failure again, which is the silent green this file exists to avoid")
+
+
+def test_no_node_of_this_file_reaches_the_vault_copy():
+    """#2396 clause 5: the vault witness is for a person, and a node that opened it would
+    grade a tree the gate does not run in.
+
+    `backlog/data/qmd-side-copy-rebuild-20261004-2026-10-04T113501.json` is the third copy
+    of these bytes — human-facing, checked by eye with `wc -l -c` (68 lines, 1,783 B), which
+    is why the family comments in `tests/fixtures/.gitignore` all say the re-derive happens
+    against the committed bytes. The route this node closes is the one that would quietly
+    work here and fail everywhere else: the passwd anchor that `REFLECTION` uses reaches
+    `~/obsidian` too, from inside a node, in a gate worktree whose `$HOME` is a round home
+    where the vault does not exist. One anchor, one purpose.
+    """
+    src = Path(__file__).read_text(encoding="utf-8")
+    anchor = "getpw" + "uid"   # assembled, so this node is not the second occurrence
+    assert src.count(anchor) == 1, (
+        "a second passwd-derived home anchor appeared in this file. The one that exists is "
+        "`REFLECTION`, and the other thing that anchor reaches is the vault — whose "
+        "`backlog/data/` witness is the copy clause 5 says no test may read.")
+    assert "backlog/data" in src, (
+        "the vault witness is no longer named anywhere in this file, which is the other way "
+        "the absence above could be satisfied: by forgetting the copy exists")

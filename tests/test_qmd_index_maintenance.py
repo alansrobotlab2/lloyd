@@ -1799,6 +1799,16 @@ def test_the_code_reference_walk_finds_a_real_reader_and_a_real_absence():
 SWAP_WITNESS = (ROOT / "tests" / "fixtures"
                 / "qmd-side-copy-rebuild-20261005-2026-10-05T072250.json")
 
+#: The whole committed report family: every witness of this job's reports the tree holds,
+#: which is five files since #2396 committed the 2026-10-04 rehearsal and the 10-05 and
+#: 10-06 nightlies beside the two above. The guard below reads the directory rather than a
+#: hand-written pair of paths because its property is over "every name a committed report
+#: measured", and a list of two stops being that set the day somebody commits a sixth
+#: witness — a hand-maintained allowlist cannot close a property over an open set. The
+#: two named constants stay load-bearing as the assertion inside that node, which is what
+#: proves the glob is a superset of what this file used to read.
+REPORT_FIXTURES = sorted((ROOT / "tests" / "fixtures").glob("qmd-*.json"))
+
 
 def _measured_backup_names() -> set[str]:
     """Every `index.sqlite.bak*` name a committed report measured, mains and sidecars.
@@ -1807,10 +1817,12 @@ def _measured_backup_names() -> set[str]:
     #2323: `code_reference_hits` substring-matches a candidate's whole filename against
     every `*.py`/`*.ts`/`*.sh`/`*.yml`, so this file — which is part of that tree — is the
     last place one of these names may be written. `*.json` is outside `CODE_REF_SUFFIXES`,
-    so the report that measured a name is the one place it is allowed to appear.
+    so the report that measured a name is the one place it is allowed to appear. The set is
+    `REPORT_FIXTURES` widened to, so a witness added for a later item is in scope from the
+    run that lands it.
     """
     names: set[str] = set()
-    for path in (WITNESS, SWAP_WITNESS):
+    for path in REPORT_FIXTURES:
         rep = json.loads(path.read_text(encoding="utf-8"))
         names |= {e["name"] for e in rep.get("stray", [])}
         sr = rep.get("stray_retention") or {}
@@ -1840,6 +1852,15 @@ def test_no_scanned_file_in_our_own_tree_names_a_measured_backup():
     the module's own docstring held a file it never mentioned by that name.
     """
     assert m.REPO_ROOT == ROOT, "the walk has to be over the tree this node lives in"
+    assert WITNESS in REPORT_FIXTURES and SWAP_WITNESS in REPORT_FIXTURES, (
+        f"the glob matched {len(REPORT_FIXTURES)} report(s) and missed a witness this file "
+        "names by hand: the denominator of this guard is the committed report family, and a "
+        "report outside it contributes no name — a hold nobody is checking")
+    assert len(REPORT_FIXTURES) >= 5, (
+        f"`tests/fixtures/qmd-*.json` matched {len(REPORT_FIXTURES)} reports; the family is "
+        "five since #2396 committed the rehearsal and the two nightlies the #1992 paragraph "
+        "cites beside #2119's, and a denominator that shrinks silently has stopped answering "
+        "the question the guard asks")
     names = sorted(_measured_backup_names())
     assert len(names) >= 7, f"too few names to be the pile: {names}"
     assert any(n.endswith(("-wal", "-shm")) for n in names), (
