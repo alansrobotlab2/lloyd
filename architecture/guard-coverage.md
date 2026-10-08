@@ -255,9 +255,17 @@ The probe is wired at one call site, and it is a tool-dispatch site:
 git grep -ln "_injection_probe" -- "*.py" ':!tests/*'
 ```
 
-The only file that answer names is `agent_mcp/main.py`. Assistant prose is a
-harness event the reviewer does not even branch on, and the same pattern finds
-the event's own definition, so the miss is the reviewer's and not a typo:
+That answer names three files, and only one of them is wiring.
+`agent_mcp/main.py` carries the dispatch call site, which is what the line above
+means by one: `git grep -n "_injection_probe.apply(" -- agent_mcp/main.py` prints
+exactly one line, so the claim is one tool-dispatch call site and not one file.
+`agent_mcp/_injection_patterns.py` is a docstring cross-reference from the shared
+pattern table, and `app/harness/guard_arm_matrix.py` is a prose mention in the
+guard-arm matrix's own list of guards that refuse from inside a tool handler.
+
+Assistant prose is a harness event the reviewer does not even branch on, and the
+same pattern finds the event's own definition, so the miss is the reviewer's and
+not a typo:
 
 ```
 git grep -n 'kind == "tool' -- app/harness/action_review.py

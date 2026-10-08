@@ -2505,3 +2505,176 @@ def test_the_tools_page_points_at_the_renamed_heading():
         "the pointer still quotes the two-surfaces heading that no longer exists")
     assert "vault_write" in window and "(#2362)" in window, (
         "the pointer still says one more surface than the tool, not two")
+
+
+# --------------------------------------------------------------------------- #
+# guard-coverage.md §3: the sentence under the probe's wiring grep names the
+# files that grep prints (#2392)
+# --------------------------------------------------------------------------- #
+
+#: The fenced command §3 offers as the answer to "where is the probe wired?", and
+#: the command the sentence under it cites for the one-call-site claim. Both are
+#: typed here rather than read back out of the page: a node that extracted its own
+#: needle would stay green on a page that carried neither, which is the vacuity
+#: this file's header forbids. Verbatim, including the quoting — `git` reads a
+#: differently-quoted pathspec as a different pattern.
+PROBE_WIRING_GREP = "git grep -ln \"_injection_probe\" -- \"*.py\" ':!tests/*'"
+PROBE_CALLSITE_GREP = 'git grep -n "_injection_probe.apply(" -- agent_mcp/main.py'
+
+#: The three files `PROBE_WIRING_GREP` prints, with the role each mention plays.
+#: A file set, not a line set: `agent_mcp/main.py` carries three mentions of one
+#: wiring (the import, the `PROBED_TOOLS` gate and the `apply(` call), so a
+#: line-count comparison would fail on a reflow of `main.py` and pass on a second
+#: wiring.
+PROBE_WIRING_FILES = {
+    "agent_mcp/main.py": ("dispatch", "call site"),
+    "agent_mcp/_injection_patterns.py": ("docstring", "cross-reference"),
+    "app/harness/guard_arm_matrix.py": ("prose",),
+}
+
+_CODE_SPAN = re.compile(r"`([^`]*)`")
+_SHELL_COMMAND = re.compile(
+    r"\A\s*(?:git|grep|rg|sed|awk|ls|cat|find|python|pytest|bash|sh)\b")
+_CITED_PY_PATH = re.compile(r"\b[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-/]*\.py\b")
+
+
+def _section_3_wiring_paragraph() -> str:
+    """§3's prose, from just under its wiring grep to the next blank line.
+
+    Wrap-normalised for the same reason the stamp node normalises its stamp line:
+    a reflow of the paragraph is not a change of claim, and an extractor that
+    broke on one would be grading line lengths instead of the sentence.
+    """
+    text = _text("guard-coverage.md")
+    assert PROBE_WIRING_GREP in text, (
+        "§3 no longer carries the fenced `git grep -ln \"_injection_probe\"` block "
+        "this group grades — the nodes below would be reading a paragraph that is "
+        "not the one the page presents as its wiring answer")
+    close = text.index("```", text.index(PROBE_WIRING_GREP))
+    body = text[close + 3:].lstrip("\n")
+    paragraph = body.split("\n\n", 1)[0]
+    assert paragraph.strip(), "nothing follows the §3 wiring fence"
+    return " ".join(paragraph.split())
+
+
+def _files_named_by(paragraph: str) -> set[str]:
+    """Repo-relative `.py` paths a paragraph cites, command spans excluded.
+
+    A span opening with a shell verb is a *command*, not a filename, and is
+    dropped before the scan. Without that rule the `agent_mcp/main.py` riding
+    inside the cited `git grep -n "_injection_probe.apply(" -- agent_mcp/main.py`
+    counts as a citation, and the set check would hold on prose that named no file
+    at all — the exact page this item is fixing, plus a command.
+    """
+    prose = _CODE_SPAN.sub(
+        lambda m: "" if _SHELL_COMMAND.match(m.group(1)) else m.group(1), paragraph)
+    return set(_CITED_PY_PATH.findall(prose))
+
+
+def _clause_about(paragraph: str, path: str) -> str:
+    """The stretch of prose a reader attributes to one cited path: from that path
+    up to the next path the paragraph cites."""
+    i = paragraph.index(path)
+    later = [paragraph.find(p, i + len(path)) for p in PROBE_WIRING_FILES]
+    stops = [j for j in later if j > i]
+    return paragraph[i + len(path):min(stops) if stops else len(paragraph)]
+
+
+def test_guard_coverage_section_3_names_every_file_the_wiring_grep_prints():
+    """source: architecture/guard-coverage.md §3, the paragraph under the
+    `_injection_probe` wiring grep.
+    claim: it names all three files that grep prints and says what each mention
+           is — `agent_mcp/main.py` the dispatch wiring,
+           `agent_mcp/_injection_patterns.py` a docstring cross-reference from the
+           shared pattern table, `app/harness/guard_arm_matrix.py` a prose mention
+           in the guard-arm matrix — and no longer says the answer names one file.
+    verdict: #1959 moved `FAMILIES` into `agent_mcp/_injection_patterns.py` and
+             #1963 added the guard-arm matrix, so "the only file" went false on the
+             page while the suite stayed green; the fix is naming, because none of
+             the three is a second wiring.
+
+    The role words are graded with the paths because a bare list of three files is
+    a different false claim: it reads as three places that screen content, and
+    sends a reader looking for two more probes.
+    """
+    paragraph = _section_3_wiring_paragraph()
+    assert "only file that answer names" not in _text("guard-coverage.md"), (
+        "§3 still claims the wiring grep names one file, which has been false "
+        "since #1959 and #1963 added the other two mentions")
+    assert _files_named_by(paragraph) == set(PROBE_WIRING_FILES), paragraph
+
+    assert len(PROBE_WIRING_FILES) == 3, (
+        "the expected set stopped being three files, so this node is no longer "
+        "grading the mismatch #2392 is about")
+    for path, roles in PROBE_WIRING_FILES.items():
+        clause = _clause_about(paragraph, path)
+        assert clause.strip(), f"§3 cites {path} with no prose around it"
+        for role in roles:
+            assert role in clause, (
+                f"§3 cites {path} without saying what the mention is ({role!r} "
+                f"missing) — an unlabelled mention is what makes a docstring read "
+                f"like a second wiring")
+
+
+def test_guard_coverage_section_3_keeps_the_one_call_site_and_cites_its_command():
+    """source: architecture/guard-coverage.md §3, same paragraph.
+    claim: the one-tool-dispatch-call-site claim survives the correction, and it
+           cites `git grep -n "_injection_probe.apply(" -- agent_mcp/main.py`
+           rather than a hand-typed line number.
+    verdict: the claim was never the problem — only the word "file" was. The
+             command prints exactly one line at HEAD, which is the whole content of
+             the claim, and a typed `:714` would rot on the next edit to `main.py`
+             while this node stayed green.
+    """
+    paragraph = _section_3_wiring_paragraph()
+    assert PROBE_CALLSITE_GREP in paragraph, (
+        "§3 no longer cites the command that establishes the one-call-site claim; "
+        "a line number typed in its place moves with every edit to main.py")
+    assert "tool-dispatch call site" in paragraph, (
+        "the paragraph stopped asserting the single call site, which is the claim "
+        "#2392 exists to preserve while fixing the file count")
+    assert not re.search(r"main\.py:\d+", paragraph), (
+        "§3 pins a hand-typed line number for the dispatch site; cite the "
+        "command instead")
+
+    printed = _run(PROBE_CALLSITE_GREP)
+    assert len(printed) == 1, (
+        f"the call-site claim is false, not the wording: the command printed "
+        f"{len(printed)} lines — {printed}")
+    assert printed[0].startswith("agent_mcp/main.py:"), printed
+
+
+def test_the_files_section_3_names_are_the_files_the_wiring_grep_prints():
+    """source: architecture/guard-coverage.md §3, same paragraph.
+    claim: the set of source files the paragraph names equals the set
+           `git grep -ln "_injection_probe" -- "*.py" ':!tests/*'` prints.
+    verdict: this is the rung that was missing. Three earlier rounds touched the
+             page or the symbol (#1948, #1959, #1963) and none compared the
+             sentence to its own command, so the page carried a stale count under a
+             green suite; from here a fourth mention — a new guard module naming
+             the probe — reddens the suite instead of quietly widening the set.
+
+    Compared as file sets, never line sets: `main.py` carries three mentions of
+    the one wiring, so lines would count reflows rather than guardrails.
+    """
+    printed = _run(PROBE_WIRING_GREP)
+    assert printed, (
+        f"{PROBE_WIRING_GREP} printed nothing, so there is no set to compare and "
+        f"an equality against an empty set would prove nothing")
+    assert _files_named_by(_section_3_wiring_paragraph()) == set(printed), (
+        "the page's §3 paragraph and its own wiring grep disagree about which "
+        "files mention the probe")
+
+    # The check can fail, and fails for both directions of drift — on text this
+    # file writes, not on the page.
+    stale = "The only file that answer names is `agent_mcp/main.py`."
+    assert _files_named_by(stale) == {"agent_mcp/main.py"}, (
+        "the extractor found nothing in the stale sentence, so it cannot fail on "
+        "the very wording this item replaced")
+    grown = stale + " Also `app/harness/a_new_guard.py` now mentions it."
+    assert "app/harness/a_new_guard.py" in _files_named_by(grown), (
+        "a file added to the prose is invisible to the extractor")
+    command_only = "Run `git grep -ln x -- agent_mcp/main.py` instead."
+    assert _files_named_by(command_only) == set(), (
+        "a filename inside a cited command is being read as a citation, which is "
+        "how the set check would pass on prose that names no file")
