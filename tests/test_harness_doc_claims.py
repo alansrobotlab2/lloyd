@@ -1138,3 +1138,47 @@ def test_the_canary_bench_docstring_counts_the_scenarios_it_ships():
         f"{len(scenarios)}")
     assert f"with {word[n_controls]} controls" in row[0], (
         f"the registry row no longer counts the {n_controls} controls")
+
+
+def test_the_canary_registry_row_names_the_endpoint_state_as_what_sets_the_arm():
+    """#2435 clause 5: the measurement registry may not say the runner's flag picks the arm.
+
+    The row read `Runs in two arms — LLOYD_EGRESS_ENFORCE on or unset`, which is the
+    sentence #2338 refuted for `harness.md` and left standing here: that flag decides
+    nothing until the AGGREGATOR serving the tools carries it, and the shared daemon
+    answers `enforce: false` over its `/state` however the runner's shell is set up. A
+    reader who took the row at its word would run the A/B and measure one arm twice —
+    which is the state every row in `rows.jsonl` is in, and the reason the window exists.
+
+    So the row names the key the arm is READ from (the serving endpoint's `/state`
+    `egress.enforce`), where the flag actually has to be set, `--mcp-url` as the route
+    that points the bench at an enforcing endpoint, and the window that runs both arms in
+    one pass. `on or unset` is asserted absent from the WHOLE doc rather than the row
+    alone: it is the item's own check, and a copy in a neighbouring row would be the same
+    false claim in a reader's hands.
+    """
+    doc = (ROOT / "architecture" / "measurement.md").read_text(encoding="utf-8")
+    assert "on or unset" not in doc, (
+        "`on or unset` is back in measurement.md: the flag in the runner's shell is not "
+        "what sets the arm, and this is the sentence that made the A/B one arm")
+    row = [ln for ln in doc.splitlines() if ln.startswith("| `injection_canary` |")]
+    assert len(row) == 1, row
+    for phrase in ("/state", "egress.enforce", "LLOYD_EGRESS_ENFORCE", "--mcp-url",
+                   "guard_egress_enforce"):
+        assert phrase in row[0], f"the registry row no longer names {phrase}"
+    assert "never from the bench's own environment" in row[0], (
+        "the row has to say outright which environment is NOT the one that decides")
+    assert "run_egress_arms.sh" in row[0], (
+        "the held window that runs both arms is the mechanism this row now points at")
+
+    # The prose describes code that has to exist: the key the row says to read, and the
+    # process that reads its OWN environment for the flag.
+    aggregator = (ROOT / "agent_mcp" / "main.py").read_text(encoding="utf-8")
+    assert '"egress":' in aggregator, (
+        "`GET /state` stopped publishing the egress key the row tells a reader to ask")
+    guard = (ROOT / "agent_mcp" / "egress.py").read_text(encoding="utf-8")
+    assert "def enforce_on(" in guard, (
+        "`enforce_on()` is the reader of `LLOYD_EGRESS_ENFORCE`, in the process the row "
+        "says must carry it")
+    assert (ROOT / "eval" / "egress_arms.py").is_file(), (
+        "the row points at a window runner that is not in the tree")

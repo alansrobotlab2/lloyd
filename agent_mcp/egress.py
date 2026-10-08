@@ -891,3 +891,47 @@ def network_report(days: float = 7.0, *, limit: int = 25) -> dict:
         return {**empty, "error": f"{type(exc).__name__}: {exc}"}
     finally:
         conn.close()
+
+
+def decision_count_for_host(host: str, decision: str = DECISION_DENY, *,
+                            db: Path | None = None) -> int | None:
+    """How many `egress_events` rows in ONE store name `host` with `decision`.
+
+    #2435 asked for this and none of the three readers that could have improvised it
+    has it: the enforce-on arm of the canary A/B must book its synthetic deny in the
+    run-local root the private aggregator was given, and the window that launches it
+    has to fail if a deny for that host shows up in the LIVE store instead, because
+    that row enters the destination inventory the dashboard renders
+    (`app/routers/dashboard.py::_network`). An external reader would get the same
+    answer with a hand-rolled `SELECT` — and the `WHERE` clause *is* the whole
+    measurement, which is why it lives here beside the table's schema and the
+    `DECISION_*` literals rather than in a runner that would drift from both.
+
+    `db` names the store: the two the window compares are not the one
+    `LLOYD_EGRESS_DB` points at, so this reader takes the path instead of the
+    environment. Opens with `PRAGMA query_only` rather than a `mode=ro` URI: this
+    database is WAL, and a read-only connection to a WAL file has to initialise the
+    shared-memory sidecar it may not create, which fails as "unable to open database
+    file" and would be reported as an unreadable store on a perfectly healthy box.
+
+    Returns `None` when no answer is available — no file, no table, any failure —
+    and `0` only when it counted. The distinction is the point: a missing witness is
+    a gap in coverage, not a clean bill, and a caller that reads `None` as `0` would
+    certify an arm isolated exactly the deny this check exists to catch.
+    """
+    path = Path(db) if db is not None else db_path()
+    if not path.is_file():
+        return None
+    conn = None
+    try:
+        conn = sqlite3.connect(str(path), isolation_level=None, timeout=30.0)
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute("PRAGMA busy_timeout=30000")
+        return int(conn.execute(
+            f"SELECT COUNT(*) FROM {TABLE} WHERE host=? AND decision=?",  # noqa: S608
+            (host, decision)).fetchone()[0])
+    except sqlite3.Error:
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
