@@ -31,6 +31,20 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 VALIDATE = ROOT / "scripts" / "vault" / "validate_okf.py"
 MIGRATE = ROOT / "scripts" / "vault" / "okf_migrate.py"
+ALLOWLIST = ROOT / "scripts" / "vault" / "okf_stranded_known.txt"
+
+# The two #2402 nodes below reach two modules as imports while every node above keeps
+# driving the gates as subprocesses, because each asks a question a subprocess cannot:
+# `render_frontmatter` is called so the fixture fences with the bytes the generator
+# actually emits rather than a hand-copied shape that could drift from them, and
+# `validate_okf.EXCLUDE_PATHS` is read as a tuple because "the exemption holds exactly
+# its three ruled prefixes" is a claim about the object, not about one line of text.
+# `tests/` is not a package, so the repo root is not on `sys.path` by default — the same
+# insert `tests/test_referential_integrity.py` makes for the same reason.
+sys.path.insert(0, str(ROOT))
+
+from scripts.maintenance.referential_integrity import render_frontmatter  # noqa: E402
+from scripts.vault import validate_okf as okf  # noqa: E402
 
 # Spec-conformant reserved files: prose only, NO frontmatter (§8).
 INDEX = "# Test index\n\n## research\n- [Foo](foo.md) — a page about foo\n"
@@ -267,8 +281,13 @@ def test_no_path_outside_backlog_data_leaves_the_okf_gate(tmp_path):
 # concept files`, every one of them `no parseable frontmatter block`, partitioning
 # 39 `lloyd/memory/` + 4 `autonomy/referential-integrity*` + 2 `plans/` + 2
 # `lloyd/reviews/` + 1 `.pytest_cache/README.md`. This section scopes out the three
-# machine-artifact classes — 42 of those 48 — and the six that stay in scope stay
-# there by another item's ruling (#2326's generator, and the two review archives).
+# machine-artifact classes — 42 of those 48. The six that stayed in scope have each
+# since been FENCED, so none is outstanding and none is exempt: the report generator
+# writes its own five-key fence (#2326, lloyd 5ae75298) and #2402 back-filled that
+# fence over the three dated copies written before it (vault 5e48758a), while #2347
+# fenced the two `lloyd/reviews/` archives (vault 223c5787).
+# `test_no_comment_in_this_file_still_defers_the_six_to_another_item` pins that this
+# comment states the closed state, not the 2026-10-07 open one.
 
 TOPIC_BODY = """# Topic detail written without a fence
 
@@ -486,3 +505,143 @@ def test_a_frontmatter_less_concept_note_still_fails_the_strict_gate(tmp_path):
         f"a concept document with no front matter no longer fails the gate — the "
         f"narrowing took the gate with it:\n{proc.stdout}")
     assert "orphan.md: no parseable frontmatter block" in proc.stdout, proc.stdout
+
+
+# ── #2402: the referential-integrity dated copies are concept documents, and the
+#    fence is what cleared them — not a move of the gate ────────────────────────────────
+#
+# `validate_okf.py --dir autonomy --strict` sat at `VIOLATIONS : 3` from 2026-10-04 to
+# 2026-10-08 on the three dated copies autonomy task #94's `cp` wrote BEFORE #2326 gave
+# the generator a fence. The gate's only drift canary for `autonomy/` therefore carried a
+# standing three, so a new frontmatter regression landed inside a number already red.
+# #2402 cleared it by writing #2326's fence onto those three files. Two nodes here keep
+# that distinction alive, because the cheap version of the same green — a fourth prefix in
+# EXCLUDE_PATHS, or a line in the stranded allow-list — is a canary that goes quiet.
+
+#: The three pre-fix dated copies and what each body's own `Run …Z` line says, as
+#: (stamp, total cites, dangling). `generated_at` has to equal the body stamp: two
+#: timestamps in one report drift apart, and `tests/test_referential_integrity.py` pins
+#: that rule for the generator's own output.
+RI_DATED = {"2026-10-04.md": ("2026-10-04T12:00:41Z", 206, 12),
+            "2026-10-05.md": ("2026-10-05T12:01:29Z", 215, 13),
+            "2026-10-06.md": ("2026-10-06T12:01:14Z", 225, 13)}
+
+RI_BODY = ("# Referential integrity — loaded memory\n\n"
+           "Run {stamp} by `scripts/maintenance/referential_integrity.py` (#882). "
+           "Report only: nothing cited here was edited.\n")
+
+
+def test_a_dated_referential_integrity_copy_is_in_scope_and_only_the_fence_clears_it(
+        tmp_path):
+    """#2402 clause 3: the class was cleared by a fence, not by a widened gate.
+
+    Three fixture dated copies under `autonomy/referential-integrity/` — the directory
+    task #94's `cp` writes into each night — on the exact command line autonomy task #80
+    runs. Unfenced they are `VIOLATIONS : 3` at `scanned 3`, so the subdirectory is
+    walked and graded and the NEXT nightly copy will be graded by the same rule. Fenced
+    they are `VIOLATIONS : 0` at `scanned 3` — the same 3, which is the assertion doing
+    the work: a scope change would have shrunk the denominator, so three twice is the
+    statement that the files were fixed and not exempted.
+
+    The number pinned is the fixture's own, and it is compared to itself rather than to a
+    live count on purpose: the live `--dir autonomy` scan holds 60 files today and 61
+    tomorrow, because the ledger writes a dated copy every night. A node pinning 60 would
+    go red on a healthy night; the invariant is that fencing does not remove a file.
+    """
+    root = tmp_path / "vault"
+    dated = root / "autonomy" / "referential-integrity"
+    dated.mkdir(parents=True)
+    for name, (stamp, _total, _dang) in RI_DATED.items():
+        (dated / name).write_text(RI_BODY.format(stamp=stamp), encoding="utf-8")
+
+    bare = run(VALIDATE, "--root", str(root), "--dir", "autonomy", "--strict")
+    assert bare.returncode == 1, (
+        f"a fence-less dated report under `autonomy/referential-integrity/` is no "
+        f"longer a §3 violation — the canary was widened, not satisfied:\n{bare.stdout}")
+    assert "VIOLATIONS : 3" in bare.stdout, bare.stdout
+    for name in RI_DATED:
+        assert (f"autonomy/referential-integrity/{name}: "
+                f"no parseable frontmatter block") in bare.stdout, bare.stdout
+
+    for name, (stamp, total, dang) in RI_DATED.items():
+        f = dated / name
+        f.write_text(render_frontmatter(stamp, total, dang).rstrip("\n") + "\n\n"
+                     + f.read_text(encoding="utf-8"), encoding="utf-8")
+
+    fenced = run(VALIDATE, "--root", str(root), "--dir", "autonomy", "--strict")
+    assert fenced.returncode == 0, fenced.stdout
+    assert "VIOLATIONS : 0" in fenced.stdout, fenced.stdout
+    assert scanned_count(fenced.stdout) == scanned_count(bare.stdout) == 3, (
+        "the walk got smaller when the fences went on, so the three files were scoped "
+        f"out rather than fixed: bare scanned "
+        f"{scanned_count(bare.stdout)}, fenced scanned "
+        f"{scanned_count(fenced.stdout)}")
+
+    # The two routes #2402 rejected, pinned as rejected because both look cheap and both
+    # would have bought the green by blinding the canary. `EXCLUDE_PATHS` is prefix-only,
+    # so a `referential-integrity/` prefix exempts the directory the FIXED generator
+    # writes a fresh copy into every night; the stranded allow-list is consulted only
+    # inside the `if stranded:` branch of the walk, so it cannot reach a file that has no
+    # fence to strand in the first place.
+    assert okf.EXCLUDE_PATHS == ("backlog/data/", "lloyd/memory/", "plans/"), (
+        f"EXCLUDE_PATHS is no longer exactly the three ruled prefixes — a fourth one is "
+        f"a scope decision this item did not make: {okf.EXCLUDE_PATHS}")
+    assert "referential-integrity" not in ALLOWLIST.read_text(encoding="utf-8"), (
+        "the stranded allow-list carries a referential-integrity path: that list is "
+        "read only for a stranded frontmatter block and cannot clear a missing one")
+
+
+#: The two stale sentences, quoted as constants so a paragraph cannot satisfy the node
+#: below by paraphrasing the claim it exists to retire. Both halves are refuted: the
+#: generator's fence shipped at lloyd 5ae75298 and #2402 back-filled it over the three
+#: pre-fix copies at vault 5e48758a, and #2347 fenced the two `lloyd/reviews/` archives at
+#: vault 223c5787.
+STALE_AWAIT_2326 = "await #2326"
+STALE_SIX_OUTSTANDING = "the six that stay in scope stay"
+
+
+def _comments(path: Path) -> str:
+    """A file's `#` lines only — the region a stale claim can actually reach a reader from.
+
+    Scoping the scan to comments is not a courtesy to this file's own code, though it is
+    also that: the node below forbids these two phrases, so a whole-file scan of THIS file
+    would find the constants it forbids them with and could never go green. The principle
+    is narrower than the mechanism — a retired decision comes back as work through prose,
+    and prose is what a later reader reads. Code that names a dead claim is that claim's
+    tombstone, and tombstones are not instructions.
+    """
+    return "\n".join(ln for ln in path.read_text(encoding="utf-8").splitlines()
+                     if ln.lstrip().startswith("#"))
+
+
+def test_no_comment_in_this_file_still_defers_the_six_to_another_item():
+    """#2402 clause 4: a closed item's plan must not survive as a standing instruction.
+
+    Two sites restated the 2026-10-07 partition in the present tense. The "What is NOT
+    here" paragraph above `EXCLUDE_PATHS` said the four `autonomy/referential-integrity*`
+    outputs "await #2326's generator fix" and the two `lloyd/reviews/` archives were an
+    open two-file vault write; this file's own section header said the six "stay in
+    scope … by another item's ruling". Both are dead — #2326 shipped, #2402 fenced its
+    three pre-fix copies, #2347 fenced the archives — and a reader who trusts either goes
+    hunting for a fix that landed or waits on a write nobody owes. That is how a retired
+    decision comes back as work, and it is why the correction has a node: the count in
+    these comments is a 2026-10-07 measurement, while the tense was a claim.
+
+    Not vacuous, and the anchor is the control: `What is NOT here` must still be in the
+    gate's comments, so deleting the paragraph instead of correcting it fails here too.
+    """
+    gate = _comments(VALIDATE)
+    assert "What is NOT here" in gate, (
+        "the paragraph that says what is deliberately OUTSIDE the exemption was deleted "
+        "rather than corrected — which would pass this node vacuously")
+    assert STALE_AWAIT_2326 not in gate, (
+        f"`{VALIDATE.name}` still tells the next reader the referential-integrity "
+        "reports await a generator fix that shipped at 5ae75298")
+    assert "#2402" in gate, (
+        "the paragraph states the six are closed without naming the item that closed "
+        "them, so the next reader has no provenance to check it against")
+
+    own = _comments(Path(__file__))
+    assert STALE_SIX_OUTSTANDING not in own, (
+        "this file's section header again claims the six are still outstanding, which "
+        "#2326, #2347 and #2402 have each refuted")

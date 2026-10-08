@@ -260,3 +260,68 @@ def test_the_fence_sits_in_front_of_the_marker_the_new_dangling_memory_reads(wor
         "the fence hid the previous run's marker, so nothing carried over")
     assert "- newly dangling since the previous report: 1" in second, (
         "every dangling cite reading as new is the symptom of an unread marker")
+
+
+def test_the_nightly_dated_copy_is_fenced_by_the_same_bytes_and_still_graded(world):
+    """#2402: the `cp` step's copy is graded by the gate, and it never becomes the delta base.
+
+    The ledger skill copies `-latest.md` to `referential-integrity/<UTC date>.md` AFTER
+    the generator exits, and derives its run count from `ls -1` over that directory. Three
+    things have to hold for that route to keep working and none of them was pinned on the
+    writer's side: the copy is conformant (it is the same bytes as a report the gate
+    already accepts, so a fence regression surfaces there too); the copy is WALKED — the
+    OKF scan descends into that subdirectory, which is the opposite of the Mission Control
+    tab, which deliberately never sees it (`tests/test_mc_summarize_autonomy_gate.py`
+    pins the tab half against these very bytes); and the copy never becomes the delta
+    base, because `previous_dangling()` reads its state marker from the `--report` path
+    and nothing else.
+
+    That last clause is what the three unfenced copies were the visible symptom of: the
+    generator was fixed at 5ae75298, but the back-history files written before it stood
+    red from 2026-10-04 to 2026-10-08 with no prune path to age them out, so the only
+    drift canary for `autonomy/` carried a standing 3. The control at the bottom is the
+    same shape #2402 found — one fenced-away copy in that subdirectory — and it must be
+    reported while `-latest.md` stays clean.
+    """
+    vault = world["vault"]
+    report = vault / "autonomy" / "referential-integrity-latest.md"
+    ri.main(_args(world) + ["--report", str(report)])
+    latest = report.read_text()
+    assert latest.startswith("---\n"), "the bytes the `cp` copies must carry the fence"
+
+    dated = vault / "autonomy" / "referential-integrity"
+    dated.mkdir()
+    copy = dated / "2026-10-08.md"
+    copy.write_text(latest, encoding="utf-8")        # task #94's `cp`, byte for byte
+    assert copy.read_bytes() == report.read_bytes(), "the copy diverged from its base"
+
+    checked = _run_gate(vault, "autonomy")
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    assert "referential-integrity" not in checked.stdout, checked.stdout
+
+    # The delta base has to survive the copy sitting beside it: a second run, one cite
+    # newly dead, must still report exactly one new dangling cite out of the SAME
+    # `--report` path. `n/a (no previous report)` here would mean the marker was read
+    # from somewhere else — and the ledger skill's own rule is that a fresh base is the
+    # bug that marks every dangling cite new, every night, forever.
+    (vault / "knowledge" / "software" / "present.md").unlink()
+    ri.main(_args(world) + ["--report", str(report)])
+    second = report.read_text()
+    assert "- newly dangling since the previous report: 1" in second, (
+        "with a dated copy in the subdirectory the run fell back to `n/a (no previous "
+        "report)`: the state marker was read from something other than --report")
+    assert copy.read_text() == latest, (
+        "a generator run wrote into the dated-copy subdirectory, which is the ledger "
+        "skill's run count and no longer a pure copy")
+
+    # Control: the same copy with its fence cut off is the state the three pre-fix files
+    # sat in, and the walk has to name it — while `-latest.md`, the delta base, is not
+    # the file reported.
+    copy.write_text(latest[latest.index("\n---\n") + len("\n---\n"):], encoding="utf-8")
+    assert not okf.STRICT_FM_RE.match(copy.read_text()), (
+        "the control must fail the fence check itself")
+    refused = _run_gate(vault, "autonomy")
+    assert refused.returncode == 1, refused.stdout + refused.stderr
+    assert ("autonomy/referential-integrity/2026-10-08.md: no parseable frontmatter "
+            "block") in refused.stdout, refused.stdout
+    assert "referential-integrity-latest.md" not in refused.stdout, refused.stdout

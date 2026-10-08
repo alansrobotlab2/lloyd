@@ -273,8 +273,11 @@ REPORT_TAGS = ["referential-integrity", "loaded-memory", "dangling-cites"]
 def render_frontmatter(stamp: str, total: int, dangling: int) -> str:
     """The `---` block `render_report` puts on top of every report it writes.
 
-    The gate `yaml.safe_load`s this block whole (`validate_okf.py:184-191`: `STRICT_FM_RE`
-    match, then a parse whose failure is itself a violation), so the shapes here are chosen
+    The gate `yaml.safe_load`s this block whole (`validate_okf.py:237-242`: `STRICT_FM_RE`
+    match at `:155`, then a parse whose failure is itself a violation — the numbers are
+    #2402's re-measure, and they were already ~45 lines adrift before it: this cite named
+    184-191, which is `main()`'s argparse, because nothing resolves a `path:N` cite inside
+    a source docstring), so the shapes here are chosen
     against what a YAML resolver does to them rather than against a text count. `segment`
     and `type` are plain scalars. `generated_at` is quoted because PyYAML resolves a bare
     `2026-10-07T03:07:45Z` to a `datetime`, which makes `json.dumps(frontmatter)` raise

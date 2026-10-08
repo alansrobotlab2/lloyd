@@ -140,8 +140,17 @@ EXCLUDE_FILES = {"tags.md", "index.md", "log.md"}
 #
 # What is NOT here, so the next reader can tell a narrowed gate from a satisfied one:
 # #2340 closed 42 of the live vault's 48 §3 violations and left 6 in scope BY RULING —
-# the 4 `autonomy/referential-integrity*.md` outputs await #2326's generator fix, and
-# the 2 `lloyd/reviews/` archives are a named two-file vault write, not a class.
+# the 4 `autonomy/referential-integrity*.md` outputs, and the 2 `lloyd/reviews/` archives
+# as a named two-file vault write rather than a class. NONE of that six is outstanding
+# now, and until #2402 this paragraph said otherwise: the generator writes its own
+# five-key fence (#2326, lloyd 5ae75298) and #2402 back-filled that fence over the three
+# dated copies written before it (vault 5e48758a), while #2347 fenced the two review
+# archives (vault 223c5787). The tuple below is therefore the three ruled classes and no
+# residue, and the two routes that did NOT get one are on record here because they look
+# cheap: a `referential-integrity/` prefix would exempt the very directory the fixed
+# generator writes a fresh dated copy into each night, and the stranded allow-list is
+# consulted only inside the `if stranded:` branch, so it can never reach a file that has
+# no fence to strand.
 EXCLUDE_PATHS = ("backlog/data/", "lloyd/memory/", "plans/")
 STRICT_FM_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
 
