@@ -14,6 +14,8 @@ import re
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
@@ -501,3 +503,146 @@ def test_retire_is_never_a_way_to_make_room(tmp_path, monkeypatch):
     # ...and the module says why, by name.
     doc = " ".join((ml.__doc__ or "").split())
     assert "#1881" in doc and "never make room" in doc
+
+
+# ── #2425 — the archive is a vault file, and the vault-wide OKF gate scans it ──
+#
+# `lloyd/reviews/` is not excluded from `scripts/vault/validate_okf.py`: its
+# `EXCLUDE_PATHS` is `("backlog/data/", "lloyd/memory/", "plans/")`. The archive
+# this step writes therefore needs the `---` block every sibling in that directory
+# carries, and until #2425 the writer emitted only a `# <stem> — retired rows`
+# heading. The copy #2415's curator hand-wrote in that shape is what held the
+# whole-vault gate red (`scanned 6945 concept files / VIOLATIONS : 1`), which is
+# the state in which an unrelated fresh violation is unreadable.
+#
+# The seam is two processes: `retire` writes bytes into the vault tree, and a
+# separate `python -m scripts.vault.validate_okf` run — weekly, and on every
+# promotion — reads them. `_run_okf` crosses it by invoking the gate's own
+# `main()` over a fixture tree, so the writer is graded by the reader's real
+# detectors (offset-0 `STRICT_FM_RE`, the YAML parse, the non-empty `type`, the
+# stranded-body scan) rather than by a copy of any of them.
+
+
+def _run_okf(monkeypatch, capsys, root: Path, only_dir: str) -> tuple[int, str]:
+    """The real OKF gate over `root`/`only_dir`, as the weekly job runs it."""
+    from scripts.vault import validate_okf
+
+    monkeypatch.setattr(sys, "argv", ["validate_okf", "--root", str(root),
+                                      "--dir", only_dir])
+    rc = validate_okf.main()
+    return rc, capsys.readouterr().out
+
+
+def test_a_newly_created_archive_passes_the_real_okf_gate(tmp_path, monkeypatch,
+                                                          capsys):
+    """Clause 2, creation edge: the archive `retire` creates is accepted by the
+    gate that flagged the unfenced one, and the same gate with the block stripped
+    from those very bytes refuses them — so the passing half is a graded file, not
+    a scan that found nothing to scan."""
+    import yaml
+
+    from scripts.vault import validate_okf
+
+    d, _ = _retire_dir(tmp_path)
+    assert ml.main(["retire", "--memories-dir", str(d)]) == 0
+    archive = d / "reviews" / "user-md-ledger-archive.md"
+    text = archive.read_text(encoding="utf-8")
+
+    rc, out = _run_okf(monkeypatch, capsys, d, "reviews")
+    assert rc == 0 and "VIOLATIONS : 0" in out and "scanned 1 concept file" in out, out
+
+    m = validate_okf.STRICT_FM_RE.match(text)
+    assert m, f"the created file must open with the gate's fence, got: {text[:80]!r}"
+    fm = yaml.safe_load(m.group(1))
+    assert fm["type"] == ml.ARCHIVE_TYPE, fm
+    # The gate only WARNS on an off-set type, so the test is the only thing that
+    # would catch `ARCHIVE_TYPE` being changed to something outside the taxonomy.
+    assert ml.ARCHIVE_TYPE in validate_okf.KNOWN_TYPES, "type must be in the taxonomy"
+    assert fm["segment"] == "lloyd", "the segment memories_dir itself declares"
+    assert "retired-rows" in fm["tags"], fm
+    assert isinstance(fm["timestamp"], str), "quoted, or PyYAML resolves a date object"
+    assert "# user-md-ledger — retired rows" in text[m.end():], "title follows the fence"
+    assert validate_okf.find_stranded_frontmatter(text) == [], "no block stranded in the body"
+
+    # Control: the bytes minus the block are exactly what the writer used to emit,
+    # and what this gate exists to catch.
+    archive.write_text(text[text.index("\n---\n") + len("\n---\n"):], encoding="utf-8")
+    rc, out = _run_okf(monkeypatch, capsys, d, "reviews")
+    assert rc == 1, "the unfenced shape must still be refused, or the pass above proves nothing"
+    assert "user-md-ledger-archive.md: no parseable frontmatter block" in out, out
+
+
+def test_appending_to_an_existing_archive_writes_no_second_header(tmp_path, monkeypatch,
+                                                                  capsys):
+    """Clause 2, append edge: the header belongs to creation only. A second
+    `retire` that really moves a row appends under the block that is already
+    there, so the file still passes the gate — whose own `find_stranded_frontmatter`
+    is the detector that files a second `---` block in the body as a violation."""
+    from scripts.vault import validate_okf
+
+    d, anchors = _retire_dir(tmp_path)
+    ml.retire(d)
+    archive = d / "reviews" / "user-md-ledger-archive.md"
+    first = archive.read_text(encoding="utf-8")
+
+    # Make a second row an orphan by taking its line out of the loaded file, then
+    # run the step again — this time the archive already exists.
+    loaded = d / "USER.md"
+    loaded.write_text("".join(ln for ln in loaded.read_text(encoding="utf-8")
+                             .splitlines(True) if anchors[0][:20] not in ln),
+                      encoding="utf-8")
+    rep = ml.retire(d)
+
+    assert rep["USER.md"]["moved"], "the second run must actually move a row"
+    text = archive.read_text(encoding="utf-8")
+    assert text.startswith(first), "the first run's bytes are a prefix, header included"
+    assert len(re.findall(r"(?m)^## Retired \d{4}-\d{2}-\d{2}$", text)) == 2, (
+        "and the append still produced its own dated section: the two runs are "
+        "separate folds, not one duplicated header")
+    assert validate_okf.find_stranded_frontmatter(text) == [], "no second fence in the body"
+    rc, out = _run_okf(monkeypatch, capsys, d, "reviews")
+    assert rc == 0 and "VIOLATIONS : 0" in out, out
+
+
+def test_the_curation_skill_tells_a_run_to_fence_an_archive_it_creates():
+    """Clause 3: the step that hand-creates a `lloyd/reviews/` archive now carries
+    the fence rule in §3 itself — the route that produced the unfenced #2415 file
+    is closed by instruction, not by a back-fill after the gate flags it. The vault
+    is a live tree, read here the way `_skill_row_templates` already reads it."""
+    text = SKILL.read_text(encoding="utf-8")
+    parts = text.split("## 3. Archive", 1)
+    assert len(parts) == 2, "the §3 heading is the anchor this node reads"
+    rule = parts[1].split("## 4.", 1)[0]
+
+    m = re.search(r"A file you \*create\* under `lloyd/reviews/`[^\n]*", rule)
+    assert m, "§3 must state the rule for a file the run CREATES, not only for appends"
+    assert f"type: {ml.ARCHIVE_TYPE}" in m.group(0), "the prose names the key the writer emits"
+    assert "segment: lloyd" in m.group(0), m.group(0)
+    assert "`---`" in rule, "and names the fence itself"
+    assert "validate_okf" in rule, "naming the gate that scans the directory"
+    assert "back-fill" in rule, "fence at creation, never repair after the gate flags"
+
+
+@pytest.mark.live_vault
+def test_the_landed_memory_ledger_archive_is_fenced_on_the_live_vault():
+    """Clause 1's reporting pin: the file #2415 wrote unfenced (vault `972e265e`,
+    back-filled by vault `5c6793be`) opens with the block on the tree the gate
+    actually scans. Marked `live_vault` because no round controls `~/obsidian`
+    (pytest.ini), and pinned to the ONE file this item back-filled — not the
+    whole-vault count — so another author's offender can never fail this node.
+    The whole-vault `VIOLATIONS : 0` at rc=0 is asserted by the promotion route
+    that owns that tree, which is why it is the item's post-landing owed check."""
+    import yaml
+
+    from scripts.vault import validate_okf
+
+    target = Path.home() / "obsidian" / "lloyd/reviews/memory-md-ledger-archive.md"
+    assert target.is_file(), f"{target} is not on the live vault"
+    text = target.read_text(encoding="utf-8")
+
+    m = validate_okf.STRICT_FM_RE.match(text)
+    assert m, f"the live archive opens with: {text[:60]!r}"
+    fm = yaml.safe_load(m.group(1))
+    assert fm["type"] in validate_okf.KNOWN_TYPES and fm["segment"] == "lloyd", fm
+    assert text.startswith("---\ntype: note\nsegment: lloyd\n"), "the siblings' key order"
+    assert "# memory-md-ledger — retired rows" in text[m.end():], "title follows the fence"

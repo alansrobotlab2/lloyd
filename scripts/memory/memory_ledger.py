@@ -231,6 +231,57 @@ def archive_path(memories_dir: Path, ledger_name: str) -> Path:
     return memories_dir / ARCHIVE_SUBDIR / f"{Path(ledger_name).stem}-archive.md"
 
 
+#: The archive is a vault file like the ones beside it: the vault-wide OKF gate
+#: `scripts/vault/validate_okf.py` scans `lloyd/reviews/` (its `EXCLUDE_PATHS`
+#: names `backlog/data/`, `lloyd/memory/` and `plans/` and nothing else), matches
+#: `STRICT_FM_RE` at byte 0, and files a `VIOLATIONS` line and exit 1 against any
+#: file with no `---` block to parse. #2425 is the round that got here: this route
+#: emitted a bare `# <stem> — retired rows` heading, the copy #2415's curator made
+#: of that shape turned the whole-vault gate red (`scanned 6945 / VIOLATIONS : 1`),
+#: and a permanently red gate is the state in which the next, unrelated violation
+#: is unreadable — the mode that let four referential-integrity reports sit red
+#: unwatched 2026-10-04→07. The keys and values below are the ones the gate's
+#: already-fenced siblings in that directory carry.
+ARCHIVE_TYPE = "note"
+ARCHIVE_TAGS = ["archive", "memory-ledger", "retired-rows"]
+
+
+def archive_head(memories_dir: Path, loaded_name: str, ledger_name: str,
+                 stamp: str) -> str:
+    """The header `retire` gives a NEWLY CREATED archive: front matter, then title.
+
+    The `---` block exists for one reader: the OKF gate matches `STRICT_FM_RE`
+    (`scripts/vault/validate_okf.py`) at offset 0, `yaml.safe_load`s what is
+    between the fences, and reports a violation for an absent block, a parse
+    failure and an empty `type`. So the shape is built against that regex rather
+    than against prose taste, and `tests/test_memory_ledger.py` cross-checks these
+    bytes against the gate's own `STRICT_FM_RE` — writer and gate cannot then
+    disagree about what a fence is. `timestamp` is quoted because PyYAML resolves
+    a bare `2026-10-08` to a `date`, which makes any later reader that serialises
+    the block raise `TypeError`.
+
+    `segment` is the vault segment the file sits in, and `archive_path` puts it at
+    `<memories_dir>/reviews/`, so the segment is `memories_dir`'s own name: the
+    live call passes `~/obsidian/lloyd`, the directory `USER.md` and `MEMORY.md`
+    live in, which is the `segment: lloyd` every sibling declares.
+    """
+    return "\n".join([
+        "---",
+        f"type: {ARCHIVE_TYPE}",
+        f"segment: {Path(memories_dir).resolve().name}",
+        f"tags: [{', '.join(ARCHIVE_TAGS)}]",
+        f"timestamp: '{stamp}'",
+        "---",
+        f"# {Path(ledger_name).stem} — retired rows",
+        "",
+        f"Rows `scripts/memory/memory_ledger.py retire` moved out of "
+        f"`lloyd/memory/{ledger_name}` because the line they anchored is no "
+        f"longer in `lloyd/{loaded_name}`. Verbatim; nothing reads this file "
+        f"back.",
+        "",
+    ])
+
+
 def retire(memories_dir: Path, *, dry_run: bool = False, today: str | None = None) -> dict:
     """Move orphan rows out of each live ledger into its archive.
 
@@ -238,7 +289,10 @@ def retire(memories_dir: Path, *, dry_run: bool = False, today: str | None = Non
     whose line is still loaded is kept, byte for byte, whatever the ledger's size.
     Lines of the ledger that are not rows (the heading, blank lines, notes) are
     never touched. The archive is appended to BEFORE the ledger is rewritten, so a
-    crash between the two leaves a row in both places rather than in neither.
+    crash between the two leaves a row in both places rather than in neither. A
+    file that does not exist yet is created with `archive_head`'s `---` front
+    matter so the OKF gate that scans `lloyd/reviews/` accepts it; a file that
+    exists is appended to and gets no header at all.
 
     Returns `{loaded file: {"moved": [anchor…], "kept": n, "archive": path}}`.
     """
@@ -270,11 +324,11 @@ def retire(memories_dir: Path, *, dry_run: bool = False, today: str | None = Non
         apath = archive_path(memories_dir, ledger_name)
         if moved and not dry_run:
             apath.parent.mkdir(parents=True, exist_ok=True)
-            head = "" if apath.exists() else (
-                f"# {Path(ledger_name).stem} — retired rows\n\n"
-                f"Rows `scripts/memory/memory_ledger.py retire` moved out of "
-                f"`lloyd/memory/{ledger_name}` because the line they anchored is no "
-                f"longer in `lloyd/{name}`. Verbatim; nothing reads this file back.\n")
+            # Only a CREATION gets the header: an existing archive already has
+            # exactly one `---` block, and writing the header again would strand a
+            # second front-matter block mid-file, which the OKF gate flags too.
+            head = ("" if apath.exists()
+                    else archive_head(memories_dir, name, ledger_name, stamp))
             with apath.open("a", encoding="utf-8") as fh:
                 fh.write(f"{head}\n## Retired {stamp}\n\n" + "".join(moved_lines))
             tmp = lpath.with_name(lpath.name + ".retire-tmp")
