@@ -227,6 +227,47 @@ def _attr(attrs: str, name: str) -> str | None:
     return m.group(2) if m.group(2) is not None else "{expr}"
 
 
+def _class_tokens(attrs: str) -> list[str]:
+    """Class tokens an element is actually given, reading through a computed className.
+
+    `_attr` answers the literal string `"{expr}"` for any `name={…}` (line 227), so
+    every `className={cn(...)}` in the page has been counting as zero class tokens.
+    For a LABEL that is right: `test_the_seven_label_spans_carry_a_wrapping_base_and_sm_truncate`
+    reads the label's own classes literally, and a label whose wrapping base is
+    computed rather than shipped is exactly what that test should redden. For the
+    premise rule the question is the opposite one — not "did this class ship
+    literally" but "does something beside the label refuse to shrink" — and a
+    sibling written `className={cn('ml-auto flex-shrink-0 …', TONE_TEXT[tone])}`
+    does refuse to shrink, because `cn` merges its literal arguments and every token
+    inside a quoted literal reaches the element. The browser agrees: at a 320 px
+    viewport on the live tree, the right-aligned span of a TaskLine row measures
+    `cw=42 sw=42` (whole) while the label beside it is squeezed to `cw=0`.
+
+    Only literals are harvested — an identifier such as `TONE_TEXT[tone]` resolves to
+    something this file cannot see, so it is never guessed at. That means the harvest
+    can only ADD a sibling the source really applies, never excuse a row that has
+    none, and `test_premise_scan_reddens_when_no_sibling_holds_whole` is the seed
+    that proves it. The row's own classes stay read literally by the caller: `flex`
+    on the row is a declaration the contract requires in the text, not merely a
+    runtime fact.
+    """
+    m = re.search(r"(?<![\w-])className\s*=\s*\{", attrs)
+    if not m:
+        return (_attr(attrs, "className") or "").split()
+    depth = 0
+    end = len(attrs)
+    for j in range(m.end() - 1, len(attrs)):
+        if attrs[j] == "{":
+            depth += 1
+        elif attrs[j] == "}":
+            depth -= 1
+            if depth == 0:
+                end = j
+                break
+    literals = re.findall(r"'([^']*)'|\"([^\"]*)\"|`([^`]*)`", attrs[m.end():end])
+    return [t for group in literals for t in " ".join(group).split()]
+
+
 def _label_spans(masked: str, key: str):
     """The `<span>` elements whose entire content is `key`.
 
@@ -484,6 +525,34 @@ def test_the_contract_reddens_when_a_label_drops_only_its_released_minimum():
         f"a label that still wraps was reported as clipped: {joined}")
 
 
+def _row_premise(src: str) -> dict:
+    """Per labelled row: its parent tag, the row's own class tokens, and the class
+    tokens of every sibling that refuses to shrink.
+
+    One measurement, read by both the rule and its seed, so the seed cannot pass by
+    checking something the rule does not look at. The row's classes go through
+    `_attr` (literal only — `flex` must be in the text); a sibling's go through
+    `_class_tokens`, because what is asked of a sibling is a runtime fact about what
+    the browser is told to hold whole.
+    """
+    masked = _mask(src)
+    els = list(_elements(masked))
+    premise = {}
+    for key, _count in _table():
+        for start, _attrs, ancestors, _end in _label_spans(masked, key):
+            assert ancestors, f"{key}: a label span has no parent element at all"
+            parent, p_attrs, p_lt = ancestors[-1]
+            sibs = [_class_tokens(s_attrs)
+                    for _s, _n, s_attrs, _anc in els
+                    if _anc and _anc[-1][2] == p_lt and _s != start]
+            premise[f"{key}@{start}"] = {
+                "parent": parent,
+                "row": (_attr(p_attrs, "className") or "").split(),
+                "shrinkers": [s for s in sibs if "flex-shrink-0" in s],
+            }
+    return premise
+
+
 def test_every_label_sits_in_a_flex_row_beside_a_value_that_stays_whole():
     """The premise that makes `min-w-0` load-bearing rather than decorative.
 
@@ -496,22 +565,12 @@ def test_every_label_sits_in_a_flex_row_beside_a_value_that_stays_whole():
     element tree, so a row that stops being flex or loses its right-aligned value
     reddens HERE, naming the row, instead of leaving `min-w-0` in place as a class
     that pins an absent mechanism.
+
+    #2398 moved the `TaskLine` row's evidence from its note span to its two
+    `cn(...)` spans, which is why the sibling read goes through `_class_tokens`;
+    `test_premise_scan_reddens_when_no_sibling_holds_whole` is the seed.
     """
-    masked = _mask(_page())
-    els = list(_elements(masked))
-    premise = {}
-    for key, _count in _table():
-        for start, _attrs, ancestors, _end in _label_spans(masked, key):
-            assert ancestors, f"{key}: a label span has no parent element at all"
-            parent, p_attrs, p_lt = ancestors[-1]
-            sibs = [(_attr(s_attrs, "className") or "").split()
-                    for _s, _n, s_attrs, _anc in els
-                    if _anc and _anc[-1][2] == p_lt and _s != start]
-            premise[f"{key}@{start}"] = {
-                "parent": parent,
-                "row": (_attr(p_attrs, "className") or "").split(),
-                "shrinkers": [s for s in sibs if "flex-shrink-0" in s],
-            }
+    premise = _row_premise(_page())
     assert len(premise) == 7, f"expected the seven labels, got {len(premise)}"
     not_flex = {k: v["row"] for k, v in premise.items()
                 if v["parent"] != "div" or "flex" not in v["row"]}
@@ -522,6 +581,49 @@ def test_every_label_sits_in_a_flex_row_beside_a_value_that_stays_whole():
     assert not no_pusher, (
         "these rows have no `flex-shrink-0` sibling to hold its width, so the "
         f"#2298 push-out cannot happen in them and the rule is over-broad: {no_pusher}")
+
+
+def test_premise_scan_reddens_when_no_sibling_holds_whole():
+    """The seed that keeps #2398's `cn(...)` read from becoming a free pass.
+
+    `_class_tokens` was added so the premise rule can see a `TaskLine` row's
+    right-aligned span, whose `flex-shrink-0` reaches the element through
+    `cn('ml-auto flex-shrink-0 font-mono tabular-nums', TONE_TEXT[tone])`. A read that
+    can never fail is not a check, so here both of the row's computed siblings are
+    stripped of the token and the SAME measurement must report the row. This is also
+    the only pin for #2398's mechanism itself: the shipped page now has NO literal
+    `flex-shrink-0` anywhere in `TaskLine`, so a `min-w-0` released on the label and
+    the note would be pure decoration if this row quietly lost its whole sibling.
+
+    `count=1` on each strip because both literals are the FIRST occurrence of their
+    text in the file, and a seed that does not land asserts nothing — the same trap
+    `test_the_contract_reddens_when_a_label_drops_only_its_released_minimum` names for
+    `min-w-0`. Both strips are checked before the measurement is read.
+    """
+    shipped = _page()
+    seeded = shipped.replace("cn('ml-auto flex-shrink-0 font-mono tabular-nums',",
+                             "cn('ml-auto font-mono tabular-nums',", 1)
+    seeded = seeded.replace("cn('h-3 w-3 flex-shrink-0',", "cn('h-3 w-3',", 1)
+    assert seeded != shipped, "neither seed landed: the seed is the shipped file"
+    for probe in ("cn('ml-auto font-mono tabular-nums',", "cn('h-3 w-3',"):
+        assert probe in seeded, f"seed did not land: {probe!r} is not in the mutant"
+    # A literal token elsewhere in the file is not the sibling this seed is about,
+    # so the precondition is scoped to TaskLine's own row, bounded by the label it
+    # holds rather than by a pattern that could match an earlier row: every `<span>`
+    # in that row must have lost the token once the two strips land.
+    at = seeded.index("{task.name}</span>")
+    row = seeded[seeded.rindex('<div className="flex items-center gap-2', 0, at):
+                 seeded.index("</div>", at)]
+    assert not [c for c in re.findall(r'<span className="([^"]*)"', row)
+                if "flex-shrink-0" in c.split()], (
+        "a literal `flex-shrink-0` is still on a span inside the seeded row, so this "
+        "seed would be testing the shipped page and not the computed siblings")
+
+    premise = _row_premise(seeded)
+    bare = {k for k, v in premise.items() if not v["shrinkers"]}
+    assert any(k.startswith("{task.name}@") for k in bare), (
+        f"stripping `flex-shrink-0` out of both of TaskLine's computed siblings left "
+        f"its row looking whole, so the read is a free pass: {sorted(bare)}")
 
 
 def test_the_contract_reddens_when_a_label_trades_its_wrap_for_a_title():

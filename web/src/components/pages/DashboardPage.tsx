@@ -659,8 +659,20 @@ function TaskLine({
     <div className="flex items-center gap-2 text-[10px]">
       <CalendarClock className={cn('h-3 w-3 flex-shrink-0', TONE_TEXT[tone])} />
       <span className="min-w-0 whitespace-normal break-words sm:truncate text-foreground">{task.name}</span>
+      {/* The note gets the SAME three-part contract as the name, not a
+          relaxed one. `task.blocked` is scheduler-written free text, so with
+          `flex-shrink-0 whitespace-nowrap` on it the row's width was a fact
+          about the fleet's vocabulary this hour: a held row reading
+          `waiting on #38 (inside its 36 h stale_bypass window)` measured
+          322 px of unbreakable line, which held this card's content box at
+          406 px inside its own 235 px track — the desktop track pin's
+          "clips its content at 235px" — and, because it was the only
+          unfloored item in the row, squeezed `{task.name}` to 0 px wide.
+          `min-w-0` releases the flex automatic minimum, `whitespace-normal
+          break-words` wraps it on a phone, `sm:truncate` ellipsizes it from
+          640 px up. (#2398, both of that item's red dashboard pins.) */}
       {note && (
-        <span className="flex-shrink-0 whitespace-nowrap text-muted-foreground/60">{note}</span>
+        <span className="min-w-0 whitespace-normal break-words sm:truncate text-muted-foreground/60">{note}</span>
       )}
       <span className={cn('ml-auto flex-shrink-0 font-mono tabular-nums', TONE_TEXT[tone])}>
         {relativeTime(when)}
