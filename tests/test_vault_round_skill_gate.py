@@ -431,10 +431,13 @@ def test_a_skill_outside_the_spill_sample_is_never_measured(vault):
     """#1985's scope rule, at the shipped default since #2158: no monkeypatch.
 
     Three times the cap and still no row: enforcement reaches
-    `skill_lint.SPILL_SAMPLE` only. Library-wide it would refuse most landings
-    — 106 of 197 skills were over the cap on 2026-10-01 — and #2158's ruling
-    left that scope decision, and the lint-failure question behind it, to a
-    person.
+    `skill_lint.SPILL_SAMPLE` and nothing else. That scope is ruled twice over —
+    #2158 set it, and #2334 ruled library-wide enforcement NO on 2026-10-08 — so
+    no count of the library is quoted here. The figure this docstring carried was
+    measured on 2026-10-01 and had moved by the 2026-10-07 re-run; the count that
+    would decide a library-wide rule is `skill_lint.render_size`'s to print on
+    every sweep, so this node keeps the scope and points at the sweep instead of
+    transcribing a number that ages in a docstring.
     """
     assert "uncovered" not in SL.SPILL_SAMPLE
     rel = _write_skill(vault, "uncovered", SL.MAX_BODY_LINES * 3)
@@ -444,42 +447,71 @@ def test_a_skill_outside_the_spill_sample_is_never_measured(vault):
     assert out["ok"] and "skill_body" not in out
 
 
-def test_no_surface_still_defers_the_ceiling_flip_to_a_person():
-    """#2158 clause 5: a ruled decision must not still read as somebody's errand.
+def test_no_surface_still_carries_the_library_wide_question_as_open():
+    """#2436 clause 4: the ruling is settled, so a surface that still defers is the drift.
 
-    The comment above the assignment used to say flipping the switch "is a
-    human's change", and `architecture/skills.md` said the cap "is advisory",
-    the over-cap landing "recorded, not refused", with
-    "`vault_round.SKILL_BODY_ENFORCE`, off" the switch that "would" refuse.
-    #2158 took the ruling on 2026-10-04, so both surfaces now say the ceiling
-    is enforced on SPILL_SAMPLE landings; what stays a person's call is the
-    library-wide lint-failure question the #624 owed entry reserves. This node
-    reads the two files themselves: the module ships `True`, cites #2158, and
-    has lost the deferral wording; the doc has lost the pending-flip sentences
-    and carries the enforced-on-the-sample statement.
+    This node's job inverted when #2334 ruled on 2026-10-08. It used to refuse any
+    surface that took the ceiling decision out of a person's hands; the person has
+    answered — SIZE stays advisory library-wide, `MAX_BODY_LINES` (100) is the
+    `SPILL_SAMPLE` spill target and not a library ceiling, the p90 is rejected as a
+    ceiling because it moves — so the drift is now a surface that keeps sending a
+    session to a person who has already ruled. It pins the settled content in all three
+    places the question was ever deferred (`skill_lint.py`'s size section and its
+    constant comment are the third, graded in `tests/test_skill_lint_size.py`), and it
+    pins the other half that keeps this from being won by erasure: the doc must still
+    name the spill-sample scope, the constant, and the fact that widening enforcement
+    needs a NEW ruled item rather than an edit.
+
+    The section comment and constant comment in `scripts/skill_lint.py` carry the same
+    ruling and are graded by `tests/test_skill_lint_size.py`, so this node reads only
+    the two surfaces it is the rail for: the enforce comment in the module under test,
+    and the doc that comment sends a reader to.
     """
     src = (ROOT / "scripts" / "automod" / "vault_round.py").read_text(encoding="utf-8")
     doc = (ROOT / "architecture" / "skills.md").read_text(encoding="utf-8")
-    assert "SKILL_BODY_ENFORCE = True" in src
-    assert "SKILL_BODY_ENFORCE = False" not in src
-    assert "#2158 ruled it enforcing" in src, "the flag no longer cites its ruling"
-    assert "human's change" not in src, "the module still defers the flip to a person"
-    assert "The 100-line cap is advisory" not in doc
-    assert "is recorded, not refused" not in doc
-    assert "`vault_round.SKILL_BODY_ENFORCE`, off" not in doc
+    here = Path(__file__).read_text(encoding="utf-8")
+
+    # Nothing defers the flip any more, on any of the three surfaces.
+    assert "human's change" not in src, "the module defers the flip again"
+    assert "person" not in doc.lower(), (
+        "architecture/skills.md defers the library-wide question to a person again, and "
+        "#2334 settled it on 2026-10-08")
+    assert "#2334" in doc and "2026-10-08" in doc, (
+        "the settled ruling has to arrive dated and named, or a reader cannot tell it "
+        "from the open question it replaced")
+
+    # What the ruling IS, in the doc's words.
+    dflat = " ".join(doc.split())
+    for ruling in ("advisory library-wide", "`SPILL_SAMPLE` spill target", "ruled NO",
+                   "MAX_BODY_LINES"):
+        assert ruling in dflat, (
+            f"the doc no longer states the ruling ({ruling!r}), so the surfaces that "
+            f"point at it are pointing at nothing: {dflat}")
+
+    # The scope that survives the ruling, still stated and still narrow.
     assert "cap is enforced on vault landings" in doc, (
-        "architecture/skills.md no longer states the enforced scope")
-    assert "person's call" in doc, (
-        "the library-wide question must still read as a person's ruling")
+        "the spill-sample scope is gone rather than settled: the rail would be "
+        "unenforced and this doc silent about it")
+    assert "fresh ruled item" in dflat, (
+        "widening past SPILL_SAMPLE must read as a new ruled item's decision — without "
+        "that sentence 'advisory library-wide' reads as a suggestion a round can ignore")
+    assert "SPILL_SAMPLE" in src, (
+        "the enforce scope is unchanged, and the comment that states it has to keep "
+        "naming the set it covers")
+
+    # And this file may not quietly restore the old rail. The needle is built at
+    # runtime, because a literal here would be the deferral this assert refuses.
+    deferral = "remains a " + "person"
+    offending = [ln for ln in here.split(chr(10)) if deferral in ln]
+    assert not offending, (
+        "a surface in this file still defers the ceiling flip: " + offending[0])
 
 
-# ── #2173 clauses 3-5: the pre-flight the nightly knowledge-write job must follow ─
-#: The skill that writes `lloyd/MEMORY.md` and its topic files, then commits the
+#: The knowledge-write skill as the nightly skills pass maintains it, in the live
 #: vault itself — the writer whose unred-checked commit reddened `main` on
 #: 2026-10-04 by rewriting an index line a code test pins.
 KNOWLEDGE_WRITE = "skills/nightly-reflection-knowledge-write/SKILL.md"
 LIVE_VAULT = Path.home() / "obsidian"
-
 
 @pytest.mark.live_vault
 def test_the_knowledge_write_skill_carries_a_memory_index_pre_flight():
@@ -524,7 +556,7 @@ def test_the_enforce_comment_names_the_doc_by_the_path_this_file_resolves():
     """#2334 clause 3: a citation two files answer to is a citation to neither.
 
     The comment above `SKILL_BODY_ENFORCE` recorded the ruling as standing in
-    "`architecture/skills.md`", meaning the repo copy this file's own deferral rail
+    "`architecture/skills.md`", meaning the repo copy this file's own size-ruling rail
     opens as `ROOT / "architecture" / "skills.md"`. The bare name also matches the
     vault's `~/obsidian/architecture/skills.md`, and a reader who followed it there
     landed on 113 lines whose front matter still claims "34 current custom skills"
@@ -548,13 +580,25 @@ def test_the_enforce_comment_names_the_doc_by_the_path_this_file_resolves():
     assert "REPO-root" in flat or "repo-root" in flat or "repo root" in flat, flat
     assert "obsidian" in flat.lower(), (
         f"it must say which other file the bare name also reaches: {flat}")
-    assert "#2334" in flat and "#2158" in flat, (
-        "the narrow ruling and the open library-wide question stay distinguishable: " + flat)
+    assert "#2334" in flat and "#2158" in flat and "2026-10-08" in flat, (
+        "the spill-sample ruling (#2158) and the library-wide ruling (#2334, dated) "
+        "stay distinguishable in the comment that cites the doc: " + flat)
 
     # The path it names resolves, and is the page that actually carries both halves.
     doc = (ROOT / "architecture" / "skills.md").read_text(encoding="utf-8")
-    assert "cap is enforced on vault landings" in doc and "person's call" in doc, (
-        "the repo copy must keep both halves of the #2158 ruling the comment cites")
+    assert "cap is enforced on vault landings" in doc, (
+        "the repo copy must still carry the #2158 scope the comment cites")
+    # ...and the page carries the #2334 ruling the comment now cites beside that
+    # scope. A doc that quietly reverted to "this question is open" would leave the
+    # comment pointing at a page that defers, which is the drift this node refuses.
+    dflat = " ".join(doc.split())
+    for ruling in ("advisory library-wide", "#2334", "2026-10-08",
+                   "`SPILL_SAMPLE` spill target", "ruled NO", "fresh ruled item"):
+        assert ruling in dflat, (
+            f"the comment cites a page that no longer carries {ruling!r}: " + dflat)
+    assert "person" not in doc.lower(), (
+        "the doc defers the library-wide question to someone again; #2334 settled it "
+        "on 2026-10-08, and this comment sends a reader there")
 
     # And the ambiguity the comment warns about is real rather than invented: the same
     # relative path exists in the vault and is NOT that page. If the vault arch-doc
@@ -563,6 +607,7 @@ def test_the_enforce_comment_names_the_doc_by_the_path_this_file_resolves():
     twin = Path.home() / "obsidian" / "architecture" / "skills.md"
     if twin.exists():
         twin_text = twin.read_text(encoding="utf-8")
-        assert "person's call" not in twin_text and "MAX_BODY_LINES" not in twin_text, (
+        assert "MAX_BODY_LINES" not in twin_text and "### SIZE" not in twin_text, (
             "the vault copy now carries the SIZE ruling too, so the comment's claim "
             "that only the repo copy does is stale: rewrite the comment, do not delete it")
+

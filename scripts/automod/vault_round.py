@@ -432,17 +432,23 @@ def skill_activation_findings(paths: list[str]) -> list[dict]:
 # the log caught: two real over-cap landings while the row only recorded — a
 # 103-line body on 2026-10-03T08:48:22Z (commit 98823179, `would_refuse: true`,
 # landed anyway; hand-fixed by 9b7b8986) and #1534 at 116 lines whose only red
-# node was a `live_vault` check the gate deselects. The scope is
-# `skill_lint.SPILL_SAMPLE` only: library-wide enforcement stays a person's
-# call — that question is #2334's, and the ceiling it would set lives in
-# `skill_lint.MAX_BODY_LINES`, borrowed there. The doc that records both halves of
-# the #2158 ruling is the repo-root architecture/skills.md — the file
+# node was a `live_vault` check the gate deselects. The scope stops at the sample
+# because library-wide enforcement was ruled NO, dated: #2334 on 2026-10-08, the
+# gain unmeasurable on the traffic a library-wide refusal would prevent (#2272
+# measured the run that would have had to pay for it at 0 USD, 93% cache read, no
+# compaction event). What that ruling left the 100 in `skill_lint.MAX_BODY_LINES`
+# as is the `SPILL_SAMPLE` spill target, not a ceiling on the library, and
+# widening enforcement past the sampled five is a new ruled item's decision rather
+# than an edit to a constant. The doc that records the scope (#2158) and the ruling
+# on the library (#2334) is the repo-root architecture/skills.md — the file
 # tests/test_vault_round_skill_gate.py opens as `ROOT / "architecture" / "skills.md"`
 # — NOT the vault's ~/obsidian/architecture/skills.md, which answers to the same
 # bare name and has no SIZE section, no spill paragraph and no `MAX_BODY_LINES` in it
 # at all. Citing the bare name is what #1985 and #2148 did, at line numbers (":411",
 # ":441") that exist only in the repo copy; follow the name from the vault and you
 # land on a page that cannot answer the question this comment is pointing at.
+#
+# The 100-line cap is enforced on vault landings that touch the sampled five.  # MAX_BODY_LINES=100
 SKILL_BODY_ENFORCE = True
 
 
@@ -453,10 +459,13 @@ def skill_body_findings(paths: list[str]) -> list[dict]:
     The ceiling's only failing check was a `live_vault` node the gate
     deselects, so a landing could push a spilled skill back over it and nothing
     on the landing path could say so. Scoped to `skill_lint.SPILL_SAMPLE` on
-    purpose: 106 of 197 live skills were over the cap on 2026-10-01, so a
-    library-wide rule would refuse most landings; a touched skill outside the
-    sample yields no row. Body = the text after front matter, the same rule as
-    `skill_lint.skill_size`.
+    purpose, and the scope is ruled rather than guessed: library-wide
+    enforcement was ruled NO (#2334, 2026-10-08), and the live over-cap count
+    that a library-wide rule would have to be measured against is
+    `skill_lint.render_size`'s to print on every sweep, not a figure to copy
+    into a docstring. A touched skill outside the sample yields no row —
+    enforcement reaches the sampled five only. Body = the text after front
+    matter, the same rule as `skill_lint.skill_size`.
 
     The ceiling measures the candidate's resulting state, never its delta: a
     landing that SHRINKS a sampled skill — 120 lines cut to 101 — is refused,

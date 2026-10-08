@@ -20,6 +20,7 @@ from __future__ import annotations
 import ast
 import itertools
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -541,41 +542,56 @@ def test_the_size_paragraph_says_the_line_ceiling_does_not_bound_the_uncapped_ro
         f"the sentence has to name the 100-line ceiling it is limiting: {para}")
 
 
-def test_the_size_paragraph_carries_its_counts_as_dated_and_points_at_the_sweep():
-    """#2334 clause 2: the deferral stays a person's, and its EVIDENCE stays live.
+def test_the_size_paragraph_says_the_library_wide_ruling_is_settled_and_its_evidence_live():
+    """#2436 clause 2: #2334's dated ruling replaces the deferral, the pointers stay.
 
-    The sentence that deferred the library-wide ceiling also froze a count in prose —
-    "106 of 197 skills were over the cap on 2026-10-01" — and nothing re-checks a
-    sentence, so by the sweep re-run on 2026-10-07 the page was two counts wrong while
-    reading as the authority for a ruling that has to be made on current numbers. The
-    same pair sat quoted in `vault_round`'s comment and in
-    `tests/test_vault_round_skill_gate.py`'s docstring: three frozen quotations, one
-    measurement. This node holds the two halves of the fix. The paragraph must still
-    DEFER to a person — #624's owed entry reserves the ceiling to one, and the node
-    below the rail in `test_vault_round_skill_gate.py` refuses a round that deletes
-    the sentence without a ruling — and it must send the reader to where the pair is
-    PRINTED rather than carrying it: the `### SIZE` summary line of the skill-lint
-    report, written by `skill_lint.render_size`, which prints the cap it counted
-    against in its own heading. And any count it does keep has to arrive dated, because
-    an undated count is a claim nobody will re-run.
+    This node used to insist the paragraph keep deferring the ceiling to a named
+    human, because #2334 had not ruled yet and a doc that quietly took the decision out
+    of that person's hands would have been the drift. #2334 ruled on 2026-10-08: SIZE stays advisory
+    library-wide, `MAX_BODY_LINES` is the `SPILL_SAMPLE` spill target rather than a
+    library ceiling, and the p90 is rejected as a ceiling because it moves. A rail that
+    still required the deferral would now be enforcing the OLD state of the question, so
+    it asserts the settled one, with the ruling dated (an undated "it is settled" is a
+    claim nobody can check against an item).
+
+    What the node keeps insisting on is the half that made the deferral survivable: the
+    moving pair must live where it is RE-printed — the `### SIZE` summary line of
+    `~/obsidian/autonomy/skill-lint-report.md`, written by `skill_lint.render_size` —
+    and not as a count transcribed onto this page. That is why the 2026-10-01 pair this
+    paragraph used to carry is gone rather than re-dated: by the 2026-10-07 re-run both
+    halves had moved, which is the defect #2265 exists to catch in a skill body and the
+    same one #2334 cites for rejecting the p90 as a ceiling.
     """
     text = (_REPO_ROOT / "architecture" / "skills.md").read_text(encoding="utf-8")
-    i = text.find("library-wide, whether SIZE becomes a lint failure")
-    assert i >= 0, "the library-wide SIZE deferral has left the SIZE paragraph entirely"
-    seg = text[i:text.find("What that ceiling does NOT do", i)]
-    assert "person's call" in seg, (
-        "the ceiling is a person's ruling; the paragraph may not quietly take it: " + seg)
-    assert "#2334" in seg, "the open item that owns the ruling has to be named: " + seg
-    assert "MAX_BODY_LINES" in seg, (
-        "the paragraph has to say which constant the ruling would move: " + seg)
-    assert "autonomy/skill-lint-report.md" in seg and "### SIZE" in seg, (
-        f"it must name where the live over-cap count and p90 are printed: {seg}")
-    assert "render_size" in seg, "and the function that prints them: " + seg
-    # The 2026-10-01 figure survives as a DATED measurement, not as the state of the
-    # corpus, and the date it was overtaken by is named beside it.
+    i = text.find("The 100-line cap is enforced")
+    assert i >= 0, "the spill-enforcement paragraph has vanished from the doc"
+    end = text.find("\n## ", i)
+    seg = text[i:end]
+    # The settled ruling, dated, and named to the item that made it.
+    assert "person" not in seg.lower(), (
+        "the paragraph defers the library-wide question to someone again; #2334 settled "
+        "it on 2026-10-08: " + seg)
+    for ruling in ("#2334", "2026-10-08", "advisory library-wide", "ruled NO",
+                   "MAX_BODY_LINES", "SPILL_SAMPLE"):
+        assert ruling in seg, f"the paragraph no longer carries {ruling!r}: " + seg
+    assert "fresh ruled item" in seg, (
+        "widening past SPILL_SAMPLE has to read as a new ruled item's decision: " + seg)
+    # ...and the evidence it was ruled on stays where it is re-printed.
+    for pointer in ("### SIZE", "autonomy/skill-lint-report.md", "render_size"):
+        assert pointer in seg, f"the paragraph lost its pointer {pointer!r}: " + seg
+    # The p90's own defect is the reason it is not the ceiling, so the paragraph has to
+    # state it as a dated pair that MOVED rather than as a count of the corpus.
     assert "2026-10-01" in seg and "2026-10-07" in seg, (
-        f"the frozen count must read as dated and superseded: {seg}")
-    assert "DATED" in seg.upper(), f"say of the figure that it is dated: {seg}"
-    j = seg.find("106 of 197")
-    assert j >= 0 and "2026-10-01" in seg[j:j + 260], (
-        f"the 2026-10-01 count must carry its own date beside it: {seg[j - 80:j + 260]}")
+        f"the p90 pair must read as dated measurements of two sweeps: {seg}")
+    assert "moves" in seg, f"say that the p90 moves: {seg}"
+    assert "352" in seg and "330" in seg, (
+        "the pair that shows it moves is the part a reader can check: " + seg)
+    # Nothing transcribed, in this shape or a fresher one: a count copied onto the page
+    # is a claim that ages there, which is what made the 2026-10-01 pair a false
+    # statement by the 2026-10-07 re-run. The rail is the SHAPE, so a re-spawned count
+    # with a new date and new numbers cannot walk past it.
+    transcribed = re.findall(r"\d+ of \d+[^.]{0,40}over the cap|"
+                             r"over the cap[^.]{0,40}\d+ of \d+", text)
+    assert not transcribed, (
+        "the doc transcribes a library-wide count again, dated or not; the sweep prints "
+        f"it and this page points at the sweep: {transcribed}")

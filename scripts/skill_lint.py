@@ -797,24 +797,30 @@ def check_dead_units(content: str,
 # nothing extra — it loses its tail instead, which is why `past_chat_cut` is
 # reported. The autonomy task prompt and the worker prompt splice the whole file
 # in uncapped, so there the size is the cost (`app/skill_embed.py` records which
-# route paid what per run). Advisory, and borrowed: the 100 below is another team's
-# heuristic that this lint was seeded with, never measured against this corpus, so
-# every count this script prints is a count "over 100", not "over the ceiling". The
-# ceiling is measurable here and has been on every run since #624: `render_size`'s
-# summary line prints the over-cap count and the p50/p90/max body lines of the live
-# corpus, and a ceiling set from that curve is the number this constant should one
-# day hold. Naming that number and deciding whether SIZE leaves advisory is #2334's
-# ruling — owed to a person, which is what #624's owed entry reserves it to — and it
-# is not this file's to pre-empt: #2158 ruled only the five `SPILL_SAMPLE` skills
-# enforced on vault landings. What stood here before was an undated instruction to
-# set the ceiling from a curve, with no item attached to it, which read as though
-# nobody had the data yet — they do, and the missing half is the ruling.
+# route paid what per run). Borrowed, and advisory library-wide — the second half of
+# that is a settled ruling rather than an open question: #2334 ruled on 2026-10-08
+# that SIZE stays advisory across the library and that enforcement reaches only the
+# five `SPILL_SAMPLE` skills #2158 named. The 100 below is another team's heuristic
+# this lint was seeded with, never measured against this corpus, and the ruling left
+# it borrowed on purpose: it is the `SPILL_SAMPLE` spill target, so every count this
+# script prints is a count "over the spill's own line", not "over a library ceiling".
+# The p90 this script measures was offered as that ceiling and rejected by the same
+# ruling, because it moves — 352 body lines on one day's sweep, 330 on a re-run
+# inside the next 24 h — so a gate pinned to it would refuse a skill for where the
+# pack happened to sit that morning, and `p50_lines` is the same moving number one
+# percentile lower. `MAX_BODY_LINES` does not move, which is the whole of its merit,
+# and its demerit is that nobody measured it. So `render_size` keeps printing the
+# over-cap count and the p50/p90/max body lines of the live corpus on every sweep, as
+# it has since #624: the instrument stays, the ceiling it makes tempting does not
+# ship. Widening enforcement past the spill sample is a fresh ruled item's decision,
+# and until one exists the number below does not move and this scan does not refuse.
 
 #: The body-length ceiling the SIZE bucket counts against (front matter excluded).
-#: BORROWED, not ruled — see the section comment: the number to replace it with is
-#: the p90 this script measures and prints, and picking it is #2334's ruling, not a
-#: round's edit. `tests/test_skill_lint_size.py` pins both the value and the
-#: ownership, so the constant cannot drift in either direction unowned.
+#: Settled at 100 by #2334 on 2026-10-08, and settled as the `SPILL_SAMPLE` spill
+#: target rather than a library ceiling — see the section comment. Widening it past
+#: the sampled set needs a new ruled item, not an edit here.
+#: `tests/test_skill_lint_size.py` pins both the value and that ownership, so the
+#: constant cannot drift in either direction unowned.
 MAX_BODY_LINES = 100
 
 #: `prefetch.SKILL_BODY_MAX`, restated because this script runs by path and

@@ -65,33 +65,55 @@ def test_the_threshold_is_a_named_constant_of_100_lines():
     assert sl.MAX_BODY_LINES == 100
 
 
-def test_the_comment_above_the_ceiling_owns_it_as_borrowed_and_names_the_ruling(library):
-    """#2334 clause 1: the constant is pinned by the test above, and its EXCUSE by
-    this one.
+def test_the_comment_above_the_ceiling_carries_2334_settled_ruling(library):
+    """#2334 clause 1, re-graded after the ruling: the constant is pinned by the node
+    above, and its EXCUSE by this one.
 
-    Until #2334 the comment read that the ceiling was "to be set from the measured
-    curve, by a person" — undated, naming no item, and false in the half a reader
-    acts on: the curve this script is asked to wait for has been printed on every
-    sweep since #624, on `render_size`'s summary line (over-cap count, then p50, p90
-    and max body lines). So that sentence sent the next session back to measure what
-    it could read, and #2334 exists because owed-check had to re-derive it. The
-    comment now owes three things to whoever finally rules: that the 100 is a borrowed
-    figure rather than a measured one, which open item owns replacing it, and where
-    the number to replace it with is printed. It still may not pick the number —
-    `MAX_BODY_LINES == 100` above is the half of this that must stay true until a
-    person's ruling says otherwise.
+    Two sentences have already been false here in the half a reader acts on. The first
+    said the ceiling was "to be set from the measured curve, by a person" — a task that
+    was already done, because `render_size` has printed that curve on every sweep since
+    #624. The second kept it open anyway: after #2334 ruled on 2026-10-08 that SIZE
+    stays ADVISORY library-wide, that `MAX_BODY_LINES` (100) is the `SPILL_SAMPLE` spill
+    target and not a library ceiling, and that the p90 is rejected as a ceiling because
+    it MOVES (352 → 330 body lines between the sweeps of one day), a comment still
+    calling the question owed to a person sends a session to a person who has already
+    answered. So this node now pins the settled content: the dated ruling, what the 100
+    IS, the rejected alternative with the pair that rejected it, and where the live
+    numbers are printed — and refuses the deferral phrasings outright, on the whole
+    comment, not just on the old sentence.
+
+    `MAX_BODY_LINES == 100` above stays the load-bearing assertion: the ruling keeps
+    the number, so a diff that edits it is widening enforcement, which needs a new
+    ruled item rather than this file's edit.
     """
     src = (ROOT / "scripts" / "skill_lint.py").read_text(encoding="utf-8")
     cut = src.find("MAX_BODY_LINES = 100")
-    assert cut > 0, "the ceiling is still the literal 100; no round has ruled it"
+    assert cut > 0, (
+        "#2334 keeps the 100 as the SPILL_SAMPLE spill target, so the literal has to "
+        "still be here; a diff that moves it is widening enforcement, which is a new "
+        "ruled item's job and not this file's")
     head = src[:cut]
     comment = head[head.rfind("# ── size"):]
     assert comment.strip().startswith("#"), "the text above the constant is the comment"
     flat = " ".join(comment.split())
     assert "to be set from the measured curve" not in flat, \
         "the undated instruction that made the ceiling look unmeasured is back: " + flat
-    assert "borrowed" in flat.lower(), "the 100 has to say it is not a ruled number"
-    assert "#2334" in flat, "the open item that owns the ceiling decision is named: " + flat
+    for deferral in ("owed to a person", "pre-empt", "remains a person",
+                     "#2334's ruling", "not a round's edit"):
+        assert deferral not in flat, (
+            f"the comment defers again with {deferral!r}, and #2334 closed on "
+            f"2026-10-08: " + flat)
+    assert "borrowed" in flat.lower(), "the 100 has to say it is not a measured number"
+    assert "#2334" in flat and "2026-10-08" in flat, (
+        "the settled ruling has to arrive dated, or a reader cannot tell it from the "
+        "open question it replaces: " + flat)
+    assert "advisory" in flat and "library-wide" in flat, \
+        "the ruling this comment now carries is that SIZE stays advisory library-wide: " + flat
+    assert "SPILL_SAMPLE" in flat, \
+        "the 100 has to name what it IS now that it is not a library ceiling: " + flat
+    assert "352" in flat and "330" in flat, (
+        "the p90 is rejected because it moves, and the pair that shows it moves is the "
+        "part a reader can check: " + flat)
     assert "#624" in flat and "#2158" in flat, \
         "the comment separates the narrow five-skill ruling from the library-wide one"
     assert "render_size" in flat and "p90" in flat and "over-cap" in flat, \

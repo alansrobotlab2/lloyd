@@ -456,14 +456,22 @@ refused and reverted, and `vault_round.skill_body_findings` puts a `skill_body`
 row (skill, measured body lines, the largest block to spill into) on the
 `vault_land` ledger row — on the refusal and on the passing landing alike. The
 switch is `vault_round.SKILL_BODY_ENFORCE`, on. The scope stops at the sample
-on purpose: library-wide, whether SIZE becomes a lint failure remains a
-person's call, and #2334 is the open item that owns that ruling along with the
-ceiling itself — `skill_lint.MAX_BODY_LINES` now says in its own comment that the
-100 it counts against is borrowed, not ruled. The number this page used to carry
-as the reason — 106 of 197 skills over the cap, measured on 2026-10-01 — is a
-DATED measurement and not a current count: the same sweep re-run on 2026-10-07
-reports 104 of 197, so a figure copied here stops being true the day it is
-written. What the ruling is made on is printed, not quoted: the `### SIZE` summary
+because that is the settled ruling, dated 2026-10-08 (#2334), and not an open
+question: SIZE stays advisory library-wide, the 100 that
+`skill_lint.MAX_BODY_LINES` counts against is the `SPILL_SAMPLE` spill target and
+not a ceiling on the library, and library-wide enforcement was ruled NO. Its gain
+is unmeasurable on the traffic a library-wide refusal would prevent — the run that
+would have had to pay for it measures 0 USD, 93% cache read and no compaction
+event (#2272) — and the p90 a library ceiling would have been pinned to moves
+faster than a gate can track: 352 body lines on the 2026-10-01 sweep, 330 on the
+2026-10-07 re-run of the same corpus, so a ceiling from that number would refuse a
+skill for where the pack happened to sit that morning, and `p50_lines` is the same
+moving figure one percentile lower. Widening
+enforcement past the sampled set is a fresh ruled item's decision, so until one
+exists the constant does not move and the scan does not refuse. No count of the
+library is transcribed on this page any more, dated or otherwise: the pair that
+was here until 2026-10-07 had been measured on 2026-10-01, and a figure copied
+like that stops being true the day it is written. What the ruling is made on is printed, not quoted: the `### SIZE` summary
 line of `~/obsidian/autonomy/skill-lint-report.md` carries the live over-cap count
 and the p50/p90/max body lines of every skill scanned, that line is rendered by
 `scripts/skill_lint.py`'s `render_size` — which also prints the cap it counted
