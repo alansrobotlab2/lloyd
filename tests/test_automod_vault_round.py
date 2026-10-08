@@ -6418,3 +6418,208 @@ def test_grader_outages_are_re_offered_three_deep_and_the_fourth_refuses_the_lan
     assert V._vault_review_outages(648) == 3
     assert [r["ok"] for r in _rows("vault_land", 648)] == [False, True], (
         "a streak broken by a real grading must not carry over into a second refusal")
+
+
+# ===========================================================================
+# #2437: a refused land must not revert a completion's run stamps away.
+#
+# `revert_paths` used to end in a bare `git checkout HEAD -- <path>` for every
+# tracked path, so an `autonomy/*.md` that the scheduler had stamped AFTER HEAD
+# came back with the round's edit gone and the run's `last_run`, `last_attempt`
+# and `next_run` gone with it — and the ledger row said only the path. Two
+# `vault_land` rows dated 2026-10-05 name an `autonomy/*` path reverted that way,
+# and the loss is durable for exactly the tasks that never run again.
+# ===========================================================================
+
+T0 = "2026-10-01T00:00:00Z"
+T1 = "2026-10-08T17:53:20.337968+00:00"
+T1_NEXT = "2026-10-08T21:53:20.337968+00:00"
+
+#: HEAD's copy of the task: the three stamps at T0, and `# task` as the body.
+TASK_T0 = ("---\nid: 1\nstatus: up_next\n"
+           f"last_run: '{T0}'\nlast_attempt: '{T0}'\nnext_run: '{T0}'\n"
+           "---\n# task\n")
+
+
+def _task_file(last_run: str, last_attempt: str, next_run: str,
+               body: str = "# task, edited by the round") -> str:
+    """A worktree copy of the task with each stamp written as the given YAML scalar.
+
+    The scalars are passed as raw text — quoted, bare, or nonsense — because the
+    spelling is what decides whether a stamp can be ordered against HEAD's.
+    """
+    return ("---\nid: 1\nstatus: up_next\n"
+            f"last_run: {last_run}\nlast_attempt: {last_attempt}\n"
+            f"next_run: {next_run}\n---\n" + body + "\n")
+
+
+def _commit_task_at_head(vault, text: str) -> str:
+    """Commit `text` as `autonomy/1-task.md` and return those committed bytes."""
+    (vault / "autonomy" / "1-task.md").write_text(text, encoding="utf-8")
+    git(vault, "add", "-A", "--", "autonomy/1-task.md")
+    git(vault, "commit", "-q", "-m", "task stamped at T0")
+    return git(vault, "show", "HEAD:autonomy/1-task.md").stdout
+
+
+def _refused_land(paths):
+    """Refuse a land by breaking a file that is not the task, and return the row.
+
+    The refusal has to come from somewhere the stamps are not: `last_run` and
+    friends are scheduler OUTPUT, absent from `SCHEDULE_STATE_FIELDS`, so dirty
+    stamps alone never refuse a land and would let these nodes pass with the
+    route never reaching `revert_paths` at all.
+    """
+    with pytest.raises(V.VaultRoundError, match="reverted"):
+        V.land(list(paths), "task: an activity note", item_id=None)
+    return _events("vault_land")[-1]
+
+
+def _broken_backlog(vault):
+    (vault / "backlog" / "9-item.md").write_text("---\nid: [unclosed\n---\n# item\n",
+                                                 encoding="utf-8")
+
+
+def test_a_refused_land_keeps_run_stamps_that_are_newer_than_head(vault):
+    """Clause 1: HEAD's bytes come back, except three lines that must not.
+
+    HEAD holds the three stamps at 2026-10-01; the worktree holds a round edit
+    and the same three at 2026-10-08, which is exactly the shape
+    `autonomy/24-data-pipeline.md` was in when this was triaged (an uncommitted
+    13:31:18 -> 17:53:20 advance). After the refusal the file is HEAD's, line for
+    line, and the only lines that differ are the three stamps carrying T1.
+    """
+    head_bytes = _commit_task_at_head(vault, TASK_T0)
+    (vault / "autonomy" / "1-task.md").write_text(
+        _task_file(f"'{T1}'", f"'{T1}'", f"'{T1_NEXT}'"), encoding="utf-8")
+    _broken_backlog(vault)
+    row = _refused_land(["autonomy/1-task.md", "backlog/9-item.md"])
+
+    after = (vault / "autonomy/1-task.md").read_text(encoding="utf-8")
+    assert "# task, edited by the round" not in after, "the round's own edit survived"
+    head_lines, after_lines = head_bytes.splitlines(), after.splitlines()
+    assert len(after_lines) == len(head_lines), "the revert added or dropped a line"
+    changed = {line.split(":")[0]: line
+               for line in (b for a, b in zip(head_lines, after_lines) if a != b)}
+    assert set(changed) == set(V.RUN_STAMP_FIELDS), (
+        f"only the three stamps may come back newer, and these did: {sorted(changed)}")
+    assert changed["last_run"] == f"last_run: '{T1}'"
+    assert changed["last_attempt"] == f"last_attempt: '{T1}'"
+    assert changed["next_run"] == f"next_run: '{T1_NEXT}'"
+    fm = V._front_matter_map(after)
+    assert fm["last_run"] == T1 and fm["next_run"] == T1_NEXT, fm
+    assert row["ok"] is False and row["reverted"][0].startswith("autonomy/1-task.md"), (
+        "the refusal that kept the stamps has to be the row that says so", row["reverted"])
+
+
+@pytest.mark.parametrize("stamps,kept", [
+    # Every stamp older than HEAD's: the worktree is behind, HEAD wins.
+    (dict(last_run="'2026-09-30T00:00:00Z'", last_attempt="'2026-09-30T00:00:00Z'",
+           next_run="'2026-09-30T05:00:00Z'"), []),
+    # Byte-identical stamps: nothing was advanced, so nothing is kept.
+    (dict(last_run=f"'{T0}'", last_attempt=f"'{T0}'", next_run=f"'{T0}'"), []),
+    # Naive worktree stamps beside HEAD's offset-bearing ones: later in wall
+    # clock terms, but unorderable, and assuming UTC is not proof.
+    (dict(last_run="2026-10-08T17:53:20", last_attempt="2026-10-08T17:53:20",
+          next_run="2026-10-08T21:53:20"), []),
+    (dict(last_run="'not-a-date'", last_attempt="'not-a-date'",
+           next_run="'not-a-date'"), []),
+    # One unorderable field does not excuse the other two: the rule is per field.
+    (dict(last_run="2026-10-08T17:53:20", last_attempt=f"'{T1}'",
+          next_run=f"'{T1_NEXT}'"), ["last_attempt", "next_run"]),
+], ids=["all-older", "all-equal", "naive-beside-aware", "unparseable",
+        "per-field-not-all-or-nothing"])
+def test_a_stamp_that_cannot_be_proved_newer_stays_at_head(vault, stamps, kept):
+    """Clause 2: no proof, no preservation — and a revert that never raises.
+
+    The four cases that keep nothing put the file back byte for byte; the fifth
+    keeps only the two stamps it can order, and `last_run` still says T0.
+    """
+    head_bytes = _commit_task_at_head(vault, TASK_T0)
+    (vault / "autonomy/1-task.md").write_text(
+        _task_file(stamps["last_run"], stamps["last_attempt"], stamps["next_run"]),
+        encoding="utf-8")
+    _broken_backlog(vault)
+    _refused_land(["autonomy/1-task.md", "backlog/9-item.md"])
+
+    after = (vault / "autonomy/1-task.md").read_text(encoding="utf-8")
+    if not kept:
+        assert after == head_bytes, (
+            "an unprovable stamp must leave HEAD's bytes untouched, and did not")
+        return
+    head_lines, after_lines = head_bytes.splitlines(), after.splitlines()
+    changed = {line.split(":")[0]: line
+               for line in (b for a, b in zip(head_lines, after_lines) if a != b)}
+    assert sorted(changed) == sorted(kept), changed
+    assert [line for line in after_lines if line.startswith("last_run:")][0] == \
+        f"last_run: '{T0}'", "the naive stamp was kept without proof"
+
+
+def test_a_path_that_preserves_nothing_reverts_exactly_as_today(vault):
+    """Clause 3: no stamps involved means today's behaviour, byte for byte.
+
+    Three paths in one refused land: a tracked task with none of the three
+    fields, the file whose broken front matter caused the refusal, and a file the
+    round created. The first is HEAD's again, the third is gone, and every
+    `reverted` entry is the bare path — the shape
+    `test_broken_front_matter_is_refused_and_the_file_put_back` asserts.
+    """
+    head_bytes = git(vault, "show", "HEAD:autonomy/1-task.md").stdout
+    (vault / "autonomy/1-task.md").write_text("---\nid: 1\nstatus: up_next\n---\n"
+                                              "# task, edited by the round\n",
+                                              encoding="utf-8")
+    (vault / "autonomy/3-new.md").write_text("---\nid: 3\nstatus: draft\n---\n"
+                                             "# new\n", encoding="utf-8")
+    _broken_backlog(vault)
+    row = _refused_land(["autonomy/1-task.md", "backlog/9-item.md",
+                         "autonomy/3-new.md"])
+
+    assert (vault / "autonomy/1-task.md").read_text(encoding="utf-8") == head_bytes
+    assert not (vault / "autonomy/3-new.md").exists(), "a created file must go"
+    assert row["reverted"] == ["autonomy/1-task.md", "backlog/9-item.md",
+                               "autonomy/3-new.md"], row["reverted"]
+
+
+def test_the_refusal_row_names_the_path_and_every_stamp_it_kept(vault):
+    """Clause 4: the ledger says what survived, not only what was destroyed.
+
+    One path kept three stamps, one kept nothing: the first appears naming the
+    path, each field and the value kept, the second as the bare path, so the row
+    that records a refusal can be read without diffing the vault afterwards.
+    """
+    _commit_task_at_head(vault, TASK_T0)
+    (vault / "autonomy/1-task.md").write_text(
+        _task_file(f"'{T1}'", f"'{T1}'", f"'{T1_NEXT}'"), encoding="utf-8")
+    _broken_backlog(vault)
+    row = _refused_land(["autonomy/1-task.md", "backlog/9-item.md"])
+
+    assert row["ok"] is False and len(row["reverted"]) == 2, row["reverted"]
+    kept, bare = row["reverted"]
+    assert kept.startswith("autonomy/1-task.md"), kept
+    assert f"last_run={T1}" in kept, kept
+    assert f"last_attempt={T1}" in kept, kept
+    assert f"next_run={T1_NEXT}" in kept, kept
+    assert bare == "backlog/9-item.md", bare
+
+
+def test_the_head_checkout_lives_only_in_the_stamp_preserving_helper():
+    """Item check (4), as a node: one checkout on this route, and it is the helper's.
+
+    The grep `git grep -n 'checkout", "HEAD"' -- scripts/automod/vault_round.py`
+    used to land on a bare checkout inside `revert_paths`, which is how a
+    concurrent writer's stamps went out with the round's edit. Read as a count and
+    a home, the same fact survives a re-indent that would fool a line-number
+    citation.
+    """
+    src = (Path(__file__).resolve().parent.parent / "scripts" / "automod"
+           / "vault_round.py").read_text(encoding="utf-8")
+    helper = src.split("def _revert_tracked_path", 1)[1].split("\ndef ", 1)[0]
+    caller = src.split("def revert_paths", 1)[1].split("\ndef ", 1)[0]
+    assert src.count('"checkout", "HEAD"') == 1, (
+        "exactly one path revert on this route, so exactly one place can lose a stamp")
+    assert '_git("checkout", "HEAD", "--", p)' in helper, \
+        "the checkout is not the helper's"
+    assert "_revert_tracked_path(p)" in caller, (
+        "revert_paths no longer routes a tracked path through the helper, so the "
+        "preservation it performs is unreachable from a refused land")
+    assert '"checkout"' not in caller, (
+        "revert_paths checking out a path itself is the shape that dropped the stamps")

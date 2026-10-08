@@ -35,9 +35,9 @@ failure:
      against the labelled corpus (#711) — recorded on every landing, and a
      refusal on the skills that corpus covers since #2148 turned
      `SKILL_ACTIVATION_ENFORCE` on.
-  4. **A failure reverts the round's paths** — tracked ones back to HEAD, new
-     ones deleted. The vault is live, so "nothing lands" has to mean "nothing
-     stays".
+  4. **A failure reverts the round's paths** — tracked ones back to HEAD, less
+     an autonomy run stamp a newer writer left there (#2437), new ones deleted.
+     The vault is live, so "nothing lands" has to mean "nothing stays".
   5. **Success commits exactly these paths**, on `main` (the branch guard
      mirrors `scripts/util/vault-commit.sh`, which every nightly writer
      uses), and records a `vault_land` ledger event with the sha.
@@ -644,14 +644,220 @@ def validate(paths: list[str]) -> tuple[list[str], dict[str, list[str]]]:
     return errors, buckets
 
 
+# Imported here rather than in the header for the same reason the function-local
+# `app.autonomy` imports below carry one: a note cites `vault_round.py:237` by line
+# number and `test_prompt_surface_budget.py` fails the round whose diff moves it.
+# Module scope, not function-local, because the annotations below name the type.
+import datetime
+
+#: #2437: the three front-matter fields a run's completion writes into its own task
+#: file — `app/autonomy.py` stamps `last_run`/`last_attempt` at every completion and
+#: `next_run` from `_next_run_after`. They are deliberately NOT in
+#: `SCHEDULE_STATE_FIELDS`: that set's own comment calls them "scheduler OUTPUT"
+#: whose gating "would deny every completion stamp", so the dispatch rail above
+#: refuses a round that moves a `status` and says nothing about a completion whose
+#: stamps are sitting uncommitted in the worktree. Saying nothing is what lost
+#: them: the revert checked HEAD out over the run that had just finished.
+RUN_STAMP_FIELDS: tuple[str, ...] = ("last_run", "last_attempt", "next_run")
+
+
+def _stamp_instant(value) -> "datetime.datetime | None":
+    """A run-stamp value as a `datetime`, or None when it is not an instant.
+
+    Total — never raises, because it runs on the revert path, where a raised
+    exception would leave the vault half-reverted. The shipped spelling is a
+    quoted ISO string and an unquoted one parses to a `datetime`, so both
+    arrive. A naive value is left naive rather than assumed UTC: that assumption
+    is exactly what would let one writer's timezone-less stamp overwrite
+    another's value at HEAD, and `_stamp_advanced` refuses to order the mix.
+    """
+    import datetime  # function-local: a top-level import shifts cited line numbers
+
+    if isinstance(value, datetime.datetime):
+        return value
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        return datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _stamp_advanced(head_value, worktree_value) -> bool:
+    """True only when the worktree's stamp is PROVED strictly later than HEAD's.
+
+    This is the whole of #2437's rule: a revert may keep a stamp it did not
+    write only on evidence that the stamp is newer than the one it is about to
+    restore. Anything it cannot order — a field missing on either side, an
+    unparseable string, a naive value beside a timezone-aware one — is not
+    evidence, and HEAD's bytes win. That is the safe side of every ambiguous
+    case: keeping HEAD leaves the item's measured "self-heals at the task's next
+    run" behaviour, while keeping an unproven stamp would let a stale or
+    malformed one survive the very refusal that was supposed to clean up.
+    """
+    head, work = _stamp_instant(head_value), _stamp_instant(worktree_value)
+    if head is None or work is None:
+        return False
+    try:
+        return work > head
+    except TypeError:  # naive beside timezone-aware: no order, so no proof
+        return False
+
+
+def _front_matter_field_index(lines: list[str], field: str) -> int | None:
+    """Index of `field`'s top-level line inside `lines`' front matter, or None.
+
+    Top-level only: an indented `last_run:` belongs to a nested key and rewriting
+    it would edit somebody else's value. Same block convention as
+    `policy.front_matter_map`, so this reader and the rail's cannot disagree
+    about where the front matter ends.
+    """
+    if not lines or lines[0].strip() != "---":
+        return None
+    for i, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            break
+        if line[:1] in (" ", "\t", "#") or not line.startswith(field + ":"):
+            continue
+        return i
+    return None
+
+
+def _front_matter_field_line(text: str, field: str) -> str | None:
+    """The verbatim `field:` line of `text`'s front matter, or None if there is none.
+
+    Verbatim on purpose: what gets preserved has to be the bytes the completion
+    wrote, quotes included, and not a re-rendering whose spelling a later reader
+    then has to reconcile with the scheduler's own. A block scalar is refused
+    rather than half-spliced — keeping only its first line would put broken YAML
+    where a stamp used to be, and a broken task file is the failure this whole
+    route exists to prevent.
+    """
+    lines = text.splitlines()
+    i = _front_matter_field_index(lines, field)
+    if i is None:
+        return None
+    line = lines[i]
+    if line[len(field) + 1:].strip()[:1] in ("|", ">"):
+        return None
+    return line
+
+
+def _stamp_scalar(line: str) -> str:
+    """The scalar text of one `field: value` line, surrounding quotes stripped."""
+    value = line.split(":", 1)[1].strip() if ":" in line else line.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+        value = value[1:-1]
+    return value
+
+
+def _keepable_run_stamps(p: str) -> list[tuple[str, str, "datetime.datetime"]]:
+    """`(field, verbatim line, instant)` for each stamp the worktree advanced past HEAD.
+
+    Reads only, and has to run BEFORE the checkout: the checkout is what destroys
+    the evidence. Every unreadable or undecidable case gives `[]` — a revert that
+    preserves nothing is today's behaviour, never a failure of the revert.
+    """
+    try:
+        worktree = (VAULT / p).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return []
+    shown = _git("show", f"HEAD:{p}")
+    if shown.returncode != 0:
+        return []  # an untracked path: the caller's unlink branch decides that one
+    head_fm = _front_matter_map(shown.stdout) or {}
+    work_fm = _front_matter_map(worktree) or {}
+    keep: list[tuple[str, str, "datetime.datetime"]] = []
+    for field in RUN_STAMP_FIELDS:
+        work_value = work_fm.get(field)
+        if not _stamp_advanced(head_fm.get(field), work_value):
+            continue
+        line = _front_matter_field_line(worktree, field)
+        if line is None:
+            continue  # newer by value, but no single line carries it
+        keep.append((field, line, _stamp_instant(work_value)))
+    return keep
+
+
+def _restore_run_stamps(p: str, keep: list[tuple[str, str, "datetime.datetime"]]
+                        ) -> list[tuple[str, str]]:
+    """Write each kept stamp over HEAD's line; return the ones the file really holds.
+
+    The return is verified by re-reading and re-parsing rather than by trusting
+    the write, because the `reverted` entry is a claim about the tree and #2175
+    and #2341 are both on the ledger about rows that said more than the tree
+    held. Nothing raises: a restore that cannot happen leaves the file exactly
+    where the bare checkout would have left it, and reports that honestly.
+    """
+    if not keep:
+        return []
+    f = VAULT / p
+    try:
+        lines = f.read_text(encoding="utf-8").splitlines(keepends=True)
+    except (OSError, UnicodeDecodeError):
+        return []
+    for field, raw, _instant in keep:
+        i = _front_matter_field_index(lines, field)
+        if i is None:
+            continue  # HEAD has no such line to overwrite; inventing one is not ours
+        terminator = lines[i][len(lines[i].rstrip("\r\n")):] or "\n"
+        lines[i] = raw.rstrip("\r\n") + terminator
+    try:
+        f.write_text("".join(lines), encoding="utf-8")
+        read_back = _front_matter_map(f.read_text(encoding="utf-8")) or {}
+    except (OSError, UnicodeDecodeError):
+        return []
+    return [(field, _stamp_scalar(raw))
+            for field, raw, instant in keep
+            if _stamp_instant(read_back.get(field)) == instant]
+
+
+def _revert_tracked_path(p: str) -> str:
+    """Check `p` out from HEAD, putting back any run stamp that beat HEAD's.
+
+    The one `git checkout HEAD -- <path>` on this route (#2437 check 4), and the
+    reason it lives in a helper rather than inline: the caller wants "the
+    round's bytes are gone", and those bytes can also hold a completion's stamps
+    written by a process that is not the round. The item's two ledger rows are
+    `autonomy/*` paths whose run stamps vanished with the refusal, and the only
+    thing that ever put them back was the task's next run — so a task that never
+    runs again loses them for good.
+
+    Returns this path's `reverted` entry: the bare path when the file went back
+    whole, else the path plus each field kept and the value kept, so the row
+    names what survived the refusal and not only what was destroyed by it.
+    """
+    keep = _keepable_run_stamps(p)
+    _git("checkout", "HEAD", "--", p)
+    if not keep:
+        return p
+    restored = _restore_run_stamps(p, keep)
+    if not restored:
+        return p
+    return p + " (kept " + ", ".join(f"{field}={value}"
+                                     for field, value in restored) + ")"
+
+
 def revert_paths(paths: list[str]) -> list[str]:
-    """Put the round's paths back: tracked ones to HEAD, new ones removed."""
+    """Put the round's paths back: tracked ones to HEAD, new ones removed.
+
+    #2437: "back to HEAD" no longer means "every byte". A tracked path returns to
+    HEAD's bytes except a `last_run`, `last_attempt` or `next_run` the worktree
+    holds strictly newer than HEAD's — those belong to the run that completed
+    while the round was landing, and a refusal of the round's edit is no claim on
+    them. An untracked path the round created is still unlinked whole: a created
+    file cannot both keep a completion's stamp and stop arming the task the
+    refusal exists to stop, which is owed ruling 3 on #2437 rather than a call to
+    make here.
+    """
     undone: list[str] = []
     for p in paths:
         tracked = _git("cat-file", "-e", f"HEAD:{p}").returncode == 0
         if tracked:
-            _git("checkout", "HEAD", "--", p)
-            undone.append(p)
+            undone.append(_revert_tracked_path(p))
         elif (VAULT / p).exists():
             (VAULT / p).unlink()
             undone.append(p)
