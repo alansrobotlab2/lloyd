@@ -1208,7 +1208,10 @@ rendered. This landing is additive; production prompts are byte-identical.
   (the #39 knowledge-write and #47 dream skills; the plan's
   `skills/nightly-knowledge-write` is really `nightly-reflection-knowledge-write`).
 - **Scripts.** `scripts/memory/validate_memory_index.py` (stdlib; `structure`
-  or `full`; the live test runs `full` automatically once the ceiling flips) and
+  or `full`; checks both directions of the index — a `→ topics/<slug>` whose file is
+  absent, and a topic file that no index line names, which is a rule no prompt can
+  reach (#2399) — and exits 1 on either; the live test runs `full` automatically once
+  the ceiling flips) and
   `scripts/memory/consolidate_memory_index.py --dry-run --out <overlay>`
   (deterministic, lossless — every unit verbatim in a topic file — refuses an
   `--out` inside the vault; on today's file: 73,002 B → 20,466 B index, 85

@@ -296,6 +296,125 @@ def test_the_validator_full_mode_refuses_an_untyped_unconsolidated_file(tmp_path
     assert vmi.check(tmp_path, ceiling=100_000, mode="structure")["ok"]
 
 
+def _hooked_root(tmp_path) -> Path:
+    """The smallest root that is legal in BOTH modes: one index line, one topic file.
+
+    Deliberately clean in `full` as well as `structure`, so a node that drops one
+    unlinked file into it can attribute the failure to that file alone — and so the
+    passing case is measured on the same fixture as the failing one, rather than on a
+    second root whose cleanliness is assumed.
+    """
+    root = tmp_path / "lloyd"
+    (root / "memory").mkdir(parents=True)
+    (root / "MEMORY.md").write_text(
+        "---\ntype: note\n---\n\n# Lloyd Long-Term Memory\n\n"
+        "## Infra\n- [project] **Hooked rule.** A linked detail is a readable one."
+        " → topics/hooked-rule\n",
+        encoding="utf-8")
+    (root / "memory" / "hooked-rule.md").write_text("# Hooked rule\ndetail\n",
+                                                    encoding="utf-8")
+    return root
+
+
+def _orphan(root: Path, slug: str = "orphan-rule") -> Path:
+    f = root / "memory" / f"{slug}.md"
+    f.write_text(f"# {slug}\ndetail\n", encoding="utf-8")
+    return f
+
+
+def test_an_unlinked_topic_file_is_named_and_fails_both_modes(tmp_path, capsys):
+    """The direction the validator did not have: topic file → index, not index → file.
+
+    #2399. Dream consolidation #47 found six topic files on disk that no index line
+    named, and every prompt was blind to all six, because `memory_read` is only ever
+    reached from a `→ topics/<slug>` hook line and this script checked only that a
+    link resolves. An unhooked file is a rule that exists and is never applied, so it
+    is an error, in both modes, with no exemption for files that were already orphaned
+    when the check was written — a warning nobody acts on is how six became the state
+    of the live index, and a hooked root still passes in both modes today.
+    """
+    root = _hooked_root(tmp_path)
+    _orphan(root)
+    vmi = _vmi()
+    r = vmi.check(root, ceiling=100_000, mode="structure")
+    assert r["topic_files_unlinked"] == 1, r
+    assert r["unlinked_topic_files"] == ["orphan-rule"], r
+    assert not r["ok"]
+    assert any("orphan-rule" in e for e in r["errors"]), r["errors"]
+    assert not any("hooked-rule" in e for e in r["errors"]), (
+        f"the linked file was reported too, so the check names every file: {r['errors']}")
+    # Human mode says the slug out loud, and the count rides the summary line.
+    for mode in ("full", "structure"):
+        assert vmi.main(["--root", str(root), "--mode", mode, "--ceiling", "100000"]) == 1
+    out = capsys.readouterr().out
+    assert "orphan-rule" in out, out
+    assert "1 unlinked" in out, out
+    # The same fixture without the orphan is clean in both modes: the failure above
+    # is the orphan, and no baseline exemption is needed to keep a nightly green.
+    clean = _hooked_root(tmp_path / "clean")
+    for mode in ("full", "structure"):
+        assert vmi.main(["--root", str(clean), "--mode", mode, "--ceiling", "100000"]) == 0
+
+
+def test_the_summary_line_carries_the_unlinked_count_beside_the_linked_count(tmp_path,
+                                                                            capsys):
+    """`0 unlinked` must read as "every file is hooked", not as "the check ran" (#2399).
+
+    The denominator sits beside the verdict: the linked count alone was already
+    ambiguous, because `85 links` over a root with an unhooked file and one without it
+    printed the same thing. Asserted against the printed fragment rather than a regex
+    over the whole line, so rewording the byte counts cannot hide the missing field.
+    """
+    vmi = _vmi()
+    assert vmi.main(["--root", str(_hooked_root(tmp_path)), "--mode", "structure",
+                     "--ceiling", "100000"]) == 0
+    ok_line = capsys.readouterr().out.splitlines()[0]
+    assert ok_line.startswith("OK:"), ok_line
+    assert "1 topic files, 1 links, 0 unlinked (structure)" in ok_line, ok_line
+    broken = _hooked_root(tmp_path / "broken")
+    _orphan(broken)
+    assert vmi.main(["--root", str(broken), "--mode", "structure",
+                     "--ceiling", "100000"]) == 1
+    fail_line = capsys.readouterr().out.splitlines()[0]
+    assert fail_line.startswith("FAIL:"), fail_line
+    # Two files on disk, one link, one orphan: the count that differs from the OK
+    # line's is the unlinked one, which is the point of printing it.
+    assert "2 topic files, 1 links, 1 unlinked (structure)" in fail_line, fail_line
+
+
+def test_a_dangling_link_and_an_unlinked_file_are_independent_findings(tmp_path):
+    """Both directions still fire, alone and together (#2399 clause 4).
+
+    The pre-existing index → topic error had to survive the new one unchanged, and
+    neither may mask the other: a root whose link dangles AND whose one file is
+    unhooked reports both, while a root with only the dangling link reports zero
+    unlinked files. That last half is the control that keeps the new set difference
+    from being a check that fires on any malformed index.
+    """
+    vmi = _vmi()
+    # The file that IS hooked stays on disk, so this root's set difference is
+    # non-trivially empty: a link dangles, one file is linked, and the new direction
+    # must still report nothing.
+    only_dangling = _hooked_root(tmp_path / "dangling")
+    (only_dangling / "MEMORY.md").write_text(
+        (only_dangling / "MEMORY.md").read_text() + "- [project] gone → topics/nowhere\n",
+        encoding="utf-8")
+    r = vmi.check(only_dangling, ceiling=100_000, mode="structure")
+    assert not r["ok"] and r["topic_files_unlinked"] == 0, r
+    assert any("topics/nowhere" in e and "does not exist" in e for e in r["errors"]), r["errors"]
+    assert vmi.main(["--root", str(only_dangling), "--mode", "structure",
+                     "--ceiling", "100000"]) == 1
+    both = _hooked_root(tmp_path / "both")
+    _orphan(both)
+    (both / "MEMORY.md").write_text(
+        (both / "MEMORY.md").read_text() + "- [project] gone → topics/nowhere\n",
+        encoding="utf-8")
+    r2 = vmi.check(both, ceiling=100_000, mode="structure")
+    assert any("topics/nowhere" in e for e in r2["errors"]), r2["errors"]
+    assert r2["unlinked_topic_files"] == ["orphan-rule"], r2["errors"]
+    assert vmi.main(["--root", str(both), "--mode", "structure", "--ceiling", "100000"]) == 1
+
+
 def test_the_consolidator_refuses_to_write_into_the_vault(tmp_path, monkeypatch):
     from scripts.memory import consolidate_memory_index as cmi
 

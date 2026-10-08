@@ -205,17 +205,26 @@ def test_the_stems_the_guard_treats_as_ledgers_are_the_ones_the_script_reads():
 # ── the seam: a second surface measures the same bytes ───────────────────────
 
 def _fixture_vault(tmp_path: Path, slug: str, size: int) -> Path:
-    """A `--root` the validator reads: one typed MEMORY.md line and one topic file.
+    """A `--root` the validator reads: one typed index line hooked to one topic file.
 
     The root is the `lloyd/` directory itself — `validate_memory_index.py` globs
     `root/memory/*.md` — so handing it the vault parent finds no topics at all and
     every assertion below would pass on an empty denominator.
+
+    The hook line is what makes the assertion below about SIZE and not about
+    reachability: `validate_memory_index.py` now also reports a topic file that no
+    index line names (#2399), and an unhooked fixture would report that finding on
+    the ledger stem too — turning `topic_errors("memory-md-ledger") == []` red for a
+    reason this node has never asked about. Hooking it keeps the fixture a valid
+    memory root, so a clean report means the derived bound was applied and nothing
+    else.
     """
     root = tmp_path / "lloyd"
     (root / "memory").mkdir(parents=True)
     (root / "MEMORY.md").write_text(
         "---\ntype: note\n---\n\n# Lloyd Long-Term Memory\n\n"
-        "## Infra\n- [project] **Probe rule.** A non-empty set is the positive control.\n",
+        "## Infra\n- [project] **Probe rule.** A non-empty set is the positive "
+        f"control. → topics/{slug}\n",
         encoding="utf-8")
     (root / "memory" / f"{slug}.md").write_text("x" * size, encoding="utf-8")
     return root

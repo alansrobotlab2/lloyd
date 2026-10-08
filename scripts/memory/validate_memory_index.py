@@ -12,13 +12,26 @@ pulls on demand. Two jobs keep it that way and both run this:
 
 Two modes, because the index is built before it is deployed:
 
-  structure  every `→ topics/<slug>` link resolves; every topic file has a legal
-             slug and fits `TOPIC_FILE_CEILING_BYTES`; MEMORY.md fits its ceiling.
-             Holds for today's un-indexed file, so it is what the live test runs
-             until the index ceiling is deployed.
+  structure  every `→ topics/<slug>` link resolves, and every topic file under
+             `memory/` is named by at least one index line; every topic file has a
+             legal slug and fits `TOPIC_FILE_CEILING_BYTES`; MEMORY.md fits its
+             ceiling. Holds for today's un-indexed file, so it is what the live test
+             runs until the index ceiling is deployed.
   full       structure, plus: MEMORY.md at or under `--tightness` (80%) of the
              ceiling, every top-level entry typed, every index line at or under
              `INDEX_LINE_MAX_CHARS`. What the dream pass must leave behind.
+
+Both directions of the link are checked, and the reverse one is the whole point of
+the pair. The index is the only route a topic file has into a prompt — a
+`→ topics/<slug>` hook line is what `memory_read` is reached by — so a file on disk
+that no index line names is a rule that exists and is never applied. Checking only
+index→topic let exactly that happen: dream consolidation #47 found six such files
+on 2026-10-07 (five class rules the nightly knowledge write shipped 2026-10-01 →
+10-06, plus `memory-md-ledger`), unread by every prompt for a week while this script
+printed `OK` nightly (#2399). So an unlinked topic file is an error in both modes,
+with no baseline exemption for files already orphaned when the check was written —
+the count over the live vault is 0, and a warning nobody acts on is how the six
+became six.
 
 The ceiling defaults to `prompt_surface.MEMORY_MD_CEILING_BYTES` — the live one —
 so the day it is lowered to `MEMORY_MD_INDEX_CEILING_BYTES` every caller of this
@@ -109,6 +122,19 @@ def check(root: Path, *, ceiling: int, mode: str = "full",
         elif not mc.topic_path(root, slug).is_file():
             errors.append(f"link → topics/{slug}: {mc.TOPICS_SUBDIR}/{slug}.md does not exist")
 
+    # The reverse direction, which this function did not have until #2399: a set
+    # difference over the same two collections the loop above already reads. It is
+    # the direction that matters to a READER — an index line pointing at nothing
+    # loses one detail, an unlinked file loses a whole rule silently, which is how
+    # five class rules and `memory-md-ledger` sat unread for a week. No baseline:
+    # the live count is 0, so an exemption would only ever shelter a new orphan.
+    unlinked = sorted({p.stem for p in topics} - set(linked))
+    report["topic_files_unlinked"] = len(unlinked)
+    report["unlinked_topic_files"] = unlinked
+    for slug in unlinked:
+        errors.append(f"topic file {mc.TOPICS_SUBDIR}/{slug}.md: no index line links "
+                      f"it (add a line ending → topics/{slug})")
+
     if mode == "full":
         limit = int(ceiling * tightness)
         report["tight_limit"] = limit
@@ -144,9 +170,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         print(json.dumps(report, indent=2))
     else:
+        # The unlinked count rides the same line as the linked one, so `0 unlinked`
+        # is readable as "every file is hooked" and not as "the check did not run".
         print(f"{'OK' if report['ok'] else 'FAIL'}: {report['root']}/MEMORY.md "
               f"{report['memory_md_bytes']:,} B / {report['ceiling']:,} B ceiling, "
-              f"{report['topic_files']} topic files, {report['links']} links ({args.mode})")
+              f"{report['topic_files']} topic files, {report['links']} links, "
+              f"{report['topic_files_unlinked']} unlinked ({args.mode})")
         for e in report["errors"]:
             print(f"  - {e}")
     return 0 if report["ok"] else 1
