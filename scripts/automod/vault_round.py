@@ -919,6 +919,12 @@ def _ledger_clause(c: dict) -> dict:
         row["subject"] = str(c["subject"])
     if c.get("accepted"):
         row["accepted"] = c["accepted"]
+    # The answers a conjunctive clause was AND-ed from (#2442). `met` for clause 5 means
+    # nothing on its own when the clause names two runbooks: the reader of this row has to
+    # be able to see that both subjects were graded and what each one said, or a merged
+    # verdict is just a less informative word for the same silence.
+    if isinstance(c.get("sub_verdicts"), list):
+        row["sub_verdicts"] = c["sub_verdicts"]
     return row
 
 def _vault_review(norm: list[str], item_id: int,

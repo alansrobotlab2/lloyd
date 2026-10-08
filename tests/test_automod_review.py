@@ -4073,33 +4073,127 @@ def test_a_merged_grading_that_leaves_a_clause_unanswered_is_no_verdict(
     assert "shrank to 1 clause per call" in why, why
 
 
-def test_a_merged_grading_that_grades_one_clause_twice_is_no_verdict(
-        isolated, monkeypatch, tmp_path):
-    """The same failure in the other direction: two verdicts for clause 5 mean one
-    of them is about something else, and `vault_review_outcome` counts rows, so a
-    duplicate is how a five-row verdict passes for a six-clause contract. The
-    duplicate survives the re-ask here, which is what lets this report at all
-    (#2341 clause 3): a failure that shrinking could not fix is the one that may
-    be recorded."""
-    _six_clause_item(isolated, 604, tmp_path)
-    asked = []
+def _answer(rows) -> dict:
+    """One grader answer. `rows` is `[(clause_index, verdict, note), …]`, and an index may
+    appear twice — which is the shape a clause with two subjects produces (#2442)."""
+    return {"ok": True, "structured": {
+        "premise": "sound", "summary": "read off disk", "test_honesty": [],
+        "seams_unverified": [],
+        "clauses": [{"clause": c, "verdict": v, "evidence_path": "skills/x/SKILL.md",
+                     "evidence_line": 1, "test_node_id": "", "how_verified": "read",
+                     "note": n} for c, v, n in rows]}}
 
-    def duplicates_clause_5(**kw):
+
+def test_a_clause_graded_twice_merges_to_one_verdict_and_the_contract_grades(isolated,
+                                                                             monkeypatch):
+    """#2442 clause 1: a repeat is a conjunction now, not `kind: incomplete`.
+
+    Item #2434's clause 5 asks for one figure in BOTH runbooks, so the grader answers
+    clause 5 twice — once per changed file — and `merge_grading_chunks` refused the whole
+    contract `incomplete`, which `vault_round.land` charged `blocking: true` on the FIRST
+    attempt and answered by reverting `skills/nightly-skill-consolidation/SKILL.md`, the
+    file whose edit the same grader's findings had just called correct. Four other items
+    (#2335, #2372, #2410, #2411) died the same way on ONE-path contracts, so this is not
+    about how many files a round passes.
+
+    Here the same six-clause contract — the one whose death this file used to pin — is
+    answered with clause 5 graded twice, and the run must produce a real verdict instead
+    of `RV.GRADER_INCOMPLETE`, with ONE clause-5 row carrying the worst of the two answers
+    and both answers underneath it.
+    """
+    _six_clause_item(isolated, 604, tmp_path=isolated)
+    def dup(**kw):
         slice_ = _asked_clauses(kw["prompt"])
-        asked.append(slice_)
         if slice_ == [1, 2, 3]:
             return _met_answer([1, 2, 3])
-        if slice_ == [5]:
-            return _met_answer([5, 5])
-        return _met_answer([4, 5, 5])
-    monkeypatch.setattr(RV, "run_grader", duplicates_clause_5)
-    kind, why, clauses = RV.grade_vault(item_id=604, paths=["skills/x/SKILL.md"], diff="+x",
-                                       vault=isolated)
-    assert kind == RV.GRADER_INCOMPLETE and clauses == []
-    assert "two verdicts for clause(s) 5" in why, why
-    # 5 and 6 are the indices the second call left unusable, and re-asking stops at
-    # the first one that fails again: clause 6 is never billed a generation.
-    assert asked == [[1, 2, 3], [4, 5, 6], [5]], asked
+        if slice_ == [4, 5, 6] or slice_ == [5]:
+            return _answer([(4, "met", "consolidation figure present"),
+                            (5, "met", "the management runbook carries it"),
+                            (5, "unmet", "the consolidation runbook does not"),
+                            (6, "met", "no stale figure")])
+        return _answer([(i, "met", "graded") for i in slice_])
+    monkeypatch.setattr(RV, "run_grader", dup)
+    kind, why, clauses = RV.grade_vault(item_id=604,
+                                       paths=["skills/nightly-skill-consolidation/SKILL.md",
+                                              "skills/nightly-skills-management/SKILL.md"],
+                                       diff="+x", vault=isolated)
+    assert kind != RV.GRADER_INCOMPLETE, f"a duplicate must not be a grader fault: {why}"
+    assert kind == "retry", (kind, why)
+    fives = [c for c in clauses if c["clause"] == 5]
+    assert len(fives) == 1, f"one clause index, ONE verdict: {clauses}"
+    assert fives[0]["verdict"] == "unmet", fives[0]
+    assert [v["verdict"] for v in fives[0]["sub_verdicts"]] == ["met", "unmet"], fives[0]
+    assert len([c for c in clauses if c["clause"] == 4]) == 1, clauses
+
+
+def test_the_merged_clause_verdict_does_not_depend_on_which_answer_came_first(monkeypatch):
+    """#2442 clause 2: worst-wins, so `met` cannot hide `unmet` by being emitted first.
+
+    The trap was already in the tree: `parse_review` skipped an index it had read, so the
+    surviving verdict WAS the emission order. A merge written as "keep the first" would
+    reproduce that silently and pass any single-order test, which is why both orders are
+    asserted here over the same two answers — `met` then `unmet`, and `unmet` then `met` —
+    and both must say `unmet`.
+
+    All-`met` is the other half: a clause that IS satisfied over both subjects has to come
+    out `met`, or the fix trades a false refusal for a false block.
+    """
+    def merged_verdict(rows):
+        chunks = [[1, 2, 3], [4, 5, 6]]
+        # `merge_grading_chunks` takes the grader's answer OBJECTS, not the
+        # `run_grader` envelope, which is what `grade_vault` hands it.
+        merged, why = RV.merge_grading_chunks(
+            chunks, [_met_answer([1, 2, 3])["structured"], _answer(rows)["structured"]])
+        assert why == "", why
+        five = [c for c in merged["clauses"] if c["clause"] == 5]
+        assert len(five) == 1, merged["clauses"]
+        return five[0]["verdict"], five[0]["sub_verdicts"]
+
+    met_first = merged_verdict([(4, "met", "a"), (5, "met", "management"),
+                                (5, "unmet", "consolidation"), (6, "met", "c")])
+    unmet_first = merged_verdict([(4, "met", "a"), (5, "unmet", "consolidation"),
+                                  (5, "met", "management"), (6, "met", "c")])
+    assert met_first[0] == "unmet", met_first
+    assert unmet_first[0] == "unmet", unmet_first
+    assert [v["verdict"] for v in met_first[1]] == [v["verdict"] for v in unmet_first[1]][::-1], \
+        "both orders must survive, in the order the grader emitted them"
+
+    both_met, why = RV.merge_grading_chunks(
+        [[1, 2, 3], [4, 5, 6]],
+        [_met_answer([1, 2, 3])["structured"],
+         _answer([(4, "met", "a"), (5, "met", "management"), (5, "met", "consolidation"),
+                  (6, "met", "c")])["structured"]])
+    assert why == "" and both_met is not None
+    assert [c["verdict"] for c in both_met["clauses"]] == ["met"] * 6, both_met["clauses"]
+
+
+def test_the_missing_clause_arm_still_refuses_after_the_duplicate_arm_opened(
+        isolated, monkeypatch):
+    """#2442 clause 5: weakening the duplicate arm must not weaken the gap arm.
+
+    Both faults came out of one `if missing or repeated`, so the edit that stopped
+    refusing a repeat could have stopped refusing a gap without anyone noticing — and the
+    gap is the dangerous one: a five-row answer to a six-clause contract would become a
+    verdict, and `vault_round` would land an item whose last clause nobody read. Clause 5
+    of #2434's own review called that clause conjunctive and half-met, which is only a
+    useful sentence if the OTHER clauses were graded at all.
+
+    So the same shrink path that swallows a repeat still returns `GRADER_INCOMPLETE`,
+    still names the missing index, and does it at the fixed point (1 clause per call).
+    """
+    _six_clause_item(isolated, 605, tmp_path=isolated)
+    def gap(**kw):
+        slice_ = _asked_clauses(kw["prompt"])
+        return _answer([(i, "met", "graded") for i in slice_ if i != 6]
+                       + [(5, "met", "answered twice on purpose"),
+                          (5, "met", "and the second is fine")])
+    monkeypatch.setattr(RV, "run_grader", gap)
+    kind, why, clauses = RV.grade_vault(item_id=605, paths=["skills/x/SKILL.md"],
+                                        diff="+x", vault=isolated)
+    assert kind == RV.GRADER_INCOMPLETE and clauses == [], (kind, why, clauses)
+    assert "no verdict for clause(s) 6" in why, why
+    assert "two verdicts" not in why, why
+
 
 
 def test_a_grader_that_answers_every_call_at_once_still_merges(

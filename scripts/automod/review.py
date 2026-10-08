@@ -1760,16 +1760,77 @@ def _per_call_phrase(size: int) -> str:
     return f"{int(size)} clause{'s' if int(size) != 1 else ''} per call"
 
 
+#: Worst-first order for AND-ing several answers about ONE clause index.
+_WORST_FIRST = ("retry", "unsatisfiable", "unmet", "post_landing", "partial", "met")
+
+
+def _clip(value, cap: int) -> str:
+    """One line of grader prose, capped — the same shape `parse_review` keeps."""
+    return " ".join(str(value or "").split())[:cap]
+
+
+def _verdict_rank(verdict: str) -> int:
+    """Lower is worse. An unknown word sorts worst of all: it cannot read as `met`."""
+    return _WORST_FIRST.index(verdict) if verdict in _WORST_FIRST else -1
+
+
+def merge_clause_verdicts(entries: list[dict]) -> dict:
+    """AND several grading answers about ONE clause index into one verdict.
+
+    The grader answers a clause index more than once whenever the clause has more
+    than one subject: #2434's clause 5 names two runbooks, and the ledger holds the
+    same death for #2335, #2372, #2410 and #2411 — four ONE-path lands, so the shape
+    is not about how many files a vault round passes. Until #2442 each of those
+    answers was a fault: `merge_grading_chunks` refused the contract `incomplete`,
+    `vault_round` charged it `blocking` from the FIRST attempt, and the revert
+    deleted an edit the grader's own findings had just confirmed correct. Shrinking
+    could not save it either — one clause per call is the fixed point where the
+    failure is returned, so a duplicate inside a single-clause answer was unfixable
+    by construction.
+
+    A set of answers is read as the conjunction the clause already is: it asks for the
+    figure in BOTH files, so `met` only when every subject's answer is `met`, and
+    otherwise the WORST answer wins. First-wins is exactly the trap — `parse_review`
+    used to drop the second entry, so a merge that kept the first would make the
+    verdict depend on the order the grader happened to emit, and `met` first would
+    hide `unmet` second. The individual answers survive in `sub_verdicts`, because
+    "clause 5 met, over two subjects" has to be distinguishable from "clause 5 met"
+    in the ledger row a person reads afterwards.
+    """
+    clean = [e for e in entries if isinstance(e, dict)]
+    if len(clean) < 2:
+        return clean[0] if clean else {}
+    worst = min(_verdict_rank(str(e.get("verdict") or "").strip().lower())
+                for e in clean)
+    loser = next(e for e in clean
+                 if _verdict_rank(str(e.get("verdict") or "").strip().lower()) == worst)
+    merged = {k: v for k, v in loser.items() if k != "sub_verdicts"}
+    merged["clause"] = next((e.get("clause") for e in clean if e.get("clause")), None)
+    merged["verdict"] = str(loser.get("verdict") or "").strip().lower()
+    merged["sub_verdicts"] = [
+        {"verdict": str(e.get("verdict") or "").strip().lower(),
+         "evidence_path": _clip(e.get("evidence_path"), 2000),
+         "how_verified": _clip(e.get("how_verified"), 200),
+         "note": _clip(e.get("note"), 300)} for e in clean]
+    return merged
+
+
 def merge_grading_chunks(chunks: list[list[int]], answers: list[dict]) -> tuple[dict | None, str]:
     """One object for `parse_review`, joined from the per-call grader answers.
 
     Each call was asked for its own slice of the contract and answers in the
     contract's own numbering, so the join is a concatenation with a completeness
-    check standing behind it: every index 1..N answered exactly once, no gap and
-    no duplicate. A slice answered twice or not at all returns `(None, why)` —
+    check standing behind it: every index 1..N answered, with no gap. An index
+    answered MORE than once is no longer a gap (#2442): its answers are AND-ed into
+    one verdict. An index answered not at all returns `(None, why)` —
     #2263 clause 2, because a contract clause the grader skipped is a grader that
     did not grade, and reading it as the synthesized `partial` it used to be
     refused a diff on a verdict that was never about the diff.
+
+    Several entries for ONE index inside the slice are AND-ed into a single verdict
+    (`merge_clause_verdicts`), not refused: that is the shape of a clause with more
+    than one subject, and refusing it used to destroy an edit the grader had just
+    verified (#2442).
 
     An entry naming a clause OUTSIDE the slice that call was asked for is dropped,
     not merged: a grader that answers the whole contract in every call still comes
@@ -1788,19 +1849,22 @@ def merge_grading_chunks(chunks: list[list[int]], answers: list[dict]) -> tuple[
         src = obj if isinstance(obj, dict) else {}
         if str(src.get("premise") or "").strip().lower() == "unsound":
             merged["premise"] = "unsound"
-        missing, repeated = clause_answer_gaps(chunk, src)
-        if missing or repeated:
-            bits = []
-            if missing:
-                bits.append("no verdict for clause(s) " + _idx_text(missing))
-            if repeated:
-                bits.append("two verdicts for clause(s) " + _idx_text(repeated))
-            return None, (f"{'; '.join(bits)} in the answer for clause(s) "
-                          f"{_idx_text(chunk)} (call {n} of {len(chunks)})")
+        missing, _repeated = clause_answer_gaps(chunk, src)
+        if missing:
+            return None, ("no verdict for clause(s) " + _idx_text(missing)
+                          + f" in the answer for clause(s) {_idx_text(chunk)}"
+                          + f" (call {n} of {len(chunks)})")
+        # A REPEAT is not a fault (#2442): the entries for one index are AND-ed into a
+        # single verdict by `merge_clause_verdicts` below. The MISSING arm is untouched
+        # and still refuses — five rows answering a six-clause contract is a grader
+        # that did not grade, which is the check this function exists to run.
         wanted = set(chunk)
+        by_index: dict = {}
         for raw in (src.get("clauses") if isinstance(src.get("clauses"), list) else []):
             if isinstance(raw, dict) and _clause_index(raw) in wanted:
-                merged["clauses"].append(raw)
+                by_index.setdefault(_clause_index(raw), []).append(raw)
+        for idx in sorted(by_index):
+            merged["clauses"].append(merge_clause_verdicts(by_index[idx]))
         for key in ("test_honesty", "seams_unverified"):
             got = src.get(key)
             merged[key].extend(got if isinstance(got, list) else [])
@@ -1823,7 +1887,9 @@ def grade_vault(*, item_id: int, paths: list[str], diff: str,
     The `kind` is `pass`, `retry`, `unsound`, `skipped` — and, since #2263,
     `diverged` or `incomplete` (`GRADER_FAILURE_KINDS`): the finalizer running
     its completion past its token budget, and a merged answer that leaves a
-    contract clause ungraded or grades one twice. Those two are the abstentions
+    contract clause ungraded. A clause graded over SEVERAL subjects is not an
+    abstention (#2442) — its verdicts AND — so the kind now means the grader
+    skipped something, which is the only grading fault left. Those are the abstentions
     with a mechanism behind them, and `vault_round.land` records them
     `blocking: true` rather than as another `skipped` the landing went ahead on.
 
@@ -1941,18 +2007,18 @@ def grade_vault(*, item_id: int, paths: list[str], diff: str,
             # review at all is a different abstention from a review that left a
             # clause out, and collapsing them is what that test exists to stop.
             return None, [], ("skipped", "grader returned an unusable object")
-        missing, repeated = clause_answer_gaps(chunk, obj)
-        ungraded = sorted(set(missing) | set(repeated))
-        ok = [i for i in chunk if i not in set(ungraded)]
-        if ungraded:
-            bits = []
-            if missing:
-                bits.append("no verdict for clause(s) " + _idx_text(missing))
-            if repeated:
-                bits.append("two verdicts for clause(s) " + _idx_text(repeated))
+        # A REPEAT is not an ungraded clause (#2442). The grader answers one index
+        # once per subject, which is what a clause spanning two files asks for; the
+        # entries are AND-ed by `merge_grading_chunks`. Only a MISSING index is a call
+        # that did not grade, and that arm is unchanged: its indices stay out of `ok`
+        # so `answer` re-asks exactly them at a smaller size.
+        missing, _repeated = clause_answer_gaps(chunk, obj)
+        ok = [i for i in chunk if i not in set(missing)]
+        if missing:
             return obj, ok, (GRADER_INCOMPLETE,
-                             f"{'; '.join(bits)} in the answer for clause(s) "
-                             f"{_idx_text(chunk)} ({_per_call_phrase(len(chunk))})")
+                             "no verdict for clause(s) " + _idx_text(missing)
+                             + f" in the answer for clause(s) {_idx_text(chunk)}"
+                             + f" ({_per_call_phrase(len(chunk))})")
         return obj, list(chunk), None
 
     def answer(chunk: list[int]) -> tuple[str, str] | None:
@@ -2063,6 +2129,12 @@ def grade_vault(*, item_id: int, paths: list[str], diff: str,
     # attempts are readable only because the refusal text named the rail. So the
     # waiver rides out with the verdict instead of dying in `parsed`.
     waived = {c["clause"]: c["accepted"] for c in parsed["clauses"] if c.get("accepted")}
+    # And so do the answers a conjunctive clause was AND-ed from (#2442). Without this
+    # the ledger row would say `clause 5: unmet` for a clause the grader answered twice,
+    # and a reader could not tell "one subject failed" from "both did" — which is the
+    # distinction that decides whether to edit one runbook or both.
+    subs = {c["clause"]: c["sub_verdicts"] for c in parsed["clauses"]
+            if isinstance(c.get("sub_verdicts"), list)}
     # One row per clause of the contract as it stood when graded, so a reader
     # needs no second lookup of a contract that may have changed since; a
     # clause the grader never reached is `ungraded`, which is not `met`. A
@@ -2070,7 +2142,8 @@ def grade_vault(*, item_id: int, paths: list[str], diff: str,
     # which verdicts to overwrite with the one it derives from the sha.
     return kind, findings, [{"clause": i, "verdict": graded.get(i, "ungraded"),
                              **({"subject": "landing"} if i in landing else {}),
-                             **({"accepted": waived[i]} if i in waived else {})}
+                             **({"accepted": waived[i]} if i in waived else {}),
+                             **({"sub_verdicts": subs[i]} if i in subs else {})}
                             for i in range(1, len(contract["clauses"]) + 1)]
 
 
@@ -2687,6 +2760,11 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
     broken: dict[int, list[str]] = {}
     seen: set[int] = set()
     raw_clauses = obj.get("clauses") if isinstance(obj.get("clauses"), list) else []
+    # Group by contract index FIRST, then grade ONE merged verdict per index. The old
+    # arm skipped an index it had already read, so a clause answered over two subjects
+    # was decided by emission order alone: `met` first silently hid `unmet` second
+    # (#2442 clause 2 pins both orders).
+    grouped: dict[int, list[dict]] = {}
     for raw in raw_clauses:
         if not isinstance(raw, dict):
             continue
@@ -2694,9 +2772,12 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
             idx = int(raw.get("clause") or 0)
         except (TypeError, ValueError):
             continue
-        if idx < 1 or idx > max(n_clauses, 1) or idx in seen:
+        if idx < 1 or idx > max(n_clauses, 1):
             continue
+        grouped.setdefault(idx, []).append(raw)
+    for idx, repeats in sorted(grouped.items()):
         seen.add(idx)
+        raw = merge_clause_verdicts(repeats)
         verdict = str(raw.get("verdict") or "").strip().lower()
         if verdict not in CLAUSE_VERDICTS:
             verdict = "partial"
@@ -2824,6 +2905,9 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
                         # together: `gate.json` shows the citation broke instead
                         # of the rung quietly restating `agent_mcp/facts.py:520
                         # -540` as if it named a test.
+                        **({"sub_verdicts": raw["sub_verdicts"]}
+                           if isinstance(raw.get("sub_verdicts"), list)
+                           and len(raw["sub_verdicts"]) > 1 else {}),
                         **({"citation_unresolved": unresolved} if unresolved else {}),
                         **({"downgraded": why} if why else {}),
                         **({"accepted": accepted} if accepted else {})})

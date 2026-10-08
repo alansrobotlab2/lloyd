@@ -6623,3 +6623,120 @@ def test_the_head_checkout_lives_only_in_the_stamp_preserving_helper():
         "preservation it performs is unreachable from a refused land")
     assert '"checkout"' not in caller, (
         "revert_paths checking out a path itself is the shape that dropped the stamps")
+
+
+# @@ autocode round SM_20261008_212442 (#2442): a clause answered over two subjects @@
+
+#: Item #2434's contract, in the shape that made it unlandable: clause 5 is
+#: conjunctive over TWO files and `paths` names both.
+TWO_FILE_CLAUSES = [
+    "The consolidation runbook names the measured tally.",
+    "The management runbook names the measured tally.",
+    "Neither runbook says `exit 1 when M > 0`.",
+    "Both runbooks cite the same audit command.",
+    "The tally appears as a mandated report figure in both files — consolidation's "
+    "Phase 5.2 report-key block and management's \"Reported in every run's summary "
+    "(Stage 6)\" block — skills/nightly-skill-consolidation/SKILL.md and "
+    "skills/nightly-skills-management/SKILL.md",
+]
+
+CONSOLIDATION = "skills/nightly-skill-consolidation/SKILL.md"
+MANAGEMENT = "skills/nightly-skills-management/SKILL.md"
+
+
+def _twice_answered(slice_: list[int]) -> dict:
+    """One `run_grader` answer for `slice_`, with clause 5 graded over BOTH subjects.
+
+    Clause 5's two rows are what a conjunctive clause produces: the grader reads one
+    file, says what satisfies the clause there, then reads the other and says the same
+    again — each row citing its own file, because `met` needs an evidence path.
+    """
+    rows = []
+    for i in slice_:
+        if i == 5:
+            rows.append({"clause": 5, "verdict": "met", "evidence_path": CONSOLIDATION,
+                         "evidence_line": 1, "test_node_id": "", "how_verified": "read",
+                         "note": "the consolidation report-key block carries the figure"})
+            rows.append({"clause": 5, "verdict": "met", "evidence_path": MANAGEMENT,
+                         "evidence_line": 1, "test_node_id": "", "how_verified": "read",
+                         "note": "the management Stage 6 block carries it too"})
+        else:
+            rows.append({"clause": i, "verdict": "met", "evidence_path": CONSOLIDATION,
+                         "evidence_line": 1, "test_node_id": "", "how_verified": "read",
+                         "note": f"read for clause {i}"})
+    return {"ok": True, "structured": {
+        "premise": "sound", "summary": "both runbooks read", "test_honesty": [],
+        "seams_unverified": [], "clauses": rows}}
+
+
+def _two_path_asked(prompt: str) -> list[int]:
+    """Which of THIS contract's clauses one grading prompt asks, read off the prompt.
+
+    `_five_clause_asked` matches the module's own `FIVE` text, so it returns [] for a
+    different contract and every call would look like it answered nothing.
+    """
+    return [i for i, t in enumerate(TWO_FILE_CLAUSES, 1) if f"{i}. {t}" in prompt]
+
+
+def _run_a_two_path_land(vault, items, monkeypatch, item_id: int):
+    """Land #2434's shape once: two paths, five clauses, clause 5 answered twice."""
+    write_item(items, item_id, TWO_FILE_CLAUSES)
+    monkeypatch.setattr(V, "GRADER", RV.grade_vault)
+    for path in (CONSOLIDATION, MANAGEMENT):
+        (vault / path).parent.mkdir(parents=True, exist_ok=True)
+        (vault / path).write_text("---\nname: x\n---\n"
+                                  "candidate_body_scoping: whole_file 0 dead_strip 0 "
+                                  "input_lost 0\n", encoding="utf-8")
+
+    def answer(**kw):
+        return _twice_answered(_two_path_asked(kw["prompt"]))
+    monkeypatch.setattr(RV, "run_grader", answer)
+    out = V.land([CONSOLIDATION, MANAGEMENT], "skill: both runbooks report the tally",
+                 item_id=item_id)
+    return out, _rows("vault_review", item_id), _rows("vault_land", item_id)
+
+
+def test_a_two_path_vault_land_whose_clause_spans_both_files_commits(vault, items,
+                                                                    monkeypatch):
+    """Clause 4: the contract that wrote `kind: incomplete` now writes `ok: true`.
+
+    #2434's two `vault_land` rows said `ok: false`, `errors: ["vault review:
+    incomplete"]`, `reverted: [both runbooks]`, and the review rows beside them said
+    `kind: incomplete`, `review_grader_failed: true`, `clauses: []` — so the item was
+    left `draft` with `owed: true` while its five clauses were satisfied in a patch
+    file. The same contract, the same two paths and the same twice-answered clause 5
+    must now COMMIT: `ok: true`, a non-empty `review_clauses` with one row per clause,
+    no `reverted` list, and one review row that is not a grader failure.
+    """
+    out, reviews, lands = _run_a_two_path_land(vault, items, monkeypatch, 641)
+    assert out["review"] == "pass", out
+    assert len(lands) == 1 and lands[0]["ok"] is True, lands
+    assert not lands[0].get("reverted"), f"a verified edit was reverted: {lands[0]}"
+    assert [c["clause"] for c in lands[0]["review_clauses"]] == [1, 2, 3, 4, 5], lands[0]
+    assert len(reviews) == 1 and reviews[0]["kind"] == "pass", reviews
+    assert not reviews[0].get("review_grader_failed"), reviews[0]
+    assert reviews[0]["blocking"] is False, reviews[0]
+    assert (vault / CONSOLIDATION).exists() and (vault / MANAGEMENT).exists()
+
+
+def test_a_merged_clause_puts_its_per_subject_answers_in_the_ledger_row(vault, items,
+                                                                        monkeypatch):
+    """Clause 3: the AND is visible, so `clause 5 met` says what it actually means.
+
+    The merged verdict alone would read exactly like a clause with one subject, and the
+    reason #2434's clause 5 was worth grading twice is precisely that it has two. So
+    both the `vault_review` row and the `vault_land` row carry `sub_verdicts` for that
+    index — each with its own verdict, evidence path and note — and every other clause
+    in the same row has no such key, because it was answered once.
+    """
+    _, reviews, lands = _run_a_two_path_land(vault, items, monkeypatch, 642)
+    for row, label in ((reviews[0], "vault_review"), (lands[0], "vault_land")):
+        clauses = row["clauses"] if label == "vault_review" else row["review_clauses"]
+        five = next(c for c in clauses if c["clause"] == 5)
+        assert five["verdict"] == "met", (label, five)
+        subs = five["sub_verdicts"]
+        assert [s["verdict"] for s in subs] == ["met", "met"], (label, subs)
+        assert [s["evidence_path"] for s in subs] == [CONSOLIDATION, MANAGEMENT], (label, subs)
+        assert all(s.get("note") for s in subs), (label, subs)
+        singles = [c for c in clauses if c["clause"] != 5]
+        assert all("sub_verdicts" not in c for c in singles), (label, singles)
