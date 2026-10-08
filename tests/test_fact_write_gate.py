@@ -15,6 +15,7 @@ import datetime
 import inspect
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -482,3 +483,339 @@ def test_no_code_refuses_on_so_the_reservation_really_is_prose(monkeypatch):
     # that says the prose may now say something weaker.
     monkeypatch.setenv(gate.MODE_ENV, "on")
     assert gate.mode() == "on"
+
+
+# ── #2441: the n = 60 hand-labelled UPDATE sample, and the note that carries it ─
+#
+# #2344 left one thing owed to a round that no round could do with a log count:
+# sixty hand-labelled E/S/P/D UPDATE verdicts, scored into a false-supersede CI,
+# beside the 2026-09-25 baselines. The result is prose
+# (`eval/measurements/fact-write-gate-2026-10-08.md`), and prose about a ship bar
+# is exactly the kind that outlives its evidence, so every figure the note prints
+# is checked here against bytes this repo now carries: the 60 sampled rows, their
+# labels, the seed and window of the draw, and the 160 calibration `new_hash`
+# values the overlap is computed against. Two of these nodes cross a real process
+# boundary rather than re-reading a constant: one runs the shipped scorer
+# (`eval/run_fact_write_gate_eval.py score`) as a subprocess over the committed
+# bytes and demands that the note quote its output, and one re-derives the note's
+# overlap count through `app.kg_store.text_hash`, the store's own key function.
+#
+# What stays out of reach of a gate, and is recorded as owed on #2441 rather than
+# pretended away: whether a Lloyd-agent labeler is the labeler the bar demands
+# (the note names its own), and measurement (b) of two — a paired LloydMemEval
+# `knowledge_update` gain — which no number in this file is evidence for.
+
+#: The note, its committed sample directory, and the note it supplements.
+NOTE_2441 = ROOT / "eval" / "measurements" / "fact-write-gate-2026-10-08.md"
+SAMPLE_2441 = ROOT / "eval" / "measurements" / "fact-write-gate-2026-10-08"
+BASELINE_NOTE = ROOT / "eval" / "measurements" / "fact-write-gate-2026-09-25.md"
+#: The one line per row the scorer consumes: `<row> <E|S|P|D>`.
+LABELS_2441 = SAMPLE_2441 / "labels.txt"
+#: Seed drawn from the item id, so a re-draw is never mistaken for a tuning.
+SEED_2441 = 2441
+
+
+def _note2441() -> str:
+    assert NOTE_2441.is_file(), f"{NOTE_2441} is the measurement note #2441 exists to write"
+    return NOTE_2441.read_text(encoding="utf-8")
+
+
+def _prose(text: str) -> str:
+    """One whitespace, so a claim wrapped across two source lines is still one
+    sentence to match. Every phrase asserted below is matched through this."""
+    return " ".join(text.split())
+
+
+def _sample2441() -> list[dict]:
+    path = SAMPLE_2441 / "decisions.jsonl"
+    assert path.is_file(), f"the sampled rows behind the note ({path}) are not in the tree"
+    return [json.loads(line) for line in
+            path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _labels2441() -> dict[int, str]:
+    """The same shape `run_fact_write_gate_eval._labels` reads. The authority for
+    what these labels score is the subprocess node, which runs that parser."""
+    out = {}
+    for line in LABELS_2441.read_text(encoding="utf-8").splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] in "ESPD":
+            out[int(parts[0])] = parts[1]
+    return out
+
+
+def _sample_meta() -> dict:
+    """The one line recording how the committed draw was taken. `.jsonl`, because
+    `.gitignore:42` ignores `*.json` repo-wide except for named negations, and a
+    witness written as `.json` would never have been committed at all."""
+    return json.loads((SAMPLE_2441 / "sample.jsonl").read_text(encoding="utf-8"))
+
+
+def _calibration() -> tuple[dict, list[str]]:
+    """`(<header>, the new_hash values>`), one hash per line so the 160 is also a
+    line count of the committed bytes."""
+    recs = [json.loads(line) for line in
+            (SAMPLE_2441 / "calibration-new-hashes.jsonl").read_text(encoding="utf-8").splitlines()
+            if line.strip()]
+    return recs[0]["_header"], [r["new_hash"] for r in recs[1:]]
+
+
+def _stated_n(text: str) -> int:
+    """The largest `n = <int>` the note states — the sample size it claims."""
+    found = [int(m) for m in re.findall(r"\bn = (\d+)", text)]
+    assert found, "the note states no `n = <count>`"
+    return max(found)
+
+
+#: `k/n [= p] … [lo, hi]` on one line: the note's printed proportion and the
+#: interval printed beside it. Lazy gap so each `k/n` binds to its OWN bracket,
+#: which matters on the table row carrying both this note's and the baseline's.
+_KN_INTERVAL = re.compile(r"(\d+)/(\d+)(?:\s*=\s*[\d.]+)?[^\[\n]{0,40}?"
+                          r"\[(\d\.\d{1,3}),\s*(\d\.\d{1,3})\]")
+#: … and the prose form that cites only the bound the ship decision weighs.
+_UPPER_BOUND = re.compile(r"(\d+)/(\d+)[^\[\n]{0,60}?Wilson upper bound (\d\.\d{1,3})")
+#: Half a millipoint: the note prints three decimals, so anything looser than the
+#: rounding itself is a different interval.
+_CI_TOL = 5e-4
+
+
+def _interval_problems(text: str) -> list[str]:
+    """Every printed interval in `text` that `eval.stats.wilson_ci` did not print."""
+    from eval.stats import wilson_ci
+    bad = []
+    for line in text.splitlines():
+        for k, n, lo, hi in _KN_INTERVAL.findall(line):
+            k, n = int(k), int(n)
+            if n == 0 or k > n:
+                bad.append(f"{line.strip()}: {k}/{n} is not a proportion")
+                continue
+            wlo, whi = wilson_ci(k, n)
+            if abs(float(lo) - wlo) > _CI_TOL or abs(float(hi) - whi) > _CI_TOL:
+                bad.append(f"{line.strip()}: printed [{lo}, {hi}] but "
+                           f"wilson_ci({k}, {n}) = ({wlo:.3f}, {whi:.3f})")
+        for k, n, hi in _UPPER_BOUND.findall(line):
+            k, n = int(k), int(n)
+            if n == 0 or k > n:
+                bad.append(f"{line.strip()}: {k}/{n} is not a proportion")
+                continue
+            wlo, whi = wilson_ci(k, n)
+            if abs(float(hi) - whi) > _CI_TOL:
+                bad.append(f"{line.strip()}: upper bound {hi} but "
+                           f"wilson_ci({k}, {n})[1] = {whi:.3f}")
+    return bad
+
+
+#: "this note/CI/sample … clears/arms/authorises … the bar/gate/mode", in that
+#: order, in a sentence that does not negate it. The note has to say a great deal
+#: about arming in order to say it does not authorize arming, so the shape that
+#: is actually dangerous is an affirmative clause with the note as its subject.
+_ARMING_CLAIM = re.compile(
+    r"(?:this|these)\s+(?:note|ci|sample|measurement|numbers?)|the\s+ci",
+    re.I)
+
+#: … and the dangerous predicate, as whole words. "arming" is an OBJECT word
+#: ("clears the arming bar"), never a verb here, or every honest sentence that
+#: names the bar reads as a claim to have crossed it.
+_ARMING_TAIL = re.compile(
+    r"[^.!?\n]{0,50}?\b(?:clears?|arms|armed|authoriz\w*|justif\w*|satisfies?|meets?)\b"
+    r"[^.!?\n]{0,50}?(?:arming|bar|gate|mode|threshold)", re.I)
+_NEGATION = re.compile(r"\b(?:not|never|nor|nothing|without)\b", re.I)
+
+
+def _affirmative_arming_claims(text: str) -> list[str]:
+    """Every sentence that credits the note/CI/sample with clearing the bar.
+
+    The note must name the bar to explain why it does not clear it, so the shape
+    worth refusing is an AFFIRMATIVE clause with the note as its subject and an
+    un-negated clearing verb in front of an arming object.
+    """
+    out = []
+    # `.**` ends a bolded lead-in, so the split swallows trailing stars too.
+    for chunk in re.split(r"(?<=[.!])\*{0,2}\s+|\n", text):
+        if _NEGATION.search(chunk) or not _ARMING_CLAIM.search(chunk):
+            continue
+        tail = chunk[_ARMING_CLAIM.search(chunk).end():]
+        if _ARMING_TAIL.search(tail):
+            out.append(" ".join(chunk.split()))
+    return out
+
+
+# ── clause 1: the note states n, the labeler, the seed, the window, the path ──
+
+def test_the_2441_note_states_n_the_labeler_the_seed_the_window_and_the_labels():
+    note = _prose(_note2441())
+    # Dated later than the note it supplements, by its own filename and in body.
+    assert NOTE_2441.name > "fact-write-gate-2026-09-25.md", NOTE_2441.name
+    assert datetime.date.fromisoformat(
+        re.search(r"fact-write-gate-(\d{4}-\d{2}-\d{2})", NOTE_2441.name).group(1)) \
+        > datetime.date(2026, 9, 25)
+    assert _stated_n(note) >= 60, _stated_n(note)
+    # The control for that parse: the same reader reading a smaller n says so.
+    assert _stated_n("scored at **n = 12** beside n = 3") == 12
+    # Seed, and the seed the committed draw actually carries, are the same number.
+    assert f"seed {SEED_2441}" in note, note[:400]
+    assert _sample_meta()["seed"] == SEED_2441
+    # The window sampled, stated as a range and matching the committed rows.
+    assert "2026-09-26 to 2026-10-08" in note
+    assert _sample_meta()["frame_window"] == ["2026-09-26", "2026-10-08"]
+    # The labeler, by name, and named as not djev.
+    assert "Lloyd labelled this sample" in note
+    assert "SM_20261008_220449" in note
+    assert "djev as labeler because djev is the system under test" in note
+    # The label file it was scored from, and the committed copy of those bytes.
+    assert "~/lloyd-data/eval/2441/labels.txt" in note
+    assert "eval/measurements/fact-write-gate-2026-10-08/labels.txt" in note
+    for name, sha in _sample_meta()["sha256"].items():
+        assert sha in note, (name, sha)
+
+
+def test_the_committed_sample_is_the_size_the_note_claims_and_every_row_is_labelled():
+    # The note's `n` is a claim about bytes in this repo, not about prose: a row
+    # dropped from the extract, or left unlabelled, moves n and reddens this.
+    rows, labels = _sample2441(), _labels2441()
+    assert len(rows) == _sample_meta()["n"] == _stated_n(_prose(_note2441())) >= 60
+    assert sorted(labels) == sorted(r["row"] for r in rows) == list(range(len(rows)))
+    assert set(labels.values()) <= set("ESPD")
+    # Every row is the shape the label is asked about: a new fact and an existing
+    # one it would have superseded, from the log's own `target`/`candidates`.
+    assert all(r["verdict"] == "update" and r["fact"] and r["target"]["fact"] for r in rows)
+    assert all(r["fact"] != r["target"]["fact"] for r in rows)
+    assert len({r["new_hash"] for r in rows}) == len(rows), "the sample holds a repeat row"
+    # And the committed bytes are the bytes the note says it scored.
+    import hashlib
+    for name, sha in _sample_meta()["sha256"].items():
+        assert hashlib.sha256((SAMPLE_2441 / name).read_bytes()).hexdigest().startswith(sha)
+
+
+# ── clause 2: every printed interval is the one eval.stats.wilson_ci prints ───
+
+def test_every_wilson_interval_the_note_prints_is_the_one_eval_stats_prints():
+    note = _note2441()
+    # Both named measurements are there, as k/n plus an interval, before the scan.
+    # In the fenced block the labels read as the scorer prints them; in the table
+    # the same two measurements carry a pipe-escaped label and a bolder value, so
+    # the separator between label and number is matched loosely on purpose.
+    scored = re.findall(r"(UPDATE safe \(E\|P\)|false supersede \(S\|D\))"
+                        r"[^\d\n]{1,10}(\d+/\d+) = (\d\.\d{3}) \[(\d\.\d{3}), (\d\.\d{3})\]",
+                        note)
+    assert {m[0] for m in scored} == {"UPDATE safe (E|P)", "false supersede (S|D)"}, scored
+    assert not _interval_problems(note), _interval_problems(note)
+    # The scan is an instrument, not a shrug: it fires on a bound that moved.
+    assert _interval_problems("UPDATE safe (E|P):      60/60 = 1.000 [0.940, 0.999]")
+    assert _interval_problems("false supersede (S|D):  0/60 = 0.000 [0.000, 0.160]")
+    assert _interval_problems("the old figure was 0/12, Wilson upper bound 0.281")
+    assert not _interval_problems("UPDATE safe (E|P):      60/60 = 1.000 [0.940, 1.000]")
+
+
+def test_the_note_numbers_are_what_the_shipped_scorer_prints_over_the_committed_bytes():
+    """The seam: `eval/run_fact_write_gate_eval.py score` runs as a subprocess over
+    the committed extract, and the note has to quote its output line for line. The
+    CIs in the note are therefore the scorer's, not the note author's arithmetic."""
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "eval" / "run_fact_write_gate_eval.py"), "score",
+         "--decisions", str(SAMPLE_2441 / "decisions.jsonl"),
+         "--labels", str(LABELS_2441)],
+        capture_output=True, text=True, timeout=300)
+    assert proc.returncode == 0, proc.stderr[-800:]
+    printed = {}
+    for label in ("UPDATE safe (E|P):", "false supersede (S|D):"):
+        line = next((ln for ln in proc.stdout.splitlines() if ln.startswith(label)), None)
+        assert line, f"{label!r} missing from:\n{proc.stdout}"
+        quoted = next((ln for ln in _note2441().splitlines() if ln.startswith(label)), None)
+        assert quoted, f"the note quotes no {label!r} line"
+        printed[label] = " ".join(line.split())
+        assert " ".join(quoted.split()) == printed[label], (quoted, line)
+    # And the scorer's numerator and denominator are the labels' own tally, so the
+    # line the note quotes is a reading of these bytes, not a pasted number.
+    labels = _labels2441()
+    n = len(labels)
+    safe = sum(1 for lab in labels.values() if lab in "EP")
+    false_sup = sum(1 for lab in labels.values() if lab in "SD")
+    assert f" {safe}/{n} = " in printed["UPDATE safe (E|P):"], (safe, n, printed)
+    assert f" {false_sup}/{n} = " in printed["false supersede (S|D):"], (false_sup, n, printed)
+    assert {k: sum(1 for lab in labels.values() if lab == k) for k in "ESPD"} \
+        == {"E": 5, "S": 0, "P": 55, "D": 0}, labels
+    assert "**55 P, 5 E, 0 S, 0 D.**" in _prose(_note2441())
+
+
+# ── clause 3: labels from log rows (no replay), and the calibration overlap ───
+
+def test_the_note_records_that_the_labels_came_from_log_rows_so_no_replay_ran():
+    prose = _prose(_note2441())
+    for phrase in ("the gate log's own `fact`", "`target.fact` / `candidates[0].fact`",
+                   "no replay and no `.backup` store copy were needed",
+                   "`cmd_score` opens only `--decisions` and `--labels`",
+                   "which only `replay` reaches"):
+        assert phrase in prose, phrase
+    # The claim that djev was asked nothing is a claim about the rows, checked:
+    # the frame is every row the gate asked, so an un-asked row could not carry
+    # a verdict at all — and the note says so rather than leaving it implied.
+    assert all(r["asked"] for r in _sample2441())
+    assert "djev was not asked a single question for this note" in prose
+
+
+def test_the_stated_calibration_overlap_is_re_derivable_from_the_committed_bytes():
+    """The note's overlap figure recomputed through `app.kg_store.text_hash` — the
+    store's own key — over the committed rows against the committed calibration
+    hashes. A sample drawn off the set the cutoffs were tuned on is not held out,
+    so the figure the note quotes has to survive being re-derived."""
+    cal, hashes = _calibration()
+    assert len(hashes) == len(set(hashes)) == cal["n_distinct_new_hash"] == 160, cal
+    assert cal["source"] == "~/lloyd-data/eval/1487/pairs.json" and cal["field"] == "new_hash"
+    rows = _sample2441()
+    known = set(hashes)
+    overlap = {r["row"] for r in rows if kg_store.text_hash(r["fact"]) in known}
+    assert overlap == {r["row"] for r in rows if r["in_calibration"]}
+    assert overlap == set(_sample_meta()["calibration_overlap_rows"])
+    found = re.search(r"\*\*(\d+) of the (\d+)\*\* sampled new facts", _note2441())
+    assert found, "the note states no `**N of the M** sampled new facts` overlap"
+    assert (int(found.group(1)), int(found.group(2))) == (len(overlap), len(rows)), found.groups()
+    assert cal["hash_function"].startswith("app.kg_store.text_hash"), cal["hash_function"]
+
+
+# ── clause 4: both 09-25 baselines, quoted as they read there today ───────────
+
+def test_the_note_sits_beside_both_09_25_baselines_quoted_as_they_read_there():
+    prose, baseline = _prose(_note2441()), _prose(BASELINE_NOTE.read_text(encoding="utf-8"))
+    # Quoted here…
+    assert "0/12, Wilson upper bound 0.243" in prose
+    assert "3/3 [0.438, 1.0]" in prose
+    # …and quoted the way the 09-25 note actually writes them, so the "as they read
+    # today" half of the clause is checked against the source rather than memory.
+    assert "0/12, Wilson upper bound 0.243" in baseline
+    assert "([0.438, 1.0])" in baseline
+    # The two are different measurements, and the note says so instead of merging
+    # them into one "n=12 UPDATE-safe" figure that was never taken.
+    assert "they are not the same\n" in _note2441() or "they are not the same measurement" in prose
+    for words in ("neither is replaced by the row above it", "this note supplements both"):
+        assert words in prose, words
+    assert "0.243 at n=12 becomes 0.060 at n = 60" in prose
+
+
+# ── clause 5: the close names measurement (b) and authorizes nothing ─────────
+
+def test_the_close_completes_measurement_a_only_and_names_the_untaken_measurement_b():
+    prose = _prose(_note2441())
+    assert "## What this does and does not authorize" in prose
+    assert "**two measurements plus a" in prose and "decision**" in prose
+    assert "completes measurement (a) only" in prose
+    for words in ("eval/fact_write_gate_snapshot.py", "run_memory_eval.py --fact-snapshot",
+                  "`knowledge_update`", "Alan's explicit ship decision", "**not taken**"):
+        assert words in prose, words
+    # The half the CI cannot do: a clean interval at n = 60 still says nothing
+    # about (b), and the note is required to say that out loud.
+    assert "no paired run is on record" in prose
+    # And the fence is still standing where the note says it is: no config value
+    # moved, and the round-facing refusal is a real one.
+    assert _config()["knowledge_graph"]["write_gate"]["mode"] == "noop"
+    assert "test_a_round_cannot_arm_the_fact_write_gate" in prose
+
+
+def test_the_note_arming_scan_fires_only_on_an_affirmative_claim():
+    note = _note2441()
+    assert not _affirmative_arming_claims(note), _affirmative_arming_claims(note)
+    # The control, or the scan above is a scan that matches nothing.
+    assert _affirmative_arming_claims("This CI now clears the arming bar for the gate.")
+    assert _affirmative_arming_claims("The CI satisfies the bar.")
+    # Negated, the same shape is exactly what the note is allowed to say.
+    assert not _affirmative_arming_claims("This note does not authorize flipping the mode.")

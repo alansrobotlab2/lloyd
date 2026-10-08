@@ -1,0 +1,1 @@
+{"asked": 60, "calibration_overlap_rows": [], "frame_update_rows": 644, "frame_window": ["2026-09-26", "2026-10-08"], "log_path": "~/lloyd-data/_pipeline/vault-derived/fact-write-gate.jsonl", "log_rows_as_of_2026_10_08": 25123, "n": 60, "seed": 2441, "sha256": {"decisions.jsonl": "c4e83b627cbba064", "labels.txt": "743efc8349da8f71"}, "verdicts": {"update": 60}}
