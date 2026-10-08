@@ -31,9 +31,11 @@ what it must leave alone in THIS file is pinned below.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -45,6 +47,7 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from app.paths import DATA_ROOT  # noqa: E402
 from scripts.maintenance import qmd_index_maintenance as m  # noqa: E402
 
 # A template/live pair in the shape #1298 was filed about: `facts` kept only by
@@ -2351,6 +2354,246 @@ def test_the_code_reference_hold_still_fires_beside_a_keep_list(monkeypatch, tmp
     assert "source" not in held["index.sqlite.bak-m"] and "reason" not in held[
         "index.sqlite.bak-m"], "a hold from a measurement must not borrow the provenance "\
         "fields that mean a person asked for it"
+
+
+# ─────── #2420 clauses 1 and 3, over the pile the loss actually happened to ───────
+#
+# The block above proves the keep-list works: on a synthetic `bak-a`/`bak-z`/`bak-m` pile, through
+# `main()`, with a delete that really runs. The two claims below name a real directory, and neither
+# had an artifact behind it. Clause 3 says the plan with nothing written is the plan the rule made
+# *before this feature existed*, and commit `1f25736c` recorded that figure as measured at
+# `/tmp/kl2420/base.py` — a file this box no longer holds, so the equality it states cannot be
+# re-run by anybody. The same round's outcome cited
+# `test_the_live_default_reads_the_one_path_the_nightly_job_uses` for the location claim, and
+# no node of that name exists in this file, so nothing pinned that the file a person is told to
+# write is the file the default plan opens. A keep-list at the wrong path is the original failure
+# wearing a hat: the ruling exists, the 05:00 run never sees it, the copy goes. Both claims are
+# re-derived here from bytes the repository holds — the pre-change module out of the object store,
+# the pile out of the committed 2026-10-03 witness. No real candidate's name is written in this
+# block: the names come out of the witness's bytes, for the reason `_measured_backup_names`
+# gives.
+
+#: The last commit in which this script had no keep-list at all. If a later change to the *rule*
+#: makes the comparison below go red, that change moved the rule as well as the keep-list:
+#: re-derive the figures against the witness and raise this rev to the commit before that change.
+#: Never relax the assertion — it is the whole of clause 3.
+PRE_KEEP_LIST = "b8389b2e"
+SCRIPT_REL = "scripts/maintenance/qmd_index_maintenance.py"
+#: The four shapes clause 3 calls "absent or empty".
+NO_KEEP_LIST_DOCS = [None, "", "{}", '{"entries": []}']
+
+
+def _module_at(rev: str, tag: str, tmp_path: Path):
+    """Load this script as committed at `rev`, from the object store, as its own module.
+
+    `git show` rather than a working copy, because the comparison has to hold inside a linked
+    worktree — where the tree on disk is one round's, not history's — and because anyone can re-run
+    it as one command. An unreachable rev is an assertion failure naming it, never a skip: a
+    differential that quietly stops comparing leaves a clause pinned by a paragraph of prose.
+    """
+    proc = subprocess.run(["git", "-C", str(ROOT), "show", f"{rev}:{SCRIPT_REL}"],
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, (
+        f"{SCRIPT_REL} as committed at {rev} is not reachable in this clone "
+        f"({proc.stderr.strip()[:160]}), so clause 3 has no pre-feature half to compare against")
+    src = tmp_path / f"qmd_pre_{tag}.py"
+    src.write_text(proc.stdout, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location(f"qmd_pre_{tag}", src)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    assert not hasattr(mod, "read_keep_list"), (
+        f"{rev} already reads a keep-list, so it is not the pre-feature baseline: move "
+        "PRE_KEEP_LIST back to the last commit without one")
+    return mod
+
+
+def _plan_pair(tmp_path: Path, keep_list_doc, with_prior_report: bool) -> dict:
+    """The 2026-10-03 pile built twice — once planned and applied by the pre-change module, once by
+    this one — over a shared empty code tree and a shared report directory.
+
+    Two directories rather than one, because the second half of the comparison runs
+    `apply_stray_retention` in each: a plan that agrees while the deletes disagree is exactly the
+    bug clause 1 exists to keep out, and one shared pile cannot show it. `with_prior_report` is the
+    #2119 bound, and it decides which of the two paths the pile takes: with no earlier report the
+    older copy is *held* on its sidecar evidence, with one it is *planned* and unlinked, so the two
+    parametrizations cover the two ways this rule can end.
+    """
+    rep = json.loads(WITNESS.read_text(encoding="utf-8"))
+    ran_at = datetime.fromisoformat(rep["ran_at"])
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    report_dir = tmp_path / "reflection"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    if with_prior_report:
+        _prior_report(report_dir, ran_at)
+    if keep_list_doc is not None:
+        _keep_list_at(tmp_path, keep_list_doc)
+    out = {"rep": rep}
+    for tag, mod in (("base", _module_at(PRE_KEEP_LIST, "base", tmp_path)), ("now", m)):
+        d = _witness_pile(tmp_path / tag)
+        plan = mod.plan_stray_retention(index=d / "index.sqlite", repo_root=repo,
+                                        report_dir=report_dir)
+        out[f"{tag}_plan"] = plan
+        out[f"{tag}_apply"] = mod.apply_stray_retention(plan, index=d / "index.sqlite")
+        out[f"{tag}_listing"] = _listing(d)
+    return out
+
+
+@pytest.mark.parametrize("with_prior_report", [False, True],
+                         ids=["no-earlier-run", "one-earlier-run"])
+@pytest.mark.parametrize("keep_list_doc", NO_KEEP_LIST_DOCS,
+                         ids=["absent", "blank", "empty-object", "no-entries"])
+def test_with_nothing_written_the_plan_is_the_plan_the_rule_made_before_the_feature(
+        tmp_path, keep_list_doc, with_prior_report):
+    """Clause 3, measured against the code it replaced, not this change's own output.
+
+    #2420 is allowed to change exactly one thing: what a written ruling does. So every figure the
+    pre-change module produced over the pile the 2026-10-03 witness measured — `bak_series`,
+    `kept`, `planned`, `deleted`, `deleted_bytes`, `held`, `held_for_person`, `errors`, and the
+    files left on disk after each side's own `apply_stray_retention` — has to come out of this
+    module too, with the reader in the path and a file sitting where it would be read from. The
+    pre-change module is loaded from the object store (see `PRE_KEEP_LIST`), so the equality is
+    with the old rule and not with the author's memory of it, which is the artifact `1f25736c`
+    did not commit.
+
+    Only the absent shape can be handed to both sides — the pre-change module has no reader, so a
+    written nothing in a file it cannot open would prove nothing about it — which is why the three
+    *shaped* blanks here ride the same comparison as the missing file while the four shapes'
+    `--dry-run` and exit-code behaviour stays pinned beside the acting run in
+    `test_an_absent_or_blank_keep_list_reproduces_the_plan_measured_before_the_feature`.
+    """
+    got = _plan_pair(tmp_path, keep_list_doc, with_prior_report)
+    pile = {e["name"]: e for e in got["rep"]["stray"]}
+    base, now = got["base_plan"], got["now_plan"]
+    shared = ["bak_series", "kept", "planned", "deleted", "deleted_bytes", "held",
+              "held_for_person", "errors"]
+    assert len(base["bak_series"]) == 2, (
+        f"the witness pile is no longer one kept copy and one candidate: {base['bak_series']}")
+    assert {k: base[k] for k in shared} == {k: now[k] for k in shared}, (
+        "a keep-list that nobody wrote moved the rule")
+    assert "keep_list" not in base, "the baseline already had the block this change adds"
+    assert now["keep_list"] == {"path": str(tmp_path / "reflection" / m.KEEP_LIST_NAME),
+                                "entries": 0, "held": [], "files": [], "error": None}, (
+        f"the new block is not inert for {keep_list_doc!r}: {now['keep_list']}")
+    older = [n for n in base["bak_series"] if n not in base["kept"]][0]
+    if with_prior_report:
+        assert base["planned"] == [older] and base["held"] == [], (
+            "with an earlier report behind it the pile has to offer the older copy for deletion, "
+            f"or this case is comparing two no-ops: {base['planned']} {base['held']}")
+        at_risk = sum(pile[older + s]["bytes"] for s in ("", "-wal", "-shm"))
+        for tag in ("base", "now"):
+            assert got[f"{tag}_apply"]["deleted"] == [older], (tag, got[f"{tag}_apply"])
+            assert got[f"{tag}_apply"]["deleted_bytes"] == at_risk, (tag, got[f"{tag}_apply"])
+        assert got["base_listing"] == got["now_listing"] == _listing(tmp_path / "now" / "qmd")
+        assert older not in got["now_listing"], "the planned copy was not actually freed"
+    else:
+        assert base["planned"] == [] and len(base["held"]) == 1, (
+            "with no earlier report the pile has to exercise the sidecar hold, or this case "
+            f"proves nothing about it: {base['planned']} {base['held']}")
+        assert base["held"][0]["name"] == older, base["held"]
+        for tag in ("base", "now"):
+            assert got[f"{tag}_apply"]["deleted"] == [], (tag, got[f"{tag}_apply"])
+        assert got["base_listing"] == got["now_listing"], (
+            "a held file has to still be on disk, byte for byte, in both rules")
+
+
+def test_a_seeded_glob_holds_the_copy_the_rule_was_about_to_unlink_on_the_pile_it_struck(
+        monkeypatch, tmp_path):
+    """The item's own verification sentence, run over the pile the loss actually happened to.
+
+    "A seeded keep-list naming `index.sqlite.bak-*` must yield `planned: []` on the same directory
+    where today's code plans an unlink" names one directory: the 2026-10-03 pile, with an earlier
+    run's report behind it so the #2119 releases let the older copy be planned at all. The half
+    that plans the unlink is the pre-change module's verdict, so that is the side which has to
+    plan the delete; the current one then runs as a real acting `main()` — the nightly path, with
+    the report written and the delete armed — and the directory has to come out of it
+    file-for-file
+    unchanged, with every held name reported by the reason that held it.
+    """
+    rep = json.loads(WITNESS.read_text(encoding="utf-8"))
+    ran_at = datetime.fromisoformat(rep["ran_at"])
+    d = _witness_pile(tmp_path)
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    _prior_report(tmp_path / "reflection", ran_at)
+    base = _module_at(PRE_KEEP_LIST, "namer", tmp_path)
+    base_plan = base.plan_stray_retention(index=d / "index.sqlite", repo_root=repo,
+                                          report_dir=tmp_path / "reflection")
+    assert base_plan["planned"] and base_plan["held"] == [], (
+        "this node is only worth running where the pre-change rule planned a delete: "
+        f"{base_plan['planned']} {base_plan['held']}")
+    planned = base_plan["planned"][0]
+    before = _listing(d)
+    reason = "the only pre-wipe copies left on this box"
+    _keep_list_at(tmp_path, {"entries": [{"glob": "index.sqlite.bak-*",
+                                          "reason": reason, "source": "#2420"}]})
+    sr = _retention_run(monkeypatch, tmp_path, d, repo, dry_run=False)["stray_retention"]
+    assert sr["planned"] == [], (
+        f"the rule before this change planned {planned} and a seeded glob has to stop it: "
+        f"{sr['planned']}")
+    assert sr["deleted"] == [] and sr["deleted_bytes"] == 0, sr
+    assert _listing(d) == before, "an acting run holding a keep-list copy still deleted something"
+    assert sr["keep_list"]["entries"] == 1 and sr["keep_list"]["held"] == [planned], sr
+    assert sr["kept"] == base_plan["kept"], (
+        "the newest copy is kept by rule 1, not by the keep-list: the two reasons stay apart")
+    assert sr["errors"] == [], sr
+    held = {h["name"]: h for h in sr["held_for_person"]}
+    for name in (planned, planned + "-wal", planned + "-shm"):
+        assert name in before, f"{name} is not in the pile the committed witness measured"
+        assert name in held, f"{name} survived with no entry saying why: {sorted(held)}"
+        assert held[name]["reason"] == reason and held[name]["source"] == "#2420", held[name]
+
+
+def test_the_keep_list_a_person_writes_is_the_file_the_default_plan_opens(monkeypatch, tmp_path):
+    """The location half of the acceptance: derived, named, and read with no argument passed.
+
+    The contract tells a person to put the rulings in a data file under the pipeline's `reflection`
+    directory, beside the run reports. That is three things that can each silently break and none
+    of them changes what the code does on a box that already has a keep-list: the name, the
+    directory it is derived from, and the default-argument route from `main()` to the reader. A
+    keep-list at a path only the tests know is the 2026-10-07 failure again — a protection that
+    reads as satisfied and protects nothing — so this pins the literal a person types, that
+    `REPORT_DIR` is `PIPELINE_DIR / "reflection"` under the *data* root rather than the code tree,
+    and that a `plan_stray_retention()` called with no path arguments at all consults that file
+    and holds what it names.
+
+    The data-root leg is asserted as an identity rather than as an absolute path on purpose:
+    `app.paths` anchors to whichever checkout imported it, so a literal here would be a claim about
+    one machine and would read as green inside a round's worktree, where the directory is empty.
+    """
+    assert m.KEEP_LIST_NAME == "qmd-stray-keep-list.json", (
+        "this literal is the name a person is told to write; renaming it silently un-honours "
+        "every keep-list already on disk, and nothing else in the run would say so")
+    assert not m.KEEP_LIST_NAME.startswith(m.REPORT_PREFIX)
+    assert m.REPORT_DIR == m.PIPELINE_DIR / "reflection", (
+        "the keep-list moved away from the directory the acceptance names")
+    assert m.PIPELINE_DIR == DATA_ROOT / "_pipeline", (
+        "the rulings file has to live under the data root, not the code tree: a round's worktree "
+        "is empty of it, and a ruling read from there is a ruling nobody wrote")
+    assert str(m.REPORT_DIR).endswith(str(Path("_pipeline") / "reflection")), m.REPORT_DIR
+    assert m.keep_list_path() == m.REPORT_DIR / m.KEEP_LIST_NAME
+
+    d = _three_bak_fixture(tmp_path / "pile")
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(m, "REPO_ROOT", repo)
+    monkeypatch.setattr(m, "INDEX", d / "index.sqlite")
+    monkeypatch.setattr(m, "REPORT_DIR", tmp_path / "reflection")
+    _keep_list_at(tmp_path, {"entries": [{"name": "index.sqlite.bak-z",
+                                         "reason": "the copy I am still reading",
+                                         "source": "#2420"}]})
+    plan = m.plan_stray_retention()      # no path argument: this is the call the nightly job makes
+    assert plan["keep_list"]["path"] == str(tmp_path / "reflection" / m.KEEP_LIST_NAME), (
+        "the default reader opened something other than the file the contract names: "
+        f"{plan['keep_list']['path']}")
+    assert plan["keep_list"]["held"] == ["index.sqlite.bak-z"] and plan["planned"] == [
+        "index.sqlite.bak-m"], plan
+    assert plan["kept"] == ["index.sqlite.bak-a"], plan
+    held = {h["name"]: h for h in plan["held_for_person"]}
+    for name in ("index.sqlite.bak-z", "index.sqlite.bak-z-wal", "index.sqlite.bak-z-shm"):
+        assert held[name]["reason"] == "the copy I am still reading", held.get(name)
+        assert held[name]["source"] == "#2420", held.get(name)
 
 
 # ── #1897: a fired capacity verdict escalates instead of riding a green run ──
