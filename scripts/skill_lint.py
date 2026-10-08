@@ -463,14 +463,16 @@ _TEMPLATE_PATHS = re.compile(r"[<>{}*]|\.\.\.|path/to|exact/path|example|placeho
 # `tests/test_system_health_check_frontend_endpoint.py` (item #2129, the
 # successor #1417's retired entry named for the owed scope), which is also why
 # no entry for it is re-added below — an allowance for a file in the checkout
-# excuses nothing and keeps the debt alive on paper.
+# excuses nothing and keeps the debt alive on paper. #2422 retired the third entry the
+# same way on 2026-10-08: `tests/test_health_skill_docs_live_fleet.py` has never existed
+# in this repo, the skill line that cited it asserted a re-check of the supervisor table
+# that has never run, and that line is now gone — so the entry had no citation left to
+# excuse, and an entry nobody cites is the drift this ledger exists to record honestly.
 KNOWN_ABSENT_SCRIPTS: dict[str, str] = {
     "scripts/memory/extract-session-log.py":
         "historical-knowledge-refresh; superseded by extract-transcript.py",
     "scripts/memory/next-gen-memory/context_bundle.py":
         "memory-path-scoping; directory removed with the next-gen-memory scripts",
-    "tests/test_health_skill_docs_live_fleet.py":
-        "system-health-check; test never landed",
 }
 
 

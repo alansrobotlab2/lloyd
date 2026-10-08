@@ -529,6 +529,24 @@ def _truncated(cand: str, tail: str = "") -> bool:
 #: `_dotted_module_ref` now proves before it lets a dotted reference go. A dotted
 #: reference whose module or member really is absent still arrives here as a red
 #: row, so nothing is exempted by writing its shape off.
+#:
+#: Two `system-health-check` rows left on 2026-10-08 (#2422), together with the
+#: 9-line keep-comment that sat between them. That comment had done useful work: it
+#: recorded why `tests/test_system_health_check_frontend_endpoint.py` left this set on
+#: 2026-10-03 (#2129) — the path is in the checkout now, and an allowance for a file
+#: that exists is how a ledger starts lying about what is owed — and then declared
+#: that the two rows it sat between stayed, "because those paths are still absent and
+#: still cited, at `check-components.md:57` and `:61`". #2422 deleted those two lines:
+#: the first asserted a re-check of the supervisor table by a test file this repo has
+#: never contained, and the second named a file that does not exist either. With the
+#: citations gone each row was excusing nothing, which is the exact state that
+#: comment's own closing sentence said a row must not outlive. The reason this
+#: deletion is safe to make in a set nothing counts is that the same retirement is
+#: pinned from the enforced side. In the ledger's own test file,
+#: `tests/test_fact_identity_one_action_one_fact.py`, the node
+#: `test_the_absent_script_ledger_holds_exactly_the_cited_debts`
+#: asserts the exact `KNOWN_ABSENT_SCRIPTS` mapping, so the retired entry cannot
+#: come back without a red node somewhere.
 PATH_KNOWN_UNFIXED: set[str] = {
     "skills/ai-engineer-monitor/SKILL.md::vault:autonomy/75-ai-engineer-youtube-monitor.md",
     "skills/documentation-digester/SKILL.md::repo:agent-services/llm/llama.cpp",
@@ -545,17 +563,6 @@ PATH_KNOWN_UNFIXED: set[str] = {
     "skills/plan-mode-authoring/SKILL.md::repo:web/src/components/TagChip.tsx",
     "skills/poisoned-worker-troubleshoot/SKILL.md::vault:logs/autonomy_runs/run_",
     "skills/powerpoint/SKILL.md::repo:scripts/office/soffice.py",
-    "skills/system-health-check/SKILL.md::repo:tests/test_health_skill_docs_live_fleet.py",
-    # `tests/test_system_health_check_frontend_endpoint.py` left this set on 2026-10-03
-    # with the node that landed it (#2129). The path is in the checkout now, so the
-    # allowance excused nothing: an allowance for a file that exists is how a ledger
-    # starts lying about what is owed, and this row was already dead before the file
-    # landed — the skill's only citation of it lost its `~/lloyd/` anchor in the
-    # 2026-09-23 edit, which is the state
-    # `test_the_absent_script_ledger_only_carries_drift_still_cited` catches. Its two
-    # siblings (the lines this comment sits between) stay: those paths are still absent
-    # and still cited, at `check-components.md:57` and `:61`.
-    "skills/system-health-check/SKILL.md::repo:tests/test_system_health_check_skill_fleet.py",
     "skills/voice-clone-sample/SKILL.md::repo:references/ed/ed_001.wav",
     "skills/voice-clone-sample/SKILL.md::repo:references/ed/ed_002.wav",
     "skills/voice-clone-sample/SKILL.md::repo:references/ronan/ronan_001.wav",

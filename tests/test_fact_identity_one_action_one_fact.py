@@ -509,7 +509,8 @@ def test_no_shipped_skill_names_an_absent_repo_script():
 def test_the_absent_script_ledger_only_carries_drift_still_cited():
     """A named allowlist inside an enforced rule needs a retirement route.
 
-    `KNOWN_ABSENT_SCRIPTS` is three entries as of 2026-09-23 — the exact set is
+    `KNOWN_ABSENT_SCRIPTS` is two entries as of 2026-10-08 (three until #2422
+    retired the third) — the exact set is
     pinned by `test_the_absent_script_ledger_holds_exactly_the_cited_debts`
     below, not by this sentence. Every one must still be cited
     by a shipped skill, or the entry is a stale allowance: the day a skill drops
@@ -555,6 +556,15 @@ def test_the_absent_script_ledger_holds_exactly_the_cited_debts():
     retirement of `tests/test_system_health_check_frontend_endpoint.py` (the
     skill's lone citation lost its `~/lloyd/` anchor, so the entry was allowing
     a path nobody cited) is the route out, pinned by the same node.
+
+    #2422 took that route a second time on 2026-10-08, and its case is the clean
+    one: `tests/test_health_skill_docs_live_fleet.py` has never existed anywhere in
+    this repo (`git cat-file -e HEAD:tests/test_health_skill_docs_live_fleet.py`
+    exits 128 and `git log --all --` that path prints nothing), the
+    `system-health-check` line citing it claimed in the present tense that it
+    re-checked the supervisor table on every suite run, and #2422 deleted the line.
+    An entry whose citation is gone excuses nothing, so two entries is the settled
+    set here, not a state waiting on #2129.
     """
     skill_lint = _load_skill_lint()
     assert skill_lint.KNOWN_ABSENT_SCRIPTS == {
@@ -562,8 +572,6 @@ def test_the_absent_script_ledger_holds_exactly_the_cited_debts():
             "historical-knowledge-refresh; superseded by extract-transcript.py",
         "scripts/memory/next-gen-memory/context_bundle.py":
             "memory-path-scoping; directory removed with the next-gen-memory scripts",
-        "tests/test_health_skill_docs_live_fleet.py":
-            "system-health-check; test never landed",
     }, ("the absent-path allowlist changed shape; every entry must name a drift "
         f"the rule actually found, and #1417 retired "
         f"'tests/test_system_health_check_frontend_endpoint.py' precisely because "
