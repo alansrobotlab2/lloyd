@@ -1,0 +1,42 @@
+[Unit]
+Description=Lloyd persistence-arm window (ten reps of the three persistence arms, dispatch held)
+Documentation=file:///home/alansrobotlab/lloyd/eval/run_persistence_arms.sh
+# Why a unit and not an autonomy task: a pool-dispatched run of this window is
+# impossible by construction. The driver holds dispatch and then refuses while any
+# queue row is in flight, and a dispatched run IS such a row -- `in_flight()` reads
+# the `claimed`/`running` depth off the pool status route
+# (eval/persistence_arms.py:190-207, IN_FLIGHT_STATES at :89), and that depth is
+# `SELECT source, state, COUNT(*) FROM queue GROUP BY source, state` with no
+# exclusion of the calling row (workers/queue.py:1103-1111). So a pool run burns the
+# 900 s drain and exits 2 every time it tries. A pytest round cannot run it either:
+# tests/conftest.py refuses against the production tree, and the window needs the
+# live aggregator and the engine. systemd is the caller that is neither (#2428).
+#
+# Deliberately NO LLOYD_CANARY_ROWS and NO LLOYD_CANARY_REPORT here. Unset is what
+# leaves every rep on the tracked eval/measurements/injection-canary/rows.jsonl --
+# the file the leak-rate denominator behind #2194's owed entries is read from. A
+# window writing a scratch path measures itself into nowhere.
+
+[Service]
+Type=oneshot
+Environment=HOME=%h
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Exec'd directly, not through `bash -c`, and this unit POSTs nothing itself: the
+# hold is taken by the driver's own PoolPause, the one whose resume refuses to lift
+# the automod promoter's hold together with the operator's
+# (workers/pool.py:716-728). `exec` inside the wrapper keeps systemd's SIGTERM
+# landing on the process that owns that resume rather than on a shell behind it.
+#
+# Wall clock the ten reps below are expected to occupy: thirteen minutes of engine
+# per rep -- the driver's own figure for one `run` invocation of the three arms
+# (eval/persistence_arms.py, `canary_cmd`) -- times ten, plus up to `--drain-wait`'s
+# 900 s for the queue to quiet and the closing grade: about 2 h 30 m normally, with
+# ~2 h 45 m the worst case a full drain allows.
+ExecStart=/home/alansrobotlab/lloyd/eval/run_persistence_arms.sh 10
+# So that budget has somewhere to run. The user manager's default start timeout on
+# this box is 90 s (`systemctl --user show default` reads TimeoutStartUSec=1min 30s),
+# which would SIGTERM the window inside its first rep -- the driver would resume
+# dispatch on the way out, so no hold would leak, but the timer would have produced
+# zero rows and looked like a passing run. 4 h is margin over the worst case above,
+# not an expectation.
+TimeoutStartSec=4h

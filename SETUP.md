@@ -1363,6 +1363,24 @@ fallen below half of `_pipeline/memory-graph/graph-baseline.json`. A snapshot
 taken after a wipe is worse than none: it rotates the last good one out of the
 window and records the damage as normal.
 
+### The persistence-arm window
+
+```bash
+systemctl --user enable --now lloyd-persistence-window.timer   # 10 persistence-arm reps, daily 02:10
+```
+
+`lloyd-persistence-window.service` is tracked beside it and lands through
+`agent-services/setup/install-services.sh` the same way, so it only needs enabling. It
+runs `eval/run_persistence_arms.sh 10` — ten reps of the three persistence arms with
+worker dispatch held — because nothing in the pool can: the driver refuses to start its
+reps while any queue row is in flight, and a job dispatched to run the window *is* that
+row, so it burns the 900 s drain and exits 2 every time. A pytest round cannot run it
+either (`tests/conftest.py` refuses the production tree, and the window needs the live
+aggregator and engine), so systemd is the invoker; the unit's own header carries the
+mechanism. 02:10 is the one gap wide enough for the ~2 h 30 m the ten reps need — after
+the nightly reflection chain, ahead of the 04:00 health report, the 05:00 qmd index
+maintenance, the 05:30 graph backup and the 06:00 retrieval eval.
+
 ---
 
 ## Part 11b — Desktop computer use

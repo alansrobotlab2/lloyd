@@ -1,0 +1,32 @@
+[Unit]
+Description=Nightly Lloyd persistence-arm window (#2428)
+
+[Timer]
+# 02:10 local. The one gap on this box wide enough for the ~2 h 30 m the window
+# needs -- ten reps at the driver's thirteen minutes of engine each
+# (eval/persistence_arms.py, `canary_cmd`), plus the drain and the grade. Chosen
+# against the schedule the precedent lloyd-qmd-cleanup.timer documents and against
+# the run store's own history (workers.db, populated since 2026-09-22):
+#   * AFTER the chain that precedent calls the 22:00-04:00 extraction/classifier
+#     write window, which measures out at 22:00 (#38 reflection-signals, #42
+#     knowledge-analysis), 00:00 (#58 skill-consolidation) and 01:00 (#39
+#     knowledge-write, #56 trajectory-extraction). A straggler still running at
+#     02:10 is what the 900 s drain exists to wait for.
+#   * BEFORE the morning measurements: #60 knowledge-health-report at 04:00, #81
+#     qmd-index-maintenance at 05:00, the 05:30 graph backup, and #82
+#     nightly-retrieval-eval at 06:00 -- itself an engine-heavy measurement, so a
+#     window running beside it would contaminate the one or the other.
+#   * IN the unoccupied band: user turns across 21 days of chat transcripts number
+#     1 between 01:00 and 06:59, against 20 in the 08:00 hour alone, and these reps
+#     want the primary to themselves for their whole duration.
+# What this hour does graze, and why that is survivable: the 04:17 cert renew is a
+# seconds-long tailscale mint with no engine in it, and #60's 04:00 slot queues
+# behind the dispatch hold and runs within the hour of it -- the hold defers that
+# job, this timer does not skip it.
+# Jitter like the precedent's, so the start never lands on the hourly snapshot.
+OnCalendar=*-*-* 02:10:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
