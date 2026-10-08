@@ -381,9 +381,12 @@ def test_the_curation_skill_witness_carries_no_ledger_cap_at_the_topic_ceiling()
     # of `wc -c` and a char count would fail on a file nobody truncated. Both figures were
     # measured from the re-frozen fixture itself (`wc -c` and `tr -cd '\n' | wc -c`), which
     # is what #2284 re-freezes it to — a copy of the live skill's text, not a truncation.
-    assert len(raw) == 15_555 and text.count("\n") == 74, (
+    # Re-frozen 2026-10-08 by #2415, which added the §5 rule that a retire pass waits for
+    # every orphan row to be dispositioned and the §4 `orphan rows: <before> → <after>`
+    # field; both figures below are that copy's own, re-measured the same way.
+    assert len(raw) == 17_272 and text.count("\n") == 74, (
         f"{SKILL_WITNESS.name} is {len(raw)} B / {text.count(chr(10))} newlines, not the "
-        "15,555 B / 74 lines of the whole skill file — a partial copy would make the "
+        "17,272 B / 74 lines of the whole skill file — a partial copy would make the "
         "0-hit below a coverage gap rather than a clean result")
     assert "topics/memory-md-ledger" in text and "ledger" in text.lower(), (
         f"{SKILL_WITNESS.name} does not name a ledger, so it is the wrong corpus")
