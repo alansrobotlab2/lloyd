@@ -1,4 +1,7 @@
-"""Task #95's rendered prompt must run the drill and nothing else (#2153 clause 5).
+"""Task #95's rendered prompt must read the published readings and fire nothing.
+
+#2153 clause 5 armed it as a firer; #2432 rewrote both carriers into a reader, and
+this file's pins moved with them.
 
 An autonomy task's markdown body looks like a specification and reaches no run:
 `_build_task_prompt` (`app/autonomy.py:2487`) assembles the silent-run hint, the
@@ -32,13 +35,20 @@ one new stamp wide of red — which is the defect #2229 was filed against — wh
 reading them off a function every runtime write has to go through to reach the
 vault at all is a guarantee the set cannot silently fall behind the engine.
 
-What is pinned is the part that has to be true for the drill to produce a median
-series at all: the command is exact, the exit code is reported rather than
-inferred, `Edit`/`Write` are forbidden, and a `round_hold` refusal (exit 2) reads
-as a valid outcome. That last one is the difference between a daily measurement
-that survives a busy box and one whose red days get ignored — this box runs
-self-mod rounds often enough that a refusal is a normal day, and a control that
-really regressed (exit 1) is the day the task exists for.
+What is pinned is the part that has to be true for a run of this task to report a
+reading at all: the one command is the exact GET of `/api/workers/status`, the block
+it reads is named, `Edit`/`Write` are forbidden, and the summary line the task's own
+acceptance regex grades is spelled out per surface — `n`, `median_seconds` printed
+`-` when null, and the age of the newest `at`. And what is pinned as ABSENT is the
+firing: #2333 moved the trigger onto the pool's maintenance seat
+(`workers/pool.py::_maybe_mitigation_drill`), so the drill command this file used to
+require is now a command a run is refused while a self-mod round holds the pool. All
+five #95 runs recorded in `~/lloyd-data/workers.db` before #2432 are that refusal —
+`sqlite3 "file:~/lloyd-data/workers.db?mode=ro" "select run_id,substr(summary,1,140)
+from runs where task_id='95' order by run_id desc limit 6"` returns five rows, each
+carrying a `"refused"` key naming `round_hold` and an `EXIT=2`, and not one of them
+wrote a reading — so a pin that demanded the old command would have pinned a job
+that cannot do the thing it says.
 """
 from __future__ import annotations
 
@@ -69,15 +79,29 @@ SKILL_FIXTURE = ROOT / "tests/fixtures/mitigation_drill/SKILL.md"
 LIVE_TASK = Path.home() / "obsidian/autonomy/95-mitigation-drill.md"
 LIVE_SKILL = Path.home() / "obsidian/skills/mitigation-drill/SKILL.md"
 
-#: The command the item names, verbatim. `; echo "EXIT=$?"` follows it in both
-#: carriers: the drill exits non-zero on purpose (2 = refused, 1 = a control
-#: failed) and an absorbed exit code is the only way the runner learns it.
-DRILL_COMMAND = "cd ~/lloyd && .venvs/lloyd/bin/python -m scripts.mitigation_drill"
+#: The one action #2432 leaves the run: a read of the block the pool's own
+#: maintenance seat writes. Exact, because the item names it exact and a drifted
+#: host or port is a GET that answers nothing.
+GET_COMMAND = "curl -s http://127.0.0.1:8080/api/workers/status"
+
+#: The two things that must not appear in the delivered prompt as an instruction.
+#: Both name the same script, which is why the check is an absence and not a
+#: substring: `python -m scripts.mitigation_drill` has to survive in the carriers as
+#: the explanation of who writes the numbers it reports, and a grep for the module
+#: alone cannot tell that prose from a step.
+RETIRED_RUNNER_MARKS = ('; echo "EXIT=$?"', "mitigation drill: exit <N>")
+
+#: The one summary line both carriers spell and the task's own `regex` check below
+#: grades, verbatim, placeholders included. Spelled once here so a carrier that
+#: rewords it cannot leave the pattern it is supposed to satisfy green.
+SUMMARY_LINE = ("mitigation drill: session_cancel state=<classification> n=<N> "
+                "median=<S> age=<A> | pool_pause state=<classification> n=<N> "
+                "median=<S> age=<A>")
 
 #: Lines that live in the body and nowhere else. Their absence from the prompt is
 #: the delivery claim; their presence in the file is the control that makes that
 #: absence mean "not delivered" rather than "not written".
-BODY_ONLY_PROSE = ("Why exit 2 is a report and not a failure",
+BODY_ONLY_PROSE = ("Why the reporter reads instead of firing",
                    "Verification after landing")
 
 
@@ -97,83 +121,138 @@ def _checks(task: dict) -> dict[str, list]:
     return out
 
 
-def test_the_rendered_prompt_runs_the_drill_and_reports_the_exit_code():
-    """#2153 clause 5, against the bytes the repo carries.
+def test_the_rendered_prompt_reads_the_published_readings_and_fires_nothing():
+    """#2432 clauses 1 and 4, against the bytes the repo carries.
 
     Rendered rather than grepped: `_build_task_prompt` is the boundary between a
     file a person edits and a prompt a model obeys, and each of these properties
     could hold in the file and still fail to arrive — which is exactly how #47's
-    contradiction-resolution phase went unexecuted for its whole life.
+    contradiction-resolution phase went unexecuted for its whole life. The absence
+    assertions are the point of the node: firing the drill is what every run of this
+    task tried before #2432 and what the round hold refused every time, so a prompt
+    that still instructed it would send the job out to be told no again.
     """
     task, prompt = _render(TASK_FIXTURE, SKILL_FIXTURE)
 
-    assert DRILL_COMMAND in prompt, (
-        "the drill command moved out of the delivered prompt: the run would then "
-        "be told to report a measurement it never took"
+    assert GET_COMMAND in prompt, (
+        "the one action this task has left is a read of the published block, and "
+        "without the exact GET the run has no way to reach it"
     )
-    assert 'echo "EXIT=$?"' in prompt, (
-        "without the absorbed exit code the runner cannot tell exit 2 (refused, "
-        "fine) from exit 1 (a control regressed), which is the whole report"
+    assert ".mitigation" in prompt, (
+        "the endpoint answers with the whole worker-pool status; a prompt that does "
+        "not name the block would have the run report the fleet as the drill"
     )
     assert "Bash" in prompt, "the check below grades `tool_called: Bash`"
     assert "VERBATIM" in prompt and "verbatim" in prompt, (
         "the JSON is the record; a paraphrased run leaves the median unreadable"
     )
-    assert "mitigation drill: exit <N>" in prompt, (
+    assert "mitigation drill: session_cancel state=<classification>" in prompt, (
         "the summary line the acceptance regex grades is no longer spelled out"
     )
     assert "Never call Edit or Write" in prompt, (
         "the read-only rule must reach the runner, not just the reviewer: the "
         "drill script is the only writer of its state file"
     )
+    for retired in RETIRED_RUNNER_MARKS:
+        assert retired not in prompt, (
+            f"{retired!r} is back in the delivered prompt: an exit code belongs to "
+            "a process the run no longer starts, and grading one asks the runner to "
+            "report a number it cannot have"
+        )
 
 
-def test_the_prompt_names_a_round_hold_refusal_as_valid_outcome_not_a_failure():
-    """#2153 clause 5's exit-2 half, and the reason it is worth a node.
+def test_the_drill_survives_as_the_writer_and_never_as_the_run_s_action():
+    """#2432 clause 1's other half: who is allowed to mention the retired command.
 
-    `scripts/mitigation_drill.py`'s `main()` returns 2 when `round_hold` is
-    engaged and no `--wait-free-window` was given — the branch this task's
-    verbatim command takes — and on this box a round or a landing holds the pool
-    often enough that a daily job which called that a failure would be red most
-    weeks. A red the task itself says to ignore is how the one red that matters —
-    exit 1, a control that stopped stopping — gets ignored too.
-
-    (Cited by name, not `file:line`: #2333 added the wait branch to `main()` and
-    any number written here would have moved with it.)
+    `python -m scripts.mitigation_drill` stays in both carriers, because a reader
+    who is told to report numbers and never told who writes them cannot tell a
+    stale series from a live one. What must not survive is it standing for a step.
+    Two marks make that checkable: a refusal sentence, and a `Never` line. In
+    particular ``no `python -m scripts.mitigation_drill``` is not an absence of the
+    command — it is a prohibition that has to name the thing it forbids — so this
+    node asserts the shape around it rather than pretending the string is gone.
     """
     task, prompt = _render(TASK_FIXTURE, SKILL_FIXTURE)
 
-    assert "round_hold" in prompt, (
-        "the refusal is no longer named by the flag that causes it, so a runner "
-        "reading `refused` has nothing to check the report against"
+    assert "is the writer of" in prompt and "the only writer of" in prompt, (
+        "the carriers no longer say who produces these readings, which is the "
+        "difference between a stale series and a dead drill"
     )
-    assert "Exit 2" in prompt and "VALID outcome" in prompt, (
-        "exit 2 is no longer labelled a valid outcome in the delivered prompt"
+    for carrier, text in (("SKILL.md", SKILL_FIXTURE.read_text(encoding="utf-8")),
+                          ("description", str(task.get("description") or ""))):
+        assert "Fire the drill" in text or "Do NOT fire the drill" in text, (
+            f"{carrier} no longer tells the run not to fire the drill itself"
+        )
+    for line in prompt.splitlines():
+        if "python -m scripts.mitigation_drill" in line:
+            assert re.search(r"(?i)writer|\bno\b|not |never|refus", line), (
+                f"a carrier names the drill as a step, not as the writer or a "
+                f"prohibition: {line.strip()!r}"
+            )
+
+
+def test_the_prompt_grades_a_no_op_as_the_finding_and_a_stale_reading_as_a_report():
+    """#2432 clause 4, in the delivered prompt rather than in the body.
+
+    This replaced the node that labelled a `round_hold` refusal a valid outcome.
+    That instruction was only ever a workaround for a task that could not measure
+    what it reported: #2333 moved the trigger to the pool's maintenance seat
+    (`workers/pool.py::_maybe_mitigation_drill`), the refusal moved out of this
+    task's way, and a run that only reads the published block cannot be refused by
+    the hold at all. What has to survive is the discrimination the exit codes used
+    to carry, now keyed on data instead of on a status the run no longer starts:
+    a `no-op` latest classification is the one bad day this task exists to catch,
+    and a never-run or stale block — `mitigation_state.NEVER_RUN`, which is what
+    `read()` answers for a surface with no history — is a fact about the day, not a
+    flake to be refreshed by a second GET.
+
+    A red the task itself is told to ignore is how the one red that matters gets
+    ignored too, which is why both halves are asserted beside each other.
+    """
+    task, prompt = _render(TASK_FIXTURE, SKILL_FIXTURE)
+
+    assert "no-op" in prompt, (
+        "the classification that means a control stopped stopping is no longer "
+        "named in the prompt, so the run has nothing to look at"
+    )
+    assert "CONTROL REGRESSION" in prompt or "control regression" in prompt, (
+        "the no-op is no longer named plainly as a regression: 'looks off' is how "
+        "a dead stop control gets triaged as a bad day"
+    )
+    assert re.search(r"[Cc]ontrol no longer stops|no longer stops what", prompt), (
+        "the prompt no longer says what the regression means — that the control "
+        "does not stop the thing it is supposed to stop"
+    )
+    assert '{"state": "never-run"}' in prompt, (
+        "the exact shape `mitigation_state.read()` returns for no readings is no "
+        "longer spelled out, so a run cannot tell it from a malformed response"
     )
     for phrase in ("not a failure", "not a retry"):
         assert phrase in prompt, f"{phrase!r} is gone from the delivered prompt"
-    assert re.search(r"[Ee]xit 1", prompt), (
-        "exit 1 must still be named as the real finding beside exit 2's "
-        "innocence; the two only mean anything against each other"
+    assert re.search(r"[Nn]ot a finding", prompt), (
+        "a stale or never-run reading must be named a report beside the no-op's "
+        "finding; the two only mean anything against each other"
     )
 
 
-def test_each_carrier_alone_carries_the_command_and_the_read_only_rule():
-    """#2153 clause 5's two carriers, graded separately.
+def test_each_carrier_alone_carries_the_read_and_the_read_only_rule():
+    """#2432 clauses 2, 3 and 4's two carriers, graded separately.
 
     `_build_task_prompt` concatenates the SKILL.md and the description, so a
     union-only assertion cannot tell which of the two holds an instruction, and
-    the one that does not is free to rot. Mutation-probed: deleting
-    `; echo "EXIT=$?"` from `SKILL.md` alone left every union assertion green,
-    because the description still carried it. That matters because the two files
-    are not edited together — the SKILL.md is the file a round rewrites when the
-    drill's behaviour changes, the front-matter `description` is a YAML scalar a
+    the one that does not is free to rot. Mutation-probed under the old protocol:
+    deleting `; echo "EXIT=$?"` from `SKILL.md` alone left every union assertion
+    green, because the description still carried it. That matters because the two
+    files are not edited together — the SKILL.md is the file a round rewrites when
+    the drill's behaviour changes, the front-matter `description` is a YAML scalar a
     person re-wraps to fit the task card, and a protocol that survives in exactly
-    one of them is one careless edit from being in neither. Each carrier
-    therefore has to stand on its own for what makes the run safe and legible:
-    the exact command, the exit code surfaced rather than absorbed, the
-    Edit/Write prohibition, a `round_hold` refusal labelled valid, exit 1 named as
-    the finding, and the summary line the task's own `regex` check matches.
+    one of them is one careless edit from being in neither. Each carrier therefore
+    has to stand on its own for what makes the run safe and legible: the exact GET,
+    the `.mitigation` block it reads, the summary line the task's own `regex` check
+    matches with its `<S>` and `<A>` explained, the Edit/Write prohibition, the
+    `no-op` named as a control regression, a stale reading refused as a reason to
+    re-run, `n` disclaimed as a cadence, and the retired command nowhere as an
+    action.
 
     (A missing skill does not degrade to a description-only prompt:
     `app/autonomy.py:4009-4013` returns `Skill not found` and the run never dispatches.
@@ -185,40 +264,80 @@ def test_each_carrier_alone_carries_the_command_and_the_read_only_rule():
     skill = SKILL_FIXTURE.read_text(encoding="utf-8")
 
     for carrier, text in (("SKILL.md", skill), ("description", description)):
-        assert DRILL_COMMAND in text, f"{carrier} lost the drill command"
-        assert 'echo "EXIT=$?"' in text, (
-            f"{carrier} no longer surfaces the exit code, so a run cannot tell a "
-            "refused drill (exit 2) from a control that regressed (exit 1)"
+        assert GET_COMMAND in text, f"{carrier} lost the one read that is the run"
+        assert ".mitigation" in text, (
+            f"{carrier} no longer names the block to read, so the run is told to "
+            "report the whole worker-pool status as the drill"
         )
+        assert "Bash" in text, f"{carrier} no longer names the tool it may use"
         assert re.search(r"Edit or Write", text), (
             f"{carrier} no longer forbids Edit/Write, which is what the "
             "task's own `tool_not_called` checks then grade a run against"
         )
-        assert re.search(r"round_hold", text) and re.search(
-            r"valid outcome", text, re.IGNORECASE), (
-            f"{carrier} no longer labels a round_hold refusal a valid outcome"
+        assert re.search(r"(?i)(do not|never|no) [^.]{0,40}re-?run", text), (
+            f"{carrier} no longer forbids re-running: a second GET overwrites the "
+            "newest reading, which is the only reading with an age worth reporting"
         )
-        assert re.search(r"exit\s+1", text, re.IGNORECASE), (
-            f"{carrier} no longer names exit 1 as the real finding beside the "
-            "refusal's innocence"
+        assert "no-op" in text, f"{carrier} no longer names the bad classification"
+        assert re.search(r"control regression", text, re.IGNORECASE), (
+            f"{carrier} no longer calls a no-op what it is"
+        )
+        assert '{"state": "never-run"}' in text, (
+            f"{carrier} no longer spells the no-readings shape the run may find"
+        )
+        assert "not a failure" in text, (
+            f"{carrier} no longer says a stale or absent reading is a report, so "
+            "the run is free to treat the honest day as an error"
+        )
+        assert re.search(r"not a cadence", text, re.IGNORECASE), (
+            f"{carrier} no longer disclaims n as a cadence, and the pool's seat "
+            "can write all 20 readings inside one second (#2431)"
+        )
+        assert re.search(r"last <X> hours", text), (
+            f"{carrier} lost the forbidden phrasing that disclaimer exists to stop"
         )
         # The summary line is what the task's own `regex` check grades, and the
         # prompt the run receives is either this file alone (a skill that failed
         # to load) or this file plus the other, so the shape has to survive in
         # whichever one is in force.
-        assert "mitigation drill: exit <N>" in text, (
+        assert SUMMARY_LINE in text, (
             f"{carrier} no longer spells the summary line the acceptance regex "
             "matches: a run obeying it would fail its own check"
         )
+        assert "<S>" in text and "<A>" in text, (
+            f"{carrier} spells the summary line but no longer explains its "
+            "median and age fields"
+        )
+        assert re.search(r"(?i)print `-`, never\n?\s*`0`", text), (
+            f"{carrier} no longer says a null median prints `-`: 0 would read as a "
+            "perfectly fast stop on the surface that has no stop-time at all"
+        )
+        assert re.search(r"mitigation_drill\.json", text), (
+            f"{carrier} no longer names the state file whose readings these are"
+        )
+        assert re.search(r"scripts\.mitigation_drill", text), (
+            f"{carrier} no longer says who writes the numbers it reports"
+        )
+        for retired in RETIRED_RUNNER_MARKS:
+            assert retired not in text, (
+                f"{carrier} still carries {retired!r}: the run reports a block, not "
+                "an exit code from a process it no longer starts"
+            )
 
 
-def test_the_objective_checks_grade_the_report_the_prompt_asks_for():
-    """The grading seam: the regex in the task's own front matter has to accept
-    the line the prompt instructs and reject a paraphrase of it.
+def test_the_objective_checks_grade_the_reading_report_the_prompt_asks_for():
+    """#2432 clause 2's grading seam: the regex in the task's own front matter has
+    to accept the reading line the prompt instructs and reject a paraphrase of it.
 
     A `regex` check nobody can satisfy fails every good run, and one so loose it
     matches prose passes every bad one. Both halves are asserted against the
     pattern as parsed from the fixture, so the pattern itself is what is tested.
+
+    The line the old pattern graded — `mitigation drill: exit <N> | session_cancel
+    <classification> <seconds> | pool_pause <classification>` — is asserted absent
+    here as well: #2432's premise is that an exit code is not a reading, so a
+    pattern that still accepted it would let a run report the death of the task it
+    replaced as a good day.
     """
     task, _ = _render(TASK_FIXTURE, SKILL_FIXTURE)
     checks = _checks(task)
@@ -233,19 +352,42 @@ def test_the_objective_checks_grade_the_report_the_prompt_asks_for():
     patterns = [v for v in checks.get("regex") or [] if v]
     assert len(patterns) == 1, checks
     graded = re.compile(patterns[0])
+    assert "exit" not in patterns[0].lower(), (
+        "the pattern grades an exit token again, which is the token #2432 exists to "
+        "remove: a reader of a published block has no exit code to print"
+    )
 
     reported = graded.search(
-        "mitigation drill: exit 2 | session_cancel in-flight - | pool_pause dispatch-only"
+        "mitigation drill: session_cancel state=in-flight n=20 median=0.194 age=4h "
+        "| pool_pause state=dispatch-only n=20 median=- age=4h"
     )
     assert reported, (
-        "the acceptance regex rejects the summary line the prompt instructs, so "
-        "every refused day grades as a failure"
+        "the acceptance regex rejects the line the prompt instructs, so every good "
+        "day of the reporter grades as a failure"
     )
-    assert graded.search("mitigation drill: exit 0 | session_cancel in-flight "
-                         "0.021 | pool_pause dispatch-only")
+    assert graded.search("mitigation drill: session_cancel state=in-flight n=1 "
+                         "median=0.021 age=59m | pool_pause state=dispatch-only n=1 "
+                         "median=- age=59m")
+    assert graded.search('mitigation drill: session_cancel state=- n=- median=- '
+                         'age=- | pool_pause state=- n=- median=- age=-'), (
+        "the regex rejects the shape reported when `mitigation_state.read()` answers "
+        "`never-run`: the clause that makes a stale day a report is worthless if "
+        "grading turns it red"
+    )
+    assert not graded.search("mitigation drill: exit 0 | session_cancel in-flight "
+                             "0.021 | pool_pause dispatch-only"), (
+        "the retired exit-shaped line is accepted again — the line a run of the old "
+        "task printed, from a process the new task no longer starts"
+    )
     assert not graded.search("the drill seems to have run fine today, all good"), (
-        "the regex accepts a paraphrase with no exit code in it, which is the "
-        "report shape this task was written to forbid"
+        "the regex accepts a paraphrase with no per-surface readings in it, which is "
+        "the report shape this task was written to forbid"
+    )
+    assert not graded.search("mitigation drill: session_cancel state=in-flight n=20 "
+                             "median=0.194 | pool_pause state=dispatch-only n=20 "
+                             "median=-"), (
+        "the regex accepts a line with no age in it, and the age of the newest "
+        "reading is the only thing that tells a live series from a stale one"
     )
 
 

@@ -6,7 +6,7 @@ acceptance:
   - type: max_tool_calls
     value: 4
   - type: regex
-    value: 'mitigation drill: exit [012] \||\w+(?:Error|Exception)\b'
+    value: 'mitigation drill: session_cancel state=\S+ n=(?:\d+|-) median=(?:[\d.]+|-) age=(?:\S+) \| pool_pause state=\S+ n=(?:\d+|-) median=(?:[\d.]+|-) age=(?:\S+)|\w+(?:Error|Exception)\b'
   - type: tool_not_called
     value: Edit
   - type: tool_not_called
@@ -17,29 +17,37 @@ agent_id: worker
 auto_advance: false
 category: technical
 created: '2026-10-04T03:30:00Z'
-description: 'Daily mitigation drill (#703, armed by #2153): `cd ~/lloyd && .venvs/lloyd/bin/python
-  -m scripts.mitigation_drill; echo "EXIT=$?"` — one Bash call, keeping the trailing `; echo
-  "EXIT=$?"`, because the drill exits non-zero on purpose and the exit code is half of what
-  you report. Then report the printed JSON VERBATIM (all of it) followed by exactly one line:
-  `mitigation drill: exit <N> | session_cancel <classification> <seconds> | pool_pause
-  <classification>` — `<N>` is the `EXIT=` value, `<seconds>` is session_cancel''s `seconds`
-  or `-` when null. Exit 0 is both controls behaving. **Exit 2 means the drill REFUSED
-  because a self-modification round holds the pool (`round_hold`): that is a VALID outcome,
-  not a failure, not a finding and not a retry — report the JSON and the line ending `exit
-  2` and stop.** Exit 1 means a control''s classification came back `no-op`: report the JSON
-  verbatim, name the surface, and say that the control no longer stops what it should. Never
-  call Edit or Write, never re-run the drill to confirm a refusal or a no-op, never edit the
-  script, the state file or a threshold, never open a self-modification round: the drill is
-  the only writer of `~/lloyd-data/mitigation_drill.json` and a person decides what a
-  regression means.'
+description: 'Daily mitigation-drill report (#703, armed by #2153; made a reader by
+  #2432): `curl -s http://127.0.0.1:8080/api/workers/status` — one Bash call, and read its
+  `.mitigation` block. Do NOT fire the drill: `python -m scripts.mitigation_drill` is run by
+  the worker pool''s maintenance seat and is the only writer of
+  `~/lloyd-data/mitigation_drill.json`, and a run of your own is refused while a
+  self-modification round holds the pool, which is why every day this task has so far
+  produced a refusal and no reading. Report the JSON VERBATIM (all of it), then exactly one
+  line: `mitigation drill: session_cancel state=<classification> n=<N> median=<S> age=<A> |
+  pool_pause state=<classification> n=<N> median=<S> age=<A>` — `<S>` is `median_seconds` or
+  `-` when it is null (the dispatch-only `pool_pause` has no stop-time, so print `-`, never
+  `0`) and `<A>` is the age of that surface''s newest `at`, like `4h` or `45m`. A surface
+  whose latest `classification` is `no-op` is a CONTROL REGRESSION: name the surface and say
+  the control no longer stops what it is supposed to stop. `{"state": "never-run"}` (with or
+  without an `error`) or a stale newest `at` is a report, not a failure, not a finding and
+  not a retry — keep the line''s shape, print `-` in the fields the readings do not carry,
+  and stop. `n` counts the readings the state file still stores; it is not a cadence and
+  proves no schedule, so never call it "the last <X> hours". Never call Edit or Write, never
+  run the drill or re-run the GET to confirm a `no-op` or refresh a stale reading, never
+  edit the script, the state file or a threshold, never open a self-modification round: a
+  person decides what a regression means.'
 expected_error_patterns: []
 failure_count: 0
 frequency: daily
 id: 95
 infra_failure_count: 0
+last_attempt: '2026-10-08T13:03:52.962917+00:00'
+last_run: '2026-10-08T13:03:52.962917+00:00'
 max_retries: 3
 model: primary
 name: Mitigation drill
+next_run: '2026-10-09T13:00:00+00:00'
 notify_on_complete: false
 preemptible: true
 preferred_hours:
@@ -58,37 +66,44 @@ tags:
 timeout_seconds: 300
 title: Mitigation drill
 type: autonomy
-updated: '2026-10-04T03:30:00Z'
+updated: '2026-10-08T13:03:52.962917+00:00'
 ---
 
 > **This body is documentation and the machine-written activity log — not an instruction channel.** It is not delivered to the worker: `_build_task_prompt` (`~/lloyd/app/autonomy.py`) renders only the `skill_name` SKILL.md and the front-matter `description`, so a step that lives only below this line reaches no run.
 
 # Mitigation drill
 
-Backlog #2153, armed from #703's owed entry. `scripts/mitigation_drill.py` has existed
-since `d59cdd09`/`fded0a6b` and had never run: `/api/workers/status` reported
-`{"mitigation": {"state": "never-run"}}` and `~/lloyd-data/mitigation_drill.json` did not
-exist. Two independent gaps, both closed here — nothing scheduled the drill, and
-`app/mitigation_state.py` kept only the newest reading per surface, so even a hundred runs
-would have produced no median. #2153 added the bounded per-surface history (20 readings,
-oldest dropped) and the `median_seconds`/`n` the route now publishes; this task file and
-`skills/mitigation-drill/SKILL.md` are the whole of the arming. The renderer that decides
-that is `app/autonomy.py:2487`, and the skill file is what it embeds — which is why a step
-has to be in the SKILL.md or the `description`, never only here.
+Backlog #2153, armed from #703's owed entry; #2432 rewrote the run from a firer into a
+reader. `scripts/mitigation_drill.py` has existed since `d59cdd09`/`fded0a6b`. #2153 added
+the bounded per-surface history (20 readings, oldest dropped) and the `median_seconds`/`n`
+the route now publishes, which is what makes a reading series exist at all. #2333 then moved
+the trigger itself onto the pool's maintenance seat — `workers/pool.py::_maybe_mitigation_drill`
+calls `workers/maintenance.py::maybe_run_mitigation_drill`, which spawns what
+`mitigation_drill_argv` builds — because this task, the once-a-day caller, was refused by the
+round hold on every day it tried and wrote no reading. The reporting half is what is left for
+a scheduled task, and this file plus `skills/mitigation-drill/SKILL.md` are the whole of it:
+one GET, one reading report. The renderer that decides what a run receives is
+`_build_task_prompt` (`app/autonomy.py`), which embeds the skill and the front-matter
+`description` — which is why a step has to be in one of those two, never only here.
 
-## Why exit 2 is a report and not a failure
+## Why the reporter reads instead of firing
 
 The drill reads `round_hold` from `/api/workers/status` and refuses to fire a control while
-a self-modification round holds the pool, so it never adds load while a round or the
-landing behind it wants the box (`scripts/mitigation_drill.py:268-270`, exit 2). On a box
-that runs rounds as often as this one, a daily measurement will sometimes find the box
-busy. Treating that as a failure would train everyone to ignore the task's red days, which
-are exactly the days a stop control regressed (exit 1).
+a self-modification round holds the pool, so it never adds load while a round or the landing
+behind it wants the box. On a box that runs rounds as often as this one, a task that fires
+the drill is told "refused" most weeks, and a red the task itself says to ignore is how the
+one red that matters gets ignored too. Reading the published block cannot be refused: the
+seat has already paid for the measurement, `GET /api/workers/status` answers with whatever
+was last written, and the report is the same shape on a busy box and an idle one.
+`round_hold` stays the reason the drill sometimes writes nothing, which is why `never-run`
+and a stale newest `at` are spelled out as reports rather than failures.
 
 ## Verification after landing
 
-Five scheduled daily runs from now, `curl -s localhost:8080/api/workers/status` must show
-`mitigation.session_cancel.n >= 5` with a non-null `median_seconds`, and `pool_pause.n`
-over the same window with `median_seconds: null` — a pause stops claims, never the run in
-flight, so a null median there is correct and not a missing measurement. That is owed-check's
-to measure (#2153 owed entries 1 and 2); nothing in this file can produce it early.
+Two scheduled runs of #95 from now, `runs.summary` for `task_id='95'` in
+`~/lloyd-data/workers.db` must carry the per-surface `n`/`median`/`age` line rather than a
+`round_hold` refusal — owed-check's to measure, and nothing in this file can produce it
+early. The series itself belongs to the pool's seat: `curl -s localhost:8080/api/workers/status`
+shows `mitigation.session_cancel.n` and its `median_seconds` moving whether or not this task
+ran that day, and `pool_pause.median_seconds` stays null by design because a pause stops
+claims, never the run in flight.
