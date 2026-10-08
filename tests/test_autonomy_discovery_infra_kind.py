@@ -31,6 +31,7 @@ pins that it stayed uniform rather than quietly diverging.
 """
 from __future__ import annotations
 
+import ast
 import datetime
 import importlib
 import json
@@ -42,7 +43,7 @@ import pytest
 import yaml
 
 from app.harness import mcp_pool as mcp_pool_mod
-from app.harness.errors import ToolDiscoveryError
+from app.harness.errors import StreamStalledError, ToolDiscoveryError
 from app.harness.loop import _open_pool_for_run
 from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_SERVERS, MCPPool
 from app.harness.options import RunOptions
@@ -104,7 +105,10 @@ def env(tmp_path, monkeypatch):
     # A downstream nightly task: `last_run` yesterday, upstream's is yesterday
     # too, so the freshness rule is what holds it and not some other gate.
     write(54, "knowledge-health-report", depends_on=53, frequency="1d @ 05:15")
-    return SimpleNamespace(autonomy=autonomy, runs=runs, tasks=tasks)
+    # `write` is handed back because a test that drives `run_task` itself needs
+    # a task file carrying a `skill_name` (the two above do not: nothing in the
+    # discovery tests reaches the prompt build).
+    return SimpleNamespace(autonomy=autonomy, runs=runs, tasks=tasks, write=write)
 
 
 def _front_matter(path: Path) -> dict:
@@ -549,3 +553,244 @@ async def test_pool_deaths_rest_a_task_only_at_the_unmodified_infra_ceiling(env)
     assert fm["failure_count"] == held, (
         f"the budget moved {held} → {fm['failure_count']} across {ceiling} infra "
         "deaths: this route reached the retry budget after all")
+
+
+# ── #2414: a stream stall that escapes the loop is the transport's, not the task's ──
+#
+# The record that started this — `autonomy-runs/38/run_38_20261008_050013.md`:
+# `exception: StreamStalledError`, `failure_kind: task`, `failure_count: 1`,
+# `completed_at: 2026-10-08T05:04:09Z`. The retry `run_38_20261008_110445.md`
+# began 6 h 00 m 36 s later — the `_FAILURE_BACKOFF_CAP_SECONDS` ceiling of 21600 s
+# plus the tick that found the task due — and the name it was booked under is the
+# reason: an infra kind earns the flat `_FAILURE_BACKOFF_BASE` (600 s) and leaves
+# `failure_count` alone, where a `task` kind spends 1 of `_DEFAULT_MAX_RETRIES` (5,
+# 3 in the files that carry one).
+#
+# A stall reaching `run_task` at all is the escape, not the everyday case: the
+# loop retries a stalled stream while nothing was dispatched
+# (`_BROKEN_STREAM_ERRORS`, `app/harness/loop.py:161-169`, reason `stream_stalled`
+# at `:176`). What is charged here is the stall the loop could not retry, which is
+# the same shape as the `ToolDiscoveryError` precedent one layer up: an
+# engine-side condition, reaching the same two routes this file already drives,
+# that a task can neither cause nor survive five of.
+
+
+def _infra_names_in_source(module) -> set[str]:
+    """The members of `_INFRA_EXC_NAMES`, enumerated by PARSING the assignment.
+
+    Not by grepping the name — a name-grep is the instrument that produced the
+    false report this item exists to correct. `git grep -n StreamStalledError`
+    returns the worker pool's `_TRANSIENT` regex in `workers/maintenance.py`
+    (which decides whether to restart a worker, never a run's `failure_kind`)
+    and the harness's own raise and retry sites, and nothing at all in
+    `app/autonomy.py`. The decider is the one `_INFRA_EXC_NAMES = frozenset(...)`
+    literal in that module, so this reads that literal and nothing else.
+    """
+    tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "_INFRA_EXC_NAMES"
+                        for t in node.targets)):
+            continue
+        value = node.value
+        if not (isinstance(value, ast.Call)
+                and getattr(value.func, "id", "") == "frozenset"
+                and value.args):
+            raise AssertionError(
+                "`_INFRA_EXC_NAMES` is no longer a `frozenset({...})` literal, so "
+                "this extractor cannot enumerate it — read it another way rather "
+                "than reporting the name absent")
+        members = value.args[0]
+        assert isinstance(members, (ast.Set, ast.List)), (
+            f"`frozenset(...)` is handed {type(members).__name__}, not a literal "
+            "the members can be enumerated from")
+        return {e.value for e in members.elts}
+    raise AssertionError("no `_INFRA_EXC_NAMES` assignment found to enumerate")
+
+
+def _architecture_bullet(marker: str) -> str:
+    """One bullet of `architecture/autonomy.md`'s failure-kind split.
+
+    Cut from the marker's line to the first blank line OR the next bullet,
+    because the `task` and `infra` bullets are consecutive lines of one list:
+    cutting at the blank line alone hands the `task` bullet the `infra` text as
+    well, and a control that reads its neighbour proves nothing about the cut.
+    Returns the text rather than a boolean so a missing section cannot read as a
+    passing assertion about it.
+    """
+    doc = Path(__file__).resolve().parent.parent / "architecture" / "autonomy.md"
+    text = doc.read_text(encoding="utf-8")
+    start = text.find(f"- {marker}")
+    assert start != -1, (
+        f"`architecture/autonomy.md` has no bullet starting `- {marker}`: the "
+        "page restructured the split this page is pinned to")
+    lines = text[start:].splitlines()
+    out = [lines[0]]
+    for line in lines[1:]:
+        if not line.strip() or line.startswith("- "):
+            break
+        out.append(line)
+    return "\n".join(out)
+
+
+def test_an_escaping_stream_stall_is_charged_to_the_transport_not_the_task(
+        env, monkeypatch):
+    """Clauses 1 and 2: the name is on the set, and the classifier says `infra`.
+
+    Four assertions, each closing a different way this could be true for nothing.
+    The PARSED literal carries the name, so the change is in the source and not
+    in a copy. The parse equals the live global, so the extractor is pinned to
+    the object the classifier actually reads instead of to a literal that stopped
+    being the one in use. `_failure_kind_of` — the door `run_task`'s handler,
+    `charge_death_without_verdict` and `workers/pool.py::_death_meta` all walk
+    through — returns `infra` for the exception the client actually raises
+    (`client.py:232`: timeout positional, `lines_seen` keyword). And it is shown
+    to be able to answer the other way: an unrelated exception still lands on
+    `task`, and shrinking the live set to a name the stall is not moves the answer
+    to `task`, which is what proves the verdict came from the global rather than
+    from a hard-coded string in the function.
+    """
+    autonomy = env.autonomy
+    parsed = _infra_names_in_source(autonomy)
+    assert parsed, "the parse enumerated nothing, so membership below proves nothing"
+    assert parsed == set(autonomy._INFRA_EXC_NAMES), (
+        f"the literal in the source ({sorted(parsed)}) is not the set the "
+        f"classifier reads ({sorted(autonomy._INFRA_EXC_NAMES)})")
+    assert "StreamStalledError" in parsed, (
+        "the `_INFRA_EXC_NAMES` frozenset still omits the stall class, so an "
+        "escaping stall is charged to the task")
+
+    exc = StreamStalledError(60.0, lines_seen=1)
+    assert autonomy._failure_kind_of(exc) == "infra", (
+        "the decider still files a stall under the task's own failure")
+    assert autonomy._failure_kind_of(
+        RuntimeError("skill script exited 1")) == "task", (
+        "`infra` is being returned for everything, which is the fleet-wide "
+        "disable #1085's split exists to prevent")
+
+    monkeypatch.setattr(autonomy, "_INFRA_EXC_NAMES", frozenset({"ReadTimeout"}))
+    assert autonomy._failure_kind_of(exc) == "task", (
+        "the classifier answered from something other than the module's own "
+        "`_INFRA_EXC_NAMES`, so membership of that set is not what it tests")
+
+
+@pytest.mark.asyncio
+async def test_a_stall_that_escapes_the_turn_is_recorded_infra_and_spends_nothing(
+        env, monkeypatch):
+    """Clause 3, `run_task`'s route: the stall reaches the failure handler.
+
+    The seam is a real `run_task` over a turn whose stream dies, not a hand-built
+    call into `_record_failure`: `app.harness.run_query` is the generator the loop
+    hands back, and the fake replaces it at exactly that seam, so the code doing
+    the charging is the `except Exception` handler inside `run_task` — the one
+    that calls `kind = _failure_kind_of(e)` and hands it to `_record_failure`.
+    What this node pins is the CHARGE, not the loop: the fake dies where the
+    client's own `StreamStalledError` arrives from an engine that stopped sending
+    bytes, and what the loop does with a stall before it escapes is
+    `_BROKEN_STREAM_ERRORS`'s rule (`app/harness/loop.py:161`), which this diff
+    deliberately does not touch.
+    What is asserted is the pair the witness got wrong — the record says `infra`
+    AND `failure_count` is the number the task already carried, 1, not 2. Task #38
+    is the task whose run started this, so the id is not decoration.
+    """
+    autonomy = env.autonomy
+    skill = env.tasks.parent / "stall-skill.md"
+    skill.write_text("# nightly signals\nRead the day, then stall.\n",
+                     encoding="utf-8")
+    # `model: primary`, not the fixture's `auto`: `run_task` refuses an
+    # unconfigured alias before a turn exists, and that refusal is a `skipped`
+    # with no kind at all — the turn below would never have been reached.
+    env.write(38, "nightly-reflection-signals", skill_name=str(skill),
+              timeout_seconds=60, model="primary")
+    monkeypatch.setattr("app.prompt_builder.build_system_prompt",
+                        lambda **_kw: "sys", raising=False)
+
+    def _wedged_engine(messages, options):
+        raise StreamStalledError(60.0, lines_seen=1)
+
+    monkeypatch.setattr("app.harness.run_query", _wedged_engine)
+
+    before = task_fields(env, 38)
+    assert before["failure_count"] == 1, (
+        "the fixture starts at 1 so `unchanged` cannot mean `never charged`")
+    result = await autonomy.run_task(38)
+
+    assert result.get("failure_kind") == "infra", (
+        f"an escaping stall was charged as {result.get('failure_kind')!r} "
+        f"(result: {result}): the exact charge that cost task #38 six hours of "
+        "its nightly slot")
+    record = newest_record(env, 38)
+    assert record["exception"] == "StreamStalledError", record
+    assert record["failure_kind"] == "infra", record
+    assert record["failure_count"] == 1, (
+        "the record carries a spent count, so the run is booked twice")
+
+    after = task_fields(env, 38)
+    assert after["failure_count"] == before["failure_count"] == 1, (
+        f"the retry budget moved {before['failure_count']} → "
+        f"{after['failure_count']}: five stalls (three under the `max_retries` "
+        "the files carry) retire a nightly task for an engine that stopped "
+        "sending bytes")
+    assert after["infra_failure_count"] == 1, (
+        "the stall is invisible to the infra counter too, so it is uncounted "
+        "rather than re-filed")
+    assert after["status"] == "up_next", "an outage must not retire the schedule"
+
+
+@pytest.mark.asyncio
+async def test_a_pool_death_by_stream_stall_leaves_the_retry_budget_alone(env):
+    """Clause 3, the pool's route: the same stall, charged before a verdict.
+
+    `charge_death_without_verdict` is the arm for a death that never reached a
+    verdict, and it stamps the run row's `failure_kind` through
+    `_failure_kind_of` like everything else (#2037). Same shape as
+    `test_a_pool_death_classified_infra_leaves_the_retry_budget_alone` above: the
+    record says `infra`, the infra counter moves, and `failure_count` does not.
+    """
+    before = task_fields(env, 53)
+    result = await _charge_death(env, StreamStalledError(60.0, lines_seen=4))
+
+    assert result["failure_kind"] == "infra"
+    # `task_budget_charged` is True for an infra death too, and means only that
+    # `_record_failure` ran — which is the point of the pair below, not a
+    # contradiction: the attempt is booked, the retry budget is not.
+    assert result["task_budget_charged"] is True, (
+        "nothing was written for this death at all, so it is invisible again")
+    record = newest_record(env, 53)
+    assert record["exception"] == "StreamStalledError", record
+    assert record["failure_kind"] == "infra", record
+    assert record["failure_count"] == before["failure_count"], (
+        "the record carries a spent count on an infra-classified death")
+    after = task_fields(env, 53)
+    assert after["failure_count"] == before["failure_count"], (
+        f"failure_count moved {before['failure_count']} → "
+        f"{after['failure_count']} on an infra-classified death")
+    assert after["infra_failure_count"] == 1, (
+        "the death was not booked as infra either, so it is invisible again")
+
+
+def test_the_architecture_page_names_the_stall_class_beside_the_transport_errors():
+    """Clause 4: the page that inventories the set has to move with it.
+
+    `architecture/autonomy.md` described `_INFRA_EXC_NAMES` as "the eight
+    httpx/socket connection errors", which was one name stale before this round
+    (`ToolDiscoveryError`) and two stale after it. A reader who trusts the count
+    rather than the frozenset is the reader who filed the wrong report, so the
+    assertion is on the extracted bullet, and the `task` bullet is extracted
+    beside it as the control: if the cut were grabbing the wrong span — or
+    nothing — the control would not still be free of the set's name.
+    """
+    infra = _architecture_bullet("**`infra`**")
+    task = _architecture_bullet("**`task`**")
+
+    assert "`_INFRA_EXC_NAMES`" in infra, (
+        "the extracted bullet is not the one that names the set")
+    assert "`_INFRA_EXC_NAMES`" not in task, (
+        "the bullet cut as `task` carries the infra set's name, so this "
+        "extraction is not cutting bullets")
+    assert "eight httpx/socket" not in infra, (
+        "the page still caps the set at the eight transport errors, which is the "
+        "sentence that misled the report this item came from")
+    assert "StreamStalledError" in infra, (
+        "the page does not name the stall class beside the transport errors, so "
+        "the prose still reads as excluding what the set now includes")

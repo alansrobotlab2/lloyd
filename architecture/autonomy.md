@@ -421,10 +421,16 @@ activity log, alert — and it splits two kinds:
 - **`infra`**: the model server hiccuped. Flat 600 s cooldown, and it never
   touches the retry budget, so an outage cannot disable the whole fleet — on
   2026-09-01 every task returned empty for eleven hours straight. An exception
-  whose type name is in `_INFRA_EXC_NAMES` (the eight httpx/socket connection
-  errors) is infra, and so is an empty response inside
-  `_INFRA_EMPTY_MAX_SECONDS` (15 s) **with no tool call**: that fast and that
-  silent, it is a thinking-only turn or a 200 with no content, not work.
+  whose type name is in `_INFRA_EXC_NAMES` is infra: the httpx transport and
+  socket connection errors, `ToolDiscoveryError` when the aggregator never
+  answered tool discovery, and `StreamStalledError` when an engine that had
+  already started producing goes quiet mid-generation and the loop's own retry
+  cannot take it back. Membership is the frozenset in `app/autonomy.py` — read
+  it there rather than counting the prose, because the sentence this replaced
+  said "the eight" while the set already held nine. And an empty response
+  inside `_INFRA_EMPTY_MAX_SECONDS` (15 s) **with no tool call** is infra too:
+  that fast and that silent, it is a thinking-only turn or a 200 with no
+  content, not work.
 
 `_DEFAULT_MAX_RETRIES` is 5. Thirty of the 31 runnable task files carry
 `max_retries: 3`, which is also what the create path writes, so 3 is the number

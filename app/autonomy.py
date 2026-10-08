@@ -416,6 +416,21 @@ _INFRA_EXC_NAMES = frozenset({
     # changes no dependency reading — `_record_failure` writes `last_run` for
     # neither kind, which `_is_dependency_met` is the only reader of.
     "ToolDiscoveryError",
+    # A stream that went quiet mid-generation, escaping the loop's own retry —
+    # the same argument one layer down. Its one production raise site is
+    # `harness/client.py:232`, which fires only after the engine has emitted at
+    # least one line and then produced nothing for
+    # `harness.stream_chunk_timeout_seconds`: a wedged engine, not a task whose
+    # code is wrong. The loop absorbs a stall while nothing has been dispatched
+    # (`_BROKEN_STREAM_ERRORS`, `harness/loop.py:161`, reason `stream_stalled`),
+    # so the stall that reaches a failure handler here is the one that retry
+    # could not take — and charged as `task` it spent `failure_count` and earned
+    # the capped backoff: `run_38_20261008_050013.md` closed at
+    # `2026-10-08T05:04:09Z` with `failure_kind: task` and `failure_count: 1`,
+    # and the retry did not start until `11:04:45Z`. Six hours of a nightly
+    # slot, and a fifth of that task's retry budget, for a stall that consumed
+    # nothing but wall clock (#2414).
+    "StreamStalledError",
 })
 
 
